@@ -82,6 +82,17 @@ nonisolated enum InputProbeLaunch {
     }
 }
 
+/// The development build's compass check (`ANDARIUM_COMPASS_READOUT=1`): the
+/// application prints the device motion sample the guest's field comes from,
+/// with iOS's own attitude and heading from it (`CompassReadout`).
+nonisolated enum CompassReadoutLaunch {
+    static let environmentName = "ANDARIUM_COMPASS_READOUT"
+
+    static func requested(in environment: [String: String]) -> Bool {
+        environment[environmentName] == "1"
+    }
+}
+
 extension AppEntry {
     /// Whether the launch is the person's own, which announces the release
     /// notes (`announceWhatsNew`). A launch that states any setting, the JIT
@@ -90,6 +101,7 @@ extension AppEntry {
         overrides.isEmpty && JitPreference.stated(in: environment) == nil
             && ThermalOverride.stated(in: environment) == nil
             && !InputProbeLaunch.requested(in: environment)
+            && !CompassReadoutLaunch.requested(in: environment)
             && environment["XCTestConfigurationFilePath"] == nil
     }
 

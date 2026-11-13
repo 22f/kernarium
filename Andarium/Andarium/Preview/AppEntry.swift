@@ -26,6 +26,11 @@ struct AppEntry {
     /// `systemMicrophone` does for the microphone: `simctl privacy` sets it
     /// and the system's alert asks.
     var systemLocation: Bool
+    /// The Camera switch asks the Simulator's own permission, as
+    /// `systemMicrophone` does for the microphone. The Simulator has no camera,
+    /// so the preview takes it that the device has one: `simctl privacy` sets
+    /// the access and the system's alert asks.
+    var systemCamera: Bool
     /// How many CPU readings the stats overlay and Settings' Stats rows
     /// start with, and hold: 0 is a session before its first reading. Absent,
     /// the mock readings run on.
@@ -47,6 +52,10 @@ struct AppEntry {
     /// instead of the Simulator's own, to show another device's choices.
     var displayNative: String?
     var displayPoints: String?
+    /// What the system holds the application's memory to, in MiB, which the
+    /// default resolution follows ("2867" is an iPad mini 6's); absent, no
+    /// limit, as on a Mac.
+    var memoryLimitMiB: Int?
 
     static func fromArguments() -> AppEntry {
         let defaults = UserDefaults.standard
@@ -58,6 +67,7 @@ struct AppEntry {
             bootStage: defaults.string(forKey: "bootStage").flatMap { Int($0) },
             systemMicrophone: defaults.bool(forKey: "systemMicrophone"),
             systemLocation: defaults.bool(forKey: "systemLocation"),
+            systemCamera: defaults.bool(forKey: "systemCamera"),
             statsReadings: defaults.string(forKey: "statsReadings").flatMap { Int($0) },
             statsVramMiB: defaults.string(forKey: "statsVramMiB").flatMap { Int($0) },
             device: defaults.string(forKey: "device"),
@@ -65,24 +75,28 @@ struct AppEntry {
             colorScheme: defaults.string(forKey: "colorScheme"),
             displayScale: defaults.string(forKey: "displayScale"),
             displayNative: defaults.string(forKey: "displayNative"),
-            displayPoints: defaults.string(forKey: "displayPoints")
+            displayPoints: defaults.string(forKey: "displayPoints"),
+            memoryLimitMiB: defaults.string(forKey: "memoryLimitMiB").flatMap { Int($0) }
         )
     }
 
     /// Where Home scrolls to for a screen that shows a lower section.
     private static let scrollTargets: [String: String] = [
-        "home-options": "erase", "home-recovery-erase": "erase", "start-recovery": "erase", "erase": "erase",
-        "home-new-recovery": "erase",
+        "home-options": "erase", "home-erase": "erase", "erase": "erase",
         "home-resolution": "resolution",
         "home-capabilities": "capabilities", "home-mic-on": "capabilities", "home-mic-denied": "capabilities",
         "home-haptics-off": "capabilities",
-        "home-mic-alert": "capabilities", "home-gyroscope-unavailable": "capabilities",
+        "home-mic-alert": "capabilities",
         "home-location-on": "capabilities", "home-location-denied": "capabilities",
         "home-location-approximate": "capabilities", "home-location-restricted": "capabilities",
         "home-location-services-off": "capabilities", "home-location-alert": "capabilities",
         "home-location-approximate-alert": "capabilities", "home-location-restricted-alert": "capabilities",
         "home-location-services-off-alert": "capabilities", "home-location-ask": "capabilities",
-        "home-backup": "backup",
+        "home-camera-on": "capabilities", "home-camera-denied": "capabilities",
+        "home-camera-restricted": "capabilities", "home-camera-unavailable": "capabilities",
+        "home-camera-alert": "capabilities", "home-camera-restricted-alert": "capabilities",
+        "home-camera-ask": "capabilities",
+        "home-backup": "backup", "home-backup-row": "backup-row",
         "home-jit": "jit", "home-jit-no-debugger": "jit", "home-jit-fallback": "jit",
     ]
 
@@ -98,6 +112,7 @@ struct AppEntry {
         "info-license": .license("mesa"),
         "info-license-gpl": .license("linux"),
         "whatsnew-history": .whatsNew,
+        "whatsnew-history-nofeedback": .whatsNew,
     ]
 
     var hints: ScreenHints {
@@ -111,7 +126,8 @@ struct AppEntry {
     /// datastore says; other session screenshots leave it out.
     func configureTips() {
         if resetTips { try? Tips.resetDatastore() }
-        if screen == "session-tip" {
+        // The legacy install, played, shows the tip as a real session may.
+        if screen == "session-tip" || screen == "session-tip-left" || (screen == "install-legacy" && play) {
             Tips.showAllTipsForTesting()
         } else if screen.hasPrefix("session") || screen.hasPrefix("settings") || screen.hasPrefix("files")
             || screen.hasPrefix("recovery") || screen.hasPrefix("boot")
@@ -143,7 +159,11 @@ struct AppEntry {
         model.jitAvailable = true
         // Only an iPhone has a Taptic Engine for the guest's haptics: an iPad's
         // preview, like the device, has no Haptics row.
-        model.hapticsAvailable = host.name == "iPhone"
+        model.hapticsAvailable = host.hasHaptics
+        // The mock device has a camera that iOS has not been asked about; a
+        // screen states another access (and `-systemCamera` reads the
+        // Simulator's own).
+        model.cameraAccess = .notDetermined
 
         func boot(_ kind: BootKind, stage: Int, seconds: Int) {
             model.frozenBootStage = freeze ? (bootStage ?? stage) : nil
@@ -151,8 +171,29 @@ struct AppEntry {
             model.phase = .booting(kind)
         }
 
+        /// A start that has run `seconds`: the model's own clock says so, so
+        /// the notice appears as it does for a real one, and Stop (played)
+        /// ends the run as a host stop does.
+        func slowBoot(_ kind: BootKind = .normal, stage: Int, seconds: Int, stopping: Bool = false) {
+            boot(kind, stage: stage, seconds: seconds)
+            let now = model.clock()
+            model.slowStart.begin(at: now - TimeInterval(seconds), kind: kind)
+            _ = model.slowStart.update(at: now)
+            if stopping { _ = model.slowStart.requestStop() }
+        }
+
+        /// A tap on Stop comes long after the screen's first frame; a dialog
+        /// asked for in it is presented before the screen has put its
+        /// appearance on the window, and takes the system's.
+        func asksToStopOnceSettled() {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(1600))
+                model.confirmingStop = true
+            }
+        }
+
         switch screen {
-        case "home-new", "home-new-recovery":
+        case "home-new":
             model.guest = Guest.fresh(on: host)
             model.plan = .firstStart
         case "home-grow":
@@ -192,7 +233,8 @@ struct AppEntry {
             }
         case "home-memory-warning", "system-memory-warning":
             model.guest = PreviewData.highMemoryGuest(on: host)
-        case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit", "home-location-ask":
+        case "home-options", "home-display", "home-capabilities", "home-backup", "home-backup-row", "system-edit",
+             "home-location-ask", "home-camera-ask":
             break
         case "home-jit":
             model.jitOn = true
@@ -208,8 +250,6 @@ struct AppEntry {
             model.microphoneState = .granted
         case "home-mic-denied", "home-mic-alert":
             model.microphoneState = .denied
-        case "home-gyroscope-unavailable":
-            model.motionSensorsAvailable = false
         case "home-haptics-off":
             model.guest?.haptics = false
         case "home-location-on":
@@ -224,6 +264,15 @@ struct AppEntry {
             model.locationAuthorization = .restricted
         case "home-location-services-off", "home-location-services-off-alert":
             model.locationAuthorization = .servicesOff
+        case "home-camera-on", "system-edit-camera":
+            model.guest?.camera = true
+            model.cameraAccess = .authorized
+        case "home-camera-denied", "home-camera-alert":
+            model.cameraAccess = .denied
+        case "home-camera-restricted", "home-camera-restricted-alert":
+            model.cameraAccess = .restricted
+        case "home-camera-unavailable":
+            model.cameraAccess = .unavailable
         case "busy-create":
             model.busy = BusyState(title: String(localized: "Creating virtual machine"), detail: String(localized: "Setting up Andarium with \(Formats.size(gib: 16))."), progress: 0.42)
         case "busy-erase":
@@ -247,6 +296,35 @@ struct AppEntry {
             boot(.recovery, stage: 3, seconds: 7)
         case "boot-restart":
             boot(.restart, stage: 3, seconds: 8)
+        case "boot-slow":
+            slowBoot(stage: 3, seconds: 197)
+        case "boot-slow-stopping":
+            slowBoot(stage: 3, seconds: 203, stopping: true)
+        case "boot-slow-first":
+            // A first start eight minutes in: the later notice, with a plain title.
+            model.guest = model.guest?.erased
+            model.plan = .firstStart
+            slowBoot(.firstStart, stage: 3, seconds: 497)
+        case "boot-slow-upgrade":
+            model.bootFrom = PreviewData.previousSystemRelease
+            slowBoot(.upgrade, stage: 3, seconds: 491)
+        case "boot-slow-recovery":
+            slowBoot(.recovery, stage: 3, seconds: 197)
+        case "boot-slow-live":
+            // The steps held, the clock running: the status line and the notice count one time.
+            slowBoot(stage: 3, seconds: 197)
+            model.previewClockRuns = true
+        case "boot-slow-stop":
+            // Stop chosen: the dialog that asks first.
+            slowBoot(stage: 3, seconds: 197)
+            asksToStopOnceSettled()
+        case "boot-slow-recovery-stop":
+            // The same dialog over Recovery's own, light screen.
+            slowBoot(.recovery, stage: 3, seconds: 197)
+            asksToStopOnceSettled()
+        case "boot-slow-storage":
+            // The same notice over an earlier step, as a start stuck on the disk shows it.
+            slowBoot(stage: 2, seconds: 184)
         case "boot-jit":
             model.jitOn = true
             model.preparingJit = true
@@ -255,15 +333,17 @@ struct AppEntry {
             model.jitOn = true
             model.jitLastStart = .noDebugger
             boot(.normal, stage: 1, seconds: 4)
-        case "session", "session-tip", "session-open", "session-keyboard", "session-stats",
+        case "session", "session-tip", "session-tip-left", "session-open", "session-keyboard", "session-stats",
              "session-power", "session-setup", "session-off", "session-left", "session-volume",
-             "session-graphics-notice", "session-thermal-notice", "session-network-cellular", "session-network-wifi":
-            model.session.showStats = screen == "session-stats"
+             "session-graphics-notice", "session-thermal-notice", "session-network-cellular", "session-network-wifi",
+             "session-camera-notice", "session-camera-off-notice", "session-memory-critical",
+             "session-memory-camera", "session-memory-stats", "session-memory-pressure":
+            model.session.showStats = screen == "session-stats" || screen == "session-memory-stats"
             model.session.sideKeysOpen = ["session-open", "session-off", "session-left", "session-volume"].contains(screen)
             model.sessionPreset = SessionPreset(
                 volumePanel: screen == "session-volume",
                 powerMenu: screen == "session-power",
-                leftEdge: ["session-left", "session-volume"].contains(screen),
+                leftEdge: ["session-left", "session-volume", "session-tip-left"].contains(screen),
                 guestScreen: {
                     switch screen {
                     case "session-setup": .setup
@@ -278,8 +358,20 @@ struct AppEntry {
             if screen == "session-thermal-notice" { model.previewThermalNotice() }
             if screen == "session-network-cellular" { model.previewNetworkNotice(.cellular) }
             if screen == "session-network-wifi" { model.previewNetworkNotice(.wifi) }
-        case "settings", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
-             "settings-feedback", "install-apk", "install-done", "install-failed", "install-not-apk", "install-bundle", "bug-report":
+            if screen == "session-camera-notice" { model.previewCameraNotice() }
+            if screen == "session-camera-off-notice" { model.previewCameraNotice(.blockedInUse) }
+            // The memory notice: the critical level alone, under the camera
+            // notice, and with the statistics capsule; the whole episode is
+            // played by `-play` after the first frame (`applyDeferred`).
+            if screen == "session-memory-camera" { model.previewCameraNotice(.blockedInUse) }
+            if ["session-memory-critical", "session-memory-camera", "session-memory-stats"].contains(screen) {
+                model.previewMemoryPressure(.critical)
+            }
+        case "settings", "settings-medium", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
+             "settings-feedback", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
+             "install-app-bundle", "bug-report", "install-data", "install-done-without-data", "install-done-data-not-placed", "install-done-container",
+             "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-missing-split",
+             "install-part-too-large":
             let session = model.session
             switch screen {
             case "settings-adb":
@@ -326,6 +418,11 @@ struct AppEntry {
         case "failed":
             // The failure path a real run takes: a crash after 42 minutes.
             model.fail()
+        case "stopped":
+            // What Stop on the slow-start notice leaves: the run ended by the person.
+            model.fail(RunEnd(result: -5, stoppedByUser: true), uptimeSeconds: 203)
+        case "feedback-boot", "feedback-boot-filled", "feedback-boot-details", "feedback-boot-finished":
+            slowBoot(stage: 3, seconds: 197)
         default:
             break
         }
@@ -341,17 +438,22 @@ struct AppEntry {
         }
         if systemMicrophone { useSystemMicrophone(in: model) }
         if systemLocation { useSystemLocation(in: model) }
+        if systemCamera { useSystemCamera(in: model) }
         SnapshotPreview.apply(screen: screen, to: model)
         return model
     }
 
     /// The screens that show a guest operation on the full-screen overlay.
     private static let operationScreens: Set<String> = [
-        "bug-report", "install-apk", "install-done", "install-failed", "install-not-apk", "install-bundle",
+        "bug-report", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
+        "install-app-bundle", "install-data", "install-done-without-data", "install-done-data-not-placed", "install-done-container", "install-encrypted",
+        "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-missing-split", "install-part-too-large",
     ]
     /// The ones that show how an install ended.
     private static let resultScreens: Set<String> = [
-        "install-done", "install-failed", "install-not-apk", "install-bundle",
+        "install-done", "install-failed", "install-not-apk", "install-app-bundle", "install-done-without-data",
+        "install-done-data-not-placed", "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged",
+        "install-missing-split", "install-part-too-large",
     ]
 
     /// A guest operation's overlay as it looks part way, or at its end: what
@@ -360,12 +462,62 @@ struct AppEntry {
         let cancel = BusyCancel {}
         let dismiss = BusyCancel { model.busy = nil }
         let file = PreviewData.sampleApkName
+        let container = PreviewData.sampleContainerName
         switch screen {
         case "bug-report":
             return BusyState(
                 title: String(localized: "Creating bug report"),
                 detail: String(localized: "The virtual machine is collecting its logs and state. This can take several minutes."),
                 progress: 0.6, cancel: cancel
+            )
+        case "install-parts":
+            // An app in parts, part way through being sent.
+            return BusyState(
+                title: String(localized: "Installing app"),
+                detail: String(localized: "Sending part \(2) of \(3)\u{2026}"),
+                progress: 0.45, cancel: cancel
+            )
+        case "install-data":
+            // The app is in; its data files are being copied, and Cancel is back for the copy.
+            return BusyState(
+                title: String(localized: "Installing app"),
+                detail: String(localized: "Copying data file \(1) of \(2)\u{2026}"),
+                progress: 0.6, cancel: cancel
+            )
+        case "install-done-without-data", "install-done-data-not-placed", "install-done-container":
+            // What the install's own card says for each of these endings.
+            let outcome: ApkInstallOutcome = switch screen {
+            case "install-done-without-data": .installedWithoutData
+            case "install-done-data-not-placed": .installedDataNotPlaced
+            default: .installed
+            }
+            let words = outcome.words(fileName: container)
+            return BusyState(
+                title: words.title, detail: words.detail, result: BusyResult(style: words.style, dismiss: dismiss)
+            )
+        case "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-part-too-large":
+            let refusal: InstallRefusal = switch screen {
+            case "install-encrypted": .encrypted
+            case "install-damaged-or-encrypted": .damagedOrEncrypted
+            case "install-no-app": .noApp
+            case "install-part-too-large": .partTooLarge
+            default: .damaged
+            }
+            return BusyState(
+                title: AppModel.installFailure, detail: refusal.message, result: BusyResult(failed: true, dismiss: dismiss)
+            )
+        case "install-missing-split":
+            return BusyState(
+                title: AppModel.installFailure, detail: PackageInstallMessages.message(forCode: "FAILED_MISSING_SPLIT"),
+                result: BusyResult(failed: true, dismiss: dismiss)
+            )
+        case "install-legacy":
+            // The first attempt is over and the question is up: the overlay
+            // keeps its Cancel, which the alert covers.
+            return BusyState(
+                title: String(localized: "Installing app"),
+                detail: "\(file) \u{00B7} \(Formats.size(bytes: PreviewData.sampleApkSizeBytes))",
+                progress: 0.8, cancel: cancel
             )
         case "install-done":
             return BusyState(
@@ -383,9 +535,9 @@ struct AppEntry {
                 title: AppModel.installFailure, detail: InstallRefusal.notApk.message,
                 result: BusyResult(failed: true, dismiss: dismiss)
             )
-        case "install-bundle":
+        case "install-app-bundle":
             return BusyState(
-                title: AppModel.installFailure, detail: InstallRefusal.bundle.message,
+                title: AppModel.installFailure, detail: InstallRefusal.appBundle.message,
                 result: BusyResult(failed: true, dismiss: dismiss)
             )
         default:
@@ -440,11 +592,24 @@ struct AppEntry {
         }
     }
 
-    /// The resolution the launch chooses and the screen it states: the preview
-    /// shows a 2.3 screen on any Simulator.
+    /// The device's camera conversation against the Simulator's permission,
+    /// which is read again whenever the app becomes active. The Simulator has
+    /// no camera and the conversation does not need one.
+    private func useSystemCamera(in model: AppModel) {
+        model.camera = CameraController(model: model, source: SystemCameraSource(requiresCamera: false))
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in model.camera?.refresh() }
+        }
+    }
+
+    /// The resolution the launch chooses, the memory limit and the screen it
+    /// states: the preview shows a 2.3 screen on any Simulator.
     @MainActor
     private func applyDisplay(to model: AppModel) {
         model.chosenScale = displayScale.flatMap { GuestDisplayScale(text: $0) }
+        model.memoryLimitBytes = memoryLimitMiB.map { UInt64(max($0, 0)) << 20 } ?? 0
         if let native = displayNative.flatMap({ Double($0) }) {
             model.statedNativeScale = native
             model.screenDidChange(nativeScale: native)
@@ -467,6 +632,15 @@ struct AppEntry {
             model.sheet = .resize
         case "system-edit", "system-memory-warning":
             model.sheet = .system
+        case "system-edit-camera":
+            // The sheet shows what the runtime answers for the mock's cameras
+            // when it opens, as the device's does after launch.
+            let reserve = PreviewData.cameraReserveMiB(device: device)
+            model.cameraReservePlanner = { policy in
+                CameraReservePlan(policy: policy.withCameraReserve { _ in reserve }, exact: true)
+            }
+            await model.refreshCameraReserve().value
+            model.sheet = .system
         case "resolution-sheet":
             model.sheet = .resolution
         case "home-mic-alert":
@@ -476,10 +650,12 @@ struct AppEntry {
             model.setLocation(true)
         case "home-location-approximate-alert":
             model.permissionPrompt = .location
+        case "home-camera-alert", "home-camera-restricted-alert", "home-camera-ask":
+            model.setCamera(true)
         case "erase":
             model.confirmingErase = true
         case "info", "info-acknowledgements", "info-license", "info-license-gpl", "whatsnew-info",
-             "whatsnew-history":
+             "whatsnew-history", "whatsnew-history-nofeedback":
             model.sheet = .info
         #if FEEDBACK_MAIL
         case "home-menu", "welcome-menu":
@@ -502,12 +678,48 @@ struct AppEntry {
                 title: String(localized: "Settings not saved"),
                 message: CocoaError(.fileWriteOutOfSpace).localizedDescription
             )
+        case "session-memory-pressure" where play:
+            // The pressure as a person sees it: a warning, which shows nothing,
+            // a rise to critical, a fall back to warning and the return to
+            // normal, four seconds apart. The notice goes three seconds after
+            // the fall.
+            model.previewMemoryPressure(.warning)
+            try? await Task.sleep(for: .seconds(4))
+            model.previewMemoryPressure(.critical)
+            try? await Task.sleep(for: .seconds(4))
+            model.previewMemoryPressure(.warning)
+            try? await Task.sleep(for: .seconds(4))
+            model.previewMemoryPressure(.normal)
         case "bug-report" where play:
             try? await Task.sleep(for: .milliseconds(450))
             model.createBugReport()
         case "install-apk" where play:
             try? await Task.sleep(for: .milliseconds(450))
             model.installPicked(PreviewData.sampleApk())
+        case "install-legacy" where play:
+            // The whole install: Android takes its time over the first
+            // attempt (`-legacyRefusalSeconds`, 8 by default: long enough to
+            // unfold a folding iPhone meanwhile) and refuses the app for its
+            // version; the answer decides the rest.
+            let refusalSeconds = UserDefaults.standard.string(forKey: "legacyRefusalSeconds").flatMap { Double($0) } ?? 8
+            model.previewInstallAttempt = { bypass, update in
+                for step in 1...10 {
+                    try await Task.sleep(for: .milliseconds(100))
+                    update(BusyUpdate(progress: Double(step) / 10 * 0.8))
+                }
+                guard bypass else {
+                    update(BusyUpdate(detail: String(localized: "The virtual machine is installing the app\u{2026}"), cancellable: false))
+                    try await Task.sleep(for: .seconds(refusalSeconds))
+                    throw LegacyApkRefused(target: LegacyTarget(appLevel: 7, requiredLevel: 24))
+                }
+                try await Task.sleep(for: .milliseconds(1200))
+            }
+            try? await Task.sleep(for: .milliseconds(450))
+            model.installPicked(PreviewData.sampleApk())
+        case "install-legacy":
+            // What Android's refusal of an app built for API level 7 asks.
+            try? await Task.sleep(for: .milliseconds(450))
+            model.legacyInstallQuestion = LegacyInstallQuestion(target: LegacyTarget(appLevel: 7, requiredLevel: 24))
         default:
             await SnapshotPreview.applyDeferred(screen: screen, to: model)
         }

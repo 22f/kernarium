@@ -142,6 +142,43 @@ void theConservativeSumLeavesTheGPUWhatIsLeft()
 	require(above.short_of_floor);
 }
 
+/* A live camera session holds host memory outside the GPU (the camera
+ * device's reserve, 197 MiB at the tier every host is offered, for the use
+ * with the most in it: camera_tiers.hpp), and the GPU's pool is B less it, taken after B is clamped
+ * to the floor. */
+void aLiveCameraTakesItsReserveOutOfTheBudget()
+{
+	constexpr std::uint64_t reserve = 197 * mib;
+	/* An iPad mini 6 with the default guest: B is 534 MiB. */
+	const auto mini = budgetOf(2867, 1536, 64, 240 + 24 + 320, 149);
+	require(mini.bytes == 534 * mib);
+	require(platform::gpu_pool_bytes(mini, 0) == 534 * mib,
+		"blocked cameras and none take nothing");
+	require(platform::gpu_pool_bytes(mini, reserve) == 337 * mib);
+	require(mini.bytes == 534 * mib, "B itself is unchanged");
+	/* A budget at the floor gives the pool less than the floor: the reserve is
+	 * taken after the clamp. */
+	const auto floor = budgetOf(2867, 2048, 64, 240 + 24 + 320, 149);
+	require(floor.bytes == 384 * mib && floor.short_of_floor);
+	require(platform::gpu_pool_bytes(floor, reserve) == 187 * mib);
+	/* Without a limit the budget is the guest's RAM. */
+	require(platform::gpu_pool_bytes(budgetOf(0, 2048), reserve) == (2048 - 197) * mib);
+	/* The pool is never negative. */
+	require(platform::gpu_pool_bytes(floor, floor.bytes) == 0);
+	require(platform::gpu_pool_bytes(floor, floor.bytes + 1) == 0);
+	require(platform::gpu_pool_bytes(budgetOf(0, 0), reserve) == 0);
+	/* A pool of zero is no limit to the renderer, so a reserve that takes the
+	 * whole budget is told apart from one that leaves a pool: the launch is
+	 * refused. */
+	require(!platform::gpu_pool_exhausted(mini, 0), "no camera holds nothing");
+	require(!platform::gpu_pool_exhausted(mini, reserve));
+	require(!platform::gpu_pool_exhausted(mini, mini.bytes - 1));
+	require(platform::gpu_pool_exhausted(mini, mini.bytes) &&
+		platform::gpu_pool_exhausted(mini, mini.bytes + 1));
+	require(platform::gpu_pool_exhausted(floor, 598 * mib),
+		"the large tier's most on a budget at the floor");
+}
+
 void theSumSaturates()
 {
 	constexpr auto top = std::numeric_limits<std::uint64_t>::max();
@@ -173,6 +210,8 @@ int main()
 			zeroParametersLeaveOnlyTheGuestAndTheCache},
 		{"the-conservative-sum-leaves-the-gpu-what-is-left",
 			theConservativeSumLeavesTheGPUWhatIsLeft},
+		{"a-live-camera-takes-its-reserve-out-of-the-budget",
+			aLiveCameraTakesItsReserveOutOfTheBudget},
 		{"the-sum-saturates", theSumSaturates},
 	};
 	return uml::testing::runNamedTests(tests);

@@ -137,6 +137,14 @@ PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.hardware.sensor.accelerometer.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.sensor.accelerometer.xml \
     frameworks/native/data/etc/android.hardware.sensor.gyroscope.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.sensor.gyroscope.xml
 
+# The compass is advertised only on a host with a magnetometer. The host says so
+# at boot (androidboot.kernarium.compass=1), and then the sensors HAL lists the
+# magnetometer (overlay/sensors) and SystemConfig (route p0007) reads this
+# directory, which nothing else reads. Both SKU directories are taken (the
+# camera layouts' and the haptics').
+PRODUCT_COPY_FILES += \
+    frameworks/native/data/etc/android.hardware.sensor.compass.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml
+
 PRODUCT_NAME := lineage_andarium
 PRODUCT_DEVICE := andarium
 PRODUCT_BRAND := Andarium
@@ -617,10 +625,12 @@ PRODUCT_PACKAGE_OVERLAYS += device/kernarium/andarium/overlay
 # The host's cameras. The camera device (Virtio ID 65533) gives each camera a V4L2
 # capture node and a metadata node; the emulated camera HAL of hardware/google/camera
 # (route p0030) takes the cameras, frames, stills, RAW and metadata from them and sends
-# the controls back. Its provider is the lazy service, so the process exists only while
-# an application holds a camera or the torch, and cameraserver is told to wait for it
-# (ro.camera.enableLazyHal). The stock emulated provider of the inherited product is an
-# APEX that this product removes, its JSON characteristics with it; the HAL reads one
+# the controls back. Its provider is the lazy service: a system_ext init file restarts
+# it whenever cameraserver starts, so that cameraserver lists the cameras, and the
+# process exits when no application holds a camera or the torch (ro.camera.enableLazyHal
+# tells cameraserver so; init starts the provider again through its interface). The
+# stock emulated provider of the inherited product is an APEX that this product removes,
+# its JSON characteristics with it; the HAL reads one
 # template (emu_camera_v4l2.json) and the camera descriptions of the nodes, which is what
 # ro.vendor.camera.config selects. No vendor extensions exist, so the inherited property
 # that enables the CameraX extensions is dropped. The host composes a camera layout from

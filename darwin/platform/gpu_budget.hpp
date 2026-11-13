@@ -76,4 +76,24 @@ struct GpuBudget final {
 	};
 }
 
+/* The device memory pool the GPU service gets while `reserved` bytes of the
+ * process's memory are held for another device outside the GPU (the camera's
+ * host-side memory, while its session is live): B less the reserve. The
+ * reserve is taken after B has been clamped to the floor, so a budget at the
+ * floor gives a pool smaller than the floor; it is never negative. */
+[[nodiscard]] constexpr std::uint64_t gpu_pool_bytes(
+	const GpuBudget &budget, std::uint64_t reserved) noexcept
+{
+	return budget.bytes > reserved ? budget.bytes - reserved : 0;
+}
+
+/* Whether `reserved` leaves the GPU no pool. A pool of zero means no limit to
+ * the renderer, so a launch whose reserve takes the whole budget is refused
+ * rather than given none. */
+[[nodiscard]] constexpr bool gpu_pool_exhausted(
+	const GpuBudget &budget, std::uint64_t reserved) noexcept
+{
+	return reserved != 0 && reserved >= budget.bytes;
+}
+
 } // namespace uml::platform

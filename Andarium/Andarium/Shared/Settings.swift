@@ -6,10 +6,11 @@ import UIKit
 import UniformTypeIdentifiers
 
 /// Settings while the guest runs, opened from the side keys. It slides up over
-/// the guest, which keeps running behind it: watch the stats, install an app
-/// from Files, connect a computer with adb and make a bug report. An
-/// operation on the guest dismisses Settings and shows the full-screen
-/// progress, and then how it ended.
+/// the guest, which keeps running behind it: install an app from Files and
+/// browse the guest's files (the first sections, where the side keys' tip
+/// points), watch the stats, connect a computer with adb and make a bug
+/// report. An operation on the guest dismisses Settings and shows the
+/// full-screen progress, and then how it ended.
 struct SessionSettingsSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -29,13 +30,13 @@ struct SessionSettingsSheet: View {
         NavigationStack(path: fileRoute) {
             ScrollViewReader { proxy in
                 List {
+                    if offersInstall { apps }
+                    if normalSession, model.capabilities.guestFiles, model.fileBrowser != nil { files }
                     if model.capabilities.statistics { stats(session) }
                     if model.host.supportsPointer { pointer }
                     #if !APP_STORE
                     if let probe = model.inputProbe { inputProbe(probe) }
                     #endif
-                    if normalSession, model.capabilities.apkInstall { apps }
-                    if normalSession, model.capabilities.guestFiles, model.fileBrowser != nil { files }
                     if normalSession, model.capabilities.adbOverNetwork { developer(session) }
                     if normalSession, model.capabilities.bugReport { diagnostics }
                 }
@@ -63,6 +64,23 @@ struct SessionSettingsSheet: View {
         #if FEEDBACK_MAIL
         .sendFeedbackSheet(model)
         #endif
+        // A picker that failed (Install APK and the file browser's Import are
+        // here): the alert is the sheet's own, which keeps the sheet open.
+        .background {
+            Color.clear
+                .accessibilityHidden(true)
+                .alert(
+                    model.documentPickerProblem?.title ?? "",
+                    isPresented: Binding(
+                        get: { model.documentPickerProblem != nil },
+                        set: { if !$0 { model.documentPickerProblem = nil } }),
+                    presenting: model.documentPickerProblem
+                ) { _ in
+                    Button("OK", role: .cancel) {}
+                } message: { problem in
+                    Text(problem.message.keepingTogether)
+                }
+        }
         .environment(\.filesBarHeight, filesBarHeight)
         // The bar is outside the pages, so folders slide under it.
         .safeAreaBar(edge: .bottom) {
@@ -88,17 +106,38 @@ struct SessionSettingsSheet: View {
             if browsing == true { detent = .large }
         }
         .task { await model.watchSettings() }
-        .onDisappear { model.fileBrowser?.sheetClosed() }
+        .onDisappear {
+            model.fileBrowser?.sheetClosed()
+            model.documentPickerProblem = nil
+        }
         .presentationDetents([.medium, .large], selection: $detent)
         .presentationBackground(Color(.systemGroupedBackground))
         .presentationBackgroundInteraction(.enabled(upThrough: .medium))
-        .fileImporter(isPresented: $importing, allowedContentTypes: [InstallRefusal.pickerType]) { result in
-            guard case .success(let url) = result else { return }
-            // Settings goes; the install, or the refusal of a file that is not
-            // one .apk, is on the full-screen overlay.
-            model.installPicked(url)
-            dismiss()
+        #if APP_STORE
+        .fileImporter(isPresented: $importing, allowedContentTypes: InstallRefusal.pickerTypes) { result in
+            switch result {
+            case .success(let url):
+                // Settings goes; the install, or the refusal of a file that is not
+                // an .apk, .apks, .xapk or .apkm, is on the full-screen overlay.
+                model.installPicked(url)
+                dismiss()
+            case .failure(let error):
+                model.documentPickerFailed(error, title: AppModel.installFailure)
+            }
         }
+        #else
+        // Every other build takes a copy of the file (`CopyDocumentPicker`).
+        .documentCopyPicker(isPresented: $importing, types: InstallRefusal.pickerTypes) { result in
+            switch result {
+            case .success(let picked):
+                guard let url = picked.urls.first else { return }
+                model.installPicked(url, staged: picked.folder)
+                dismiss()
+            case .failure(let error):
+                model.documentPickerFailed(error, title: AppModel.installFailure)
+            }
+        }
+        #endif
     }
 
     private var fileRoute: Binding<[FolderRoute]> {
@@ -119,6 +158,13 @@ struct SessionSettingsSheet: View {
     private var normalSession: Bool {
         if case .running(.normal) = model.phase { return true }
         return false
+    }
+
+    /// Whether this session has Install APK: the rule the side keys' tip
+    /// reads to point here, one function for both.
+    private var offersInstall: Bool {
+        guard case .running(let mode) = model.phase else { return false }
+        return model.capabilities.offersApkInstall(in: mode)
     }
 
     // MARK: File browser

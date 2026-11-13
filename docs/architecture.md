@@ -48,8 +48,12 @@ guest restarted, or by `uml_emulator_release_guest` after a clean power-off or
 halt. A failed or host-stopped guest cannot be released and requires a fresh
 process. `uml_emulator_get_run_end` says how a run ended: the guest's own report
 (see [guest lifecycle](#guest-lifecycle)), the host's stop request ahead of it,
-or a failure when the kernel said nothing. Every run of a process uses the same
-JIT cache budget and guest CPU count.
+or a failure when the kernel said nothing; it also says whether the guest's
+console reported that an Android guest finished booting (`boot_completed`) and
+whether init's output reached the host's reading of it at all (`init_observed`),
+both read from the console where the kernel writes it
+(`runtime/console_boot_signal.hpp`). Every run of a process uses the same JIT
+cache budget and guest CPU count.
 
 The hand-back refuses with `UML_EMULATOR_RUNTIME_ERROR` while a host service
 borrows guest RAM or a kernel thread runs, and a refusal changes nothing.
@@ -83,8 +87,52 @@ and releases what it frees (`darwin_uml_physmem_commit`/`_release`,
 footprint. Physical iOS also wires a page while it is committed; the one window
 with a held page unwired is a [hibernation](#hibernation). The kernel trims its
 page cache only at the host's request (`uml_emulator_trim_page_cache()`, every
-quiesce). The host GPU's memory is not carved out of the guest's RAM, and the
+quiesce, and the system's critical memory pressure below) and, in small passes,
+while its periodic trimmer runs (a memory warning below, or the application's
+request). The host GPU's memory is not carved out of the guest's RAM, and the
 host provides no Virtio balloon device.
+
+**Memory pressure.** The guest's own page-cache trimmer is on exactly while the
+system's last memory pressure level is not normal, unless the application asked
+for it (`runtime/memory_pressure_response.hpp`). A warning turns it on: it trims
+the cold file cache in small passes, and the request is one short message that
+waits for nothing. A critical level also frees the host GPU's cached driver
+allocations and asks the guest for one page-cache trim of all its cold cache,
+which unwires those pages. The normal level turns the trimmer off. A warning
+starts at most one response per 30 s of awake time (`CLOCK_UPTIME_RAW`) counted
+from the start of the last response, a critical level always starts one, and
+none starts while one runs; the 30 s limits the responses and their report, not
+the trimmer, which a withheld warning still turns on. The emulator keeps what
+the application and the response want of the trimmer and what the guest last
+took, and a request the guest did not take (a failed send, or a quiesced guest)
+is sent by the next call or by the resume, which replays it after the wake. A
+request skipped for a guest the host has quiesced or with no console is not
+retried, except a trimmer request that could not be written; one that meets
+another lifecycle call of the guest, or a console request in flight, is retried
+up to four times, a second apart, until a response of its own or the normal
+level takes its place. A lifecycle call (quiesce, resume, stop) goes before a
+pressure request, which gives way and is retried. A quiesce counts its trim's
+reply wait from its call, and omits its own trim only when a pressure trim
+reached the guest while it waited and used the wait up. A request wakes a guest
+that suspended itself. macOS and iOS, and both applications, get it through the
+runtime. Each notification the system delivers is also reported to the
+application (the level, and whether a response starts, is withheld by the 30 s
+or is already running), once and before that notification's work, the normal
+level included (`set_pressure_observer`, and the runtime API's
+`set_memory_pressure_callback`). The source's handler only records the delivery
+and a second serial queue handles the deliveries one at a time, in the order
+they arrived: a level raised during a response is reported and answered after
+it, and a notification the system itself merged reads as its most serious flag.
+At most 64 deliveries wait, and the oldest is dropped beyond that. An iPad's
+source never delivers the normal level, so the level held returns to normal
+itself, the same way and with a report, after 240 s of device awake time (the
+clock stops while the device sleeps) in which the source delivered no level but
+normal (the policy's timer, no thread of its own); a process suspended for
+longer meets the return at its resume, which only asks the trimmer off. The
+observer lives for the process. Each level change and each response is one
+rate-limited line: the footprint, the failed guest-RAM wiring operations and,
+on a response line, the bytes each part released and the trim's duration (a
+warning's, the state of the trimmer).
 
 **Budgets.** The process's memory limit, L, is the figure the memory budgets
 derive from. iOS enforces one per application
@@ -106,7 +154,16 @@ of E and S are launch parameters defaulting to the conservative launch set in
 `runtime/guest_memory_budget.hpp`. L is the limit the system advertises to the
 process; shortage elsewhere in the system is not counted. A launch under the
 floor is never refused: B is the floor and the launch says the process is likely
-to be ended. [`graphics.md`](graphics.md) owns what B bounds.
+to be ended. [`graphics.md`](graphics.md) owns what B bounds. A live camera
+session holds host memory outside the GPU (the camera device's reserve,
+`device/camera/camera_tiers.hpp`), and the GPU's pool is B less it
+(`gpu_pool_bytes`), taken after the clamp; blocked cameras and none take
+nothing, a reserve that takes all of B refuses the launch (a pool of zero is no
+limit to the renderer), and the applications show the pool. The reserve is the
+use the host's cameras compose, which the runtime answers before the boot
+(`plan_camera_reserve`, the next boot's figure while the cameras, the source
+and the calibration data are unchanged); the loader's ceiling, which bounds the
+system cameras, is the figure only where no runtime can say.
 
 The guest side's memory follows the vCPU count, v, and that header is the one
 place that says how; every caller evaluates it:
@@ -476,13 +533,33 @@ that carries a request is consumed and dropped, because its sender may be
 waiting with interrupts off; only the GPU, whose requests are asynchronous, the
 vsock and GNSS devices, whose requests the guest never waits on, and the video
 devices, whose streams outlive a suspend, ask to keep them. A ring disable also
-resets a device that holds a deferred request, unless the device asks to keep it
-(`keepsDeferredRequestsWhileDisabled()`, which the video devices do): the
-transport then leaves the device alone, keeps what it completes while a ring is
-disabled and writes it to the ring at its enable, in the order the device
-finished it. A message that changes the memory, the
+resets a device that holds a deferred request, and says so on stderr, unless the
+device asks to keep it
+(`keepsDeferredRequestsWhileDisabled()`, which the GPU, video and camera
+devices do): the transport then leaves the device alone, keeps what it
+completes while a ring is disabled and writes it to the ring at its enable, in
+the order the device finished it. A fenced GPU command still on the host when
+the guest suspends so keeps its contexts and resources, and its answer reaches
+the guest after the enable. A message that changes the memory, the
 features, a ring's layout or base, or ends the driver (the `GET_FEATURES` that
-follows a teardown's disables included) resets such a device first. A
+follows a teardown's disables included) resets such a device first. While the
+transport waits for the front-end to acknowledge a backend request (a
+shared-memory map or unmap, a configuration change, a call), that
+`GET_FEATURES` is answered after the wait and behind every message already
+queued, rather than inside it, since a reset sends unmaps of its own; so a
+device with a shared-memory region may keep its requests too. The wait ends with
+the acknowledgement, the end of the backend-request channel, or a service stop;
+it has no deadline of its own, and a front-end that never answers leaves the
+reset waiting. A reset whose unmap is refused or whose channel has ended also
+drops every range the backend published from the host index. That
+`GET_FEATURES` also retires every ring still disabled, which the guest then
+frees: the transport reads it no more until its next `SET_VRING_KICK` or
+in-band `VRING_KICK`, whereas an enabled ring, and a disabled one no teardown
+followed, stay read and are refused when their available flags are reserved. A
+write to the control or backend-request socket that fails because the
+front-end closed its end (`EPIPE`, `ECONNRESET`, `ENOTCONN`) ends the
+connection without a failure report; a write to a queue's call descriptor that
+fails still reports. A
 `VRING_KICK` is accepted whatever the state of the rings: a kick on a disabled
 ring is handled as that ring's buffers are, and a kick that asks for no
 acknowledgement gets none.
@@ -530,9 +607,16 @@ stream, that reports end of file or an error other than would-block means the
 backend is gone. The guest stops that interrupt source at once, reports it once
 per queue, and hands the device to the connection-broken path, which breaks its
 virtqueues and unregisters it so that pending and later requests fail instead of
-waiting (`guest-vhost-user-backend-gone`). Recovery ends there: a lost GPU
-backend kills the guest's Vulkan client within seconds, but a client waiting on
-a full control queue stays blocked until Mesa's own ring timeout.
+waiting (`guest-vhost-user-backend-gone`). A backend lost while the device is
+being removed, as at power off, leaves the removal to the path that began it:
+the exit call stops the connection-broken work before it removes a device, so
+that a device is unregistered once (`guest-vhost-user-power-off`). The work is
+queued by one loss report per device and holds the platform device's lock
+around its lookup of the virtio device, so an unbind cannot free what it
+breaks. Recovery
+ends there: a lost GPU backend kills the guest's Vulkan client within seconds,
+but a client waiting on a full control queue stays blocked until Mesa's own
+ring timeout.
 
 **Control socket.** A queue is kicked by a request on the control socket. Only a
 console kick asks for an answer, which the backend sends after it has run the
@@ -643,8 +727,20 @@ A launch that passes `--session-record=PATH` gets a record of how its session
 ended (`runtime/session_record`): "running" from the boot on, overwritten by
 every end that runs code, a panic with its message and the kernel's last
 output included. A record still "running" at the next launch means the process
-was ended from outside without running, as a memory-limit end is. The file is
-text of a fixed layout (`uml-session 6`) that never passes 17920 bytes
+was ended from outside without running, as a memory-limit end is. For an
+Android guest the state also says whether the boot finished (`boot completed`;
+`boot unfinished` once init's output was seen without it; `boot unobserved`
+when the record saw none of init's output) and how many times the guest
+restarted before the session (`restarts N`); until the boot completes the
+checkpoint thread rewrites the state with the console's last output whenever
+that grew, so a process ended mid-boot leaves where the boot had got, and a
+stop, restart or power-off before the boot completed quotes that output too.
+The output a record quotes is its own boot's, never an earlier boot's of the
+same process. An end is the last state on disk unless the process dies between
+a delayed checkpoint's write and its repair: the end formats its record before
+it writes it, and a checkpoint whose write lands after it writes that record
+again at once. The file is text of a fixed layout
+(`uml-session 6`) that never passes 17920 bytes
 (`session_record_max_bytes`): an 8 KiB memory slot, a 4 KiB stall slot, a 512-byte
 network slot and the state with the kernel output it quotes, at most 5 KiB. Each
 part is rewritten in place by its own writer, so nothing grows with the session;
@@ -748,9 +844,15 @@ provider, the GPU service with its display) and make the services and command
 line of each boot afresh; after a restart they reset the SLiRP link, ask the GPU
 service for its next connection and run the handle again, and the exit status
 is the last guest's. A guest that does not boot is not restarted for ever
-(`emulator/src/restart_loop_guard.hpp`), and a stop request ends the loop at
-once. Android's boot control block is part of the loop: every restart reads the
-misc partition again (see the
+(`emulator/src/restart_loop_guard.hpp`): five restarts in a row within 15 s of
+their boot end the loop, and so do eight in a row that came within 15 s or, for
+an Android guest whose init output the console showed (`init_observed`), before
+the boot had finished (`boot_completed`), however long it ran. The higher limit
+leaves Android's own boot-loop rescue its turn. A restart after a finished boot
+that lasted 15 s or more never counts, so a reboot suite is not limited; a
+Linux guest, or an Android console that shows nothing of init, keeps the 15 s
+rule alone. A stop request ends the loop at once. Android's boot control block
+is part of the loop: every restart reads the misc partition again (see the
 [Android boot contract](../android/lineage-24/README.md)). The Kernarium runtime
 runs the same loop inside its one `run` call
 (`Kernarium/Runtime/KernariumRestartLoop.hpp`, `kernarium-restart-loop`): a stop

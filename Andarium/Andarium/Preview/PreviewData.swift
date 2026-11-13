@@ -31,17 +31,20 @@ enum PreviewData {
         case "iphone-18-pro-max":
             return HostDevice(
                 name: "iPhone", processorCount: 6, memory: iPhone18ProMaxMemory,
-                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 41.6), supportsPointer: false
+                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 41.6), supportsPointer: false,
+                idiom: .phone, hasHaptics: true, hasCompass: true, hasCamera: true
             )
         case "ipad-mini-6":
             return HostDevice(
                 name: "iPad", processorCount: 6, memory: iPadMini6Memory,
-                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 118.3)
+                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 118.3), idiom: .pad, hasHaptics: false,
+                hasCompass: true, hasCamera: true
             )
         case "mac-64-gib":
             return HostDevice(
                 name: "Mac", processorCount: 8, memory: mac64GiBMemory,
-                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 412.6)
+                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 412.6), idiom: .mac, hasHaptics: false,
+                hasCompass: false, hasCamera: false
             )
         default:
             break
@@ -53,7 +56,8 @@ enum PreviewData {
                     maximumsMiB: Array(repeating: 4096, count: 8), defaultsMiB: Array(repeating: 3584, count: 8),
                     graphicsMiB: { memory, count in budget(limitMiB: 6144, memoryMiB: memory, vCPUs: count) }
                 ),
-                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 118.3)
+                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 118.3), idiom: .pad, hasHaptics: false,
+                hasCompass: true, hasCamera: true
             )
         }
         return HostDevice(
@@ -62,7 +66,8 @@ enum PreviewData {
                 maximumsMiB: [3136, 3072, 3008, 2944, 2880, 2816], defaultsMiB: Array(repeating: 2560, count: 6),
                 graphicsMiB: { memory, count in budget(limitMiB: 4096, memoryMiB: memory, vCPUs: count) }
             ),
-            freeStorageBytes: gibibytes(lowSpace ? 1.2 : 41.6), supportsPointer: false
+            freeStorageBytes: gibibytes(lowSpace ? 1.2 : 41.6), supportsPointer: false,
+            idiom: .phone, hasHaptics: true, hasCompass: true, hasCamera: true
         )
     }
 
@@ -73,7 +78,8 @@ enum PreviewData {
     /// evaluates as the runtime does for a guest of 1.5 GiB or more.
     static let iPadMini6Memory = MemoryPolicy(
         maximumsMiB: [2304, 2304, 2240, 2240, 2176, 2176], defaultsMiB: Array(repeating: 1536, count: 6),
-        graphicsMiB: { memory, count in budget(limitMiB: 2867, memoryMiB: memory, vCPUs: count) }
+        graphicsMiB: { memory, count in budget(limitMiB: 2867, memoryMiB: memory, vCPUs: count) },
+        cameraReserveMiB: { _ in cameraCeilingMiB }
     )
 
     /// The same for a memory limit of 5120 MiB, which an iPhone 18 Pro Max is
@@ -83,8 +89,21 @@ enum PreviewData {
     static let iPhone18ProMaxMemory = MemoryPolicy(
         maximumsMiB: Array(repeating: 4096, count: 6), defaultsMiB: Array(repeating: 3072, count: 6),
         safeMiB: Array(repeating: 3584, count: 6), defaultHoldsGraphics: Array(repeating: true, count: 6),
-        graphicsMiB: { memory, count in budget(limitMiB: 5120, memoryMiB: memory, vCPUs: count) }
+        graphicsMiB: { memory, count in budget(limitMiB: 5120, memoryMiB: memory, vCPUs: count) },
+        cameraReserveMiB: { _ in cameraCeilingMiB }
     )
+
+    /// What a live camera session holds out of the budget at most, which a
+    /// device plans with until its runtime says the figure for its cameras.
+    static let cameraCeilingMiB = 197
+
+    /// What the runtime would answer for a mock device's cameras: the iPad
+    /// mini 6's back camera takes a RAW still but its front camera does not run
+    /// with it (one stream and RAW), a phone's two cameras run together (two
+    /// streams and RAW, which is the ceiling).
+    static func cameraReserveMiB(device: String?) -> Int {
+        device == "ipad-mini-6" ? 171 : cameraCeilingMiB
+    }
 
     /// An iOS app on a Mac with 64 GiB: the host's RAM is on offer at every
     /// count (about a thousand positions on the memory ruler), a new guest gets
@@ -132,6 +151,9 @@ enum PreviewData {
 
     static let sampleApkName = "Signal-7.21.4.apk"
     static let sampleApkSizeBytes = UInt64(38.2 * Double(Limits.bytesPerMiB))
+    /// The name of an app in parts that carries data files, for the preview's
+    /// scenes about them (an invented name, as the sample APK's is).
+    static let sampleContainerName = "Skyline-Run-1.4.0.xapk"
 
     /// A sparse file named like the sample APK, for the preview's install.
     static func sampleApk() -> URL {

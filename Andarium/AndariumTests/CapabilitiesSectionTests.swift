@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AndariumCore
+import AndariumCoreTestSupport
 import SwiftUI
 import Testing
 import UIKit
@@ -64,7 +65,7 @@ struct CapabilitiesSectionTests {
         defer { lease.give() }
         let with = model(hapticsAvailable: true)
         let controller = try await host(with.model, count: 4, in: lease)
-        // Location, Microphone, Gyroscope, then Haptics.
+        // Location, Microphone, Camera, then Haptics: the motion sensors have no row.
         #expect(switches(in: controller.view).count == 4)
         let without = model(hapticsAvailable: false)
         let other = try await host(without.model, count: 3, in: lease)
@@ -87,7 +88,7 @@ struct CapabilitiesSectionTests {
         #expect(driver.savedGuest?.haptics == false)
         // The other three are as they were.
         let others = switches(in: controller.view).dropLast()
-        #expect(others.map(\.isOn) == [false, false, true])
+        #expect(others.map(\.isOn) == [false, false, false])
 
         haptics = try #require(switches(in: controller.view).last)
         #expect(!haptics.isOn)

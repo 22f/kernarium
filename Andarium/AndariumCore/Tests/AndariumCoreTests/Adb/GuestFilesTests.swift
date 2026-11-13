@@ -497,6 +497,11 @@ struct GuestFilesHelperTests {
         #expect(GuestFiles.removeCommand(for: root + "/a/.andarium-1.part") == "rm -f -- '\(root)/a/.andarium-1.part'")
     }
 
+    @Test func aFolderIsMadeWithItsParentsInOneQuotedWord() {
+        #expect(GuestFiles.makeFolderCommand(for: root + "/Android/obb/com.example.game") == "mkdir -p -- '\(root)/Android/obb/com.example.game'")
+        #expect(GuestFiles.makeFolderCommand(for: root + "/it's") == "mkdir -p -- '\(root)/it'\\''s'")
+    }
+
     @Test func anUploadWritesOnlyUnderAPartialName() throws {
         let adbd = FakeAdbd(features: v2Features, services: storage([root + "/D": .folder]).services)
         defer { adbd.shutdown() }

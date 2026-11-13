@@ -54,6 +54,28 @@ uml_add_unit_test(
     COMMAND uml_runtime_session_record_tests
         ${PROJECT_SOURCE_DIR}/tests/unit/andarium/fixtures/network-slot-golden.txt)
 
+# The same record against a state checkpoint that is delayed past an end: the
+# binary defines pwrite to hold one write, so it is a binary of its own.
+add_executable(uml_runtime_session_record_delayed_checkpoint_tests
+    session_record_delayed_checkpoint_tests.cpp)
+target_link_libraries(uml_runtime_session_record_delayed_checkpoint_tests PRIVATE
+    UML::RuntimeSessionRecord
+    UML::RuntimeGuestStatistics)
+uml_add_unit_test(
+    NAME runtime-session-record-delayed-checkpoint
+    COMMAND uml_runtime_session_record_delayed_checkpoint_tests)
+
+# The console's word that an Android guest finished booting, which the
+# emulator reports at a run's end and an application's restart loop reads.
+add_executable(uml_runtime_console_boot_signal_tests
+    console_boot_signal_tests.cpp)
+target_include_directories(uml_runtime_console_boot_signal_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/darwin/runtime)
+uml_add_unit_test(
+    NAME runtime-console-boot-signal
+    COMMAND uml_runtime_console_boot_signal_tests
+    LABELS tsan)
+
 # The refusal to resume on a disk that changed: it ends the process, and the
 # session record says why.
 add_executable(uml_runtime_guest_resume_refusal_tests
@@ -313,3 +335,35 @@ uml_add_unit_test(
     COMMAND uml_runtime_stall_watch_tests
     TIMEOUT 120)
 set_tests_properties(runtime-stall-watch PROPERTIES RUN_SERIAL TRUE)
+
+# What the host gives back when the system warns of memory pressure: the
+# policy against a clock and actions of the test's own, and the system's side
+# against a source the test raises.
+add_executable(uml_runtime_memory_pressure_response_tests
+    memory_pressure_response_tests.cpp)
+target_link_libraries(uml_runtime_memory_pressure_response_tests PRIVATE
+    UML::RuntimeMemoryPressure
+    UML::RuntimeGuestStatistics
+    UML::PlatformContract)
+uml_add_unit_test(
+    NAME runtime-memory-pressure-response
+    COMMAND uml_runtime_memory_pressure_response_tests
+    TIMEOUT 120)
+
+# A level raised after exit() has run the destructors of ordinary statics, with a
+# guest still owning its watch. The object that registers the raising handler is
+# linked ahead of the response's, which is what puts the handler after their
+# destructors.
+add_library(uml_runtime_memory_pressure_exit_first OBJECT
+    memory_pressure_exit_first.cpp)
+add_executable(uml_runtime_memory_pressure_exit_tests
+    memory_pressure_exit_tests.cpp)
+target_link_libraries(uml_runtime_memory_pressure_exit_tests PRIVATE
+    uml_runtime_memory_pressure_exit_first
+    UML::RuntimeMemoryPressure
+    UML::RuntimeGuestStatistics
+    UML::PlatformContract)
+uml_add_unit_test(
+    NAME runtime-memory-pressure-exit
+    COMMAND uml_runtime_memory_pressure_exit_tests
+    TIMEOUT 60)

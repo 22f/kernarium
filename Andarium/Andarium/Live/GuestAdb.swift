@@ -294,23 +294,90 @@ nonisolated struct AdbGuestOperations: Sendable {
         }
     }
 
-    /// Installs the APK at `url` (readable by the caller), cancellable while
-    /// the file is being sent. The file's size is read when it is in hand.
-    func installApk(at url: URL, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
+    /// Installs the app at `url` (readable by the caller): an .apk, or a
+    /// file that holds an app in parts (.apks, .xapk, .apkm). Cancellable
+    /// while the file is being sent; a stop or a failure before the commit
+    /// abandons the install session the parts were written into. The file's
+    /// size is read when it is in hand.
+    /// `bypassLowTargetSdkBlock` sends the package manager's flag that lifts its
+    /// refusal of an app built for a much older Android; only Settings' Install
+    /// APK sets it, once, after the person's answer (`LegacyInstallFlow`). An
+    /// app refused for that reason without it throws `LegacyApkRefused`.
+    ///
+    /// An .xapk's OBB files are copied after the commit. The app is installed
+    /// by then, so whatever stops that copy (the Cancel button, a failure, the
+    /// connection) ends the call with `installedWithoutData` and not with an
+    /// error; the partial file it was writing is removed. `partials` is told of
+    /// the copy as of an import (`PartialSweepLedger`).
+    @discardableResult
+    func installApk(
+        at url: URL, bypassLowTargetSdkBlock: Bool = false, partials: PartialSweepLedger? = nil,
+        update: @escaping @Sendable (BusyUpdate) -> Void
+    ) async throws -> ApkInstallOutcome {
         guard let identity else { throw AdbFailure(.keyRejected, activity: .installApp) }
         let coordinator = FileCoordinatorBox()
         let device = device
         let hostFree = hostFree
+        let trail = ApkInstallTrail()
+        let step = ApkDataStep(run: run, partials: partials)
+        let outcome: ApkInstallOutcome
         do {
-            try await AdbOperationRunner.run(
+            outcome = try await AdbOperationRunner.run(
                 identity: identity, clock: clock, connector: connector, onCancel: { coordinator.cancel() }
             ) { session in
                 try ApkInstallOperation.run(
-                    session: session, coordinator: coordinator, url: url, device: device, hostFree: hostFree,
+                    session: session, coordinator: coordinator, url: url, device: device,
+                    bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, hostFree: hostFree, trail: trail, data: step,
                     update: update)
             }
         } catch {
+            await finishInstall(identity: identity, trail: trail, step: step)
+            // Once the commit has answered the app is installed; what ended
+            // the run after that ended the copying of its data.
+            if trail.committed { return .installedWithoutData }
             throw AdbOperationRunner.presented(error, activity: .installApp)
+        }
+        await finishInstall(identity: identity, trail: trail, step: step)
+        return outcome
+    }
+
+    /// Undoes what an install left in the guest, on connections of their own
+    /// that a cancelled task cannot end: the session that was not committed,
+    /// and the partial file of a data copy that did not finish. The ledger is
+    /// told the copy ended when its file is in place or known to be gone.
+    private func finishInstall(identity: AdbKeyStore.Identity, trail: ApkInstallTrail, step: ApkDataStep) async {
+        await abandonInstallSession(identity: identity, trail: trail)
+        if let temporary = trail.partialFile {
+            let removed = try? await AdbOperationRunner.run(
+                identity: identity, clock: clock, cancellable: false, connector: connector
+            ) { session in
+                try session.run { connection in
+                    session.watchdog.arm(idle: .seconds(15), overall: .seconds(30))
+                    return try connection.runShell(GuestFiles.removeCommand(for: temporary))
+                }
+            }
+            if removed?.exitCode == 0 { trail.partialFile = nil }
+        }
+        if trail.importOpen {
+            trail.importOpen = false
+            step.partials?.importEnded(mark: step.run, clean: trail.partialFile == nil)
+        }
+    }
+
+    /// Deletes the install session a failed or stopped install left open in
+    /// the guest, on a connection of its own that a cancelled task cannot
+    /// end. A session that was committed is gone already and is not touched.
+    private func abandonInstallSession(identity: AdbKeyStore.Identity, trail: ApkInstallTrail) async {
+        guard let id = trail.openSession else { return }
+        trail.openSession = nil
+        _ = try? await AdbOperationRunner.run(
+            identity: identity, clock: clock, cancellable: false, connector: connector
+        ) { session in
+            try session.run { connection in
+                session.watchdog.arm(idle: .seconds(15), overall: .seconds(30))
+                let stream = try connection.open(PackageInstallCommand.abandonSession(id))
+                _ = try stream.readToEnd(limit: 64 * 1024)
+            }
         }
     }
 }

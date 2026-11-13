@@ -60,11 +60,14 @@ endif()
 
 add_library(KernariumRuntime SHARED
     KernariumAdbChannel.hpp
+    KernariumCamera.hpp
     KernariumConsoleInput.hpp
     KernariumConsoleOutput.hpp
     KernariumGuestTimeZone.hpp
     KernariumHostFeatures.hpp
+    KernariumIdentity.hpp
     KernariumKeyWake.hpp
+    KernariumMemoryPressure.hpp
     KernariumRestartLoop.hpp
     KernariumRuntime.h
     KernariumRuntime.mm)
@@ -129,6 +132,11 @@ target_link_libraries(KernariumRuntime PRIVATE
     "-framework Metal"
     "-framework MetalKit"
     "-framework UIKit")
+# Only an Android guest has cameras (KernariumCamera.hpp). The source library
+# carries the device library with it.
+if(KERNARIUM_RUNTIME_ANDROID_GUEST)
+    target_link_libraries(KernariumRuntime PRIVATE UML::CameraSource)
+endif()
 target_compile_definitions(KernariumRuntime PRIVATE
     KERNARIUM_RUNTIME_ANDROID_GUEST=${KERNARIUM_RUNTIME_ANDROID_GUEST}
     KERNARIUM_RUNTIME_GUEST_FLAVOR=${KERNARIUM_RUNTIME_GUEST_FLAVOR}

@@ -91,6 +91,50 @@
         }
       }
     },
+    "%@ is installed in the virtual machine, but not all of its data files were copied. The app may not work without them." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@を仮想マシンにインストールしましたが、一部のデータファイルはコピーされていません。データファイルがないと、アプリが動作しない場合があります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@已安装到虚拟机中，但并非所有数据文件都已拷贝。没有这些文件，应用可能无法运行。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@已安裝到虛擬機器中，但並非所有資料檔案都已拷貝。沒有這些檔案，應用程式可能無法運作。"
+          }
+        }
+      }
+    },
+    "%@ is installed in the virtual machine, but not all of its data files were copied. The app may not work without them. Install the file again to copy them." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@を仮想マシンにインストールしましたが、一部のデータファイルはコピーされていません。データファイルがないと、アプリが動作しない場合があります。コピーするには、このファイルをもう一度インストールしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@已安装到虚拟机中，但并非所有数据文件都已拷贝。没有这些文件，应用可能无法运行。请再次安装此文件以拷贝这些文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@已安裝到虛擬機器中，但並非所有資料檔案都已拷貝。沒有這些檔案，應用程式可能無法運作。請再次安裝此檔案以拷貝這些檔案。"
+          }
+        }
+      }
+    },
     "%@ is installed in the virtual machine." : {
       "localizations" : {
         "ja" : {
@@ -1212,6 +1256,28 @@
         }
       }
     },
+    "Allow camera access" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "カメラへのアクセスを許可"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许访问相机"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允許取用相機"
+          }
+        }
+      }
+    },
     "Allow location access" : {
       "localizations" : {
         "ja" : {
@@ -1351,6 +1417,28 @@
         }
       }
     },
+    "Andarium couldn’t take the file from Files." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumは“ファイル”からそのファイルを取得できませんでした。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium无法从“文件”取得该文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium無法從「檔案」取得該檔案。"
+          }
+        }
+      }
+    },
     "Andarium is incomplete" : {
       "localizations" : {
         "ja" : {
@@ -1369,6 +1457,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Andarium不完整"
+          }
+        }
+      }
+    },
+    "Andarium is not allowed to use the camera. Turning this on offers to open Settings." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumはカメラの使用を許可されていません。オンにすると“設定”を開くよう案内されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium未获准使用相机。打开此开关会提示你前往“设置”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium未獲允許使用相機。開啟此開關會提示你前往「設定」。"
           }
         }
       }
@@ -1838,6 +1948,29 @@
         }
       }
     },
+    "App installed, some data missing" : {
+      "comment" : "Title of the card an install ends on when the app is in but some of its data files (an OBB file of an .xapk or .apkm, say) were not copied or are not copied at all. It shows with a warning symbol, in place of \"App installed\", so that it is not taken for a plain success.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "データの一部なしでインストールしました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "应用已安装，部分数据缺失"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "應用程式已安裝，部分資料缺失"
+          }
+        }
+      }
+    },
     "App not installed" : {
       "localizations" : {
         "ja" : {
@@ -1996,29 +2129,6 @@
         }
       }
     },
-    "Back up virtual machine data" : {
-      "comment" : "Switch: include the virtual machine's data in iCloud and computer backups.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "仮想マシンのデータをバックアップ"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "备份虚拟机数据"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "備份虛擬機器資料"
-          }
-        }
-      }
-    },
     "Backup" : {
       "comment" : "Home section about backups of the virtual machine's data.",
       "localizations" : {
@@ -2083,6 +2193,94 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "建置版本"
+          }
+        }
+      }
+    },
+    "Camera" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "カメラ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相机"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相機"
+          }
+        }
+      }
+    },
+    "Camera is off" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "カメラがオフです"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相机已关闭"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相機已關閉"
+          }
+        }
+      }
+    },
+    "Camera is restricted" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "カメラが制限されています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相机受限"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相機受到限制"
+          }
+        }
+      }
+    },
+    "Camera paused while other apps are on screen" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ほかのアプリと同時に表示している間は、カメラが一時停止します"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同时显示其他App时，相机会暂停"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同時顯示其他App時，相機會暫停"
           }
         }
       }
@@ -2176,7 +2374,7 @@
       }
     },
     "Capabilities" : {
-      "comment" : "Home section: what the virtual machine may use of this device (location, microphone, gyroscope).",
+      "comment" : "Home section: what the virtual machine may use of this device (location, microphone, haptics).",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -2461,6 +2659,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "拷貝報告"
+          }
+        }
+      }
+    },
+    "Copying app data…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アプリのデータをコピー中…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在拷贝应用数据…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在拷貝應用程式資料…"
+          }
+        }
+      }
+    },
+    "Copying data file %lld of %lld…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$lld件中%1$lld件目のデータファイルをコピー中…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在拷贝第%1$lld个数据文件，共%2$lld个…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在拷貝第%1$lld個資料檔案，共%2$lld個…"
           }
         }
       }
@@ -3819,28 +4061,6 @@
         }
       }
     },
-    "Gyroscope" : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ジャイロスコープ"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "陀螺仪"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "陀螺儀"
-          }
-        }
-      }
-    },
     "Haptics" : {
       "comment" : "A switch under Capabilities: the virtual machine's vibration and haptic feedback play on this device's Taptic Engine. Haptics is iOS's own name (Sounds & Haptics).",
       "localizations" : {
@@ -4018,6 +4238,29 @@
         }
       }
     },
+    "Include in backups" : {
+      "comment" : "Switch: include the virtual machine's data in iCloud and computer backups.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バックアップに含める"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "包含在备份中"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "包含在備份中"
+          }
+        }
+      }
+    },
     "Info" : {
       "comment" : "Title of the Info button and sheet.",
       "localizations" : {
@@ -4037,6 +4280,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "資訊"
+          }
+        }
+      }
+    },
+    "Install anyway" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "それでもインストール"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍要安装"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍要安裝"
           }
         }
       }
@@ -4081,6 +4346,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "安裝應用程式、ADB、統計資料和選項"
+          }
+        }
+      }
+    },
+    "Install this app anyway?" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "それでもこのアプリをインストールしますか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍要安装此应用吗？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍要安裝此應用程式嗎？"
           }
         }
       }
@@ -4196,6 +4483,28 @@
         }
       }
     },
+    "iOS is not allowing Andarium to use the camera. Turn on Camera for Andarium in Settings, then come back to use it." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOSはAndariumによるカメラの使用を許可していません。“設定”でAndariumの“カメラ”をオンにしてから、このアプリに戻って使用してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS不允许Andarium使用相机。请在“设置”中为Andarium打开“相机”，然后返回使用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS不允許Andarium使用相機。請在「設定」中為Andarium開啟「相機」，然後回來使用。"
+          }
+        }
+      }
+    },
     "iOS is not allowing Andarium to use the microphone. Turn on Microphone for Andarium in Settings, then come back to use it." : {
       "localizations" : {
         "ja" : {
@@ -4236,6 +4545,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "iOS不允許Andarium使用此裝置的位置。請在「設定」中為Andarium開啟「位置」，然後回來使用。"
+          }
+        }
+      }
+    },
+    "iOS may close Andarium." : {
+      "comment" : "Text of the notice shown when iOS is critically short of memory: iOS may end the Andarium app. Andarium is the app's name.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOSによってAndariumが終了される可能性があります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS可能会关闭Andarium。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS可能會關閉Andarium。"
           }
         }
       }
@@ -4683,6 +5015,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "記憶體%@"
+          }
+        }
+      }
+    },
+    "Memory is critically low" : {
+      "comment" : "Title of the notice shown over the running guest when iOS is critically short of memory.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "メモリが著しく不足しています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "内存严重不足"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "記憶體嚴重不足"
           }
         }
       }
@@ -5752,29 +6107,6 @@
         }
       }
     },
-    "Recovery and erase" : {
-      "comment" : "Home section with Start in recovery and Erase virtual machine.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "リカバリモードと消去"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "恢复模式与抹掉"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "復原模式與清除"
-          }
-        }
-      }
-    },
     "Remove %@" : {
       "localizations" : {
         "ja" : {
@@ -6264,6 +6596,28 @@
         }
       }
     },
+    "Sending part %lld of %lld…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$lld個中%1$lld個目のパーツを送信中…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在发送第%1$lld部分，共%2$lld部分…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在傳送第%1$lld部分，共%2$lld部分…"
+          }
+        }
+      }
+    },
     "Set up virtual machine" : {
       "localizations" : {
         "ja" : {
@@ -6513,6 +6867,28 @@
         }
       }
     },
+    "Shut down the virtual machine, then turn on Camera in Capabilities." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“デバイス機能”の“カメラ”は、仮想マシンをシャットダウンしてからオンにしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请先将虚拟机关机，然后在“设备功能”中打开“相机”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "請先將虛擬機器關機，然後在「裝置功能」中開啟「相機」。"
+          }
+        }
+      }
+    },
     "Shutting down…" : {
       "localizations" : {
         "ja" : {
@@ -6756,6 +7132,28 @@
         }
       }
     },
+    "Some parts of this app are missing. Choose an .apks, .xapk or .apkm file that holds all of them." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリの一部のパーツがありません。すべてのパーツを含む.apks、.xapk、.apkmのいずれかのファイルを選択してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用的某些部分缺失。请选择包含所有部分的.apks、.xapk或.apkm文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式的某些部分缺失。請選擇包含所有部分的.apks、.xapk或.apkm檔案。"
+          }
+        }
+      }
+    },
     "Sort By" : {
       "localizations" : {
         "ja" : {
@@ -6853,29 +7251,6 @@
         }
       }
     },
-    "Start in recovery" : {
-      "comment" : "Starts Android's recovery mode.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "リカバリモードで起動"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "以恢复模式启动"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "以復原模式啟動"
-          }
-        }
-      }
-    },
     "Start the virtual machine once first. Until then there is no data to keep." : {
       "localizations" : {
         "ja" : {
@@ -6916,6 +7291,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在啟動"
+          }
+        }
+      }
+    },
+    "Starting is taking a long time" : {
+      "comment" : "Title of the notice on the boot screen, after eight minutes, for the virtual machine's first start and the first start after an update, which have no usual time to be slower than; also spoken as VoiceOver's announcement when it appears.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "起動に時間がかかっています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启动耗时较长"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "啟動所需時間較長"
+          }
+        }
+      }
+    },
+    "Starting is taking longer than usual" : {
+      "comment" : "Title of the notice on the boot screen after three minutes of one start without Android finishing (an ordinary start, or a restart or recovery); also spoken as VoiceOver's announcement when it appears.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "起動に通常より時間がかかっています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启动耗时比平常更长"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "啟動時間比平常更長"
           }
         }
       }
@@ -7031,6 +7452,29 @@
         }
       }
     },
+    "Stop" : {
+      "comment" : "Button of the slow-start notice on the boot screen, and of its confirmation: stops the virtual machine that is starting.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "停止"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "停止"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "停止"
+          }
+        }
+      }
+    },
     "Stop and Close" : {
       "localizations" : {
         "ja" : {
@@ -7075,6 +7519,29 @@
         }
       }
     },
+    "Stop the virtual machine?" : {
+      "comment" : "Title of the confirmation that Stop on the boot screen's slow-start notice asks first; its buttons are Stop and Cancel and its message says what a stop needs to start again.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンを停止しますか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要停止虚拟机吗？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要停止虛擬機器嗎？"
+          }
+        }
+      }
+    },
     "Stopped when Andarium left the foreground." : {
       "localizations" : {
         "ja" : {
@@ -7093,6 +7560,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Andarium離開前景時已停止。"
+          }
+        }
+      }
+    },
+    "Stopping…" : {
+      "comment" : "The slow-start notice's Stop button after it was chosen, until the virtual machine has stopped.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "停止中…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在停止…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在停止…"
           }
         }
       }
@@ -7455,6 +7945,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此應用程式需要虛擬機器中沒有的系統程式庫。"
+          }
+        }
+      }
+    },
+    "The camera is restricted on this device. Turning this on explains why." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このデバイスではカメラが制限されています。オンにすると理由が表示されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此设备上的相机受到限制。打开此开关会说明原因。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此裝置上的相機受到限制。開啟此開關會說明原因。"
           }
         }
       }
@@ -8142,6 +8654,29 @@
         }
       }
     },
+    "The virtual machine is still starting. You can keep waiting, or stop it. To start it again after stopping, close Andarium in the App Switcher and open it again." : {
+      "comment" : "Text of the slow-start notice on the boot screen: the virtual machine goes on starting behind it, and a stop ends the virtual machine for this launch of the app.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンはまだ起動中です。このまま待つことも、停止することもできます。停止した後にもう一度起動するには、AppスイッチャーでAndariumを終了してからもう一度開いてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机仍在启动。你可以继续等待，也可以将其停止。停止后若要重新启动，请在App切换器中关闭Andarium后重新打开。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器仍在啟動。你可以繼續等待，也可以將其停止。停止後若要重新啟動，請在App切換器中關閉Andarium後重新打開。"
+          }
+        }
+      }
+    },
     "The virtual machine isn’t answering yet. Try again once it has started." : {
       "localizations" : {
         "ja" : {
@@ -8738,46 +9273,24 @@
         }
       }
     },
-    "This app comes in several parts, which Andarium can’t install yet." : {
+    "This app has no code for this device’s processor. Choose a version of the app made for ARM processors." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このアプリは複数のパーツで構成されており、Andariumではまだインストールできません。"
+            "value" : "このアプリには、このデバイスのプロセッサ用のコードがありません。ARMプロセッサ用のバージョンのアプリを選択してください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此应用由多个部分组成，Andarium暂时无法安装。"
+            "value" : "此应用没有适用于此设备处理器的代码。请选择适用于ARM处理器的应用版本。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此應用程式由多個部分組成，Andarium目前無法安裝。"
-          }
-        }
-      }
-    },
-    "This app has no code for this device’s processor." : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "このアプリには、このデバイスのプロセッサ用のコードがありません。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此应用没有适用于此设备处理器的代码。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此應用程式沒有適用於此裝置處理器的程式碼。"
+            "value" : "此應用程式沒有適用於此裝置處理器的程式碼。請選擇適用於ARM處理器的應用程式版本。"
           }
         }
       }
@@ -8844,6 +9357,51 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此App版本比虛擬機器上次啟動時使用的版本更舊，且虛擬機器資料無法降級回舊版本。請安裝較新版本的Andarium、回復較早的快照，或清除虛擬機器以使用此版本重新開始。"
+          }
+        }
+      }
+    },
+    "This app was built for a much older version of Android. Android blocks apps like this because they predate its newer privacy and security protections. If you install it anyway, it may not work properly." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリは、はるかに古いバージョンのAndroid向けに作られています。Androidは、新しいプライバシー保護やセキュリティ保護より前に作られたこのようなアプリのインストールをブロックします。それでもインストールすると、正しく動作しない場合があります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用是为非常旧的Android版本开发的。Android会阻止安装这类应用，因为它们是在Android推出较新的隐私和安全保护之前开发的。如果仍要安装，此应用可能无法正常运行。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式是為非常舊的Android版本所開發。Android會阻擋安裝這類應用程式，因為它們是在Android推出較新的隱私權與安全性保護之前開發的。若仍要安裝，此應用程式可能無法正常運作。"
+          }
+        }
+      }
+    },
+    "This app was built for API level %lld. Android in this virtual machine normally installs only apps built for API level %lld or later." : {
+      "comment" : "API level is Android's number for a version; both are plain numbers (7, 24).",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリはAPIレベル%1$lld向けに作られています。この仮想マシンのAndroidは、通常、APIレベル%2$lld以降向けに作られたアプリのみをインストールします。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用是为API级别%1$lld开发的。此虚拟机中的Android通常只安装为API级别%2$lld或更高级别开发的应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式是為API級別%1$lld所開發。此虛擬機器中的Android通常只會安裝為API級別%2$lld或更高級別所開發的應用程式。"
           }
         }
       }
@@ -9002,24 +9560,24 @@
         }
       }
     },
-    "This device has no gyroscope or accelerometer to share." : {
+    "This device has no camera to share." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このデバイスには利用可能なジャイロスコープや加速度センサーがありません。"
+            "value" : "このデバイスには利用可能なカメラがありません。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此设备没有可供使用的陀螺仪或加速度计。"
+            "value" : "此设备没有可供使用的相机。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此裝置沒有可供使用的陀螺儀或加速度計。"
+            "value" : "此裝置沒有可供使用的相機。"
           }
         }
       }
@@ -9042,6 +9600,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此裝置沒有Wi-Fi位址。請連接Wi-Fi以透過網路使用ADB。"
+          }
+        }
+      }
+    },
+    "This device’s settings, such as Screen Time or a profile, do not let apps use the camera, so Andarium cannot share it." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このデバイスの設定（“スクリーンタイム”やプロファイルなど）でアプリによるカメラの使用が許可されていないため、Andariumはカメラを共有できません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此设备的设置（例如“屏幕时间”或描述文件）不允许App使用相机，因此Andarium无法共享相机。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此裝置的設定（例如「螢幕使用時間」或描述檔）不允許App使用相機，因此Andarium無法分享相機。"
           }
         }
       }
@@ -9206,24 +9786,48 @@
         }
       }
     },
-    "To start it again, close Andarium and open it again." : {
+    "To install an app, open Settings here and choose Install APK." : {
+      "comment" : "Second line of the side keys' tip, shown where Settings has Install APK.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "もう一度起動するには、Andariumを閉じてからもう一度開いてください。"
+            "value" : "アプリをインストールするには、ここで“設定”を開き、“APKをインストール”を選択します。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "要重新启动，请关闭Andarium后重新打开。"
+            "value" : "要安装应用，请在此打开“设置”，然后选择“安装APK”。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "若要重新啟動，請關閉Andarium後重新打開。"
+            "value" : "要安裝應用程式，請在此打開「設定」，然後選擇「安裝APK」。"
+          }
+        }
+      }
+    },
+    "To start it again, close Andarium in the App Switcher and open it again." : {
+      "comment" : "Under the title of the screen that follows an unexpected end of the virtual machine or the person's Stop on the boot screen, and in Stop's confirmation. The App Switcher is iOS's own; the app has to be closed there, not sent to the Home Screen.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "もう一度起動するには、AppスイッチャーでAndariumを終了してからもう一度開いてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要重新启动，请在App切换器中关闭Andarium后重新打开。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "若要重新啟動，請在App切換器中關閉Andarium後重新打開。"
           }
         }
       }
@@ -9647,6 +10251,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "處理中"
+          }
+        }
+      }
+    },
+    "You stopped the virtual machine" : {
+      "comment" : "Title of the screen that follows Stop on the boot screen's slow-start notice.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンを停止しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你已停止虚拟机"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你已停止虛擬機器"
           }
         }
       }

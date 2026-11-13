@@ -13,7 +13,9 @@ from __future__ import annotations
 
 __import__("sys").dont_write_bytecode = True
 
+import argparse
 import importlib.util
+import io
 import math
 import shutil
 import socket
@@ -164,6 +166,33 @@ class WireTests(unittest.TestCase):
                 runner.parse_control(frames[name])
         with self.assertRaises(ValueError):
             runner.parse_control(frames["control-v2-idle"][:15])
+
+    def test_the_20_byte_frame_of_a_guest_with_the_magnetometer_is_read_as_the_fixture_says(self) -> None:
+        frames = golden()
+        expected = {
+            "control-v3-idle": (runner.Control(3, 0, 10_000, 10_000, 20_000), False, False),
+            "control-v3-magnetometer": (runner.Control(3, 8, 10_000, 10_000, 50_000), False, False),
+            "control-v3-orientation-idle": (runner.Control(3, 16, 10_000, 10_000, 20_000), True, False),
+            "control-v3-orientation": (runner.Control(3, 20, 10_000, 10_000, 20_000), True, True),
+            "control-v3-all": (runner.Control(3, 31, 20_000, 1_000_000, 40_000), True, True),
+        }
+        for name, (control, listed, active) in expected.items():
+            parsed = runner.parse_control(frames[name])
+            self.assertEqual(parsed, control, name)
+            self.assertEqual((parsed.orientation_listed, parsed.orientation_active), (listed, active), name)
+        # Version 2 always lists the sensor; version 1 never does.
+        self.assertTrue(runner.parse_control(frames["control-v2-idle"]).orientation_listed)
+        self.assertFalse(runner.parse_control(frames["control-v1-idle"]).orientation_listed)
+        rejected = [name for name in frames if name.startswith("reject-control-")]
+        self.assertGreaterEqual(len(rejected), 8)
+        for name in rejected:
+            with self.assertRaises(ValueError, msg=name):
+                runner.parse_control(frames[name])
+        with self.assertRaises(ValueError):
+            runner.parse_control(frames["control-v3-idle"][:16])
+        self.assertEqual([runner.frame_length(frames[name][:4]) for name in
+                          ("control-v1-idle", "control-v2-idle", "control-v3-idle", "reject-control-magic")],
+                         [16, 16, 20, None])
 
     def test_each_posture_is_the_orientation_the_accelerometer_judge_reads_from_it(self) -> None:
         # AccelSensorJudge: orientationAngle = -atan2(-x, y) in degrees, and the nearest quarter turn is
@@ -414,6 +443,69 @@ class HostTests(unittest.TestCase):
         finally:
             host.stop()
             guest.close()
+
+    def test_a_host_replays_at_the_first_anc3_that_lists_the_orientation_sensor(self) -> None:
+        frames = golden()
+        guest = FakeGuest(frames["control-v3-orientation-idle"])
+        host = runner.Host(guest.port)
+        try:
+            host.replay = True
+            host.current = 2
+            host.connect()
+            self.assertEqual(host.wait_frame(5), runner.Control(3, 16, 10_000, 10_000, 20_000))
+            self.assertEqual(self.records_within(guest, 1), [frames["orientation-2"]])
+            # Active, in pieces and after a 16-byte frame: said at the edge, and the frames are cut where their
+            # magics say.
+            guest.say(frames["control-v2-idle"])
+            guest.say(frames["control-v3-orientation"][:7])
+            threading.Event().wait(0.2)
+            guest.say(frames["control-v3-orientation"][7:])
+            self.assertEqual(self.records_within(guest, 2), [frames["orientation-2"]] * 2)
+            self.assertEqual(host.replays, 2)
+            self.assertEqual([frame.version for frame in host.frames], [3, 2, 3])
+            self.assertEqual(host.bad, [])
+        finally:
+            host.stop()
+            guest.close()
+
+    def test_a_guest_with_only_the_magnetometer_is_never_answered_with_an_orientation_record(self) -> None:
+        frames = golden()
+        guest = FakeGuest(frames["control-v3-magnetometer"])
+        host = runner.Host(guest.port)
+        try:
+            host.replay = True
+            host.current = 1
+            host.connect()
+            self.assertEqual(host.wait_frame(5), runner.Control(3, 8, 10_000, 10_000, 50_000))
+            threading.Event().wait(0.3)
+            self.assertEqual(guest.records, [])
+        finally:
+            host.stop()
+            guest.close()
+
+    def test_the_compass_argument_is_the_runners_option_or_a_builders_extra_argument(self) -> None:
+        import argparse
+        self.assertTrue(runner.with_compass(argparse.Namespace(with_compass=True)))
+        self.assertTrue(runner.with_compass(argparse.Namespace(extra_arguments=[runner.COMPASS_ARGUMENT])))
+        self.assertFalse(runner.with_compass(argparse.Namespace()))
+
+    def test_the_legacy_phase_refuses_the_compass_argument_before_booting_anything(self) -> None:
+        parse = runner.build_parser().parse_args
+        for arguments in (["--expect", "none", "--with-compass"],
+                          ["--expect", "none", "--no-argument", "--with-compass"]):
+            with self.subTest(arguments):
+                self.assertIn("--with-compass needs --expect sensor", runner.unsupported_combination(parse(arguments)))
+        for arguments in (["--with-compass"], ["--expect", "sensor", "--with-compass"], ["--expect", "none"],
+                          ["--expect", "none", "--no-argument"]):
+            with self.subTest(arguments):
+                self.assertIsNone(runner.unsupported_combination(parse(arguments)))
+        # main() refuses before it resolves adb or starts a guest: no executable is needed.
+        with mock.patch.object(sys, "argv", ["run", "--expect", "none", "--with-compass"]), mock.patch.object(
+                runner.boot_android, "resolve_executable", side_effect=AssertionError("started")), mock.patch(
+                "sys.stderr", new_callable=io.StringIO) as stderr:
+            self.assertEqual(runner.main(), 2)
+        self.assertIn("needs --expect sensor", stderr.getvalue())
+        self.assertEqual(runner.COMPASS_ARGUMENT, "androidboot.kernarium.compass=1")
 
     def test_an_old_guest_is_never_answered_with_an_orientation_record(self) -> None:
         frames = golden()

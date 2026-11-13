@@ -20,7 +20,7 @@ import UIKit
 ///         xcodebuild test -scheme Andarium -destination 'platform=macOS,variant=Designed for iPad' \
 ///         -only-testing:AndariumTests/ResumeAfterSaveTests
 ///
-/// The save flips Back up guest data, so the attribute is written on every
+/// The save flips Include in backups, so the attribute is written on every
 /// host; iOS's Foundation also writes it again on a save that changes
 /// nothing. The flip is undone once the guest is back. The test requires
 /// that the host held the guest while the application was away, which is

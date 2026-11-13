@@ -71,6 +71,24 @@ struct uml_emulator_run_end {
 	/* The command the guest passed to its restart, cut to 255 bytes;
 	 * empty when it gave none and for every other kind. */
 	char restart_command[256];
+	/* 1 when the guest's console said, during this run, that the guest
+	 * finished booting: an Android guest's init processed
+	 * sys.boot_completed=1 or started its recovery, or apexd logged that
+	 * the system booted. 0 otherwise, for a guest that restarted or ended
+	 * before it got there and also for a guest whose console never says
+	 * so, such as a Linux desktop: a caller that wants the answer knows
+	 * which guest it runs. The host reads the console where the kernel
+	 * writes it (stdout, stderr and the descriptors the console arguments
+	 * name with fd:), so the answer holds for every end kind; a console
+	 * that goes anywhere else shows nothing. A run that is resumed from a
+	 * hibernation keeps what the run had seen before it was suspended. */
+	uint32_t boot_completed;
+	/* 1 when init's output reached the host's reading of the console during
+	 * this run: its first line, or any line that ends the boot. A caller
+	 * may take a boot with boot_completed 0 for one that did not finish
+	 * only when this is 1; with both 0 the console showed nothing of init,
+	 * which a healthy boot on an unread console also does. */
+	uint32_t init_observed;
 };
 
 /* What the host measures of a running guest, for a host that shows
@@ -254,7 +272,9 @@ void uml_emulator_wake(struct uml_emulator *emulator);
  * host every few seconds and pays a host read for each evicted page it reads
  * again, backing off while that happens often. A guest boots with trimming
  * off, which suits a guest in front of its user; turn it on while the guest
- * runs unattended, as in the background, and off again on return. A change
+ * runs unattended, as in the background, and off again on return. The host
+ * also turns it on while the system reports memory pressure, and trimming runs
+ * while either of you asks for it. A change
  * made while uml_emulator_quiesce has the guest suspended reaches the guest
  * when uml_emulator_resume wakes it.
  * Returns 0 once the guest has applied the change, -UML_EMULATOR_UNSUPPORTED

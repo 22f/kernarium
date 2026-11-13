@@ -10,12 +10,11 @@
 #include <time.h>
 #include <unistd.h>
 extern "C" {
+#include "irq.h"
 int os_setup_epoll(); int os_add_epoll_fd(int,int,void*);
 int os_del_epoll_fd(int); int os_waiting_for_events_epoll(); void os_close_epoll_fd();
 void *os_epoll_get_data_pointer(int); int os_epoll_triggered(int,int);
 int darwin_irq_set_notification(int,int); int os_irq_wake_pending();
-int darwin_irq_idle_begin(void); void darwin_irq_idle_end(void);
-int darwin_irq_dispatch(int,unsigned long long,void*);
 void panic(const char*,...) { std::abort(); }
 }
 // The notification thread names itself first; every pass of its loop reads the
@@ -35,8 +34,12 @@ long long os_nsecs(void) {
 // collects what has arrived, as the real one does until a kevent() returns
 // nothing, and then lingers before it returns, as the real one does before the
 // token is released.
+// With `poll_events' the handler also polls as the real one does, until a poll
+// returns nothing: `collected' counts the events it took, and a descriptor in
+// `inject_fd' gets a byte after the first poll, so that the next pass has one.
 static std::atomic<int> dispatches{0}, wakes{0}, shot{-1}, shot_result{-1};
-static std::atomic<bool> stress{false};
+static std::atomic<bool> stress{false}, poll_events{false};
+static std::atomic<int> collected{0}, inject_fd{-1};
 static std::atomic<long> arrived{0}, taken{0};
 static std::atomic<int> linger{0};
 extern "C" void sigio_handler(int,void*,void*,void*) {
@@ -44,6 +47,13 @@ extern "C" void sigio_handler(int,void*,void*,void*) {
  int cpu = shot.exchange(-1);
  // A CPU that dispatches while another does must not, whatever its time.
  if (cpu>=0) shot_result = darwin_irq_dispatch(cpu,1ULL<<62,nullptr);
+ if (poll_events) {
+  int count;
+  while ((count = os_waiting_for_events_epoll()) > 0) collected += count;
+  assert(count==0);
+  int fd = inject_fd.exchange(-1);
+  if (fd>=0) assert(write(fd,"i",1)==1);
+ }
  if (stress) {
   for (long seen; taken < (seen = arrived.load()); ) taken = seen;
   for (volatile int i=0;i<linger;i=i+1) {}
@@ -127,6 +137,32 @@ int main() {
  // dispatches once more after it releases the token; CPU0 did not wait.
  shot=0; shot_result=-1; assert(darwin_irq_dispatch(1,t0+80*ms,nullptr)==1 && shot_result==0 && dispatches==6);
  assert(darwin_irq_dispatch(0,t0+81*ms,nullptr)==1 && dispatches==7);
+ // What a dispatch returns: DARWIN_IRQ_HANDLED when a poll of its handler
+ // collected an event, in any pass of it, and 1 otherwise. The edge is taken
+ // once; the descriptor stays readable and the next dispatch finds nothing.
+ {
+  int hp[2]; assert(pipe(hp)==0 && os_add_epoll_fd(1,hp[0],&token)==0);
+  char byte; poll_events=true; collected=0;
+  assert(darwin_irq_dispatch(0,t0+90*ms,nullptr)==1 && collected==0);
+  assert(write(hp[1],"p",1)==1);
+  assert(darwin_irq_dispatch(0,t0+91*ms,nullptr)==DARWIN_IRQ_HANDLED && collected==1);
+  assert(darwin_irq_dispatch(0,t0+92*ms,nullptr)==1 && collected==1);
+  assert(darwin_irq_dispatch(0,t0+93*ms,nullptr)==1 && collected==1);
+  // The first pass collects an event and a retry, which another CPU's attempt
+  // during the pass asks for, finds nothing: the result keeps the first's.
+  assert(read(hp[0],&byte,1)==1 && write(hp[1],"q",1)==1);
+  shot=0; shot_result=-1; collected=0; int before=dispatches;
+  assert(darwin_irq_dispatch(1,t0+130*ms,nullptr)==DARWIN_IRQ_HANDLED && shot_result==0 && dispatches-before==2 && collected==1);
+  assert(darwin_irq_dispatch(0,t0+131*ms,nullptr)==1 && collected==1);
+  // The first pass finds nothing and the event comes during it: the retry's
+  // poll collects it and the result is that pass's.
+  assert(read(hp[0],&byte,1)==1);
+  shot=0; shot_result=-1; collected=0; before=dispatches; inject_fd=hp[1];
+  assert(darwin_irq_dispatch(1,t0+170*ms,nullptr)==DARWIN_IRQ_HANDLED && shot_result==0 && dispatches-before==2 && collected==1);
+  assert(darwin_irq_dispatch(0,t0+171*ms,nullptr)==1 && collected==1);
+  poll_events=false;
+  assert(os_del_epoll_fd(hp[0])==0); close(hp[0]); close(hp[1]);
+ }
  // An edge nobody dispatches after is handed to an idle secondary after 20 ms,
  // again after each interval, and no more once the dispatches go on, as a
  // running CPU0's do at its tick.
@@ -275,5 +311,5 @@ int main() {
   }
   holder.join(); stress=false;
  }
- os_close_epoll_fd(); puts("PASS IRQ reentry, MOD rearm, wake source, drain/refill, EOF, early registration, dispatch token, takeover wake, idle wait wake, parked thread, token handshake, shutdown");
+ os_close_epoll_fd(); puts("PASS IRQ reentry, MOD rearm, wake source, drain/refill, EOF, early registration, dispatch token and its result, takeover wake, idle wait wake, parked thread, token handshake, shutdown");
 }

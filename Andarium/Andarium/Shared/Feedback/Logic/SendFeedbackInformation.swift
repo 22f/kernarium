@@ -20,6 +20,16 @@ nonisolated struct SendFeedbackInformation: Equatable, Sendable {
         var graphicsMiB: Int?
     }
 
+    /// A start that has not reached Android: where it is and for how long,
+    /// when the mail is written from the boot screen's notice.
+    struct Boot: Equatable, Sendable {
+        /// The step the boot screen names, in English.
+        var step: String
+        var seconds: Int
+        /// How many times the virtual machine restarted itself in the start.
+        var restarts: Int
+    }
+
     var appVersion: String
     var build: String
     var configuration: String
@@ -35,6 +45,8 @@ nonisolated struct SendFeedbackInformation: Equatable, Sendable {
     var androidRelease: String
     /// Seconds the virtual machine has run; nil while none runs.
     var runningSeconds: Int?
+    /// nil unless a start is under way.
+    var boot: Boot?
     /// The free space as the application shows it.
     var freeSpaceBytes: UInt64
     var thermalState: String
@@ -68,6 +80,11 @@ nonisolated struct SendFeedbackInformation: Equatable, Sendable {
         }
         lines.append("Android: \(androidRelease)")
         lines.append("Running: \(runningSeconds.map { "yes, for \(Self.duration($0))" } ?? "no")")
+        if let boot {
+            var line = "Boot: not finished, at \(boot.step) after \(Self.duration(boot.seconds))"
+            if boot.restarts > 0 { line += ", restarted \(boot.restarts) time\(boot.restarts == 1 ? "" : "s")" }
+            lines.append(line)
+        }
         lines.append("Free space: \(Formats.size(bytes: freeSpaceBytes))")
         lines.append("Thermal state: \(thermalState)")
         return lines.map(Self.oneLine)

@@ -89,6 +89,18 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 30)
 
+# The macOS Android launcher's own argument checks, on the built executable
+# (registered where the Android CLI is part of the build).
+if(TARGET uml-darwin-android17)
+    uml_add_tooling_test(
+        NAME android17-launcher-arguments
+        COMMAND ${Python3_EXECUTABLE} -B
+            ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_android17_launcher_arguments.py
+            $<TARGET_FILE:uml-darwin-android17>
+        LABELS android
+        TIMEOUT 120)
+endif()
+
 uml_add_tooling_test(
     NAME android17-instance-rules
     COMMAND ${Python3_EXECUTABLE} -B
@@ -118,6 +130,13 @@ uml_add_tooling_test(
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_guest_proc_runner.py
     LABELS android
     TIMEOUT 60)
+
+uml_add_tooling_test(
+    NAME android17-installation-identity-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_installation_identity_runner.py
+    LABELS android
+    TIMEOUT 30)
 
 uml_add_tooling_test(
     NAME android17-provision-helper
@@ -151,6 +170,18 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 60)
 
+# The compass runner without a guest: the wire against the golden frames (the
+# magnetic field records and the 20-byte "ANC3" frame), the oracle of the four
+# mounts and the compass points, the parsers of what the guest prints, its host
+# against a fake guest on loopback, and the launch-state check against scripted
+# answers.
+uml_add_tooling_test(
+    NAME android17-compass-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_compass_runner.py
+    LABELS android
+    TIMEOUT 60)
+
 # The Wi-Fi network runner's reading of the guest's status, listing, dumps and
 # overlay list, and of the boot script's settle time; its upgrade checks against
 # scripted answers.
@@ -160,6 +191,16 @@ uml_add_tooling_test(
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_wifi_network_runner.py
     LABELS android
     TIMEOUT 60)
+
+# The video-suspend runner's suspend step against a fake guest: a host GPU reset
+# across the wake fails it by that name, and the shared reader of the launcher's
+# log that the Wi-Fi network runner uses as well.
+uml_add_tooling_test(
+    NAME android17-video-suspend-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_video_suspend_runner.py
+    LABELS android
+    TIMEOUT 30)
 
 # The gamepad runner without a guest: the host's end of the wire against the
 # golden frames and the C++ header, the controller families against the

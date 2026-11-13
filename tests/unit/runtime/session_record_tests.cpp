@@ -8,6 +8,7 @@
 #include "session_record.hpp"
 #include "require.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -45,7 +46,7 @@ std::string read_file(const std::string &path)
 	return text;
 }
 
-bool has(const std::string &text, const char *part)
+bool has(const std::string &text, const std::string &part)
 {
 	return text.find(part) != std::string::npos;
 }
@@ -142,6 +143,409 @@ void test_kept_output()
 	uml::runtime::reset_session_record();
 }
 
+/* The console says an Android guest's boot finished: kernel_write reads it as
+ * it passes, from a console and not from another descriptor, and a new session
+ * forgets it. */
+void test_the_console_says_when_the_boot_finished()
+{
+	uml::runtime::reset_session_record();
+	int console[2];
+	require(pipe(console) == 0);
+	int other[2];
+	require(pipe(other) == 0);
+	const std::vector<std::string> arguments{"ssl0=fd:" +
+		std::to_string(console[1])};
+	require(uml::runtime::begin_session_record({}, arguments));
+	require(!uml::runtime::console_boot_completed() &&
+		!uml::runtime::console_init_observed(),
+		"a new session was a finished boot or had seen init");
+	const std::string line =
+		"init: processing action (sys.boot_completed=1) from (x)\n";
+	require(uml::runtime::kernel_write(other[1], line.data(), line.size()) ==
+		static_cast<ssize_t>(line.size()));
+	require(!uml::runtime::console_boot_completed(),
+		"output that is no console's finished the boot");
+	/* A write that splits the line. */
+	const std::size_t cut = line.find("boot_");
+	require(uml::runtime::kernel_write(console[1], line.data(), cut) ==
+		static_cast<ssize_t>(cut));
+	require(!uml::runtime::console_boot_completed(),
+		"half a line finished the boot");
+	require(uml::runtime::kernel_write(console[1], line.data() + cut,
+		line.size() - cut) == static_cast<ssize_t>(line.size() - cut));
+	require(uml::runtime::console_boot_completed() &&
+		uml::runtime::console_init_observed(),
+		"the console's line did not finish the boot");
+	/* The next session begins from nothing. */
+	require(uml::runtime::begin_session_record({}, arguments));
+	require(!uml::runtime::console_boot_completed() &&
+		!uml::runtime::console_init_observed(),
+		"a finished boot outlived its session");
+	uml::runtime::reset_session_record();
+	for (const int descriptor : {console[0], console[1], other[0], other[1]})
+		close(descriptor);
+}
+
+/* A console of the test: a descriptor the kernel arguments name, on a file
+ * that takes everything written. */
+class TestConsole final {
+public:
+	TestConsole() : descriptor_{open("/dev/null", O_WRONLY)}
+	{
+		require(descriptor_ >= 0, "no console");
+	}
+	TestConsole(const TestConsole &) = delete;
+	TestConsole &operator=(const TestConsole &) = delete;
+	~TestConsole() { close(descriptor_); }
+
+	std::vector<std::string> arguments() const
+	{
+		return {"ssl0=fd:" + std::to_string(descriptor_)};
+	}
+
+	void write(const std::string &text) const
+	{
+		require(uml::runtime::kernel_write(descriptor_, text.data(),
+			text.size()) == static_cast<ssize_t>(text.size()));
+	}
+
+private:
+	int descriptor_;
+};
+
+/* Replaces the first bytes of the state, which no rewrite of it leaves. */
+void scratch_the_state(const std::string &path)
+{
+	const int descriptor = open(path.c_str(), O_WRONLY);
+	require(descriptor >= 0);
+	require(pwrite(descriptor, "SCRATCH", 7, state_offset) == 7);
+	close(descriptor);
+}
+
+bool state_was_rewritten(const std::string &path)
+{
+	return !read_file(path).substr(state_offset).starts_with("SCRATCH");
+}
+
+std::size_t file_size(const std::string &path)
+{
+	return read_file(path).size();
+}
+
+void test_boot_state()
+{
+	const std::string stuck = "init: init first stage started!\n"
+		"init: starting service 'netd'\n";
+	const std::string done =
+		"init: processing action (sys.boot_completed=1) from (x)\n";
+	const TestConsole console;
+
+	/* A guest that reports its boot: the state says where the boot is, the
+	 * checkpoints keep the output, and a completed boot drops it. Until
+	 * init's output is seen the boot is unobserved, not unfinished. */
+	uml::runtime::reset_session_record();
+	uml::runtime::set_session_boot_facts(true, 3);
+	std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	std::string state = read_file(path).substr(state_offset);
+	require(state.starts_with("state running\nend running\nstatus 0\npid ") &&
+		has(state, "\nboot unobserved\nrestarts 3\n") &&
+		!has(state, "kernel-output"),
+		"a begun boot was recorded wrong: " + state);
+	uml::runtime::checkpoint_session_memory();
+	scratch_the_state(path);
+	uml::runtime::checkpoint_session_memory();
+	require(!state_was_rewritten(path), "a silent boot was written again");
+	console.write(stuck);
+	uml::runtime::checkpoint_session_memory();
+	state = read_file(path).substr(state_offset);
+	require(state.starts_with("state running\n") &&
+		has(state, "\nboot unfinished\nrestarts 3\n") &&
+		state.ends_with("kernel-output\n" + stuck),
+		"a checkpoint did not keep the output: " + state);
+	scratch_the_state(path);
+	uml::runtime::checkpoint_session_memory();
+	require(!state_was_rewritten(path),
+		"output that did not grow was written again");
+	console.write(done);
+	uml::runtime::checkpoint_session_memory();
+	state = read_file(path).substr(state_offset);
+	require(state.starts_with("state running\n") &&
+		has(state, "\nboot completed\nrestarts 3\n") &&
+		!has(state, "kernel-output") && state.ends_with("\n") &&
+		file_size(path) == state_offset + state.size(),
+		"a completed boot was recorded wrong: " + state);
+	scratch_the_state(path);
+	console.write(stuck);
+	uml::runtime::checkpoint_session_memory();
+	require(!state_was_rewritten(path), "a completed boot was written again");
+	uml::runtime::end_session_record(SessionEnd::stopped, 0);
+	state = read_file(path).substr(state_offset);
+	require(has(state, "state ended\nend stopped\n") &&
+		has(state, "\nboot completed\nrestarts 3\n") &&
+		!has(state, "kernel-output"),
+		"a stop after the boot was recorded wrong: " + state);
+	unlink(path.c_str());
+
+	/* The ends that a person or the guest chooses quote the output while the
+	 * boot is unfinished, and only then. */
+	for (const SessionEnd end : {SessionEnd::stopped, SessionEnd::restarted,
+		     SessionEnd::powered_off}) {
+		path = temporary_record();
+		uml::runtime::reset_session_record();
+		uml::runtime::set_session_boot_facts(true, 2);
+		require(uml::runtime::begin_session_record(path,
+			console.arguments()));
+		console.write(stuck);
+		uml::runtime::end_session_record(end, 0);
+		state = read_file(path).substr(state_offset);
+		require(has(state, "state ended\nend ") &&
+			has(state, "\nboot unfinished\nrestarts 2\n") &&
+			state.ends_with("kernel-output\n" + stuck),
+			"an end during the boot was recorded wrong: " + state);
+		unlink(path.c_str());
+	}
+
+	/* A guest that does not report its boot has neither line and no
+	 * checkpoint of the state. */
+	path = temporary_record();
+	uml::runtime::reset_session_record();
+	uml::runtime::set_session_boot_facts(false, 4);
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	state = read_file(path).substr(state_offset);
+	require(!has(state, "boot ") && !has(state, "restarts "),
+		"a Linux guest's record named a boot: " + state);
+	scratch_the_state(path);
+	console.write(stuck);
+	uml::runtime::checkpoint_session_memory();
+	require(!state_was_rewritten(path),
+		"the state of a guest that reports no boot was checkpointed");
+	uml::runtime::end_session_record(SessionEnd::stopped, 0);
+	require(!has(read_file(path), "kernel-output"),
+		"a stop quoted the output of a guest that reports no boot");
+	unlink(path.c_str());
+	uml::runtime::reset_session_record();
+}
+
+/* A console that shows nothing of init, such as a kernel's lines alone, is
+ * not an unfinished boot: the record says so, and still keeps the output. */
+void test_boot_unobserved()
+{
+	const std::string kernel = "Linux version 6.18\n";
+	const std::string init = "init: init first stage started!\n";
+	const TestConsole console;
+	uml::runtime::reset_session_record();
+	uml::runtime::set_session_boot_facts(true, 0);
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	console.write(kernel);
+	uml::runtime::checkpoint_session_memory();
+	std::string state = read_file(path).substr(state_offset);
+	require(has(state, "\nboot unobserved\nrestarts 0\n") &&
+		state.ends_with("kernel-output\n" + kernel),
+		"output without init's was recorded wrong: " + state);
+	console.write(init);
+	uml::runtime::checkpoint_session_memory();
+	state = read_file(path).substr(state_offset);
+	require(has(state, "\nboot unfinished\nrestarts 0\n") &&
+		state.ends_with("kernel-output\n" + kernel + init),
+		"init's first line did not make the boot unfinished: " + state);
+	uml::runtime::end_session_record(SessionEnd::stopped, 0);
+	uml::runtime::reset_session_record();
+	uml::runtime::set_session_boot_facts(true, 0);
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	console.write(kernel);
+	uml::runtime::end_session_record(SessionEnd::stopped, 0);
+	state = read_file(path).substr(state_offset);
+	require(has(state, "state ended\nend stopped\n") &&
+		has(state, "\nboot unobserved\n") &&
+		state.ends_with("kernel-output\n" + kernel),
+		"a stop of an unobserved boot was recorded wrong: " + state);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
+/* The restart count and the boot belong to their session: the next one
+ * starts unobserved again, whatever the one before did. */
+void test_boot_state_per_session()
+{
+	const std::string done =
+		"init: processing action (sys.boot_completed=1) from (x)\n";
+	const TestConsole console;
+	uml::runtime::reset_session_record();
+	uml::runtime::set_session_boot_facts(true, 0);
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	console.write(done);
+	uml::runtime::checkpoint_session_memory();
+	require(has(read_file(path), "\nboot completed\nrestarts 0\n"));
+	uml::runtime::end_session_record(SessionEnd::restarted, 0);
+	uml::runtime::set_session_boot_facts(true, 1);
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	const std::string state = read_file(path).substr(state_offset);
+	require(state.starts_with("state running\n") &&
+		has(state, "\nboot unobserved\nrestarts 1\n") &&
+		!has(state, "kernel-output"),
+		"a restarted boot began finished: " + state);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
+/* A boot's record quotes the output of its own boot. The console of a boot
+ * that completed is left out of its orderly end; the unfinished record of the
+ * boot after it, which is checkpointed and ended with the output so far, must
+ * not bring it back. */
+void test_a_boot_quotes_only_its_own_output()
+{
+	const TestConsole console;
+	uml::runtime::reset_session_record();
+	uml::runtime::set_session_boot_facts(true, 0);
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	console.write("init: processing action (sys.boot_completed=1) from (x)\n"
+		"PREVIOUS_BOOT_CANARY\n");
+	uml::runtime::checkpoint_session_memory();
+	uml::runtime::end_session_record(SessionEnd::restarted, 0);
+	require(!has(read_file(path), "PREVIOUS_BOOT_CANARY"),
+		"a completed boot's end quoted its console");
+	uml::runtime::set_session_boot_facts(true, 1);
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	char tail[uml::runtime::session_kernel_output_bytes];
+	require(uml::runtime::kernel_output_tail(tail) == 0,
+		"a new boot held the boot before's output");
+	console.write("init: init first stage started!\n");
+	uml::runtime::checkpoint_session_memory();
+	std::string state = read_file(path).substr(state_offset);
+	require(has(state, "\nboot unfinished\n") &&
+		has(state, "init first stage started") &&
+		!has(state, "PREVIOUS_BOOT_CANARY"),
+		"the unfinished boot quoted the boot before: " + state);
+	uml::runtime::end_session_record(SessionEnd::stopped, 0);
+	state = read_file(path).substr(state_offset);
+	require(has(state, "state ended\nend stopped\n") &&
+		has(state, "init first stage started") &&
+		!has(state, "PREVIOUS_BOOT_CANARY"),
+		"the unfinished boot's end quoted the boot before: " + state);
+	/* A boot whose first line is a crash does not take the one before into
+	 * its tail either. */
+	uml::runtime::set_session_boot_facts(true, 2);
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	console.write("Darwin UML panic: short\n");
+	uml::runtime::end_session_record(SessionEnd::failed, 1, "x");
+	state = read_file(path).substr(state_offset);
+	require(has(state, "Darwin UML panic: short") &&
+		!has(state, "init first stage started"),
+		"a later boot's end quoted an earlier boot: " + state);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
+/* The record starts a quoted tail at a whole line only where the ring cut it
+ * (the kernel echoes a serial number in its command line, which the masking of
+ * the tail cannot find in the middle of a line). A boot that follows one that
+ * overflowed the ring begins at its own first line, and keeps it. */
+void test_a_short_boot_after_a_long_one_keeps_its_first_line()
+{
+	const TestConsole console;
+	uml::runtime::reset_session_record();
+	uml::runtime::set_session_boot_facts(true, 0);
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	std::string long_boot;
+	while (long_boot.size() < 3 * uml::runtime::session_kernel_output_bytes)
+		long_boot += "init: a line of the long boot\n";
+	console.write(long_boot);
+	uml::runtime::end_session_record(SessionEnd::restarted, 0);
+	uml::runtime::set_session_boot_facts(true, 1);
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	console.write("FIRST_LINE_OF_THE_SHORT_BOOT\n"
+		"init: init first stage started!\n");
+	uml::runtime::checkpoint_session_memory();
+	std::string state = read_file(path).substr(state_offset);
+	require(has(state, "kernel-output\nFIRST_LINE_OF_THE_SHORT_BOOT\n") &&
+		!has(state, "a line of the long boot"),
+		"the short boot's first line was dropped or the long boot's quoted: " + state);
+	/* Its own output that overflows the ring is cut: the record starts at
+	 * the first whole line the ring kept, and never in the middle of one. */
+	console.write(long_boot);
+	uml::runtime::end_session_record(SessionEnd::stopped, 0);
+	state = read_file(path).substr(state_offset);
+	require(has(state, "kernel-output\ninit: a line of the long boot\n") &&
+		!has(state, "FIRST_LINE_OF_THE_SHORT_BOOT"),
+		"a boot that overflowed the ring did not start at a whole line: " + state);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
+/* The state of an unfinished boot is bounded like the end's, whatever the
+ * console writes. */
+void test_boot_state_size()
+{
+	const TestConsole console;
+	uml::runtime::reset_session_record();
+	uml::runtime::set_session_boot_facts(true, 4294967295U);
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	/* Lines, in one write longer than the ring: the record quotes the lines
+	 * the ring kept, from the first whole one. */
+	std::string output;
+	while (output.size() < 3 * uml::runtime::session_kernel_output_bytes)
+		output += std::string(63, '\x01') + '\n';
+	console.write(output);
+	uml::runtime::checkpoint_session_memory();
+	require(file_size(path) <= uml::runtime::session_record_max_bytes &&
+		file_size(path) > state_offset + 4096,
+		"an unfinished boot's state is not bounded: " +
+			std::to_string(file_size(path)));
+	uml::runtime::end_session_record(SessionEnd::stopped, 0);
+	require(file_size(path) <= uml::runtime::session_record_max_bytes);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
+/* An end is the last word on the state: a checkpoint that is running while
+ * the session ends, or that comes after, leaves the end alone. */
+void test_the_end_outlasts_state_checkpoints()
+{
+	const TestConsole console;
+	for (int round = 0; round < 300; ++round) {
+		uml::runtime::reset_session_record();
+		uml::runtime::set_session_boot_facts(true, 0);
+		const std::string path = temporary_record();
+		require(uml::runtime::begin_session_record(path,
+			console.arguments()));
+		console.write("init: init first stage started!\n");
+		std::atomic<bool> stop{false};
+		std::thread checkpoints{[&] {
+			std::uint64_t counter = 0;
+			while (!stop.load(std::memory_order_acquire)) {
+				console.write("init: line " + std::to_string(++counter) +
+					"\n");
+				uml::runtime::checkpoint_session_memory();
+			}
+		}};
+		for (int spin = 0; spin < round % 50; ++spin)
+			std::this_thread::yield();
+		uml::runtime::end_session_record(SessionEnd::stopped, 0);
+		const std::string just_after = read_file(path).substr(state_offset);
+		stop.store(true, std::memory_order_release);
+		checkpoints.join();
+		const std::string state = read_file(path).substr(state_offset);
+		require(has(just_after, "state ended\nend stopped\n") &&
+			has(state, "state ended\nend stopped\n") &&
+			has(state, "\nboot unfinished\n"),
+			"a checkpoint overwrote the end in round " +
+				std::to_string(round) + ": " + state);
+		/* The file holds one record, whatever order the writes came in. */
+		require(file_size(path) == state_offset + state.size() &&
+			state.find('\0') == std::string::npos,
+			"the state is not one record in round " +
+				std::to_string(round));
+		uml::runtime::reset_session_record();
+		unlink(path.c_str());
+	}
+}
+
 void test_record_lifecycle()
 {
 	uml::runtime::reset_session_record();
@@ -175,6 +579,119 @@ void test_record_lifecycle()
 		has(record, "kernel-output\n") &&
 		has(record, "the kernel says goodbye\n"),
 		"a kernel exit was recorded wrong: " + record);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
+/* The kernel echoes its command line, which holds the Android guest's serial
+ * number; the record keeps the output but not that value, and neither does
+ * what a bug report archive copies from it. The values are synthetic. */
+void test_the_record_keeps_no_serial_number()
+{
+	uml::runtime::reset_session_record();
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, {}));
+	const char echo[] =
+		"Kernel command line: quiet androidboot.serialno=TESTSERIAL0123 "
+		"androidboot.hardware=cutf_cvm\n"
+		"init: ro.boot.serialno=TESTSERIAL0123\n"
+		"two on a line androidboot.serialno=\"FIRSTVALUE\" "
+		"androidboot.serialno=SECONDVALUE\n"
+		"the last: androidboot.serialno=LASTVALUE";
+	(void)uml::runtime::kernel_write(STDERR_FILENO, echo, sizeof(echo) - 1);
+	uml::runtime::end_session_record(SessionEnd::kernel_exit, 143, "exit");
+	const std::string record = read_file(path);
+	require(has(record, "kernel-output\n") &&
+		has(record, "Kernel command line: quiet androidboot.serialno=<masked> "
+			    "androidboot.hardware=cutf_cvm\n") &&
+		has(record, "init: ro.boot.serialno=<masked>\n") &&
+		has(record, "the last: androidboot.serialno=<masked>"),
+		"the tail was not kept with the serial masked: " + record);
+	for (const char *value : {"TESTSERIAL0123", "FIRSTVALUE", "SECONDVALUE",
+				  "LASTVALUE"})
+		require(!has(record, value),
+			std::string{"the record keeps a serial number: "} + value);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
+/* The ring keeps the last bytes of the output, so after a wrap its first line
+ * is cut at any byte: in the middle of `androidboot.serialno=` or of its value.
+ * The record starts at the first complete line, with the output as one write
+ * longer than the ring (which keeps its end) and as many small ones. */
+void test_a_wrapped_ring_keeps_no_serial_number()
+{
+	constexpr std::size_t ring = uml::runtime::session_kernel_output_bytes;
+	const std::string key = "androidboot.serialno=";
+	const std::string serial = "TESTSERIAL0123456";
+	const std::string echo =
+		"Kernel command line: quiet " + key + serial + " next\n";
+	const std::size_t at = echo.find(key);
+	const std::string marker = "\nring end marker\n";
+	for (const bool one_write : {true, false}) {
+		/* The ring starts `cut` bytes into the echo: before the key,
+		 * inside it, at its last byte, at the value, inside the value
+		 * and just after it. */
+		for (const std::size_t cut :
+		     {std::size_t{0}, std::size_t{3}, at - 1, at, at + 1,
+		      at + 12, at + 13, at + 20, at + key.size(),
+		      at + key.size() + 4, at + key.size() + serial.size() - 1,
+		      at + key.size() + serial.size()}) {
+			std::string input = echo;
+			const std::size_t padding =
+				ring + cut - echo.size() - marker.size();
+			for (std::size_t line = 0; line < padding / 32; ++line)
+				input += std::string(31, 'y') + '\n';
+			input += std::string(padding % 32, 'y');
+			input += marker;
+			require(input.size() == ring + cut, "a wrong test input");
+			uml::runtime::reset_session_record();
+			const std::string path = temporary_record();
+			require(uml::runtime::begin_session_record(path, {}));
+			if (one_write) {
+				(void)uml::runtime::kernel_write(
+					STDERR_FILENO, input.data(), input.size());
+			} else {
+				for (std::size_t offset = 0; offset < input.size();
+				     offset += 64)
+					(void)uml::runtime::kernel_write(
+						STDERR_FILENO, input.data() + offset,
+						std::min<std::size_t>(64, input.size() - offset));
+			}
+			uml::runtime::end_session_record(SessionEnd::kernel_exit, 143,
+				"exit");
+			const std::string record = read_file(path);
+			const std::string where = (one_write ? " (one write, cut " :
+							       " (small writes, cut ") +
+				std::to_string(cut) + "): " + record;
+			for (const char *part : {"TESTSERIAL", "SERIAL0123", "0123456"})
+				require(!has(record, part),
+					std::string{"the record keeps part of the serial number "} +
+						part + where);
+			require(has(record, "ring end marker\n"),
+				"the record lost the end of the output" + where);
+			/* A first line that is cut is dropped whole, never kept
+			 * as the part that is left of it. */
+			require(!has(record, "kernel-output\nrmand") &&
+				!has(record, "kernel-output\n" + serial),
+				"the record starts inside a line" + where);
+			uml::runtime::reset_session_record();
+			unlink(path.c_str());
+		}
+	}
+	/* The ring that dropped nothing keeps its first line, even when the output
+	 * fills it exactly. */
+	uml::runtime::reset_session_record();
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, {}));
+	std::string full = echo;
+	full.resize(ring, 'y');
+	(void)uml::runtime::kernel_write(STDERR_FILENO, full.data(), full.size());
+	uml::runtime::end_session_record(SessionEnd::kernel_exit, 143, "exit");
+	const std::string record = read_file(path);
+	require(has(record, "kernel-output\nKernel command line: quiet " + key +
+			    "<masked> next\n") && !has(record, serial),
+		"a ring that dropped nothing lost its first line: " + record);
 	uml::runtime::reset_session_record();
 	unlink(path.c_str());
 }
@@ -1099,7 +1616,17 @@ int main(int argc, char **argv)
 		test_console_descriptors();
 		test_panic_message();
 		test_kept_output();
+		test_the_console_says_when_the_boot_finished();
+		test_boot_state();
+		test_boot_unobserved();
+		test_boot_state_per_session();
+		test_a_boot_quotes_only_its_own_output();
+		test_a_short_boot_after_a_long_one_keeps_its_first_line();
+		test_boot_state_size();
+		test_the_end_outlasts_state_checkpoints();
 		test_record_lifecycle();
+		test_the_record_keeps_no_serial_number();
+		test_a_wrapped_ring_keeps_no_serial_number();
 		test_memory_checkpoints();
 		test_network_slot();
 		/* The registration passes the golden file; a run without it

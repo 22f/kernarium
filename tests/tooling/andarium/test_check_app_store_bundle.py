@@ -7,6 +7,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import json
 import plistlib
 import shutil
 import subprocess
@@ -72,6 +73,8 @@ DEBUG_SUPPORT = (
     ("launch harness", "int _s8Andarium15ThermalOverrideO6stated2inAA010HostThermalE0OSgSDyS2SG_tFZ(void) { return 1; }\n"),
     # The Simulator preview's denied-network notice.
     ("network notice preview", "int _s8Andarium8AppModelC20previewNetworkNoticeyyAA0C6DenialOF(void) { return 1; }\n"),
+    # The Simulator preview's play of the legacy install.
+    ("legacy install preview", "int _s8Andarium8AppModelC21previewInstallAttemptySb_yAA10BusyUpdateVXEtYaKcSgvg(void) { return 1; }\n"),
     # The Simulator preview's hooks into the Send feedback sheet.
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV20previewOpensAtLaunchSbvg(void) { return 1; }\n"),
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV14previewPrepareyyAA0aD5ModelCYaYbcvg(void) { return 1; }\n"),
@@ -85,14 +88,31 @@ DEBUG_SUPPORT = (
     ("input probe", "int _s8Andarium8AppModelC10inputProbeAA0cD0CSgvg(void) { return 1; }\n"),
     ("input probe", 'const char *fixture(void) { return "inputProbeLog"; }\n'),
     ("input probe", 'const char *fixture(void) { return "inputProbeField"; }\n'),
+    # The development build's compass check: its class, its launch setting and its line.
+    ("compass readout", "int _s8Andarium14CompassReadoutC4line3forSSSgSo14CMDeviceMotionC_tF(void) { return 1; }\n"),
+    ("compass readout", "int _s8Andarium20CompassReadoutLaunchO9requested2inSbSDyS2SG_tFZ(void) { return 1; }\n"),
+    ("compass readout", 'const char *fixture(void) { return "Andarium: compass-check: t=%s mount=%s"; }\n'),
     # The fold reader's test hook, which replaces the system's reading.
     ("fold reader stub", "int _s8Andarium15FoldSceneReaderC4stubSo9FoldReadingVSgyYbcSgvg(void) { return 1; }\n"),
+    # The picked file's access a hosted test puts in place of the real one.
+    ("picked file access stub", "int _s8Andarium8AppModelC20accessPickedFileStubyyc10Foundation3URLVcSgvg(void) { return 1; }\n"),
     # The synthetic camera: its class, its entries and its profiles' names.
     ("synthetic camera", "int _ZN3uml8platform15SyntheticCamera13sessionsOpenedEv(void) { return 1; }\n"),
     ("synthetic camera", "int _ZN3uml8platform19makeSyntheticCameraERKNS0_22SyntheticCameraOptionsE(void) { return 1; }\n"),
     ("synthetic camera", "int _ZN3uml8platform17decodeChartMarkerEPKhmjj(void) { return 1; }\n"),
     ("synthetic camera", 'const char *fixture(void) { return "SyntheticPhone1,1"; }\n'),
     ("synthetic camera", 'const char *fixture(void) { return "synthetic-back-wide"; }\n'),
+    # The runtime's environment knob for it and the function that reads it.
+    ("synthetic camera", 'const char *knob(void) { return "KERNARIUM_CAMERA_SOURCE"; }\n'),
+    ("synthetic camera", "int _ZN9kernarium6camera11parseSourceEPKc(void) { return 1; }\n"),
+    ("synthetic camera", "int _ZN9kernarium6camera12chooseSourceIPFvvEEENSt3__110shared_ptrIN3uml8platform6CameraEEERKNS0_12SourceChoiceEOT_(void) { return 1; }\n"),
+    # The camera's development lines and the preview's camera and thermal notices.
+    ("camera diagnostics", "int _ZN3uml6camera17printRotateAndCropEjjj(void) { return 1; }\n"),
+    ("camera diagnostics", "int _ZN3uml6camera15printCheckpointENS0_16CameraCheckpointE(void) { return 1; }\n"),
+    ("camera diagnostics", 'const char *fixture(void) { return "Camera: camera %u: ROTATE_AND_CROP %u"; }\n'),
+    ("camera diagnostics", 'const char *fixture(void) { return "Camera: memory: %s, footprint"; }\n'),
+    ("camera diagnostics", "int _s8Andarium8AppModelC19previewCameraNoticeyyF(void) { return 1; }\n"),
+    ("camera diagnostics", "int _s8Andarium8AppModelC20previewThermalNoticeyyF(void) { return 1; }\n"),
     # The simulated controllers: the scripted input, the guest end of the wire
     # and the test-support module that holds them.
     ("synthetic controllers", "int _s12AndariumCore13GamepadScriptV8identityACvgZ(void) { return 1; }\n"),
@@ -216,6 +236,23 @@ HARMLESS_PATHS = (
     '  "/nonexistent/share/locale",\n'
     "};\n"
 )
+# The document pickers (Andarium/README.md#configurations). The App Store
+# configuration refers to SwiftUI's fileImporter for one file and for several,
+# which every product the checks accept holds (`build` appends it). The other
+# configurations hold the copy-mode presenter: a type, the modifier that
+# presents it and the files of a pick, each of which the App Store check refuses.
+IN_PLACE_PICKERS = (
+    "int _s7SwiftUI4ViewPAAE12fileImporter11isPresented19allowedContentTypes12onCompletionFixture(void) { return 1; }\n"
+    "int _s7SwiftUI4ViewPAAE12fileImporter11isPresented19allowedContentTypes23allowsMultipleSelection"
+    "12onCompletionFixture(void) { return 1; }\n"
+)
+ONE_FILE_IMPORTER = IN_PLACE_PICKERS.splitlines(keepends=True)[0]
+SEVERAL_FILES_IMPORTER = IN_PLACE_PICKERS.splitlines(keepends=True)[1]
+COPY_PICKERS = (
+    ("a type", "int _s8Andarium18CopyDocumentPickerV4bodyyyF(void) { return 1; }\n"),
+    ("the modifier", "int _s7SwiftUI4ViewP8Andarium18documentCopyPicker11isPresented5typesyyF(void) { return 1; }\n"),
+    ("the files of a pick", "int _s8Andarium12PickedCopiesV4urlsSay10Foundation3URLVGvg(void) { return 1; }\n"),
+)
 MANIFEST = {
     "NSPrivacyTracking": False,
     "NSPrivacyTrackingDomains": [],
@@ -237,9 +274,12 @@ def run(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProc
     )
 
 
-def build(root: Path, name: str, source: str, extra: list[str] | None = None) -> Path:
+def build(root: Path, name: str, source: str, extra: list[str] | None = None,
+          pickers: str = IN_PLACE_PICKERS) -> Path:
+    """A library of `source` and of the document pickers `pickers` (the App
+    Store configuration's own by default)."""
     source_path = root / f"{name}.c"
-    source_path.write_text(source, encoding="utf-8")
+    source_path.write_text(source + pickers, encoding="utf-8")
     output = root / f"lib{name}.dylib"
     # A framework's install name is @rpath-relative; the default one is the
     # output path, which is the temporary directory of this test.
@@ -263,7 +303,7 @@ def build_with_debug_map(root: Path, name: str, directory: str | None = None, so
     work = root / "Volumes" / "NAME"
     work.mkdir(parents=True, exist_ok=True)
     source_path = work / f"{name}.c"
-    source_path.write_text(source, encoding="utf-8")
+    source_path.write_text(source + IN_PLACE_PICKERS, encoding="utf-8")
     objects = work / f"{name}.o"
     # A source named relative to the compilation directory is what puts that
     # directory in the debug map.
@@ -309,10 +349,38 @@ def app_info(**overrides: object) -> dict:
         "ITSAppUsesNonExemptEncryption": False,
         "UIRequiredDeviceCapabilities": ["arm64", "metal"],
         "UIDeviceFamily": [1, 2],
+        "NSCameraUsageDescription": "Uses the camera only while Camera is on.",
         "NSMicrophoneUsageDescription": "Records only while Microphone is on.",
+        "NSLocationWhenInUseUsageDescription": "Shares the location only while Location is on.",
     }
     keys.update(overrides)
     return {key: value for key, value in keys.items() if value is not None}
+
+
+# The notes' entry about Send feedback, which every product bundles and one
+# without the feature hides, and the translations of its strings.
+FEEDBACK_ENTRY = {
+    "id": "send-feedback", "title": "Send feedback", "symbol": "envelope.fill",
+    "text": "Email the developer from the Info menu on Home, with a bug report if you like.",
+    "requirement": {"feature": "sendFeedback"},
+}
+FEEDBACK_POINTS_ENTRY = {
+    "id": "feedback-points", "title": "More ways to reach us", "symbol": "envelope.fill",
+    "points": ["Write to the developer from Settings", "Attach screenshots"],
+    "requirement": {"feature": "sendFeedback"},
+}
+PLAIN_ENTRY = {
+    "id": "snapshots", "title": "Snapshots", "symbol": "clock.arrow.circlepath",
+    "text": "Save the virtual machine\u2019s data and restore it later, from Home.",
+}
+NOTES_STRINGS = {
+    "Send feedback": "フィードバックを送信",
+    FEEDBACK_ENTRY["text"]: "開発者にメールを送れます。",
+    "Write to the developer from Settings": "設定から開発者に連絡できます",
+    "Attach screenshots": "スクリーンショットを添付できます",
+    "Snapshots": "スナップショット",
+    PLAIN_ENTRY["text"]: "仮想マシンのデータを保存します。",
+}
 
 
 def write_feedback_tables(app: Path, languages: tuple[str, ...] = ("ja", "zh-Hans", "zh-Hant")) -> None:
@@ -322,6 +390,19 @@ def write_feedback_tables(app: Path, languages: tuple[str, ...] = ("ja", "zh-Han
         lproj.mkdir(exist_ok=True)
         (lproj / "Feedback.strings").write_bytes(
             plistlib.dumps({"Send feedback": "Feedback fixture"}, fmt=plistlib.FMT_BINARY))
+
+
+def write_notes(app: Path, entries: list[dict] | None, strings: dict[str, str],
+                languages: tuple[str, ...] = ("ja", "zh-Hans")) -> None:
+    """The What's New notes a build bundles whole (WhatsNew.json, none if `entries`
+    is None) and the compiled table of their translations in each language."""
+    if entries is not None:
+        (app / "WhatsNew.json").write_text(
+            json.dumps([{"build": 10, "version": "1.0 (10)", "entries": entries}]), encoding="utf-8")
+    for language in languages:
+        lproj = app / f"{language}.lproj"
+        lproj.mkdir(exist_ok=True)
+        (lproj / "WhatsNew.strings").write_bytes(plistlib.dumps(strings, fmt=plistlib.FMT_BINARY))
 
 
 def write_follow_x_tables(app: Path, languages: tuple[str, ...] = ("ja", "zh-Hans", "zh-Hant")) -> None:
@@ -450,6 +531,13 @@ def main() -> int:
               passes=False, expect="UIDeviceFamily")
         check(make_app(root, "background", clean, app_info(UIBackgroundModes=["audio"])),
               passes=False, expect="background mode")
+        # Each permission text the application shows is present and not empty.
+        for key in ("NSCameraUsageDescription", "NSMicrophoneUsageDescription",
+                    "NSLocationWhenInUseUsageDescription"):
+            check(make_app(root, f"no-{key}", clean, app_info(**{key: None})),
+                  passes=False, expect=f"{key} must be a non-empty string")
+            check(make_app(root, f"blank-{key}", clean, app_info(**{key: "  "})),
+                  passes=False, expect=f"{key} must be a non-empty string")
 
         # Automation knobs in the host code of the application or a framework.
         check(make_app(root, "app-knob", knob, app_info()),
@@ -622,6 +710,9 @@ def main() -> int:
         arranged = ["--feedback-address", "feedback@example.com"]
         check(make_app(root, "feedback-built", feature, feedback_info), passes=True,
               expect="Send feedback is compiled in", args=appstore)
+        built_notes = make_app(root, "feedback-built-notes", feature, feedback_info)
+        write_notes(built_notes, [FEEDBACK_ENTRY, PLAIN_ENTRY], NOTES_STRINGS)
+        check(built_notes, passes=True, expect="Send feedback is compiled in", args=appstore)
         check(make_app(root, "feedback-absent", clean, app_info()), passes=True,
               expect="Send feedback is not compiled in")
         check(make_app(root, "feedback-no-key", feature, app_info()), passes=False,
@@ -644,6 +735,44 @@ def main() -> int:
         (words / "en.lproj" / "Localizable.strings").write_bytes(
             plistlib.dumps({"Send feedback": "Send feedback"}, fmt=plistlib.FMT_BINARY))
         check(words, passes=False, expect="has Send feedback strings")
+        # The What's New notes bundle the entry about Send feedback in every build, and
+        # the build hides it unless it has the feature: its strings, found through the
+        # bundled notes, are the one text of the feature a product without it may hold,
+        # in the notes' table alone and by the entry's own strings alone.
+        hidden = [FEEDBACK_ENTRY, FEEDBACK_POINTS_ENTRY, PLAIN_ENTRY]
+        notes = make_app(root, "notes-hidden", clean, app_info())
+        write_notes(notes, hidden, NOTES_STRINGS)
+        check(notes, passes=True, expect="Send feedback is not compiled in")
+        for configuration in ("Debug", "Release"):
+            check(notes, passes=True, expect=f"Send feedback is not compiled in ({configuration})",
+                  args=["--feedback", "--configuration", configuration])
+        for name, other in (
+                ("key", {"Fixed Send feedback not opening": "x"}),
+                ("value", {"Snapshots": "Andarium feedback"}),
+                ("word", {"Andarium feedback": "x"})):
+            leak = make_app(root, f"notes-other-{name}", clean, app_info())
+            write_notes(leak, hidden, {**NOTES_STRINGS, **other})
+            check(leak, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings")
+            check(leak, passes=False, expect="has Send feedback strings",
+                  args=["--feedback", "--configuration", "Release"])
+        # Marked entries only: an entry with no mark, or another one, is shown in a
+        # build without the feature, and so is a table with no notes beside it.
+        for name, entries in (
+                ("unmarked", [{**FEEDBACK_ENTRY, "requirement": None}, PLAIN_ENTRY]),
+                ("other-feature", [{**FEEDBACK_ENTRY, "requirement": {"feature": "other"}}, PLAIN_ENTRY]),
+                ("other-requirement", [{**FEEDBACK_ENTRY, "requirement": {"device": "pad"}}, PLAIN_ENTRY]),
+                ("no-notes", None), ("broken-notes", None)):
+            shown = make_app(root, f"notes-{name}", clean, app_info())
+            write_notes(shown, entries, NOTES_STRINGS)
+            if name == "broken-notes":
+                (shown / "WhatsNew.json").write_text("[{", encoding="utf-8")
+            check(shown, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings")
+        # The exemption is the notes' table and nothing else.
+        elsewhere = make_app(root, "notes-elsewhere", clean, app_info())
+        write_notes(elsewhere, hidden, {"Snapshots": "スナップショット"})
+        (elsewhere / "ja.lproj" / "Localizable.strings").write_bytes(
+            plistlib.dumps({"Send feedback": "x"}, fmt=plistlib.FMT_BINARY))
+        check(elsewhere, passes=False, expect="ja.lproj/Localizable.strings: has Send feedback strings")
         # The feature's own strings table (Feedback.strings, and the stringsdict of
         # its plurals) is the feature's: a product without the receiver holds none,
         # found by the file name though the table says nothing of the feature.
@@ -1039,6 +1168,43 @@ def main() -> int:
         # A source that cannot be read is no pass.
         check(make_app(root, "info-source-absent", clean, app_info(**base_info)), passes=False,
               expect="cannot be compared", args=["--info-source", str(root / "absent.plist")])
+
+        # The document pickers. The App Store configuration opens files in
+        # place: both of SwiftUI's importers are referred to, and no trace of the
+        # copy-mode presenter is in the application or in a framework. Whoever
+        # takes the condition away leaves the presenter in, or the importers out.
+        check(make_app(root, "pickers-in-place", clean, app_info()), passes=True,
+              expect="document pickers open the files in place")
+        for missing_name, lacking in (("one file", ONE_FILE_IMPORTER), ("several files", SEVERAL_FILES_IMPORTER)):
+            kept = IN_PLACE_PICKERS.replace(lacking, "")
+            check(make_app(root, f"pickers-lack-{missing_name.replace(' ', '-')}",
+                           build(root, f"lack-{missing_name.replace(' ', '-')}", CLEAN, pickers=kept), app_info()),
+                  passes=False, expect=f"lacks fileImporter for {missing_name}")
+        check(make_app(root, "pickers-none", build(root, "no-pickers", CLEAN, pickers=""), app_info()),
+              passes=False, expect="lacks fileImporter for one file (Install APK)")
+        for index, (what, source) in enumerate(COPY_PICKERS):
+            presenter = build(root, f"presenter{index}", CLEAN, pickers=IN_PLACE_PICKERS + source)
+            check(make_app(root, f"pickers-copy-app-{index}", presenter, app_info()), passes=False,
+                  expect="carries the copy-mode document picker")
+            check(make_app(root, f"pickers-copy-framework-{index}", clean, app_info(), framework=presenter),
+                  passes=False, expect="carries the copy-mode document picker")
+            # Without the importers too: the copy-mode picker in place of them.
+            replaced = build(root, f"replaced{index}", CLEAN, pickers=source)
+            check(make_app(root, f"pickers-replaced-{index}", replaced, app_info()), passes=False,
+                  expect="carries the copy-mode document picker")
+        # Every other configuration copies the files: its product holds the
+        # presenter, and the check says so, which shows it finds one.
+        copying = build(root, "copying", CLEAN, pickers="".join(source for _what, source in COPY_PICKERS))
+        for configuration in ("Debug", "Release"):
+            check(make_app(root, f"pickers-{configuration}-copy", copying, app_info()), passes=True,
+                  expect="document pickers copy the files", args=["--pickers", "--configuration", configuration])
+            check(make_app(root, f"pickers-{configuration}-in-place", clean, app_info()), passes=False,
+                  expect="lacks the copy-mode document picker", args=["--pickers", "--configuration", configuration])
+            # The debug library of a Debug build holds the code, as for Send feedback.
+            debug_library = make_app(root, f"pickers-{configuration}-library", clean, app_info())
+            shutil.copyfile(copying, debug_library / "Fixture.debug.dylib")
+            check(debug_library, passes=True, expect="document pickers copy the files",
+                  args=["--pickers", "--configuration", configuration])
 
         # The privacy manifests are checked too.
         check(make_app(root, "no-manifest", clean, app_info(), manifest=False),

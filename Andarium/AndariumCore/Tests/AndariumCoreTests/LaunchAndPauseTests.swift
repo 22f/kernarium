@@ -4,6 +4,7 @@ import Foundation
 import Testing
 
 @testable import AndariumCore
+import AndariumCoreTestSupport
 
 /// The settings of a launch, answered as the application's environment
 /// reader would.
@@ -51,9 +52,11 @@ struct LaunchOverridesTests {
 
     @Test func aStoredFollowWindowValueIsIgnored() throws {
         // The guest's display always follows the window: an earlier version's
-        // stored choice is read past, not migrated.
+        // stored value is read past, and its Retina mode is no choice.
         let old = Data(#"{"retina":true,"followWindow":false}"#.utf8)
-        #expect(try JSONDecoder().decode(DisplayOptions.self, from: old) == DisplayOptions(chosenScale: .native))
+        #expect(try JSONDecoder().decode(DisplayOptions.self, from: old) == DisplayOptions())
+        let scaled = Data(#"{"scale":2,"followWindow":false}"#.utf8)
+        #expect(try JSONDecoder().decode(DisplayOptions.self, from: scaled) == DisplayOptions(chosenScale: .factor(2)))
     }
 
     @Test func ignoresValuesOutOfRangeOrOffStep() {

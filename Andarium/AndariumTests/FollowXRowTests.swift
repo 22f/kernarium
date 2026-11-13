@@ -3,6 +3,7 @@
 #if FOLLOW_X
 
 import AndariumCore
+import AndariumCoreTestSupport
 import SwiftUI
 import Testing
 import UIKit

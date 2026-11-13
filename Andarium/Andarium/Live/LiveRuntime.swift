@@ -9,21 +9,28 @@ import UIKit
 nonisolated final class ConsoleSink: @unchecked Sendable {
     private let lock = NSLock()
     private var scanner = ConsoleScanner()
-    private let report: @Sendable ([BootMilestone], Bool) -> Void
+    private let report: @Sendable ([BootMilestone], Bool, Bool) -> Void
 
-    /// `report` gets the milestones a chunk completes and whether Android
-    /// reported `sys.boot_completed` in it.
-    init(report: @escaping @Sendable ([BootMilestone], Bool) -> Void) {
+    /// `report` gets the milestones a chunk completes, whether Android
+    /// reported `sys.boot_completed` in it and whether the recovery image
+    /// started in it.
+    init(report: @escaping @Sendable ([BootMilestone], Bool, Bool) -> Void) {
         self.report = report
     }
 
+    /// The guest restarted itself in place (`LiveRuntime.guestRestarted`): the
+    /// text that follows is another boot's.
+    func restarted() {
+        lock.withLock { scanner.beginBoot() }
+    }
+
     func feed(_ data: Data) {
-        let (found, completed) = lock.withLock { () -> ([BootMilestone], Bool) in
-            let before = scanner.bootCompletedCount
+        let (found, completed, recovery) = lock.withLock { () -> ([BootMilestone], Bool, Bool) in
+            let before = (scanner.bootCompletedCount, scanner.recoveryStartedCount)
             let found = scanner.feed(data)
-            return (found, scanner.bootCompletedCount > before)
+            return (found, scanner.bootCompletedCount > before.0, scanner.recoveryStartedCount > before.1)
         }
-        if !found.isEmpty || completed { report(found, completed) }
+        if !found.isEmpty || completed || recovery { report(found, completed, recovery) }
     }
 }
 
@@ -50,12 +57,23 @@ final class LiveRuntime: RuntimeDriver {
     /// clean end records. Recovery never does.
     private var reachedBootCompleted = false
     private let pause: PauseController
-    /// Counts the time the guest runs, for the limits of adb operations: it
-    /// stops while the application holds the guest paused.
+    /// The effects of the pause, on the one serial queue of the runtime calls
+    /// that wait: a stop is delivered on it too.
+    private let pauseEffects: LivePauseEffects
+    /// Counts the time the guest runs, for the limits of adb operations and
+    /// the boot screen's notice that a start is slow: it stops while the
+    /// application holds the guest paused, and while it is away before the
+    /// runtime runs (`holdStartClock`).
     private let clock = GuestRunClock()
+    /// The clock stopped for the application's span in the background before
+    /// the runtime ran.
+    private var startClockHeld = false
     private let keyStore: AdbKeyStore
     /// Where the runtime records how each session ends, for the next launch.
     private let sessionRecord: URL?
+    /// Where the colour data a Bayer still teaches the camera is kept: beside
+    /// the session records, outside the guest's disks, so an erase leaves it.
+    private let cameraDirectory: URL?
     /// The guest's adb key, made before the start that boots with it.
     private var adbIdentity: AdbKeyStore.Identity?
     /// What this run puts in the names of its imports' partial files, new at
@@ -127,6 +145,9 @@ final class LiveRuntime: RuntimeDriver {
                 message: String(localized: "The virtual machine’s screen could not follow this window. Close and reopen Andarium to try again."))
         })
     private var normalRun = false
+    /// The device body's turn last given to the camera in this run
+    /// (`updateCameraRotation`).
+    private var cameraRotationSent: UInt32?
     /// The runtime runs a guest, from its start until its run returns.
     private var runActive = false { didSet { publishSnapshotActivity() } }
     private var active = UIApplication.shared.applicationState == .active
@@ -149,6 +170,35 @@ final class LiveRuntime: RuntimeDriver {
     private let preferences: PreferenceKeeper
 
     private var pending: PendingRun? { didSet { publishSnapshotActivity() } }
+    /// Which start the preparation in hand belongs to: a start the person
+    /// stopped before the runtime ran moves it on, and the preparation, which
+    /// goes on to its end, then drops its launch.
+    private var launchGeneration = 0
+    /// The preparation of the start in hand, from the first file it touches
+    /// until it hands the run to the runtime or ends. It owns the guest's files
+    /// for that span, and goes on after the person stops the start: a start
+    /// asked for since waits for it (`startIfReady`), and so does whatever else
+    /// writes the files (`settleGuestFiles`).
+    private var preparation: Task<Void, Never>?
+    /// The changes of the guest's files from Home (`withGuestFiles`: setting
+    /// the guest up, erasing it, the update's Restore) from the moment they are
+    /// asked for until they end. A start asked for meanwhile waits for them
+    /// (`startIfReady`): one that waited behind a preparation must not be let
+    /// in ahead of a change that was asked for before it.
+    private var fileChanges = 0
+    /// The start `preparation` belongs to, so that the end of one that was
+    /// stopped does not clear its successor.
+    private var preparationGeneration = -1
+    /// The person's stop of the run in hand (`RunStop`), from the launch until
+    /// the run's end is reported.
+    private var runStop: RunStop?
+    #if DEBUG && !APP_STORE
+    /// A test's stand-in for the preparation of the files, where it holds a
+    /// start.
+    var prepareFilesOverride: (@MainActor (Guest) async throws -> Void)?
+    #endif
+    /// The person stopped this start (`stopGuest`); the run's end says so.
+    private var userStopped = false
     private var launching = false { didSet { publishSnapshotActivity() } }
     private var preparing = false { didSet { publishSnapshotActivity() } }
     /// The snapshot operation under way (`SnapshotDriver`). It clears the
@@ -171,11 +221,12 @@ final class LiveRuntime: RuntimeDriver {
     private var bootStartedAt = Date()
     private(set) var runStartedAt: Date?
     private var thermalObserver: NSObjectProtocol?
-    private var console: ConsoleSink?
+    /// The sink of the run's console; a test sets its own.
+    var console: ConsoleSink?
 
     init(
         model: AppModel, storage: TwoDiskStorage, marker: PauseMarker, keyStore: AdbKeyStore = AdbKeyStore(),
-        sessionRecord: URL? = nil,
+        sessionRecord: URL? = nil, cameraDirectory: URL? = nil,
         freeSpace: @escaping @Sendable () -> UInt64 = { AppEntry.freeStorageBytes() },
         keyboardMouse: KeyboardMouse? = nil
     ) {
@@ -188,9 +239,15 @@ final class LiveRuntime: RuntimeDriver {
         partials = PartialSweepLedger(directory: storage.locations.directory)
         self.keyStore = keyStore
         self.sessionRecord = sessionRecord
+        self.cameraDirectory = cameraDirectory
         self.freeSpace = freeSpace
         let effects = LivePauseEffects()
+        pauseEffects = effects
         pause = PauseController(effects: effects, marker: marker, runClock: clock)
+        // The boot screen counts a start by the guest's running time, not by
+        // the wall clock: neither a span in the background nor a correction of
+        // the date moves it.
+        model.clock = { [clock] in clock.seconds }
         effects.statistics = { [weak self] in await self?.readStatistics() }
         model.microphone = MicrophoneController(model: model, source: SystemMicrophoneSource()) {
             // The runtime is told the setting and never asks the system
@@ -211,9 +268,22 @@ final class LiveRuntime: RuntimeDriver {
         kernarium_runtime_loader_set_location_receiver_handler { @Sendable [weak self] powered in
             MainActor.assumeIsolated { self?.location.receiverPower(powered) }
         }
-        model.motionSensorsAvailable = motion.available
+        // The camera is read once, when the guest starts; the runtime says
+        // what the host is doing for it (the notice for other apps sharing the
+        // screen), delivered on the main queue.
+        model.camera = CameraController(model: model, source: SystemCameraSource())
+        kernarium_runtime_loader_set_camera_state_handler { @Sendable [weak model] state in
+            MainActor.assumeIsolated { model?.cameraCaptureChanged(Self.cameraCapture(runtimeState: state)) }
+        }
+        // The runtime answers the system's memory pressure itself and reports
+        // each level it raises, delivered on the main queue in order; the
+        // session says so at the critical level while it is on screen. What
+        // the runtime does about a level changes nothing the person can do.
+        kernarium_runtime_loader_set_memory_pressure_handler { @Sendable [weak model] level, _ in
+            guard let level = Self.memoryPressureLevel(runtimeLevel: level) else { return }
+            MainActor.assumeIsolated { model?.memoryPressureChanged(level) }
+        }
         model.hapticsAvailable = hapticsAvailable
-        motion.problem = { [weak model] in model?.motionSensorsProblem = $0 }
         self.keyboardMouse.setPointerAsTouch(model.pointerAsTouch)
         observeLifecycle()
         observeRotationPolicy()
@@ -225,29 +295,56 @@ final class LiveRuntime: RuntimeDriver {
 
     func create(_ guest: Guest, progress: @escaping @Sendable (Double) -> Void) async throws -> Guest {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
-        await settleSnapshotOperation()
-        storageBusy = true
-        defer {
-            snapshotRevision += 1
-            storageBusy = false
+        return try await withGuestFiles {
+            storageBusy = true
+            defer {
+                snapshotRevision += 1
+                storageBusy = false
+            }
+            return try await storage.create(guest, progress: progress)
         }
-        return try await storage.create(guest, progress: progress)
     }
 
     func erase(progress: @escaping @Sendable (Double) -> Void) async throws {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
-        // The snapshots go with the guest: an operation on them finishes first.
-        await settleSnapshotOperation()
-        storageBusy = true
-        defer {
-            snapshotRevision += 1
-            storageBusy = false
+        // The snapshots go with the guest: an operation on them finishes first,
+        // and so does the preparation of a start that was stopped.
+        try await withGuestFiles {
+            storageBusy = true
+            defer {
+                snapshotRevision += 1
+                storageBusy = false
+            }
+            try await storage.erase(progress: progress)
+            partials.diskErased()
+            // The next guest is a new one: it boots with a key of its own.
+            keyStore.delete()
+            adbIdentity = nil
         }
-        try await storage.erase(progress: progress)
-        partials.diskErased()
-        // The next guest is a new one: it boots with a key of its own.
-        keyStore.delete()
-        adbIdentity = nil
+    }
+
+    /// Changes the guest's files from Home. The change owns them from the
+    /// moment it is asked for, before its first wait, so a start asked for
+    /// after it does not begin until it has ended; it then waits until nothing
+    /// else writes them, and refuses if a start or the run took them first (a
+    /// start that was under way when it was asked for, and went on to the
+    /// runtime): the end of a preparation does not say that the files are idle.
+    private func withGuestFiles<Value>(_ change: () async throws -> Value) async throws -> Value {
+        fileChanges += 1
+        defer {
+            fileChanges -= 1
+            startIfReady()
+        }
+        await settleGuestFiles()
+        guard !SnapshotRules.runtimeActive(running: runActive, pending: false, launching: launching, preparing: preparing)
+        else { throw GuestFilesTaken() }
+        return try await change()
+    }
+
+    /// What a change of the guest's files says when a start or the run holds
+    /// them: the snapshots' own words.
+    private struct GuestFilesTaken: LocalizedError {
+        var errorDescription: String? { String(localized: "Not while the virtual machine is starting or running.") }
     }
 
     func save(_ guest: Guest) throws {
@@ -260,6 +357,10 @@ final class LiveRuntime: RuntimeDriver {
         storage.startPlan()
     }
 
+    func firstBootPending() -> Bool {
+        storage.firstBootPending()
+    }
+
     func measuredUsedBytes() -> UInt64 {
         storage.measuredUsedBytes()
     }
@@ -269,16 +370,17 @@ final class LiveRuntime: RuntimeDriver {
     /// restore that did not finish first), so what a screen has listed is stale.
     func restoreUpdate() async throws {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
-        await settleSnapshotOperation()
-        // A guest being set up or erased has no update to restore.
-        guard !storageBusy else { return }
-        defer { snapshotRevision += 1 }
-        do {
-            try storage.restoreUpdate()
-            rollForwardFailure = nil
-        } catch let unfinished as SnapshotRestoreUnfinished {
-            rollForwardFailure = SnapshotFailure(unfinished.cause)
-            throw unfinished
+        try await withGuestFiles {
+            // A guest being set up or erased has no update to restore.
+            guard !storageBusy else { return }
+            defer { snapshotRevision += 1 }
+            do {
+                try storage.restoreUpdate()
+                rollForwardFailure = nil
+            } catch let unfinished as SnapshotRestoreUnfinished {
+                rollForwardFailure = SnapshotFailure(unfinished.cause)
+                throw unfinished
+            }
         }
     }
 
@@ -294,9 +396,33 @@ final class LiveRuntime: RuntimeDriver {
         // new boot's view to lay out before starting another runtime.
         view = nil
         geometry = nil
+        launchGeneration += 1
+        userStopped = false
+        // A preparation of a start that was stopped is still the owner of
+        // `launching` and of the guest's files: this start waits for it to end
+        // (`startIfReady`, and the end of that preparation).
         pending = PendingRun(guest: guest, mode: mode, kind: kind)
-        launching = false
         startIfReady()
+    }
+
+    /// The person stopped the start. The application states the intent at once
+    /// and asks nothing of the runtime on the main actor: the request goes
+    /// through the queue of the runtime's other waiting calls, and is made
+    /// again until the run ends (`RunStop`).
+    func stopGuest() {
+        userStopped = true
+        if runActive, let stop = runStop {
+            // The run returns, and `finished` reports it as the person's.
+            if stop.request() { pauseEffects.deliverStop(stop) }
+            return
+        }
+        // The runtime has not run: the start ends here. A preparation under
+        // way goes on to its end, since it is the guest's files that it
+        // writes, and drops its launch.
+        launchGeneration += 1
+        pending = nil
+        userStopped = false
+        model?.runEnded(RunEnd(result: 0, stoppedByUser: true), uptimeSeconds: nil)
     }
 
     /// The display view has a size. The first layout after a run is wanted
@@ -311,23 +437,43 @@ final class LiveRuntime: RuntimeDriver {
     }
 
     private func startIfReady() {
-        guard let run = pending, !launching, view != nil, geometry != nil else { return }
+        guard let run = pending, !launching, fileChanges == 0, view != nil, geometry != nil else { return }
         pending = nil
         launching = true
-        Task { await prepareAndLaunch(run) }
+        let generation = launchGeneration
+        preparationGeneration = generation
+        preparation = Task {
+            await prepareAndLaunch(run, generation: generation)
+            // A start asked for meanwhile has its own preparation by now.
+            if preparationGeneration == generation { preparation = nil }
+        }
     }
 
-    private func prepareAndLaunch(_ run: PendingRun) async {
+    /// The person stopped the start that this preparation is for.
+    private func launchWasStopped(_ generation: Int) -> Bool {
+        guard generation != launchGeneration else { return false }
+        preparing = false
+        launching = false
+        model?.preparingDisk = false
+        model?.diskProgress = nil
+        // A start asked for since waits for this preparation to end.
+        startIfReady()
+        return true
+    }
+
+    private func prepareAndLaunch(_ run: PendingRun, generation: Int) async {
         preparing = true
         do {
             try await prepareFiles(for: run.guest) { fraction in
                 Task { @MainActor in self.preparingDisk(fraction) }
             }
         } catch {
+            if launchWasStopped(generation) { return }
             preparing = false
             end(startFailure: "the disk could not be prepared: \(error.localizedDescription)")
             return
         }
+        if launchWasStopped(generation) { return }
         // The guest's adb key, made here when there is none: generating it
         // takes a moment and the main thread does not wait for it. Without
         // one the guest still boots; its adb features then say why they fail.
@@ -340,6 +486,7 @@ final class LiveRuntime: RuntimeDriver {
                 return nil
             }
         }.value
+        if launchWasStopped(generation) { return }
         preparing = false
         model?.preparingDisk = false
         #if APP_STORE
@@ -347,6 +494,7 @@ final class LiveRuntime: RuntimeDriver {
         #else
         var extras = StartExtras()
         extras.jit = await prepareJit(for: run)
+        if launchWasStopped(generation) { return }
         #endif
         guard let view, let geometry else {
             end(startFailure: "the display is not ready")
@@ -359,6 +507,12 @@ final class LiveRuntime: RuntimeDriver {
     /// finishes first, and the update rules then apply to what it left (a
     /// restore that did not finish completes here).
     func prepareFiles(for guest: Guest, progress: @escaping @Sendable (Double) -> Void) async throws {
+        #if DEBUG && !APP_STORE
+        if let prepareFilesOverride {
+            try await prepareFilesOverride(guest)
+            return
+        }
+        #endif
         await settleSnapshotOperation()
         do {
             try await storage.prepareStart(guest, progress: progress)
@@ -394,6 +548,9 @@ final class LiveRuntime: RuntimeDriver {
 
     private func end(startFailure: String) {
         print("Andarium: cannot start the guest: \(startFailure)")
+        // The start is over: nothing owns the launch any more.
+        preparing = false
+        launching = false
         model?.runEnded(RunEnd(result: -1, startFailure: startFailure), uptimeSeconds: nil)
     }
 
@@ -431,15 +588,15 @@ final class LiveRuntime: RuntimeDriver {
             guard let restart = GuestRestartEvent(event: event, restartCount: restartCount) else { return }
             MainActor.assumeIsolated { self?.guestRestarted(restart) }
         }
-        let sink = ConsoleSink { milestones, bootCompleted in
-            Task { @MainActor in self.reached(milestones, bootCompleted: bootCompleted) }
-        }
+        let sink = makeConsoleSink()
         console = sink
         kernarium_runtime_loader_set_console_output_handler { data in sink.feed(data) }
         // A Microphone setting the person turned on earlier follows the
         // guest while iOS still allows it; otherwise the guest hears nothing.
         model?.microphone?.guestStarting()
 
+        let stop = RunStop()
+        runStop = stop
         pause.guestDidStart()
         runActive = true
         shuttingDown = false
@@ -461,13 +618,18 @@ final class LiveRuntime: RuntimeDriver {
         updateThermal()
         if normalRun { thermalMonitor.start() }
         motionMount.begin(interface: interfaceMotionAxes)
+        cameraRotationSent = nil
+        updateCameraRotation(policy: rotationPolicy, starting: true)
         updateHaptics()
         updateGameControllers()
         updateLocation()
         inputRunReady = false
         updateKeyboardMouse()
         let hostFeatures = Self.hostFeatures(
-            hapticsAvailable: hapticsAvailable, followsDeviceOrientation: model?.followsDeviceOrientation == true)
+            hapticsAvailable: hapticsAvailable, followsDeviceOrientation: model?.followsDeviceOrientation == true,
+            compassAvailable: motion.compassAvailable)
+        let cameraMode = cameraBootMode()
+        let cameraPath = cameraDirectory.map { Self.prepareCalibrationDirectory($0) }?.path
         let bootMode: UInt32 = run.mode == .recovery ? 2 : 1
         let memoryMiB = UInt32(run.guest.memoryMiB)
         let processorCount = UInt32(run.guest.cores)
@@ -482,12 +644,21 @@ final class LiveRuntime: RuntimeDriver {
         // the main thread. It owns a thread outright rather than a place on
         // the cooperative pool it would block for hours.
         let worker = Thread {
+            // A stop asked for since the launch began keeps the run out of the
+            // runtime: the runtime drops a stop from before its run begins.
+            guard stop.enter() else {
+                stop.end()
+                Task { @MainActor in self.finished(result: 0) }
+                return
+            }
             let result = Self.runGuest(
                 view: view, dataDiskPath: dataDiskPath, releasePath: releasePath, dataGiB: dataGiB, bootMode: bootMode,
                 width: width, height: height, dotsPerInch: dotsPerInch, memoryMiB: memoryMiB,
                 processorCount: processorCount, adbKeyLine: adbKeyLine, timeZone: timeZone,
-                sessionRecordPath: sessionRecordPath, hostFeatures: hostFeatures, extras: extras
+                sessionRecordPath: sessionRecordPath, hostFeatures: hostFeatures, cameraMode: cameraMode,
+                cameraPath: cameraPath, extras: extras
             )
+            stop.end()
             Task { @MainActor in self.finished(result: result) }
         }
         worker.name = "andarium-runtime"
@@ -498,45 +669,51 @@ final class LiveRuntime: RuntimeDriver {
         view: GuestMetalView, dataDiskPath: String, releasePath: String, dataGiB: UInt32, bootMode: UInt32,
         width: UInt32, height: UInt32, dotsPerInch: UInt32, memoryMiB: UInt32,
         processorCount: UInt32, adbKeyLine: String?, timeZone: String?, sessionRecordPath: String?,
-        hostFeatures: UInt32, extras: StartExtras
+        hostFeatures: UInt32, cameraMode: UInt32, cameraPath: String?, extras: StartExtras
     ) -> Int32 {
         dataDiskPath.withCString { dataDisk in
             releasePath.withCString { release in
                 withOptionalCString(adbKeyLine) { adbKey in
                     withOptionalCString(timeZone) { zone in
                         withOptionalCString(sessionRecordPath) { record in
-                            var request = kernarium_runtime_boot()
-                            request.struct_size = UInt32(MemoryLayout<kernarium_runtime_boot>.size)
-                            request.width = width
-                            request.height = height
-                            request.dots_per_inch = dotsPerInch
-                            request.guest_memory_mib = memoryMiB
-                            request.guest_processor_count = processorCount
-                            request.android_boot_mode = bootMode
-                            // The guest's display always follows the window.
-                            request.auto_resize_guest = 1
-                            request.android_data_disk_path = dataDisk
-                            request.android_release_path = release
-                            request.android_data_gib = dataGiB
-                            // The conservative launch parameters the default memory was computed with.
-                            let parameters = kernarium_runtime_loader_launch_memory_set()
-                            request.gpu_budget_application_mib = parameters.application_mib
-                            request.gpu_budget_engine_mib = parameters.engine_mib
-                            request.gpu_budget_headroom_mib = parameters.headroom_mib
-                            // The key adbd authorizes for this boot, or none.
-                            request.android_adb_public_key = adbKey
-                            // The host's time zone, which the guest applies while its
-                            // own automatic time zone is on, or none.
-                            request.android_time_zone = zone
-                            // Where the runtime records how the session ends.
-                            request.session_record_path = record
-                            // What the host has that the guest is to find.
-                            request.android_host_features = hostFeatures
-                            #if !APP_STORE
-                            // The JIT engine, once its memory is prepared; gadgets otherwise.
-                            request.use_jit = extras.jit ? 1 : 0
-                            #endif
-                            return withUnsafePointer(to: &request) { kernarium_runtime_loader_run(view, $0) }
+                            withOptionalCString(cameraPath) { calibration in
+                                var request = kernarium_runtime_boot()
+                                request.struct_size = UInt32(MemoryLayout<kernarium_runtime_boot>.size)
+                                request.width = width
+                                request.height = height
+                                request.dots_per_inch = dotsPerInch
+                                request.guest_memory_mib = memoryMiB
+                                request.guest_processor_count = processorCount
+                                request.android_boot_mode = bootMode
+                                // The guest's display always follows the window.
+                                request.auto_resize_guest = 1
+                                request.android_data_disk_path = dataDisk
+                                request.android_release_path = release
+                                request.android_data_gib = dataGiB
+                                // The conservative launch parameters the default memory was computed with.
+                                let parameters = kernarium_runtime_loader_launch_memory_set()
+                                request.gpu_budget_application_mib = parameters.application_mib
+                                request.gpu_budget_engine_mib = parameters.engine_mib
+                                request.gpu_budget_headroom_mib = parameters.headroom_mib
+                                // The key adbd authorizes for this boot, or none.
+                                request.android_adb_public_key = adbKey
+                                // The host's time zone, which the guest applies while its
+                                // own automatic time zone is on, or none.
+                                request.android_time_zone = zone
+                                // Where the runtime records how the session ends.
+                                request.session_record_path = record
+                                // What the host has that the guest is to find.
+                                request.android_host_features = hostFeatures
+                                // What the cameras do for the whole run, and where the
+                                // colour data a Bayer still teaches is kept.
+                                request.android_camera_mode = cameraMode
+                                request.android_camera_calibration_path = calibration
+                                #if !APP_STORE
+                                // The JIT engine, once its memory is prepared; gadgets otherwise.
+                                request.use_jit = extras.jit ? 1 : 0
+                                #endif
+                                return withUnsafePointer(to: &request) { kernarium_runtime_loader_run(view, $0) }
+                            }
                         }
                     }
                 }
@@ -552,11 +729,97 @@ final class LiveRuntime: RuntimeDriver {
     }
 
     /// What the boot request tells the guest the host has
-    /// (`android_host_features`): a vibrator, on a device with haptics, and a
-    /// device orientation to follow, where the guest follows it.
-    nonisolated static func hostFeatures(hapticsAvailable: Bool, followsDeviceOrientation: Bool = false) -> UInt32 {
+    /// (`android_host_features`): a vibrator, on a device with haptics, a
+    /// device orientation to follow, where the guest follows it, and a
+    /// magnetic field, on a device that can give one.
+    nonisolated static func hostFeatures(
+        hapticsAvailable: Bool, followsDeviceOrientation: Bool = false, compassAvailable: Bool = false
+    ) -> UInt32 {
         (hapticsAvailable ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS) : 0)
             | (followsDeviceOrientation ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION) : 0)
+            | (compassAvailable ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS) : 0)
+    }
+
+    /// The camera mode the boot request states. iOS may have changed the
+    /// camera's access since Home read it: the mode is what it allows at this
+    /// moment, and it holds until the guest powers off.
+    func cameraBootMode() -> UInt32 {
+        model?.camera?.refresh()
+        return Self.cameraRuntimeMode(model?.cameraMode ?? .blocked)
+    }
+
+    /// Where the colour data a Bayer still teaches is kept. It is derived from
+    /// this device's own sensors and learned again at the next photo, so it
+    /// stays out of iCloud and computer backups.
+    nonisolated static func prepareCalibrationDirectory(_ directory: URL) -> URL {
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var target = directory
+        var excluded = URLResourceValues()
+        excluded.isExcludedFromBackup = true
+        try? target.setResourceValues(excluded)
+        return directory
+    }
+
+    /// The policy with the memory a live camera session of this host holds out
+    /// of each budget, as the runtime composes it before the boot: the layout
+    /// of the cameras it discovers (which asks iOS for nothing and opens no
+    /// session) and the colour data in `calibration`, which the boot reads.
+    /// The runtime discovers the cameras for the first budget and keeps them
+    /// for the rest. It is the loader's ceiling (which bounds the system
+    /// cameras), and not exact, where no runtime can be loaded or it cannot
+    /// discover the cameras. Off the main
+    /// thread: loading the runtime and discovering the cameras are not quick.
+    nonisolated static func cameraReservePlan(for policy: MemoryPolicy, calibration: URL?) -> CameraReservePlan {
+        _ = kernarium_runtime_loader_select(androidFlavor)
+        var exact = true
+        var first: UInt32 = 1
+        let planned = withOptionalCString(calibration?.path) { path in
+            policy.withCameraReserve { budgetMiB in
+                var figureIsExact: UInt32 = 0
+                let reserve = kernarium_runtime_loader_plan_camera_reserve_mib(
+                    UInt32(clamping: budgetMiB), path, first, &figureIsExact)
+                first = 0
+                exact = exact && figureIsExact != 0
+                return Int(reserve)
+            }
+        }
+        return CameraReservePlan(policy: planned, exact: exact)
+    }
+
+    /// The runtime's word for the session's camera mode (KernariumRuntime.h).
+    nonisolated static func cameraRuntimeMode(_ mode: CameraMode) -> UInt32 {
+        switch mode {
+        case .blocked: UInt32(KERNARIUM_RUNTIME_ANDROID_CAMERA_BLOCKED)
+        case .live: UInt32(KERNARIUM_RUNTIME_ANDROID_CAMERA_LIVE)
+        }
+    }
+
+    /// What the runtime's camera state (KernariumRuntime.h) says the host is
+    /// doing. A state this application does not know counts as an interruption,
+    /// the safe reading: a notice follows only the multitasking one and a blocked
+    /// guest's open of a camera.
+    nonisolated static func cameraCapture(runtimeState state: Int32) -> CameraCapture {
+        switch state {
+        case Int32(KERNARIUM_RUNTIME_CAMERA_STATE_IDLE): .idle
+        case Int32(KERNARIUM_RUNTIME_CAMERA_STATE_STREAMING): .streaming
+        case Int32(KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_MULTITASKING): .interruptedByMultitasking
+        case Int32(KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_SYSTEM_PRESSURE): .interruptedBySystemPressure
+        case Int32(KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE): .blockedInUse
+        default: .interrupted
+        }
+    }
+
+    /// The level the runtime reports (KernariumRuntime.h), or nil for a value
+    /// this application does not know: it is ignored, for it would end a
+    /// notice that is up or clear a dismissal if it were read as normal. A
+    /// runtime of another API version is not loaded, so none is expected.
+    nonisolated static func memoryPressureLevel(runtimeLevel level: Int32) -> MemoryPressureLevel? {
+        switch level {
+        case Int32(KERNARIUM_RUNTIME_MEMORY_PRESSURE_NORMAL): .normal
+        case Int32(KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING): .warning
+        case Int32(KERNARIUM_RUNTIME_MEMORY_PRESSURE_CRITICAL): .critical
+        default: nil
+        }
     }
 
     // MARK: Android operations
@@ -611,8 +874,11 @@ final class LiveRuntime: RuntimeDriver {
         await operations.guestProcFiles()
     }
 
-    func installApk(at url: URL, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
-        try await operations.installApk(at: url, update: update)
+    func installApk(
+        at url: URL, bypassLowTargetSdkBlock: Bool, update: @escaping @Sendable (BusyUpdate) -> Void
+    ) async throws -> ApkInstallOutcome {
+        try await operations.installApk(
+            at: url, bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, partials: partials, update: update)
     }
 
     func usbDebugging() async -> Bool? {
@@ -643,7 +909,36 @@ final class LiveRuntime: RuntimeDriver {
 
     // MARK: Events
 
-    private func reached(_ milestones: [BootMilestone], bootCompleted: Bool) {
+    /// The sink of a run's console, which the loader feeds on the main queue in
+    /// the order the runtime wrote it. It applies what it finds there and
+    /// then, synchronously, so that a report of an old boot cannot overtake the
+    /// restart that follows it: the loader delivers the console and the
+    /// restart events on the same queue, and any hop of the report's own
+    /// would run after the restart's.
+    func makeConsoleSink() -> ConsoleSink {
+        ConsoleSink { [weak self] milestones, bootCompleted, recovery in
+            MainActor.assumeIsolated {
+                self?.reached(milestones, bootCompleted: bootCompleted, recoveryStarted: recovery)
+            }
+        }
+    }
+
+    /// The application is away while a start is being prepared, before the
+    /// runtime runs (a guest that runs is held by `PauseController`, which
+    /// stops the clock): the span is not the start's.
+    private func holdStartClock() {
+        guard !runActive, pending != nil || launching else { return }
+        startClockHeld = true
+        clock.pause()
+    }
+
+    private func releaseStartClock() {
+        guard startClockHeld else { return }
+        startClockHeld = false
+        clock.resume()
+    }
+
+    private func reached(_ milestones: [BootMilestone], bootCompleted: Bool, recoveryStarted: Bool) {
         guard let model else { return }
         // The guest console answers, so the emulator exists and takes requests
         // for the keyboard and the mouse.
@@ -652,6 +947,9 @@ final class LiveRuntime: RuntimeDriver {
             updateKeyboardMouse()
         }
         let seconds = Int(Date().timeIntervalSince(bootStartedAt))
+        // Before the milestones: the boot screen ends at `.ready` and shows
+        // what the guest turned out to be.
+        if recoveryStarted { model.bootTracker.noteRecovery() }
         if bootCompleted {
             reachedBootCompleted = true
             partialSweep?.guestBooted()
@@ -671,8 +969,9 @@ final class LiveRuntime: RuntimeDriver {
         print("Andarium: \(event)")
         guard case .began = event, let model else { return }
         // The boot that follows is another one: it ends an update only by
-        // reaching sys.boot_completed itself.
+        // reaching sys.boot_completed itself, and its console is read afresh.
         reachedBootCompleted = false
+        console?.restarted()
         // No import outlives the restart (the browser stops its transfer
         // below and the guest's adb connections end with it), so the files of
         // the run so far are leftovers to the boot that follows. Only the
@@ -717,6 +1016,7 @@ final class LiveRuntime: RuntimeDriver {
         kernarium_runtime_loader_set_console_output_handler(nil)
         console = nil
         pause.guestDidEnd()
+        runStop = nil
         view = nil
         geometry = nil
         launching = false
@@ -736,7 +1036,9 @@ final class LiveRuntime: RuntimeDriver {
         // than before it.
         model?.host.freeStorageBytes = freeSpace()
         let loop = result == Int32(KERNARIUM_RUNTIME_RESULT_RESTART_LOOP)
-        model?.runEnded(RunEnd(result: result, restartedInALoop: loop), uptimeSeconds: uptime)
+        let stopped = userStopped
+        userStopped = false
+        model?.runEnded(RunEnd(result: result, restartedInALoop: loop, stoppedByUser: stopped), uptimeSeconds: uptime)
     }
 
     // MARK: Keys
@@ -792,12 +1094,34 @@ final class LiveRuntime: RuntimeDriver {
         // the mount follows the scene's orientation. Never remap per sensor
         // sample.
         if motionMount.update(policy: policy, interface: interfaceMotionAxes) { motion.restart() }
+        updateCameraRotation(policy: policy)
         rotation.update(policy: policy, ready: normalRun && reachedBootCompleted && active && !holdsGuestStill)
         updateMotionSensors()
         updateHaptics()
         updateGameControllers()
         updateLocation()
         updateKeyboardMouse()
+    }
+
+    /// Tells the camera the turn of the device body: where the host owns the
+    /// rotation (an iPad window) the window's orientation says it, else it is
+    /// zero (`CameraRotation`). The guest hears the turn at its start, for each
+    /// camera's SENSOR_ORIENTATION, and a later change turns the picture. The
+    /// runtime keeps the figure across runs, so a run that starts without a
+    /// scene to read says zero rather than leave an earlier run's turn; only a
+    /// change is sent.
+    private func updateCameraRotation(policy: GuestRotationPolicy, starting: Bool = false) {
+        guard runActive else { return }
+        let degrees: UInt32
+        if let axes = interfaceMotionAxes {
+            degrees = CameraRotation.degrees(policy: policy, interface: axes)
+        } else if starting {
+            degrees = 0
+        } else {
+            return
+        }
+        guard degrees != cameraRotationSent else { return }
+        if kernarium_runtime_loader_set_camera_rotation(degrees) == 0 { cameraRotationSent = degrees }
     }
 
     func setNetworkNotice(_ denial: NetworkDenial?) {
@@ -815,21 +1139,19 @@ final class LiveRuntime: RuntimeDriver {
         }
     }
 
-    func setMotionSensors(_ on: Bool) {
-        model?.motionSensorsProblem = nil
-        updateMotionSensors()
-    }
-
+    /// The sensors are the guest's wherever the device has them, while the
+    /// guest is in front; a sensor is read only while an application in the
+    /// guest uses it (`MotionSession`).
     private func updateMotionSensors() {
         let foreground = normalRun && reachedBootCompleted && active && !holdsGuestStill
             && rotation.applied == rotationPolicy
         // Where the interface does not turn and the guest owns rotation, Android
         // follows the device's orientation as iOS reports it, which already
-        // includes the person's Portrait Orientation Lock. The Gyroscope switch
-        // is about the readings applications take, so it does not decide this.
+        // includes the person's Portrait Orientation Lock. That is the display's
+        // own behaviour, not a reading an application takes, so the sensors do
+        // not decide it.
         let follows = model?.followsDeviceOrientation == true && rotationPolicy == .guest
         motion.update(
-            enabled: model?.motionSensorsOn == true,
             foreground: foreground,
             axes: motionMount.axes,
             followsOrientation: follows
@@ -1242,10 +1564,12 @@ final class LiveRuntime: RuntimeDriver {
             }),
             (UIApplication.didEnterBackgroundNotification, {
                 $0.pause.didEnterBackground()
+                $0.holdStartClock()
                 $0.updateSpaceWatch()
             }),
             (UIApplication.willEnterForegroundNotification, {
                 $0.pause.willEnterForeground()
+                $0.releaseStartClock()
                 $0.updateSpaceWatch()
             }),
             (UIApplication.willTerminateNotification, { $0.pause.willTerminate() }),
@@ -1278,6 +1602,7 @@ final class LiveRuntime: RuntimeDriver {
         if model.spacePause != nil { model.spacePause?.freeBytes = free }
         model.microphone?.refresh()
         model.location?.refresh()
+        model.camera?.refresh()
     }
 
     private func observeRotationPolicy() {
@@ -1323,6 +1648,32 @@ final class LivePauseEffects: PauseEffects {
         queue.async {
             kernarium_runtime_loader_resume()
             Task { @MainActor in finished() }
+        }
+    }
+
+    /// Asks the runtime to stop the run `stop` belongs to, off the main actor:
+    /// the request may wait for a guest being restored or for the runtime's
+    /// own lock. It is made again until the run ends, because the runtime
+    /// drops a stop that arrives before its run begins, and nothing here can
+    /// see that moment. It goes through the queue of the other runtime calls
+    /// that wait, so it comes after a hold that was asked for before it.
+    ///
+    /// `request` is the runtime's stop, and `interval` how long after one it is
+    /// made again; a test supplies its own.
+    func deliverStop(
+        _ stop: RunStop, every interval: DispatchTimeInterval = .seconds(1),
+        request: @escaping @Sendable () -> Void = { kernarium_runtime_loader_request_stop() }
+    ) {
+        Self.deliver(stop, on: queue, every: interval, request: request)
+    }
+
+    private nonisolated static func deliver(
+        _ stop: RunStop, on queue: DispatchQueue, every interval: DispatchTimeInterval,
+        request: @escaping @Sendable () -> Void
+    ) {
+        queue.async {
+            guard stop.deliver(request) else { return }
+            queue.asyncAfter(deadline: .now() + interval) { deliver(stop, on: queue, every: interval, request: request) }
         }
     }
 
@@ -1465,6 +1816,24 @@ extension LiveRuntime: SnapshotDriver {
         while let operation = snapshotOperation { await operation.value }
     }
 
+    /// Waits for the preparation of a start, if one is in hand: it writes the
+    /// guest's files, and goes on to its end after the person stopped the
+    /// start. Not for the preparation's own use (it settles the snapshot
+    /// operation itself).
+    fileprivate func settlePreparation() async {
+        while let task = preparation { await task.value }
+    }
+
+    /// Waits until nothing else writes the guest's files: the preparation of a
+    /// start and the snapshot operation under way, which may follow one
+    /// another. What changes the files, besides a start, begins after it.
+    fileprivate func settleGuestFiles() async {
+        while preparation != nil || snapshotOperation != nil {
+            await settlePreparation()
+            await settleSnapshotOperation()
+        }
+    }
+
     /// Runs `body` on the storage off the main actor as the one operation
     /// under way. A gated one refuses unless the guest is stopped and idle;
     /// one that is not (Rename) waits its turn, and refuses only while a guest
@@ -1475,7 +1844,7 @@ extension LiveRuntime: SnapshotDriver {
         if gated {
             if let refusal = snapshotGate { return .refused(refusal) }
         } else {
-            await settleSnapshotOperation()
+            await settleGuestFiles()
             if storageBusy { return .refused(.busy) }
         }
         let storage = self.storage

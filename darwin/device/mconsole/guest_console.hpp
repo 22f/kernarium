@@ -138,6 +138,11 @@ enum class GuestRequest {
 	refused,
 	/* The guest did it. */
 	done,
+	/* Sent, and its reply was not waited for (the requests that say so). */
+	sent,
+	/* Not tried: another request holds the console (the requests that do not
+	 * wait for it). */
+	busy,
 };
 
 /*
@@ -147,6 +152,17 @@ enum class GuestRequest {
  * reads evicted pages back.
  */
 [[nodiscard]] GuestRequest set_guest_page_cache_trim(bool enabled) noexcept;
+
+/*
+ * set_guest_page_cache_trim for a caller that must not wait: it sends the
+ * request and returns, leaving the reply unread (the guest's late reply finds
+ * no socket and is dropped). It neither waits for a request another thread has
+ * in flight (that is `busy`) nor for room in the console's queue (a full queue
+ * is `unreachable`: nothing was sent). It does not tell a guest that refuses
+ * the command from one that took it.
+ */
+[[nodiscard]] GuestRequest set_guest_page_cache_trim_nowait(
+	bool enabled) noexcept;
 
 /*
  * Has the guest trim all of its cold page cache and hand its free memory to

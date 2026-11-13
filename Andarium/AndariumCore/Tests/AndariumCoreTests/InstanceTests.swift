@@ -95,8 +95,16 @@ struct DecisionVectorTests {
     }
 
     private struct Document: Decodable {
+        struct Legacy: Decodable {
+            var first: Int
+            var last: Int
+        }
+        var legacyBuildNumbers: Legacy
         var cases: [Vector]
         var transitions: [Transition]
+        enum CodingKeys: String, CodingKey {
+            case legacyBuildNumbers = "legacy_build_numbers", cases, transitions
+        }
     }
 
     private static func document() throws -> Document {
@@ -158,9 +166,31 @@ struct DecisionVectorTests {
         }
     }
 
+    @Test func theLegacyRangeIsTheVectors() throws {
+        let legacy = try Self.document().legacyBuildNumbers
+        #expect(BuildNumber.legacyRange == legacy.first...legacy.last)
+        #expect(BuildNumber.legacyRange == 2_026_110_800...2_026_110_899)
+    }
+
+    @Test func theOldCounterIsOlderThanEveryOtherNumber() {
+        let ascending = [
+            2_026_110_800, 2_026_110_801, 2_026_110_805, 2_026_110_817, 2_026_110_899,
+            1, 26, 27, 10_000, 2_026_110_799, 2_026_110_900, 9_999_999_999,
+        ]
+        for (position, number) in ascending.enumerated() {
+            #expect(!BuildNumber.isOlder(number, than: number), "\(number)")
+            for other in ascending[(position + 1)...] {
+                #expect(BuildNumber.isOlder(number, than: other), "\(number) is older than \(other)")
+                #expect(!BuildNumber.isOlder(other, than: number), "\(other) is not older than \(number)")
+            }
+        }
+        #expect(ascending.allSatisfy { !BuildNumber.isOlder($0, than: BuildNumber.oldest) })
+        #expect(ascending.dropFirst().allSatisfy { BuildNumber.isOlder(BuildNumber.oldest, than: $0) })
+    }
+
     @Test func everyVectorIsReproduced() throws {
         let cases = try Self.vectors()
-        #expect(cases.count == 28)
+        #expect(cases.count == 44)
         for vector in cases {
             let state = vector.instance.map { instance in
                 var state = InstanceState(
@@ -246,6 +276,27 @@ struct InstanceFileTests {
         #expect(done.pendingUpdate == nil && done.lastCompleted?.releaseID == "rel-b")
         #expect(!FileManager.default.fileExists(atPath: snapshot.path))
         #expect(try files.decide(for: second).action == .boot)
+    }
+
+    /// The data of a release of the old counter updates to a release number,
+    /// and no way leads back.
+    @Test func aReleaseNumberUpdatesTheDataOfTheOldCounterAndNotBack() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = InstanceFiles(directory: root.appendingPathComponent("Guest"))
+        let old = release("rel-a", build: 2_026_110_817, sha: String(repeating: "a", count: 64))
+        let numbered = release("rel-b", build: 26, sha: String(repeating: "b", count: 64))
+        try files.apply(try files.decide(for: old), release: old)
+        try Data("android data".utf8).write(to: files.data)
+        try files.complete(release: old)
+
+        let update = try files.decide(for: numbered)
+        #expect(update.action == .update)
+        let updated = try files.apply(update, release: numbered)
+        #expect(updated.buildIncremental == "26" && updated.pendingUpdate?.from.buildIncremental == "2026110817")
+        try files.complete(release: numbered)
+        #expect(try files.decide(for: old).action == .refuseDowngrade)
+        #expect(try files.decide(for: release("rel-c", build: 27, sha: String(repeating: "c", count: 64))).action == .update)
     }
 
     /// The sequence that lost a week of user data: r13 settles, r15 updates and
@@ -376,6 +427,63 @@ struct InstanceFileTests {
         #expect(!FileManager.default.fileExists(atPath: files.snapshot(for: "rel-b").path))
     }
 
+    /// What the runtime keeps beside the data disk: a synthetic one, since no
+    /// real installation's values belong in a test.
+    private static let identityContent = Data(
+        #"{"ethernet_mac": "02:aa:bb:cc:dd:ee", "schema": 1, "serialno": "0123456789abcdef"}"#.utf8)
+
+    @Test func theInstallationIdentityGoesThroughUpdatesRetriesAndRestoresUntouched() throws {
+        let (files, root, _) = try started()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Self.identityContent.write(to: files.identity)
+        let manager = FileManager.default
+        func unchanged(_ step: String) throws {
+            #expect(try Data(contentsOf: files.identity) == Self.identityContent, "\(step)")
+        }
+
+        let second = release("rel-b", build: 200)
+        try files.apply(try files.decide(for: second), release: second)
+        try unchanged("an update")
+        let retry = try files.decide(for: second, flags: InstanceFlags(retry: true))
+        try files.apply(retry, release: second)
+        try unchanged("a retry")
+        let restore = try files.decide(for: second, flags: InstanceFlags(restoreSnapshot: true))
+        try files.apply(restore, release: second)
+        try unchanged("a restore of the data an update started from")
+        try files.apply(try files.decide(for: second), release: second)
+        try files.complete(release: second)
+        try unchanged("a completed update")
+        let boot = try files.decide(for: second)
+        #expect(boot.action == .boot)
+        try files.apply(boot, release: second)
+        try unchanged("a boot")
+        #expect(manager.fileExists(atPath: files.identity.path))
+    }
+
+    @Test func resetAndANewDataDiskEndTheInstallationIdentity() throws {
+        let (files, root, first) = try started()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manager = FileManager.default
+        let leftover = files.directory.appendingPathComponent(InstanceFiles.identityFile + ".tmp-123")
+        try Self.identityContent.write(to: files.identity)
+        try Data("half".utf8).write(to: leftover)
+
+        // An erase and the tooling's reset delete the file and what a crash left of a write of it.
+        let reset = try files.decide(for: first, flags: InstanceFlags(reset: true))
+        #expect(reset.action == .reset)
+        try files.apply(reset, release: first)
+        #expect(!manager.fileExists(atPath: files.identity.path) && !manager.fileExists(atPath: leftover.path))
+
+        // A data disk that is gone starts a new installation, whatever lies beside it.
+        try Self.identityContent.write(to: files.identity)
+        try Data("disk".utf8).write(to: files.data)
+        try manager.removeItem(at: files.data)
+        let created = try files.decide(for: first)
+        #expect(created.action == .create)
+        try files.apply(created, release: first)
+        #expect(!manager.fileExists(atPath: files.identity.path))
+    }
+
     @Test func aReleaseIdentityIsReadFromTheManifestAndTheLayout() throws {
         let manifest = #"{"release_id": "20261102-los24-r5", "android": {"fingerprint": "Andarium/lineage_andarium/andarium:17/a/b:user/release-keys", "build_number": 1793463711, "security_patch": "2026-10-01"}}"#
         let layout = #"{"system_disk": {"sha256": "\#(String(repeating: "c", count: 64))"}, "data_disk": {"layout_version": 1, "capacity_gib": {"minimum": 4, "default": 8, "maximum": 64}}}"#
@@ -385,5 +493,76 @@ struct InstanceFileTests {
         // A manifest of an earlier schema has no build number.
         let old = #"{"release_id": "20261031-los24-r4", "android": {"fingerprint": "f"}}"#
         #expect(throws: InstanceError.self) { try ReleaseIdentity(manifest: Data(old.utf8), layout: Data(layout.utf8)) }
+    }
+}
+
+/// Whether a guest's first Android boot has been seen to complete, which the
+/// slow-start notice reads to give a first boot its longer time: a persisted
+/// fact, since the plan from the files says only that the data disk exists.
+struct FirstBootMarkerTests {
+    @Test func aGuestsFirstBootIsPendingUntilAndroidBootedOnce() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = InstanceFiles(directory: root)
+        let first = release()
+        #expect(!files.firstBootPending)
+        try files.apply(files.decide(for: first), release: first)
+        #expect(files.firstBootPending)
+        // The runtime made the data disk and the process ended before the
+        // kernel ran: the files say an ordinary start, and the boot is still
+        // the first.
+        try Data("data".utf8).write(to: files.data)
+        let again = try files.decide(for: first)
+        #expect(again.action == .boot && files.startPlan(for: first) == .normal)
+        try files.apply(again, release: first)
+        #expect(files.firstBootPending)
+        // Android booted.
+        try files.booted(release: first)
+        #expect(!files.firstBootPending)
+        let next = try files.decide(for: first)
+        try files.apply(next, release: first)
+        #expect(!files.firstBootPending)
+    }
+
+    @Test func aCleanEndOfTheFirstRunSaysItBootedToo() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = InstanceFiles(directory: root)
+        let first = release()
+        try files.apply(files.decide(for: first), release: first)
+        try Data("data".utf8).write(to: files.data)
+        try files.complete(release: first)
+        #expect(!files.firstBootPending)
+    }
+
+    @Test func eraseAndResetGiveTheNextGuestItsOwnFirstBoot() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = InstanceFiles(directory: root)
+        let first = release()
+        try files.apply(files.decide(for: first), release: first)
+        try Data("data".utf8).write(to: files.data)
+        try files.booted(release: first)
+        #expect(!files.firstBootPending)
+        // A reset makes a new instance: its first boot is pending.
+        let reset = try files.decide(for: first, flags: InstanceFlags(reset: true))
+        try files.apply(reset, release: first)
+        #expect(files.firstBootPending)
+        // Erasing takes the marker with the rest.
+        try files.removeAll()
+        #expect(!files.firstBootPending)
+    }
+
+    @Test func aGuestAnEarlierVersionMadeIsPastItsFirstBoot() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = InstanceFiles(directory: root)
+        let first = release()
+        try files.apply(files.decide(for: first), release: first)
+        try FileManager.default.removeItem(at: files.firstBoot)
+        try Data("data".utf8).write(to: files.data)
+        #expect(!files.firstBootPending)
+        try files.apply(files.decide(for: first), release: first)
+        #expect(!files.firstBootPending)
     }
 }

@@ -18,10 +18,35 @@ struct BusyCancel: Equatable {
 /// How an operation ended, when its overlay stays up to say so until the
 /// person closes it.
 struct BusyResult: Equatable {
-    /// The operation did not do what was asked.
-    var failed: Bool
+    /// How the card presents the end: the operation did what was asked (a
+    /// check), did it but not all of it (a warning, in the colour the app's
+    /// cautions have), or did not do it (a failure).
+    enum Style: Equatable {
+        case success, warning, failure
+    }
+
+    var style: Style
     /// Closes the overlay.
     let dismiss: BusyCancel
+
+    /// The operation did not do what was asked.
+    var failed: Bool { style == .failure }
+
+    init(style: Style, dismiss: BusyCancel) {
+        self.style = style
+        self.dismiss = dismiss
+    }
+
+    init(failed: Bool, dismiss: BusyCancel) {
+        self.init(style: failed ? .failure : .success, dismiss: dismiss)
+    }
+}
+
+/// The words an operation ends with on its card, and how the card presents them.
+struct BusyWords: Equatable {
+    var title: String
+    var detail: String
+    var style = BusyResult.Style.success
 }
 
 /// A long task the screens wait for: creating or erasing a guest, or one of
@@ -42,8 +67,9 @@ struct BusyState: Equatable {
 nonisolated struct BusyUpdate: Sendable {
     var progress: Double?
     var detail: String?
-    /// False once the task is past the point where it can stop; true again is
-    /// never sent.
+    /// False once the task is past the point where it can stop. True again is
+    /// sent only by an install that has finished installing and goes on to copy
+    /// the app's data, which can be stopped.
     var cancellable: Bool?
 
     init(progress: Double? = nil, detail: String? = nil, cancellable: Bool? = nil) {
@@ -60,6 +86,13 @@ struct AppAlert: Identifiable, Equatable {
     var message: String
 }
 
+/// Settings' Install APK asks whether to install an app Android refused for
+/// the version it was built for, with the versions when Android named them.
+struct LegacyInstallQuestion: Identifiable, Equatable {
+    let id = UUID()
+    var target: LegacyTarget
+}
+
 /// How far the system lets Andarium use the microphone.
 enum MicrophoneState: Equatable {
     case notAsked, denied, granted
@@ -69,6 +102,9 @@ enum MicrophoneState: Equatable {
 /// person can change in Settings.
 enum PermissionPrompt: Identifiable, Equatable {
     case microphone
+    /// The camera is refused or restricted; the words follow the access
+    /// (`CameraWords.alert`).
+    case camera
     /// The location is refused, restricted, off or approximate; the words
     /// follow the access (`LocationWords.alert`).
     case location
@@ -88,12 +124,22 @@ protocol RuntimeDriver: AnyObject {
     /// What a start would be, from the guest's files; nil when they cannot be
     /// read, which a start then reports.
     func startPlan() -> StartPlan?
+    /// Whether the guest's first Android boot has not been seen to complete,
+    /// which outlasts a start that ended before it: the next start is long by
+    /// its nature (`SlowStart`) though its disk exists.
+    func firstBootPending() -> Bool
     /// What the guest's data disk occupies now, measured from its file; the
     /// guest changes it while it runs.
     func measuredUsedBytes() -> UInt64
     /// A run is wanted. The runtime starts once the guest's display has its
     /// size, after the disk is ready.
     func begin(guest: Guest, mode: StartMode, kind: BootKind)
+    /// The person stops the start under way, from the boot screen's notice
+    /// for a slow start. A run that is under way is asked to stop and ends
+    /// through the runtime's result, which the model reports as the person's
+    /// (`RunEnd.stoppedByUser`); a start that has not reached the runtime yet
+    /// is ended here, and the model hears it as a run that ended.
+    func stopGuest()
     /// Puts the data back to what the update that did not finish started
     /// from; the guest does not start. It waits for a snapshot operation under
     /// way, as a start does.
@@ -116,8 +162,6 @@ protocol RuntimeDriver: AnyObject {
     /// the session record. The runtime keeps it; saying it again changes
     /// nothing.
     func setNetworkNotice(_ denial: NetworkDenial?)
-    /// Enables or stops sharing motion with the guest.
-    func setMotionSensors(_ on: Bool)
     /// Lets the guest play its haptics on the device, or not: the Haptics
     /// switch, which applies at once.
     func setHaptics(_ on: Bool)
@@ -135,11 +179,18 @@ protocol RuntimeDriver: AnyObject {
     /// The guest kernel's counters that bear on a stall (`GuestProcFiles`), as
     /// entries for the bug report; empty when the guest cannot be read now.
     func guestStallFiles() async -> [BugReportArchive.Entry]
-    /// Installs the APK at `url`, which the caller can read, into the guest.
+    /// Installs the app at `url`, which the caller can read, into the guest:
+    /// an .apk, or a file that holds an app in parts (.apks, .xapk, .apkm).
     /// Its size is read once the file is in hand, since an iCloud file has
     /// none before. Cancelling the task stops it while the file is still being
-    /// sent.
-    func installApk(at url: URL, update: @escaping @Sendable (BusyUpdate) -> Void) async throws
+    /// sent (an archive's parts go into an install session, which the stop
+    /// abandons). `bypassLowTargetSdkBlock` is true only for the second
+    /// attempt of Settings' Install APK, after the person chose to install an
+    /// app Android refused for the version it was built for; without it that
+    /// refusal throws `LegacyApkRefused`.
+    func installApk(
+        at url: URL, bypassLowTargetSdkBlock: Bool, update: @escaping @Sendable (BusyUpdate) -> Void
+    ) async throws -> ApkInstallOutcome
     /// Whether the guest's USB debugging setting is on; nil when it cannot be
     /// read now.
     func usbDebugging() async -> Bool?

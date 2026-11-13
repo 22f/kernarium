@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 37U
+#define KERNARIUM_RUNTIME_API_VERSION 42U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -66,6 +66,30 @@ enum {
      * manager follows in place of the accelerometer; without the bit it lists
      * none and judges the accelerometer, as an image without the sensor does. */
     KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION = 1u << 1,
+    /* The application gives the guest the device's magnetic field (runtime API
+     * 38). The guest then lists a magnetometer and declares the compass
+     * feature, from which Android derives the rotation vector and the
+     * orientation that navigation applications take their heading from;
+     * without the bit it lists none and declares none. */
+    KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS = 1u << 2,
+};
+
+/* What the camera does for an Android guest this run (runtime API 37), the
+ * value of kernarium_runtime_boot.android_camera_mode. It is fixed at the
+ * start of the run and nothing changes it until the guest powers off. */
+enum {
+    /* The guest finds the host's cameras and every frame is black: the guest
+     * reports Android's hardware camera privacy switch as on (a lens cover),
+     * the host opens no capture session, and the system's camera indicator
+     * cannot light. This is also what zero, an application that states
+     * nothing, gets. */
+    KERNARIUM_RUNTIME_ANDROID_CAMERA_BLOCKED = 0,
+    /* The guest's camera apps see the host's cameras. A capture session opens
+     * only while a guest app has a camera open. The application asks the
+     * system for access first (the runtime never does) and states this only
+     * when the system has granted it: a session whose access is refused later
+     * delivers black frames as an interruption does. */
+    KERNARIUM_RUNTIME_ANDROID_CAMERA_LIVE = 1,
 };
 
 /* A boot request. Linux guests supply rootfs_path and overlay_path. Android
@@ -126,7 +150,38 @@ enum {
  * argument the guest's image reads for it, which the release's command-line
  * file cannot set, and ignores a bit it does not know with a line on stderr: a
  * feature never fails a boot. The runtime reads it only from a request whose
- * struct_size covers it; a Linux guest ignores it. */
+ * struct_size covers it; a Linux guest ignores it.
+ *
+ * android_camera_mode and android_camera_calibration_path (runtime API 37)
+ * give an Android guest the host's cameras. The runtime discovers them, which
+ * needs no permission, composes the camera layout that describes them
+ * (darwin/device/camera/README.md) as androidboot.product.vendor.sku, which the
+ * release's command-line file cannot set, and makes the camera device after
+ * the GNSS receiver. A host with no camera gets no device and the layout
+ * "none". The mode is one of the KERNARIUM_RUNTIME_ANDROID_CAMERA_ values; an
+ * unknown value runs as blocked, with a line on stderr, because a camera never
+ * fails a boot. The calibration path is a directory, the one the colour data a
+ * Bayer still teaches is kept in (per lens, outside the guest's disks), or null
+ * to keep it in memory. The runtime reads both only from a request whose
+ * struct_size covers them; a Linux guest ignores them.
+ *
+ * android_serial_number and android_ethernet_mac (runtime API 42) state the
+ * installation's identity for a run that must have fixed values, which a test
+ * or a measurement wants. An Android guest otherwise has an identity of its
+ * own: the runtime keeps a random serial number and a random eth0 address in
+ * identity.json beside the data disk, made at the first start of a data disk
+ * (and of an installation that has none), and gives them to the guest. A
+ * request that states either value gets that one value, the other stays what
+ * the release and the user network have without an identity, and the file is
+ * neither read nor written. The serial is 6 through 20 characters of A-Z a-z
+ * 0-9 other than "unknown"; the address is the text aa:bb:cc:dd:ee:ff of a
+ * unicast address that is locally administered and none of 02:00:00:00:00:00,
+ * 52:54:00:12:34:56 or 02:15:b2:00:00:00. A value that is anything else fails
+ * the run with -UML_EMULATOR_INVALID_ARGUMENT. The host's own messages never
+ * contain either value; what the guest itself reports (an Android bug report,
+ * the kernel's echo of its command line) carries them as on any Android device.
+ * The runtime reads them only from a request whose struct_size covers them; a
+ * Linux guest ignores them. */
 typedef struct kernarium_runtime_boot {
     uint32_t struct_size;
     uint32_t width;
@@ -149,6 +204,10 @@ typedef struct kernarium_runtime_boot {
     const char* session_record_path;
     uint32_t use_jit;
     uint32_t android_host_features;
+    uint32_t android_camera_mode;
+    const char* android_camera_calibration_path;
+    const char* android_serial_number;
+    const char* android_ethernet_mac;
 } kernarium_runtime_boot;
 
 /* What a launch's host GPU budget comes to, as the runtime evaluates it for
@@ -175,20 +234,24 @@ typedef struct kernarium_runtime_gpu_budget {
 /* Boots the guest and returns when it is over. A guest that restarts itself is
  * booted again inside this call, on the same view, disk and network, so the
  * call returns only when the guest powers off, the application stops it, a run
- * fails, or the guest restarts itself again and again within seconds of
- * booting. It returns the guest's own status (0 for a power-off or a stop), a
- * negated uml_emulator error constant for a run or start-up that failed, or
- * KERNARIUM_RUNTIME_RESULT_RESTART_LOOP. For Android, 0 means the guest powered
- * off cleanly and all its resources have been released: another run may start
- * in this process. A host stop or an unreported shutdown returns an error. */
+ * fails, or the restart-loop guard ends the loop. It returns the guest's own
+ * status (0 for a power-off or a stop), a negated uml_emulator error constant
+ * for a run or start-up that failed, or KERNARIUM_RUNTIME_RESULT_RESTART_LOOP.
+ * For Android, 0 means the guest powered off cleanly and all its resources have
+ * been released: another run may start in this process. A host stop or an
+ * unreported shutdown returns an error. */
 typedef int (*kernarium_runtime_run_function)(
     KernariumMetalView view,
     const kernarium_runtime_boot* boot);
 
 enum {
-    /* The guest restarted itself five times in a row, each within 15 seconds
-     * of its boot, so the runtime stopped booting it. It is outside the range
-     * of the negated uml_emulator errors (-1 through -4). */
+    /* The guest restarted itself five times in a row within 15 seconds of its
+     * boot, or, for Android, eight times in a row each within 15 seconds or
+     * before its boot had finished (init processed sys.boot_completed=1,
+     * started recovery or apexd marked the boot completed, on a console that
+     * showed init's output), so the runtime stopped booting it. A restart
+     * after a finished boot that lasted 15 seconds or more never counts. It is
+     * outside the range of the negated uml_emulator errors (-1 through -4). */
     KERNARIUM_RUNTIME_RESULT_RESTART_LOOP = -100,
 };
 
@@ -771,6 +834,180 @@ enum {
  * another value. Any thread. */
 typedef int (*kernarium_runtime_set_network_notice_function)(int notice);
 
+/* What the host is doing for the cameras of the running guest, as the
+ * callback reports it (runtime API 37; BLOCKED_IN_USE is API 39). */
+enum {
+    /* No guest app has a camera open: no capture session exists and the
+     * system's camera indicator is off. Also the state of a guest that
+     * ended. */
+    KERNARIUM_RUNTIME_CAMERA_STATE_IDLE = 0,
+    /* A guest app has a camera open and frames flow. */
+    KERNARIUM_RUNTIME_CAMERA_STATE_STREAMING = 1,
+    /* The capture cannot run for a reason that ends by itself (another app
+     * or a call has the camera, the system has not granted access); the guest
+     * gets black frames meanwhile. */
+    KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED = 2,
+    /* The same, because other apps share the screen (iPad Split View, Slide
+     * Over or a window the system does not let capture). */
+    KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_MULTITASKING = 3,
+    /* The same, because the system is under pressure (heat). */
+    KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_SYSTEM_PRESSURE = 4,
+    /* The guest runs blocked (android_camera_mode) and a guest app has a
+     * camera open: no capture session exists and the system's camera
+     * indicator stays off, the guest gets black frames, and the application
+     * can say the camera is off. Reported when the app opens a camera and
+     * again at each later open, IDLE in between; a live guest never reports
+     * it. A runtime before API 39 reports a blocked guest as IDLE. */
+    KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE = 5,
+};
+
+/* `state` is a KERNARIUM_RUNTIME_CAMERA_STATE_ value. It runs on a runtime
+ * thread and must return promptly. */
+typedef void (*kernarium_runtime_camera_state_callback)(
+    void* context,
+    int state);
+/* Sets, or with a null callback clears, the one receiver of the camera state
+ * (runtime API 37). The state in force is reported to a new callback at once.
+ * A state is reported when it changes, and IDLE when the guest ends or
+ * restarts with a camera open. Once it returns, no call to the previous
+ * callback is running or will start, so its context may be released; the
+ * callback must not call this. A runtime without a camera keeps the entry and
+ * never calls back. */
+typedef void (*kernarium_runtime_set_camera_state_callback_function)(
+    kernarium_runtime_camera_state_callback callback,
+    void* context);
+
+/* Tells the cameras how the device body is turned (runtime API 37): the
+ * clockwise degrees from portrait, 0, 90, 180 or 270, as the device's user
+ * sees it. It matters when the host owns the rotation (an iPad window): the
+ * guest's display stays upright at rotation 0 while the device, which carries
+ * every built-in sensor, turns under it, so the sensors' mounting turns with
+ * it. Each boot reads it once and states every camera's SENSOR_ORIENTATION
+ * from it (a back camera's turned the same way, a front camera's the other
+ * way, an external camera's not at all); a later change turns the picture by
+ * the difference, as ROTATE_AND_CROP's automatic setting does. A guest whose
+ * display the guest rotates itself (an iPhone) keeps 0. Zero until the
+ * application says otherwise. Returns 0, or -EINVAL for another
+ * value. Any thread, with or without a guest. */
+typedef int (*kernarium_runtime_set_camera_rotation_function)(
+    uint32_t degrees);
+
+/* How a camera reserve was reached (runtime API 40). */
+enum {
+    /* The reserve is the layout's own: the runtime discovered the host's
+     * cameras (which asks the system for no permission and opens no capture
+     * session), read the colour data the calibration directory holds, composed
+     * the layout it would run and took the memory that layout lets a live
+     * session hold. A host with no camera the image can describe holds none:
+     * the reserve is 0, and exact. */
+    KERNARIUM_RUNTIME_CAMERA_RESERVE_EXACT = 0,
+    /* The cameras could not be discovered: the reserve is the tier's ceiling,
+     * which bounds the layouts of the system cameras at the budget's tier (a
+     * development synthetic source can hold more). */
+    KERNARIUM_RUNTIME_CAMERA_RESERVE_CEILING = 1,
+};
+
+/* What the caller of kernarium_runtime_plan_camera_reserve_function asks. */
+enum {
+    /* Discover the host's cameras again before answering, and compose every
+     * answer again: the runtime keeps the discovered source and the answers
+     * composed from it (calibration files included) until a call asks for
+     * this, so an application that asks for each of many budgets sets this on
+     * the first and not on the rest. */
+    KERNARIUM_RUNTIME_CAMERA_PLAN_DISCOVER_AGAIN = 1,
+};
+
+/* What kernarium_runtime_plan_camera_reserve_function takes and answers. The
+ * caller sets struct_size and flags. */
+typedef struct kernarium_runtime_camera_reserve {
+    uint32_t struct_size;
+    /* KERNARIUM_RUNTIME_CAMERA_PLAN_ flags. */
+    uint32_t flags;
+    /* The host memory, in whole MiB, that a live camera session holds out of
+     * the GPU budget. */
+    uint32_t reserve_mib;
+    /* A KERNARIUM_RUNTIME_CAMERA_RESERVE_ value. */
+    uint32_t basis;
+} kernarium_runtime_camera_reserve;
+
+/* The host memory a live camera session of this host would hold out of the GPU
+ * budget of `gpu_budget_mib` MiB (runtime API 40): the figure the next boot with
+ * android_camera_mode LIVE and the same calibration directory takes out of the
+ * pool it gives the GPU, while the camera source, the cameras it presents and
+ * the calibration data are as they were when the answer was composed. The
+ * application asks before the boot, to show the graphics memory the guest would
+ * have while Camera is on. The runtime composes the layout the boot would run
+ * (the cameras it discovers and the colour data in `camera_calibration_path`,
+ * null for none), at the tier the budget gets, and answers what that layout lets
+ * a session hold. It keeps the discovered source and the answers composed from
+ * it: the first call discovers, and `flags` DISCOVER_AGAIN discovers again and
+ * composes every answer again (a boot discovers for its own run). Nothing is
+ * opened and no permission is asked. A host without a camera, and a runtime
+ * without cameras (a Linux guest), answer 0. Returns 0, or a negative value for
+ * a null or short `reserve`; any thread, with or without a guest. */
+typedef int (*kernarium_runtime_plan_camera_reserve_function)(
+    uint32_t gpu_budget_mib,
+    const char* camera_calibration_path,
+    kernarium_runtime_camera_reserve* reserve);
+
+/* The level the system's memory pressure source reported to the host (runtime
+ * API 41). At a warning the host turns on the guest's page-cache trimmer, and
+ * at a critical level it also frees what it can get back at once
+ * (docs/architecture.md, "Memory pressure"). */
+enum {
+    KERNARIUM_RUNTIME_MEMORY_PRESSURE_NORMAL = 0,
+    KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING = 1,
+    KERNARIUM_RUNTIME_MEMORY_PRESSURE_CRITICAL = 2,
+};
+
+/* What the host does about that level. */
+enum {
+    /* The normal level: no response starts (the guest's trimmer is turned
+     * off). */
+    KERNARIUM_RUNTIME_MEMORY_RESPONSE_NONE = 0,
+    /* The host starts a response now. A warning turns on the guest's gradual
+     * page-cache trimmer, which asks the guest for one short message; a
+     * critical level frees the host's graphics caches and asks the guest to
+     * trim all of its page cache, which can take seconds. */
+    KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED = 1,
+    /* A warning less than 30 s after the last response began: no response
+     * starts for it (the guest's trimmer is still turned on if it is off). */
+    KERNARIUM_RUNTIME_MEMORY_RESPONSE_WITHHELD = 2,
+    /* A response is already running, and this level starts none: a higher
+     * level that meets it is neither queued nor added to it, and a running
+     * warning's response is not upgraded. The host handles the notifications
+     * one at a time, each after the response of the one before, so this is
+     * rare. */
+    KERNARIUM_RUNTIME_MEMORY_RESPONSE_UNDER_WAY = 3,
+};
+
+/* `level` is a KERNARIUM_RUNTIME_MEMORY_PRESSURE_ value and `response` a
+ * KERNARIUM_RUNTIME_MEMORY_RESPONSE_ value. It is called once for each
+ * notification the system delivers while a guest runs, the repeats and the
+ * return to NORMAL included (also the host's own return to NORMAL after a long
+ * quiet, for a system that never delivers it), as soon as the host has decided
+ * what it does and
+ * before it starts the work for that notification (a response can take
+ * seconds), in the order delivered. The host handles the notifications one at a
+ * time: a level raised during a response is reported after the response, and
+ * one that the system itself merged with others is reported as the most
+ * serious of them. It carries no figures. It runs on a runtime thread and must
+ * return promptly. */
+typedef void (*kernarium_runtime_memory_pressure_callback)(
+    void* context,
+    int level,
+    int response);
+/* Sets, or with a null callback clears, the one receiver of the reports
+ * (runtime API 41). It is an event and not a state: a callback set while the
+ * pressure is in force hears the next level, and a guest that ends or restarts
+ * during the pressure reports no NORMAL, so the application takes the end of
+ * the run as the end of it. It may be set before a guest runs. Once it
+ * returns, no call to the previous callback is running or will start, so its
+ * context may be released; the callback must not call this. */
+typedef void (*kernarium_runtime_set_memory_pressure_callback_function)(
+    kernarium_runtime_memory_pressure_callback callback,
+    void* context);
+
 /* The application resolves only this versioned getter after loading exactly
  * one runtime framework. The table is immutable and remains valid until
  * process exit. The selected framework owns one host runtime and its
@@ -817,6 +1054,12 @@ typedef struct kernarium_runtime_api {
         set_input_status_callback;
     kernarium_runtime_wake_for_input_function wake_for_input;
     kernarium_runtime_set_network_notice_function set_network_notice;
+    kernarium_runtime_set_camera_state_callback_function
+        set_camera_state_callback;
+    kernarium_runtime_set_camera_rotation_function set_camera_rotation;
+    kernarium_runtime_plan_camera_reserve_function plan_camera_reserve;
+    kernarium_runtime_set_memory_pressure_callback_function
+        set_memory_pressure_callback;
 } kernarium_runtime_api;
 
 #if defined(__GNUC__)

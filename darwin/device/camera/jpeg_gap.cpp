@@ -54,6 +54,13 @@ bool multiPictureIndex(std::span<const std::uint8_t> jpeg, std::uint8_t marker, 
     return marker == 0xe2 && length >= 6 && std::memcmp(jpeg.data() + code + 3, "MPF\0", 4) == 0;
 }
 
+/* A frame header (SOF0 to SOF15 except the table, JPEG-extension and
+ * arithmetic-conditioning codes 0xc4, 0xc8 and 0xcc). */
+bool frameHeader(std::uint8_t marker) noexcept
+{
+    return marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc;
+}
+
 } // namespace
 
 std::optional<JpegWithGap> reserveExifGap(std::span<const std::uint8_t> jpeg, std::uint32_t gapLength)
@@ -91,6 +98,11 @@ std::optional<JpegWithGap> reserveExifGap(std::span<const std::uint8_t> jpeg, st
         if (code + 3 > jpeg.size()) return std::nullopt;
         const std::size_t length = std::size_t(jpeg[code + 1]) << 8 | jpeg[code + 2];
         if (length < 2 || code + 1 + length > jpeg.size()) return std::nullopt;
+        if (frameHeader(marker) && length >= 8 && result.frameWidth == 0 && result.frameHeight == 0) {
+            // Precision, then the height and the width, two bytes each.
+            result.frameHeight = std::uint16_t(jpeg[code + 4] << 8 | jpeg[code + 5]);
+            result.frameWidth = std::uint16_t(jpeg[code + 6] << 8 | jpeg[code + 7]);
+        }
         if (marker != 0xe1 && !multiPictureIndex(jpeg, marker, code, length))
             result.head.insert(result.head.end(), jpeg.begin() + std::ptrdiff_t(code - 1),
                                jpeg.begin() + std::ptrdiff_t(code + 1 + length));

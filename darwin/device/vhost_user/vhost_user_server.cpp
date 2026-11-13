@@ -46,6 +46,13 @@ constexpr std::uint32_t maximumGuestMemoryRegions =
 constexpr int socketPollTimeoutMilliseconds =
     UML_GPU_STOP_POLL_TIMEOUT_MILLISECONDS;
 static_assert(socketPollTimeoutMilliseconds > 0);
+/* The start of the line written when a ring disable resets a device that
+ * holds deferred requests, followed by ` device=<name> ring=<index>
+ * deferred=<count>`. The Android runners match it. */
+constexpr const char* ringDisableResetPrefix =
+    "Vhost-user: device reset at ring disable:";
+/* How many such resets are each reported before only the doublings are. */
+constexpr unsigned reportedDisableResets = 256;
 constexpr std::uint64_t transportFeatures =
     protocol::vhostFeatureProtocol |
     protocol::virtioFeatureVersion1;
@@ -64,8 +71,8 @@ class ConnectionStopped final {};
 class ConnectionClosed final {};
 
 /* What a write goes to. A socket of the connection whose peer has closed it
- * fails a write with EPIPE, or with ECONNRESET when the peer left data
- * unread; either means the front-end closed the connection. */
+ * fails a write in the ways writeFailureMeansPeerClosed() lists, and each
+ * means the front-end closed the connection. */
 enum class WriteTarget : bool {
     descriptor,
     socket,
@@ -76,17 +83,18 @@ enum class WriteTarget : bool {
     const char* operation,
     int error)
 {
-    if (target == WriteTarget::socket &&
-        (error == EPIPE || error == ECONNRESET)) {
+    if (target == WriteTarget::socket && writeFailureMeansPeerClosed(error))
         throw ConnectionClosed {};
-    }
     throw std::runtime_error(
         std::string(operation) + ": " + std::strerror(error));
 }
 
 /* A front-end request whose reply the front-end reads from the main socket
- * without draining the backend channel, and whose handling only reads state,
- * so it can be answered while a backend request is outstanding. */
+ * without draining the backend channel, so it can be answered while a backend
+ * request is outstanding. Most only read state. GET_FEATURES, which ends a
+ * driver, also retires the disabled rings, a flag flip with no I/O; when it
+ * would reset held requests as well it is not answered inside the wait
+ * (awaitBackendAcknowledgement). */
 [[nodiscard]] bool answeredDuringBackendWait(std::uint32_t request) noexcept
 {
     switch (static_cast<protocol::VhostRequest>(request)) {
@@ -408,16 +416,6 @@ VhostUserServer::VhostUserServer(
     if (!device_ || device_->queueCount() == 0 ||
         device_->queueCount() > maximumQueueCount)
         throw std::invalid_argument("invalid vhost-user device queue count");
-    /* The shared-memory map or unmap a request raises waits for the
-     * front-end's acknowledgement (awaitBackendAcknowledgement), answering
-     * a GET_FEATURES meanwhile; that resets a device that keeps deferred
-     * requests and would release the request being run. A device with a
-     * shared-memory region therefore cannot keep them. */
-    if (device_->keepsDeferredRequestsWhileDisabled() &&
-        device_->sharedMemoryRegion())
-        throw std::invalid_argument(
-            "a vhost-user device that keeps deferred requests cannot "
-            "have a shared-memory region");
     device_->setGuestMapper([this](std::uint64_t address, std::size_t length) {
         auto* pointer = translate(address, length, false);
         return pointer ? std::span(pointer, length) : std::span<std::uint8_t>{};
@@ -447,12 +445,17 @@ void VhostUserServer::setStopShutsDownConnection() noexcept
     stopShutsDownConnection_ = true;
 }
 
+void VhostUserServer::revokeOwnedSharedMemory() noexcept
+{
+    if (sharedMemoryRegions_ && device_ && device_->sharedMemoryRegion())
+        sharedMemoryRegions_->revokeAll();
+}
+
 void VhostUserServer::resetConnection() noexcept
 {
     resetDeviceState();
     slaveRequestDescriptor_.reset();
-    if (sharedMemoryRegions_ && device_ && device_->sharedMemoryRegion())
-        sharedMemoryRegions_->revokeAll();
+    revokeOwnedSharedMemory();
     clearMappings();
     resetQueues();
     negotiatedFeatures_ = 0;
@@ -468,13 +471,35 @@ void VhostUserServer::resetDeviceState() noexcept
         dispatchSharedMemoryActions();
     } catch (...) {
         // Fail closed if an acknowledgement is missing or negative. Closing
-        // the backend-request channel makes the front-end revoke every map;
-        // local teardown must still retire each renderer owner below.
+        // the backend-request channel makes the front-end revoke every map,
+        // so the host index drops every range this backend owns with it, not
+        // only those whose unmap was already sent; local teardown must still
+        // retire each renderer owner below.
         slaveRequestDescriptor_.reset();
+        revokeOwnedSharedMemory();
     }
     device_->reset();
     pendingRequests_.clear();
     heldCompletions_.clear();
+}
+
+/* The one reset a guest's suspend can cause without a word, and it loses
+ * what the guest holds: each is said in one line, which the test runners
+ * match by `ringDisableResetPrefix` (see the constant). A guest that did it
+ * more than `reportedDisableResets` times is told of each doubling only, so
+ * a loop cannot flood the log. */
+void VhostUserServer::reportDisableReset(std::uint32_t ring) noexcept
+{
+    const auto count = ++disableResets_;
+    if (count > reportedDisableResets && (count & (count - 1U)) != 0)
+        return;
+    std::fprintf(
+        stderr,
+        "%s device=%s ring=%u deferred=%zu\n",
+        ringDisableResetPrefix,
+        device_->name(),
+        ring,
+        pendingRequests_.size());
 }
 
 bool VhostUserServer::requestsAreHeld() const noexcept
@@ -490,6 +515,19 @@ void VhostUserServer::retireHeldRequests() noexcept
 {
     if (requestsAreHeld())
         resetDeviceState();
+}
+
+/* A ring still disabled when the driver ends is one the guest frees: what it
+ * puts in that memory afterwards is not a ring, so the ring is read no more
+ * until the front-end starts it again with its kick. A ring that is enabled,
+ * and a disabled one whose driver has not ended, stay read and stay refused
+ * when their flags are reserved. */
+void VhostUserServer::retireDisabledRings() noexcept
+{
+    for (auto& queue : queues_) {
+        if (!queue.enabled)
+            queue.started = false;
+    }
 }
 
 bool VhostUserServer::everyConfiguredRingIsEnabled() const noexcept
@@ -988,7 +1026,22 @@ void VhostUserServer::awaitBackendAcknowledgement(
             frontendOpen = false;
             continue;
         }
-        if (answeredDuringBackendWait(request.header.request))
+        /* A GET_FEATURES that retires held requests resets the device: it
+         * would send the unmaps of the device's shared memory while this
+         * request's reply is still owed, and clear the requests under the
+         * loop that waits here. The front-end drains the backend channel
+         * while it waits for the reply, so the acknowledgement arrives and
+         * the GET_FEATURES is answered once the wait is over. It also stays
+         * behind every message already queued: those can be the ring
+         * disables that make it retire the requests, sent without a reply
+         * for it to follow, and its own reply tells the driver that the
+         * disables and everything before them have taken effect. */
+        const bool mustFollowQueued =
+            static_cast<protocol::VhostRequest>(request.header.request) ==
+                protocol::VhostRequest::getFeatures &&
+            (requestsAreHeld() || !deferredFrontendMessages_.empty());
+        if (answeredDuringBackendWait(request.header.request) &&
+            !mustFollowQueued)
             handleMessage(frontendDescriptor_, request);
         else
             deferredFrontendMessages_.push_back(std::move(request));
@@ -1623,6 +1676,7 @@ void VhostUserServer::handleMessage(
          * that the disables were handled, and then frees the rings. A
          * suspend never sends it. */
         retireHeldRequests();
+        retireDisabledRings();
         sendIntegerReply(socket, message.header, offeredFeatures);
         sentReply = true;
         break;
@@ -1838,6 +1892,7 @@ void VhostUserServer::handleMessage(
          * reset only by a message that changes what they refer to. */
         if (state.value == 0 && !pendingRequests_.empty() &&
             !device_->keepsDeferredRequestsWhileDisabled()) {
+            reportDisableReset(state.index);
             resetDeviceState();
         }
         queues_[state.index].enabled = state.value != 0;

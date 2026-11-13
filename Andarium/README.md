@@ -83,9 +83,10 @@ device's orientation as iOS reports it, which already includes the person's
 Portrait Orientation Lock: while a session is in front the application
 observes `UIDevice` (`DeviceOrientationObserver`) and sends the orientation
 over the motion connection (`MotionOrientation.swift`), which Android treats as
-a rotation proposal that its own policy still decides on. The Gyroscope switch
-governs only the accelerometer and gyroscope data apps may read, not this. A
-guest whose image has no such sensor judges the accelerometer as before. On iPad
+a rotation proposal that its own policy still decides on. That is the display's
+own behaviour and uses no accelerometer or gyroscope reading, which are the
+guest's separately ([Runtime](#runtime), Motion). A guest whose image has no
+such sensor judges the accelerometer as before. On iPad
 the interface turns with the device in a session as it does at Home, full screen
 or in a window, and the host drives the guest: it is held at display rotation
 zero, its display follows the scene, and the sensor axes follow the scene's
@@ -202,6 +203,13 @@ everything that exists for automation or only pretends:
   no debugging or automation support (the `kernarium-ios-device-android-app-store`
   preset, packaged with `package-ios-frameworks.sh --app-store --runtimes
   android`; [`Kernarium/README.md`](../Kernarium/README.md#automation-runs)).
+- It opens the files of Install APK and of the file browser's Import in place
+  (SwiftUI's `fileImporter`); every other configuration presents the document
+  picker in copy mode (`Shared/CopyDocumentPicker.swift`, compiled out by
+  `APP_STORE`), moves each copy at once into a folder of its own under
+  `tmp/PickedFiles/` and removes it when the install or import that uses it is
+  over (Install anyway and Try Again still find it) and at the next launch. A
+  picker that fails shows an alert in every configuration.
 - Its Archive action uses it, and the archive is the build TestFlight and the
   App Store offer to Macs.
 - It refuses an embedded artifact that is behind the archived commit: a build
@@ -218,7 +226,8 @@ everything that exists for automation or only pretends:
   build on a missing Info.plist key, an environment knob, a symbol or log text
   of the debugging and automation support, the JIT (its symbols and text and
   the `brk #0xf00d` instruction), a test bundle or XCTest framework, a
-  trace of the build host, a harness console line, or a privacy manifest that
+  trace of the build host, a harness console line, the copy-mode document
+  picker or a missing in-place importer, or a privacy manifest that
   does not cover a binary
   ([`scripts/check-privacy-manifests.py`](../scripts/check-privacy-manifests.py));
   the script's header is the complete list.
@@ -346,8 +355,7 @@ control out.
 - **Storage.** A guest's files live in `Library/Guest/` of the application's
   container behind `GuestStorage`. The system disk is Android's, read-only, and
   stays in the release directory; the runtime creates the data disk `data.img`
-  at the first start, sized by the guest's capacity, and only grows it after;
-  Home disables Start in recovery until then (`StartPlan.offersRecovery`).
+  at the first start, sized by the guest's capacity, and only grows it after.
   A larger size chosen in Resize waits on Home and applies as the next start,
   of any kind, is handed to the runtime (`Lifecycle.start`), which grows the
   disk then; the guest records the new capacity at that point, so a start that
@@ -359,15 +367,16 @@ control out.
   [Android README](../android/lineage-24/README.md#guest-instance-storage) and
   `StartPlan` is what Home shows of them before Start. An update clones
   `data.img` first (the update's copy, until the updated Android has booted),
-  and Erase virtual machine deletes everything the guest has stored, its snapshots and
-  the adb key included.
+  and Erase virtual machine deletes everything the guest has stored, its snapshots,
+  the adb key and its installation identity included.
 - **Backup.** The guest is left out of iCloud and computer backups unless the
-  user turns on Back up guest data. Its snapshots are never backed up.
+  user turns on Include in backups. Its snapshots are never backed up.
 - **Snapshots.** A snapshot is an APFS clone of `data.img` with a copy of
   `instance.json`, in `Library/Guest/Snapshots/` (`SnapshotStore`): it costs
   nothing when made and then the blocks the guest rewrites. It keeps the data
   and the record of its Android, not the guest's choices, the system disk or
-  the adb key. Create, Restore and Delete run only while the guest is stopped
+  the adb key; a restore keeps the installation's identity. Create, Restore and
+  Delete run only while the guest is stopped
   (Home, with no run active, pending or launching, since iOS takes no file lock
   on the disk), and Create only after Android's own shut down and with no
   update unfinished and on a volume that clones. Restore replaces the data and
@@ -409,9 +418,16 @@ control out.
   none).
   The first launch of an update that carries notes shows a ribbon above Start,
   on at most three launches, that opens them; a build shows the notes up to its
-  own number and no later ones. Info keeps every release's notes
-  (`WhatsNewRules`, `WhatsNewStore`). A launch with a launch setting, or one a
-  test runs, shows no ribbon and keeps no record.
+  own number and no later ones. An entry can name the devices it is for (more
+  guest memory than a limit, an iPad, a device with haptics, a compass or a
+  camera): the ribbon and its sheet announce only the entries the device meets.
+  An entry can also name a feature the build may lack (Send feedback): a build
+  without it shows the entry nowhere, though the notes and their strings are
+  bundled whole, so the bundle check leaves that entry's strings, and no other
+  of the notes' table, out of its search for Send feedback text. Info keeps
+  every other entry as written (`WhatsNewRules`, `WhatsNewStore`). A launch
+  with a launch setting, or one a test runs, shows no ribbon and keeps no
+  record.
 
 ## Runtime
 
@@ -423,6 +439,43 @@ disk then holds and where Start boots again in the same process; an unclean
 shutdown, a host stop or a cleanup that fails keeps the failure screen and
 requires reopening Andarium.
 
+- **Slow start.** A start still on the boot screen after three minutes
+  (`SlowStart`; eight for a guest's first start and the first start after an
+  update, which also get a title that does not say the start is slower than
+  usual; a first start that ended before Android booted is still the first,
+  by the guest's `first-boot-pending` record, kept until `sys.boot_completed`
+  is seen) puts a notice above the steps: the step under way and the time, Stop
+  and, where Send feedback is compiled in, Send feedback. The boot goes on
+  behind it and the notice goes with the boot; it has no dismissal. It sits
+  above the steps and pushes them down; where the screen is short, the screen
+  scrolls. The time is the start's, on the runtime's pause-aware run clock
+  (`GuestRunClock`, which stops while the guest is held and while the
+  application is away before the runtime runs) and kept through the restarts
+  of a start that had not finished. Stop asks first (an alert with Stop and Cancel, in the
+  screen's own appearance: the boot's dark screen asks the window for dark, so the
+  alert and the Send feedback sheet over it are dark whatever the system's is, and Recovery's
+  light screen leaves them to the system), then the
+  application states the intent at once and the runtime's stop is requested
+  off the main actor, on the queue of the runtime's other waiting calls, again
+  every second until the run has ended (`RunStop`: the runtime drops a stop
+  that arrives before its run begins). A stopped Android guest cannot be
+  released, so the end is the end screen with its own wording
+  (`RunEnd.stoppedByUser`), not Home, and a stop before the runtime runs ends
+  at Home. A start the person stopped leaves its preparation to end: the
+  guest's files stay its own until then, and a start asked for since, Erase,
+  Create, the update's Restore and a snapshot rename wait for it. Send
+  feedback opens the sheet the root presents (`feedbackFromBoot`), which stays
+  up with its draft when the boot completes or the run ends; a bug report and
+  a screenshot need a running guest, and the information block gains a Boot
+  line with the step, the time and the restarts. A process that ended in the
+  boot leaves the runtime's session record with the console's last output of
+  that boot, which the next bug report carries as the previous session's
+  record.
+- **Recovery the guest asked for.** `init: starting service 'recovery'` on the
+  console (`ConsoleScanner.recoveryStartedCount`) makes the session a recovery
+  session, as the launch's recovery mode does, whatever the start was: `adb
+  reboot recovery`, the recovery image's own menu, Android's rescue after
+  failed boots. The recovery's reboot is a restart into a normal session.
 - **Time zone.** Every start gives the guest the host's zone
   (`GuestTimeZone`, the boot request's `android_time_zone`); the system image
   applies it unless the guest's user chose a zone
@@ -463,7 +516,8 @@ requires reopening Andarium.
   gamepad that lists only what the controller has. Controllers are looked for
   during a normal run, and nothing is scanned for or paired. Their input
   reaches the guest only while Andarium is in front, and leaving the front
-  lets every button go. Home, Menu, Options and Share are taken from iOS's
+  lets every button go; what a controller holds on the return reaches the
+  guest with its next report. Home, Menu, Options and Share are taken from iOS's
   gestures while a controller is held and reach Android as buttons (iOS's own
   Home setting decides whether Andarium may have Home). A button going down
   wakes a guest that suspended itself (`wake_for_input`, runtime API 34).
@@ -485,6 +539,56 @@ requires reopening Andarium.
   location or Location Services are off, and says Approximate location, with an
   explanation and Settings, when Precise Location is off. No test reads a real
   location.
+- **Camera.** Camera is a per-guest switch under Capabilities on Home, after
+  Microphone; it is off for a new guest and for one stored before. iOS is asked
+  for camera access only when the person turns it on. The guest always lists
+  the host's cameras (the layout is composed from them, with no permission
+  asked), and the switch decides one thing: whether the host captures. It is
+  read once, when the guest starts, as the boot request's
+  `android_camera_mode` (runtime API 37): live only while it is on and iOS
+  allows it, otherwise blocked, which gives the guest black frames, opens no
+  capture session and reports Android's camera lens cover. The row is off with
+  its reason when iOS refuses or the device restricts the camera, and turning
+  it on then explains why and, for a refusal, offers Settings. A device with no
+  camera shows the row off and disabled with a note and keeps the person's
+  choice; a device has one when it has a built-in front camera, the rule the
+  guest's layout follows, and the iPad app running on a Mac has none
+  (`CameraAvailability`). On an iPad, a session that other apps
+  share the screen with pauses the camera (black frames) and shows a notice
+  that goes with the interruption. When a guest app opens a camera while the
+  session is blocked, the runtime reports it
+  (`KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE`, runtime API 39) and the
+  session shows a notice that Camera is off and can be turned on only from
+  Home, for the next start. A dismissal holds for the run; an undismissed
+  notice goes shortly after the guest closes the camera and returns at a
+  later open; it is not shown on a device with no camera to share. Camera apps
+  in the guest save a photo taken
+  sideways the right way up from the guest's accelerometer, which the guest has
+  wherever the device has sensors (see Motion below); an iPad app on a Mac and
+  the Simulator have none. Where the
+  host owns the rotation (an iPad window) it tells the runtime how the device
+  body is turned from portrait (`CameraRotation`): each start derives every
+  camera's sensor orientation from it, and a later turn turns the picture
+  ([orientation](../darwin/device/camera/README.md#orientation)). The colour
+  data a Bayer still teaches is kept in a folder of Application Support that
+  backups leave out. The memory a live session's cameras hold comes out of the
+  graphics budget ([camera device](../darwin/device/camera/README.md)): with
+  Camera on, the VRAM the System sheet and the statistics show is the pool,
+  the budget less that reserve, and the ruler's graphics warning follows the
+  pool too; the memory offered and the default are unchanged. The reserve is the
+  figure the runtime answers for this device's cameras and the colour data they
+  have learned (`plan_camera_reserve`, which asks iOS for no permission and
+  opens no session), read again while Camera is on whenever either may have
+  changed; until the first answer, and where the runtime cannot discover the
+  cameras, the sheet uses the tier's ceiling. The Simulator has
+  no camera: the preview states the access (`-systemCamera` reads the
+  Simulator's own permission) and the non-App Store runtime serves a synthetic
+  camera (`KERNARIUM_CAMERA_SOURCE`) to a run that has none, and no camera at
+  all for a value it does not know; an App Store build has neither. No test
+  captures a real camera. The default suites boot no guest; the opt-in
+  `CameraGuestTests` boots one through this runtime on the synthetic camera and
+  reads the vendor SKU, the camera IDs and the lens cover of a live and a
+  blocked session.
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
   ten fingers onto the guest's display; the hardware keyboard and mouse are
   the next item. A touch the system takes over reaches
@@ -548,9 +652,12 @@ requires reopening Andarium.
   (`SessionDisplayArea`, read by `DisplayAreaProbe`), and follows a window as it
   resizes. A choice applies at the next start. Native is stored as the symbol
   and follows the screen, and a stored number that is no choice of this screen
-  goes to the nearest one. A person who never chose gets native where the
-  system lets the application use more than 4 GiB of memory, else the choice
-  nearest 1.5 (`DisplayOptions`). Native's host allocations count against the
+  goes to the nearest one. A person who never chose gets the choice nearest 1.5
+  (240 dpi) where the system holds the application to 4 GiB of memory or less,
+  else the choice nearest 2.0 (320 dpi), which is native only where native is
+  that near (`DisplayOptions`). The Retina mode an earlier version stored is no
+  choice, so everyone coming from it gets this default; a choice made on Home
+  is stored as a scale and stays. Native's host allocations count against the
   same iOS process limit as guest RAM; neither the graphics-memory estimate
   nor the memory default counts the display's pixels.
 - **JIT.** A development build on a device has a JIT row on Home, off until
@@ -583,11 +690,30 @@ requires reopening Andarium.
   slower than on gadgets, and a long single-process computation runs faster. An
   App Store build carries none of this: its runtime has no JIT and the
   application has no row, preference, entries or sentences.
-- **Motion.** Gyroscope needs no permission. The host reads a sensor only while
-  a guest application uses it and sends samples over private vsock port 5556
-  from the process's one Core Motion manager, which is never released (a
-  released manager crashes inside Core Motion); the system image must include
-  the [motion sub-HAL](../android/lineage-24/README.md#motion-sensors).
+- **Motion.** The guest has the device's accelerometer and gyroscope wherever
+  the device has them, with no setting and no permission. An iPad app on a Mac
+  and the Simulator have none, so nothing is read there, and Android still
+  lists both sensors. The host reads a sensor only while the guest is in front
+  and an application in it uses the sensor, and sends samples over private
+  vsock port 5556 from the process's one Core Motion manager, which is never
+  released (a released manager crashes inside Core Motion). A failure of the
+  device's sensors stops them and keeps the connection, which also carries the
+  orientation; they are tried again when the guest's demand changes or the
+  application next updates the session. The system image must include the
+  [motion sub-HAL](../android/lineage-24/README.md#motion-sensors).
+  The magnetometer, for an image that lists it (the `compass` host feature),
+  is Core Motion's calibrated device-motion field with Core Motion's accuracy
+  as Android's, read while an application uses it, with no setting and no
+  permission. Core Motion's request to move the device for calibration is no
+  failure; a start that delivers nothing in 5 s without that request, or any
+  other Core Motion error, turns it off for the rest of the run, where the
+  accelerometer and gyroscope are tried again as above. A run ends with the
+  foreground, a changed mount or a restart, not with a reconnect. From iOS 27.2
+  a motion status of denied or restricted hides it from the guest; nothing is
+  requested. A development build launched with `ANDARIUM_COMPASS_READOUT=1`
+  prints, at most about twice a second, the Core Motion sample behind the
+  guest's field with iOS's own attitude and heading; App Store builds compile it
+  out.
 - **Free space.** Free space is the space a write can use (`HostStorage`,
   `statfs(2)`), the one figure the watch, the start and transfer checks and
   every screen use; it leaves out the purgeable space iOS Settings counts, so
@@ -659,6 +785,17 @@ requires reopening Andarium.
   in force (runtime API 36), and the session record notes it beside the counts
   of the guest's network (`NetworkRecord`), which the bug report carries in
   words.
+- **Memory low.** The runtime answers iOS's memory pressure itself
+  ([`docs/architecture.md`](../docs/architecture.md#memory-and-executable-code))
+  and reports every level it raises to the application
+  (`set_memory_pressure_callback`, runtime API 41). Only the critical level has
+  a notice: while a guest session is on screen (not Home, the boot screen or the
+  background), one notice says iOS may close Andarium
+  (`MemoryPressureNoticeState` decides; every configuration has it). It appears
+  when the level reaches critical and stays while it lasts and a little after;
+  a dismissal holds until the level has left critical and reached it again, and
+  a restart or the end of a run clears it. The notices of a session share one
+  column, which scrolls when they are together taller than its room.
 - **Session ends.** The runtime records how each session ended
   ([`docs/architecture.md`](../docs/architecture.md)). The next launch keeps
   that record as the previous session's (`PreviousSession`) and, after an end
@@ -686,7 +823,10 @@ is on. `AndariumCore/Adb` speaks the protocol.
   device only and not synchronized. Its public key goes in each boot request
   (`android_adb_public_key`), which adbd authorizes for that boot.
 - **Create bug report and Install APK** are in every build, in a normal
-  session. A bug report is Android's zip with Andarium's session records and
+  session. Settings lists Install APK and the file browser first, above the
+  statistics, and the side keys' tip adds a line saying where Install APK is
+  exactly where the row is offered (`Capabilities.offersApkInstall`). A bug
+  report is Android's zip with Andarium's session records and
   MetricKit reports added under `andarium/`, the application's container paths
   taken out (`BugReportAttachments`); a zip that cannot be amended safely is
   shared as Android made it. An install streams the file to the package
@@ -695,7 +835,68 @@ is on. `AndariumCore/Adb` speaks the protocol.
   before the first byte when the device (`TransferRoom`) or the virtual
   machine's data partition lacks room for the app and its reserve
   (`InstallRoom`), or when the file is a single .apk of 4 GiB or more, which
-  Android cannot install (`InstallRefusal.tooLarge`).
+  Android cannot install (`InstallRefusal.tooLarge`). The first attempt is
+  always the plain install. When Android's own answer is the refusal of an app
+  built for a much older version (`INSTALL_FAILED_DEPRECATED_SDK_VERSION`),
+  and for no other answer, an alert asks whether to install it anyway, and
+  Install anyway sends the same file again with the package manager's
+  `--bypass-low-target-sdk-block`, once (`LegacyInstallFlow`). Nothing else in
+  Andarium sends that flag, and the choice is kept nowhere.
+- **An app in parts** installs from one file: .apks, .xapk or .apkm, never
+  .zip, and an .aab is refused. The file is recognised by its content, not its
+  name: an APK under one of those names installs as an APK, and a file that is
+  not a ZIP, or is cut short, is damaged. It is read in place, never unpacked
+  or copied, under bounds on what a hostile file can ask for (the entry count,
+  the sizes, and the time, which a cancel ends; `ZipArchive`). The APKs inside
+  are never opened. A bundletool .apks is read through its table of contents,
+  and the Android and the processor of each variant and APK are matched as
+  bundletool's matchers do, from the values and the alternatives each lists:
+  exactly one variant must fit the guest, and a sibling made for a newer
+  Android that the guest has excludes a variant (there is no falling back
+  across it; a level a variant does not state is 0). A processor or any other
+  restriction the reader has no name for, in a list of values or of
+  alternatives and whatever its wire type, never means no restriction: it
+  leaves its variant or APK out, and targeting it does not weigh on an APK
+  that would be installed (a graphics API, a device tier) refuses the file. A
+  variant for several processors together (the standalone builds of old
+  Androids) or for a density is not weighed and is not chosen. A table that
+  states a singular field twice, more than one SDK value, or a processor as
+  its own alternative is damaged. Each variant keeps its own description of an
+  APK; a path described twice in one variant is a damaged table. The parts of
+  the chosen variant were each matched to the guest by their own targeting and
+  none is dropped after that. The one variant installed
+  has the splits of the processor the guest prefers, and a universal .apks
+  installs as one APK; a table that cannot be read, or names no variant for the
+  guest, is a damaged file and nothing is guessed from the names. The slices of
+  the table's install-time asset packs go in the same session, as `bundletool
+  install-apks` does, when their own targeting fits the guest (a language or a
+  density is not weighed: every such slice is sent; a slice with a texture
+  format refuses the file, since the guest's formats are not asked, while an
+  app's own texture splits are sent). A
+  fast-follow or on-demand pack, or one the table does not say is install-time,
+  is not installed, and the result says the app's data was not all copied.
+  The other layouts are
+  classified by entry names and the container's own metadata. The parts go
+  into one install session over the same connection, each read from the
+  archive as it is written and checked when it ends; a session that was not
+  committed is abandoned on a fresh connection when the install fails or is
+  cancelled (not when the guest is gone or the session's creation was not
+  answered, which leaves it to Android), and the older-app retry opens a new
+  session with the flag. Only the package manager's whole answer being
+  `Success` installs. Each APK inside is held to the 4 GiB limit; the file
+  itself may be larger, and its footprint does not grow with it. A file with
+  encrypted entries, no app, or parts that do not fit together is refused, and
+  nothing is installed. The OBB files of an .xapk, or an .apkm that lists
+  them, are copied once the app is in, to `Android/obb/<package>/` of
+  internal storage and nowhere else, and only for a package the package
+  manager has checked against the base APK: the session is created for the
+  package the file names. Each goes to a hidden partial name as an import
+  does, covered by the same ledger, and is moved into place only after it has
+  been verified. Other data in the file (`Android/data`, say) is not placed.
+  The copy has its own Cancel, and a stop or a failure in it leaves the app
+  installed, with a result that says its data was not all copied. That
+  result is a warning, not a success: the caution symbol in the caution
+  colour, and a title of its own (`ApkInstallOutcome.words`).
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB

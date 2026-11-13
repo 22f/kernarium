@@ -151,7 +151,7 @@ layout once, so a guest created earlier keeps its home screen.
 The product installs Android's AIDL multi-HAL service and a motion sub-HAL
 (`overlay/sensors/`) advertising an accelerometer and a gyroscope with
 continuous delivery and 10 ms minimum periods. Andarium supplies samples only
-while its Gyroscope switch is on and an application uses the sensor. The sub-HAL
+while an application uses the sensor, on a device that has it. The sub-HAL
 accepts a single stream on vsock port 5556 from host CID 2 (no guest-originated
 source) and tells the host which sensors are active.
 `overlay/sensors/motion_protocol.hpp` and
@@ -167,10 +167,21 @@ manager follows the host's orientation as a rotation proposal that Android's own
 policy (auto-rotate, the foreground application's requested orientation) still
 decides on; the sub-HAL gives the framework the host's last orientation when it
 enables the sensor, and Android keeps its rotation until the host has said one.
-Without the argument the sub-HAL lists the accelerometer and the gyroscope alone
-and Android judges the accelerometer, as before. The host sends its current
+Without the argument the sub-HAL does not list the sensor and Android judges the
+accelerometer, as before. The host sends its current
 orientation at the start of each connection whose control frames say the guest
 has the sensor (`overlay/sensors/motion_protocol.hpp` has the frames).
+
+When the launch passes `androidboot.kernarium.compass=1` (a host with a
+magnetometer), the sub-HAL also lists a continuous `TYPE_MAGNETIC_FIELD` sensor
+(20 ms to 1 s) fed with the host's field in the device's frame, with the host's
+accuracy as the event's status, and says so in a 20-byte "ANC3" control frame;
+the framework declares `android.hardware.sensor.compass` from the same property
+(the `SystemConfig` topic of route p0007 reads the vendor's `kernarium_compass`
+permission directory only then). The property is supplied only by an application
+that speaks the 20-byte request, and forcing it for an older application is
+unsupported. Without the argument the image lists no magnetometer, declares no
+compass and ends the connection on a magnetic field record, as before.
 
 ### Haptics
 
@@ -234,9 +245,25 @@ receiver is open, and without the lock it would suspend and wake every second
 for as long as a client listens. The lock belongs to the HAL's process, so it
 goes with the HAL, and it holds back only Android's own autosuspend.
 
+The HAL never calls the framework from an entry point or under one of its own
+locks: every announcement, status and report is posted to the HAL's one
+reporter thread, which makes the calls in the order posted, so a framework
+thread that holds a lock of its own while it calls the HAL cannot wait on a HAL
+thread that waits for it, and no entry point waits for a delivery. A callback's
+announcement and every status are never dropped: they reach the callback they
+were posted for, in one order across callbacks, even if the HAL is closed or
+the callback replaced first, and a `start()` is refused while 64 sessions'
+statuses are still undelivered. A session's `engine_on` and `session_begin`
+come before its first location and its `session_end` and `engine_off` after the
+last. Locations, sentences and satellite reports may be dropped: a session's
+queued ones go when it is restarted, or the HAL is closed or its callback
+replaced, and only the newest 64 are kept when the framework is slow.
+
 `overlay/gnss/nmea.hpp` and `location_policy.hpp` hold the parsing and the
-rules and `gnss_engine.hpp` the session, with no Android dependency; the
-`gnss-hal-*` unit tests read the host writer's own epochs through them.
+rules, `gnss_engine.hpp` the session, `gnss_reporter.hpp` the calls to the
+framework and `gnss_hal.hpp` the state behind the AIDL entry points, with no
+Android dependency; the `gnss-hal-*` unit tests read the host writer's own
+epochs through them.
 `tests/integration/android/location/` is a probe application for the candidate
 image, never installed in a release.
 
@@ -296,17 +323,26 @@ metadata node, and the emulated camera HAL of `hardware/google/camera` (route
 `p0030`) takes the cameras, their frames, stills, RAW and per-frame metadata
 from them and writes the controls back. Its provider is the lazy service
 `android.hardware.camera.provider@2.7-service-google-lazy`
-(`ICameraProvider/internal/0`, declared once in the vendor manifest): init
-starts it when an application opens a camera or the torch, and no process
-exists while none does. The image expects the driver to register the camera
+(`ICameraProvider/internal/0`, declared once in the vendor manifest). A
+system_ext init file restarts it, for a layout with cameras, whenever
+cameraserver starts: cameraserver lists only a provider that has registered,
+nothing else starts a lazy AIDL provider, and init drops a property trigger on
+cameraserver's status in a vendor file. The provider exits when cameraserver
+holds no camera, and init starts it again through its interface line when an
+application opens a camera or the torch. A provider crash while cameraserver
+holds it leaves the guest without cameras until cameraserver starts again.
+The image expects the driver to register the camera
 nodes as `/dev/video10` and above; the codec nodes stay in `video0` to
 `video9`, which the HAL never opens. The HAL's rules (the wire, camera IDs,
 controls, Exif, concurrency) are the headers of `overlay/camera/hal/`, which
 the HAL includes and the `andarium-camera-*` unit tests compile without
 Android. The camera application is LineageOS's Aperture, without its Google
 Lens launcher and button (route `p0031`), and its lens selector lists each
-lens of the host as a camera of its own (a static overlay in
-`overlay/overlay/packages/apps/Aperture`).
+lens of the host as a camera of its own (a product overlay in
+`overlay/overlay/packages/apps/Aperture`, which the build installs as a static
+runtime overlay of the application; the application declares no overlayable
+section, so Android applies the preinstalled overlay, and the target-files
+verifier reads the overlay, not the application).
 
 The image states no camera feature of its own. The host composes a camera
 layout from the cameras it has and passes its name as
@@ -340,27 +376,48 @@ otherwise; the framework overlay reads that switch
 (`config_supportsHardwareCamToggle`) and Android shows its own blocked-camera
 state. The host also sends black frames while it interrupts a camera, and the
 HAL passes them on as frames of the camera. Output sizes the host lacks that
-CTS and the camera API require (standard JPEG sizes, the YUV sizes of every
-smaller JPEG, 1920x1440 and 1280x720 for a concurrent camera) are cut from the
-smallest native video mode that covers them, scaled in the HAL and, for a
-JPEG, encoded there. `BURST_CAPTURE` is never declared. The candidate's smoke
-test is `tests/integration/android/run_android_camera.py` (`android-camera`).
+CTS and the camera API require (standard JPEG sizes, 3840x2160 where that is the
+largest video mode, which is the recording size of the large tier, the YUV sizes
+of every smaller JPEG, 1920x1440 and 1280x720 for a concurrent camera) are cut
+from the smallest native video mode that covers them, scaled in the HAL and, for
+a JPEG, encoded there; the 3840x2160 one is cut from the mode of that size, so
+it asks the host for nothing a stream of that mode does not, and it is listed
+only when the camera's stills reach that size. A request whose
+outputs the host refuses or does not deliver within the HAL's deadline (3 s,
+15 s for a request with a still) is a failed request (`ERROR_REQUEST`, which
+Camera2 and CameraX report as a failed capture); a request that loses only some
+of its outputs reports `ERROR_BUFFER` for those. `BURST_CAPTURE` is never
+declared. A camera lists the keys it honours: the frame duration and the black
+level lock only with `MANUAL_SENSOR`, the AF regions only with autofocus, and no
+camera lists the tone map mode or curves or states the available tone map modes
+(the templates carry no tone map key). Every result carries the scene mode
+(`DISABLED`) and, with `MANUAL_SENSOR`, the black level lock. The candidate's
+smoke test is `tests/integration/android/run_android_camera.py`
+(`android-camera`).
 
 ### Networking
 
 The guest's one network device, `eth0`, is the host's user-mode network (SLiRP,
 10.0.2.0/24) and the management NIC: adb is reached through the host's forward
-to 10.0.2.15, so the framework never manages `eth0`. `kernarium_net_setup`
+to 10.0.2.15, so the framework never manages `eth0`; its hardware address and
+the guest's serial number are the installation's own, which the host chooses at
+random once for each data disk. `kernarium_net_setup`
 (`overlay/tools`) prepares it at `post-fs-data` and stacks the `virt_wifi`
 device `wlan0` on it, and the kernel needs `CONFIG_MACVLAN`, `CONFIG_CFG80211`
 and `CONFIG_VIRT_WIFI` built in (the verifier requires them). Apps see Wi-Fi
 only, the open SSID `VirtWifi`, because the product declares
 `android.hardware.wifi` and not `android.hardware.ethernet`; turning Wi-Fi or
 airplane mode off takes apps offline while adb keeps working. The platform
-validates a Wi-Fi network without probes (route `p0029`): NetworkMonitor sends
-none and reports the network validated once private DNS passes, so a blocked
-validation server never leaves a no-internet state or a sign-in notification. A
-VPN, a test network, DNS and the private DNS settings keep the stock rules. The
+validates a Wi-Fi network before it checks it (route `p0029`): NetworkMonitor
+reports it validated once private DNS passes and then probes it, again after a
+back-off while the checks fail, and without evaluating private DNS again. A
+failed check, including one that a sign-in or block page answers, shows a warning
+in the status bar and the Wi-Fi list (route `p0033`) and changes nothing else:
+a failed check never leaves the network unvalidated and no sign-in notification
+is posted. A forced re-evaluation checks a validated network; a network whose
+private DNS has failed is evaluated as the stock rules say. A VPN, a test
+network, a network under CTS's test URLs, a network the stock rules do not
+validate, DNS and the private DNS settings keep the stock rules. The
 product's one network, VirtWifi, is saved once and is never disabled for lack of
 internet (`overlay/rro/KernariumWifiOverlay`), because the platform never joins a
 disabled network again. Until the station has joined it once, a boot that finds
@@ -701,8 +758,11 @@ A guest reboot restarts the guest in the same host process, so `adb reboot`,
 Every restart reads `misc` again: `boot-recovery` boots recovery, which clears
 it, and no command boots Android. There is no bootloader, so the launcher
 behaves as a bootloader that continues and clears a `bootonce-bootloader`
-command. A guest that restarts within 15 s of booting five times in a row ends
-the launch with exit status 3.
+command. A guest that restarts five times in a row within 15 s of booting, or
+eight times in a row each within 15 s or before its boot had finished
+(`sys.boot_completed`, recovery's start or apexd's `markBootCompleted()` on the
+console, once init's output was seen there), ends the launch with exit status 3;
+restarts after a finished boot that lasted 15 s or more are not limited.
 
 `build/assemble-image.sh` owns ramdisk composition, system disk assembly and
 verification, and `tools/verify-lineage-recovery.py` checks the recovery image.
@@ -713,10 +773,12 @@ verification, and `tools/verify-lineage-recovery.py` checks the recovery image.
 release. It binds the system disk and its layout, boot ranges, command line,
 target-file support, and source provenance. The Android section records the
 security patch level and the build number (`ro.build.version.incremental`),
-which a release must set numerically (`build-aosp.sh --build-number N`): it is
-both the user-visible release number and the monotonic key by which the host
-refuses a downgrade. The checked `metadata/accepted-release.env` selects one
-reviewed release without recording a builder path.
+which a release sets to its release number (`build-aosp.sh --build-number N`:
+`r26` is 26 and `r10000` is 10000, up to ten digits), and so does every proof
+build or rebuild of that release. The host orders releases by it and refuses a
+downgrade ([Guest instance storage](#guest-instance-storage)). The checked
+`metadata/accepted-release.env` selects one reviewed release without recording
+a builder path.
 
 The manifest also records, as `outer.input_trees`, the Git object ID of every
 path that [`support/release/input-paths.tsv`](support/release/input-paths.tsv)
@@ -798,8 +860,11 @@ topic in route `p0007` owns this policy.
 
 A guest instance is the writable half of a guest: a directory holding the data
 disk, `data.img` (the creation and growth rules are in
-[`darwin/device/block`](../../darwin/device/block/README.md)), and
-`instance.json`, which records the release the disk was last started with. The
+[`darwin/device/block`](../../darwin/device/block/README.md)), `identity.json`,
+the installation's own serial number and eth0 address (made by the host and kept
+with the disk,
+[`darwin/device/block`](../../darwin/device/block/README.md#installation-identity)),
+and `instance.json`, which records the release the disk was last started with. The
 system disk is not part of an instance. Every launcher that keeps instances,
 the macOS script and the Andarium app, applies the same rules before each
 start; [`tools/android_instance.py`](../../tools/android_instance.py) is the
@@ -809,8 +874,12 @@ holds decision vectors and the record's transitions that any other
 implementation must reproduce. The release's identity comes from its manifest
 and layout, never from hashing the disk at launch.
 
-The build number orders releases; the rules compare nothing else. Before a
-start:
+The build number orders releases; the rules compare nothing else. Numbers
+compare as integers, except that `2026110800` to `2026110899`, the counter
+the first public releases were built with, are older than every number outside
+that range (`LEGACY_BUILD_FIRST` and `LEGACY_BUILD_LAST` in the reference
+implementation, `BuildNumber.legacyRange` in AndariumCore, and
+`legacy_build_numbers` in the vectors). Before a start:
 
 | Case | Action |
 | --- | --- |
@@ -861,14 +930,15 @@ Kernarium represents one Android guest as a `.kern` directory containing:
 - `guest/system.img`, the release's read-only system disk, and
   `guest/partition-layout.json`, which describes it; and
 - `guest/data.img`, the guest's writable data disk, which the runtime creates at
-  the first launch and only grows afterwards.
+  the first launch and only grows afterwards, and `guest/identity.json`, the
+  installation's identity, which the runtime makes beside it.
 
 The kernel is supplied by the runtime framework and is not bundle payload. The
 manifest is provenance rather than a runtime compatibility token. Android
 appends the host-owned display density, hardware timeout multiplier, ADB
 authorization policy, ADB host key, ADB TCP policy, and tagged-pointer option at
 launch, and launches write
-persistent guest changes only to `guest/data.img`. How Kernarium keeps,
+persistent guest changes only to `guest/data.img` and `guest/identity.json`. How Kernarium keeps,
 relaunches, and copies a bundle is in
 [`../../Kernarium/README.md`](../../Kernarium/README.md#guest-storage).
 

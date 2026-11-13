@@ -26,45 +26,51 @@ nonisolated enum ApkInstallOperation {
     static let sendingShare = 0.8
     static let sendIdleLimit = Duration.seconds(60)
     static let commitLimit = Duration.seconds(15 * 60)
-
-    /// Android's `INSTALL_REASON_USER`: an install the person started.
-    static let userInstallReason = 4
-
-    /// `-r` replaces an installed app, as the person expects of an APK for
-    /// one already there; `-t` admits test-only builds; `--install-reason`
-    /// marks the install as the person's, because the launcher adds a
-    /// home-screen icon only for such an install; `-S` gives the size.
-    static func service(size: Int) -> String {
-        "abb_exec:package\0install\0-r\0-t\0--install-reason\0\(userInstallReason)\0-S\0\(size)"
-    }
+    /// Reading an archive's directory and manifests is quick; a file that
+    /// takes this long, in the guest's running time, is not one.
+    static let inspectLimit = Duration.seconds(5 * 60)
 
     /// Installs the file at `url`. What the install needs to know of the file
     /// (its size, and with it the room it takes) is read once the coordinated
     /// read has the file, since an iCloud file has no size, and perhaps no
     /// room, until it is down. `device` is "iPad", "iPhone" or "Mac" and
     /// `hostFree` the device's free space, read after the file is in hand.
+    /// An .apk is streamed whole as it always was; the other names the picker
+    /// offers (.apks, .xapk, .apkm) are archives of an app's parts, installed
+    /// through a session (`ContainerInstallOperation`). `trail` is told what
+    /// a failure or a cancel must undo in the guest.
+    @discardableResult
     static func run(
         session: AdbSession, coordinator: FileCoordinatorBox, url: URL, device: String,
-        hostFree: @Sendable () -> UInt64, update: @escaping @Sendable (BusyUpdate) -> Void
-    ) throws {
-        var result: Result<Void, Error> = .success(())
+        bypassLowTargetSdkBlock: Bool = false, hostFree: @Sendable () -> UInt64,
+        trail: ApkInstallTrail = ApkInstallTrail(), data: ApkDataStep = ApkDataStep(),
+        update: @escaping @Sendable (BusyUpdate) -> Void
+    ) throws -> ApkInstallOutcome {
+        var result: Result<ApkInstallOutcome, Error> = .success(.installed)
         var coordinationError: NSError?
         // The read is coordinated, which brings an iCloud file down first.
         update(BusyUpdate(detail: String(localized: "Getting the file\u{2026}")))
         coordinator.current.coordinate(readingItemAt: url, options: [], error: &coordinationError) { readable in
             result = Result {
-                try send(
-                    session: session, file: readable, name: url.lastPathComponent, device: device, hostFree: hostFree,
-                    update: update)
+                if InstallRefusal.isPlainApk(fileName: url.lastPathComponent) {
+                    try sendPlain(
+                        session: session, file: readable, name: url.lastPathComponent, device: device,
+                        bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, hostFree: hostFree, update: update)
+                    return .installed
+                }
+                return try ContainerInstallOperation.run(
+                    session: session, file: readable, name: url.lastPathComponent, device: device,
+                    bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, hostFree: hostFree, trail: trail, data: data, update: update)
             }
         }
         if let coordinationError { throw coordinationError }
-        try result.get()
+        return try result.get()
     }
 
-    private static func send(
-        session: AdbSession, file: URL, name: String, device: String, hostFree: @Sendable () -> UInt64,
-        update: @escaping @Sendable (BusyUpdate) -> Void
+    /// One APK, sent whole with the package manager's `install`.
+    static func sendPlain(
+        session: AdbSession, file: URL, name: String, device: String, bypassLowTargetSdkBlock: Bool,
+        hostFree: @Sendable () -> UInt64, update: @escaping @Sendable (BusyUpdate) -> Void
     ) throws {
         let reader = try FileChunkReader(contentsOf: file, capacity: chunkBytes)
         let bytes = reader.size
@@ -88,7 +94,8 @@ nonisolated enum ApkInstallOperation {
                let shortage = InstallRoom.guestShortage(bytes: bytes, free: free) {
                 throw AdbFailure(message: shortage.message(device: device))
             }
-            let stream = try connection.open(service(size: size))
+            let stream = try connection.open(
+                PackageInstallCommand.service(size: size, bypassLowTargetSdkBlock: bypassLowTargetSdkBlock))
             var sent = 0
             do {
                 while sent < size {
@@ -107,8 +114,14 @@ nonisolated enum ApkInstallOperation {
                 progress: sendingShare, detail: String(localized: "The virtual machine is installing the app\u{2026}"),
                 cancellable: false))
             watchdog.arm(idle: nil, overall: commitLimit)
-            let output = try stream.readToEnd(limit: 64 * 1024)
-            if let message = PackageInstallMessages.failure(inOutput: String(decoding: output, as: UTF8.self)) {
+            let text = String(decoding: try stream.readToEnd(limit: 64 * 1024), as: UTF8.self)
+            // The one refusal that is asked about, when the flag was not sent:
+            // Settings decides what follows (`LegacyInstallFlow`). With the
+            // flag it is an ordinary failure.
+            if !bypassLowTargetSdkBlock, case let .tooOldTarget(target) = PackageInstallAnswer(output: text) {
+                throw LegacyApkRefused(target: target)
+            }
+            if let message = PackageInstallMessages.failure(inOutput: text) {
                 throw AdbFailure(message: message)
             }
         }

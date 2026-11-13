@@ -3,6 +3,7 @@
 import Foundation
 import Testing
 @testable import AndariumCore
+import AndariumCoreTestSupport
 
 private func releaseIdentity(
     _ id: String = "20261031-los24-r4", build: Int = 100, sha: String = String(repeating: "a", count: 64)
@@ -79,31 +80,27 @@ struct StorageTests {
         #expect(second >= first + (8 << 20))
     }
 
-    /// Start in recovery waits for the first start: the plan is the first
-    /// start until the runtime has created the data disk, and an erased and
-    /// recreated guest is back to it.
+    /// The plan is the first start until the runtime has created the data
+    /// disk, and an erased and recreated guest is back to it.
     @Test func theFirstStartLastsUntilTheDataDiskExistsAndAnEraseReturnsToIt() async throws {
         let (storage, root) = try makeStorage()
         defer { try? FileManager.default.removeItem(at: root) }
         let guest = try await storage.create(Guest.fresh(on: host))
         #expect(storage.startPlan() == .firstStart)
-        #expect(storage.startPlan()?.offersRecovery == false)
         // The first start is prepared and under way; the runtime creates the
         // disk and Android sets itself up.
         try await storage.prepareStart(guest)
         #expect(storage.startPlan() == .firstStart)
         try Data("android data".utf8).write(to: storage.locations.data)
         #expect(storage.startPlan() == .normal)
-        #expect(storage.startPlan()?.offersRecovery == true)
         // The plan lasts across a clean shutdown and a new process.
         try storage.bootCompleted()
         try storage.completeRun()
-        #expect(storage.startPlan()?.offersRecovery == true)
+        #expect(storage.startPlan() == .normal)
 
         try await storage.erase()
         _ = try await storage.create(Guest.fresh(on: host))
         #expect(storage.startPlan() == .firstStart)
-        #expect(storage.startPlan()?.offersRecovery == false)
     }
 
     @Test func eraseDeletesTheDataTheRecordAndTheChoicesSoNoGuestIsLeft() async throws {
@@ -130,6 +127,33 @@ struct StorageTests {
         #expect(storage.startPlan() == .firstStart)
         let next = try await storage.create(Guest.fresh(on: host))
         #expect(next.cores == host.processorCount)
+    }
+
+    /// The serial number and eth0 address the runtime keeps beside the data disk
+    /// belong to the installation: a start, a resize and a clean shutdown leave
+    /// them, and an erase deletes them so that the next installation has values
+    /// of its own (the content is synthetic).
+    @Test func theInstallationIdentityLastsUntilTheGuestIsErased() async throws {
+        let (storage, root) = try makeStorage()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var guest = try await storage.create(Guest.fresh(on: host))
+        let content = Data(#"{"ethernet_mac": "02:aa:bb:cc:dd:ee", "schema": 1, "serialno": "0123456789abcdef"}"#.utf8)
+        let identity = storage.locations.directory.appendingPathComponent(InstanceFiles.identityFile)
+        let leftover = storage.locations.directory.appendingPathComponent(InstanceFiles.identityFile + ".tmp-77")
+        try Data(repeating: 1, count: 4096).write(to: storage.locations.data)
+        try content.write(to: identity)
+
+        try await storage.prepareStart(guest)
+        guest.pendingCapacityGiB = guest.effectiveCapacityGiB + 8
+        try storage.save(guest)
+        try storage.bootCompleted()
+        try storage.completeRun()
+        #expect(try Data(contentsOf: identity) == content)
+
+        try Data("half".utf8).write(to: leftover)
+        try await storage.erase()
+        #expect(!FileManager.default.fileExists(atPath: identity.path))
+        #expect(!FileManager.default.fileExists(atPath: leftover.path))
     }
 
     @Test func eraseWithNoGuestChangesNothing() async throws {
