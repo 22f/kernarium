@@ -54,6 +54,19 @@ uml_add_tooling_test(
     LABELS andarium;package
     TIMEOUT 600)
 
+# The document pickers open files in place in the App Store configuration and
+# present the copy-mode picker in every other: the sources are read as the
+# compiler reads them with and without APP_STORE, and the changes a later edit
+# could make to the condition must fail, as must a bundle-check name for the
+# presenter that no source defines.
+uml_add_tooling_test(
+    NAME andarium-document-pickers
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_document_pickers.py
+        --root ${PROJECT_SOURCE_DIR}
+    LABELS andarium
+    TIMEOUT 60)
+
 # The release build refuses an embedded artifact that is behind the commit it
 # archives; the fixtures build a repository, a staged system and an application
 # with a kernel carrying a banner and a configuration, and change one thing each.

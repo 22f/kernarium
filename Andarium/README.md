@@ -226,7 +226,8 @@ everything that exists for automation or only pretends:
   build on a missing Info.plist key, an environment knob, a symbol or log text
   of the debugging and automation support, the JIT (its symbols and text and
   the `brk #0xf00d` instruction), a test bundle or XCTest framework, a
-  trace of the build host, a harness console line, or a privacy manifest that
+  trace of the build host, a harness console line, the copy-mode document
+  picker or a missing in-place importer, or a privacy manifest that
   does not cover a binary
   ([`scripts/check-privacy-manifests.py`](../scripts/check-privacy-manifests.py));
   the script's header is the complete list.

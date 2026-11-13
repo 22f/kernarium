@@ -203,6 +203,19 @@
             "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --follow-x --configuration \"$CONFIGURATION\" --follow-x-handle \"$FOLLOW_X_HANDLE\" --developer-x-handle \"$DEVELOPER_X_HANDLE\" --info-source \"$SRCROOT/Config/Info.plist\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
             "",
           ],
+        }, {
+          "kind": "script",
+          "name": "Check document pickers",
+          "input-paths": [
+            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+          ],
+          "run-on-every-build": true,
+          "shell": "/bin/sh",
+          "script": [
+            "[ \"$CONFIGURATION\" != AppStore ] || exit 0",
+            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --pickers --configuration \"$CONFIGURATION\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
+            "",
+          ],
         },
       ],
       "package-product-members": [
