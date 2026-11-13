@@ -1417,6 +1417,28 @@
         }
       }
     },
+    "Andarium couldn’t take the file from Files." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumは“ファイル”からそのファイルを取得できませんでした。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium无法从“文件”取得该文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium無法從「檔案」取得該檔案。"
+          }
+        }
+      }
+    },
     "Andarium is incomplete" : {
       "localizations" : {
         "ja" : {
@@ -7273,6 +7295,52 @@
         }
       }
     },
+    "Starting is taking a long time" : {
+      "comment" : "Title of the notice on the boot screen, after eight minutes, for the virtual machine's first start and the first start after an update, which have no usual time to be slower than; also spoken as VoiceOver's announcement when it appears.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "起動に時間がかかっています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启动耗时较长"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "啟動所需時間較長"
+          }
+        }
+      }
+    },
+    "Starting is taking longer than usual" : {
+      "comment" : "Title of the notice on the boot screen after three minutes of one start without Android finishing (an ordinary start, or a restart or recovery); also spoken as VoiceOver's announcement when it appears.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "起動に通常より時間がかかっています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启动耗时比平常更长"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "啟動時間比平常更長"
+          }
+        }
+      }
+    },
     "Starting recovery" : {
       "localizations" : {
         "ja" : {
@@ -7384,6 +7452,29 @@
         }
       }
     },
+    "Stop" : {
+      "comment" : "Button of the slow-start notice on the boot screen, and of its confirmation: stops the virtual machine that is starting.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "停止"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "停止"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "停止"
+          }
+        }
+      }
+    },
     "Stop and Close" : {
       "localizations" : {
         "ja" : {
@@ -7428,6 +7519,29 @@
         }
       }
     },
+    "Stop the virtual machine?" : {
+      "comment" : "Title of the confirmation that Stop on the boot screen's slow-start notice asks first; its buttons are Stop and Cancel and its message says what a stop needs to start again.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンを停止しますか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要停止虚拟机吗？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要停止虛擬機器嗎？"
+          }
+        }
+      }
+    },
     "Stopped when Andarium left the foreground." : {
       "localizations" : {
         "ja" : {
@@ -7446,6 +7560,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Andarium離開前景時已停止。"
+          }
+        }
+      }
+    },
+    "Stopping…" : {
+      "comment" : "The slow-start notice's Stop button after it was chosen, until the virtual machine has stopped.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "停止中…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在停止…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在停止…"
           }
         }
       }
@@ -8513,6 +8650,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "虛擬機器正在啟動或執行。只有在其停止時才能建立、回復和刪除快照。"
+          }
+        }
+      }
+    },
+    "The virtual machine is still starting. You can keep waiting, or stop it. To start it again after stopping, close Andarium in the App Switcher and open it again." : {
+      "comment" : "Text of the slow-start notice on the boot screen: the virtual machine goes on starting behind it, and a stop ends the virtual machine for this launch of the app.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンはまだ起動中です。このまま待つことも、停止することもできます。停止した後にもう一度起動するには、AppスイッチャーでAndariumを終了してからもう一度開いてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机仍在启动。你可以继续等待，也可以将其停止。停止后若要重新启动，请在App切换器中关闭Andarium后重新打开。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器仍在啟動。你可以繼續等待，也可以將其停止。停止後若要重新啟動，請在App切換器中關閉Andarium後重新打開。"
           }
         }
       }
@@ -9649,24 +9809,25 @@
         }
       }
     },
-    "To start it again, close Andarium and open it again." : {
+    "To start it again, close Andarium in the App Switcher and open it again." : {
+      "comment" : "Under the title of the screen that follows an unexpected end of the virtual machine or the person's Stop on the boot screen, and in Stop's confirmation. The App Switcher is iOS's own; the app has to be closed there, not sent to the Home Screen.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "もう一度起動するには、Andariumを閉じてからもう一度開いてください。"
+            "value" : "もう一度起動するには、AppスイッチャーでAndariumを終了してからもう一度開いてください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "要重新启动，请关闭Andarium后重新打开。"
+            "value" : "要重新启动，请在App切换器中关闭Andarium后重新打开。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "若要重新啟動，請關閉Andarium後重新打開。"
+            "value" : "若要重新啟動，請在App切換器中關閉Andarium後重新打開。"
           }
         }
       }
@@ -10090,6 +10251,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "處理中"
+          }
+        }
+      }
+    },
+    "You stopped the virtual machine" : {
+      "comment" : "Title of the screen that follows Stop on the boot screen's slow-start notice.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンを停止しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你已停止虚拟机"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你已停止虛擬機器"
           }
         }
       }

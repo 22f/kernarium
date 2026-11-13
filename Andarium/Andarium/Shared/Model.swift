@@ -88,6 +88,12 @@ final class AppModel {
         // The readings run while the guest does.
         didSet {
             if lifecycle.phase != oldValue.phase {
+                // The notice belongs to the boot screen: any other screen has
+                // no start under way to call slow.
+                if case .booting = lifecycle.phase {} else {
+                    slowStart.finish()
+                    confirmingStop = false
+                }
                 refreshStatistics()
                 refreshGraphicsNotice()
                 showThermalNoticeIfWaiting()
@@ -414,6 +420,10 @@ final class AppModel {
     @ObservationIgnored var feedbackServices = SendFeedbackServices()
     /// The Send feedback sheet is open, over Home or over the session's Settings.
     var feedbackSheetOpen = false
+    /// The Send feedback sheet the boot screen's notice opened is open. The
+    /// root presents it, so it stays up, with what the person typed, when the
+    /// boot ends or the run does.
+    var feedbackFromBoot = false
     #endif
     #if FOLLOW_X
     /// The handle Follow developer on X opens, from Info.plist, which only a
@@ -426,6 +436,8 @@ final class AppModel {
     /// screen over the session asks what to do.
     var spacePause: SpacePause?
     var alert: AppAlert?
+    /// What a Files picker's failure says, over Settings (`documentPickerFailed`).
+    var documentPickerProblem: AppAlert?
     /// Settings' Install APK asks whether to install an app Android refused for
     /// the version it was built for; the screens' alert shows it while the
     /// install waits behind the overlay (`LegacyInstallFlow`).
@@ -437,6 +449,20 @@ final class AppModel {
     @ObservationIgnored private var installAttemptTag = 0
     /// How far the current boot has got, from the guest's console.
     var bootTracker = BootTracker()
+    /// When the start under way began and whether the boot screen says it is
+    /// slow (`SlowStart`).
+    var slowStart = SlowStart()
+    /// The notice's Stop asked first (`askToStop`): the dialog is up.
+    var confirmingStop = false
+    #if !APP_STORE
+    /// The preview's frozen boot screen shows the start's own clock, which runs.
+    @ObservationIgnored var previewClockRuns = false
+    #endif
+    /// The time the boot screen counts a start by, in seconds: a monotonic
+    /// reading that does not run while the guest is held (a background span, a
+    /// pause for space). A runtime supplies its pause-aware clock; a test
+    /// replaces it.
+    @ObservationIgnored var clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     /// The guest's disk is being written before the run can begin.
     var preparingDisk = false
     var diskProgress: Double?
@@ -1315,8 +1341,10 @@ final class AppModel {
     /// .apk, .apks, .xapk or .apkm, or is an .apk that Android cannot take by
     /// its size, is refused on the same overlay, at once; an archive of an
     /// app's parts is read, and refused or installed, by the operation. The
-    /// file's security scope is held to the end of the install.
-    func installPicked(_ url: URL) {
+    /// file's security scope is held to the end of the install. `staged` is the
+    /// folder of ours that holds a copy the picker made: it is removed at each
+    /// refusal and when the install is over, across Install anyway too.
+    func installPicked(_ url: URL, staged: PickedFolder? = nil) {
         guard busy == nil else { return }
         guard fileBrowser?.busy != true else {
             alert = AppAlert(
@@ -1346,7 +1374,10 @@ final class AppModel {
             failure: Self.installFailure,
             ending: { (outcome: ApkInstallOutcome) in outcome.words(fileName: name) },
             { [driver] update in
-                defer { endAccess() }
+                defer {
+                    endAccess()
+                    staged?.discard()
+                }
                 let outcome = try await self.installAskingAboutLegacyApps(detail: detail) { bypass, update in
                     if let driver {
                         return try await driver.installApk(at: url, bypassLowTargetSdkBlock: bypass, update: update)
@@ -1461,6 +1492,14 @@ final class AppModel {
     /// The title of an install that did not happen.
     static let installFailure = String(localized: "App not installed")
 
+    /// The Files picker of Install APK or of the file browser's Import failed:
+    /// the person is told, where nothing would otherwise happen. Settings,
+    /// which both pickers are in, shows it over itself (`SessionSettingsSheet`):
+    /// an alert of the screens beneath it would close the sheet to be shown.
+    func documentPickerFailed(_ error: Error, title: String) {
+        documentPickerProblem = AppAlert(title: title, message: error.localizedDescription)
+    }
+
     #if !APP_STORE
     /// What one attempt of the preview's install does instead of
     /// `playInstall`, for a preview that plays how the install can end.
@@ -1511,6 +1550,7 @@ final class AppModel {
             snapshots.cancelReads()
             frozenBootStage = nil
             bootTracker = BootTracker()
+            slowStart.begin(at: clock(), kind: kind, firstBootPending: driver?.firstBootPending() ?? false)
             preparingDisk = false
             diskProgress = nil
             #if !APP_STORE
@@ -1534,7 +1574,12 @@ final class AppModel {
         }
     }
 
-    func finishBoot(_ kind: BootKind) {
+    func finishBoot(_ started: BootKind) {
+        // A guest that booted its recovery image on its own (a reboot into
+        // recovery from the shell, Android's rescue after a loop of failed
+        // boots) is the session the launch's recovery mode makes; its way
+        // back, the recovery's reboot, is a restart into a normal session.
+        let kind = bootTracker.recovery ? BootKind.recovery : started
         let firstStart = plan == .firstStart
         lifecycle.finishBoot(kind)
         if driver != nil {
@@ -1615,7 +1660,48 @@ final class AppModel {
         // A guest that restarts during the pressure reports no end of it, and
         // the level the notice holds is not known across the restart.
         resetMemoryNotice()
+        // A restart before the start finished is the same start; a running
+        // session's restart begins a boot of its own.
+        var unfinished = false
+        if case .booting = phase { unfinished = true }
         lifecycle.restart()
+        slowStart.guestRestarted(at: clock(), startUnfinished: unfinished)
+    }
+
+    // MARK: Slow start
+
+    /// The boot screen looked at the clock: puts the notice up once a start
+    /// has run for `SlowStart.threshold`. Returns whether it just appeared.
+    @discardableResult
+    func updateSlowStart() -> Bool {
+        guard case .booting = phase else { return false }
+        return slowStart.update(at: clock())
+    }
+
+    /// The seconds the start under way has run, as the status line and the
+    /// notice both show them.
+    func bootElapsedSeconds() -> Int {
+        slowStart.elapsedSeconds(at: clock())
+    }
+
+    /// The notice's Stop button: asks first, because a stop ends the virtual
+    /// machine for this launch of the app (`stopStart` does it on the answer).
+    func askToStop() {
+        guard case .booting = phase, slowStart.began != nil, !slowStart.stopping else { return }
+        confirmingStop = true
+    }
+
+    /// Ends the start under way: the answer to the dialog. The runtime ends
+    /// the run and `runEnded` follows; the notice says Stopping meanwhile. The
+    /// preview, with no runtime, ends it at once as a host stop does.
+    func stopStart() {
+        confirmingStop = false
+        guard case .booting = phase, slowStart.requestStop() else { return }
+        if let driver {
+            driver.stopGuest()
+        } else {
+            runEnded(RunEnd(result: -5, stoppedByUser: true), uptimeSeconds: bootElapsedSeconds())
+        }
     }
 
     func factoryReset() {
