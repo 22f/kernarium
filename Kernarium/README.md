@@ -230,7 +230,15 @@ Kernarium attaches:
   live only when it has it, and nothing changes the mode before the guest powers
   off. The camera tier follows the launch's GPU budget within the cap (the small
   tier for every host), live cameras take their host-side memory out of the
-  GPU's pool, the colour data a Bayer still teaches is kept in
+  GPU's pool (the use the composed layout lets a session hold, which the
+  application asks for before the boot with `plan_camera_reserve`, runtime API
+  40: the runtime discovers the cameras without a permission or a session,
+  keeps them and the answers composed from them until asked to discover again,
+  and answers the figure the next boot would take while the source, the
+  cameras and the calibration data are unchanged, or the tier's ceiling, saying
+  so, where it cannot discover them; a host with no camera and a Linux guest
+  answer 0), the colour data a Bayer
+  still teaches is kept in
   `android_camera_calibration_path`, the state of the capture (idle, streaming,
   interrupted, interrupted by iPad multitasking, by system pressure, and, for a
   blocked guest, blocked in use while an app has a camera open, which opens no

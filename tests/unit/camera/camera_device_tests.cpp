@@ -284,6 +284,9 @@ struct Rig final {
         options.onRotateAndCrop = [this](std::uint32_t camera, std::uint32_t setting, std::uint32_t degrees) {
             rotations.push_back({camera, setting, degrees});
         };
+        options.onFlash = [this](std::uint32_t camera, bool torch, uml::platform::CameraFlashMode flash) {
+            lights.push_back({camera, torch, flash});
+        };
         watched = std::make_shared<WatchedCamera>(camera);
         watched->workingBytes = rigOptions.workingBytes;
         watched->rawStillSize = rigOptions.rawStillSize;
@@ -311,6 +314,13 @@ struct Rig final {
     std::vector<CameraCheckpoint> checkpoints;
     /* What the device reported to onRotateAndCrop: camera, setting, degrees. */
     std::vector<std::array<std::uint32_t, 3>> rotations;
+    /* What the device reported to onFlash. */
+    struct Light {
+        std::uint32_t camera {};
+        bool torch {};
+        uml::platform::CameraFlashMode flash {};
+    };
+    std::vector<Light> lights;
     std::uint32_t* automaticDegrees {};
     std::vector<std::uint8_t> memory;
     std::size_t bump {16 * page};
@@ -1408,6 +1418,27 @@ void testTorchHoldsTheSession()
     rig.setOk(1, {{UML_V4L2_CID_FLASH_LED_MODE, UML_V4L2_FLASH_LED_MODE_TORCH, {}}});
     rig.device->reset();
     require(rig.camera->sessionsOpen() == 0, "and a reset releases it");
+}
+
+void testTheLightTheGuestAsksForIsTold()
+{
+    using uml::platform::CameraFlashMode;
+    Rig rig;
+    rig.create(1, 0, metaKind);
+    require(rig.lights.empty(), "a camera nobody asked anything of says nothing");
+    rig.setOk(1, {{UML_V4L2_CID_FLASH_LED_MODE, UML_V4L2_FLASH_LED_MODE_TORCH, {}}});
+    require(rig.lights.size() == 1 && rig.lights[0].torch && rig.lights[0].flash == CameraFlashMode::off, "the torch");
+    // A still's flash is a control of its own, and the torch stays as it was.
+    rig.setOk(1, {{VIRTIO_VIDEO_CAMERA_CID_STILL_FLASH, 2, {}}});
+    require(rig.lights.size() == 2 && rig.lights[1].torch && rig.lights[1].flash == CameraFlashMode::on, "the flash");
+    // The same ask again changes nothing, so it is not told again.
+    rig.setOk(1, {{VIRTIO_VIDEO_CAMERA_CID_STILL_FLASH, 2, {}}});
+    require(rig.lights.size() == 2, "an ask that changes nothing is not told");
+    rig.setOk(1, {{UML_V4L2_CID_FLASH_LED_MODE, UML_V4L2_FLASH_LED_MODE_NONE, {}},
+                  {VIRTIO_VIDEO_CAMERA_CID_STILL_FLASH, 1, {}}});
+    require(rig.lights.size() == 3 && !rig.lights[2].torch && rig.lights[2].flash == CameraFlashMode::automatic,
+        "both change together, and the device tells the pair once");
+    require(rig.lights[0].camera == rig.lights[2].camera, "of the same camera");
 }
 
 void testResetAndDestroy()
@@ -2984,6 +3015,7 @@ int main()
     testStillsAndCalibration();
     testControlsOnStreams();
     testTorchHoldsTheSession();
+    testTheLightTheGuestAsksForIsTold();
     testResetAndDestroy();
     testFrontCameraChoice();
     testCamerasJoin();

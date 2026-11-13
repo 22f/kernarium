@@ -487,6 +487,16 @@ final class AppModel {
     /// preview's system mode have one; a preview without it takes the access
     /// as given.
     @ObservationIgnored var camera: CameraController?
+    /// Asks the runtime what a live camera session of this host holds out of
+    /// the GPU's budget, for every budget the memory policy has
+    /// (`MemoryPolicy.withCameraReserve`). The device application has one, and
+    /// so do the preview states that show a camera reserve; without one the
+    /// model keeps the policy's own figure, the ceiling that bounds the system
+    /// cameras.
+    @ObservationIgnored var cameraReservePlanner: (@Sendable (MemoryPolicy) -> CameraReservePlan)?
+    /// The last question to the runtime for the camera reserve, which a test
+    /// waits for.
+    @ObservationIgnored private(set) var cameraReserveTask: Task<Void, Never>?
     /// What the host is doing for the guest's cameras, from the runtime, and
     /// whether the person put the notice it raised away.
     private(set) var cameraNotice = CameraNoticeState()
@@ -687,6 +697,32 @@ final class AppModel {
         // A record that cannot be read has no plan; the start then fails
         // with the reason.
         plan = driver.startPlan() ?? .normal
+        // A run may have taught the store a lens's colour data, which changes
+        // the layout the cameras make and so what a session holds.
+        refreshCameraReserve()
+    }
+
+    /// Reads the memory a live camera session holds from the runtime again, for
+    /// the sheet's graphics memory: after the Camera choice or the access to the
+    /// cameras changes, after a run, and when the System sheet opens, because
+    /// the cameras the host has and the colour data they have learned decide
+    /// the layout. It matters only
+    /// while the Camera choice is on, so that is when the runtime is asked; the
+    /// policy keeps its own figure meanwhile. Questions are answered in order,
+    /// and the result is the task that ends with this one.
+    @discardableResult
+    func refreshCameraReserve() -> Task<Void, Never> {
+        let before = cameraReserveTask
+        guard let planner = cameraReservePlanner, guest?.camera == true else { return before ?? Task {} }
+        let task = Task { [weak self] in
+            await before?.value
+            guard let self, self.guest?.camera == true else { return }
+            let current = self.host.memory
+            let plan = await Task.detached(priority: .utility) { planner(current) }.value
+            if self.host.memory == current, plan.policy != current { self.host.memory = plan.policy }
+        }
+        cameraReserveTask = task
+        return task
     }
 
     /// Records the guest's choices a moment after the last change, so a
@@ -1744,6 +1780,7 @@ final class AppModel {
             guest?.camera = true
             cameraAsking = true
             persistNow()
+            refreshCameraReserve()
             // The controller asks iOS and reports the answer to
             // `cameraAccessChanged`. A preview without one has no system
             // prompt to show and takes it as given.
@@ -1751,6 +1788,7 @@ final class AppModel {
         case .authorized:
             guest?.camera = true
             persistNow()
+            refreshCameraReserve()
         }
     }
 
@@ -1787,6 +1825,9 @@ final class AppModel {
             cameraAwaitsSettings = false
             cameraAsking = false
         }
+        // The cameras a host has can change with the access to them (a
+        // Continuity camera that comes or goes).
+        refreshCameraReserve()
     }
 
     /// The alert's Open Settings: for a refusal, the switch the person tapped
