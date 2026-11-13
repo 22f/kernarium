@@ -279,6 +279,41 @@ links. The feature's words are looked up in the `Feedback` string table
 prefix and its information block are English whatever the interface language,
 and the bug report's overlay text is the app's own.
 
+Send needs both a problem (the mail's subject) and details (its body); white
+space counts as empty, and a file or the start log is neither. Send stays
+enabled while one is empty: its tap opens no composer and shows one alert that
+names what is missing, and the first empty field takes the focus after OK.
+
+The sheet attaches the bug report, a screenshot, photos and videos from the
+photo library, and any number of files from Files. The bar has three buttons:
+Bug report, Screenshot and Add, a paperclip whose menu offers Photos and Files
+(the system's menu, anchored on the button; the Large Content Viewer reads
+every button of the bar). A file is opened where it is kept (the document
+picker in place, `Shared/Feedback/SendFeedbackFilePicker.swift`), never copied
+first: the sheet holds the access the picker gave it from the pick until the
+row is removed or the sheet closes (a file still being looked at keeps its own
+until that ends), each start stopped once, and Send maps the file from there
+for the composer, so a file of any size is never read into memory. A file that
+cannot be used in place (its provider has not downloaded it, or its volume
+refuses mapping) is copied into the sheet's folder instead, after a free-space
+check, under the app's progress overlay with Cancel; a copy that is cancelled or
+fails leaves nothing. Cancel ends the whole batch: what was attached before it
+stays, the files that were not yet taken in are not. Send looks at every file
+again and maps it before the composer opens: one that is gone or can no longer
+be mapped is taken out of the list, and nothing is sent. The mail names
+what the app makes itself `bugreport-yyyyMMdd-HHmmss.zip` and
+`screenshot-yyyyMMdd-HHmmss.png`: fixed English words and a fixed date (Gregorian,
+ASCII digits, the device's time zone) whatever the interface language or the
+device's calendar and digits. The mail carries a picked
+file's name as written, in any script; only path separators, control
+characters (the ones that reverse text among them) and a leading dot are
+replaced or removed, and a long name is cut to 100 characters and 200 bytes
+with its extension kept; a name another attachment has is numbered. The row
+keeps the name as the person knows it. Above 20 MiB in all, files included,
+the sheet warns that a mail service may refuse the mail; Send is never
+blocked. Nothing about a picked file (name, size, place) is logged or kept
+once the sheet closes.
+
 ### Follow developer on X
 
 Info has one passive outward link more: Follow developer on X, a row in the

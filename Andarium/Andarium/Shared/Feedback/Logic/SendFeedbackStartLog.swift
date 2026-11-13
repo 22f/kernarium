@@ -11,26 +11,6 @@ import Foundation
 /// boot only. It is in English, for whoever reads the mail, as the information
 /// block is, and the person sees it as a row they can remove.
 nonisolated enum SendFeedbackStartLog {
-    /// The file's name in the mail: `start-log-yyyyMMdd-HHmmss.txt`, the moment
-    /// the log was made. It is never localized: the formatter names its locale
-    /// (en_US_POSIX), its calendar (Gregorian) and its digits (ASCII) itself,
-    /// and takes only the clock's time zone from the device, so the name does
-    /// not change with the interface language, the calendar or the numbering
-    /// system the person has chosen. The time zone is not part of the name.
-    static func fileName(at date: Date, in timeZone: TimeZone = .current) -> String {
-        "start-log-\(nameFormatter(in: timeZone).string(from: date)).txt"
-    }
-
-    /// The formatter of the name's date and time, fixed but for the time zone.
-    static func nameFormatter(in timeZone: TimeZone) -> DateFormatter {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.timeZone = timeZone
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return formatter
-    }
-
     /// The most of the printed output the file holds. The runtime's session
     /// record keeps 4 KiB of a boot's output (`session_kernel_output_bytes`); a
     /// longer text is cut from its start, to the last whole line.

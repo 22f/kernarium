@@ -65,34 +65,38 @@ struct SendFeedbackStartLogTests {
     private let moment = Date(timeIntervalSince1970: 1_794_114_290)
     private let namePattern = #"^start-log-[0-9]{8}-[0-9]{6}\.txt$"#
 
+    /// The mail names the log by the moment it was made, as every file the app
+    /// makes (`SendFeedbackNames.stamp`), in the device's clock.
     @Test func theNameIsTheMomentTheLogWasMadeInTheDevicesClock() throws {
-        let utc = try #require(TimeZone(identifier: "UTC"))
-        let tokyo = try #require(TimeZone(identifier: "Asia/Tokyo"))
-        let losAngeles = try #require(TimeZone(identifier: "America/Los_Angeles"))
-        #expect(SendFeedbackStartLog.fileName(at: moment, in: utc) == "start-log-20261108-050450.txt")
-        #expect(SendFeedbackStartLog.fileName(at: moment, in: tokyo) == "start-log-20261108-140450.txt")
-        #expect(SendFeedbackStartLog.fileName(at: moment, in: losAngeles) == "start-log-20261107-210450.txt")
+        func name(_ date: Date) -> String? { SendFeedbackAttachment.Kind.startLog.generatedFileName(at: date) }
+        // The stamp's own zones, written out here independently of the code.
+        for (identifier, expected) in [
+            ("UTC", "20261108-050450"), ("Asia/Tokyo", "20261108-140450"), ("America/Los_Angeles", "20261107-210450"),
+        ] {
+            let zone = try #require(TimeZone(identifier: identifier))
+            #expect(SendFeedbackNames.stamp(moment, in: zone) == expected, "\(identifier)")
+        }
         // The year's end and a day of single digits: every field is padded to its width.
-        #expect(SendFeedbackStartLog.fileName(at: Date(timeIntervalSince1970: 1_798_761_599), in: utc)
-            == "start-log-20261231-235959.txt")
-        #expect(SendFeedbackStartLog.fileName(at: Date(timeIntervalSince1970: 1_798_761_600), in: utc)
-            == "start-log-20270101-000000.txt")
-        #expect(SendFeedbackStartLog.fileName(at: Date(timeIntervalSince1970: 1_804_136_767), in: utc)
-            == "start-log-20270304-050607.txt")
-        // The device's own zone is what it takes without one; the name carries no zone text.
-        #expect(SendFeedbackStartLog.fileName(at: moment).range(of: namePattern, options: .regularExpression) != nil)
+        let utc = try #require(TimeZone(identifier: "UTC"))
+        #expect(SendFeedbackNames.stamp(Date(timeIntervalSince1970: 1_798_761_599), in: utc) == "20261231-235959")
+        #expect(SendFeedbackNames.stamp(Date(timeIntervalSince1970: 1_798_761_600), in: utc) == "20270101-000000")
+        #expect(SendFeedbackNames.stamp(Date(timeIntervalSince1970: 1_804_136_767), in: utc) == "20270304-050607")
+        // The log's name is that stamp in the device's clock, with no zone text.
+        #expect(name(moment) == "start-log-\(SendFeedbackNames.stamp(moment)).txt")
+        #expect(name(moment)?.range(of: namePattern, options: .regularExpression) != nil)
+        // The mail's name is that, and not the name the file has where it is staged.
+        let attachment = SendFeedbackAttachment(
+            kind: .startLog, url: URL(fileURLWithPath: "/staged/start-log.txt"), bytes: 1, madeAt: moment)
+        #expect(attachment.fileName == name(moment) && attachment.mimeType == "text/plain")
     }
 
-    /// The formatter names its locale, calendar and digits, so the interface
+    /// The stamp names its locale, calendar and digits, so the interface
     /// language and the numbering and calendar a person chose do not reach the
     /// name. The control is the same pattern from a formatter that follows such a
     /// setting: it writes another year and other digits, and the name does not.
     @Test func theNameDoesNotFollowTheLanguageTheCalendarOrTheDigits() throws {
         let utc = try #require(TimeZone(identifier: "UTC"))
-        let formatter = SendFeedbackStartLog.nameFormatter(in: utc)
-        #expect(formatter.locale.identifier == "en_US_POSIX" && formatter.calendar.identifier == .gregorian)
-        #expect(formatter.dateFormat == "yyyyMMdd-HHmmss" && formatter.timeZone == utc)
-        let name = SendFeedbackStartLog.fileName(at: moment, in: utc)
+        let name = "start-log-\(SendFeedbackNames.stamp(moment, in: utc)).txt"
         let settings: [(String, differs: Bool)] = [
             ("en", false), ("zh-Hans", false), ("zh-Hant", false), ("ja", false),
             ("th_TH@calendar=buddhist", true), ("ar@numbers=arab", true),

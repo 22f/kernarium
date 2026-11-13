@@ -35,10 +35,14 @@ PRESENTER_NAMES = ("CopyDocumentPicker", "documentCopyPicker", "PickedCopies", "
 
 # The production sources that may hold an in-place importer in a configuration
 # other than the App Store's, besides the two call sites (whose own split is
-# checked below): path from the repository root -> why it is meant. Empty. A
-# source that adds an in-place importer on purpose names it here, and the entry
-# must keep matching one.
-PERMITTED_IN_PLACE_IMPORTERS: dict[str, str] = {}
+# checked below): path from the repository root -> why it is meant. A source
+# that adds an in-place importer on purpose names it here, and the entry must
+# keep matching one.
+PERMITTED_IN_PLACE_IMPORTERS: dict[str, str] = {
+    "Andarium/Andarium/Shared/Feedback/SendFeedbackFilePicker.swift":
+        "Send feedback attaches a picked file where it is kept (a file of any size is mapped for the mail, "
+        "never copied first), in every configuration that has the feature",
+}
 
 SWIFTUI_IMPORTER = re.compile(r"\bfileImporter\s*\(")
 UIKIT_PICKER = re.compile(r"\bUIDocumentPickerViewController\s*\(")
@@ -253,12 +257,12 @@ def main() -> int:
         "an exception for a source with no importer": (exporter, {third: "meant"}, True),
     }
     for label, (text, permitted, must_fail) in third_cases.items():
-        found = problems(call_sites, presenter, {**others, third: text}, permitted)
+        found = problems(call_sites, presenter, {**others, third: text}, {**PERMITTED_IN_PLACE_IMPORTERS, **permitted})
         if must_fail and not found:
             failures.append(f"{label} passed the check")
         elif not must_fail and found:
             failures.append(f"{label} failed the check: {found}")
-    if problems(call_sites, presenter, others, {third: "meant"}) == []:
+    if problems(call_sites, presenter, others, {**PERMITTED_IN_PLACE_IMPORTERS, third: "meant"}) == []:
         failures.append("an exception that names no source passed the check")
 
     for failure in failures:

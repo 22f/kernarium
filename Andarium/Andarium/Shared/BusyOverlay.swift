@@ -32,6 +32,10 @@ struct BusyOverlay: View {
         .transition(.opacity)
         .animation(.easeInOut(duration: 0.2), value: state.cancel != nil)
         .accessibilityElement(children: .contain)
+        // The card is what the person is to deal with: VoiceOver reaches nothing behind it, and says what is
+        // happening when it appears, for a task (a copy of a large file) that can take minutes.
+        .accessibilityAddTraits(.isModal)
+        .onAppear { AccessibilityNotification.Announcement(state.title).post() }
     }
 
     private func content(scrolls: Bool) -> some View {

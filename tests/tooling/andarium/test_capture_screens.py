@@ -222,6 +222,9 @@ class FeedbackShotTests(unittest.TestCase):
                 mock.patch.object(self.script, "app_state", return_value=state):
             self.assertIn("FEEDBACK_ADDRESS", self.script.not_in_front("UDID", 7, shot))
             state["feedback"] = True
+            # The sheet is kept for a picture only once it is open and its draft is made.
+            self.assertIn("draft", self.script.not_in_front("UDID", 7, shot))
+            state["feedbackReady"] = True
             self.assertIsNone(self.script.not_in_front("UDID", 7, shot))
 
     def test_the_other_shots_ask_nothing_of_the_build(self):

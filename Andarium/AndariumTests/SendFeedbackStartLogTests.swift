@@ -149,9 +149,9 @@ struct SendFeedbackStartLogTests {
         sheet.offerStartLog()
         #expect(sheet.form.attachments.count == 1)
         let log = try #require(sheet.form.attachments.items.first)
-        #expect(log.kind == .startLog && log.url.lastPathComponent == Self.expectedName && log.mimeType == "text/plain")
+        #expect(log.kind == .startLog && log.fileName == Self.expectedName && log.mimeType == "text/plain")
         // The name is English, Gregorian and ASCII whatever the device's language, calendar and digits are.
-        #expect(log.url.lastPathComponent.range(of: #"^start-log-[0-9]{8}-[0-9]{6}\.txt$"#, options: .regularExpression) != nil)
+        #expect(log.fileName.range(of: #"^start-log-[0-9]{8}-[0-9]{6}\.txt$"#, options: .regularExpression) != nil)
         let text = try contents(of: log)
         #expect(UInt64(text.utf8.count) == log.bytes)
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
@@ -160,11 +160,12 @@ struct SendFeedbackStartLogTests {
         #expect(lines.contains("[  102.9] init: starting service 'netd'..."))
         // It counts with the rest.
         #expect(sheet.form.attachments.totalBytes == log.bytes)
-        // And it goes with the mail.
+        // And it goes with the mail, once the Problem and the details are written.
         sheet.form.problem = "Too slow"
+        sheet.form.details = "Stuck at the boot screen"
         sheet.send()
         let request = try #require(fixture.composer.request)
-        #expect(request.attachments.map(\.url.lastPathComponent) == [Self.expectedName])
+        #expect(request.attachments.map(\.fileName) == [Self.expectedName])
         #expect(request.body.contains("Boot: not finished"))
         sheet.close()
     }
@@ -293,20 +294,17 @@ struct SendFeedbackStartLogTests {
         #expect(text.contains("[    5.0] eth0: 10.0.2.15 at 05:04:50"))
     }
 
-    /// The name is the moment the log was made, in the device's clock: a zone
-    /// other than the test machine's gives the other hour, and the ambient
+    /// The name is the moment the log was made, in the device's clock, and the ambient
     /// language, calendar and digits (the run's `-testLanguage` and `-testRegion`)
     /// change nothing: the control shows what a formatter that follows them
     /// writes.
     @Test func theNameIsFixedWhateverTheDevicesLanguageCalendarAndDigitsAre() throws {
-        let before = NSTimeZone.default
-        defer { NSTimeZone.default = before }
-        NSTimeZone.default = try #require(TimeZone(identifier: "Asia/Tokyo"))
         let fixture = try fixture()
         let sheet = fixture.sheet()
         sheet.offerStartLog()
-        let name = try #require(sheet.form.attachments.items.first).url.lastPathComponent
-        #expect(name == "start-log-20261108-140450.txt")
+        let name = try #require(sheet.form.attachments.items.first).fileName
+        #expect(name == Self.expectedName)
+        #expect(name.range(of: #"^start-log-[0-9]{8}-[0-9]{6}\.txt$"#, options: .regularExpression) != nil)
         let following = DateFormatter()
         following.timeZone = TimeZone.current
         following.dateFormat = "yyyyMMdd-HHmmss"
@@ -371,6 +369,29 @@ struct SendFeedbackStartLogTests {
         sheet.offerStartLog()
         #expect(try contents(of: log) == before && !before.contains("a later line"))
         #expect(sheet.form.attachments.count == 1)
+        sheet.close()
+    }
+
+    /// The log that the sheet attaches by itself is neither the Problem nor the
+    /// details: Send looks dimmed until both are written, and its tap, which is
+    /// enabled, says what is missing instead of opening the mail.
+    @Test func theStartLogDoesNotCountAsAFilledField() throws {
+        let fixture = try fixture()
+        try fixture.writeRecord(output: Self.output)
+        let sheet = fixture.sheet()
+        sheet.offerStartLog()
+        #expect(sheet.form.attachments.count == 1)
+        #expect(sheet.state.canSend && sheet.state.missing == .both && !sheet.state.readyToSend)
+        sheet.send()
+        #expect(sheet.incomplete == .both && fixture.composer.request == nil)
+        sheet.form.problem = "Too slow"
+        #expect(sheet.state.missing == .details && !sheet.state.readyToSend)
+        sheet.send()
+        #expect(sheet.incomplete == .details && fixture.composer.request == nil)
+        sheet.form.details = "Stuck at the boot screen"
+        #expect(sheet.state.missing == nil && sheet.state.readyToSend)
+        sheet.send()
+        #expect(fixture.composer.request?.attachments.map(\.kind) == [.startLog])
         sheet.close()
     }
 
