@@ -402,6 +402,7 @@ struct AppEntry {
         let cancel = BusyCancel {}
         let dismiss = BusyCancel { model.busy = nil }
         let file = PreviewData.sampleApkName
+        let container = PreviewData.sampleContainerName
         switch screen {
         case "bug-report":
             return BusyState(
@@ -426,13 +427,13 @@ struct AppEntry {
         case "install-done-without-data":
             return BusyState(
                 title: String(localized: "App installed"),
-                detail: String(localized: "\(file) is installed in the virtual machine, but not all of its data files were copied. The app may not work without them. Install the file again to copy them."),
+                detail: String(localized: "\(container) is installed in the virtual machine, but not all of its data files were copied. The app may not work without them. Install the file again to copy them."),
                 result: BusyResult(failed: false, dismiss: dismiss)
             )
         case "install-done-data-not-placed":
             return BusyState(
                 title: String(localized: "App installed"),
-                detail: String(localized: "\(file) is installed in the virtual machine, but not all of its data files were copied. The app may not work without them."),
+                detail: String(localized: "\(container) is installed in the virtual machine, but not all of its data files were copied. The app may not work without them."),
                 result: BusyResult(failed: false, dismiss: dismiss)
             )
         case "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-part-too-large":
