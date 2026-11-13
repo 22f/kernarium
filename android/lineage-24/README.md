@@ -405,8 +405,12 @@ random once for each data disk. `kernarium_net_setup`
 (`overlay/tools`) prepares it at `post-fs-data` and stacks the `virt_wifi`
 device `wlan0` on it, with a hardware address derived from `eth0`'s
 (`overlay/tools/kernarium_wifi_mac.h`: no kernel argument carries it, because an
-`androidboot.*` argument becomes a property every application can read), and the
-kernel needs `CONFIG_MACVLAN`, `CONFIG_CFG80211`
+`androidboot.*` argument becomes a property every application can read). The
+lower devices, `eth0` and the macvlan `buried_eth0`, carry no IPv6, so no
+link-local address built from their hardware addresses shows the installation's
+values to an application; a later change that gives the guest IPv6 puts it on
+`wlan0`. The tool exits with an error when it cannot turn IPv6 off, and `wlan0`
+is then not created. The kernel needs `CONFIG_MACVLAN`, `CONFIG_CFG80211`
 and `CONFIG_VIRT_WIFI` built in (the verifier requires them). Apps see Wi-Fi
 only, the open SSID `VirtWifi`, because the product declares
 `android.hardware.wifi` and not `android.hardware.ethernet`; turning Wi-Fi or

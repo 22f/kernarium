@@ -40,13 +40,22 @@
  * init has set arp_ignore and arp_announce already, so eth0 and the macvlan
  * answer ARP for their own addresses only.
  *
+ * The lower devices carry no IPv6: the tool turns it off on eth0 first and on
+ * the macvlan before that comes up, because a link-local address built from
+ * a MAC would hand the installation's MACs to every application that lists
+ * its interface addresses. A later change that gives the guest IPv6 puts it
+ * on wlan0.
+ *
  * The tool fails closed: without the lease or the source rule wlan0 would
  * either take over the address adb is reached on or send adb's replies out
- * of the wrong device, so it creates no Wi-Fi device in either case.
+ * of the wrong device, so it creates no Wi-Fi device in either case. A
+ * failure to turn IPv6 off is fatal in the same way: the error is logged and
+ * the tool exits with 1 before it makes the next device.
  */
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/fib_rules.h>
 #include <linux/if_arp.h>
 #include <linux/if_link.h>
@@ -57,6 +66,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -358,6 +368,23 @@ bool AddVirtWifi(cuttlefish::NetlinkClient& netlink, uint32_t lower_index) {
   return netlink.Send(request);
 }
 
+// Writes 1 to the interface's disable_ipv6: the kernel drops the addresses the interface
+// has, link-local included, and generates none while it is set.
+bool DisableIpv6(const char* name) {
+  char path[64];
+  snprintf(path, sizeof(path), "/proc/sys/net/ipv6/conf/%s/disable_ipv6", name);
+  android::base::unique_fd fd(open(path, O_WRONLY | O_CLOEXEC));
+  if (fd.get() < 0) {
+    PLOG(ERROR) << "cannot open " << path;
+    return false;
+  }
+  if (write(fd.get(), "1", 1) != 1) {
+    PLOG(ERROR) << "cannot write " << path;
+    return false;
+  }
+  return true;
+}
+
 bool BringUp(cuttlefish::NetlinkClient& netlink, uint32_t index) {
   cuttlefish::NetlinkRequest request(RTM_SETLINK, 0);
   request.AddIfInfo(static_cast<int32_t>(index), true);
@@ -366,6 +393,10 @@ bool BringUp(cuttlefish::NetlinkClient& netlink, uint32_t index) {
 
 int Run() {
   if (!WaitForInterface(kLowerName)) return 1;
+  if (!DisableIpv6(kLowerName)) {
+    LOG(ERROR) << "cannot turn IPv6 off on " << kLowerName;
+    return 1;
+  }
   Mac lower_mac;
   if (!ReadHardwareAddress(kLowerName, &lower_mac)) return 1;
 
@@ -396,6 +427,10 @@ int Run() {
   const uint32_t macvlan_index = if_nametoindex(kMacvlanName);
   if (macvlan_index == 0) {
     LOG(ERROR) << kMacvlanName << " is missing after it was added";
+    return 1;
+  }
+  if (!DisableIpv6(kMacvlanName)) {
+    LOG(ERROR) << "cannot turn IPv6 off on " << kMacvlanName;
     return 1;
   }
   if (!AddVirtWifi(*netlink, macvlan_index)) {

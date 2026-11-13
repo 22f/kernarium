@@ -2222,6 +2222,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         else "(typetransition init_202604 kernarium_net_setup_exec process "
                         "kernarium_net_setup)\n"
                     )
+                    # The network setup domain turns IPv6 off through the sysctl files.
+                    + (
+                        ""
+                        if net_policy_variant == "no-sysctl-write"
+                        else "(allow kernarium_net_setup proc_net_202604 (file (open write)))\n"
+                    )
                     # The gamepad relay: init enters its domain through its executable's label, and
                     # the domain may use the uhid node and vsock, as an unconstrained vsock user.
                     + (
@@ -3499,6 +3505,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("net-library", {"missing_net_library": True}),
             ("net-policy-label", {"net_policy_variant": "missing-label"}),
             ("net-policy-transition", {"net_policy_variant": "missing-transition"}),
+            ("net-policy-sysctl-write", {"net_policy_variant": "no-sysctl-write"}),
             ("wifi-network-missing-rc", {"wifi_network_variant": "missing-rc"}),
             ("wifi-network-missing-service", {"wifi_network_variant": "missing-service"}),
             ("wifi-network-not-oneshot", {"wifi_network_variant": "not-oneshot"}),
@@ -4047,6 +4054,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "do not label /vendor/bin/kernarium_net_setup"),
             ("net-policy-transition-cause", {"net_policy_variant": "missing-transition"},
              "does not move init into the network setup domain"),
+            ("net-policy-sysctl-write-cause", {"net_policy_variant": "no-sysctl-write"},
+             "does not let kernarium_net_setup open and write proc_net files"),
             ("wifi-network-missing-rc-cause", {"wifi_network_variant": "missing-rc"},
              "SYSTEM_EXT/etc/init/kernarium_wifi_network.rc"),
             ("wifi-network-missing-service-cause", {"wifi_network_variant": "missing-service"},
@@ -5797,6 +5806,20 @@ def verify_net_setup_tool(android_root: Path) -> None:
     source = (android_root / "overlay/tools/kernarium_net_setup.cpp").read_text()
     if re.search(r"\bifi_change\s*=", source):
         fail("kernarium_net_setup.cpp assigns ifi_change: a link-creation flag mask clears IFF_MULTICAST")
+    verify_net_setup_ipv6(source)
+
+
+def verify_net_setup_ipv6(source: str) -> None:
+    """eth0 and the macvlan carry no IPv6, so no link-local address is built from their MACs. The
+    tool turns it off on eth0 once it exists and on the macvlan before that comes up, and a failure
+    to do so is fatal."""
+    for name in ("kLowerName", "kMacvlanName"):
+        if not re.search(rf"if \(!DisableIpv6\({name}\)\) \{{[^}}]*return 1;", source):
+            fail(f"kernarium_net_setup.cpp does not turn IPv6 off on {name} and fail when it cannot")
+    macvlan = source.find("DisableIpv6(kMacvlanName)")
+    bring_up = source.find("BringUp(*netlink, macvlan_index)")
+    if not 0 < macvlan < bring_up:
+        fail("kernarium_net_setup.cpp turns IPv6 off on the macvlan after it brings the macvlan up")
 
 
 def verify_erofs_board(android_root: Path) -> None:

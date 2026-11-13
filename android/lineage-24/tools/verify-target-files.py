@@ -740,6 +740,10 @@ SUSPEND_BLOCKER_SERVICE = ("suspend_blocker", "/vendor/bin/suspend_blocker")
 # (overlay/config/init.vendor.rc, tools/kernarium_net_setup.cpp).
 NET_SETUP_SERVICE = ("kernarium_net_setup", "/vendor/bin/kernarium_net_setup")
 NET_SETUP_TRIGGER = "post-fs-data"
+# The tool turns IPv6 off on eth0 and the macvlan through the kernel's sysctl files, so that
+# neither carries a link-local address built from its MAC.
+NET_SETUP_DOMAIN = "kernarium_net_setup"
+NET_SETUP_SYSCTL_LABEL = "proc_net"
 NET_SETUP_SYSCTLS = (
     "write /proc/sys/net/ipv4/conf/all/arp_ignore 1",
     "write /proc/sys/net/ipv4/conf/all/arp_announce 2",
@@ -4165,6 +4169,14 @@ def check_network_setup_policy(vendor_policy: bytes, vendor_file_contexts: bytes
         fail("vendor file contexts do not label /vendor/bin/kernarium_net_setup")
     if not NET_SETUP_TRANSITION.search(vendor_policy):
         fail("vendor policy does not move init into the network setup domain")
+    if not cil_allows(
+        (vendor_policy,), NET_SETUP_DOMAIN, NET_SETUP_SYSCTL_LABEL, "file", {"open", "write"}
+    ):
+        fail(
+            f"vendor policy does not let {NET_SETUP_DOMAIN} open and write {NET_SETUP_SYSCTL_LABEL} "
+            "files: it could not turn IPv6 off on eth0 and the macvlan, and would exit before "
+            "it made wlan0"
+        )
 
 
 def check_wifi_network(rc_payload: str, script: bytes) -> None:
