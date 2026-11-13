@@ -143,7 +143,10 @@ class Scratch:
         artifacts = self.root / f"artifacts-{self.runs}"
         (self.root / "home").mkdir(exist_ok=True)
         variables = {
-            "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+            # The fakes first, then only the system tools their wrappers
+            # need: nothing of the ambient PATH, so the fake idevicecrashreport
+            # is the one the run finds.
+            "PATH": os.pathsep.join([str(self.bin), "/usr/bin", "/bin"]),
             "FAKE_STATE": str(self.state),
             # Reports a run moves go under the user's home.
             "HOME": str(self.root / "home"),
@@ -172,7 +175,9 @@ class AndroidRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.scratch = Scratch(pathlib.Path(directory.name))
+        # Resolved: a report directory's path may hold no symlink, and the
+        # system temporary directory is one on macOS.
+        self.scratch = Scratch(pathlib.Path(directory.name).resolve())
 
     def run_android(self, *arguments: str, **keywords: object) -> Outcome:
         return self.scratch.run(*arguments, **keywords)

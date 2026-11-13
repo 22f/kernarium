@@ -55,7 +55,8 @@ def listing_text(entries: object) -> str:
 
 
 def entry(path: str, size: int = 1, *, directory: object = False) -> dict:
-    return {"relativePath": path, "resources": {"isDirectory": directory},
+    return {"relativePath": path,
+            "resources": {"isDirectory": directory, "isSymbolicLink": False},
             "metadata": {"size": size}}
 
 
@@ -68,14 +69,25 @@ class Scratch(unittest.TestCase):
         self.root = pathlib.Path(directory.name).resolve()
         self.lines: list[str] = []
 
+    def swap_for_link(self, parent: pathlib.Path, target: pathlib.Path) -> None:
+        """Replace a directory by a link to ``target``, as a racing process
+        could: the directory itself moves aside."""
+        parent.rename(parent.with_name(parent.name + "-aside"))
+        parent.symlink_to(target)
+
 
 class FakeStore:
     """A store that holds nothing but names and records what is done."""
 
     def __init__(self, names: list[str], *, udid: str | None = UDID,
                  listing_fails: bool = False, copy_fails: bool = False,
-                 removes: bool = True, mover: bool = True) -> None:
+                 removes: bool = True, mover: bool = True,
+                 leftovers: list[str] | None = None,
+                 on_resolve=None, on_copy=None) -> None:
         self.held = list(names)
+        self.leftovers = list(leftovers or [])
+        self.on_resolve = on_resolve
+        self.on_copy = on_copy
         self.udid = udid
         self.listing_fails = listing_fails
         self.copy_fails = copy_fails
@@ -97,6 +109,8 @@ class FakeStore:
 
     def resolve_udid(self) -> str:
         self.calls.append("resolve")
+        if self.on_resolve:
+            self.on_resolve()
         if self.udid is None:
             raise ios_device.DeviceError(
                 "cannot resolve the device's UDID, so no report was removed")
@@ -107,26 +121,28 @@ class FakeStore:
         if not self.mover:
             raise ios_device.DeviceError("idevicecrashreport is not on PATH")
 
-    def copy_verified(self, files, directory: pathlib.Path) -> None:
+    def copy_verified(self, files, directory: reports.ReportDirectory) -> None:
         self.calls.append("copy")
         if self.copy_fails:
             raise ios_device.DeviceError(
                 "copying a report failed; nothing was removed")
-        self.copy_directory = directory
+        self.copy_directory = directory.copy
         for file in files:
-            target = directory / file.path
+            target = directory.copy / file.path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(file.path)
+        if self.on_copy:
+            self.on_copy()
 
-    def remove_all(self, udid: str, directory: pathlib.Path) -> None:
+    def remove_all(self, udid: str, directory: reports.ReportDirectory) -> None:
         self.calls.append("remove")
         assert self.copy_directory is not None
-        self.mover_udid, self.mover_directory = udid, directory
+        self.mover_udid, self.mover_directory = udid, directory.mover
         self.copied_at_removal = sorted(
             path.relative_to(self.copy_directory).as_posix()
             for path in self.copy_directory.rglob("*") if path.is_file())
         if self.removes:
-            self.held = []
+            self.held = list(self.leftovers)
 
 
 class ListingTests(unittest.TestCase):
@@ -174,6 +190,12 @@ class ListingTests(unittest.TestCase):
             "a directory with children": listing_text([
                 {**entry("Retired", directory=True),
                  "children": [good]}]),
+            "a directory whose children are an object": listing_text([
+                {**entry("Retired", directory=True),
+                 "children": {"files": [good]}}]),
+            "an entry that does not say whether it is a link": listing_text([
+                {"relativePath": "x", "resources": {"isDirectory": False},
+                 "metadata": {"size": 1}}]),
             "an entry that is no object": listing_text(["Orchid"]),
             "no path": listing_text([{"resources": {"isDirectory": False},
                                       "metadata": {"size": 1}}]),
@@ -335,15 +357,93 @@ class SlotTests(Scratch):
             self.ensure(store)
         self.assertNotIn("copy", store.calls)
 
-    def test_a_destination_that_holds_files_is_refused_before_a_copy(self) -> None:
+    def test_an_existing_destination_is_refused_empty_or_not(self) -> None:
+        for filled in (False, True):
+            with self.subTest(filled=filled):
+                destination = self.root / f"moved-{filled}"
+                destination.mkdir()
+                if filled:
+                    (destination / "old").write_text("x")
+                store = FakeStore(invent("JetsamEvent", 25))
+                with self.assertRaisesRegex(
+                    ios_device.DeviceError, "already exists"
+                ):
+                    self.ensure(store, destination.name)
+                self.assertNotIn("copy", store.calls)
+                self.assertNotIn("remove", store.calls)
+                self.assertEqual(len(store.held), 25)
+                self.assertEqual(
+                    [path.name for path in destination.iterdir()],
+                    ["old"] if filled else [])
+
+    def test_a_directory_that_appears_after_the_check_is_refused(self) -> None:
         destination = self.root / "moved"
-        destination.mkdir()
-        (destination / "old").write_text("x")
-        store = FakeStore(invent("JetsamEvent", 25))
-        with self.assertRaisesRegex(ios_device.DeviceError, "already holds"):
+        store = FakeStore(invent("JetsamEvent", 25),
+                          on_resolve=destination.mkdir)
+        with self.assertRaisesRegex(ios_device.DeviceError, "already exists"):
             self.ensure(store)
-        self.assertNotIn("copy", store.calls)
+        self.assertEqual(store.calls, ["listing", "resolve", "require"])
+        self.assertEqual(list(destination.iterdir()), [])
+
+    def test_a_parent_swapped_for_a_link_during_the_resolution_is_refused(
+        self
+    ) -> None:
+        parent, elsewhere = self.root / "parent", self.root / "elsewhere"
+        parent.mkdir()
+        elsewhere.mkdir()
+        store = FakeStore(
+            invent("JetsamEvent", 25),
+            on_resolve=lambda: self.swap_for_link(parent, elsewhere))
+        with self.assertRaisesRegex(ios_device.DeviceError, "symlink"):
+            reports.ensure_report_slots(
+                store, PROCESSES, parent / "run", emit=self.lines.append)
+        self.assertEqual(store.calls, ["listing", "resolve", "require"])
+        self.assertEqual(list(elsewhere.iterdir()), [])
         self.assertEqual(len(store.held), 25)
+
+    def test_a_directory_replaced_before_the_mover_stops_the_removal(self) -> None:
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        for case in ("parent linked away", "run directory replaced"):
+            with self.subTest(case):
+                parent = self.root / case.replace(" ", "-")
+                parent.mkdir()
+                if case == "parent linked away":
+                    swap = lambda: self.swap_for_link(parent, elsewhere)
+                else:
+                    def swap() -> None:
+                        (parent / "run").rename(parent / "run-aside")
+                        (parent / "run").mkdir()
+                store = FakeStore(invent("JetsamEvent", 25), on_copy=swap)
+                with self.assertRaisesRegex(
+                    ios_device.DeviceError, "not where this run created it"
+                ):
+                    reports.ensure_report_slots(
+                        store, PROCESSES, parent / "run",
+                        emit=self.lines.append)
+                self.assertNotIn("remove", store.calls)
+                self.assertEqual(len(store.held), 25)
+
+    def test_a_symlink_in_the_home_path_is_refused_without_a_tool_call(self) -> None:
+        real = self.root / "real-home"
+        real.mkdir()
+        (self.root / "up").symlink_to(self.root)
+        for home in (self.root / "linked-home", self.root / "up" / "real-home"):
+            if not home.exists():
+                home.symlink_to(real)
+            store = FakeStore(invent("JetsamEvent", 25))
+            with self.subTest(home=home.name), \
+                    mock.patch.dict(os.environ, {"HOME": str(home)}):
+                for destination in (reports.default_destination(),
+                                    home / "explicit"):
+                    with self.assertRaisesRegex(
+                        ios_device.DeviceError, "symlink"
+                    ):
+                        reports.ensure_report_slots(
+                            store, PROCESSES, destination,
+                            emit=self.lines.append)
+                self.assertEqual(store.calls, [])
+                self.assertEqual(list(real.iterdir()), [])
 
     def test_the_directories_are_new_and_private(self) -> None:
         store = FakeStore(invent("JetsamEvent", 25))
@@ -363,6 +463,17 @@ class SlotTests(Scratch):
         self.assertIn("JetsamEvent 25 -> 25", self.lines[0])
         # Whatever was copied stays where it is.
         self.assertEqual(len(list((self.root / "moved" / "copy").iterdir())), 25)
+
+    def test_a_recount_with_an_uncountable_relevant_file_fails_the_run(self) -> None:
+        store = FakeStore(
+            invent("JetsamEvent", 25),
+            leftovers=["Kernarium_2026-01-01-000000_pad.crash"])
+        with self.assertRaisesRegex(
+            ios_device.DeviceError, "cannot be counted as reports after the move"
+        ):
+            self.ensure(store)
+        self.assertEqual(store.calls[-2:], ["remove", "listing"])
+        self.assertEqual(self.lines, [])
 
     def test_a_listing_that_fails_fails_the_run(self) -> None:
         with self.assertRaisesRegex(ios_device.DeviceError, "cannot list"):
@@ -420,7 +531,7 @@ class DestinationTests(Scratch):
         ):
             with self.subTest(destination=destination):
                 with self.assertRaisesRegex(
-                    ios_device.DeviceError, "inside the checkout"
+                    ios_device.DeviceError, "inside a checkout"
                 ):
                     self.ensure(destination)
 
@@ -439,13 +550,25 @@ class DestinationTests(Scratch):
         with self.assertRaisesRegex(ios_device.DeviceError, "symlink"):
             self.ensure(self.root / "link" / "x")
 
-    def test_only_components_below_the_home_directory_are_checked_there(self) -> None:
+    def test_any_checkout_is_refused_by_its_git_entry(self) -> None:
+        for marker in ("file", "directory"):
+            with self.subTest(marker):
+                other = self.root / marker
+                other.mkdir()
+                if marker == "file":
+                    (other / ".git").write_text("gitdir: elsewhere\n")
+                else:
+                    (other / ".git").mkdir()
+                with self.assertRaisesRegex(
+                    ios_device.DeviceError, "inside a checkout"
+                ):
+                    self.ensure(other / "deep" / "x")
+
+    def test_a_home_under_version_control_does_not_refuse_the_default(self) -> None:
         home = self.root / "home"
-        (home / "real").mkdir(parents=True)
-        (home / "Library").symlink_to(home / "real")
+        (home / ".git").mkdir(parents=True)
         with mock.patch.dict(os.environ, {"HOME": str(home)}):
-            with self.assertRaisesRegex(ios_device.DeviceError, "symlink"):
-                self.ensure(reports.default_destination())
+            self.ensure(reports.default_destination())
 
     def test_a_plain_directory_outside_the_checkout_is_accepted(self) -> None:
         self.ensure(self.root / "reports")
@@ -603,7 +726,7 @@ class DeviceStoreTests(Scratch):
         self.assertEqual(list((self.root / "moved" / "mover").iterdir()), [])
 
     def test_a_copy_that_differs_from_the_listing_stops_before_a_removal(self) -> None:
-        for mode in ("short", "rename", "fail"):
+        for mode in ("short", "rename", "fail", "link"):
             with self.subTest(mode):
                 root = self.root / mode
                 root.mkdir()
@@ -620,6 +743,36 @@ class DeviceStoreTests(Scratch):
             reports.ensure_report_slots(
                 reports.DeviceStore(DEVICE), PROCESSES, root / "moved",
                 emit=lambda line: None)
+
+    def test_a_parent_swapped_while_copying_fails_the_checks_before_a_removal(
+        self
+    ) -> None:
+        # The tools take path strings, so the copies follow the swapped link
+        # and land in ``elsewhere``; the checks go through the open handle of
+        # the real ``copy/``, find nothing there, and nothing is removed.
+        parent, elsewhere = self.root / "parent", self.root / "elsewhere"
+        parent.mkdir()
+        (elsewhere / "run" / "copy").mkdir(parents=True)
+        tools = FakeTools(self.root, invent("JetsamEvent", 25))
+        run_tool, swapped = reports.run_tool, []
+
+        def swapping(command, timeout, what):
+            if "copy" in command and not swapped:
+                swapped.append(True)
+                self.swap_for_link(parent, elsewhere)
+            return run_tool(command, timeout, what)
+
+        with tools.environment(), \
+                mock.patch.object(reports, "run_tool", swapping), \
+                self.assertRaisesRegex(
+                    ios_device.DeviceError,
+                    r"25 of 25 copied reports are missing.*nothing was removed"):
+            reports.ensure_report_slots(
+                reports.DeviceStore(DEVICE), PROCESSES, parent / "run",
+                emit=self.lines.append)
+        self.assertEqual(len(list((elsewhere / "run" / "copy").iterdir())), 25)
+        self.assertNotIn("idevicecrashreport", tools.steps())
+        self.assertEqual(len(tools.held()), 25)
 
     def test_a_device_that_does_not_resolve_loses_nothing(self) -> None:
         tools = FakeTools(self.root, invent("JetsamEvent", 25))
@@ -781,6 +934,12 @@ class CommandLineTests(Scratch):
 
 
 # --- every device runner calls the preflight ------------------------------
+#
+# These are structural checks on the source text, not control-flow analysis:
+# an inventory of the files that touch a device, and for each entry function
+# a check that a preflight call comes before the first call that touches the
+# device. Two shapes they miss: a preflight inside a nested function that the
+# entry never calls, and one under a loop that never runs (``while False``).
 
 # A call to one of these names touches the device (install, copy, launch) or
 # starts the process that does.
@@ -788,6 +947,11 @@ ACTIONS = frozenset({
     "install_app", "copy_to_device", "run_device_console", "Console",
     "Popen", "run", "send",
 })
+# A ``run`` or ``Popen`` of a literal command that names none of these is a
+# local tool, not a device action. ``_supervise`` is the automation host's
+# supervisor, which starts xcodebuild.
+DEVICE_TOKENS = ("devicectl", "xcodebuild", "xcrun", "idevice",
+                 "test-without-building", "_supervise")
 PREFLIGHTS = frozenset({"preflight", "check_report_slots"})
 # Each device runner and the function that is its entry point for one run.
 RUNNERS = {
@@ -808,6 +972,8 @@ DEVICE_ACTION = re.compile(
 )
 SHELL_DEVICE_ACTION = re.compile(
     r"devicectl\s+device\s+(?:process\s+launch|install)")
+# A shell script may run the standalone preflight before it acts.
+STANDALONE_PREFLIGHT = "ios_device_reports.py"
 # The support modules that define the plumbing or build on it.
 PLUMBING = {
     "tests/integration/support/ios_device.py",
@@ -816,6 +982,8 @@ PLUMBING = {
     "tests/integration/support/andarium.py",
 }
 IMPORTS_PLUMBING = {"ios_device", "ios_jit_debugger"}
+# Importing only these from the plumbing reads a type, it starts nothing.
+HARMLESS_IMPORTS = {"DeviceError"}
 
 
 def callee(node: ast.Call) -> str | None:
@@ -825,6 +993,19 @@ def callee(node: ast.Call) -> str | None:
     if isinstance(function, ast.Name):
         return function.id
     return None
+
+
+def touches_device(call: ast.Call) -> bool:
+    """Whether the call is one of the ``ACTIONS``. A ``run`` or ``Popen`` of a
+    literal command list without a device tool in it is not; a command held in
+    a variable is treated as a device action."""
+    if callee(call) not in ACTIONS:
+        return False
+    local = (callee(call) in ("run", "Popen") and call.args
+             and isinstance(call.args[0], (ast.List, ast.Tuple))
+             and not any(token in ast.unparse(call.args[0])
+                         for token in DEVICE_TOKENS))
+    return not local
 
 
 def live_calls(function: ast.AST) -> list[ast.Call]:
@@ -863,41 +1044,65 @@ def live_calls(function: ast.AST) -> list[ast.Call]:
 def runner_problems(source: str, entries: tuple[str, ...]) -> list[str]:
     """What is wrong with the runner source: for each entry function, the
     preflight must be called, and before the first call that touches the
-    device (a call of an action, or of a function of the file that makes one)."""
+    device (a call of an action, or of a function of the file that makes one).
+    A function of the file that preflights before it acts guards its callers:
+    calling it counts as the preflight."""
     module = ast.parse(source)
     functions = {node.name: node for node in ast.walk(module)
                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    helpers = {name for name, function in functions.items()
-               if any(callee(call) in ACTIONS for call in live_calls(function))}
+    calls_of = {name: live_calls(function) for name, function in functions.items()}
+    guards: dict[str, bool] = {}   # guarding function -> whether it also acts
+    helpers = set()
+    for name, calls in calls_of.items():
+        checks = [c.lineno for c in calls if callee(c) in PREFLIGHTS]
+        actions = [c.lineno for c in calls if touches_device(c)]
+        if checks and (not actions or min(checks) < min(actions)):
+            guards[name] = bool(actions)
+        elif actions:
+            helpers.add(name)
     problems = []
     for entry_name in entries:
         if entry_name not in functions:
             problems.append(f"{entry_name} does not exist")
             continue
-        calls = live_calls(functions[entry_name])
-        checks = [c.lineno for c in calls if callee(c) in PREFLIGHTS]
-        actions = [c.lineno for c in calls if callee(c) in ACTIONS | helpers]
+        calls = calls_of[entry_name]
+        checks = [c.lineno for c in calls
+                  if callee(c) in PREFLIGHTS or callee(c) in guards]
+        actions = [c.lineno for c in calls
+                   if touches_device(c) or callee(c) in helpers]
+        acting_guards = [c for c in calls if guards.get(callee(c) or "")]
         if not checks:
             problems.append(f"{entry_name} never calls the preflight")
         elif actions and min(actions) < min(checks):
             problems.append(f"{entry_name} touches the device first")
-        elif not actions:
+        elif not actions and not acting_guards:
             problems.append(f"{entry_name} never touches the device")
     return problems
 
 
 def imports_plumbing(source: str) -> bool:
-    """Whether the file imports the device plumbing, under any alias."""
+    """Whether the file imports the device plumbing, under any alias. A
+    ``from`` import of only ``HARMLESS_IMPORTS`` does not count."""
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
-            names = [alias.name for alias in node.names]
+            if any(alias.name.split(".")[0] in IMPORTS_PLUMBING
+                   for alias in node.names):
+                return True
         elif isinstance(node, ast.ImportFrom):
-            names = [node.module or ""]
-        else:
-            continue
-        if any(name.split(".")[0] in IMPORTS_PLUMBING for name in names):
-            return True
+            if ((node.module or "").split(".")[0] in IMPORTS_PLUMBING
+                    and any(alias.name not in HARMLESS_IMPORTS
+                            for alias in node.names)):
+                return True
     return False
+
+
+def shell_acts_unchecked(text: str) -> bool:
+    """Whether a shell script installs or launches on a device without the
+    standalone preflight on an earlier, uncommented line."""
+    code = "\n".join(line for line in text.splitlines()
+                     if not line.lstrip().startswith("#"))
+    found = SHELL_DEVICE_ACTION.search(code)
+    return bool(found) and STANDALONE_PREFLIGHT not in code[:found.start()]
 
 
 class RunnerStructureTests(unittest.TestCase):
@@ -930,6 +1135,46 @@ class RunnerStructureTests(unittest.TestCase):
                 self.assertEqual(runner_problems(
                     template.format(before=before, after=""), ("main",)), [])
 
+    def test_the_check_accepts_what_is_legitimate(self) -> None:
+        cases = {
+            "a local tool before the preflight": (
+                'def main():\n    subprocess.run(["python3", "check.py"])\n'
+                "    preflight(o, [])\n    ios_device.install_app(a, b, c)\n"),
+            "a helper that preflights and then installs": (
+                "def checked():\n    preflight(o, [])\n"
+                "    ios_device.install_app(a, b, c)\n"
+                "def main():\n    checked()\n"),
+            "a helper that only preflights": (
+                "def check():\n    preflight(o, [])\n"
+                "def main():\n    check()\n    ios_device.install_app(a, b, c)\n"),
+        }
+        for name, source in cases.items():
+            with self.subTest(name):
+                self.assertEqual(runner_problems(source, ("main",)), [])
+
+    def test_the_check_still_notices_what_is_not_legitimate(self) -> None:
+        cases = {
+            "a device tool run before the preflight": (
+                'def main():\n    subprocess.run(["xcrun", "devicectl"])\n'
+                "    preflight(o, [])\n"),
+            "a command in a variable run before the preflight": (
+                "def main():\n    subprocess.run(command)\n"
+                "    preflight(o, [])\n    ios_device.install_app(a, b, c)\n"),
+            "a helper that installs and then preflights": (
+                "def late():\n    ios_device.install_app(a, b, c)\n"
+                "    preflight(o, [])\n"
+                "def main():\n    late()\n"),
+            "a helper that installs without a preflight": (
+                "def bare():\n    ios_device.install_app(a, b, c)\n"
+                "def main():\n    preflight(o, [])\n    bare()\n"
+                "def other():\n    bare()\n"),
+        }
+        for name, source in cases.items():
+            entries = ("other",) if name.startswith("a helper that installs "
+                                                    "without") else ("main",)
+            with self.subTest(name):
+                self.assertNotEqual(runner_problems(source, entries), [])
+
     def test_every_file_that_launches_or_installs_is_a_listed_runner(self) -> None:
         found = set()
         for root in ("tests/perf", "tests/integration", "Kernarium/scripts",
@@ -948,18 +1193,35 @@ class RunnerStructureTests(unittest.TestCase):
 
     def test_the_discovery_sees_an_aliased_import(self) -> None:
         for source in ("import ios_device as d\n", "from ios_device import install_app as i\n",
-                       "import ios_jit_debugger\n", "from ios_device import Console\n"):
+                       "import ios_jit_debugger\n", "from ios_device import Console\n",
+                       "from ios_device import DeviceError, install_app\n"):
             with self.subTest(source):
                 self.assertTrue(imports_plumbing(source))
-        self.assertFalse(imports_plumbing("import json\n"))
+        for source in ("import json\n", "from ios_device import DeviceError\n"):
+            with self.subTest(source):
+                self.assertFalse(imports_plumbing(source))
 
-    def test_no_shell_script_launches_or_installs_on_a_device(self) -> None:
+    def test_a_shell_script_may_run_the_standalone_preflight_first(self) -> None:
+        action = ('xcrun devicectl device process launch --device "$D" '
+                  "com.example.Orchid\n")
+        check = ('python3 tests/integration/support/ios_device_reports.py '
+                 '--device "$D" || exit\n')
+        self.assertTrue(shell_acts_unchecked(action))
+        self.assertTrue(shell_acts_unchecked(action + check))
+        self.assertTrue(shell_acts_unchecked("# " + check + action))
+        self.assertFalse(shell_acts_unchecked(check + action))
+        self.assertFalse(shell_acts_unchecked("echo hello\n"))
+
+    def test_no_shell_script_launches_or_installs_unchecked(self) -> None:
         found = []
         for root in ("tests", "Kernarium/scripts", "Andarium/scripts", "scripts"):
             for path in (REPOSITORY / root).rglob("*.sh"):
-                if SHELL_DEVICE_ACTION.search(path.read_text(encoding="utf-8")):
+                if shell_acts_unchecked(path.read_text(encoding="utf-8")):
                     found.append(path.relative_to(REPOSITORY).as_posix())
-        self.assertEqual(found, [], "a shell script cannot call the preflight")
+        self.assertEqual(
+            found, [],
+            "a shell script that installs or launches must run "
+            f"{STANDALONE_PREFLIGHT} first")
 
     def test_every_runner_takes_the_two_report_options(self) -> None:
         for relative in RUNNERS:

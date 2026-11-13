@@ -287,9 +287,12 @@ and Kernarium's device runners keep Linux; both share
 fakes, so no device is needed. A device run starts with at least five free
 slots of JetsamEvent reports and of each tested process's crash reports, since
 iOS drops the next report once a kind is full: otherwise the
-[preflight](../tests/integration/support/ios_device_reports.py) moves the
-device's reports to the Mac, outside the checkout, and fails the run if the
-slots stay short. Android recovery qualification uses a fresh
+[preflight](../tests/integration/support/ios_device_reports.py) copies the
+reports listed at the start to a new directory on the Mac, outside every
+checkout, checks each copy by type and size (not byte for byte), and only then
+empties the store, failing the run if the slots stay short. A report that
+arrives after that listing is moved without a checked copy, into the mover's
+own directory. Android recovery qualification uses a fresh
 disposable bundle with `TEST_RUNNER_KERNARIUM_ANDROID_BOOT_MODE=recovery`;
 never run wipe checks against an existing user bundle.
 

@@ -134,7 +134,8 @@ def info_files(arguments: list[str]) -> int:
     if override.exists():
         emit_json(arguments, override.read_text())
         return 0
-    files = [{"relativePath": name, "resources": {"isDirectory": False},
+    files = [{"relativePath": name,
+              "resources": {"isDirectory": False, "isSymbolicLink": False},
               "metadata": {"size": len(name.encode())}}
              for name in crash_logs()]
     emit_json(arguments, json.dumps({"result": {"files": files}}))
@@ -169,6 +170,9 @@ def copy_from(arguments: list[str]) -> int:
         content = content[:-1]
     if mode == "rename":
         target += ".renamed"
+    if mode == "link":
+        os.symlink("missing", target)
+        return 0
     pathlib.Path(target).write_bytes(content)
     return 0
 
