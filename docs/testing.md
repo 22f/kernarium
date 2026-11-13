@@ -284,7 +284,15 @@ On a connected iOS device, Android runs go through Andarium
 (`tests/perf/run_ios_device_android.py`, [`Andarium/README.md`](../Andarium/README.md#automation))
 and Kernarium's device runners keep Linux; both share
 `tests/integration/support/ios_device.py`, and their tooling tests run against
-fakes, so no device is needed. Android recovery qualification uses a fresh
+fakes, so no device is needed. A device run starts with at least five free
+slots of JetsamEvent reports and of each tested process's crash reports, since
+iOS drops the next report once a kind is full: otherwise the
+[preflight](../tests/integration/support/ios_device_reports.py) copies the
+reports listed at the start to a new directory on the Mac, outside every
+checkout, checks each copy by type and size (not byte for byte), and only then
+empties the store, failing the run if the slots stay short. A report that
+arrives after that listing is moved without a checked copy, into the mover's
+own directory. Android recovery qualification uses a fresh
 disposable bundle with `TEST_RUNNER_KERNARIUM_ANDROID_BOOT_MODE=recovery`;
 never run wipe checks against an existing user bundle.
 
@@ -490,7 +498,10 @@ needs a debugger, so `run_ios_device_android.py --engine jit` is its lane.
 Unattended device automation goes through the long-lived `KernariumAutomation`
 UI-test host, because each new XCTest session on a device with a passcode needs
 the owner's approval. `Kernarium/scripts/ipad-automation.py --help` has its
-commands and failure modes. Keep all automation code in the test targets.
+commands and failure modes. Keep all automation code in the test targets. The
+host's test run records no screen video and keeps no attachments (the scheme
+sets it, and `start` refuses a built run file that does not), and its result
+bundle lives under the state directory, not in DerivedData.
 
 ### Edge gestures (device only)
 
