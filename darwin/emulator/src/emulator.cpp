@@ -745,7 +745,7 @@ public:
 		bool force = false) noexcept
 	{
 		using ::uml::device::GuestRequest;
-		const bool wanted = trim_wanted_by_app_ || trim_wanted_by_pressure_;
+		const bool wanted = trim_wanted_by_app_ || trim_wanted_by_pressure_.load();
 		if (wanted == trim_applied_ && !force && !trim_requested_by_app_)
 			return GuestRequest::done;
 		::uml::runtime::note_host_wake();
@@ -785,6 +785,12 @@ public:
 	{
 		using ::uml::runtime::TrimKind;
 		using ::uml::runtime::TrimOutcome;
+		/* What the response last wanted of the trimmer is recorded before the
+		 * lock is tried, so that a request that finds the guest held by a
+		 * lifecycle call for longer than its retries last still reaches the
+		 * guest: the resume and any later call settle the difference. */
+		if (kind != TrimKind::once)
+			trim_wanted_by_pressure_.store(kind == TrimKind::gradual_on);
 		std::unique_lock lock{guest_lifecycle_mutex_, std::try_to_lock};
 		if (!lock.owns_lock())
 			return TrimOutcome::busy;
@@ -794,7 +800,7 @@ public:
 		if (lifecycle_calls_.load() != 0U)
 			return TrimOutcome::busy;
 		if (kind != TrimKind::once)
-			return set_trimming_for_pressure(kind == TrimKind::gradual_on);
+			return set_trimming_for_pressure();
 		if (guest_suspension_ != ::uml::device::GuestSuspension::none)
 			return TrimOutcome::quiesced;
 		::uml::runtime::note_host_wake();
@@ -810,11 +816,10 @@ public:
 	/* The guest's periodic trimmer for the response: it stays on while the
 	 * application wants it. The request is sent and not waited for, as the
 	 * lifecycle mutex is held. Under the lifecycle mutex. */
-	[[nodiscard]] ::uml::runtime::TrimOutcome set_trimming_for_pressure(
-		bool wanted) noexcept
+	[[nodiscard]] ::uml::runtime::TrimOutcome set_trimming_for_pressure() noexcept
 	{
 		using ::uml::runtime::TrimOutcome;
-		trim_wanted_by_pressure_ = wanted;
+		/* The wish was recorded by the caller, before it took the lock. */
 		if (guest_suspension_ != ::uml::device::GuestSuspension::none)
 			return TrimOutcome::quiesced;
 		return trim_outcome_of(apply_trimming(false));
@@ -1057,7 +1062,7 @@ private:
 		/* The next kernel starts with its trimmer off, and nothing wants it
 		 * on. */
 		trim_wanted_by_app_ = false;
-		trim_wanted_by_pressure_ = false;
+		trim_wanted_by_pressure_.store(false);
 		trim_applied_ = false;
 		trim_requested_by_app_ = false;
 	}
@@ -1353,7 +1358,8 @@ private:
 	 * request is deferred (the guest is quiesced) or did not go through.
 	 * Guarded by the lifecycle mutex. */
 	bool trim_wanted_by_app_{};
-	bool trim_wanted_by_pressure_{};
+	/* Atomic: the response records its wish before it tries the mutex. */
+	std::atomic<bool> trim_wanted_by_pressure_{false};
 	bool trim_applied_{};
 	/* The application asked for a change while the guest was quiesced, and the
 	 * guest has not been told since: the resume sends it even when it equals
@@ -1410,6 +1416,13 @@ void use_hibernation(uml_emulator *emulator,
 bool kernel_image_borrowed(const uml_emulator *emulator) noexcept
 {
 	return emulator->implementation.kernel_image_borrowed();
+}
+
+::uml::runtime::TrimOutcome trim_for_memory_pressure(
+	uml_emulator *emulator) noexcept
+{
+	return emulator->implementation.trim_for_memory_pressure(
+		::uml::runtime::TrimKind::once);
 }
 
 ::uml::runtime::TrimOutcome trim_for_memory_pressure(

@@ -2,7 +2,6 @@
 #pragma once
 
 #if UML_EMULATOR_TESTING
-#include "memory_pressure_response.hpp"
 #include "uml/emulator.h"
 
 #include <chrono>
@@ -14,6 +13,8 @@
 namespace uml::runtime {
 class HibernationSteps;
 enum class GuestShutdownKind : int;
+enum class TrimKind : std::uint8_t;
+enum class TrimOutcome : std::uint8_t;
 }
 
 namespace uml::emulator::testing {
@@ -97,10 +98,13 @@ void report_guest_shutdown(::uml::runtime::GuestShutdownKind kind,
 
 /* The guest page-cache request of `kind` the memory pressure response asks of
  * `emulator`: what the response's own thread would call when the system
- * reports memory pressure. A test variant never listens to the system. */
+ * reports memory pressure (the one without a kind is the trim of all the
+ * cache). A test variant never listens to the system. Only a test that
+ * includes memory_pressure_response.hpp can name a kind or read an outcome. */
 [[nodiscard]] ::uml::runtime::TrimOutcome trim_for_memory_pressure(
-	uml_emulator *emulator,
-	::uml::runtime::TrimKind kind = ::uml::runtime::TrimKind::once) noexcept;
+	uml_emulator *emulator) noexcept;
+[[nodiscard]] ::uml::runtime::TrimOutcome trim_for_memory_pressure(
+	uml_emulator *emulator, ::uml::runtime::TrimKind kind) noexcept;
 
 /* What the handle forgets of its guest when the run that boots it again
  * begins (a restart): a suspension, the wishes for the guest's page-cache
