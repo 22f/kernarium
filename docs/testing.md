@@ -344,9 +344,11 @@ the watcher's start and stop on a fake path source);
 `andarium-thermal-protocol`, `andarium-thermal-levels` and
 `andarium-gamepad-protocol` (unit), `andarium-stage-system-image`,
 `andarium-capture-screens` and `andarium-localization` (tooling) cover the
-motion wire format (its device-orientation records and control frames against
-the golden frames in `tests/unit/andarium/fixtures`, which `andarium-core` reads
-too) and what the orientation sensor reports and when (`andarium-core` also
+motion wire format (its device-orientation and magnetic field records and its
+control frames, "ANC3" included, against the golden frames in
+`tests/unit/andarium/fixtures`, which `andarium-core` reads too, and which
+sensors the sub-HAL lists and which records it takes for each launch property)
+and what the orientation sensor reports and when (`andarium-core` also
 covers the magnetometer: its records, the control frame that asks for them, the
 status mapping, the failure it keeps for the run, the field's source (its
 watchdog, movement notice and stale callbacks, on a fake Core Motion and timer)
@@ -769,15 +771,33 @@ while the guest is busy, as the host does) and by the guest's own on one stream
 each, and the host closes no stream by a reset.
 `android-wifi-network` (integration) registers when
 `UML_ANDROID_WIFI_NETWORK_RELEASE` names the release: the guest's one Wi-Fi
-network stays enabled and joined while the internet checks fail, joins again
-after a suspend and after a restart, and the boot script runs without SELinux
-denials; a joined network keeps its metered and Auto-connect settings, a
-forgotten one stays forgotten and Wi-Fi that is off stays off.
-`UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE` adds the upgrade section: a data
-disk on which that release left the network disabled is repaired once by the
-first boot of the release under test, and the next boot leaves it alone.
-`android17-wifi-network-runner` (tooling) runs its parsers, and the upgrade
-section's checks against scripted answers, without a guest.
+network stays enabled, joined and validated while the internet checks fail, and
+only Android's Wi-Fi mark shows the failed check in Settings and in the status
+bar, also when a sign-in or block page that the runner's server gives the probes
+answers them. On one network that is never replaced or validated again, which
+is validated while its first check is still unanswered (the server holds that
+answer), the warning shows with no other action, follows the server from a
+failing check to a passing one and back, and returns when a forced
+re-evaluation checks the network; a strict private DNS name is not probed again
+for each failed check, and each forced re-evaluation of a network whose strict
+name fails adds its own log line, leaves the network unvalidated with its
+private DNS broken and runs no check. A guest of the
+release under test streams its log from the start of each boot to a host file,
+confirmed carrying before a restart or suspend; crashes and ANRs of
+NetworkStack, SystemUI and Settings, and illegal instructions, are read from
+the whole stream and fail the run, in the section whose window holds them or in
+none.
+The network joins again after a suspend and after a restart, and the boot script
+runs without SELinux denials; a joined network keeps its metered and
+Auto-connect settings, a forgotten one stays forgotten and Wi-Fi that is off
+stays off.
+`UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE` (a `;`-separated list) adds the
+upgrade sections: a data disk on which a release left the network disabled is
+repaired once by the first boot of the release under test and the next boot
+leaves it alone, a disk of a release that never disables the network is left
+alone, and a failed check shows only the warning on both.
+`android17-wifi-network-runner` (tooling) runs its parsers, the host's server
+and the sections' checks against scripted and simulated answers, without a guest.
 `android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
 names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's
@@ -808,6 +828,14 @@ postures. The runner needs a JDK, which builds and signs the probe
 application.
 `android17-orientation-runner` (tooling) runs its wire, parsers, rotation rules,
 host and probe manifest without a guest.
+`android-compass` and `android-compass-absent` (integration) register when
+`UML_ANDROID_COMPASS_RELEASE` names the release and
+`UML_ANDROID_COMPASS_PROBE_APK` the motion probe (built by
+`tests/integration/android/motion/build-apk.sh`): the runner plays the host over
+a vsock forward and qualifies the magnetometer and the compass feature a release
+declares when the launch says the host has one, and that it declares neither
+without. `android17-compass-runner` (tooling) runs its wire, oracle and parsers
+without a guest.
 `android-gamepad` (integration) registers when `UML_ANDROID_GAMEPAD_RELEASE`
 names the release and `UML_ANDROID_GAMEPAD_PROBE_APK` the APK of
 [`gamepad/build-apk.sh`](../tests/integration/android/gamepad/README.md): the
@@ -823,8 +851,13 @@ names the release: the runner boots it with the launcher's synthetic camera
 SKU (`--layout auto` has the launcher compose it, as the iOS runtime does, with
 RAW once `--calibration-dir` holds colour data from an earlier session), and
 checks what Android lists (features, media profiles, camera IDs), one preview
-frame and one still of the camera application, and, in a blocked session, that
-the same cameras give black frames and no still.
+frame and one still of the camera application, photo-to-video switches
+(`--switch-rounds`, four by default; each from a freshly started application
+with capture running and the window animations off, and each seen: the photo
+activity's pause, the video activity's resume and capture after them) that
+refuse no capture request and draw no SELinux denial of the camera HAL's use of
+the display composer's file descriptors, and, in a blocked session, that the
+same cameras give black frames and no still.
 `android17-camera-runner` (tooling) runs its parsers and the expectations of
 every layout without a guest, and `android17-camera-layouts` (tooling) the
 layout set, its fallback order and the generated files.
