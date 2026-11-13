@@ -101,6 +101,10 @@ void report_guest_shutdown(::uml::runtime::GuestShutdownKind kind,
 [[nodiscard]] ::uml::runtime::TrimOutcome trim_for_memory_pressure(
 	uml_emulator *emulator) noexcept;
 
+/* The lifecycle calls on `emulator` that are waiting for its lifecycle mutex
+ * or hold it. */
+[[nodiscard]] unsigned int lifecycle_calls(const uml_emulator *emulator) noexcept;
+
 /* Replaces the clock the lifecycle calls count their waits by (the quiesce's
  * trim wait, from its call); null restores the steady clock. */
 void set_lifecycle_clock(std::chrono::steady_clock::time_point (*now)()

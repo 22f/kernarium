@@ -1315,6 +1315,148 @@ void aQuiesceBesideAPressureTrimWaitsForWhatIsLeft()
 		"the quiesce waited its full wait after the pressure trim");
 }
 
+/* The mutex has no queue, so a pressure trim that tries it as a waiting
+ * quiesce is woken could take it first, and every later response could do
+ * the same: a warning then a critical level, each unanswered, held the
+ * quiesce for 6 s. A lifecycle call is counted before it waits, and a
+ * pressure trim that finds one gives way. Here the first pressure trim is
+ * in the guest's hands and the quiesce waits; when it ends, pressure trims
+ * come as fast as the thread can make them, and none may reach the guest
+ * before the quiesce is done. */
+void aPressureResponseCannotOvertakeAWaitingQuiesce()
+{
+	const auto emulator = makeEmulator();
+	FakeGuestConsole console;
+	const ManualClock clock;
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool trimming {false};
+	bool released {false};
+	console.onRequest = [&](const std::string &command) {
+		if (command != "trim once")
+			return;
+		std::unique_lock lock {mutex};
+		if (trimming)
+			return;
+		trimming = true;
+		changed.notify_all();
+		(void)changed.wait_for(lock, std::chrono::seconds {10},
+			[&] { return released; });
+	};
+	std::atomic<bool> quiesced {false};
+	std::size_t reachedTheGuest {0};
+	std::chrono::milliseconds took {};
+	const auto heard = console.requests(2U, [&] {
+		std::thread first {[&] {
+			(void)uml::emulator::testing::trim_for_memory_pressure(
+				emulator.get());
+		}};
+		{
+			std::unique_lock lock {mutex};
+			require(changed.wait_for(lock, std::chrono::seconds {10},
+				[&] { return trimming; }),
+				"the pressure trim never reached the guest");
+		}
+		const auto called = std::chrono::steady_clock::now();
+		std::thread quiescing {[&] {
+			require(uml_emulator_quiesce(emulator.get()) == 0);
+			took = std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now() - called);
+			quiesced = true;
+		}};
+		require(waitUntil([&] {
+			return uml::emulator::testing::lifecycle_calls(emulator.get()) >= 1U
+				&& manualReads.load() >= 1;
+		}, std::chrono::seconds {10}), "the quiesce never began to wait");
+		manualMilliseconds += 3000;
+		{
+			const std::lock_guard lock {mutex};
+			released = true;
+		}
+		changed.notify_all();
+		/* Later responses, one after another, from this thread. */
+		const auto until = std::chrono::steady_clock::now() +
+			std::chrono::seconds {10};
+		while (!quiesced && std::chrono::steady_clock::now() < until) {
+			const auto outcome =
+				uml::emulator::testing::trim_for_memory_pressure(
+					emulator.get());
+			if (outcome != ::uml::runtime::TrimOutcome::busy &&
+			    outcome != ::uml::runtime::TrimOutcome::quiesced)
+				++reachedTheGuest;
+		}
+		first.join();
+		quiescing.join();
+	});
+	require(reachedTheGuest == 0,
+		"a pressure trim took the mutex ahead of a waiting quiesce");
+	require(heard == Requests {"trim once", "suspend"},
+		"a pressure trim reached the guest ahead of a waiting quiesce");
+	require(took < std::chrono::seconds {3},
+		"the quiesce waited behind later pressure trims");
+}
+
+/* Time spent behind another lifecycle call is not a pressure trim: the guest
+ * was not asked, so the quiesce still asks it, as the API promises, with its
+ * reply wait spent: the request goes out and its reply is not waited for. The
+ * resume here waits for the guest's replies to its wake and its trimming
+ * change, and a quiesce called meanwhile queues behind it. */
+void aQuiesceBesideAResumeStillSendsItsTrim()
+{
+	const auto emulator = makeEmulator();
+	FakeGuestConsole console;
+	const ManualClock clock;
+	/* The first quiesce is answered; the one beside the resume is not, as the
+	 * reply to a request that is not waited for is not heard. */
+	console.trimsAnsweredBeforeSilence = 1;
+	require(console.requests(2U, [&] {
+		require(uml_emulator_quiesce(emulator.get()) == 0);
+	}) == Requests {"trim once", "suspend"});
+	/* A trimming change asked of a quiesced guest waits for the resume. */
+	require(uml_emulator_set_page_cache_trimming(emulator.get(), 0) ==
+		UML_EMULATOR_OK);
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool waking {false};
+	bool released {false};
+	console.onRequest = [&](const std::string &command) {
+		if (command != "wake")
+			return;
+		std::unique_lock lock {mutex};
+		waking = true;
+		changed.notify_all();
+		(void)changed.wait_for(lock, std::chrono::seconds {10},
+			[&] { return released; });
+	};
+	manualReads = 0;
+	const auto heard = console.requests(4U, [&] {
+		std::thread resuming {[&] { uml_emulator_resume(emulator.get()); }};
+		{
+			std::unique_lock lock {mutex};
+			require(changed.wait_for(lock, std::chrono::seconds {10},
+				[&] { return waking; }), "the resume never woke the guest");
+		}
+		std::thread quiescing {[&] {
+			require(uml_emulator_quiesce(emulator.get()) == 0);
+		}};
+		require(waitUntil([&] {
+			return uml::emulator::testing::lifecycle_calls(emulator.get()) >= 2U
+				&& manualReads.load() >= 1;
+		}, std::chrono::seconds {10}), "the quiesce never began to wait");
+		/* The resume's replies took the whole of the trim's wait. */
+		manualMilliseconds += 3200;
+		{
+			const std::lock_guard lock {mutex};
+			released = true;
+		}
+		changed.notify_all();
+		resuming.join();
+		quiescing.join();
+	});
+	require(heard == Requests {"wake", "trim off", "trim once", "suspend"},
+		"the quiesce left the guest's page cache untrimmed");
+}
+
 /* With nothing ahead of it the quiesce's trim has the whole wait. */
 void aQuiesceWithNothingAheadWaitsTheWholeTrimWait()
 {
@@ -1400,6 +1542,28 @@ int main(int argc, char **argv)
 		aGuestInsideTheRegistryDoesNotWedgeTheSuspension();
 		return EXIT_SUCCESS;
 	}
+	/* The quiesce's trim cases, each alone, for a change to the code they
+	 * guard to show which of them it breaks. */
+	if (selected == "quiesce-spent-wait") {
+		aQuiesceBesideAPressureTrimThatSpentTheWaitSendsNoSecondTrim();
+		return EXIT_SUCCESS;
+	}
+	if (selected == "quiesce-remaining-wait") {
+		aQuiesceBesideAPressureTrimWaitsForWhatIsLeft();
+		return EXIT_SUCCESS;
+	}
+	if (selected == "quiesce-whole-wait") {
+		aQuiesceWithNothingAheadWaitsTheWholeTrimWait();
+		return EXIT_SUCCESS;
+	}
+	if (selected == "pressure-overtake") {
+		aPressureResponseCannotOvertakeAWaitingQuiesce();
+		return EXIT_SUCCESS;
+	}
+	if (selected == "quiesce-beside-resume") {
+		aQuiesceBesideAResumeStillSendsItsTrim();
+		return EXIT_SUCCESS;
+	}
 	if (!selected.empty())
 		return EXIT_FAILURE;
 	const auto emulator = makeEmulator();
@@ -1432,5 +1596,7 @@ int main(int argc, char **argv)
 	aQuiesceBesideAPressureTrimThatSpentTheWaitSendsNoSecondTrim();
 	aQuiesceBesideAPressureTrimWaitsForWhatIsLeft();
 	aQuiesceWithNothingAheadWaitsTheWholeTrimWait();
+	aPressureResponseCannotOvertakeAWaitingQuiesce();
+	aQuiesceBesideAResumeStillSendsItsTrim();
 	return EXIT_SUCCESS;
 }

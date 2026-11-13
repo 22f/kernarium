@@ -93,9 +93,10 @@ and asks the guest for one page-cache trim, which unwires those pages
 trim is skipped for a guest the host has quiesced and for one with no console;
 a trim that meets another lifecycle call of the guest is retried up to four
 times, a second apart, until a response of its own or the normal level takes its
-place. A quiesce that queues behind a pressure trim counts its own trim wait
-from its call, and sends none when the trim used it up. A trim wakes a guest
-that suspended itself. A warning starts at most one
+place. A lifecycle call (quiesce, resume, stop) goes before a pressure trim,
+which gives way and is retried. A quiesce counts its trim's reply wait from its
+call, and omits its own trim only when a pressure trim reached the guest while
+it waited and used the wait up. A trim wakes a guest that suspended itself. A warning starts at most one
 response per 30 s of awake time (`CLOCK_UPTIME_RAW`) counted from the start of
 the last response, a critical level always starts one, and none starts while one
 runs. macOS and iOS, and both applications, get it through the runtime. Each
