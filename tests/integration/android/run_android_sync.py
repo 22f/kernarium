@@ -109,9 +109,6 @@ def run_checks(guest: "base.Guest", image: pathlib.Path, request: str) -> None:
     if not error or text != "sysrq s disabled":
         raise Failure(f"'sysrq s' ended with {'an error' if error else 'a success'} {text!r}: the guest's "
                       "SysRq is on, and the run proves nothing about a guest that needs no SysRq")
-    # Only the console's sync confirms the storage: a suspend syncs on its
-    # way only while the guest's sync_on_suspend is set. Recorded, not required.
-    print("guest /sys/power/sync_on_suspend:", guest.shell("cat /sys/power/sync_on_suspend").strip())
     # The write-back cannot be held off, so a file that the guest's flusher
     # wrote before the control looked is written again, as another file.
     for byte in PAYLOAD_BYTES_BY_ATTEMPT:
