@@ -4284,28 +4284,6 @@
         }
       }
     },
-    "iOS asked Andarium to free memory. The virtual machine may slow down for a moment." : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "iOSがAndariumにメモリの解放を要求しました。仮想マシンが一時的に遅くなることがあります。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "iOS要求Andarium释放内存。虚拟机可能会短暂变慢。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "iOS要求Andarium釋出記憶體。虛擬機器可能會暫時變慢。"
-          }
-        }
-      }
-    },
     "iOS closed Andarium" : {
       "localizations" : {
         "ja" : {
@@ -4438,24 +4416,25 @@
         }
       }
     },
-    "iOS may close Andarium. Close other apps, or shut down the virtual machine and lower its memory with Edit under Virtual machine." : {
+    "iOS may close Andarium." : {
+      "comment" : "Text of the notice shown when iOS is critically short of memory: iOS may end the Andarium app. Andarium is the app's name.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "iOSによってAndariumが終了される可能性があります。他のアプリを閉じるか、仮想マシンをシャットダウンしてから、“仮想マシン”の“編集”でメモリを減らしてください。"
+            "value" : "iOSによってAndariumが終了される可能性があります。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "iOS可能会关闭Andarium。请关闭其他应用，或先将虚拟机关机，再使用“虚拟机”下的“编辑”降低其内存。"
+            "value" : "iOS可能会关闭Andarium。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "iOS可能會關閉Andarium。請關閉其他應用程式，或先將虛擬機器關機，再使用「虛擬機器」下的「編輯」降低其記憶體。"
+            "value" : "iOS可能會關閉Andarium。"
           }
         }
       }
@@ -4908,6 +4887,7 @@
       }
     },
     "Memory is critically low" : {
+      "comment" : "Title of the notice shown over the running guest when iOS is critically short of memory.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -4925,28 +4905,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "記憶體嚴重不足"
-          }
-        }
-      }
-    },
-    "Memory is low" : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "メモリが不足しています"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "内存不足"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "記憶體不足"
           }
         }
       }

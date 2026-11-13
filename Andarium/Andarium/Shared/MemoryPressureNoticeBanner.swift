@@ -3,13 +3,10 @@
 import AndariumCore
 import SwiftUI
 
-/// The words that iOS is short of memory over the top of the session, in the
-/// shape of the camera notice: a warning says iOS asked Andarium to free memory
-/// and the virtual machine may slow down for a moment, and critical says iOS may
-/// close Andarium and what to do about it. It takes touches only where it is
-/// drawn, and it goes when the person dismisses it or the pressure has passed.
+/// The words that iOS may close Andarium, over the top of the session, in the
+/// shape of the camera notice. It takes touches only where it is drawn, and it
+/// goes when the person dismisses it or the level has left critical.
 struct MemoryPressureNoticeBanner: View {
-    let notice: MemoryPressureNotice
     let dismiss: () -> Void
 
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -33,21 +30,16 @@ struct MemoryPressureNoticeBanner: View {
         .padding(.horizontal, 24)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("memory-notice")
+        // A VoiceOver user is told when it appears, as the screen does not
+        // change otherwise.
+        .onAppear { AccessibilityNotification.Announcement(MemoryPressureWords.announcement).post() }
     }
 
-    /// Critical is red, as the memory ruler's line about iOS closing Andarium
-    /// is; a warning is orange like the other notices.
-    private var tint: Color {
-        switch notice {
-        case .low: .orange
-        case .critical: .red
-        }
-    }
-
+    /// Red, as the memory ruler's line about iOS closing Andarium is.
     private var icon: some View {
         Image(systemName: "memorychip.fill")
             .font(.title3)
-            .foregroundStyle(tint)
+            .foregroundStyle(.red)
             .accessibilityHidden(true)
     }
 
@@ -59,13 +51,13 @@ struct MemoryPressureNoticeBanner: View {
     }
 
     private func titleText(oneLine: Bool) -> some View {
-        Text(MemoryPressureWords.title(for: notice))
+        Text(MemoryPressureWords.title)
             .font(.subheadline.weight(.semibold))
             .fixedSize(horizontal: oneLine, vertical: true)
     }
 
     private func detailText(oneLine: Bool) -> some View {
-        Text(MemoryPressureWords.detail(for: notice).keepingTogether)
+        Text(MemoryPressureWords.detail.keepingTogether)
             .font(.footnote)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: oneLine, vertical: true)

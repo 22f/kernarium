@@ -987,23 +987,32 @@ struct FoldSessionHostingTests {
 
     // MARK: The memory notice
 
-    /// The notice that iOS is short of memory hangs from the top of the pose's
-    /// HUD with the other notices: inside it, inside the window, and clear of
-    /// the fold while the screen is bent.
+    /// The notice that iOS is critically short of memory hangs from the top of
+    /// the pose's HUD with the other notices: its words and its button inside
+    /// the HUD, inside the window, and clear of the fold while the screen is
+    /// bent.
     @Test(arguments: Pose.allCases)
     func theMemoryNoticeIsInTheHudOfEveryPose(_ pose: Pose) async throws {
         let rig = try await Rig(pose, test: self)
         defer { rig.end() }
         let plan = try #require(rig.model.sessionPlan, "\(pose): no plan")
-        rig.model.memoryPressureChanged(.warning)
-        var found: CGRect?
+        rig.model.memoryPressureChanged(.critical)
+        var parts: (title: CGRect, detail: CGRect, dismiss: CGRect)?
         _ = await eventually {
             rig.controller.view.layoutIfNeeded()
-            found = rig.labelled().first { $0.label == MemoryPressureWords.lowTitle }?.frame
-            return found != nil
+            let labelled = rig.labelled()
+            guard let title = labelled.first(where: { $0.label == MemoryPressureWords.title })?.frame,
+                let detail = labelled.first(where: { $0.label == MemoryPressureWords.detail })?.frame,
+                // The notice is the last of the column: its button is the lowest Dismiss.
+                let dismiss = labelled.filter({ $0.label == NetworkWords.dismissLabel }).map(\.frame)
+                    .max(by: { $0.minY < $1.minY })
+            else { return false }
+            parts = (title, detail, dismiss)
+            return true
         }
-        let frame = try #require(
-            found, "\(pose): the notice was not found: is application accessibility on in this Simulator?")
+        let found = try #require(
+            parts, "\(pose): the notice was not found: is application accessibility on in this Simulator?")
+        let frame = found.title.union(found.detail).union(found.dismiss)
         #expect(
             plan.hud.insetBy(dx: -0.5, dy: -0.5).contains(frame), "\(pose): \(frame) is not in the HUD \(plan.hud)")
         #expect(pose.reading.window.contains(frame), "\(pose): \(frame) is not in the window")

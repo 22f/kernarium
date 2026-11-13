@@ -6,7 +6,7 @@ import Testing
 import UIKit
 @testable import Andarium
 
-/// Holds the memory notice's stay after the pressure has passed until a test
+/// Holds the memory notice's stay after the level has left critical until a test
 /// ends it, and gives the model the clock a test moves by hand.
 @MainActor
 final class MemoryNoticePace {
@@ -74,147 +74,192 @@ private func makeModel(phase: Phase? = .running(.normal)) -> AppModel {
 
 /// What iOS says about memory reaches the session: when the notice is up, how
 /// it follows the levels, and what a dismissal holds, on the model the screens
-/// read.
+/// read. Only the critical level has a notice.
 @MainActor
 struct MemoryPressureModelTests {
     @Test func theRuntimesLevelsAreTheApplicationsWords() {
         #expect(LiveRuntime.memoryPressureLevel(runtimeLevel: Int32(KERNARIUM_RUNTIME_MEMORY_PRESSURE_NORMAL)) == .normal)
         #expect(LiveRuntime.memoryPressureLevel(runtimeLevel: Int32(KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING)) == .warning)
         #expect(LiveRuntime.memoryPressureLevel(runtimeLevel: Int32(KERNARIUM_RUNTIME_MEMORY_PRESSURE_CRITICAL)) == .critical)
-        #expect(LiveRuntime.memoryPressureLevel(runtimeLevel: 99) == .normal, "a level it does not know raises nothing")
+        #expect(LiveRuntime.memoryPressureLevel(runtimeLevel: 99) == nil, "a level it does not know is ignored, not read as normal")
     }
 
     @Test func theNoticeIsUpOnlyWhileASessionIsOnScreen() {
         let model = makeModel(phase: nil)
         let pace = MemoryNoticePace()
         pace.attach(to: model)
-        model.memoryPressureChanged(.warning)
+        model.memoryPressureChanged(.critical)
         #expect(model.phase == .home)
-        #expect(model.memoryNoticeKind == nil, "not on Home")
+        #expect(!model.memoryNoticeShowing, "not on Home")
         model.phase = .booting(.normal)
-        #expect(model.memoryNoticeKind == nil, "not while the boot screen shows")
+        #expect(!model.memoryNoticeShowing, "not while the boot screen shows")
         model.phase = .running(.normal)
-        #expect(model.memoryNoticeKind == .low, "the pressure lasts: the session shows it")
+        #expect(model.memoryNoticeShowing, "the level is still critical: the session shows it")
         model.applicationActive = false
-        #expect(model.memoryNoticeKind == nil, "not in the background")
+        #expect(!model.memoryNoticeShowing, "not in the background")
         model.applicationActive = true
-        #expect(model.memoryNoticeKind == .low)
+        #expect(model.memoryNoticeShowing)
         model.phase = .failed
-        #expect(model.memoryNoticeKind == nil)
+        #expect(!model.memoryNoticeShowing)
+    }
+
+    @Test func anEpisodeThatEndedOutOfSightShowsNothingOnReturn() {
+        let model = makeModel(phase: nil)
+        model.memoryPressureChanged(.critical)
+        model.memoryPressureChanged(.warning)
+        model.phase = .running(.normal)
+        #expect(!model.memoryNoticeShowing, "the level is no longer critical when the session is back")
     }
 
     @Test func aRecoverySessionShowsItToo() {
         let model = makeModel(phase: .running(.recovery))
         model.memoryPressureChanged(.critical)
-        #expect(model.memoryNoticeKind == .critical)
-    }
-
-    @Test func aWarningThenCriticalIsOneNoticeThatChangesItsWords() {
-        let model = makeModel()
-        model.memoryPressureChanged(.warning)
-        #expect(model.memoryNoticeKind == .low)
-        model.memoryPressureChanged(.warning)
-        #expect(model.memoryNoticeKind == .low, "a repeat changes nothing")
-        model.memoryPressureChanged(.critical)
-        #expect(model.memoryNoticeKind == .critical)
         #expect(model.memoryNoticeShowing)
     }
 
-    @Test func theNoticeStaysWhileThePressureLastsAndGoesAfterItsReturnToNormal() async {
+    @Test func aWarningShowsNoNotice() {
+        let model = makeModel()
+        model.memoryPressureChanged(.warning)
+        #expect(!model.memoryNoticeShowing)
+        model.memoryPressureChanged(.warning)
+        #expect(!model.memoryNoticeShowing, "a repeat changes nothing")
+        model.memoryPressureChanged(.critical)
+        #expect(model.memoryNoticeShowing, "a rise to critical does")
+        #expect(model.memoryNotice.level == .critical)
+    }
+
+    @Test func theNoticeStaysWhileTheLevelIsCriticalAndGoesAfterItLeaves() async {
         let model = makeModel()
         let pace = MemoryNoticePace()
         pace.attach(to: model)
-        model.memoryPressureChanged(.warning)
+        model.memoryPressureChanged(.critical)
         pace.advance(20)
+        model.memoryPressureChanged(.critical)
+        #expect(!pace.isWaiting, "nothing ends it while the level is critical")
         model.memoryPressureChanged(.warning)
-        #expect(!pace.isWaiting, "nothing ends it while the pressure lasts")
-        model.memoryPressureChanged(.normal)
         #expect(await MemoryNoticePace.until { pace.isWaiting })
-        #expect(pace.waits == [.seconds(3)], "a few seconds after the return")
-        #expect(model.memoryNoticeKind == .low, "it lingers")
+        #expect(pace.waits == [.seconds(3)], "a few seconds after the fall, as after a return to normal")
+        #expect(model.memoryNoticeShowing, "it lingers")
         pace.release(after: 3)
-        #expect(await MemoryNoticePace.until { model.memoryNoticeKind == nil })
+        #expect(await MemoryNoticePace.until { !model.memoryNoticeShowing })
         #expect(!pace.isWaiting)
     }
 
-    @Test func aWarningThatEndsAtOnceStaysSixSecondsFromItsAppearance() async {
+    @Test func aCriticalLevelThatEndsAtOnceStaysSixSecondsFromItsAppearance() async {
         let model = makeModel()
         let pace = MemoryNoticePace()
         pace.attach(to: model)
-        model.memoryPressureChanged(.warning)
+        model.memoryPressureChanged(.critical)
         pace.advance(1)
         model.memoryPressureChanged(.normal)
         #expect(await MemoryNoticePace.until { pace.isWaiting })
         #expect(pace.waits == [.seconds(5)])
         pace.release(after: 5)
-        #expect(await MemoryNoticePace.until { model.memoryNoticeKind == nil })
+        #expect(await MemoryNoticePace.until { !model.memoryNoticeShowing })
     }
 
-    @Test func aLevelThatRisesAgainWhileTheNoticeLingersEndsTheWait() async {
+    @Test func aWakeBeforeTheEndWaitsOutWhatIsLeft() async {
         let model = makeModel()
         let pace = MemoryNoticePace()
         pace.attach(to: model)
-        model.memoryPressureChanged(.warning)
-        pace.advance(10)
+        model.memoryPressureChanged(.critical)
+        pace.advance(1)
         model.memoryPressureChanged(.normal)
         #expect(await MemoryNoticePace.until { pace.isWaiting })
-        pace.advance(1)
-        model.memoryPressureChanged(.warning)
-        #expect(await MemoryNoticePace.until { !pace.isWaiting }, "the same showing goes on")
-        #expect(model.memoryNoticeKind == .low)
+        pace.release(after: 2)
+        #expect(await MemoryNoticePace.until { pace.waits.count == 2 && pace.isWaiting }, "it waited again")
+        #expect(pace.waits == [.seconds(5), .seconds(3)])
+        #expect(model.memoryNoticeShowing, "the notice was not taken away early")
+        pace.release(after: 3)
+        #expect(await MemoryNoticePace.until { !model.memoryNoticeShowing })
     }
 
-    @Test func aDismissalHoldsUntilTheLevelHasReturnedToNormalAndRisenAgain() {
+    @Test func aLevelThatReachesCriticalAgainWhileTheNoticeLingersEndsTheWait() async {
         let model = makeModel()
+        let pace = MemoryNoticePace()
+        pace.attach(to: model)
+        model.memoryPressureChanged(.critical)
+        pace.advance(10)
         model.memoryPressureChanged(.warning)
+        #expect(await MemoryNoticePace.until { pace.isWaiting })
+        pace.advance(1)
+        model.memoryPressureChanged(.critical)
+        #expect(await MemoryNoticePace.until { !pace.isWaiting }, "the same showing goes on")
+        #expect(model.memoryNoticeShowing)
+    }
+
+    @Test func aDismissalHoldsUntilTheLevelHasLeftCriticalAndReachedItAgain() {
+        let model = makeModel()
+        model.memoryPressureChanged(.critical)
         model.dismissMemoryNotice()
-        #expect(model.memoryNoticeKind == nil)
-        model.memoryPressureChanged(.warning)
-        #expect(model.memoryNoticeKind == nil, "repeated warnings in the episode show nothing")
+        #expect(!model.memoryNoticeShowing)
+        model.memoryPressureChanged(.critical)
+        #expect(!model.memoryNoticeShowing, "repeated reports in the episode show nothing")
         model.applicationActive = false
         model.applicationActive = true
-        #expect(model.memoryNoticeKind == nil, "nor does coming back")
-        model.memoryPressureChanged(.critical)
-        #expect(model.memoryNoticeKind == .critical, "a rise to critical shows once more")
-        model.dismissMemoryNotice()
+        #expect(!model.memoryNoticeShowing, "nor does coming back")
         model.memoryPressureChanged(.warning)
+        #expect(!model.memoryNoticeShowing, "the dismissed notice does not linger")
         model.memoryPressureChanged(.critical)
-        #expect(model.memoryNoticeKind == nil)
-        model.memoryPressureChanged(.normal)
-        model.memoryPressureChanged(.warning)
-        #expect(model.memoryNoticeKind == .low, "the next episode")
+        #expect(model.memoryNoticeShowing, "the next episode")
     }
 
     @Test func theEndOfARunClearsTheNoticeItsDismissalAndItsWait() async {
         let model = makeModel()
         let pace = MemoryNoticePace()
         pace.attach(to: model)
-        model.memoryPressureChanged(.warning)
+        model.memoryPressureChanged(.critical)
         model.dismissMemoryNotice()
         model.memoryPressureChanged(.normal)
         model.memoryPressureChanged(.critical)
         model.memoryPressureChanged(.normal)
-        #expect(model.memoryNoticeKind == .critical)
+        #expect(model.memoryNoticeShowing)
         #expect(await MemoryNoticePace.until { pace.isWaiting })
         model.runEnded(RunEnd(result: 0), uptimeSeconds: 10)
-        #expect(model.memoryNoticeKind == nil)
+        #expect(!model.memoryNoticeShowing)
         #expect(await MemoryNoticePace.until { !pace.isWaiting }, "the wait was cancelled")
         // The next run starts clean: the old dismissal is gone.
         model.phase = .running(.normal)
+        model.memoryPressureChanged(.critical)
+        #expect(model.memoryNoticeShowing)
+    }
+
+    @Test func aRestartOfTheGuestClearsTheNoticeItsLevelAndItsWait() async {
+        let model = makeModel()
+        let pace = MemoryNoticePace()
+        pace.attach(to: model)
+        model.memoryPressureChanged(.critical)
+        model.dismissMemoryNotice()
+        model.memoryPressureChanged(.critical)
+        model.memoryPressureChanged(.normal)
+        model.memoryPressureChanged(.critical)
+        #expect(model.memoryNoticeShowing)
+        // The guest restarts during the pressure: the restart reports no end of
+        // the episode, so the level the notice holds is not known any more.
+        model.restart()
+        #expect(!model.memoryNoticeShowing)
+        #expect(model.memoryNotice.level == .normal)
+        #expect(await MemoryNoticePace.until { !pace.isWaiting })
+        // It is the same screen on the new boot, with nothing said of memory:
+        // the next report starts the episode, and an old dismissal is not held.
+        model.phase = .running(.normal)
+        #expect(!model.memoryNoticeShowing, "a notice for an episode that ended with the old run does not return")
         model.memoryPressureChanged(.warning)
-        #expect(model.memoryNoticeKind == .low)
+        #expect(!model.memoryNoticeShowing)
+        model.memoryPressureChanged(.critical)
+        #expect(model.memoryNoticeShowing)
     }
 
     @Test func aDismissalDuringTheLingerEndsTheWait() async {
         let model = makeModel()
         let pace = MemoryNoticePace()
         pace.attach(to: model)
-        model.memoryPressureChanged(.warning)
+        model.memoryPressureChanged(.critical)
         pace.advance(10)
         model.memoryPressureChanged(.normal)
         #expect(await MemoryNoticePace.until { pace.isWaiting })
         model.dismissMemoryNotice()
-        #expect(model.memoryNoticeKind == nil)
+        #expect(!model.memoryNoticeShowing)
         #expect(await MemoryNoticePace.until { !pace.isWaiting })
     }
 }
@@ -278,15 +323,13 @@ struct MemoryPressureNoticeBannerTests {
         }.max { $0.accessibilityFrame.minY < $1.accessibilityFrame.minY }
     }
 
-    /// The notice of `kind` in `controller`, waiting for SwiftUI to publish its parts.
-    private func parts(
-        of kind: MemoryPressureNotice, in controller: UIViewController
-    ) async throws -> Parts? {
+    /// The notice in `controller`, waiting for SwiftUI to publish its parts.
+    private func parts(in controller: UIViewController) async throws -> Parts? {
         let deadline = ContinuousClock.now + .seconds(5)
         while ContinuousClock.now < deadline {
             controller.view.layoutIfNeeded()
-            let title = find(in: controller.view) { $0.accessibilityLabel == MemoryPressureWords.title(for: kind) }
-            let detail = find(in: controller.view) { $0.accessibilityLabel == MemoryPressureWords.detail(for: kind) }
+            let title = find(in: controller.view) { $0.accessibilityLabel == MemoryPressureWords.title }
+            let detail = find(in: controller.view) { $0.accessibilityLabel == MemoryPressureWords.detail }
             if let title, let detail, let dismiss = memoryDismiss(in: controller) {
                 return Parts(title: title, detail: detail, dismiss: dismiss)
             }
@@ -296,11 +339,11 @@ struct MemoryPressureNoticeBannerTests {
     }
 
     /// Waits for the notice's words to leave the screen, for at most five seconds.
-    private func wordsGone(of kind: MemoryPressureNotice, in controller: UIViewController) async -> Bool {
+    private func wordsGone(in controller: UIViewController) async -> Bool {
         let deadline = ContinuousClock.now + .seconds(5)
         while ContinuousClock.now < deadline {
             controller.view.layoutIfNeeded()
-            if find(in: controller.view, { $0.accessibilityLabel == MemoryPressureWords.title(for: kind) }) == nil {
+            if find(in: controller.view, { $0.accessibilityLabel == MemoryPressureWords.title }) == nil {
                 return true
             }
             try? await Task.sleep(for: .milliseconds(50))
@@ -308,11 +351,14 @@ struct MemoryPressureNoticeBannerTests {
         return false
     }
 
+    /// The notices in a window of `width` (and `height`, when a test gives the
+    /// room a height of its own).
     private func hosted(
-        _ model: AppModel, width: CGFloat, size: DynamicTypeSize, in lease: HostWindow.Lease
+        _ model: AppModel, width: CGFloat, height: CGFloat? = nil, size: DynamicTypeSize, in lease: HostWindow.Lease
     ) -> UIViewController {
         let controller = UIHostingController(
-            rootView: SessionNoticesOverlay().environment(model).dynamicTypeSize(size).frame(width: width))
+            rootView: SessionNoticesOverlay().environment(model).dynamicTypeSize(size)
+                .frame(width: width, height: height))
         lease.window.rootViewController = controller
         controller.view.layoutIfNeeded()
         return controller
@@ -322,7 +368,7 @@ struct MemoryPressureNoticeBannerTests {
     /// capsule and the notices from the top, the side keys on the edge over
     /// them.
     private func sessionHosted(
-        _ model: AppModel, width: CGFloat, size: DynamicTypeSize, in lease: HostWindow.Lease
+        _ model: AppModel, width: CGFloat, height: CGFloat? = nil, size: DynamicTypeSize, in lease: HostWindow.Lease
     ) -> UIViewController {
         let actions = SideKeyActions(
             power: {}, powerHold: {}, volumeUp: {}, volumeDown: {}, back: {}, home: {}, settings: {})
@@ -335,126 +381,105 @@ struct MemoryPressureNoticeBannerTests {
                 }
                 .overlay(alignment: .top) { SessionNoticesOverlay() }
                 .overlay { SideKeysOverlay(mode: .normal, lit: true, open: .constant(false), actions: actions) }
-                .environment(model).dynamicTypeSize(size).frame(width: width))
+                .environment(model).dynamicTypeSize(size).frame(width: width, height: height))
         lease.window.rootViewController = controller
         controller.view.layoutIfNeeded()
         return controller
     }
 
-    // MARK: Content
-
-    @Test func theWarningSaysIOSAskedForMemoryAndTheDismissReachesTheModel() async throws {
-        let model = makeModel()
-        model.memoryPressureChanged(.warning)
-        let lease = try await HostWindow.take()
-        defer { lease.give() }
-        let controller = hosted(model, width: 390, size: .large, in: lease)
-        guard let found = try await parts(of: .low, in: controller) else {
-            Issue.record("The notice was not found: is application accessibility on in this Simulator?")
-            return
-        }
-        #expect(found.title.accessibilityLabel == "Memory is low")
-        #expect(
-            found.detail.accessibilityLabel
-                == "iOS asked Andarium to free memory. The virtual machine may slow down for a moment.")
-        #expect(found.dismiss.accessibilityActivate())
-        #expect(model.memoryNoticeKind == nil, "dismissing it puts it away")
-        #expect(model.memoryNotice.level == .warning, "the pressure still lasts")
-        // The dismissal holds for the episode.
-        model.memoryPressureChanged(.warning)
-        #expect(model.memoryNoticeKind == nil)
-        #expect(await wordsGone(of: .low, in: controller), "the notice is off the screen")
+    /// The scroll views under `view`: the notice column has one only while its
+    /// notices do not fit the room.
+    private func scrollViews(under view: UIView) -> [UIScrollView] {
+        var found: [UIScrollView] = []
+        if let scroll = view as? UIScrollView { found.append(scroll) }
+        for sub in view.subviews { found += scrollViews(under: sub) }
+        return found
     }
 
-    @Test func criticalSaysIOSMayCloseAndarium() async throws {
+    // MARK: Content
+
+    @Test func theNoticeSaysIOSMayCloseAndariumAndTheDismissReachesTheModel() async throws {
         let model = makeModel()
         model.memoryPressureChanged(.critical)
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let controller = hosted(model, width: 390, size: .large, in: lease)
-        guard let found = try await parts(of: .critical, in: controller) else {
+        guard let found = try await parts(in: controller) else {
             Issue.record("The notice was not found: is application accessibility on in this Simulator?")
             return
         }
         #expect(found.title.accessibilityLabel == "Memory is critically low")
-        #expect(
-            found.detail.accessibilityLabel
-                == "iOS may close Andarium. Close other apps, or shut down the virtual machine and lower its memory with Edit under Virtual machine.")
+        #expect(found.detail.accessibilityLabel == "iOS may close Andarium.")
+        #expect(found.dismiss.accessibilityActivate())
+        #expect(!model.memoryNoticeShowing, "dismissing it puts it away")
+        #expect(model.memoryNotice.level == .critical, "the level still lasts")
+        // The dismissal holds for the episode.
+        model.memoryPressureChanged(.critical)
+        #expect(!model.memoryNoticeShowing)
+        #expect(await wordsGone(in: controller), "the notice is off the screen")
+    }
+
+    @Test func aWarningDrawsNothing() async throws {
+        let model = makeModel()
+        model.memoryPressureChanged(.warning)
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let controller = hosted(model, width: 390, size: .large, in: lease)
+        try await Task.sleep(for: .milliseconds(300))
+        controller.view.layoutIfNeeded()
+        #expect(find(in: controller.view) { $0.accessibilityLabel == MemoryPressureWords.title } == nil)
+        #expect(scrollViews(under: controller.view).isEmpty)
     }
 
     @Test func theWordsAreNoMoreThanWhatTheAppCanKeep() {
-        for notice in [MemoryPressureNotice.low, .critical] {
-            let words = MemoryPressureWords.title(for: notice) + " " + MemoryPressureWords.detail(for: notice)
-            for name in ["Google", "Pixel", "Gemini", "Chrome", "Android"] {
-                #expect(!words.contains(name), "\(name) in: \(words)")
-            }
+        let words = MemoryPressureWords.title + " " + MemoryPressureWords.detail
+        for name in ["Google", "Pixel", "Gemini", "Chrome", "Android"] {
+            #expect(!words.contains(name), "\(name) in: \(words)")
         }
-        // Where memory is set, as the app names it on Home.
-        #expect(MemoryPressureWords.criticalDetail.contains("Edit under Virtual machine"))
-        #expect(!MemoryPressureWords.lowDetail.contains("close"), "a warning promises nothing about closing")
+        #expect(MemoryPressureWords.detail == "iOS may close Andarium.", "one line, and no advice the app cannot keep")
+        #expect(
+            MemoryPressureWords.announcement == "Memory is critically low. iOS may close Andarium.",
+            "VoiceOver says the title and the line")
     }
 
-    @Test func aRiseToCriticalUpdatesTheOneNoticeOnTheScreen() async throws {
-        let model = makeModel()
-        model.memoryPressureChanged(.warning)
-        let lease = try await HostWindow.take()
-        defer { lease.give() }
-        let controller = hosted(model, width: 390, size: .large, in: lease)
-        guard try await parts(of: .low, in: controller) != nil else {
-            Issue.record("The notice was not found: is application accessibility on in this Simulator?")
-            return
-        }
-        model.memoryPressureChanged(.critical)
-        guard try await parts(of: .critical, in: controller) != nil else {
-            Issue.record("The critical words were not found")
-            return
-        }
-        #expect(await wordsGone(of: .low, in: controller), "the warning's words are replaced")
-        // One Dismiss button is one notice: nothing else is up in this model.
-        let notices = count(in: controller.view) {
-            $0.accessibilityLabel == NetworkWords.dismissLabel && $0.accessibilityTraits.contains(.button)
-        }
-        #expect(notices == 1, "one notice, not two: \(notices)")
-    }
-
-    @Test func theNoticeLeavesTheScreenWhenThePressureHasPassedAndItsStayEnds() async throws {
+    @Test func theNoticeLeavesTheScreenWhenTheLevelHasLeftCriticalAndItsStayEnds() async throws {
         let model = makeModel()
         let pace = MemoryNoticePace()
         pace.attach(to: model)
-        model.memoryPressureChanged(.warning)
+        model.memoryPressureChanged(.critical)
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let controller = hosted(model, width: 390, size: .large, in: lease)
-        guard try await parts(of: .low, in: controller) != nil else {
+        guard try await parts(in: controller) != nil else {
             Issue.record("The notice was not found: is application accessibility on in this Simulator?")
             return
         }
         pace.advance(20)
-        model.memoryPressureChanged(.normal)
+        model.memoryPressureChanged(.warning)
         #expect(await MemoryNoticePace.until { pace.isWaiting })
         try await Task.sleep(for: .milliseconds(300))
         controller.view.layoutIfNeeded()
         #expect(
-            find(in: controller.view) { $0.accessibilityLabel == MemoryPressureWords.lowTitle } != nil,
+            find(in: controller.view) { $0.accessibilityLabel == MemoryPressureWords.title } != nil,
             "still up during the stay")
         pace.release(after: 3)
-        #expect(await wordsGone(of: .low, in: controller), "gone when the stay ends")
+        #expect(await wordsGone(in: controller), "gone when the stay ends")
     }
 
     // MARK: Frames
 
     /// The notice in a window of `width`, its words and button inside the
     /// column and not wider than it, the button under the words at the
-    /// accessibility sizes.
-    @Test(arguments: [DynamicTypeSize.large, .accessibility3, .accessibility5], [MemoryPressureNotice.low, .critical])
-    func theNoticeFitsANarrowScreenAtEveryTextSize(size: DynamicTypeSize, kind: MemoryPressureNotice) async throws {
+    /// accessibility sizes, and all of it inside the window's height.
+    @Test(arguments: [DynamicTypeSize.large, .accessibility3, .accessibility5])
+    func theNoticeFitsANarrowScreenAtEveryTextSize(size: DynamicTypeSize) async throws {
         let model = makeModel()
-        model.memoryPressureChanged(kind == .low ? .warning : .critical)
+        model.memoryPressureChanged(.critical)
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let width: CGFloat = 320
         let controller = hosted(model, width: width, size: size, in: lease)
-        guard let found = try await parts(of: kind, in: controller) else {
+        guard let found = try await parts(in: controller) else {
             Issue.record("The notice was not found: is application accessibility on in this Simulator?")
             return
         }
@@ -475,15 +500,11 @@ struct MemoryPressureNoticeBannerTests {
         if size.isAccessibilitySize {
             #expect(dismiss.minY >= detail.maxY - 1, "the button goes under the words")
         }
-        // The critical words at the largest size are taller than a phone's
-        // window at this narrow width, and the stack of notices does not
-        // scroll: every other case keeps inside the height.
         let screen = lease.window.bounds
-        if !(size == .accessibility5 && kind == .critical) {
-            #expect(
-                title.minY >= screen.minY && dismiss.maxY <= screen.maxY,
-                "inside the screen's height \(screen.height): \(title.union(dismiss))")
-        }
+        #expect(
+            title.minY >= screen.minY && dismiss.maxY <= screen.maxY,
+            "inside the screen's height \(screen.height): \(title.union(dismiss))")
+        #expect(scrollViews(under: controller.view).isEmpty, "a notice that fits is not in a scroll view")
         let union = title.union(detail).union(dismiss)
         #expect(union.width <= width, "the notice is no wider than the screen: \(union)")
     }
@@ -491,10 +512,10 @@ struct MemoryPressureNoticeBannerTests {
     // MARK: Coexistence
 
     /// The memory notice under the Camera-is-off notice, in the column the
-    /// session gives its notices: the later one joins the stack below the ones
-    /// up, nothing overlaps another, and nothing leaves the screen. The
-    /// statistics capsule above and the closed side keys on the edge keep
-    /// their places.
+    /// session gives its notices: it is the later one, below the camera notice,
+    /// nothing overlaps another, and the column stays clear of the statistics
+    /// capsule above and the closed side keys on the edge. At the largest size
+    /// the two are taller than a phone's window.
     @Test(arguments: [DynamicTypeSize.large, .accessibility5], [true, false])
     func theNoticeJoinsTheStackBelowTheCameraNoticeClearOfTheCapsuleAndTheKeys(
         size: DynamicTypeSize, statsShowing: Bool
@@ -502,15 +523,15 @@ struct MemoryPressureNoticeBannerTests {
         let model = makeModel()
         model.cameraAccess = .notDetermined
         model.cameraCaptureChanged(.blockedInUse)
-        model.memoryPressureChanged(.warning)
+        model.memoryPressureChanged(.critical)
         model.session.showStats = statsShowing
         #expect(model.cameraNoticeKind == .cameraOff)
-        #expect(model.memoryNoticeKind == .low)
+        #expect(model.memoryNoticeShowing)
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let width: CGFloat = 390
         let controller = sessionHosted(model, width: width, size: size, in: lease)
-        guard let memory = try await parts(of: .low, in: controller),
+        guard let memory = try await parts(in: controller),
             let cameraTitle = find(in: controller.view, { $0.accessibilityLabel == CameraWords.offTitle }),
             let cameraDetail = find(in: controller.view, { $0.accessibilityLabel == CameraWords.offDetail })
         else {
@@ -522,13 +543,7 @@ struct MemoryPressureNoticeBannerTests {
             .union(memory.dismiss.accessibilityFrame)
         #expect(memoryFrame.minY >= cameraFrame.maxY, "the memory notice is below the camera notice")
         #expect(!cameraFrame.intersects(memoryFrame), "they do not overlap")
-        // Two notices at the largest size are taller than a phone's window;
-        // the one above is dismissed first, and the window of an iPad is tall
-        // enough for both.
         let screen = lease.window.bounds
-        if size != .accessibility5 {
-            #expect(memoryFrame.maxY <= screen.maxY, "inside the screen: \(memoryFrame) in \(screen)")
-        }
         let column = controller.view.convert(controller.view.bounds, to: nil)
             .insetBy(dx: (controller.view.bounds.width - width) / 2, dy: 0)
         for frame in [cameraFrame, memoryFrame] {
@@ -541,10 +556,9 @@ struct MemoryPressureNoticeBannerTests {
                 Issue.record("The statistics capsule was not found")
                 return
             }
-            let capsuleFrame = capsule.accessibilityFrame
-            #expect(!capsuleFrame.intersects(cameraFrame), "the capsule keeps its place: \(capsuleFrame)")
-            #expect(!capsuleFrame.intersects(memoryFrame))
-            #expect(cameraFrame.minY >= capsuleFrame.maxY, "the notices hang below the capsule")
+            #expect(!capsule.accessibilityFrame.intersects(cameraFrame), "the capsule keeps its place")
+            #expect(!capsule.accessibilityFrame.intersects(memoryFrame))
+            #expect(cameraFrame.minY >= capsule.accessibilityFrame.maxY, "the notices hang below the capsule")
         }
         guard let keys = find(in: controller.view, { $0.accessibilityLabel == "Side keys" }) else {
             Issue.record("The side keys were not found")
@@ -556,6 +570,11 @@ struct MemoryPressureNoticeBannerTests {
         for frame in [cameraFrame, memoryFrame] {
             #expect(frame.maxX <= keysFrame.maxX - 12 + 0.5, "short of the keys' capsules: \(frame) and \(keysFrame)")
         }
+        // Two notices at the largest size are taller than a phone's window,
+        // and the column does not scroll yet: the iPad's window holds both.
+        if size != .accessibility5 {
+            #expect(screen.contains(memoryFrame), "inside the screen: \(memoryFrame) in \(screen)")
+        }
     }
 
     /// Every notice the session has, up together at the default size: the
@@ -564,19 +583,24 @@ struct MemoryPressureNoticeBannerTests {
         let model = makeModel()
         model.cameraAccess = .notDetermined
         model.cameraCaptureChanged(.blockedInUse)
+        model.previewNetworkNotice(.wifi)
         model.previewGraphicsNotice()
+        model.previewThermalNotice()
         model.memoryPressureChanged(.critical)
         let lease = try await HostWindow.take()
         defer { lease.give() }
-        let controller = hosted(model, width: 390, size: .large, in: lease)
-        guard let memory = try await parts(of: .critical, in: controller),
+        let controller = hosted(model, width: 390, height: 1400, size: .large, in: lease)
+        guard let memory = try await parts(in: controller),
+            let network = find(in: controller.view, { $0.accessibilityLabel == NetworkWords.title(for: .wifi) }),
             let graphics = find(in: controller.view, { $0.accessibilityLabel == GraphicsNotice.title }),
+            let thermal = find(in: controller.view, { $0.accessibilityLabel == ThermalNotice.text }),
             let camera = find(in: controller.view, { $0.accessibilityLabel == CameraWords.offTitle })
         else {
             Issue.record("A notice was not found: is application accessibility on in this Simulator?")
             return
         }
-        let order = [graphics, camera, memory.title].map { $0.accessibilityFrame.minY }
-        #expect(order == order.sorted(), "graphics, then camera, then memory: \(order)")
+        let order = [network, graphics, thermal, camera, memory.title].map { $0.accessibilityFrame.minY }
+        #expect(order == order.sorted(), "network, graphics, thermal, camera, then memory: \(order)")
+        #expect(Set(order).count == order.count, "each notice has a place of its own")
     }
 }

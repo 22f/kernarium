@@ -227,10 +227,11 @@ final class LiveRuntime: RuntimeDriver {
         }
         // The runtime answers the system's memory pressure itself and reports
         // each level it raises, delivered on the main queue in order; the
-        // session says so while it is on screen. The runtime's word for what
-        // it does about the level changes nothing the person can do.
+        // session says so at the critical level while it is on screen. What
+        // the runtime does about a level changes nothing the person can do.
         kernarium_runtime_loader_set_memory_pressure_handler { @Sendable [weak model] level, _ in
-            MainActor.assumeIsolated { model?.memoryPressureChanged(Self.memoryPressureLevel(runtimeLevel: level)) }
+            guard let level = Self.memoryPressureLevel(runtimeLevel: level) else { return }
+            MainActor.assumeIsolated { model?.memoryPressureChanged(level) }
         }
         model.hapticsAvailable = hapticsAvailable
         self.keyboardMouse.setPointerAsTouch(model.pointerAsTouch)
@@ -637,14 +638,16 @@ final class LiveRuntime: RuntimeDriver {
         }
     }
 
-    /// The level the runtime reports (KernariumRuntime.h). A value this
-    /// application does not know raises no notice: a runtime of another API
-    /// version is not loaded, so none is expected.
-    nonisolated static func memoryPressureLevel(runtimeLevel level: Int32) -> MemoryPressureLevel {
+    /// The level the runtime reports (KernariumRuntime.h), or nil for a value
+    /// this application does not know: it is ignored, for it would end a
+    /// notice that is up or clear a dismissal if it were read as normal. A
+    /// runtime of another API version is not loaded, so none is expected.
+    nonisolated static func memoryPressureLevel(runtimeLevel level: Int32) -> MemoryPressureLevel? {
         switch level {
+        case Int32(KERNARIUM_RUNTIME_MEMORY_PRESSURE_NORMAL): .normal
         case Int32(KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING): .warning
         case Int32(KERNARIUM_RUNTIME_MEMORY_PRESSURE_CRITICAL): .critical
-        default: .normal
+        default: nil
         }
     }
 

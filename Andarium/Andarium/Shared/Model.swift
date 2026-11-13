@@ -611,7 +611,7 @@ final class AppModel {
     // MARK: Memory notice state
 
     /// What iOS says of the device's memory, from the runtime, with whether a
-    /// session is on screen and whether the person put the notice away.
+    /// guest session is on screen and whether the person put the notice away.
     private(set) var memoryNotice = MemoryPressureNoticeState()
     /// Waits out the time the notice lingers after the pressure has passed; a
     /// test paces it by hand.
@@ -1514,9 +1514,7 @@ final class AppModel {
         cameraNoticeExpiry?.cancel()
         cameraNoticeExpiry = nil
         cameraNotice.runEnded()
-        memoryNoticeExpiry?.cancel()
-        memoryNoticeExpiry = nil
-        memoryNotice.runEnded()
+        resetMemoryNotice()
         runEnd = end
         runUptimeSeconds = uptimeSeconds
         if end.poweredOff {
@@ -1554,6 +1552,9 @@ final class AppModel {
         session.showStats = showStats
         statisticsMeter = StatsMeter()
         bootTracker = BootTracker()
+        // A guest that restarts during the pressure reports no end of it, and
+        // the level the notice holds is not known across the restart.
+        resetMemoryNotice()
         lifecycle.restart()
     }
 
@@ -1870,15 +1871,15 @@ final class AppModel {
     // MARK: Memory notice
 
     /// The runtime reports a level the system raised, the repeats and the
-    /// return to normal included. The notice follows the level alone: whether
-    /// the host's own response ran changes nothing the person can do.
+    /// return to normal included. Only the critical level has a notice, and the
+    /// state follows every level, for the notice that ends with it; whether the
+    /// host's own response ran changes nothing the person can do.
     func memoryPressureChanged(_ level: MemoryPressureLevel) {
         changeMemoryNotice { $0.levelChanged(level, at: $1) }
     }
 
-    /// A virtual machine session is on screen: the guest runs and Andarium is
-    /// the active application. Not Home, not the boot screen, not the
-    /// background.
+    /// A guest session is on screen: the guest runs and Andarium is the active
+    /// application. Not Home, not the boot screen, not the background.
     private var memoryNoticeSessionOnScreen: Bool {
         guard case .running = phase else { return false }
         return applicationActive
@@ -1897,9 +1898,15 @@ final class AppModel {
         change(&next, memoryNoticeClock())
         guard next != memoryNotice else { return }
         memoryNotice = next
+        armMemoryNoticeExpiry()
+    }
+
+    /// Times the end of a notice that is on its way out, in place of the one
+    /// before.
+    private func armMemoryNoticeExpiry() {
         memoryNoticeExpiry?.cancel()
         memoryNoticeExpiry = nil
-        guard let wait = next.staysFor(at: memoryNoticeClock()) else { return }
+        guard let wait = memoryNotice.staysFor(at: memoryNoticeClock()) else { return }
         memoryNoticeExpiry = Task { [weak self] in
             await self?.memoryNoticeSleep(wait)
             guard !Task.isCancelled else { return }
@@ -1907,19 +1914,26 @@ final class AppModel {
         }
     }
 
-    /// The pressure passed and the notice's time is up.
+    /// The level left critical and the notice's time is up.
     private func expireMemoryNotice() {
         memoryNoticeExpiry = nil
         var next = memoryNotice
         next.expire(at: memoryNoticeClock())
         if next != memoryNotice { memoryNotice = next }
+        // A wake before the end leaves the time that is left to wait out.
+        armMemoryNoticeExpiry()
     }
 
-    /// The notice the session shows about the memory, and none while no
-    /// session is on screen or the person put it away.
-    var memoryNoticeKind: MemoryPressureNotice? { memoryNotice.showing }
+    /// The run ended, or restarts: the next one starts clean.
+    private func resetMemoryNotice() {
+        memoryNoticeExpiry?.cancel()
+        memoryNoticeExpiry = nil
+        memoryNotice.runEnded()
+    }
 
-    var memoryNoticeShowing: Bool { memoryNoticeKind != nil }
+    /// Whether the session shows the notice that iOS is critically short of
+    /// memory: none while no session is on screen or the person put it away.
+    var memoryNoticeShowing: Bool { memoryNotice.isShowing }
 
     func dismissMemoryNotice() {
         var next = memoryNotice
