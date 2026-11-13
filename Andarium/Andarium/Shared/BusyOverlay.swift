@@ -16,12 +16,12 @@ struct BusyOverlay: View {
     var body: some View {
         ZStack {
             Color.black.opacity(0.32).ignoresSafeArea()
-            VStack(alignment: .leading, spacing: 14) {
-                if let result = state.result {
-                    ended(result)
-                } else {
-                    running
-                }
+            // The card is as tall as its text. Where the text does not fit the screen (the largest accessibility
+            // sizes, a long text in another language) the text scrolls between the title and the button, so
+            // that the button stays on the screen and the card can be closed.
+            ViewThatFits(in: .vertical) {
+                content(scrolls: false)
+                content(scrolls: true)
             }
             .padding(20)
             .frame(maxWidth: sizeClass == .regular ? 520 : 360)
@@ -34,8 +34,33 @@ struct BusyOverlay: View {
         .accessibilityElement(children: .contain)
     }
 
+    private func content(scrolls: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let result = state.result {
+                ended(result, scrolls: scrolls)
+            } else {
+                running(scrolls: scrolls)
+            }
+        }
+    }
+
+    /// The card's text: whole, or in a scroll view that takes the height the screen leaves.
     @ViewBuilder
-    private var running: some View {
+    private func detail(scrolls: Bool) -> some View {
+        let text = Text(state.detail.keepingTogether)
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        if scrolls {
+            ScrollView { text.frame(maxWidth: .infinity, alignment: .leading) }
+                .scrollBounceBehavior(.basedOnSize)
+        } else {
+            text
+        }
+    }
+
+    @ViewBuilder
+    private func running(scrolls: Bool) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(state.title.keepingTogether)
                 .font(.title3.weight(.bold))
@@ -49,10 +74,7 @@ struct BusyOverlay: View {
             }
         }
         ProgressBar(value: state.progress ?? 0)
-        Text(state.detail.keepingTogether)
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+        detail(scrolls: scrolls)
         if let cancel = state.cancel {
             Button("Cancel", role: .cancel, action: cancel.action)
                 .buttonStyle(.bordered)
@@ -62,7 +84,7 @@ struct BusyOverlay: View {
     }
 
     @ViewBuilder
-    private func ended(_ result: BusyResult) -> some View {
+    private func ended(_ result: BusyResult, scrolls: Bool) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Image(systemName: result.failed ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                 .font(.title3)
@@ -71,10 +93,7 @@ struct BusyOverlay: View {
             Text(state.title.keepingTogether)
                 .font(.title3.weight(.bold))
         }
-        Text(state.detail.keepingTogether)
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+        detail(scrolls: scrolls)
         Button(result.failed ? "OK" : "Done", action: result.dismiss.action)
             .buttonStyle(.borderedProminent)
             .frame(maxWidth: .infinity, alignment: .trailing)
