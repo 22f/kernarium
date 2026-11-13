@@ -120,6 +120,54 @@ class BootAndroidTests(unittest.TestCase):
         self.assertFalse(options.build)
         self.assertTrue(boot_android.parse_arguments(["--build"]).build)
 
+    def command_for(self, *arguments: str) -> list[str]:
+        options = boot_android.parse_arguments(list(arguments))
+        return boot_android.emulator_command(
+            options,
+            Path("/tmp/release"),
+            Path("/tmp/instance/data.img"),
+            Path("/tmp/uml-darwin-android17"),
+        )
+
+    def test_an_installation_has_an_identity_file_beside_its_data_disk(self) -> None:
+        command = self.command_for()
+        self.assertIn("--android-identity=/tmp/instance/identity.json", command)
+        # The command names the file and never a value of the installation.
+        self.assertFalse(any(
+            value.startswith(("--android-serialno", "--net-mac")) for value in command
+        ))
+
+    def test_values_a_run_states_replace_the_identity_file(self) -> None:
+        both = self.command_for("--serialno", "TESTSERIAL01", "--eth-mac", "02:AA:bb:cc:dd:ee")
+        self.assertIn("--android-serialno=TESTSERIAL01", both)
+        self.assertIn("--net-mac=02:aa:bb:cc:dd:ee", both)
+        self.assertFalse(any(value.startswith("--android-identity") for value in both))
+        # One value alone: the file is still not used, and the other value stays
+        # what the guest has without one.
+        serial = self.command_for("--serialno", "TESTSERIAL01")
+        self.assertIn("--android-serialno=TESTSERIAL01", serial)
+        self.assertFalse(any(value.startswith(("--net-mac", "--android-identity")) for value in serial))
+        mac = self.command_for("--eth-mac", "06:11:22:33:44:55")
+        self.assertIn("--net-mac=06:11:22:33:44:55", mac)
+        self.assertFalse(any(value.startswith(("--android-serialno", "--android-identity")) for value in mac))
+
+    def test_a_serial_and_an_address_that_cannot_be_the_guests_are_refused(self) -> None:
+        for arguments in (
+            ["--serialno", "abc"],
+            ["--serialno", "unknown"],
+            ["--serialno", "UNKNOWN"],
+            ["--serialno", "a" * 21],
+            ["--serialno", "abc def1"],
+            ["--eth-mac", "02:aa:bb:cc:dd"],
+            ["--eth-mac", "02-aa-bb-cc-dd-ee"],
+            ["--eth-mac", "03:aa:bb:cc:dd:ee"],
+            ["--eth-mac", "00:00:00:00:00:00"],
+            ["--eth-mac", "zz:aa:bb:cc:dd:ee"],
+        ):
+            with self.subTest(arguments=arguments), mock.patch("sys.stderr"):
+                with self.assertRaises(SystemExit):
+                    boot_android.parse_arguments(arguments)
+
     def test_vnc_display_names_its_port(self) -> None:
         options = boot_android.parse_arguments(
             ["--display", "vnc", "--vnc-port", "5931"]
@@ -753,6 +801,25 @@ class BootAndroidTests(unittest.TestCase):
                 "--dry-run", "--adb", str(adb),
             ])
             self.assertEqual(result, 0)
+            self.assertFalse(instance.exists())
+
+    def test_the_identity_file_is_the_emulators_to_make_and_the_start_leaves_it(self) -> None:
+        # The launcher passes the file's name; the instance's files do not gain one
+        # from the start, and a dry run prints the name and no value.
+        with tempfile.TemporaryDirectory(prefix="android-launcher-") as temporary:
+            root = Path(temporary)
+            release = self.installed_release(root / "releases")
+            _emulator, adb = self.fake_tools(root)
+            instance = root / "instance"
+            with mock.patch("builtins.print") as printed:
+                result = boot_android.main([
+                    "--release", str(release), "--instance", str(instance),
+                    "--dry-run", "--adb", str(adb),
+                ])
+            self.assertEqual(result, 0)
+            lines = [str(call.args[0]) for call in printed.call_args_list if call.args]
+            self.assertTrue(any(f"--android-identity={instance.resolve()}/identity.json" in line for line in lines))
+            self.assertFalse(any("--android-serialno" in line or "--net-mac" in line for line in lines))
             self.assertFalse(instance.exists())
 
     def test_the_emulator_leads_its_own_process_group(self) -> None:

@@ -89,6 +89,18 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 30)
 
+# The macOS Android launcher's own argument checks, on the built executable
+# (registered where the Android CLI is part of the build).
+if(TARGET uml-darwin-android17)
+    uml_add_tooling_test(
+        NAME android17-launcher-arguments
+        COMMAND ${Python3_EXECUTABLE} -B
+            ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_android17_launcher_arguments.py
+            $<TARGET_FILE:uml-darwin-android17>
+        LABELS android
+        TIMEOUT 120)
+endif()
+
 uml_add_tooling_test(
     NAME android17-instance-rules
     COMMAND ${Python3_EXECUTABLE} -B
@@ -118,6 +130,13 @@ uml_add_tooling_test(
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_guest_proc_runner.py
     LABELS android
     TIMEOUT 60)
+
+uml_add_tooling_test(
+    NAME android17-installation-identity-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_installation_identity_runner.py
+    LABELS android
+    TIMEOUT 30)
 
 uml_add_tooling_test(
     NAME android17-provision-helper

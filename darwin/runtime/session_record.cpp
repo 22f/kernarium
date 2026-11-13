@@ -43,6 +43,9 @@ constexpr std::string_view host_fault_line{
 
 std::atomic<char> output[output_size];
 std::atomic<std::uint64_t> output_end{0};
+/* Set when the ring dropped output from its head: a write longer than the ring
+ * keeps only its last bytes, while output_end counts only what was kept. */
+std::atomic<bool> output_clipped{false};
 /* What the same output says of the boot (console_boot_signal.hpp). */
 ConsoleBootSignal boot_signal;
 std::atomic<int> console_descriptors[console_slots] = {-1, -1, -1, -1};
@@ -176,6 +179,7 @@ void keep_output(const void *data, std::size_t length) noexcept
 	if (length > output_size) {
 		bytes += length - output_size;
 		length = output_size;
+		output_clipped.store(true, std::memory_order_release);
 	}
 	const std::uint64_t start =
 		output_end.fetch_add(length, std::memory_order_acq_rel);
@@ -731,6 +735,40 @@ void start_checkpoints() noexcept
 	(void)pthread_sigmask(SIG_SETMASK, &previous, nullptr);
 }
 
+/* The kernel's last output as the record keeps it. The kernel echoes its
+ * command line, which carries the Android guest's serial number
+ * (`androidboot.serialno=`); the record and the bug report archive that copies
+ * it do not keep the value, only that one was there. Everything up to the next
+ * white space after `serialno=` is masked. */
+void keep_tail(Text &record, std::string_view tail) noexcept
+{
+	constexpr std::string_view key{"serialno="};
+	for (auto at = tail.find(key); at != std::string_view::npos;
+	     at = tail.find(key)) {
+		record.printable(tail.substr(0, at + key.size()), true);
+		record.text("<masked>");
+		tail.remove_prefix(at + key.size());
+		const auto stop = tail.find_first_of(" \t\r\n");
+		tail = stop == std::string_view::npos ? std::string_view{} :
+							tail.substr(stop);
+	}
+	record.printable(tail, true);
+}
+
+/* `tail` from its first complete line when the ring has dropped output: its
+ * first bytes are then the middle of a line, perhaps of `androidboot.serialno=`
+ * or of its value, which keep_tail cannot know to mask. A ring that dropped
+ * nothing starts at the first line. */
+std::string_view from_whole_line(std::string_view tail) noexcept
+{
+	if (!output_clipped.load(std::memory_order_acquire) &&
+	    output_end.load(std::memory_order_acquire) <= output_size)
+		return tail;
+	const auto newline = tail.find('\n');
+	return newline == std::string_view::npos ? std::string_view{} :
+						   tail.substr(newline + 1);
+}
+
 void write_record(SessionEnd end, int status, std::string_view message,
 	std::string_view tail) noexcept
 {
@@ -752,8 +790,11 @@ void write_record(SessionEnd end, int status, std::string_view message,
 	if (!message.empty())
 		record.text("\nmessage ").printable(message, false);
 	record.text("\n");
-	if (!tail.empty())
-		record.text("kernel-output\n").printable(tail, true);
+	tail = from_whole_line(tail);
+	if (!tail.empty()) {
+		record.text("kernel-output\n");
+		keep_tail(record, tail);
+	}
 	ssize_t written;
 	do {
 		written = pwrite(descriptor, record_text, record.size(),
@@ -1115,6 +1156,7 @@ void reset_session_record() noexcept
 	for (auto &console : console_descriptors)
 		console.store(-1, std::memory_order_relaxed);
 	output_end.store(0, std::memory_order_release);
+	output_clipped.store(false, std::memory_order_release);
 	boot_signal.reset();
 	crash_recorded.store(false, std::memory_order_release);
 }
