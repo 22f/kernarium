@@ -29,10 +29,13 @@ show Android's own Wi-Fi mark. The runner shows all of it:
   goes from both and a new passing check is in the log; a forced re-evaluation
   (`cmd connectivity reevaluate`, whose failure fails the section) brings it back
   and the next passing check takes it away; a passing check on a network that
-  has just joined, by the host's server and by the stock servers, leaves no
-  warning; with a strict private DNS name the platform can use, a check that
-  fails again and again leaves the network validated with its private DNS not
-  broken, and the private DNS probe is not repeated for each check; a forced
+  has just joined leaves no warning, by the host's server (the HTTPS probe off:
+  the platform's `captive_portal_use_https` flag of DeviceConfig's connectivity
+  namespace at 0, which the log shows by sending no HTTPS probe) and by the stock
+  servers (both probes asked, the log naming each stock URL and its 204); with
+  a strict private DNS name the platform can use, a check that fails again and
+  again leaves the network validated with its private DNS not broken, and the
+  private DNS probe is not repeated for each check; a forced
   re-evaluation of a network whose strict name does not resolve leaves it not
   validated with its private DNS broken, without a check at the server or in the
   log from the request on, and once the name is gone the network is validated
@@ -166,8 +169,18 @@ PROBE_SETTINGS = {
 # fails the network (the platform reports it invalid), so the warning sections leave the private DNS settings out.
 CHECK_SETTINGS = {key: value for key, value in PROBE_SETTINGS.items() if not key.startswith("private_dns")}
 PRIVATE_DNS_SETTINGS = ("private_dns_mode", "private_dns_specifier")
-USE_HTTPS_SETTING = "captive_portal_use_https"
-ALL_CHECK_SETTINGS = (*PROBE_SETTINGS, USE_HTTPS_SETTING)
+# The platform's switch for the HTTPS probe is a flag of the `connectivity` namespace of DeviceConfig (`cmd
+# device_config`), not a global setting: the image's NetworkStack sends the HTTPS probe whatever the setting of that
+# name says. With the flag at 0 a check asks the HTTP probe alone, which the host's server answers; with it unset a
+# pass needs the HTTPS probe answered too, which only the stock servers do. The sections put and delete it with
+# `put_settings` and `delete_settings`, as they do the probe settings; the monitor of a network reads it when the
+# network joins.
+USE_HTTPS_FLAG = "captive_portal_use_https"
+HTTPS_FLAG_NAMESPACE = "connectivity"
+ALL_CHECK_SETTINGS = (*PROBE_SETTINGS, USE_HTTPS_FLAG)
+# What the platform probes with no URL setting, as the image's validation log names the servers.
+STOCK_HTTP_URL = "http://connectivitycheck.gstatic.com/generate_204"
+STOCK_HTTPS_URL = "https://www.google.com/generate_204"
 MARKER_PROPERTY = "persist.sys.kernarium.virtwifi_saved"
 # The validation log lines of the NetworkMonitor topic of route p0029 (the verifier requires them in the image).
 CHECK_FAILED_LINE = "Wi-Fi internet check failed, the network stays validated"
@@ -565,6 +578,27 @@ def probe_answer_problems(messages: list[str], scenario: str, code: int) -> list
     if code == 200 and any("interpreted as failed" in line and scenario in line for line in messages):
         return [f"the 200 answer of {scenario} was taken for a failed answer, not a page"]
     return []
+
+
+def https_off_problems(messages: list[str]) -> list[str]:
+    """With the HTTPS flag at 0 a check asks the HTTP probe alone: a log line for an HTTPS probe means the platform
+    did not take the flag, and the answer that passed is not the host's server's alone."""
+    sent = [message for message in messages if message.startswith("PROBE_HTTPS ")]
+    return [f"the platform sent an HTTPS probe with the HTTPS flag at 0: {sent[0][:160]}"] if sent else []
+
+
+def stock_answer_problems(messages: list[str]) -> list[str]:
+    """Whether a check's probes asked the stock servers and both received 204: a line of the validation log for the
+    HTTP probe of the stock URL and one for the HTTPS probe of the stock URL, each with `ret=204` and neither a probe
+    that failed (the URLs the image's platform probes with no setting)."""
+    problems = []
+    for probe, url in (("PROBE_HTTP", STOCK_HTTP_URL), ("PROBE_HTTPS", STOCK_HTTPS_URL)):
+        lines = [message for message in messages if message.startswith(f"{probe} ")]
+        if not any(line.startswith(f"{probe} {url} ") and " ret=204 " in line and "Probe failed" not in line
+                   for line in lines):
+            last = f": the last is {lines[-1][:160]!r}" if lines else ""
+            problems.append(f"the validation log shows no {probe} of {url} that received 204{last}")
+    return problems
 
 
 def retry_problems(times: list[float]) -> list[str]:
@@ -1067,11 +1101,35 @@ class Guest:
 
     def put_settings(self, settings: dict[str, str]) -> None:
         for key, value in settings.items():
-            self.shell(f"settings put global {key} {value}")
+            if key == USE_HTTPS_FLAG:
+                self.put_flag(key, value)
+            else:
+                self.shell(f"settings put global {key} {value}")
 
     def delete_settings(self, keys: tuple[str, ...] | list[str]) -> None:
         for key in keys:
-            self.shell(f"settings delete global {key}")
+            if key == USE_HTTPS_FLAG:
+                self.delete_flag(key)
+            else:
+                self.shell(f"settings delete global {key}")
+
+    def read_flag(self, key: str) -> str:
+        return self.shell(f"cmd device_config get {HTTPS_FLAG_NAMESPACE} {key}").strip()
+
+    def put_flag(self, key: str, value: str) -> None:
+        """Puts a flag of the namespace and reads it back: a flag that does not read as put never reached the
+        platform, and a section that relies on it would be judging the wrong switch."""
+        self.shell(f"cmd device_config put {HTTPS_FLAG_NAMESPACE} {key} {value}")
+        read = self.read_flag(key)
+        if read != value:
+            raise Failure(f"cmd device_config put {HTTPS_FLAG_NAMESPACE} {key} {value}: it reads {read!r}")
+
+    def delete_flag(self, key: str) -> None:
+        """Deletes a flag of the namespace (one that is not set is no error) and reads it back as unset."""
+        self.adb_run("shell", f"cmd device_config delete {HTTPS_FLAG_NAMESPACE} {key}")
+        read = self.read_flag(key)
+        if read not in ("", "null"):
+            raise Failure(f"cmd device_config delete {HTTPS_FLAG_NAMESPACE} {key}: it still reads {read!r}")
 
     def read_setting(self, key: str) -> str:
         return self.shell(f"settings get global {key}").strip()
@@ -1953,7 +2011,7 @@ def warning_shown(guest: Guest, probes_failed: bool, seconds: float, what: str, 
 def check_failed_check_warns(guest: Guest) -> str | None:
     """The validation probes at a black hole fail the check, and nothing else: the network stays validated
     (as on a host that reaches no validation server) while Android's Wi-Fi mark shows the failed check."""
-    guest.rejoin_with_settings(CHECK_SETTINGS, clear=(*PRIVATE_DNS_SETTINGS, USE_HTTPS_SETTING))
+    guest.rejoin_with_settings(CHECK_SETTINGS, clear=(*PRIVATE_DNS_SETTINGS, USE_HTTPS_FLAG))
     pin = pin_network(guest)
     warning_shown(guest, True, WARNING_HOLD_SECONDS, "the failed check shows only the warning", pin)
     return f"validated, joined and enabled for {WARNING_HOLD_SECONDS} s with the mark shown"
@@ -2002,7 +2060,7 @@ def check_page_answer_warns(guest: Guest, server: "ProbeServer", mode: str) -> s
     server.mode = mode
     server.clear()
     guest.reverse(server.port)
-    guest.rejoin_with_settings(page_settings(server.port, scenario), clear=(*PRIVATE_DNS_SETTINGS, USE_HTTPS_SETTING))
+    guest.rejoin_with_settings(page_settings(server.port, scenario), clear=(*PRIVATE_DNS_SETTINGS, USE_HTTPS_FLAG))
     pin = pin_network(guest)
     wait_for("a probe reaches the host's server", WARNING_SECONDS,
              lambda: None if server.probes(scenario) else "the server has seen no request of this scenario", guest)
@@ -2070,7 +2128,7 @@ def check_recovery_on_one_network(guest: Guest, server: "ProbeServer") -> str | 
     guest.reverse(server.port)
     guest.show_internet_page()
     try:
-        guest.rejoin_with_settings({**page_settings(server.port, scenario), USE_HTTPS_SETTING: "0"},
+        guest.rejoin_with_settings({**page_settings(server.port, scenario), USE_HTTPS_FLAG: "0"},
                                    clear=PRIVATE_DNS_SETTINGS)
         pin = validated_while_unanswered(guest, server, scenario)
         # The answer is out: the check's result is logged, and the network was validated before any probe of it.
@@ -2098,10 +2156,13 @@ def check_recovery_on_one_network(guest: Guest, server: "ProbeServer") -> str | 
         wrong = server_answer_problems(server, scenario, 200)
         if wrong:
             raise Failure("; ".join(wrong))
-        # The server now gives the expected answer: nothing else changes, and no rejoin.
+        # The server now gives the expected answer, and the HTTP probe alone is asked: nothing else changes,
+        # and no rejoin.
         server.mode = "expected"
-        wait_watching("the warning goes from Settings and the status bar when a check passes", WARNING_SECONDS,
-                      guest, pin, lambda: "; ".join(cleared_problems(guest, pin, after_failure=True)) or None)
+        wait_watching("the warning goes from Settings and the status bar when the host's server passes a check",
+                      WARNING_SECONDS, guest, pin,
+                      lambda: "; ".join(cleared_problems(guest, pin, after_failure=True)
+                                        + https_off_problems(guest.validation_log(pin.net_id))) or None)
         # A forced re-evaluation checks the network again. No timer is left after a pass, which the quiet hold
         # shows, so a new check at the server is the forced one.
         hold_quiet(guest, server, scenario, QUIET_SECONDS, pin)
@@ -2113,13 +2174,15 @@ def check_recovery_on_one_network(guest: Guest, server: "ProbeServer") -> str | 
         wait_watching("the warning returns after the forced check", WARNING_SECONDS, guest, pin,
                       lambda: "; ".join(warning_problems(guest, False, pin)) or None)
         server.mode = "expected"
-        wait_watching("the warning goes again when the next check passes", WARNING_SECONDS, guest, pin,
-                      lambda: "; ".join(cleared_problems(guest, pin, after_failure=True)) or None)
+        wait_watching("the warning goes again when the next check passes at the host's server", WARNING_SECONDS,
+                      guest, pin,
+                      lambda: "; ".join(cleared_problems(guest, pin, after_failure=True)
+                                        + https_off_problems(guest.validation_log(pin.net_id))) or None)
         hold_validated(guest, SHORT_HOLD_SECONDS, pin)
     finally:
         guest.leave_internet_page()
     return (f"network {pin.net_id} validated while its first check was unanswered and at {pin.validated_at} "
-            f"throughout, {len(server.checks(scenario))} checks")
+            f"throughout, {len(server.checks(scenario))} checks at the host's server (HTTPS probe off)")
 
 
 def same_network_problems(networks: dict[int, frozenset[str]], net_id: int) -> list[str]:
@@ -2164,24 +2227,31 @@ def pin_recovered(guest: Guest, net_id: int, seconds: float = WARNING_SECONDS) -
     return found[-1]
 
 
+def first_pass_problems(messages: list[str]) -> str | None:
+    """Whether a network's first check has passed, with the HTTP probe alone."""
+    if not any(CHECK_PASSED_LINE in message for message in messages):
+        return "no passing check yet"
+    return "; ".join(https_off_problems(messages)) or None
+
+
 def check_forced_evaluation_after_private_dns_failed(guest: Guest, server: "ProbeServer") -> str | None:
     """A forced re-evaluation of a network whose strict private DNS name fails is evaluated as the stock
     platform does: the network stays not validated, with its private DNS broken, and no check runs (a check
     would report it validated while its private DNS is broken). Each request is judged by itself: the log
     gained a new line that says it was forced, naming this network, and no internet check from the request to
     the end of the hold, and the server sees no check. When the setting is deleted the network is validated
-    again with its private DNS no longer broken, and a new request is taken (a new line) and checked."""
+    again with its private DNS no longer broken, and a new request is taken (a new line) and checked. The host's
+    server answers every check (the expected 204, and the HTTP probe alone is asked), which it sees."""
     scenario = server.scenario()
     server.mode = "expected"
     server.clear()
     guest.reverse(server.port)
-    guest.rejoin_with_settings({**page_settings(server.port, scenario), USE_HTTPS_SETTING: "0"},
+    guest.rejoin_with_settings({**page_settings(server.port, scenario), USE_HTTPS_FLAG: "0"},
                                clear=PRIVATE_DNS_SETTINGS)
     pin = pin_network(guest)
     net_id = pin.net_id
-    wait_watching("the first check passes", WARNING_SECONDS, guest, pin,
-                  lambda: None if any(CHECK_PASSED_LINE in message for message in guest.validation_log(net_id))
-                  else "no passing check yet")
+    wait_watching("the first check passes at the host's server", WARNING_SECONDS, guest, pin,
+                  lambda: first_pass_problems(guest.validation_log(net_id)))
     union = LogUnion()
     # The setting changes with no rejoin: the platform evaluates the name for the network it has.
     guest.put_settings({"private_dns_mode": "hostname", "private_dns_specifier": UNRESOLVED_NAME})
@@ -2243,7 +2313,7 @@ def check_strict_private_dns_holds(guest: Guest, server: "ProbeServer") -> str |
     server.mode = "page"
     server.clear()
     guest.reverse(server.port)
-    settings = {**page_settings(server.port, scenario), USE_HTTPS_SETTING: "0", "private_dns_mode": "hostname",
+    settings = {**page_settings(server.port, scenario), USE_HTTPS_FLAG: "0", "private_dns_mode": "hostname",
                 "private_dns_specifier": PRIVATE_DNS_HOST}
     guest.rejoin_with_settings(settings, clear=())
     try:
@@ -2271,21 +2341,22 @@ def check_strict_private_dns_holds(guest: Guest, server: "ProbeServer") -> str |
 
 
 def check_passing_check_clears(guest: Guest, server: "ProbeServer") -> str | None:
-    """The expected answer (the host's server with the HTTPS probe off) passes the check of a network that has
-    just joined: the current network's probe received the 204, the warning is not there and the network is
-    validated."""
+    """The expected answer (the host's server with the HTTPS probe off, the HTTP probe alone asked) passes the
+    check of a network that has just joined: the current network's probe received the 204, no HTTPS probe was
+    sent, the warning is not there and the network is validated."""
     scenario = server.scenario()
     server.mode = "expected"
     server.clear()
     guest.reverse(server.port)
-    guest.rejoin_with_settings({**page_settings(server.port, scenario), USE_HTTPS_SETTING: "0"},
+    guest.rejoin_with_settings({**page_settings(server.port, scenario), USE_HTTPS_FLAG: "0"},
                                clear=PRIVATE_DNS_SETTINGS)
     pin = pin_network(guest)
     guest.show_internet_page()
     try:
-        wait_problems("the warning is not there when the check passes", WARNING_SECONDS, guest,
+        wait_problems("the warning is not there when the host's server passes the check", WARNING_SECONDS, guest,
                       lambda: cleared_problems(guest, pin)
-                      + probe_answer_problems(guest.validation_log(pin.net_id), scenario, 204))
+                      + probe_answer_problems(guest.validation_log(pin.net_id), scenario, 204)
+                      + https_off_problems(guest.validation_log(pin.net_id)))
         hold_validated(guest, SHORT_HOLD_SECONDS, pin)
     finally:
         guest.leave_internet_page()
@@ -2293,14 +2364,15 @@ def check_passing_check_clears(guest: Guest, server: "ProbeServer") -> str | Non
 
 
 def check_stock_servers_clear(guest: Guest) -> str | None:
-    """With every setting deleted the probes go to the stock servers through the host's network: the check
-    passes and the warning is gone. A host that reaches no stock server cannot show this."""
+    """With every setting and flag deleted the probes go to the stock servers through the host's network: the
+    HTTP probe and the HTTPS probe both receive 204 from the stock URLs, the check passes and the warning is gone.
+    A host that reaches no stock server cannot show this."""
     guest.rejoin_with_settings({}, clear=ALL_CHECK_SETTINGS)
     pin = pin_network(guest)
     guest.show_internet_page()
     try:
         wait_problems("the stock servers leave no warning (the host must reach them)", WARNING_SECONDS, guest,
-                      lambda: cleared_problems(guest, pin))
+                      lambda: cleared_problems(guest, pin) + stock_answer_problems(guest.validation_log(pin.net_id)))
     finally:
         guest.leave_internet_page()
     return None
@@ -2320,13 +2392,15 @@ def warning_sections(guest: Guest, server: "ProbeServer", report: "Report") -> N
                        lambda: check_page_answer_warns(guest, server, "redirect"))
         report.section("a block page in place of the expected answer shows only the warning", guest,
                        lambda: check_page_answer_warns(guest, server, "page"))
-        report.section("the warning follows one network from a failing check to a passing one and back", guest,
+        report.section("the warning follows one network from a failing check to a passing one and back, at the "
+                       "host's server with the HTTPS probe off", guest,
                        lambda: check_recovery_on_one_network(guest, server))
-        report.section("a forced re-evaluation does not validate a network whose strict private DNS failed", guest,
+        report.section("a forced re-evaluation does not validate a network whose strict private DNS failed "
+                       "(the host's server answers, the HTTPS probe off)", guest,
                        lambda: check_forced_evaluation_after_private_dns_failed(guest, server))
-        report.section("a passing check leaves no warning", guest,
+        report.section("a check that the host's server passes, with the HTTPS probe off, leaves no warning", guest,
                        lambda: check_passing_check_clears(guest, server))
-        report.section("the stock servers leave no warning", guest,
+        report.section("a check that the stock servers pass, with both probes asked, leaves no warning", guest,
                        lambda: check_stock_servers_clear(guest))
         report.section("a failing check does not probe a strict private DNS name again", guest,
                        lambda: check_strict_private_dns_holds(guest, server))

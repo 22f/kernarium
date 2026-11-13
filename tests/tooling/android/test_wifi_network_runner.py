@@ -26,6 +26,7 @@ import inspect
 import io
 from pathlib import Path
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -906,7 +907,7 @@ class WarningSectionTests(unittest.TestCase):
     def test_a_failed_check_section_sets_only_the_probes_and_joins_the_network_again(self) -> None:
         guest = self.stubbed()
         self.assertIn("validated, joined and enabled", runner.check_failed_check_warns(guest))
-        self.assertEqual(guest.calls[0], f"delete {sorted((*runner.PRIVATE_DNS_SETTINGS, runner.USE_HTTPS_SETTING))}")
+        self.assertEqual(guest.calls[0], f"delete {sorted((*runner.PRIVATE_DNS_SETTINGS, runner.USE_HTTPS_FLAG))}")
         self.assertEqual(guest.calls[1], f"put {sorted(runner.CHECK_SETTINGS)}")
         self.assertEqual(guest.calls[2:4], ["forget and save", "joined the station joins the network saved again"])
         self.assertFalse([call for call in guest.calls if call.startswith("reevaluate")])
@@ -986,7 +987,7 @@ class WarningSectionTests(unittest.TestCase):
         # The strict private DNS name fails the network itself, so no warning section sets it.
         for settings in (runner.CHECK_SETTINGS, runner.page_settings(1)):
             self.assertFalse([key for key in settings if key.startswith("private_dns")])
-        self.assertEqual(set(runner.ALL_CHECK_SETTINGS), set(runner.PROBE_SETTINGS) | {runner.USE_HTTPS_SETTING})
+        self.assertEqual(set(runner.ALL_CHECK_SETTINGS), set(runner.PROBE_SETTINGS) | {runner.USE_HTTPS_FLAG})
 
 
 class UpgradeSectionTests(unittest.TestCase):
@@ -1160,6 +1161,107 @@ class ContinuityReadingTests(unittest.TestCase):
         elsewhere = runner.ui_nodes(CLEAR_SCREEN.replace('package="com.android.systemui"',
                                                          'package="com.android.settings"'))
         self.assertFalse(runner.status_bar_present(elsewhere))
+
+
+class HttpsFlagTests(unittest.TestCase):
+    """The platform's switch for the HTTPS probe is a DeviceConfig flag of the connectivity namespace: the real
+    `put_settings` and `delete_settings` send it there and read it back, over commands that are answered as the
+    image answers them (a flag that was put reads back; one that was deleted, or never set, reads `null`; deleting
+    one that is not set prints a failure and exits 0)."""
+
+    class Recording(runner.Guest):
+        def __init__(self, **faults: bool) -> None:
+            self.commands: list[str] = []
+            self.flag: str | None = None
+            self.faults = faults
+
+        def adb_run(self, *arguments: str, timeout: float = runner.COMMAND_SECONDS) -> subprocess.CompletedProcess:
+            command = arguments[-1]
+            self.commands.append(command)
+            text = ""
+            if command.startswith("cmd device_config put "):
+                if not self.faults.get("put_ignored"):
+                    self.flag = command.rsplit(" ", 1)[1]
+            elif command.startswith("cmd device_config delete "):
+                if self.flag is None:
+                    text = "Failed to delete captive_portal_use_https from connectivity\n"
+                elif not self.faults.get("delete_ignored"):
+                    self.flag = None
+            elif command.startswith("cmd device_config get "):
+                text = (self.flag or "null") + "\n"
+            return subprocess.CompletedProcess(list(arguments), 0, stdout=text.encode())
+
+    def test_the_flag_is_put_to_device_config_and_read_back(self) -> None:
+        guest = self.Recording()
+        guest.put_settings({runner.USE_HTTPS_FLAG: "0"})
+        self.assertEqual(guest.commands, ["cmd device_config put connectivity captive_portal_use_https 0",
+                                          "cmd device_config get connectivity captive_portal_use_https"])
+
+    def test_the_probe_settings_stay_global_settings(self) -> None:
+        guest = self.Recording()
+        guest.put_settings({"captive_portal_http_url": "http://127.0.0.1:1/generate_204", runner.USE_HTTPS_FLAG: "0"})
+        guest.delete_settings(("captive_portal_http_url", runner.USE_HTTPS_FLAG))
+        self.assertEqual(guest.commands, [
+            "settings put global captive_portal_http_url http://127.0.0.1:1/generate_204",
+            "cmd device_config put connectivity captive_portal_use_https 0",
+            "cmd device_config get connectivity captive_portal_use_https",
+            "settings delete global captive_portal_http_url",
+            "cmd device_config delete connectivity captive_portal_use_https",
+            "cmd device_config get connectivity captive_portal_use_https"])
+        # The image's NetworkStack ignores a global setting of the flag's name: none is ever put.
+        self.assertFalse([command for command in guest.commands if "global captive_portal_use_https" in command])
+
+    def test_a_flag_that_does_not_read_as_put_fails(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, r"cmd device_config put connectivity captive_portal_use_https 0: "
+                                                    r"it reads 'null'"):
+            self.Recording(put_ignored=True).put_settings({runner.USE_HTTPS_FLAG: "0"})
+
+    def test_deleting_a_flag_that_is_not_set_is_no_error(self) -> None:
+        guest = self.Recording()
+        guest.delete_settings((runner.USE_HTTPS_FLAG,))
+        self.assertEqual(guest.flag, None)
+
+    def test_a_flag_that_is_still_set_after_the_delete_fails(self) -> None:
+        guest = self.Recording(delete_ignored=True)
+        guest.put_settings({runner.USE_HTTPS_FLAG: "0"})
+        with self.assertRaisesRegex(runner.Failure, r"cmd device_config delete connectivity captive_portal_use_https: "
+                                                    r"it still reads '0'"):
+            guest.delete_settings((runner.USE_HTTPS_FLAG,))
+
+    def test_the_flag_is_one_of_the_names_every_cleanup_deletes(self) -> None:
+        self.assertIn(runner.USE_HTTPS_FLAG, runner.ALL_CHECK_SETTINGS)
+
+
+class ProbeAnswerReadingTests(unittest.TestCase):
+    """What the validation log says of the servers a check asked."""
+
+    HTTP = f"PROBE_HTTP {runner.STOCK_HTTP_URL} time=20ms ret=204 request={{}} headers={{}}"
+    HTTPS = f"PROBE_HTTPS {runner.STOCK_HTTPS_URL} time=234ms ret=204 request={{}} headers={{}}"
+
+    def test_a_check_that_asked_no_https_probe_has_no_problem(self) -> None:
+        self.assertEqual(runner.https_off_problems([self.HTTP, runner.CHECK_PASSED_LINE]), [])
+
+    def test_an_https_probe_with_the_flag_at_zero_is_a_problem(self) -> None:
+        problems = runner.https_off_problems([self.HTTP, self.HTTPS])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("sent an HTTPS probe with the HTTPS flag at 0", problems[0])
+
+    def test_the_stock_servers_answered_when_both_probes_got_204_at_their_urls(self) -> None:
+        self.assertEqual(runner.stock_answer_problems([self.HTTP, self.HTTPS, runner.CHECK_PASSED_LINE]), [])
+
+    def test_a_pass_needs_both_probes_at_the_stock_urls(self) -> None:
+        # PROBE_HTTP is not the line of PROBE_HTTPS, and the stock HTTPS probe is not the stock HTTP one.
+        self.assertEqual(len(runner.stock_answer_problems([self.HTTP])), 1)
+        self.assertEqual(len(runner.stock_answer_problems([self.HTTPS])), 1)
+        self.assertEqual(len(runner.stock_answer_problems([])), 2)
+
+    def test_a_probe_that_failed_or_asked_another_server_is_not_the_stock_servers_answer(self) -> None:
+        failed = self.HTTPS.replace("time=234ms ret=204", "Probe failed with exception java.io.IOException: x")
+        self.assertEqual(len(runner.stock_answer_problems([self.HTTP, failed])), 1)
+        elsewhere = self.HTTP.replace("connectivitycheck.gstatic.com", "127.0.0.1:9")
+        self.assertEqual(len(runner.stock_answer_problems([elsewhere, self.HTTPS])), 1)
+        redirected = self.HTTP.replace("ret=204", "ret=302")
+        self.assertEqual(len(runner.stock_answer_problems([redirected, self.HTTPS])), 1)
 
 
 class PlatformFormatTests(unittest.TestCase):
@@ -2042,8 +2144,11 @@ class LogStreamDrainTests(unittest.TestCase):
 
 class SimulatedGuest(StubbedGuest):
     """A guest whose network follows the server that its probes ask, on the fake clock: a check at the time the
-    platform would make it, a log line for each, and a screen that shows what the platform last reported. A
-    fault is a way the platform or the screen can be wrong: each of them must fail the section that sees it."""
+    platform would make it, a log line for each, and a screen that shows what the platform last reported. The
+    platform is the image's: a check passes only when every probe it sends is answered 204, and it sends the HTTPS
+    probe unless the HTTPS flag read 0 when the network joined, so the host's server (no HTTPS answer) passes a
+    check only with the flag at 0 and the stock servers (both answered) with no URL setting. A fault is a way the
+    platform or the screen can be wrong: each of them must fail the section that sees it."""
 
     def __init__(self, server: "runner.ProbeServer", clock: FakeClock, **faults: object) -> None:
         super().__init__()
@@ -2071,6 +2176,9 @@ class SimulatedGuest(StubbedGuest):
         url = self.settings.get("captive_portal_http_url", "")
         match = re.fullmatch(r"http://127\.0\.0\.1:\d+(/s[0-9a-f]+)?/generate_204", url)
         self.scenario = match[1] if match else None
+        # No URL setting: the stock servers. The HTTPS flag is read once, when the network joins.
+        self.stock = "captive_portal_http_url" not in self.settings
+        self.https_off = self.settings.get(runner.USE_HTTPS_FLAG) == "0" and not self.faults.get("https_flag_ignored")
         self.strict = self.settings.get("private_dns_mode") == "hostname"
         self.failures = self.checks_done = 0
         self.settings_mark = self.bar_mark = bool(self.faults.get("mark_from_start"))
@@ -2105,6 +2213,15 @@ class SimulatedGuest(StubbedGuest):
 
     def check(self, when: float) -> None:
         self.checks_done += 1
+        if self.stock:
+            # Both probes ask the stock servers and both are answered: the check passes.
+            http, https = (runner.STOCK_HTTP_URL, runner.STOCK_HTTPS_URL)
+            if self.faults.get("pass_elsewhere"):
+                http, https = "http://198.51.100.7/generate_204", "https://198.51.100.7/generate_204"
+            self.add(f"PROBE_HTTP {http} time=64ms ret=204 request={{}} headers={{}}")
+            self.add(f"PROBE_HTTPS {https} time=107ms ret=204 request={{}} headers={{}}")
+            self.conclude(when, not self.faults.get("stock_servers_unreachable"))
+            return
         if self.scenario is None:
             self.add("PROBE_HTTPS https://192.0.2.1/generate_204 Probe failed with exception java.net.SocketTimeoutException")
             self.add("PROBE_HTTP http://192.0.2.1/generate_204 Probe failed with exception java.net.SocketTimeoutException")
@@ -2126,6 +2243,13 @@ class SimulatedGuest(StubbedGuest):
         else:
             self.add(f"PROBE_HTTP {url} time=3ms ret={status} request={{}} headers={{}}")
             passed = status == 204
+            if passed and not self.https_off:
+                # The HTTPS probe goes to the black hole and fails: partial connectivity, a failed check.
+                self.add("PROBE_HTTPS https://192.0.2.1/generate_204 Probe failed with exception "
+                         "java.net.SocketTimeoutException")
+                passed = False
+            elif passed and self.faults.get("https_probe_sent_anyway"):
+                self.add("PROBE_HTTPS https://192.0.2.1/generate_204 time=3ms ret=204 request={} headers={}")
         if self.faults.get("explanation_late") and self.checks_done == 1:
             self.add(runner.VALIDATED_FIRST_LINE)
         self.conclude(when, passed)
@@ -2311,7 +2435,7 @@ class SimulatedSectionTests(unittest.TestCase):
         guest = self.guest()
         note = self.recovery(guest)
         self.assertRegex(note, r"^network 102 validated while its first check was unanswered and at \d+ throughout, "
-                               r"\d+ checks$")
+                               r"\d+ checks at the host's server \(HTTPS probe off\)$")
         # No rejoin or other action: the network joined once, and the forced check was asked for by its ID.
         self.assertEqual(guest.net_id, 102)
         self.assertEqual(guest.calls.count("forget and save"), 1)
@@ -2373,8 +2497,52 @@ class SimulatedSectionTests(unittest.TestCase):
 
     def test_a_warning_that_stays_after_a_passing_check_fails_the_section(self) -> None:
         guest = self.guest(clear_only_on_rejoin=True, mark_from_start=True)
-        with self.assertRaisesRegex(runner.Failure, "the warning is not there when the check passes: .*"):
+        with self.assertRaisesRegex(runner.Failure, "the warning is not there when the host's server passes the check: .*"):
             runner.check_passing_check_clears(guest, self.server)
+
+    def test_a_platform_that_ignores_the_https_flag_does_not_pass_the_host_servers_check(self) -> None:
+        # The HTTP probe gets 204 and the HTTPS probe goes to the black hole: partial connectivity, a failed check.
+        guest = self.guest(https_flag_ignored=True)
+        with self.assertRaisesRegex(runner.Failure, "the warning is not there when the host's server passes the check"):
+            runner.check_passing_check_clears(guest, self.server)
+
+    def test_the_host_server_alone_passes_a_check_only_with_the_https_flag_at_zero(self) -> None:
+        for flag, passed in (({runner.USE_HTTPS_FLAG: "0"}, True), ({}, False)):
+            with self.subTest(flag=flag):
+                guest = self.guest()
+                scenario = self.server.scenario()
+                self.server.mode = "expected"
+                self.server.clear()
+                guest.rejoin_with_settings({**runner.page_settings(self.server.port, scenario), **flag}, clear=())
+                self.clock.now += 5
+                guest.advance()
+                lines = [message for _, message in guest.log]
+                self.assertEqual(runner.CHECK_PASSED_LINE in lines, passed, lines)
+                self.assertEqual(runner.CHECK_FAILED_LINE in lines, not passed, lines)
+
+    def test_an_https_probe_that_the_platform_sends_with_the_flag_at_zero_fails_the_sections_that_pass(self) -> None:
+        pattern = "the platform sent an HTTPS probe with the HTTPS flag at 0"
+        with self.assertRaisesRegex(runner.Failure, pattern):
+            runner.check_passing_check_clears(self.guest(https_probe_sent_anyway=True), self.server)
+        with self.assertRaisesRegex(runner.Failure, pattern):
+            self.recovery(self.guest(https_probe_sent_anyway=True))
+        with self.assertRaisesRegex(runner.Failure, pattern):
+            runner.check_forced_evaluation_after_private_dns_failed(self.guest(https_probe_sent_anyway=True),
+                                                                    self.server)
+
+    def test_a_check_that_the_stock_servers_pass_leaves_no_warning(self) -> None:
+        guest = self.guest()
+        self.assertIsNone(runner.check_stock_servers_clear(guest))
+        self.assertEqual(guest.settings, {})
+
+    def test_a_pass_that_did_not_ask_the_stock_servers_is_not_theirs(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, f"no PROBE_HTTP of {re.escape(runner.STOCK_HTTP_URL)} that "
+                                                    "received 204"):
+            runner.check_stock_servers_clear(self.guest(pass_elsewhere=True))
+
+    def test_stock_servers_that_the_host_cannot_reach_leave_the_warning(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, r"the stock servers leave no warning \(the host must reach them\)"):
+            runner.check_stock_servers_clear(self.guest(stock_servers_unreachable=True))
 
     def test_the_failed_check_of_a_black_hole_shows_only_the_warning(self) -> None:
         self.assertIn("validated, joined and enabled", runner.check_failed_check_warns(self.guest()))
