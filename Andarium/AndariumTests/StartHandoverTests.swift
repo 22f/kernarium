@@ -462,6 +462,14 @@ struct StartHandoverTests {
         stop.end()
     }
 
+    /// The runtime's own write-back, with no guest running: the loader says
+    /// there is none to ask, at once, and the stop is not held up.
+    @Test func theWriteBackBeforeAStopCostsNothingWithNoGuest() {
+        let before = ContinuousClock.now
+        LivePauseEffects.settleBeforeStop()
+        #expect(ContinuousClock.now - before < .seconds(2), "a stop with no guest waited for the write-back")
+    }
+
     /// A stop before the runtime runs has no guest to ask.
     @Test func aStopBeforeTheRuntimeRunsAsksNoGuest() async throws {
         let effects = LivePauseEffects()
