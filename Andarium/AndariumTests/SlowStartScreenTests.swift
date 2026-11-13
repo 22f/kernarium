@@ -17,13 +17,13 @@ struct SlowStartScreenTests {
     private let host = HostDevice(
         name: "iPhone", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [4096]), freeStorageBytes: 41_000_000_000
     )
-    private let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+    private let t0: TimeInterval = 1_000
 
     /// A clock the test moves.
     private final class Clock {
-        var now: Date
-        init(_ now: Date) { self.now = now }
-        func advance(_ seconds: TimeInterval) { now = now.addingTimeInterval(seconds) }
+        var now: TimeInterval
+        init(_ now: TimeInterval) { self.now = now }
+        func advance(_ seconds: TimeInterval) { now += seconds }
     }
 
     private struct Fixture {
@@ -189,6 +189,8 @@ struct SlowStartScreenTests {
             model: fixture.model, storage: storage,
             marker: PauseMarker(url: directory.appendingPathComponent("pause.json")))
         fixture.model.driver = runtime
+        // The runtime counts by its own clock; the test moves this one.
+        fixture.model.clock = { [clock = fixture.clock] in clock.now }
         let guest = try #require(fixture.model.guest)
         begun(fixture)
         runtime.begin(guest: guest, mode: .normal, kind: .normal)

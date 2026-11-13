@@ -177,7 +177,7 @@ struct AppEntry {
         func slowBoot(stage: Int, seconds: Int, stopping: Bool = false) {
             boot(.normal, stage: stage, seconds: seconds)
             let now = model.clock()
-            model.slowStart.begin(at: now.addingTimeInterval(-TimeInterval(seconds)))
+            model.slowStart.begin(at: now - TimeInterval(seconds))
             _ = model.slowStart.update(at: now)
             if stopping { _ = model.slowStart.requestStop() }
         }

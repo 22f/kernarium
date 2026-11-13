@@ -13,14 +13,26 @@ import Foundation
 /// beginning. The notice never ends the boot: it offers Stop, and the boot
 /// goes on behind it until the person stops it or it completes.
 ///
-/// The type holds dates and nothing else: whoever owns it passes the time, so
-/// a test needs no wait.
+/// A guest's first start, and the first start after an update, do work that a
+/// later start does not (Android sets itself up, or optimizes its apps): they
+/// are given longer before the notice, and the notice does not say the start
+/// is slower than usual.
+///
+/// The type holds readings of one monotonic clock that does not count the time
+/// the guest is held (`GuestRunClock`) and nothing else: whoever owns it
+/// passes them, so a test needs no wait.
 public struct SlowStart: Equatable, Sendable {
-    /// How long one start runs before the boot screen says so.
+    /// How long an ordinary start runs before the boot screen says so.
     public static let threshold: TimeInterval = 180
+    /// How long a start does that is the guest's first, or the first after an
+    /// update.
+    public static let firstStartThreshold: TimeInterval = 480
 
-    /// When the start under way began; nil when none is.
-    public private(set) var began: Date?
+    /// The reading when the start under way began; nil when none is.
+    public private(set) var began: TimeInterval?
+    /// The start is one that is long by its nature: a first start, or the
+    /// first after an update.
+    public private(set) var longByNature = false
     /// The notice is up.
     public private(set) var showing = false
     /// The person asked to stop the start, and the run has not ended yet.
@@ -30,20 +42,31 @@ public struct SlowStart: Equatable, Sendable {
 
     public init() {}
 
-    /// A start begins: nothing has been said of it.
-    public mutating func begin(at date: Date) {
+    /// How long the start under way runs before the notice.
+    public var patience: TimeInterval {
+        longByNature ? Self.firstStartThreshold : Self.threshold
+    }
+
+    /// Whether a start of `kind` is long by its nature.
+    public static func isLongByNature(_ kind: BootKind) -> Bool {
+        kind == .firstStart || kind == .upgrade
+    }
+
+    /// A start of `kind` begins at `reading`: nothing has been said of it.
+    public mutating func begin(at reading: TimeInterval, kind: BootKind = .normal) {
         self = SlowStart()
-        began = date
+        began = reading
+        longByNature = Self.isLongByNature(kind)
     }
 
     /// Android restarted the guest in place. The start continues when it was
-    /// unfinished (`startUnfinished`); a running session's restart begins a
-    /// boot of its own.
-    public mutating func guestRestarted(at date: Date, startUnfinished: Bool) {
+    /// unfinished (`startUnfinished`), with its count of restarts; a running
+    /// session's restart begins a boot of its own.
+    public mutating func guestRestarted(at reading: TimeInterval, startUnfinished: Bool) {
         if startUnfinished, began != nil {
             restarts += 1
         } else {
-            begin(at: date)
+            begin(at: reading, kind: .restart)
         }
     }
 
@@ -52,20 +75,18 @@ public struct SlowStart: Equatable, Sendable {
         self = SlowStart()
     }
 
-    /// Seconds into the start at `date`; zero before it began or when the
-    /// clock went back.
-    public func elapsedSeconds(at date: Date) -> Int {
+    /// Seconds into the start at `reading`; zero before it began or for a
+    /// reading before its beginning.
+    public func elapsedSeconds(at reading: TimeInterval) -> Int {
         guard let began else { return 0 }
-        return Int(max(date.timeIntervalSince(began), 0))
+        return Int(max(reading - began, 0))
     }
 
     /// Looks at the clock. Returns true on the call that puts the notice up,
     /// once for each start.
     @discardableResult
-    public mutating func update(at date: Date) -> Bool {
-        guard began != nil, !showing,
-            date.timeIntervalSince(began ?? date) >= Self.threshold
-        else { return false }
+    public mutating func update(at reading: TimeInterval) -> Bool {
+        guard let began, !showing, reading - began >= patience else { return false }
         showing = true
         return true
     }

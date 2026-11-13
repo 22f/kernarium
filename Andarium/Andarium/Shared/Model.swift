@@ -443,8 +443,11 @@ final class AppModel {
     /// When the start under way began and whether the boot screen says it is
     /// slow (`SlowStart`).
     var slowStart = SlowStart()
-    /// The time the boot screen counts a start by; a test replaces it.
-    @ObservationIgnored var clock: () -> Date = { Date() }
+    /// The time the boot screen counts a start by, in seconds: a monotonic
+    /// reading that does not run while the guest is held (a background span, a
+    /// pause for space). A runtime supplies its pause-aware clock; a test
+    /// replaces it.
+    @ObservationIgnored var clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     /// The guest's disk is being written before the run can begin.
     var preparingDisk = false
     var diskProgress: Double?
@@ -1497,7 +1500,7 @@ final class AppModel {
             snapshots.cancelReads()
             frozenBootStage = nil
             bootTracker = BootTracker()
-            slowStart.begin(at: clock())
+            slowStart.begin(at: clock(), kind: kind)
             preparingDisk = false
             diskProgress = nil
             #if !APP_STORE

@@ -51,9 +51,17 @@ final class LiveRuntime: RuntimeDriver {
     /// clean end records. Recovery never does.
     private var reachedBootCompleted = false
     private let pause: PauseController
-    /// Counts the time the guest runs, for the limits of adb operations: it
-    /// stops while the application holds the guest paused.
+    /// The effects of the pause, on the one serial queue of the runtime calls
+    /// that wait: a stop is delivered on it too.
+    private let pauseEffects: LivePauseEffects
+    /// Counts the time the guest runs, for the limits of adb operations and
+    /// the boot screen's notice that a start is slow: it stops while the
+    /// application holds the guest paused, and while it is away before the
+    /// runtime runs (`holdStartClock`).
     private let clock = GuestRunClock()
+    /// The clock stopped for the application's span in the background before
+    /// the runtime ran.
+    private var startClockHeld = false
     private let keyStore: AdbKeyStore
     /// Where the runtime records how each session ends, for the next launch.
     private let sessionRecord: URL?
@@ -160,6 +168,23 @@ final class LiveRuntime: RuntimeDriver {
     /// stopped before the runtime ran moves it on, and the preparation, which
     /// goes on to its end, then drops its launch.
     private var launchGeneration = 0
+    /// The preparation of the start in hand, from the first file it touches
+    /// until it hands the run to the runtime or ends. It owns the guest's files
+    /// for that span, and goes on after the person stops the start: a start
+    /// asked for since waits for it (`startIfReady`), and so does whatever else
+    /// writes the files (`settleGuestFiles`).
+    private var preparation: Task<Void, Never>?
+    /// The start `preparation` belongs to, so that the end of one that was
+    /// stopped does not clear its successor.
+    private var preparationGeneration = -1
+    /// The person's stop of the run in hand (`RunStop`), from the launch until
+    /// the run's end is reported.
+    private var runStop: RunStop?
+    #if DEBUG && !APP_STORE
+    /// A test's stand-in for the preparation of the files, where it holds a
+    /// start.
+    var prepareFilesOverride: (@MainActor (Guest) async throws -> Void)?
+    #endif
     /// The person stopped this start (`stopGuest`); the run's end says so.
     private var userStopped = false
     private var launching = false { didSet { publishSnapshotActivity() } }
@@ -204,7 +229,12 @@ final class LiveRuntime: RuntimeDriver {
         self.cameraDirectory = cameraDirectory
         self.freeSpace = freeSpace
         let effects = LivePauseEffects()
+        pauseEffects = effects
         pause = PauseController(effects: effects, marker: marker, runClock: clock)
+        // The boot screen counts a start by the guest's running time, not by
+        // the wall clock: neither a span in the background nor a correction of
+        // the date moves it.
+        model.clock = { [clock] in clock.seconds }
         effects.statistics = { [weak self] in await self?.readStatistics() }
         model.microphone = MicrophoneController(model: model, source: SystemMicrophoneSource()) {
             // The runtime is told the setting and never asks the system
@@ -252,7 +282,7 @@ final class LiveRuntime: RuntimeDriver {
 
     func create(_ guest: Guest, progress: @escaping @Sendable (Double) -> Void) async throws -> Guest {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
-        await settleSnapshotOperation()
+        await settleGuestFiles()
         storageBusy = true
         defer {
             snapshotRevision += 1
@@ -263,8 +293,9 @@ final class LiveRuntime: RuntimeDriver {
 
     func erase(progress: @escaping @Sendable (Double) -> Void) async throws {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
-        // The snapshots go with the guest: an operation on them finishes first.
-        await settleSnapshotOperation()
+        // The snapshots go with the guest: an operation on them finishes first,
+        // and so does the preparation of a start that was stopped.
+        await settleGuestFiles()
         storageBusy = true
         defer {
             snapshotRevision += 1
@@ -296,7 +327,7 @@ final class LiveRuntime: RuntimeDriver {
     /// restore that did not finish first), so what a screen has listed is stale.
     func restoreUpdate() async throws {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
-        await settleSnapshotOperation()
+        await settleGuestFiles()
         // A guest being set up or erased has no update to restore.
         guard !storageBusy else { return }
         defer { snapshotRevision += 1 }
@@ -323,16 +354,22 @@ final class LiveRuntime: RuntimeDriver {
         geometry = nil
         launchGeneration += 1
         userStopped = false
+        // A preparation of a start that was stopped is still the owner of
+        // `launching` and of the guest's files: this start waits for it to end
+        // (`startIfReady`, and the end of that preparation).
         pending = PendingRun(guest: guest, mode: mode, kind: kind)
-        launching = false
         startIfReady()
     }
 
+    /// The person stopped the start. The application states the intent at once
+    /// and asks nothing of the runtime on the main actor: the request goes
+    /// through the queue of the runtime's other waiting calls, and is made
+    /// again until the run ends (`RunStop`).
     func stopGuest() {
         userStopped = true
-        if runActive {
+        if runActive, let stop = runStop {
             // The run returns, and `finished` reports it as the person's.
-            kernarium_runtime_loader_request_stop()
+            if stop.request() { pauseEffects.deliverStop(stop) }
             return
         }
         // The runtime has not run: the start ends here. A preparation under
@@ -360,7 +397,12 @@ final class LiveRuntime: RuntimeDriver {
         pending = nil
         launching = true
         let generation = launchGeneration
-        Task { await prepareAndLaunch(run, generation: generation) }
+        preparationGeneration = generation
+        preparation = Task {
+            await prepareAndLaunch(run, generation: generation)
+            // A start asked for meanwhile has its own preparation by now.
+            if preparationGeneration == generation { preparation = nil }
+        }
     }
 
     /// The person stopped the start that this preparation is for.
@@ -421,6 +463,12 @@ final class LiveRuntime: RuntimeDriver {
     /// finishes first, and the update rules then apply to what it left (a
     /// restore that did not finish completes here).
     func prepareFiles(for guest: Guest, progress: @escaping @Sendable (Double) -> Void) async throws {
+        #if DEBUG && !APP_STORE
+        if let prepareFilesOverride {
+            try await prepareFilesOverride(guest)
+            return
+        }
+        #endif
         await settleSnapshotOperation()
         do {
             try await storage.prepareStart(guest, progress: progress)
@@ -456,6 +504,9 @@ final class LiveRuntime: RuntimeDriver {
 
     private func end(startFailure: String) {
         print("Andarium: cannot start the guest: \(startFailure)")
+        // The start is over: nothing owns the launch any more.
+        preparing = false
+        launching = false
         model?.runEnded(RunEnd(result: -1, startFailure: startFailure), uptimeSeconds: nil)
     }
 
@@ -493,15 +544,15 @@ final class LiveRuntime: RuntimeDriver {
             guard let restart = GuestRestartEvent(event: event, restartCount: restartCount) else { return }
             MainActor.assumeIsolated { self?.guestRestarted(restart) }
         }
-        let sink = ConsoleSink { milestones, bootCompleted, recovery in
-            Task { @MainActor in self.reached(milestones, bootCompleted: bootCompleted, recoveryStarted: recovery) }
-        }
+        let sink = makeConsoleSink()
         console = sink
         kernarium_runtime_loader_set_console_output_handler { data in sink.feed(data) }
         // A Microphone setting the person turned on earlier follows the
         // guest while iOS still allows it; otherwise the guest hears nothing.
         model?.microphone?.guestStarting()
 
+        let stop = RunStop()
+        runStop = stop
         pause.guestDidStart()
         runActive = true
         shuttingDown = false
@@ -549,6 +600,13 @@ final class LiveRuntime: RuntimeDriver {
         // the main thread. It owns a thread outright rather than a place on
         // the cooperative pool it would block for hours.
         let worker = Thread {
+            // A stop asked for since the launch began keeps the run out of the
+            // runtime: the runtime drops a stop from before its run begins.
+            guard stop.enter() else {
+                stop.end()
+                Task { @MainActor in self.finished(result: 0) }
+                return
+            }
             let result = Self.runGuest(
                 view: view, dataDiskPath: dataDiskPath, releasePath: releasePath, dataGiB: dataGiB, bootMode: bootMode,
                 width: width, height: height, dotsPerInch: dotsPerInch, memoryMiB: memoryMiB,
@@ -556,6 +614,7 @@ final class LiveRuntime: RuntimeDriver {
                 sessionRecordPath: sessionRecordPath, hostFeatures: hostFeatures, cameraMode: cameraMode,
                 cameraPath: cameraPath, extras: extras
             )
+            stop.end()
             Task { @MainActor in self.finished(result: result) }
         }
         worker.name = "andarium-runtime"
@@ -805,6 +864,35 @@ final class LiveRuntime: RuntimeDriver {
 
     // MARK: Events
 
+    /// The sink of a run's console, which the loader feeds on the main queue in
+    /// the order the runtime wrote it. It applies what it finds there and
+    /// then, synchronously, so that a report of an old boot cannot overtake the
+    /// restart that follows it: the loader delivers the console and the
+    /// restart events on the same queue, and any hop of the report's own
+    /// would run after the restart's.
+    func makeConsoleSink() -> ConsoleSink {
+        ConsoleSink { [weak self] milestones, bootCompleted, recovery in
+            MainActor.assumeIsolated {
+                self?.reached(milestones, bootCompleted: bootCompleted, recoveryStarted: recovery)
+            }
+        }
+    }
+
+    /// The application is away while a start is being prepared, before the
+    /// runtime runs (a guest that runs is held by `PauseController`, which
+    /// stops the clock): the span is not the start's.
+    private func holdStartClock() {
+        guard !runActive, pending != nil || launching else { return }
+        startClockHeld = true
+        clock.pause()
+    }
+
+    private func releaseStartClock() {
+        guard startClockHeld else { return }
+        startClockHeld = false
+        clock.resume()
+    }
+
     private func reached(_ milestones: [BootMilestone], bootCompleted: Bool, recoveryStarted: Bool) {
         guard let model else { return }
         // The guest console answers, so the emulator exists and takes requests
@@ -882,6 +970,7 @@ final class LiveRuntime: RuntimeDriver {
         kernarium_runtime_loader_set_console_output_handler(nil)
         console = nil
         pause.guestDidEnd()
+        runStop = nil
         view = nil
         geometry = nil
         launching = false
@@ -1429,10 +1518,12 @@ final class LiveRuntime: RuntimeDriver {
             }),
             (UIApplication.didEnterBackgroundNotification, {
                 $0.pause.didEnterBackground()
+                $0.holdStartClock()
                 $0.updateSpaceWatch()
             }),
             (UIApplication.willEnterForegroundNotification, {
                 $0.pause.willEnterForeground()
+                $0.releaseStartClock()
                 $0.updateSpaceWatch()
             }),
             (UIApplication.willTerminateNotification, { $0.pause.willTerminate() }),
@@ -1511,6 +1602,32 @@ final class LivePauseEffects: PauseEffects {
         queue.async {
             kernarium_runtime_loader_resume()
             Task { @MainActor in finished() }
+        }
+    }
+
+    /// Asks the runtime to stop the run `stop` belongs to, off the main actor:
+    /// the request may wait for a guest being restored or for the runtime's
+    /// own lock. It is made again until the run ends, because the runtime
+    /// drops a stop that arrives before its run begins, and nothing here can
+    /// see that moment. It goes through the queue of the other runtime calls
+    /// that wait, so it comes after a hold that was asked for before it.
+    ///
+    /// `request` is the runtime's stop, and `interval` how long after one it is
+    /// made again; a test supplies its own.
+    func deliverStop(
+        _ stop: RunStop, every interval: DispatchTimeInterval = .seconds(1),
+        request: @escaping @Sendable () -> Void = { kernarium_runtime_loader_request_stop() }
+    ) {
+        Self.deliver(stop, on: queue, every: interval, request: request)
+    }
+
+    private nonisolated static func deliver(
+        _ stop: RunStop, on queue: DispatchQueue, every interval: DispatchTimeInterval,
+        request: @escaping @Sendable () -> Void
+    ) {
+        queue.async {
+            guard stop.deliver(request) else { return }
+            queue.asyncAfter(deadline: .now() + interval) { deliver(stop, on: queue, every: interval, request: request) }
         }
     }
 
@@ -1653,6 +1770,24 @@ extension LiveRuntime: SnapshotDriver {
         while let operation = snapshotOperation { await operation.value }
     }
 
+    /// Waits for the preparation of a start, if one is in hand: it writes the
+    /// guest's files, and goes on to its end after the person stopped the
+    /// start. Not for the preparation's own use (it settles the snapshot
+    /// operation itself).
+    fileprivate func settlePreparation() async {
+        while let task = preparation { await task.value }
+    }
+
+    /// Waits until nothing else writes the guest's files: the preparation of a
+    /// start and the snapshot operation under way, which may follow one
+    /// another. What changes the files, besides a start, begins after it.
+    fileprivate func settleGuestFiles() async {
+        while preparation != nil || snapshotOperation != nil {
+            await settlePreparation()
+            await settleSnapshotOperation()
+        }
+    }
+
     /// Runs `body` on the storage off the main actor as the one operation
     /// under way. A gated one refuses unless the guest is stopped and idle;
     /// one that is not (Rename) waits its turn, and refuses only while a guest
@@ -1663,7 +1798,7 @@ extension LiveRuntime: SnapshotDriver {
         if gated {
             if let refusal = snapshotGate { return .refused(refusal) }
         } else {
-            await settleSnapshotOperation()
+            await settleGuestFiles()
             if storageBusy { return .refused(.busy) }
         }
         let storage = self.storage

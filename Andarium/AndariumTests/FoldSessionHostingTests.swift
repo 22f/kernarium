@@ -687,7 +687,7 @@ struct FoldSessionHostingTests {
             case .slowBoot:
                 // A start that has run 3 minutes 17 seconds, by the model's own clock.
                 let now = model.clock()
-                model.slowStart.begin(at: now.addingTimeInterval(-197))
+                model.slowStart.begin(at: now - 197)
                 _ = model.slowStart.update(at: now)
             case .stopped:
                 model.runEnd = RunEnd(result: -5, stoppedByUser: true)
