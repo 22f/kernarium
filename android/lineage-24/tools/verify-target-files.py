@@ -2922,9 +2922,55 @@ def check_compass_feature(archive: zipfile.ZipFile, infos: dict[str, zipfile.Zip
     ]
     if features != [COMPASS_FEATURE]:
         fail(f"{COMPASS_FEATURE_FILE} declares {features}, not {COMPASS_FEATURE} alone")
+    # SystemConfig reads <permissions> files; the file is that root with the one feature and nothing that
+    # takes a feature away again.
+    if root.tag != "permissions":
+        fail(f"{COMPASS_FEATURE_FILE} has the root element <{root.tag}>, not <permissions>")
+    if any(element.tag.rsplit("}", 1)[-1] == "unavailable-feature" for element in root.iter()):
+        fail(f"{COMPASS_FEATURE_FILE} holds an unavailable-feature element: it declares the compass feature alone")
+    children = list(root)
+    if len(children) != 1 or children[0].tag != "feature" or set(children[0].attrib) != {"name"}:
+        fail(f"{COMPASS_FEATURE_FILE} is not one <feature name=...> in <permissions>: {[c.tag for c in children]}")
     for name in sorted(infos):
         if name.startswith(f"{COMPASS_PERMISSION_DIRECTORY}/") and name != COMPASS_FEATURE_FILE:
             fail(f"{name} is in {COMPASS_PERMISSION_DIRECTORY}, which holds the compass feature alone")
+        # SystemConfig reads etc/sysconfig of every partition with the flags that allow features, as it
+        # reads etc/permissions: a declaration there would be read for every launch.
+        path = PurePosixPath(name)
+        if infos[name].is_dir() or path.suffix != ".xml" or "sysconfig" not in path.parts:
+            continue
+        try:
+            other = ET.fromstring(read_small(archive, infos[name]))
+        except ET.ParseError:
+            continue
+        if any(
+            element.tag.rsplit("}", 1)[-1] == "feature" and element.attrib.get("name") == COMPASS_FEATURE
+            for element in other.iter()
+        ):
+            fail(
+                f"the compass feature is declared in the sysconfig file {name}: only a host with a "
+                f"magnetometer has a compass, and SystemConfig reads {COMPASS_PERMISSION_DIRECTORY} for "
+                "such a host alone"
+            )
+    check_motion_properties_in_init(archive, infos)
+
+
+INIT_SETPROP = re.compile(r"^\s*setprop\s+(\S+)")
+
+
+def check_motion_properties_in_init(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    """The launch alone states what the host feeds: no init script of the image sets the properties the
+    sensors' list and the compass feature follow (build.prop is checked with every property file)."""
+    for name in sorted(infos):
+        if infos[name].is_dir() or not name.endswith(".rc"):
+            continue
+        for line in read_small(archive, infos[name]).decode("utf-8", errors="replace").splitlines():
+            match = INIT_SETPROP.match(line.split("#", 1)[0])
+            if match and match[1] in (MOTION_ORIENTATION_PROPERTY, MOTION_COMPASS_PROPERTY):
+                fail(
+                    f"{name} sets {match[1]}: the launch alone states whether the host feeds the "
+                    "device-orientation sensor and has a magnetometer"
+                )
 
 
 # The vibrator HAL exists only on a device with haptics. The host passes the "haptics" ODM SKU for

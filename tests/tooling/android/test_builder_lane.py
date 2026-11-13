@@ -5553,6 +5553,37 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 "VENDOR/etc/permissions/sku_haptics/android.hardware.sensor.compass.xml":
                     b'<permissions><feature name="android.hardware.sensor.compass"/></permissions>'}},
              "the compass feature is declared outside VENDOR/etc/permissions/kernarium_compass"),
+            # SystemConfig reads etc/sysconfig of every partition with the flags that allow features as well.
+            ("compass-feature-in-the-system-sysconfig", {"entries": {
+                "SYSTEM/etc/sysconfig/extra-compass.xml":
+                    b'<config><feature name="android.hardware.sensor.compass"/></config>'}},
+             "the compass feature is declared in the sysconfig file SYSTEM/etc/sysconfig/extra-compass.xml"),
+            ("compass-feature-in-the-vendor-sysconfig", {"entries": {
+                "VENDOR/etc/sysconfig/extra-compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass"/></permissions>'}},
+             "the compass feature is declared in the sysconfig file VENDOR/etc/sysconfig/extra-compass.xml"),
+            # The one file is the permissions root with the one feature, and nothing that takes a feature away.
+            ("compass-feature-file-with-another-root", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml":
+                    b'<config><feature name="android.hardware.sensor.compass"/></config>'}},
+             "has the root element <config>, not <permissions>"),
+            ("compass-feature-file-with-an-unavailable-feature", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass"/>'
+                    b'<unavailable-feature name="android.hardware.sensor.light"/></permissions>'}},
+             "holds an unavailable-feature element"),
+            ("compass-feature-with-another-attribute", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass" notLowRam="true"/></permissions>'}},
+             "is not one <feature name=...> in <permissions>"),
+            ("init-sets-the-compass-property", {"entries": {
+                "SYSTEM/etc/init/early-compass.rc":
+                    b"on early-init\n    setprop ro.boot.kernarium.compass 1  # a host with a magnetometer\n"}},
+             "early-compass.rc sets ro.boot.kernarium.compass"),
+            ("init-sets-the-orientation-property", {"entries": {
+                "SYSTEM/etc/init/early-orientation.rc":
+                    b"on early-init\n    setprop ro.boot.kernarium.orientation 1\n"}},
+             "early-orientation.rc sets ro.boot.kernarium.orientation"),
             ("services-jar-without-the-compass-property", {"services_jar_variant": "no-compass-marker"},
              "lacks the SystemConfig topic that reads the compass feature for a host with a magnetometer"),
             ("services-jar-without-the-compass-directory", {"services_jar_variant": "no-compass-directory-marker"},
