@@ -17,6 +17,8 @@ import io
 import json
 import os
 from pathlib import Path
+import random
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -327,47 +329,126 @@ class RunnerLifecycleTests(unittest.TestCase):
         self.assertEqual(stopped, ["fine"])
 
 
+HEADER_DIRECTORY = Path(__file__).resolve().parents[3] / "android/lineage-24/overlay/tools"
+DRIVER = r"""
+#include <stdio.h>
+#include "kernarium_wifi_mac.h"
+int main() {
+  char line[64];
+  while (fgets(line, sizeof line, stdin)) {
+    unsigned v[6];
+    if (sscanf(line, "%x:%x:%x:%x:%x:%x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return 2;
+    kernarium_net::Mac ethernet = {};
+    for (int i = 0; i < 6; ++i) ethernet[i] = static_cast<unsigned char>(v[i]);
+    const kernarium_net::Mac wifi = kernarium_net::DeriveWifiMac(ethernet);
+    const kernarium_net::Mac back = kernarium_net::EthernetFromWifiMac(wifi);
+    printf("%02x:%02x:%02x:%02x:%02x:%02x %02x:%02x:%02x:%02x:%02x:%02x\n",
+           wifi[0], wifi[1], wifi[2], wifi[3], wifi[4], wifi[5],
+           back[0], back[1], back[2], back[3], back[4], back[5]);
+  }
+  return 0;
+}
+"""
+
+
+def reserved_addresses() -> list[int]:
+    return [0x020000000000] + [0x52550A000200 | last for last in range(256)]
+
+
+def is_host_address(mac: str) -> bool:
+    """An address the host can give eth0: locally administered unicast and not reserved."""
+    packed = int(mac.replace(":", ""), 16)
+    return packed >> 40 & 0x03 == 0x02 and packed not in reserved_addresses()
+
+
+def random_macs(count: int, seed: int) -> list[str]:
+    rng = random.Random(seed)
+    return [runner.format_mac(runner.mac_from_bits(rng.getrandbits(46))) for _ in range(count)]
+
+
 class WifiDerivationTests(unittest.TestCase):
     def test_the_port_gives_the_golden_vectors_the_cpp_gives(self) -> None:
         vectors = runner.golden_vectors()
-        self.assertGreaterEqual(len(vectors), 10)
+        self.assertGreaterEqual(len(vectors), 1000)
         for ethernet, wifi in vectors:
             self.assertEqual(runner.derive_wifi_mac(ethernet), wifi, ethernet)
+            if is_host_address(ethernet):
+                self.assertEqual(runner.ethernet_from_wifi_mac(wifi), ethernet, wifi)
 
     def test_every_result_is_a_local_unicast_address_that_is_not_refused(self) -> None:
         for ethernet in ["52:54:00:12:34:56", "00:00:00:00:00:00", ETHERNET, OTHER_ETHERNET,
-                         "02:15:b2:00:00:00", "52:55:0a:00:02:02"]:
+                         "02:15:b2:00:00:00", "52:55:0a:00:02:02"] + random_macs(2000, 1):
             wifi = runner.derive_wifi_mac(ethernet)
-            first = int(wifi[:2], 16)
-            self.assertEqual(first & 0x03, 0x02, ethernet)
-            self.assertNotIn(wifi, (ethernet, "02:00:00:00:00:00"), ethernet)
-            self.assertNotEqual(wifi[:14], "52:55:0a:00:02", ethernet)
-        self.assertNotEqual(runner.derive_wifi_mac(ETHERNET), runner.derive_wifi_mac(OTHER_ETHERNET))
+            self.assertEqual(int(wifi[:2], 16) & 0x03, 0x02, ethernet)
+            self.assertNotEqual(wifi, ethernet)
+            self.assertNotIn(int(wifi.replace(":", ""), 16), reserved_addresses(), ethernet)
 
-    def test_a_refused_candidate_takes_the_next_round_and_no_round_takes_the_fallback(self) -> None:
-        # The header's rules, by the key under which round 0 gives eth0's own address: the
-        # inverse of the mixer finds it.
-        def unmix(value: int) -> int:
-            def inverse(odd: int) -> int:
-                result = odd
-                for _ in range(6):
-                    result = result * (2 - odd * result) & runner.MASK64
-                return result
-            value ^= value >> 33
-            value = value * inverse(0xC4CEB9FE1A85EC53) & runner.MASK64
-            value ^= value >> 33
-            value = value * inverse(0xFF51AFD7ED558CCD) & runner.MASK64
-            return value ^ value >> 33
+    def test_the_review_pair_gives_two_addresses(self) -> None:
+        # A hash gave these two eth0 addresses one Wi-Fi address.
+        self.assertNotEqual(runner.derive_wifi_mac("0a:11:22:33:44:56"), runner.derive_wifi_mac("62:a7:34:c8:24:f6"))
 
-        ethernet = "0a:11:22:33:44:55"
-        packed = int(ethernet.replace(":", ""), 16)
-        key = packed ^ unmix(unmix(packed << 16))
-        first = runner.mix64(runner.mix64(packed ^ key))
-        self.assertEqual(first >> 16, packed)
-        derived = runner.derive_wifi_mac(ethernet, key)
-        self.assertNotEqual(derived, ethernet)
-        self.assertEqual(runner.derive_wifi_mac(ethernet, key, 0), runner.LEGACY_WIFI_MAC)
-        self.assertEqual(runner.derive_wifi_mac(runner.LEGACY_WIFI_MAC, key, 0), "02:15:b2:00:00:01")
+    def test_the_inverse_round_trips_and_the_permutation_is_one_to_one(self) -> None:
+        for ethernet in random_macs(3000, 2):
+            self.assertEqual(runner.ethernet_from_wifi_mac(runner.derive_wifi_mac(ethernet)), ethernet)
+        rng = random.Random(3)
+        for _ in range(3000):
+            bits = rng.getrandbits(runner.WIFI_BITS)
+            self.assertEqual(runner.wifi_unpermute(runner.wifi_permute(bits)), bits)
+        self.assertEqual(len({runner.derive_wifi_mac(ethernet) for ethernet in random_macs(20000, 4)}), 20000)
+
+    def test_a_reserved_address_is_walked_past_with_at_most_the_stated_bound(self) -> None:
+        reserved = reserved_addresses()
+        self.assertEqual(len(reserved), 257)
+        self.assertEqual(runner.WIFI_MAX_STEPS, len(reserved) + 1)
+        for packed in reserved:
+            # The eth0 address whose first step lands on the reserved one.
+            position = runner.wifi_permute(runner.mac_bits(runner.format_mac(packed)))
+            ethernet = runner.format_mac(runner.mac_from_bits(
+                runner.wifi_unpermute((position - 1) % runner.WIFI_VALUES)))
+            wifi = int(runner.derive_wifi_mac(ethernet).replace(":", ""), 16)
+            self.assertNotEqual(wifi, packed)
+            self.assertNotIn(wifi, reserved)
+            expected = next(candidate for step in range(2, runner.WIFI_MAX_STEPS + 1)
+                            for candidate in [runner.mac_from_bits(
+                                runner.wifi_unpermute((position - 1 + step) % runner.WIFI_VALUES))]
+                            if candidate not in reserved)
+            self.assertEqual(wifi, expected)
+
+    def test_what_the_host_never_generates_has_the_documented_result(self) -> None:
+        # The flag bits are ignored: the broadcast address gives the result of its local twin.
+        self.assertEqual(runner.derive_wifi_mac("ff:ff:ff:ff:ff:ff"), runner.derive_wifi_mac("fe:ff:ff:ff:ff:ff"))
+        self.assertEqual(runner.derive_wifi_mac("01:aa:bb:cc:dd:ee"), runner.derive_wifi_mac("02:aa:bb:cc:dd:ee"))
+        # A reserved input gives the result of the unreserved address before it on the cycle.
+        for packed in reserved_addresses()[:20]:
+            before = runner.wifi_unpermute((runner.wifi_permute(runner.mac_bits(runner.format_mac(packed))) - 1)
+                                           % runner.WIFI_VALUES)
+            if runner.mac_from_bits(before) in reserved_addresses():
+                continue
+            self.assertEqual(runner.derive_wifi_mac(runner.format_mac(packed)),
+                             runner.derive_wifi_mac(runner.format_mac(runner.mac_from_bits(before))))
+
+    @unittest.skipUnless(shutil.which("c++"), "no C++ compiler")
+    def test_a_differential_run_of_the_header_agrees_with_the_port(self) -> None:
+        macs = random_macs(5000, 5) + [
+            "00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff", "01:23:45:67:89:ab", "02:00:00:00:00:00",
+            "52:55:0a:00:02:02", "52:55:0a:00:02:ff", "02:15:b2:00:00:00", "0a:11:22:33:44:56"]
+        rng = random.Random(6)
+        macs += [runner.format_mac(rng.getrandbits(48)) for _ in range(2000)]  # flag bits included
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "driver.cpp"
+            binary = Path(directory) / "driver"
+            source.write_text(DRIVER)
+            subprocess.run(["c++", "-std=c++20", "-O1", f"-I{HEADER_DIRECTORY}", str(source), "-o", str(binary)],
+                           check=True, capture_output=True)
+            output = subprocess.run([str(binary)], input="\n".join(macs) + "\n", text=True, check=True,
+                                    capture_output=True).stdout.splitlines()
+        self.assertEqual(len(output), len(macs))
+        for ethernet, line in zip(macs, output):
+            wifi, back = line.split()
+            self.assertEqual(wifi, runner.derive_wifi_mac(ethernet), ethernet)
+            self.assertEqual(back, runner.ethernet_from_wifi_mac(wifi), ethernet)
+            if is_host_address(ethernet):
+                self.assertEqual(back, ethernet)
 
 
 WLAN0 = (

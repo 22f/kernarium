@@ -322,7 +322,12 @@ def check_network(device: Device) -> None:
 
 MASK64 = (1 << 64) - 1
 WIFI_KEY = 0x6B726E5F77696669  # "krn_wifi"
-WIFI_ROUNDS = 16
+WIFI_BITS = 46
+WIFI_HALF_BITS = 23
+WIFI_HALF_MASK = (1 << WIFI_HALF_BITS) - 1
+WIFI_VALUES = 1 << WIFI_BITS
+WIFI_ROUNDS = 6
+WIFI_MAX_STEPS = 258
 
 
 def mix64(value: int) -> int:
@@ -334,23 +339,64 @@ def mix64(value: int) -> int:
     return value ^ value >> 33
 
 
-def format_mac(raw: bytes) -> str:
-    return ":".join(f"{byte:02x}" for byte in raw)
+def format_mac(packed: int) -> str:
+    return ":".join(f"{(packed >> shift) & 0xFF:02x}" for shift in range(40, -8, -8))
 
 
-def derive_wifi_mac(ethernet: str, key: int = WIFI_KEY, rounds: int = WIFI_ROUNDS) -> str:
-    """wlan0's address as a function of eth0's: the port of DeriveWifiMac in
-    android/lineage-24/overlay/tools/kernarium_wifi_mac.h. The golden vectors that the C++
-    unit test checks too are what ties the two."""
-    packed = int(ethernet.replace(":", ""), 16)
-    for round_number in range(rounds):
-        mixed = mix64(mix64(packed ^ key) + round_number & MASK64)
-        candidate = bytearray(mixed.to_bytes(8, "big")[:6])
-        candidate[0] = (candidate[0] | 0x02) & 0xFE
-        value = int.from_bytes(candidate, "big")
-        if value not in (packed, 0x020000000000) and value >> 8 != 0x52550A0002:
-            return format_mac(bytes(candidate))
-    return "02:15:b2:00:00:01" if packed == 0x0215B2000000 else LEGACY_WIFI_MAC
+def mac_bits(mac: str) -> int:
+    """The address without its two flag bits (WifiMacBits)."""
+    packed = int(mac.replace(":", ""), 16)
+    return (packed >> 42) << 40 | packed & 0xFFFFFFFFFF
+
+
+def mac_from_bits(bits: int) -> int:
+    """The locally administered unicast address of the 46 bits, packed (WifiMacFromBits)."""
+    return ((bits >> 40 << 2 | 0x02) << 40) | bits & 0xFFFFFFFFFF
+
+
+def wifi_reserved(packed: int) -> bool:
+    return packed == 0x020000000000 or packed >> 8 == 0x52550A0002
+
+
+def wifi_round(half: int, key: int, round_number: int) -> int:
+    return mix64(half ^ (key + round_number * 0x9E3779B97F4A7C15 & MASK64) & MASK64) & WIFI_HALF_MASK
+
+
+def wifi_permute(bits: int, key: int = WIFI_KEY) -> int:
+    left, right = bits >> WIFI_HALF_BITS, bits & WIFI_HALF_MASK
+    for round_number in range(WIFI_ROUNDS):
+        left, right = right, left ^ wifi_round(right, key, round_number)
+    return left << WIFI_HALF_BITS | right
+
+
+def wifi_unpermute(bits: int, key: int = WIFI_KEY) -> int:
+    left, right = bits >> WIFI_HALF_BITS, bits & WIFI_HALF_MASK
+    for round_number in reversed(range(WIFI_ROUNDS)):
+        left, right = right ^ wifi_round(left, key, round_number), left
+    return left << WIFI_HALF_BITS | right
+
+
+def derive_wifi_mac(ethernet: str, key: int = WIFI_KEY) -> str:
+    """wlan0's address as a function of eth0's: a permutation of the 46 free bits (a Feistel
+    network rho), taken at the first step after eth0's along rho^-1(rho(x) + k) that is not
+    reserved. The port of DeriveWifiMac in android/lineage-24/overlay/tools/kernarium_wifi_mac.h,
+    which the golden vectors tie to the C++."""
+    position = wifi_permute(mac_bits(ethernet), key)
+    for step in range(1, WIFI_MAX_STEPS + 1):
+        candidate = mac_from_bits(wifi_unpermute((position + step) % WIFI_VALUES, key))
+        if not wifi_reserved(candidate):
+            break
+    return format_mac(candidate)
+
+
+def ethernet_from_wifi_mac(wifi: str, key: int = WIFI_KEY) -> str:
+    """The inverse of derive_wifi_mac (EthernetFromWifiMac)."""
+    position = wifi_permute(mac_bits(wifi), key)
+    for step in range(1, WIFI_MAX_STEPS + 1):
+        candidate = mac_from_bits(wifi_unpermute((position - step) % WIFI_VALUES, key))
+        if not wifi_reserved(candidate):
+            break
+    return format_mac(candidate)
 
 
 def golden_vectors(path: pathlib.Path = GOLDEN_VECTORS) -> list[tuple[str, str]]:
