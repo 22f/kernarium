@@ -532,7 +532,11 @@ Tooling tests cover `scripts/check-privacy-manifests.py`
 device slice it packages), `Andarium/scripts/check-app-store-bundle.py`
 (`andarium-app-store-bundle`, the last build phase of the AppStore
 configuration, [configurations](../Andarium/README.md#configurations)), the
-Acknowledgements resource (`andarium-acknowledgements`) and the stand-in
+document pickers' build conditions (`andarium-document-pickers`: the App Store
+configuration opens files in place, every other presents the copy-mode picker,
+and an in-place importer anywhere else is in an App Store branch or a named
+exception),
+the Acknowledgements resource (`andarium-acknowledgements`) and the stand-in
 debugger that serves the JIT's request for executable memory on a device
 (`andarium-ios-jit-debugger`). The JIT's region route has host tests that run
 on macOS (`arm64-jit-debugger-region`, `arm64-jit-debugger-request` for a

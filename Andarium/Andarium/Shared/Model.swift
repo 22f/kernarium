@@ -436,6 +436,8 @@ final class AppModel {
     /// screen over the session asks what to do.
     var spacePause: SpacePause?
     var alert: AppAlert?
+    /// What a Files picker's failure says, over Settings (`documentPickerFailed`).
+    var documentPickerProblem: AppAlert?
     /// Settings' Install APK asks whether to install an app Android refused for
     /// the version it was built for; the screens' alert shows it while the
     /// install waits behind the overlay (`LegacyInstallFlow`).
@@ -1339,8 +1341,10 @@ final class AppModel {
     /// .apk, .apks, .xapk or .apkm, or is an .apk that Android cannot take by
     /// its size, is refused on the same overlay, at once; an archive of an
     /// app's parts is read, and refused or installed, by the operation. The
-    /// file's security scope is held to the end of the install.
-    func installPicked(_ url: URL) {
+    /// file's security scope is held to the end of the install. `staged` is the
+    /// folder of ours that holds a copy the picker made: it is removed at each
+    /// refusal and when the install is over, across Install anyway too.
+    func installPicked(_ url: URL, staged: PickedFolder? = nil) {
         guard busy == nil else { return }
         guard fileBrowser?.busy != true else {
             alert = AppAlert(
@@ -1370,7 +1374,10 @@ final class AppModel {
             failure: Self.installFailure,
             ending: { (outcome: ApkInstallOutcome) in outcome.words(fileName: name) },
             { [driver] update in
-                defer { endAccess() }
+                defer {
+                    endAccess()
+                    staged?.discard()
+                }
                 let outcome = try await self.installAskingAboutLegacyApps(detail: detail) { bypass, update in
                     if let driver {
                         return try await driver.installApk(at: url, bypassLowTargetSdkBlock: bypass, update: update)
@@ -1484,6 +1491,14 @@ final class AppModel {
 
     /// The title of an install that did not happen.
     static let installFailure = String(localized: "App not installed")
+
+    /// The Files picker of Install APK or of the file browser's Import failed:
+    /// the person is told, where nothing would otherwise happen. Settings,
+    /// which both pickers are in, shows it over itself (`SessionSettingsSheet`):
+    /// an alert of the screens beneath it would close the sheet to be shown.
+    func documentPickerFailed(_ error: Error, title: String) {
+        documentPickerProblem = AppAlert(title: title, message: error.localizedDescription)
+    }
 
     #if !APP_STORE
     /// What one attempt of the preview's install does instead of

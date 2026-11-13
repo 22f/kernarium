@@ -203,6 +203,13 @@ everything that exists for automation or only pretends:
   no debugging or automation support (the `kernarium-ios-device-android-app-store`
   preset, packaged with `package-ios-frameworks.sh --app-store --runtimes
   android`; [`Kernarium/README.md`](../Kernarium/README.md#automation-runs)).
+- It opens the files of Install APK and of the file browser's Import in place
+  (SwiftUI's `fileImporter`); every other configuration presents the document
+  picker in copy mode (`Shared/CopyDocumentPicker.swift`, compiled out by
+  `APP_STORE`), moves each copy at once into a folder of its own under
+  `tmp/PickedFiles/` and removes it when the install or import that uses it is
+  over (Install anyway and Try Again still find it) and at the next launch. A
+  picker that fails shows an alert in every configuration.
 - Its Archive action uses it, and the archive is the build TestFlight and the
   App Store offer to Macs.
 - It refuses an embedded artifact that is behind the archived commit: a build
@@ -219,7 +226,8 @@ everything that exists for automation or only pretends:
   build on a missing Info.plist key, an environment knob, a symbol or log text
   of the debugging and automation support, the JIT (its symbols and text and
   the `brk #0xf00d` instruction), a test bundle or XCTest framework, a
-  trace of the build host, a harness console line, or a privacy manifest that
+  trace of the build host, a harness console line, the copy-mode document
+  picker or a missing in-place importer, or a privacy manifest that
   does not cover a binary
   ([`scripts/check-privacy-manifests.py`](../scripts/check-privacy-manifests.py));
   the script's header is the complete list.
