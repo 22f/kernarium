@@ -611,6 +611,33 @@ def verify_target_files_fixtures(verifier: Path) -> None:
     import camera_layouts
 
     tool = load_tool(verifier)
+    # The camera HAL's grant on the composer's file descriptors, in the forms the compiled vendor policy has (the
+    # attribute, and the six-digit version of a platform symbol) and in the near misses it must not accept.
+    camera_fence = b"(allow hal_camera_default hal_graphics_composer (fd (use)))"
+    for accepted, line in (
+        ("the rule", camera_fence),
+        ("more permissions", camera_fence.replace(b"(use)", b"(use getattr)")),
+        ("versioned names", b"(allow hal_camera_default_202604 hal_graphics_composer_202604 (fd (use)))"),
+    ):
+        if not tool.CAMERA_HAL_COMPOSER_FENCE.search(b"(type x)\n" + line + b"\n"):
+            fail(f"the camera fence check rejects {accepted}")
+    for rejected, line in (
+        ("another numeric source symbol", camera_fence.replace(b"hal_camera_default ", b"hal_camera_default_2 ")),
+        ("another numeric target symbol", camera_fence.replace(b"hal_graphics_composer ", b"hal_graphics_composer_2 ")),
+        ("a five-digit source suffix", camera_fence.replace(b"hal_camera_default ", b"hal_camera_default_20260 ")),
+        ("a seven-digit target suffix", camera_fence.replace(b"composer ", b"composer_2026040 ")),
+        ("a named source suffix", camera_fence.replace(b"hal_camera_default ", b"hal_camera_default_xx ")),
+        ("the composer's type", camera_fence.replace(b"hal_graphics_composer ", b"hal_graphics_composer_default ")),
+        ("the camera attribute", camera_fence.replace(b"hal_camera_default ", b"hal_camera ")),
+        ("another permission", camera_fence.replace(b"(use)", b"(getattr)")),
+        ("another class", camera_fence.replace(b"(fd (use))", b"(file (use))")),
+        ("a dontaudit", camera_fence.replace(b"(allow", b"(dontaudit")),
+        ("a neverallow", camera_fence.replace(b"(allow", b"(neverallow")),
+        ("a comment", b";;" + camera_fence),
+        ("two rules on a line", camera_fence + b" " + camera_fence),
+    ):
+        if tool.CAMERA_HAL_COMPOSER_FENCE.search(b"(type x)\n" + line + b"\n"):
+            fail(f"the camera fence check accepts {rejected}")
     pinner_overlay_entry = tool.PINNER_OVERLAY
     wifi_overlay_entry = tool.WIFI_OVERLAY
     wifi_never = tool.WIFI_NEVER_DISABLED_THRESHOLD
@@ -1053,7 +1080,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           core_sets_vendor_prop: bool = False,
                           missing_audio_binder_policy: bool = False,
                           missing_wifi_debug_policy: bool = False,
-                          missing_camera_fence_policy: bool = False,
+                          camera_fence_variant: str | None = None,
                           clearkey_memfd_variant: str | None = None,
                           oversize_platform_policy: bool = False,
                           media_codecs_variant: str | None = None,
@@ -2134,11 +2161,18 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         else "(allow hal_wifi_default persist_vendor_debug_wifi_prop_202604 "
                         "(file (read getattr map open)))\n"
                     )
-                    + (
-                        ""
-                        if missing_camera_fence_policy
-                        else "(allow hal_camera_default hal_graphics_composer (fd (use)))\n"
-                    )
+                    + {
+                        None: "(allow hal_camera_default hal_graphics_composer (fd (use)))\n",
+                        "missing": "",
+                        # A numeric suffix is the version of a platform symbol (_202604, six digits); on a
+                        # vendor type or any other length it is a different symbol, which the rule does not cover.
+                        "source-other-type": "(type hal_camera_default_2)\n"
+                        "(allow hal_camera_default_2 hal_graphics_composer (fd (use)))\n",
+                        "target-other-type": "(type hal_graphics_composer_2)\n"
+                        "(allow hal_camera_default hal_graphics_composer_2 (fd (use)))\n",
+                        "source-short-suffix": "(allow hal_camera_default_20260 hal_graphics_composer (fd (use)))\n",
+                        "target-long-suffix": "(allow hal_camera_default hal_graphics_composer_2026040 (fd (use)))\n",
+                    }[camera_fence_variant]
                     + (
                         "(allow adbd_202604 virtual_face_hal_prop_202604 (property_service (set)))\n"
                         if core_sets_vendor_prop
@@ -3463,7 +3497,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("core-sets-vendor-prop", {"core_sets_vendor_prop": True}),
             ("audio-binder-policy", {"missing_audio_binder_policy": True}),
             ("wifi-debug-property-policy", {"missing_wifi_debug_policy": True}),
-            ("camera-fence-policy", {"missing_camera_fence_policy": True}),
+            ("camera-fence-policy", {"camera_fence_variant": "missing"}),
+            ("camera-fence-source-other-type", {"camera_fence_variant": "source-other-type"}),
+            ("camera-fence-target-other-type", {"camera_fence_variant": "target-other-type"}),
+            ("camera-fence-source-short-suffix", {"camera_fence_variant": "source-short-suffix"}),
+            ("camera-fence-target-long-suffix", {"camera_fence_variant": "target-long-suffix"}),
             ("clearkey-memfd-missing", {"clearkey_memfd_variant": "missing"}),
             ("clearkey-memfd-no-write", {"clearkey_memfd_variant": "no-write"}),
             ("clearkey-memfd-isolated-apps", {"clearkey_memfd_variant": "all-apps"}),
@@ -4143,7 +4181,15 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "audio HAL processes call each other's binder"),
             ("wifi-debug-property-policy-cause", {"missing_wifi_debug_policy": True},
              "Wi-Fi HAL read persist_vendor_debug_wifi_prop"),
-            ("camera-fence-policy-cause", {"missing_camera_fence_policy": True},
+            ("camera-fence-policy-cause", {"camera_fence_variant": "missing"},
+             "camera HAL use the display composer's file descriptors"),
+            ("camera-fence-source-other-type-cause", {"camera_fence_variant": "source-other-type"},
+             "camera HAL use the display composer's file descriptors"),
+            ("camera-fence-target-other-type-cause", {"camera_fence_variant": "target-other-type"},
+             "camera HAL use the display composer's file descriptors"),
+            ("camera-fence-source-short-suffix-cause", {"camera_fence_variant": "source-short-suffix"},
+             "camera HAL use the display composer's file descriptors"),
+            ("camera-fence-target-long-suffix-cause", {"camera_fence_variant": "target-long-suffix"},
              "camera HAL use the display composer's file descriptors"),
             ("clearkey-memfd-missing-cause", {"clearkey_memfd_variant": "missing"},
              "ClearKey DRM HAL read, write and map the memfd files"),

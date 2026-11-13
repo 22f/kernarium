@@ -805,10 +805,13 @@ names the release: the runner boots it with the launcher's synthetic camera
 SKU (`--layout auto` has the launcher compose it, as the iOS runtime does, with
 RAW once `--calibration-dir` holds colour data from an earlier session), and
 checks what Android lists (features, media profiles, camera IDs), one preview
-frame and one still of the camera application, four photo-to-video switches
-with the preview running and the window animations off (none refuses a capture
-request or draws an SELinux denial naming the camera HAL's domain), and, in a
-blocked session, that the same cameras give black frames and no still.
+frame and one still of the camera application, photo-to-video switches
+(`--switch-rounds`, four by default; each from a freshly started application
+with capture running and the window animations off, and each seen: the photo
+activity's pause, the video activity's resume and capture after them) that
+refuse no capture request and draw no SELinux denial of the camera HAL's use of
+the display composer's file descriptors, and, in a blocked session, that the
+same cameras give black frames and no still.
 `android17-camera-runner` (tooling) runs its parsers and the expectations of
 every layout without a guest, and `android17-camera-layouts` (tooling) the
 layout set, its fallback order and the generated files.

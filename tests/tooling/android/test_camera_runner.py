@@ -302,6 +302,20 @@ class LauncherTests(unittest.TestCase):
         options = runner.build_parser().parse_args([])
         self.assertEqual((options.mode, options.camera_profile, options.layout), ("live", "phone", None))
         self.assertEqual(options.adb_port, runner.slot_ports.slot_port(runner.slot_ports.ADB_OFFSET, 5580))
+        self.assertEqual(options.switch_rounds, 4)
+
+    def test_the_switch_rounds_are_a_positive_whole_number(self) -> None:
+        parser = runner.build_parser()
+        self.assertEqual(parser.parse_args(["--switch-rounds", "12"]).switch_rounds, 12)
+        self.assertEqual(parser.parse_args(["--switch-rounds", "1"]).switch_rounds, 1)
+        for bad in ("0", "-3", "x", "2.5", ""):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit, msg=bad):
+                parser.parse_args(["--switch-rounds", bad])
+        layout = "bf-large-flash-manual-concurrent-front2160"
+        self.assertEqual(runner.make_plan(layout, "phone", "live").switch_rounds, 4)
+        self.assertEqual(runner.make_plan(layout, "phone", "live", 12).switch_rounds, 12)
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            runner.make_plan(layout, "phone", "live", 0)
 
 
 class GuestReaderTests(unittest.TestCase):
@@ -519,14 +533,21 @@ def box(kind: bytes, payload: bytes) -> bytes:
 
 
 # A log across a photo to video switch: the denial and the refusal that the camera service logs when binder will
-# not hand the display composer's fence to the camera HAL (the lines have the layout logcat prints), the
-# unrelated lines that share a word with them, and a clean switch.
+# not hand the display composer's fence to the camera HAL (the lines have the layout logcat prints), the events
+# of the switch, and lines that share a word with the denial or the refusal and are neither.
 SWITCH_DENIAL = ("11-13 03:50:46.961   495   495 I auditd  : type=1400 audit(0.0:137): avc:  denied  { use } for "
                  'comm="C3Dev-0-ReqQueu" path="anon_inode:sync_file" dev="anon_inodefs" ino=5 '
                  "scontext=u:r:hal_camera_default:s0 tcontext=u:r:hal_graphics_composer_default:s0 tclass=fd "
                  "permissive=0")
 SWITCH_REFUSAL = ("11-13 03:50:46.970   495  2263 E Camera3-Device: Camera 0: sendRequestsBatch: RequestThread: "
                   "Unable to submit capture request 1494 to HAL device: Broken pipe (-32)")
+SWITCH_PAUSED = ("11-13 03:50:46.900  2180  2180 I wm_on_paused_called: "
+                 "[87926199,org.lineageos.aperture.CameraActivity,performPause,6]")
+SWITCH_RESUMED = ("11-13 03:50:47.100  2180  2180 I wm_on_resume_called: "
+                  "[157384853,org.lineageos.aperture.VideoCamera,RESUME_ACTIVITY,2]")
+# What a correct image logs around a switch and a force-stop (the two Camera3-OutputStream lines are cameraserver's
+# own, from a stream whose application was stopped), and denials that are not the camera HAL's use of the
+# composer's descriptors.
 SWITCH_QUIET = """\
 11-13 03:50:46.900   495  2263 D Camera3-Device: Camera 0: processCaptureRequest: request 1493 submitted
 11-13 03:50:46.910   215   230 I auditd  : type=1400 audit(0.0:138): avc:  denied  { read } for comm="dmesg" \
@@ -536,7 +557,23 @@ scontext=u:r:hal_camera_default:s0 tcontext=u:r:surfaceflinger:s0 tclass=fd
 11-13 03:50:46.930  1200  1212 W adbd    : Failed to write while dumping service activity: Broken pipe
 11-13 03:50:46.940  1200  1212 E adbd    : write failed: Broken pipe (-32)
 11-13 03:50:46.950   495  2263 I Camera3-Device: Camera 0: stopped: Broken pipe (-32)
+11-13 05:21:55.914   491  1603 E Camera3-OutputStream: returnBufferCheckedLocked: Stream 15: Error queueing buffer to native window: Broken pipe (-32)
+11-13 05:21:55.914   491  2366 E Camera3-OutputStream: getBufferLockedCommon: Stream 15: Can't dequeue next output buffer: Broken pipe (-32)
+11-13 05:21:56.111   491   566 W Camera3-OutputStream: disconnectLocked: While disconnecting stream 15 from native window, the native window died from under us
+11-13 03:50:46.970  5000  5001 E CameraUploader: network write failed: Broken pipe (-32)
+11-13 03:50:46.971  5000  5001 E Other-Device: Unable to submit capture request 3 to HAL device: Broken pipe (-32)
 """
+SWITCH_UNRELATED_DENIALS = (
+    "11-13 03:50:46.970  5000  5001 I auditd: avc: denied { ptrace } for scontext=u:r:untrusted_app:s0 "
+    "tcontext=u:r:hal_camera_default:s0 tclass=process permissive=0",
+    "11-13 03:50:46.971   495   495 I auditd  : type=1400 audit(0.0:140): avc:  denied  { read } for "
+    'comm="android.hardwar" name="foo" scontext=u:r:hal_camera_default:s0 tcontext=u:object_r:vendor_file:s0 '
+    "tclass=file permissive=0",
+    "11-13 03:50:46.972   495   495 I auditd  : type=1400 audit(0.0:141): avc:  denied  { use } for "
+    "scontext=u:r:hal_camera_default:s0 tcontext=u:r:surfaceflinger:s0 tclass=fd permissive=0",
+    "11-13 03:50:46.973   495   495 I auditd  : type=1400 audit(0.0:142): avc:  denied  { use } for "
+    "scontext=u:r:cameraserver:s0 tcontext=u:r:hal_graphics_composer_default:s0 tclass=fd permissive=0",
+)
 
 
 MEDIA_SCALE = 90000
@@ -633,10 +670,26 @@ class FakeGuest:
         self.movie = movies if movies is not None else movie(3.5)
         self.still_files = {"IMG_old.jpg"}
         self.log = ""
-        # The whole log of a mode switch step: what follows each round's marker line, by round number.
+        # The log of a mode switch step. The video mode's start by round number n logs the events of the switch
+        # (events[n] = (photo paused, video resumed), both by default) and then switch_logs[n]; the nth read of
+        # the log is followed by late_logs[n] (lines that land after it) and, in wrap_after_read, by a log that
+        # holds nothing any more.
         self.full_log = "11-13 03:50:00.000   495   495 I Camera3-Device: before any switch\n"
         self.switch_logs: dict[int, str] = {}
+        self.events: dict[int, tuple[bool, bool]] = {}
+        self.late_logs: dict[int, str] = {}
+        self.wrap_after_read: set[int] = set()
         self.no_markers = False
+        self.log_reads = 0
+        self.video_starts = 0
+        # The camera service's frame counters: they rise on every read except in the phases named here.
+        self.stalled: set[str] = set()
+        # The phases ("photo", "video") in which the application opens no camera.
+        self.no_camera_in: set[str] = set()
+        self.in_video = False
+        self.frames = 1000
+        # Commands that fail, as a guest command that exits non-zero does.
+        self.failing: set[str] = set()
         # The global settings (the window animation scales) and what they were at each start of the video mode.
         self.settings: dict[str, str] = {}
         self.settings_at_video_start: list[dict[str, str]] = []
@@ -649,19 +702,25 @@ class FakeGuest:
 
     def shell(self, command: str, timeout: float = 0) -> str:
         self.commands.append(command)
+        if command in self.failing:
+            raise runner.Failure(f"'{command}' exited 1: injected")
         if command.startswith("am start") and "USE_FRONT_CAMERA true" in command:
             # The laptop's only camera is the front one, camera 0.
             front = "0" if self.plan.profile == "laptop" else "1"
             self.held = {front} if self.front_holds else {"0"}
         elif command.startswith("am start"):
-            self.held = {"0"}
+            self.held = set() if ("video" if "VIDEO_CAMERA" in command else "photo") in self.no_camera_in else {"0"}
         if command.startswith(f"log -t {runner.SWITCH_MARKER_TAG} '") and not self.no_markers:
             marker = command.split("'")[1]
             number = int(re.search(r"switch (\d+) of", marker).group(1))
             self.full_log += f"11-13 03:50:46.800   100   100 I {runner.SWITCH_MARKER_TAG}: {marker}\n"
-            self.full_log += self.switch_logs.get(number, "")
         if command == "logcat -d -b all":
-            return self.full_log
+            self.log_reads += 1
+            text = self.full_log
+            self.full_log += self.late_logs.get(self.log_reads, "")
+            if self.log_reads in self.wrap_after_read:
+                self.full_log = ""
+            return text
         if command.startswith("settings get global "):
             return self.settings.get(command.rsplit(" ", 1)[1], "null") + "\n"
         if command.startswith("settings put global "):
@@ -671,6 +730,13 @@ class FakeGuest:
             self.settings.pop(command.rsplit(" ", 1)[1], None)
         if command.startswith("am start") and "VIDEO_CAMERA" in command:
             self.settings_at_video_start.append(dict(self.settings))
+            self.video_starts += 1
+            self.in_video = True
+            paused, resumed = self.events.get(self.video_starts, (True, True))
+            self.full_log += (SWITCH_PAUSED + "\n" if paused else "") + (SWITCH_RESUMED + "\n" if resumed else "")
+            self.full_log += self.switch_logs.get(self.video_starts, "")
+        elif command.startswith("am start") or command.startswith("am force-stop"):
+            self.in_video = False
         if command == f"input keyevent {runner.CAMERA_KEYCODE}":
             if "VIDEO_CAMERA" in " ".join(self.commands):
                 if self.recording:
@@ -684,7 +750,10 @@ class FakeGuest:
         clients = "".join(
             f"(Camera ID: {camera}, Cost: 100, PID: 1301, Score: 0, State: 2User Id: 0, "
             "Client Package Name: org.lineageos.aperture, Conflicting Client Devices: {})\n" for camera in sorted(self.held))
-        return "Active Camera Clients:\n" + clients + "Active Client listener PIDs: 1\n"
+        if ("video" if self.in_video else "photo") not in self.stalled:
+            self.frames += 25
+        return ("Active Camera Clients:\n" + clients + "Active Client listener PIDs: 1\n"
+                f"    Stream[3]: Output\n      Frames produced: {self.frames}, last timestamp: 1 ns\n")
 
     def screenshot(self):
         return self.chart
@@ -1026,40 +1095,80 @@ class VideoAndFrontFlowTests(unittest.TestCase):
     def test_the_new_steps_run_in_live_mode_only(self) -> None:
         source = SCRIPT.read_text()
         run_checks = source[source.index("def run_checks"):source.index("def cameraserver_restart_skip")]
-        self.assertRegex(run_checks, r'if plan.mode == "live":\n\s+check_mode_switch\(guest, plan\)\n'
-                         r'\s+check_video\(guest, plan\)\n\s+check_front\(guest, plan\)\n\s+check_hal_log\(guest\)')
+        # The switches follow the other live steps, which see the state they always saw.
+        self.assertRegex(run_checks, r'if plan.mode == "live":\n\s+check_video\(guest, plan\)\n'
+                         r'\s+check_front\(guest, plan\)\n\s+check_mode_switch\(guest, plan\)\n'
+                         r'\s+check_hal_log\(guest\)')
 
 
 class ModeSwitchTests(unittest.TestCase):
-    def test_a_denial_of_the_camera_hals_domain_and_a_refused_request_are_told_apart(self) -> None:
+    LAYOUT = "bf-large-flash-manual-concurrent-front2160"
+
+    def plan(self, rounds: int = 4, profile: str = "phone"):
+        return runner.make_plan(self.LAYOUT if profile == "phone" else "front", profile, "live", rounds)
+
+    def run_step(self, guest, plan=None) -> str:
+        """The step with its sleeps skipped and its deadlines short, so that a wait that fails ends at once."""
+        self.printed = io.StringIO()
+        with mock.patch.object(runner.time, "sleep", lambda seconds: None), \
+                mock.patch.object(runner, "SWITCH_OBSERVE_SECONDS", 0.05), contextlib.redirect_stdout(self.printed):
+            runner.check_mode_switch(guest, plan or guest.plan)
+        return self.printed.getvalue()
+
+    def guest(self, rounds: int = 4, profile: str = "phone"):
+        return FakeGuest(self.plan(rounds, profile))
+
+    # -- What counts as a refusal.
+
+    def test_the_denial_and_the_refusal_are_exactly_those_lines(self) -> None:
         self.assertEqual(runner.switch_failures(SWITCH_DENIAL), [(runner.SWITCH_DENIAL_KIND, SWITCH_DENIAL)])
         self.assertEqual(runner.switch_failures(SWITCH_REFUSAL), [(runner.SWITCH_REFUSAL_KIND, SWITCH_REFUSAL)])
         both = runner.switch_failures(f"{SWITCH_QUIET}{SWITCH_DENIAL}\n{SWITCH_REFUSAL}\n")
         self.assertEqual([what for what, _ in both], [runner.SWITCH_DENIAL_KIND, runner.SWITCH_REFUSAL_KIND])
         self.assertEqual(runner.SWITCH_DENIAL_KIND, "an SELinux denial naming hal_camera_default")
+        # The kernel's own copy of the record (the process name as the tag, no comm field) and a security
+        # context with categories are the same denial.
+        copy = SWITCH_DENIAL.replace("I auditd  :", "W C3Dev-0-ReqQueu:").replace('comm="C3Dev-0-ReqQueu" ', "")
+        self.assertEqual(len(runner.switch_failures(copy)), 1)
+        categories = SWITCH_DENIAL.replace("hal_camera_default:s0", "hal_camera_default:s0:c512,c768")
+        self.assertEqual(len(runner.switch_failures(categories)), 1)
 
-    def test_a_clean_switch_has_no_failure_whatever_else_the_log_says(self) -> None:
-        # A denial of another domain, a granted line, an adbd write error and a camera tag at info level do not count.
+    def test_a_correct_image_and_unrelated_events_are_not_refusals(self) -> None:
         self.assertEqual(runner.switch_failures(SWITCH_QUIET), [])
         self.assertEqual(runner.switch_failures(""), [])
+        for line in SWITCH_UNRELATED_DENIALS:
+            self.assertEqual(runner.switch_failures(line), [], line)
+        # One field of the denial at a time: any other source, target, class or permission, or a grant.
+        for old, new in (("scontext=u:r:hal_camera_default:s0", "scontext=u:r:cameraserver:s0"),
+                         ("scontext=u:r:hal_camera_default:s0", "scontext=u:r:hal_camera_default_x:s0"),
+                         ("tcontext=u:r:hal_graphics_composer_default:s0", "tcontext=u:r:surfaceflinger:s0"),
+                         ("tcontext=u:r:hal_graphics_composer_default:s0",
+                          "tcontext=u:r:hal_graphics_composer_default_x:s0"),
+                         ("tclass=fd", "tclass=file"), ("{ use }", "{ read }"), ("{ use }", "{ ioctl }"),
+                         ("denied", "granted")):
+            self.assertEqual(runner.switch_failures(SWITCH_DENIAL.replace(old, new)), [], new)
+        # A permission set that holds `use` among others is still the denial.
+        self.assertEqual(len(runner.switch_failures(SWITCH_DENIAL.replace("{ use }", "{ read use }"))), 1)
 
-    def run_step(self, guest, plan) -> str:
-        output = io.StringIO()
-        with mock.patch.object(runner.time, "sleep", lambda seconds: None), contextlib.redirect_stdout(output):
-            runner.check_mode_switch(guest, plan)
-        return output.getvalue()
+    def test_the_stream_errors_of_a_stopped_application_do_not_fail_a_correct_image(self) -> None:
+        plan = self.plan(2)
+        guest = FakeGuest(plan)
+        for number in (1, 2):
+            guest.switch_logs[number] = SWITCH_QUIET + "\n".join(SWITCH_UNRELATED_DENIALS) + "\n"
+        output = self.run_step(guest)
+        self.assertIn("mode switch 2 of 2", output)
+
+    # -- The flow.
 
     def test_every_round_starts_the_photo_mode_then_the_video_mode_and_reads_the_log_after_its_marker(self) -> None:
-        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
-        guest = FakeGuest(plan)
+        guest = self.guest()
         sleeps: list[float] = []
         output = io.StringIO()
         with mock.patch.object(runner.time, "sleep", sleeps.append), contextlib.redirect_stdout(output):
-            runner.check_mode_switch(guest, plan)
-        output = output.getvalue()
+            runner.check_mode_switch(guest, guest.plan)
         self.assertEqual(sleeps.count(runner.SWITCH_HOLD_SECONDS), runner.SWITCH_ROUNDS)
         self.assertEqual(sleeps.count(runner.SWITCH_SETTLE_SECONDS), runner.SWITCH_ROUNDS)
-        # Every round starts from a freshly started application, whose preview runs when the video mode covers it.
+        self.assertEqual(sleeps.count(runner.SWITCH_DRAIN_SECONDS), 1)
         stop = f"am force-stop {runner.CAMERA_PACKAGE}"
         photo = f"am start -a android.media.action.STILL_IMAGE_CAMERA --ez {runner.FRONT_EXTRA} false"
         video = f"am start -a {runner.VIDEO_ACTION} --ez {runner.FRONT_EXTRA} false"
@@ -1067,76 +1176,202 @@ class ModeSwitchTests(unittest.TestCase):
         self.assertEqual(activity, [stop, photo, video] * runner.SWITCH_ROUNDS)
         self.assertEqual(len([c for c in guest.commands if c.startswith(f"log -t {runner.SWITCH_MARKER_TAG} ")]),
                          runner.SWITCH_ROUNDS)
-        self.assertIn(f"mode switch {runner.SWITCH_ROUNDS} of {runner.SWITCH_ROUNDS}: no refused capture request",
-                      output)
+        # One read per round (the switch is seen at once) and the read after the last round.
+        self.assertEqual(guest.log_reads, runner.SWITCH_ROUNDS + 1)
+        self.assertIn(f"mode switch {runner.SWITCH_ROUNDS} of {runner.SWITCH_ROUNDS}: photo activity paused, video "
+                      "activity resumed, capture before and after; no refused capture request", output.getvalue())
+
+    def test_the_rounds_are_the_plans(self) -> None:
+        for rounds in (1, 2, 12):
+            guest = self.guest(rounds)
+            output = self.run_step(guest)
+            markers = [c for c in guest.commands if c.startswith(f"log -t {runner.SWITCH_MARKER_TAG} ")]
+            self.assertEqual(len(markers), rounds)
+            self.assertIn(f"photo to video switch {rounds} of {rounds}'", markers[-1])
+            self.assertIn(f"mode switch {rounds} of {rounds}:", output)
 
     def test_the_animations_are_off_for_the_switches_and_restored_after_them(self) -> None:
-        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
         for before in ({}, {"window_animation_scale": "0.5", "transition_animation_scale": "1.5",
                             "animator_duration_scale": "2.0"}):
-            guest = FakeGuest(plan)
+            guest = self.guest()
             guest.settings = dict(before)
-            self.run_step(guest, plan)
+            self.run_step(guest)
             self.assertEqual(len(guest.settings_at_video_start), runner.SWITCH_ROUNDS)
             for seen in guest.settings_at_video_start:
                 self.assertEqual(seen, {key: "0" for key in runner.ANIMATION_SCALES})
             self.assertEqual(guest.settings, before)
 
+    def test_the_laptop_switches_with_its_front_camera(self) -> None:
+        guest = self.guest(2, "laptop")
+        self.run_step(guest)
+        starts = [command for command in guest.commands if command.startswith("am start")]
+        self.assertTrue(all(f"{runner.FRONT_EXTRA} true" in command for command in starts), starts)
+
+    # -- A round passes only when the switch was seen (live capture before, the pause, the resume, capture after).
+
+    def test_a_round_without_the_switch_fails_by_name(self) -> None:
+        for events, missing in (((False, False), "no pause of org.lineageos.aperture.CameraActivity and no resume of "
+                                                 "org.lineageos.aperture.VideoCamera"),
+                                ((True, False), "no resume of org.lineageos.aperture.VideoCamera"),
+                                ((False, True), "no pause of org.lineageos.aperture.CameraActivity")):
+            guest = self.guest()
+            guest.events[1] = events
+            with self.assertRaisesRegex(runner.Failure, r"^no mode switch observed in the photo to video switch 1 of 4: "
+                                        r"the log after its marker shows " + re.escape(missing)):
+                self.run_step(guest)
+
+    def test_the_events_of_an_earlier_round_do_not_make_a_later_one(self) -> None:
+        guest = self.guest()
+        guest.events[3] = (False, False)
+        with self.assertRaisesRegex(runner.Failure, "no mode switch observed in the photo to video switch 3 of 4"):
+            self.run_step(guest)
+        self.assertEqual(guest.video_starts, 3)
+
+    def test_capture_must_be_running_before_the_switch_and_after_it(self) -> None:
+        guest = self.guest()
+        guest.stalled = {"photo"}
+        with self.assertRaisesRegex(runner.Failure, r"^live capture \(photo, before switch 1\): the frame counters stand at"):
+            self.run_step(guest)
+        self.assertEqual(guest.video_starts, 0)
+        guest = self.guest()
+        guest.stalled = {"video"}
+        with self.assertRaisesRegex(runner.Failure, r"^live capture \(video, after the photo to video switch 1 of 4\)"):
+            self.run_step(guest)
+
+    def test_the_application_must_hold_the_camera_and_show_the_chart_before_and_after(self) -> None:
+        with mock.patch.object(runner, "PREVIEW_SECONDS", 0.05):
+            guest = self.guest()
+            guest.no_camera_in = {"photo"}
+            with self.assertRaisesRegex(runner.Failure, r"^the camera application holding camera 0 \(photo\)"):
+                self.run_step(guest)
+            self.assertEqual(guest.video_starts, 0)
+            guest = self.guest()
+            guest.no_camera_in = {"video"}
+            with self.assertRaisesRegex(runner.Failure, r"^the camera application holding camera 0 \(video\)"):
+                self.run_step(guest)
+            self.assertEqual(guest.video_starts, 1)
+
+    def test_the_frame_counters_of_the_dump_are_summed(self) -> None:
+        dump = "Stream[3]: Output\n  Frames produced: 815, last timestamp: 20 ns\nStream[4]: Output\n  Frames produced: 0, x\n"
+        self.assertEqual(runner.frames_produced(dump), 815)
+        self.assertEqual(runner.frames_produced("nothing"), 0)
+
+    # -- The refusal is read wherever it lands: between two reads and after the last.
+
+    def test_the_exact_denial_and_refusal_fail_the_round_and_name_both(self) -> None:
+        for lines in (f"{SWITCH_REFUSAL}\n{SWITCH_DENIAL}\n", f"{SWITCH_DENIAL}\n{SWITCH_REFUSAL}\n"):
+            guest = self.guest()
+            guest.switch_logs[3] = lines
+            with self.assertRaisesRegex(
+                    runner.Failure, r'^an SELinux denial naming hal_camera_default and the camera service\'s "Unable to '
+                    r'submit capture request" since the photo to video switch 2 of 4 \(read after the photo to video '
+                    r"switch 3 of 4\): .*avc:  denied  \{ use \}.* \| .*Unable to submit"):
+                self.run_step(guest)
+
+    def test_a_denial_alone_and_a_refusal_alone_fail_the_step(self) -> None:
+        for line, kind in ((SWITCH_DENIAL, "an SELinux denial naming hal_camera_default"),
+                           (SWITCH_REFUSAL, 'the camera service\'s "Unable to submit capture request"')):
+            guest = self.guest(2, "laptop")
+            guest.switch_logs[1] = line + "\n"
+            with self.assertRaisesRegex(runner.Failure, "^" + re.escape(kind) + " since the photo to video switch 1 of 2"):
+                self.run_step(guest)
+
+    def test_a_refusal_that_lands_between_two_reads_is_read_by_the_next(self) -> None:
+        guest = self.guest()
+        guest.late_logs[1] = SWITCH_DENIAL + "\n" + SWITCH_REFUSAL + "\n"
+        with self.assertRaisesRegex(runner.Failure, r"since the photo to video switch 1 of 4 \(read after the photo to "
+                                    r"video switch 2 of 4\)"):
+            self.run_step(guest)
+        # The same log without the late lines passes.
+        self.run_step(self.guest())
+
+    def test_a_refusal_that_lands_after_the_last_round_is_read_at_the_end(self) -> None:
+        guest = self.guest(2)
+        guest.late_logs[2] = SWITCH_REFUSAL + "\n"
+        with self.assertRaisesRegex(runner.Failure, r"in the final read after the last switch \(photo to video switch 2 "
+                                    r"of 2\): .*Unable to submit"):
+            self.run_step(guest)
+        self.assertEqual(guest.log_reads, 3)
+        self.run_step(self.guest(2))
+
+    def test_a_log_that_lost_the_previous_marker_cannot_be_judged(self) -> None:
+        guest = self.guest()
+        guest.wrap_after_read = {1}
+        with self.assertRaisesRegex(runner.Failure, "the log has no line for the photo to video switch 1 of 4: it was "
+                                    "lost or never written, so the photo to video switches cannot be judged"):
+            self.run_step(guest)
+        guest = self.guest()
+        guest.no_markers = True
+        with self.assertRaisesRegex(runner.Failure, "the log has no line for the photo to video switch 1 of 4"):
+            self.run_step(guest)
+
+    def test_what_the_log_held_before_the_first_marker_is_not_judged(self) -> None:
+        guest = self.guest()
+        guest.full_log += SWITCH_DENIAL + "\n" + SWITCH_REFUSAL + "\n"
+        self.run_step(guest)
+
+    def test_a_long_run_reads_only_from_the_previous_marker(self) -> None:
+        # Twelve rounds outlast a log buffer that keeps three rounds: lines older than the previous marker are
+        # gone from the log, and the step still passes because it never needs them.
+        guest = self.guest(12)
+        original = guest.shell
+
+        def trimming(command, timeout=0):
+            text = original(command, timeout)
+            if command == "logcat -d -b all":
+                markers = [m.end() for m in re.finditer(r"CamSwitch: photo to video switch \d+ of 12\n", text)]
+                return text[markers[-2] - 60:] if len(markers) > 2 else text
+            return text
+        guest.shell = trimming
+        self.run_step(guest)
+
+    # -- The animation scales come back on every exit.
+
     def test_the_animations_are_restored_when_a_switch_fails_too(self) -> None:
-        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
-        guest = FakeGuest(plan)
+        guest = self.guest()
         guest.settings = {"window_animation_scale": "0.5"}
         guest.switch_logs[2] = SWITCH_REFUSAL + "\n"
         with self.assertRaises(runner.Failure):
-            self.run_step(guest, plan)
+            self.run_step(guest)
         self.assertEqual(len(guest.settings_at_video_start), 2)
         self.assertEqual(guest.settings, {"window_animation_scale": "0.5"})
 
-    def test_a_denial_in_a_later_round_fails_the_step_by_name(self) -> None:
-        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
-        guest = FakeGuest(plan)
-        guest.switch_logs[2] = SWITCH_DENIAL + "\n"
-        with self.assertRaisesRegex(runner.Failure, r"an SELinux denial naming hal_camera_default during the "
-                                    r"photo to video switch 2 of 4: .*scontext=u:r:hal_camera_default"):
-            self.run_step(guest, plan)
+    def test_a_failed_second_write_leaves_no_scale_at_zero(self) -> None:
+        guest = self.guest()
+        guest.settings = {key: "1" for key in runner.ANIMATION_SCALES}
+        guest.failing = {"settings put global transition_animation_scale 0"}
+        with self.assertRaisesRegex(runner.Failure, "injected"):
+            self.run_step(guest)
+        self.assertEqual(guest.settings, {key: "1" for key in runner.ANIMATION_SCALES})
+        self.assertEqual(guest.video_starts, 0)
 
-    def test_a_denial_and_a_refusal_are_both_named_whichever_the_log_shows_first(self) -> None:
-        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
-        for lines in (f"{SWITCH_REFUSAL}\n{SWITCH_DENIAL}\n", f"{SWITCH_DENIAL}\n{SWITCH_REFUSAL}\n"):
-            guest = FakeGuest(plan)
-            guest.switch_logs[3] = lines
-            with self.assertRaisesRegex(
-                    runner.Failure, r'^an SELinux denial naming hal_camera_default and "Broken pipe \(-32\)" from the '
-                    r"camera service during the photo to video switch 3 of 4: .*avc:  denied  \{ use \}.* \| .*Unable to submit"):
-                self.run_step(guest, plan)
+    def test_a_failed_read_leaves_the_scales_alone(self) -> None:
+        guest = self.guest()
+        guest.settings = {key: "1" for key in runner.ANIMATION_SCALES}
+        guest.failing = {"settings get global transition_animation_scale"}
+        with self.assertRaisesRegex(runner.Failure, "injected"):
+            self.run_step(guest)
+        self.assertEqual(guest.settings, {key: "1" for key in runner.ANIMATION_SCALES})
 
-    def test_a_refused_request_fails_the_step_by_name(self) -> None:
-        plan = runner.make_plan("front", "laptop", "live")
-        guest = FakeGuest(plan)
-        guest.switch_logs[1] = SWITCH_REFUSAL + "\n"
-        with self.assertRaisesRegex(runner.Failure, r'"Broken pipe \(-32\)" from the camera service during the '
-                                    r"photo to video switch 1 of 4: .*Unable to submit capture request 1494"):
-            self.run_step(guest, plan)
+    def test_a_restore_that_fails_fails_the_step_and_the_others_are_still_restored(self) -> None:
+        guest = self.guest()
+        guest.settings = {key: "1" for key in runner.ANIMATION_SCALES}
+        guest.failing = {"settings put global window_animation_scale 1"}
+        with self.assertRaisesRegex(runner.Failure, "the animation scale window_animation_scale was not restored"):
+            self.run_step(guest)
+        self.assertEqual(guest.settings, {"window_animation_scale": "0", "transition_animation_scale": "1",
+                                          "animator_duration_scale": "1"})
 
-    def test_what_the_log_held_before_the_marker_is_not_judged(self) -> None:
-        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
-        guest = FakeGuest(plan)
-        guest.full_log += SWITCH_DENIAL + "\n" + SWITCH_REFUSAL + "\n"
-        self.run_step(guest, plan)
-
-    def test_a_log_without_the_marker_cannot_be_judged(self) -> None:
-        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
-        guest = FakeGuest(plan)
-        guest.no_markers = True
-        with self.assertRaisesRegex(runner.Failure, "no marker line for the photo to video switch 1 of 4"):
-            self.run_step(guest, plan)
-
-    def test_the_laptop_switches_with_its_front_camera(self) -> None:
-        plan = runner.make_plan("front", "laptop", "live")
-        guest = FakeGuest(plan)
-        self.run_step(guest, plan)
-        starts = [command for command in guest.commands if command.startswith("am start")]
-        self.assertTrue(all(f"{runner.FRONT_EXTRA} true" in command for command in starts), starts)
+    def test_a_restore_that_fails_does_not_hide_the_failure_of_the_switch(self) -> None:
+        guest = self.guest()
+        guest.settings = {key: "1" for key in runner.ANIMATION_SCALES}
+        guest.failing = {"settings put global window_animation_scale 1"}
+        guest.switch_logs[1] = SWITCH_DENIAL + "\n"
+        with self.assertRaisesRegex(runner.Failure, "an SELinux denial naming"):
+            self.run_step(guest)
+        self.assertIn("the animation scale window_animation_scale was not restored", self.printed.getvalue())
+        self.assertEqual(guest.settings["transition_animation_scale"], "1")
+        self.assertEqual(guest.settings["animator_duration_scale"], "1")
 
 
 if __name__ == "__main__":
