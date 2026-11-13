@@ -347,8 +347,7 @@ control out.
 - **Storage.** A guest's files live in `Library/Guest/` of the application's
   container behind `GuestStorage`. The system disk is Android's, read-only, and
   stays in the release directory; the runtime creates the data disk `data.img`
-  at the first start, sized by the guest's capacity, and only grows it after;
-  Home disables Start in recovery until then (`StartPlan.offersRecovery`).
+  at the first start, sized by the guest's capacity, and only grows it after.
   A larger size chosen in Resize waits on Home and applies as the next start,
   of any kind, is handed to the runtime (`Lifecycle.start`), which grows the
   disk then; the guest records the new capacity at that point, so a start that
@@ -774,7 +773,10 @@ is on. `AndariumCore/Adb` speaks the protocol.
   device only and not synchronized. Its public key goes in each boot request
   (`android_adb_public_key`), which adbd authorizes for that boot.
 - **Create bug report and Install APK** are in every build, in a normal
-  session. A bug report is Android's zip with Andarium's session records and
+  session. Settings lists Install APK and the file browser first, above the
+  statistics, and the side keys' tip adds a line saying where Install APK is
+  exactly where the row is offered (`Capabilities.offersApkInstall`). A bug
+  report is Android's zip with Andarium's session records and
   MetricKit reports added under `andarium/`, the application's container paths
   taken out (`BugReportAttachments`); a zip that cannot be amended safely is
   shared as Android made it. An install streams the file to the package

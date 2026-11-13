@@ -31,7 +31,7 @@ struct FoldSessionOverlay: View {
                 case .edge:
                     SideKeysOverlay(
                         mode: mode, lit: lit, open: $model.session.sideKeysOpen, leading: keysLeading,
-                        actions: actions
+                        tip: SideKeysTip(offersInstall: model.capabilities.offersApkInstall(in: mode)), actions: actions
                     )
                     .frame(width: plan.guest.width, height: plan.guest.height)
                     .offset(x: plan.guest.minX - origin.x, y: plan.guest.minY - origin.y)
