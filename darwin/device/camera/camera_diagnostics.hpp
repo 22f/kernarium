@@ -64,6 +64,11 @@ inline std::atomic<std::uint64_t>& footprintPeak() noexcept
     return peak;
 }
 
+inline double wallClockSeconds() noexcept
+{
+    return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 inline void startFootprintSampler() noexcept
 {
     static const bool started = [] {
@@ -73,8 +78,7 @@ inline void startFootprintSampler() noexcept
                 const auto now = physicalFootprintBytes();
                 if ((now > printed ? now - printed : printed - now) >= (8ull << 20)) {
                     printed = now;
-                    const auto wall = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
-                    std::fprintf(stderr, "Camera: memory: sample t=%.3f, footprint %llu MiB\n", wall, static_cast<unsigned long long>(now >> 20));
+                    std::fprintf(stderr, "Camera: memory: sample t=%.3f, footprint %llu MiB\n", wallClockSeconds(), static_cast<unsigned long long>(now >> 20));
                 }
                 auto& peak = footprintPeak();
                 auto seen = peak.load(std::memory_order_relaxed);
@@ -95,8 +99,8 @@ inline void printCheckpoint(CameraCheckpoint where) noexcept
     detail::startFootprintSampler();
     const auto now = physicalFootprintBytes();
     const auto peak = std::max(now, detail::footprintPeak().exchange(now, std::memory_order_relaxed));
-    std::fprintf(stderr, "Camera: memory: %s, footprint %llu MiB, peak %llu MiB since the last checkpoint\n", checkpointName(where),
-                 static_cast<unsigned long long>(now >> 20), static_cast<unsigned long long>(peak >> 20));
+    std::fprintf(stderr, "Camera: memory: %s t=%.3f, footprint %llu MiB, peak %llu MiB since the last checkpoint\n", checkpointName(where),
+                 detail::wallClockSeconds(), static_cast<unsigned long long>(now >> 20), static_cast<unsigned long long>(peak >> 20));
 }
 
 } // namespace uml::camera
