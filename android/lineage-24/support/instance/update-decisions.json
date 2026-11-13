@@ -815,6 +815,46 @@
       "expect": "refuse_downgrade"
     },
     {
+      "name": "a release number updates to the number just above the old counter",
+      "instance": {
+        "release_id": "rel-a",
+        "build_number": 26,
+        "system_disk_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "data_layout": 1,
+        "pending_to_release_id": null
+      },
+      "data_disk": true,
+      "snapshot": false,
+      "release": {
+        "release_id": "rel-b",
+        "build_number": 2026110900,
+        "system_disk_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "data_layout": 1
+      },
+      "flags": [],
+      "expect": "update"
+    },
+    {
+      "name": "the number just above the old counter cannot go back to a release number",
+      "instance": {
+        "release_id": "rel-b",
+        "build_number": 2026110900,
+        "system_disk_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "data_layout": 1,
+        "pending_to_release_id": null
+      },
+      "data_disk": true,
+      "snapshot": false,
+      "release": {
+        "release_id": "rel-a",
+        "build_number": 26,
+        "system_disk_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "data_layout": 1
+      },
+      "flags": [],
+      "expect": "refuse_downgrade"
+    },
+    {
       "name": "a newer release restores an unfinished update of the old counter before updating to a release number",
       "instance": {
         "release_id": "rel-b",

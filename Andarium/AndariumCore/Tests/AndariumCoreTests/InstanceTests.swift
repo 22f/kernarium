@@ -190,7 +190,7 @@ struct DecisionVectorTests {
 
     @Test func everyVectorIsReproduced() throws {
         let cases = try Self.vectors()
-        #expect(cases.count == 42)
+        #expect(cases.count == 44)
         for vector in cases {
             let state = vector.instance.map { instance in
                 var state = InstanceState(
