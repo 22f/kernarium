@@ -380,8 +380,9 @@ public:
     [[nodiscard]] virtual std::unique_ptr<Nv12Transformer> makeFrameTransformer() const = 0;
     // The working storage, in bytes for each pixel of a JPEG still, that this
     // host's source holds while it makes the picture, beyond the encoded file
-    // the device counts. Zero where it is not measured (the system's camera) or
-    // the source makes the file in place.
+    // the device counts: `systemCameraStillWorkingBytesPerPixel` for the
+    // system's camera. Zero where the source makes the file in place or the
+    // host does not say.
     [[nodiscard]] virtual std::uint32_t stillWorkingBytesPerPixel() const noexcept { return 0; }
     // Opens a capture session, or returns null when the system has not granted
     // access or the host has no camera. This is the only call that can light a

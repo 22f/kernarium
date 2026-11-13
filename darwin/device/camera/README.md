@@ -75,7 +75,10 @@ application's statements (the sensor orientation, the rotation that
   source working storage), and a run that began without cameras stays without.
   A reserve that takes all of B refuses the launch. The loader states the
   ceiling for the application's plan before the boot. The system camera's own
-  processing peak while it makes a picture is excluded and unmeasured.
+  processing storage while it makes a picture is counted as working bytes for
+  each pixel of a JPEG still (`systemCameraStillWorkingBytesPerPixel`), a figure
+  measured on one device with headroom, and the ceiling holds it. The platform
+  camera's peak is not otherwise measured.
 - **Frames.** Video buffers hold NV12, BT.709 full range, rows at the 16-byte
   pitch of `raw_pitch.hpp`. The device crops (centred, to the stream's aspect),
   rotates and scales with the platform camera's transformer

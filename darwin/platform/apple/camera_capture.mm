@@ -9,6 +9,7 @@
 #include "accelerated_nv12.hpp"
 #include "camera.hpp"
 #include "dng_color.hpp"
+#include "frame_bytes.hpp"
 #include "key_path_observer.h"
 #include "photo_metadata.hpp"
 #include "photo_dimensions.hpp"
@@ -1734,6 +1735,8 @@ public:
     std::uint64_t now() const noexcept override { return hostNow(); }
 
     std::unique_ptr<Nv12Transformer> makeFrameTransformer() const override { return makeAcceleratedNv12Transformer(); }
+
+    std::uint32_t stillWorkingBytesPerPixel() const noexcept override { return systemCameraStillWorkingBytesPerPixel; }
 
     std::unique_ptr<CameraSession> openSession(CameraSessionDelegate& delegate) override
     {

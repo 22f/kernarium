@@ -357,7 +357,7 @@ void testTheReserveFollowsTheUse()
 {
     const auto tier = CameraTier::small;
     const auto ceiling = cameraHostMemoryReserveMiB(tier);
-    require(ceiling == 173, "the tier's ceiling");
+    require(ceiling == 197, "the tier's ceiling");
     require(cameraHostMemoryReserveMiB(tier, CameraUse {}) == ceiling, "the default use is the ceiling");
 
     std::set<std::uint64_t> figures;
@@ -370,7 +370,7 @@ void testTheReserveFollowsTheUse()
         const auto named = layoutDimensionsNamed(name);
         require(named && layoutName(*named) == name, "every layout of the set is found by its name");
         for (const bool raw : {false, true}) {
-            const CameraUse use {streams, raw, 0};
+            const CameraUse use {streams, raw, uml::platform::systemCameraStillWorkingBytesPerPixel};
             const auto reserve = liveCameraReserveMiB(CameraMode::live, name, use, tier);
             require(liveCameraReserveMiB(CameraMode::blocked, name, use, tier) == 0, "a blocked session holds none");
             if (!layoutHasCameras(name)) {
@@ -382,7 +382,7 @@ void testTheReserveFollowsTheUse()
             reachesTheCeiling = reachesTheCeiling || reserve == ceiling;
         }
     }
-    require(figures == std::set<std::uint64_t> {75, 100, 147, 173}, "the four figures are all there are");
+    require(figures == std::set<std::uint64_t> {99, 124, 171, 197}, "the four figures are all there are");
     require(reachesTheCeiling, "the ceiling is a use's own figure");
     require(!layoutDimensionsNamed("").has_value() && !layoutDimensionsNamed("bf-small-nothing").has_value());
 }

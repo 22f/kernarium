@@ -487,22 +487,27 @@ void testHostMemoryReserve()
     require(jpegCaptureBytes(pixels) == maximumJpegBytes(pixels) * 2 && rawCaptureBytes(pixels) == pixels * 2 * 3, "the costs of one capture of each kind");
     require(jpegCaptureBytes(pixels, 11) == maximumJpegBytes(pixels) * 2 + pixels * 11,
             "a source that holds working storage for each pixel adds it to its JPEG capture");
-    require(small.stills == jpegCaptureBytes(pixels) + rawCaptureBytes(pixels), "the fullest capture: a JPEG with a RAW");
+    const auto system = uml::platform::systemCameraStillWorkingBytesPerPixel;
+    require(CameraUse {}.stillWorkingBytesPerPixel == system && system == 2, "the ceiling holds the system camera's working storage");
+    require(small.stills == jpegCaptureBytes(pixels, system) + rawCaptureBytes(pixels), "the fullest capture: a JPEG with a RAW");
     require(small.total() == 53'084'160ull + 3'110'400ull + 9'953'280ull + small.stills, "the parts add up");
-    require(cameraHostMemoryReserveMiB(CameraTier::small) == 173, "172.09 MiB, rounded up");
+    require(cameraHostMemoryReserveMiB(CameraTier::small) == 197, "196.31 MiB, rounded up");
     // The ceiling is the fullest use: both cameras streaming together and a RAW still. A use that holds less is less.
     require(CameraUse {}.streams == concurrentCameras && CameraUse {}.rawStill, "the default use is the fullest");
-    require(cameraHostMemory(CameraTier::small, {2, true, 0}).total() == small.total(), "which is the ceiling");
-    require(cameraHostMemory(CameraTier::small, {1, true, 0}).total() == small.total() - 4'423'680ull * 6, "one stream fewer");
-    require(cameraHostMemory(CameraTier::small, {2, false, 0}).total() == small.total() - 76'200'000ull, "no RAW still");
+    require(cameraHostMemory(CameraTier::small, {2, true, system}).total() == small.total(), "which is the ceiling");
+    require(cameraHostMemory(CameraTier::small, {1, true, system}).total() == small.total() - 4'423'680ull * 6, "one stream fewer");
+    require(cameraHostMemory(CameraTier::small, {2, false, system}).total() == small.total() - 76'200'000ull, "no RAW still");
     require(cameraHostMemoryReserveMiB(CameraTier::small, {1, false, 0}) == 75 && cameraHostMemoryReserveMiB(CameraTier::small, {1, true, 0}) == 147 &&
                 cameraHostMemoryReserveMiB(CameraTier::small, {2, false, 0}) == 100 && cameraHostMemoryReserveMiB(CameraTier::small, {2, true, 0}) == 173,
-            "the four figures of the small tier");
+            "the four figures of the small tier, for a source that holds nothing more");
+    require(cameraHostMemoryReserveMiB(CameraTier::small, {1, false, system}) == 99 && cameraHostMemoryReserveMiB(CameraTier::small, {1, true, system}) == 171 &&
+                cameraHostMemoryReserveMiB(CameraTier::small, {2, false, system}) == 124 && cameraHostMemoryReserveMiB(CameraTier::small, {2, true, system}) == 197,
+            "and for the system camera's");
     require(cameraHostMemoryReserveMiB(CameraTier::small, {1, false, 11}) == 208,
             "a source that holds 11 bytes a pixel while it makes a JPEG (the synthetic camera) holds more than the ceiling of one that does not");
     // The tier every host gets is the small one, whatever its budget, and so is the reserve it holds.
-    require(cameraHostMemoryReserveMiB(cameraTierForBudget(534ull << 20)) == 173);
-    require(cameraHostMemoryReserveMiB(cameraTierForBudget(1249ull << 20)) == 173);
+    require(cameraHostMemoryReserveMiB(cameraTierForBudget(534ull << 20)) == 197);
+    require(cameraHostMemoryReserveMiB(cameraTierForBudget(1249ull << 20)) == 197);
     const auto large = cameraHostMemory(CameraTier::large);
     require(large.capturePools == alignedFrameBytes(3840, 2880) * 6 * 2 && large.staging == 3840ull * 2160 * 3 / 2);
     require(large.transformerScratch == 12'441'600ull * 2 + 14'929'920ull);

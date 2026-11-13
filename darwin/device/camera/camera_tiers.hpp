@@ -97,11 +97,12 @@ inline constexpr CameraTier largestOfferedTier = CameraTier::small;
  *    learned later only moves a lens from the second case to the first;
  *  - `stillWorkingBytesPerPixel`: the working storage, beyond the model's, the
  *    platform camera's source holds for each pixel of a JPEG still
- *    (`uml::platform::Camera::stillWorkingBytesPerPixel`). */
+ *    (`uml::platform::Camera::stillWorkingBytesPerPixel`); the default is the
+ *    system camera's, so the ceiling holds it. */
 struct CameraUse {
     std::uint32_t streams {concurrentCameras};
     bool rawStill {true};
-    std::uint32_t stillWorkingBytesPerPixel {};
+    std::uint32_t stillWorkingBytesPerPixel {uml::platform::systemCameraStillWorkingBytesPerPixel};
 
     friend bool operator==(const CameraUse&, const CameraUse&) = default;
 };
@@ -134,8 +135,8 @@ struct CameraUse {
  * (2 bytes each) three times, the platform's buffer, the device's copy and the
  * DNG that comes with it. The device admits a capture only while the captures
  * it holds, these costs summed, stay within `stillAdmissionBytes`. The
- * platform's own peak while it makes a picture is not counted for a real
- * camera: it is not measured. */
+ * platform's own working storage while it makes a picture is the camera's
+ * `stillWorkingBytesPerPixel`. */
 [[nodiscard]] constexpr std::uint64_t jpegCaptureBytes(std::uint64_t pixels, std::uint32_t workingBytesPerPixel = 0) noexcept
 {
     return maximumJpegBytes(pixels) * 2 + pixels * workingBytesPerPixel;
