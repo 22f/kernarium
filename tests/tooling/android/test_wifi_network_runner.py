@@ -197,7 +197,7 @@ class ScriptedGuest(runner.Guest):
                 "notifications": "dumpsys notification --noredact", "activities": "dumpsys activity activities",
                 "ui": (f"uiautomator dump --windows {runner.UI_DUMP} >/dev/null 2>&1; cat {runner.UI_DUMP} "
                        f"2>/dev/null; rm -f {runner.UI_DUMP}"),
-                "marker": f"getprop {runner.MARKER_PROPERTY}", "listing": "cmd wifi list-networks"}
+                "script_service": f"getprop {runner.SERVICE_PROPERTY}", "listing": "cmd wifi list-networks"}
 
     def __init__(self, **answers: list[str]) -> None:
         self.answers = {self.COMMANDS[name]: list(values) for name, values in answers.items()}
@@ -1014,27 +1014,89 @@ class UpgradeSectionTests(unittest.TestCase):
         with mock.patch.object(runner, "check_overlay", side_effect=runner.Failure("the overlay is not enabled")):
             self.assertFalse(runner.previous_never_disables(ScriptedGuest()))
 
-    def test_a_disk_the_release_leaves_alone_keeps_its_marker_and_its_metered_setting(self) -> None:
+    def test_a_disk_the_release_leaves_alone_keeps_its_network_and_its_metered_setting(self) -> None:
         guest = ScriptedGuest(status=[JOINED], dump=[ENABLED_DUMP.replace("meteredOverride 0", "meteredOverride 1")],
-                              marker=["2"], script_log=[""])
-        self.assertIsNone(runner.check_left_alone(guest))
+                              script_service=["stopped"], listing=[LISTING], script_log=[""])
+        self.assertIsNone(runner.check_left_alone(guest, WAITS))
 
-    def test_a_marker_that_is_not_2_fails(self) -> None:
+    def test_a_boot_script_that_never_ran_fails(self) -> None:
         guest = ScriptedGuest(status=[JOINED], dump=[ENABLED_DUMP.replace("meteredOverride 0", "meteredOverride 1")],
-                              marker=["1"], script_log=[""])
-        with self.assertRaisesRegex(runner.Failure, "marker is '1'"):
-            runner.check_left_alone(guest)
+                              script_service=[""], listing=[LISTING], script_log=[""])
+        with self.assertRaisesRegex(runner.Failure, "service is 'not started', not 'stopped'"):
+            runner.check_left_alone(guest, WAITS)
+
+    def test_a_boot_script_that_is_still_waiting_fails_after_the_repair_wait(self) -> None:
+        guest = ScriptedGuest(status=[JOINED], dump=[ENABLED_DUMP.replace("meteredOverride 0", "meteredOverride 1")],
+                              script_service=["running"], listing=[LISTING], script_log=[""])
+        with self.assertRaisesRegex(runner.Failure, r"service is 'running', not 'stopped'.*after 255 s"):
+            runner.check_left_alone(guest, WAITS)
+
+    def test_a_boot_script_that_stopped_with_the_network_unsaved_or_unjoined_fails(self) -> None:
+        for listing, status, message in ((["Network Id      SSID                         Security type\n"], JOINED, "not saved"),
+                                         ([LISTING], NOT_JOINED, "has not joined")):
+            guest = ScriptedGuest(status=[status], dump=[ENABLED_DUMP], script_service=["stopped"], listing=listing)
+            self.assertIn(message, runner.boot_script_finished(guest) or "")
 
     def test_a_network_saved_again_loses_its_metered_setting(self) -> None:
-        guest = ScriptedGuest(status=[JOINED], dump=[ENABLED_DUMP], marker=["2"], script_log=[""])
+        guest = ScriptedGuest(status=[JOINED], dump=[ENABLED_DUMP], script_service=["stopped"], listing=[LISTING],
+                              script_log=[""])
         with self.assertRaisesRegex(runner.Failure, "reset its metered setting"):
-            runner.check_left_alone(guest)
+            runner.check_left_alone(guest, WAITS)
 
     def test_a_repair_line_on_a_disk_that_needs_none_fails(self) -> None:
         guest = ScriptedGuest(status=[JOINED], dump=[ENABLED_DUMP.replace("meteredOverride 0", "meteredOverride 1")],
-                              marker=["2"], script_log=[REPAIR_LINE])
+                              script_service=["stopped"], listing=[LISTING], script_log=[REPAIR_LINE])
         with self.assertRaisesRegex(runner.Failure, "saved the network again although the station had joined"):
-            runner.check_left_alone(guest)
+            runner.check_left_alone(guest, WAITS)
+
+    def test_the_marker_property_is_not_read_as_the_shell(self) -> None:
+        # The shell is denied the marker's label on a user build, so a read of it can only print nothing.
+        self.assertFalse(hasattr(runner, "MARKER_PROPERTY"))
+        self.assertFalse(hasattr(runner.Guest, "marker"))
+        self.assertEqual(runner.SERVICE_PROPERTY, "init.svc.kernarium_wifi_network")
+
+    def kept_guest(self, service: list[str], dumps: list[str], listing: list[str] | None = None) -> ScriptedGuest:
+        class Kept(StubbedGuest):
+            def shell(self, command: str, timeout: float = runner.COMMAND_SECONDS) -> str:
+                if command == f"cmd wifi add-network {runner.SSID} open -m":
+                    self.calls.append("add metered network")
+                    return ""
+                return super().shell(command, timeout)
+
+        return Kept(script_service=service, dump=dumps, status=[JOINED], listing=listing or [LISTING])
+
+    def test_a_disk_of_a_release_that_never_disables_the_network_is_prepared_once_its_script_finished(self) -> None:
+        metered = ENABLED_DUMP.replace("meteredOverride 0", "meteredOverride 1")
+        guest = self.kept_guest(["running", "stopped"], [metered])
+        self.assertIsNone(runner.prepare_kept(guest, WAITS))
+        self.assertEqual(guest.restarts, 1)
+        self.assertIn("add metered network", guest.calls)
+
+    def test_a_previous_release_whose_script_did_not_run_fails_before_the_restart(self) -> None:
+        # No saved network and no service state: the shape of a disk the script never touched.
+        guest = self.kept_guest([""], [ENABLED_DUMP], listing=["Network Id      SSID                         Security type\n"])
+        with self.assertRaisesRegex(runner.Failure, "VirtWifi is saved: not saved"):
+            runner.prepare_kept(guest, WAITS)
+        self.assertEqual(guest.restarts, 0)
+        # A saved and joined network with the script never started or still waiting is not enough either.
+        for state, text in (([""], "not started"), (["running"], "'running'")):
+            guest = self.kept_guest(state, [ENABLED_DUMP])
+            with self.assertRaisesRegex(runner.Failure, f"marks the network joined: .*{text}"):
+                runner.prepare_kept(guest, WAITS)
+            self.assertEqual(guest.restarts, 0)
+
+    def test_a_script_that_does_not_finish_after_the_restart_fails(self) -> None:
+        metered = ENABLED_DUMP.replace("meteredOverride 0", "meteredOverride 1")
+        guest = self.kept_guest(["stopped", ""], [metered])
+        with self.assertRaisesRegex(runner.Failure, "finishes after the restart: .*not started"):
+            runner.prepare_kept(guest, WAITS)
+        self.assertEqual(guest.restarts, 1)
+
+    def test_a_network_the_script_saved_again_on_the_restart_loses_its_metered_setting(self) -> None:
+        metered = ENABLED_DUMP.replace("meteredOverride 0", "meteredOverride 1")
+        guest = self.kept_guest(["stopped"], [metered, ENABLED_DUMP])
+        with self.assertRaisesRegex(runner.Failure, "holds metered 0, not 1"):
+            runner.prepare_kept(guest, WAITS)
 
     def settings_guest(self, held: dict[str, str]) -> ScriptedGuest:
         class Settings(StubbedGuest):

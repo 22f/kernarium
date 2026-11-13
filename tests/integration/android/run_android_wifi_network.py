@@ -184,7 +184,12 @@ ALL_CHECK_SETTINGS = (*PROBE_SETTINGS, USE_HTTPS_FLAG)
 # What the platform probes with no URL setting, as the image's validation log names the servers.
 STOCK_HTTP_URL = "http://connectivitycheck.gstatic.com/generate_204"
 STOCK_HTTPS_URL = "https://www.google.com/generate_204"
-MARKER_PROPERTY = "persist.sys.kernarium.virtwifi_saved"
+# The state init keeps for the boot script's service: "running" while the script waits, "stopped" once it has
+# exited, and nothing before it first starts. The shell reads it on a user build. The script's own marker
+# (persist.sys.kernarium.virtwifi_saved) is not readable that way: its label is the script domain's alone, so
+# `getprop` as the shell prints nothing for it whatever the disk holds (an avc denial), and no section may
+# take that for the marker being unset.
+SERVICE_PROPERTY = "init.svc.kernarium_wifi_network"
 # The validation log lines of the NetworkMonitor topic of route p0029 (the verifier requires them in the image).
 CHECK_FAILED_LINE = "Wi-Fi internet check failed, the network stays validated"
 CHECK_PASSED_LINE = "Wi-Fi internet check passed"
@@ -1039,9 +1044,9 @@ class Guest:
         return self.shell(f"uiautomator dump --windows {UI_DUMP} >/dev/null 2>&1; cat {UI_DUMP} 2>/dev/null; "
                           f"rm -f {UI_DUMP}", timeout=90)
 
-    def marker(self) -> str:
-        """The boot script's marker: 1 once the network is saved, 2 once the station has joined it."""
-        return self.shell(f"getprop {MARKER_PROPERTY}").strip()
+    def script_service(self) -> str:
+        """The state init keeps for the boot script's service: running, stopped, or empty before it started."""
+        return self.shell(f"getprop {SERVICE_PROPERTY}").strip()
 
     def validation_entries(self, net_id: int) -> list[tuple[str, str]]:
         return validation_entries(self.network_stack()).get(net_id, [])
@@ -2514,14 +2519,33 @@ def previous_never_disables(guest: Guest) -> bool:
     return True
 
 
+def boot_script_finished(guest: Guest) -> str | None:
+    """None once the boot script has run to its end on this boot and the network it saved is joined; else what
+    is still missing. This is what the shell can read of the script's marker reaching 2 (the station joined):
+    the script saves the network only itself, and the way out of it that leaves a joined network behind is
+    setting the marker to 2. Its other ends leave the network unsaved (it could not save it) or not joined
+    (Wi-Fi off, or no join within the settle and rejoin seconds). A disk whose script did not run has no
+    saved network and no service state, and fails here. A script that saved the network again logs it, which
+    the sections that care read apart from this."""
+    state = guest.script_service()
+    if state != "stopped":
+        return f"the boot script's service is {state or 'not started'!r}, not 'stopped'"
+    if network_id(guest.listing()) is None:
+        return "the boot script has stopped and VirtWifi is not saved"
+    if not guest.joined():
+        return "the boot script has stopped and the station has not joined VirtWifi"
+    return None
+
+
 def prepare_kept(guest: Guest, waits: Waits) -> str | None:
-    """On the disk of a release that never disables the network: the station has joined it (the marker is 2),
-    the user marked it metered (saving it again would reset that), and the probes fail the check; a restart
-    of this guest shows what the disk holds."""
+    """On the disk of a release that never disables the network: the station has joined it and the boot
+    script has finished (it marks the network joined, boot_script_finished), the user marked it metered
+    (saving it again would reset that), and the probes fail the check; a restart of this guest shows what
+    the disk holds: the script does nothing more, so it finishes again and the metered setting is still
+    there."""
     wait_for("VirtWifi is saved", 60, lambda: None if network_id(guest.listing()) is not None else "not saved", guest)
     guest.wait_joined(JOIN_SECONDS, "the previous release joins VirtWifi")
-    wait_for("the boot script marks the network joined", waits.repair,
-             lambda: None if guest.marker() == "2" else f"the marker is {guest.marker()!r}", guest,
+    wait_for("the boot script marks the network joined", waits.repair, lambda: boot_script_finished(guest), guest,
              interval=POLL_SECONDS)
     guest.shell(f"cmd wifi add-network {SSID} open -m")
     guest.wait_joined(JOIN_SECONDS, "the metered network is joined")
@@ -2531,21 +2555,23 @@ def prepare_kept(guest: Guest, waits: Waits) -> str | None:
     guest.put_settings(CHECK_SETTINGS)
     guest.restart()
     guest.wait_joined(JOIN_SECONDS, "the station joins after the restart")
-    if guest.marker() != "2" or metered_override(guest.dump()) != 1:
-        raise Failure(f"the disk holds marker {guest.marker()!r} and metered {metered_override(guest.dump())}, "
-                      "not marker '2' and metered 1")
+    wait_for("the boot script finishes after the restart", waits.repair, lambda: boot_script_finished(guest), guest,
+             interval=POLL_SECONDS)
+    if metered_override(guest.dump()) != 1:
+        raise Failure(f"the disk holds metered {metered_override(guest.dump())}, not 1: the boot script saved the "
+                      "network again")
     if selection_status(guest.dump()) != "NETWORK_SELECTION_ENABLED":
         raise Failure("the previous release's network is not enabled")
     return None
 
 
-def check_left_alone(guest: Guest) -> str | None:
+def check_left_alone(guest: Guest, waits: Waits) -> str | None:
     """The first boot of the release under test finds the station joined once (marker 2), so the script saves
-    nothing again: the marker, the metered setting and the join are the disk's."""
+    nothing again: it finishes at once, and the metered setting and the join are the disk's."""
     guest.wait_joined(JOIN_SECONDS, "the station joins after the first boot of the release")
     time.sleep(MARGIN_SECONDS)
-    if guest.marker() != "2":
-        raise Failure(f"the marker is {guest.marker()!r}, not '2'")
+    wait_for("the boot script finishes on the first boot of the release", waits.repair,
+             lambda: boot_script_finished(guest), guest, interval=POLL_SECONDS)
     if metered_override(guest.dump()) != 1:
         raise Failure("the boot script saved a joined network again and reset its metered setting")
     status = selection_status(guest.dump())
@@ -2619,7 +2645,7 @@ def upgrade_from(options: argparse.Namespace, adb: str, private: pathlib.Path, r
     try:
         if kept:
             report.section("the first boot of the release leaves the joined network alone", guest,
-                           lambda: check_left_alone(guest))
+                           lambda: check_left_alone(guest, waits))
             report.section("the boot script runs without SELinux denials", guest, lambda: check_no_denials(guest))
             report.section("a failed internet check shows only the warning on the upgraded disk", guest,
                            lambda: check_warning_on_disk(guest))
