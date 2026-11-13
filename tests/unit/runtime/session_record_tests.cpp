@@ -1189,9 +1189,13 @@ void test_storage_slot()
 			session_storage_slot_bytes);
 	};
 	/* The outcomes the slot counts as settled are the ones the applications
-	 * print "settled" for, and no others. */
+	 * print "settled" for, and no others, and the zero value, which claims
+	 * nothing, is none of them. */
+	require(static_cast<int>(GuestStorage::not_reported) == 0,
+		"the zero value of the storage outcome claims something");
 	require(uml::runtime::guest_storage_settled(GuestStorage::confirmed) &&
 		uml::runtime::guest_storage_settled(GuestStorage::no_guest) &&
+		!uml::runtime::guest_storage_settled(GuestStorage::not_reported) &&
 		!uml::runtime::guest_storage_settled(GuestStorage::unconfirmed) &&
 		!uml::runtime::guest_storage_settled(GuestStorage::refused) &&
 		!uml::runtime::guest_storage_settled(GuestStorage::unreachable),

@@ -296,21 +296,26 @@ typedef void (*kernarium_runtime_request_stop_function)(void);
 
 /* What the guest confirmed about the writeback of its own storage when sync,
  * quiesce or quiesce_resident returned, as uml_emulator_guest_storage states
- * it. Only CONFIRMED and NO_GUEST mean that nothing the host cannot see is
- * left dirty in the guest: a caller says the guest's storage is settled only
- * for those two. */
+ * it. Only CONFIRMED and NO_GUEST mean that nothing the host cannot see was
+ * left dirty in the guest when the call returned: a caller says the guest's
+ * storage is settled only for those two. The zero value claims nothing. */
 enum {
-    /* The guest wrote every filesystem back and said so. */
-    KERNARIUM_RUNTIME_GUEST_STORAGE_CONFIRMED = 0,
+    /* Nothing was reported: the call did not write the report, as when it
+     * returned an error, so a report the caller zeroed still holds this. */
+    KERNARIUM_RUNTIME_GUEST_STORAGE_NOT_REPORTED = 0,
+    /* The guest ran sync(2) to its return and said so, in this call. A suspend
+     * never confirms the storage: the guest syncs on the way to suspend only
+     * while /sys/power/sync_on_suspend is set, and says nothing of it. */
+    KERNARIUM_RUNTIME_GUEST_STORAGE_CONFIRMED = 1,
     /* No guest was running, so there was nothing to settle. */
-    KERNARIUM_RUNTIME_GUEST_STORAGE_NO_GUEST = 1,
+    KERNARIUM_RUNTIME_GUEST_STORAGE_NO_GUEST = 2,
     /* The guest was asked and did not confirm in time, or the host could not
-     * ask because another lifecycle call was busy. */
-    KERNARIUM_RUNTIME_GUEST_STORAGE_UNCONFIRMED = 2,
-    /* The guest refused the request. */
-    KERNARIUM_RUNTIME_GUEST_STORAGE_REFUSED = 3,
+     * ask because another lifecycle call or console request was busy. */
+    KERNARIUM_RUNTIME_GUEST_STORAGE_UNCONFIRMED = 3,
+    /* The guest refused the request, or its reply was no confirmation. */
+    KERNARIUM_RUNTIME_GUEST_STORAGE_REFUSED = 4,
     /* A guest was running and its management console could not be reached. */
-    KERNARIUM_RUNTIME_GUEST_STORAGE_UNREACHABLE = 4,
+    KERNARIUM_RUNTIME_GUEST_STORAGE_UNREACHABLE = 5,
 };
 /* Whether the call put the guest to sleep. */
 enum {
@@ -321,6 +326,8 @@ enum {
     /* The guest refused, or did not confirm that it slept: it may run. */
     KERNARIUM_RUNTIME_GUEST_SUSPENSION_NOT_SUSPENDED = 2,
 };
+/* What sync, quiesce and quiesce_resident report about the guest. The call
+ * writes it only when it returns 0 or more. */
 typedef struct kernarium_runtime_settle {
     /* Set by the caller to sizeof the structure. */
     uint32_t struct_size;
@@ -335,22 +342,29 @@ typedef struct kernarium_runtime_settle {
  * host files. Safe to call from any thread while a guest runs, and reports the
  * number of files that could not be flushed: it says nothing of the guest.
  * `settle` (nullable; the caller sets struct_size) reports what the guest
- * confirmed. The call waits for the guest at most 3.5 s, and for another
- * lifecycle call at most 1 s of that; it fills `settle` with NO_GUEST when
- * no guest runs. Returns -EINVAL for a struct_size smaller than the
- * structure. */
+ * confirmed. The call waits for the guest at most 3.5 s, and for a lifecycle
+ * call in progress at most 1 s of that, whoever else is in the runtime; the
+ * host files are flushed all the same, and the storage is UNCONFIRMED when the
+ * guest did not reply in time. It fills `settle` with NO_GUEST when no guest
+ * runs. Returns -EINVAL for a struct_size smaller than the structure, with
+ * `settle` untouched, as for the calls below. */
 typedef int (*kernarium_runtime_sync_function)(kernarium_runtime_settle* settle);
 /* Leaves the guest safely abandonable: has it write its filesystems back,
  * trims its cold page cache once, enters full system suspend, then flushes
  * the host's own files. Pair it with resume. `settle` (nullable) reports
- * what the guest confirmed, as for sync, and whether it sleeps. A quiesce
- * waits for a lifecycle call in progress, which is itself bounded; each wait
- * for the guest is bounded: the first writeback 2 s, the trim 3 s, the suspend
- * 10 s and a final writeback after a suspend that failed 1.5 s. */
+ * what the guest confirmed, as for sync, and whether it sleeps. The storage
+ * is confirmed by the guest's reply to a writeback request of this call, never
+ * by the suspend. A quiesce waits for a lifecycle call in progress, which is
+ * itself bounded; each wait for the guest is bounded: the first writeback 2 s,
+ * the trim 3 s, the suspend 10 s (4 s more to abort one that does not
+ * answer) and a final writeback after a suspend that failed 1.5 s. Returns
+ * -EINVAL for a struct_size smaller than the structure, with `settle`
+ * untouched. */
 typedef int (*kernarium_runtime_quiesce_function)(kernarium_runtime_settle* settle);
 /* quiesce for a host that must not write what it is short of: the same
- * order, result and report, with the guest's RAM kept in the process and no
- * hibernation image written where a quiesce would have written one. */
+ * order, result, report and struct_size rule, with the guest's RAM kept in the
+ * process and no hibernation image written where a quiesce would have written
+ * one. */
 typedef int (*kernarium_runtime_quiesce_resident_function)(kernarium_runtime_settle* settle);
 typedef void (*kernarium_runtime_resume_function)(void);
 typedef void (*kernarium_runtime_send_touch_function)(

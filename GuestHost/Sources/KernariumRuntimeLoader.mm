@@ -506,10 +506,14 @@ extern "C" void kernarium_runtime_loader_request_stop(void)
         runtime->request_stop();
 }
 
-/* With no runtime loaded there is no guest, so nothing to settle. */
+/* With no runtime loaded there is no guest, so nothing to settle: a report that
+ * fits says NO_GUEST, and one that does not is refused as the runtime refuses
+ * it. */
 static int noRuntime(kernarium_runtime_settle* settle)
 {
-    if (settle != nullptr && settle->struct_size >= sizeof(*settle)) {
+    if (settle != nullptr) {
+        if (settle->struct_size < sizeof(*settle))
+            return -EINVAL;
         settle->reserved = 0U;
         settle->guest_storage = KERNARIUM_RUNTIME_GUEST_STORAGE_NO_GUEST;
         settle->guest_suspension = KERNARIUM_RUNTIME_GUEST_SUSPENSION_NOT_ASKED;

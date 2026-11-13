@@ -10,20 +10,25 @@
 /// had (or when no guest ran, which leaves nothing dirty).
 public struct GuestSettle: Equatable, Sendable {
     /// What the guest confirmed about the writeback of its storage, in the
-    /// order of `KERNARIUM_RUNTIME_GUEST_STORAGE_*`.
+    /// order of `KERNARIUM_RUNTIME_GUEST_STORAGE_*`. The zero value claims
+    /// nothing.
     public enum Storage: UInt32, Sendable {
-        /// The guest wrote every filesystem back and said so.
-        case confirmed = 0
+        /// Nothing was reported: the call did not fill the report, as when it
+        /// failed.
+        case notReported = 0
+        /// The guest ran sync(2) to its return and said so, in that call. A
+        /// suspend never confirms the storage.
+        case confirmed = 1
         /// No guest was running: there was nothing to settle.
-        case noGuest = 1
+        case noGuest = 2
         /// The guest was asked and did not confirm in time, or the host could
         /// not ask because another lifecycle call was busy.
-        case unconfirmed = 2
-        /// The guest refused the request.
-        case refused = 3
+        case unconfirmed = 3
+        /// The guest refused the request, or its reply was no confirmation.
+        case refused = 4
         /// A guest was running and its management console could not be
         /// reached.
-        case unreachable = 4
+        case unreachable = 5
     }
 
     /// Whether the call put the guest to sleep, in the order of
@@ -92,6 +97,7 @@ public struct GuestSettle: Equatable, Sendable {
 
     private static func notConfirmed(_ storage: Storage) -> String {
         switch storage {
+        case .notReported: "the runtime reported nothing"
         case .unconfirmed: "the guest did not confirm its writeback"
         case .refused: "the guest refused the writeback"
         case .unreachable: "the guest's console could not be reached"

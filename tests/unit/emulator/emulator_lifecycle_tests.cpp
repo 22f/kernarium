@@ -510,7 +510,7 @@ void aRunningGuestWithoutAConsoleIsNotSettled()
 	require(runningGuest.sync.guest_suspension ==
 		UML_EMULATOR_GUEST_SUSPENSION_NOT_ASKED &&
 		runningGuest.quiesce.guest_suspension ==
-		UML_EMULATOR_GUEST_NOT_SUSPENDED);
+		UML_EMULATOR_GUEST_SUSPENSION_NOT_SUSPENDED);
 }
 
 /* The calls refuse what they cannot fill, and leave the report alone. */
@@ -533,8 +533,9 @@ void theReportIsChecked(uml_emulator *emulator)
 		"a refused call wrote its report");
 }
 
-/* A quiesce that suspends is confirmed by the suspend, which syncs before it
- * replies; the guest's data goes first, and the trim after it. */
+/* A quiesce that suspends is confirmed by the guest's reply to its sync, which
+ * goes first, and the trim after it: the suspend's own reply confirms nothing
+ * of the storage. A sync that finds the guest held asks nothing. */
 void aSuspendedGuestIsConfirmed()
 {
 	const auto emulator = makeEmulator();
@@ -546,7 +547,8 @@ void aSuspendedGuestIsConfirmed()
 	require(result.heard == Requests {"sync", "trim once", "suspend"},
 		"the writeback comes before the trim");
 	requireReport(result, UML_EMULATOR_GUEST_STORAGE_CONFIRMED,
-		UML_EMULATOR_GUEST_SUSPENDED, "a suspended guest is confirmed");
+		UML_EMULATOR_GUEST_SUSPENSION_SUSPENDED,
+		"a guest that answered its sync and suspended is confirmed");
 	require(storageIsSettled(result.settle));
 	/* A sync that finds the guest quiesced asks nothing, which would end the
 	 * suspend, and reports what the quiesce did. */
@@ -555,7 +557,7 @@ void aSuspendedGuestIsConfirmed()
 		require(uml_emulator_sync(emulator.get(), &settle) == 0);
 	}).empty());
 	require(settle.guest_storage == UML_EMULATOR_GUEST_STORAGE_CONFIRMED &&
-		settle.guest_suspension == UML_EMULATOR_GUEST_SUSPENDED);
+		settle.guest_suspension == UML_EMULATOR_GUEST_SUSPENSION_SUSPENDED);
 	require(console.requests(1U, [&] { uml_emulator_resume(emulator.get()); })
 		== Requests {"wake"});
 }
@@ -573,14 +575,15 @@ void aRefusedSuspendIsWrittenBackAndNotSuspended()
 		});
 	require(result.heard == Requests {"sync", "trim once", "suspend", "sync"});
 	requireReport(result, UML_EMULATOR_GUEST_STORAGE_CONFIRMED,
-		UML_EMULATOR_GUEST_NOT_SUSPENDED,
+		UML_EMULATOR_GUEST_SUSPENSION_NOT_SUSPENDED,
 		"the storage is confirmed and the guest runs");
 }
 
-/* An older kernel's SysRq 's' only starts the writeback, and the suspend that
- * follows still syncs and confirms it; where the suspend is refused the guest
- * stays unconfirmed. */
-void anOlderKernelIsConfirmedBySuspendAndOnlyBySuspend()
+/* An older kernel's SysRq 's' only starts the writeback, and a suspend that
+ * follows says nothing of the storage: the guest's own sync_on_suspend decides
+ * whether it syncs, so the storage stays unconfirmed whether the guest sleeps
+ * or not. */
+void anOlderKernelIsNeverConfirmedBySuspend()
 {
 	const auto emulator = makeEmulator();
 	FakeGuestConsole console;
@@ -593,8 +596,10 @@ void anOlderKernelIsConfirmedBySuspendAndOnlyBySuspend()
 		Requests {"sync", "sysrq s", "trim once", "suspend"},
 		"the fixed settling period waits for the failed suspend only");
 	require(suspended.took < std::chrono::milliseconds {1400});
-	requireReport(suspended, UML_EMULATOR_GUEST_STORAGE_CONFIRMED,
-		UML_EMULATOR_GUEST_SUSPENDED, "the suspend syncs");
+	requireReport(suspended, UML_EMULATOR_GUEST_STORAGE_UNCONFIRMED,
+		UML_EMULATOR_GUEST_SUSPENSION_SUSPENDED,
+		"a suspend does not confirm a started writeback");
+	require(!storageIsSettled(suspended.settle));
 	(void)console.requests(1U, [&] { uml_emulator_resume(emulator.get()); });
 	console.refuseSuspend = true;
 	const auto refused = settleAgainst(console, 6U,
@@ -604,9 +609,30 @@ void anOlderKernelIsConfirmedBySuspendAndOnlyBySuspend()
 	require(refused.heard == Requests {"sync", "sysrq s", "trim once",
 		"suspend", "sync", "sysrq s"});
 	requireReport(refused, UML_EMULATOR_GUEST_STORAGE_UNCONFIRMED,
-		UML_EMULATOR_GUEST_NOT_SUSPENDED,
+		UML_EMULATOR_GUEST_SUSPENSION_NOT_SUSPENDED,
 		"a started writeback is not a confirmed one");
 	require(!storageIsSettled(refused.settle));
+}
+
+/* A guest that sleeps but refused its writeback is not settled either: the
+ * suspend is no confirmation, and the report says both. */
+void aSuspendDoesNotSettleARefusedWriteback()
+{
+	const auto emulator = makeEmulator();
+	FakeGuestConsole console;
+	console.sync = FakeGuestConsole::Sync::unknown;
+	console.sysrqDisabled = true;
+	const auto result = settleAgainst(console, 4U,
+		[&](uml_emulator_settle &settle) {
+			return uml_emulator_quiesce(emulator.get(), &settle);
+		});
+	require(result.heard ==
+		Requests {"sync", "sysrq s", "trim once", "suspend"});
+	requireReport(result, UML_EMULATOR_GUEST_STORAGE_REFUSED,
+		UML_EMULATOR_GUEST_SUSPENSION_SUSPENDED,
+		"a refused writeback stays refused beside a suspension");
+	require(!storageIsSettled(result.settle));
+	(void)console.requests(1U, [&] { uml_emulator_resume(emulator.get()); });
 }
 
 /* A guest that refuses to write back and to suspend is reported refused. */
@@ -624,12 +650,13 @@ void aRefusingGuestIsNotSettledByAQuiesce()
 	require(result.heard == Requests {"sync", "sysrq s", "trim once",
 		"suspend", "sync", "sysrq s"});
 	requireReport(result, UML_EMULATOR_GUEST_STORAGE_REFUSED,
-		UML_EMULATOR_GUEST_NOT_SUSPENDED, "a refusal is reported");
+		UML_EMULATOR_GUEST_SUSPENSION_NOT_SUSPENDED, "a refusal is reported");
 }
 
-/* A sync that gets no reply keeps the guest's console busy, so nothing is
- * queued behind it but the suspend, which still syncs and confirms; with the
- * suspend refused the storage stays unconfirmed and no second sync is tried. */
+/* A sync that gets no reply is a guest that is slow, or stuck on its I/O: the
+ * trim is not sent after it, and the suspend that follows confirms nothing, so
+ * the storage stays unconfirmed beside it; with the suspend refused no second
+ * sync is tried either. */
 void aQuiesceWhoseSyncGetsNoReplySkipsTheTrim()
 {
 	const auto emulator = makeEmulator();
@@ -641,8 +668,10 @@ void aQuiesceWhoseSyncGetsNoReplySkipsTheTrim()
 		});
 	require(suspended.heard == Requests {"sync", "suspend"},
 		"no trim queues behind a sync that is still running");
-	requireReport(suspended, UML_EMULATOR_GUEST_STORAGE_CONFIRMED,
-		UML_EMULATOR_GUEST_SUSPENDED, "the suspend syncs");
+	requireReport(suspended, UML_EMULATOR_GUEST_STORAGE_UNCONFIRMED,
+		UML_EMULATOR_GUEST_SUSPENSION_SUSPENDED,
+		"a suspend does not confirm the storage the sync did not");
+	require(!storageIsSettled(suspended.settle));
 	require(suspended.took >= std::chrono::milliseconds {1900} &&
 		suspended.took < std::chrono::milliseconds {4000},
 		"the opening sync waits for 2 s");
@@ -654,7 +683,7 @@ void aQuiesceWhoseSyncGetsNoReplySkipsTheTrim()
 		});
 	require(refused.heard == Requests {"sync", "suspend"});
 	requireReport(refused, UML_EMULATOR_GUEST_STORAGE_UNCONFIRMED,
-		UML_EMULATOR_GUEST_NOT_SUSPENDED, "no confirmation");
+		UML_EMULATOR_GUEST_SUSPENSION_NOT_SUSPENDED, "no confirmation");
 }
 
 /* The writeback after a refused suspend waits for 1.5 s, and a guest that
@@ -671,7 +700,7 @@ void aFinalWritebackWithoutAReplyIsUnconfirmed()
 		});
 	require(result.heard == Requests {"sync", "trim once", "suspend", "sync"});
 	requireReport(result, UML_EMULATOR_GUEST_STORAGE_UNCONFIRMED,
-		UML_EMULATOR_GUEST_NOT_SUSPENDED, "the last sync got no reply");
+		UML_EMULATOR_GUEST_SUSPENSION_NOT_SUSPENDED, "the last sync got no reply");
 	require(result.took >= std::chrono::milliseconds {1400});
 }
 
@@ -1007,6 +1036,15 @@ void aSuspendThatNeverAnsweredIsWokenAtTheResume()
 		require(uml_emulator_get_guest_memory(emulator.get(), &memory) ==
 			-UML_EMULATOR_UNSUPPORTED);
 	}).empty(), "a guest that may be asleep was asked for its memory");
+	/* What the quiesce answered is not repeated while the guest may have run:
+	 * its wake ended the suspend, and it can have written since. A sync and a
+	 * quiesce each ask it. */
+	auto settle = blankSettle();
+	require(console.requests(1U, [&] {
+		require(uml_emulator_sync(emulator.get(), &settle) == 0);
+	}) == Requests {"sync"}, "an unconfirmed guest was not asked again");
+	require(settle.guest_storage == UML_EMULATOR_GUEST_STORAGE_CONFIRMED &&
+		settle.guest_suspension == UML_EMULATOR_GUEST_SUSPENSION_NOT_ASKED);
 	require(console.requests(1U, [&] { uml_emulator_resume(emulator.get()); })
 			== Requests {"wake"},
 		"an unconfirmed guest is woken at the resume");
@@ -1423,6 +1461,56 @@ void aHibernationThatCannotHoldKeepsTheLocks()
 		uml_emulator_resume(emulator.get());
 	}) == Requests {"wake"});
 	require(disk.lockedByAnotherProcess());
+	(void)hibernationLog.take();
+}
+
+/* A suspension whose threads the host could not hold is no guarantee that the
+ * guest stays put: it can wake itself and write. What a quiesce said of it is
+ * then not repeated by a later call, which asks the guest again, and a quiesce
+ * of the guest the host now holds is the one that is reported again. */
+void aGuestTheHostDoesNotHoldIsAskedAgain()
+{
+	const auto emulator = makeEmulator();
+	FakeGuestConsole console;
+	Steps *const steps = installSteps(emulator.get());
+	steps->holdSucceeds = false;
+	(void)hibernationLog.take();
+	const auto first = settleAgainst(console, 3U,
+		[&](uml_emulator_settle &settle) {
+			return uml_emulator_quiesce(emulator.get(), &settle);
+		});
+	require(first.heard == Requests {"sync", "trim once", "suspend"});
+	requireReport(first, UML_EMULATOR_GUEST_STORAGE_CONFIRMED,
+		UML_EMULATOR_GUEST_SUSPENSION_SUSPENDED, "the first quiesce");
+	/* The guest woke by itself and wrote. A sync is asked, not remembered. */
+	const auto sync = settleAgainst(console, 1U,
+		[&](uml_emulator_settle &settle) {
+			return uml_emulator_sync(emulator.get(), &settle);
+		});
+	require(sync.heard == Requests {"sync"},
+		"a guest the host does not hold is asked again");
+	requireReport(sync, UML_EMULATOR_GUEST_STORAGE_CONFIRMED,
+		UML_EMULATOR_GUEST_SUSPENSION_NOT_ASKED, "the sync's own answer");
+	/* Another quiesce runs its whole sequence, and this time holds the guest. */
+	steps->holdSucceeds = true;
+	const auto second = settleAgainst(console, 3U,
+		[&](uml_emulator_settle &settle) {
+			return uml_emulator_quiesce(emulator.get(), &settle);
+		});
+	require(second.heard == Requests {"sync", "trim once", "suspend"},
+		"a quiesce of a guest that is not held is a whole quiesce");
+	requireReport(second, UML_EMULATOR_GUEST_STORAGE_CONFIRMED,
+		UML_EMULATOR_GUEST_SUSPENSION_SUSPENDED, "the second quiesce");
+	/* Now it is held, and nothing it did is unseen. */
+	require(console.requests(0U, [&] {
+		uml_emulator_settle settle = blankSettle();
+		require(uml_emulator_sync(emulator.get(), &settle) == 0);
+		require(settle.guest_storage == UML_EMULATOR_GUEST_STORAGE_CONFIRMED &&
+			settle.guest_suspension ==
+			UML_EMULATOR_GUEST_SUSPENSION_SUSPENDED);
+	}).empty(), "a held guest is reported again, not asked");
+	require(console.requests(1U, [&] { uml_emulator_resume(emulator.get()); })
+		== Requests {"wake"});
 	(void)hibernationLog.take();
 }
 
@@ -1987,7 +2075,7 @@ int main(int argc, char **argv)
 	if (selected == "settle-timeouts") {
 		anOlderKernelIsOnlyAskedAndStaysUnconfirmed();
 		aSyncWithoutAReplyIsUnconfirmedAfterItsBound();
-		anOlderKernelIsConfirmedBySuspendAndOnlyBySuspend();
+		anOlderKernelIsNeverConfirmedBySuspend();
 		aQuiesceWhoseSyncGetsNoReplySkipsTheTrim();
 		aFinalWritebackWithoutAReplyIsUnconfirmed();
 		aSyncBesideALongLifecycleCallIsUnconfirmed();
@@ -2054,6 +2142,8 @@ int main(int argc, char **argv)
 	aSuspendedGuestIsConfirmed();
 	aRefusedSuspendIsWrittenBackAndNotSuspended();
 	aRefusingGuestIsNotSettledByAQuiesce();
+	aSuspendDoesNotSettleARefusedWriteback();
+	aGuestTheHostDoesNotHoldIsAskedAgain();
 	/* Last: a run removes the console's directory when it returns. */
 	aRunningGuestWithoutAConsoleIsNotSettled();
 	return EXIT_SUCCESS;

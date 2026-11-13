@@ -4,7 +4,7 @@ import GuestHostCore
 
 /// The runtime's calls that write the guest's storage back, with what each
 /// reports about the guest (`kernarium_runtime_settle`). A call that does not
-/// fill the report leaves the guest unreachable, which no application calls
+/// fill the report leaves it "not reported", which no application calls
 /// settled.
 extension GuestSettle {
     static func sync() -> GuestSettle {
@@ -26,7 +26,7 @@ extension GuestSettle {
         var report = kernarium_runtime_settle(
             struct_size: UInt32(MemoryLayout<kernarium_runtime_settle>.size),
             reserved: 0,
-            guest_storage: UInt32(KERNARIUM_RUNTIME_GUEST_STORAGE_UNREACHABLE),
+            guest_storage: UInt32(KERNARIUM_RUNTIME_GUEST_STORAGE_NOT_REPORTED),
             guest_suspension: UInt32(KERNARIUM_RUNTIME_GUEST_SUSPENSION_NOT_ASKED)
         )
         let unflushed = call(&report)

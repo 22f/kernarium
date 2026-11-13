@@ -22,7 +22,7 @@ struct GuestSettleTests {
         #expect(GuestSettle(unflushed: -1, storage: .noGuest, suspension: .notAsked).isSettled)
     }
 
-    @Test(arguments: [GuestSettle.Storage.unconfirmed, .refused, .unreachable])
+    @Test(arguments: [GuestSettle.Storage.notReported, .unconfirmed, .refused, .unreachable])
     func anyOtherOutcomeIsNotSettled(storage: GuestSettle.Storage) {
         let settle = GuestSettle(unflushed: 0, storage: storage, suspension: .notAsked)
         #expect(!settle.isSettled && !settle.guestStorageSettled)
@@ -56,9 +56,12 @@ struct GuestSettleTests {
     }
 
     @Test func aValueTheBuildDoesNotKnowClaimsNothing() {
-        let known = GuestSettle(unflushed: 0, rawStorage: 0, rawSuspension: 1)
+        let known = GuestSettle(unflushed: 0, rawStorage: 1, rawSuspension: 1)
         #expect(known == GuestSettle(unflushed: 0, storage: .confirmed, suspension: .suspended))
         let unknown = GuestSettle(unflushed: 0, rawStorage: 9, rawSuspension: 9)
+        // A report that was never written is zero, and is no confirmation.
+        let blank = GuestSettle(unflushed: -1, rawStorage: 0, rawSuspension: 0)
+        #expect(blank.storage == .notReported && !blank.isSettled)
         #expect(unknown.storage == .unconfirmed && unknown.suspension == .notSuspended)
         #expect(!unknown.isSettled)
     }
@@ -66,8 +69,8 @@ struct GuestSettleTests {
     @Test func theRawValuesAreTheRuntimesOwn() {
         // KERNARIUM_RUNTIME_GUEST_STORAGE_* and _SUSPENSION_*.
         #expect([
-            GuestSettle.Storage.confirmed, .noGuest, .unconfirmed, .refused, .unreachable,
-        ].map(\.rawValue) == [0, 1, 2, 3, 4])
+            GuestSettle.Storage.notReported, .confirmed, .noGuest, .unconfirmed, .refused, .unreachable,
+        ].map(\.rawValue) == [0, 1, 2, 3, 4, 5])
         #expect([GuestSettle.Suspension.notAsked, .suspended, .notSuspended].map(\.rawValue) == [0, 1, 2])
     }
 }

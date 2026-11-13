@@ -13,6 +13,7 @@
 #include "KernariumMemoryPressure.hpp"
 #include "KernariumLocation.hpp"
 #include "KernariumRestartLoop.hpp"
+#include "KernariumSettle.hpp"
 #include "KernariumStatistics.hpp"
 #if KERNARIUM_AUTOMATION_HARNESS
 #include "KernariumHarness.hpp"
@@ -173,6 +174,8 @@ std::atomic_bool runtimeActive;
  * kernarium::console::InputRegistry.
  */
 std::mutex emulatorLifecycleMutex;
+/* The emulator that runs, for a sync, which must not wait for the mutex above. */
+kernarium::settle::Gate emulatorGate;
 /* A held key repeats, so an ordinary key sends the guest one wake edge a second
  * at most. */
 kernarium::input::KeyWakePolicy keyWakePolicy {std::chrono::seconds(1)};
@@ -798,12 +801,17 @@ class ActiveEmulatorRegistration final {
 public:
     explicit ActiveEmulatorRegistration(uml_emulator* emulator)
     {
-        std::scoped_lock lock(emulatorLifecycleMutex, activeEmulatorMutex);
-        activeEmulator = emulator;
+        {
+            std::scoped_lock lock(emulatorLifecycleMutex, activeEmulatorMutex);
+            activeEmulator = emulator;
+        }
+        emulatorGate.open(emulator);
     }
 
     ~ActiveEmulatorRegistration()
     {
+        /* Waits for a sync that is still using the handle. */
+        emulatorGate.close();
         std::scoped_lock lock(emulatorLifecycleMutex, activeEmulatorMutex);
         activeEmulator = nullptr;
     }
@@ -2605,47 +2613,18 @@ void runtimeRequestStop(void)
  * so the guest's writable images have to reach stable storage while the app is
  * still scheduled. This flushes what the guest has already handed to the host;
  * pages still dirty inside the guest are written back by the guest itself.
+ *
+ * A sync does not take the lifecycle mutex, which a quiesce or a resume holds
+ * for seconds: it pins the handle, and the library bounds how long it waits for
+ * its own lifecycle lock, so the call's promise holds whoever else is in the
+ * runtime.
  */
-/* What a call reports when no guest runs: nothing to flush and nothing to
- * settle. */
-[[nodiscard]] bool settleUsable(const kernarium_runtime_settle* settle)
-{
-    return settle == nullptr || settle->struct_size >= sizeof(*settle);
-}
-
-void reportNoGuest(kernarium_runtime_settle* settle)
-{
-    if (settle == nullptr)
-        return;
-    settle->reserved = 0U;
-    settle->guest_storage = KERNARIUM_RUNTIME_GUEST_STORAGE_NO_GUEST;
-    settle->guest_suspension = KERNARIUM_RUNTIME_GUEST_SUSPENSION_NOT_ASKED;
-}
-
-/* Fills the runtime's report from the library's, whose values it shares. */
-void reportSettle(kernarium_runtime_settle* settle, const uml_emulator_settle& report)
-{
-    if (settle == nullptr)
-        return;
-    settle->reserved = 0U;
-    settle->guest_storage = static_cast<uint32_t>(report.guest_storage);
-    settle->guest_suspension = static_cast<uint32_t>(report.guest_suspension);
-}
-
 int runtimeSync(kernarium_runtime_settle* settle)
 {
-    if (!settleUsable(settle))
-        return -EINVAL;
-    std::lock_guard lock(emulatorLifecycleMutex);
-    if (activeEmulator == nullptr) {
-        reportNoGuest(settle);
-        return 0;
-    }
-    uml_emulator_settle report {};
-    report.struct_size = sizeof(report);
-    const int failed = uml_emulator_sync(activeEmulator, &report);
-    reportSettle(settle, report);
-    return failed;
+    return kernarium::settle::sync(emulatorGate, settle,
+        [](uml_emulator* emulator, uml_emulator_settle* report) {
+            return uml_emulator_sync(emulator, report);
+        });
 }
 
 /*
@@ -2656,7 +2635,7 @@ int runtimeSync(kernarium_runtime_settle* settle)
  */
 int quiesceGuest(bool resident, kernarium_runtime_settle* settle)
 {
-    if (!settleUsable(settle))
+    if (!kernarium::settle::usable(settle))
         return -EINVAL;
     /* A guest that restarts between the quiesce and the resume waits for the
      * resume before it boots: the library's quiesce of an idle handle only
@@ -2664,16 +2643,11 @@ int quiesceGuest(bool resident, kernarium_runtime_settle* settle)
      * is away. */
     lifecycle.quiesce();
     std::lock_guard lock(emulatorLifecycleMutex);
-    if (activeEmulator == nullptr) {
-        reportNoGuest(settle);
-        return 0;
-    }
-    uml_emulator_settle report {};
-    report.struct_size = sizeof(report);
-    const int failed = resident ? uml_emulator_quiesce_resident(activeEmulator, &report)
-                                : uml_emulator_quiesce(activeEmulator, &report);
-    reportSettle(settle, report);
-    return failed;
+    return kernarium::settle::run(settle, activeEmulator,
+        [resident](uml_emulator* emulator, uml_emulator_settle* report) {
+            return resident ? uml_emulator_quiesce_resident(emulator, report)
+                            : uml_emulator_quiesce(emulator, report);
+        });
 }
 
 int runtimeQuiesce(kernarium_runtime_settle* settle)

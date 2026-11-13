@@ -62,8 +62,10 @@ char tail_text[output_size];
 /* The record's first bytes are a fixed slot that only the checkpoints write,
  * the next are the stall slot that only the stall watch writes, the network
  * slot after it is written by the checkpoints and the session's begin and
- * end, and the rest is the session's state that only its begin and its end
- * write, so none ever overwrites another's bytes, whichever finishes last. */
+ * end, the storage slot after that is written by the settle calls
+ * (note_guest_settle) and the session's begin, and the rest is the session's
+ * state that only its begin and its end write, so none ever overwrites
+ * another's bytes, whichever finishes last. */
 constexpr std::size_t memory_slot_size = session_memory_slot_bytes;
 constexpr std::size_t stall_slot_offset = session_memory_slot_bytes;
 std::atomic<bool> checkpoint_thread_started{false};
@@ -708,6 +710,8 @@ std::string_view settle_kind_word(SettleKind kind) noexcept
 std::string_view guest_storage_word(GuestStorage storage) noexcept
 {
 	switch (storage) {
+	case GuestStorage::not_reported:
+		break;
 	case GuestStorage::confirmed:
 		return "confirmed";
 	case GuestStorage::no_guest:

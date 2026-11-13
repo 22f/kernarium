@@ -201,12 +201,15 @@ enum class SettleKind : std::uint8_t {
 };
 
 enum class GuestStorage : std::uint8_t {
-	/* The guest wrote every filesystem back and said so. */
+	/* The zero value claims nothing: no call reported. A record never holds
+	 * it. */
+	not_reported,
+	/* The guest ran sync(2) to its return and said so. */
 	confirmed,
 	/* No guest was running: there was nothing to settle. */
 	no_guest,
 	/* The guest was asked and did not confirm in time, or only started the
-	 * writeback. */
+	 * writeback, or the host could not ask. */
 	unconfirmed,
 	/* The guest refused the request. */
 	refused,
