@@ -178,6 +178,7 @@ public final class MotionActivity extends Activity implements SensorEventListene
     private void writeCompass() {
         try {
             JSONObject report = new JSONObject().put("mode", mode).put("run_id", runId).put("valid", valid)
+                .put("started_ns", started)
                 .put("accelerometer", acceleration.json()).put("gyroscope", rotation.json())
                 .put("magnetometer", field.json().put("accuracy", fieldAccuracy)
                     .put("latest", new org.json.JSONArray().put(field.latest[0]).put(field.latest[1]).put(field.latest[2]))
