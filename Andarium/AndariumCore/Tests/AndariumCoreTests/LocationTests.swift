@@ -4,6 +4,7 @@ import Foundation
 import Testing
 
 @testable import AndariumCore
+import AndariumCoreTestSupport
 
 /// The position source and the guest's receiver as a test plays them: every
 /// call is kept, in order.
