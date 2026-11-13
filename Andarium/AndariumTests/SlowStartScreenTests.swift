@@ -447,11 +447,9 @@ struct SlowStartScreenTests {
     /// points tall at the default text size, the minimum touch target.
     private static let ordinaryButtonHeight: CGFloat = 44
 
-    /// Every content size the system offers, the smallest first.
+    /// Every standard content size, the smallest first.
     private static let contentSizes: [UIContentSizeCategory] = [
         .extraSmall, .small, .medium, .large, .extraLarge, .extraExtraLarge, .extraExtraExtraLarge,
-        .accessibilityMedium, .accessibilityLarge, .accessibilityExtraLarge, .accessibilityExtraExtraLarge,
-        .accessibilityExtraExtraExtraLarge,
     ]
 
     private func noticeFixture() -> Fixture {

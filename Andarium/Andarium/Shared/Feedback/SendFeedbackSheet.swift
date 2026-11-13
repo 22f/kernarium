@@ -18,7 +18,6 @@ struct SendFeedbackSheet: View {
     @State private var picked: [PhotosPickerItem] = []
     @FocusState private var focus: Field?
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.scenePhase) private var scenePhase
 
     private enum Field { case problem, details }
@@ -70,11 +69,6 @@ struct SendFeedbackSheet: View {
                         subject
                         Divider().padding(.leading, 20)
                         bodyText
-                        // At accessibility sizes the card would cover the
-                        // mail; it scrolls with it instead.
-                        if showsCard && typeSize.isAccessibilitySize {
-                            card.padding(.horizontal, 16).padding(.bottom, 14)
-                        }
                         if !state.attachments.isEmpty { attachments }
                         information
                     }
@@ -434,7 +428,7 @@ struct SendFeedbackSheet: View {
 
     private var bar: some View {
         VStack(spacing: 10) {
-            if showsCard && !typeSize.isAccessibilitySize {
+            if showsCard {
                 card.transition(.move(edge: .bottom).combined(with: .opacity))
             }
             ViewThatFits(in: .horizontal) {
@@ -447,7 +441,6 @@ struct SendFeedbackSheet: View {
             .padding(.vertical, 6)
             .glassEffect(.regular, in: .capsule)
             .disabled(!state.mailAvailable)
-            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         }
         .frame(maxWidth: 560)
         .padding(.horizontal, 12)
@@ -531,7 +524,6 @@ struct SendFeedbackSheet: View {
         .disabled(!enabled)
         .accessibilityLabel(Text(Words.addPhotoOrFile))
         .accessibilityIdentifier("feedback-add")
-        .accessibilityShowsLargeContentViewer()
     }
 
     private func source(
@@ -547,7 +539,6 @@ struct SendFeedbackSheet: View {
         .accessibilityValue(value.map { Text($0) } ?? Text(verbatim: ""))
         .accessibilityHint(hint.map { Text($0) } ?? Text(verbatim: ""))
         .accessibilityIdentifier(id)
-        .accessibilityShowsLargeContentViewer()
     }
 
     /// The control that hands the mail to Mail. Its words shorten when the
@@ -581,7 +572,6 @@ struct SendFeedbackSheet: View {
         .disabled(!state.canSend)
         .accessibilityLabel(Text("Send feedback", tableName: "Feedback"))
         .accessibilityIdentifier("feedback-send")
-        .accessibilityShowsLargeContentViewer()
         .fixedSize()
     }
 

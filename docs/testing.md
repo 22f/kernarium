@@ -471,8 +471,7 @@ notice's clock stands still while the application is away, and that the stop is
 made off the main actor until the run ends.
 `SlowStartCaptureTests` save the notice in windows the Simulator's own capture
 cannot take (an iPad turned, a narrow Split View window, the Duo's poses) and
-at the largest text size scrolled to its buttons, and do nothing unless
-`TEST_RUNNER_ANDARIUM_CAPTURE_DIR` names a folder.
+do nothing unless `TEST_RUNNER_ANDARIUM_CAPTURE_DIR` names a folder.
 `GuestRecoveryTests` check that a recovery the guest asked for is a recovery
 session and its reboot a normal one.
 

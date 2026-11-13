@@ -92,14 +92,6 @@ enum FeedbackPreview {
         switch screen {
         case "feedback", "feedback-home", "feedback-nomail", "feedback-boot":
             break
-        case "feedback-boot-end":
-            // The sheet scrolled to the end of its content, as opening and
-            // closing the information block leaves it: a large text size shows
-            // the tip and the log row there, above the bar.
-            try? await Task.sleep(for: .milliseconds(600))
-            feedback.showsInformation = true
-            try? await Task.sleep(for: .milliseconds(900))
-            feedback.showsInformation = false
         case "feedback-boot-removed":
             // The start log was taken out: the sheet does not make it again.
             if let log = feedback.form.attachments.items.first(where: { $0.kind == .startLog }) {
