@@ -445,12 +445,17 @@ void VhostUserServer::setStopShutsDownConnection() noexcept
     stopShutsDownConnection_ = true;
 }
 
+void VhostUserServer::revokeOwnedSharedMemory() noexcept
+{
+    if (sharedMemoryRegions_ && device_ && device_->sharedMemoryRegion())
+        sharedMemoryRegions_->revokeAll();
+}
+
 void VhostUserServer::resetConnection() noexcept
 {
     resetDeviceState();
     slaveRequestDescriptor_.reset();
-    if (sharedMemoryRegions_ && device_ && device_->sharedMemoryRegion())
-        sharedMemoryRegions_->revokeAll();
+    revokeOwnedSharedMemory();
     clearMappings();
     resetQueues();
     negotiatedFeatures_ = 0;
@@ -466,9 +471,12 @@ void VhostUserServer::resetDeviceState() noexcept
         dispatchSharedMemoryActions();
     } catch (...) {
         // Fail closed if an acknowledgement is missing or negative. Closing
-        // the backend-request channel makes the front-end revoke every map;
-        // local teardown must still retire each renderer owner below.
+        // the backend-request channel makes the front-end revoke every map,
+        // so the host index drops every range this backend owns with it, not
+        // only those whose unmap was already sent; local teardown must still
+        // retire each renderer owner below.
         slaveRequestDescriptor_.reset();
+        revokeOwnedSharedMemory();
     }
     device_->reset();
     pendingRequests_.clear();

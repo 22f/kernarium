@@ -497,7 +497,8 @@ queued, rather than inside it, since a reset sends unmaps of its own; so a
 device with a shared-memory region may keep its requests too. The wait ends with
 the acknowledgement, the end of the backend-request channel, or a service stop;
 it has no deadline of its own, and a front-end that never answers leaves the
-reset waiting. That
+reset waiting. A reset whose unmap is refused or whose channel has ended also
+drops every range the backend published from the host index. That
 `GET_FEATURES` also retires every ring still disabled, which the guest then
 frees: the transport reads it no more until its next `SET_VRING_KICK` or
 in-band `VRING_KICK`, whereas an enabled ring, and a disabled one no teardown

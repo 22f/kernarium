@@ -105,6 +105,9 @@ private:
 
     void resetConnection() noexcept;
     void resetDeviceState() noexcept;
+    /* Drops every shared-memory range this backend published from the host
+     * index, when its device owns a region. */
+    void revokeOwnedSharedMemory() noexcept;
     /* Says on stderr that a ring disable is resetting the device under
      * deferred requests. */
     void reportDisableReset(std::uint32_t ring) noexcept;

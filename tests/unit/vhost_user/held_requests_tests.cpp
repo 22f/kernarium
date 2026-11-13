@@ -12,6 +12,7 @@
 // The front end is the GPU tests', so their support header and protocol
 // header are on the path.
 #include "gpu_test_support.hpp"
+#include "shared_memory_regions.hpp"
 #include "vhost_user_device.hpp"
 
 #include <algorithm>
@@ -592,6 +593,13 @@ public:
         }
         changed_.notify_all();
     }
+    /* The next `unmaps` shared-memory unmap requests are answered with a
+     * failure status. */
+    void refuseUnmaps(unsigned unmaps)
+    {
+        const std::lock_guard lock {mutex_};
+        refusals_ = unmaps;
+    }
     [[nodiscard]] unsigned count(protocol::VhostSlaveRequest request) const
     {
         const std::lock_guard lock {mutex_};
@@ -626,8 +634,15 @@ private:
             changed_.wait(lock, [this] { return !held_; });
             if (stopping_)
                 return;
+            std::uint64_t status = 0;
+            if (message.header.request ==
+                    static_cast<std::uint32_t>(protocol::VhostSlaveRequest::sharedMemoryUnmap) &&
+                refusals_ != 0) {
+                --refusals_;
+                status = 1;
+            }
             lock.unlock();
-            replyToBackend(client_, message.header);
+            replyToBackend(client_, message.header, status);
         }
     }
 
@@ -636,6 +651,7 @@ private:
     std::condition_variable changed_;
     bool held_ {};
     bool stopping_ {};
+    unsigned refusals_ {};
     std::array<unsigned, 16> counts_ {};
     std::thread thread_;
 };
@@ -651,6 +667,8 @@ struct HeldSession {
     TestQueue& events;
     int socket;
     BackendAnswerer* backend {};
+    /* The host index of the ranges the device's backend published. */
+    uml::virtio::SharedMemoryRegions* regions {};
 };
 
 /* Runs `body` on a connection whose guest has posted `postedRequests`
@@ -667,6 +685,9 @@ void withSuspendedGuest(
     auto device = std::make_unique<HoldingDevice>(options);
     auto* recorder = device.get();
     VhostUserServer server {std::move(device)};
+    auto regions = std::make_shared<uml::virtio::SharedMemoryRegions>();
+    if (options.sharedMemory)
+        server.setSharedMemoryRegions(regions);
     SplitRing ring;
     TestQueue requests {ring, requestQueue, requestLayout};
     TestQueue events {ring, eventQueue, eventLayout};
@@ -701,10 +722,12 @@ void withSuspendedGuest(
         }
         requests.enable(socket, false);
         events.enable(socket, false);
-        body({*recorder, ring, requests, events, socket, answerer ? &*answerer : nullptr});
+        body({*recorder, ring, requests, events, socket,
+              answerer ? &*answerer : nullptr, regions.get()});
     });
     if (afterEnd)
-        afterEnd({*recorder, ring, requests, events, -1, answerer ? &*answerer : nullptr});
+        afterEnd({*recorder, ring, requests, events, -1,
+                  answerer ? &*answerer : nullptr, regions.get()});
 }
 
 /* A request the device completes while the guest is suspended, and an event
@@ -1021,6 +1044,10 @@ void teardownRetiresHeldRequestsAtTheFeaturesRequest(bool sharedMemory)
                 "the features request after the disables did not retire the request");
         require(device.mapped() == 0 && device.unmapsCompleted() == (sharedMemory ? 1U : 0U),
                 "the features request after the disables did not unmap what the device had mapped");
+        if (sharedMemory) {
+            require(!session.regions->contains(0, 0, 1),
+                    "the features request after the disables left the host index a range");
+        }
         for (const std::uint64_t queue : {std::uint64_t {eventQueue}, std::uint64_t {requestQueue}}) {
             const std::uint64_t withdrawn = queue | protocol::vhostVringNoDescriptor;
             sendRequestAndReadAcknowledgement(
@@ -1221,6 +1248,33 @@ void getFeaturesFollowsDisablesQueuedInAMapWait()
     });
 }
 
+/* A reset whose first unmap the front end refuses fails closed: the server
+ * ends the backend channel, which makes the front end revoke every map, and
+ * the host index drops the range it had not yet asked to unmap along with the
+ * one it had, so no host mapping outlives the guest's. */
+void failedUnmapDropsEveryRangeOfTheBackend()
+{
+    withSuspendedGuest({true, false, true}, 2, [&](const HeldSession& session) {
+        auto& device = session.device;
+        auto& backend = *session.backend;
+        const auto& regions = *session.regions;
+        const int socket = session.socket;
+        constexpr auto unmap = protocol::VhostSlaveRequest::sharedMemoryUnmap;
+        require(regions.contains(0, 0, 1) && regions.contains(0, HoldingDevice::rangeLength, 1),
+                "the device's ranges were not published to the host");
+        const auto resets = device.resets();
+
+        backend.refuseUnmaps(1);
+        (void)getFeatures(socket);
+        require(device.resets() == resets + 1 && device.held() == 0 && device.mapped() == 0,
+                "the features request did not reset the device whose unmap failed");
+        require(backend.count(unmap) == 1, "the reset went on asking after a refused unmap");
+        require(!regions.contains(0, 0, 1) && !regions.contains(0, HoldingDevice::rangeLength, 1),
+                "a range stayed in the host index after the reset");
+        (void)readConfig(socket, 0, 1);
+    });
+}
+
 /* A guest that suspends and never comes back, whose connection ends instead,
  * leaves a device that keeps its requests reset, with its ranges unmapped, and
  * nothing written to a ring it did not enable again. */
@@ -1290,6 +1344,7 @@ int main(int argc, char** argv)
     cases.push_back({"reset-report-rate", theResetAtADisableIsReportedLessOften});
     cases.push_back({"features-in-a-map-wait", getFeaturesInsideAMapWaitIsAnsweredAfterIt});
     cases.push_back({"features-behind-queued-disables", getFeaturesFollowsDisablesQueuedInAMapWait});
+    cases.push_back({"failed-unmap-drops-ranges", failedUnmapDropsEveryRangeOfTheBackend});
     try {
         for (const auto& test : cases) {
             if (argc > 1 && std::string {argv[1]} != test.name)
