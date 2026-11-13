@@ -92,7 +92,7 @@ struct SessionSettingsSheet: View {
         .presentationDetents([.medium, .large], selection: $detent)
         .presentationBackground(Color(.systemGroupedBackground))
         .presentationBackgroundInteraction(.enabled(upThrough: .medium))
-        .fileImporter(isPresented: $importing, allowedContentTypes: [InstallRefusal.pickerType]) { result in
+        .fileImporter(isPresented: $importing, allowedContentTypes: InstallRefusal.pickerTypes) { result in
             guard case .success(let url) = result else { return }
             // Settings goes; the install, or the refusal of a file that is not
             // one .apk, is on the full-screen overlay.

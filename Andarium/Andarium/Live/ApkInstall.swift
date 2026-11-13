@@ -32,27 +32,39 @@ nonisolated enum ApkInstallOperation {
     /// read has the file, since an iCloud file has no size, and perhaps no
     /// room, until it is down. `device` is "iPad", "iPhone" or "Mac" and
     /// `hostFree` the device's free space, read after the file is in hand.
+    /// An .apk is streamed whole as it always was; the other names the picker
+    /// offers (.apks, .xapk, .apkm) are archives of an app's parts, installed
+    /// through a session (`ContainerInstallOperation`). `trail` is told what
+    /// a failure or a cancel must undo in the guest.
+    @discardableResult
     static func run(
         session: AdbSession, coordinator: FileCoordinatorBox, url: URL, device: String,
         bypassLowTargetSdkBlock: Bool = false, hostFree: @Sendable () -> UInt64,
-        update: @escaping @Sendable (BusyUpdate) -> Void
-    ) throws {
-        var result: Result<Void, Error> = .success(())
+        trail: ApkInstallTrail = ApkInstallTrail(), update: @escaping @Sendable (BusyUpdate) -> Void
+    ) throws -> ApkInstallOutcome {
+        var result: Result<ApkInstallOutcome, Error> = .success(.installed)
         var coordinationError: NSError?
         // The read is coordinated, which brings an iCloud file down first.
         update(BusyUpdate(detail: String(localized: "Getting the file\u{2026}")))
         coordinator.current.coordinate(readingItemAt: url, options: [], error: &coordinationError) { readable in
             result = Result {
-                try send(
+                if InstallRefusal.isPlainApk(fileName: url.lastPathComponent) {
+                    try sendPlain(
+                        session: session, file: readable, name: url.lastPathComponent, device: device,
+                        bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, hostFree: hostFree, update: update)
+                    return .installed
+                }
+                return try ContainerInstallOperation.run(
                     session: session, file: readable, name: url.lastPathComponent, device: device,
-                    bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, hostFree: hostFree, update: update)
+                    bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, hostFree: hostFree, trail: trail, update: update)
             }
         }
         if let coordinationError { throw coordinationError }
-        try result.get()
+        return try result.get()
     }
 
-    private static func send(
+    /// One APK, sent whole with the package manager's `install`.
+    static func sendPlain(
         session: AdbSession, file: URL, name: String, device: String, bypassLowTargetSdkBlock: Bool,
         hostFree: @Sendable () -> UInt64, update: @escaping @Sendable (BusyUpdate) -> Void
     ) throws {

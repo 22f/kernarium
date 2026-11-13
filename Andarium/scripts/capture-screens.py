@@ -308,7 +308,8 @@ SHOTS: list[Shot] = [
     s("overlay-install-done", "Operations", "install-done", "The install overlay at its end: App installed with Done. It stays until closed."),
     s("overlay-install-failed", "Operations", "install-failed", "The install overlay at its end: App not installed, the guest's reason and OK."),
     s("overlay-install-not-apk", "Operations", "install-not-apk", "A file that is not an app, refused at once on the overlay."),
-    s("overlay-install-bundle", "Operations", "install-bundle", "An app in several files, refused at once on the overlay."),
+    s("overlay-install-parts", "Operations", "install-parts", "The full-screen progress while an app that comes in parts (.apks, .xapk, .apkm) is sent, part by part.", wait=2.0),
+    s("overlay-install-app-bundle", "Operations", "install-app-bundle", "An app bundle for publishing apps (.aab), refused at once on the overlay."),
     # Send feedback: needs a Preview built with FEEDBACK_ADDRESS=feedback@example.com (see --help)
     feedback("feedback-menu-home", "home-menu", "Home's toolbar menu open on a configured guest: Info, then Send feedback after a separator.", dark=True, wait=3.0),
     feedback("feedback-menu-welcome", "welcome-menu", "The same menu open on the welcome screen, before any guest exists: Send feedback is reachable from the first screen.", dark=True, wait=3.0),

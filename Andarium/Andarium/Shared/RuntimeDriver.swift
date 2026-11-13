@@ -143,16 +143,18 @@ protocol RuntimeDriver: AnyObject {
     /// The guest kernel's counters that bear on a stall (`GuestProcFiles`), as
     /// entries for the bug report; empty when the guest cannot be read now.
     func guestStallFiles() async -> [BugReportArchive.Entry]
-    /// Installs the APK at `url`, which the caller can read, into the guest.
+    /// Installs the app at `url`, which the caller can read, into the guest:
+    /// an .apk, or a file that holds an app in parts (.apks, .xapk, .apkm).
     /// Its size is read once the file is in hand, since an iCloud file has
     /// none before. Cancelling the task stops it while the file is still being
-    /// sent. `bypassLowTargetSdkBlock` is true only for the second attempt of
-    /// Settings' Install APK, after the person chose to install an app Android
-    /// refused for the version it was built for; without it that refusal
-    /// throws `LegacyApkRefused`.
+    /// sent (an archive's parts go into an install session, which the stop
+    /// abandons). `bypassLowTargetSdkBlock` is true only for the second
+    /// attempt of Settings' Install APK, after the person chose to install an
+    /// app Android refused for the version it was built for; without it that
+    /// refusal throws `LegacyApkRefused`.
     func installApk(
         at url: URL, bypassLowTargetSdkBlock: Bool, update: @escaping @Sendable (BusyUpdate) -> Void
-    ) async throws
+    ) async throws -> ApkInstallOutcome
     /// Whether the guest's USB debugging setting is on; nil when it cannot be
     /// read now.
     func usbDebugging() async -> Bool?

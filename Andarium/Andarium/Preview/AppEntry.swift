@@ -306,8 +306,8 @@ struct AppEntry {
             if screen == "session-camera-notice" { model.previewCameraNotice() }
             if screen == "session-camera-off-notice" { model.previewCameraNotice(.blockedInUse) }
         case "settings", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
-             "settings-feedback", "install-apk", "install-legacy", "install-done", "install-failed", "install-not-apk", "install-bundle",
-             "bug-report":
+             "settings-feedback", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
+             "install-app-bundle", "bug-report":
             let session = model.session
             switch screen {
             case "settings-adb":
@@ -376,12 +376,12 @@ struct AppEntry {
 
     /// The screens that show a guest operation on the full-screen overlay.
     private static let operationScreens: Set<String> = [
-        "bug-report", "install-apk", "install-legacy", "install-done", "install-failed", "install-not-apk",
-        "install-bundle",
+        "bug-report", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
+        "install-app-bundle",
     ]
     /// The ones that show how an install ended.
     private static let resultScreens: Set<String> = [
-        "install-done", "install-failed", "install-not-apk", "install-bundle",
+        "install-done", "install-failed", "install-not-apk", "install-app-bundle",
     ]
 
     /// A guest operation's overlay as it looks part way, or at its end: what
@@ -396,6 +396,13 @@ struct AppEntry {
                 title: String(localized: "Creating bug report"),
                 detail: String(localized: "The virtual machine is collecting its logs and state. This can take several minutes."),
                 progress: 0.6, cancel: cancel
+            )
+        case "install-parts":
+            // An app in parts, part way through being sent.
+            return BusyState(
+                title: String(localized: "Installing app"),
+                detail: String(localized: "Sending part \(2) of \(3)\u{2026}"),
+                progress: 0.45, cancel: cancel
             )
         case "install-legacy":
             // The first attempt is over and the question is up: the overlay
@@ -421,9 +428,9 @@ struct AppEntry {
                 title: AppModel.installFailure, detail: InstallRefusal.notApk.message,
                 result: BusyResult(failed: true, dismiss: dismiss)
             )
-        case "install-bundle":
+        case "install-app-bundle":
             return BusyState(
-                title: AppModel.installFailure, detail: InstallRefusal.bundle.message,
+                title: AppModel.installFailure, detail: InstallRefusal.appBundle.message,
                 result: BusyResult(failed: true, dismiss: dismiss)
             )
         default:

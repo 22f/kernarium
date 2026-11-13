@@ -390,11 +390,10 @@ struct AndroidOperationTests {
         #expect(model.busy == nil)
     }
 
-    @Test func anythingButASingleApkIsRefusedAtOnceOnTheSameOverlay() throws {
+    @Test func aFileThatIsNotAnAppIsRefusedAtOnceOnTheSameOverlay() throws {
         let (model, driver) = running()
         let expected: [(String, InstallRefusal)] = [
-            ("Trip.zip", .notApk), ("app.apks", .bundle), ("app.xapk", .bundle), ("app.apkm", .bundle),
-            ("notes.txt", .notApk),
+            ("Trip.zip", .notApk), ("app.aab", .notApk), ("app.apk.zip", .notApk), ("notes.txt", .notApk),
         ]
         for (name, refusal) in expected {
             let url = try apk(named: name)
@@ -623,7 +622,7 @@ struct PackageInstallMessagesTests {
             "FAILED_DEPRECATED_SDK_VERSION": "This app was made for a system version that this virtual machine no longer installs.",
             "FAILED_NO_MATCHING_ABIS": "This app has no code for this device\u{2019}s processor.",
             "FAILED_INSUFFICIENT_STORAGE": "The virtual machine doesn\u{2019}t have enough free space. Free some up in the virtual machine, or give it more storage with Resize.",
-            "FAILED_MISSING_SPLIT": "This app comes in several parts, which Andarium can\u{2019}t install yet.",
+            "FAILED_MISSING_SPLIT": "This app comes in several parts. Install its .apks, .xapk or .apkm file, which holds all of them.",
             "FAILED_MISSING_SHARED_LIBRARY": "The app needs a system library this virtual machine doesn\u{2019}t have.",
             "FAILED_DUPLICATE_PERMISSION": "The app conflicts with an app that\u{2019}s already installed.",
             "FAILED_CONFLICTING_PROVIDER": "The app conflicts with an app that\u{2019}s already installed.",

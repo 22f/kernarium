@@ -774,6 +774,24 @@ is on. `AndariumCore/Adb` speaks the protocol.
   Install anyway sends the same file again with the package manager's
   `--bypass-low-target-sdk-block`, once (`LegacyInstallFlow`). Nothing else in
   Andarium sends that flag, and the choice is kept nowhere.
+- **An app in parts** installs from one file: .apks, .xapk or .apkm, never
+  .zip, and an .aab is refused. The file is recognised by its content, a ZIP
+  central directory read in place (`ZipArchive`: bounded entry count, name
+  length and directory size, raw inflate and CRC through the system zlib,
+  nothing unpacked or copied), and its parts are classified by entry names
+  and the container's own metadata; the APKs inside are never opened. The
+  base, the configuration splits, and the ABI splits for the first of the
+  virtual machine's `ro.product.cpu.abilist` that the app has go into one
+  install session over the same connection, each part read from the archive
+  as it is written (`install-create`, `install-write -S` with the exact
+  length, `install-commit`; `ContainerInstallOperation`,
+  `PackageInstallCommand`). A session that is not committed is abandoned on a
+  fresh connection when the install fails or is cancelled, and the older-app
+  retry opens a new session with the flag, so no session outlives the
+  install. Each APK inside is held to the 4 GiB limit; the file itself may be
+  larger, and its footprint does not grow with it. A file with encrypted
+  entries, no app, or parts that do not fit together is refused, and nothing
+  is installed.
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB

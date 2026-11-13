@@ -1248,10 +1248,11 @@ final class AppModel {
 
     /// Install APK: `url` is what the Files picker returned. Settings has
     /// dismissed and the install runs behind the overlay, which stays up at the
-    /// end with how it went until the person closes it. A file that is not a
-    /// single .apk, or is one Android cannot take by its size, is refused on the
-    /// same overlay, at once. The file's security scope is held to the end of
-    /// the install.
+    /// end with how it went until the person closes it. A file that is not an
+    /// .apk, .apks, .xapk or .apkm, or is an .apk that Android cannot take by
+    /// its size, is refused on the same overlay, at once; an archive of an
+    /// app's parts is read, and refused or installed, by the operation. The
+    /// file's security scope is held to the end of the install.
     func installPicked(_ url: URL) {
         guard busy == nil else { return }
         guard fileBrowser?.busy != true else {
@@ -1269,7 +1270,9 @@ final class AppModel {
         // down has none yet, and the install reads the real one when it has
         // the file.
         let size = UInt64(max((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0, 0))
-        if let refusal = InstallRefusal(sizeBytes: size) {
+        // The size limit is an .apk's: an archive may be larger, and each APK
+        // inside it is held to the limit by the operation.
+        if InstallRefusal.isPlainApk(fileName: name), let refusal = InstallRefusal(sizeBytes: size) {
             endAccess()
             busy = ended(title: Self.installFailure, detail: refusal.message, failed: true)
             return
@@ -1278,19 +1281,31 @@ final class AppModel {
         runOperation(
             BusyState(title: String(localized: "Installing app"), detail: detail, progress: 0),
             failure: Self.installFailure,
-            ending: { _ in (title: String(localized: "App installed"), detail: String(localized: "\(name) is installed in the virtual machine.")) },
+            ending: { (outcome: ApkInstallOutcome) in
+                switch outcome {
+                case .installed:
+                    (title: String(localized: "App installed"), detail: String(localized: "\(name) is installed in the virtual machine."))
+                case .installedWithoutData:
+                    (
+                        title: String(localized: "App installed"),
+                        detail: String(localized: "\(name) is installed in the virtual machine, but its data files could not all be copied. The app may not work without them.")
+                    )
+                }
+            },
             { [driver] update in
                 defer { endAccess() }
-                try await self.installAskingAboutLegacyApps(detail: detail) { bypass, update in
+                let outcome = try await self.installAskingAboutLegacyApps(detail: detail) { bypass, update in
                     if let driver {
-                        try await driver.installApk(at: url, bypassLowTargetSdkBlock: bypass, update: update)
+                        return try await driver.installApk(at: url, bypassLowTargetSdkBlock: bypass, update: update)
                     } else {
                         try await self.playInstall(bypassLowTargetSdkBlock: bypass, update)
+                        return self.previewInstallOutcome
                     }
                 }
                 // 100% for a moment, then the result.
                 update(BusyUpdate(progress: 1))
                 try? await Task.sleep(for: .milliseconds(500))
+                return outcome
             }
         )
     }
@@ -1304,10 +1319,11 @@ final class AppModel {
     /// attempt reads the file and checks the room afresh.
     private func installAskingAboutLegacyApps(
         detail: String,
-        attempt: (_ bypassLowTargetSdkBlock: Bool, _ update: @escaping @Sendable (BusyUpdate) -> Void) async throws -> Void
-    ) async throws {
+        attempt: (_ bypassLowTargetSdkBlock: Bool, _ update: @escaping @Sendable (BusyUpdate) -> Void) async throws -> ApkInstallOutcome
+    ) async throws -> ApkInstallOutcome {
         let epoch = operationEpoch
         var flow = LegacyInstallFlow()
+        var outcome = ApkInstallOutcome.installed
         while true {
             switch flow.step {
             case let .attempt(bypass):
@@ -1320,7 +1336,7 @@ final class AppModel {
                     }
                 }
                 do {
-                    try await attempt(bypass, update)
+                    outcome = try await attempt(bypass, update)
                     flow.attemptEnded(.installed)
                 } catch let refused as LegacyApkRefused {
                     flow.attemptEnded(.tooOldTarget(refused.target))
@@ -1343,7 +1359,7 @@ final class AppModel {
                 if installAnyway { busy?.progress = 0 }
             case let .finished(ending):
                 switch ending {
-                case .installed: return
+                case .installed: return outcome
                 case .cancelled: throw CancellationError()
                 // Today only a second too-old refusal ends this way, and
                 // `ApkInstall` words one of those as an ordinary failure
@@ -1397,6 +1413,12 @@ final class AppModel {
     /// The App Store configuration leaves this out.
     @ObservationIgnored
     var previewInstallAttempt: (@Sendable (_ bypassLowTargetSdkBlock: Bool, _ update: @Sendable (BusyUpdate) -> Void) async throws -> Void)?
+    /// How the preview's install ends. The App Store configuration leaves
+    /// this out, and its install always ends as installed.
+    @ObservationIgnored
+    var previewInstallOutcome = ApkInstallOutcome.installed
+    #else
+    private var previewInstallOutcome: ApkInstallOutcome { .installed }
     #endif
 
     private func playInstall(bypassLowTargetSdkBlock: Bool, _ update: @Sendable (BusyUpdate) -> Void) async throws {

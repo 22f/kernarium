@@ -51,7 +51,8 @@ public enum ApkContainer {
         }
     }
 
-    static func refusal(for error: ZipError) -> InstallRefusal {
+    /// The words an archive's failure gets.
+    public static func refusal(for error: ZipError) -> InstallRefusal {
         switch error {
         case .encrypted: .encrypted
         case .notAnArchive: .notApk
@@ -395,9 +396,10 @@ public struct ApkContainerPlan: Equatable, Sendable {
         return plan
     }
 
-    /// The bytes of the APKs and of the data files.
+    /// The bytes of the APKs and of the data files, and both together.
     public var apkBytes: UInt64 { candidates.reduce(0) { Self.add($0, $1.bytes) } }
     public var dataBytes: UInt64 { data.reduce(0) { Self.add($0, $1.bytes) } }
+    public var totalBytes: UInt64 { Self.add(apkBytes, dataBytes) }
 
     private static func add(_ a: UInt64, _ b: UInt64) -> UInt64 {
         let (sum, overflow) = a.addingReportingOverflow(b)

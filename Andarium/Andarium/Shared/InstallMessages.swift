@@ -36,7 +36,7 @@ nonisolated enum PackageInstallMessages {
         ),
         (
             ["FAILED_MISSING_SPLIT"],
-            String(localized: "This app comes in several parts, which Andarium can\u{2019}t install yet.")
+            String(localized: "This app comes in several parts. Install its .apks, .xapk or .apkm file, which holds all of them.")
         ),
         (["FAILED_MISSING_SHARED_LIBRARY"], String(localized: "The app needs a system library this virtual machine doesn\u{2019}t have.")),
         (
@@ -88,6 +88,14 @@ nonisolated enum PackageInstallMessages {
 
     /// Every code the table maps, for the test that checks the table.
     static var mappedCodes: [String] { table.flatMap(\.codes) }
+}
+
+/// How an install that reached the package manager ended.
+nonisolated enum ApkInstallOutcome: Equatable, Sendable {
+    case installed
+    /// The app is installed, but the data files its archive carried (an
+    /// .xapk's OBB files) were not all copied.
+    case installedWithoutData
 }
 
 /// The package manager refused an app for the version of Android it was built

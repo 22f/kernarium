@@ -91,6 +91,28 @@
         }
       }
     },
+    "%@ is installed in the virtual machine, but its data files could not all be copied. The app may not work without them." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@を仮想マシンにインストールしましたが、データファイルをすべてコピーできませんでした。データファイルがないと、アプリが動作しない場合があります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@已安装到虚拟机中，但并非所有数据文件都已复制。没有这些文件，应用可能无法运行。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@已安裝到虛擬機器中，但並非所有資料檔案都已複製。沒有這些檔案，應用程式可能無法運作。"
+          }
+        }
+      }
+    },
     "%@ is installed in the virtual machine." : {
       "localizations" : {
         "ja" : {
@@ -6440,6 +6462,28 @@
         }
       }
     },
+    "Sending part %lld of %lld…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "パーツ%1$lld/%2$lldを送信中…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在发送第%1$lld部分，共%2$lld部分…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在傳送第%1$lld部分，共%2$lld部分…"
+          }
+        }
+      }
+    },
     "Set up virtual machine" : {
       "localizations" : {
         "ja" : {
@@ -8958,24 +9002,24 @@
         }
       }
     },
-    "This app comes in several parts, which Andarium can’t install yet." : {
+    "This app comes in several parts. Install its .apks, .xapk or .apkm file, which holds all of them." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このアプリは複数のパーツで構成されており、Andariumではまだインストールできません。"
+            "value" : "このアプリは複数のパーツで構成されています。すべてのパーツを含む.apks、.xapk、.apkmファイルからインストールしてください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此应用由多个部分组成，Andarium暂时无法安装。"
+            "value" : "此应用由多个部分组成。请安装包含全部部分的.apks、.xapk或.apkm文件。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此應用程式由多個部分組成，Andarium目前無法安裝。"
+            "value" : "此應用程式由多個部分組成。請安裝包含全部部分的.apks、.xapk或.apkm檔案。"
           }
         }
       }
