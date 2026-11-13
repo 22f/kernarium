@@ -413,8 +413,9 @@ struct GameControllersTests {
     }
 
     /// What a state read before the application left, and passed on after its
-    /// return, is: the controller's state from before the stretch. A report
-    /// read after the return is the controller's own.
+    /// return, is: the controller's state from before the stretch, and so is
+    /// every state buffered behind it that the same callback goes on to read. A
+    /// report read by a later callback is the controller's own.
     @Test func aStateReadBeforeTheApplicationLeftAndPassedOnAfterItsReturnIsDropped() async throws {
         /// The reads of a controller's states: the first is held until the test
         /// lets it go, as a callback that is slow to get on is, and then
@@ -459,11 +460,16 @@ struct GameControllersTests {
         let heldState = GamepadState(buttons: .south, leftStick: GamepadStick(x: 0.5, y: -0.25), rightTrigger: 0.8)
         let heldReport = try #require(encoder.reports(for: heldState, after: nil).first)
         #expect(heldReport != neutral)
+        // A second state buffered behind it, as a button pressed after the first.
+        let laterState = GamepadState(buttons: [.south, .east], leftStick: GamepadStick(x: 0.5, y: -0.25), rightTrigger: 0.8)
+        let laterReport = try #require(encoder.reports(for: laterState, after: nil).first)
+        #expect(laterReport != heldReport)
 
-        // The callback of iOS reads a state that holds A, and is slow to pass it on.
+        // The callback of iOS reads a state that holds A, with another behind it, and is slow to pass the first on.
         let entry = try #require(controllers.table.all.first)
         let handler = try #require(entry.controller.input.inputStateAvailableHandler)
         reads.add(heldState)
+        reads.add(laterState)
         let input = entry.controller.input
         let callback = Task.detached { handler(input) }
         #expect(await Task.detached { reads.reading.wait(timeout: .now() + 3) == .success }.value)
@@ -474,9 +480,9 @@ struct GameControllersTests {
         reads.proceed.signal()
         await callback.value
         controllers.session.settle()
-        // What the callback read is not passed on, though the application is in front again.
-        #expect(!inputReports(await relay.frames()).contains(heldReport))
-        // A report read after the return is.
+        // Nothing the callback read is passed on, though the application is in front again.
+        #expect(inputReports(await relay.frames()).isEmpty)
+        // A report read by a later callback is.
         reads.add(heldState)
         handler(input)
         #expect(inputReports(await relay.frames()) == [heldReport])

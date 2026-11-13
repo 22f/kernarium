@@ -344,9 +344,9 @@ nonisolated final class GameControllers: @unchecked Sendable {
     private var running = false
     private var foreground = false
     /// Counts the times the application has gone to the back or come to the
-    /// front, under `lock`, together with the session being told: a state the
-    /// controller queue read in an earlier count is from before that
-    /// transition, and `drain` does not pass it on.
+    /// front, under `lock`, together with the session being told: a callback
+    /// of the controller queue that began in an earlier count reads states
+    /// from before that transition, and `drain` does not pass them on.
     private var epoch: UInt64 = 0
     private var observers: [NSObjectProtocol] = []
     private var batteryTimer: DispatchSourceTimer?
@@ -412,7 +412,7 @@ nonisolated final class GameControllers: @unchecked Sendable {
         if change == false { stopLooking() }
         // `drain` passes a state on under this lock too, so a state is queued
         // for the session either before this transition, to be let go of by it,
-        // or after it, and then it was read after it.
+        // or after it, and then its callback began after it.
         lock.withLock {
             if foreground != self.foreground {
                 self.foreground = foreground
@@ -506,16 +506,16 @@ nonisolated final class GameControllers: @unchecked Sendable {
     /// Reads every buffered state in order, so that no tap between two
     /// callbacks is lost; the session sends what changes a button at once. The
     /// callback runs on the controller queue, apart from the application's
-    /// going to the back and coming to the front, so a state may be read just
+    /// going to the back and coming to the front, so a state may be read
     /// before one and reach this point after it: it is the controller's state
-    /// from before, which the guest has been told to let go of, and it is
-    /// dropped (the controller's next report is its state). A state still
-    /// waiting in iOS's queue when the callback first runs after a return is
-    /// read as new, which nothing here can tell from a report just made.
+    /// from before, which the guest has been told to let go of, and so is each
+    /// state the callback reads after it. They are read and dropped, so that
+    /// none is left for a later callback, and the controller's next report is
+    /// its state. The only old state that can still be taken as new is one
+    /// waiting in iOS's queue at a callback that first runs after the return.
     private func drain(_ live: GCControllerLiveInput, id: Int) {
-        while true {
-            let read = lock.withLock { epoch }
-            guard let state = readState(live) else { return }
+        let read = lock.withLock { epoch }
+        while let state = readState(live) {
             lock.withLock {
                 guard epoch == read else { return }
                 session.submit(state, for: id)
