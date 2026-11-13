@@ -380,7 +380,10 @@ struct MemoryPressureNoticeBannerTests {
                         .allowsHitTesting(false)
                 }
                 .overlay(alignment: .top) { SessionNoticesOverlay() }
-                .overlay { SideKeysOverlay(mode: .normal, lit: true, open: .constant(false), actions: actions) }
+                .overlay {
+                    SideKeysOverlay(
+                        mode: .normal, lit: true, open: .constant(false), tip: SideKeysTip(offersInstall: false), actions: actions)
+                }
                 .environment(model).dynamicTypeSize(size).frame(width: width, height: height))
         lease.window.rootViewController = controller
         controller.view.layoutIfNeeded()
