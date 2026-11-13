@@ -213,22 +213,21 @@ struct CameraFlowTests {
         #expect(planner.asked == 1)
         #expect(s.model.cameraMode == .live)
         #expect(pool(s.model) == 363, "534 less the layout's 171, not the ceiling's 197")
-        #expect(s.model.cameraReserveIsExact)
         // Off again: the budget is the figure, whatever the policy holds.
         s.model.setCamera(false)
         #expect(pool(s.model) == 534)
     }
 
-    @Test func aReserveThatIsNotExactSaysSoAndStaysTheCeiling() async {
+    @Test func theFigureAPlannerAnswersIsTheOneShownWhetherOrNotItIsExact() async {
+        // The answer differs from the policy's own reserve (197), so the pool can only be 329 if the plan was applied.
         let s = setup(.authorized)
         s.model.host.memory = tightPolicy
-        let planner = Planner([197], exact: false)
+        let planner = Planner([205], exact: false)
         s.model.cameraReservePlanner = planner.plan
         s.model.setCamera(true)
         await s.model.cameraReserveTask?.value
         #expect(planner.asked == 1)
-        #expect(!s.model.cameraReserveIsExact)
-        #expect(pool(s.model) == 337)
+        #expect(pool(s.model) == 329, "534 less the 205 the planner answered, not the policy's own 197")
     }
 
     @Test func aHostThatHoldsNothingIsShownTheWholeBudgetWhileCameraIsOn() async {
@@ -238,7 +237,7 @@ struct CameraFlowTests {
         s.model.cameraReservePlanner = Planner([0]).plan
         s.model.setCamera(true)
         await s.model.cameraReserveTask?.value
-        #expect(s.model.cameraReserveIsExact && pool(s.model) == 534)
+        #expect(pool(s.model) == 534)
     }
 
     @Test func theChoiceMadeBeforeIOSAnswersIsPlannedAtOnceAndTheAnswerChangesWhatTheSheetShows() async {

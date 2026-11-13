@@ -78,10 +78,10 @@ struct SystemSheetCameraTests {
         let live = await model(.authorized, chosen: true, reserve: 171)
         #expect(live.0.cameraMode == .live)
         #expect(try await vram(of: live.0, in: lease) == "\u{2248} 363 MiB")
-        // The runtime could not discover the cameras: the ceiling, in the same words.
-        let ceiling = await model(.authorized, chosen: true, reserve: 197, exact: false)
-        #expect(!ceiling.0.cameraReserveIsExact)
-        #expect(try await vram(of: ceiling.0, in: lease) == "\u{2248} 337 MiB")
+        // An answer that is not the layout's own (the policy's reserve is 197 and the answer 205, so the figure
+        // can only be this if the plan was applied): shown as answered.
+        let notExact = await model(.authorized, chosen: true, reserve: 205, exact: false)
+        #expect(try await vram(of: notExact.0, in: lease) == "\u{2248} 329 MiB")
         // A host whose cameras the image cannot describe holds nothing.
         let none = await model(.authorized, chosen: true, reserve: 0)
         #expect(try await vram(of: none.0, in: lease) == "\u{2248} 534 MiB")

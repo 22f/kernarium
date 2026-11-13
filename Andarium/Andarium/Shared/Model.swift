@@ -494,9 +494,6 @@ final class AppModel {
     /// model keeps the policy's own figure, the ceiling that bounds the system
     /// cameras.
     @ObservationIgnored var cameraReservePlanner: (@Sendable (MemoryPolicy) -> CameraReservePlan)?
-    /// The policy's camera reserve is what the runtime composes for this host's
-    /// cameras, not the ceiling it keeps where it cannot say.
-    private(set) var cameraReserveIsExact = false
     /// The last question to the runtime for the camera reserve, which a test
     /// waits for.
     @ObservationIgnored private(set) var cameraReserveTask: Task<Void, Never>?
@@ -722,7 +719,6 @@ final class AppModel {
             let current = self.host.memory
             let plan = await Task.detached(priority: .utility) { planner(current) }.value
             if self.host.memory == current, plan.policy != current { self.host.memory = plan.policy }
-            self.cameraReserveIsExact = plan.exact
         }
         cameraReserveTask = task
         return task
