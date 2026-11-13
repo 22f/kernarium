@@ -7,12 +7,16 @@
 // contain it.
 //
 // The chart. Every frame is an NV12 picture of a luma gradient with a 6 x 4
-// grid of colour patches and, in the top-left corner, a row of 64 marker cells
-// (each `markerCell(width)` samples wide and 8 high) that carry, most
-// significant bit first, a 16-bit tag naming the camera, a 32-bit frame counter
-// and a 16-bit check word (the exclusive or of the three 16-bit groups before
-// it). A cell is luma 235 for a one and 16 for a zero. decodeChartMarker() reads
-// them back from a picture of the camera's own size.
+// grid of colour patches and, across the middle of the picture, a row of 64
+// marker cells (the picture's width shared among them, and 8 rows high) that
+// carry, most significant bit first, a 16-bit tag naming the camera, a 32-bit
+// frame counter and a 16-bit check word (the exclusive or of the three 16-bit
+// groups before it). A cell is luma 235 for a one and 16 for a zero.
+// decodeChartMarker() reads them back from a picture of any size: the marker
+// spans the width and lies on the middle row, so the centred crop and the scale
+// a device makes of an anchored camera's frame for a stream of another shape or
+// size (the rows of a 16:9 stream of a 4:3 picture, a stream half its size)
+// leave it readable.
 
 #include "camera.hpp"
 
@@ -120,7 +124,6 @@ public:
 [[nodiscard]] std::unique_ptr<SyntheticCamera> makeSyntheticCamera(const SyntheticCameraOptions& options = {});
 
 // The chart a frame of the given size carries.
-[[nodiscard]] std::uint32_t markerCell(std::uint32_t width) noexcept;
 struct ChartMarker {
     std::uint16_t tag {};
     std::uint32_t counter {};
