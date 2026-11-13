@@ -553,6 +553,24 @@ host's test run records no screen video and keeps no attachments (the scheme
 sets it, and `start` refuses a built run file that does not), and its result
 bundle lives under the state directory, not in DerivedData.
 
+A host ends on its own now and then, and a new one started within minutes needs
+no approval at the device while one started hours later does. `watch` keeps one
+device's host serving, and acts only on evidence: it adopts a serving host,
+starts the next only once the old one is shown to be dead (three reads in a row
+that all worked and all showed the same beat), and otherwise replaces nothing
+and ends with a status and state of its own that `status` reports (approval the
+device may have asked for, a heartbeat it cannot read, a remainder of the old
+host that is not shown gone). The refusal for approval stays in the state
+directory until a host serves, and a device with no host to read is the first
+`start`'s job. A command in flight when its host is replaced is not repeated,
+and its sender gets status 3. Run it in a terminal, detached with
+`watch --detach`, or as a job manager's job (`watch --print-launchd-job
+<label>` prints a launchd job that launchd never restarts, and creates nothing:
+make its log directory first); `stop --force` ends the watch before the host.
+The `kernarium-ipad-automation-watch` and
+`kernarium-ipad-automation-watch-process` tooling tests run the real script
+against fake `xcrun` and `xcodebuild` executables.
+
 ### Edge gestures (device only)
 
 The Simulator shows which edges a run defers (`AndariumPreview -screen
