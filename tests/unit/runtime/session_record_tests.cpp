@@ -222,6 +222,38 @@ void test_record_lifecycle()
 	unlink(path.c_str());
 }
 
+/* The kernel echoes its command line, which holds the Android guest's serial
+ * number; the record keeps the output but not that value, and neither does
+ * what a bug report archive copies from it. The values are synthetic. */
+void test_the_record_keeps_no_serial_number()
+{
+	uml::runtime::reset_session_record();
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, {}));
+	const char echo[] =
+		"Kernel command line: quiet androidboot.serialno=TESTSERIAL0123 "
+		"androidboot.hardware=cutf_cvm\n"
+		"init: ro.boot.serialno=TESTSERIAL0123\n"
+		"two on a line androidboot.serialno=\"FIRSTVALUE\" "
+		"androidboot.serialno=SECONDVALUE\n"
+		"the last: androidboot.serialno=LASTVALUE";
+	(void)uml::runtime::kernel_write(STDERR_FILENO, echo, sizeof(echo) - 1);
+	uml::runtime::end_session_record(SessionEnd::kernel_exit, 143, "exit");
+	const std::string record = read_file(path);
+	require(has(record, "kernel-output\n") &&
+		has(record, "Kernel command line: quiet androidboot.serialno=<masked> "
+			    "androidboot.hardware=cutf_cvm\n") &&
+		has(record, "init: ro.boot.serialno=<masked>\n") &&
+		has(record, "the last: androidboot.serialno=<masked>"),
+		"the tail was not kept with the serial masked: " + record);
+	for (const char *value : {"TESTSERIAL0123", "FIRSTVALUE", "SECONDVALUE",
+				  "LASTVALUE"})
+		require(!has(record, value),
+			std::string{"the record keeps a serial number: "} + value);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
 void test_memory_checkpoints()
 {
 	uml::runtime::reset_session_record();
@@ -1144,6 +1176,7 @@ int main(int argc, char **argv)
 		test_kept_output();
 		test_the_console_says_when_the_boot_finished();
 		test_record_lifecycle();
+		test_the_record_keeps_no_serial_number();
 		test_memory_checkpoints();
 		test_network_slot();
 		/* The registration passes the golden file; a run without it

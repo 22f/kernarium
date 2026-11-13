@@ -731,6 +731,27 @@ void start_checkpoints() noexcept
 	(void)pthread_sigmask(SIG_SETMASK, &previous, nullptr);
 }
 
+/* The kernel's last output as the record keeps it. The kernel echoes its
+ * command line, which carries the Android guest's serial number
+ * (`androidboot.serialno=`); the record and the bug report archive that copies
+ * it do not keep the value, only that one was there. Everything up to the next
+ * white space after `serialno=` is masked, which also covers an echo whose
+ * start the ring cut off. */
+void keep_tail(Text &record, std::string_view tail) noexcept
+{
+	constexpr std::string_view key{"serialno="};
+	for (auto at = tail.find(key); at != std::string_view::npos;
+	     at = tail.find(key)) {
+		record.printable(tail.substr(0, at + key.size()), true);
+		record.text("<masked>");
+		tail.remove_prefix(at + key.size());
+		const auto stop = tail.find_first_of(" \t\r\n");
+		tail = stop == std::string_view::npos ? std::string_view{} :
+							tail.substr(stop);
+	}
+	record.printable(tail, true);
+}
+
 void write_record(SessionEnd end, int status, std::string_view message,
 	std::string_view tail) noexcept
 {
@@ -752,8 +773,10 @@ void write_record(SessionEnd end, int status, std::string_view message,
 	if (!message.empty())
 		record.text("\nmessage ").printable(message, false);
 	record.text("\n");
-	if (!tail.empty())
-		record.text("kernel-output\n").printable(tail, true);
+	if (!tail.empty()) {
+		record.text("kernel-output\n");
+		keep_tail(record, tail);
+	}
 	ssize_t written;
 	do {
 		written = pwrite(descriptor, record_text, record.size(),

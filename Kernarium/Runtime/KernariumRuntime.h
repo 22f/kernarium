@@ -177,7 +177,9 @@ enum {
  * 0-9 other than "unknown"; the address is the text aa:bb:cc:dd:ee:ff of a
  * unicast address that is locally administered and none of 02:00:00:00:00:00,
  * 52:54:00:12:34:56 or 02:15:b2:00:00:00. A value that is anything else fails
- * the run with -UML_EMULATOR_INVALID_ARGUMENT; neither value is ever logged.
+ * the run with -UML_EMULATOR_INVALID_ARGUMENT. The host's own messages never
+ * contain either value; what the guest itself reports (an Android bug report,
+ * the kernel's echo of its command line) carries them as on any Android device.
  * The runtime reads them only from a request whose struct_size covers them; a
  * Linux guest ignores them. */
 typedef struct kernarium_runtime_boot {
