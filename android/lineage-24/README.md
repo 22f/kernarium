@@ -403,7 +403,15 @@ to 10.0.2.15, so the framework never manages `eth0`; its hardware address and
 the guest's serial number are the installation's own, which the host chooses at
 random once for each data disk. `kernarium_net_setup`
 (`overlay/tools`) prepares it at `post-fs-data` and stacks the `virt_wifi`
-device `wlan0` on it, and the kernel needs `CONFIG_MACVLAN`, `CONFIG_CFG80211`
+device `wlan0` on it, with a hardware address derived from `eth0`'s
+(`overlay/tools/kernarium_wifi_mac.h`: no kernel argument carries it, because an
+`androidboot.*` argument becomes a property every application can read). The
+lower devices, `eth0` and the macvlan `buried_eth0`, carry no IPv6, so no
+link-local address built from their hardware addresses shows the installation's
+values to an application. The guest's IPv6 is `wlan0`'s, which the framework
+enables once Wi-Fi is up, with an address that is not built from the MAC; a
+later change that gives the guest more IPv6 puts it on `wlan0`. The tool exits with an error when it cannot turn IPv6 off, and `wlan0`
+is then not created. The kernel needs `CONFIG_MACVLAN`, `CONFIG_CFG80211`
 and `CONFIG_VIRT_WIFI` built in (the verifier requires them). Apps see Wi-Fi
 only, the open SSID `VirtWifi`, because the product declares
 `android.hardware.wifi` and not `android.hardware.ethernet`; turning Wi-Fi or
@@ -514,7 +522,12 @@ carry host-owned choices that bundle command lines may not override:
 - `ro.boot.kernarium.adb_tcp` is 0 when the launch has no host forward, as in
   the iOS release: adbd then listens on `vsock:5555` alone.
 - `ro.boot.kernarium.adb_key` is the adb public key the host application
-  authorizes for the boot; adbd accepts it whatever the user's setting.
+  authorizes for the boot; adbd accepts it whatever the user's setting. Its type
+  is `kernarium_adb_key_prop` (`overlay/sepolicy/system_ext/private`), which no
+  application may read: the other two are `bootloader_prop`, readable by every
+  application, and a key that is unique to an installation would identify it.
+  adbd reads it and init sets it; dumpstate can read it too, so a bug report
+  that the user shares can carry the key.
 
 The user's debugging setting stays meaningful while adbd remains the host's
 channel: route `p0007` records the setting in `persist.sys.usb.config` and
@@ -575,6 +588,12 @@ outcomes are known and not defects of the image:
   set it, and the vendor init script falls back to 5 when a launch passes none.
   The launchers refuse any value of it in a release's command line except the
   `=5` that earlier releases carry, which they drop.
+- The release's command line carries `androidboot.serialno=umlandroid17`, the
+  fallback for a launch that states no serial number, so that the guest always
+  has exactly one. A launcher that states the installation's own
+  ([`../../darwin/device/block/README.md`](../../darwin/device/block/README.md))
+  drops the fallback and appends it; the builder and the verifier require the
+  one token.
 - The guest has a compressed swap of half its RAM (one zram entry in
   `fstab.uml`), enabled at `sys.boot_completed`. PinnerService does not lock the
   home app's files, and `kernarium_reclaim_boot_apps.sh` kills only the cached

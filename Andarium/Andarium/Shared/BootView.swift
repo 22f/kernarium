@@ -314,12 +314,28 @@ struct BootView: View {
         .accessibilityIdentifier("boot-slow-notice")
     }
 
+    /// The notice has Send feedback beside Stop.
+    private var offersFeedback: Bool {
+        #if FEEDBACK_MAIL
+        model.feedbackAddress != nil
+        #else
+        false
+        #endif
+    }
+
+    /// Both buttons are the application's ordinary size: 44 points at the
+    /// default text size, as the end screen's Copy report is, and no less at
+    /// any size (the minimum touch target). The bordered style pads its label
+    /// by 7 points above and below, so a label this tall makes 44.
+    private static let slowButtonLabelHeight: CGFloat = 30
+
     /// Side by side, at one width (`EqualWidthRow`), only where both labels fit
     /// at their own; stacked, a label wraps. Stop's label is as wide as its
     /// longer state, so that choosing it moves nothing.
     @ViewBuilder
     private func slowButtons(lineLimit: Int?, axis: Axis) -> some View {
-        let layout = axis == .horizontal ? AnyLayout(EqualWidthRow(spacing: 12)) : AnyLayout(VStackLayout(spacing: 10))
+        let layout = axis == .horizontal
+            ? AnyLayout(EqualWidthRow(spacing: 12)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 10))
         layout {
             Button(role: .destructive) {
                 model.askToStop()
@@ -328,11 +344,13 @@ struct BootView: View {
                     stopLabel(stopping: true, lineLimit: lineLimit, axis: axis).hidden()
                     stopLabel(stopping: model.slowStart.stopping, lineLimit: lineLimit, axis: axis)
                 }
-                .frame(maxWidth: .infinity, minHeight: 32)
+                // Beside Send feedback, one width with it; alone, as wide as
+                // its label and no more.
+                .frame(maxWidth: offersFeedback ? .infinity : nil, minHeight: Self.slowButtonLabelHeight)
             }
             .buttonStyle(.bordered)
             .tint(.red)
-            .controlSize(.large)
+            .controlSize(.regular)
             .disabled(model.slowStart.stopping)
             .accessibilityIdentifier("boot-stop")
             // An alert, not a confirmation dialog: on iPhone and iPad that is a
@@ -356,14 +374,14 @@ struct BootView: View {
                     model.feedbackFromBoot = true
                 } label: {
                     Text("Send feedback", tableName: "Feedback")
-                        .fontWeight(.semibold)
+                        .font(.body.weight(.semibold))
                         .lineLimit(lineLimit)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: axis == .horizontal, vertical: true)
-                        .frame(maxWidth: .infinity, minHeight: 32)
+                        .frame(maxWidth: .infinity, minHeight: Self.slowButtonLabelHeight)
                 }
                 .buttonStyle(.bordered)
-                .controlSize(.large)
+                .controlSize(.regular)
                 .accessibilityIdentifier("boot-send-feedback")
             }
             #endif
@@ -384,7 +402,7 @@ struct BootView: View {
                     .accessibilityHidden(true)
             }
             Text(stopping ? "Stopping\u{2026}" : "Stop")
-                .fontWeight(.semibold)
+                .font(.body.weight(.semibold))
                 .lineLimit(axis == .horizontal ? lineLimit : 1)
                 .minimumScaleFactor(axis == .horizontal ? 1 : 0.5)
                 .multilineTextAlignment(.center)
@@ -509,6 +527,8 @@ private struct EqualWidthRow: Layout {
     let spacing: CGFloat
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        // One button is as wide as it is, and not as the row is.
+        if subviews.count == 1 { return subviews[0].sizeThatFits(ProposedViewSize(width: proposal.width, height: nil)) }
         let ideals = subviews.map { $0.sizeThatFits(.unspecified) }
         let cell = ideals.map(\.width).max() ?? 0
         let ideal = cell * CGFloat(subviews.count) + spacing * CGFloat(max(subviews.count - 1, 0))
@@ -517,6 +537,10 @@ private struct EqualWidthRow: Layout {
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         guard !subviews.isEmpty else { return }
+        if subviews.count == 1 {
+            subviews[0].place(at: bounds.origin, proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
+            return
+        }
         let gaps = spacing * CGFloat(subviews.count - 1)
         let cell = (bounds.width - gaps) / CGFloat(subviews.count)
         for (index, subview) in subviews.enumerated() {

@@ -9,7 +9,7 @@ import SwiftUI
 /// Send feedback, laid out as the mail it becomes: the problem is the subject
 /// line, the details are the body, the files sit in the body as Mail shows
 /// them, and the basic information closes it. One bar at the foot holds the
-/// bug report, the screenshot, the photos and videos, and Send feedback; it
+/// bug report, the screenshot, the photos and videos, the files, and Send feedback; it
 /// rides above the keyboard. A card over the bar asks for a bug report until
 /// one is attached or the card is put away.
 struct SendFeedbackSheet: View {
@@ -27,9 +27,14 @@ struct SendFeedbackSheet: View {
     /// The words more than one place uses, in the feature's table.
     private enum Words {
         static let bugReport = LocalizedStringResource("Bug report", table: "Feedback")
+        static let startLog = LocalizedStringResource("Start log", table: "Feedback")
         static let screenshot = LocalizedStringResource("Screenshot", table: "Feedback")
         static let photos = LocalizedStringResource("Photos", table: "Feedback")
         static let addPhotos = LocalizedStringResource("Add photos or videos", table: "Feedback")
+        static let files = LocalizedStringResource("Files", table: "Feedback")
+        static let addFiles = LocalizedStringResource("Add files", table: "Feedback")
+        static let add = LocalizedStringResource("Add", table: "Feedback")
+        static let addPhotoOrFile = LocalizedStringResource("Add a photo or a file", table: "Feedback")
         static let attached = LocalizedStringResource("Attached", table: "Feedback")
         static let onlyWhileRunning = LocalizedStringResource(
             "Only while the virtual machine is running", table: "Feedback")
@@ -103,6 +108,8 @@ struct SendFeedbackSheet: View {
         .overlay {
             if let busy = model.app.feedbackBusy {
                 BusyOverlay(state: busy)
+            } else if let busy = model.fileBusy {
+                BusyOverlay(state: busy)
             } else if model.sent {
                 BusyOverlay(state: BusyState(
                     title: String(localized: "Feedback sent", table: "Feedback"),
@@ -111,9 +118,10 @@ struct SendFeedbackSheet: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: model.app.feedbackBusy != nil)
+        .animation(.easeInOut(duration: 0.2), value: model.fileBusy != nil)
         .animation(.easeInOut(duration: 0.2), value: model.sent)
         // Once something is typed or attached, a stray swipe loses nothing.
-        .interactiveDismissDisabled(state.hasContent || state.makingBugReport)
+        .interactiveDismissDisabled(state.hasContent || state.makingBugReport || model.fileBusy != nil)
         // An alert, not a dialog: on an iPad a dialog is a popover that leaves out
         // its cancel button, and both choices must show.
         .alert(Text("Discard this feedback?", tableName: "Feedback"), isPresented: $model.confirmingDiscard) {
@@ -121,13 +129,24 @@ struct SendFeedbackSheet: View {
             Button(Words.keepEditing, role: .cancel) {}
         }
         .alert(
-            model.failure?.title ?? "",
+            (model.failure?.title ?? "").keepingTogether,
             isPresented: Binding(get: { model.failure != nil }, set: { if !$0 { model.failure = nil } }),
             presenting: model.failure
         ) { _ in
             Button(Words.ok, role: .cancel) {}
         } message: { failure in
-            Text(failure.message)
+            Text(failure.message.keepingTogether)
+        }
+        // The mail needs a problem and details: Send says which is empty, and the first empty field is
+        // ready to be typed in once the alert is closed.
+        .alert(
+            Text("Can\u{2019}t send yet", tableName: "Feedback"),
+            isPresented: Binding(get: { model.incomplete != nil }, set: { if !$0 { model.incomplete = nil } }),
+            presenting: model.incomplete
+        ) { missing in
+            Button(Words.ok, role: .cancel) { focus = missing.focusesProblem ? .problem : .details }
+        } message: { missing in
+            Text(missing.message.keepingTogether)
         }
         .photosPicker(
             isPresented: $picking, selection: $picked, matching: .any(of: [.images, .videos]),
@@ -150,9 +169,14 @@ struct SendFeedbackSheet: View {
             try? await Task.sleep(for: .seconds(1.8))
             dismiss()
         }
-        #if !APP_STORE
-        .task { await model.app.feedbackServices.previewPrepare(model) }
-        #endif
+        .task {
+            // Opened during a start, the sheet attaches its start log once; the
+            // task runs again if the view is rebuilt, and the model remembers.
+            model.offerStartLog()
+            #if !APP_STORE
+            await model.app.feedbackServices.previewPrepare(model)
+            #endif
+        }
         .onDisappear { model.close() }
         .presentationSizing(.page)
     }
@@ -268,8 +292,13 @@ struct SendFeedbackSheet: View {
                 .clipShape(.rect(cornerRadius: 9, style: .continuous))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 0) {
-                Text(Self.title(attachment.kind))
+                // A file is known by its name; the others by what they are.
+                (attachment.kind == .file
+                    ? Text(verbatim: attachment.displayName ?? attachment.fileName)
+                    : Text(Self.title(attachment.kind)))
                     .font(.subheadline.weight(.semibold))
+                    .lineLimit(attachment.kind == .file ? 1 : nil)
+                    .truncationMode(.middle)
                 Text(Self.detail(attachment))
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -310,19 +339,22 @@ struct SendFeedbackSheet: View {
         } else {
             ZStack {
                 Rectangle().fill(Color.accentColor.gradient)
+                // A fixed size, as the tile is: a glyph that grew with the text would outgrow it.
                 Image(systemName: Self.symbol(attachment.kind))
-                    .font(.title3.weight(.semibold))
+                    .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(.white)
             }
         }
     }
 
-    private static func symbol(_ kind: SendFeedbackAttachment.Kind) -> String {
+    static func symbol(_ kind: SendFeedbackAttachment.Kind) -> String {
         switch kind {
         case .bugReport: "ladybug.fill"
         case .screenshot: "camera.viewfinder"
         case .photo: "photo"
         case .video: "video.fill"
+        case .startLog: "doc.text.fill"
+        case .file: "doc.fill"
         }
     }
 
@@ -332,21 +364,25 @@ struct SendFeedbackSheet: View {
         case .screenshot: Words.screenshot
         case .photo: LocalizedStringResource("Photo", table: "Feedback")
         case .video: LocalizedStringResource("Video", table: "Feedback")
+        case .startLog: Words.startLog
+        case .file: LocalizedStringResource("File", table: "Feedback")
         }
     }
 
-    private static func removeLabel(_ kind: SendFeedbackAttachment.Kind) -> LocalizedStringResource {
+    static func removeLabel(_ kind: SendFeedbackAttachment.Kind) -> LocalizedStringResource {
         switch kind {
         case .bugReport: LocalizedStringResource("Remove bug report", table: "Feedback")
         case .screenshot: LocalizedStringResource("Remove screenshot", table: "Feedback")
         case .photo: LocalizedStringResource("Remove photo", table: "Feedback")
         case .video: LocalizedStringResource("Remove video", table: "Feedback")
+        case .startLog: LocalizedStringResource("Remove start log", table: "Feedback")
+        case .file: LocalizedStringResource("Remove file", table: "Feedback")
         }
     }
 
     /// The line under the title: the picture's pixels or a video's length,
     /// then the size.
-    private static func detail(_ attachment: SendFeedbackAttachment) -> String {
+    static func detail(_ attachment: SendFeedbackAttachment) -> String {
         var parts: [String] = []
         if let pixels = attachment.pixels { parts.append("\(pixels.width) \u{00D7} \(pixels.height)") }
         if let seconds = attachment.durationSeconds { parts.append(Formats.elapsed(seconds)) }
@@ -354,10 +390,11 @@ struct SendFeedbackSheet: View {
         return parts.joined(separator: " \u{00B7} ")
     }
 
-    /// What VoiceOver reads for a row: its kind, a video's length ("1 second",
-    /// "42 seconds") and its size.
-    private static func spoken(_ attachment: SendFeedbackAttachment) -> String {
+    /// What VoiceOver reads for a row: its kind, a file's name, a video's length
+    /// ("1 second", "42 seconds") and its size.
+    static func spoken(_ attachment: SendFeedbackAttachment) -> String {
         var parts = [String(localized: title(attachment.kind))]
+        if attachment.kind == .file { parts.append(attachment.displayName ?? attachment.fileName) }
         if let seconds = attachment.durationSeconds {
             parts.append(String(AttributedString(
                 localized: "^[\(seconds) second](inflect: true)", table: "Feedback").characters))
@@ -445,11 +482,56 @@ struct SendFeedbackSheet: View {
                 source(symbol: "camera.viewfinder", title: Words.screenshot, enabled: state.canTakeScreenshot,
                        id: "feedback-screenshot", action: model.takeScreenshot)
             }
-            source(symbol: "photo.on.rectangle.angled", title: Words.photos, enabled: state.canAddMedia,
-                   id: "feedback-photos", spoken: Words.addPhotos) { picking = true }
+            addMenu
             Spacer(minLength: 8)
             sendButton(style)
         }
+    }
+
+    /// What a button of the bar looks like: its symbol over its name.
+    private func sourceLabel(symbol: String, title: LocalizedStringResource, enabled: Bool) -> some View {
+        VStack(spacing: 3) {
+            Image(systemName: symbol)
+                .font(.system(size: 19, weight: .semibold))
+                .frame(height: 22)
+            Text(title)
+                .font(.caption2.weight(.medium))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .foregroundStyle(enabled && state.mailAvailable ? Color.accentColor : Color(.tertiaryLabel))
+        .padding(.horizontal, 3)
+        .frame(minWidth: 54, minHeight: 48)
+        .contentShape(.capsule)
+    }
+
+    /// One button for what comes from outside the app: a menu with the photo
+    /// library and Files. Each item opens its picker as it did from its own
+    /// button; the menu is the system's, anchored on the button.
+    private var addMenu: some View {
+        let enabled = state.canAddMedia || state.canAddFiles
+        return Menu {
+            Button { picking = true } label: {
+                Label(Words.photos, systemImage: "photo.on.rectangle.angled")
+            }
+            .disabled(!state.canAddMedia)
+            .accessibilityLabel(Text(Words.addPhotos))
+            .accessibilityIdentifier("feedback-photos")
+            Button(action: model.pickFiles) {
+                Label(Words.files, systemImage: "doc")
+            }
+            .disabled(!state.canAddFiles)
+            .accessibilityLabel(Text(Words.addFiles))
+            .accessibilityIdentifier("feedback-files")
+        } label: {
+            sourceLabel(symbol: "paperclip", title: Words.add, enabled: enabled)
+        }
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .disabled(!enabled)
+        .accessibilityLabel(Text(Words.addPhotoOrFile))
+        .accessibilityIdentifier("feedback-add")
+        .accessibilityShowsLargeContentViewer()
     }
 
     private func source(
@@ -458,19 +540,7 @@ struct SendFeedbackSheet: View {
         spoken: LocalizedStringResource? = nil, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            VStack(spacing: 3) {
-                Image(systemName: symbol)
-                    .font(.system(size: 19, weight: .semibold))
-                    .frame(height: 22)
-                Text(title)
-                    .font(.caption2.weight(.medium))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
-            .foregroundStyle(enabled && state.mailAvailable ? Color.accentColor : Color(.tertiaryLabel))
-            .padding(.horizontal, 3)
-            .frame(minWidth: 54, minHeight: 48)
-            .contentShape(.capsule)
+            sourceLabel(symbol: symbol, title: title, enabled: enabled)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text(spoken ?? title))
@@ -483,7 +553,12 @@ struct SendFeedbackSheet: View {
     /// The control that hands the mail to Mail. Its words shorten when the
     /// bar cannot hold them; its accessibility name never does.
     private func sendButton(_ style: SendStyle) -> some View {
-        Button(action: model.send) {
+        Button {
+            // An alert that says what is missing would give the focus back to the field that had it
+            // when it closes, after the first empty field was asked for: let go of it first.
+            if state.missing != nil { focus = nil }
+            model.send()
+        } label: {
             Group {
                 switch style {
                 case .words:
@@ -498,7 +573,7 @@ struct SendFeedbackSheet: View {
             .lineLimit(1)
             .padding(.horizontal, style == .icon ? 0 : 14)
             .frame(minWidth: 48, minHeight: 48)
-            .background(Capsule().fill(state.canSend ? Color.accentColor : Color(.systemGray3)))
+            .background(Capsule().fill(state.readyToSend ? Color.accentColor : Color(.systemGray3)))
             .contentShape(.capsule)
         }
         .buttonStyle(.plain)
@@ -506,6 +581,7 @@ struct SendFeedbackSheet: View {
         .disabled(!state.canSend)
         .accessibilityLabel(Text("Send feedback", tableName: "Feedback"))
         .accessibilityIdentifier("feedback-send")
+        .accessibilityShowsLargeContentViewer()
         .fixedSize()
     }
 
@@ -518,7 +594,8 @@ struct SendFeedbackSheet: View {
                 .foregroundStyle(Color.accentColor)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 8) {
-                if state.running {
+                switch state.tip {
+                case .running:
                     Text(
                         "For any bug, attach a bug report. It tells us what the virtual machine and the app were doing.",
                         tableName: "Feedback")
@@ -529,7 +606,21 @@ struct SendFeedbackSheet: View {
                         .controlSize(.small)
                         .disabled(!state.canMakeBugReport)
                         .accessibilityIdentifier("feedback-create-bug-report")
-                } else {
+                case .starting:
+                    // The virtual machine is starting, so there is nothing to
+                    // start: the log of the start is what goes with the mail.
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Reporting a slow start?", tableName: "Feedback")
+                            .font(.subheadline.weight(.semibold))
+                        Text(String(
+                            localized: "A bug report and a screenshot need the virtual machine to finish starting. The start log is attached.",
+                            table: "Feedback").keepingTogether)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .accessibilityElement(children: .combine)
+                case .home:
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Reporting a bug?", tableName: "Feedback")
                             .font(.subheadline.weight(.semibold))

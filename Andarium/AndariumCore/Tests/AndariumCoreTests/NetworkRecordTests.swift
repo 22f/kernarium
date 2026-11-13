@@ -211,7 +211,7 @@ struct NetworkRecordTests {
             atomically: true, encoding: .utf8)
         let entries = BugReportAttachments.entries(from: directory, containers: [])
         let note = String(decoding: try #require(entries.first).data, as: UTF8.self)
-        #expect(note.contains("at most 17920"))
+        #expect(note.contains("at most 18176"))
         #expect(entries.map(\.name) == ["andarium/session-current.txt"])
     }
 }

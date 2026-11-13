@@ -70,12 +70,15 @@ nonisolated enum SendFeedbackMail {
 }
 
 /// What the composer is given: where the mail goes, what it says and the files
-/// that go with it.
-nonisolated struct SendFeedbackMailRequest: Equatable, Sendable {
+/// that go with it, each already mapped (`mapped[i]` is the bytes of
+/// `attachments[i]`), so the composer never has a file to leave out. Not
+/// `Equatable`: comparing it would compare the bytes of every file.
+nonisolated struct SendFeedbackMailRequest: Sendable {
     var address: String
     var subject: String
     var body: String
     var attachments: [SendFeedbackAttachment]
+    var mapped: [Data]
 }
 
 #endif

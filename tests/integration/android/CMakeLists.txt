@@ -56,6 +56,27 @@ if(UML_ANDROID_INSTALLATION_IDENTITY_RELEASE AND TARGET uml-darwin-android17)
         RESOURCE_GROUPS cpus:4)
 endif()
 
+# The same runner with --image-inputs, for a release built from this
+# repository's overlay: wlan0's address derived from eth0's, the Wi-Fi joined,
+# no IPv6 link-local address on eth0 and the macvlan, and the adb key that no
+# application may read. The accepted release predates
+# these image inputs and fails it, so it names its own release.
+set(UML_ANDROID_INSTALLATION_IDENTITY_IMAGE_RELEASE "" CACHE PATH
+    "Installed Android release directory, built with the installation identity image inputs, that android-installation-identity-image boots")
+if(UML_ANDROID_INSTALLATION_IDENTITY_IMAGE_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-installation-identity-image
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_installation_identity.py
+            --release ${UML_ANDROID_INSTALLATION_IDENTITY_IMAGE_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+            --image-inputs
+        LABELS guest;boot;android
+        TIMEOUT 3600
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
 # A fresh guest starts in Setup Wizard; the runner completes the wizard through
 # its pages and checks that the harness helper (boot_android.py --provision)
 # reaches the same end state. It boots Android twice with the macOS launcher, so
@@ -346,6 +367,25 @@ if(UML_ANDROID_GAMEPAD_RELEASE AND UML_ANDROID_GAMEPAD_PROBE_APK AND TARGET uml-
             --release ${UML_ANDROID_GAMEPAD_RELEASE}
             --emulator $<TARGET_FILE:uml-darwin-android17>
             --probe-apk ${UML_ANDROID_GAMEPAD_PROBE_APK}
+        LABELS guest;boot;android
+        TIMEOUT 3600
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
+# The management console's sync on an Android guest, whose init leaves SysRq
+# off: a file the guest holds dirty reaches the host's data image once sync
+# replies, and survives a hard kill of the emulator. It boots Android with the
+# macOS launcher, so it is opt-in: name the release under test.
+set(UML_ANDROID_SYNC_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-sync test boots")
+if(UML_ANDROID_SYNC_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-sync
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_sync.py
+            --release ${UML_ANDROID_SYNC_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
         LABELS guest;boot;android
         TIMEOUT 3600
         PROCESSORS 4

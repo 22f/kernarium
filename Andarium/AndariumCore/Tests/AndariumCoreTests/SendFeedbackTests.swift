@@ -182,7 +182,7 @@ struct SendFeedbackTests {
 
     @Test func removingAFileGivesItBackAndLowersTheTotal() {
         var set = SendFeedbackAttachments()
-        let photo = attachment(.photo, bytes: 3 << 20)
+        let photo = attachment(.photo, bytes: 3 << 20, name: "photo.bin")
         set.add(attachment(.screenshot, bytes: 1 << 20))
         set.add(photo)
         #expect(set.remove(photo.id) == photo)
@@ -202,6 +202,77 @@ struct SendFeedbackTests {
         #expect(set.bugReport == second)
     }
 
+    private func made(_ kind: SendFeedbackAttachment.Kind, _ name: String, at date: Date) -> SendFeedbackAttachment {
+        SendFeedbackAttachment(kind: kind, url: URL(fileURLWithPath: "/staged/\(name)"), bytes: 1, madeAt: date)
+    }
+
+    /// The mail names what the app makes itself with fixed English words and the moment it was made, whatever
+    /// the file is called where it is staged (the guest names its own report; a name could come from a translated
+    /// word or a date); the person's own files keep theirs.
+    @Test func filesTheAppMakesHaveFixedEnglishDatedMailNamesAndThePersonsFilesKeepTheirs() {
+        let moment = Date(timeIntervalSince1970: 1_794_626_712)
+        let later = moment.addingTimeInterval(5)
+        let stamp = SendFeedbackNames.stamp(moment)
+        let laterStamp = SendFeedbackNames.stamp(later)
+        var set = SendFeedbackAttachments()
+        set.add(attachment(.photo, bytes: 1, name: "IMG_0042.JPG"))
+        set.add(made(.bugReport, "bugreport-lineage-2026-11-03-10-00-00.zip", at: moment))
+        set.add(made(.screenshot, "\u{5C4F}\u{5E55}\u{622A}\u{56FE} 2026-11-14.png", at: moment))
+        set.add(made(.screenshot, "\u{30B9}\u{30AF}\u{30EA}\u{30FC}\u{30F3}.png", at: later))
+        #expect(set.items.map(\.fileName) == [
+            "bugreport-\(stamp).zip", "IMG_0042.JPG", "screenshot-\(stamp).png", "screenshot-\(laterStamp).png",
+        ])
+        let generated = set.items.filter { $0.kind == .bugReport || $0.kind == .screenshot }
+        #expect(generated.allSatisfy { $0.fileName.allSatisfy(\.isASCII) })
+        #expect(generated.map(\.mimeType) == ["application/zip", "image/png", "image/png"])
+    }
+
+    @Test func aGeneratedFileTakesTheNumberWhenAnotherAttachmentHasItsName() {
+        let moment = Date(timeIntervalSince1970: 1_794_626_712)
+        var set = SendFeedbackAttachments()
+        set.add(attachment(.file, bytes: 1, name: "SCREENSHOT-\(SendFeedbackNames.stamp(moment)).PNG"))
+        set.add(made(.screenshot, "anything.png", at: moment))
+        set.add(made(.screenshot, "other.png", at: moment))
+        #expect(set.items.map(\.fileName) == [
+            "SCREENSHOT-\(SendFeedbackNames.stamp(moment)).PNG",
+            "screenshot-\(SendFeedbackNames.stamp(moment))-2.png", "screenshot-\(SendFeedbackNames.stamp(moment))-3.png",
+        ])
+    }
+
+    @Test func theStampIsOnePatternInAsciiOnTheGregorianCalendarInTheGivenZone() throws {
+        let moment = Date(timeIntervalSince1970: 1_794_626_712)  // 2026-11-14 03:25:12 UTC
+        let utc = try #require(TimeZone(secondsFromGMT: 0))
+        let bangkok = try #require(TimeZone(identifier: "Asia/Bangkok"))
+        let newYork = try #require(TimeZone(identifier: "America/New_York"))
+        #expect(SendFeedbackNames.stamp(moment, in: utc) == "20261114-032512")
+        #expect(SendFeedbackNames.stamp(moment, in: bangkok) == "20261114-102512")
+        #expect(SendFeedbackNames.stamp(moment, in: newYork) == "20261113-222512")
+        #expect(SendFeedbackNames.stamp(Date(timeIntervalSince1970: 0), in: utc) == "19700101-000000")
+        // The shape is the same wherever the device is set: eight digits, a dash, six digits.
+        let shape = SendFeedbackNames.stamp(moment)
+        #expect(shape.count == 15 && shape.allSatisfy(\.isASCII))
+        #expect(shape.enumerated().allSatisfy { $0.offset == 8 ? $0.element == "-" : $0.element.isNumber })
+    }
+
+    /// What a formatter that follows the device's settings would write for the same moment: not ASCII digits,
+    /// and not the Gregorian year. The stamp consults no setting, so a device set this way (a Buddhist calendar
+    /// with Thai digits, Arabic-Indic digits on the Hijri calendar, Persian digits) gets the same name.
+    @Test func aDeviceSetToAnotherCalendarOrOtherDigitsStillGetsAnAsciiGregorianName() throws {
+        let moment = Date(timeIntervalSince1970: 1_794_626_712)
+        let utc = try #require(TimeZone(secondsFromGMT: 0))
+        for identifier in [
+            "th_TH@calendar=buddhist;numbers=thai", "ar_SA@calendar=islamic-umalqura;numbers=arab",
+            "fa_IR@calendar=persian;numbers=arabext", "ja_JP@calendar=japanese", "zh_Hans_CN@numbers=hanidec",
+        ] {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: identifier)
+            formatter.timeZone = utc
+            formatter.dateFormat = "yyyyMMdd-HHmmss"
+            #expect(formatter.string(from: moment) != "20261114-032512", "\(identifier) would have changed the name")
+        }
+        #expect(SendFeedbackNames.stamp(moment, in: utc) == "20261114-032512")
+    }
+
     @Test func aFileHasItsMimeTypeFromItsExtension() {
         func mime(_ name: String) -> String { attachment(.photo, bytes: 1, name: name).mimeType }
         #expect(mime("a.png") == "image/png")
@@ -213,15 +284,70 @@ struct SendFeedbackTests {
 
     // MARK: The form
 
-    @Test func sendWaitsForAProblem() {
+    @Test func sendNeedsAProblemAndDetailsAndSaysWhichIsMissing() {
         var form = SendFeedbackForm(mailAvailable: true, running: true)
-        #expect(!form.canSend)
-        form.problem = "  \n "
-        #expect(!form.canSend)
+        #expect(form.canSend, "Send stays enabled, so that its tap can say what is missing")
+        #expect(form.missing == .both)
         form.problem = "It froze"
-        #expect(form.canSend)
-        form.details = "more"
-        #expect(form.canSend)
+        #expect(form.canSend && form.missing == .details)
+        form.details = "I opened a game"
+        #expect(form.canSend && form.missing == nil)
+        form.problem = ""
+        #expect(form.canSend && form.missing == .problem)
+    }
+
+    @Test func sendLooksReadyOnlyWhenATapWouldOpenTheMail() {
+        var form = SendFeedbackForm(mailAvailable: true, running: true)
+        #expect(form.canSend && !form.readyToSend, "dimmed, and its tap still says what is missing")
+        form.problem = "It froze"
+        #expect(!form.readyToSend)
+        form.details = "  \n "
+        #expect(!form.readyToSend, "white space is not details")
+        form.details = "I opened a game"
+        #expect(form.readyToSend)
+        form.importingMedia = true
+        #expect(!form.readyToSend)
+        form.importingMedia = false
+        form.mailAvailable = false
+        #expect(!form.readyToSend)
+    }
+
+    @Test func whiteSpaceAndLineBreaksAreNotWords() {
+        var form = SendFeedbackForm(mailAvailable: true, running: true)
+        form.problem = "  \n \t"
+        form.details = "\n\n   \r\n"
+        #expect(form.missing == .both)
+        form.problem = "It froze"
+        #expect(form.missing == .details)
+        form.problem = " \n "
+        form.details = "I opened a game"
+        #expect(form.missing == .problem)
+        form.problem = "\u{00A0}\u{2003}"
+        #expect(form.missing == .problem, "no-break and wide spaces are white space too")
+    }
+
+    @Test func filesAndTheStartLogAreNeitherAProblemNorDetails() {
+        var form = SendFeedbackForm(mailAvailable: true, running: true)
+        form.attachments.add(attachment(.bugReport, bytes: 10))
+        form.attachments.add(attachment(.screenshot, bytes: 10))
+        form.attachments.add(attachment(.file, bytes: 10))
+        #expect(form.missing == .both)
+        form.problem = "x"
+        #expect(form.missing == .details)
+    }
+
+    @Test func theProblemLineIsFocusedFirstWhenItIsEmpty() {
+        #expect(SendFeedbackMissing.both.focusesProblem)
+        #expect(SendFeedbackMissing.problem.focusesProblem)
+        #expect(!SendFeedbackMissing.details.focusesProblem)
+    }
+
+    @Test func aMissingFieldDoesNotEnableSendWhileSomethingRunsOrMailIsOff() {
+        var form = SendFeedbackForm(mailAvailable: false, running: true)
+        #expect(!form.canSend)
+        form.mailAvailable = true
+        form.importingMedia = true
+        #expect(!form.canSend && form.missing == .both)
     }
 
     @Test func whileAReportIsMadeNothingIsEditedOrAddedOrSent() {
@@ -333,7 +459,7 @@ struct SendFeedbackTests {
         try Data(repeating: 7, count: 5).write(to: incoming)
         let adopted = try folder.adopt(incoming, named: "../My Photo (1).jpg")
         #expect(adopted.deletingLastPathComponent().standardizedFileURL == folder.url.standardizedFileURL)
-        #expect(adopted.lastPathComponent == "_My_Photo__1_.jpg")
+        #expect(adopted.lastPathComponent == "_My Photo (1).jpg")
         #expect(!FileManager.default.fileExists(atPath: incoming.path))
         #expect(try Data(contentsOf: adopted).count == 5)
         #expect(SendFeedbackFolder.safeName("...") == "file")

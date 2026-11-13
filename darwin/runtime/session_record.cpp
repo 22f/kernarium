@@ -97,8 +97,10 @@ constexpr unsigned state_checkpoint_wait_ms = 50;
 /* The record's first bytes are a fixed slot that only the checkpoints write,
  * the next are the stall slot that only the stall watch writes, the network
  * slot after it is written by the checkpoints and the session's begin and
- * end, and the rest is the session's state that only its begin and its end
- * write, so none ever overwrites another's bytes, whichever finishes last. */
+ * end, the storage slot after that is written by the settle calls
+ * (note_guest_settle) and the session's begin, and the rest is the session's
+ * state that only its begin and its end write, so none ever overwrites
+ * another's bytes, whichever finishes last. */
 constexpr std::size_t memory_slot_size = session_memory_slot_bytes;
 constexpr std::size_t stall_slot_offset = session_memory_slot_bytes;
 std::atomic<bool> checkpoint_thread_started{false};
@@ -488,7 +490,7 @@ void write_memory_slot(int descriptor, bool beginning) noexcept
 	os_unfair_lock_lock(&history_lock);
 	Text text{slot, sizeof(slot) - 1};
 	const std::int64_t at = now();
-	text.text("uml-session 6\nmemory at ").number(at);
+	text.text("uml-session 7\nmemory at ").number(at);
 	task_vm_info_data_t info{};
 	mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
 	std::uint64_t footprint = 0;
@@ -716,6 +718,94 @@ void write_network_slot(int descriptor) noexcept
 	network_slot_busy.clear(std::memory_order_release);
 }
 
+/* The storage slot: how many times the guest's storage was settled and how
+ * many of those it did not confirm, and the last one. One writer at a time,
+ * and the session's begin, which blanks it, waits for the flag. */
+std::atomic_flag storage_slot_busy = ATOMIC_FLAG_INIT;
+std::uint64_t storage_settles{};
+std::uint64_t storage_unsettled{};
+bool storage_has_last{};
+SettleKind storage_last_kind{};
+GuestStorage storage_last_storage{};
+SettleSuspension storage_last_suspension{};
+std::int64_t storage_last_at{};
+
+std::string_view settle_kind_word(SettleKind kind) noexcept
+{
+	switch (kind) {
+	case SettleKind::sync:
+		return "sync";
+	case SettleKind::quiesce:
+		return "quiesce";
+	case SettleKind::quiesce_resident:
+		return "quiesce-resident";
+	}
+	return "sync";
+}
+
+std::string_view guest_storage_word(GuestStorage storage) noexcept
+{
+	switch (storage) {
+	case GuestStorage::not_reported:
+		break;
+	case GuestStorage::confirmed:
+		return "confirmed";
+	case GuestStorage::no_guest:
+		return "no-guest";
+	case GuestStorage::unconfirmed:
+		return "unconfirmed";
+	case GuestStorage::refused:
+		return "refused";
+	case GuestStorage::unreachable:
+		return "unreachable";
+	}
+	return "unconfirmed";
+}
+
+std::string_view settle_suspension_word(SettleSuspension suspension) noexcept
+{
+	switch (suspension) {
+	case SettleSuspension::not_asked:
+		return "not-asked";
+	case SettleSuspension::suspended:
+		return "suspended";
+	case SettleSuspension::not_suspended:
+		return "not-suspended";
+	}
+	return "not-asked";
+}
+
+/* The storage slot, padded to its size: blank before the first settle, else a
+ * format line, the counts and the last settle. Held under
+ * `storage_slot_busy`. */
+void write_storage_slot(int descriptor) noexcept
+{
+	static char slot[session_storage_slot_bytes];
+	Text text{slot, sizeof(slot) - 1};
+	if (storage_settles != 0U) {
+		const auto n = [](std::uint64_t value) {
+			return static_cast<std::int64_t>(std::min<std::uint64_t>(
+				value, INT64_MAX));
+		};
+		text.text("storage 1\nsettles ").number(n(storage_settles))
+			.text(" unsettled ").number(n(storage_unsettled)).text("\n");
+		if (storage_has_last)
+			text.text("last ").text(settle_kind_word(storage_last_kind))
+				.text(" ").text(guest_storage_word(storage_last_storage))
+				.text(" ")
+				.text(settle_suspension_word(storage_last_suspension))
+				.text(" at ").number(storage_last_at).text("\n");
+	}
+	const std::size_t used = text.size();
+	std::memset(slot + used, ' ', sizeof(slot) - 1 - used);
+	slot[sizeof(slot) - 1] = '\n';
+	ssize_t written;
+	do {
+		written = pwrite(descriptor, slot, sizeof(slot),
+			session_storage_offset);
+	} while (written < 0 && errno == EINTR);
+}
+
 /* Waits one checkpoint interval inside libsystem_kernel alone: the thread
  * fence defers a thread inside libsystem_c (nanosleep, usleep) on every pass,
  * and so never holds this uml-* thread. */
@@ -806,7 +896,9 @@ std::string_view from_whole_line(std::string_view tail) noexcept
 }
 
 /* The state: the session's lines, what it says of the boot where the guest's
- * console reports one, a message and the quoted output. */
+ * console reports one, a message and the quoted output. The text is followed
+ * by newlines to the whole of the state's area (write_state), which the
+ * readers ignore; the size returned is the text's. */
 std::size_t format_state(char *buffer, SessionEnd end, int status,
 	std::string_view message, std::string_view tail) noexcept
 {
@@ -834,18 +926,25 @@ std::size_t format_state(char *buffer, SessionEnd end, int status,
 		record.text("kernel-output\n");
 		keep_tail(record, tail);
 	}
-	return record.size();
+	const std::size_t size = std::min(record.size(), session_state_max_bytes);
+	std::memset(buffer + size, '\n', session_state_max_bytes - size);
+	return size;
 }
 
-void write_state(int descriptor, const char *text, std::size_t size) noexcept
+/* Publishes a state (formatted into a buffer of session_state_max_bytes) in
+ * one pwrite that covers the whole of the state's area. The area is never
+ * shortened between two states: a ftruncate after a shorter state left a
+ * reader that came between the two calls with the new state's prefix followed
+ * by the old state's suffix. Every writer covers the same bytes, so whichever
+ * lands last is the whole of what a reader sees, a checkpoint delayed past an
+ * end included. */
+void write_state(int descriptor, const char *text) noexcept
 {
 	ssize_t written;
 	do {
-		written = pwrite(descriptor, text, size, session_state_offset);
+		written = pwrite(descriptor, text, session_state_max_bytes,
+			session_state_offset);
 	} while (written < 0 && errno == EINTR);
-	if (written == static_cast<ssize_t>(size))
-		(void)ftruncate(descriptor,
-			static_cast<off_t>(session_state_offset + size));
 }
 
 /* A checkpoint under way (it set `state_checkpointing` before it looked at
@@ -867,8 +966,8 @@ void wait_out_state_checkpoint() noexcept
 void write_record_unguarded(int descriptor, SessionEnd end, int status,
 	std::string_view message, std::string_view tail) noexcept
 {
-	write_state(descriptor, record_text,
-		format_state(record_text, end, status, message, tail));
+	(void)format_state(record_text, end, status, message, tail);
+	write_state(descriptor, record_text);
 }
 
 void write_record(SessionEnd end, int status, std::string_view message,
@@ -885,7 +984,7 @@ void write_record(SessionEnd end, int status, std::string_view message,
 	/* A checkpoint whose write lands from here on writes this record again
 	 * (checkpoint_state); it reads the size, so the record is formatted. */
 	terminal_size.store(size, std::memory_order_seq_cst);
-	write_state(descriptor, record_text, size);
+	write_state(descriptor, record_text);
 }
 
 /* Rewrites the state of a guest whose boot has not completed when the output
@@ -913,11 +1012,10 @@ void checkpoint_state(int descriptor) noexcept
 		const bool done = boot_signal.completed();
 		const std::size_t quoted = done ? 0 :
 			kernel_output_tail({checkpoint_tail, sizeof(checkpoint_tail)});
-		const std::size_t size = format_state(checkpoint_text,
-			SessionEnd::running, 0, {},
+		(void)format_state(checkpoint_text, SessionEnd::running, 0, {},
 			{checkpoint_tail, quoted});
 		if (session_open.load(std::memory_order_seq_cst)) {
-			write_state(descriptor, checkpoint_text, size);
+			write_state(descriptor, checkpoint_text);
 			checkpointed_output_end.store(output_now,
 				std::memory_order_relaxed);
 			checkpointed_completed.store(done, std::memory_order_relaxed);
@@ -928,10 +1026,8 @@ void checkpoint_state(int descriptor) noexcept
 			 * this write lands and before the next line writes leaves
 			 * "running" on disk, which is what a record that was never
 			 * ended says. */
-			if (const std::size_t ended =
-				    terminal_size.load(std::memory_order_seq_cst);
-			    ended != 0)
-				write_state(descriptor, record_text, ended);
+			if (terminal_size.load(std::memory_order_seq_cst) != 0)
+				write_state(descriptor, record_text);
 		}
 	}
 	state_checkpointing.clear(std::memory_order_seq_cst);
@@ -1125,9 +1221,23 @@ bool begin_session_record(std::string_view path,
 	write_memory_slot(descriptor, true);
 	write_blank_stall_slot(descriptor);
 	write_network_slot(descriptor);
+	/* The storage slot of the session before is blank before any settle of
+	 * this one is noted. */
+	while (storage_slot_busy.test_and_set(std::memory_order_acquire))
+		sched_yield();
+	storage_settles = 0;
+	storage_unsettled = 0;
+	storage_has_last = false;
+	write_storage_slot(descriptor);
+	storage_slot_busy.clear(std::memory_order_release);
 	/* The same for a checkpoint of the state. */
 	while (state_checkpointing.test_and_set(std::memory_order_seq_cst))
 		sched_yield();
+	/* The file is as long as the record is, once, before the session's first
+	 * state: that state covers all of the state's area (write_state), and no
+	 * write after it changes the length. */
+	(void)ftruncate(descriptor,
+		static_cast<off_t>(session_state_offset + session_state_max_bytes));
 	checkpointed_output_end.store(output_end.load(std::memory_order_acquire),
 		std::memory_order_relaxed);
 	checkpointed_completed.store(false, std::memory_order_relaxed);
@@ -1183,6 +1293,28 @@ void set_run_figures_reader(RunFiguresReader reader) noexcept
 void set_network_counts_reader(SessionNetworkReader reader) noexcept
 {
 	network_reader.store(reader, std::memory_order_release);
+}
+
+void note_guest_settle(SettleKind kind, GuestStorage storage,
+	SettleSuspension suspension) noexcept
+{
+	if (!session_open.load(std::memory_order_acquire))
+		return;
+	const int descriptor = record_descriptor.load(std::memory_order_acquire);
+	if (descriptor < 0)
+		return;
+	while (storage_slot_busy.test_and_set(std::memory_order_acquire))
+		sched_yield();
+	++storage_settles;
+	if (!guest_storage_settled(storage))
+		++storage_unsettled;
+	storage_has_last = true;
+	storage_last_kind = kind;
+	storage_last_storage = storage;
+	storage_last_suspension = suspension;
+	storage_last_at = now();
+	write_storage_slot(descriptor);
+	storage_slot_busy.clear(std::memory_order_release);
 }
 
 void set_session_boot_facts(bool console_reports_completion,

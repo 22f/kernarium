@@ -27,7 +27,8 @@
  * on any Android device. They reach the guest as the kernel argument
  * `androidboot.serialno=` (readKernelCommandLine drops the release's own) and
  * as the hardware address the user network gives eth0. The guest's Wi-Fi
- * address is the image's own constant and is not stored here. */
+ * address is derived from the eth0 address by the guest's own network setup
+ * tool and is not stored here. */
 namespace uml::android {
 
 using MacAddress = std::array<std::uint8_t, 6>;
@@ -40,7 +41,8 @@ inline constexpr std::string_view identityFileName{"identity.json"};
 std::filesystem::path identityFile(const std::filesystem::path &dataDisk);
 
 /* The hardware address the user network gives eth0 when nothing sets one, and
- * the guest tool's constant Wi-Fi address: neither is ever generated. */
+ * the fixed Wi-Fi address that earlier images gave wlan0 whatever eth0 had:
+ * neither is ever generated. */
 inline constexpr MacAddress defaultEthernetMac{
 	0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
 inline constexpr MacAddress legacyWifiMac{0x02, 0x15, 0xb2, 0x00, 0x00, 0x00};

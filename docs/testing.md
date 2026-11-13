@@ -181,8 +181,11 @@ A test of a suspend contract, such as `guest-video-suspend` for the Virtio video
 devices, suspends the guest both as the host's quiesce does and as the guest does
 by itself, with a stream in progress as well as idle. `vhost-user-held-requests`
 checks the transport's rules for a device that holds requests across a ring
-disable, and `gpu-device-suspend-held-fence` the Virtio-GPU device's fenced
-command across one, on a renderer the test controls. A driver path that only a
+disable, `vhost-user-backend-wait` the budget of the wait for a backend
+request's acknowledgement and the end of the main socket during it, in time the
+test moves, and
+`gpu-device-suspend-held-fence` the Virtio-GPU device's fenced command across
+one, on a renderer the test controls. A driver path that only a
 misbehaving device reaches, such as a device that was reset during a suspend
 (`guest-video-camera-reset`) or is late to stop a stream
 (`guest-video-camera-slow-clear`, `guest-video-camera-slow-stop`), is reached by
@@ -335,7 +338,7 @@ fake guests and players, the haptics wire against the golden frames in
 relay test against too; the game controllers' wire against that directory's
 gamepad frames, each family's reports read back through a test-only HID
 descriptor parser, and the stream and session on a fake relay; the session
-record's stall and network slots against the golden slots there, which
+record's stall, network and storage slots against the golden slots there, which
 `runtime-stall-record` and `runtime-session-record` check the runtime's writers
 against; and the notice that iOS denies the network, from the path's mapping to
 the watcher's start and stop on a fake path source);
@@ -413,8 +416,11 @@ checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
-screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`
-and `HomeMenuTests` (Home's toolbar menu) exist only in a build with
+screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`,
+`SendFeedbackStartLogTests` (the sheet's tip and start log during a start),
+`SendFeedbackFilesScreenTests` (files from Files: in place, the copy of a file
+that cannot be used there, the access held and stopped once) and
+`HomeMenuTests` (Home's toolbar menu) exist only in a build with
 `FEEDBACK_ADDRESS=feedback@example.com` on the command line, as the command
 above has it ([Send feedback](../Andarium/README.md#send-feedback)), and
 `HomePlainInfoTests` (the plain Info button) only in a build without it;
@@ -451,7 +457,8 @@ the test moves, so no test waits three minutes: when the notice comes (also for
 a start whose boot line never comes, the case it is for), what Stop asks of the
 runtime (after the dialog's answer) and the stopped end screen's words, the
 later notice and plain title of a first start, the controls with and without
-the feedback receiver, that the sheet the notice opens outlives the boot, that
+the feedback receiver and their size (the application's ordinary 44 points at the
+default text size, no less at any size), that the sheet the notice opens outlives the boot, that
 the alert and the sheet take the appearance of the screen under them, the
 Boot line of the information block, and that the notice goes with the boot.
 `StartHandoverTests` run the real runtime object with the files' preparation
@@ -553,8 +560,11 @@ host's test run records no screen video and keeps no attachments (the scheme
 sets it, and `start` refuses a built run file that does not), and its result
 bundle lives under the state directory, not in DerivedData.
 
-A host ends on its own now and then, and a new one started within minutes needs
-no approval at the device while one started hours later does. `watch` keeps one
+A host ends on its own now and then. A new one needs the owner at the device
+only when the system lost the last approval, however soon it starts: when
+xcodebuild's relaunch of the runner initialized (its log says so) nothing is
+asked and the watch replaces the host at once; when it failed to initialize, or
+the log does not say, the owner may be needed and the watch ends. `watch` keeps one
 device's host serving, and acts only on evidence: it adopts a serving host,
 starts the next only once the old one is shown to be dead (three reads in a row
 that all worked and all showed the same beat), and otherwise replaces nothing
@@ -819,7 +829,16 @@ instances and check the setup wizard's flow and end state, the product's adb
 defaults, that the command Andarium's bug report sends for the guest's
 `/proc` counters (`GuestProcFiles`, its one source) reads each file or says why
 not, and that each instance's guest reports its own serial number and eth0
-address, kept across a reboot and a new launch;
+address, kept across a reboot and a new launch
+(`android-installation-identity-image` registers when
+`UML_ANDROID_INSTALLATION_IDENTITY_IMAGE_RELEASE` names a release built with the
+overlay and also checks wlan0's derived address, the Wi-Fi lease, that eth0 and
+the macvlan carry no IPv6 link-local address, and that a probe application in an
+ordinary application process cannot read `ro.boot.kernarium.adb_key`; that
+the guest's adbd reads the key is proven on a Kernarium runtime guest by
+`AndariumTests/AdbOverVsockTests` (the application's own adb client; the macOS
+launcher fixes ADB authorization off, and `run_android_adb_debugging.py` cannot
+be authorized by a runtime guest, which accepts only the key its application made);
 `tests/integration/android/run_guest_android_adb_vsock.py` is the
 opt-in ADB-over-vsock counterpart of `guest-vsock-stream`.
 `android-microg-spoofing` (integration) additionally needs
@@ -839,6 +858,15 @@ previous release's data disk to check the one-time on-screen keyboard change.
 `screenrecord`'s encoder run across a suspend by the host's route (asked again
 while the guest is busy, as the host does) and by the guest's own on one stream
 each, and the host closes no stream by a reset.
+`android-sync` (integration) registers when `UML_ANDROID_SYNC_RELEASE` names the
+release: with SysRq off, a file the guest holds dirty reaches the host's data
+image once the management console's `sync` replies, and survives a hard kill of
+the emulator; a request that is refused leaves it in the guest only. The host's
+side of the settle calls is covered on any host by `guest-console-writeback`
+(with `-timeout`, `-strict` for the reply grammar and `-budget` for the one
+deadline), `emulator-lifecycle` (what each call reports, and when a saved answer
+is repeated), `kernarium-settle-plumbing` (the runtime's report envelope, the
+handle a sync pins and the loader's forwarding) and `runtime-session-record`.
 `android-wifi-network` (integration) registers when
 `UML_ANDROID_WIFI_NETWORK_RELEASE` names the release: the guest's one Wi-Fi
 network stays enabled, joined and validated while the internet checks fail, and

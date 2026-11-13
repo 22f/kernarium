@@ -42,8 +42,14 @@ records each such termination as a Kernarium crash.
 
 A host ends on its own now and then: its runner dies under memory pressure
 on a small device, its lifetime runs out, or the process that started it goes
-away. A new host started within minutes of the old one's end needs no approval;
-one started hours later does. `watch` keeps one device's host serving:
+away. Automation mode ends with the runner, and the next runner turns it on
+again without the owner while the system still holds the last approval, however
+soon it starts; it needs the owner only when the system lost it. xcodebuild
+starts a runner that iOS ended again at once, and its log says which case it
+was: "Restarting after unexpected exit" then "Executed 0 tests" means the new
+runner initialized (a new host then serves with nobody at the device), and
+"Failed to initialize for UI testing" means the owner is needed. `watch` keeps
+one device's host serving:
 
   ipad-automation.py --device UDID watch --hours 8
   ipad-automation.py --device UDID watch --detach
@@ -99,7 +105,10 @@ what it could not establish and ends with a status of its own.
   LocalAuthentication error of code -4 or -2 (the owner's authentication
   cancelled, by the system or the owner), or a runner came up that the log does
   not show initialized: one that xcodebuild started again after the host's
-  runner died, or one of a launch that never served. That is recorded (the
+  runner died and whose restart notice and "Executed 0 tests" the log does not
+  show (a relaunch that initialized is no risk, and the host is replaced at
+  once; a log that ends before it says is not shown), or one of a launch that
+  never served. That is recorded (the
   file approval.json in the state directory) before anything is ended and read
   again after, and the watch ends with status 4 and the state needs-approval,
   which `status` reports. It starts nothing again until a host serves: a
@@ -244,6 +253,11 @@ FOREIGN_SETTLE = 2.0
 RUNNER_UP_LINE = "Running tests..."
 APPROVAL_TIMEOUT_LINE = "Timed out while enabling automation mode"
 INIT_FAILURE_LINE = "Failed to initialize for UI testing"
+# What xcodebuild prints when the runner it started again after the first one
+# died has initialized: its restart notice, then the totals of that run, which
+# ran no test (the one that serves is not run again).
+RESTART_LINE = "Restarting after unexpected exit"
+NO_TESTS_LINE = "Executed 0 tests"
 # The same line when the owner's authentication for it was cancelled: by the
 # owner (LAError -2) or by the system (-4, "UI canceled by system", as when the
 # screen locks during the prompt). The description is localized; the domain
@@ -1564,10 +1578,19 @@ class LogScan:
         self.path = path
         self.offset = 0
         self.runner_up = 0
+        # What the log shows of each runner after the first, in order:
+        # "pending" (it came up and nothing more), "restarted" (xcodebuild's
+        # restart notice), "initialized" (and the totals of a run of no tests)
+        # or "failed" (XCTest's initialization failure).
+        self.relaunches = []
         self.approval_failure = None
         self.init_failure = None
         self.exit_status = None
         self.note = None
+
+    def unconfirmed_relaunches(self):
+        """How many runners started again are not shown to have initialized."""
+        return sum(1 for outcome in self.relaunches if outcome != "initialized")
 
     def read(self):
         if not self.path:
@@ -1586,7 +1609,17 @@ class LogScan:
     def take(self, line):
         if line.endswith(RUNNER_UP_LINE):
             self.runner_up += 1
+            if self.runner_up > 1:
+                self.relaunches.append("pending")
+        elif self.relaunches:
+            text = line.strip()
+            if text.startswith(RESTART_LINE) and self.relaunches[-1] == "pending":
+                self.relaunches[-1] = "restarted"
+            elif text.startswith(NO_TESTS_LINE) and self.relaunches[-1] == "restarted":
+                self.relaunches[-1] = "initialized"
         if INIT_FAILURE_LINE in line:
+            if self.relaunches:
+                self.relaunches[-1] = "failed"
             failure = line[line.index(INIT_FAILURE_LINE):][:160]
             if APPROVAL_TIMEOUT_LINE in line or AUTHENTICATION_CANCELLED.search(line):
                 # The device asked for an approval and did not get it.
@@ -2007,14 +2040,19 @@ class Watch:
         """(kind, nonce, detail) of what a device may have been asked, or
         None. Observed: a log says the approval was not given. Possible: a
         runner came up that is not known to have gone through
-        initialization: one started again after the host served, or one of a
-        launch that never served."""
+        initialization: one started again after the host served whose log
+        does not show it initialized (the restart notice, then the totals of
+        a run of no tests; a log cut before that says nothing, and nothing is
+        not taken for safe), or one of a launch that never served. A runner
+        started again that initialized is no risk: the system still held the
+        approval, and a new host serves without the owner."""
         found = None
         for nonce, scan, served in scans:
             scan.read()
             if scan.approval_failure:
                 return "observed", nonce, scan.describe(), scan.path
-            if found is None and scan.runner_up >= (2 if served else 1):
+            if found is None and (scan.unconfirmed_relaunches() if served
+                                  else scan.runner_up):
                 found = ("possible", nonce,
                          "a runner came up that is not known to have been "
                          "initialized for UI testing, so the device may have "
@@ -2086,6 +2124,9 @@ class Watch:
         if risk:
             # Before anything is ended: a crash from here on leaves it.
             self.latch.set(risk[0], risk[1], risk[3], risk[2])
+        elif scans[0][1].relaunches:
+            self.say("xcodebuild started the runner again and it initialized, "
+                     "so the device needs no approval: replacing the host")
         remainder = []
         status = self.end_all(verdict, remainder)
         # What the ended processes printed last counts.
@@ -2099,9 +2140,12 @@ class Watch:
                 f"what is left of the host that stopped serving is not known to "
                 f"be gone ({status}{': ' + pids if pids else ''}); nothing was "
                 "started beside it", EXIT_WATCH_REMAINDER)
-        if after:
+        # What was unknown before the cleanup and shows now is not undone: the
+        # risk that was recorded stands.
+        refusal = after or risk
+        if refusal:
             return self.refuse_after_approval_failure(
-                f"{after[2]} (the host that ended: {reason_of(verdict)})")
+                f"{refusal[2]} (the host that ended: {reason_of(verdict)})")
         recent = self.recent_restarts()
         if len(recent) >= options.max_restarts:
             return self.give_up(

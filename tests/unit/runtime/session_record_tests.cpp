@@ -232,6 +232,16 @@ std::size_t file_size(const std::string &path)
 	return read_file(path).size();
 }
 
+/* The state as the reader sees it: the writer pads the area to its full
+ * size with newlines, so the text ends where they begin. */
+std::string state_of(const std::string &path)
+{
+	std::string state = read_file(path).substr(state_offset);
+	while (state.ends_with("\n\n"))
+		state.pop_back();
+	return state;
+}
+
 void test_boot_state()
 {
 	const std::string stuck = "init: init first stage started!\n"
@@ -247,7 +257,7 @@ void test_boot_state()
 	uml::runtime::set_session_boot_facts(true, 3);
 	std::string path = temporary_record();
 	require(uml::runtime::begin_session_record(path, console.arguments()));
-	std::string state = read_file(path).substr(state_offset);
+	std::string state = state_of(path);
 	require(state.starts_with("state running\nend running\nstatus 0\npid ") &&
 		has(state, "\nboot unobserved\nrestarts 3\n") &&
 		!has(state, "kernel-output"),
@@ -258,7 +268,7 @@ void test_boot_state()
 	require(!state_was_rewritten(path), "a silent boot was written again");
 	console.write(stuck);
 	uml::runtime::checkpoint_session_memory();
-	state = read_file(path).substr(state_offset);
+	state = state_of(path);
 	require(state.starts_with("state running\n") &&
 		has(state, "\nboot unfinished\nrestarts 3\n") &&
 		state.ends_with("kernel-output\n" + stuck),
@@ -269,18 +279,18 @@ void test_boot_state()
 		"output that did not grow was written again");
 	console.write(done);
 	uml::runtime::checkpoint_session_memory();
-	state = read_file(path).substr(state_offset);
+	state = state_of(path);
 	require(state.starts_with("state running\n") &&
 		has(state, "\nboot completed\nrestarts 3\n") &&
 		!has(state, "kernel-output") && state.ends_with("\n") &&
-		file_size(path) == state_offset + state.size(),
+		file_size(path) == uml::runtime::session_record_max_bytes,
 		"a completed boot was recorded wrong: " + state);
 	scratch_the_state(path);
 	console.write(stuck);
 	uml::runtime::checkpoint_session_memory();
 	require(!state_was_rewritten(path), "a completed boot was written again");
 	uml::runtime::end_session_record(SessionEnd::stopped, 0);
-	state = read_file(path).substr(state_offset);
+	state = state_of(path);
 	require(has(state, "state ended\nend stopped\n") &&
 		has(state, "\nboot completed\nrestarts 3\n") &&
 		!has(state, "kernel-output"),
@@ -298,7 +308,7 @@ void test_boot_state()
 			console.arguments()));
 		console.write(stuck);
 		uml::runtime::end_session_record(end, 0);
-		state = read_file(path).substr(state_offset);
+		state = state_of(path);
 		require(has(state, "state ended\nend ") &&
 			has(state, "\nboot unfinished\nrestarts 2\n") &&
 			state.ends_with("kernel-output\n" + stuck),
@@ -312,7 +322,7 @@ void test_boot_state()
 	uml::runtime::reset_session_record();
 	uml::runtime::set_session_boot_facts(false, 4);
 	require(uml::runtime::begin_session_record(path, console.arguments()));
-	state = read_file(path).substr(state_offset);
+	state = state_of(path);
 	require(!has(state, "boot ") && !has(state, "restarts "),
 		"a Linux guest's record named a boot: " + state);
 	scratch_the_state(path);
@@ -340,13 +350,13 @@ void test_boot_unobserved()
 	require(uml::runtime::begin_session_record(path, console.arguments()));
 	console.write(kernel);
 	uml::runtime::checkpoint_session_memory();
-	std::string state = read_file(path).substr(state_offset);
+	std::string state = state_of(path);
 	require(has(state, "\nboot unobserved\nrestarts 0\n") &&
 		state.ends_with("kernel-output\n" + kernel),
 		"output without init's was recorded wrong: " + state);
 	console.write(init);
 	uml::runtime::checkpoint_session_memory();
-	state = read_file(path).substr(state_offset);
+	state = state_of(path);
 	require(has(state, "\nboot unfinished\nrestarts 0\n") &&
 		state.ends_with("kernel-output\n" + kernel + init),
 		"init's first line did not make the boot unfinished: " + state);
@@ -356,7 +366,7 @@ void test_boot_unobserved()
 	require(uml::runtime::begin_session_record(path, console.arguments()));
 	console.write(kernel);
 	uml::runtime::end_session_record(SessionEnd::stopped, 0);
-	state = read_file(path).substr(state_offset);
+	state = state_of(path);
 	require(has(state, "state ended\nend stopped\n") &&
 		has(state, "\nboot unobserved\n") &&
 		state.ends_with("kernel-output\n" + kernel),
@@ -382,7 +392,7 @@ void test_boot_state_per_session()
 	uml::runtime::end_session_record(SessionEnd::restarted, 0);
 	uml::runtime::set_session_boot_facts(true, 1);
 	require(uml::runtime::begin_session_record(path, console.arguments()));
-	const std::string state = read_file(path).substr(state_offset);
+	const std::string state = state_of(path);
 	require(state.starts_with("state running\n") &&
 		has(state, "\nboot unobserved\nrestarts 1\n") &&
 		!has(state, "kernel-output"),
@@ -415,13 +425,13 @@ void test_a_boot_quotes_only_its_own_output()
 		"a new boot held the boot before's output");
 	console.write("init: init first stage started!\n");
 	uml::runtime::checkpoint_session_memory();
-	std::string state = read_file(path).substr(state_offset);
+	std::string state = state_of(path);
 	require(has(state, "\nboot unfinished\n") &&
 		has(state, "init first stage started") &&
 		!has(state, "PREVIOUS_BOOT_CANARY"),
 		"the unfinished boot quoted the boot before: " + state);
 	uml::runtime::end_session_record(SessionEnd::stopped, 0);
-	state = read_file(path).substr(state_offset);
+	state = state_of(path);
 	require(has(state, "state ended\nend stopped\n") &&
 		has(state, "init first stage started") &&
 		!has(state, "PREVIOUS_BOOT_CANARY"),
@@ -432,7 +442,7 @@ void test_a_boot_quotes_only_its_own_output()
 	require(uml::runtime::begin_session_record(path, console.arguments()));
 	console.write("Darwin UML panic: short\n");
 	uml::runtime::end_session_record(SessionEnd::failed, 1, "x");
-	state = read_file(path).substr(state_offset);
+	state = state_of(path);
 	require(has(state, "Darwin UML panic: short") &&
 		!has(state, "init first stage started"),
 		"a later boot's end quoted an earlier boot: " + state);
@@ -461,7 +471,7 @@ void test_a_short_boot_after_a_long_one_keeps_its_first_line()
 	console.write("FIRST_LINE_OF_THE_SHORT_BOOT\n"
 		"init: init first stage started!\n");
 	uml::runtime::checkpoint_session_memory();
-	std::string state = read_file(path).substr(state_offset);
+	std::string state = state_of(path);
 	require(has(state, "kernel-output\nFIRST_LINE_OF_THE_SHORT_BOOT\n") &&
 		!has(state, "a line of the long boot"),
 		"the short boot's first line was dropped or the long boot's quoted: " + state);
@@ -469,7 +479,7 @@ void test_a_short_boot_after_a_long_one_keeps_its_first_line()
 	 * the first whole line the ring kept, and never in the middle of one. */
 	console.write(long_boot);
 	uml::runtime::end_session_record(SessionEnd::stopped, 0);
-	state = read_file(path).substr(state_offset);
+	state = state_of(path);
 	require(has(state, "kernel-output\ninit: a line of the long boot\n") &&
 		!has(state, "FIRST_LINE_OF_THE_SHORT_BOOT"),
 		"a boot that overflowed the ring did not start at a whole line: " + state);
@@ -527,17 +537,17 @@ void test_the_end_outlasts_state_checkpoints()
 		for (int spin = 0; spin < round % 50; ++spin)
 			std::this_thread::yield();
 		uml::runtime::end_session_record(SessionEnd::stopped, 0);
-		const std::string just_after = read_file(path).substr(state_offset);
+		const std::string just_after = state_of(path);
 		stop.store(true, std::memory_order_release);
 		checkpoints.join();
-		const std::string state = read_file(path).substr(state_offset);
+		const std::string state = state_of(path);
 		require(has(just_after, "state ended\nend stopped\n") &&
 			has(state, "state ended\nend stopped\n") &&
 			has(state, "\nboot unfinished\n"),
 			"a checkpoint overwrote the end in round " +
 				std::to_string(round) + ": " + state);
 		/* The file holds one record, whatever order the writes came in. */
-		require(file_size(path) == state_offset + state.size() &&
+		require(file_size(path) == uml::runtime::session_record_max_bytes &&
 			state.find('\0') == std::string::npos,
 			"the state is not one record in round " +
 				std::to_string(round));
@@ -552,7 +562,7 @@ void test_record_lifecycle()
 	const std::string path = temporary_record();
 	require(uml::runtime::begin_session_record(path, {}));
 	std::string record = read_file(path);
-	require(record.starts_with("uml-session 6\nmemory at ") &&
+	require(record.starts_with("uml-session 7\nmemory at ") &&
 		record.size() > state_offset && record[slot_bytes - 1] == '\n' &&
 		record.substr(state_offset).starts_with(
 			"state running\nend running\n"),
@@ -1370,7 +1380,7 @@ void test_size_bound_and_stall_slot()
 {
 	using uml::runtime::session_record_max_bytes;
 	using uml::runtime::session_stall_slot_bytes;
-	static_assert(session_record_max_bytes == 17920,
+	static_assert(session_record_max_bytes == 18176,
 		"the record's largest size is stated in the documentation");
 	uml::runtime::reset_session_record();
 	const std::string path = temporary_record();
@@ -1385,7 +1395,8 @@ void test_size_bound_and_stall_slot()
 		begun[state_offset - 1] == '\n' &&
 		begun.substr(slot_bytes).find("total 0 shown 0") != std::string::npos,
 		"a session starts with an empty stall slot");
-	require(begun.size() < state_offset + 200);
+	/* The file has its whole size from the start, and keeps it. */
+	require(begun.size() == session_record_max_bytes);
 
 	/* A slot of the wrong size changes nothing; the right one lands in its
 	 * place alone. */
@@ -1416,8 +1427,9 @@ void test_size_bound_and_stall_slot()
 	uml::runtime::end_session_record(SessionEnd::failed, 1,
 		std::string(100000, 'm'));
 	const std::string ended = read_file(path);
-	require(ended.size() <= session_record_max_bytes &&
-		ended.size() > state_offset + 1000,
+	require(ended.size() == session_record_max_bytes &&
+		has(ended.substr(state_offset), "state ended\nend failed\n") &&
+		has(ended.substr(state_offset), "\nmessage m"),
 		"an end of a long message left a record of " +
 		std::to_string(ended.size()) + " bytes");
 	/* Nothing writes the slot once the session has ended. */
@@ -1425,10 +1437,12 @@ void test_size_bound_and_stall_slot()
 		session_stall_slot_bytes, 'y'));
 	require(read_file(path) == ended, "a slot was written after the end");
 
-	/* The next session in the file starts empty, and the file shrinks. */
+	/* The next session in the file starts empty, in the same size. */
 	require(uml::runtime::begin_session_record(path, arguments));
 	const std::string next = read_file(path);
-	require(next.size() < ended.size() && next.size() < state_offset + 200 &&
+	require(next.size() == ended.size() &&
+		next.substr(state_offset, 14) == "state running\n" &&
+		!has(next.substr(state_offset), "message m") &&
 		next.substr(slot_bytes, 14) == "stalls 1 base ",
 		"a session inherited the last one");
 	uml::runtime::reset_session_record();
@@ -1503,8 +1517,8 @@ void test_network_slot()
 	using uml::runtime::session_network_slot_bytes;
 	static_assert(session_network_offset == 12288 &&
 			session_network_slot_bytes == 512 &&
-			state_offset == session_network_offset +
-				session_network_slot_bytes,
+			uml::runtime::session_storage_offset ==
+				session_network_offset + session_network_slot_bytes,
 		"the network slot sits after the stall slot");
 	const auto slot_of = [](const std::string &record) {
 		return record.substr(session_network_offset,
@@ -1596,6 +1610,161 @@ void test_network_slot()
 	unlink(path.c_str());
 }
 
+/* The storage slot sits between the network slot and the state: blank until
+ * the guest's storage is first settled, then the counts of the settles and of
+ * those that left it unsettled, and the last one. It touches no other part and
+ * holds words and numbers only. */
+std::string storage_slot_text(const std::string &slot)
+{
+	return slot.substr(0, slot.find_last_of('\n', slot.size() - 2) + 1);
+}
+
+/* The last line's time is the wall clock's: a golden file holds a fixed one. */
+std::string without_the_time(std::string text)
+{
+	const std::size_t at = text.rfind(" at ");
+	require(at != std::string::npos, "the storage slot has no time: " + text);
+	const std::size_t end = text.find('\n', at);
+	return text.replace(at + 4, end - at - 4, "1794114290");
+}
+
+/* The slot's text for fixed figures is the golden file AndariumCore parses
+ * too (tests/unit/andarium/fixtures/storage-slot-golden.txt). */
+void the_storage_slot_matches_the_golden_file(const char *golden_path)
+{
+	using uml::runtime::GuestStorage;
+	using uml::runtime::SettleKind;
+	using uml::runtime::SettleSuspension;
+	uml::runtime::reset_session_record();
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, {}));
+	uml::runtime::note_guest_settle(SettleKind::sync,
+		GuestStorage::unconfirmed, SettleSuspension::not_asked);
+	uml::runtime::note_guest_settle(SettleKind::quiesce_resident,
+		GuestStorage::confirmed, SettleSuspension::suspended);
+	uml::runtime::note_guest_settle(SettleKind::quiesce,
+		GuestStorage::refused, SettleSuspension::not_suspended);
+	uml::runtime::note_guest_settle(SettleKind::quiesce,
+		GuestStorage::confirmed, SettleSuspension::suspended);
+	const std::string text = without_the_time(storage_slot_text(
+		read_file(path).substr(uml::runtime::session_storage_offset,
+			uml::runtime::session_storage_slot_bytes)));
+	const std::string golden = read_file(golden_path);
+	require(!golden.empty(), "the golden storage slot opens");
+	if (golden != text) {
+		std::fprintf(stderr, "golden:\n%s\nslot:\n%s\n", golden.c_str(),
+			text.c_str());
+		require(false, "the storage slot differs from the golden file");
+	}
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
+void test_storage_slot()
+{
+	using uml::runtime::GuestStorage;
+	using uml::runtime::SettleKind;
+	using uml::runtime::SettleSuspension;
+	using uml::runtime::session_storage_offset;
+	using uml::runtime::session_storage_slot_bytes;
+	static_assert(session_storage_offset == 12800 &&
+			session_storage_slot_bytes == 256 &&
+			state_offset == session_storage_offset +
+				session_storage_slot_bytes,
+		"the storage slot sits between the network slot and the state");
+	const auto slot_of = [](const std::string &record) {
+		return record.substr(session_storage_offset,
+			session_storage_slot_bytes);
+	};
+	/* The outcomes the slot counts as settled are the ones the applications
+	 * print "settled" for, and no others, and the zero value, which claims
+	 * nothing, is none of them. */
+	require(static_cast<int>(GuestStorage::not_reported) == 0,
+		"the zero value of the storage outcome claims something");
+	require(uml::runtime::guest_storage_settled(GuestStorage::confirmed) &&
+		uml::runtime::guest_storage_settled(GuestStorage::no_guest) &&
+		!uml::runtime::guest_storage_settled(GuestStorage::not_reported) &&
+		!uml::runtime::guest_storage_settled(GuestStorage::unconfirmed) &&
+		!uml::runtime::guest_storage_settled(GuestStorage::refused) &&
+		!uml::runtime::guest_storage_settled(GuestStorage::unreachable),
+		"an outcome was counted settled that is not");
+
+	uml::runtime::reset_session_record();
+	/* Without a session nothing is recorded, and nothing fails. */
+	uml::runtime::note_guest_settle(SettleKind::sync,
+		GuestStorage::confirmed, SettleSuspension::not_asked);
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, {}));
+	std::string record = read_file(path);
+	std::string slot = slot_of(record);
+	require(slot == std::string(session_storage_slot_bytes - 1, ' ') + "\n",
+		"a session does not begin with a blank storage slot: " + slot);
+
+	/* A settle writes the counts and the last one, in the slot alone. */
+	uml::runtime::note_guest_settle(SettleKind::sync,
+		GuestStorage::confirmed, SettleSuspension::not_asked);
+	record = read_file(path);
+	slot = slot_of(record);
+	require(slot.starts_with("storage 1\nsettles 1 unsettled 0\n"
+				 "last sync confirmed not-asked at ") &&
+		slot.back() == '\n' && slot.size() == session_storage_slot_bytes,
+		"a confirmed sync was recorded wrong: " + slot);
+	require(record.substr(state_offset).starts_with(
+			"state running\nend running\n") &&
+		record.substr(slot_bytes, 14) == "stalls 1 base " &&
+		record.substr(uml::runtime::session_network_offset, 9) ==
+			"network 1",
+		"the storage slot touched another part");
+
+	/* An unreachable console, a refusal and a guest that did not answer
+	 * count as unsettled; no guest does not. The last one is the last. */
+	uml::runtime::note_guest_settle(SettleKind::quiesce,
+		GuestStorage::unreachable, SettleSuspension::not_suspended);
+	slot = slot_of(read_file(path));
+	require(slot.starts_with("storage 1\nsettles 2 unsettled 1\n"
+				 "last quiesce unreachable not-suspended at "),
+		"an unreachable console was recorded wrong: " + slot);
+	uml::runtime::note_guest_settle(SettleKind::sync, GuestStorage::no_guest,
+		SettleSuspension::not_asked);
+	uml::runtime::note_guest_settle(SettleKind::quiesce_resident,
+		GuestStorage::refused, SettleSuspension::not_suspended);
+	uml::runtime::note_guest_settle(SettleKind::sync,
+		GuestStorage::unconfirmed, SettleSuspension::not_asked);
+	slot = slot_of(read_file(path));
+	require(slot.starts_with("storage 1\nsettles 5 unsettled 3\n"
+				 "last sync unconfirmed not-asked at "),
+		"the counts of settles were wrong: " + slot);
+	/* Words, digits and blanks only: never a path, an address or a name. */
+	for (const char c : storage_slot_text(slot))
+		require((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+				c == ' ' || c == '-' || c == '\n',
+			"the storage slot holds a character that is no word: " + slot);
+
+	/* The end keeps what the session counted, and the file does not change
+	 * once the session has ended. */
+	uml::runtime::end_session_record(SessionEnd::powered_off, 0);
+	const std::string ended = read_file(path);
+	require(slot_of(ended).starts_with("storage 1\nsettles 5 unsettled 3\n"),
+		"the end lost the storage slot");
+	uml::runtime::note_guest_settle(SettleKind::quiesce,
+		GuestStorage::confirmed, SettleSuspension::suspended);
+	require(read_file(path) == ended, "a settle was written after the end");
+
+	/* The next session in the file starts blank and counts its own. */
+	require(uml::runtime::begin_session_record(path, {}));
+	slot = slot_of(read_file(path));
+	require(slot == std::string(session_storage_slot_bytes - 1, ' ') + "\n",
+		"a session inherited the last one's storage slot: " + slot);
+	uml::runtime::note_guest_settle(SettleKind::quiesce,
+		GuestStorage::confirmed, SettleSuspension::suspended);
+	slot = slot_of(read_file(path));
+	require(slot.starts_with("storage 1\nsettles 1 unsettled 0\n"
+				 "last quiesce confirmed suspended at "),
+		"the next session did not count its own: " + slot);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
 void test_unopenable_record()
 {
 	uml::runtime::reset_session_record();
@@ -1629,10 +1798,12 @@ int main(int argc, char **argv)
 		test_a_wrapped_ring_keeps_no_serial_number();
 		test_memory_checkpoints();
 		test_network_slot();
-		/* The registration passes the golden file; a run without it
+		test_storage_slot();
+		/* The registration passes the golden files; a run without them
 		 * fails rather than skipping the check. */
-		require(argc == 2, "the golden network slot file is not given");
+		require(argc == 3, "the golden slot files are not given");
 		the_network_slot_matches_the_golden_file(argv[1]);
+		the_storage_slot_matches_the_golden_file(argv[2]);
 		test_memory_terms();
 		test_run_figures_in_a_row();
 		test_older_rows_sum_their_window();

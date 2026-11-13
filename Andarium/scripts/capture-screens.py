@@ -273,10 +273,13 @@ SHOTS: list[Shot] = [
     s("boot-slow-largest-text", "Boot", "boot-slow", "The notice at the largest accessibility text size: the buttons stack, the text wraps and the screen scrolls where it does not fit.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"),
     s("boot-slow-storage", "Boot", "boot-slow-storage", "The notice over an earlier step (Storage under way): the step and the time name where the start is.", "-bootStage", "2"),
     s("boot-slow-stopping", "Boot", "boot-slow-stopping", "Stop confirmed: the status line says Stopping\u2026, Stop's label says it too (with a spinner where the buttons are side by side) and is disabled until the run ends, and the buttons keep their size."),
-    feedback("feedback-boot", "feedback-boot", "Send feedback opened from the slow-start notice: the sheet the root presents over the boot screen, where a bug report and a screenshot need the virtual machine running (the card says so) and the information block carries the start's step, time and restarts."),
-    feedback("feedback-boot-filled", "feedback-boot-filled", "The same sheet with a typed problem, details and attachments."),
+    feedback("feedback-boot", "feedback-boot", "Send feedback opened from the slow-start notice: the sheet the root presents over the boot screen. The card says a bug report and a screenshot need the virtual machine to finish starting and that the start log is attached; the log is a row of its own with its size and a remove button, and the information block carries the start's step, time and restarts."),
+    feedback("feedback-boot-filled", "feedback-boot-filled", "The same sheet with a typed problem, details and a photo: the start log stays the first row, counted in the total."),
     feedback("feedback-boot-details", "feedback-boot-details", "The same sheet with the information block expanded: the Boot line says the step and time of the start."),
-    feedback("feedback-boot-finished", "feedback-boot-finished", "The sheet opened over the boot screen with a typed draft, after the start finished: it is still open, with the draft, over the running session."),
+    feedback("feedback-boot-removed", "feedback-boot-removed", "The same sheet after the start log was taken out: no row, no total, and the sheet does not attach it again."),
+    feedback("feedback-boot-largest-text", "feedback-boot", "The same sheet at the largest accessibility text size: the tip and the log row wrap and the sheet scrolls.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"),
+    feedback("feedback-boot-largest-text-end", "feedback-boot-end", "The same sheet at the largest accessibility text size, scrolled to the end of its content: the tip and the start log row above the bar.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL", wait=16.0),
+    feedback("feedback-boot-finished", "feedback-boot-finished", "The sheet opened over the boot screen with a typed draft, after the start finished: it is still open, with the draft and the start log, over the running session, where the card now offers the bug report."),
     s("boot-jit", "Boot", "boot-jit", "The debugger preparing the JIT: the System image step says Preparing JIT."),
     s("boot-jit-fallback", "Boot", "boot-jit-fallback", "A boot that ran without the JIT it was asked for: a note under the steps says why."),
     *boot_stages("boot-recovery", "boot-recovery", ["System image", "Linux kernel", "Storage", "Recovery"], "Recovery boot (opaque, own stage list, no progress bar)", dark_step=3),
@@ -353,12 +356,28 @@ SHOTS: list[Shot] = [
     feedback("feedback-menu-home", "home-menu", "Home's toolbar menu open on a configured guest: Info, then Send feedback after a separator.", dark=True, wait=3.0),
     feedback("feedback-menu-welcome", "welcome-menu", "The same menu open on the welcome screen, before any guest exists: Send feedback is reachable from the first screen.", dark=True, wait=3.0),
     feedback("feedback-entrance-settings", "settings-feedback", "Settings scrolled to Diagnostics: Send feedback is the first row, above Create bug report.", dark=True, wait=3.0),
-    feedback("feedback-empty", "feedback", "Send feedback opened from a running session's Settings, empty: the subject and body lines, the information block folded, the card that asks for a bug report and the bar (Bug report, Screenshot, Photos, Send feedback). Send is dimmed until there is a problem."),
+    feedback("feedback-empty", "feedback", "Send feedback opened from a running session's Settings, empty: the subject and body lines, the information block folded, the card that asks for a bug report and the bar (Bug report, Screenshot, Add, Send feedback). Send is enabled: a tap with the problem or the details empty says which."),
     feedback("feedback-filled", "feedback-filled", "Send feedback from a session with a problem and details, and three attachments (bug report, screenshot, photo) with their sizes and remove buttons and the total under them; the bar shows the bug report as attached.", dark=True),
     feedback("feedback-details", "feedback-details", "Send feedback filled, with the app and device details opened in full at the end of the mail."),
     feedback("feedback-large", "feedback-large", "Send feedback with attachments over 20 MiB: the total turns orange and says some mail services refuse mail over 20 MiB; Send still works."),
+    feedback("feedback-file", "feedback-file", "Send feedback with one file from Files attached, an APK: a document tile, its name and size, a remove button and the total under it. The bar has three buttons, Bug report, Screenshot and Add (a paperclip whose menu offers Photos and Files).", dark=True),
+    feedback("feedback-file-bar-xxxlarge", "feedback-file", "The same sheet at the largest standard text size, where the bar's text stops growing: no label is cut in the bar.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryXXXL"),
+    feedback("feedback-file-long", "feedback-file-long", "A file with a long name (the end of the base cut in the middle, the extension kept) at the default text size."),
+    feedback("feedback-file-names", "feedback-file-names", "Two files named in Chinese and in Japanese: the rows keep the names as written, and so does the mail."),
+    feedback("feedback-file-mixed", "feedback-file-mixed", "Send feedback with a bug report, a screenshot, a photo and a file together, in the order they were added, one total under them."),
+    feedback("feedback-file-large", "feedback-file-large", "A file of about 1.9 GiB attached: its size is its own and the total turns orange with the warning that some mail services refuse mail over 20 MiB; Send still works. The file is mapped, never read, for the size.", dark=True),
+    feedback("feedback-file-copying", "feedback-file-copying", "The card over the sheet while a file that cannot be used where it is kept (not downloaded from its cloud storage) is copied first: a progress bar and Cancel. Send and the bar are dimmed and the file's row is not there yet; the screenshot attached before stays.", dark=True),
+    feedback("feedback-file-refused", "feedback-file-refused", "The alert after a folder and an empty file were chosen: two items weren't added, one line for each reason.", dark=True),
+    feedback("feedback-file-refused-one", "feedback-file-refused-one", "The alert for one file that was not added: the title for one item and its reason."),
+    feedback("feedback-file-refused-four", "feedback-file-refused-four", "The alert for four items that were not added for four different reasons: not enough space, a folder or a package, an empty file and a file that could not be read, a line each.", dark=True),
+    feedback("feedback-file-gone", "feedback-file-gone", "Send, after the only file attached was deleted from where it was kept: Attachment not available, the file taken out of the list.", dark=True),
+    feedback("feedback-file-picker", "feedback-file-picker", "The system's document picker over the sheet, as a tap on Files in the Add menu opens it.", wait=20.0),
+    feedback("feedback-file-menu", "feedback-file-menu", "The bar's Add menu open: Photos and Files, anchored on the button."),
     feedback("feedback-generating", "feedback-generating", "Send feedback while the bug report is made: the app's progress overlay with Cancel over the whole sheet, Settings still open beneath."),
     feedback("feedback-sent", "feedback-sent", "Send feedback once the mail was sent: the Feedback sent card with Done over the whole sheet."),
+    feedback("feedback-missing-both", "feedback-missing-both", "Send tapped with the problem and the details both empty: Can't send yet, and what to write in each.", dark=True),
+    feedback("feedback-missing-problem", "feedback-missing-problem", "Send tapped with the details written and the problem empty: the alert asks for the Problem line."),
+    feedback("feedback-missing-details", "feedback-missing-details", "Send tapped with the problem written and the details empty: the alert asks for what was done and what happened."),
     feedback("feedback-discard", "feedback-discard", "Cancel after something is typed or attached: Discard or Keep editing."),
     feedback("feedback-nomail", "feedback-nomail", "Send feedback where Mail cannot send (no account): the error and the way to fix it, and every control disabled."),
     feedback("feedback-home", "feedback-home", "Send feedback opened from Home's toolbar menu, where no virtual machine runs: the card says a bug report and a screenshot need the virtual machine running and gives three steps; the rest of the form works.", dark=True),
@@ -465,6 +484,8 @@ def not_in_front(udid: str, pid: int, shot: Shot, *, after: bool = False) -> str
         return f"the app reported screen {state.get('screen')!r}, not {shot.screen!r}"
     if shot.feedback and state.get("feedback") is not True:
         return "this Preview has no Send feedback: build it with FEEDBACK_ADDRESS=feedback@example.com on the command line"
+    if shot.feedback and shot.screen.startswith("feedback") and state.get("feedbackReady") is not True:
+        return "the sheet of Send feedback is not open with its draft made"
     if state.get("state") != "active" and not (after and shot.alert):
         return f"the app is {state.get('state')}, not active: a system alert, another app or the Home screen is in front"
     return None
