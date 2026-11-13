@@ -673,14 +673,14 @@ ADB_HOST_PROPERTY_TYPE = "kernarium_adb_host_prop"
 # The host application is the adb host of its guest and reaches adbd over virtio-vsock. adbd's p0011
 # topics read two launch properties themselves: ro.boot.kernarium.adb_key, the public key the
 # application authorizes for the boot, and ro.boot.kernarium.adb_tcp, 0 when the launch has no
-# host forward, which keeps adbd off guest TCP. The TCP property is a bootloader_prop, which
-# every domain may read, and the key has a type that no application reads; service.adb.listen_addrs
-# would not do, as it is a system_prop that vendor_init may not set. The adbd binary sits in its APEX, whose payload hints keep it
-# uncompressed so that the verifier reads these names in the payload's bytes.
-# adb_tcp is a bootloader_prop. The key is the installation's own, and a bootloader_prop is
-# readable by every application, so the key has a type of its own (overlay/sepolicy/system_ext/
-# private/adb_key_prop.te) that no application may read. adbd reads it, init sets it and
-# dumpstate can read it, so a bug report that the user shares can carry the key.
+# host forward, which keeps adbd off guest TCP (service.adb.listen_addrs would not do, as it is a
+# system_prop that vendor_init may not set). The TCP property is a bootloader_prop, which every
+# domain may read. The key is the installation's own, and a bootloader_prop is readable by every
+# application, so the key has a type of its own (overlay/sepolicy/system_ext/private/
+# adb_key_prop.te) that no application may read: adbd reads it, init sets it and dumpstate can
+# read it, so a bug report that the user shares can carry the key. The adbd binary sits in its
+# APEX, whose payload hints keep it uncompressed so that the verifier reads these names in the
+# payload's bytes.
 ADBD_APEX = "SYSTEM/apex/com.android.adbd.apex"
 ADBD_BINARY = "bin/adbd"
 ADB_KEY_PROPERTY = "ro.boot.kernarium.adb_key"

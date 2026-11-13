@@ -829,8 +829,9 @@ overlay and also checks wlan0's derived address, the Wi-Fi lease, that eth0 and
 the macvlan carry no IPv6 link-local address, and that a probe application in an
 ordinary application process cannot read `ro.boot.kernarium.adb_key`; that
 the guest's adbd reads the key is proven on a Kernarium runtime guest by
-`tests/integration/android/run_android_adb_debugging.py --serial HOST:PORT`, as
-the macOS launcher fixes ADB authorization off);
+`AndariumTests/AdbOverVsockTests` (the application's own adb client; the macOS
+launcher fixes ADB authorization off, and `run_android_adb_debugging.py` cannot
+be authorized by a runtime guest, which accepts only the key its application made);
 `tests/integration/android/run_guest_android_adb_vsock.py` is the
 opt-in ADB-over-vsock counterpart of `guest-vsock-stream`.
 `android-microg-spoofing` (integration) additionally needs

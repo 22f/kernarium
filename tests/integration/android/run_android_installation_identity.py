@@ -48,11 +48,13 @@ and wlan0, whether the guest's own listing holds an IPv6 link-local address):
 What a launcher run proves is the property's type and the address's absence in this boot. It does
 not prove that adbd reads the key and authorizes the host: the macOS launcher fixes ADB
 authorization off and refuses `androidboot.kernarium.adb_auth`, so adbd never compares the
-placeholder with a host key. That is proven only on a guest that the Kernarium runtime started
-with authorization on (the iOS Simulator product or the macOS runtime), by
-`run_android_adb_debugging.py --serial HOST:PORT` against it on a fresh data partition, which
-checks the key rule: a second key stays unauthorized with no prompt while debugging is off, and the
-host's own key is never refused.
+placeholder with a host key. `run_android_adb_debugging.py` cannot prove it either: it connects to
+a launcher's adb port with keys of its own, and a guest the Kernarium runtime started authorizes
+only the key its application made for that boot, which no host adb server holds. The proof is
+Andarium's own adb client against a runtime guest with authorization on,
+`AndariumTests/AdbOverVsockTests` (the iOS Simulator or a device; docs/testing.md): the
+application's key is accepted whatever the debugging setting, and a foreign key is refused with
+no prompt while debugging is off and with a prompt while it is on.
 
 Every wait has a deadline; the guest's launcher is stopped through its own
 process on any exit.
