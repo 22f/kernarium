@@ -73,14 +73,22 @@ struct uml_emulator_run_end {
 	char restart_command[256];
 	/* 1 when the guest's console said, during this run, that the guest
 	 * finished booting: an Android guest's init processed
-	 * sys.boot_completed=1 or started its recovery. 0 otherwise, for a
-	 * guest that restarted or ended before it got there and also for a
-	 * guest whose console never says so, such as a Linux desktop: a caller
-	 * that wants the answer knows which guest it runs. The host reads the
-	 * console as the kernel writes it, so the answer holds for every end
-	 * kind, and for a run that restores a hibernated guest, which prints
-	 * nothing of its earlier boot, it is 0. */
+	 * sys.boot_completed=1 or started its recovery, or apexd logged that
+	 * the system booted. 0 otherwise, for a guest that restarted or ended
+	 * before it got there and also for a guest whose console never says
+	 * so, such as a Linux desktop: a caller that wants the answer knows
+	 * which guest it runs. The host reads the console where the kernel
+	 * writes it (stdout, stderr and the descriptors the console arguments
+	 * name with fd:), so the answer holds for every end kind; a console
+	 * that goes anywhere else shows nothing. A run that is resumed from a
+	 * hibernation keeps what the run had seen before it was suspended. */
 	uint32_t boot_completed;
+	/* 1 when init's output reached the host's reading of the console during
+	 * this run: its first line, or any line that ends the boot. A caller
+	 * may take a boot with boot_completed 0 for one that did not finish
+	 * only when this is 1; with both 0 the console showed nothing of init,
+	 * which a healthy boot on an unread console also does. */
+	uint32_t init_observed;
 };
 
 /* What the host measures of a running guest, for a host that shows

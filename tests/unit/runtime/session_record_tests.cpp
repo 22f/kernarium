@@ -155,15 +155,16 @@ void test_the_console_says_when_the_boot_finished()
 	const std::vector<std::string> arguments{"ssl0=fd:" +
 		std::to_string(console[1])};
 	require(uml::runtime::begin_session_record({}, arguments));
-	require(!uml::runtime::console_boot_completed(),
-		"a new session was a finished boot");
+	require(!uml::runtime::console_boot_completed() &&
+		!uml::runtime::console_init_observed(),
+		"a new session was a finished boot or had seen init");
 	const std::string line =
 		"init: processing action (sys.boot_completed=1) from (x)\n";
 	require(uml::runtime::kernel_write(other[1], line.data(), line.size()) ==
 		static_cast<ssize_t>(line.size()));
 	require(!uml::runtime::console_boot_completed(),
 		"output that is no console's finished the boot");
-	/* Written in two parts by the kernel's console driver. */
+	/* A write that splits the line. */
 	const std::size_t cut = line.find("boot_");
 	require(uml::runtime::kernel_write(console[1], line.data(), cut) ==
 		static_cast<ssize_t>(cut));
@@ -171,11 +172,13 @@ void test_the_console_says_when_the_boot_finished()
 		"half a line finished the boot");
 	require(uml::runtime::kernel_write(console[1], line.data() + cut,
 		line.size() - cut) == static_cast<ssize_t>(line.size() - cut));
-	require(uml::runtime::console_boot_completed(),
+	require(uml::runtime::console_boot_completed() &&
+		uml::runtime::console_init_observed(),
 		"the console's line did not finish the boot");
 	/* The next session begins from nothing. */
 	require(uml::runtime::begin_session_record({}, arguments));
-	require(!uml::runtime::console_boot_completed(),
+	require(!uml::runtime::console_boot_completed() &&
+		!uml::runtime::console_init_observed(),
 		"a finished boot outlived its session");
 	uml::runtime::reset_session_record();
 	for (const int descriptor : {console[0], console[1], other[0], other[1]})

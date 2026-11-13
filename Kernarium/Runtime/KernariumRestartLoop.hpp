@@ -352,9 +352,7 @@ private:
         machine.resetLink();
         if (!guard.may_restart(machine.now(), end.completion)) {
             machine.say(
-                "the guest " +
-                uml::emulator::restart_loop_end_message(
-                    guard.early_restarts(), end.completion) +
+                "the guest " + guard.end_message() +
                 "; not booting it again");
             return KERNARIUM_RUNTIME_RESULT_RESTART_LOOP;
         }

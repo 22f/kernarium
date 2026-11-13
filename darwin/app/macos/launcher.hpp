@@ -21,7 +21,8 @@ struct LaunchConfiguration {
 	DisplayInput input_mode{DisplayInput::mouse};
 	/* Whether the guest's console says when its boot finishes (an Android
 	 * guest; a Linux desktop guest's does not). The loop guard then counts a
-	 * restart before that point as early however long the boot ran. */
+	 * restart before that point as early however long the boot ran, once
+	 * init's output was seen on the console. */
 	bool console_reports_boot_completion{};
 	/* A file or directory the launcher created for this run only, removed
 	 * once the launch ends. */
@@ -46,8 +47,9 @@ struct LaunchConfiguration {
  * line are made for each boot, and the network link is reset between boots so
  * the old guest's connections end. A restart less than 15 s after its boot
  * started is early, as is one before the boot finished where the guest's
- * console says so (LaunchConfiguration::console_reports_boot_completion),
- * and five in a row end the launch with status 3
+ * console says so (LaunchConfiguration::console_reports_boot_completion);
+ * five in a row within that time, or eight early ones in a row, end the
+ * launch with status 3
  * (emulator/src/restart_loop_guard.hpp). A power-off ends the launch as it
  * always did, and a kernel panic still ends the process. */
 int runEmbeddedKernel(const std::vector<std::string> &command_line,

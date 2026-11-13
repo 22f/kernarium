@@ -34,14 +34,19 @@ namespace uml::runtime {
  * process through the default disposition, which writes the crash report.
  * kernel_write records that end as host_fault when it sees the report. The
  * same output tells whether an Android guest finished booting
- * (console_boot_completed), which the emulator reports as the run's end and an
- * application's restart loop reads. For a guest whose console reports its boot
- * (set_session_boot_facts) the state also says "boot unfinished" or "boot
- * completed" and "restarts N", and while the boot is unfinished the checkpoint
- * thread rewrites the state with the output so far whenever the output grew, so
- * a process that is killed mid-boot leaves where the boot had got; an end that
- * the guest or the person chose (a power-off, a restart, a stop) quotes the
- * output too while the boot is unfinished. The checkpoint never follows an end.
+ * (console_boot_completed) and whether init's output reached the record at all
+ * (console_init_observed), which the emulator reports as the run's end and an
+ * application's restart loop reads. The output is read where it is written to
+ * stdout, stderr and the descriptors the `con` and `ssl` arguments name with
+ * fd:, so a console on anything else shows none of it. For a guest whose
+ * console reports its boot (set_session_boot_facts) the state also says "boot
+ * completed", "boot unfinished" (init's output was seen, the boot did not
+ * finish) or "boot unobserved" (neither was seen), and "restarts N". While the
+ * boot has not completed the checkpoint thread rewrites the state with the
+ * output so far whenever the output grew, so a process that is killed
+ * mid-boot leaves where the boot had got; an end that the guest or the person
+ * chose (a power-off, a restart, a stop) quotes the output too. The
+ * checkpoint never follows an end.
  *
  * Every memory_checkpoint_interval_ms while a session runs, a thread of the
  * record's own writes the process's footprint, its peak and what its memory
@@ -264,6 +269,13 @@ ssize_t kernel_write(int descriptor, const void *buffer, std::size_t length)
  * Android guest finished booting (console_boot_signal.hpp). It is false for a
  * guest whose console never says so. Any thread. */
 [[nodiscard]] bool console_boot_completed() noexcept;
+
+/* Whether init's output has reached the record since the session began: its
+ * first line, or a line that ends the boot. False for a console the record
+ * does not read, and for a guest that is not Android. A boot that is neither
+ * completed nor init-observed is unobserved, not known to be unfinished. Any
+ * thread. */
+[[nodiscard]] bool console_init_observed() noexcept;
 
 /* What the record holds of the kernel's output: the last bytes, oldest first,
  * copied into `buffer`. For tests. */

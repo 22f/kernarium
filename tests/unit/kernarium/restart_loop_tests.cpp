@@ -483,24 +483,51 @@ void aBootThatNeverFinishedCountsHoweverLongItRan()
 {
     FakeMachine machine;
     // The loop the 15 s window let through: a restart every 20 s, before the
-    // boot ever finished.
+    // boot ever finished. Android's own boot-loop rescue gets its five boots
+    // first; the loop ends at the eighth.
     machine.script = {restartsAndroid(BootCompletion::unfinished, 20s)};
     require(kernarium::restart::run(machine, quickly) ==
                 KERNARIUM_RUNTIME_RESULT_RESTART_LOOP,
             "a guest that never finishes booting did not end with the loop "
             "result");
-    require(machine.count("enter") == 5U,
-            "the loop guard did not end the late loop at five boots");
-    require(machine.count("began") == 4U,
+    require(machine.count("enter") == 8U,
+            "the loop guard did not end the late loop at eight boots");
+    require(machine.count("began") == 7U,
             "a restart the guard refused was announced");
-    require(machine.count("stop-services") == 5U &&
-                machine.count("reset-link") == 5U,
+    require(machine.count("stop-services") == 8U &&
+                machine.count("reset-link") == 8U,
             "the services of the last guest were left running");
     require(contains(machine.said(),
-                "the guest restarted 5 times in a row, each before it "
+                "the guest restarted 8 times in a row, each before it "
                 "finished booting or within 15 s of booting; not booting it "
                 "again"),
             "the late loop's end was not logged with its reason");
+}
+
+void anAndroidGuestRestartingAtOnceEndsAtFive()
+{
+    FakeMachine machine;
+    machine.script = {restartsAndroid(BootCompletion::unfinished, 3s)};
+    require(kernarium::restart::run(machine, quickly) ==
+                KERNARIUM_RUNTIME_RESULT_RESTART_LOOP,
+            "a guest that restarts at once did not end with the loop result");
+    require(machine.count("enter") == 5U,
+            "the loop guard did not end the early loop at five boots");
+    require(contains(machine.said(),
+                "the guest restarted 5 times in a row within 15 s of "
+                "booting; not booting it again"),
+            "the early loop's end was not logged with its reason");
+}
+
+void aConsoleThatShowsNothingOfInitIsNotAnUnfinishedBoot()
+{
+    FakeMachine machine;
+    // A healthy Android guest on a console the host does not read: boots of
+    // 20 s are no loop.
+    machine.script.assign(12, restartsAndroid(BootCompletion::unobserved, 20s));
+    machine.script.push_back(powersOff(20s));
+    require(kernarium::restart::run(machine, quickly) == 0,
+            "boots of 20 s on an unread console ended the loop");
 }
 
 void restartsAfterFinishedBootsAreNeverLimited()
@@ -518,19 +545,19 @@ void restartsAfterFinishedBootsAreNeverLimited()
 void aFinishedBootResetsTheCountOfUnfinishedOnes()
 {
     FakeMachine machine;
-    machine.script = {
-        restartsAndroid(BootCompletion::unfinished, 30s),
-        restartsAndroid(BootCompletion::unfinished, 30s),
-        restartsAndroid(BootCompletion::unfinished, 30s),
-        restartsAndroid(BootCompletion::unfinished, 30s),
-        restartsAndroid(BootCompletion::completed, 30s),
-        restartsAndroid(BootCompletion::unfinished, 30s),
-        restartsAndroid(BootCompletion::unfinished, 30s),
-        restartsAndroid(BootCompletion::unfinished, 30s),
-        restartsAndroid(BootCompletion::unfinished, 30s), powersOff(30s)};
+    // Seven boots that did not finish, one that did, seven more: never eight
+    // in a row.
+    for (int round = 0; round != 2; ++round) {
+        for (int slow = 0; slow != 7; ++slow)
+            machine.script.push_back(
+                restartsAndroid(BootCompletion::unfinished, 30s));
+        machine.script.push_back(
+            restartsAndroid(BootCompletion::completed, 30s));
+    }
+    machine.script.push_back(powersOff(30s));
     require(kernarium::restart::run(machine, quickly) == 0,
             "a finished boot did not reset the count of unfinished ones");
-    require(machine.count("enter") == 10U, "the script did not run through");
+    require(machine.count("enter") == 17U, "the script did not run through");
 }
 
 void aGuestWhoseConsoleSaysNothingKeepsTheWindowAlone()
@@ -743,6 +770,10 @@ const uml::testing::NamedTest tests[] {
         fiveEarlyRestartsInARowEndTheLoopWithItsOwnResult},
     {"a-fifteen-second-boot-resets-the-count",
         aBootThatLastsFifteenSecondsResetsTheCount},
+    {"an-android-guest-restarting-at-once-ends-at-five",
+        anAndroidGuestRestartingAtOnceEndsAtFive},
+    {"a-console-that-shows-nothing-of-init-is-not-an-unfinished-boot",
+        aConsoleThatShowsNothingOfInitIsNotAnUnfinishedBoot},
     {"an-unfinished-boot-counts-however-long-it-ran",
         aBootThatNeverFinishedCountsHoweverLongItRan},
     {"restarts-after-finished-boots-are-unlimited",

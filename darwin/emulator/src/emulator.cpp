@@ -996,6 +996,7 @@ private:
 			.kind = UML_EMULATOR_RUN_END_NONE,
 			.restart_command = {},
 			.boot_completed = 0,
+			.init_observed = 0,
 		};
 	}
 
@@ -1010,6 +1011,8 @@ private:
 			.restart_command = {},
 			.boot_completed =
 				::uml::runtime::console_boot_completed() ? 1U : 0U,
+			.init_observed =
+				::uml::runtime::console_init_observed() ? 1U : 0U,
 		};
 		const auto shutdown = runtime_.guest_shutdown();
 		if (runtime_.stop_requested()) {
@@ -1296,6 +1299,7 @@ private:
 		.kind = UML_EMULATOR_RUN_END_NONE,
 		.restart_command = {},
 		.boot_completed = 0,
+		.init_observed = 0,
 	};
 };
 

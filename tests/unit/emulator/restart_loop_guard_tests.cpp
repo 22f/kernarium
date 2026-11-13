@@ -2,9 +2,10 @@
 /*
  * The loop guard of an application that boots a guest again after it
  * restarted itself: a restart less than 15 s after its boot started is early,
- * and so is one before the boot finished where the guest's console says when
- * it does; five early restarts in a row end the loop, and a restart that is
- * not early resets the count.
+ * and so is one before the boot finished where the guest's console shows its
+ * init and says when the boot ends. Five restarts in a row within the window
+ * end the loop; eight early ones in a row end it too, and a restart that is
+ * not early resets both counts.
  */
 #include "require.hpp"
 #include "restart_loop_guard.hpp"
@@ -37,13 +38,15 @@ RestartLoopGuard::Clock::time_point restart_after(RestartLoopGuard &guard,
 	return restart;
 }
 
-void test_the_policy_is_fifteen_seconds_and_five_restarts()
+void test_the_policy_is_fifteen_seconds_five_and_eight_restarts()
 {
 	/* Applications and their documentation quote these numbers. */
 	require(uml::emulator::early_restart_window == 15s,
 		"an early restart is not one under 15 s");
 	require(uml::emulator::early_restart_limit == 5U,
-		"the loop does not end on the fifth early restart");
+		"the loop does not end on the fifth restart within the window");
+	require(uml::emulator::unfinished_restart_limit == 8U,
+		"the loop does not end on the eighth early restart");
 	require(uml::emulator::early_restart_exit_status == 3,
 		"the launchers' guard exit status is not 3");
 }
@@ -155,7 +158,9 @@ void test_a_restart_with_no_time_at_all_is_early()
 }
 
 /* A guest whose console reports its boot's end, restarting every 20 s and
- * never getting there, is the loop the 15 s window alone let through. */
+ * never getting there, is the loop the 15 s window alone let through. Android
+ * is left to its own boot-loop rescue (five failed boots, a warm reboot, then
+ * recovery's prompt) before the host ends the loop at the eighth. */
 void test_a_boot_that_never_finished_counts_however_long_it_ran()
 {
 	RestartLoopGuard guard;
@@ -169,14 +174,16 @@ void test_a_boot_that_never_finished_counts_however_long_it_ran()
 			break;
 		require(boots < 100U, "a guest that never boots never ended");
 	}
-	require(boots == uml::emulator::early_restart_limit,
-		"an unfinished boot of 20 s did not count like an early one");
-	require(guard.early_restarts() == uml::emulator::early_restart_limit,
-		"the ending restart was not counted");
+	require(boots == uml::emulator::unfinished_restart_limit,
+		"an unfinished boot of 20 s did not count toward the limit of eight");
+	require(guard.early_restarts() == uml::emulator::unfinished_restart_limit &&
+		guard.restarts_within_window() == 0U,
+		"the ending restart was not counted as an unfinished one");
 
 	/* However long it ran: an hour is no better than twenty seconds. */
 	RestartLoopGuard slow;
-	for (unsigned boot = 1; boot != uml::emulator::early_restart_limit; ++boot)
+	for (unsigned boot = 1; boot != uml::emulator::unfinished_restart_limit;
+	     ++boot)
 		now = restart_after(slow, now, std::chrono::hours{1}, true,
 			BootCompletion::unfinished);
 	(void)restart_after(slow, now, std::chrono::hours{1}, false,
@@ -190,7 +197,8 @@ void test_restarts_after_finished_boots_are_never_limited()
 	auto now = epoch;
 	for (int reboot = 0; reboot != 200; ++reboot)
 		now = restart_after(guard, now, 25s, true, BootCompletion::completed);
-	require(guard.early_restarts() == 0U,
+	require(guard.early_restarts() == 0U &&
+		guard.restarts_within_window() == 0U,
 		"restarts after finished boots were counted");
 }
 
@@ -198,10 +206,10 @@ void test_a_finished_boot_resets_the_count()
 {
 	RestartLoopGuard guard;
 	auto now = epoch;
-	/* Four boots that did not finish, one that did, four more: eight
-	 * unfinished restarts, never five in a row. */
+	/* Seven boots that did not finish, one that did, seven more: fourteen
+	 * unfinished restarts, never eight in a row. */
 	for (int round = 0; round != 3; ++round) {
-		for (int early = 0; early != 4; ++early)
+		for (int early = 0; early != 7; ++early)
 			now = restart_after(guard, now, 30s, true,
 				BootCompletion::unfinished);
 		now = restart_after(guard, now, 30s, true,
@@ -212,7 +220,8 @@ void test_a_finished_boot_resets_the_count()
 }
 
 /* The two rules apply together: a boot that finished and restarted within the
- * window is early, as it was before the console said anything. */
+ * window is early, as it was before the console said anything, and five of
+ * them in a row end the loop. */
 void test_the_window_still_counts_a_finished_boot()
 {
 	RestartLoopGuard guard;
@@ -242,38 +251,127 @@ void test_a_guest_with_no_signal_keeps_the_window_alone()
 	(void)restart_after(guard, now, 5s, false, BootCompletion::unobserved);
 }
 
+/* Four restarts within the window, then slow ones that never finished: the
+ * window's count resets at the first slow restart and the eight count goes on
+ * from the four. */
+void test_fast_restarts_and_slow_ones_count_together_toward_eight()
+{
+	RestartLoopGuard guard;
+	auto now = epoch;
+	for (int fast = 0; fast != 4; ++fast)
+		now = restart_after(guard, now, 2s, true, BootCompletion::unfinished);
+	require(guard.restarts_within_window() == 4U &&
+		guard.early_restarts() == 4U, "four fast restarts were counted wrong");
+	for (unsigned slow = 5; slow != uml::emulator::unfinished_restart_limit;
+	     ++slow) {
+		now = restart_after(guard, now, 20s, true,
+			BootCompletion::unfinished);
+		require(guard.restarts_within_window() == 0U &&
+			guard.early_restarts() == slow,
+			"a slow restart did not reset the window's count alone");
+	}
+	(void)restart_after(guard, now, 20s, false, BootCompletion::unfinished);
+	require(guard.early_restarts() == 8U,
+		"the eighth early restart did not end the loop");
+	require(guard.end_message() ==
+		"restarted 8 times in a row, each before it finished booting or "
+		"within 15 s of booting", "the late loop's message is wrong: " +
+		guard.end_message());
+}
+
+/* Seven slow restarts, then a boot that finished: the loop never ends. */
+void test_seven_slow_restarts_and_a_finished_boot_never_end_the_loop()
+{
+	RestartLoopGuard guard;
+	auto now = epoch;
+	for (int round = 0; round != 5; ++round) {
+		for (int slow = 0; slow != 7; ++slow)
+			now = restart_after(guard, now, 20s, true,
+				BootCompletion::unfinished);
+		now = restart_after(guard, now, 20s, true, BootCompletion::completed);
+	}
+}
+
+/* Five within the window end the loop even when slow, unfinished boots came
+ * before them: the window's own count is five in a row. */
+void test_five_within_the_window_end_the_loop_after_slow_ones()
+{
+	RestartLoopGuard guard;
+	auto now = epoch;
+	now = restart_after(guard, now, 20s, true, BootCompletion::unfinished);
+	now = restart_after(guard, now, 20s, true, BootCompletion::unfinished);
+	for (unsigned fast = 1; fast != uml::emulator::early_restart_limit; ++fast)
+		now = restart_after(guard, now, 2s, true, BootCompletion::unfinished);
+	(void)restart_after(guard, now, 2s, false, BootCompletion::unfinished);
+	require(guard.end_message() ==
+		"restarted 5 times in a row within 15 s of booting",
+		"the early loop's message is wrong: " + guard.end_message());
+}
+
+/* A slow restart in the middle of fast ones starts the window's count again:
+ * four fast, a slow, four fast is no five in a row. */
+void test_a_slow_restart_breaks_the_windows_run_of_five()
+{
+	RestartLoopGuard guard;
+	auto now = epoch;
+	for (int fast = 0; fast != 4; ++fast)
+		now = restart_after(guard, now, 2s, true, BootCompletion::completed);
+	now = restart_after(guard, now, 20s, true, BootCompletion::completed);
+	for (int fast = 0; fast != 4; ++fast)
+		now = restart_after(guard, now, 2s, true, BootCompletion::completed);
+}
+
 void test_the_completion_follows_the_guest_kind()
 {
 	using uml::emulator::boot_completion;
-	require(boot_completion(false, true) == BootCompletion::unobserved &&
-		boot_completion(false, false) == BootCompletion::unobserved,
-		"a guest whose console says nothing was observed");
-	require(boot_completion(true, true) == BootCompletion::completed,
+	/* A guest whose kind says nothing of its boot is never anything else. */
+	for (const bool init : {false, true})
+		for (const bool done : {false, true})
+			require(boot_completion(false, init, done) ==
+				BootCompletion::unobserved,
+				"a guest whose console says nothing was observed");
+	require(boot_completion(true, true, true) == BootCompletion::completed &&
+		boot_completion(true, false, true) == BootCompletion::completed,
 		"a finished boot was not completed");
-	require(boot_completion(true, false) == BootCompletion::unfinished,
-		"an unfinished boot was not unfinished");
+	require(boot_completion(true, true, false) == BootCompletion::unfinished,
+		"a boot whose init was seen and did not finish was not unfinished");
+	/* An Android console that shows nothing of init, as one the host does
+	 * not read does on a healthy boot, is not evidence of an unfinished boot. */
+	require(boot_completion(true, false, false) == BootCompletion::unobserved,
+		"a boot with no init output was taken for an unfinished one");
 }
 
-void test_the_end_is_worded_for_its_reason()
+/* Healthy boots on a console the host does not read: only the window counts,
+ * as for a Linux guest. */
+void test_healthy_boots_on_an_unread_console_are_never_limited()
 {
-	using uml::emulator::restart_loop_end_message;
-	/* The words existing logs and tests quote. */
-	require(restart_loop_end_message(5, BootCompletion::unobserved) ==
+	RestartLoopGuard guard;
+	auto now = epoch;
+	const auto none = uml::emulator::boot_completion(true, false, false);
+	for (int reboot = 0; reboot != 50; ++reboot)
+		now = restart_after(guard, now, 20s, true, none);
+	require(guard.early_restarts() == 0U,
+		"restarts on an unread console were counted");
+}
+
+void test_the_end_is_worded_for_its_limit()
+{
+	/* The words existing logs and tests quote, for a Linux guest. */
+	RestartLoopGuard linux_guest;
+	auto now = epoch;
+	for (unsigned boot = 1; boot != uml::emulator::early_restart_limit; ++boot)
+		now = restart_after(linux_guest, now, 2s, true);
+	(void)restart_after(linux_guest, now, 2s, false);
+	require(linux_guest.end_message() ==
 		"restarted 5 times in a row within 15 s of booting",
-		"the early loop's message changed");
-	require(restart_loop_end_message(5, BootCompletion::unfinished) ==
-		"restarted 5 times in a row, each before it finished booting or "
-		"within 15 s of booting", "the late loop's message is wrong");
-	require(restart_loop_end_message(5, BootCompletion::completed) ==
-		restart_loop_end_message(5, BootCompletion::unfinished),
-		"a guest that reports its boots words the loop another way");
+		"the early loop's message changed: " + linux_guest.end_message());
 }
 
 } // namespace
 
 int main()
 {
-	test_the_policy_is_fifteen_seconds_and_five_restarts();
+	test_the_policy_is_fifteen_seconds_five_and_eight_restarts();
 	test_a_boot_that_lasts_the_window_is_not_early();
 	test_the_fifth_early_restart_in_a_row_ends_the_loop();
 	test_a_long_boot_resets_the_count();
@@ -284,8 +382,13 @@ int main()
 	test_a_finished_boot_resets_the_count();
 	test_the_window_still_counts_a_finished_boot();
 	test_a_guest_with_no_signal_keeps_the_window_alone();
+	test_fast_restarts_and_slow_ones_count_together_toward_eight();
+	test_seven_slow_restarts_and_a_finished_boot_never_end_the_loop();
+	test_five_within_the_window_end_the_loop_after_slow_ones();
+	test_a_slow_restart_breaks_the_windows_run_of_five();
 	test_the_completion_follows_the_guest_kind();
-	test_the_end_is_worded_for_its_reason();
+	test_healthy_boots_on_an_unread_console_are_never_limited();
+	test_the_end_is_worded_for_its_limit();
 	test_the_restart_command_is_printable();
 	test_the_retry_policy_is_bounded();
 	std::puts("restart loop guard tests passed");

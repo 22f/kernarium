@@ -135,8 +135,8 @@ public struct Lifecycle: Equatable, Sendable {
 /// How a run ended, from the runtime's result.
 public struct RunEnd: Equatable, Sendable {
     public var result: Int32
-    /// The runtime stopped a guest that kept restarting: five times in a row,
-    /// each before the boot finished or within seconds of booting.
+    /// The runtime stopped a guest that kept restarting: five times within
+    /// seconds of booting, or eight times before the boot finished.
     public var restartedInALoop: Bool
     /// Why the run could not begin, when it did not.
     public var startFailure: String?

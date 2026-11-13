@@ -225,10 +225,12 @@ typedef int (*kernarium_runtime_run_function)(
     const kernarium_runtime_boot* boot);
 
 enum {
-    /* The guest restarted itself five times in a row, each within 15 seconds
-     * of its boot or, for Android, before its boot had finished (init
-     * processed sys.boot_completed=1 or started recovery), so the runtime
-     * stopped booting it. A restart after a finished boot never counts. It is
+    /* The guest restarted itself five times in a row within 15 seconds of its
+     * boot, or, for Android, eight times in a row each within 15 seconds or
+     * before its boot had finished (init processed sys.boot_completed=1,
+     * started recovery or apexd marked the boot completed, on a console that
+     * showed init's output), so the runtime stopped booting it. A restart
+     * after a finished boot that lasted 15 seconds or more never counts. It is
      * outside the range of the negated uml_emulator errors (-1 through -4). */
     KERNARIUM_RUNTIME_RESULT_RESTART_LOOP = -100,
 };

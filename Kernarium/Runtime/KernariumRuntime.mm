@@ -1632,7 +1632,8 @@ public:
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
         // Only an Android guest's console says when its boot finishes.
         end.completion = uml::emulator::boot_completion(
-            true, information.boot_completed != 0U);
+            true, information.init_observed != 0U,
+            information.boot_completed != 0U);
 #endif
         return true;
     }

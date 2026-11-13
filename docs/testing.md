@@ -775,10 +775,10 @@ disk on which that release left the network disabled is repaired once by the
 first boot of the release under test, and the next boot leaves it alone.
 `android-restart-loop` (integration) registers when
 `UML_ANDROID_RESTART_LOOP_RELEASE` names the release: a guest restarted 16 s
-after each kernel start, before Android's `sys.boot_completed`, ends the launch
-with status 3 after five boots, and eight boots in a row restarted after they
-finished are never limited and power off cleanly (the loop guard,
-`emulator/src/restart_loop_guard.hpp`).
+after each kernel start, while `sys.boot_completed` is still unset, ends the
+launch with status 3 after eight boots, and eight boots in a row restarted after
+they finished (seven restarts, each after the window) are never limited and
+power off cleanly (the loop guard, `emulator/src/restart_loop_guard.hpp`).
 `android17-wifi-network-runner` (tooling) runs its parsers, and the upgrade
 section's checks against scripted answers, without a guest.
 `android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
