@@ -6,10 +6,11 @@ import UIKit
 import UniformTypeIdentifiers
 
 /// Settings while the guest runs, opened from the side keys. It slides up over
-/// the guest, which keeps running behind it: watch the stats, install an app
-/// from Files, connect a computer with adb and make a bug report. An
-/// operation on the guest dismisses Settings and shows the full-screen
-/// progress, and then how it ended.
+/// the guest, which keeps running behind it: install an app from Files and
+/// browse the guest's files (the first sections, where the side keys' tip
+/// points), watch the stats, connect a computer with adb and make a bug
+/// report. An operation on the guest dismisses Settings and shows the
+/// full-screen progress, and then how it ended.
 struct SessionSettingsSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -29,13 +30,13 @@ struct SessionSettingsSheet: View {
         NavigationStack(path: fileRoute) {
             ScrollViewReader { proxy in
                 List {
+                    if normalSession, model.capabilities.apkInstall { apps }
+                    if normalSession, model.capabilities.guestFiles, model.fileBrowser != nil { files }
                     if model.capabilities.statistics { stats(session) }
                     if model.host.supportsPointer { pointer }
                     #if !APP_STORE
                     if let probe = model.inputProbe { inputProbe(probe) }
                     #endif
-                    if normalSession, model.capabilities.apkInstall { apps }
-                    if normalSession, model.capabilities.guestFiles, model.fileBrowser != nil { files }
                     if normalSession, model.capabilities.adbOverNetwork { developer(session) }
                     if normalSession, model.capabilities.bugReport { diagnostics }
                 }

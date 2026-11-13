@@ -59,7 +59,10 @@ struct SessionView: View {
                     SessionNoticesOverlay()
                 }
                 .overlay {
-                    SideKeysOverlay(mode: mode, lit: true, open: $model.session.sideKeysOpen, actions: actions)
+                    SideKeysOverlay(
+                        mode: mode, lit: true, open: $model.session.sideKeysOpen,
+                        offersInstall: model.capabilities.offersApkInstall(in: mode), actions: actions
+                    )
                 }
         }
     }

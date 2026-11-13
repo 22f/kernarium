@@ -757,7 +757,10 @@ is on. `AndariumCore/Adb` speaks the protocol.
   device only and not synchronized. Its public key goes in each boot request
   (`android_adb_public_key`), which adbd authorizes for that boot.
 - **Create bug report and Install APK** are in every build, in a normal
-  session. A bug report is Android's zip with Andarium's session records and
+  session. Settings lists Install APK and the file browser first, above the
+  statistics, and the side keys' tip adds a line saying where Install APK is
+  exactly where the row is offered (`Capabilities.offersApkInstall`). A bug
+  report is Android's zip with Andarium's session records and
   MetricKit reports added under `andarium/`, the application's container paths
   taken out (`BugReportAttachments`); a zip that cannot be amended safely is
   shared as Android made it. An install streams the file to the package

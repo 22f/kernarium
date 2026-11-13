@@ -73,20 +73,27 @@ struct SideKeysTouchTests {
         let groupWidth = KeyMetrics.width * 2 + KeyMetrics.columnGap
         private let safe: UIEdgeInsets
 
-        /// Holds the host window until `end()`.
-        init(_ test: SideKeysTouchTests) async throws {
+        /// Holds the host window until `end()`. The session runs in `mode` on a
+        /// runtime with `capabilities`, and the window reads its text at
+        /// `contentSize` when that is given.
+        init(
+            _ test: SideKeysTouchTests, capabilities: Capabilities = .device, mode: StartMode = .normal,
+            contentSize: UIContentSizeCategory? = nil
+        ) async throws {
             let entry = AppEntry.fromArguments()
             let model = entry.makeModel()
             model.launchApplied = true
+            model.capabilities = capabilities
             model.driver = StubDriver(plan: nil)
             let lease = try await HostWindow.take()
+            if let contentSize { lease.window.traitOverrides.preferredContentSizeCategory = contentSize }
             let controller = AndariumHostingController(rootView: RootView(entry: entry).environment(model), model: model)
             // These are the phone's edge keys. A display that folds lays the
             // session out by its pose instead (`FoldSessionHostingTests`), so
             // here the scene reads as one that does not fold.
             controller.foldReader.stub = { nil }
             lease.window.rootViewController = controller
-            model.phase = .running(.normal)
+            model.phase = .running(mode)
             let root = controller.view!
             var display: GuestMetalView?
             let found = await test.eventually {
@@ -95,6 +102,7 @@ struct SideKeysTouchTests {
                 return display != nil && display!.bounds.width > 0
             }
             guard found, let display else {
+                lease.window.traitOverrides.remove(UITraitPreferredContentSizeCategory.self)
                 lease.give()
                 throw Failure.noDisplay
             }
@@ -120,7 +128,10 @@ struct SideKeysTouchTests {
 
         enum Failure: Error { case noDisplay }
 
-        func end() { lease.give() }
+        func end() {
+            lease.window.traitOverrides.remove(UITraitPreferredContentSizeCategory.self)
+            lease.give()
+        }
 
         /// A point of the overlay's safe area in the window.
         func window(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
@@ -245,5 +256,85 @@ struct SideKeysTouchTests {
         #expect(await eventually { run.presented != nil }, "the tip did not come back with the closed keys")
         model.phase = .home
         #expect(await eventually { run.presented == nil }, "the tip stayed after the session ended")
+    }
+
+    // MARK: The tip's line for Install APK
+
+    private static let installLine = "To install an app, open Settings here and choose Install APK."
+
+    private var withoutApkInstall: Capabilities {
+        var capabilities = Capabilities.device
+        capabilities.apkInstall = false
+        return capabilities
+    }
+
+    /// The tip's words: its keys line always, the line for Install APK only
+    /// when the session can offer the row. It is one tip either way, so a
+    /// person who closed it is not shown it again for the added line.
+    @Test func theTipsWordsAddTheInstallLineOnlyWhenAskedAndKeepTheKeysLine() {
+        let keys = SideKeysTip.words(offersInstall: false)
+        #expect(keys == "Tap for Back, Home and Settings. Hold Power for the power menu. Drag to move.")
+        #expect(SideKeysTip.words(offersInstall: true) == keys + "\n" + Self.installLine)
+        #expect(SideKeysTip(offersInstall: true).id == SideKeysTip(offersInstall: false).id)
+    }
+
+    /// The tip points at Install APK exactly where Settings has the row: a
+    /// normal session of a runtime that installs apps. Recovery runs no adb,
+    /// and a runtime without the install has no row.
+    @Test(arguments: [(true, StartMode.normal), (false, StartMode.normal), (true, StartMode.recovery)])
+    func theTipPointsAtInstallApkOnlyWhereSettingsHasTheRow(_ installs: Bool, _ mode: StartMode) async throws {
+        let run = try await RunningSession(self, capabilities: installs ? .device : withoutApkInstall, mode: mode)
+        defer { run.end() }
+        try #require(await eventually { run.presented != nil }, "the tip did not show")
+        try await Task.sleep(for: .milliseconds(400))
+        let view = try #require(run.presented?.viewIfLoaded)
+        let labels = Self.elements(in: view).map(\.label)
+        let hint = labels.contains { $0.contains("Install APK") }
+        #expect(hint == (installs && mode == .normal), "installs \(installs), \(mode): the tip reads \(labels)")
+        #expect(labels.contains { $0.contains("Hold Power for the power menu") }, "the keys line stays: \(labels)")
+        // The tip's condition is the row's: Settings of this session has the
+        // row exactly when the tip says so.
+        #expect(run.model.capabilities.offersApkInstall(in: mode) == hint)
+    }
+
+    /// At the largest accessibility text size the tip is a card inside the
+    /// screen with all of its text inside the card, with and without the line.
+    @Test(arguments: [true, false])
+    func theTipFitsTheScreenAtTheLargestTextSize(_ installs: Bool) async throws {
+        let run = try await RunningSession(
+            self, capabilities: installs ? .device : withoutApkInstall, contentSize: .accessibilityExtraExtraExtraLarge)
+        defer { run.end() }
+        try #require(await eventually { run.presented != nil }, "the tip did not show")
+        try await Task.sleep(for: .milliseconds(600))
+        let view = try #require(run.presented?.viewIfLoaded)
+        let card = UIAccessibility.convertToScreenCoordinates(view.bounds, in: view)
+        let screen = UIAccessibility.convertToScreenCoordinates(run.lease.window.bounds, in: run.lease.window)
+        #expect(screen.contains(card), "the card \(card) is not inside the screen \(screen)")
+        let text = Self.elements(in: view).filter { !$0.label.isEmpty }
+        try #require(!text.isEmpty, "no text found in the tip")
+        for element in text {
+            #expect(
+                card.insetBy(dx: -1, dy: -1).contains(element.frame),
+                "\(element.label) at \(element.frame) is outside the card \(card)")
+        }
+        #expect(text.contains { $0.label.contains("Install APK") } == installs)
+    }
+
+    /// Every accessibility element of a view tree with its label and screen
+    /// frame, in the order UIKit walks them.
+    static func elements(in root: UIView) -> [(label: String, frame: CGRect)] {
+        var found: [(label: String, frame: CGRect)] = []
+        var seen = Set<ObjectIdentifier>()
+        func walk(_ node: NSObject, depth: Int) {
+            guard depth < 64, seen.insert(ObjectIdentifier(node)).inserted else { return }
+            if let label = node.accessibilityLabel, !label.isEmpty {
+                found.append((label, node.accessibilityFrame))
+            }
+            var children = (node.accessibilityElements ?? []).compactMap { $0 as? NSObject }
+            if let view = node as? UIView { children += view.subviews }
+            for child in children { walk(child, depth: depth + 1) }
+        }
+        walk(root, depth: 0)
+        return found
     }
 }

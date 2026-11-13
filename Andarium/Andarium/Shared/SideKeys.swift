@@ -43,16 +43,22 @@ struct SideKeysOverlay: View {
     /// Counts key presses for the click felt on each one.
     @State private var keyPresses = 0
     @Namespace private var keysSpace
-    private let tip = SideKeysTip()
+    private let tip: SideKeysTip
     /// The tip's popover is up: while the closed keys are on screen and the
     /// tip wants to show.
     @State private var tipShown = false
 
-    init(mode: StartMode, lit: Bool, open: Binding<Bool>, leading: Bool = false, actions: SideKeyActions) {
+    /// `offersInstall` is whether Settings has Install APK in this session
+    /// (`Capabilities.offersApkInstall`), which the tip then says.
+    init(
+        mode: StartMode, lit: Bool, open: Binding<Bool>, leading: Bool = false, offersInstall: Bool,
+        actions: SideKeyActions
+    ) {
         self.mode = mode
         self.lit = lit
         _open = open
         self.actions = actions
+        tip = SideKeysTip(offersInstall: offersInstall)
         _leading = State(initialValue: leading)
     }
 
@@ -489,8 +495,22 @@ struct KeyDeck: View {
 /// Shown once Android has booted, pointing at the side keys. It stops once the
 /// keys have been opened or the tip closed, and appears at most three times.
 nonisolated struct SideKeysTip: Tip {
+    /// Settings has Install APK in this session, so the tip says where. The
+    /// tip is the same one either way (its identity and its count of
+    /// displays do not change), so a person who closed it is not shown it
+    /// again for the added line.
+    let offersInstall: Bool
+
     var title: Text { Text("Side keys") }
-    var message: Text? { Text("Tap for Back, Home and Settings. Hold Power for the power menu. Drag to move.") }
+    var message: Text? { Text(Self.words(offersInstall: offersInstall).keepingTogether) }
+
+    /// The tip's words: the keys, and a second line for Install APK.
+    static func words(offersInstall: Bool) -> String {
+        let keys = String(localized: "Tap for Back, Home and Settings. Hold Power for the power menu. Drag to move.")
+        guard offersInstall else { return keys }
+        return keys + "\n" + String(localized: "To install an app, open Settings here and choose Install APK.")
+    }
+
     var image: Image? { Image(systemName: "hand.tap") }
     var options: [any TipOption] { [MaxDisplayCount(3)] }
 }
