@@ -188,6 +188,16 @@ struct CompassReadoutTests {
             line == "Andarium: compass-check: t=12.500 mount=landscapeLeft acc=2 field=1.500,-2.250,-40.000 "
                 + "grav=0.00000,0.00000,-1.00000 att=1.00000,0.00000,0.00000,0.00000,1.00000,0.00000,0.00000,0.00000,1.00000 "
                 + "heading=123.46")
+        // Nine different numbers, so that a transposed or shuffled matrix, or a swapped gravity axis, cannot print the same line.
+        let rows = CMRotationMatrix(m11: 0.1, m12: 0.2, m13: 0.3, m21: 0.4, m22: 0.5, m23: 0.6, m31: 0.7, m32: 0.8, m33: 0.9)
+        let distinct = CompassReadout.line(
+            timestamp: 0.25, mount: .portrait, accuracy: -1,
+            field: CMMagneticField(x: -7.125, y: 3.5, z: 21.75), gravity: CMAcceleration(x: 0.25, y: -0.5, z: -0.75),
+            attitude: rows, heading: -1)
+        #expect(
+            distinct == "Andarium: compass-check: t=0.250 mount=portrait acc=-1 field=-7.125,3.500,21.750 "
+                + "grav=0.25000,-0.50000,-0.75000 att=0.10000,0.20000,0.30000,0.40000,0.50000,0.60000,0.70000,0.80000,0.90000 "
+                + "heading=-1.00")
     }
 }
 #endif
