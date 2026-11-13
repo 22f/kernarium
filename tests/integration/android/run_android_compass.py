@@ -28,9 +28,10 @@ adds the orientation sensor's argument too). It checks:
   again on the connection that follows; the listener's end says the magnetometer idle.
 
 ``--expect none`` is a release that does not list the sensor: an older release, or this release booted without
-the argument (the default). The guest sends "ANC1" frames (or "ANC2" with ``--with-orientation``) and never
-"ANC3", lists no magnetic field sensor, declares no compass feature, and ends the connection on a magnetic
-field record as it always has.
+the argument (the default), or an older release given it (``--with-argument``: the application passes it to
+every image, and the older one reads it as a property nothing uses). The guest sends "ANC1" frames (or "ANC2"
+with ``--with-orientation``) and never "ANC3", lists no magnetic field sensor, declares no compass feature, and
+ends the connection on a magnetic field record as it always has.
 
 ``--launch-only`` stops each guest once the launch's state is checked: the first thing to run on a new image.
 
@@ -386,13 +387,15 @@ class Host:
 
 # ---- Checks. Each returns a line for the report, or raises Failure.
 
-def launch_state(guest: Guest, compass: bool, with_orientation: bool) -> str:
-    """What the launch's argument decided: the property, the sensors listed (the sub-HAL's own log line says how
+def launch_state(guest: Guest, compass: bool, with_orientation: bool, argument: bool | None = None) -> str:
+    """What the launch's argument decided (``argument``: whether the launch carried it, which is ``compass``
+    unless an older release is given it): the property, the sensors listed (the sub-HAL's own log line says how
     many), the magnetometer's description, the compass feature, and no SELinux denial about the property."""
     notes = []
+    argument = compass if argument is None else argument
     value = guest.shell(f"getprop {COMPASS_PROPERTY}").strip()
-    if value != ("1" if compass else ""):
-        raise Failure(f"getprop {COMPASS_PROPERTY} reads {value!r}, expected {'1' if compass else 'nothing'}")
+    if value != ("1" if argument else ""):
+        raise Failure(f"getprop {COMPASS_PROPERTY} reads {value!r}, expected {'1' if argument else 'nothing'}")
     dump = guest.shell("dumpsys sensorservice")
     sensors = orient.parse_sensor_state(dump)
     for name, kind in (("Host Accelerometer", 1), ("Host Gyroscope", 4)):
@@ -656,6 +659,11 @@ def older_wire(guest: Guest, host: Host, with_orientation: bool) -> str:
 
 # ---- The run.
 
+def passes_argument(options: argparse.Namespace) -> bool:
+    """The launch carries the compass argument for a release that lists the sensor, and for an older one if asked."""
+    return options.expect == "sensor" or options.with_argument
+
+
 def start_guest(options: argparse.Namespace, adb: str, private: pathlib.Path) -> Guest:
     """The orientation runner's launch, with this runner's arguments: the orientation sensor's if asked for and the
     compass argument for ``--expect sensor``."""
@@ -663,18 +671,19 @@ def start_guest(options: argparse.Namespace, adb: str, private: pathlib.Path) ->
         release=options.release, emulator=options.emulator, instance=None, adb_port=options.adb_port,
         cpus=options.cpus, memory=options.memory, boot_timeout=options.boot_timeout,
         no_argument=not options.with_orientation,
-        extra_arguments=[COMPASS_ARGUMENT] if options.expect == "sensor" else [])
+        extra_arguments=[COMPASS_ARGUMENT] if passes_argument(options) else [])
     return orient.start_guest(settings, adb, private, early=None, holder={}, provision=True)
 
 
 def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report) -> None:
     compass = options.expect == "sensor"
-    print(f"expect {options.expect}: booting {'with' if compass else 'without'} {COMPASS_ARGUMENT}"
+    print(f"expect {options.expect}: booting {'with' if passes_argument(options) else 'without'} {COMPASS_ARGUMENT}"
           f"{' and the orientation argument' if options.with_orientation else ''}", flush=True)
     guest = start_guest(options, adb, private / "guest")
     host = Host(guest.forward_port)
     try:
-        report.run("launch state", lambda: launch_state(guest, compass, options.with_orientation))
+        report.run("launch state", lambda: launch_state(
+            guest, compass, options.with_orientation, passes_argument(options)))
         if options.launch_only:
             return
         if not compass:
@@ -701,6 +710,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--release", type=pathlib.Path, help="installed Android release (default: accepted)")
     parser.add_argument("--expect", choices=("sensor", "none"), default="sensor",
                         help="sensor: the release lists the magnetometer when asked; none: it does not")
+    parser.add_argument("--with-argument", action="store_true",
+                        help="with --expect none, pass androidboot.kernarium.compass=1 anyway: an older image "
+                        "given what a newer application always passes")
     parser.add_argument("--with-orientation", action="store_true",
                         help="also pass androidboot.kernarium.orientation=1, as a phone does")
     parser.add_argument("--probe-apk", type=pathlib.Path,

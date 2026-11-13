@@ -441,6 +441,16 @@ class LaunchStateTests(unittest.TestCase):
         older = "I MotionSubHal: Andarium motion: ro.boot.kernarium.orientation=0, 2 sensors"
         self.assertIn("compass=not said", runner.launch_state(self.older_guest(log=older), False, False))
 
+    def test_an_older_release_given_the_argument_reads_it_and_lists_nothing(self) -> None:
+        # The application passes the argument to every image; an older one has the property and no consumer of it.
+        guest = self.older_guest(property_value="1", log="I MotionSubHal: Andarium motion: "
+                                 "ro.boot.kernarium.orientation=0, 2 sensors")
+        self.assertIn("no magnetic field sensor", runner.launch_state(guest, False, False, True))
+        with self.assertRaisesRegex(runner.Failure, "reads '1', expected nothing"):
+            runner.launch_state(guest, False, False)
+        with self.assertRaisesRegex(runner.Failure, "reads '', expected '1'|reads '', expected 1"):
+            runner.launch_state(self.older_guest(), False, False, True)
+
     def test_each_way_the_launch_state_can_be_wrong(self) -> None:
         cases = [
             ("the property is unset", self.sensor_guest(property_value=""), True, "reads ''"),
