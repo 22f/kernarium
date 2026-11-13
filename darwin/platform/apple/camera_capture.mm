@@ -431,9 +431,9 @@ struct RunningCamera : StreamCache {
     AVCaptureDeviceInput* input {};
     AVCaptureVideoDataOutput* videoOutput {};
     AVCapturePhotoOutput* photoOutput {};
-    // When the admission whose photo maximum exceeds the format's size was committed (host nanoseconds); zero if
-    // it does not (stillSettleNanoseconds).
-    std::uint64_t photoMaximumRaisedAt {};
+    // When the photo maximum that exceeds the format's size was committed, by the admission or by a repair of the
+    // anchor (host nanoseconds); zero if there is none (photoMaximumCommittedAt, stillSettleNanoseconds).
+    std::uint64_t photoMaximumCommittedAt {};
     UMLCameraOutputDelegate* delegate {};
     AVCaptureConnection* connection {};
     AVCaptureDeviceFormat* format {};
@@ -893,14 +893,6 @@ public:
         if (!prepareStill(camera)) return false;
         AVCapturePhotoOutput* output = running.photoOutput;
         AVCapturePhotoSettings* settings = nil;
-        // The pipeline applies a maximum that exceeds the format's size some time after the session commits it, and a
-        // capture that starts before is served at the format's size: the first still waits out the rest of that time.
-        // Another attempt of the request (stillSizeOutcome) has waited.
-        if (const std::uint64_t wait = attempt == 1 ? stillSettleNanoseconds(running.photoMaximumRaisedAt, hostNow()) : 0; wait != 0) {
-            std::fprintf(stderr, "Camera: camera %zu: the first still waits %llu ms for the photo output's maximum beyond its format\n", camera,
-                         static_cast<unsigned long long>(wait / 1000000));
-            [NSThread sleepForTimeInterval:double(wait) * 1e-9];
-        }
         // The quality belongs inside the compression properties: iOS raises
         // (NSInvalidArgumentException) for it at the top level, which refused
         // every still there.
@@ -970,9 +962,86 @@ public:
             std::lock_guard lock(photoMutex_);
             photos_[request.token] = {camera, delegate, request, attempt};
         }
+        // The pipeline applies a maximum that exceeds the format's size some time after the session commits it, and a
+        // capture that starts before is served at the format's size: the first still starts when that time has
+        // passed, scheduled on the session's queue, which stays free for the other cameras and the stop meanwhile.
+        // Another attempt of the request (stillSizeOutcome) has waited.
+        if (const std::uint64_t wait = attempt == 1 ? stillSettleNanoseconds(running.photoMaximumCommittedAt, hostNow()) : 0; wait != 0) {
+            std::fprintf(stderr, "Camera: camera %zu: the first still starts in %llu ms, when the photo output's maximum beyond its format has taken effect\n",
+                         camera, static_cast<unsigned long long>(wait / 1000000));
+            scheduleStill(camera, request.token, output, settings, delegate, wait);
+            return true;
+        }
+        return captureStill(camera, output, settings, delegate);
+    }
+
+    bool captureStill(std::size_t camera, AVCapturePhotoOutput* output, AVCapturePhotoSettings* settings, UMLPhotoDelegate* delegate)
+    {
         [output capturePhotoWithSettings:settings delegate:delegate];
         refusals_.reset(camera);
         return true;
+    }
+
+    // Starts a registered capture `wait` nanoseconds from now on the session's queue. The block holds the state, not the
+    // session: a session that ended (stop() clears the state's pointer first and drains the queue after) is not
+    // touched, and one that is running is held by that drain until the block is done.
+    void scheduleStill(std::size_t camera, std::uint64_t token, AVCapturePhotoOutput* output, AVCapturePhotoSettings* settings,
+                       UMLPhotoDelegate* delegate, std::uint64_t wait)
+    {
+        std::shared_ptr<SessionState> state = state_;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, std::int64_t(wait)), queue_, ^{
+            AppleSession* session = nullptr;
+            {
+                std::lock_guard lock(state->mutex);
+                session = static_cast<AppleSession*>(state->session);
+            }
+            if (session == nullptr) {
+                std::fprintf(stderr, "Camera: a scheduled still was dropped: the session ended\n");
+                return;
+            }
+            session->fireStill(camera, token, output, settings, delegate);
+        });
+    }
+
+    // The time of a scheduled capture came (on the session's queue).
+    void fireStill(std::size_t camera, std::uint64_t token, AVCapturePhotoOutput* output, AVCapturePhotoSettings* settings,
+                   UMLPhotoDelegate* delegate)
+    {
+        bool known = false;
+        {
+            std::lock_guard lock(photoMutex_);
+            const auto found = photos_.find(token);
+            known = found != photos_.end() && found->second.camera == camera;
+        }
+        const auto running = cameras_.find(camera);
+        const std::uint64_t committedAt = running == cameras_.end() ? 0 : running->second.photoMaximumCommittedAt;
+        switch (scheduledStillStep(stopped_, known && running != cameras_.end(), committedAt, hostNow())) {
+        case ScheduledStillStep::drop:
+            std::fprintf(stderr, "Camera: a scheduled still was dropped: the session ended or the request is gone\n");
+            return;
+        case ScheduledStillStep::waitAgain:
+            scheduleStill(camera, token, output, settings, delegate, stillSettleNanoseconds(committedAt, hostNow()));
+            return;
+        case ScheduledStillStep::fire:
+            break;
+        }
+        bool started = false;
+        @try {
+            started = captureStill(camera, output, settings, delegate);
+        } @catch (NSException* exception) {
+            refuse(camera, Refusal::raised, std::string("a still: ") + exception.reason.UTF8String);
+        }
+        // The capture fails at once: the guest is told, never left to wait for it.
+        if (!started) failStill(camera, token);
+    }
+
+    // The result of a capture that cannot be made, delivered at once (the retry's failure and a scheduled capture's).
+    void failStill(std::size_t camera, std::uint64_t token)
+    {
+        CameraStillResult failed;
+        failed.token = token;
+        std::lock_guard lock(state_->mutex);
+        if (state_->session) deliverStill(camera, std::move(failed));
     }
 
     void stop() override
@@ -1096,12 +1165,8 @@ public:
         } @catch (NSException* exception) {
             refuse(camera, Refusal::raised, std::string("a still: ") + exception.reason.UTF8String);
         }
-        if (started) return;
         // The capture fails at once: the guest is told, never left to wait for it.
-        CameraStillResult failed;
-        failed.token = token;
-        std::lock_guard lock(state_->mutex);
-        if (state_->session) deliverStill(camera, std::move(failed));
+        if (!started) failStill(camera, token);
     }
 
     // The device's own state now: its 3A states, white balance, zoom, lens and
@@ -1255,7 +1320,6 @@ private:
         UMLCameraOutputDelegate* newDelegate = nil;
         AVCaptureConnection* newConnection = nil;
         AVCapturePhotoOutput* newPhoto = nil;
-        bool newPhotoExceedsFormat = false;
         AdmitPlan plan;
         plan.addInput = running.input == nil;
         plan.activate = plan.addInput || video;
@@ -1346,7 +1410,6 @@ private:
                 const auto setMaximum = [&](CameraStillSize size) -> bool {
                     @try {
                         output.maxPhotoDimensions = CMVideoDimensions {std::int32_t(size.width), std::int32_t(size.height)};
-                        newPhotoExceedsFormat = photoMaximumExceedsFormat({anchor->facts.width, anchor->facts.height}, size);
                         return true;
                     } @catch (NSException* exception) {
                         // The first refusal's detail is the one logged; the admission's own
@@ -1415,7 +1478,8 @@ private:
         }
         if (newPhoto != nil) {
             running.photoOutput = newPhoto;
-            running.photoMaximumRaisedAt = newPhotoExceedsFormat ? hostNow() : 0;
+            running.photoMaximumCommittedAt = uml::platform::photoMaximumCommittedAt(
+                photoMaximum(anchor->facts, limits_.maximumStillPixels), {anchor->facts.width, anchor->facts.height}, hostNow());
         }
         running.format = anchor->format;
         // The timing written again is known; what was applied before is written again after it.
@@ -1562,6 +1626,10 @@ private:
             return true;
         });
         [session_ commitConfiguration];
+        // The photo maximum was written again: the pipeline takes its time again.
+        if (ok && running.photoOutput != nil)
+            running.photoMaximumCommittedAt = uml::platform::photoMaximumCommittedAt(
+                photoMaximum(anchor->facts, limits_.maximumStillPixels), {anchor->facts.width, anchor->facts.height}, hostNow());
         // A stream's durations are written with its anchor; a still-only camera's are written when it streams.
         if (ok && running.video) running.timingWritten();
         if (ok && running.applied) applyOnQueue(camera, running.settings, true);

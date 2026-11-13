@@ -142,6 +142,33 @@ void aMaximumBeyondTheFormatIsGivenTimeToTakeEffectBeforeTheFirstStill()
     require(stillSettleNanoseconds(raisedAt, raisedAt + 10 * settle) == 0, "nor long after");
     require(stillSettleNanoseconds(raisedAt, raisedAt - 1) == settle, "a clock that reads before the commit waits the whole time");
     require(settle > 0 && settle < 1'000'000'000, "a wait the guest does not notice as a stall");
+
+    // What a camera records at admission and at the repair of its anchor, by the same function.
+    constexpr CameraStillSize format {4032, 3024};
+    require(photoMaximumCommittedAt(CameraStillSize {8064, 6048}, format, 7) == 7, "a maximum beyond the format is stamped with the time");
+    require(photoMaximumCommittedAt(CameraStillSize {4032, 3024}, format, 7) == 0, "one within the format records nothing to wait for");
+    require(photoMaximumCommittedAt(std::nullopt, format, 7) == 0, "a format that lists no size records none");
+    // A repair commits again: the stamp moves forward, and the wait with it.
+    const std::uint64_t admitted = photoMaximumCommittedAt(CameraStillSize {8064, 6048}, format, raisedAt);
+    const std::uint64_t repaired = photoMaximumCommittedAt(CameraStillSize {8064, 6048}, format, raisedAt + 5 * settle);
+    require(stillSettleNanoseconds(admitted, raisedAt + 5 * settle) == 0, "the admission's time has passed");
+    require(stillSettleNanoseconds(repaired, raisedAt + 5 * settle) == settle, "a still right after the repair waits the whole time again");
+}
+
+void aScheduledStillFiresWaitsAgainOrIsDropped()
+{
+    constexpr std::uint64_t committed = 5'000'000'000;
+    constexpr std::uint64_t settle = photoOutputSettleNanoseconds;
+    using Step = ScheduledStillStep;
+    require(scheduledStillStep(false, true, committed, committed + settle) == Step::fire, "its time has come: it starts");
+    require(scheduledStillStep(false, true, committed, committed + settle + 1) == Step::fire, "and after");
+    require(scheduledStillStep(false, true, committed + 2 * settle, committed + settle) == Step::waitAgain,
+            "a repair committed again since: it waits the rest of that");
+    require(scheduledStillStep(true, true, committed, committed + settle) == Step::drop, "a stop inside the settle time drops it");
+    require(scheduledStillStep(true, true, committed, committed) == Step::drop, "also at once");
+    require(scheduledStillStep(false, false, committed, committed + settle) == Step::drop, "a request that is gone is not started");
+    require(scheduledStillStep(true, false, committed, committed + settle) == Step::drop, "nor when the session ended and it is gone");
+    require(scheduledStillStep(false, true, 0, committed) == Step::fire, "a camera with nothing to wait for starts it");
 }
 
 // A photo output as AVFoundation treats it: its maximum is refused (it raises)
@@ -312,6 +339,7 @@ int main()
     theResolvedSizeIsTheRequestOrItIsRefused();
     aPhotoOfAnotherSizeIsMadeAgainOnceAndThenFails();
     aMaximumBeyondTheFormatIsGivenTimeToTakeEffectBeforeTheFirstStill();
+    aScheduledStillFiresWaitsAgainOrIsDropped();
     theOutputIsAttachedBeforeItsMaximumIsSet();
     aMaximumTheSourceRefusesDetachesTheOutput();
     anOutputThatCannotBeAttachedGetsNoMaximum();

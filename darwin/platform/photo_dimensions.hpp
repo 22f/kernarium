@@ -106,10 +106,29 @@ enum class PhotoOutputPreparation : std::uint8_t {
 // committed before a capture is served at the new size.
 inline constexpr std::uint64_t photoOutputSettleNanoseconds = 300'000'000;
 
+// What a camera records when it commits a photo output's maximum (at admission
+// and when its anchor is repaired, the same bookkeeping): `now` when the
+// maximum exceeds the format's size, zero (nothing to wait for) when there is
+// none or it does not.
+[[nodiscard]] std::uint64_t photoMaximumCommittedAt(std::optional<CameraStillSize> maximum, CameraStillSize format,
+                                                    std::uint64_t now) noexcept;
+
 // How long a capture waits before it starts: the rest of the settle time
-// since `raisedAt` (host nanoseconds when the maximum that exceeds its format
-// was committed; zero when it does not), zero once it has passed.
-[[nodiscard]] std::uint64_t stillSettleNanoseconds(std::uint64_t raisedAt, std::uint64_t now) noexcept;
+// since `committedAt` (photoMaximumCommittedAt), zero once it has passed or
+// when there is nothing to wait for.
+[[nodiscard]] std::uint64_t stillSettleNanoseconds(std::uint64_t committedAt, std::uint64_t now) noexcept;
+
+// What a capture scheduled for the end of the settle time does when its time
+// comes: it starts, waits the rest of a later commit (a repair of the anchor
+// since), or is dropped because the session ended or the request is gone (a
+// stop inside the settle time).
+enum class ScheduledStillStep : std::uint8_t {
+    fire,
+    waitAgain,
+    drop,
+};
+[[nodiscard]] ScheduledStillStep scheduledStillStep(bool sessionEnded, bool requestKnown, std::uint64_t committedAt,
+                                                    std::uint64_t now) noexcept;
 
 // What a finished capture whose photo is not the size asked for leads to. A
 // capture that starts before the settle time has passed can still be served at

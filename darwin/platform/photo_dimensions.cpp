@@ -131,11 +131,22 @@ bool photoMaximumExceedsFormat(CameraStillSize format, CameraStillSize maximum) 
     return std::uint64_t(maximum.width) * maximum.height > std::uint64_t(format.width) * format.height;
 }
 
-std::uint64_t stillSettleNanoseconds(std::uint64_t raisedAt, std::uint64_t now) noexcept
+std::uint64_t photoMaximumCommittedAt(std::optional<CameraStillSize> maximum, CameraStillSize format, std::uint64_t now) noexcept
 {
-    if (raisedAt == 0) return 0;
-    const std::uint64_t elapsed = now > raisedAt ? now - raisedAt : 0;
+    return maximum && photoMaximumExceedsFormat(format, *maximum) ? now : 0;
+}
+
+std::uint64_t stillSettleNanoseconds(std::uint64_t committedAt, std::uint64_t now) noexcept
+{
+    if (committedAt == 0) return 0;
+    const std::uint64_t elapsed = now > committedAt ? now - committedAt : 0;
     return elapsed >= photoOutputSettleNanoseconds ? 0 : photoOutputSettleNanoseconds - elapsed;
+}
+
+ScheduledStillStep scheduledStillStep(bool sessionEnded, bool requestKnown, std::uint64_t committedAt, std::uint64_t now) noexcept
+{
+    if (sessionEnded || !requestKnown) return ScheduledStillStep::drop;
+    return stillSettleNanoseconds(committedAt, now) != 0 ? ScheduledStillStep::waitAgain : ScheduledStillStep::fire;
 }
 
 StillSizeOutcome stillSizeOutcome(CameraStillSize resolved, CameraStillSize requested, unsigned attempt) noexcept
