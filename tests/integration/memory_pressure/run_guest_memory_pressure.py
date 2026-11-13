@@ -52,9 +52,9 @@ from guest import Guest  # noqa: E402
 
 
 GUEST_MEMORY = "1G"
-# The least the guest's page cache must grow by to make the trim worth seeing.
-# The trimmer is on while the second fill reads, so the growth is what the
-# reads add less what a pass of the trimmer took meanwhile.
+# The least the guest's page cache must grow by to make the trim worth seeing;
+# the trimmer is on by design during the second fill, so the growth is net of
+# its passes.
 MINIMUM_FILL_KIB = 32 * 1024
 # What a response must release from the guest and from the page cache.
 MINIMUM_RELEASE_MIB = 16
