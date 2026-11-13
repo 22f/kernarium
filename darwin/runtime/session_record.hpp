@@ -38,7 +38,17 @@ namespace uml::runtime {
  * (console_init_observed), which the emulator reports as the run's end and an
  * application's restart loop reads. The output is read where it is written to
  * stdout, stderr and the descriptors the `con` and `ssl` arguments name with
- * fd:, so a console on anything else shows none of it.
+ * fd:, so a console on anything else shows none of it. For a guest whose
+ * console reports its boot (set_session_boot_facts) the state also says "boot
+ * completed", "boot unfinished" (init's output was seen, the boot did not
+ * finish) or "boot unobserved" (neither was seen), and "restarts N". While the
+ * boot has not completed the checkpoint thread rewrites the state with the
+ * output so far whenever the output grew, so a process that is killed
+ * mid-boot leaves where the boot had got; an end that the guest or the person
+ * chose (a power-off, a restart, a stop) quotes the output too. The output a
+ * record quotes is that of its own boot: what an earlier boot of the process
+ * printed is not in it. An end is the last write of the state: a checkpoint
+ * whose write lands after it, however late, writes the end's record again.
  *
  * Every memory_checkpoint_interval_ms while a session runs, a thread of the
  * record's own writes the process's footprint, its peak and what its memory
@@ -99,9 +109,9 @@ inline constexpr std::size_t session_network_offset =
 inline constexpr std::size_t session_state_offset =
 	session_network_offset + session_network_slot_bytes;
 /* The kernel output the state quotes, and the most the state ever takes: its
- * lines, a message and that output. Once the ring has dropped output the state
- * quotes it from its first complete line, with the guest's serial number
- * masked. */
+ * lines, a message and that output, which is the boot's own. Once the ring has
+ * dropped output of that boot the state quotes it from its first complete
+ * line, with the guest's serial number masked. */
 inline constexpr std::size_t session_kernel_output_bytes = 4096;
 inline constexpr std::size_t session_state_max_bytes =
 	session_kernel_output_bytes + 1024;
@@ -227,8 +237,20 @@ void end_session_record(SessionEnd end, int status,
  * that the crash report, which shows thread names, says why. */
 void record_kernel_crash() noexcept;
 
-/* Writes the memory slot now; the checkpoint thread calls it. */
+/* Writes the memory slot, the network slot and, for a guest whose boot is
+ * unfinished (set_session_boot_facts), the state with the output so far now;
+ * the checkpoint thread calls it. */
 void checkpoint_session_memory() noexcept;
+
+/* What the host that runs the guest knows of its boots, for the state the
+ * record keeps: whether the guest's console reports a finished boot (an
+ * Android guest's does, a Linux desktop guest's does not) and how many times
+ * the guest restarted in this process before the session that begins. Set it
+ * before each run; any thread. For a guest that reports its boot the state
+ * says "boot completed", "boot unfinished" or "boot unobserved" and "restarts
+ * N"; for the others it says none and the checkpoints leave the state alone. */
+void set_session_boot_facts(bool console_reports_completion,
+	unsigned restarts) noexcept;
 
 /* Whether a session is writing to a record file. */
 [[nodiscard]] bool session_record_open() noexcept;
@@ -259,8 +281,8 @@ ssize_t kernel_write(int descriptor, const void *buffer, std::size_t length)
  * thread. */
 [[nodiscard]] bool console_init_observed() noexcept;
 
-/* What the record holds of the kernel's output: the last bytes, oldest first,
- * copied into `buffer`. For tests. */
+/* What the record holds of the kernel's output since the session began: the
+ * last bytes, oldest first, copied into `buffer`. For tests. */
 std::size_t kernel_output_tail(std::span<char> buffer) noexcept;
 
 /* The message of the last "Darwin UML panic: " line in `output`, or empty. */

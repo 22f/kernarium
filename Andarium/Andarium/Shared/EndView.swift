@@ -1,22 +1,26 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import AndariumCore
 import SwiftUI
 import UIKit
 
 /// An unclean end requires a fresh process before the guest can start again.
+/// One the person chose, with Stop on the boot screen's notice, says so and
+/// is not drawn as a fault.
 struct EndView: View {
     @Environment(AppModel.self) private var model
     @State private var copied = false
 
     var body: some View {
+        let stopped = model.runEnd.stoppedByUser
         VStack(spacing: 0) {
             Spacer(minLength: 24)
-            StackMark(lit: false, width: 140, fault: true)
+            StackMark(lit: false, width: 140, fault: !stopped)
                 .padding(.bottom, 36)
-            Text("The virtual machine stopped unexpectedly")
+            Text(stopped ? "You stopped the virtual machine" : "The virtual machine stopped unexpectedly")
                 .font(.title2.weight(.bold))
                 .multilineTextAlignment(.center)
-            Text("To start it again, close Andarium and open it again.")
+            Text("To start it again, close Andarium in the App Switcher and open it again.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

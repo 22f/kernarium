@@ -54,6 +54,17 @@ uml_add_unit_test(
     COMMAND uml_runtime_session_record_tests
         ${PROJECT_SOURCE_DIR}/tests/unit/andarium/fixtures/network-slot-golden.txt)
 
+# The same record against a state checkpoint that is delayed past an end: the
+# binary defines pwrite to hold one write, so it is a binary of its own.
+add_executable(uml_runtime_session_record_delayed_checkpoint_tests
+    session_record_delayed_checkpoint_tests.cpp)
+target_link_libraries(uml_runtime_session_record_delayed_checkpoint_tests PRIVATE
+    UML::RuntimeSessionRecord
+    UML::RuntimeGuestStatistics)
+uml_add_unit_test(
+    NAME runtime-session-record-delayed-checkpoint
+    COMMAND uml_runtime_session_record_delayed_checkpoint_tests)
+
 # The console's word that an Android guest finished booting, which the
 # emulator reports at a run's end and an application's restart loop reads.
 add_executable(uml_runtime_console_boot_signal_tests

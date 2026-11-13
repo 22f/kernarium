@@ -31,6 +31,7 @@ extension View {
     /// Presents Send feedback over Home or Settings. It stays over Settings,
     /// which does not close beneath it, so a bug report made from the sheet
     /// leaves the session as it was.
+    ///
     func sendFeedbackSheet(_ app: AppModel) -> some View {
         sheet(isPresented: Binding(get: { app.feedbackSheetOpen }, set: { app.feedbackSheetOpen = $0 })) {
             SendFeedbackSheet(app: app)
@@ -45,6 +46,27 @@ extension View {
             guard app.feedbackServices.previewOpensAtLaunch else { return }
             try? await Task.sleep(for: .milliseconds(1600))
             app.feedbackSheetOpen = true
+        }
+        #endif
+    }
+
+    /// Presents the Send feedback sheet the boot screen's notice opens, from
+    /// the root, which every phase is under: the sheet and what the person
+    /// typed in it stay up when the boot completes, restarts or ends. Its own
+    /// flag keeps it apart from Home's and Settings' presenters.
+    func sendFeedbackFromBootSheet(_ app: AppModel) -> some View {
+        sheet(isPresented: Binding(get: { app.feedbackFromBoot }, set: { app.feedbackFromBoot = $0 })) {
+            SendFeedbackSheet(app: app)
+                .environment(app)
+                .statusBarHidden(app.virtualMachineRuns)
+        }
+        #if !APP_STORE
+        .task {
+            // The Simulator preview opens it over the boot screen once that has
+            // settled; only `feedback-boot…` shots ask.
+            guard app.feedbackServices.previewOpensOverBoot else { return }
+            try? await Task.sleep(for: .milliseconds(1600))
+            app.feedbackFromBoot = true
         }
         #endif
     }
