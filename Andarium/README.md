@@ -367,15 +367,16 @@ control out.
   [Android README](../android/lineage-24/README.md#guest-instance-storage) and
   `StartPlan` is what Home shows of them before Start. An update clones
   `data.img` first (the update's copy, until the updated Android has booted),
-  and Erase virtual machine deletes everything the guest has stored, its snapshots and
-  the adb key included.
+  and Erase virtual machine deletes everything the guest has stored, its snapshots,
+  the adb key and its installation identity included.
 - **Backup.** The guest is left out of iCloud and computer backups unless the
   user turns on Include in backups. Its snapshots are never backed up.
 - **Snapshots.** A snapshot is an APFS clone of `data.img` with a copy of
   `instance.json`, in `Library/Guest/Snapshots/` (`SnapshotStore`): it costs
   nothing when made and then the blocks the guest rewrites. It keeps the data
   and the record of its Android, not the guest's choices, the system disk or
-  the adb key. Create, Restore and Delete run only while the guest is stopped
+  the adb key; a restore keeps the installation's identity. Create, Restore and
+  Delete run only while the guest is stopped
   (Home, with no run active, pending or launching, since iOS takes no file lock
   on the disk), and Create only after Android's own shut down and with no
   update unfinished and on a volume that clones. Restore replaces the data and

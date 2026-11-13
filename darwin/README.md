@@ -150,6 +150,9 @@ patches provide the behaviors the `slirp-network-*` tests check.
   what SLiRP holds for it, and never aborts; a connect the host stack refuses
   is answered with ICMP net-unreachable (port 0 excepted); ICMP echo is
   forwarded as a router would.
+- The guest's hardware address is the provider's default until the launcher sets
+  one (`--net-mac`, `uml_slirp_net_set_mac`), and the provider's ARP, DHCP and
+  DNS answers follow the guest's own address (`slirp-network-guest-mac`).
 - The provider answers the guest's name server itself, through the host's system
   resolver, and SLiRP's own DNS proxy is off: the proxy would send queries from
   the application to a local-network router, which needs the Local Network

@@ -19,6 +19,7 @@ __import__("sys").dont_write_bytecode = True
 import argparse
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import signal
@@ -126,6 +127,26 @@ def positive_integer(value: str) -> int:
     return parsed
 
 
+def serial_number(value: str) -> str:
+    """A serial the guest can have: the platform's own form, and not "unknown"."""
+    if re.fullmatch(r"[0-9A-Za-z]{6,20}", value) is None or value.lower() == "unknown":
+        raise argparse.ArgumentTypeError(
+            "must be 6 to 20 letters and digits, and not 'unknown'"
+        )
+    return value
+
+
+def unicast_mac(value: str) -> str:
+    """A hardware address aa:bb:cc:dd:ee:ff whose group bit is clear and that
+    is not all zero, in the emulator's spelling."""
+    if re.fullmatch(r"[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}", value) is None:
+        raise argparse.ArgumentTypeError("must be aa:bb:cc:dd:ee:ff")
+    octets = [int(part, 16) for part in value.split(":")]
+    if octets[0] & 1 or not any(octets):
+        raise argparse.ArgumentTypeError("must be a unicast address")
+    return value.lower()
+
+
 def port_number(value: str) -> int:
     parsed = positive_integer(value)
     if parsed > 65535:
@@ -167,8 +188,29 @@ def parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespac
         "--instance",
         type=Path,
         help=(
-            "directory of the guest instance: its data.img, instance.json and "
-            "update snapshot (default: android-17 below .build/android/instances)"
+            "directory of the guest instance: its data.img, instance.json, "
+            "identity.json and update snapshot (default: android-17 below "
+            ".build/android/instances)"
+        ),
+    )
+    parser.add_argument(
+        "--serialno",
+        type=serial_number,
+        help=(
+            "the guest's serial number, 6 to 20 letters and digits, for a run "
+            "that must have a fixed one; the instance's identity file is then "
+            "neither read nor written, and the eth0 address stays the user "
+            "network's default unless --eth-mac gives one"
+        ),
+    )
+    parser.add_argument(
+        "--eth-mac",
+        type=unicast_mac,
+        metavar="AA:BB:CC:DD:EE:FF",
+        help=(
+            "eth0's hardware address, a unicast address, for a run that must "
+            "have a fixed one; like --serialno it excludes the instance's "
+            "identity file"
         ),
     )
     parser.add_argument(
@@ -201,7 +243,7 @@ def parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespac
     update.add_argument(
         "--reset",
         action="store_true",
-        help="delete the instance (data disk, state, snapshots) and create it anew",
+        help="delete the instance (data disk, state, identity, snapshots) and create it anew",
     )
     parser.add_argument(
         "--emulator",
@@ -451,6 +493,19 @@ def build_commands(cmake: Path) -> list[list[str]]:
     ]
 
 
+def identity_arguments(options: argparse.Namespace, data_disk: Path) -> list[str]:
+    """What tells this installation from another: the identity file beside its
+    data disk, which the emulator makes when it is absent and when the data disk
+    is new, or the values a run states for itself, which exclude the file."""
+    stated = [
+        *([f"--android-serialno={options.serialno}"] if options.serialno else []),
+        *([f"--net-mac={options.eth_mac}"] if options.eth_mac else []),
+    ]
+    if stated:
+        return stated
+    return [f"--android-identity={data_disk.parent / android_instance.IDENTITY_FILE}"]
+
+
 def emulator_command(
     options: argparse.Namespace,
     release: Path,
@@ -463,6 +518,7 @@ def emulator_command(
         f"--android-release={release}",
         f"--android-data-disk={data_disk}",
         *([f"--android-data-gib={data_gib}"] if data_gib is not None else []),
+        *identity_arguments(options, data_disk),
         f"--android-boot-mode={options.boot_mode}",
         f"--net-forward=tcp:127.0.0.1:{options.adb_port}-{GUEST_ADB_PORT}",
         "--gpu",
