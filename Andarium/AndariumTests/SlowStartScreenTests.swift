@@ -285,9 +285,10 @@ struct SlowStartScreenTests {
     }
 
     /// UIKit presents the alert, and the sheet the notice opens, in the
-    /// appearance of the screen under them: dark over the boot's dark screen
-    /// when the system's is light, and the system's over Recovery's own. A
-    /// light alert over the dark screen has its buttons unreadable.
+    /// appearance of the window: dark while the boot's dark screen is in it
+    /// when the system's is light, and the system's over Recovery's own, and
+    /// the window gets its own appearance back when the boot ends. A light
+    /// alert over the dark screen has its buttons unreadable.
     @Test(arguments: [BootKind.normal, .recovery]) func theAlertAndTheSheetTakeTheAppearanceOfTheScreenUnderThem(
         kind: BootKind
     ) async throws {
@@ -333,11 +334,20 @@ struct SlowStartScreenTests {
         let alert = try await presented(
             { fixture.model.askToStop() }, gone: { fixture.model.confirmingStop = false })
         #expect(alert == expected, "the Stop alert is not in the screen's appearance")
+        #expect(lease.window.overrideUserInterfaceStyle == (kind == .recovery ? .light : .dark))
         #if FEEDBACK_MAIL
         let sheet = try await presented(
             { fixture.model.feedbackFromBoot = true }, gone: { fixture.model.feedbackFromBoot = false })
         #expect(sheet == expected, "the sheet is not in the screen's appearance")
         #endif
+        // What follows the boot is in the appearance the window had.
+        fixture.model.finishBoot(kind)
+        let leaving = ContinuousClock.now + .seconds(5)
+        while lease.window.overrideUserInterfaceStyle != .light, ContinuousClock.now < leaving {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(lease.window.overrideUserInterfaceStyle == .light, "the window kept the boot screen's appearance")
+        #expect(host.traitCollection.userInterfaceStyle == .light)
     }
 
     @Test func theDialogGoesWithTheStartItWasAskedFor() {

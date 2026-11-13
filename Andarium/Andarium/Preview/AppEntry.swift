@@ -182,6 +182,16 @@ struct AppEntry {
             if stopping { _ = model.slowStart.requestStop() }
         }
 
+        /// A tap on Stop comes long after the screen's first frame; a dialog
+        /// asked for in it is presented before the screen has put its
+        /// appearance on the window, and takes the system's.
+        func asksToStopOnceSettled() {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(1600))
+                model.confirmingStop = true
+            }
+        }
+
         switch screen {
         case "home-new":
             model.guest = Guest.fresh(on: host)
@@ -307,11 +317,11 @@ struct AppEntry {
         case "boot-slow-stop":
             // Stop chosen: the dialog that asks first.
             slowBoot(stage: 3, seconds: 197)
-            model.confirmingStop = true
+            asksToStopOnceSettled()
         case "boot-slow-recovery-stop":
             // The same dialog over Recovery's own, light screen.
             slowBoot(.recovery, stage: 3, seconds: 197)
-            model.confirmingStop = true
+            asksToStopOnceSettled()
         case "boot-slow-storage":
             // The same notice over an earlier step, as a start stuck on the disk shows it.
             slowBoot(stage: 2, seconds: 184)

@@ -58,11 +58,12 @@ struct BootView: View {
         .onCardHalf(.boot)
         .background { backdrop }
         // The screen is dark over the guest's display, whatever the system's
-        // appearance is. The preference reaches what UIKit presents over it:
-        // the Stop alert and the feedback sheet take the screen's appearance,
-        // not the system's. Recovery's own screen follows the system, and so
-        // does what follows the boot.
-        .preferredColorScheme(dimmed ? .dark : nil)
+        // appearance is. UIKit presents the Stop alert and the feedback sheet
+        // in the window's appearance, which a SwiftUI preference leaves
+        // alone: the window is asked for dark while this screen is in it.
+        // Recovery's own screen follows the system, and so does what follows
+        // the boot.
+        .background { if dimmed { DarkWindow() } }
         .environment(\.colorScheme, dimmed ? .dark : colorScheme)
         .statusBarHidden(true)
         .task {
@@ -110,6 +111,12 @@ struct BootView: View {
 
     /// The guest's display shows through, dimmed, on every boot but Recovery's.
     private var dimmed: Bool { kind != .recovery }
+
+    /// The dark screen asks for a dark alert; Recovery's follows the system's.
+    private var alertIsDark: Bool { dimmed || colorScheme == .dark }
+
+    /// The app's teal, lightened for the dark alert's buttons.
+    private static let darkAlertTint = Color(red: 0.36, green: 0.82, blue: 0.78)
 
     @ViewBuilder
     private var backdrop: some View {
@@ -177,6 +184,10 @@ struct BootView: View {
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .contentTransition(.numericText())
+                    // The time keeps its width; the state beside it is the one
+                    // that wraps or shrinks.
+                    .lineLimit(1)
+                    .fixedSize()
             }
         }
         .padding(.horizontal, 24)
@@ -335,6 +346,10 @@ struct BootView: View {
             } message: {
                 Text("To start it again, close Andarium in the App Switcher and open it again.")
             }
+            // Cancel takes the tint: the app's teal is 2.1:1 to 2.3:1 on the
+            // dark alert's glass, this one 4.1:1 to 4.7:1. After the alert,
+            // so the alert is inside it; Stop's own red is inside it too.
+            .tint(alertIsDark ? Self.darkAlertTint : Color.accentColor)
             #if FEEDBACK_MAIL
             if model.feedbackAddress != nil {
                 Button {
@@ -565,5 +580,56 @@ struct PulsingDot: View {
             .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: dim)
             .onAppear { dim = true }
             .accessibilityHidden(true)
+    }
+}
+
+/// Puts a dark appearance on the window the boot screen is in, for as long as
+/// it is there. Windows are counted, so a screen that replaces another in the
+/// window leaves the appearance it was given back and not the dark one.
+private struct DarkWindow: UIViewRepresentable {
+    func makeUIView(context: Context) -> WindowStyleView { WindowStyleView() }
+    func updateUIView(_ view: WindowStyleView, context: Context) {}
+
+    @MainActor
+    final class Loan {
+        weak var window: UIWindow?
+        var users = 0
+        let before: UIUserInterfaceStyle
+        init(window: UIWindow) {
+            self.window = window
+            before = window.overrideUserInterfaceStyle
+        }
+    }
+
+    @MainActor private static var loans: [ObjectIdentifier: Loan] = [:]
+
+    @MainActor static func take(_ window: UIWindow) {
+        let key = ObjectIdentifier(window)
+        let loan: Loan
+        if let held = loans[key], held.window === window {
+            loan = held
+        } else {
+            loan = Loan(window: window)
+            loans[key] = loan
+        }
+        loan.users += 1
+        window.overrideUserInterfaceStyle = .dark
+    }
+
+    @MainActor static func give(_ window: UIWindow) {
+        let key = ObjectIdentifier(window)
+        guard let loan = loans[key], loan.window === window else { return }
+        loan.users -= 1
+        guard loan.users <= 0 else { return }
+        window.overrideUserInterfaceStyle = loan.before
+        loans[key] = nil
+    }
+
+    final class WindowStyleView: UIView {
+        override func willMove(toWindow newWindow: UIWindow?) {
+            super.willMove(toWindow: newWindow)
+            if let window { DarkWindow.give(window) }
+            if let newWindow { DarkWindow.take(newWindow) }
+        }
     }
 }
