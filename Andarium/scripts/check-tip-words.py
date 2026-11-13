@@ -8,7 +8,9 @@ premium access, or quotes a token amount or balance, in any language the table
 has: the English words, and the Chinese and Japanese ones that say the same.
 The table also says plainly, in the statement string, that a tip is a voluntary
 one-time purchase and that every feature is free either way, and the statement
-says it in every language the table has: each storefront reads its own. A tip is
+says it in every language the table has: each storefront reads its own. A no-break
+space reads as a space and a word joiner (U+2060), which ties the last characters
+of a Chinese or Japanese text so that none wraps alone, as nothing. A tip is
 打赏 in Simplified Chinese and 贊助 in Traditional Chinese, and neither language
 uses the other's word or 小费.
 
@@ -113,20 +115,26 @@ def statement_problems(texts: list[tuple[str, str, str]], name: str, languages: 
     return found
 
 
+def plain(text: str) -> str:
+    """The text as it reads: a no-break space is a space, and a word joiner, which ties the
+    last characters of a Chinese or Japanese line (and says nothing), is nothing."""
+    return text.replace("\u2060", "").replace("\u00a0", " ")
+
+
 def texts_of_catalog(data: dict) -> list[tuple[str, str, str]]:
     """(key, language, text) for every key of a String Catalog (the key itself is
     the source language's text) and every value localized for it."""
     source = data.get("sourceLanguage", "en")
     found = []
     for key, entry in data.get("strings", {}).items():
-        found.append((key, source, key))
+        found.append((plain(key), source, plain(key)))
         for language, localization in (entry.get("localizations") or {}).items():
             units = []
             if "stringUnit" in localization:
                 units.append(localization["stringUnit"])
             for variation in (localization.get("variations") or {}).values():
                 units.extend(item.get("stringUnit", {}) for item in variation.values())
-            found.extend((key, language, unit["value"]) for unit in units if isinstance(unit.get("value"), str))
+            found.extend((plain(key), language, plain(unit["value"])) for unit in units if isinstance(unit.get("value"), str))
     return found
 
 
@@ -139,12 +147,12 @@ def texts_of_strings(path: Path) -> list[tuple[str, str, str]]:
         table = plistlib.loads(raw)
     except (plistlib.InvalidFileException, ValueError):
         # An old-style text file: UTF-16 with a mark, or UTF-8.
-        text = raw.decode("utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8", errors="replace")
+        text = plain(raw.decode("utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8", errors="replace"))
         return [(text[:40], language, text)]
     found = []
     for key, value in table.items():
-        found.append((str(key), language, str(key)))
-        found.extend((str(key), language, text) for text in flatten(value))
+        found.append((plain(str(key)), language, plain(str(key))))
+        found.extend((plain(str(key)), language, plain(text)) for text in flatten(value))
     return found
 
 

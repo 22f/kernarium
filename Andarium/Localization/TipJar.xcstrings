@@ -1,19 +1,19 @@
 {
   "sourceLanguage": "en",
   "strings": {
-    "A tip is a voluntary one-time purchase that supports Andarium’s development. Every feature is free either way.": {
-      "comment": "The plain statement under the chat, as a centred note. It must say that a tip is voluntary, one-time and a purchase, and that every feature is free whether or not someone tips.",
+    "A tip is a voluntary one-time purchase that supports Andarium’s development. Every feature is free either way.": {
+      "comment": "The plain statement under the chat, as a centred note. It must say that a tip is voluntary, one-time and a purchase, and that every feature is free whether or not someone tips. Its last two words are tied with a no-break space (U+00A0) so that the last one does not wrap alone; a translation ties its last words the same way, and in Chinese and Japanese with U+2060 between the characters.",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "A tip is a voluntary one-time purchase that supports Andarium’s development. Every feature is free either way."
+            "value": "A tip is a voluntary one-time purchase that supports Andarium’s development. Every feature is free either way."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "チップは、Andariumの開発を支える任意の一回限りの購入です。チップの有無にかかわらず、すべての機能は無料です。"
+            "value": "チップは、Andariumの開発を支える任意の一回限りの購入です。チップの有無にかかわらず、すべての機能は無⁠料⁠で⁠す⁠。"
           }
         },
         "zh-Hans": {
@@ -117,19 +117,19 @@
         }
       }
     },
-    "Developers used to run on coffee.": {
-      "comment": "First message of the chat: the joke begins. It runs on, and ends in the next message.",
+    "Developers used to run on coffee.": {
+      "comment": "First message of the chat: the joke begins. It runs on, and ends in the next message. Its last two words are tied with a no-break space (U+00A0) so that the last one does not wrap alone; a translation ties its last words the same way, and in Chinese and Japanese with U+2060 between the characters.",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Developers used to run on coffee."
+            "value": "Developers used to run on coffee."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "デベロッパはかつて、コーヒーで動いていました。"
+            "value": "デベロッパはかつて、コーヒーで動いていま⁠し⁠た⁠。"
           }
         },
         "zh-Hans": {
@@ -175,31 +175,31 @@
         }
       }
     },
-    "If Andarium is useful to you, you can buy me some.": {
-      "comment": "Third message of the chat: the invitation to tip, in the developer's first-person voice.",
+    "If Andarium is useful to you, you can buy me some.": {
+      "comment": "Third message of the chat: the invitation to tip, in the developer's first-person voice. Its last two words are tied with a no-break space (U+00A0) so that the last one does not wrap alone; a translation ties its last words the same way, and in Chinese and Japanese with U+2060 between the characters.",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "If Andarium is useful to you, you can buy me some."
+            "value": "If Andarium is useful to you, you can buy me some."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Andariumが役に立っていたら、おごってもらえるとうれしいです。"
+            "value": "Andariumが役に立っていたら、おごってもらえるとうれしい⁠で⁠す⁠。"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "如果觉得Andarium好用，不妨请我来点。"
+            "value": "如果觉得Andarium好用，不妨请我⁠来⁠点⁠。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "如果覺得Andarium好用，不妨請我來點。"
+            "value": "如果覺得Andarium好用，不妨請我⁠來⁠點⁠。"
           }
         }
       }
@@ -262,13 +262,13 @@
         }
       }
     },
-    "Purchases aren’t allowed on this %@": {
-      "comment": "Title of the note when this device may not make purchases. The placeholder is iPhone or iPad.",
+    "Purchases aren’t allowed on this %@": {
+      "comment": "Title of the note when this device may not make purchases. The placeholder is iPhone or iPad. Its last two words are tied with a no-break space (U+00A0) so that the last one does not wrap alone; a translation ties its last words the same way, and in Chinese and Japanese with U+2060 between the characters.",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Purchases aren’t allowed on this %@"
+            "value": "Purchases aren’t allowed on this %@"
           }
         },
         "ja": {
@@ -321,7 +321,7 @@
       }
     },
     "That’s a real token of appreciation, and it keeps Andarium going.": {
-      "comment": "The developer's second message after a tip. 'Token of appreciation' is a pun on the tokens of the joke; a translation may drop the pun and thank warmly.",
+      "comment": "The developer's second message after a tip. 'Token of appreciation' is a pun on the tokens of the joke; a translation may drop the pun and thank warmly. Chinese and Japanese tie its last characters with U+2060 so that no lone character or mark wraps alone.",
       "localizations": {
         "en": {
           "stringUnit": {
@@ -332,7 +332,7 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "このトークン、まさに感謝のしるしです。Andariumを続けていく力になります。"
+            "value": "このトークン、まさに感謝のしるしです。Andariumを続けていく力になり⁠ま⁠す⁠。"
           }
         },
         "zh-Hans": {
@@ -350,7 +350,7 @@
       }
     },
     "The App Store didn’t answer. Check the connection, then try again.": {
-      "comment": "The note under the unavailable title; the Try again button follows it.",
+      "comment": "The note under the unavailable title; the Try again button follows it. Chinese and Japanese tie its last characters with U+2060 so that no lone character or mark wraps alone.",
       "localizations": {
         "en": {
           "stringUnit": {
@@ -367,13 +367,13 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "App Store没有响应。请检查网络连接，然后重试。"
+            "value": "App Store没有响应。请检查网络连接，然⁠后⁠重⁠试⁠。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "App Store沒有回應。請檢查網路連線，然後再試一次。"
+            "value": "App Store沒有回應。請檢查網路連線，然後再⁠試⁠一⁠次⁠。"
           }
         }
       }
@@ -553,7 +553,7 @@
       }
     },
     "You can close this sheet meanwhile.": {
-      "comment": "The note under the waiting title: the sheet may be closed while the approval is pending.",
+      "comment": "The note under the waiting title: the sheet may be closed while the approval is pending. Chinese and Japanese tie its last characters with U+2060 so that no lone character or mark wraps alone.",
       "localizations": {
         "en": {
           "stringUnit": {
@@ -564,7 +564,7 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "承認を待つあいだ、この画面は閉じても構いません。"
+            "value": "承認を待つあいだ、この画面は閉じても構いま⁠せ⁠ん⁠。"
           }
         },
         "zh-Hans": {

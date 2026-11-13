@@ -346,7 +346,10 @@ one entrance is the item in [Home's toolbar menu](#home-toolbar-menu), offered
 once a virtual machine is set up. The words never use "donate", "plan" or
 "subscribe" and name no token amount: `scripts/check-tip-words.py`
 (`andarium-tip-words`) checks every language of the `TipJar` string table, and
-each price is the store's own. The tier names are the products' own in App
+each price is the store's own. The last words of a longer text are tied (a
+no-break space in English, U+2060 between the last characters in Chinese and
+Japanese) so that no short word or lone mark wraps alone; the word check reads
+a tie as a space or as nothing. The tier names are the products' own in App
 Store Connect; no tracked text assumes they appear on the system's purchase
 sheet.
 

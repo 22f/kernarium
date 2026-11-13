@@ -113,6 +113,17 @@ def main() -> int:
             expect(f"{language}-{index}", run(table(f"cjk-{index}", {"Thanks": {language: text}})),
                    passes=False, said=f"[{language}]")
 
+        # The ties that keep a last word on its line (a no-break space, a word joiner between the last
+        # characters) change nothing: the statement says what it must through them, and a forbidden word
+        # cannot hide behind one.
+        expect("ties", run(table("ties", {"Done": {"ja": "x"}}, said={
+            "ja": STATEMENTS["ja"].replace("無料", "無\u2060料").replace("購入", "購\u2060入")})), passes=True)
+        expect("ties-en", run(table("ties-en", {"Please sort the thing out.": {}, "Done": {"en": "Almost\u00a0done."}})),
+               passes=True)
+        for index, (language, text) in enumerate((("en", "Please sub\u2060scribe"), ("zh-Hans", "订\u2060阅更多"),
+                                                  ("ja", "寄\u2060付"), ("en", "Please donate\u00a0now"))):
+            expect(f"tie-{index}", run(table(f"tie-{index}", {"Thanks": {language: text}})), passes=False, said="uses")
+
         # A tip is 打赏 in Simplified and 贊助 in Traditional Chinese: each language's own word passes, and the
         # other's, in either script, and 小费 in both, do not.
         expect("tip-words", run(table("tip-words", {

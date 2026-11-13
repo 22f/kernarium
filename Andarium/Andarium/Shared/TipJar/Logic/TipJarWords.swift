@@ -31,18 +31,18 @@ nonisolated enum TipJarWords {
         "Andarium\u{2019}s developer", table: "TipJar",
         comment: "Who speaks in the chat: the person who makes the app. Shown above the first message and the reply.")
     static let coffee = LocalizedStringResource(
-        "Developers used to run on coffee.", table: "TipJar",
-        comment: "First message of the chat: the joke begins. It runs on, and ends in the next message.")
+        "Developers used to run on\u{00A0}coffee.", table: "TipJar",
+        comment: "First message of the chat: the joke begins. It runs on, and ends in the next message. Its last two words are tied with a no-break space (U+00A0) so that the last one does not wrap alone; a translation ties its last words the same way, and in Chinese and Japanese with U+2060 between the characters.")
     static let tokens = LocalizedStringResource(
         "These days it\u{2019}s tokens.", table: "TipJar",
         comment: "Second message of the chat: the end of the joke, tokens being what AI services bill in.")
     static let invitation = LocalizedStringResource(
-        "If Andarium is useful to you, you can buy me some.", table: "TipJar",
-        comment: "Third message of the chat: the invitation to tip, in the developer's first-person voice.")
+        "If Andarium is useful to you, you can buy me\u{00A0}some.", table: "TipJar",
+        comment: "Third message of the chat: the invitation to tip, in the developer's first-person voice. Its last two words are tied with a no-break space (U+00A0) so that the last one does not wrap alone; a translation ties its last words the same way, and in Chinese and Japanese with U+2060 between the characters.")
     static let statement = LocalizedStringResource(
-        "A tip is a voluntary one-time purchase that supports Andarium\u{2019}s development. Every feature is free either way.",
+        "A tip is a voluntary one-time purchase that supports Andarium\u{2019}s development. Every feature is free either\u{00A0}way.",
         table: "TipJar",
-        comment: "The plain statement under the chat, as a centred note. It must say that a tip is voluntary, one-time and a purchase, and that every feature is free whether or not someone tips.")
+        comment: "The plain statement under the chat, as a centred note. It must say that a tip is voluntary, one-time and a purchase, and that every feature is free whether or not someone tips. Its last two words are tied with a no-break space (U+00A0) so that the last one does not wrap alone; a translation ties its last words the same way, and in Chinese and Japanese with U+2060 between the characters.")
 
     // What follows a tip.
     static let thanksTitle = LocalizedStringResource(
@@ -50,13 +50,13 @@ nonisolated enum TipJarWords {
         comment: "The developer's first message after a tip.")
     static let thanksText = LocalizedStringResource(
         "That\u{2019}s a real token of appreciation, and it keeps Andarium going.", table: "TipJar",
-        comment: "The developer's second message after a tip. 'Token of appreciation' is a pun on the tokens of the joke; a translation may drop the pun and thank warmly.")
+        comment: "The developer's second message after a tip. 'Token of appreciation' is a pun on the tokens of the joke; a translation may drop the pun and thank warmly. Chinese and Japanese tie its last characters with U+2060 so that no lone character or mark wraps alone.")
     static let pendingTitle = LocalizedStringResource(
         "Waiting for approval", table: "TipJar",
         comment: "Title of the note when a tip waits for a family organiser to approve it (Ask to Buy).")
     static let pendingText = LocalizedStringResource(
         "You can close this sheet meanwhile.", table: "TipJar",
-        comment: "The note under the waiting title: the sheet may be closed while the approval is pending.")
+        comment: "The note under the waiting title: the sheet may be closed while the approval is pending. Chinese and Japanese tie its last characters with U+2060 so that no lone character or mark wraps alone.")
     static let failedTitle = LocalizedStringResource(
         "The tip didn\u{2019}t go through", table: "TipJar",
         comment: "Title of the note when a purchase failed; the App Store's own message follows it.")
@@ -67,14 +67,14 @@ nonisolated enum TipJarWords {
         comment: "Title of the note when the App Store gave no prices.")
     static let unavailableText = LocalizedStringResource(
         "The App Store didn\u{2019}t answer. Check the connection, then try again.", table: "TipJar",
-        comment: "The note under the unavailable title; the Try again button follows it.")
+        comment: "The note under the unavailable title; the Try again button follows it. Chinese and Japanese tie its last characters with U+2060 so that no lone character or mark wraps alone.")
     static let retry = LocalizedStringResource(
         "Try again", table: "TipJar",
         comment: "Button under the unavailable note: asks the App Store for the prices again.")
     static func restrictedTitle(device: String) -> LocalizedStringResource {
         LocalizedStringResource(
-            "Purchases aren\u{2019}t allowed on this \(device)", table: "TipJar",
-            comment: "Title of the note when this device may not make purchases. The placeholder is iPhone or iPad.")
+            "Purchases aren\u{2019}t allowed on this\u{00A0}\(device)", table: "TipJar",
+            comment: "Title of the note when this device may not make purchases. The placeholder is iPhone or iPad. Its last two words are tied with a no-break space (U+00A0) so that the last one does not wrap alone; a translation ties its last words the same way, and in Chinese and Japanese with U+2060 between the characters.")
     }
 
     // Controls and VoiceOver.

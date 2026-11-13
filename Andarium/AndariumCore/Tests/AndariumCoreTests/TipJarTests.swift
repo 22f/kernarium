@@ -384,7 +384,20 @@ struct TipJarTests {
         #expect(TipJarWords.tableName == "TipJar")
         let keys = TipJarWords.all.map(\.key)
         #expect(Set(keys).count == keys.count)
-        #expect(keys.contains("Purchases aren\u{2019}t allowed on this %@"))
+        #expect(keys.contains("Purchases aren\u{2019}t allowed on this\u{00A0}%@"))
         #expect(keys.contains("Buy me tokens"))
+    }
+
+    /// The last word of each longer English text is tied to the one before it with a no-break space, so
+    /// that "way." or "coffee." never wraps alone, and nothing else in the text is tied.
+    @Test func theLastWordsOfTheLongerEnglishTextsAreTied() {
+        let tied: [(LocalizedStringResource, String)] = [
+            (TipJarWords.coffee, "on\u{00A0}coffee."), (TipJarWords.invitation, "me\u{00A0}some."),
+            (TipJarWords.statement, "either\u{00A0}way."), (TipJarWords.restrictedTitle(device: "iPhone"), "this\u{00A0}%@"),
+        ]
+        for (resource, end) in tied {
+            #expect(resource.key.hasSuffix(end), "\(resource.key)")
+            #expect(resource.key.filter { $0 == "\u{00A0}" }.count == 1, "\(resource.key)")
+        }
     }
 }
