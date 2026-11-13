@@ -544,11 +544,10 @@ nonisolated struct SideKeysTip: Tip {
 
 /// The tip in its popover, drawn as TipKit draws a popover tip: the popover's
 /// own background, at most 400 points wide. A touch beside it reaches the
-/// guest, as a touch beside TipKit's does. Its text grows with the person's
-/// text size up to the third accessibility size, and the card takes at most
+/// guest, as a touch beside TipKit's does. The card takes at most
 /// `maxHeight`: what does not fit scrolls inside it, so the card, the
-/// icon and the close button stay on the screen on the smallest iPhone, and
-/// in the half of a folding iPhone, at any text size.
+/// icon and the close button stay on the screen on the smallest iPhone and
+/// in the half of a folding iPhone.
 ///
 /// The popover is as high as the card measures at its ideal width, so that
 /// width has to be the one UIKit gives it: UIKit narrows a popover to the room
@@ -577,7 +576,6 @@ struct SideKeysTipCard: View {
         ScrollView {
             TipView(tip)
                 .tipBackground(.clear)
-                .dynamicTypeSize(...DynamicTypeSize.accessibility3)
         }
         .scrollBounceBehavior(.basedOnSize)
         .frame(maxHeight: maxHeight)
