@@ -194,7 +194,9 @@ asks for it, and the launcher refuses to start, saying how to grant it, when it
 is not. The tier follows the launch's GPU budget within the cap, and a state
 line goes to stderr when the host starts or stops capturing, a line for each
 change of the ROTATE_AND_CROP setting a camera's frames get, and the process's
-footprint when a capture session opens, closes and after each still.
+footprint when a capture session opens, closes and after each still, with the
+highest it reached since the previous line (a sampler thread reads it every
+50 ms and prints a line, with the wall clock, when it moves 8 MiB).
 
 ## Layout
 
