@@ -165,6 +165,24 @@ FormatSet formatSetOf(AVCaptureDevice* device)
 // What a video output delivers: NV12, at the size the stream needs. The
 // anchor's own size arrives unless it decides another (outputSizesFor: the
 // anchor's aspect ratio).
+NSDictionary* videoSettingsOf(const VideoFormatFacts& facts, std::uint32_t width, std::uint32_t height);
+
+// Sets what a video output delivers. An output left to configure its own buffer dimensions may have been set to
+// deliver preview-sized buffers (the platform decides from the session's other outputs, a photo output of the full
+// sensor size among them), and a size set then raises ("Width/height may not be changed when
+// deliversPreviewSizedOutputBuffers is set to YES"): such an output is made to deliver the size asked for first. One
+// that already delivers full-size buffers is left as the platform configured it.
+void setVideoOutputSettings(AVCaptureVideoDataOutput* output, NSDictionary* settings)
+{
+#if TARGET_OS_IOS
+    if (output.deliversPreviewSizedOutputBuffers) {
+        output.automaticallyConfiguresOutputBufferDimensions = NO;
+        output.deliversPreviewSizedOutputBuffers = NO;
+    }
+#endif
+    output.videoSettings = settings;
+}
+
 NSDictionary* videoSettingsOf(const VideoFormatFacts& facts, std::uint32_t width, std::uint32_t height)
 {
     NSMutableDictionary* settings = [NSMutableDictionary dictionaryWithObject:@(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
@@ -1341,14 +1359,6 @@ private:
                 output.videoSettings = @{(__bridge NSString*)kCVPixelBufferPixelFormatTypeKey:
                                              @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)};
                 output.alwaysDiscardsLateVideoFrames = YES;
-#if TARGET_OS_IOS
-                // The stream is delivered at the size the guest asked for. Left automatic, the output may choose
-                // preview-sized buffers (what it assumes follows from the session's other outputs) and then raises when
-                // the stream's size is set: a stream was refused wherever the session also had a photo output of the full
-                // sensor size.
-                output.automaticallyConfiguresOutputBufferDimensions = NO;
-                output.deliversPreviewSizedOutputBuffers = NO;
-#endif
                 UMLCameraOutputDelegate* delegate = [[UMLCameraOutputDelegate alloc] initWithCamera:camera state:state_];
                 [output setSampleBufferDelegate:delegate queue:outputQueue_];
                 newDelegate = delegate;
@@ -1375,7 +1385,7 @@ private:
                 }
                 // The stream's size, scaled by the platform from the anchor's at
                 // the anchor's aspect ratio: set once the output has its source.
-                output.videoSettings = videoSettingsOf(anchor->facts, width, height);
+                setVideoOutputSettings(output, videoSettingsOf(anchor->facts, width, height));
                 return true;
             });
         };
@@ -1532,7 +1542,7 @@ private:
         if (sizeChanges)
             steps.setVideoSize = [&] {
                 return guarded(camera, [&] {
-                    running.videoOutput.videoSettings = videoSettingsOf(anchor->facts, width, height);
+                    setVideoOutputSettings(running.videoOutput, videoSettingsOf(anchor->facts, width, height));
                     return true;
                 });
             };
@@ -1624,7 +1634,8 @@ private:
         const bool ok = guarded(camera, [&] {
             if (!activate(entry.device, *anchor, running.video ? programmedFor(*anchor, running.frameRate, pressureCapOf(running)) : std::nullopt))
                 return false;
-            if (running.videoOutput != nil) running.videoOutput.videoSettings = videoSettingsOf(anchor->facts, running.width, running.height);
+            if (running.videoOutput != nil)
+                setVideoOutputSettings(running.videoOutput, videoSettingsOf(anchor->facts, running.width, running.height));
             if (running.photoOutput != nil)
                 if (const auto maximum = photoMaximum(anchor->facts, limits_.maximumStillPixels))
                     running.photoOutput.maxPhotoDimensions = CMVideoDimensions {std::int32_t(maximum->width), std::int32_t(maximum->height)};
