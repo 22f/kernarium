@@ -581,6 +581,11 @@ outcomes are known and not defects of the image:
 - The guest has a compressed swap of half its RAM (one zram entry in
   `fstab.uml`), enabled at `sys.boot_completed`. PinnerService does not lock the
   home app's files, and `kernarium_reclaim_boot_apps.sh` kills only the cached
+- The release's command line carries no serial number: the launchers state the
+  installation's own as `androidboot.serialno=`
+  ([`../../darwin/device/block/README.md`](../../darwin/device/block/README.md)),
+  and drop the `=umlandroid17` that earlier releases carry. A run that states none
+  gets Android's own default.
   processes of a reviewed list of boot-started apps after boot completes.
 - lmkd ends the cached app that holds the most host graphics memory while the
   kernel reports host GPU pressure in `/sys/class/drm/card0/gpu_memory_report`
