@@ -16,6 +16,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -74,6 +75,8 @@ struct Host {
     std::atomic<unsigned> sessions {8};
     std::atomic<unsigned> loads {};
     std::atomic<bool> listFails {};   // the call that lists the encoders fails
+    std::atomic<bool> spawnFails {};  // no thread can be created for a discovery
+    std::atomic<unsigned> spawnAttempts {};
     bool hasEncoder {true};           // the list names an H.264 encoder
     std::function<void()> onListed;   // runs when a discovery asks for the list
     unsigned waitMilliseconds {300'000};
@@ -186,6 +189,11 @@ struct Host {
         };
         h.now = [this] { return clock.load(); };
         h.waitMilliseconds = waitMilliseconds;
+        h.spawn = [this](std::function<void()> task) {
+            ++spawnAttempts;
+            if (spawnFails) throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+            std::thread(std::move(task)).detach();
+        };
         h.load = [this]() -> std::optional<Discovery> {
             ++loads;
             return cache;
@@ -223,6 +231,12 @@ bool lists(const VideoEncodeProfileCapability& profile, RawVideoLayout layout)
 bool has(const std::vector<VideoRateControl>& modes, VideoRateControl mode)
 {
     return std::find(modes.begin(), modes.end(), mode) != modes.end();
+}
+
+bool permitsSize(const VideoEncodeCapability& capability, std::uint32_t width, std::uint32_t height)
+{
+    return width >= capability.minimumWidth && width <= capability.maximumWidth && height >= capability.minimumHeight &&
+           height <= capability.maximumHeight && width % capability.sizeAlignment == 0 && height % capability.sizeAlignment == 0;
 }
 
 // Every profile lists the two packed orders together or neither.
@@ -522,8 +536,9 @@ void aMixedRunKeepsItsCeilingsAndIsAskedAgain()
 
 void aReplacementNeverShrinksTheAnswer()
 {
-    // Run 1 offers Main/BGRA and a large picture and bitrate and constant bitrate, and has no answer
-    // for High/BGRA. Run 2 is whole and says the opposite about each of them.
+    // Run 1 offers Main/BGRA, a large picture and bitrate and constant bitrate, and has no answer
+    // for High/BGRA. Run 2 is whole and says the opposite about each of them, so it does not contain
+    // run 1: the answer stays run 1's entry, as that run described it.
     Host host;
     bool secondRun = false, triggered = false;
     unsigned busyLeft = 0;
@@ -557,18 +572,155 @@ void aReplacementNeverShrinksTheAnswer()
     host.clock += kInterval;
     (void)service->query();
     const auto later = service->current();
-    require(later->complete, "run 2 is whole and replaces the answer");
+    require(later->complete, "run 2 is whole");
     require(host.stored.size() == 1 && !lists(*profileOf(host.stored[0], VideoEncodeProfile::h264Main), RawVideoLayout::bgra) &&
+                lists(*profileOf(host.stored[0], VideoEncodeProfile::h264High), RawVideoLayout::bgra) &&
                 h264Of(host.stored[0])->maximumWidth == 1920 && !has(h264Of(host.stored[0])->rateControls, VideoRateControl::constantBitrate),
             "the cache holds run 2 as it measured it");
-    // The answer of the process offers what either run did.
+    // What the answer offered is still accepted, as run 1 described it.
     require(lists(*profileOf(*later, VideoEncodeProfile::h264Main), RawVideoLayout::bgra) &&
                 lists(*profileOf(*later, VideoEncodeProfile::h264Main), RawVideoLayout::rgba),
             "a layout that was offered is still accepted");
-    require(lists(*profileOf(*later, VideoEncodeProfile::h264High), RawVideoLayout::bgra), "and the new one is too");
     require(h264Of(*later)->maximumWidth == 4096 && h264Of(*later)->maximumHeight == 2304, "a size that was offered is still accepted");
     require(h264Of(*later)->maximumBitrate == 100'000'000ull, "a bitrate too");
     require(has(h264Of(*later)->rateControls, VideoRateControl::constantBitrate), "and a rate control");
+    // And nothing of run 2 is mixed into it: the entry is run 1's own.
+    require(!lists(*profileOf(*later, VideoEncodeProfile::h264High), RawVideoLayout::bgra), "run 2's layouts are not added to run 1's entry");
+}
+
+void aReplacementDoesNotInventSizes()
+{
+    // Run 1 has no answer for the smallest picture and lists 96..4096; run 2 lists 64..1024 and refuses
+    // pictures that are wide and short. Neither lists 4096x64, and no combination of them does.
+    Host host;
+    host.largestSamples = 4096ull * 4096ull;
+    bool secondRun = false, triggered = false;
+    unsigned busyLeft = 0;
+    host.answer = [&](const Probe& probe, std::size_t) {
+        const auto& s = probe.settings;
+        if (!secondRun && !triggered && s.width == 64 && s.height == 64) {
+            triggered = true;
+            busyLeft = 1 + kRetries + 1;
+        }
+        if (busyLeft) {
+            --busyLeft;
+            return Answer::busy;
+        }
+        if ((s.width > 1024 && s.height == 64) || (s.height > 1024 && s.width == 64)) return Answer::refused;
+        return Answer::healthy;
+    };
+    auto service = makeDiscoveryService(host.hooks());
+    (void)service->query();
+    const auto early = service->current();
+    require(!early->complete && h264Of(*early)->minimumHeight == 96 && h264Of(*early)->maximumWidth == 4096, "run 1 lists 96..4096");
+    secondRun = true;
+    host.clock += kInterval;
+    (void)service->query();
+    require(host.stored.size() == 1, "run 2 is whole");
+    const auto& fresh = *h264Of(host.stored[0]);
+    require(fresh.minimumHeight == 64 && fresh.maximumWidth == 1024, "and lists 64..1024");
+    const auto& answer = *h264Of(*service->current());
+    require(!permitsSize(*h264Of(*early), 4096, 64) && !permitsSize(fresh, 4096, 64), "neither run lists 4096x64");
+    require(!permitsSize(answer, 4096, 64), "so the answer does not");
+    require(answer.maximumWidth == 4096 && answer.minimumHeight == 96, "it is run 1's entry, which run 2 does not contain");
+}
+
+void aReplacementDoesNotInventControlCombinations()
+{
+    // Run 1 has no answer for constant bitrate and takes 100 Mbit/s; run 2 has constant bitrate and takes
+    // 2 Mbit/s. Constant bitrate at 100 Mbit/s is in neither, and the host refuses it.
+    Host host;
+    bool secondRun = false, triggered = false;
+    unsigned busyLeft = 0;
+    host.answer = [&](const Probe& probe, std::size_t) {
+        const auto& s = probe.settings;
+        if (!secondRun && !triggered && s.rateControl == VideoRateControl::constantBitrate && probe.frames == 4) {
+            triggered = true;
+            busyLeft = 1 + kRetries + 1;
+        }
+        if (busyLeft) {
+            --busyLeft;
+            return Answer::busy;
+        }
+        if (s.rateControl == VideoRateControl::constantBitrate && s.bitrate > 8'000'000) return Answer::refused;
+        if (secondRun && s.rateControl == VideoRateControl::variableBitrate && probe.frames == 4 && !s.minimumQp && s.bitrate > 2'000'000)
+            return Answer::refused;
+        return Answer::healthy;
+    };
+    const auto permits = [](const VideoEncodeCapability& capability) {
+        return capability.maximumBitrate >= 100'000'000ull && has(capability.rateControls, VideoRateControl::constantBitrate);
+    };
+    auto service = makeDiscoveryService(host.hooks());
+    (void)service->query();
+    const auto early = service->current();
+    require(!early->complete && h264Of(*early)->maximumBitrate == 100'000'000ull && !has(h264Of(*early)->rateControls, VideoRateControl::constantBitrate),
+            "run 1: 100 Mbit/s, no constant bitrate");
+    secondRun = true;
+    host.clock += kInterval;
+    (void)service->query();
+    require(host.stored.size() == 1 && h264Of(host.stored[0])->maximumBitrate == 2'000'000ull &&
+                has(h264Of(host.stored[0])->rateControls, VideoRateControl::constantBitrate),
+            "run 2: 2 Mbit/s, constant bitrate");
+    require(!permits(*h264Of(*early)) && !permits(*h264Of(host.stored[0])), "neither run lists constant bitrate at 100 Mbit/s");
+    require(!permits(*h264Of(*service->current())), "so the answer does not");
+}
+
+void aResultThatContainsTheAnswerReplacesIt()
+{
+    // Run 1 has no answer for Main/BGRA and measures one session; run 2 is whole, lists that layout too
+    // and measures three. It contains run 1, so it replaces the entry, as run 2 measured it.
+    Host host;
+    bool secondRun = false, triggered = false;
+    unsigned busyLeft = 0;
+    host.sessions = 1;
+    host.answer = [&](const Probe& probe, std::size_t) {
+        if (!secondRun && !triggered && Host::is(probe, VideoEncodeProfile::h264Main, RawVideoLayout::bgra)) {
+            triggered = true;
+            busyLeft = 1 + kRetries + 1;
+        }
+        if (busyLeft) {
+            --busyLeft;
+            return Answer::busy;
+        }
+        return Answer::healthy;
+    };
+    auto service = makeDiscoveryService(host.hooks());
+    (void)service->query();
+    require(!service->current()->complete && h264Of(*service->current())->concurrentSessions == 1, "run 1");
+    secondRun = true;
+    host.sessions = 3;
+    host.clock += kInterval;
+    (void)service->query();
+    require(host.stored.size() == 1, "run 2 is whole");
+    const auto& answer = *h264Of(*service->current());
+    const auto& run2 = *h264Of(host.stored[0]);
+    require(answer.profiles.size() == run2.profiles.size() && answer.concurrentSessions == 3 && answer.maximumWidth == run2.maximumWidth &&
+                answer.rateControls == run2.rateControls,
+            "the answer is run 2's entry");
+    require(lists(*profileOf(*service->current(), VideoEncodeProfile::h264Main), RawVideoLayout::bgra), "with the layout run 1 lacked");
+}
+
+void allBitrateTargetsFail()
+{
+    // The four-frame variable-bitrate trial works at 2 Mbit/s. Every target above it is refused next to a
+    // healthy control, and the 2 Mbit/s one would be too if it were asked again: the codec is not absent.
+    Host host;
+    unsigned floorCalls = 0;
+    host.answer = [&](const Probe& probe, std::size_t) {
+        const auto& s = probe.settings;
+        if (s.profile == VideoEncodeProfile::h264High && s.input == RawVideoLayout::nv12 && s.width == 128 && s.height == 96 &&
+            probe.frames == 4 && s.rateControl == VideoRateControl::variableBitrate && !s.minimumQp && !s.maximumQp) {
+            if (s.bitrate > 2'000'000) return Answer::refused;
+            if (s.bitrate == 2'000'000 && ++floorCalls > 1) return Answer::busy;
+        }
+        return Answer::healthy;
+    };
+    auto service = makeDiscoveryService(host.hooks());
+    const auto capabilities = service->query();
+    require(capabilities.size() == 1 && capabilities[0].codec == VideoCodec::h264, "a codec that encodes at 2 Mbit/s is listed");
+    require(capabilities[0].maximumBitrate == 2'000'000ull, "with the rate that worked as its ceiling");
+    require(host.stored.size() == 1 && h264Of(host.stored[0]) != nullptr, "and it is not stored as absent");
+    require(floorCalls == 1, "the rate that worked is not asked again");
 }
 
 // ---- The first discovery and a later one are one discovery at a time.
@@ -632,6 +784,58 @@ void aQueryDuringARefreshAnswersWithTheAnswerItHas()
     gate.open();
     require(refreshing.get().size() == 1, "the query that ran the refresh answers with the refresh");
     require(service->query().size() == 1 && host.discoveries == 2, "and so does the next");
+}
+
+// ---- A discovery that cannot get a thread.
+
+template<class T> bool readyWithin(std::future<T>& future, unsigned seconds)
+{
+    return future.wait_for(std::chrono::seconds(seconds)) == std::future_status::ready;
+}
+
+void aFirstDiscoveryThatCannotGetAThreadIsTriedAgain()
+{
+    Host host;
+    host.spawnFails = true;
+    auto service = makeDiscoveryService(host.hooks());
+    auto first = std::async(std::launch::async, [&] { return service->query(); });
+    require(readyWithin(first, 10), "a query whose discovery cannot start is not left waiting");
+    require(first.get().empty() && host.discoveries == 0 && !service->current()->complete, "it answers with nothing, as an incomplete answer");
+    host.spawnFails = false;
+    host.clock += kInterval;
+    const auto later = service->query();
+    require(later.size() == 1 && service->current()->complete && host.discoveries == 1, "a later query starts the discovery that never ran");
+}
+
+void aRefreshThatCannotGetAThreadKeepsTheAnswerAndIsTriedAgain()
+{
+    Host host;
+    std::atomic<bool> busy {true};
+    host.answer = [&busy](const Probe&, std::size_t) { return busy ? Answer::busy : Answer::healthy; };
+    auto service = makeDiscoveryService(host.hooks());
+    require(service->query().empty() && host.discoveries == 1, "the first answer is incomplete");
+    busy = false;
+    host.spawnFails = true;
+    host.clock += kInterval;
+    auto failing = std::async(std::launch::async, [&] { return service->query(); });
+    require(readyWithin(failing, 10), "a refresh that cannot start does not hold its query");
+    require(failing.get().empty() && host.discoveries == 1 && !service->current()->complete, "the answer stays");
+    host.spawnFails = false;
+    host.clock += kInterval;
+    const auto later = service->query();
+    require(host.discoveries == 2 && later.size() == 1 && service->current()->complete, "a later query tries again, and the discovery runs");
+}
+
+void aDiscoveryThatNeverGetsAThreadIsTriedABoundedNumberOfTimes()
+{
+    Host host;
+    host.spawnFails = true;
+    auto service = makeDiscoveryService(host.hooks());
+    for (unsigned query = 0; query < 10; ++query) {
+        (void)service->query();
+        host.clock += kInterval;
+    }
+    require(host.spawnAttempts == DiscoveryService::kMaximumRuns, "a host with no thread is asked a bounded number of times");
 }
 
 // ---- What is measured in each process.
@@ -791,8 +995,15 @@ int main(int argc, char** argv)
         {"aCeilingIsStored", aCeilingIsStored},
         {"aMixedRunKeepsItsCeilingsAndIsAskedAgain", aMixedRunKeepsItsCeilingsAndIsAskedAgain},
         {"aReplacementNeverShrinksTheAnswer", aReplacementNeverShrinksTheAnswer},
+        {"aReplacementDoesNotInventSizes", aReplacementDoesNotInventSizes},
+        {"aReplacementDoesNotInventControlCombinations", aReplacementDoesNotInventControlCombinations},
+        {"aResultThatContainsTheAnswerReplacesIt", aResultThatContainsTheAnswerReplacesIt},
+        {"allBitrateTargetsFail", allBitrateTargetsFail},
         {"anInitialRunThatOutlastsTheWaitCannotOverwriteALaterAnswer", anInitialRunThatOutlastsTheWaitCannotOverwriteALaterAnswer},
         {"aQueryDuringARefreshAnswersWithTheAnswerItHas", aQueryDuringARefreshAnswersWithTheAnswerItHas},
+        {"aFirstDiscoveryThatCannotGetAThreadIsTriedAgain", aFirstDiscoveryThatCannotGetAThreadIsTriedAgain},
+        {"aRefreshThatCannotGetAThreadKeepsTheAnswerAndIsTriedAgain", aRefreshThatCannotGetAThreadKeepsTheAnswerAndIsTriedAgain},
+        {"aDiscoveryThatNeverGetsAThreadIsTriedABoundedNumberOfTimes", aDiscoveryThatNeverGetsAThreadIsTriedABoundedNumberOfTimes},
         {"theSessionCountIsMeasuredInEachProcess", theSessionCountIsMeasuredInEachProcess},
         {"aCachedResultWithNoSessionIsIncomplete", aCachedResultWithNoSessionIsIncomplete},
         {"aCachedResultWhoseSessionsNeverOpenIsMeasuredABoundedNumberOfTimes", aCachedResultWhoseSessionsNeverOpenIsMeasuredABoundedNumberOfTimes},

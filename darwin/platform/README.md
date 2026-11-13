@@ -45,12 +45,16 @@ incomplete result is never cached. One discovery runs at a time, whether it is
 the first or a later one. An incomplete result serves the query that found it,
 and a later query, at least 30 seconds after the last run and at most three runs
 in the process, computes discovery again. The answer of a process never shrinks:
-a complete result replaces an incomplete one as the union of the two, so what a
-guest was offered is still accepted, while the cache holds the complete run as
-measured. A running guest's device took its list when it was created and keeps
-it: a better answer changes what the encoder accepts, not what the guest was
-offered. The concurrent session count is measured in each process, cached or
-not, because what other processes held is no property of the host.
+a complete result replaces a codec's entry only when it contains that entry,
+and a codec the answer lacks is added, so what a guest was offered is still
+accepted and each entry is one run's own description; the cache holds the
+complete run as measured. A discovery whose thread cannot be created leaves the
+answer as it is and is tried again by a later query, within the same bound. A
+running guest's device took its list when it was created and keeps it: a better
+answer changes what the encoder accepts, not what the guest was offered. The
+cache file carries the concurrent session count, but each process
+replaces it with its own measurement, because what other processes held is no
+property of the host.
 
 ## Sessions
 

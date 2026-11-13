@@ -717,10 +717,13 @@ std::optional<CodecDiscovery> discoverCodec(Prober& prober, const DiscoveryHooks
             capability.minimumQp = 0;
             capability.maximumQp = 51;
         }
-        // The ladder reaches below any rate a guest asks for with a picture this large, so a codec that
-        // encodes at all has a ceiling and is not dropped for one it cannot state.
+        // The ladder starts from what the variable-bitrate trial above proved: that rate is the
+        // floor, so a codec that encodes at all has a ceiling, and it is never probed again,
+        // where a refusal would contradict the trial that just worked.
+        capability.maximumBitrate = referenceSettings(kProbeWidth, kProbeHeight).bitrate;
         for (const std::uint64_t bitrate : {300'000'000ull, 240'000'000ull, 100'000'000ull, 50'000'000ull, 20'000'000ull, 10'000'000ull,
-                                            5'000'000ull, 2'000'000ull}) {
+                                            5'000'000ull}) {
+            if (bitrate <= capability.maximumBitrate) break;
             Probe probe {referenceSettings(kProbeWidth, kProbeHeight), 4};
             probe.settings.bitrate = bitrate;
             if (proves(probe, prober.run(probe))) {
@@ -728,7 +731,6 @@ std::optional<CodecDiscovery> discoverCodec(Prober& prober, const DiscoveryHooks
                 break;
             }
         }
-        if (!capability.maximumBitrate) return std::nullopt;
 
         // B-frames: whatever the encoder does when it is allowed to reorder.
         // The hardware encoders refuse every property that would limit the run
@@ -1023,8 +1025,9 @@ DiscoveryHooks productionHooks()
 // The sessions that open together are what the host has free: other processes
 // hold some of them, so a count is a figure of its moment and never a ceiling
 // to keep. Each process measures it, for the discovery it computed and for one
-// it took from the cache, which does not carry the figure. A codec that cannot
-// open a session is left out and is unanswered.
+// it took from the cache, whose figure is that of another process and is
+// replaced here. A codec that cannot open a session is left out and is
+// unanswered.
 void measureSessions(Prober& prober, Discovery& discovery)
 {
     for (auto codec = discovery.codecs.begin(); codec != discovery.codecs.end();) {
@@ -1072,58 +1075,59 @@ Discovery discoverHost(const DiscoveryHooks& hooks)
     }
 }
 
-// ---- Joining two answers of one process.
+// ---- Replacing an answer of one process.
 
-template<class T> void join(std::vector<T>& into, const std::vector<T>& from)
+template<class T> bool containsAll(const std::vector<T>& outer, const std::vector<T>& inner)
 {
-    for (const auto& value : from)
-        if (std::find(into.begin(), into.end(), value) == into.end()) into.push_back(value);
+    return std::all_of(inner.begin(), inner.end(), [&](const T& value) { return std::find(outer.begin(), outer.end(), value) != outer.end(); });
 }
 
-void joinCodec(CodecDiscovery& into, const CodecDiscovery& from)
+// Whether `next` offers every configuration `old` did. A capability is a set of
+// configurations, and a codec's entry is one run's coherent description of it:
+// the entries are not combined field by field, which would offer sizes and
+// rates no run proved together.
+bool contains(const CodecDiscovery& next, const CodecDiscovery& old)
 {
-    auto& c = into.capability;
-    const auto& f = from.capability;
-    for (const auto& profile : f.profiles) {
-        auto found = std::find_if(c.profiles.begin(), c.profiles.end(), [&](const auto& entry) { return entry.profile == profile.profile; });
-        if (found == c.profiles.end()) {
-            c.profiles.push_back(profile);
-            continue;
-        }
-        join(found->inputs, profile.inputs);
-        found->maximumLevel = std::max(found->maximumLevel, profile.maximumLevel);
-        found->levelSelectable = found->levelSelectable || profile.levelSelectable;
+    const auto& n = next.capability;
+    const auto& o = old.capability;
+    for (const auto& profile : o.profiles) {
+        const auto found = std::find_if(n.profiles.begin(), n.profiles.end(), [&](const auto& entry) { return entry.profile == profile.profile; });
+        if (found == n.profiles.end() || !containsAll(found->inputs, profile.inputs) || found->maximumLevel < profile.maximumLevel ||
+            (profile.levelSelectable && !found->levelSelectable))
+            return false;
     }
-    c.minimumWidth = std::min(c.minimumWidth, f.minimumWidth);
-    c.minimumHeight = std::min(c.minimumHeight, f.minimumHeight);
-    c.maximumWidth = std::max(c.maximumWidth, f.maximumWidth);
-    c.maximumHeight = std::max(c.maximumHeight, f.maximumHeight);
-    c.sizeAlignment = std::min(c.sizeAlignment, f.sizeAlignment);
-    join(c.rateControls, f.rateControls);
-    c.maximumBitrate = std::max(c.maximumBitrate, f.maximumBitrate);
-    c.minimumQp = std::min(c.minimumQp, f.minimumQp);
-    c.maximumQp = std::max(c.maximumQp, f.maximumQp);
-    c.maximumBFrames = std::max(c.maximumBFrames, f.maximumBFrames);
-    c.maximumTemporalLayers = std::max(c.maximumTemporalLayers, f.maximumTemporalLayers);
-    c.entropyModeSelectable = c.entropyModeSelectable || f.entropyModeSelectable;
-    c.hdrStaticMetadata = c.hdrStaticMetadata || f.hdrStaticMetadata;
-    c.concurrentSessions = std::max(c.concurrentSessions, f.concurrentSessions);
-    if (!c.measuredFramesPerSecond720p) c.measuredFramesPerSecond720p = f.measuredFramesPerSecond720p;
-    if (!c.measuredFramesPerSecond1080p) c.measuredFramesPerSecond1080p = f.measuredFramesPerSecond1080p;
-    join(into.lowLatencyProfiles, from.lowLatencyProfiles);
+    return n.minimumWidth <= o.minimumWidth && n.minimumHeight <= o.minimumHeight && n.maximumWidth >= o.maximumWidth &&
+           n.maximumHeight >= o.maximumHeight && n.sizeAlignment && o.sizeAlignment % n.sizeAlignment == 0 &&
+           containsAll(n.rateControls, o.rateControls) && n.maximumBitrate >= o.maximumBitrate && n.minimumQp <= o.minimumQp &&
+           n.maximumQp >= o.maximumQp && n.maximumBFrames >= o.maximumBFrames && n.maximumTemporalLayers >= o.maximumTemporalLayers &&
+           (!o.entropyModeSelectable || n.entropyModeSelectable) && (!o.hdrStaticMetadata || n.hdrStaticMetadata) &&
+           containsAll(next.lowLatencyProfiles, old.lowLatencyProfiles);
 }
 
-// The complete result that replaces an answer, with everything the answer
-// offered kept: a guest that was offered a configuration may still use it. Every
-// fact of either is an encode that worked, so the join lists no more than the
-// host did.
-Discovery joinAnswers(const Discovery& served, Discovery fresh)
+// The complete result that replaces an answer. A guest that was offered a
+// configuration may still use it, so a codec the answer has stays as it is
+// unless the new entry contains it, and a codec the answer lacks is added. The
+// session count is a measurement, not part of what an entry offers: it is
+// never lowered.
+Discovery replaceAnswer(const Discovery& served, Discovery fresh)
 {
     for (const auto& old : served.codecs) {
         auto found = std::find_if(fresh.codecs.begin(), fresh.codecs.end(),
                                   [&](const auto& entry) { return entry.capability.codec == old.capability.codec; });
-        if (found == fresh.codecs.end()) fresh.codecs.push_back(old);
-        else joinCodec(*found, old);
+        if (found == fresh.codecs.end()) {
+            fresh.codecs.push_back(old);
+            continue;
+        }
+        const auto sessions = std::max(found->capability.concurrentSessions, old.capability.concurrentSessions);
+        if (contains(*found, old)) {
+            // Measured speeds describe the host, not what an entry offers: the one that was measured stays.
+            auto& c = found->capability;
+            if (!c.measuredFramesPerSecond720p) c.measuredFramesPerSecond720p = old.capability.measuredFramesPerSecond720p;
+            if (!c.measuredFramesPerSecond1080p) c.measuredFramesPerSecond1080p = old.capability.measuredFramesPerSecond1080p;
+        } else {
+            *found = old;
+        }
+        found->capability.concurrentSessions = sessions;
     }
     std::sort(fresh.codecs.begin(), fresh.codecs.end(),
               [](const auto& a, const auto& b) { return int(a.capability.codec) < int(b.capability.codec); });
@@ -1153,11 +1157,13 @@ public:
         std::unique_lock lock(state_->mutex);
         // Every probe has its own deadline, so discovery ends; the bound here keeps
         // a caller from waiting on a VideoToolbox that never answers, in which case
-        // the host reports no encoder rather than hanging the guest's probe.
+        // the host reports no encoder rather than hanging the guest's probe. A
+        // discovery whose thread could not be created is not running, and nothing
+        // is waited for.
         if (!state_->condition.wait_for(lock, std::chrono::milliseconds(state_->hooks.waitMilliseconds),
-                                        [&] { return state_->result != nullptr; }))
+                                        [&] { return state_->result != nullptr || !state_->running; }))
             return State::unknown();
-        return state_->result;
+        return state_->result ? state_->result : State::unknown();
     }
 
     std::vector<VideoEncodeCapability> query() override
@@ -1165,9 +1171,9 @@ public:
         (void)current();
         std::unique_lock lock(state_->mutex);
         auto& state = *state_;
-        // A later query computes again once an incomplete answer has been served,
-        // while no discovery runs, a few times and not in the same busy moment.
-        if (state.result && !state.result->complete && state.served && !state.running && state.runs < kMaximumRuns &&
+        // A later query computes again once an incomplete answer, or none, has been
+        // served, while no discovery runs, a few times and not in the same busy moment.
+        if ((!state.result || !state.result->complete) && state.served && !state.running && state.runs < kMaximumRuns &&
             state.hooks.now() - state.lastRun >= kRerunIntervalMilliseconds) {
             state.reserveLocked();
             lock.unlock();
@@ -1201,9 +1207,22 @@ private:
             ++runs;
         }
 
+        // Starts the discovery reserved by the caller. When no thread can be created the
+        // reservation is released and the waiting callers woken, the answer stays as it
+        // is, and a later query may try again: the run still counts.
         void launch()
         {
-            std::thread([state = shared_from_this()] { state->work(); }).detach();
+            try {
+                auto task = [state = shared_from_this()] { state->work(); };
+                if (hooks.spawn) hooks.spawn(std::move(task));
+                else std::thread(std::move(task)).detach();
+            } catch (...) {
+                std::fprintf(stderr, "Video encoder discovery: no thread to run it on; a later query tries again\n");
+                std::lock_guard lock(mutex);
+                lastRun = hooks.now();
+                running = false;
+                condition.notify_all();
+            }
         }
 
         // The cache, when it has a valid answer, or a discovery of the host;
@@ -1241,7 +1260,7 @@ private:
             if (!result) {
                 result = std::make_shared<const Discovery>(std::move(next));
             } else if (!result->complete && next.complete) {
-                result = std::make_shared<const Discovery>(joinAnswers(*result, std::move(next)));
+                result = std::make_shared<const Discovery>(replaceAnswer(*result, std::move(next)));
             }
         }
 

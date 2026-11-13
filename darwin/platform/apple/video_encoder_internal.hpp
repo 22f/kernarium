@@ -119,6 +119,8 @@ struct DiscoveryHooks {
     // How long a query waits for a discovery that runs; the discovery goes on
     // in the background when it passes.
     unsigned waitMilliseconds {300'000};
+    // Runs a task on a new thread, and throws when it cannot. Empty: a detached thread.
+    std::function<void(std::function<void()>)> spawn;
 };
 
 // The result of discovery for a process, and when it is computed again.
@@ -128,11 +130,12 @@ struct DiscoveryHooks {
 // kMaximumRuns times in the process and not sooner than kRerunInterval after
 // the last one, and a complete result replaces the answer. One discovery runs
 // at a time, whoever started it; a run counts when it starts. The answer of
-// a process never shrinks: what was offered stays valid, so a complete result
-// is published joined with the answer it replaces, and nothing replaces a
-// complete answer. The session count is measured in each process; the cache
-// does not carry it. `discovery()` never computes: the encoder checks against
-// the answer it has.
+// a process never shrinks: what was offered stays valid, so a codec's entry is
+// replaced only by one that contains it, and nothing replaces a complete
+// answer. A discovery whose thread cannot be created releases its place, keeps
+// the answer, and counts as a run. The cache file carries the session count,
+// but each process replaces it with its own measurement before it publishes.
+// `discovery()` never computes: the encoder checks against the answer it has.
 class DiscoveryService {
 public:
     static constexpr unsigned kMaximumRuns = 3;
