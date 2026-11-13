@@ -27,8 +27,10 @@ import io
 from pathlib import Path
 import re
 import sys
+import tempfile
 import threading
 import time
+import types
 import unittest
 from unittest import mock
 import zipfile
@@ -1888,9 +1890,12 @@ class SuspendingGuest(LoggingGuest):
     suspend_and_wake = runner.Guest.suspend_and_wake
     suspend_and_wake_guest = runner.Guest.suspend_and_wake_guest
 
-    def __init__(self, drops: bool) -> None:
+    def __init__(self, drops: bool, before: str = "", on_wake: str = "") -> None:
         super().__init__()
         self.drops = drops
+        # The launcher's log (the host's messages and the guest kernel's console): what it held before the
+        # suspend, and what the wake adds.
+        self.launcher_log = before
         guest = self
 
         class Console:
@@ -1898,9 +1903,17 @@ class SuspendingGuest(LoggingGuest):
                 if command == "suspend" and guest.drops:
                     for stream in guest.streams:
                         stream.cut = True
+                if command == "wake":
+                    guest.launcher_log += on_wake
                 return "suspended" if command == "suspend" else "running"
 
         self.console = Console()
+
+    def log_size(self) -> int:
+        return len(self.launcher_log)
+
+    def log_since(self, offset: int) -> str:
+        return self.launcher_log[offset:]
 
     def adb_answers(self) -> str | None:
         return None
@@ -1948,6 +1961,58 @@ class CrashEvidenceAcrossASuspendTests(unittest.TestCase):
         guest.streams[-1].cut = True
         with self.assertRaisesRegex(runner.Failure, "the log stream of this boot ended"):
             guest.alive()
+
+
+KERNEL_GPU_ERROR = "[  186.505954][   T11] [drm:virtio_gpu_dequeue_ctrl_func] *ERROR* response 0x1204 (command 0x202)\n"
+HOST_GPU_REFUSAL = "Virtio-GPU submit rejected unknown context: id=3 bytes=44\n"
+
+
+class HostGpuResetTests(unittest.TestCase):
+    """A wake after which the launcher's log shows the host's GPU device reset fails the step by that name, with
+    the first line of it: the proof classifies such a run as the known host defect, not as load or Wi-Fi."""
+
+    def setUp(self) -> None:
+        patch = mock.patch.object(runner, "time", FakeClock())
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_the_first_line_of_a_reset_is_found(self) -> None:
+        text = "[ 1.0][ T1] init: x\n" + KERNEL_GPU_ERROR + HOST_GPU_REFUSAL
+        self.assertEqual(runner.host_gpu_reset_line(text), KERNEL_GPU_ERROR.strip())
+        self.assertEqual(runner.host_gpu_reset_line(HOST_GPU_REFUSAL), HOST_GPU_REFUSAL.strip())
+        self.assertIsNone(runner.host_gpu_reset_line("[ 1.0][ T1] PM: suspend exit\nVirtio-GPU vhost-user transport\n"))
+        self.assertIsNone(runner.host_gpu_reset_line(""))
+
+    def test_a_wake_that_shows_the_kernels_error_fails_with_the_line(self) -> None:
+        guest = SuspendingGuest(drops=False, on_wake="PM: suspend exit\n" + KERNEL_GPU_ERROR)
+        with self.assertRaisesRegex(runner.Failure, re.escape(f"{runner.GPU_RESET_FAILURE}: {KERNEL_GPU_ERROR.strip()}")):
+            guest.suspend_and_wake()
+
+    def test_a_wake_that_shows_the_hosts_refusal_fails_with_the_line(self) -> None:
+        guest = SuspendingGuest(drops=True, on_wake=HOST_GPU_REFUSAL)
+        with self.assertRaisesRegex(runner.Failure, re.escape(f"{runner.GPU_RESET_FAILURE}: {HOST_GPU_REFUSAL.strip()}")):
+            guest.suspend_and_wake()
+
+    def test_the_section_that_wakes_the_guest_fails_by_the_name(self) -> None:
+        guest = SuspendingGuest(drops=False, on_wake=KERNEL_GPU_ERROR)
+        report = runner.Report()
+        report.section("the warning shows again after a suspend and wake", guest, guest.suspend_and_wake)
+        self.assertEqual(len(report.failures), 1)
+        self.assertIn(runner.GPU_RESET_FAILURE, report.failures[0])
+
+    def test_lines_from_before_the_suspend_are_not_a_reset(self) -> None:
+        guest = SuspendingGuest(drops=False, before=KERNEL_GPU_ERROR + HOST_GPU_REFUSAL, on_wake="PM: suspend exit\n")
+        guest.suspend_and_wake()
+
+    def test_the_launchers_log_is_read_from_the_mark(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "emulator.log"
+            log.write_text("before\n")
+            stand_in = types.SimpleNamespace(log=log)
+            size = runner.Guest.log_size(stand_in)
+            log.write_text("before\n" + KERNEL_GPU_ERROR)
+            self.assertEqual(runner.Guest.log_since(stand_in, size), KERNEL_GPU_ERROR)
+            self.assertEqual(runner.Guest.log_size(types.SimpleNamespace(log=Path(directory) / "gone")), 0)
 
 
 class LogStreamDrainTests(unittest.TestCase):

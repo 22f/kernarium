@@ -57,7 +57,11 @@ show Android's own Wi-Fi mark. The runner shows all of it:
   private DNS name evaluated; on the image under test the old "validated
   without probes" statement is a failure), and is joined again after
   a guest suspend and wake (the host's route, `suspend` and `wake` on the
-  management console) and after a restart; a network the user marked metered, or turned Auto-connect off for,
+  management console; a wake after which the launcher's log, with the guest
+  kernel's console in it, shows the host's GPU device reset across the suspend
+  fails the step by that name and quotes the first line: it is a known host
+  defect that leaves the guest's graphics gone, not a Wi-Fi failure) and after
+  a restart; a network the user marked metered, or turned Auto-connect off for,
   keeps that after a restart (the script has nothing to save once the station
   has joined); a forgotten network is still forgotten after a restart; and Wi-Fi
   that was turned off is still off;
@@ -206,10 +210,27 @@ WARNING_HOLD_SECONDS = 60
 SHORT_HOLD_SECONDS = 30
 PAGE_BYTES = 2048
 MAGIC, VERSION, DATA = 0xCAFEBABE, 2, 512
+# What the launcher's log holds when the host reset its GPU device across a suspend: the guest kernel's console
+# shows the host refusing the guest's commands as
+# `[drm:virtio_gpu_dequeue_ctrl_func] *ERROR* response 0x1204 (command 0x202)`, and the host says
+# `Virtio-GPU submit rejected unknown context: id=3 bytes=44`. Every context the guest holds is gone, so its
+# applications abort in the graphics stack and the framework follows.
+GPU_RESET_KERNEL = "virtio_gpu_dequeue_ctrl_func"
+GPU_RESET_HOST = "submit rejected unknown context"
+GPU_RESET_FAILURE = "host GPU reset across the suspend"
 
 
 class Failure(RuntimeError):
     pass
+
+
+def host_gpu_reset_line(text: str) -> str | None:
+    """The first line of the launcher's log that shows the host's GPU device was reset: the guest kernel's error
+    for a command refused by the host, or the host's own refusal of a context it no longer knows."""
+    for line in text.splitlines():
+        if (GPU_RESET_KERNEL in line and "ERROR" in line) or GPU_RESET_HOST in line:
+            return line.strip()[:300]
+    return None
 
 
 class CaptureFailure(Failure):
@@ -1074,13 +1095,27 @@ class Guest:
     def wait_joined(self, seconds: float, what: str) -> None:
         wait_for(what, seconds, lambda: None if self.joined() else "the station has not joined", self)
 
+    def log_size(self) -> int:
+        """How much the launcher's own log (the host's messages and the guest kernel's console) holds now."""
+        try:
+            return self.log.stat().st_size
+        except OSError:
+            return 0
+
+    def log_since(self, offset: int) -> str:
+        with self.log.open("rb") as stream:
+            stream.seek(offset)
+            return stream.read().decode(errors="replace")
+
     def suspend_and_wake(self) -> None:
         """The route the host's quiesce takes. The log stream may end with the connection: that is expected
-        until the guest answers again, and a stream that ended starts another segment."""
+        until the guest answers again, and a stream that ended starts another segment. A wake after which the
+        launcher's log shows the host's GPU device reset fails the step by that name, with the first line."""
         capture = self.capture
         if capture is not None:
             capture.confirm(self)
             capture.going_down()
+        mark = self.log_size()
         try:
             self.suspend_and_wake_guest()
             if capture is not None:
@@ -1089,6 +1124,9 @@ class Guest:
             if capture is not None:
                 capture.expect_end = False
             raise
+        reset = host_gpu_reset_line(self.log_since(mark))
+        if reset is not None:
+            raise Failure(f"{GPU_RESET_FAILURE}: {reset}")
 
     def suspend_and_wake_guest(self) -> None:
         # A suspend can be refused while the guest is busy (EBUSY); it is asked for again.
