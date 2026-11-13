@@ -861,7 +861,8 @@ class ImageInputTests(unittest.TestCase):
             "buried_eth0 has a link-local address": ImageDevice(self.probes, root_link_local={"buried_eth0": True}),
             "an application sees eth0's": ImageDevice(self.probes, app_links={"eth0": True, "buried_eth0": False}),
             "an application sees buried_eth0's": ImageDevice(self.probes, app_links={"eth0": False, "buried_eth0": True}),
-            "an application's listing lacks the lower devices": ImageDevice(self.probes, app_links={"wlan0": True}),
+            "an application's listing lacks eth0, which holds an address": ImageDevice(
+                self.probes, app_links={"wlan0": True, "buried_eth0": False}),
         }
         for label, device in cases.items():
             with self.subTest(label), mock.patch.object(runner, "LEASE_SECONDS", 1), \
@@ -869,6 +870,10 @@ class ImageInputTests(unittest.TestCase):
                     mock.patch.object(runner.time, "sleep", lambda seconds: None):
                 with self.assertRaises(runner.Failure):
                     self.check(device)
+
+    def test_the_macvlan_without_an_address_is_not_in_the_applications_listing(self) -> None:
+        # The listing names interfaces that hold an address: buried_eth0 holds none without IPv6.
+        self.check(ImageDevice(self.probes, app_links={"dummy0": True, "eth0": False, "wlan0": True, "lo": False}))
 
     def test_wlan0_may_hold_a_link_local_address(self) -> None:
         self.check(ImageDevice(self.probes, root_link_local={"wlan0": True}, app_links={

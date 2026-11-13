@@ -33,7 +33,8 @@ and wlan0, whether the guest's own listing holds an IPv6 link-local address):
   not the old fixed one nor eth0's, the same after a reboot and a new launch, and different
   between installations; wlan0 holds an IPv4 lease (Wi-Fi connected);
 - eth0 and buried_eth0 carry no IPv6 link-local address, in the guest's own listing and in the
-  interface listing an application calls (`NetworkInterface`);
+  interface listing an application calls (`NetworkInterface`, which names only interfaces that
+  hold an address: the macvlan holds none, so it is not listed);
 - an ordinary application cannot read `ro.boot.kernarium.adb_key`. The emulator is started through
   a wrapper that adds a placeholder key and a control argument to the kernel command line (the macOS
   launcher passes neither). A probe application (property_probe_apk.py) is started with
@@ -575,11 +576,13 @@ def check_key_property(device: Device, probes: "Probes") -> str:
         raise Failure(f"an application can read {KEY_PROPERTY}")
     if boot_id(device) != boot:
         raise Failure("the guest rebooted while the probe ran: the control and the key are not of one boot")
+    # The listing names the interfaces that hold an address: eth0 holds 10.0.2.15, so it is there; the
+    # macvlan holds none once it has no IPv6, so it is not listed and shows no address either.
+    if "eth0" not in result.links:
+        raise Failure("the application's interface listing has no eth0, which holds an IPv4 address: the test cannot tell")
     for name in LOWER_DEVICES:
         if result.links.get(name, False):
             raise Failure(f"the application's interface listing shows an IPv6 link-local address for {name}")
-        if name not in result.links:
-            raise Failure(f"the application's interface listing has no {name}: the test cannot tell")
     control = "root reads the key" if rooted else "the key is on the kernel command line (inferred: no su)"
     return (f"the probe ran as {result.domain}: it reads the control property and not the key in a boot where "
             f"{control}; its interface listing shows no link-local address for eth0 or buried_eth0")
