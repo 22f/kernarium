@@ -26,6 +26,7 @@ std::atomic<bool> destroyed {false};
 std::atomic<bool> sawDestroyed {false};
 std::atomic<int> handled {0};
 std::atomic<int> lastValue {0};
+std::atomic<bool> sawAfter {false};
 dispatch_semaphore_t entered, proceed, finished;
 
 struct Sentinel {
@@ -136,15 +137,64 @@ void aReleasedObserverIsRemoved()
     require(handled == 1, "an observer that is released stops observing (no handler, no crash)");
 }
 
-// Many changes race a stop: no handler starts after invalidate returns.
-void noHandlerStartsAfterInvalidateReturns()
+} // namespace
+
+// A notification that has taken the handler before `invalidate` runs calls it afterwards (the contract in the header:
+// the stop does not wait for a running notification). The stand-in's getter pauses after the handler is taken.
+@interface PausingStandIn : StandIn
+@end
+// The getter is called twice for a change: by key-value observing to make the change's new value, and by the
+// observer's notification (after it has taken the handler) to hand the handler the value. It pauses on the second.
+std::atomic<int> pauseOnGetter {0};
+@implementation PausingStandIn
+- (id)valueForKey:(NSString*)key
+{
+    if (pauseOnGetter.fetch_sub(1) == 1) {
+        dispatch_semaphore_signal(entered);
+        if (!wait(proceed)) std::abort();
+    }
+    return [super valueForKey:key];
+}
+@end
+
+namespace {
+
+void aNotificationThatTookTheHandlerMayRunItAfterInvalidate()
+{
+    reset();
+    PausingStandIn* subject = [PausingStandIn new];
+    UMLKeyPathObserver* observer = [[UMLKeyPathObserver alloc] initWithObject:subject
+                                                                      keyPath:@"value"
+                                                                      handler:^(id value) {
+        lastValue = [static_cast<NSNumber*>(value) intValue];
+        ++handled;
+    }];
+    pauseOnGetter = 2;
+    std::thread notifier([&] { subject.value = @5; });
+    require(wait(entered), "the notification took the handler and paused before calling it");
+    [observer invalidate];
+    require(handled == 0, "invalidate does not wait for it");
+    dispatch_semaphore_signal(proceed);
+    notifier.join();
+    require(handled == 1 && lastValue == 5, "the handler it had taken ran after invalidate returned");
+    subject.value = @6;
+    require(handled == 1, "and no later notification takes it");
+}
+
+// Many changes race a stop. What was in flight at the stop may still call the handler; nothing that is changed after
+// invalidate has returned does.
+void nothingChangedAfterInvalidateReturnsCallsTheHandler()
 {
     for (int round = 0; round < 50; ++round) {
         reset();
         StandIn* subject = [StandIn new];
+        sawAfter = false;
         UMLKeyPathObserver* observer = [[UMLKeyPathObserver alloc] initWithObject:subject
                                                                           keyPath:@"value"
-                                                                          handler:^(id) { ++handled; }];
+                                                                          handler:^(id value) {
+            if ([static_cast<NSNumber*>(value) intValue] < 0) sawAfter = true;
+            ++handled;
+        }];
         std::atomic<bool> go {false};
         std::thread writer([&] {
             while (!go) std::this_thread::yield();
@@ -153,9 +203,10 @@ void noHandlerStartsAfterInvalidateReturns()
         go = true;
         std::this_thread::yield();
         [observer invalidate];
-        const int atInvalidate = handled;
+        // The writer's notifications that are still running may report their own values; this one is after the stop.
+        subject.value = @(-1);
         writer.join();
-        require(handled == atInvalidate, "no handler starts once invalidate has returned");
+        require(!sawAfter, "a value changed after invalidate returned never reaches the handler");
     }
 }
 
@@ -168,7 +219,8 @@ int main()
         theHandlerGetsTheNewValueAndNothingAfterInvalidate();
         aHandlerMayInvalidateItsOwnObserver();
         aReleasedObserverIsRemoved();
-        noHandlerStartsAfterInvalidateReturns();
+        aNotificationThatTookTheHandlerMayRunItAfterInvalidate();
+        nothingChangedAfterInvalidateReturnsCallsTheHandler();
     }
     return 0;
 }
