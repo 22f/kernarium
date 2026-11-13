@@ -66,7 +66,7 @@ struct CameraNoticeBanner: View {
     @ViewBuilder
     private func detailText(oneLine: Bool) -> some View {
         if let detail = CameraWords.noticeDetail(for: notice) {
-            Text(detail)
+            Text(detail.keepingTogether)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: oneLine, vertical: true)
