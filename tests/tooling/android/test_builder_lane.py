@@ -1883,6 +1883,14 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     "(typeattributeset coredomain (adbd init system_server lmkd"
                     + (" hal_audio_default" if audio_ring_variant == "core-hal" else "")
                     + "))\n"
+                    # The concrete types that run applications, as the platform lists them.
+                    + "(typeattributeset appdomain (runas_app untrusted_app untrusted_app_34 "
+                    "untrusted_app_30 untrusted_app_29 untrusted_app_25 gmscore_app mediaprovider_app "
+                    "platform_app platform_app_36 priv_app priv_app_36 isolated_app ephemeral_app "
+                    "system_app sdk_sandbox_34 sdk_sandbox_audit sdk_sandbox_next shell))\n"
+                    + "(typeattributeset untrusted_app_all (runas_app untrusted_app untrusted_app_34 "
+                    "untrusted_app_30 untrusted_app_29 untrusted_app_25))\n"
+                    + "(typeattributeset sdk_sandbox_all (sdk_sandbox_34 sdk_sandbox_audit sdk_sandbox_next))\n"
                     + "(typeattributeset domain ("
                     + ("" if adbd_launch_unreadable else "adbd ")
                     + "init system_server vendor_init untrusted_app surfaceflinger lmkd hal_audio_default"
@@ -2153,6 +2161,13 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     + {
                         "untrusted-app-reads": "(allow untrusted_app kernarium_adb_key_prop (file (getattr open read map)))\n",
                         "appdomain-reads": "(allow appdomain kernarium_adb_key_prop (file (getattr open read map)))\n",
+                        "untrusted-app-34-reads": "(allow untrusted_app_34 kernarium_adb_key_prop (file (getattr open read map)))\n",
+                        "untrusted-app-29-reads": "(allow untrusted_app_29_202604 kernarium_adb_key_prop_202604 (file (read)))\n",
+                        "runas-app-reads": "(allow runas_app kernarium_adb_key_prop (file (open read)))\n",
+                        "sdk-sandbox-reads": "(allow sdk_sandbox_audit kernarium_adb_key_prop (file (read)))\n",
+                        "shell-reads": "(allow shell kernarium_adb_key_prop (file (read)))\n",
+                        "generated-attribute-reads": "(typeattributeset base_typeattr_77 (untrusted_app_34 gmscore_app))\n"
+                        "(allow base_typeattr_77 kernarium_adb_key_prop (file (read)))\n",
                     }.get(adb_key_variant or "", "")
                     + (
                         ""
@@ -3705,6 +3720,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("adb-key-adbd-cannot-read", {"adb_key_variant": "adbd-unreadable"}),
             ("adb-key-untrusted-app-reads", {"adb_key_variant": "untrusted-app-reads"}),
             ("adb-key-appdomain-reads", {"adb_key_variant": "appdomain-reads"}),
+            ("adb-key-untrusted-app-34-reads", {"adb_key_variant": "untrusted-app-34-reads"}),
+            ("adb-key-untrusted-app-29-reads", {"adb_key_variant": "untrusted-app-29-reads"}),
+            ("adb-key-runas-app-reads", {"adb_key_variant": "runas-app-reads"}),
+            ("adb-key-sdk-sandbox-reads", {"adb_key_variant": "sdk-sandbox-reads"}),
+            ("adb-key-shell-reads", {"adb_key_variant": "shell-reads"}),
+            ("adb-key-generated-attribute-reads", {"adb_key_variant": "generated-attribute-reads"}),
             ("missing-cas-plugin-64", {"cas_hal_variant": "no-plugin64"}),
             ("missing-cas-plugin-32", {"cas_hal_variant": "no-plugin32"}),
             ("lineage-discrete-ops-list-only", {"discrete_ops_variant": "lineage-list-only"}),
@@ -4472,6 +4493,18 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "untrusted_app may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
             ("adb-key-appdomain-reads-cause", {"adb_key_variant": "appdomain-reads"},
              "appdomain may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-untrusted-app-34-reads-cause", {"adb_key_variant": "untrusted-app-34-reads"},
+             "untrusted_app_34 may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-untrusted-app-29-reads-cause", {"adb_key_variant": "untrusted-app-29-reads"},
+             "untrusted_app_29 may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-runas-app-reads-cause", {"adb_key_variant": "runas-app-reads"},
+             "runas_app may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-sdk-sandbox-reads-cause", {"adb_key_variant": "sdk-sandbox-reads"},
+             "sdk_sandbox_audit may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-shell-reads-cause", {"adb_key_variant": "shell-reads"},
+             "shell may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-generated-attribute-reads-cause", {"adb_key_variant": "generated-attribute-reads"},
+             "gmscore_app may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
             ("missing-cas-apex-cause", {"cas_hal_variant": "missing-apex"},
              "com.android.hardware.cas.apex is missing: the product needs the default CAS HAL"),
             ("cas-apex-without-binary-cause", {"cas_hal_variant": "no-binary"},

@@ -2,8 +2,8 @@
 # adbd's report that an adb host is connected; product init turns it into a wakelock.
 sys.kernarium.adb.host_connected    u:object_r:kernarium_adb_host_prop:s0 exact bool
 
-# The adb public key the host authorizes for the boot, which only adbd may read:
-# the other ro.boot.* properties are readable by every application.
+# The adb public key the host authorizes for the boot, which no application may
+# read: the other ro.boot.* properties are readable by every application.
 ro.boot.kernarium.adb_key    u:object_r:kernarium_adb_key_prop:s0 exact string
 
 # 1 once the product has saved its virtual Wi-Fi network, so a network the user

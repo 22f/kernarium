@@ -522,9 +522,11 @@ carry host-owned choices that bundle command lines may not override:
   the iOS release: adbd then listens on `vsock:5555` alone.
 - `ro.boot.kernarium.adb_key` is the adb public key the host application
   authorizes for the boot; adbd accepts it whatever the user's setting. Its type
-  is `kernarium_adb_key_prop` (`overlay/sepolicy/system_ext/private`), which only
-  adbd may read: the other two are `bootloader_prop`, readable by every
+  is `kernarium_adb_key_prop` (`overlay/sepolicy/system_ext/private`), which no
+  application may read: the other two are `bootloader_prop`, readable by every
   application, and a key that is unique to an installation would identify it.
+  adbd reads it and init sets it; dumpstate can read it too, so a bug report
+  that the user shares can carry the key.
 
 The user's debugging setting stays meaningful while adbd remains the host's
 channel: route `p0007` records the setting in `persist.sys.usb.config` and

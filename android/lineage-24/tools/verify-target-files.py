@@ -674,21 +674,30 @@ ADB_HOST_PROPERTY_TYPE = "kernarium_adb_host_prop"
 # topics read two launch properties themselves: ro.boot.kernarium.adb_key, the public key the
 # application authorizes for the boot, and ro.boot.kernarium.adb_tcp, 0 when the launch has no
 # host forward, which keeps adbd off guest TCP. The TCP property is a bootloader_prop, which
-# every domain may read, and the key has a type that only adbd reads; service.adb.listen_addrs
+# every domain may read, and the key has a type that no application reads; service.adb.listen_addrs
 # would not do, as it is a system_prop that vendor_init may not set. The adbd binary sits in its APEX, whose payload hints keep it
 # uncompressed so that the verifier reads these names in the payload's bytes.
 # adb_tcp is a bootloader_prop. The key is the installation's own, and a bootloader_prop is
 # readable by every application, so the key has a type of its own (overlay/sepolicy/system_ext/
-# private/adb_key_prop.te) that adbd alone may read.
+# private/adb_key_prop.te) that no application may read. adbd reads it, init sets it and
+# dumpstate can read it, so a bug report that the user shares can carry the key.
 ADBD_APEX = "SYSTEM/apex/com.android.adbd.apex"
 ADBD_BINARY = "bin/adbd"
 ADB_KEY_PROPERTY = "ro.boot.kernarium.adb_key"
 ADB_KEY_PROPERTY_TYPE = "kernarium_adb_key_prop"
 ADBD_LAUNCH_PROPERTIES = (ADB_KEY_PROPERTY, "ro.boot.kernarium.adb_tcp")
-# The domains that run applications, and the attribute that holds them all: none may read the key.
+# No application may read the key. The platform lists the concrete types that run applications in
+# the attributes below (untrusted_app_29, untrusted_app_34, runas_app, sdk_sandbox_34, ...), and
+# a rule is written against a concrete type or a generated attribute, so a rule for
+# untrusted_app_34 does not reach the name untrusted_app. The check reads every concrete member,
+# after the names that a rule is most likely to use.
 ADB_KEY_APP_DOMAINS = (
     "appdomain", "untrusted_app", "isolated_app", "ephemeral_app", "platform_app", "priv_app", "system_app",
 )
+ADB_KEY_APP_ATTRIBUTES = ("appdomain", "untrusted_app_all", "isolated_app_all", "sdk_sandbox_all")
+# The policies that may add application domains: the platform's, the vendor's and system_ext's, and
+# the product's and the odm's when the image has them.
+APP_POLICY_CIL = ("PRODUCT/etc/selinux/product_sepolicy.cil", "ODM/etc/selinux/odm_sepolicy.cil")
 # The key rule of p0011 reads the guest's debugging setting: AdbService records USB debugging in
 # persist.sys.usb.config (route p0007) and wireless debugging is persist.adb.tls_server.enable. adbd
 # offers any key but the host's only while one is on, and logs the refusal line otherwise; the line
@@ -4010,7 +4019,11 @@ def check_kernel_policy(
                 (platform_policy, vendor_policy, system_ext_policy),
                 f"{entry}: ",
             )
-    check_adbd_launch_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
+    check_adbd_launch_policy(
+        contexts,
+        (platform_policy, vendor_policy, system_ext_policy)
+        + tuple(read_small(archive, infos[name]) for name in APP_POLICY_CIL if name in infos),
+    )
     check_lmkd_gpu_policy(contexts, (platform_policy, vendor_policy, system_ext_policy), vendor_policy)
     check_venus_option_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
     check_audio_ring_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
@@ -4825,7 +4838,15 @@ def check_adbd_launch_policy(contexts: list[str], policies: tuple[bytes, ...]) -
             "(overlay/sepolicy/system_ext/private/property_contexts): every application could read "
             "the key that the host makes for the installation"
         )
-    for domain in ADB_KEY_APP_DOMAINS:
+    members = {
+        member
+        for policy in policies
+        for attribute in ADB_KEY_APP_ATTRIBUTES
+        for member in cil_attribute_members(policy, attribute)
+    }
+    if not any(cil_attribute_members(policy, "appdomain") for policy in policies):
+        fail("the policy lists no type for appdomain: the check could not tell who runs applications")
+    for domain in (*ADB_KEY_APP_DOMAINS, *sorted(members - set(ADB_KEY_APP_DOMAINS))):
         if cil_allows_file_read(policies, domain, key_label):
             fail(
                 f"{domain} may read {ADB_KEY_PROPERTY}, labelled {key_label}: an application could "
