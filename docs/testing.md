@@ -801,6 +801,12 @@ leaves it alone, a disk of a release that never disables the network is left
 alone, and a failed check shows only the warning on both.
 `android17-wifi-network-runner` (tooling) runs its parsers, the host's server
 and the sections' checks against scripted and simulated answers, without a guest.
+`android-restart-loop` (integration) registers when
+`UML_ANDROID_RESTART_LOOP_RELEASE` names the release: a guest restarted 16 s
+after each kernel start, while `sys.boot_completed` is still unset, ends the
+launch with status 3 after eight boots, and eight boots in a row restarted after
+they finished (seven restarts, each after the window) are never limited and
+power off cleanly (the loop guard, `emulator/src/restart_loop_guard.hpp`).
 `android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
 names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's

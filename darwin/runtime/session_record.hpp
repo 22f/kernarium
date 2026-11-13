@@ -32,7 +32,13 @@ namespace uml::runtime {
  * fault on a host thread that owns no vCPU does not reach the kernel's fault
  * path: the kernel's handler reports it on stderr and lets the fault end the
  * process through the default disposition, which writes the crash report.
- * kernel_write records that end as host_fault when it sees the report.
+ * kernel_write records that end as host_fault when it sees the report. The
+ * same output tells whether an Android guest finished booting
+ * (console_boot_completed) and whether init's output reached the record at all
+ * (console_init_observed), which the emulator reports as the run's end and an
+ * application's restart loop reads. The output is read where it is written to
+ * stdout, stderr and the descriptors the `con` and `ssl` arguments name with
+ * fd:, so a console on anything else shows none of it.
  *
  * Every memory_checkpoint_interval_ms while a session runs, a thread of the
  * record's own writes the process's footprint, its peak and what its memory
@@ -238,6 +244,18 @@ ssize_t kernel_write(int descriptor, const void *buffer, std::size_t length)
 /* kernel_write for the import named `name` (write, with or without the
  * leading underscore the Darwin SDK's asm labels add), else nullptr. */
 [[nodiscard]] void *kernel_output_import(const char *name) noexcept;
+
+/* Whether the kernel's console output, since the session began, said that an
+ * Android guest finished booting (console_boot_signal.hpp). It is false for a
+ * guest whose console never says so. Any thread. */
+[[nodiscard]] bool console_boot_completed() noexcept;
+
+/* Whether init's output has reached the record since the session began: its
+ * first line, or a line that ends the boot. False for a console the record
+ * does not read, and for a guest that is not Android. A boot that is neither
+ * completed nor init-observed is unobserved, not known to be unfinished. Any
+ * thread. */
+[[nodiscard]] bool console_init_observed() noexcept;
 
 /* What the record holds of the kernel's output: the last bytes, oldest first,
  * copied into `buffer`. For tests. */
