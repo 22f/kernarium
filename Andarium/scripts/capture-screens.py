@@ -209,7 +209,8 @@ SHOTS: list[Shot] = [
     s("home-capabilities-camera-restricted", "Home", "home-camera-restricted", "Capabilities on a device that restricts the camera (Screen Time or a profile): the row is dimmed and says it is restricted.", dark=True),
     s("home-capabilities-camera-restricted-alert", "Home", "home-camera-restricted-alert", "Turning Camera on while the device restricts it: the alert explains and has only OK.", dark=True),
     s("home-capabilities-camera-unavailable", "Home", "home-camera-unavailable", "Capabilities on a device with no camera (the Simulator, say): Camera is disabled and the note says there is no camera to share.", dark=True),
-    s("home-backup", "Home", "home-backup", "Home scrolled to Backup: the guest-data backup toggle and a one-line note."),
+    s("home-backup", "Home", "home-backup", "Home scrolled to Backup: the Include in backups switch and the note under it."),
+    s("home-backup-largest-text", "Home", "home-backup", "The Backup section at the largest accessibility text size: the row's title wraps over lines, never cut.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"),
     s("home-erase", "Home", "home-erase", "Home scrolled to the end: Erase virtual machine in a card of its own, with no heading.", dark=True),
     s("home-storage-grow", "Home", "home-grow", "Virtual machine with a larger storage size chosen: the Storage row's bar outlines the new size and the note under it says the growth takes effect at the next start.", dark=True),
     s("home-storage-max", "Home", "home-max", "Virtual machine with storage at its largest size (128 GiB, in 4 GiB steps): the note under the Storage bar says so and Resize is dimmed.", dark=True),
@@ -228,6 +229,7 @@ SHOTS: list[Shot] = [
     s("alert-error", "Alerts", "alert-error", "An error alert (an operation that failed with the system's message)."),
     # Sheets and dialogs
     s("setup-new-guest", "Setup", "create", "The initial setup sheet: Storage and Backup only; vCPUs and memory are no longer asked.", dark=True),
+    s("setup-new-guest-largest-text", "Setup", "create", "The setup sheet at the largest accessibility text size (the launch states it for the Preview alone): the Backup row wraps over lines, never cut.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"),
     s("setup-new-guest-low-space", "Setup", "create-low-space", "The setup sheet when the device lacks the free space the first start needs: the notice and a disabled Create."),
     s("start-low-space-alert", "Setup", "start-low-space", "Start pressed without enough free space: the alert."),
     s("storage-resize", "Sheets", "resize", "The Resize sheet for the guest's storage."),

@@ -362,7 +362,7 @@ control out.
   and Erase virtual machine deletes everything the guest has stored, its snapshots and
   the adb key included.
 - **Backup.** The guest is left out of iCloud and computer backups unless the
-  user turns on Back up guest data. Its snapshots are never backed up.
+  user turns on Include in backups. Its snapshots are never backed up.
 - **Snapshots.** A snapshot is an APFS clone of `data.img` with a copy of
   `instance.json`, in `Library/Guest/Snapshots/` (`SnapshotStore`): it costs
   nothing when made and then the blocks the guest rewrites. It keeps the data
