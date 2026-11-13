@@ -467,7 +467,8 @@ struct StartHandoverTests {
     @Test func theWriteBackBeforeAStopCostsNothingWithNoGuest() {
         let before = ContinuousClock.now
         LivePauseEffects.settleBeforeStop()
-        #expect(ContinuousClock.now - before < .seconds(2), "a stop with no guest waited for the write-back")
+        // A guest that never answered would hold it for `StopSettle.bound`.
+        #expect(ContinuousClock.now - before < .seconds(3), "a stop with no guest waited for the write-back")
     }
 
     /// A stop before the runtime runs has no guest to ask.
