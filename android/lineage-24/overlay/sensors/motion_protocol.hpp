@@ -220,11 +220,11 @@ inline ControlFrame control_frame(
 }
 
 // What the sensor service is told about the magnetometer. Core Motion states
-// neither the range nor the resolution of the field it fuses, so these are
-// declarations, figures within the compatibility definition (section 7.3.2: a
-// range of at least 900 uT, a resolution of at most 0.6 uT, a rate of at least
-// 10 Hz); whether the hardware behind Core Motion meets its other requirements
-// is Apple's and unmeasured. The resolution is a power of two, 1/8 uT, so that
+// neither the range nor the resolution of the field it fuses, so these declare
+// figures within the compatibility definition (section 7.3.2: a range of at
+// least 900 uT, a resolution of at most 0.6 uT, a rate of at least 10 Hz);
+// whether the hardware behind Core Motion meets its other requirements is
+// Apple's and unmeasured. The resolution is a power of two, 1/8 uT, so that
 // the range (4912 uT, 39296 steps) is an exact multiple of it, which the
 // sensor service checks. The service rounds every event value to an eighth of
 // the resolution it holds for the sensor, so a test that compares a value
