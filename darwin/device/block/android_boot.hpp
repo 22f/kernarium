@@ -3,6 +3,7 @@
 #define UML_DEVICE_BLOCK_ANDROID_BOOT_HPP
 
 #include "android_data_disk.hpp"
+#include "android_identity.hpp"
 #include "android_layout.hpp"
 
 #include <cstdint>
@@ -127,7 +128,8 @@ void validateUbdPath(const std::filesystem::path &path, std::string_view label);
  * launcher sets itself, or with one of storageArgumentPrefixes(), or when it
  * lacks bootDevicesArgument. A launcher that lists hwTimeoutMultiplierPrefix
  * has the one argument legacyHwTimeoutMultiplierArgument dropped from the
- * result instead of refused. */
+ * result instead of refused, and one that lists serialPrefix
+ * (android_identity.hpp) the same for legacySerialArgument. */
 std::vector<std::string> readKernelCommandLine(
 	const std::filesystem::path &path,
 	std::span<const std::string_view> launcherPrefixes);

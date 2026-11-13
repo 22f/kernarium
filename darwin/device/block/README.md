@@ -53,6 +53,19 @@ disk; `validateDataDisk` checks it.
   disk's capacity keeps the disk and reports its capacity, so a caller whose
   record lags a disk that already grew still starts.
 
+## Installation identity
+
+`android_identity.hpp` gives each installation of the guest its own serial
+number and its own eth0 address, in place of the release's `umlandroid17` and
+the user network's default. `resolveIdentity` keeps them in `identity.json`
+beside the data disk: it is made at random when it is absent or invalid and
+when a start created the data disk, is private to its owner, and is never
+rewritten while valid, so the values follow the disk through updates, resizes,
+snapshot restores and the guest's own factory reset and go with it when the
+instance is erased. A launcher that states a value uses it and touches no file.
+`readKernelCommandLine` drops the release's `androidboot.serialno=` argument
+when the launcher sets its own; the values are never logged.
+
 ## Exactly two disks
 
 `Storage` validates a release root and a data disk and is the only source of a

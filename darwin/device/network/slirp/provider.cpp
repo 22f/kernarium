@@ -40,9 +40,6 @@ constexpr std::uint32_t ipv4_value(const dns::Ipv4Address &address) noexcept
 
 using uml::platform::UniqueDescriptor;
 
-constexpr std::array<unsigned char, 6> default_mac{
-	0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
-
 bool create_pipe(std::array<UniqueDescriptor, 2> &result) noexcept
 {
 	std::array<int, 2> descriptors{};
@@ -263,8 +260,19 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 		}
 		started_.store(true, std::memory_order_release);
 	}
-	std::ranges::copy(default_mac, mac.begin());
+	std::ranges::copy(mac_, mac.begin());
 	mtu = 1500;
+	return 0;
+}
+
+int SlirpProvider::set_mac(std::span<const unsigned char, 6> mac)
+{
+	const bool zero = std::ranges::all_of(
+		mac, [](unsigned char byte) { return byte == 0; });
+	if ((mac[0] & 0x01U) != 0 || zero)
+		return -EINVAL;
+	std::lock_guard lock{start_mutex_};
+	std::ranges::copy(mac, mac_.begin());
 	return 0;
 }
 
@@ -650,6 +658,19 @@ extern "C" int uml_slirp_net_open(
 	try {
 		return static_cast<uml::network::SlirpProvider *>(context)->open(
 			std::span<unsigned char, 6>{mac, 6}, *mtu);
+	} catch (...) {
+		return -EIO;
+	}
+}
+
+extern "C" int uml_slirp_net_set_mac(
+	void *context, const unsigned char mac[6])
+{
+	if (context == nullptr || mac == nullptr)
+		return -EINVAL;
+	try {
+		return static_cast<uml::network::SlirpProvider *>(context)->set_mac(
+			std::span<const unsigned char, 6>{mac, 6});
 	} catch (...) {
 		return -EIO;
 	}

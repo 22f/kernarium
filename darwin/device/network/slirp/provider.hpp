@@ -49,6 +49,10 @@ inline constexpr const char *network_mask = "255.255.255.0";
 inline constexpr const char *host_alias_address = "10.0.2.2";
 inline constexpr const char *guest_address = "10.0.2.15";
 inline constexpr const char *nameserver_address = "10.0.2.3";
+/* The hardware address the guest's interface has unless a caller states one
+ * (SlirpProvider::set_mac). */
+inline constexpr std::array<unsigned char, 6> default_guest_mac{
+	0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
 inline constexpr dns::Ipv4Address nameserver_ipv4{10, 0, 2, 3};
 inline constexpr dns::Ipv4Address host_alias_ipv4{10, 0, 2, 2};
 /* A frame that needs the host's addresses (dns::needs_host_check) finds them
@@ -112,6 +116,11 @@ public:
 	~SlirpProvider();
 
     int open(std::span<unsigned char, 6> mac, unsigned int &mtu);
+	/* The hardware address the next open() gives the guest's interface, in
+	 * place of default_guest_mac. Returns 0, or -EINVAL for a multicast or an
+	 * all-zero address. DHCP and DNS answer whatever address the guest uses,
+	 * so nothing else depends on the value. */
+	int set_mac(std::span<const unsigned char, 6> mac);
 	/* Register a host forward. It is recorded and installed on each SLiRP
 	 * instance open() creates, before that instance's worker starts: libslirp
 	 * takes no lock, so nothing may join an instance its worker is walking.
@@ -328,6 +337,8 @@ private:
 	std::size_t transmit_tail_{};
 	std::list<std::unique_ptr<Timer>> timers_;
 	std::vector<HostForward> forwards_;
+	/* Guarded by start_mutex_. */
+	std::array<unsigned char, 6> mac_{default_guest_mac};
 	std::unique_ptr<Slirp, SlirpDeleter> slirp_;
 	std::array<uml::platform::UniqueDescriptor, 2> wake_pipe_;
 	std::array<uml::platform::UniqueDescriptor, 2> receive_pipe_;

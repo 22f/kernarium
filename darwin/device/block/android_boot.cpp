@@ -249,10 +249,16 @@ std::vector<std::string> readKernelCommandLine(
 		const std::string_view argument{text.data() + begin,
 			cursor - begin};
 		/* A launcher that sets the multiplier gets the legacy one dropped
-		 * rather than refused: every release before it carries it. */
+		 * rather than refused: every release before it carries it. The
+		 * serial number is the same: a launcher that sets it drops the
+		 * release's fixed one. */
 		if (argument == legacyHwTimeoutMultiplierArgument &&
 		    std::ranges::find(launcherPrefixes,
 				      hwTimeoutMultiplierPrefix) !=
+			    launcherPrefixes.end())
+			continue;
+		if (argument == legacySerialArgument &&
+		    std::ranges::find(launcherPrefixes, serialPrefix) !=
 			    launcherPrefixes.end())
 			continue;
 		for (const auto prefix : launcherPrefixes)

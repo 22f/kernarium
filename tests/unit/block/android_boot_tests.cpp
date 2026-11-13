@@ -1033,6 +1033,75 @@ void testHwTimeoutMultiplier(const fs::path &directory)
 	});
 }
 
+/* A launcher that has the installation's serial number sets it itself, and the
+ * release's own `umlandroid17` that every release published before then
+ * carries is dropped for it. Any other serial in a release is refused by such
+ * a launcher; a launcher with no serial of its own passes the release's
+ * command line through as it is. */
+void testSerialNumber(const fs::path &directory)
+{
+	require(android::serialPrefix == "androidboot.serialno=");
+	require(android::serialArgument("0123456789abcdef") ==
+		"androidboot.serialno=0123456789abcdef");
+	require(android::legacySerialArgument ==
+		std::string{android::serialPrefix} + "umlandroid17");
+
+	const std::string devices{android::bootDevicesArgument};
+	const auto path = directory / "serial-command-line.txt";
+	constexpr std::array<std::string_view, 2> setsSerial{
+		"androidboot.kernarium.adb_auth=", android::serialPrefix};
+	constexpr std::array<std::string_view, 1> leavesSerial{
+		"androidboot.kernarium.adb_auth="};
+
+	/* The legacy argument is dropped, in whatever place it stands, and the
+	 * others keep their order. */
+	writeText(path, "quiet androidboot.serialno=umlandroid17 " + devices +
+			" console=ttyS0\n");
+	require(android::readKernelCommandLine(path, setsSerial) ==
+		std::vector<std::string>{"quiet", devices, "console=ttyS0"});
+	writeText(path, "androidboot.serialno=umlandroid17 quiet " + devices + "\n");
+	require(android::readKernelCommandLine(path, setsSerial) ==
+		std::vector<std::string>{"quiet", devices});
+	/* A release without it reads the same. */
+	writeText(path, "quiet " + devices + "\n");
+	require(android::readKernelCommandLine(path, setsSerial) ==
+		std::vector<std::string>{"quiet", devices});
+	/* Any other serial is refused: the launcher fixes it. */
+	for (const char *bad : {"androidboot.serialno=0123456789abcdef",
+				"androidboot.serialno=umlandroid18",
+				"androidboot.serialno=umlandroid17x",
+				"androidboot.serialno=",
+				"androidboot.serialno=UMLANDROID17"}) {
+		writeText(path, std::string{"quiet "} + bad + " " + devices + "\n");
+		requireThrows([&] {
+			(void)android::readKernelCommandLine(path, setsSerial);
+		});
+		/* A launcher with no serial of its own passes it through. */
+		const auto arguments =
+			android::readKernelCommandLine(path, leavesSerial);
+		require(std::find(arguments.begin(), arguments.end(),
+				  std::string{bad}) != arguments.end());
+	}
+	/* The release's command line is read as it is when the launcher has no
+	 * serial: the legacy argument stays and boots the guest as before. */
+	writeText(path, "quiet androidboot.serialno=umlandroid17 " + devices + "\n");
+	require(android::readKernelCommandLine(path, leavesSerial) ==
+		std::vector<std::string>{"quiet", "androidboot.serialno=umlandroid17",
+					 devices});
+	/* Dropping the argument leaves the rest of the checks in force. */
+	writeText(path, "quiet androidboot.serialno=umlandroid17\n");
+	requireThrows([&] {
+		(void)android::readKernelCommandLine(path, setsSerial);
+	});
+	/* The launchers' own multiplier rule is unaffected. */
+	writeText(path, "androidboot.serialno=umlandroid17 "
+			"androidboot.hw_timeout_multiplier=5 " + devices + "\n");
+	constexpr std::array<std::string_view, 2> setsBoth{
+		android::serialPrefix, android::hwTimeoutMultiplierPrefix};
+	require(android::readKernelCommandLine(path, setsBoth) ==
+		std::vector<std::string>{devices});
+}
+
 /* Both launchers reserve the hardware SKU that tells the guest what the host
  * has (the iOS runtime's KernariumHostFeatures.hpp, and the standalone
  * launcher, which passes a host's own argument through) and the vendor SKU
@@ -1140,6 +1209,7 @@ int main(int argc, char *argv[])
 	testStorageIsExact(fixture, fresh("exact"));
 	testLcdDensity(fresh("density"));
 	testHwTimeoutMultiplier(fresh("multiplier"));
+	testSerialNumber(fresh("serial"));
 	testHostFeatureArguments(fresh("feature-arguments"));
 	testKernelCommandLine(fresh("command-line"));
 	testUbdPath();

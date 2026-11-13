@@ -92,6 +92,17 @@ uml_add_unit_test(NAME kernarium-host-features
     COMMAND uml_kernarium_host_features_tests
     LABELS kernarium)
 
+# The installation identity an Android guest is given: the boot request's
+# statements and the file beside the data disk.
+add_executable(uml_kernarium_identity_tests identity_tests.cpp)
+target_include_directories(uml_kernarium_identity_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/Kernarium/Runtime
+    ${PROJECT_SOURCE_DIR}/darwin/device)
+target_link_libraries(uml_kernarium_identity_tests PRIVATE UML::AndroidBoot)
+uml_add_unit_test(NAME kernarium-identity
+    COMMAND uml_kernarium_identity_tests
+    LABELS kernarium)
+
 # How a statistics reading is composed from the emulator's and the display's
 # figures, and when the guest's memory may be asked for.
 add_executable(uml_kernarium_statistics_tests statistics_tests.cpp)

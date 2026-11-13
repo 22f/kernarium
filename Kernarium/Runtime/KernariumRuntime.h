@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 41U
+#define KERNARIUM_RUNTIME_API_VERSION 42U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -163,7 +163,23 @@ enum {
  * fails a boot. The calibration path is a directory, the one the colour data a
  * Bayer still teaches is kept in (per lens, outside the guest's disks), or null
  * to keep it in memory. The runtime reads both only from a request whose
- * struct_size covers them; a Linux guest ignores them. */
+ * struct_size covers them; a Linux guest ignores them.
+ *
+ * android_serial_number and android_ethernet_mac (runtime API 42) state the
+ * installation's identity for a run that must have fixed values, which a test
+ * or a measurement wants. An Android guest otherwise has an identity of its
+ * own: the runtime keeps a random serial number and a random eth0 address in
+ * identity.json beside the data disk, made at the first start of a data disk
+ * (and of an installation that has none), and gives them to the guest. A
+ * request that states either value gets that one value, the other stays what
+ * the release and the user network have without an identity, and the file is
+ * neither read nor written. The serial is 6 through 20 characters of A-Z a-z
+ * 0-9 other than "unknown"; the address is the text aa:bb:cc:dd:ee:ff of a
+ * unicast address that is locally administered and none of 02:00:00:00:00:00,
+ * 52:54:00:12:34:56 or 02:15:b2:00:00:00. A value that is anything else fails
+ * the run with -UML_EMULATOR_INVALID_ARGUMENT; neither value is ever logged.
+ * The runtime reads them only from a request whose struct_size covers them; a
+ * Linux guest ignores them. */
 typedef struct kernarium_runtime_boot {
     uint32_t struct_size;
     uint32_t width;
@@ -188,6 +204,8 @@ typedef struct kernarium_runtime_boot {
     uint32_t android_host_features;
     uint32_t android_camera_mode;
     const char* android_camera_calibration_path;
+    const char* android_serial_number;
+    const char* android_ethernet_mac;
 } kernarium_runtime_boot;
 
 /* What a launch's host GPU budget comes to, as the runtime evaluates it for
