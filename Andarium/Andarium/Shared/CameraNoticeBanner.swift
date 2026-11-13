@@ -57,24 +57,29 @@ struct CameraNoticeBanner: View {
             .accessibilityIdentifier(identifier + "-dismiss")
     }
 
-    private func words(oneLine: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(CameraWords.noticeTitle(for: notice))
-                .font(.subheadline.weight(.semibold))
+    private func titleText(oneLine: Bool) -> some View {
+        Text(CameraWords.noticeTitle(for: notice))
+            .font(.subheadline.weight(.semibold))
+            .fixedSize(horizontal: oneLine, vertical: true)
+    }
+
+    @ViewBuilder
+    private func detailText(oneLine: Bool) -> some View {
+        if let detail = CameraWords.noticeDetail(for: notice) {
+            Text(detail)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
                 .fixedSize(horizontal: oneLine, vertical: true)
-            if let detail = CameraWords.noticeDetail(for: notice) {
-                Text(detail)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: oneLine, vertical: true)
-            }
         }
     }
 
     private func banner(oneLine: Bool) -> some View {
         HStack(alignment: .center, spacing: 12) {
             icon
-            words(oneLine: oneLine)
+            VStack(alignment: .leading, spacing: 2) {
+                titleText(oneLine: oneLine)
+                detailText(oneLine: oneLine)
+            }
             dismissButton
         }
         .padding(.vertical, 10)
@@ -82,12 +87,16 @@ struct CameraNoticeBanner: View {
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
     }
 
+    /// The icon stays beside the title only: the line under it takes the
+    /// whole width, so the larger text sizes do not wrap it into a narrow
+    /// column and the notice stays about as tall as the one without a line.
     private var stacked: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 12) {
                 icon
-                words(oneLine: false)
+                titleText(oneLine: false)
             }
+            detailText(oneLine: false)
             dismissButton
         }
         .padding(.vertical, 12)
