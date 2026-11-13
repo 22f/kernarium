@@ -431,8 +431,8 @@ struct RunningCamera : StreamCache {
     AVCaptureDeviceInput* input {};
     AVCaptureVideoDataOutput* videoOutput {};
     AVCapturePhotoOutput* photoOutput {};
-    // When a photo maximum that needs the sensor's full-resolution mode was committed, by the admission or by a repair
-    // of the anchor (host nanoseconds); zero if there is none (photoMaximumCommittedAt, stillSettleNanoseconds).
+    // When the session last committed a configuration with a photo maximum that needs the sensor's full-resolution
+    // mode (host nanoseconds); zero if there is none (photoPipelinesSettle, stillSettleNanoseconds).
     std::uint64_t photoMaximumCommittedAt {};
     UMLCameraOutputDelegate* delegate {};
     AVCaptureConnection* connection {};
@@ -963,11 +963,11 @@ public:
             photos_[request.token] = {camera, delegate, request, attempt};
         }
         // The pipeline applies a maximum that needs the sensor's full-resolution mode some time after the session commits
-        // it, and a capture that starts before is served at the binned size: the first still starts when that time has
-        // passed, scheduled on the session's queue, which stays free for the other cameras and the stop meanwhile.
-        // Another attempt of the request (stillSizeOutcome) has waited.
-        if (const std::uint64_t wait = attempt == 1 ? stillSettleNanoseconds(running.photoMaximumCommittedAt, hostNow()) : 0; wait != 0) {
-            std::fprintf(stderr, "Camera: camera %zu: the first still starts in %llu ms, when the photo output's full-resolution maximum has taken effect\n",
+        // a configuration, and a capture that starts before is served at the binned size: a still starts when that time
+        // has passed (the first after the admission, and one after a stream started, resized or stopped, or after a
+        // repair), scheduled on the session's queue, which stays free for the other cameras and the stop meanwhile.
+        if (const std::uint64_t wait = stillSettleNanoseconds(running.photoMaximumCommittedAt, hostNow()); wait != 0) {
+            std::fprintf(stderr, "Camera: camera %zu: the still starts in %llu ms, when the photo output's full-resolution maximum has taken effect\n",
                          camera, static_cast<unsigned long long>(wait / 1000000));
             scheduleStill(camera, request.token, output, settings, delegate, wait);
             return true;
@@ -1327,7 +1327,10 @@ private:
         plan.addPhoto = photo && running.photoOutput == nil;
         AdmitSteps steps;
         steps.begin = [&] { [session_ beginConfiguration]; };
-        steps.commit = [&] { [session_ commitConfiguration]; };
+        steps.commit = [&] {
+            [session_ commitConfiguration];
+            photoPipelinesSettle();
+        };
         steps.addInput = [&] { return guarded(camera, [&] { return addInput(entry, running); }); };
         steps.snapshotTiming = [&] { held = timingOf(entry.device); };
         steps.restoreTiming = [&] { restoreTiming(camera, entry.device, held); };
@@ -1478,8 +1481,7 @@ private:
         }
         if (newPhoto != nil) {
             running.photoOutput = newPhoto;
-            running.photoMaximumCommittedAt = uml::platform::photoMaximumCommittedAt(
-                photoMaximum(anchor->facts, limits_.maximumStillPixels), hostNow());
+            photoPipelinesSettle();
         }
         running.format = anchor->format;
         // The timing written again is known; what was applied before is written again after it.
@@ -1515,7 +1517,10 @@ private:
         std::optional<DeviceTiming> held;
         ResizeSteps steps;
         steps.begin = [&] { [session_ beginConfiguration]; };
-        steps.commit = [&] { [session_ commitConfiguration]; };
+        steps.commit = [&] {
+            [session_ commitConfiguration];
+            photoPipelinesSettle();
+        };
         steps.snapshotTiming = [&] { held = timingOf(entry.device); };
         if (rateChanges)
             steps.setDurations = [&] {
@@ -1626,10 +1631,7 @@ private:
             return true;
         });
         [session_ commitConfiguration];
-        // The photo maximum was written again: the pipeline takes its time again.
-        if (ok && running.photoOutput != nil)
-            running.photoMaximumCommittedAt = uml::platform::photoMaximumCommittedAt(
-                photoMaximum(anchor->facts, limits_.maximumStillPixels), hostNow());
+        photoPipelinesSettle();
         // A stream's durations are written with its anchor; a still-only camera's are written when it streams.
         if (ok && running.video) running.timingWritten();
         if (ok && running.applied) applyOnQueue(camera, running.settings, true);
@@ -1712,6 +1714,21 @@ private:
             running.format = nil;
         }
         [session_ commitConfiguration];
+        photoPipelinesSettle();
+    }
+
+    // The session committed a configuration (an admission, a stream's resize, a repair of an anchor, a removal), and
+    // the pipeline of every photo output whose maximum needs the full-resolution mode is reconfigured again: it takes
+    // its time from now. The one bookkeeping of every commit (photoMaximumCommittedAt).
+    void photoPipelinesSettle()
+    {
+        const std::uint64_t now = hostNow();
+        for (auto& [camera, running] : cameras_) {
+            const Anchor* anchor = anchorOf(camera);
+            if (running.photoOutput == nil || anchor == nullptr) continue;
+            running.photoMaximumCommittedAt =
+                uml::platform::photoMaximumCommittedAt(photoMaximum(anchor->facts, limits_.maximumStillPixels), now);
+        }
     }
 
     // Called on the session's queue after a still is delivered: a camera that
