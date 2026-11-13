@@ -54,6 +54,14 @@ KernariumLocationReceiverHandler locationHandler;
 std::mutex cameraStateHandlerMutex;
 std::mutex cameraStateRegistrationMutex;
 KernariumCameraStateHandler cameraStateHandler;
+/* And for the memory pressure, with the console handler's lifetime: the pressure
+ * queue can still deliver a report while exit() destroys ordinary statics. */
+struct MemoryPressureHandlerState final {
+    std::mutex handlerMutex;
+    std::mutex registrationMutex;
+    KernariumMemoryPressureHandler handler {nil};
+};
+MemoryPressureHandlerState& memoryPressure = *new MemoryPressureHandlerState;
 /* And for the input status. */
 std::mutex inputStatusHandlerMutex;
 std::mutex inputStatusRegistrationMutex;
@@ -172,6 +180,34 @@ void updateCameraStateForwarder(const kernarium_runtime_api* runtime)
     }
     runtime->set_camera_state_callback(
         wanted ? forwardCameraState : nullptr, nullptr);
+}
+
+/* Runs on a runtime thread, inside the runtime's call, so it only hands the
+ * report to the main queue. */
+void forwardMemoryPressure(void*, int level, int response)
+{
+    KernariumMemoryPressureHandler handler;
+    {
+        std::lock_guard lock(memoryPressure.handlerMutex);
+        handler = memoryPressure.handler;
+    }
+    if (handler == nil)
+        return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        handler(level, response);
+    });
+}
+
+void updateMemoryPressureForwarder(const kernarium_runtime_api* runtime)
+{
+    std::lock_guard registration(memoryPressure.registrationMutex);
+    bool wanted;
+    {
+        std::lock_guard lock(memoryPressure.handlerMutex);
+        wanted = memoryPressure.handler != nil;
+    }
+    runtime->set_memory_pressure_callback(
+        wanted ? forwardMemoryPressure : nullptr, nullptr);
 }
 
 /* Runs on a runtime thread, inside the runtime's call, so it only hands the
@@ -351,7 +387,8 @@ __attribute__((constructor)) void isolateGuestTimerFromApplicationThreads()
         api->set_network_notice == nullptr ||
         api->set_camera_state_callback == nullptr ||
         api->set_camera_rotation == nullptr ||
-        api->plan_camera_reserve == nullptr) {
+        api->plan_camera_reserve == nullptr ||
+        api->set_memory_pressure_callback == nullptr) {
         std::fputs("Kernarium: runtime API validation failed\n", stderr);
         return false;
     }
@@ -404,6 +441,7 @@ __attribute__((constructor)) void isolateGuestTimerFromApplicationThreads()
     updateRestartForwarder(api);
     updateLocationReceiverForwarder(api);
     updateCameraStateForwarder(api);
+    updateMemoryPressureForwarder(api);
     updateInputStatusForwarder(api);
 #ifndef UML_APP_STORE_APPLICATION
     /* Optional: only a runtime built for automation has it. */
@@ -870,6 +908,18 @@ extern "C" void kernarium_runtime_loader_set_camera_state_handler(
     const kernarium_runtime_api* runtime = api();
     if (runtime != nullptr)
         updateCameraStateForwarder(runtime);
+}
+
+extern "C" void kernarium_runtime_loader_set_memory_pressure_handler(
+    KernariumMemoryPressureHandler handler)
+{
+    {
+        std::lock_guard lock(memoryPressure.handlerMutex);
+        memoryPressure.handler = [handler copy];
+    }
+    const kernarium_runtime_api* runtime = api();
+    if (runtime != nullptr)
+        updateMemoryPressureForwarder(runtime);
 }
 
 extern "C" int kernarium_runtime_loader_set_camera_rotation(uint32_t degrees)
