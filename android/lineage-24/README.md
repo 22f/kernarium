@@ -365,14 +365,22 @@ otherwise; the framework overlay reads that switch
 (`config_supportsHardwareCamToggle`) and Android shows its own blocked-camera
 state. The host also sends black frames while it interrupts a camera, and the
 HAL passes them on as frames of the camera. Output sizes the host lacks that
-CTS and the camera API require (standard JPEG sizes, the YUV sizes of every
-smaller JPEG, 1920x1440 and 1280x720 for a concurrent camera) are cut from the
-smallest native video mode that covers them, scaled in the HAL and, for a
-JPEG, encoded there. A request whose outputs the host refuses or does not
-deliver within the HAL's deadline (3 s, 15 s for a request with a still) is a
-failed request (`ERROR_REQUEST`, which Camera2 and CameraX report as a failed
-capture); a request that loses only some of its outputs reports
-`ERROR_BUFFER` for those. `BURST_CAPTURE` is never declared. The candidate's
+CTS and the camera API require (standard JPEG sizes, 3840x2160 where that is the
+largest video mode, which is the recording size of the large tier, the YUV sizes
+of every smaller JPEG, 1920x1440 and 1280x720 for a concurrent camera) are cut
+from the smallest native video mode that covers them, scaled in the HAL and, for
+a JPEG, encoded there; the 3840x2160 one is cut from the mode of that size, so
+it asks the host for nothing a stream of that mode does not, and it is listed
+only when the camera's stills reach that size. A request whose
+outputs the host refuses or does not deliver within the HAL's deadline (3 s,
+15 s for a request with a still) is a failed request (`ERROR_REQUEST`, which
+Camera2 and CameraX report as a failed capture); a request that loses only some
+of its outputs reports `ERROR_BUFFER` for those. `BURST_CAPTURE` is never
+declared. A camera lists the keys it honours: the frame duration and the black
+level lock only with `MANUAL_SENSOR`, the AF regions only with autofocus, and no
+camera lists the tone map mode or curves or states the available tone map modes
+(the templates carry no tone map key). Every result carries the scene mode
+(`DISABLED`) and, with `MANUAL_SENSOR`, the black level lock. The candidate's
 smoke test is `tests/integration/android/run_android_camera.py`
 (`android-camera`).
 
