@@ -25,7 +25,8 @@ inline constexpr std::uint32_t cameraDeviceId = UML_VIRTIO_VIDEO_CAMERA_DEVICE_I
  *
  * Blocked never opens one, so the host's capture indicator cannot light: the
  * device publishes the cameras that discovery found, and every video buffer
- * completes black and flagged blocked. */
+ * completes black and flagged blocked. It reports CameraState::blockedInUse
+ * while the guest has a camera open. */
 enum class CameraMode : std::uint8_t { live, blocked };
 
 /* What the host is doing for the guest, for the application's notice. */
@@ -38,6 +39,12 @@ enum class CameraState : std::uint8_t {
     interruptedByMultitasking,
     /* The same, because the system is under pressure (heat). */
     interruptedBySystemPressure,
+    /* A blocked session, and an application in the guest has a camera open
+     * (a video stream is running, or a still was asked for): nothing is
+     * captured, the guest gets black frames, and the application can say that
+     * the camera is off. It lasts until the guest has closed every camera, so
+     * a new open reports it again. A live session never reports it. */
+    blockedInUse,
 };
 
 /* Where a diagnostic reading of the process's memory is useful, to measure

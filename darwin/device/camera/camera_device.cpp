@@ -570,13 +570,21 @@ public:
             if (runtime.interruption == Interruption::pressure) pressure = true;
             if (runtime.interruption == Interruption::interrupted || runtime.failed) interrupted = true;
         }
+        bool blockedUse = false;
         for (const auto& [id, stream] : streams) {
             (void)id;
             active |= startedVideo(stream);
+            // A video stream that runs, or a still that was asked for. A
+            // metadata stream is queued for every camera the guest opens and
+            // does not say a client is using it.
+            blockedUse |= stream.started && stream.kind != VIRTIO_VIDEO_CAMERA_STREAM_META;
         }
         // A blocked session never captures, so nothing is "streaming" however many
-        // black frames the guest's streams get.
-        CameraState state = blocked() || !active ? CameraState::idle : multitasking ? CameraState::interruptedByMultitasking
+        // black frames the guest's streams get; the application hears that a
+        // guest app has a camera open (blockedInUse), once for each open.
+        CameraState state = blocked() ? (blockedUse ? CameraState::blockedInUse : CameraState::idle)
+            : !active ? CameraState::idle
+            : multitasking ? CameraState::interruptedByMultitasking
             : pressure ? CameraState::interruptedBySystemPressure
             : interrupted ? CameraState::interrupted : CameraState::streaming;
         if (state == reported) return;
@@ -923,6 +931,8 @@ public:
         else if (runtime.interruption != Interruption::none) refusal = VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED;
         if (refusal != 0) {
             complete(stream.id, held, held.cookie, VIRTIO_VIDEO_DEQUEUE_FLAG_ERR | refusal);
+            // A blocked session's still is the guest's use of a camera too.
+            if (blocked()) reportState();
             return;
         }
         const bool more = (held.flags & VIRTIO_VIDEO_CAMERA_QUEUE_F_GROUP_MORE) != 0 && held.cookie != 0;
