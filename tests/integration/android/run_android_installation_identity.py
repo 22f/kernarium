@@ -18,8 +18,9 @@ with the macOS launcher (tools/boot_android.py), and the runner checks that:
 - a second instance gets a serial number and an address of its own.
 
 The values are random per installation and are never printed: a failure names
-what differed, not what the value was. The guest's Wi-Fi address is derived in
-the guest from eth0's by a later release and is not checked here.
+what differed, not what the value was, and the launcher's log tail that a
+failure prints has every serial number and hardware address masked (`mask`).
+The guest's Wi-Fi address is the image's own constant and is not checked here.
 
 Every wait has a deadline; the guest's launcher is stopped through its own
 process on any exit.
@@ -56,10 +57,34 @@ STOP_SECONDS = 120
 SETTLE_SECONDS = 60
 TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 MAC_PATTERN = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
+ANY_MAC = re.compile(r"(?i)(?<![0-9a-z])(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}(?![0-9a-z])")
+SERIAL_ASSIGNMENT = re.compile(r"(?i)(serialno\W{0,4})[0-9a-z]{6,20}")
+MASKED = "<masked>"
 
 
 class Failure(RuntimeError):
     pass
+
+
+def mask(text: str, known: tuple[str, ...] = ()) -> str:
+    """The text with every serial number and hardware address replaced: the values this
+    run knows (the identity files'), any address, and whatever follows `serialno`."""
+    for value in known:
+        if value:
+            text = text.replace(value, MASKED)
+    return SERIAL_ASSIGNMENT.sub(r"\1" + MASKED, ANY_MAC.sub(MASKED, text))
+
+
+def known_values(instances: list[pathlib.Path]) -> tuple[str, ...]:
+    """The serial numbers and addresses of the identity files that exist, best effort."""
+    values: list[str] = []
+    for instance in instances:
+        try:
+            members = json.loads((instance / IDENTITY_FILE).read_text())
+            values += [str(members.get("serialno", "")), str(members.get("ethernet_mac", ""))]
+        except (OSError, ValueError, AttributeError):
+            pass
+    return tuple(values)
 
 
 def ignore_termination() -> None:
@@ -141,9 +166,11 @@ class Guest:
         self.instance = instance
         self.log = log
         self.process: subprocess.Popen | None = None
+        self.connected = True
         self.device = Device(options.adb, f"127.0.0.1:{options.adb_port}")
 
     def start(self) -> None:
+        self.connected = True
         options = self.options
         command = [sys.executable, str(LAUNCHER), "--instance", str(self.instance),
                    "--adb", options.adb, "--adb-port", str(options.adb_port), "--display", "offscreen",
@@ -159,15 +186,29 @@ class Guest:
         wait_booted(self.device, options.boot_timeout, self.process)
 
     def stop(self) -> None:
+        """Ends the launcher and drops the connection; neither a launcher that ignores SIGTERM
+        nor an adb that times out keeps the other half from running."""
         process, self.process = self.process, None
-        if process is not None and process.poll() is None:
-            process.send_signal(signal.SIGTERM)
-            try:
-                process.wait(timeout=STOP_SECONDS)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=30)
-        self.device.run("disconnect", self.device.serial, timeout=30)
+        try:
+            if process is not None and process.poll() is None:
+                process.send_signal(signal.SIGTERM)
+                try:
+                    process.wait(timeout=STOP_SECONDS)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=30)
+        finally:
+            self.disconnect()
+
+    def disconnect(self) -> None:
+        """Best effort: a guest that is gone has nothing to disconnect from."""
+        if not self.connected:
+            return
+        self.connected = False
+        try:
+            self.device.run("disconnect", self.device.serial, timeout=30)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
 
     def reboot(self) -> None:
         previous = boot_id(self.device)
@@ -255,6 +296,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def stop_all(guests: list[Guest]) -> None:
+    """Every guest is stopped, whatever an earlier stop raises: the emulator runs in a process
+    group of its own, so the runner's exit does not end it."""
+    for guest in guests:
+        try:
+            guest.stop()
+        except (subprocess.TimeoutExpired, OSError) as problem:
+            print(f"cleanup: a guest did not stop cleanly: {type(problem).__name__}", file=sys.stderr)
+
+
 def main() -> int:
     options = build_parser().parse_args()
     options.adb = shutil.which(options.adb) or options.adb
@@ -301,15 +352,16 @@ def main() -> int:
             print("PASS")
             return 0
         except (Failure, subprocess.TimeoutExpired, OSError) as problem:
-            print(f"FAIL: {problem}", file=sys.stderr)
+            known = known_values([scratch / "first", scratch / "second"])
+            print(f"FAIL: {mask(str(problem), known)}", file=sys.stderr)
             if log_path.is_file():
-                print("launcher log tail:\n" + "\n".join(log_path.read_text(errors="replace").splitlines()[-30:]),
+                tail = "\n".join(log_path.read_text(errors="replace").splitlines()[-30:])
+                print("launcher log tail (serial numbers and addresses masked):\n" + mask(tail, known),
                       file=sys.stderr)
             return 1
         finally:
             ignore_termination()
-            for guest in guests:
-                guest.stop()
+            stop_all(guests)
 
 
 if __name__ == "__main__":
