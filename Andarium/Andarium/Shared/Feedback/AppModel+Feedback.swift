@@ -43,6 +43,24 @@ extension AppModel {
             thermalState: Self.thermalName(ProcessInfo.processInfo.thermalState))
     }
 
+    /// The virtual machine is starting: the boot screen is up and Android has
+    /// not been seen to boot.
+    var virtualMachineStarts: Bool {
+        if case .booting = phase { return true }
+        return false
+    }
+
+    /// What the virtual machine printed in this boot, as the runtime's session
+    /// record last quoted it: at most 4 KiB, from a checkpoint a few seconds
+    /// old, and the boot's own (the record's cursor starts with the boot). nil
+    /// where there is no record or it has no output yet.
+    func startOutput() -> String? {
+        guard let diagnosticsDirectory else { return nil }
+        let output = SessionRecord.read(at: diagnosticsDirectory.appendingPathComponent(BugReportAttachments.sessionRecord))?
+            .kernelOutput
+        return output?.isEmpty == false ? output : nil
+    }
+
     /// Where a start that is still under way has got, for the mail written
     /// from the boot screen's notice; nil in any other state.
     private func bootingInformation() -> SendFeedbackInformation.Boot? {

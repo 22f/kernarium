@@ -11,6 +11,8 @@ import UniformTypeIdentifiers
 nonisolated struct SendFeedbackAttachment: Identifiable, Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         case bugReport, screenshot, photo, video
+        /// What the sheet attaches by itself when it opens during a start.
+        case startLog
     }
 
     let id: UUID

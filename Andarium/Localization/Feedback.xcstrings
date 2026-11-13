@@ -139,6 +139,29 @@
         }
       }
     },
+    "A bug report and a screenshot need the virtual machine to finish starting. The start log is attached." : {
+      "comment" : "The line under that title: a bug report and a screenshot wait for the start, and the start log is already attached as a row.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バグレポートとスクリーンショットには、仮想マシンの起動完了が必要です。起動ログを添付しています。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "错误报告和截屏需要等虚拟机启动完成。启动日志已附上。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "錯誤報告和截圖需要等虛擬機器啟動完成。啟動記錄檔已附上。"
+          }
+        }
+      }
+    },
     "Add photos or videos" : {
       "comment" : "What VoiceOver says for the Photos button.",
       "localizations" : {
@@ -875,6 +898,29 @@
         }
       }
     },
+    "Remove start log" : {
+      "comment" : "VoiceOver name of the button that takes the start log out of the mail.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "起動ログを削除"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移除启动日志"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移除啟動記錄檔"
+          }
+        }
+      }
+    },
     "Remove video" : {
       "comment" : "VoiceOver name of the button that takes a video out of the mail.",
       "localizations" : {
@@ -917,6 +963,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "要回報錯誤嗎？"
+          }
+        }
+      }
+    },
+    "Reporting a slow start?" : {
+      "comment" : "The title of the card over the bar when the sheet was opened during a start (from the boot screen's notice): the virtual machine is starting, so there is nothing to start.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "起動が遅いことを報告しますか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要报告启动缓慢吗？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要回報啟動緩慢嗎？"
           }
         }
       }
@@ -1078,6 +1147,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "顯示App和裝置詳細資訊"
+          }
+        }
+      }
+    },
+    "Start log" : {
+      "comment" : "The name of the attached text file that holds what the virtual machine printed while starting, as a row of the mail and a name for VoiceOver.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "起動ログ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启动日志"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "啟動記錄檔"
           }
         }
       }

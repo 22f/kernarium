@@ -38,6 +38,10 @@ final class SendFeedbackModel {
     private(set) var sent = false
     private(set) var closed = false
     private var presentingMail = false
+    /// The start log was offered once, whether or not it was attached, and
+    /// whether or not it was removed since: it is made when the sheet opens
+    /// and never again.
+    @ObservationIgnored private var startLogOffered = false
 
     init(app: AppModel, staging: SendFeedbackStaging = SendFeedbackStaging()) {
         self.app = app
@@ -57,6 +61,7 @@ final class SendFeedbackModel {
     var state: SendFeedbackForm {
         var state = form
         state.running = app.virtualMachineRuns
+        state.starting = app.virtualMachineStarts
         state.bugReportPossible = app.canCreateBugReport && app.busy == nil
         state.makingBugReport = app.feedbackBusy != nil
         return state
@@ -70,6 +75,29 @@ final class SendFeedbackModel {
     /// the foreground.
     func refresh() {
         form.mailAvailable = app.feedbackServices.canSendMail()
+    }
+
+    // MARK: Start log
+
+    /// Opened during a start, the sheet attaches the start log by itself, once:
+    /// the step, the time on the notice's clock, the kind of start and this
+    /// boot's output as the runtime's record quotes it. It is a row like the
+    /// others; taking it out is remembered for this sheet, and it is not made
+    /// again while the sheet is open, whatever the start does.
+    func offerStartLog() {
+        guard !startLogOffered else { return }
+        startLogOffered = true
+        guard !closed, case let .booting(kind) = app.phase, let boot = information.boot else { return }
+        let text = SendFeedbackStartLog.text(
+            step: boot.step, seconds: boot.seconds, kind: kind, restarts: boot.restarts, output: app.startOutput(),
+            containers: app.diagnosticsContainers)
+        do {
+            let url = try folder.reserve(SendFeedbackStartLog.fileName)
+            try Data(text.utf8).write(to: url)
+            form.attachments.add(SendFeedbackAttachment(kind: .startLog, url: url, bytes: Self.size(of: url)))
+        } catch {
+            // The log helps; a sheet without it is as usable.
+        }
     }
 
     // MARK: Bug report

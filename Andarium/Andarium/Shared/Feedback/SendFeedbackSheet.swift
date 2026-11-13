@@ -27,6 +27,7 @@ struct SendFeedbackSheet: View {
     /// The words more than one place uses, in the feature's table.
     private enum Words {
         static let bugReport = LocalizedStringResource("Bug report", table: "Feedback")
+        static let startLog = LocalizedStringResource("Start log", table: "Feedback")
         static let screenshot = LocalizedStringResource("Screenshot", table: "Feedback")
         static let photos = LocalizedStringResource("Photos", table: "Feedback")
         static let addPhotos = LocalizedStringResource("Add photos or videos", table: "Feedback")
@@ -151,7 +152,10 @@ struct SendFeedbackSheet: View {
             dismiss()
         }
         #if !APP_STORE
-        .task { await model.app.feedbackServices.previewPrepare(model) }
+        .task {
+            model.offerStartLog()
+            await model.app.feedbackServices.previewPrepare(model)
+        }
         #endif
         .onDisappear { model.close() }
         .presentationSizing(.page)
@@ -323,6 +327,7 @@ struct SendFeedbackSheet: View {
         case .screenshot: "camera.viewfinder"
         case .photo: "photo"
         case .video: "video.fill"
+        case .startLog: "doc.text.fill"
         }
     }
 
@@ -332,6 +337,7 @@ struct SendFeedbackSheet: View {
         case .screenshot: Words.screenshot
         case .photo: LocalizedStringResource("Photo", table: "Feedback")
         case .video: LocalizedStringResource("Video", table: "Feedback")
+        case .startLog: Words.startLog
         }
     }
 
@@ -341,6 +347,7 @@ struct SendFeedbackSheet: View {
         case .screenshot: LocalizedStringResource("Remove screenshot", table: "Feedback")
         case .photo: LocalizedStringResource("Remove photo", table: "Feedback")
         case .video: LocalizedStringResource("Remove video", table: "Feedback")
+        case .startLog: LocalizedStringResource("Remove start log", table: "Feedback")
         }
     }
 
@@ -518,7 +525,8 @@ struct SendFeedbackSheet: View {
                 .foregroundStyle(Color.accentColor)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 8) {
-                if state.running {
+                switch state.tip {
+                case .running:
                     Text(
                         "For any bug, attach a bug report. It tells us what the virtual machine and the app were doing.",
                         tableName: "Feedback")
@@ -529,7 +537,21 @@ struct SendFeedbackSheet: View {
                         .controlSize(.small)
                         .disabled(!state.canMakeBugReport)
                         .accessibilityIdentifier("feedback-create-bug-report")
-                } else {
+                case .starting:
+                    // The virtual machine is starting, so there is nothing to
+                    // start: the log of the start is what goes with the mail.
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Reporting a slow start?", tableName: "Feedback")
+                            .font(.subheadline.weight(.semibold))
+                        Text(String(
+                            localized: "A bug report and a screenshot need the virtual machine to finish starting. The start log is attached.",
+                            table: "Feedback").keepingTogether)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .accessibilityElement(children: .combine)
+                case .home:
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Reporting a bug?", tableName: "Feedback")
                             .font(.subheadline.weight(.semibold))

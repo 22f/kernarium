@@ -457,9 +457,17 @@ requires reopening Andarium.
   guest's files stay its own until then, and a start asked for since, Erase,
   Create, the update's Restore and a snapshot rename wait for it. Send
   feedback opens the sheet the root presents (`feedbackFromBoot`), which stays
-  up with its draft when the boot completes or the run ends; a bug report and
-  a screenshot need a running guest, and the information block gains a Boot
-  line with the step, the time and the restarts. A process that ended in the
+  up with its draft when the boot completes or the run ends. During the start
+  its tip says that a bug report and a screenshot wait for the start to finish
+  and that the start log is attached, and the sheet attaches `start-log.txt`
+  once, when it opens: the step, the time on the notice's clock, the kind of
+  start and this boot's printed output, from the session record's last 4 KiB
+  (the serial, every `adb_key=` value, hardware addresses and the application's
+  folders are masked). It is a row the person can remove, counted in the total;
+  a removed log is not made again, and the file is not refreshed while the sheet
+  is open. When the boot completes the tip becomes the running one and the log
+  stays. The information block gains a Boot line with the step, the time and
+  the restarts. A process that ended in the
   boot leaves the runtime's session record with the console's last output of
   that boot, which the next bug report carries as the previous session's
   record.
