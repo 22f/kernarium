@@ -29,14 +29,17 @@ nonisolated enum PackageInstallMessages {
             ["FAILED_DEPRECATED_SDK_VERSION"],
             String(localized: "This app was made for a system version that this virtual machine no longer installs.")
         ),
-        (["FAILED_NO_MATCHING_ABIS"], String(localized: "This app has no code for this device\u{2019}s processor.")),
+        (
+            ["FAILED_NO_MATCHING_ABIS"],
+            String(localized: "This app has no code for this device\u{2019}s processor. Choose a version of the app made for ARM processors.")
+        ),
         (
             ["FAILED_INSUFFICIENT_STORAGE"],
             String(localized: "The virtual machine doesn\u{2019}t have enough free space. Free some up in the virtual machine, or give it more storage with Resize.")
         ),
         (
             ["FAILED_MISSING_SPLIT"],
-            String(localized: "This app comes in several parts, which Andarium can\u{2019}t install yet.")
+            String(localized: "Some parts of this app are missing. Choose an .apks, .xapk or .apkm file that holds all of them.")
         ),
         (["FAILED_MISSING_SHARED_LIBRARY"], String(localized: "The app needs a system library this virtual machine doesn\u{2019}t have.")),
         (
@@ -53,17 +56,20 @@ nonisolated enum PackageInstallMessages {
     /// the message for the person. Output with neither word is a failure that
     /// names nothing.
     static func failure(inOutput output: String) -> String? {
-        let lines = output.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
-        if lines.contains(where: { $0.hasPrefix("Success") }) { return nil }
-        guard let line = lines.last(where: { $0.hasPrefix("Failure") }) else {
+        let generic = String(localized: "The virtual machine couldn\u{2019}t install the app.")
+        switch PackageInstallResponse(output: output) {
+        case .success:
+            return nil
+        case .unrecognized:
             // Session creation can fail on the exception alone, with no line
             // of its own: `IOException: Requested internal only, but not
             // enough space`.
             if isStorageException(output) { return message(forCode: "FAILED_INSUFFICIENT_STORAGE") }
-            return String(localized: "The virtual machine couldn\u{2019}t install the app.")
+            return generic
+        case let .failure(line):
+            guard let code = code(inFailure: line) else { return generic }
+            return message(forCode: code)
         }
-        guard let code = code(inFailure: line) else { return String(localized: "The virtual machine couldn\u{2019}t install the app.") }
-        return message(forCode: code)
     }
 
     /// Whether the output is an exception that says the partition is full.
@@ -88,6 +94,44 @@ nonisolated enum PackageInstallMessages {
 
     /// Every code the table maps, for the test that checks the table.
     static var mappedCodes: [String] { table.flatMap(\.codes) }
+}
+
+/// How an install that reached the package manager ended.
+nonisolated enum ApkInstallOutcome: Equatable, Sendable {
+    case installed
+    /// The app is installed, but the data files its archive carried (an OBB
+    /// file of an .xapk or .apkm) were not all copied: the copy was stopped
+    /// or failed, and installing the same file again copies them.
+    case installedWithoutData
+    /// The app is installed, but some of the archive's data is of a kind that
+    /// is not copied (it names no OBB file of the app, or no package): installing
+    /// the file again would not help.
+    case installedDataNotPlaced
+}
+
+extension ApkInstallOutcome {
+    /// What the install's card says, and how it presents it. An app that is in
+    /// with some of its data not copied is a warning, with a title of its own, so
+    /// that it is not taken for a plain success.
+    func words(fileName name: String) -> BusyWords {
+        switch self {
+        case .installed:
+            BusyWords(title: String(localized: "App installed"), detail: String(localized: "\(name) is installed in the virtual machine."))
+        case .installedWithoutData:
+            BusyWords(
+                title: Self.warningTitle,
+                detail: String(localized: "\(name) is installed in the virtual machine, but not all of its data files were copied. The app may not work without them. Install the file again to copy them."),
+                style: .warning)
+        case .installedDataNotPlaced:
+            BusyWords(
+                title: Self.warningTitle,
+                detail: String(localized: "\(name) is installed in the virtual machine, but not all of its data files were copied. The app may not work without them."),
+                style: .warning)
+        }
+    }
+
+    /// The title of the card of an install whose app is in but whose data is not all there.
+    static var warningTitle: String { String(localized: "App installed, some data missing") }
 }
 
 /// The package manager refused an app for the version of Android it was built

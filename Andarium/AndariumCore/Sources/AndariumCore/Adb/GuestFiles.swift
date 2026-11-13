@@ -347,6 +347,12 @@ public enum GuestFiles {
         return "\(move) && { \(scanCommand(for: path)) >/dev/null 2>&1; true; }"
     }
 
+    /// Makes `folder`, and the folders above it that are missing; it succeeds
+    /// when they are there. The caller has checked that it is inside `root`.
+    public static func makeFolderCommand(for folder: String) -> String {
+        "mkdir -p -- \(quotedForShell(folder))"
+    }
+
     /// Removes a partial file; the command succeeds when it is not there.
     public static func removeCommand(for temporary: String) -> String {
         "rm -f -- \(quotedForShell(temporary))"
