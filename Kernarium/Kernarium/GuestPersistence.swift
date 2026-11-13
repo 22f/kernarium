@@ -148,12 +148,9 @@ final class GuestPersistence {
     ) {
         let assertion = BackgroundTaskAssertion(named: "guest-sync")
         queue.async {
-            let unflushed = kernarium_runtime_loader_quiesce_resident()
+            let settle = GuestSettle.quiesceResident()
             Task { @MainActor in
-                print(
-                    "Kernarium: guest storage settled on \(reason), RAM " +
-                        "kept (\(unflushed) unflushed)"
-                )
+                print("Kernarium: " + settle.logLine(reason: reason, kept: "RAM kept"))
                 assertion.end()
                 finished()
             }
@@ -199,29 +196,18 @@ final class GuestPersistence {
         let assertion = BackgroundTaskAssertion(named: "guest-sync")
         let finished = DispatchSemaphore(value: 0)
         queue.async {
-            let unflushed = switch departure {
-            case .flush: kernarium_runtime_loader_sync()
-            case .quiesce: kernarium_runtime_loader_quiesce()
+            let settle = switch departure {
+            case .flush: GuestSettle.sync()
+            case .quiesce: GuestSettle.quiesce()
             }
             finished.signal()
             Task { @MainActor in
-                GuestPersistence.report(reason: reason, unflushed: unflushed)
+                print("Kernarium: " + settle.logLine(reason: reason))
                 assertion.end()
             }
         }
         if let deadline {
             _ = finished.wait(timeout: deadline)
-        }
-    }
-
-    private static func report(reason: String, unflushed: Int32) {
-        if unflushed > 0 {
-            print(
-                "Kernarium: \(reason) sync left \(unflushed) guest " +
-                "file(s) unflushed"
-            )
-        } else if unflushed == 0 {
-            print("Kernarium: guest storage settled on \(reason)")
         }
     }
 }

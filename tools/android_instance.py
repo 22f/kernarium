@@ -45,10 +45,24 @@ SNAPSHOT_PREFIX = "data.img.pre-"
 IDENTITY_FILE = "identity.json"
 RELEASE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+# The build number orders releases, with one exception: the numbers of the
+# counter the first public releases were built with (it began as a date and
+# every proof build spent one) are older than every number outside this range.
+# Inside and outside it, numbers compare as integers.
+LEGACY_BUILD_FIRST = 2026110800
+LEGACY_BUILD_LAST = 2026110899
 
 
 class InstanceError(RuntimeError):
     """A refusal or a failure the user must act on."""
+
+
+def build_order(build_number: int) -> tuple[int, int]:
+    """The key that orders build numbers: `a` is older than `b` when
+    `build_order(a) < build_order(b)`, and the keys are equal only for equal
+    numbers."""
+    legacy = LEGACY_BUILD_FIRST <= build_number <= LEGACY_BUILD_LAST
+    return (0 if legacy else 1, build_number)
 
 
 # --- the release ---------------------------------------------------------------
@@ -296,7 +310,8 @@ def decide(
                     "a retry boots the release whose update did not complete",
                 )
             return Decision("retry", "the update boots again, its snapshot kept")
-        if release.release_id != state.release_id and release.build_number > state.build_number:
+        newer = build_order(release.build_number) > build_order(state.build_number)
+        if release.release_id != state.release_id and newer:
             if not snapshot_exists:
                 return Decision("refuse_conflict", "the update's snapshot is missing")
             if release.data_layout < pending["from"]["data_layout"]:
@@ -318,7 +333,7 @@ def decide(
         if release.system_disk_sha256 != state.system_disk_sha256:
             return Decision("refuse_conflict", "one release id names two system disks")
         return Decision("boot", "the release the data disk was last started with")
-    if release.build_number < state.build_number:
+    if build_order(release.build_number) < build_order(state.build_number):
         return Decision(
             "refuse_downgrade",
             f"build {release.build_number} is older than build {state.build_number}, "

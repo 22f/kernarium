@@ -38,6 +38,68 @@ struct ConsoleScannerTests {
         #expect(scanner.bootCompletedCount == 2)
     }
 
+    @Test func apexdsReportThatTheSystemBootedCompletesTheBootToo() {
+        let apex = "[   22.8] apexd: markBootCompleted() received by ApexService\n"
+        let initLine = "[   22.9] init: processing action (sys.boot_completed=1) from (/x:1)\n"
+        // On its own, as when a restart comes between the two lines.
+        var scanner = ConsoleScanner()
+        _ = scanner.feed("[    0.6] init: init first stage started!\n")
+        #expect(scanner.bootCompletedCount == 0)
+        #expect(scanner.feed(apex) == [.ready] && scanner.bootCompletedCount == 1)
+        // A boot that says both counts once, in either order.
+        _ = scanner.feed(initLine)
+        #expect(scanner.bootCompletedCount == 1)
+        _ = scanner.feed("[    0.0] Linux version 6.18.54 (clang)\n")
+        _ = scanner.feed(initLine)
+        _ = scanner.feed(apex)
+        #expect(scanner.bootCompletedCount == 2)
+        // The next boot counts again.
+        _ = scanner.feed("[    0.0] Linux version 6.18.54 (clang)\n")
+        _ = scanner.feed(apex)
+        _ = scanner.feed(initLine)
+        #expect(scanner.bootCompletedCount == 3)
+    }
+
+    /// A boot that began without a banner the scanner could read (the app
+    /// tells it at the guest's restart) counts its own completion.
+    @Test func aRestartBeginsABootEvenWhenTheConsolePrintsNoBanner() {
+        let apex = "[   22.8] apexd: markBootCompleted() received by ApexService\n"
+        let initLine = "[   22.9] init: processing action (sys.boot_completed=1) from (/x:1)\n"
+        var scanner = ConsoleScanner()
+        _ = scanner.feed(apex)
+        #expect(scanner.bootCompletedCount == 1)
+        scanner.beginBoot()
+        _ = scanner.feed(initLine)
+        #expect(scanner.bootCompletedCount == 2)
+        // The old boot's unfinished line is not the next one's beginning.
+        var cut = ConsoleScanner()
+        _ = cut.feed("[    1.0] init: processing action (sys.boot_")
+        cut.beginBoot()
+        _ = cut.feed("completed=1) from (/x:1)\n")
+        #expect(cut.bootCompletedCount == 0)
+        // The counts only grow.
+        #expect(scanner.recoveryStartedCount == 0)
+    }
+
+    @Test func theBootTrackerOfTheAppAgreesWithTheRuntimeOnWhatCompletesABoot() {
+        var scanner = ConsoleScanner()
+        var tracker = BootTracker()
+        let seen = scanner.feed(
+            "init: init first stage started!\napexd: markBootCompleted() received by ApexService\n")
+        for milestone in seen { tracker.reach(milestone, atSeconds: 25) }
+        #expect(tracker.isReady && scanner.bootCompletedCount == 1)
+    }
+
+    @Test func theRecoveryImageIsCountedApartFromAnAndroidBoot() {
+        var scanner = ConsoleScanner()
+        _ = scanner.feed("[    0.8] init: starting service 'recovery'...\n")
+        #expect(scanner.recoveryStartedCount == 1 && scanner.bootCompletedCount == 0)
+        _ = scanner.feed("[   22.9] init: processing action (sys.boot_completed=1) from (/x:1)\n")
+        #expect(scanner.recoveryStartedCount == 1 && scanner.bootCompletedCount == 1)
+        _ = scanner.feed("[    1.2] init: starting service 'recovery-persist'...\n")
+        #expect(scanner.recoveryStartedCount == 1)
+    }
+
     @Test func aLineSplitAcrossChunksIsStillFound() {
         var scanner = ConsoleScanner()
         #expect(scanner.feed("Linux ver").isEmpty)
@@ -80,6 +142,18 @@ struct BootTrackerTests {
         let ready = tracker.reach(.ready, atSeconds: 40)
         #expect(ready)
         #expect(tracker.isReady)
+    }
+}
+
+extension BootTrackerTests {
+    @Test func aRecoveryBootIsKnownOnceTheConsoleShowsIt() {
+        var tracker = BootTracker()
+        #expect(!tracker.recovery)
+        tracker.noteRecovery()
+        _ = tracker.reach(.ready, atSeconds: 9)
+        #expect(tracker.recovery && tracker.isReady)
+        tracker.restart()
+        #expect(!tracker.recovery && !tracker.isReady)
     }
 }
 

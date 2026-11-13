@@ -690,11 +690,14 @@ first, which is safe.
 ## Guest lifecycle
 
 The platform layer tracks every writable host descriptor opened for the guest.
-`uml_emulator_sync()` asks the guest to write back through its management
-console, then flushes those descriptors. `uml_emulator_quiesce()` has the guest
-trim its cold page cache and hand its free memory to the host, enters full Linux
-system suspend and waits for the platform sleep boundary before flushing the
-host. `uml_emulator_quiesce_resident()` does the same and keeps the guest's RAM
+`uml_emulator_sync()` has the guest write back through the management console's
+`sync` command, then flushes those descriptors. The command runs `sync(2)` in
+the guest's process context and replies only after it returns, whatever the
+magic SysRq mask is. `uml_emulator_quiesce()` has the guest write back first,
+so that what it dirtied becomes reclaimable, then trim its cold page cache and
+hand its free memory to the host, enters full Linux system suspend and waits
+for the platform sleep boundary before flushing the host.
+`uml_emulator_quiesce_resident()` does the same and keeps the guest's RAM
 in the process where a quiesce would [hibernate](#hibernation) it, for a host
 short of the space an image takes. `uml_emulator_resume()` sends the console
 wake edge, and
@@ -708,9 +711,40 @@ busy, is not frozen and the host treats it as not suspended. A request with no
 reply at the deadline is aborted: only a "suspended" reply that arrived before
 the wake edge counts, otherwise the suspension is unconfirmed, never
 hibernated, and woken at the resume. The management console's own stop is no
-fallback, because it halts only one vCPU. Guests that need write-back boot with
-magic SysRq enabled; if the physical iOS sandbox cannot bind the console,
-host-file flushing still runs but guest write-back and freeze are unavailable.
+fallback, because it halts only one vCPU. If the physical iOS sandbox cannot
+bind the console, host-file flushing still runs but guest write-back and freeze
+are unavailable.
+
+Each of the three calls reports what the guest confirmed through a nullable
+`uml_emulator_settle`, and whether it sleeps. The guest's storage is confirmed
+only by its own reply to a `sync` request made in that call. A suspend never
+confirms it: the kernel syncs on the way to suspend only while the guest's
+`sync_on_suspend` is set, and its reply says nothing of that. Otherwise there
+was no guest, or the storage is unconfirmed (no reply in time, a busy lifecycle
+call or console, or a kernel that only started a writeback), refused, or
+unreachable (its console could not be bound). Only confirmed and no-guest are
+settled: an application never logs "settled" for another outcome (`GuestSettle`
+in `GuestHostCore`, filled from the runtime's `kernarium_runtime_settle`), and
+the session record counts them. The zero value of the storage report claims
+nothing, so a report the call never wrote is no confirmation.
+
+A reply confirms only as "synced in <n> ms" whole, in one well-formed datagram
+per part; text that starts alike, a truncated datagram and an error flagged in
+any part of the reply are refusals. A kernel without the `sync` command answers
+exactly "Unknown command", and the host then asks for `sysrq s`, which only
+starts a writeback and needs SysRq enabled (the Kernarium runtime boots its
+guests with it for that case): the result is unconfirmed. One deadline, from the
+call, covers a writeback request in full: the console's lock, every part of the
+reply, the fallback and its settling period. The header
+([`darwin/api/include/uml/emulator.h`](../darwin/api/include/uml/emulator.h))
+states each call's bounds. A quiesced guest the host holds is reported again by a later call; a
+guest whose threads could not be held, or whose suspension is unconfirmed, may
+have run and written since, so a later call asks it again. The guest runs each
+`sync` on a work item of its own, so the console's dispatcher is never blocked
+behind one, and a reply that comes after the host stopped waiting finds the
+request's own socket closed. The runtime's `sync` pins the handle instead of
+holding the lifecycle mutex, which a quiesce keeps for as long as it takes, so
+the library's own bounded wait is the only one.
 
 The kernel says how the guest ends before it shuts its drivers down, with the
 bridge import `darwin_uml_guest_shutdown()`: power-off, halt, or restart with the
@@ -727,13 +761,27 @@ A launch that passes `--session-record=PATH` gets a record of how its session
 ended (`runtime/session_record`): "running" from the boot on, overwritten by
 every end that runs code, a panic with its message and the kernel's last
 output included. A record still "running" at the next launch means the process
-was ended from outside without running, as a memory-limit end is. The file is
-text of a fixed layout (`uml-session 6`) that never passes 17920 bytes
-(`session_record_max_bytes`): an 8 KiB memory slot, a 4 KiB stall slot, a 512-byte
-network slot and the state with the kernel output it quotes, at most 5 KiB. Each
-part is rewritten in place by its own writer, so nothing grows with the session;
-layouts 1 to 5, which lack the figures of the run or the network slot or the
-stall slot, still parse. The
+was ended from outside without running, as a memory-limit end is. For an
+Android guest the state also says whether the boot finished (`boot completed`;
+`boot unfinished` once init's output was seen without it; `boot unobserved`
+when the record saw none of init's output) and how many times the guest
+restarted before the session (`restarts N`); until the boot completes the
+checkpoint thread rewrites the state with the console's last output whenever
+that grew, so a process ended mid-boot leaves where the boot had got, and a
+stop, restart or power-off before the boot completed quotes that output too.
+The output a record quotes is its own boot's, never an earlier boot's of the
+same process. An end is the last state on disk unless the process dies between
+a delayed checkpoint's write and its repair: the end formats its record before
+it writes it, and a checkpoint whose write lands after it writes that record
+again at once. The file is text of a fixed layout (`uml-session 7`) that never
+passes 18176 bytes (`session_record_max_bytes`): an 8 KiB memory slot, a 4 KiB
+stall slot, a 512-byte network slot, a 256-byte storage slot and the state with
+the kernel output it quotes, at most 5 KiB. Each part is rewritten in place by
+its own writer, so nothing grows with the session; layouts 1 to 6, which lack
+the storage slot or the figures of the run or the network slot or the stall
+slot, still parse. The storage slot counts the session's settles and those that
+were not confirmed, and names the last one's call, outcome and time: words and
+numbers only, blank until the first. The
 first 8 KiB are a memory checkpoint that a thread of its own rewrites every 2 s
 (`memory_checkpoint_interval_ms`): the footprint, its peak and what the
 process's memory limit still allows, the large terms of the footprint (guest

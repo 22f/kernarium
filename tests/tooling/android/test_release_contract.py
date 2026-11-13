@@ -506,6 +506,13 @@ def main() -> None:
                 lambda: verify_release(release_root, android_root, semantic=False),
                 label,
             )
+        # A release number of any width up to ten digits is a build number, and
+        # so is one of the old counter: the contract orders no releases.
+        for value in (1, 26, 10_000, 2026110817, 9_999_999_999):
+            manifest = copy.deepcopy(original)
+            manifest["android"]["build_number"] = value
+            manifest_path.write_text(json.dumps(manifest))
+            verify_release(release_root, android_root, semantic=False)
         for key in ("build_number", "security_patch"):
             manifest = copy.deepcopy(original)
             del manifest["android"][key]

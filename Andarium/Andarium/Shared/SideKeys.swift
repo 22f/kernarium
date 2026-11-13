@@ -47,6 +47,19 @@ struct SideKeysOverlay: View {
     /// The tip's popover is up: while the closed keys are on screen and the
     /// tip wants to show.
     @State private var tipShown = false
+    @Environment(AppModel.self) private var model: AppModel?
+
+    /// A sheet the application keeps over the screens is up (Send feedback,
+    /// opened from the boot screen's notice): the tip waits, because a popover
+    /// SwiftUI presents beside it takes the sheet, and what was typed in it,
+    /// away.
+    private var sheetOverScreens: Bool {
+        #if FEEDBACK_MAIL
+        model?.feedbackFromBoot ?? false
+        #else
+        false
+        #endif
+    }
 
     /// `tip` is the tip beside the closed keys. It says where Install APK is
     /// where Settings has the row in this session
@@ -114,7 +127,10 @@ struct SideKeysOverlay: View {
                     // away (opening, or the session ending), over the open
                     // keys or Home, where its card takes their touches.
                     // SwiftUI dismisses its popover with the closed keys.
-                    .popover(isPresented: $tipShown, arrowEdge: leading ? .leading : .trailing) {
+                    .popover(
+                        isPresented: Binding(get: { tipShown && !sheetOverScreens }, set: { tipShown = $0 }),
+                        arrowEdge: leading ? .leading : .trailing
+                    ) {
                         SideKeysTipCard(
                             tip: tip, maxHeight: SideKeysTipCard.maxHeight(in: size.height),
                             width: SideKeysTipCard.width(in: size.width))
