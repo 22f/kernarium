@@ -893,9 +893,10 @@ std::optional<GuestMemoryQuery> GuestMemoryQuery::start() noexcept
 			return std::nullopt;
 		adoptConsolePath(location->console);
 		auto state = std::make_unique<State>(*location);
-		/* The console's usual reply wait is also the wait for room. */
-		if (!state->client.send("mem",
-			    std::chrono::steady_clock::now() + replyWait))
+		/* One attempt, whatever the queue: the console's lock is held, and a
+		 * caller's lifecycle lock behind it. The query owns no reply
+		 * deadline here, so it does not wait for room. */
+		if (!state->client.trySend("mem"))
 			return std::nullopt;
 		return GuestMemoryQuery(std::move(state));
 	} catch (...) {

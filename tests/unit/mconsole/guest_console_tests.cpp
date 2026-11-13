@@ -829,6 +829,29 @@ void aSilentGuestIsWaitedForUpToTheBound()
 	(void)::close(server);
 }
 
+/* The memory request is sent under the console's lock, which a caller's
+ * lifecycle lock may wait behind: it makes one attempt, so that a console whose
+ * queue is full is answered at once and not after a wait for room. */
+void aMemoryRequestDoesNotWaitForRoomInAFullQueue()
+{
+	const ::uml::device::GuestConsoleRun run {true};
+	const auto path = consolePath();
+	const int server = bindServer(path);
+	require(fillTheConsoleQueue(path) > 0U);
+	const auto started = std::chrono::steady_clock::now();
+	auto query = GuestMemoryQuery::start();
+	const auto spent = std::chrono::steady_clock::now() - started;
+	require(!query.has_value(), "a request was sent to a full queue");
+	require(spent < std::chrono::milliseconds {300},
+		"the memory request waited for room in the console's queue");
+	sockaddr_un client {};
+	socklen_t clientLength {};
+	while (awaitRequest(server, 200))
+		require(receiveRequest(server, client, clientLength) == "fill",
+			"a memory request that was not sent reached the console");
+	(void)::close(server);
+}
+
 /* The reply is waited for without the console's lock: another request
  * reaches the guest, and is answered, while a "mem" waits for a slow one. */
 void aWaitingMemoryRequestDoesNotHoldTheConsole()
@@ -1167,6 +1190,7 @@ int main(int argc, char **argv)
 			aMemoryRequestReadsTheGuestsFigures();
 			aSilentGuestIsWaitedForUpToTheBound();
 			aWaitingMemoryRequestDoesNotHoldTheConsole();
+			aMemoryRequestDoesNotWaitForRoomInAFullQueue();
 		});
 	} else if (selected == "suspend-timeout") {
 		runPrivately(aSuspendThatDoesNotReplyIsAborted);
