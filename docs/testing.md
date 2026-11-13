@@ -451,7 +451,8 @@ the test moves, so no test waits three minutes: when the notice comes (also for
 a start whose boot line never comes, the case it is for), what Stop asks of the
 runtime (after the dialog's answer) and the stopped end screen's words, the
 later notice and plain title of a first start, the controls with and without
-the feedback receiver, that the sheet the notice opens outlives the boot, the
+the feedback receiver, that the sheet the notice opens outlives the boot, that
+the alert and the sheet take the appearance of the screen under them, the
 Boot line of the information block, and that the notice goes with the boot.
 `StartHandoverTests` run the real runtime object with the files' preparation
 held, and check that a stopped start's preparation is the only one at a time,

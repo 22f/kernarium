@@ -308,6 +308,10 @@ struct AppEntry {
             // Stop chosen: the dialog that asks first.
             slowBoot(stage: 3, seconds: 197)
             model.confirmingStop = true
+        case "boot-slow-recovery-stop":
+            // The same dialog over Recovery's own, light screen.
+            slowBoot(.recovery, stage: 3, seconds: 197)
+            model.confirmingStop = true
         case "boot-slow-storage":
             // The same notice over an earlier step, as a start stuck on the disk shows it.
             slowBoot(stage: 2, seconds: 184)

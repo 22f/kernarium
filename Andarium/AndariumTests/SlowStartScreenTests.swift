@@ -284,6 +284,62 @@ struct SlowStartScreenTests {
         #expect(!fixture.model.confirmingStop && fixture.driver.guestStops == 1)
     }
 
+    /// UIKit presents the alert, and the sheet the notice opens, in the
+    /// appearance of the screen under them: dark over the boot's dark screen
+    /// when the system's is light, and the system's over Recovery's own. A
+    /// light alert over the dark screen has its buttons unreadable.
+    @Test(arguments: [BootKind.normal, .recovery]) func theAlertAndTheSheetTakeTheAppearanceOfTheScreenUnderThem(
+        kind: BootKind
+    ) async throws {
+        let fixture = fixture()
+        #if FEEDBACK_MAIL
+        var services = SendFeedbackServices()
+        services.address = { "feedback@example.com" }
+        services.canSendMail = { true }
+        fixture.model.feedbackServices = services
+        #endif
+        begun(fixture, kind: kind)
+        fixture.clock.advance(185)
+        fixture.model.updateSlowStart()
+        let lease = try await HostWindow.take()
+        let style = lease.window.overrideUserInterfaceStyle
+        defer {
+            lease.window.overrideUserInterfaceStyle = style
+            lease.give()
+        }
+        lease.window.overrideUserInterfaceStyle = .light
+        let host = AndariumHostingController(
+            rootView: RootView(entry: AppEntry(overrides: LaunchOverrides())).environment(fixture.model),
+            model: fixture.model)
+        lease.window.rootViewController = host
+        host.view.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(300))
+        let expected: UIUserInterfaceStyle = kind == .recovery ? .light : .dark
+        func presented(_ present: () -> Void, gone: () -> Void) async throws -> UIUserInterfaceStyle {
+            present()
+            let deadline = ContinuousClock.now + .seconds(8)
+            while host.presentedViewController == nil, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            let shown = try #require(host.presentedViewController, "nothing was presented")
+            let appearance = shown.traitCollection.userInterfaceStyle
+            gone()
+            let closing = ContinuousClock.now + .seconds(8)
+            while host.presentedViewController != nil, ContinuousClock.now < closing {
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            return appearance
+        }
+        let alert = try await presented(
+            { fixture.model.askToStop() }, gone: { fixture.model.confirmingStop = false })
+        #expect(alert == expected, "the Stop alert is not in the screen's appearance")
+        #if FEEDBACK_MAIL
+        let sheet = try await presented(
+            { fixture.model.feedbackFromBoot = true }, gone: { fixture.model.feedbackFromBoot = false })
+        #expect(sheet == expected, "the sheet is not in the screen's appearance")
+        #endif
+    }
+
     @Test func theDialogGoesWithTheStartItWasAskedFor() {
         let fixture = fixture()
         // Nothing asks outside a start, or before the notice's start has begun.
@@ -435,6 +491,24 @@ struct SlowStartScreenTests {
         #expect(host.presentedViewController === sheet && sheet.view.window != nil, "the sheet was taken away")
         fixture.model.feedbackFromBoot = false
         host.dismiss(animated: false)
+    }
+
+    /// The mail names the step the notice shows, from the same source: while
+    /// the debugger prepares the JIT the screen is at its first step.
+    @Test func theMailNamesTheStepTheNoticeShows() {
+        let fixture = fixture()
+        begun(fixture)
+        fixture.clock.advance(185)
+        fixture.model.updateSlowStart()
+        #expect(fixture.model.feedbackInformation().boot?.step == "Linux kernel")
+        fixture.model.preparingDisk = true
+        #expect(fixture.model.feedbackInformation().boot?.step == "System image")
+        fixture.model.preparingDisk = false
+        #if !APP_STORE
+        fixture.model.preparingJit = true
+        #expect(fixture.model.feedbackInformation().boot?.step == "System image")
+        fixture.model.preparingJit = false
+        #endif
     }
 
     @Test func withoutAReceiverTheNoticeHasStopAlone() async throws {

@@ -443,7 +443,10 @@ requires reopening Andarium.
   scrolls. The time is the start's, on the runtime's pause-aware run clock
   (`GuestRunClock`, which stops while the guest is held and while the
   application is away before the runtime runs) and kept through the restarts
-  of a start that had not finished. Stop asks first (an alert with Stop and Cancel), then the
+  of a start that had not finished. Stop asks first (an alert with Stop and Cancel, in the
+  screen's own appearance: the boot's dark screen asks the window for dark, so the
+  alert and the Send feedback sheet over it are dark whatever the system's is, and Recovery's
+  light screen leaves them to the system), then the
   application states the intent at once and the runtime's stop is requested
   off the main actor, on the queue of the runtime's other waiting calls, again
   every second until the run has ended (`RunStop`: the runtime drops a stop

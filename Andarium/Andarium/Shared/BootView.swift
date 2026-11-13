@@ -57,6 +57,12 @@ struct BootView: View {
         }
         .onCardHalf(.boot)
         .background { backdrop }
+        // The screen is dark over the guest's display, whatever the system's
+        // appearance is. The preference reaches what UIKit presents over it:
+        // the Stop alert and the feedback sheet take the screen's appearance,
+        // not the system's. Recovery's own screen follows the system, and so
+        // does what follows the boot.
+        .preferredColorScheme(dimmed ? .dark : nil)
         .environment(\.colorScheme, dimmed ? .dark : colorScheme)
         .statusBarHidden(true)
         .task {
@@ -155,6 +161,10 @@ struct BootView: View {
             Text(model.slowStart.stopping ? String(localized: "Stopping\u{2026}") : Self.status(kind))
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Color.accentColor)
+                .lineLimit(2)
+                .minimumScaleFactor(0.7)
+                .fixedSize(horizontal: false, vertical: true)
+                .layoutPriority(1)
             Spacer()
             TimelineView(.periodic(from: startedAt, by: 1)) { timeline in
                 // The start's own time, which a restart of the guest in place
@@ -170,7 +180,9 @@ struct BootView: View {
             }
         }
         .padding(.horizontal, 24)
-        .frame(height: 44)
+        // Taller than 44 where the text is large enough for two lines.
+        .padding(.vertical, 6)
+        .frame(minHeight: 44)
         .frame(maxWidth: 640)
         .frame(maxWidth: .infinity)
     }
@@ -343,18 +355,23 @@ struct BootView: View {
         }
     }
 
-    /// Stop's label in one of its two states: "Stopping\u{2026}" has a spinner.
+    /// Stop's label in one of its two states. Side by side, "Stopping\u{2026}"
+    /// has a spinner. Stacked, the button is as wide as the notice and the text
+    /// the largest sizes make is wide: the word keeps the whole width, with no
+    /// spinner beside it (the status line and the disabled button say it), and
+    /// shrinks before it would break.
     @ViewBuilder
     private func stopLabel(stopping: Bool, lineLimit: Int?, axis: Axis) -> some View {
         HStack(spacing: 8) {
-            if stopping {
+            if stopping && axis == .horizontal {
                 ProgressView()
                     .controlSize(.small)
                     .accessibilityHidden(true)
             }
             Text(stopping ? "Stopping\u{2026}" : "Stop")
                 .fontWeight(.semibold)
-                .lineLimit(lineLimit)
+                .lineLimit(axis == .horizontal ? lineLimit : 1)
+                .minimumScaleFactor(axis == .horizontal ? 1 : 0.5)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: axis == .horizontal, vertical: true)
         }

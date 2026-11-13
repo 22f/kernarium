@@ -47,7 +47,8 @@ extension AppModel {
     /// from the boot screen's notice; nil in any other state.
     private func bootingInformation() -> SendFeedbackInformation.Boot? {
         guard case let .booting(kind) = phase else { return nil }
-        let step = BootSteps.current(preparingDisk: preparingDisk, milestone: bootTracker.milestone)
+        // The boot screen's own step, so the mail names the one the notice shows.
+        let step = liveBootStage()
         return SendFeedbackInformation.Boot(
             step: BootSteps.reportName(ofStep: min(step, BootSteps.count - 1), recovery: kind == .recovery),
             seconds: bootElapsedSeconds(), restarts: slowStart.restarts)
