@@ -70,6 +70,17 @@ uml_add_unit_test(NAME platform-video-encoder-recovery
     COMMAND uml_video_encoder_recovery_tests ${PROJECT_SOURCE_DIR}/tests/support/video
     LABELS video TIMEOUT 300)
 
+# Discovery against a scripted host, which needs no hardware: a refusal and a
+# ceiling are answers and are stored; a probe the host did not answer is not an
+# answer, leaves the discovery incomplete and out of the cache, and is asked
+# again later, a bounded number of times.
+add_executable(uml_video_encoder_discovery_tests video_encoder_discovery_tests.cpp)
+target_link_libraries(uml_video_encoder_discovery_tests PRIVATE
+    uml_video_encoder_test_variant)
+uml_add_unit_test(NAME platform-video-encoder-discovery
+    COMMAND uml_video_encoder_discovery_tests
+    LABELS video)
+
 # The capability cache, through child processes that find a valid file, no
 # file, or a file they cannot vouch for.
 add_executable(uml_video_encoder_cache_tests video_encoder_cache_tests.cpp)

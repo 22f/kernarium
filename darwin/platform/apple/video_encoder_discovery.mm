@@ -35,7 +35,16 @@
  * the HDR messages in its SEI.
  *
  * Every probe is the production encoder, so discovery also proves the pipeline
- * a guest's stream takes. The result is cached per host model and OS build. */
+ * a guest's stream takes. The result is cached per host model and OS build.
+ *
+ * A probe that does not prove what it asked for is either a refusal of the host
+ * or no answer at all: a session the busy hardware could not give, a session
+ * lost, a drain that never finished. Only a refusal is a fact. Where the two
+ * look alike (a refused picture size and a busy encoder both fail to create a
+ * session), the probe is asked again, and it is a refusal only when a probe
+ * that proved earlier in the same discovery still proves right after it. A
+ * discovery with a probe left unanswered is incomplete: it is never cached, and
+ * DiscoveryService computes it again later. */
 
 namespace uml::platform {
 namespace apple_encoder {
@@ -44,32 +53,21 @@ namespace {
 using bitstream::Bytes;
 
 // 5: the smallest picture side is kVideoEncodeMinimumSide; earlier results list smaller ones.
-constexpr unsigned kDiscoveryRevision = 5;
+// 6: a result that lacked the answer of a probe was cached as if the host had refused it.
+constexpr unsigned kDiscoveryRevision = 6;
 constexpr std::chrono::seconds kDiscoveryWait {300};   // a discovery takes seconds; the bound only ends a stuck one
 constexpr std::uint32_t kProbeWidth = 128;
 constexpr std::uint32_t kProbeHeight = 96;
 constexpr unsigned kSessionProbeLimit = 16;   // the device bounds a guest's streams at eight
 constexpr std::uint64_t kHevcLevelSixLumaSamples = 35'651'584;
+constexpr unsigned kProbeRetries = 3;                                  // a probe with no answer is asked this many times more
+constexpr unsigned kRetryPauseMilliseconds[kProbeRetries] = {100, 250, 500};
+constexpr unsigned kUnansweredLimit = 4;                               // consecutive unanswered probes that end a codec's discovery
+constexpr unsigned kReportedLimit = 16;                                // unanswered probes one discovery names on stderr
 
 // ---- Probing.
 
 using Clock = std::chrono::steady_clock;
-
-struct Stream {
-    VideoEncodeStatus status {VideoEncodeStatus::failed};
-    bool encoded {};   // every frame produced a coded picture and the drain completed
-    std::vector<EncodedVideoFrame> frames;
-    std::string encoder;
-    std::string diagnostic;
-    double seconds {};
-};
-
-struct Probe {
-    VideoEncodeSettings settings;
-    unsigned frames {2};
-    bool noisy {};   // fill with a pattern rather than leave the pool's zeros
-    unsigned timeoutMilliseconds {15'000};
-};
 
 VideoEncodeSettings baseSettings(VideoCodec codec, VideoEncodeProfile profile, RawVideoLayout layout,
                                  std::uint32_t width = kProbeWidth, std::uint32_t height = kProbeHeight)
@@ -123,6 +121,7 @@ Stream runProbe(const Probe& probe)
 {
     Stream out;
     auto encoder = makeProbeEncoder();
+    encoder->setDrainWait(probe.timeoutMilliseconds);
     out.status = encoder->configureUnchecked(probe.settings);
     out.diagnostic = encoder->diagnostic();
     if (out.status != VideoEncodeStatus::ok) return out;
@@ -287,17 +286,141 @@ std::size_t codedBytes(const Stream& stream)
     return total;
 }
 
+// ---- Telling a refusal of the host from no answer.
+
+const char* statusName(VideoEncodeStatus status)
+{
+    switch (status) {
+    case VideoEncodeStatus::ok: return "ok";
+    case VideoEncodeStatus::unsupported: return "unsupported";
+    case VideoEncodeStatus::invalid: return "invalid";
+    case VideoEncodeStatus::exhausted: return "exhausted";
+    case VideoEncodeStatus::failed: return "failed";
+    }
+    return "?";
+}
+
+const char* layoutText(RawVideoLayout layout)
+{
+    switch (layout) {
+    case RawVideoLayout::nv12: return "nv12";
+    case RawVideoLayout::i420: return "i420";
+    case RawVideoLayout::p010: return "p010";
+    case RawVideoLayout::nv16: return "nv16";
+    case RawVideoLayout::nv24: return "nv24";
+    case RawVideoLayout::bgra: return "bgra";
+    case RawVideoLayout::rgba: return "rgba";
+    }
+    return "?";
+}
+
+// A probe is answered when the host said what it does: the encode finished,
+// whether or not its stream proves the request, or the configuration was
+// refused as it stands. A session the host could not give, a frame that never
+// came out and a drain that ran out of time are not answers.
+bool answered(const Stream& stream)
+{
+    return stream.encoded || stream.status == VideoEncodeStatus::unsupported || stream.status == VideoEncodeStatus::invalid;
+}
+
+// Runs the probes of one discovery. A probe with no answer is asked again after
+// a short pause, kProbeRetries times at most. A probe that still has none is a
+// refusal when the control, the first probe that proved in this codec, proves
+// again right after it, so a ceiling (VideoToolbox cannot create a session for
+// a picture of 8192 by 8192) is told from a host that cannot create sessions at
+// all. Otherwise it stays unanswered, which makes the discovery incomplete,
+// and a codec whose probes keep being unanswered is given up.
+class Prober {
+public:
+    explicit Prober(const DiscoveryHooks& hooks) : hooks_(hooks) {}
+
+    void beginCodec()
+    {
+        control_.reset();
+        consecutive_ = 0;
+    }
+    [[nodiscard]] unsigned unanswered() const noexcept { return unanswered_; }
+
+    Stream run(const Probe& probe)
+    {
+        if (givenUp()) return {};
+        auto stream = hooks_.run(probe);
+        if (answered(stream)) return settle(probe, std::move(stream));
+        for (unsigned retry = 0; retry < kProbeRetries; ++retry) {
+            hooks_.pause(kRetryPauseMilliseconds[retry]);
+            stream = hooks_.run(probe);
+            if (answered(stream)) return settle(probe, std::move(stream));
+            if (control_ && proves(*control_, hooks_.run(*control_))) {
+                consecutive_ = 0;
+                return stream;
+            }
+        }
+        report(describe(probe), statusName(stream.status), stream.diagnostic);
+        return stream;
+    }
+
+    // Sessions that open together, which the system limits across processes:
+    // the count is what this host gave now. Only none at all is no answer.
+    unsigned sessions(const VideoEncodeSettings& settings)
+    {
+        if (givenUp()) return 0;
+        auto held = hooks_.countSessions(settings);
+        for (unsigned retry = 0; !held && retry < kProbeRetries; ++retry) {
+            hooks_.pause(kRetryPauseMilliseconds[retry]);
+            held = hooks_.countSessions(settings);
+        }
+        if (held) consecutive_ = 0;
+        else report("concurrent sessions", "exhausted", {});
+        return held;
+    }
+
+private:
+    [[nodiscard]] bool givenUp() const noexcept { return consecutive_ >= kUnansweredLimit; }
+
+    Stream settle(const Probe& probe, Stream stream)
+    {
+        consecutive_ = 0;
+        if (!control_ && proves(probe, stream))
+            control_ = Probe {baseSettings(probe.settings.codec, probe.settings.profile, probe.settings.input)};
+        return stream;
+    }
+
+    static std::string describe(const Probe& probe)
+    {
+        const auto& s = probe.settings;
+        return std::string(s.codec == VideoCodec::h264 ? "h264" : s.codec == VideoCodec::hevc ? "hevc" : "jpeg") + " profile " +
+               std::to_string(int(s.profile)) + " input " + layoutText(s.input) + " " + std::to_string(s.width) + "x" +
+               std::to_string(s.height);
+    }
+
+    // Once per probe left unanswered, so the next report of a missing capability
+    // names the host call that failed.
+    void report(const std::string& what, const char* status, const std::string& diagnostic)
+    {
+        ++unanswered_;
+        ++consecutive_;
+        if (unanswered_ > kReportedLimit) return;
+        std::fprintf(stderr, "Video encoder discovery: no answer for %s after %u tries (status %s%s%s); the result is not cached\n",
+                     what.c_str(), kProbeRetries + 1, status, diagnostic.empty() ? "" : ", ", diagnostic.c_str());
+    }
+
+    const DiscoveryHooks& hooks_;
+    std::optional<Probe> control_;
+    unsigned consecutive_ {};
+    unsigned unanswered_ {};
+};
+
 // Whether a rate control mode does what its name says. A property the encoder
 // accepts and ignores is not a mode: the stream it makes is the same whatever
 // the mode's parameter is, so the mode is published only when its parameter
 // moves the size of the stream, the right way round.
-bool modeTakesEffect(VideoCodec codec, const VideoEncodeProfileCapability& reference, VideoRateControl mode)
+bool modeTakesEffect(Prober& prober, VideoCodec codec, const VideoEncodeProfileCapability& reference, VideoRateControl mode)
 {
     const auto bytesWith = [&](auto&& choose) -> std::optional<std::size_t> {
         Probe probe {baseSettings(codec, reference.profile, reference.inputs.front()), 24, true};
         probe.settings.rateControl = mode;
         choose(probe.settings);
-        const auto stream = runProbe(probe);
+        const auto stream = prober.run(probe);
         if (!proves(probe, stream)) return std::nullopt;
         return codedBytes(stream);
     };
@@ -329,7 +452,10 @@ struct Candidate {
 
 std::vector<Candidate> candidates(VideoCodec codec)
 {
-    const std::vector<RawVideoLayout> common {RawVideoLayout::nv12, RawVideoLayout::i420, RawVideoLayout::bgra, RawVideoLayout::rgba};
+    // bgra stands for both packed orders: rgba is the same session, pool and
+    // conversion with its red and blue bytes exchanged on submit, so one probe
+    // decides both (discoverCodec).
+    const std::vector<RawVideoLayout> common {RawVideoLayout::nv12, RawVideoLayout::i420, RawVideoLayout::bgra};
     switch (codec) {
     case VideoCodec::h264:
         return {{VideoEncodeProfile::h264Baseline, common}, {VideoEncodeProfile::h264ConstrainedBaseline, common},
@@ -339,7 +465,7 @@ std::vector<Candidate> candidates(VideoCodec codec)
                 {VideoEncodeProfile::h264High444Predictive, {RawVideoLayout::nv24}}};
     case VideoCodec::hevc:
         return {{VideoEncodeProfile::hevcMain, common},
-                {VideoEncodeProfile::hevcMain10, {RawVideoLayout::p010, RawVideoLayout::nv12, RawVideoLayout::i420, RawVideoLayout::bgra, RawVideoLayout::rgba}},
+                {VideoEncodeProfile::hevcMain10, {RawVideoLayout::p010, RawVideoLayout::nv12, RawVideoLayout::i420, RawVideoLayout::bgra}},
                 {VideoEncodeProfile::hevcMainStill, common}};
     case VideoCodec::jpeg: return {{VideoEncodeProfile::jpegBaseline, common}};
     case VideoCodec::vp9: break;
@@ -414,7 +540,7 @@ unsigned secondsToTimeout(const Size& size)
     return size.width * size.height >= 3840u * 2160u ? 45'000 : 20'000;
 }
 
-unsigned countSessions(const VideoEncodeSettings& settings)
+unsigned hardwareSessionCount(const VideoEncodeSettings& settings)
 {
     std::vector<std::unique_ptr<ProbeEncoder>> held;
     while (held.size() < kSessionProbeLimit) {
@@ -427,12 +553,12 @@ unsigned countSessions(const VideoEncodeSettings& settings)
 
 // Frames per second one session sustains: the marginal rate between a short
 // and a longer run, which leaves the first frame's latency out.
-unsigned measureFramesPerSecond(const VideoEncodeSettings& settings, unsigned shortRun, unsigned longRun)
+unsigned measureFramesPerSecond(Prober& prober, const VideoEncodeSettings& settings, unsigned shortRun, unsigned longRun)
 {
     Probe a {settings, shortRun, true};
     Probe b {settings, longRun, true};
-    const auto first = runProbe(a);
-    const auto second = runProbe(b);
+    const auto first = prober.run(a);
+    const auto second = prober.run(b);
     if (!first.encoded || !second.encoded || second.seconds <= first.seconds) return 0;
     return unsigned(double(longRun - shortRun) / (second.seconds - first.seconds) + 0.5);
 }
@@ -450,11 +576,9 @@ VideoHdrStaticMetadata sampleHdr()
     return hdr;
 }
 
-std::optional<CodecDiscovery> discoverCodec(VideoCodec codec)
+std::optional<CodecDiscovery> discoverCodec(Prober& prober, const DiscoveryHooks& hooks, VideoCodec codec)
 {
-    const CMVideoCodecType type = codec == VideoCodec::h264 ? kCMVideoCodecType_H264
-        : codec == VideoCodec::hevc ? kCMVideoCodecType_HEVC : kCMVideoCodecType_JPEG;
-    if (!hardwareEncoderListed(type)) return std::nullopt;
+    if (!hooks.hardwareListed(codec)) return std::nullopt;
     const bool jpeg = codec == VideoCodec::jpeg;
     CodecDiscovery found;
     auto& capability = found.capability;
@@ -462,14 +586,16 @@ std::optional<CodecDiscovery> discoverCodec(VideoCodec codec)
     capability.sizeAlignment = 2;
 
     // Profiles and the layouts each accepts.
-    const auto listed = jpeg ? std::set<std::string> {} : listedProfileValues(type);
+    const auto listed = jpeg ? std::set<std::string> {} : hooks.listedProfiles(codec);
     for (const auto& candidate : candidates(codec)) {
         if (!listed.empty() && !listed.count(autoLevelName(candidate.profile))) continue;
         VideoEncodeProfileCapability profile;
         profile.profile = candidate.profile;
         for (const auto layout : candidate.layouts) {
             const Probe probe {baseSettings(codec, candidate.profile, layout)};
-            if (proves(probe, runProbe(probe))) profile.inputs.push_back(layout);
+            if (!proves(probe, prober.run(probe))) continue;
+            profile.inputs.push_back(layout);
+            if (layout == RawVideoLayout::bgra) profile.inputs.push_back(RawVideoLayout::rgba);
         }
         if (!profile.inputs.empty()) capability.profiles.push_back(std::move(profile));
     }
@@ -489,7 +615,7 @@ std::optional<CodecDiscovery> discoverCodec(VideoCodec codec)
         const unsigned asked = codec == VideoCodec::h264 ? 52 : 120;
         Probe probe {baseSettings(codec, profile.profile, profile.inputs.front())};
         probe.settings.level = asked;
-        const auto stream = runProbe(probe);
+        const auto stream = prober.run(probe);
         if (codec == VideoCodec::h264) profile.maximumLevel = asked;
         profile.levelSelectable = stream.encoded && analyze(codec, stream.frames).levelIdc == asked;
     }
@@ -505,7 +631,7 @@ std::optional<CodecDiscovery> discoverCodec(VideoCodec codec)
                                                      : std::vector<std::uint32_t> {kVideoEncodeMinimumSide, 96};
     for (const std::uint32_t side : smallest) {
         const Probe probe {referenceSettings(side, side), 2};
-        if (proves(probe, runProbe(probe))) {
+        if (proves(probe, prober.run(probe))) {
             capability.minimumWidth = capability.minimumHeight = side;
             break;
         }
@@ -516,7 +642,7 @@ std::optional<CodecDiscovery> discoverCodec(VideoCodec codec)
     for (const auto& size : kSizeLadder) {
         Probe probe {referenceSettings(size.width, size.height), 1};
         probe.timeoutMilliseconds = secondsToTimeout(size);
-        const auto stream = runProbe(probe);
+        const auto stream = prober.run(probe);
         if (!proves(probe, stream)) break;
         capability.maximumWidth = std::max(capability.maximumWidth, size.width);
         capability.maximumHeight = std::max(capability.maximumHeight, size.height);
@@ -525,7 +651,7 @@ std::optional<CodecDiscovery> discoverCodec(VideoCodec codec)
     }
     const auto narrow = [&](std::uint32_t width, std::uint32_t height) {
         const Probe probe {referenceSettings(width, height), 1};
-        return proves(probe, runProbe(probe));
+        return proves(probe, prober.run(probe));
     };
     while (capability.maximumWidth > 1280 && !narrow(capability.maximumWidth, capability.minimumHeight))
         capability.maximumWidth /= 2;
@@ -536,7 +662,7 @@ std::optional<CodecDiscovery> discoverCodec(VideoCodec codec)
     if (jpeg) {
         // The hardware JPEG encoder keeps an odd picture exactly.
         const Probe probe {referenceSettings(65, 33), 1};
-        if (proves(probe, runProbe(probe))) capability.sizeAlignment = 1;
+        if (proves(probe, prober.run(probe))) capability.sizeAlignment = 1;
     }
 
     // Rate control. Variable bitrate is the encoder's baseline: without it
@@ -548,8 +674,8 @@ std::optional<CodecDiscovery> discoverCodec(VideoCodec codec)
                                 VideoRateControl::constantQuality, VideoRateControl::constantQp}) {
             Probe probe {referenceSettings(kProbeWidth, kProbeHeight), 4};
             probe.settings.rateControl = mode;
-            if (!proves(probe, runProbe(probe))) continue;
-            if (mode != VideoRateControl::variableBitrate && !modeTakesEffect(codec, reference, mode)) continue;
+            if (!proves(probe, prober.run(probe))) continue;
+            if (mode != VideoRateControl::variableBitrate && !modeTakesEffect(prober, codec, reference, mode)) continue;
             capability.rateControls.push_back(mode);
         }
         if (capability.rateControls.empty() || capability.rateControls.front() != VideoRateControl::variableBitrate) return std::nullopt;
@@ -557,14 +683,14 @@ std::optional<CodecDiscovery> discoverCodec(VideoCodec codec)
         Probe bounds {referenceSettings(kProbeWidth, kProbeHeight), 4};
         bounds.settings.minimumQp = 0;
         bounds.settings.maximumQp = 51;
-        if (proves(bounds, runProbe(bounds))) {
+        if (proves(bounds, prober.run(bounds))) {
             capability.minimumQp = 0;
             capability.maximumQp = 51;
         }
         for (const std::uint64_t bitrate : {300'000'000ull, 240'000'000ull, 100'000'000ull, 50'000'000ull, 20'000'000ull}) {
             Probe probe {referenceSettings(kProbeWidth, kProbeHeight), 4};
             probe.settings.bitrate = bitrate;
-            if (proves(probe, runProbe(probe))) {
+            if (proves(probe, prober.run(probe))) {
                 capability.maximumBitrate = bitrate;
                 break;
             }
@@ -577,7 +703,7 @@ std::optional<CodecDiscovery> discoverCodec(VideoCodec codec)
         // is the run, which a stream codes whole or not at all.
         Probe reorder {referenceSettings(kProbeWidth, kProbeHeight), 36, true};
         reorder.settings.bFrames = 4;
-        const auto reordered = runProbe(reorder);
+        const auto reordered = prober.run(reorder);
         if (reordered.encoded) capability.maximumBFrames = std::min(analyze(codec, reordered.frames).longestBidirectionalRun, 4u);
 
         // Temporal layers exist only on the low-latency encoder, which also
@@ -585,7 +711,7 @@ std::optional<CodecDiscovery> discoverCodec(VideoCodec codec)
         Probe layered {referenceSettings(kProbeWidth, kProbeHeight), 24, true};
         layered.settings.temporalLayers = 2;
         layered.settings.realTime = true;
-        const auto layeredStream = runProbe(layered);
+        const auto layeredStream = prober.run(layered);
         const auto layeredFacts = analyze(codec, layeredStream.frames);
         if (layeredStream.encoded && writesProfile(reference.profile, layeredFacts) && layeredFacts.upperLayerFrames > 0 &&
             layeredFacts.sawLowerLayerFrame) {
@@ -594,7 +720,7 @@ std::optional<CodecDiscovery> discoverCodec(VideoCodec codec)
                 Probe each {baseSettings(codec, profile.profile, profile.inputs.front()), 2};
                 each.settings.temporalLayers = 2;
                 each.settings.realTime = true;
-                if (proves(each, runProbe(each))) found.lowLatencyProfiles.push_back(profile.profile);
+                if (proves(each, prober.run(each))) found.lowLatencyProfiles.push_back(profile.profile);
             }
         }
     }
@@ -608,7 +734,7 @@ std::optional<CodecDiscovery> discoverCodec(VideoCodec codec)
             for (const bool cabac : {true, false}) {
                 Probe probe {referenceSettings(kProbeWidth, kProbeHeight), 2};
                 probe.settings.cabac = cabac;
-                const auto stream = runProbe(probe);
+                const auto stream = prober.run(probe);
                 const auto facts = analyze(codec, stream.frames);
                 selectable = selectable && stream.encoded && facts.cabac && *facts.cabac == cabac;
             }
@@ -623,7 +749,7 @@ std::optional<CodecDiscovery> discoverCodec(VideoCodec codec)
             Probe probe {baseSettings(codec, VideoEncodeProfile::hevcMain10, main10->inputs.front()), 2};
             probe.settings.color = {VideoColorPrimaries::bt2020, VideoTransferFunction::pq, VideoMatrixCoefficients::bt2020, false};
             probe.settings.hdr = sampleHdr();
-            const auto stream = runProbe(probe);
+            const auto stream = prober.run(probe);
             bool mastering = false, light = false;
             for (const auto& message : analyze(codec, stream.frames).sei) {
                 mastering = mastering || (message.type == 137 && message.payload.size() == 24);
@@ -633,17 +759,17 @@ std::optional<CodecDiscovery> discoverCodec(VideoCodec codec)
         }
     }
 
-    capability.concurrentSessions = countSessions(referenceSettings(kProbeWidth, kProbeHeight));
+    capability.concurrentSessions = prober.sessions(referenceSettings(kProbeWidth, kProbeHeight));
     if (!capability.concurrentSessions) return std::nullopt;
 
     // Throughput, for the codecs a guest streams in real time.
     if (!jpeg) {
         auto settings = referenceSettings(1280, 720);
         settings.bitrate = 8'000'000;
-        capability.measuredFramesPerSecond720p = measureFramesPerSecond(settings, 10, 70);
+        capability.measuredFramesPerSecond720p = measureFramesPerSecond(prober, settings, 10, 70);
         settings = referenceSettings(1920, 1080);
         settings.bitrate = 16'000'000;
-        capability.measuredFramesPerSecond1080p = measureFramesPerSecond(settings, 10, 50);
+        capability.measuredFramesPerSecond1080p = measureFramesPerSecond(prober, settings, 10, 50);
     }
     return found;
 }
@@ -836,68 +962,177 @@ void storeCache(const Discovery& discovery)
     }
 }
 
-// ---- The process-wide result.
+// ---- What the product asks of the host.
 
-struct State {
-    std::mutex mutex;
-    std::condition_variable condition;
-    bool started {};
-    std::shared_ptr<const Discovery> result;
-};
-
-State& state()
+CMVideoCodecType codecType(VideoCodec codec)
 {
-    // Never destroyed: the discovery thread may still be running at exit.
-    static State* instance = new State;
-    return *instance;
+    return codec == VideoCodec::h264 ? kCMVideoCodecType_H264 : codec == VideoCodec::hevc ? kCMVideoCodecType_HEVC : kCMVideoCodecType_JPEG;
 }
 
-void start()
+DiscoveryHooks productionHooks()
 {
-    auto& shared = state();
-    {
-        std::lock_guard lock(shared.mutex);
-        if (shared.started) return;
-        shared.started = true;
-    }
-    std::thread([] {
-        pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
-        @autoreleasepool {
-            auto cached = loadCache();
-            const bool fromCache = cached.has_value();
-            Discovery computed = fromCache ? std::move(*cached) : runDiscovery();
-            if (!fromCache) storeCache(computed);
-            auto& global = state();
-            std::lock_guard lock(global.mutex);
-            global.result = std::make_shared<const Discovery>(std::move(computed));
-            global.condition.notify_all();
-        }
-    }).detach();
+    DiscoveryHooks hooks;
+    hooks.run = runProbe;
+    hooks.countSessions = hardwareSessionCount;
+    hooks.hardwareListed = [](VideoCodec codec) { return hardwareEncoderListed(codecType(codec)); };
+    hooks.listedProfiles = [](VideoCodec codec) { return listedProfileValues(codecType(codec)); };
+    hooks.pause = [](unsigned milliseconds) { std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds)); };
+    hooks.now = [] {
+        return std::uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count());
+    };
+    hooks.load = loadCache;
+    hooks.store = storeCache;
+    return hooks;
 }
 
-} // namespace
+// ---- Discovery of the whole host.
 
-Discovery runDiscovery()
+Discovery discoverHost(const DiscoveryHooks& hooks)
 {
     @autoreleasepool {
+        Prober prober(hooks);
         Discovery discovery;
-        for (const auto codec : {VideoCodec::h264, VideoCodec::hevc, VideoCodec::jpeg})
-            if (auto found = discoverCodec(codec)) discovery.codecs.push_back(std::move(*found));
+        for (const auto codec : {VideoCodec::h264, VideoCodec::hevc, VideoCodec::jpeg}) {
+            prober.beginCodec();
+            if (auto found = discoverCodec(prober, hooks, codec)) discovery.codecs.push_back(std::move(*found));
+        }
+        discovery.unanswered = prober.unanswered();
+        discovery.complete = discovery.unanswered == 0;
         return discovery;
     }
 }
 
+// ---- The process-wide result.
+
+class ServiceImpl final : public DiscoveryService {
+public:
+    explicit ServiceImpl(DiscoveryHooks hooks) : state_(std::make_shared<State>(std::move(hooks))) {}
+
+    void start() override
+    {
+        {
+            std::lock_guard lock(state_->mutex);
+            if (state_->started) return;
+            state_->started = true;
+        }
+        std::thread([state = state_] {
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+            @autoreleasepool {
+                auto cached = state->hooks.load();
+                Discovery computed = cached ? std::move(*cached) : state->compute();
+                state->publish(std::move(computed));
+            }
+        }).detach();
+    }
+
+    std::shared_ptr<const Discovery> current() override
+    {
+        start();
+        std::unique_lock lock(state_->mutex);
+        // Every probe has its own deadline, so discovery ends; the bound here keeps
+        // a caller from waiting on a VideoToolbox that never answers, in which case
+        // the host reports no encoder rather than hanging the guest's probe.
+        if (!state_->condition.wait_for(lock, kDiscoveryWait, [&] { return state_->result != nullptr; })) {
+            auto none = std::make_shared<Discovery>();
+            none->complete = false;
+            return none;
+        }
+        return state_->result;
+    }
+
+    std::vector<VideoEncodeCapability> query() override
+    {
+        auto answer = current();
+        // One refresh at a time: a second query waits for it and takes its answer.
+        std::lock_guard refresh(state_->refreshMutex);
+        if (!answer->complete && state_->refreshDue()) {
+            // Another process may have finished the discovery meanwhile.
+            auto next = state_->hooks.load();
+            if (!next) next = state_->compute();
+            if (next->complete) state_->publish(std::move(*next));
+            answer = current();
+        }
+        if (!answer->complete) state_->servedIncomplete(true);
+        std::vector<VideoEncodeCapability> capabilities;
+        for (const auto& entry : answer->codecs) capabilities.push_back(entry.capability);
+        return capabilities;
+    }
+
+private:
+    struct State {
+        explicit State(DiscoveryHooks given) : hooks(std::move(given)) {}
+
+        // Computes the discovery and stores it when it is complete.
+        Discovery compute()
+        {
+            auto discovery = discoverHost(hooks);
+            if (discovery.complete) hooks.store(discovery);
+            else std::fprintf(stderr, "Video encoder discovery is incomplete: %u probe(s) had no answer\n", discovery.unanswered);
+            std::lock_guard lock(mutex);
+            ++runs;
+            lastRun = hooks.now();
+            return discovery;
+        }
+
+        void publish(Discovery discovery)
+        {
+            std::lock_guard lock(mutex);
+            result = std::make_shared<const Discovery>(std::move(discovery));
+            condition.notify_all();
+        }
+
+        // A later query computes again once an incomplete answer has been served,
+        // a few times and not in the same busy moment.
+        bool refreshDue()
+        {
+            std::lock_guard lock(mutex);
+            return served && runs < kMaximumRuns && hooks.now() - lastRun >= kRerunIntervalMilliseconds;
+        }
+
+        void servedIncomplete(bool value)
+        {
+            std::lock_guard lock(mutex);
+            served = value;
+        }
+
+        DiscoveryHooks hooks;
+        std::mutex mutex;
+        std::mutex refreshMutex;
+        std::condition_variable condition;
+        bool started {};
+        bool served {};   // the last query was answered with an incomplete discovery
+        unsigned runs {};
+        std::uint64_t lastRun {};
+        std::shared_ptr<const Discovery> result;
+    };
+
+    std::shared_ptr<State> state_;
+};
+
+// Never destroyed: the discovery thread may still be running at exit.
+DiscoveryService& service()
+{
+    static DiscoveryService* instance = new ServiceImpl(productionHooks());
+    return *instance;
+}
+
+} // namespace
+
+#if UML_VIDEO_ENCODER_TESTING
+Discovery runDiscovery(const DiscoveryHooks& hooks)
+{
+    return discoverHost(hooks);
+}
+
+std::unique_ptr<DiscoveryService> makeDiscoveryService(DiscoveryHooks hooks)
+{
+    return std::make_unique<ServiceImpl>(std::move(hooks));
+}
+#endif
+
 std::shared_ptr<const Discovery> discovery()
 {
-    start();
-    auto& shared = state();
-    std::unique_lock lock(shared.mutex);
-    // Every probe has its own deadline, so discovery ends; the bound here keeps
-    // a caller from waiting on a VideoToolbox that never answers, in which case
-    // the host reports no encoder rather than hanging the guest's probe.
-    if (!shared.condition.wait_for(lock, kDiscoveryWait, [&] { return shared.result != nullptr; }))
-        return std::make_shared<const Discovery>();
-    return shared.result;
+    return service().current();
 }
 
 void invalidateDiscoveryCache() noexcept
@@ -911,14 +1146,12 @@ void invalidateDiscoveryCache() noexcept
 
 void prepareVideoEncodeCapabilities()
 {
-    apple_encoder::start();
+    apple_encoder::service().start();
 }
 
 std::vector<VideoEncodeCapability> videoEncodeCapabilities()
 {
-    std::vector<VideoEncodeCapability> capabilities;
-    for (const auto& entry : apple_encoder::discovery()->codecs) capabilities.push_back(entry.capability);
-    return capabilities;
+    return apple_encoder::service().query();
 }
 
 } // namespace uml::platform

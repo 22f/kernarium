@@ -7,7 +7,11 @@
 
 #include "video_encoder.hpp"
 
+#include <cstdint>
+#include <functional>
 #include <memory>
+#include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -25,6 +29,12 @@ struct CodecDiscovery {
 
 struct Discovery {
     std::vector<CodecDiscovery> codecs;
+    // False when a probe of the discovery could not be answered, because the
+    // host was busy or lost the session, which is not an answer of the host. An
+    // incomplete result lists no more than the host proved, so it is a subset
+    // of the complete one; it is never cached.
+    bool complete {true};
+    unsigned unanswered {};   // the probes that stayed unanswered
 
     [[nodiscard]] const CodecDiscovery* find(VideoCodec codec) const noexcept
     {
@@ -34,7 +44,9 @@ struct Discovery {
     }
 };
 
-// The discovery of this process, from the cache or computed; waits for it.
+// The discovery of this process, from the cache or computed; waits for it. It is
+// the answer the encoder checks a configuration against, and a better one
+// replaces it only whole (see DiscoveryService).
 [[nodiscard]] std::shared_ptr<const Discovery> discovery();
 
 // Removes the cache file, so the next process rediscovers the host. Called when
@@ -55,6 +67,9 @@ public:
     // Why the last configure or session step failed, for the line a test or
     // a probe prints; empty when nothing failed.
     [[nodiscard]] virtual std::string diagnostic() const = 0;
+    // How long a drain waits for the frames in flight. A session starts with
+    // five seconds; a probe passes its own time budget.
+    virtual void setDrainWait(unsigned milliseconds) = 0;
 #if UML_VIDEO_ENCODER_TESTING
     virtual void loseSessionForTest(unsigned count) = 0;
     virtual void invalidateSessionForTest() = 0;
@@ -67,8 +82,63 @@ public:
 // the encoder, for example "H264_High_AutoLevel".
 [[nodiscard]] std::string autoLevelName(VideoEncodeProfile profile);
 
-// The discovery computation itself, run once on its own thread by the session
-// layer's `discovery()` when no valid cache exists.
-[[nodiscard]] Discovery runDiscovery();
+// ---- What discovery asks of the host.
+
+// What one trial encode produced.
+struct Stream {
+    VideoEncodeStatus status {VideoEncodeStatus::failed};
+    bool encoded {};   // every frame produced a coded picture and the drain completed
+    std::vector<EncodedVideoFrame> frames;
+    std::string encoder;
+    std::string diagnostic;
+    double seconds {};
+};
+
+struct Probe {
+    VideoEncodeSettings settings;
+    unsigned frames {2};
+    bool noisy {};   // fill with a pattern rather than leave the pool's zeros
+    unsigned timeoutMilliseconds {15'000};
+};
+
+// Everything discovery and its process-wide result take from outside: the
+// host's answers, time, and the cache file. The product's are the VideoToolbox
+// session, the clock and the JSON file; the unit test variant scripts them.
+struct DiscoveryHooks {
+    std::function<Stream(const Probe&)> run;                                 // one trial encode
+    std::function<unsigned(const VideoEncodeSettings&)> countSessions;       // sessions opened together, up to a limit
+    std::function<bool(VideoCodec)> hardwareListed;                          // VideoToolbox lists a hardware encoder
+    std::function<std::set<std::string>(VideoCodec)> listedProfiles;         // empty: the encoder would not say
+    std::function<void(unsigned)> pause;                                     // milliseconds
+    std::function<std::uint64_t()> now;                                      // monotonic milliseconds
+    std::function<std::optional<Discovery>()> load;                          // the cache file, when it is valid
+    std::function<void(const Discovery&)> store;                             // writes the cache file
+};
+
+// The result of discovery for a process, and when it is computed again.
+//
+// An incomplete discovery (Discovery::complete) is never stored. It serves the
+// query that found it. A later query computes the discovery again, at most
+// kMaximumRuns times in the process and not sooner than kRerunInterval after
+// the last one, and a complete result replaces the answer whole.
+// `discovery()` never computes: the encoder checks against the answer it has,
+// which only grows to a superset of it.
+class DiscoveryService {
+public:
+    static constexpr unsigned kMaximumRuns = 3;
+    static constexpr std::uint64_t kRerunIntervalMilliseconds = 30'000;
+    virtual ~DiscoveryService() = default;
+    // Starts the first discovery on its own thread; idempotent.
+    virtual void start() = 0;
+    // The current answer, waiting for the first one.
+    [[nodiscard]] virtual std::shared_ptr<const Discovery> current() = 0;
+    // The capabilities a caller who offers them to a guest is told.
+    [[nodiscard]] virtual std::vector<VideoEncodeCapability> query() = 0;
+};
+
+#if UML_VIDEO_ENCODER_TESTING
+[[nodiscard]] Discovery runDiscovery(const DiscoveryHooks& hooks);
+[[nodiscard]] std::unique_ptr<DiscoveryService> makeDiscoveryService(DiscoveryHooks hooks);
+#endif
 
 } // namespace uml::platform::apple_encoder

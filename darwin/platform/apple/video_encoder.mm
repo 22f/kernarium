@@ -698,6 +698,7 @@ public:
 
     [[nodiscard]] std::string encoderIdentifier() const override { return encoderIdentifier_; }
     [[nodiscard]] std::string diagnostic() const override { return diagnostic_; }
+    void setDrainWait(unsigned milliseconds) override { drainWait_ = milliseconds; }
 
     [[nodiscard]] VideoEncodeStatus update(const VideoEncodeUpdate& update) override
     {
@@ -811,9 +812,10 @@ public:
             }
             auto shared = shared_;
             auto session = session_;
+            const unsigned wait = drainWait_;
             dispatch_async(drainQueue_, ^{
                 @autoreleasepool {
-                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kDrainWaitMilliseconds);
+                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait);
                     const auto outstanding = [&] {
                         return !shared->pending.empty() && shared->pending.begin()->first < horizon;
                     };
@@ -1194,21 +1196,27 @@ private:
 
     // Sets one property. A refusal fails the configuration when the property
     // carries something the stream asked for, and is only noted when the
-    // property is a refinement the encoder is free to ignore.
+    // property is a refinement the encoder is free to ignore. A session that is
+    // lost or cannot get its hardware is not a refusal of the property: that
+    // configuration is exhausted, not unsupported.
     bool apply(VTCompressionSessionRef session, CFStringRef key, id value, bool required)
     {
         const OSStatus status = setProperty(session, key, (__bridge CFTypeRef)value);
         if (status == noErr) return true;
-        if (required) diagnostic_ = std::string("VTSessionSetProperty ") + [(__bridge NSString*)key UTF8String] + " " + std::to_string(status);
+        if (required) {
+            diagnostic_ = std::string("VTSessionSetProperty ") + [(__bridge NSString*)key UTF8String] + " " + std::to_string(status);
+            if (sessionLoss(status) || status == kVTAllocationFailedErr) hostUnavailable_ = true;
+        }
         return !required;
     }
 
     VideoEncodeStatus applyProperties(VTCompressionSessionRef session)
     {
         const auto& s = plan_.settings;
+        hostUnavailable_ = false;
         const auto refuse = [&](const char* what) {
             if (diagnostic_.empty()) diagnostic_ = std::string("cannot set ") + what;
-            return VideoEncodeStatus::unsupported;
+            return hostUnavailable_ ? VideoEncodeStatus::exhausted : VideoEncodeStatus::unsupported;
         };
 #define UML_KEY(name) kVTCompressionPropertyKey_##name
         if (s.codec == VideoCodec::jpeg) {
@@ -1540,7 +1548,7 @@ private:
         if (session_) {
             VTCompressionSessionCompleteFrames(session_.get(), kCMTimeInvalid);
             std::unique_lock lock(shared_->mutex);
-            shared_->condition.wait_for(lock, std::chrono::milliseconds(kDrainWaitMilliseconds),
+            shared_->condition.wait_for(lock, std::chrono::milliseconds(drainWait_),
                                         [&] { return shared_->pending.empty() || shared_->lost; });
         }
         recoverIfLost();
@@ -1643,6 +1651,8 @@ private:
     bool checked_ {};
     bool levelFallback_ {};
     bool rebuild_ {};   // a setting the running session ignores changed; the next frame starts a new session
+    bool hostUnavailable_ {};   // a property was refused because the session was lost, not because of the property
+    unsigned drainWait_ {kDrainWaitMilliseconds};
     CFRef<VTCompressionSessionRef> session_;
     CFRef<CVPixelBufferPoolRef> pool_;
     CFRef<CVPixelBufferPoolRef> stagingPool_;   // plan_.convertsRgb: the caller's frames

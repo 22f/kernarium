@@ -93,7 +93,23 @@ void expectOrdered(const Output& output, unsigned count, bool keyFirst = true)
 void capabilityInvariants()
 {
     step("capability invariants");
-    const auto capabilities = videoEncodeCapabilities();
+    auto capabilities = videoEncodeCapabilities();
+    // A host that is busy can leave a probe unanswered. That discovery is
+    // incomplete: it lists what was proved, is never cached, and a later query
+    // computes it again, a bounded number of times. Ask for the complete one
+    // that many times; the facts that only a complete discovery guarantees are
+    // checked for one, and every other invariant, the packed pair included,
+    // always. A defect of the encoder is a complete discovery that is wrong.
+    for (unsigned run = 1; run < apple_encoder::DiscoveryService::kMaximumRuns && !apple_encoder::discovery()->complete; ++run) {
+        std::printf("  discovery incomplete (%u probe(s) had no answer): asking again\n", apple_encoder::discovery()->unanswered);
+        std::fflush(stdout);
+        sleep(unsigned(apple_encoder::DiscoveryService::kRerunIntervalMilliseconds / 1000) + 1);
+        capabilities = videoEncodeCapabilities();
+    }
+    const bool complete = apple_encoder::discovery()->complete;
+    if (!complete)
+        std::printf("  discovery stayed incomplete (%u probe(s) had no answer): only the invariants of any result are checked\n",
+                    apple_encoder::discovery()->unanswered);
     require(!capabilities.empty(), "no hardware video encoder available");
     h264Capability = hevcCapability = jpegCapability = nullptr;
     static const auto stored = capabilities;   // the tests point into this copy
@@ -123,14 +139,14 @@ void capabilityInvariants()
         for (const auto& profile : capability.profiles) {
             require(codecOf(profile.profile) == capability.codec, "profile belongs to the codec");
             require(!profile.inputs.empty(), "a profile with no input layout is not listed");
-            require(jpeg == (profile.maximumLevel == 0), "only JPEG has no level");
+            require(!complete || jpeg == (profile.maximumLevel == 0), "only JPEG has no level");
             require(!jpeg || !profile.levelSelectable, "JPEG has no level to select");
             const auto lists = [&](RawVideoLayout layout) {
                 return std::find(profile.inputs.begin(), profile.inputs.end(), layout) != profile.inputs.end();
             };
             // Both packed orders reach the encoder through one pool, so one is not offered without the other.
             require(lists(RawVideoLayout::bgra) == lists(RawVideoLayout::rgba), "BGRA and RGBA input are offered together");
-            require(profile.profile != VideoEncodeProfile::hevcMain10 || lists(RawVideoLayout::p010), "HEVC Main 10 takes 10-bit input");
+            require(!complete || profile.profile != VideoEncodeProfile::hevcMain10 || lists(RawVideoLayout::p010), "HEVC Main 10 takes 10-bit input");
         }
         if (jpeg) {
             require(capability.rateControls.size() == 1 && capability.rateControls[0] == VideoRateControl::constantQuality,
@@ -143,7 +159,8 @@ void capabilityInvariants()
         require(capability.maximumTemporalLayers >= 1, "temporal layers");
         (capability.codec == VideoCodec::hevc ? hevcCapability : h264Capability) = &capability;
     }
-    require(h264Capability, "this host has no hardware H.264 encoder");
+    require(h264Capability, complete ? "this host has no hardware H.264 encoder"
+                                     : "this host never answered the H.264 probes in three discoveries");
     // A second query returns the same facts.
     const auto again = videoEncodeCapabilities();
     require(again.size() == stored.size(), "capabilities changed between queries");

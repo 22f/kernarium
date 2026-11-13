@@ -22,9 +22,28 @@ answers nothing reports no encoder. A capability never lists a picture side
 below `kVideoEncodeMinimumSide`, and profiles a guest API cannot name (ProRes,
 HEVC range extensions, alpha, depth) are not probed.
 
+A probe that does not prove what it asked for is a refusal of the host or no
+answer at all (a session the busy hardware could not give, a session lost, a
+drain that ran out of time). Only a refusal is a fact. A probe with no answer is
+asked again a few times after a short pause; where a refusal and a busy encoder
+look alike (a size beyond the ceiling and an encoder with no session both fail
+to create one), it is a refusal when the first probe that proved in that codec
+proves again right after it. A probe still unanswered makes the discovery
+**incomplete**: its result lists only what was proved, and a codec whose probes
+keep going unanswered is given up. `bgra` and `rgba` are one probe, because they
+are one session and pool with the red and blue bytes exchanged on submit, so a
+profile lists both or neither.
+
 The result is cached as JSON keyed by the host model, OS build and a format
 revision. `UML_VIDEO_ENCODE_CACHE` names the file and an empty value turns the
-cache off; a missing, foreign or unreadable file is ignored and replaced.
+cache off; a missing, foreign or unreadable file is ignored and replaced. An
+incomplete result is never cached. It serves the query that found it, and a
+later query, at least 30 seconds after the last run and at most three runs in
+the process, computes discovery again; a complete result replaces the answer
+whole, so it lists a superset of what the guest was offered. A running guest's
+device took its list when it was created and keeps it: a better answer changes
+what the encoder accepts, not what the guest was offered. The session count is a
+snapshot of what other processes held when it was measured.
 
 ## Sessions
 
