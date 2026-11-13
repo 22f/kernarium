@@ -104,7 +104,7 @@ struct SendFeedbackStartLogTests {
             [    0.0] Kernel command line: androidboot.serialno=K7QX2M9T4R \
             --session-record=/var/mobile/Containers/Data/Application/1B2C3D4E-0000-4A5B-8C9D-0123456789AB/Library/x
             [    5.1] eth0: link up, address aa:bb:cc:dd:ee:ff and 0A:1B:2C:3D:4E:5F
-            [    5.2] opened /Users/someone/Library/Containers/x
+            [    5.2] opened /Users/NAME/Library/Containers/x
             [    5.3] [ro.boot.serialno]: [K7QX2M9T4R]
             """
         let masked = SendFeedbackStartLog.masked(output, containers: containers)
@@ -113,7 +113,7 @@ struct SendFeedbackStartLogTests {
         #expect(!masked.localizedCaseInsensitiveContains("aa:bb:cc") && !masked.contains("0A:1B:2C"))
         #expect(masked.contains("<address>"))
         #expect(!masked.contains("1B2C3D4E") && masked.contains("<container>"))
-        #expect(!masked.contains("someone") && masked.contains("/Users/<user>"))
+        #expect(!masked.contains("/Users/NAME") && masked.contains("/Users/<user>"))
     }
 
     // MARK: The sheet's rules
