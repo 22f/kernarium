@@ -856,7 +856,11 @@ requires reopening Andarium.
   ([`docs/architecture.md`](../docs/architecture.md)). The next launch keeps
   that record as the previous session's (`PreviousSession`) and, after an end
   that was neither Android's own nor a stop, Home shows a notice with its cause
-  (`SessionRecord.notice`). `ExitReports` keeps the exit and diagnostic reports
+  (`SessionRecord.notice`). The runtime writes the record without the serial
+  number, the adb key and the time zone the launch stated and without any
+  hardware address in its colon spelling (masked as the start log masks them),
+  so neither the bug report nor the previous session's copy has them.
+  `ExitReports` keeps the exit and diagnostic reports
   MetricKit delivers beside the records. The record's stall slot (`StallRecord`)
   says when the guest's vCPUs stopped running on the host and what the host was
   doing; the bug report carries it in words, with the guest's `/proc` counters

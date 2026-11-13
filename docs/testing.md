@@ -340,7 +340,8 @@ gamepad frames, each family's reports read back through a test-only HID
 descriptor parser, and the stream and session on a fake relay; the session
 record's stall, network and storage slots against the golden slots there, which
 `runtime-stall-record` and `runtime-session-record` check the runtime's writers
-against; and the notice that iOS denies the network, from the path's mapping to
+against, and that the record quotes no identity value (`runtime-session-record`);
+and the notice that iOS denies the network, from the path's mapping to
 the watcher's start and stop on a fake path source);
 `andarium-motion-protocol`, `andarium-device-orientation`,
 `andarium-haptics-protocol`, `andarium-haptics-player`,

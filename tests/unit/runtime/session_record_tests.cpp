@@ -706,6 +706,224 @@ void test_a_wrapped_ring_keeps_no_serial_number()
 	unlink(path.c_str());
 }
 
+/* Made-up values: nothing here belongs to an installation. */
+const std::string made_up_key =
+	"ZmFrZS1rZXktZm9yLXRlc3RzLW9ubHkrL0FCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFla0123456789==";
+const std::string made_up_serial = "TESTSERIAL0123";
+const std::string made_up_zone = "Test/Nowhere";
+const std::string made_up_address = "02:ab:cd:00:11:22";
+
+/* The kernel arguments through which the runtime states them. */
+std::vector<std::string> identity_arguments()
+{
+	return {"quiet", "androidboot.serialno=" + made_up_serial,
+		"androidboot.kernarium.adb_key=" + made_up_key,
+		"androidboot.kernarium.timezone=" + made_up_zone,
+		"androidboot.hardware=test"};
+}
+
+/* No eight characters of `value` in a row: the record keeps none of it. */
+void require_no_part_of(const std::string &record, const std::string &value,
+	const std::string &where)
+{
+	for (std::size_t at = 0; at + 8 <= value.size(); ++at)
+		require(!has(record, value.substr(at, 8)),
+			"the record keeps part of a value (" + value.substr(at, 8) +
+				")" + where);
+}
+
+void require_no_identity(const std::string &record, const std::string &where)
+{
+	require_no_part_of(record, made_up_key, where);
+	require_no_part_of(record, made_up_serial, where);
+	require_no_part_of(record, made_up_zone, where);
+	require_no_part_of(record, made_up_address, where);
+}
+
+/* The kernel echoes its command line, which carries the guest's serial
+ * number, the host's adb key and the time zone it was given, and init prints
+ * a property it cannot set with the value: the record keeps the output and
+ * none of the three values, wherever they stand, and no hardware address,
+ * and it puts what the application's start log puts in their place. */
+void test_the_record_keeps_no_identity_values()
+{
+	uml::runtime::reset_session_record();
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, identity_arguments()));
+	const std::string lines[] = {
+		"Kernel command line: quiet androidboot.serialno=" + made_up_serial +
+			" androidboot.kernarium.adb_key=" + made_up_key +
+			" androidboot.kernarium.timezone=" + made_up_zone +
+			" androidboot.hardware=test\n",
+		"init: Init cannot set 'ro.boot.kernarium.adb_key' to '" +
+			made_up_key + "': too long\n",
+		"[ro.serialno]: [" + made_up_serial + "]\n",
+		"[persist.sys.timezone]: [" + made_up_zone + "]\n",
+		"eth0: link up, address " + made_up_address + "\n",
+		"unrelated: 05:04:50 dead:beef::1 12:34:56 serial OTHERSERIAL99 "
+		"zone Other/Elsewhere\n",
+		"the last: " + made_up_key,
+	};
+	for (const std::string &line : lines)
+		(void)uml::runtime::kernel_write(STDERR_FILENO, line.data(),
+			line.size());
+	uml::runtime::end_session_record(SessionEnd::kernel_exit, 143, "exit");
+	const std::string record = read_file(path);
+	require_no_identity(record, ": " + record);
+	require(has(record, "Kernel command line: quiet androidboot.serialno="
+			    "<masked> androidboot.kernarium.adb_key=<masked> "
+			    "androidboot.kernarium.timezone=<time zone> "
+			    "androidboot.hardware=test\n") &&
+		has(record, "init: Init cannot set 'ro.boot.kernarium.adb_key' to "
+			    "'<masked>': too long\n") &&
+		has(record, "[ro.serialno]: [<masked>]\n") &&
+		has(record, "[persist.sys.timezone]: [<time zone>]\n") &&
+		has(record, "eth0: link up, address <address>\n") &&
+		has(record, "the last: <masked>"),
+		"the output was not kept with its values masked: " + record);
+	/* What is not an identity value stays: a time of day, an IPv6 address,
+	 * another serial number and another zone. */
+	require(has(record, "unrelated: 05:04:50 dead:beef::1 12:34:56 serial "
+			    "OTHERSERIAL99 zone Other/Elsewhere\n"),
+		"the record masked what is no identity value: " + record);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+
+	/* A message, which an end states from what the guest printed. */
+	require(uml::runtime::begin_session_record(path, identity_arguments()));
+	uml::runtime::end_session_record(SessionEnd::failed, 1,
+		"gave up on " + made_up_serial + " with " + made_up_key);
+	const std::string message = read_file(path);
+	require(has(message, "message gave up on <masked> with <masked>\n"),
+		"the message was not kept with its values masked: " + message);
+	require_no_identity(message, ": " + message);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
+/* A session states its own values, and none of an earlier one stays: a record
+ * of a launch that states none keeps the output as the kernel printed it,
+ * apart from what the names and the hardware address's shape take out. */
+void test_a_session_masks_only_its_own_values()
+{
+	uml::runtime::reset_session_record();
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, identity_arguments()));
+	uml::runtime::end_session_record(SessionEnd::kernel_exit, 0, "exit");
+	const std::vector<std::string> none{"quiet"};
+	require(uml::runtime::begin_session_record(path, none));
+	const std::string line = "[ro.serialno]: [" + made_up_serial + "]\n";
+	(void)uml::runtime::kernel_write(STDERR_FILENO, line.data(), line.size());
+	uml::runtime::end_session_record(SessionEnd::kernel_exit, 0, "exit");
+	const std::string record = read_file(path);
+	require(has(record, line), "an earlier session's value was masked: " + record);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
+/* The ring keeps the last bytes of the output, so after a wrap its first line
+ * is cut at any byte, in a value as well as in a name. The record starts at the
+ * first complete line, with the output as one write longer than the ring and as
+ * many small ones, whichever byte the ring begins at. */
+void test_a_wrapped_ring_keeps_no_identity_values()
+{
+	constexpr std::size_t ring = uml::runtime::session_kernel_output_bytes;
+	const std::string echo =
+		"init: Init cannot set 'ro.boot.kernarium.adb_key' to '" + made_up_key +
+		"'\n[ro.serialno]: [" + made_up_serial + "]\n[tz]: [" + made_up_zone +
+		"]\nup on " + made_up_address + " ok\n";
+	const std::string marker = "\nring end marker\n";
+	for (const bool one_write : {true, false}) {
+		for (std::size_t cut = 0; cut < echo.size(); ++cut) {
+			std::string input = echo;
+			const std::size_t padding =
+				ring + cut - echo.size() - marker.size();
+			for (std::size_t line = 0; line < padding / 32; ++line)
+				input += std::string(31, 'y') + '\n';
+			input += std::string(padding % 32, 'y');
+			input += marker;
+			require(input.size() == ring + cut, "a wrong test input");
+			uml::runtime::reset_session_record();
+			const std::string path = temporary_record();
+			require(uml::runtime::begin_session_record(path,
+				identity_arguments()));
+			if (one_write) {
+				(void)uml::runtime::kernel_write(
+					STDERR_FILENO, input.data(), input.size());
+			} else {
+				for (std::size_t offset = 0; offset < input.size();
+				     offset += 61)
+					(void)uml::runtime::kernel_write(
+						STDERR_FILENO, input.data() + offset,
+						std::min<std::size_t>(61, input.size() - offset));
+			}
+			uml::runtime::end_session_record(SessionEnd::kernel_exit, 143,
+				"exit");
+			const std::string record = read_file(path);
+			const std::string where = (one_write ? " (one write, cut " :
+							       " (small writes, cut ") +
+				std::to_string(cut) + ")";
+			require_no_identity(record, where);
+			require(has(record, "ring end marker\n"),
+				"the record lost the end of the output" + where);
+			uml::runtime::reset_session_record();
+			unlink(path.c_str());
+		}
+	}
+}
+
+/* A value that arrives in two writes: a record written between them, as a
+ * checkpoint of a boot that is not finished does and a process that is ended
+ * from outside leaves, holds none of the part that is there, and the whole
+ * output is masked once the rest has come. */
+void test_a_value_in_two_writes_is_masked_in_both_states()
+{
+	struct Split {
+		std::string before;
+		std::string value;
+		std::string after;
+		std::string masked;
+	};
+	const std::vector<Split> splits{
+		{"init: Init cannot set 'ro.boot.kernarium.adb_key' to '", made_up_key,
+			"'\n", "<masked>'\n"},
+		{"[ro.serialno]: [", made_up_serial, "]\n", "<masked>]\n"},
+		{"[persist.sys.timezone]: [", made_up_zone, "]\n", "<time zone>]\n"},
+	};
+	for (const Split &split : splits) {
+		for (std::size_t cut = 4; cut < split.value.size(); ++cut) {
+			uml::runtime::reset_session_record();
+			uml::runtime::set_session_boot_facts(true, 0);
+			const std::string path = temporary_record();
+			require(uml::runtime::begin_session_record(path,
+				identity_arguments()));
+			const std::string first = split.before + split.value.substr(0, cut);
+			(void)uml::runtime::kernel_write(STDERR_FILENO, first.data(),
+				first.size());
+			uml::runtime::checkpoint_session_memory();
+			const std::string where = " (split at " + std::to_string(cut) +
+				" of " + split.value + ")";
+			const std::string between = read_file(path);
+			require(has(between, "kernel-output\n" + split.before),
+				"the checkpoint did not quote the output" + where + ": " +
+					between);
+			require_no_identity(between, where);
+			const std::string rest =
+				split.value.substr(cut) + split.after;
+			(void)uml::runtime::kernel_write(STDERR_FILENO, rest.data(),
+				rest.size());
+			uml::runtime::end_session_record(SessionEnd::kernel_exit, 143,
+				"exit");
+			const std::string record = read_file(path);
+			require_no_identity(record, where);
+			require(has(record, split.before + split.masked),
+				"the output was not kept masked" + where + ": " + record);
+			uml::runtime::reset_session_record();
+			unlink(path.c_str());
+		}
+	}
+}
+
 void test_memory_checkpoints()
 {
 	uml::runtime::reset_session_record();
@@ -1796,6 +2014,10 @@ int main(int argc, char **argv)
 		test_record_lifecycle();
 		test_the_record_keeps_no_serial_number();
 		test_a_wrapped_ring_keeps_no_serial_number();
+		test_the_record_keeps_no_identity_values();
+		test_a_session_masks_only_its_own_values();
+		test_a_wrapped_ring_keeps_no_identity_values();
+		test_a_value_in_two_writes_is_masked_in_both_states();
 		test_memory_checkpoints();
 		test_network_slot();
 		test_storage_slot();

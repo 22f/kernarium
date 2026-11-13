@@ -121,7 +121,10 @@ inline constexpr std::size_t session_state_offset =
 /* The kernel output the state quotes, and the most the state ever takes: its
  * lines, a message and that output, which is the boot's own. Once the ring has
  * dropped output of that boot the state quotes it from its first complete
- * line, with the guest's serial number masked. */
+ * line. What identifies the installation is masked wherever the state quotes
+ * it: the serial number, the adb key and the time zone that the session's
+ * kernel arguments state (by their assignments and by value) and any hardware
+ * address in its colon spelling, as the application's start log masks them. */
 inline constexpr std::size_t session_kernel_output_bytes = 4096;
 inline constexpr std::size_t session_state_max_bytes =
 	session_kernel_output_bytes + 1024;
