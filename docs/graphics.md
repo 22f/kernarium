@@ -371,20 +371,31 @@ that reached its bound is not repeated until Metal's counter falls again.
   (`guest-virtgpu-blob-refusal`). The staging buffer of a buffer or texture
   upload, and the buffers a draw uploads (the program's constants and the
   attributes it has no array for), come from the driver and are refused there.
-  Mesa then flushes the context and waits, 2 s in all, for its work, trims it,
-  releases what the screen caches, and tries the upload or the draw's state
-  once more, again for 300 ms at most while the freed memory reaches the pool
-  (`gpu-host-gl-refusal-retry-draw`, `gpu-host-gl-refusal-retry-upload`). An
-  upload made without synchronizing with the context's thread only releases
-  what the screen caches. Work that does not finish in time rules out another
-  reclaim for ten seconds, and one that did not help for a quarter of a
-  second. What still does not fit is dropped: an upload is lost without an
-  error (`gpu-host-gl-refusal-retry-persist`), and a draw whose upload is
-  refused is skipped and raises `GL_OUT_OF_MEMORY`, and the next draw sets its
-  state up again (`gpu-host-gl-upload-refusal`). The upload buffer glthread
-  shares between a context's `glBufferSubData` calls is refused at the driver
-  too and is not retried: the write then copies its data through the command
-  stream and needs no buffer (`gpu-host-gl-glthread-upload-refusal`).
+  Mesa then gives back what it can and makes the request once more, once and
+  not again: it flushes the context, waits for its work, trims it and waits
+  for the trim, which is 2 s in all after the flush has returned (the flush,
+  and the synchronization of a threaded context ahead of a large image
+  upload, wait as they always do), releases what the screen caches, and waits
+  up to 300 ms, 20 ms when little was freed, for the freed memory to reach the
+  pool (`gpu-host-gl-refusal-retry-draw`, `-sustained`, `-upload`, `-buffer`).
+  The retry covers the draws, the staged uploads of a texture, and the buffer
+  updates of the threaded context, large and small. An upload made without
+  synchronizing with the context's thread only releases what the screen
+  caches, and never waits for the GPU. Work that does not finish in time
+  leaves the request refused and rules out every reclaim on the screen for ten
+  seconds. A reclaim that did not help rules out another of the same context
+  for a quarter of a second, and does not affect another context's. One
+  reclaim runs on a screen at a time; a context that meets a refusal meanwhile
+  leaves its request refused. A map or an uploader that the driver refused
+  releases what it had taken, so that refusals leave nothing behind
+  (`gpu-host-gl-refusal-retry-cycle`). What still does not fit is dropped: an
+  upload is lost without an error (`gpu-host-gl-refusal-retry-persist`), and a
+  draw whose upload is refused is skipped and raises `GL_OUT_OF_MEMORY`, and
+  the next draw sets its state up again (`gpu-host-gl-upload-refusal`). The
+  upload buffer glthread shares between a context's `glBufferSubData` calls is
+  refused at the driver too and is not retried: the write then copies its data
+  through the command stream and needs no buffer
+  (`gpu-host-gl-glthread-upload-refusal`).
 - Venus: the guest driver submits `vkAllocateMemory` asynchronously, so a
   refusal reaches the guest as a failed context at the next command naming the
   allocation, and only that guest process aborts. The Android guest allocates

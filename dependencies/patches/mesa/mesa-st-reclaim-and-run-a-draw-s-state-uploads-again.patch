@@ -18,9 +18,9 @@ again do not reclaim in their turn.
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  src/mesa/state_tracker/st_context.h |  5 +++
- src/mesa/state_tracker/st_draw.c    | 34 +++++++++++++---
+ src/mesa/state_tracker/st_draw.c    | 33 +++++++++++++---
  src/mesa/state_tracker/st_util.h    | 60 +++++++++++++++++------------
- 3 files changed, 70 insertions(+), 29 deletions(-)
+ 3 files changed, 69 insertions(+), 29 deletions(-)
 
 diff --git a/src/mesa/state_tracker/st_context.h b/src/mesa/state_tracker/st_context.h
 index 7d8eb0650559adfe1b1d9a5ae4d0772783919b05..a2c5d02d3e4153237156c28e7ae1981c2811dcd2 100644
@@ -39,7 +39,7 @@ index 7d8eb0650559adfe1b1d9a5ae4d0772783919b05..a2c5d02d3e4153237156c28e7ae1981c
     bool can_scissor_clear;
  
 diff --git a/src/mesa/state_tracker/st_draw.c b/src/mesa/state_tracker/st_draw.c
-index 58b264fbb7445b1d47683e3be99cc24e0e5651bf..852c65fe185aaf5f60643a45b2c0a86ccb1fc807 100644
+index 58b264fbb7445b1d47683e3be99cc24e0e5651bf..7cfcb62e9ed44ce3a31de1e4b73017ae00fe02a9 100644
 --- a/src/mesa/state_tracker/st_draw.c
 +++ b/src/mesa/state_tracker/st_draw.c
 @@ -58,6 +58,7 @@
@@ -50,7 +50,7 @@ index 58b264fbb7445b1d47683e3be99cc24e0e5651bf..852c65fe185aaf5f60643a45b2c0a86c
  #include "util/u_draw.h"
  #include "util/u_upload_mgr.h"
  #include "util/u_threaded_context.h"
-@@ -71,13 +72,36 @@ static_assert(GL_QUADS == MESA_PRIM_QUADS, "enum mismatch");
+@@ -71,13 +72,35 @@ static_assert(GL_QUADS == MESA_PRIM_QUADS, "enum mismatch");
  static_assert(GL_TRIANGLE_STRIP_ADJACENCY == MESA_PRIM_TRIANGLE_STRIP_ADJACENCY, "enum mismatch");
  static_assert(GL_PATCHES == MESA_PRIM_PATCHES, "enum mismatch");
  
@@ -59,10 +59,10 @@ index 58b264fbb7445b1d47683e3be99cc24e0e5651bf..852c65fe185aaf5f60643a45b2c0a86c
 +/**
 + * A state update could not get the upload memory it needs: the driver
 + * refused it, and the state is dirty again. The driver is asked to give back
-+ * what it can, and the updates run again, a little later while the room it
-+ * freed has not shown yet. When they still fail, nothing is lost but the
-+ * draw: GL_OUT_OF_MEMORY is raised, and the state stays dirty for the next
-+ * one to try.
++ * what it can, and the updates run once more, a little later, when the room
++ * it freed has shown in the budget. When they still fail, nothing is lost but
++ * the draw: GL_OUT_OF_MEMORY is raised, and the state stays dirty for the
++ * next one to try.
 + */
 +bool
 +st_retry_state_after_reclaim(struct st_context *st,
@@ -78,9 +78,8 @@ index 58b264fbb7445b1d47683e3be99cc24e0e5651bf..852c65fe185aaf5f60643a45b2c0a86c
 +      bool updated;
 +
 +      st->reclaiming = true;
-+      do {
-+         updated = st_update_dirty_states(st, pipeline_state_mask);
-+      } while (!updated && u_reclaim_settle(&reclaim));
++      u_reclaim_settle(&reclaim);
++      updated = st_update_dirty_states(st, pipeline_state_mask);
 +      st->reclaiming = false;
 +      u_reclaim_end(&reclaim, updated);
 +      if (updated)

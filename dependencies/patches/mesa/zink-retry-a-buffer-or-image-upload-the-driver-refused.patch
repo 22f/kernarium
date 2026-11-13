@@ -20,10 +20,10 @@ budget to show the room is worth it.
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  src/gallium/drivers/zink/zink_bo.c       |  1 +
- src/gallium/drivers/zink/zink_resource.c | 32 +++++++++++++++++++++++-
+ src/gallium/drivers/zink/zink_resource.c | 29 +++++++++++++++++++++++-
  src/gallium/drivers/zink/zink_screen.c   |  7 ++++++
  src/gallium/drivers/zink/zink_types.h    |  1 +
- 4 files changed, 40 insertions(+), 1 deletion(-)
+ 4 files changed, 37 insertions(+), 1 deletion(-)
 
 diff --git a/src/gallium/drivers/zink/zink_bo.c b/src/gallium/drivers/zink/zink_bo.c
 index 42c394eee1363db75cb78e48ffc072d7f2bae17a..cee44a35ddab841062320a42f691d84a65558455 100644
@@ -38,7 +38,7 @@ index 42c394eee1363db75cb78e48ffc072d7f2bae17a..cee44a35ddab841062320a42f691d84a
     simple_mtx_destroy(&bo->lock);
     FREE(bo);
 diff --git a/src/gallium/drivers/zink/zink_resource.c b/src/gallium/drivers/zink/zink_resource.c
-index 5821a7321b0d87600ea9ab8c59effe2fa40e9605..d7bd3a9f00200a41e8bf969fceafbc4d1e5ebfc8 100644
+index 5821a7321b0d87600ea9ab8c59effe2fa40e9605..49fc93bf604ae9ca16c62f68f141dd0b08c2ad76 100644
 --- a/src/gallium/drivers/zink/zink_resource.c
 +++ b/src/gallium/drivers/zink/zink_resource.c
 @@ -42,6 +42,8 @@
@@ -50,7 +50,7 @@ index 5821a7321b0d87600ea9ab8c59effe2fa40e9605..d7bd3a9f00200a41e8bf969fceafbc4d
  #include "util/u_transfer_helper.h"
  #include "util/u_inlines.h"
  #include "util/u_memory.h"
-@@ -3173,7 +3175,23 @@ zink_image_subdata(struct pipe_context *pctx,
+@@ -3173,7 +3175,21 @@ zink_image_subdata(struct pipe_context *pctx,
        return;
     }
     /* fallback case for per-resource unsupported or device-level unsupported */
@@ -64,18 +64,16 @@ index 5821a7321b0d87600ea9ab8c59effe2fa40e9605..d7bd3a9f00200a41e8bf969fceafbc4d
 +       */
 +      struct u_reclaim reclaim;
 +      if (u_reclaim_begin(pctx, !(usage & TC_TRANSFER_MAP_THREADED_UNSYNC), &reclaim)) {
-+         bool written;
-+         do {
-+            written = u_texture_subdata_try(pctx, pres, level, usage, box,
-+                                            data, stride, layer_stride);
-+         } while (!written && u_reclaim_settle(&reclaim));
-+         u_reclaim_end(&reclaim, written);
++         u_reclaim_settle(&reclaim);
++         u_reclaim_end(&reclaim,
++                       u_texture_subdata_try(pctx, pres, level, usage, box,
++                                             data, stride, layer_stride));
 +      }
 +   }
     res->subdata = false;
     if (res->fb_bind_count)
        ctx->rp_tc_info_updated = true;
-@@ -3535,6 +3553,18 @@ zink_buffer_subdata(struct pipe_context *ctx, struct pipe_resource *buffer,
+@@ -3535,6 +3551,17 @@ zink_buffer_subdata(struct pipe_context *ctx, struct pipe_resource *buffer,
  
     u_box_1d(offset, size, &box);
     map = zink_buffer_map(ctx, buffer, 0, usage, &box, &transfer);
@@ -85,9 +83,8 @@ index 5821a7321b0d87600ea9ab8c59effe2fa40e9605..d7bd3a9f00200a41e8bf969fceafbc4d
 +       */
 +      struct u_reclaim reclaim;
 +      if (u_reclaim_begin(ctx, !(usage & TC_TRANSFER_MAP_THREADED_UNSYNC), &reclaim)) {
-+         do {
-+            map = zink_buffer_map(ctx, buffer, 0, usage, &box, &transfer);
-+         } while (!map && u_reclaim_settle(&reclaim));
++         u_reclaim_settle(&reclaim);
++         map = zink_buffer_map(ctx, buffer, 0, usage, &box, &transfer);
 +         u_reclaim_end(&reclaim, map != NULL);
 +      }
 +   }
