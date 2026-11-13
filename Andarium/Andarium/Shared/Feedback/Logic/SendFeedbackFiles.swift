@@ -210,6 +210,22 @@ nonisolated enum SendFeedbackNames {
         return result
     }
 
+    /// A moment as a file name carries it: `20261114-031512`, the same pattern as every generated name
+    /// (`yyyyMMdd-HHmmss`), on the Gregorian calendar, in ASCII digits, in the device's time zone with no
+    /// zone text. Nothing here follows the device's language, region, calendar or numbering system, so the name
+    /// has the same shape wherever the mail is made.
+    static func stamp(_ date: Date, in zone: TimeZone = .current) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        func digits(_ value: Int?, _ width: Int) -> String {
+            let text = String(max(value ?? 0, 0))
+            return String(repeating: "0", count: max(0, width - text.count)) + text
+        }
+        return digits(parts.year, 4) + digits(parts.month, 2) + digits(parts.day, 2) + "-"
+            + digits(parts.hour, 2) + digits(parts.minute, 2) + digits(parts.second, 2)
+    }
+
     /// What a path or a header would obey, which a name never keeps: control and format characters
     /// (the ones that reverse text among them), line and paragraph separators, and what has no meaning.
     static func isControl(_ scalar: Unicode.Scalar) -> Bool {

@@ -310,14 +310,19 @@ struct SendFeedbackFilesScreenTests {
         sheet.form.details = "Details"
         sheet.takeScreenshot()
         #expect(await eventually { sheet.form.attachments.count == 1 })
-        let clash = try fixture.original("Screenshot.PNG")
+        // The screenshot is named with the moment it was made; a file of the person's with that name,
+        // whatever the letters' case, is numbered, not the screenshot.
+        let stamp = SendFeedbackNames.stamp(sheet.form.attachments.items[0].madeAt)
+        let clash = try fixture.original("Screenshot-\(stamp).PNG")
         let odd = try fixture.original("My App \u{5E94}\u{7528} (v2)\u{202E}.apk")
         await sheet.addFiles([clash, odd])
         sheet.send()
         let request = try #require(fixture.composer.request)
-        #expect(request.attachments.map(\.fileName) == ["screenshot.png", "Screenshot-2.PNG", "My App \u{5E94}\u{7528} (v2)_.apk"])
+        #expect(request.attachments.map(\.fileName) == [
+            "screenshot-\(stamp).png", "Screenshot-\(stamp)-2.PNG", "My App \u{5E94}\u{7528} (v2)_.apk",
+        ])
         #expect(request.attachments[1].url == clash && request.attachments[2].url == odd, "from where they are kept")
-        #expect(request.attachments.map(\.displayName) == [nil, "Screenshot.PNG", "My App \u{5E94}\u{7528} (v2).apk"], "the row has no control characters")
+        #expect(request.attachments.map(\.displayName) == [nil, "Screenshot-\(stamp).PNG", "My App \u{5E94}\u{7528} (v2).apk"], "the row has no control characters")
         #expect(request.attachments[2].mimeType == "application/vnd.android.package-archive")
         sheet.close()
     }

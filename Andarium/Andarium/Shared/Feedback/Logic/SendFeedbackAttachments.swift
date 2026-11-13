@@ -14,6 +14,18 @@ nonisolated struct SendFeedbackAttachment: Identifiable, Equatable, Sendable {
         case bugReport, screenshot, photo, video
         /// Any other file, picked from Files.
         case file
+
+        /// The name the mail gives a file the app made itself: fixed English words and the moment it was
+        /// made (`SendFeedbackNames.stamp`), whatever the interface language and whatever the file is
+        /// called where it is staged (the guest names its own report). A file the person picked keeps
+        /// its own name.
+        func generatedFileName(at date: Date) -> String? {
+            switch self {
+            case .bugReport: "bugreport-\(SendFeedbackNames.stamp(date)).zip"
+            case .screenshot: "screenshot-\(SendFeedbackNames.stamp(date)).png"
+            case .photo, .video, .file: nil
+            }
+        }
     }
 
     let id: UUID
@@ -29,6 +41,8 @@ nonisolated struct SendFeedbackAttachment: Identifiable, Equatable, Sendable {
     /// The name the mail carries, when it is not the file's own: a picked
     /// file's name made safe, and any name that another attachment has.
     var mailName: String?
+    /// When the app made the file, for the date in a generated file's mail name.
+    var madeAt: Date
     /// `url` is the person's own file, opened where it is kept under an access
     /// the sheet holds until the attachment is removed. It is never moved or
     /// deleted, only released.
@@ -36,7 +50,8 @@ nonisolated struct SendFeedbackAttachment: Identifiable, Equatable, Sendable {
 
     init(
         id: UUID = UUID(), kind: Kind, url: URL, bytes: UInt64, pixels: SendFeedbackPixels? = nil,
-        durationSeconds: Int? = nil, displayName: String? = nil, mailName: String? = nil, inPlace: Bool = false
+        durationSeconds: Int? = nil, displayName: String? = nil, mailName: String? = nil, inPlace: Bool = false,
+        madeAt: Date = Date()
     ) {
         self.id = id
         self.kind = kind
@@ -47,10 +62,12 @@ nonisolated struct SendFeedbackAttachment: Identifiable, Equatable, Sendable {
         self.displayName = displayName
         self.mailName = mailName
         self.inPlace = inPlace
+        self.madeAt = madeAt
     }
 
-    /// The name the mail gives the file.
-    var fileName: String { mailName ?? url.lastPathComponent }
+    /// The name the mail gives the file: a numbered one when another attachment has its name, else the
+    /// fixed name of a file the app made, else the file's own.
+    var fileName: String { mailName ?? kind.generatedFileName(at: madeAt) ?? url.lastPathComponent }
 
     /// The type the composer is told the file has.
     var mimeType: String {

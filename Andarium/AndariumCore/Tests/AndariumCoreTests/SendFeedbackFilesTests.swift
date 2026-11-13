@@ -48,10 +48,14 @@ struct SendFeedbackFilesTests {
         return now > before ? now - before : 0
     }
 
+    /// The moment a generated file is made, so that its dated mail name is known.
+    private let moment = Date(timeIntervalSince1970: 1_794_626_712)
+
     private func attachment(
         _ kind: SendFeedbackAttachment.Kind, bytes: UInt64 = 1, path: String, inPlace: Bool = false, mailName: String? = nil
     ) -> SendFeedbackAttachment {
-        SendFeedbackAttachment(kind: kind, url: URL(fileURLWithPath: path), bytes: bytes, mailName: mailName, inPlace: inPlace)
+        SendFeedbackAttachment(
+            kind: kind, url: URL(fileURLWithPath: path), bytes: bytes, mailName: mailName, inPlace: inPlace, madeAt: moment)
     }
 
     private nonisolated final class Counter: @unchecked Sendable {
@@ -77,19 +81,23 @@ struct SendFeedbackFilesTests {
     }
 
     @Test func twoAttachmentsNeverShareAMailNameWhateverTheLettersCase() {
+        let stamp = SendFeedbackNames.stamp(moment)
         var set = SendFeedbackAttachments()
         set.add(attachment(.screenshot, path: "/staged/screenshot.png"))
-        set.add(attachment(.file, path: "/Files/Screenshot.PNG", inPlace: true, mailName: "Screenshot.PNG"))
-        set.add(attachment(.file, path: "/Other/screenshot.png", inPlace: true, mailName: "screenshot.png"))
-        set.add(attachment(.file, path: "/Other/SCREENSHOT-2.png", inPlace: true, mailName: "SCREENSHOT-2.png"))
-        #expect(set.items.map(\.fileName) == ["screenshot.png", "Screenshot-2.PNG", "screenshot-3.png", "SCREENSHOT-2-2.png"])
-        // The staged one keeps its own name.
+        set.add(attachment(.file, path: "/Files/Screenshot.PNG", inPlace: true, mailName: "Screenshot-\(stamp).PNG"))
+        set.add(attachment(.file, path: "/Other/screenshot.png", inPlace: true, mailName: "screenshot-\(stamp).png"))
+        set.add(attachment(.file, path: "/Other/SCREENSHOT-2.png", inPlace: true, mailName: "SCREENSHOT-\(stamp)-2.PNG"))
+        #expect(set.items.map(\.fileName) == [
+            "screenshot-\(stamp).png", "Screenshot-\(stamp)-2.PNG", "screenshot-\(stamp)-3.png",
+            "SCREENSHOT-\(stamp)-2-2.PNG",
+        ])
+        // The staged one keeps the name it was made with.
         #expect(set.items[0].mailName == nil)
         // A bug report that replaces the one there is not renamed after it.
         set.add(attachment(.bugReport, path: "/staged/bugreport.zip"))
         let replaced = set.add(attachment(.bugReport, path: "/staged/bugreport.zip"))
-        #expect(replaced?.fileName == "bugreport.zip")
-        #expect(set.bugReport?.fileName == "bugreport.zip")
+        #expect(replaced?.fileName == "bugreport-\(stamp).zip")
+        #expect(set.bugReport?.fileName == "bugreport-\(stamp).zip")
     }
 
     @Test func theListMapsEveryFileBeforeTheComposerIsGivenOneAndNamesTheOnesThatFailed() throws {

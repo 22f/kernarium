@@ -292,7 +292,11 @@ check, under the app's progress overlay with Cancel; a copy that is cancelled or
 fails leaves nothing. Cancel ends the whole batch: what was attached before it
 stays, the files that were not yet taken in are not. Send looks at every file
 again and maps it before the composer opens: one that is gone or can no longer
-be mapped is taken out of the list, and nothing is sent. The mail carries a
+be mapped is taken out of the list, and nothing is sent. The mail names
+what the app makes itself `bugreport-yyyyMMdd-HHmmss.zip` and
+`screenshot-yyyyMMdd-HHmmss.png`: fixed English words and a fixed date (Gregorian,
+ASCII digits, the device's time zone) whatever the interface language or the
+device's calendar and digits. The mail carries a picked
 file's name as written, in any script; only path separators, control
 characters (the ones that reverse text among them) and a leading dot are
 replaced or removed, and a long name is cut to 100 characters and 200 bytes

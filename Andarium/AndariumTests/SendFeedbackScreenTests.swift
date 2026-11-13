@@ -478,6 +478,32 @@ struct SendFeedbackScreenTests {
         sheet.close()
     }
 
+    /// The names the composer is handed for what the app makes: fixed English ASCII, the same under every
+    /// interface language (the suite is also run with each of en, zh-Hans, zh-Hant and ja as the test language).
+    @Test func theComposerIsHandedFixedEnglishNamesForTheBugReportAndTheScreenshot() async throws {
+        let fixture = fixture()
+        let file = try report(in: fixture)
+        fixture.driver.bugReport = { _ in file }
+        let sheet = fixture.sheet()
+        sheet.form.problem = "x"
+        sheet.form.details = "Details"
+        sheet.createBugReport()
+        #expect(await eventually { sheet.form.attachments.bugReport != nil })
+        sheet.takeScreenshot()
+        #expect(await eventually { sheet.form.attachments.items.contains { $0.kind == .screenshot } })
+        sheet.send()
+        let request = try #require(fixture.composer.request)
+        // `bugreport-yyyyMMdd-HHmmss.zip` and `screenshot-yyyyMMdd-HHmmss.png`: fixed English words, a fixed
+        // pattern of ASCII digits, whatever the interface language or the device's calendar and digits.
+        let names = request.attachments.map(\.fileName)
+        #expect(names.count == 2)
+        #expect(names[0].wholeMatch(of: /bugreport-[0-9]{8}-[0-9]{6}\.zip/) != nil)
+        #expect(names[1].wholeMatch(of: /screenshot-[0-9]{8}-[0-9]{6}\.png/) != nil)
+        #expect(request.attachments.map(\.mimeType) == ["application/zip", "image/png"])
+        #expect(names.allSatisfy { $0.allSatisfy(\.isASCII) })
+        sheet.close()
+    }
+
     @Test func sendNeedsAProblemDetailsAndAnAvailableComposer() {
         let fixture = fixture()
         let sheet = fixture.sheet()
