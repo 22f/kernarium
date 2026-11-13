@@ -240,8 +240,8 @@ using GuestTrim = TrimOutcome (*)(void *context) noexcept;
  * it is destroyed. The destructor returns once a response that is running has
  * ended, and no response, retry or call of the run's `GuestTrim` starts after
  * it. The source, its queue and the retry timer are the process's, made on the
- * first watch and kept: cancelling a source leaves a libdispatch worker thread behind, and a
- * run leaves no thread of its own. */
+ * first watch and kept: cancelling a source leaves a libdispatch worker thread
+ * behind, and a run leaves no thread of its own. */
 class MemoryPressureWatch final {
 public:
 	~MemoryPressureWatch();
