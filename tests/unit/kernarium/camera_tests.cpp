@@ -152,7 +152,7 @@ void aLiveSessionReservesMemoryOnlyForCamerasItHas()
     const auto ceiling = uml::camera::cameraHostMemoryReserveMiB(tier);
     const auto phone = present(
         uml::camera::makeSyntheticCameraSource(uml::camera::SyntheticProfile::phone), tier, "");
-    require(ceiling == 160, "the most a session of the tier holds");
+    require(ceiling == 173, "the most a session of the tier holds");
     // The reserve follows what the device is given: this phone's front camera does not run with its back one, and its
     // back lens teaches the store its colour data with its first still, so a RAW capture is possible from the first boot.
     require(phone.hasCameras() && phone.layout == "bf-small-flash-manual" && phone.use.streams == 1 && phone.use.rawStill,

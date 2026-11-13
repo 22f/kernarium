@@ -3,6 +3,7 @@
 
 // The application's runtime loader includes this header with no include path.
 #include "../../platform/frame_bytes.hpp"
+#include "jpeg_gap.hpp"
 
 #include <cstdint>
 
@@ -106,12 +107,15 @@ struct CameraUse {
 };
 
 /* The largest encoded file the host takes for a still of `pixels` pixels, in
- * bytes: one byte a pixel. A larger file fails its capture before it is copied.
- * It is the platform's file and the device's copy that the cost of a capture
- * holds. */
+ * bytes: the guest's JPEG buffer for that size, a byte and a half a pixel (a
+ * YUV 4:2:0 picture) and the Exif gap, the size the device states for the
+ * stream (the guest allocates its JPEG buffer from it). A larger file fails its
+ * capture before it is copied, and the device could not copy it into the
+ * guest's buffer in any case. It is the platform's file and the device's copy
+ * that the cost of a capture holds. */
 [[nodiscard]] constexpr std::uint64_t maximumJpegBytes(std::uint64_t pixels) noexcept
 {
-    return pixels;
+    return pixels * 3 / 2 + exifGapLength;
 }
 
 /* What one capture holds while it is with the host, in bytes. A JPEG still of

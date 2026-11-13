@@ -56,8 +56,9 @@ application's statements (the sensor orientation, the rotation that
     back the frames the worker has not taken, although the session stays open
     for the torch or a still, so a switch holds one camera's frames.
   - The stills the device admits at once cost no more than
-    `stillAdmissionBytes`. A JPEG capture holds its file twice, at most one byte
-    a pixel of the size asked (a larger file fails the capture before it is
+    `stillAdmissionBytes`. A JPEG capture holds its file twice, at most the
+    guest's JPEG buffer for the size asked (a byte and a half a pixel and the
+    Exif gap, `maximumJpegBytes`; a larger file fails the capture before it is
     copied), and the working storage the platform camera's source holds for
     each pixel (`Camera::stillWorkingBytesPerPixel`: 11 bytes for the synthetic
     camera, not measured for the system's camera, whose own peak while it
@@ -71,8 +72,8 @@ application's statements (the sensor orientation, the rotation that
     or picture size holds one: a blocked session holds none of the memory
     above and opens no capture session.
 
-  At the small tier the reserve is 62 MiB (one stream), 88 (two), 135 (one with
-  RAW) or 160 (two with RAW, the tier's ceiling `cameraHostMemoryReserveMiB`,
+  At the small tier the reserve is 75 MiB (one stream), 100 (two), 147 (one with
+  RAW) or 173 (two with RAW, the tier's ceiling `cameraHostMemoryReserveMiB`,
   which a layout stated by name takes, as the device is not held to what it
   says). The runtime and the launcher compose the device's use from the
   cameras the guest is told (`composeCameras`) and take it from the GPU's pool

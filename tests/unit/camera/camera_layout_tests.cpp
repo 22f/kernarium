@@ -357,7 +357,7 @@ void testTheReserveFollowsTheUse()
 {
     const auto tier = CameraTier::small;
     const auto ceiling = cameraHostMemoryReserveMiB(tier);
-    require(ceiling == 160, "the tier's ceiling");
+    require(ceiling == 173, "the tier's ceiling");
     require(cameraHostMemoryReserveMiB(tier, CameraUse {}) == ceiling, "the default use is the ceiling");
 
     std::set<std::uint64_t> figures;
@@ -382,7 +382,7 @@ void testTheReserveFollowsTheUse()
             reachesTheCeiling = reachesTheCeiling || reserve == ceiling;
         }
     }
-    require(figures == std::set<std::uint64_t> {62, 88, 135, 160}, "the four figures are all there are");
+    require(figures == std::set<std::uint64_t> {75, 100, 147, 173}, "the four figures are all there are");
     require(reachesTheCeiling, "the ceiling is a use's own figure");
     require(!layoutDimensionsNamed("").has_value() && !layoutDimensionsNamed("bf-small-nothing").has_value());
 }

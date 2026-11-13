@@ -2182,7 +2182,8 @@ void testStillsAreAdmittedByTheBytesTheyCost()
     require(small.camera->stillsTaken() == 4, "four small captures are with the platform at once");
 }
 
-// A file larger than a byte a pixel of the size the guest asked for fails its capture, and nothing of it reaches the guest.
+// A file larger than the guest's JPEG buffer for the size it asked for (a byte and a half a pixel and the Exif gap) fails
+// its capture, and nothing of it reaches the guest.
 void testAnOversizedStillFailsItsCapture()
 {
     Rig rig;
@@ -2203,6 +2204,27 @@ void testAnOversizedStillFailsItsCapture()
     rig.camera->pump(0, 0);
     rig.step();
     require(rig.done(next) && rig.result(next).base.flags == 0, "the next capture is taken");
+}
+
+// A photo the host took before keeps working: a file larger than a byte a pixel, the bound it once had, and a file of
+// exactly the guest's buffer for the size are taken; only a file past the buffer fails.
+void testAFileWithinTheGuestsBufferIsTaken()
+{
+    constexpr std::uint32_t width = 1008, height = 756;
+    const auto bound = maximumJpegBytes(std::uint64_t(width) * height);
+    for (const std::uint64_t padded : {std::uint64_t(width) * height + 1, bound}) {
+        Rig rig;
+        rig.camera->paddedStills(padded);
+        rig.create(1, 0, stillKind);
+        require(Rig::type(rig.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, width, height)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+        const auto size = rig.params(1).plane_formats[0].plane_size;
+        require(size == bound, "the buffer the device states is the bound");
+        rig.attach(1, 1, size);
+        const auto still = rig.queue(1, 1, 410);
+        rig.camera->pump(0, 0);
+        rig.step();
+        require(rig.done(still) && rig.result(still).base.flags == 0, "a file of this size is taken");
+    }
 }
 
 // Black pictures hold nothing of their own, however many streams are black and however large their pictures are: twenty
@@ -2462,6 +2484,7 @@ int main()
     testASwitchWithTheTorchOnHoldsOneCamerasFrames();
     testStillsAreAdmittedByTheBytesTheyCost();
     testAnOversizedStillFailsItsCapture();
+    testAFileWithinTheGuestsBufferIsTaken();
     testBlackPicturesHoldNothingOfTheirOwn();
     testService();
     return 0;

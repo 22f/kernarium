@@ -279,6 +279,10 @@ struct CameraStillRequest {
     std::uint32_t jpegWidth {};
     std::uint32_t jpegHeight {};
     std::uint32_t jpegQuality {95};
+    // The largest JPEG file the host takes, in bytes (the guest's buffer for
+    // that size): the platform drops a larger file and the capture fails.
+    // Zero: no bound.
+    std::uint64_t maximumJpegBytes {};
     bool raw {};
     // The capture must not use multi-frame processing (a Bayer still needs it).
     bool speedPrioritized {};

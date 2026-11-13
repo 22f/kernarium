@@ -1117,6 +1117,7 @@ public:
                 jpeg = true;
                 request.jpegWidth = stream.width;
                 request.jpegHeight = stream.height;
+                request.maximumJpegBytes = maximumJpegBytes(std::uint64_t(stream.width) * stream.height);
             } else {
                 if (raw) refusal = 1;
                 raw = true;
@@ -1426,7 +1427,7 @@ public:
             break;
         case VIRTIO_VIDEO_CAMERA_STREAM_STILL:
             if (stream.format == VIRTIO_VIDEO_FORMAT_CAMERA_JPEG)
-                p.plane_formats[0] = {std::uint32_t(std::uint64_t(stream.width) * stream.height * 3 / 2 + exifGapLength), 0};
+                p.plane_formats[0] = {std::uint32_t(maximumJpegBytes(std::uint64_t(stream.width) * stream.height)), 0};
             else
                 p.plane_formats[0] = {rawPitch(2 * stream.width) * stream.height, rawPitch(2 * stream.width)};
             break;

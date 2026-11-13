@@ -115,10 +115,15 @@ public:
     // The platform makes a JPEG of another size than the request names (the
     // device must fail that still, not pass the picture on).
     virtual void stillsOfAnotherSize(bool another) = 0;
-    // The platform's JPEG files are larger than a byte a pixel (padded behind the
-    // picture), as a noisy scene at the highest quality can make them: the device
-    // must fail that still, not copy the file.
+    // The platform's JPEG files are larger than the host takes (padded behind
+    // the picture past the request's `maximumJpegBytes`), as a noisy scene at
+    // the highest quality can make them: the device must fail that still, not
+    // copy the file.
     virtual void oversizedStills(bool oversized) = 0;
+    // The platform's JPEG files are at least this many bytes (padded behind the
+    // picture): a large file that the host takes, as a noisy scene makes them.
+    // Zero: the files are as the encoder wrote them.
+    virtual void paddedStills(std::uint64_t bytes) = 0;
     // The stills the sessions have been asked for and accepted since the object
     // was made, so a test sees how many captures the device had with the platform.
     [[nodiscard]] virtual unsigned stillsTaken() const noexcept = 0;

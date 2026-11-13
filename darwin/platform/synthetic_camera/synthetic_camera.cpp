@@ -470,6 +470,7 @@ public:
     std::atomic<bool> rawFails {false};
     std::atomic<bool> stillsOfAnotherSize {false};
     std::atomic<bool> oversizedStills {false};
+    std::atomic<std::uint64_t> stillPadding {0};
     std::atomic<unsigned> stillsTaken {0};
     // The system moved the anchored cameras out of their formats while the cameras were
     // interrupted; a session that opens puts them back by starting afresh.
@@ -964,8 +965,13 @@ private:
                 const auto picture = render(base(state, size->width / divisor, size->height / divisor), outcome.scene);
                 result.jpeg = encodeSyntheticJpeg(picture.luma.data(), picture.width, picture.chroma.data(),
                                                   picture.width, picture.width, picture.height, request.jpegQuality);
-                if (core_.oversizedStills && !result.jpeg.empty())
-                    result.jpeg.resize(std::max(result.jpeg.size(), std::size_t(request.jpegWidth) * request.jpegHeight + 1), 0);
+                if (core_.oversizedStills && !result.jpeg.empty()) {
+                    const std::size_t bound = request.maximumJpegBytes != 0 ? std::size_t(request.maximumJpegBytes)
+                                                                           : std::size_t(request.jpegWidth) * request.jpegHeight;
+                    result.jpeg.resize(std::max(result.jpeg.size(), bound + 1), 0);
+                }
+                if (const std::uint64_t padding = core_.stillPadding; padding != 0 && !result.jpeg.empty())
+                    result.jpeg.resize(std::max<std::size_t>(result.jpeg.size(), padding), 0);
             }
             if (request.raw && !core_.rawFails) {
                 const auto picture = render(base(state, info.rawStillSize.width, info.rawStillSize.height), outcome.scene);
@@ -1140,6 +1146,7 @@ public:
     void failRaw(bool fail) override { core_.rawFails = fail; }
     void stillsOfAnotherSize(bool another) override { core_.stillsOfAnotherSize = another; }
     void oversizedStills(bool oversized) override { core_.oversizedStills = oversized; }
+    void paddedStills(std::uint64_t bytes) override { core_.stillPadding = bytes; }
     unsigned stillsTaken() const noexcept override { return core_.stillsTaken; }
 
     void resume() override

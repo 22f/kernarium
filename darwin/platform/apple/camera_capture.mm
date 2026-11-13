@@ -406,6 +406,7 @@ using uml::platform::SessionState;
                          token:(uint64_t)token
                       wantJpeg:(BOOL)wantJpeg
                       jpegSize:(uml::platform::CameraStillSize)jpegSize
+                  maximumBytes:(uint64_t)maximumBytes
                        wantRaw:(BOOL)wantRaw
                          state:(std::shared_ptr<SessionState>)state;
 @end
@@ -944,6 +945,7 @@ public:
                                                                          token:request.token
                                                                       wantJpeg:request.jpegWidth != 0
                                                                       jpegSize:wanted
+                                                                  maximumBytes:request.maximumJpegBytes
                                                                        wantRaw:request.raw
                                                                          state:state_];
         // The photo output holds its delegate weakly, so the session keeps it
@@ -1795,6 +1797,8 @@ std::unique_ptr<Camera> makeAppleCamera()
     BOOL _wantJpeg;
     // The size of the JPEG the guest configured.
     uml::platform::CameraStillSize _jpegSize;
+    // The largest file the host takes; zero for no bound.
+    uint64_t _maximumBytes;
     BOOL _wantRaw;
     std::shared_ptr<SessionState> _state;
     uml::platform::CameraStillResult _result;
@@ -1810,6 +1814,7 @@ std::unique_ptr<Camera> makeAppleCamera()
                          token:(uint64_t)token
                       wantJpeg:(BOOL)wantJpeg
                       jpegSize:(uml::platform::CameraStillSize)jpegSize
+                  maximumBytes:(uint64_t)maximumBytes
                        wantRaw:(BOOL)wantRaw
                          state:(std::shared_ptr<SessionState>)state
 {
@@ -1818,6 +1823,7 @@ std::unique_ptr<Camera> makeAppleCamera()
         _token = token;
         _wantJpeg = wantJpeg;
         _jpegSize = jpegSize;
+        _maximumBytes = maximumBytes;
         _wantRaw = wantRaw;
         _state = std::move(state);
         _result.token = token;
@@ -1873,13 +1879,13 @@ std::unique_ptr<Camera> makeAppleCamera()
     } else
 #endif
     if (data != nil) {
-        // A file larger than a byte a pixel of the size the guest configured is not copied: the capture
-        // fails with those bytes still the system's alone (the host's cost of a capture counts this file).
-        const std::uint64_t pixels = std::uint64_t(_jpegSize.width) * _jpegSize.height;
-        if (!_wantJpeg || data.length > pixels) {
+        // A file larger than the host takes for the size the guest configured (its JPEG buffer) is not
+        // copied: the capture fails with those bytes still the system's alone (the host's cost of a
+        // capture counts this file).
+        if (!_wantJpeg || (_maximumBytes != 0 && data.length > _maximumBytes)) {
             if (_wantJpeg)
                 std::fprintf(stderr, "Camera: the photo's file is %lu bytes, more than the %llu a %ux%u photo may take\n",
-                             static_cast<unsigned long>(data.length), static_cast<unsigned long long>(pixels), _jpegSize.width,
+                             static_cast<unsigned long>(data.length), static_cast<unsigned long long>(_maximumBytes), _jpegSize.width,
                              _jpegSize.height);
             return;
         }
