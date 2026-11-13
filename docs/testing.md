@@ -382,7 +382,7 @@ metadata, fed literal metadata and an in-memory image, never a camera, and
 fake format tables
 ([Cameras](../darwin/device/camera/README.md)). The Camera setting's hosted
 tests (`CameraFlowTests`, and `CameraOffNoticeBannerTests` for the notice that
-Camera is off, drawn in a window at the largest text size) play iOS's
+Camera is off, drawn in a window) play iOS's
 permission with a fake and open no camera;
 the Simulator has no camera and `simctl privacy` cannot grant or revoke one, so
 the denied, restricted and absent states are shown by the preview

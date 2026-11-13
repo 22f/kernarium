@@ -69,12 +69,11 @@ struct SnapshotsSheet: View {
 /// the right.
 struct SnapshotsSplit: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
         HStack(spacing: 0) {
             SnapshotList(selectable: true)
-                .frame(width: typeSize.isAccessibilitySize ? 400 : 340)
+                .frame(width: 340)
             Divider().ignoresSafeArea(edges: .bottom)
             Group {
                 switch model.snapshots.selection {
@@ -214,26 +213,17 @@ private struct Facts: View {
 /// One snapshot in the list: its name (or when it was taken), when and from
 /// which system image, and what deleting it frees.
 struct SnapshotRow: View {
-    @Environment(\.dynamicTypeSize) private var typeSize
     let item: SnapshotSummary
     /// What deleting it frees; nil while it is not measured.
     let frees: SnapshotFigure?
 
     var body: some View {
-        if typeSize.isAccessibilitySize {
-            VStack(alignment: .leading, spacing: 4) {
-                words
-                size
-            }
-            .padding(.vertical, 4)
-        } else {
-            HStack(spacing: 12) {
-                words
-                Spacer(minLength: 8)
-                size
-            }
-            .padding(.vertical, 2)
+        HStack(spacing: 12) {
+            words
+            Spacer(minLength: 8)
+            size
         }
+        .padding(.vertical, 2)
     }
 
     private var words: some View {
@@ -250,24 +240,17 @@ struct SnapshotRow: View {
             } else {
                 Text(SnapshotWords.title(of: item))
                     .fontWeight(.medium)
-                if typeSize.isAccessibilitySize {
-                    // One fact a line: the date and the release do not share a
-                    // line that wraps between them.
-                    Text(SnapshotWords.taken(item.created)).font(.subheadline).foregroundStyle(.secondary)
-                    Text(SnapshotWords.revision(of: item.releaseID)).font(.subheadline).foregroundStyle(.secondary)
-                } else {
-                    Facts(
-                        one: [SnapshotWords.rowDetail(of: item)],
-                        two: [SnapshotWords.taken(item.created), SnapshotWords.revision(of: item.releaseID)],
-                        three: [
-                            SnapshotWords.takenDate(item.created), SnapshotWords.takenTime(item.created),
-                            SnapshotWords.revision(of: item.releaseID),
-                        ],
-                        wrapped: SnapshotWords.rowDetail(of: item)
-                    )
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                }
+                Facts(
+                    one: [SnapshotWords.rowDetail(of: item)],
+                    two: [SnapshotWords.taken(item.created), SnapshotWords.revision(of: item.releaseID)],
+                    three: [
+                        SnapshotWords.takenDate(item.created), SnapshotWords.takenTime(item.created),
+                        SnapshotWords.revision(of: item.releaseID),
+                    ],
+                    wrapped: SnapshotWords.rowDetail(of: item)
+                )
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
             }
             if let flag = SnapshotWords.rowFlag(item.restore) {
                 Text(flag)

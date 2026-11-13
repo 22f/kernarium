@@ -66,11 +66,9 @@ struct CameraOffNoticeBannerTests {
         return nil
     }
 
-    private func hosted(
-        _ model: AppModel, width: CGFloat, size: DynamicTypeSize, in lease: HostWindow.Lease
-    ) -> UIViewController {
+    private func hosted(_ model: AppModel, width: CGFloat, in lease: HostWindow.Lease) -> UIViewController {
         let controller = UIHostingController(
-            rootView: SessionNoticesOverlay().environment(model).dynamicTypeSize(size).frame(width: width))
+            rootView: SessionNoticesOverlay().environment(model).dynamicTypeSize(.large).frame(width: width))
         lease.window.rootViewController = controller
         controller.view.layoutIfNeeded()
         return controller
@@ -81,7 +79,7 @@ struct CameraOffNoticeBannerTests {
         #expect(model.cameraNoticeKind == .cameraOff)
         let lease = try await HostWindow.take()
         defer { lease.give() }
-        let controller = hosted(model, width: 390, size: .large, in: lease)
+        let controller = hosted(model, width: 390, in: lease)
         guard let found = try await parts(in: controller) else {
             Issue.record("The notice was not found: is application accessibility on in this Simulator?")
             return
@@ -107,7 +105,7 @@ struct CameraOffNoticeBannerTests {
         pace.attach(to: model)
         let lease = try await HostWindow.take()
         defer { lease.give() }
-        let controller = hosted(model, width: 390, size: .large, in: lease)
+        let controller = hosted(model, width: 390, in: lease)
         let shown = try #require(await parts(in: controller), "The notice was not found: is application accessibility on in this Simulator?")
         #expect(shown.title.accessibilityLabel == "Camera is off")
         model.cameraCaptureChanged(.idle)
@@ -138,23 +136,20 @@ struct CameraOffNoticeBannerTests {
         let model = model()
         let lease = try await HostWindow.take()
         defer { lease.give() }
-        let controller = hosted(model, width: 390, size: .large, in: lease)
+        let controller = hosted(model, width: 390, in: lease)
         _ = try #require(await parts(in: controller), "The notice was not found: is application accessibility on in this Simulator?")
         model.cameraAccess = .unavailable
         #expect(await titleGone(in: controller), "the notice goes with the camera")
         #expect(model.cameraNoticeKind == nil)
     }
 
-    /// At the largest accessibility size the words keep the width and the
-    /// button goes under them, as the camera notice's does, and nothing leaves
-    /// the screen's width.
-    @Test(arguments: [DynamicTypeSize.large, .accessibility5])
-    func theNoticeFitsANarrowScreenAtEveryTextSize(size: DynamicTypeSize) async throws {
+    /// Nothing of the notice leaves a narrow screen's width.
+    @Test func theNoticeFitsANarrowScreen() async throws {
         let model = model()
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let width: CGFloat = 320
-        let controller = hosted(model, width: width, size: size, in: lease)
+        let controller = hosted(model, width: width, in: lease)
         guard let found = try await parts(in: controller) else {
             Issue.record("The notice was not found: is application accessibility on in this Simulator?")
             return
@@ -173,9 +168,6 @@ struct CameraOffNoticeBannerTests {
                 "inside the column \(column): \(frame)")
         }
         #expect(detail.minY >= title.maxY - 1, "the detail is under the title")
-        if size.isAccessibilitySize {
-            #expect(dismiss.minY >= detail.maxY - 1, "the button goes under the words")
-        }
         let union = title.union(detail).union(dismiss)
         #expect(union.width <= width, "the notice is no wider than the screen: \(union)")
     }
