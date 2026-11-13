@@ -151,6 +151,9 @@ enum PreviewData {
 
     static let sampleApkName = "Signal-7.21.4.apk"
     static let sampleApkSizeBytes = UInt64(38.2 * Double(Limits.bytesPerMiB))
+    /// The name of an app in parts that carries data files, for the preview's
+    /// scenes about them (an invented name, as the sample APK's is).
+    static let sampleContainerName = "Skyline-Run-1.4.0.xapk"
 
     /// A sparse file named like the sample APK, for the preview's install.
     static func sampleApk() -> URL {
