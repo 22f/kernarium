@@ -79,8 +79,11 @@ application's statements (the sensor orientation, the rotation that
   A reserve that takes all of B refuses the launch. The runtime answers the
   application the same figure before the boot (`plan_camera_reserve`): it
   discovers the cameras, which asks for no permission and opens no session, and
-  composes the use a boot would reserve for. The loader's ceiling stands only
-  where no runtime can say. The system camera's own
+  composes the use a boot would reserve for, while the source, the cameras and
+  the calibration data are unchanged; a request to discover again refreshes the
+  discovered source and the composed answers together. The loader's ceiling
+  bounds the system cameras and stands only where no runtime can say. The
+  system camera's own
   processing storage while it makes a picture is counted as working bytes for
   each pixel of a JPEG still (`systemCameraStillWorkingBytesPerPixel`), a figure
   measured on one device with headroom, and the ceiling holds it. The platform

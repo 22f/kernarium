@@ -1468,10 +1468,13 @@ kernarium::camera::Presentation presentCameras(const GuestRequest& request)
 
 /* The camera reserve the application plans with before a boot (runtime API
  * 40): what a boot at `tier` with this calibration directory would hold out of
- * the GPU's pool. The application asks for every size of guest memory, so the
- * cameras are discovered once and kept, with the answers composed from them,
- * until a caller asks to discover them again (a boot discovers them for its own
- * run). A host whose cameras cannot be discovered answers the tier's ceiling. */
+ * the GPU's pool, while the source, the cameras and the calibration data are
+ * as they were when the answer was composed. The application asks for every
+ * size of guest memory, so the cameras are discovered once and kept, with the
+ * answers composed from them (calibration files included), until a caller asks
+ * to discover them again, which also composes every answer again (a boot
+ * discovers for its own run). A host whose cameras cannot be discovered answers
+ * the tier's ceiling. */
 kernarium::camera::ReservePlan planCameraReserve(
     uml::camera::CameraTier tier,
     const std::string& calibrationDirectory,

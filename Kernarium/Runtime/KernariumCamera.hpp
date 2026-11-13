@@ -195,8 +195,9 @@ struct ReservePlan {
         true};
 }
 
-/* The reserve of a host whose cameras could not be discovered: the most any
- * layout holds at `tier`. */
+/* The reserve of a host whose cameras could not be discovered: the tier's
+ * ceiling, which bounds the layouts of the system cameras (a development
+ * synthetic source can hold more). */
 [[nodiscard]] inline ReservePlan ceilingReserve(uml::camera::CameraTier tier)
 {
     return {

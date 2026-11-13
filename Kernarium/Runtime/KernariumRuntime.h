@@ -877,17 +877,19 @@ enum {
      * session hold. A host with no camera the image can describe holds none:
      * the reserve is 0, and exact. */
     KERNARIUM_RUNTIME_CAMERA_RESERVE_EXACT = 0,
-    /* The cameras could not be discovered: the reserve is the ceiling, the most
-     * any layout holds at the budget's tier. */
+    /* The cameras could not be discovered: the reserve is the tier's ceiling,
+     * which bounds the layouts of the system cameras at the budget's tier (a
+     * development synthetic source can hold more). */
     KERNARIUM_RUNTIME_CAMERA_RESERVE_CEILING = 1,
 };
 
 /* What the caller of kernarium_runtime_plan_camera_reserve_function asks. */
 enum {
-    /* Discover the host's cameras again before answering. The runtime
-     * discovers them for the first call and reuses them for the later ones, so
-     * an application that asks for each of many budgets sets this on the first
-     * and not on the rest. */
+    /* Discover the host's cameras again before answering, and compose every
+     * answer again: the runtime keeps the discovered source and the answers
+     * composed from it (calibration files included) until a call asks for
+     * this, so an application that asks for each of many budgets sets this on
+     * the first and not on the rest. */
     KERNARIUM_RUNTIME_CAMERA_PLAN_DISCOVER_AGAIN = 1,
 };
 
@@ -905,18 +907,20 @@ typedef struct kernarium_runtime_camera_reserve {
 } kernarium_runtime_camera_reserve;
 
 /* The host memory a live camera session of this host would hold out of the GPU
- * budget of `gpu_budget_mib` MiB (runtime API 40): the figure a boot with
+ * budget of `gpu_budget_mib` MiB (runtime API 40): the figure the next boot with
  * android_camera_mode LIVE and the same calibration directory takes out of the
- * pool it gives the GPU. The application asks before the boot, to show the
- * graphics memory the guest would have while Camera is on. The runtime composes
- * the layout the boot would run (the cameras it discovers and the colour data in
- * `camera_calibration_path`, null for none), at the tier the budget gets, and
- * answers what that layout lets a session hold. The cameras are discovered by
- * the first call and again whenever `flags` asks (a boot discovers them for its
- * own run). Nothing is opened and no permission is asked. A host without a
- * camera, and a runtime without cameras (a Linux guest), answer 0. Returns 0,
- * or a negative value for a null or short `reserve`; any thread, with or
- * without a guest. */
+ * pool it gives the GPU, while the camera source, the cameras it presents and
+ * the calibration data are as they were when the answer was composed. The
+ * application asks before the boot, to show the graphics memory the guest would
+ * have while Camera is on. The runtime composes the layout the boot would run
+ * (the cameras it discovers and the colour data in `camera_calibration_path`,
+ * null for none), at the tier the budget gets, and answers what that layout lets
+ * a session hold. It keeps the discovered source and the answers composed from
+ * it: the first call discovers, and `flags` DISCOVER_AGAIN discovers again and
+ * composes every answer again (a boot discovers for its own run). Nothing is
+ * opened and no permission is asked. A host without a camera, and a runtime
+ * without cameras (a Linux guest), answer 0. Returns 0, or a negative value for
+ * a null or short `reserve`; any thread, with or without a guest. */
 typedef int (*kernarium_runtime_plan_camera_reserve_function)(
     uint32_t gpu_budget_mib,
     const char* camera_calibration_path,

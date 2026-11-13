@@ -227,7 +227,8 @@ uint32_t kernarium_runtime_loader_gpu_budget_mib_for_limit(
 /* The most host-side memory, in MiB, that a live camera session holds out of
  * the GPU budget B of `gpu_budget_mib` MiB: the camera device's ceiling for
  * the tier that budget gets (uml::camera::cameraHostMemoryReserveMiB,
- * darwin/device/camera/camera_tiers.hpp), which no layout exceeds. It needs no
+ * darwin/device/camera/camera_tiers.hpp), which bounds the layouts of the
+ * system cameras (a development synthetic source can hold more). It needs no
  * runtime; it is what the application plans with where the runtime cannot say
  * the exact figure (kernarium_runtime_loader_plan_camera_reserve_mib). */
 uint32_t kernarium_runtime_loader_camera_reserve_mib(uint32_t gpu_budget_mib);
@@ -238,9 +239,12 @@ uint32_t kernarium_runtime_loader_camera_reserve_mib(uint32_t gpu_budget_mib);
  * decides how much. While the cameras are live the GPU's pool is B less this
  * figure, taken after B is clamped to its floor; blocked cameras or none take
  * nothing, and a host without a camera answers 0. Discovery asks for no
- * permission and opens no session. The runtime discovers the cameras for the first
- * question and reuses them; `rediscover` (not 0) discovers them again, which
- * a caller sets on the first of the questions it asks together. `*exact`, when
+ * permission and opens no session. The runtime discovers the cameras for the
+ * first question and keeps them with the answers composed from them;
+ * `rediscover` (not 0) discovers again and composes every answer again, which
+ * a caller sets on the first of the questions it asks together. The figure is
+ * the next boot's while the camera source, the cameras and the calibration data
+ * are unchanged since it was composed. `*exact`, when
  * not null, is set to 1 for the layout's own figure and to 0 where the figure is
  * the ceiling, because no runtime is loaded or it could not discover the
  * cameras. Any thread. */

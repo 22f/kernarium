@@ -233,9 +233,11 @@ Kernarium attaches:
   GPU's pool (the use the composed layout lets a session hold, which the
   application asks for before the boot with `plan_camera_reserve`, runtime API
   40: the runtime discovers the cameras without a permission or a session,
-  reuses them until asked to discover them again, and answers the figure a boot
-  would take, or the tier's ceiling, saying so, where it cannot discover them;
-  a host with no camera and a Linux guest answer 0), the colour data a Bayer
+  keeps them and the answers composed from them until asked to discover again,
+  and answers the figure the next boot would take while the source, the
+  cameras and the calibration data are unchanged, or the tier's ceiling, saying
+  so, where it cannot discover them; a host with no camera and a Linux guest
+  answer 0), the colour data a Bayer
   still teaches is kept in
   `android_camera_calibration_path`, the state of the capture (idle, streaming,
   interrupted, interrupted by iPad multitasking, by system pressure, and, for a
