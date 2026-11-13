@@ -36,54 +36,46 @@ application's statements (the sensor orientation, the rotation that
   (`largestOfferedTier`), so no layout of the large tier or with a 2160p front
   camera is composed; the image keeps them, and the launcher's `--camera-tier=`
   exercises them.
-- **Memory.** A live session holds host memory outside the guest's RAM, and the
+- **Memory.** A live session holds host memory outside the guest's RAM. The
   device holds the host to what it counts (`camera_tiers.hpp`, `CameraUse`,
-  which the device is given in `CameraDeviceOptions::use`):
-  - At most `use.streams` cameras hold a capture at once: two only for the
-    layout of back and front cameras with the concurrent feature, one
-    otherwise. A start or a still beyond it is refused as the platform refuses
-    a camera that conflicts with a running one, whatever the platform would
-    allow and whatever the guest was told; so the guest closes a camera before
-    it opens the other where they do not run together.
-  - The capture pools are six frames (`heldFramesPerCamera`: the inbox's
-    three, the pump's, the platform's and the capture's) of the largest buffer
-    the platform delivers, the 4:3 frame of the tier's width at the capture
-    buffer's 256-byte row alignment, for each camera that runs; the device's
-    staging is one frame of the largest video size; the transformer's scratch
-    is a scaled buffer, a rotation scratch and vImage's temporaries. The first
-    buffer of each configuration is checked against the pool's buffer (a log
-    line says when one is larger). A camera whose last stream stops gives
-    back the frames the worker has not taken, although the session stays open
-    for the torch or a still, so a switch holds one camera's frames.
-  - The stills the device admits at once cost no more than
-    `stillAdmissionBytes`. A JPEG capture holds its file twice, at most the
-    guest's JPEG buffer for the size asked (a byte and a half a pixel and the
-    Exif gap, `maximumJpegBytes`; a larger file fails the capture before it is
-    copied), and the working storage the platform camera's source holds for
-    each pixel (`Camera::stillWorkingBytesPerPixel`: 11 bytes for the synthetic
-    camera, not measured for the system's camera, whose own peak while it
-    makes a picture is not counted); a RAW capture holds its pixels three
-    times. RAW is counted wherever a lens the guest sees can make a RAW still
-    in the run: it offers one, or its first still takes its colour data
-    whatever the layout lists. The first capture is always admitted and a later
-    one that does not fit waits for the others, in the order the guests asked,
-    so a burst is slower and fails nowhere.
+  given in `CameraDeviceOptions::use`), and the application takes the matching
+  reserve from the GPU's pool while the cameras are live:
+  - **Cameras.** At most `use.streams` cameras hold a capture at once; a start
+    or a still beyond it is refused as the platform refuses a conflicting
+    camera, whatever the guest was told. A camera holds its capture until the
+    platform has stopped it, whatever its streams ask: a change of a running
+    video that the platform refuses leaves the old capture running and
+    counted, and the stream's end stops it.
+  - **Frames.** The capture pools, the device's staging and the transformer's
+    scratch are bounded for each camera that runs. A camera whose video stops
+    gives back the frames the worker has not taken, and a platform callback
+    that is still in progress finds it stopped and keeps none, although the
+    session stays open for the torch or a still.
+  - **Stills.** The captures the device has at once cost no more than
+    `stillAdmissionBytes`. A JPEG capture's file is bounded by the guest's JPEG
+    buffer for the size asked (`maximumJpegBytes`; a larger file fails the
+    capture before it is copied, and the pre-copy check, the device and the
+    count use one bound); a RAW capture and the working storage of the
+    platform camera's source (`Camera::stillWorkingBytesPerPixel`) are counted.
+    RAW is counted wherever a lens the guest sees can make a RAW still in the
+    run. A capture that does not fit waits, and none starts while an older one
+    waits. A capture that costs more than the whole budget fails before it
+    starts. A capture the guest gave up on keeps its charge until the platform
+    ends it (or the session is torn down: one the platform never ends is taken
+    as lost after a bounded time), and a result's payload is freed before its
+    charge is spent again.
   - Black pictures are written from a chunk of the device's own, so no stream
     or picture size holds one: a blocked session holds none of the memory
     above and opens no capture session.
 
-  At the small tier the reserve is 75 MiB (one stream), 100 (two), 147 (one with
-  RAW) or 173 (two with RAW, the tier's ceiling `cameraHostMemoryReserveMiB`,
-  which a layout stated by name takes, as the device is not held to what it
-  says). The runtime and the launcher compose the device's use from the
-  cameras the guest is told (`composeCameras`) and take it from the GPU's pool
-  while the cameras are live: B less the reserve, and B otherwise. The use of a
-  later boot of a run never exceeds the first's, because colour data learned
-  later only moves a lens from capturing it to offering it, so the pool is
-  sized once. A reserve that takes all of B refuses the launch. The loader
-  states the ceiling, which no use of a system camera exceeds, for the
-  application's plan before the boot. Nothing the guest is offered depends on
-  any of it: the offer is bounded by the capture buffer alone.
+  The runtime and the launcher compose the use from the cameras the guest is
+  told (`composeCameras`). The first discovery's use is the run's reservation,
+  and a later boot composes under all of it (`composeCamerasWithin`): the layout
+  the guest is told is one the reservation covers (cameras at once, RAW capture,
+  source working storage), and a run that began without cameras stays without.
+  A reserve that takes all of B refuses the launch. The loader states the
+  ceiling for the application's plan before the boot. The system camera's own
+  processing peak while it makes a picture is excluded and unmeasured.
 - **Frames.** Video buffers hold NV12, BT.709 full range, rows at the 16-byte
   pitch of `raw_pitch.hpp`. The device crops (centred, to the stream's aspect),
   rotates and scales with the platform camera's transformer
@@ -96,11 +88,11 @@ application's statements (the sensor orientation, the rotation that
   carries 16-bit rows at the 16-byte pitch. Buffers of one non-zero cookie
   queued with `GROUP_MORE` are filled from one capture, which starts with the
   buffer that lacks the flag. A group not complete in two seconds fails; a
-  capture that has started has ten seconds to deliver. At most as many captures
-  as a tier has buffers are with the platform for one camera; one more fails
-  its buffers; a capture that the bytes it costs do not leave room for waits
-  for the others (Memory). A still in a blocked or interrupted session, or one the platform
-  refuses, completes with the error flag (and the interrupted flag when the
+  capture has ten seconds to deliver from the request, whether it waits or has
+  started. At most as many captures as a tier has buffers are with the platform
+  for one camera; one more fails its buffers; a capture that the bytes it costs
+  do not leave room for waits (Memory). A still in a blocked or interrupted
+  session, or one the platform refuses, completes with the error flag (and the interrupted flag when the
   session failed or was interrupted), and so does one that completes while its
   camera is interrupted or that was asked for before an interruption or
   recovery of its camera that has since been handled. The JPEG ends at the first picture's end
