@@ -486,7 +486,12 @@ transport then leaves the device alone, keeps what it completes while a ring is
 disabled and writes it to the ring at its enable, in the order the device
 finished it. A message that changes the memory, the
 features, a ring's layout or base, or ends the driver (the `GET_FEATURES` that
-follows a teardown's disables included) resets such a device first. That
+follows a teardown's disables included) resets such a device first. While the
+transport waits for the front-end to acknowledge a backend request (a
+shared-memory map or unmap, a configuration change, a call), that
+`GET_FEATURES` is answered after the acknowledgement rather than inside the
+wait, since a reset sends unmaps of its own; so a device with a shared-memory
+region may keep its requests too. That
 `GET_FEATURES` also retires every ring still disabled, which the guest then
 frees: the transport reads it no more until its next `SET_VRING_KICK` or
 in-band `VRING_KICK`, whereas an enabled ring, and a disabled one no teardown

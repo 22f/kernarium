@@ -85,8 +85,9 @@ enum class WriteTarget : bool {
 /* A front-end request whose reply the front-end reads from the main socket
  * without draining the backend channel, so it can be answered while a backend
  * request is outstanding. Most only read state. GET_FEATURES, which ends a
- * driver, also resets what a device holds and retires the disabled rings, and
- * retiring is a flag flip with no I/O, so it is safe inside the wait. */
+ * driver, also retires the disabled rings, a flag flip with no I/O; when it
+ * would reset held requests as well it is not answered inside the wait
+ * (awaitBackendAcknowledgement). */
 [[nodiscard]] bool answeredDuringBackendWait(std::uint32_t request) noexcept
 {
     switch (static_cast<protocol::VhostRequest>(request)) {
@@ -408,16 +409,6 @@ VhostUserServer::VhostUserServer(
     if (!device_ || device_->queueCount() == 0 ||
         device_->queueCount() > maximumQueueCount)
         throw std::invalid_argument("invalid vhost-user device queue count");
-    /* The shared-memory map or unmap a request raises waits for the
-     * front-end's acknowledgement (awaitBackendAcknowledgement), answering
-     * a GET_FEATURES meanwhile; that resets a device that keeps deferred
-     * requests and would release the request being run. A device with a
-     * shared-memory region therefore cannot keep them. */
-    if (device_->keepsDeferredRequestsWhileDisabled() &&
-        device_->sharedMemoryRegion())
-        throw std::invalid_argument(
-            "a vhost-user device that keeps deferred requests cannot "
-            "have a shared-memory region");
     device_->setGuestMapper([this](std::uint64_t address, std::size_t length) {
         auto* pointer = translate(address, length, false);
         return pointer ? std::span(pointer, length) : std::span<std::uint8_t>{};
@@ -1001,7 +992,18 @@ void VhostUserServer::awaitBackendAcknowledgement(
             frontendOpen = false;
             continue;
         }
-        if (answeredDuringBackendWait(request.header.request))
+        /* A GET_FEATURES that retires held requests resets the device: it
+         * would send the unmaps of the device's shared memory while this
+         * request's reply is still owed, and clear the requests under the
+         * loop that waits here. The front-end drains the backend channel
+         * while it waits for the reply, so the acknowledgement arrives and
+         * the GET_FEATURES is answered once the wait is over. */
+        const bool retiresHeldRequests =
+            static_cast<protocol::VhostRequest>(request.header.request) ==
+                protocol::VhostRequest::getFeatures &&
+            requestsAreHeld();
+        if (answeredDuringBackendWait(request.header.request) &&
+            !retiresHeldRequests)
             handleMessage(frontendDescriptor_, request);
         else
             deferredFrontendMessages_.push_back(std::move(request));
