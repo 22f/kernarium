@@ -35,9 +35,10 @@ namespace uml::gpu {
  * The wait's own polls spend it, each charged at most the interval it asked
  * for plus a small slack (WaitBudget), not the clock: an interval in which the
  * whole process could not run costs one poll. An awake front-end that stays
- * silent therefore gets this much real time and the time the wait spends
- * between polls. Only the frames received during such a wait are timed, from
- * their first byte, and an armed wait's budget covers them too; ordinary
+ * silent therefore gets this much charged poll time; real time is longer by
+ * the work between polls and by an overrun beyond a poll's cap. Only the
+ * frames received during such a wait are timed, from their first byte, and an
+ * armed wait's budget covers them too; ordinary
  * request reception is not. A wait that nothing waits behind, such as an
  * acknowledgement a suspended guest has not yet sent, has no budget. */
 inline constexpr std::chrono::seconds backendAcknowledgementBound {10};
