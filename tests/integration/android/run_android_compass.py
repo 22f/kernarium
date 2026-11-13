@@ -417,7 +417,8 @@ def launch_state(guest: Guest, compass: bool, with_orientation: bool, argument: 
             raise Failure(f"the sensor service lists a magnetic field sensor without the argument: {sensors.listed}")
         notes.append("no magnetic field sensor")
     features = parse_features(guest.shell("pm list features"))
-    answer = guest.shell(f"cmd package has-feature {COMPASS_FEATURE}").strip()
+    # The package manager's own answer; it exits 1 and says "false" for a feature the device does not have.
+    answer = guest.adb_run("shell", f"cmd package has-feature {COMPASS_FEATURE}", timeout=60).stdout.strip()
     if (COMPASS_FEATURE in features) != compass or (answer == "true") != compass:
         raise Failure(f"{COMPASS_FEATURE}: pm list features says {COMPASS_FEATURE in features}, has-feature says "
                       f"{answer!r}, expected {compass}")

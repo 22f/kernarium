@@ -16,6 +16,7 @@ import importlib.util
 import math
 import socket
 import struct
+import subprocess
 import sys
 import threading
 import unittest
@@ -397,11 +398,16 @@ class ScriptedGuest(runner.Guest):
             return self.dump
         if command == "pm list features":
             return self.features
-        if command.startswith("cmd package has-feature"):
-            return self.has_feature + "\n"
         if command.startswith("logcat"):
             return self.log
         raise AssertionError(command)
+
+    def adb_run(self, *arguments: str, timeout: float = 0) -> subprocess.CompletedProcess:
+        # `cmd package has-feature` exits 1 and prints "false" for a feature the device does not have.
+        self.commands.append(arguments[-1])
+        assert arguments[-1].startswith("cmd package has-feature"), arguments
+        return subprocess.CompletedProcess(
+            arguments, 0 if self.has_feature == "true" else 1, stdout=self.has_feature + "\n")
 
     def alive(self) -> None:
         pass
