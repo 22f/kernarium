@@ -265,6 +265,9 @@ struct BootView: View {
         .accessibilityIdentifier("boot-slow-notice")
     }
 
+    /// Side by side only where both labels fit at their own width (`fixedSize`
+    /// makes `ViewThatFits` see a label that would otherwise truncate); stacked,
+    /// a label wraps.
     @ViewBuilder
     private func slowButtons(lineLimit: Int?, axis: Axis) -> some View {
         let layout = axis == .horizontal ? AnyLayout(HStackLayout(spacing: 12)) : AnyLayout(VStackLayout(spacing: 10))
@@ -275,6 +278,7 @@ struct BootView: View {
                 Text(model.slowStart.stopping ? "Stopping\u{2026}" : "Stop")
                     .lineLimit(lineLimit)
                     .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: axis == .horizontal, vertical: true)
                     .frame(maxWidth: .infinity, minHeight: 32)
             }
             .buttonStyle(.bordered)
@@ -289,6 +293,7 @@ struct BootView: View {
                     Text("Send feedback", tableName: "Feedback")
                         .lineLimit(lineLimit)
                         .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: axis == .horizontal, vertical: true)
                         .frame(maxWidth: .infinity, minHeight: 32)
                 }
                 .buttonStyle(.bordered)
