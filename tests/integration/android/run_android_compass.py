@@ -17,24 +17,31 @@ adds the orientation sensor's argument too). It checks:
 
 - the launch state: the property, the sensor service's list (``Host Magnetometer``, type 2, continuous,
   non-wake-up, and with it the rotation vector and the geomagnetic rotation vector the service makes from the
-  three sensors), ``pm list features`` and the package manager's own answer for
-  ``android.hardware.sensor.compass``, the sub-HAL's log line, and no SELinux denial about the property or the
-  sensors HAL;
+  three sensors; the orientation sensor exactly when its argument was passed), ``pm list features`` and the
+  package manager's own answer for ``android.hardware.sensor.compass`` (exit 0 and "true", or exit 1 and
+  "false"), the sub-HAL's log line, and no SELinux denial about the property or the sensors HAL;
 - the demand: the guest's frame is "ANC3" with the magnetometer idle, and nothing holds the sensor on the home
   screen, in Settings, in the camera application or across a screen off and on;
 - the field: a foreground client (the motion probe, ``--probe-apk``, in its ``compass`` mode) registers a
-  listener, the guest says so (bit 3 of "ANC3" and the period it asked for), the rotation vector gets events
-  and settles on one heading for a steady field, the application's field reaches the listener unchanged for
-  each of the four mounts with the azimuth the platform computes from it, a turn through north, east, south and
-  west gives those azimuths, and each of the four statuses passes through;
-- a record the guest refuses (a status above 3) ends the connection and not the guest, and the sensor is in use
-  again on the connection that follows; the listener's end says the magnetometer idle.
+  listener, the guest says so (bit 3 of "ANC3" and the period it asked for) and the range and resolution the
+  client is given meet the compatibility definition, the rotation vector gets events and settles on one heading
+  for a steady field, the application's field reaches the listener for each of the four mounts (to within half
+  of the sensor service's rounding) with the azimuth the platform computes from it, a turn through north, east,
+  south and west gives those azimuths, and each of the four statuses reaches ``onAccuracyChanged`` and
+  ``SensorEvent.accuracy``;
+- a record the guest refuses (a status above 3) ends the connection and not the guest: the sensor is in use
+  again on the connection that follows, a different field reaches the same listener as a new sample, and
+  neither system_server nor the sensors HAL restarted; the listener's end says the magnetometer idle.
+
+A frame that is no frame, or the guest ending a connection nobody asked it to, fails the step that was running,
+whatever came after it.
 
 ``--expect none`` is a release that does not list the sensor: an older release, or this release booted without
 the argument (the default), or an older release given it (``--with-argument``: the application passes it to
 every image, and the older one reads it as a property nothing uses). The guest sends "ANC1" frames (or "ANC2"
 with ``--with-orientation``) and never "ANC3", lists no magnetic field sensor, declares no compass feature, and
-ends the connection on a magnetic field record as it always has.
+ends the connection on a magnetic field record as it always has, with system_server and the sensors HAL still
+the same processes.
 
 ``--launch-only`` stops each guest once the launch's state is checked: the first thing to run on a new image.
 ``--feed SECONDS`` keeps the guest up for that long as a host that sends a steady field, accelerometer and
@@ -102,12 +109,20 @@ GRAVITY = orient.GRAVITY
 # down, so a device lying face up reads (0, 25, -40) when its y axis points north.
 HORIZONTAL = 25.0
 VERTICAL = -40.0
-# The sensor service rounds every value to a quarter of the declared resolution (overlay/sensors/motion_protocol.hpp
-# declares 1/8 uT), so the fields sent are multiples of that quantum, which a float holds exactly, and the
-# tolerance of a value stays far under one quantum.
-RESOLUTION = 0.125
-QUANTUM = RESOLUTION / 4
-VALUE_TOLERANCE = 1e-3
+# The sensor service rounds every event value to an eighth of the resolution it holds for the sensor (and may take
+# that resolution from the range), so the probe reports the resolution a client sees and a value read back is the
+# value sent to within half of that quantum, plus a float's slack: never a whole quantum.
+SERVICE_FACTOR = 0.125
+FLOAT_SLACK = 1e-4
+# The figures of the compatibility definition the declarations are checked against: a range of at least 900 uT and a
+# resolution of at most 0.6 uT; the range is a whole number of resolution steps, as the sensor service requires.
+MINIMUM_RANGE = 900.0
+MAXIMUM_RESOLUTION = 0.6
+RANGE_STEP_SLACK = 1e-3
+# The sensors HAL's process: the product installs it as this service binary.
+SENSORS_HAL = "android.hardware.sensors-service.multihal"
+# The recovery step after a refused record sends this heading's field: not the one before it.
+RECOVERY_HEADING = 90.0
 AZIMUTH_TOLERANCE = 2.0
 # Types of the sensors the service makes from the accelerometer, the gyroscope and the magnetometer.
 ROTATION_VECTOR_TYPE = 11
@@ -238,6 +253,69 @@ HAL_LOG_LINE = re.compile(
     r"Andarium motion: ro\.boot\.kernarium\.orientation=(\d+), (\d+) sensors(?:, ro\.boot\.kernarium\.compass=(\d+))?")
 
 
+def value_tolerance(resolution: float) -> float:
+    """How far a value read back may be from the one sent: half of the service's quantum for this resolution."""
+    return resolution * SERVICE_FACTOR / 2 + FLOAT_SLACK
+
+
+def finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def check_figures(resolution: object, max_range: object) -> str:
+    """The range and the resolution the sensor service reports to a client for the magnetometer."""
+    for name, value in (("resolution", resolution), ("range", max_range)):
+        if not finite_number(value) or value <= 0:  # type: ignore[operator]
+            raise Failure(f"the probe reports the magnetometer's {name} as {value!r}")
+    assert isinstance(resolution, (int, float)) and isinstance(max_range, (int, float))
+    if resolution > MAXIMUM_RESOLUTION:
+        raise Failure(f"the magnetometer's resolution is {resolution} uT, finer than {MAXIMUM_RESOLUTION} is required")
+    if max_range < MINIMUM_RANGE:
+        raise Failure(f"the magnetometer's range is {max_range} uT, under {MINIMUM_RANGE:g}")
+    steps = max_range / resolution
+    if abs(steps - round(steps)) > RANGE_STEP_SLACK:
+        raise Failure(f"the magnetometer's range {max_range} uT is not a whole number of its resolution {resolution} uT")
+    return f"resolution {resolution:g} uT, range {max_range:g} uT ({round(steps)} steps)"
+
+
+def has_feature_answer(returncode: int, text: str) -> bool:
+    """`cmd package has-feature`: exit 0 and "true", or exit 1 and "false"; any other pair (an error, an empty
+    answer, a stray exit status) is not an answer and raises."""
+    answer = text.strip()
+    if (returncode, answer) == (0, "true"):
+        return True
+    if (returncode, answer) == (1, "false"):
+        return False
+    raise Failure(f"cmd package has-feature {COMPASS_FEATURE}: exit {returncode} and {answer!r}, "
+                  "expected exit 0 and 'true' or exit 1 and 'false'")
+
+
+def parse_hal_pids(text: str) -> list[int]:
+    """The pids in `ps -A -o PID,ARGS` lines that run the sensors HAL."""
+    pids = []
+    for line in text.splitlines():
+        fields = line.split(None, 1)
+        if len(fields) == 2 and fields[0].isdigit() and SENSORS_HAL in fields[1]:
+            pids.append(int(fields[0]))
+    return pids
+
+
+def parse_start_time(stat: str) -> int:
+    """The start time, in clock ticks since boot, from /proc/<pid>/stat (field 22; the name may hold spaces)."""
+    try:
+        return int(stat.rsplit(")", 1)[1].split()[19])
+    except (IndexError, ValueError) as problem:
+        raise Failure(f"not a /proc stat line: {stat.strip()[:120]!r}") from problem
+
+
+def sensors_hal(guest: Guest) -> tuple[int, int]:
+    """The sensors HAL's identity, its pid and start time: unchanged across a step means it did not restart."""
+    pids = parse_hal_pids(guest.shell(f"ps -A -o PID,ARGS 2>/dev/null | grep -F {SENSORS_HAL} | grep -v -F grep; true"))
+    if len(pids) != 1:
+        raise Failure(f"expected one {SENSORS_HAL} process, found {pids}")
+    return pids[0], parse_start_time(guest.shell(f"cat /proc/{pids[0]}/stat"))
+
+
 def parse_features(text: str) -> set[str]:
     """`pm list features`: the names after "feature:"."""
     return {line[len("feature:"):].split("=")[0].strip() for line in text.splitlines() if line.startswith("feature:")}
@@ -270,6 +348,11 @@ class Host:
         self.frames: list[Frame] = []
         self.bad: list[bytes] = []
         self.closed = False
+        #: Set before sending what makes the guest end the connection; cleared by the next ``connect``.
+        self.closure_expected = False
+        #: What went wrong on any connection of the run, never cleared: a frame that is no frame, or the guest
+        #: ending a connection nobody asked it to. ``raise_faults`` fails the step that finds any.
+        self.faults: list[str] = []
         self.reader: threading.Thread | None = None
         self.field: tuple[float, float, float] | None = None
         self.status = 3
@@ -286,6 +369,7 @@ class Host:
             self.frames = []
             self.bad = []
             self.closed = False
+            self.closure_expected = False
         self.reader = threading.Thread(target=self._read, args=(connection,), daemon=True)
         self.reader.start()
 
@@ -306,6 +390,7 @@ class Host:
                     if length is None:
                         with self.condition:
                             self.bad.append(buffer)
+                            self.faults.append(f"a frame with no known magic: {buffer[:8].hex(' ')}")
                             self.condition.notify_all()
                         buffer = b""
                         break
@@ -314,9 +399,10 @@ class Host:
                     raw, buffer = buffer[:length], buffer[length:]
                     try:
                         frame = parse_frame(raw)
-                    except ValueError:
+                    except ValueError as problem:
                         with self.condition:
                             self.bad.append(raw)
+                            self.faults.append(str(problem))
                             self.condition.notify_all()
                         continue
                     with self.condition:
@@ -328,7 +414,15 @@ class Host:
         with self.condition:
             if self.connection is connection:
                 self.closed = True
+                if not self.closure_expected:
+                    self.faults.append("the guest ended the connection")
             self.condition.notify_all()
+
+    def raise_faults(self) -> None:
+        with self.condition:
+            faults = list(self.faults)
+        if faults:
+            raise Failure("the connection to the guest went wrong: " + "; ".join(faults[:4]))
 
     def latest(self) -> Frame | None:
         with self.condition:
@@ -341,6 +435,8 @@ class Host:
         deadline = time.monotonic() + seconds
         with self.condition:
             while True:
+                if self.faults:
+                    raise Failure("the connection to the guest went wrong: " + "; ".join(self.faults[:4]))
                 for frame in self.frames[after:]:
                     if predicate(frame):
                         return frame
@@ -420,6 +516,12 @@ def launch_state(guest: Guest, compass: bool, with_orientation: bool, argument: 
     for name, kind in (("Host Accelerometer", 1), ("Host Gyroscope", 4)):
         if sensors.listed.get(name) != kind:
             raise Failure(f"the sensor service lists {sensors.listed}, not {name} (type {kind})")
+    if with_orientation:
+        if sensors.listed.get(orient.SENSOR_NAME) != orient.ORIENTATION_TYPE:
+            raise Failure(f"the sensor service lists {sensors.listed}, not {orient.SENSOR_NAME} "
+                          f"(type {orient.ORIENTATION_TYPE}) for a launch that carried its argument")
+    elif orient.SENSOR_NAME in sensors.listed:
+        raise Failure(f"the sensor service lists {orient.SENSOR_NAME} for a launch without its argument")
     if compass:
         if sensors.listed.get(MAGNETOMETER) != MAGNETIC_FIELD_TYPE:
             raise Failure(f"the sensor service lists {sensors.listed}, not {MAGNETOMETER} (type 2)")
@@ -448,9 +550,10 @@ def launch_state(guest: Guest, compass: bool, with_orientation: bool, argument: 
             raise Failure(f"the sensor service lists sensors that need a magnetometer without one: {fused}")
         notes.append("no magnetic field sensor, no rotation vector")
     features = parse_features(guest.shell("pm list features"))
-    # The package manager's own answer; it exits 1 and says "false" for a feature the device does not have.
-    answer = guest.adb_run("shell", f"cmd package has-feature {COMPASS_FEATURE}", timeout=60).stdout.strip()
-    if (COMPASS_FEATURE in features) != compass or (answer == "true") != compass:
+    # The package manager's own answer: exit 0 and "true", or exit 1 and "false" for a feature the device lacks.
+    asked = guest.adb_run("shell", f"cmd package has-feature {COMPASS_FEATURE}", timeout=60)
+    answer = has_feature_answer(asked.returncode, asked.stdout)
+    if (COMPASS_FEATURE in features) != compass or answer != compass:
         raise Failure(f"{COMPASS_FEATURE}: pm list features says {COMPASS_FEATURE in features}, has-feature says "
                       f"{answer!r}, expected {compass}")
     notes.append(f"{COMPASS_FEATURE} {'declared' if compass else 'not declared'}")
@@ -538,13 +641,17 @@ def install_probe(guest: Guest, apk: pathlib.Path) -> None:
         raise Failure(f"installing the probe: {result.stdout.strip()[-400:]}")
 
 
-def start_probe(guest: Guest, magnetometer_us: int = PROBE_REQUESTED_US) -> None:
+def start_probe(guest: Guest, magnetometer_us: int = PROBE_REQUESTED_US) -> str:
+    """Starts the probe's compass mode and remembers its run id on the guest: every later look at its report must
+    be of this run."""
     run_id = str(int(time.time()))
     output = guest.shell(
         f"am start -W -n {PROBE_COMPONENT} -e mode compass -e run_id {run_id} --ei seconds 240 "
         f"--ei mag_us {magnetometer_us}")
     if "Error" in output:
         raise Failure(f"starting the probe: {output.strip()[-300:]}")
+    guest.probe_run_id = run_id  # type: ignore[attr-defined]
+    return run_id
 
 
 def probe_report(guest: Guest) -> dict | None:
@@ -558,24 +665,43 @@ def probe_report(guest: Guest) -> dict | None:
 
 
 def wait_field(guest: Guest, expected: tuple[float, float, float], label: str, *, heading: float | None = None,
-               status: int | None = None, seconds: float = FIELD_SECONDS) -> dict:
-    """The listener's last field is what the host sent (exactly, within float32), and the azimuth and the
-    accuracy are what they should be."""
+               status: int | None = None, callback: bool = False, newer: tuple[int, int] | None = None,
+               seconds: float = FIELD_SECONDS) -> dict:
+    """The listener's last field is what the host sent (to within half of the service's quantum for the
+    resolution the probe reports), and the azimuth and the accuracy are what they should be. ``callback``: the last
+    onAccuracyChanged call was with ``status``. ``newer``: the report holds a sample after this (count, timestamp)
+    pair. A report of another run of the probe is never taken."""
+    run_id = getattr(guest, "probe_run_id", None)
+
     def check() -> str | None:
         report = probe_report(guest)
         if report is None:
             return "no report from the probe"
+        if run_id is not None and report.get("run_id") != run_id:
+            return f"the report is of run {report.get('run_id')!r}, not the probe's {run_id!r}"
         if not report.get("valid"):
             return "the probe says it is not valid (a sensor missing or an event out of order)"
         magnetometer = report["magnetometer"]
+        resolution = magnetometer.get("resolution")
+        if not finite_number(resolution) or resolution <= 0:
+            return f"the probe reports the resolution as {resolution!r}"
+        if newer is not None and not (magnetometer.get("count", 0) > newer[0] and magnetometer.get("last_ns", 0) > newer[1]):
+            return (f"no new sample: count {magnetometer.get('count')}, timestamp {magnetometer.get('last_ns')}, "
+                    f"after count {newer[0]}, timestamp {newer[1]}")
         latest = magnetometer.get("latest", [])
-        if len(latest) != 3 or any(abs(a - b) > VALUE_TOLERANCE for a, b in zip(latest, expected)):
+        if len(latest) != 3 or not all(finite_number(value) for value in latest):
+            return f"the listener has {latest}, not three numbers"
+        if any(abs(a - b) > value_tolerance(resolution) for a, b in zip(latest, expected)):
             return f"the listener has {latest}, not {list(expected)}"
         if status is not None and magnetometer.get("accuracy") != status:
             return f"accuracy {magnetometer.get('accuracy')}, not {status}"
+        if callback:
+            calls = magnetometer.get("accuracy_calls") or []
+            if not calls or calls[-1] != status:
+                return f"onAccuracyChanged was last called with {calls[-1] if calls else None}, not {status}"
         if heading is not None:
             found = magnetometer.get("azimuth_deg")
-            if found is None or angle_difference(found, heading) > AZIMUTH_TOLERANCE:
+            if not finite_number(found) or angle_difference(found, heading) > AZIMUTH_TOLERANCE:
                 return f"azimuth {found}, not {heading}"
         return None
 
@@ -589,7 +715,7 @@ def listener_registers(guest: Guest, host: Host, probe: pathlib.Path) -> str:
     """The probe registers a listener; the guest's frame says the magnetometer is in use at the period it asked for."""
     install_probe(guest, probe)
     after = len(host.frames)
-    start_probe(guest)
+    run_id = start_probe(guest)
     frame = host.wait_frame(FRAME_SECONDS, lambda found: found.magnetometer_active, after)
     if frame is None:
         raise Failure("the guest never said the magnetometer is in use after the probe registered a listener")
@@ -598,7 +724,20 @@ def listener_registers(guest: Guest, host: Host, probe: pathlib.Path) -> str:
     sensors = guest.sensors()
     if not sensors.active.get(MAGNETOMETER):
         raise Failure(f"the sensor service has no connection to {MAGNETOMETER}: {sensors.active}")
-    return f"ANC3 mask {frame.mask:#04x}, magnetometer period {frame.magnetometer_us} us"
+    figures: list[str] = []
+
+    def reported() -> str | None:
+        report = probe_report(guest)
+        if report is None or report.get("run_id") != run_id:
+            return "no report of this run from the probe"
+        magnetometer = report["magnetometer"]
+        if magnetometer.get("resolution") is None or magnetometer.get("max_range") is None:
+            return "the report has no resolution and range"
+        figures[:] = [check_figures(magnetometer["resolution"], magnetometer["max_range"])]
+        return None
+
+    orient.wait_for("the probe's report of the magnetometer", 30, reported, guest)
+    return f"ANC3 mask {frame.mask:#04x}, magnetometer period {frame.magnetometer_us} us; {figures[0]}"
 
 
 def rotation_vector(guest: Guest, host: Host) -> str:
@@ -642,6 +781,7 @@ def feed(guest: Guest, host: Host, seconds: float) -> str:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         guest.alive()
+        host.raise_faults()
         time.sleep(2.0)
     return f"fed {seconds:.0f} s on {guest.serial}"
 
@@ -676,14 +816,39 @@ def statuses(guest: Guest, host: Host) -> str:
     field = field_at_heading(0.0)
     for status in (0, 1, 2, 3):
         host.stream(field, status)
-        wait_field(guest, field, f"status {status}", status=status)
+        wait_field(guest, field, f"status {status}", status=status, callback=True)
     return "unreliable, low, medium, high reach onAccuracyChanged and SensorEvent.accuracy"
 
 
+def probe_position(guest: Guest) -> tuple[str | None, int, int]:
+    """The probe's run id and its magnetometer's sample count and last timestamp: where the listener stands."""
+    report = probe_report(guest)
+    magnetometer = (report or {}).get("magnetometer") or {}
+    if report is None or not report.get("valid") or not magnetometer.get("count"):
+        raise Failure(f"the probe has no valid samples to stand on: {report}")
+    run_id = getattr(guest, "probe_run_id", None)
+    if run_id is not None and report.get("run_id") != run_id:
+        raise Failure(f"the probe's report is of run {report.get('run_id')!r}, not {run_id!r}")
+    return report.get("run_id"), magnetometer["count"], magnetometer["last_ns"]
+
+
+def unchanged(guest: Guest, server: str, hal: tuple[int, int], where: str) -> None:
+    """Neither system_server nor the sensors HAL restarted: the same pids, the HAL also the same start time."""
+    if guest.system_server() != server:
+        raise Failure(f"system_server restarted {where}")
+    if sensors_hal(guest) != hal:
+        raise Failure(f"the sensors HAL restarted {where}: it was (pid, start time) {hal}, it is {sensors_hal(guest)}")
+
+
 def refused_record(guest: Guest, host: Host) -> str:
-    """A record the guest refuses ends the connection and not the guest; the sensor is in use again on the next."""
+    """A record the guest refuses ends the connection and not the guest: the next connection says the magnetometer
+    is in use and a different field then reaches the same listener as a new sample, with neither system_server nor
+    the sensors HAL restarted."""
     server = guest.system_server()
+    hal = sensors_hal(guest)
+    _, count, last_ns = probe_position(guest)
     host.stream(None)
+    host.closure_expected = True
     host.send(magnetic_record(0.0, HORIZONTAL, VERTICAL, 4))
     if not host.closed_by_guest(orient.CLOSE_SECONDS):
         raise Failure("the guest kept the connection after a record of status 4")
@@ -691,12 +856,13 @@ def refused_record(guest: Guest, host: Host) -> str:
     frame = host.wait_frame(FRAME_SECONDS)
     if frame is None or not frame.magnetometer_active:
         raise Failure(f"the first frame of the next connection does not say the magnetometer is in use: {frame}")
-    field = field_at_heading(0.0)
+    field = field_at_heading(RECOVERY_HEADING)
     host.stream(field, 3)
-    wait_field(guest, field, "after the connection was ended", status=3)
-    if guest.system_server() != server:
-        raise Failure("system_server restarted")
-    return "ended by a status 4; the next connection says the magnetometer is in use and the field flows"
+    found = wait_field(guest, field, "after the connection was ended", status=3, newer=(count, last_ns))
+    unchanged(guest, server, hal, "after the record was refused")
+    return (f"ended by a status 4; the next connection says the magnetometer is in use and a new field reaches the "
+            f"listener (sample {found.get('count')} after {count}); system_server and the sensors HAL (pid {hal[0]}) "
+            "did not restart")
 
 
 def listener_leaves(guest: Guest, host: Host) -> str:
@@ -713,15 +879,18 @@ def listener_leaves(guest: Guest, host: Host) -> str:
 def older_wire(guest: Guest, host: Host, with_orientation: bool) -> str:
     """An image without the sensor: no "ANC3", a magnetic field record ends the connection, the guest stays up."""
     server = guest.system_server()
+    hal = sensors_hal(guest)
     host.stream(None)
     host.connect()
     time.sleep(3)
+    host.raise_faults()
     frames = list(host.frames)
     if not frames or any(frame.version == 3 for frame in frames):
         raise Failure(f"the frames of an image without the sensor are {frames}")
     expected = 2 if with_orientation else 1
     if any(frame.version != expected for frame in frames):
         raise Failure(f"the frames are not all version {expected}: {frames}")
+    host.closure_expected = True
     host.send(magnetic_record(0.0, HORIZONTAL, VERTICAL, 3))
     if not host.closed_by_guest(orient.CLOSE_SECONDS):
         raise Failure("the guest kept the connection after a magnetic field record it never listed")
@@ -729,9 +898,9 @@ def older_wire(guest: Guest, host: Host, with_orientation: bool) -> str:
     again = host.wait_frame(FRAME_SECONDS)
     if again is None or again.version != expected:
         raise Failure(f"the next connection's first frame is {again}")
-    if guest.system_server() != server:
-        raise Failure("system_server restarted")
-    return f"ANC{expected} only; a magnetic field record ends the connection, the guest stays up"
+    unchanged(guest, server, hal, "after the record was refused")
+    return (f"ANC{expected} only; a magnetic field record ends the connection, the guest stays up (system_server and "
+            f"the sensors HAL, pid {hal[0]}, did not restart)")
 
 
 # ---- The run.
@@ -752,32 +921,49 @@ def start_guest(options: argparse.Namespace, adb: str, private: pathlib.Path) ->
     return orient.start_guest(settings, adb, private, early=None, holder={}, provision=True)
 
 
+def checked(host: Host, function: Callable[[], str]) -> str:
+    """A step's note, unless the connection went wrong during it: a frame that is no frame, or the guest ending a
+    connection nobody asked it to, fails the step even when what it waited for came later."""
+    try:
+        note = function()
+    except Failure as problem:
+        if host.faults:
+            raise Failure(f"{problem}; and the connection went wrong: {'; '.join(host.faults[:4])}") from problem
+        raise
+    host.raise_faults()
+    return note
+
+
 def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report) -> None:
     compass = options.expect == "sensor"
     print(f"expect {options.expect}: booting {'with' if passes_argument(options) else 'without'} {COMPASS_ARGUMENT}"
           f"{' and the orientation argument' if options.with_orientation else ''}", flush=True)
     guest = start_guest(options, adb, private / "guest")
     host = Host(guest.forward_port)
+
+    def step(name: str, function: Callable[[], str]) -> bool:
+        return report.run(name, lambda: checked(host, function))
+
     try:
         report.run("launch state", lambda: launch_state(
             guest, compass, options.with_orientation, passes_argument(options)))
         if options.launch_only:
             return
         if options.feed:
-            report.run("feed", lambda: feed(guest, host, options.feed))
+            step("feed", lambda: feed(guest, host, options.feed))
             return
         if not compass:
-            report.run("an image without the sensor", lambda: older_wire(guest, host, options.with_orientation))
+            step("an image without the sensor", lambda: older_wire(guest, host, options.with_orientation))
             return
-        if report.run("first frame", lambda: first_frame(host, True, options.with_orientation)):
-            report.run("idle demand", lambda: idle_demand(guest, host))
-            if report.run("a listener registers", lambda: listener_registers(guest, host, options.probe_apk)):
-                report.run("the rotation vector", lambda: rotation_vector(guest, host))
-                report.run("the four mounts", lambda: four_mounts(guest, host))
-                report.run("north, east, south and west", lambda: compass_points(guest, host))
-                report.run("each accuracy", lambda: statuses(guest, host))
-                report.run("a refused record", lambda: refused_record(guest, host))
-                report.run("the listener leaves", lambda: listener_leaves(guest, host))
+        if step("first frame", lambda: first_frame(host, True, options.with_orientation)):
+            step("idle demand", lambda: idle_demand(guest, host))
+            if step("a listener registers", lambda: listener_registers(guest, host, options.probe_apk)):
+                step("the rotation vector", lambda: rotation_vector(guest, host))
+                step("the four mounts", lambda: four_mounts(guest, host))
+                step("north, east, south and west", lambda: compass_points(guest, host))
+                step("each accuracy", lambda: statuses(guest, host))
+                step("a refused record", lambda: refused_record(guest, host))
+                step("the listener leaves", lambda: listener_leaves(guest, host))
     finally:
         host.stop()
         orient.stop_guest(adb, guest)

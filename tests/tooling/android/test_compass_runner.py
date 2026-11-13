@@ -13,6 +13,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import importlib.util
+import json
 import math
 import re
 import socket
@@ -77,6 +78,10 @@ def without(dump: str, *needles: str) -> str:
     return "\n".join(kept) + "\n"
 
 
+ORIENTATION_DUMP = SENSOR_DUMP.replace(
+    "Active sensors:\n",
+    "0x00000003) Host Device Orientation   | Andarium        | ver: 1 | type: android.sensor.device_orientation(27) "
+    "| perm: n/a | flags: 0x00000000\n\ton-change | maxDelay=0us | no batching | non-wakeUp |\nActive sensors:\n")
 # An older image, or this one without the argument: no magnetometer, and so no sensor made from it.
 OLDER_DUMP = without(SENSOR_DUMP, "Host Magnetometer", "(11)", "(20)")
 HELD_DUMP = SENSOR_DUMP.replace(
@@ -86,6 +91,7 @@ LOG_LINE = ("11-13 09:00:01.000   439   439 I MotionSubHal: Andarium motion: ro.
             "%d sensors, ro.boot.kernarium.compass=%d")
 PROBE_REPORT = ('{"mode":"compass","run_id":"1","valid":true,"accelerometer":{"count":100},'
                 '"gyroscope":{"count":100},"magnetometer":{"count":50,"latest":[0.0,25.0,-40.0],"accuracy":3,'
+                '"resolution":0.125,"max_range":4912.0,"accuracy_calls":[3],'
                 '"azimuth_deg":0.4},"rotation_vector":{"count":40,"latest":[0,0,0,1],"azimuth_deg":null}}')
 
 
@@ -217,17 +223,55 @@ class ParserTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=text):
                 runner.parse_probe_report(text)
 
-    def test_the_declared_range_and_resolution_are_the_ones_the_runner_assumes(self) -> None:
+    def test_the_declared_range_and_resolution_pass_the_runners_check(self) -> None:
         header = (TESTS.parent / "android/lineage-24/overlay/sensors/motion_protocol.hpp").read_text()
         declared = re.search(r"magnetometer_attributes\{\s*([\d.]+)f,\s*([\d.]+)f", header)
         self.assertIsNotNone(declared)
-        self.assertEqual(float(declared[2]), runner.RESOLUTION)
-        # The service rounds each value to a quarter of the resolution: what the runner sends is on that grid
-        # and its tolerance is far under one step of it.
-        for value in (runner.HORIZONTAL, runner.VERTICAL):
-            self.assertEqual(value % runner.QUANTUM, 0.0)
-        self.assertLess(runner.VALUE_TOLERANCE, runner.QUANTUM / 10)
-        self.assertEqual(float(declared[1]) % runner.RESOLUTION, 0.0)
+        maximum, resolution = float(declared[1]), float(declared[2])
+        self.assertIn("steps", runner.check_figures(resolution, maximum))
+        # The tolerance of a value read back is half of the service's quantum and a float's slack: under one
+        # quantum, for the declared resolution and for one the service derives from the range (16 bits).
+        for held in (resolution, maximum / 32768):
+            self.assertLess(runner.value_tolerance(held), held * runner.SERVICE_FACTOR)
+            self.assertGreater(runner.value_tolerance(held), held * runner.SERVICE_FACTOR / 2)
+
+    def test_each_way_the_reported_figures_can_be_wrong(self) -> None:
+        self.assertIn("32768 steps", runner.check_figures(4912 / 32768, 4912.0))
+        cases = [
+            ("too coarse", (0.7, 4912.0), "finer than"),
+            ("too small a range", (0.125, 800.0), "under 900"),
+            ("not a whole number of steps", (0.15, 4912.0), "not a whole number"),
+            ("no resolution", (None, 4912.0), "resolution as None"),
+            ("no range", (0.125, None), "range as None"),
+            ("zero", (0.0, 4912.0), "resolution as 0.0"),
+            ("not a number", (float("nan"), 4912.0), "resolution as nan"),
+            ("a boolean", (True, 4912.0), "resolution as True"),
+            ("infinite", (0.125, float("inf")), "range as inf"),
+        ]
+        for label, figures, message in cases:
+            with self.subTest(label), self.assertRaisesRegex(runner.Failure, message):
+                runner.check_figures(*figures)
+
+    def test_the_answer_of_has_feature_is_one_of_two_pairs(self) -> None:
+        self.assertIs(runner.has_feature_answer(0, "true\n"), True)
+        self.assertIs(runner.has_feature_answer(1, "false\n"), False)
+        for returncode, text in ((1, "true"), (0, "false"), (0, ""), (1, ""), (255, "Error: could not access the Package Manager"),
+                                 (0, "True"), (0, "true false")):
+            with self.subTest((returncode, text)), self.assertRaisesRegex(runner.Failure, "exit"):
+                runner.has_feature_answer(returncode, text)
+
+    def test_the_sensors_hal_is_found_by_its_service_name(self) -> None:
+        listing = ("  439 /vendor/bin/hw/android.hardware.sensors-service.multihal\n"
+                   "  612 /vendor/bin/hw/android.hardware.sensors.rc-something-else\n"
+                   " 1023 grep -F android.hardware.sensors-service.multihal\n")
+        self.assertEqual(runner.parse_hal_pids(listing), [439, 1023])
+        self.assertEqual(runner.parse_hal_pids("PID ARGS\n"), [])
+        stat = "439 (android.hardwar) S 1 439 439 0 -1 4194560 100 0 0 0 5 3 0 0 20 0 8 0 1234 99999 1 18446744073709551615"
+        self.assertEqual(runner.parse_start_time(stat), 1234)
+        self.assertEqual(runner.parse_start_time("77 (a b) c) S 1 2 3 0 0 0 0 0 0 0 5 3 0 0 20 0 8 0 4321 9"), 4321)
+        for text in ("", "439 no parentheses", "439 (x) S 1"):
+            with self.subTest(text), self.assertRaisesRegex(runner.Failure, "not a /proc stat line"):
+                runner.parse_start_time(text)
 
     def test_the_sensor_service_lists_the_magnetometer(self) -> None:
         state = runner.orient.parse_sensor_state(SENSOR_DUMP)
@@ -324,11 +368,15 @@ class HostTests(unittest.TestCase):
             self.assertEqual(host.wait_frame(5), runner.Frame(3, 0, 10_000, 10_000, 20_000))
             host.send(runner.magnetic_record(0.0, 25.0, -40.0, 3))
             self.assertEqual(guest.wait_records(lambda record: record[4] == 2), [frames["magnetic-status-3"]])
+            host.closure_expected = True
             host.send(runner.magnetic_record(0.0, 25.0, -40.0, 4))
             self.assertTrue(host.closed_by_guest(5))
             host.connect()
             self.assertEqual(host.wait_frame(5), runner.Frame(3, 0, 10_000, 10_000, 20_000))
             self.assertFalse(host.closed)
+            # The closure was asked for: nothing went wrong.
+            host.raise_faults()
+            self.assertEqual(host.faults, [])
         finally:
             host.stop()
             guest.close()
@@ -413,8 +461,104 @@ class HostTests(unittest.TestCase):
             guest.close()
 
 
+class FaultTests(unittest.TestCase):
+    """What the host notices on a connection and the step that was running must fail on."""
+
+    def wait_for_fault(self, host: "runner.Host") -> None:
+        for _ in range(100):
+            if host.faults:
+                return
+            threading.Event().wait(0.05)
+
+    def test_a_bad_frame_followed_by_a_good_one_still_fails(self) -> None:
+        frames = golden()
+        guest = FakeGuest(frames["reject-control-magic"])
+        host = runner.Host(guest.port)
+        try:
+            host.connect()
+            self.wait_for_fault(host)
+            guest.say(frames["control-v3-idle"])
+            # The good frame arrives, and a wait for it fails all the same; so does the check at the step's end.
+            with self.assertRaisesRegex(runner.Failure, "no known magic"):
+                host.wait_frame(5, lambda frame: frame.version == 3)
+            with self.assertRaisesRegex(runner.Failure, "no known magic"):
+                host.raise_faults()
+            self.assertEqual(len(host.frames), 1)
+        finally:
+            host.stop()
+            guest.close()
+
+    def test_a_frame_with_a_known_magic_and_a_bad_mask_fails_too(self) -> None:
+        guest = FakeGuest(golden()["reject-control-v3-orientation-unlisted"])
+        host = runner.Host(guest.port)
+        try:
+            host.connect()
+            self.wait_for_fault(host)
+            self.assertEqual(len(host.bad), 1)
+            with self.assertRaisesRegex(runner.Failure, "no such state"):
+                host.raise_faults()
+        finally:
+            host.stop()
+            guest.close()
+
+    def test_a_connection_the_guest_ends_unasked_fails_and_one_it_was_asked_to_does_not(self) -> None:
+        frames = golden()
+        guest = FakeGuest(frames["control-v3-idle"])
+        host = runner.Host(guest.port)
+        try:
+            host.connect()
+            self.assertIsNotNone(host.wait_frame(5))
+            guest.connections[-1].close()
+            self.assertTrue(host.closed_by_guest(5))
+            self.wait_for_fault(host)
+            with self.assertRaisesRegex(runner.Failure, "the guest ended the connection"):
+                host.raise_faults()
+            # The faults of a connection are not forgotten by the next one.
+            host.connect()
+            threading.Event().wait(0.3)
+            self.assertEqual(host.faults, ["the guest ended the connection"])
+            with self.assertRaisesRegex(runner.Failure, "the guest ended the connection"):
+                host.wait_frame(1)
+        finally:
+            host.stop()
+            guest.close()
+
+    def test_the_host_closing_its_own_end_is_no_fault(self) -> None:
+        guest = FakeGuest(golden()["control-v3-idle"])
+        host = runner.Host(guest.port)
+        try:
+            host.connect()
+            self.assertIsNotNone(host.wait_frame(5))
+            host.close()
+            threading.Event().wait(0.3)
+            self.assertEqual(host.faults, [])
+        finally:
+            host.stop()
+            guest.close()
+
+    def test_a_step_fails_on_a_fault_it_did_not_wait_for_and_says_so_when_it_fails_on_its_own(self) -> None:
+        host = runner.Host(0)
+        self.assertEqual(runner.checked(host, lambda: "fine"), "fine")
+        host.faults.append("the guest ended the connection")
+        with self.assertRaisesRegex(runner.Failure, "the guest ended the connection"):
+            runner.checked(host, lambda: "the wait found what it wanted")
+
+        def times_out() -> str:
+            raise runner.Failure("the listener has [0.0], not [1.0]")
+
+        with self.assertRaisesRegex(runner.Failure, r"the listener has .* and the connection went wrong: the guest ended"):
+            runner.checked(host, times_out)
+        clean = runner.Host(0)
+        with self.assertRaisesRegex(runner.Failure, "^the listener has") as caught:
+            runner.checked(clean, times_out)
+        self.assertNotIn("connection went wrong", str(caught.exception))
+
+
 class ScriptedGuest(runner.Guest):
     """A guest that answers the commands the launch check runs with the text a booted release prints."""
+
+    ANSWERS = {"true": (0, "true\n"), "false": (1, "false\n"), "error": (1, "Error: could not access the Package Manager\n"),
+               "empty": (0, ""), "true-exit-1": (1, "true\n"), "false-exit-0": (0, "false\n")}
 
     def __init__(self, *, property_value: str, dump: str, features: str, has_feature: str, log: str) -> None:  # no adb
         self.property_value, self.dump, self.features, self.has_feature, self.log = (
@@ -438,8 +582,8 @@ class ScriptedGuest(runner.Guest):
         # `cmd package has-feature` exits 1 and prints "false" for a feature the device does not have.
         self.commands.append(arguments[-1])
         assert arguments[-1].startswith("cmd package has-feature"), arguments
-        return subprocess.CompletedProcess(
-            arguments, 0 if self.has_feature == "true" else 1, stdout=self.has_feature + "\n")
+        returncode, stdout = self.ANSWERS[self.has_feature]
+        return subprocess.CompletedProcess(arguments, returncode, stdout=stdout)
 
     def alive(self) -> None:
         pass
@@ -467,10 +611,17 @@ class LaunchStateTests(unittest.TestCase):
         self.assertIn("rotation vector and geomagnetic rotation vector listed", note)
 
     def test_with_the_orientation_sensor_too_the_list_has_four(self) -> None:
-        guest = self.sensor_guest(log=LOG_LINE % (1, 4, 1))
+        guest = self.sensor_guest(dump=ORIENTATION_DUMP, log=LOG_LINE % (1, 4, 1))
         self.assertIn("4 sensors", runner.launch_state(guest, True, True))
-        with self.assertRaisesRegex(runner.Failure, "expected 3 sensors"):
-            runner.launch_state(self.sensor_guest(log=LOG_LINE % (1, 4, 1)), True, False)
+        # The log line counts four, but a launch without the orientation argument expects three and no entry for it.
+        with self.assertRaisesRegex(runner.Failure, "Host Device Orientation for a launch without its argument"):
+            runner.launch_state(self.sensor_guest(dump=ORIENTATION_DUMP, log=LOG_LINE % (1, 4, 1)), True, False)
+        # A launch that carried the argument needs the type-27 entry, whatever the log line says.
+        with self.assertRaisesRegex(runner.Failure, r"not Host Device Orientation \(type 27\)"):
+            runner.launch_state(self.sensor_guest(log=LOG_LINE % (1, 4, 1)), True, True)
+        with self.assertRaisesRegex(runner.Failure, r"not Host Device Orientation \(type 27\)"):
+            runner.launch_state(self.sensor_guest(dump=ORIENTATION_DUMP.replace("(27)", "(3)"), log=LOG_LINE % (1, 4, 1)),
+                                True, True)
 
     def test_a_release_without_the_argument_lists_nothing_and_declares_nothing(self) -> None:
         note = runner.launch_state(self.older_guest(), False, False)
@@ -509,7 +660,13 @@ class LaunchStateTests(unittest.TestCase):
              "not continuous and non-wake-up"),
             ("the feature is missing", self.sensor_guest(features="feature:android.hardware.touchscreen\n"), True,
              "pm list features says False"),
-            ("the package manager disagrees", self.sensor_guest(has_feature="false"), True, "has-feature says 'false'"),
+            ("the package manager disagrees", self.sensor_guest(has_feature="false"), True, "has-feature says False"),
+            ("the package manager errors", self.sensor_guest(has_feature="error"), True, "exit 1 and 'Error"),
+            ("the package manager says nothing", self.sensor_guest(has_feature="empty"), True, "exit 0 and ''"),
+            ("true with the exit status of false", self.sensor_guest(has_feature="true-exit-1"), True, "exit 1 and 'true'"),
+            ("false with the exit status of true", self.older_guest(has_feature="false-exit-0"), False, "exit 0 and 'false'"),
+            ("an error for an absent feature", self.older_guest(has_feature="error"), False, "exit 1 and 'Error"),
+            ("an empty answer for an absent feature", self.older_guest(has_feature="empty"), False, "exit 0 and ''"),
             ("a denial", self.sensor_guest(log=LOG_LINE % (0, 3, 1) + "\navc:  denied  { read } for "
                                            "property=ro.boot.kernarium.compass scontext=u:r:system_server:s0"),
              True, "SELinux denials"),
@@ -549,6 +706,9 @@ class StreamingHost:
     def __init__(self) -> None:
         self.streams: list[tuple] = []
 
+    def raise_faults(self) -> None:
+        pass
+
     def stream(self, field, status: int = 3, gravity=None) -> None:
         self.streams.append((field, status))
 
@@ -575,6 +735,262 @@ class RotationVectorTests(unittest.TestCase):
 
     def test_the_azimuth_wraps_at_180_when_it_settles(self) -> None:
         self.assertIn("settled", self.run_step([179.0, -179.0, 180.0, -180.0, 179.5, -179.5]))
+
+
+class LiveGuest:
+    """A guest with a probe that reports the magnetometer, a system_server and a sensors HAL, each with an identity
+    that can change between the ``before`` and ``after`` stages of a step."""
+
+    serial = "127.0.0.1:5586"
+
+    def __init__(self, run_id: str = "42") -> None:
+        self.probe_run_id = run_id
+        self.report_run = run_id
+        self.stage = "before"
+        self.system_server_pid = {"before": "1000", "after": "1000"}
+        self.hal = {"before": (439, 1234), "after": (439, 1234)}
+        self.magnetometer: dict = {
+            "count": 50, "last_ns": 1_000_000, "latest": list(runner.field_at_heading(0.0)), "accuracy": 3,
+            "resolution": 0.125, "max_range": 4912.0, "accuracy_calls": [3], "azimuth_deg": 0.0}
+
+    def alive(self) -> None:
+        pass
+
+    def system_server(self) -> str:
+        return self.shell("pidof system_server").strip()
+
+    def shell(self, command: str, timeout: float = 0) -> str:
+        if command == "pidof system_server":
+            return self.system_server_pid[self.stage] + "\n"
+        if command.startswith("ps -A"):
+            return f"  {self.hal[self.stage][0]} /vendor/bin/hw/{runner.SENSORS_HAL}\n"
+        if command.startswith("cat /proc/"):
+            return (f"{self.hal[self.stage][0]} (android.hardwar) S 1 439 439 0 -1 4194560 100 0 0 0 5 3 0 0 20 0 8 0 "
+                    f"{self.hal[self.stage][1]} 99999 1\n")
+        raise AssertionError(command)
+
+    def adb_run(self, *arguments: str, timeout: float = 0) -> subprocess.CompletedProcess:
+        report = {"mode": "compass", "run_id": self.report_run, "valid": True, "magnetometer": dict(self.magnetometer),
+                  "rotation_vector": {"count": 5}}
+        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(report))
+
+    def deliver(self, field: tuple[float, float, float], *, count: int | None = None, last_ns: int | None = None) -> None:
+        self.magnetometer["latest"] = list(field)
+        self.magnetometer["count"] = self.magnetometer["count"] + 30 if count is None else count
+        self.magnetometer["last_ns"] = self.magnetometer["last_ns"] + 1_000_000_000 if last_ns is None else last_ns
+
+
+class WaitFieldTests(unittest.TestCase):
+    EXPECTED = (0.0, 25.0, -40.0)
+
+    def wait(self, guest: LiveGuest, **keywords) -> dict:
+        with mock.patch.object(runner.orient.time, "sleep"), mock.patch.dict(
+                runner.wait_field.__kwdefaults__, {"seconds": 0.2}):
+            return runner.wait_field(guest, self.EXPECTED, "a field", **keywords)
+
+    def failing(self, guest: LiveGuest, message: str, **keywords) -> None:
+        with self.assertRaisesRegex(runner.Failure, message):
+            self.wait(guest, **keywords)
+
+    def test_the_field_that_was_sent_passes(self) -> None:
+        guest = LiveGuest()
+        guest.magnetometer["latest"] = list(self.EXPECTED)
+        self.assertEqual(self.wait(guest, status=3, callback=True, heading=0.0)["count"], 50)
+
+    def test_a_value_the_service_rounded_passes_within_half_its_quantum_and_not_beyond(self) -> None:
+        for resolution in (0.125, 4912 / 32768):
+            quantum = resolution * runner.SERVICE_FACTOR
+            guest = LiveGuest()
+            guest.magnetometer.update(resolution=resolution)
+            guest.magnetometer["latest"] = [0.0, 25.0 + quantum * 0.49, -40.0 - quantum * 0.49]
+            self.wait(guest)
+            # More than half a quantum off is a value the service did not round from the one sent; one whole
+            # quantum off must never pass.
+            for off in (quantum * 0.6, quantum):
+                guest.magnetometer["latest"] = [0.0, 25.0 + off, -40.0]
+                with self.subTest(resolution=resolution, off=off):
+                    self.failing(guest, "the listener has")
+
+    def test_a_value_that_is_not_a_number_fails(self) -> None:
+        for bad in (float("nan"), float("inf"), None, "25"):
+            guest = LiveGuest()
+            guest.magnetometer["latest"] = [0.0, bad, -40.0]
+            with self.subTest(bad):
+                self.failing(guest, "not three numbers")
+        guest = LiveGuest()
+        guest.magnetometer["latest"] = [0.0, 25.0]
+        self.failing(guest, "not three numbers")
+
+    def test_a_missing_or_unusable_resolution_fails(self) -> None:
+        for resolution in (None, 0.0, float("nan"), -0.1):
+            guest = LiveGuest()
+            guest.magnetometer.update(latest=list(self.EXPECTED), resolution=resolution)
+            with self.subTest(resolution):
+                self.failing(guest, "resolution as")
+
+    def test_the_azimuth_and_the_accuracy_and_the_callback_are_checked(self) -> None:
+        guest = LiveGuest()
+        guest.magnetometer["latest"] = list(self.EXPECTED)
+        self.failing(guest, "azimuth 0.0, not 90.0", heading=90.0)
+        guest.magnetometer["azimuth_deg"] = float("nan")
+        self.failing(guest, "azimuth nan, not 0.0", heading=0.0)
+        guest.magnetometer["azimuth_deg"] = None
+        self.failing(guest, "azimuth None, not 0.0", heading=0.0)
+        guest.magnetometer["accuracy"] = 2
+        self.failing(guest, "accuracy 2, not 3", status=3)
+        # SensorEvent.accuracy says 3 but onAccuracyChanged was last called with another value, or never.
+        guest.magnetometer.update(accuracy=3, accuracy_calls=[3, 1])
+        self.failing(guest, "onAccuracyChanged was last called with 1, not 3", status=3, callback=True)
+        guest.magnetometer["accuracy_calls"] = []
+        self.failing(guest, "onAccuracyChanged was last called with None, not 3", status=3, callback=True)
+
+    def test_a_report_of_another_run_is_never_taken(self) -> None:
+        guest = LiveGuest()
+        guest.magnetometer["latest"] = list(self.EXPECTED)
+        guest.report_run = "41"
+        self.failing(guest, "run '41', not the probe's '42'")
+        guest.report_run = "42"
+        self.wait(guest)
+
+    def test_a_new_sample_must_advance_both_the_count_and_the_timestamp(self) -> None:
+        for label, count, last_ns in (("frozen", 50, 1_000_000), ("the count only", 80, 1_000_000),
+                                      ("the timestamp only", 50, 2_000_000)):
+            guest = LiveGuest()
+            guest.magnetometer.update(latest=list(self.EXPECTED), count=count, last_ns=last_ns)
+            with self.subTest(label):
+                self.failing(guest, "no new sample", newer=(50, 1_000_000))
+        guest = LiveGuest()
+        guest.magnetometer.update(latest=list(self.EXPECTED), count=51, last_ns=1_000_001)
+        self.wait(guest, newer=(50, 1_000_000))
+
+
+class RefusingHost:
+    """The host's end for the steps that make the guest end a connection: what the runner does to it, and the answers
+    a guest of each kind gives."""
+
+    def __init__(self, guest: LiveGuest, *, ends: bool = True, in_use: bool = True, recovers: bool = True,
+                 frames: list | None = None) -> None:
+        self.guest, self.ends, self.in_use, self.recovers = guest, ends, in_use, recovers
+        self.frames = list(frames or [])
+        #: What the next connection's first frame is, for a guest of an older wire.
+        self.again = self.frames[-1] if self.frames else None
+        self.closure_expected = False
+        self.sent: list[bytes] = []
+        self.streams: list[tuple] = []
+        self.connects = 0
+
+    def stream(self, field, status: int = 3, gravity=None) -> None:
+        self.streams.append((field, status))
+        if self.guest.stage == "after" and self.recovers and field is not None:
+            self.guest.deliver(field)
+
+    def send(self, data: bytes) -> None:
+        self.sent.append(data)
+
+    def closed_by_guest(self, seconds: float) -> bool:
+        return self.ends
+
+    def connect(self) -> None:
+        self.connects += 1
+        self.guest.stage = "after"
+        self.closure_expected = False
+
+    def wait_frame(self, seconds: float, predicate=None, after: int = 0):
+        if self.again is not None:
+            return self.again
+        return runner.Frame(3, 8 if self.in_use else 0, 20_000, 20_000, 20_000)
+
+    def raise_faults(self) -> None:
+        pass
+
+
+class RefusedRecordTests(unittest.TestCase):
+    def step(self, guest: LiveGuest, host: RefusingHost) -> str:
+        with mock.patch.object(runner.orient.time, "sleep"), mock.patch.dict(
+                runner.wait_field.__kwdefaults__, {"seconds": 0.2}):
+            return runner.refused_record(guest, host)
+
+    def test_a_guest_that_recovers_with_a_new_field_and_the_same_processes_passes(self) -> None:
+        guest = LiveGuest()
+        host = RefusingHost(guest)
+        note = self.step(guest, host)
+        self.assertIn("sample 80 after 50", note)
+        self.assertIn("sensors HAL (pid 439)", note)
+        # The record sent is the one the guest refuses, with the closure announced first; the field after it is
+        # another heading's than the one before.
+        self.assertEqual(host.sent, [runner.magnetic_record(0.0, runner.HORIZONTAL, runner.VERTICAL, 4)])
+        self.assertEqual(host.connects, 1)
+        self.assertEqual(host.streams[-1], (runner.field_at_heading(runner.RECOVERY_HEADING), 3))
+        self.assertNotEqual(runner.field_at_heading(runner.RECOVERY_HEADING), runner.field_at_heading(0.0))
+
+    def test_a_report_that_never_moves_again_is_no_recovery(self) -> None:
+        guest = LiveGuest()
+        with self.assertRaisesRegex(runner.Failure, "no new sample|the listener has"):
+            self.step(guest, RefusingHost(guest, recovers=False))
+        # The old field with a new count and timestamp is not the field that was sent.
+        guest = LiveGuest()
+        host = RefusingHost(guest)
+        host.stream = lambda field, status=3, gravity=None: guest.deliver(tuple(guest.magnetometer["latest"])) if guest.stage == "after" else None  # type: ignore[method-assign]
+        with self.assertRaisesRegex(runner.Failure, "the listener has"):
+            self.step(guest, host)
+
+    def test_the_sensors_hal_or_system_server_restarting_fails_it(self) -> None:
+        for label, change, message in (
+                ("a new pid", {"hal": {"after": (500, 1234)}}, "sensors HAL restarted"),
+                ("the same pid and a new start time", {"hal": {"after": (439, 9999)}}, "sensors HAL restarted"),
+                ("system_server", {"system_server_pid": {"after": "2000"}}, "system_server restarted")):
+            guest = LiveGuest()
+            for name, value in change.items():
+                getattr(guest, name).update(value)
+            with self.subTest(label), self.assertRaisesRegex(runner.Failure, message):
+                self.step(guest, RefusingHost(guest))
+
+    def test_the_other_ways_the_step_fails(self) -> None:
+        guest = LiveGuest()
+        with self.assertRaisesRegex(runner.Failure, "kept the connection"):
+            self.step(guest, RefusingHost(guest, ends=False))
+        guest = LiveGuest()
+        with self.assertRaisesRegex(runner.Failure, "does not say the magnetometer is in use"):
+            self.step(guest, RefusingHost(guest, in_use=False))
+        guest = LiveGuest()
+        guest.report_run = "7"
+        with self.assertRaisesRegex(runner.Failure, "is of run '7', not '42'"):
+            self.step(guest, RefusingHost(guest))
+        guest = LiveGuest()
+        guest.magnetometer["count"] = 0
+        with self.assertRaisesRegex(runner.Failure, "no valid samples"):
+            self.step(guest, RefusingHost(guest))
+
+
+class OlderWireTests(unittest.TestCase):
+    def step(self, guest: LiveGuest, host: RefusingHost, with_orientation: bool = False) -> str:
+        with mock.patch.object(runner.time, "sleep"):
+            return runner.older_wire(guest, host, with_orientation)
+
+    def test_an_image_without_the_sensor_ends_the_connection_and_keeps_its_processes(self) -> None:
+        guest = LiveGuest()
+        note = self.step(guest, RefusingHost(guest, frames=[runner.Frame(1, 0, 10_000, 10_000)]))
+        self.assertIn("sensors HAL, pid 439, did not restart", note)
+        guest = LiveGuest()
+        self.assertIn("ANC2 only", self.step(
+            guest, RefusingHost(guest, frames=[runner.Frame(2, 0, 10_000, 10_000)]), with_orientation=True))
+
+    def test_the_hal_or_system_server_restarting_or_a_frame_of_the_new_wire_fails_it(self) -> None:
+        for label, change, message in (
+                ("the HAL", {"hal": {"after": (500, 1234)}}, "sensors HAL restarted"),
+                ("the HAL's start time", {"hal": {"after": (439, 5)}}, "sensors HAL restarted"),
+                ("system_server", {"system_server_pid": {"after": "2000"}}, "system_server restarted")):
+            guest = LiveGuest()
+            for name, value in change.items():
+                getattr(guest, name).update(value)
+            with self.subTest(label), self.assertRaisesRegex(runner.Failure, message):
+                self.step(guest, RefusingHost(guest, frames=[runner.Frame(1, 0, 10_000, 10_000)]))
+        guest = LiveGuest()
+        with self.assertRaisesRegex(runner.Failure, "frames of an image without the sensor"):
+            self.step(guest, RefusingHost(guest, frames=[runner.Frame(3, 0, 10_000, 10_000, 20_000)]))
+        guest = LiveGuest()
+        with self.assertRaisesRegex(runner.Failure, "kept the connection"):
+            self.step(guest, RefusingHost(guest, ends=False, frames=[runner.Frame(1, 0, 10_000, 10_000)]))
 
 
 class FeedTests(unittest.TestCase):
