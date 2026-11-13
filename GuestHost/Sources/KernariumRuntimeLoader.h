@@ -225,12 +225,14 @@ uint32_t kernarium_runtime_loader_gpu_budget_mib_for_limit(
     uint32_t guest_processor_count,
     kernarium_launch_memory_set parameters);
 /* The host-side memory, in MiB, that a live camera session holds out of the GPU
- * budget B of `gpu_budget_mib` MiB: the camera device's reserve for the tier
- * that budget gets (uml::camera::cameraHostMemoryReserveMiB,
- * darwin/device/camera/camera_tiers.hpp). While the cameras are live the GPU's
- * pool is B less this figure, taken after B is clamped to its floor; blocked
- * cameras or none take nothing. The runtime applies the same figure to the pool
- * a run gives the GPU. */
+ * budget B of `gpu_budget_mib` MiB, at most: the camera device's ceiling for
+ * the tier that budget gets (uml::camera::cameraHostMemoryReserveMiB,
+ * darwin/device/camera/camera_tiers.hpp), as the cameras are not composed before
+ * the boot. While the cameras are live the GPU's pool is B less this figure,
+ * taken after B is clamped to its floor; blocked cameras or none take nothing.
+ * The runtime gives the GPU the pool of the use it composes for the host's
+ * cameras (uml::camera::liveCameraReserveMiB), which is never more than this
+ * one for a system camera. */
 uint32_t kernarium_runtime_loader_camera_reserve_mib(uint32_t gpu_budget_mib);
 /* The vCPU count the applications default to and offer at most on a device with
  * `physical_processor_count` physical cores (zero counts as one): every core,

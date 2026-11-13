@@ -61,6 +61,14 @@ enum class CameraCheckpoint : std::uint8_t {
 struct CameraDeviceOptions {
     CameraMode mode {CameraMode::live};
     CameraTier tier {CameraTier::small};
+    /* What the device lets the host hold, which the GPU's pool was reduced for
+     * (`liveCameraReserveMiB`, with this value): at most `use.streams` cameras
+     * run at once, and a start beyond it is refused as a camera that conflicts
+     * with a running one is; stills are admitted while the captures the device
+     * holds cost no more than `stillAdmissionBytes` allows, the others waiting
+     * their turn. The default is the tier's ceiling, which a device whose
+     * budget was not taken from a composed layout is given. */
+    CameraUse use;
     /* Where learned colour data is kept; null keeps it in memory. */
     std::shared_ptr<CalibrationStore> calibration;
     /* The application's statement of a camera's sensor orientation; the

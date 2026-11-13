@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -99,21 +100,45 @@ inline constexpr std::string_view noCameraLayout = "none";
     return mode == CameraMode::blocked && layoutHasCameras(layout);
 }
 
+/* The cameras a layout lets the device run at once (`CameraUse::streams`): two
+ * only for back and front cameras with the concurrent feature, one otherwise.
+ * The device enforces it; flash, manual control, RAW and the front camera's
+ * 2160p say nothing of how many cameras run. */
+[[nodiscard]] inline std::uint32_t layoutStreams(const LayoutDimensions& dimensions) noexcept
+{
+    const auto layout = normalizedLayout(dimensions);
+    return layout.cameras == LayoutCameras::backAndFront && layout.concurrent ? 2u : 1u;
+}
+
+/* The dimensions of a layout of the image's set by its name; nothing for a name
+ * that is not in it. */
+[[nodiscard]] std::optional<LayoutDimensions> layoutDimensionsNamed(std::string_view name);
+
 /* The host memory, in whole mebibytes, that a session's cameras hold outside
  * the GPU's pool (`cameraHostMemoryReserveMiB`): only a live session whose
- * layout has cameras holds any. A blocked session opens no capture session,
- * and a host with no cameras gets no device. The launcher and the
- * application's runtime both decide it here, once the layout is composed. */
-[[nodiscard]] constexpr std::uint64_t liveCameraReserveMiB(CameraMode mode, std::string_view layout, CameraTier tier) noexcept
-{
-    return mode == CameraMode::live && layoutHasCameras(layout) ? cameraHostMemoryReserveMiB(tier) : 0;
-}
+ * layout has cameras holds any, and it holds what `use` lets the device hold. A
+ * blocked session opens no capture session, and a host with no cameras gets no
+ * device. `use` is the one the device is given (`CameraDeviceOptions::use`),
+ * from `composeCameras`; a layout stated by name, which the device does not
+ * enforce, is given the default `CameraUse`, the tier's ceiling. The launcher
+ * and the application's runtime both decide it here, once the cameras are
+ * composed. */
+[[nodiscard]] std::uint64_t liveCameraReserveMiB(
+    CameraMode mode, std::string_view layout, const CameraUse& use, CameraTier tier);
 
 /* The dimensions a host's cameras (in wire order, `arrangeCameras`) earn at a
  * tier. A host with a back camera and no front one, or with no camera that is
  * front or back, has none: the set has no layout that says so, and a front
  * camera that is not there would be declared falsely. */
 [[nodiscard]] LayoutDimensions layoutDimensionsOf(std::span<const CameraDescription> cameras, CameraTier tier) noexcept;
+
+/* What the device of a host's cameras is given: the layout the guest is told,
+ * and what the device lets the host hold (`CameraUse`), which the reserve
+ * counts. */
+struct ComposedCameras {
+    std::string layout;
+    CameraUse use;
+};
 
 /* The layout of a platform camera's host, composed as the camera device will
  * present its cameras (`arrangeCameras` with `options` and what `calibration`
@@ -124,5 +149,39 @@ inline constexpr std::string_view noCameraLayout = "none";
 [[nodiscard]] std::string composeLayout(
     const uml::platform::Camera& host, const CalibrationStore& calibration, const ArrangementOptions& options,
     const std::function<bool(std::string_view)>& available = {});
+
+/* The layout (`composeLayout`) and the use of the cameras the device will
+ * present. The device runs at most the layout's cameras at once. A RAW capture
+ * is possible wherever a lens the guest sees has RAW stills and either offers
+ * them or has not taught the store its colour data (its first still takes
+ * them): that is the most any boot of a run reaches, because colour data learned
+ * later only moves a lens from the second case to the first, so the use of a
+ * later boot never exceeds this one's. */
+[[nodiscard]] ComposedCameras composeCameras(
+    const uml::platform::Camera& host, const CalibrationStore& calibration, const ArrangementOptions& options,
+    const std::function<bool(std::string_view)>& available = {});
+
+/* What a run paid for at its first discovery: the use the GPU's pool was reduced
+ * for, or no cameras at all (no reduction). A later boot is held to it. */
+struct CameraReservation {
+    bool cameras {};
+    CameraUse use;
+};
+
+[[nodiscard]] inline CameraReservation reservationOf(const ComposedCameras& composed) noexcept
+{
+    return {layoutHasCameras(composed.layout), composed.use};
+}
+
+/* The cameras of a later boot of a run (`composeCameras`), held to `reserved`:
+ * the layout the guest is told is one whose use fits the reservation (no more
+ * cameras at once, no RAW capture or source working storage it did not count),
+ * the widest of the layouts that fit if the first choice does not, and none
+ * where none fits or the first discovery had no cameras. The host's cameras that
+ * change under a running application therefore never reach the device with a
+ * use the pool was not reduced for. */
+[[nodiscard]] ComposedCameras composeCamerasWithin(
+    const uml::platform::Camera& host, const CalibrationStore& calibration, const ArrangementOptions& options,
+    const CameraReservation& reserved);
 
 } // namespace uml::camera

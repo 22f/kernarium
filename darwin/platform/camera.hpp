@@ -279,6 +279,10 @@ struct CameraStillRequest {
     std::uint32_t jpegWidth {};
     std::uint32_t jpegHeight {};
     std::uint32_t jpegQuality {95};
+    // The largest JPEG file the host takes, in bytes (the guest's buffer for
+    // that size): the platform drops a larger file and the capture fails.
+    // Zero: no bound.
+    std::uint64_t maximumJpegBytes {};
     bool raw {};
     // The capture must not use multi-frame processing (a Bayer still needs it).
     bool speedPrioritized {};
@@ -374,6 +378,12 @@ public:
     // camera's runs on the system's scaler). The caller keeps the object and
     // uses it from one thread.
     [[nodiscard]] virtual std::unique_ptr<Nv12Transformer> makeFrameTransformer() const = 0;
+    // The working storage, in bytes for each pixel of a JPEG still, that this
+    // host's source holds while it makes the picture, beyond the encoded file
+    // the device counts: `systemCameraStillWorkingBytesPerPixel` for the
+    // system's camera. Zero where the source makes the file in place or the
+    // host does not say.
+    [[nodiscard]] virtual std::uint32_t stillWorkingBytesPerPixel() const noexcept { return 0; }
     // Opens a capture session, or returns null when the system has not granted
     // access or the host has no camera. This is the only call that can light a
     // capture indicator, and a blocked guest session never makes it.
