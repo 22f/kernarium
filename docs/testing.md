@@ -608,7 +608,9 @@ blocker in every one of them.
   `arm64-instruction-corpus-exclusive-interrupted` provokes it on the gadget
   lane with the host interrupting the guest's thread, and `-exclusive-injected`
   makes the first attempt end as a lost reservation in both lanes and requires
-  that only a plain loss is retried.
+  that only a plain loss is retried. The two unit tests that run a pair once,
+  `arm64-tlb-probe-set` and `arm64-gadget-sme`, retry the same way and check
+  their own retry.
 - `arm64-emitted-registers` requires that no host code names x18, which Darwin
   clears when it interrupts a thread.
 - `arm64-instruction-corpus-invalid-encoding` requires every

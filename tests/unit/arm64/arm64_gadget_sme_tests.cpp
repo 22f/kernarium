@@ -15,6 +15,7 @@
  * twins as through their base entries, and every register-only form of the
  * encoding table selects its generated gadget, which names the guest's
  * registers in the guest's instruction. */
+#include "arm64_exclusive_retry.hpp"
 #include "arm64_kernel_stops.hpp"
 #include "arm64_sm0_vector_length_support.hpp"
 #include "jit_test_support.hpp"
@@ -1006,56 +1007,97 @@ struct MemoryResult final {
 	bool operator==(const MemoryResult &) const = default;
 };
 
+/* The register that receives the status of the store-exclusive a case runs,
+ * or none: the case has no store-exclusive, or its status is XZR. */
+[[nodiscard]] std::optional<unsigned> exclusive_status(const MemoryCase &test)
+{
+	for (const auto word : test.words)
+		if ((word & 0x3fe0'7c00U) == 0x0800'7c00U ||
+		    (word & 0xbfe0'0000U) == 0x8820'0000U) {
+			const auto status = (word >> 16) & 31U;
+			return status == 31U ? std::nullopt : std::optional{status};
+		}
+	return std::nullopt;
+}
+
+/* Whether a run of a case is a store-exclusive that lost its reservation, as
+ * a host interrupt or preemption between the pair makes it: the program ran
+ * to its SVC, the status reads 1, and the data is as the case started with
+ * it. Any other difference from a store that succeeded is not a loss. */
+[[nodiscard]] bool lost_reservation(const MemoryCase &test,
+	const MemoryResult &result)
+{
+	const auto status = exclusive_status(test);
+	return status.has_value() && result.event == EngineEvent::system_call &&
+		result.registers[*status] == 1 &&
+		result.data == pattern(2 * page, 11);
+}
+
+/* Runs a case, and a store-exclusive case again while its run is a lost
+ * reservation, as a guest's loop would. The first run over a mapping the host
+ * has not touched takes a page fault between the pair, which ends the
+ * monitor, so the runs are those of one machine: every run after the first
+ * has its mapping touched. A store that is lost in every attempt is no
+ * completion. */
 [[nodiscard]] MemoryResult run_memory_case(const MemoryCase &test,
 	std::uint8_t svcr)
 {
 	auto code = test.words;
 	code.push_back(svc);
 	Machine machine{code, native_host()};
-	machine.put_data(data_base, pattern(2 * page, 11));
-	for (unsigned n = 0; n < 31; ++n)
-		machine.cpu.registers[n] = 0x1111'1111'1111'1111ULL * (n % 15U);
-	/* Bases: an aligned line, an LSE2-block misalignment, page ends that
-	 * 2-, 4-, 8- and 16-byte accesses cross, and the unmapped page. */
-	machine.cpu.registers[0] = data_base + page - 64;
-	machine.cpu.registers[1] = data_base + page - 24;
-	machine.cpu.registers[2] = data_base + page + 8;
-	machine.cpu.registers[3] = data_base + 2 * page - 256;
-	machine.cpu.registers[5] = data_base + page - 62;
-	machine.cpu.registers[12] = data_base + 2 * page + 16;
-	machine.cpu.registers[13] = data_base + page - 6;
-	machine.cpu.registers[14] = data_base + page - 4;
-	machine.cpu.registers[15] = data_base + page - 2;
-	machine.cpu.registers[16] = 3;
-	machine.cpu.registers[17] = 0xffff'fffeULL;
-	machine.cpu.registers[18] = 5;
-	for (const auto &[number, value] : test.registers)
-		machine.cpu.registers[number] = value;
-	machine.cpu.sp = test.sp;
-	machine.cpu.defer_sme_load(machine.cpu.sme_task, svcr, 0);
-	std::vector<std::byte> za;
-	if ((svcr & arm64::svcr_za) != 0U) {
-		/* As if loaded already: the rows must come back unchanged
-		 * through every helper the twin leaves streaming mode for. */
-		machine.cpu.sme_loaded = arm64::svcr_za;
-		za = pattern(machine.svl() * machine.svl(), 23);
-		std::memcpy(machine.row(0), za.data(), za.size());
-	}
-	MemoryResult result{};
-	result.event = machine.run();
-	if (!za.empty())
-		require(equal(machine.row(0), za));
-	std::copy(machine.cpu.registers.begin(), machine.cpu.registers.end(),
-		result.registers.begin());
-	result.sp = machine.cpu.sp;
-	result.pc = machine.cpu.pc;
-	result.nzcv = machine.cpu.nzcv;
-	result.data = machine.data(data_base, 2 * page);
-	if (result.event == EngineEvent::memory_fault) {
-		result.fault_address = machine.executor().fault_address();
-		result.fault_alignment = machine.executor().fault_alignment();
-	}
-	return result;
+	const auto attempt = [&] {
+		machine.put_data(data_base, pattern(2 * page, 11));
+		machine.cpu.pc = code_base;
+		for (unsigned n = 0; n < 31; ++n)
+			machine.cpu.registers[n] = 0x1111'1111'1111'1111ULL * (n % 15U);
+		/* Bases: an aligned line, an LSE2-block misalignment, page ends that
+		 * 2-, 4-, 8- and 16-byte accesses cross, and the unmapped page. */
+		machine.cpu.registers[0] = data_base + page - 64;
+		machine.cpu.registers[1] = data_base + page - 24;
+		machine.cpu.registers[2] = data_base + page + 8;
+		machine.cpu.registers[3] = data_base + 2 * page - 256;
+		machine.cpu.registers[5] = data_base + page - 62;
+		machine.cpu.registers[12] = data_base + 2 * page + 16;
+		machine.cpu.registers[13] = data_base + page - 6;
+		machine.cpu.registers[14] = data_base + page - 4;
+		machine.cpu.registers[15] = data_base + page - 2;
+		machine.cpu.registers[16] = 3;
+		machine.cpu.registers[17] = 0xffff'fffeULL;
+		machine.cpu.registers[18] = 5;
+		for (const auto &[number, value] : test.registers)
+			machine.cpu.registers[number] = value;
+		machine.cpu.sp = test.sp;
+		machine.cpu.defer_sme_load(machine.cpu.sme_task, svcr, 0);
+		std::vector<std::byte> za;
+		if ((svcr & arm64::svcr_za) != 0U) {
+			/* As if loaded already: the rows must come back unchanged
+			 * through every helper the twin leaves streaming mode for. */
+			machine.cpu.sme_loaded = arm64::svcr_za;
+			za = pattern(machine.svl() * machine.svl(), 23);
+			std::memcpy(machine.row(0), za.data(), za.size());
+		}
+		MemoryResult result{};
+		result.event = machine.run();
+		if (!za.empty())
+			require(equal(machine.row(0), za));
+		std::copy(machine.cpu.registers.begin(), machine.cpu.registers.end(),
+			result.registers.begin());
+		result.sp = machine.cpu.sp;
+		result.pc = machine.cpu.pc;
+		result.nzcv = machine.cpu.nzcv;
+		result.data = machine.data(data_base, 2 * page);
+		if (result.event == EngineEvent::memory_fault) {
+			result.fault_address = machine.executor().fault_address();
+			result.fault_alignment = machine.executor().fault_alignment();
+		}
+		return result;
+	};
+	const auto run = uml::emulator::tests::run_exclusive(attempt,
+		[&](const MemoryResult &result) {
+			return lost_reservation(test, result);
+		});
+	require(!run.lost);
+	return run.result;
 }
 
 /* Every GPR memory family runs through its streaming twin exactly as through
@@ -1142,6 +1184,63 @@ void streaming_twins()
 				"entry\n", test.name, mode);
 			require(false);
 		}
+	}
+}
+
+/* What the retry of the twins' store-exclusive cases takes for a lost
+ * reservation, which needs no SME hardware: a status of 1 over unchanged data
+ * and nothing else, and for at most exclusive_attempts runs. */
+void a_lost_reservation_is_retried_and_nothing_else()
+{
+	const MemoryCase pair{"ldxr stxr", {0xc85f'7c14U, 0xc818'7c15U}};
+	const MemoryCase lone{"ldr", {0xf940'0014U}};
+	MemoryResult lost{};
+	lost.event = EngineEvent::system_call;
+	lost.registers[24] = 1;
+	lost.data = pattern(2 * page, 11);
+	require(exclusive_status(pair) == 24U);
+	require(!exclusive_status(lone).has_value());
+	require(lost_reservation(pair, lost));
+	require(!lost_reservation(lone, lost));
+	auto other = lost;
+	other.registers[24] = 0;
+	require(!lost_reservation(pair, other));
+	other = lost;
+	other.data[16] = ~other.data[16];
+	require(!lost_reservation(pair, other));
+	other = lost;
+	other.event = EngineEvent::memory_fault;
+	require(!lost_reservation(pair, other));
+
+	const auto is_lost = [&](const MemoryResult &result) {
+		return lost_reservation(pair, result);
+	};
+	auto stored = lost;
+	stored.registers[24] = 0;
+	unsigned runs = 0;
+	const auto once = uml::emulator::tests::run_exclusive(
+		[&] { return ++runs == 1 ? lost : stored; }, is_lost);
+	require(runs == 2 && once.attempts == 2 && !once.lost);
+	runs = 0;
+	const auto always = uml::emulator::tests::run_exclusive(
+		[&] { ++runs; return lost; }, is_lost);
+	require(runs == uml::emulator::tests::exclusive_attempts &&
+		always.attempts == runs && always.lost);
+}
+
+/* The twins' store-exclusive cases through the base entry, which any host
+ * runs: each completes, so that a run that lost its reservation was run
+ * again. */
+void store_exclusives_complete_at_the_base_entry()
+{
+	for (const auto &test : std::vector<MemoryCase>{
+		     {"ldxr stxr", {0xc85f'7c14U, 0xc818'7c15U}},
+		     {"ldaxr stlxr", {0x885f'fc14U, 0x8818'fc15U}},
+		     {"ldxp stxp", {0xc87f'5414U, 0xc838'5c16U}}}) {
+		const auto result = run_memory_case(test, 0);
+		require(result.event == EngineEvent::system_call);
+		require(result.registers[24] == 0);
+		require(result.data != pattern(2 * page, 11));
 	}
 }
 
@@ -2337,6 +2436,8 @@ int main()
 	streaming_twin_table();
 	generated_forms_match_the_table();
 	memory_forms_match_the_table();
+	a_lost_reservation_is_retried_and_nothing_else();
+	store_exclusives_complete_at_the_base_entry();
 	if (streaming_hardware()) {
 		streaming_control_core();
 		streaming_twins();
