@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# eth0 address, then the Wi-Fi address the derivation in
+# android/lineage-24/overlay/tools/kernarium_wifi_mac.h gives it. The C++ unit test
+# (wifi_mac_tests.cpp) and the guest runner (run_android_installation_identity.py)
+# read this file, so the header and the runner's Python port have one set of answers.
+# The addresses are synthetic.
+52:54:00:12:34:56 da:59:49:4a:14:1f
+00:00:00:00:00:00 02:45:0c:0b:57:8d
+ff:ff:ff:ff:ff:ff 0a:1b:72:00:b1:2a
+02:00:00:00:00:00 ca:51:05:be:cc:fe
+02:15:b2:00:00:00 46:32:10:55:ff:ac
+52:55:0a:00:02:02 ba:9e:4d:2d:ab:bf
+52:55:0a:00:02:0f 32:60:1d:70:7b:d6
+c2:bc:a0:85:06:6a 46:0c:c4:1c:b1:b3
+62:49:83:ce:ad:4d 52:8e:9e:34:d5:6e
+56:fc:e2:f5:99:5d 5a:03:08:8e:75:a5
+9a:e3:24:4a:b8:2c 9e:88:d8:46:5f:de
+fe:9d:1f:c4:84:b4 aa:6d:a1:66:97:ca
+ce:c0:47:b4:49:8a 7a:6b:ad:aa:81:5a
+6e:66:50:a9:3d:47 d2:92:63:37:a5:e4
+66:94:33:1c:e0:ea 0e:42:fb:d8:5d:70
+26:54:e5:06:b8:3f b2:93:4a:da:f2:17

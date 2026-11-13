@@ -403,7 +403,10 @@ to 10.0.2.15, so the framework never manages `eth0`; its hardware address and
 the guest's serial number are the installation's own, which the host chooses at
 random once for each data disk. `kernarium_net_setup`
 (`overlay/tools`) prepares it at `post-fs-data` and stacks the `virt_wifi`
-device `wlan0` on it, and the kernel needs `CONFIG_MACVLAN`, `CONFIG_CFG80211`
+device `wlan0` on it, with a hardware address derived from `eth0`'s
+(`overlay/tools/kernarium_wifi_mac.h`: no kernel argument carries it, because an
+`androidboot.*` argument becomes a property every application can read), and the
+kernel needs `CONFIG_MACVLAN`, `CONFIG_CFG80211`
 and `CONFIG_VIRT_WIFI` built in (the verifier requires them). Apps see Wi-Fi
 only, the open SSID `VirtWifi`, because the product declares
 `android.hardware.wifi` and not `android.hardware.ethernet`; turning Wi-Fi or
