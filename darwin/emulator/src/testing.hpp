@@ -4,6 +4,7 @@
 #if UML_EMULATOR_TESTING
 #include "uml/emulator.h"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -12,6 +13,7 @@
 namespace uml::runtime {
 class HibernationSteps;
 enum class GuestShutdownKind : int;
+enum class TrimOutcome : std::uint8_t;
 }
 
 namespace uml::emulator::testing {
@@ -92,6 +94,21 @@ struct NativeKernelWindow final {
  * run it does nothing. */
 void report_guest_shutdown(::uml::runtime::GuestShutdownKind kind,
 	const char *command) noexcept;
+
+/* The guest page-cache trim the memory pressure response asks of `emulator`:
+ * what the response's own thread would call when the system reports memory
+ * pressure. A test variant never listens to the system. */
+[[nodiscard]] ::uml::runtime::TrimOutcome trim_for_memory_pressure(
+	uml_emulator *emulator) noexcept;
+
+/* The lifecycle calls on `emulator` that are waiting for its lifecycle mutex
+ * or hold it. */
+[[nodiscard]] unsigned int lifecycle_calls(const uml_emulator *emulator) noexcept;
+
+/* Replaces the clock the lifecycle calls count their waits by (the quiesce's
+ * trim wait, from its call); null restores the steady clock. */
+void set_lifecycle_clock(std::chrono::steady_clock::time_point (*now)()
+	noexcept) noexcept;
 
 /* Replaces the steps a hibernation takes, and what a failed restore does, on
  * `emulator`; the quiesce and resume calls then run the same ordering over
