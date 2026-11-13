@@ -408,8 +408,9 @@ device `wlan0` on it, with a hardware address derived from `eth0`'s
 `androidboot.*` argument becomes a property every application can read). The
 lower devices, `eth0` and the macvlan `buried_eth0`, carry no IPv6, so no
 link-local address built from their hardware addresses shows the installation's
-values to an application; a later change that gives the guest IPv6 puts it on
-`wlan0`. The tool exits with an error when it cannot turn IPv6 off, and `wlan0`
+values to an application. The guest's IPv6 is `wlan0`'s, which the framework
+enables once Wi-Fi is up, with an address that is not built from the MAC; a
+later change that gives the guest more IPv6 puts it on `wlan0`. The tool exits with an error when it cannot turn IPv6 off, and `wlan0`
 is then not created. The kernel needs `CONFIG_MACVLAN`, `CONFIG_CFG80211`
 and `CONFIG_VIRT_WIFI` built in (the verifier requires them). Apps see Wi-Fi
 only, the open SSID `VirtWifi`, because the product declares

@@ -43,8 +43,9 @@
  * The lower devices carry no IPv6: the tool turns it off on eth0 first and on
  * the macvlan before that comes up, because a link-local address built from
  * a MAC would hand the installation's MACs to every application that lists
- * its interface addresses. A later change that gives the guest IPv6 puts it
- * on wlan0.
+ * its interface addresses. The guest's IPv6 is wlan0's, which the framework
+ * enables once Wi-Fi is up, with an address that is not built from the MAC; a
+ * later change that gives the guest more IPv6 puts it on wlan0.
  *
  * The tool fails closed: without the lease or the source rule wlan0 would
  * either take over the address adb is reached on or send adb's replies out
