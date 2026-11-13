@@ -65,6 +65,7 @@ add_library(KernariumRuntime SHARED
     KernariumConsoleOutput.hpp
     KernariumGuestTimeZone.hpp
     KernariumHostFeatures.hpp
+    KernariumIdentity.hpp
     KernariumKeyWake.hpp
     KernariumMemoryPressure.hpp
     KernariumRestartLoop.hpp

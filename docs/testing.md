@@ -709,7 +709,8 @@ Build-side contracts need no Android build: `lineage24-target-files-fixtures`,
 `lineage24-first-boot-precompile` and the `lineage24-mesa-venus-*` tests run
 the producer's verifiers over fixtures, and `android-partition-boot-selection`,
 `android17-instance-rules` and `android17-macos-launcher-options` cover the host
-library and launcher over the storage layout
+library and launcher over the storage layout (`android17-launcher-arguments`,
+where the Android CLI is built, runs the executable's own argument checks)
 ([storage](../android/lineage-24/README.md#static-disk-and-boot-contract),
 [block device](../darwin/device/block/README.md)). `guest-android-disks`
 (integration) boots the Linux test guest on a release and a data disk the
@@ -782,16 +783,19 @@ anywhere is a blocker. The candidate must show:
   and is shown to fail on the stock one
   ([Camera](../android/lineage-24/README.md#camera)).
 
-`android-oobe`, `android-adb-debugging` and `android-guest-proc` (integration)
-each register only when `UML_ANDROID_OOBE_RELEASE`,
-`UML_ANDROID_ADB_DEBUGGING_RELEASE` or `UML_ANDROID_GUEST_PROC_RELEASE` names the
-release and the Android macOS executable is built (`UML_BUILD_ANDROID17_CLI`
+`android-oobe`, `android-adb-debugging`, `android-guest-proc` and
+`android-installation-identity` (integration) each register only when
+`UML_ANDROID_OOBE_RELEASE`, `UML_ANDROID_ADB_DEBUGGING_RELEASE`,
+`UML_ANDROID_GUEST_PROC_RELEASE` or `UML_ANDROID_INSTALLATION_IDENTITY_RELEASE`
+names the release and the Android macOS executable is built (`UML_BUILD_ANDROID17_CLI`
 with `UML_KERNEL_PRODUCT=android-17`: the executable embeds its product's
 kernel, and the Linux default cannot start Android's init). They boot blank
 instances and check the setup wizard's flow and end state, the product's adb
-defaults, and that the command Andarium's bug report sends for the guest's
+defaults, that the command Andarium's bug report sends for the guest's
 `/proc` counters (`GuestProcFiles`, its one source) reads each file or says why
-not; `tests/integration/android/run_guest_android_adb_vsock.py` is the
+not, and that each instance's guest reports its own serial number and eth0
+address, kept across a reboot and a new launch;
+`tests/integration/android/run_guest_android_adb_vsock.py` is the
 opt-in ADB-over-vsock counterpart of `guest-vsock-stream`.
 `android-microg-spoofing` (integration) additionally needs
 `UML_ANDROID_MICROG_PROBE_DIR`, the output of

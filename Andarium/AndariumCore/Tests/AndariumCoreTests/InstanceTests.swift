@@ -376,6 +376,63 @@ struct InstanceFileTests {
         #expect(!FileManager.default.fileExists(atPath: files.snapshot(for: "rel-b").path))
     }
 
+    /// What the runtime keeps beside the data disk: a synthetic one, since no
+    /// real installation's values belong in a test.
+    private static let identityContent = Data(
+        #"{"ethernet_mac": "02:aa:bb:cc:dd:ee", "schema": 1, "serialno": "0123456789abcdef"}"#.utf8)
+
+    @Test func theInstallationIdentityGoesThroughUpdatesRetriesAndRestoresUntouched() throws {
+        let (files, root, _) = try started()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Self.identityContent.write(to: files.identity)
+        let manager = FileManager.default
+        func unchanged(_ step: String) throws {
+            #expect(try Data(contentsOf: files.identity) == Self.identityContent, "\(step)")
+        }
+
+        let second = release("rel-b", build: 200)
+        try files.apply(try files.decide(for: second), release: second)
+        try unchanged("an update")
+        let retry = try files.decide(for: second, flags: InstanceFlags(retry: true))
+        try files.apply(retry, release: second)
+        try unchanged("a retry")
+        let restore = try files.decide(for: second, flags: InstanceFlags(restoreSnapshot: true))
+        try files.apply(restore, release: second)
+        try unchanged("a restore of the data an update started from")
+        try files.apply(try files.decide(for: second), release: second)
+        try files.complete(release: second)
+        try unchanged("a completed update")
+        let boot = try files.decide(for: second)
+        #expect(boot.action == .boot)
+        try files.apply(boot, release: second)
+        try unchanged("a boot")
+        #expect(manager.fileExists(atPath: files.identity.path))
+    }
+
+    @Test func resetAndANewDataDiskEndTheInstallationIdentity() throws {
+        let (files, root, first) = try started()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manager = FileManager.default
+        let leftover = files.directory.appendingPathComponent(InstanceFiles.identityFile + ".tmp-123")
+        try Self.identityContent.write(to: files.identity)
+        try Data("half".utf8).write(to: leftover)
+
+        // An erase and the tooling's reset delete the file and what a crash left of a write of it.
+        let reset = try files.decide(for: first, flags: InstanceFlags(reset: true))
+        #expect(reset.action == .reset)
+        try files.apply(reset, release: first)
+        #expect(!manager.fileExists(atPath: files.identity.path) && !manager.fileExists(atPath: leftover.path))
+
+        // A data disk that is gone starts a new installation, whatever lies beside it.
+        try Self.identityContent.write(to: files.identity)
+        try Data("disk".utf8).write(to: files.data)
+        try manager.removeItem(at: files.data)
+        let created = try files.decide(for: first)
+        #expect(created.action == .create)
+        try files.apply(created, release: first)
+        #expect(!manager.fileExists(atPath: files.identity.path))
+    }
+
     @Test func aReleaseIdentityIsReadFromTheManifestAndTheLayout() throws {
         let manifest = #"{"release_id": "20261102-los24-r5", "android": {"fingerprint": "Andarium/lineage_andarium/andarium:17/a/b:user/release-keys", "build_number": 1793463711, "security_patch": "2026-10-01"}}"#
         let layout = #"{"system_disk": {"sha256": "\#(String(repeating: "c", count: 64))"}, "data_disk": {"layout_version": 1, "capacity_gib": {"minimum": 4, "default": 8, "maximum": 64}}}"#

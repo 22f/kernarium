@@ -9,6 +9,9 @@
 #include "KernariumConsoleOutput.hpp"
 #include "KernariumGuestTimeZone.hpp"
 #include "KernariumHostFeatures.hpp"
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+#include "KernariumIdentity.hpp"
+#endif
 #include "KernariumKeyWake.hpp"
 #include "KernariumMemoryPressure.hpp"
 #include "KernariumLocation.hpp"
@@ -475,6 +478,14 @@ public:
                 "Kernarium: unable to bring the user network up again: %d\n",
                 opened);
         }
+    }
+
+    /* The hardware address the guest's eth0 has, in place of the provider's
+     * default, from the guest's next open on. */
+    [[nodiscard]] bool setEthernetAddress(
+        const std::array<std::uint8_t, 6>& address) noexcept
+    {
+        return uml_slirp_net_set_mac(context_, address.data()) == 0;
     }
 
     [[nodiscard]] void* context() const noexcept { return context_; }
@@ -1187,7 +1198,8 @@ void appendKernelCommandLine(
     std::string_view adbPublicKey,
     std::string_view timeZone,
     std::uint32_t hostFeatures,
-    std::string_view cameraLayout)
+    std::string_view cameraLayout,
+    const std::optional<std::string>& serial)
 {
     const auto path = storage.release() / uml::android::releaseCommandLine;
     constexpr std::string_view adbAuthorizationPrefix {
@@ -1200,6 +1212,11 @@ void appendKernelCommandLine(
         kernarium::adb::tcpPrefix,
         kernarium::timezone::prefix,
         uml::camera::layoutArgumentPrefix};
+    /* A run that has the installation's serial number drops the release's
+     * fixed one; a run that has none leaves the release's command line as it
+     * is. */
+    if (serial)
+        launcherPrefixes.push_back(uml::android::serialPrefix);
     for (const auto prefix : kernarium::hostfeatures::launcherPrefixes())
         launcherPrefixes.push_back(prefix);
     for (auto& argument :
@@ -1272,6 +1289,9 @@ void appendKernelCommandLine(
             std::string {uml::camera::layoutArgumentPrefix} +
             std::string {cameraLayout});
     }
+    /* Android init imports this as ro.boot.serialno and ro.serialno. */
+    if (serial)
+        arguments.emplace_back(uml::android::serialArgument(*serial));
 }
 
 #endif
@@ -1400,6 +1420,9 @@ struct GuestRequest final {
      * budget in bytes that sets their memory tier. */
     kernarium::camera::Request camera;
     std::uint64_t gpuBudgetBytes {};
+    /* The installation's serial number and eth0 address, the ones this run
+     * resolved; empty values leave the guest with what it has without them. */
+    uml::android::InstallationIdentity identity;
 #endif
     /* Where the run records how the session ended, empty for nowhere. */
     std::string sessionRecordPath;
@@ -1951,7 +1974,8 @@ private:
             request_.adbPublicKey,
             request_.timeZone,
             request_.hostFeatures,
-            cameras_.layout);
+            cameras_.layout,
+            request_.identity.serial);
 #else
         /* A sealed ext4 derivative is attached read-only; the per-run /init
          * mounts either kind of image beneath the overlay. */
@@ -2306,6 +2330,16 @@ int runtimeRun(
                     unknown);
             request.hostFeatures = boot->android_host_features & ~unknown;
         }
+        /* The identity a request states is kept as given: a value that is not
+         * valid fails the run, since the caller wants exactly that one. */
+        const auto statedIdentity = kernarium::identity::readRequest(*boot);
+        if (statedIdentity.invalid) {
+            std::fputs(
+                "Kernarium: invalid Android serial number or ethernet "
+                "address\n",
+                stderr);
+            return -UML_EMULATOR_INVALID_ARGUMENT;
+        }
         /* The camera is read the same way, and never fails a boot: what is not
          * a mode or a path is dropped, with a line. */
         request.camera = kernarium::camera::readRequest(*boot);
@@ -2330,16 +2364,43 @@ int runtimeRun(
         try {
             const std::filesystem::path release = boot->android_release_path;
             const std::filesystem::path dataDisk = boot->android_data_disk_path;
-            const auto prepared = uml::android::prepareDataDisk(
+            /* Locked from the data disk's preparation to the identity's
+             * resolution: a start that creates the disk and a start that
+             * finds it are not interleaved. The identity comes from the file
+             * beside the data disk unless the request states values, and a
+             * data disk this start made is a new installation. The host's own
+             * messages never carry the values. */
+            const auto prepared = uml::android::prepareInstallation(
                 uml::android::readLayout(release / uml::android::releaseLayout),
                 dataDisk,
-                boot->android_data_gib);
-            if (prepared.change != uml::android::DataDiskChange::none)
+                boot->android_data_gib,
+                kernarium::identity::identityRequest(statedIdentity, dataDisk));
+            const auto& resolved = prepared.identity;
+            if (prepared.disk.change != uml::android::DataDiskChange::none)
                 std::printf(
                     "Kernarium: %s the data disk, %u GiB\n",
-                    prepared.change == uml::android::DataDiskChange::created
+                    prepared.disk.change == uml::android::DataDiskChange::created
                         ? "created" : "grew",
-                    prepared.capacityGiB);
+                    prepared.disk.capacityGiB);
+            switch (resolved.outcome) {
+            case uml::android::IdentityOutcome::created:
+                std::puts("Kernarium: made the installation's identity");
+                break;
+            case uml::android::IdentityOutcome::replaced:
+                std::puts(
+                    "Kernarium: replaced an identity file that was not valid");
+                break;
+            case uml::android::IdentityOutcome::unsaved:
+                std::puts(
+                    "Kernarium: the identity file cannot be kept; this start "
+                    "uses values it will not keep");
+                break;
+            case uml::android::IdentityOutcome::fixed:
+            case uml::android::IdentityOutcome::stated:
+            case uml::android::IdentityOutcome::kept:
+                break;
+            }
+            request.identity = resolved.identity;
             request.androidStorage.emplace(release, dataDisk);
         } catch (const std::exception& error) {
             std::fprintf(
@@ -2390,6 +2451,16 @@ int runtimeRun(
             guestProcessorCount);
 
         AppNetwork network;
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        if (request.identity.ethernetMac &&
+            !network.setEthernetAddress(*request.identity.ethernetMac)) {
+            std::fputs(
+                "Kernarium: the user network refused the guest's ethernet "
+                "address\n",
+                stderr);
+            return -UML_EMULATOR_INVALID_ARGUMENT;
+        }
+#endif
         const PublishNetworkCounts publishedCounts {network};
         auto networkCallbacks = network.callbacks();
         const auto destroy = &uml_emulator_destroy;
