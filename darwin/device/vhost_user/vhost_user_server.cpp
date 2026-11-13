@@ -46,6 +46,13 @@ constexpr std::uint32_t maximumGuestMemoryRegions =
 constexpr int socketPollTimeoutMilliseconds =
     UML_GPU_STOP_POLL_TIMEOUT_MILLISECONDS;
 static_assert(socketPollTimeoutMilliseconds > 0);
+/* The start of the line written when a ring disable resets a device that
+ * holds deferred requests, followed by ` device=<name> ring=<index>
+ * deferred=<count>`. The Android runners match it. */
+constexpr const char* ringDisableResetPrefix =
+    "Vhost-user: device reset at ring disable:";
+/* How many such resets are each reported before only the doublings are. */
+constexpr unsigned reportedDisableResets = 256;
 constexpr std::uint64_t transportFeatures =
     protocol::vhostFeatureProtocol |
     protocol::virtioFeatureVersion1;
@@ -469,21 +476,22 @@ void VhostUserServer::resetDeviceState() noexcept
 }
 
 /* The one reset a guest's suspend can cause without a word, and it loses
- * what the guest holds: say so for the first few, and then each time the
- * count doubles, so a guest that does it in a loop cannot flood the log. */
+ * what the guest holds: each is said in one line, which the test runners
+ * match by `ringDisableResetPrefix` (see the constant). A guest that did it
+ * more than `reportedDisableResets` times is told of each doubling only, so
+ * a loop cannot flood the log. */
 void VhostUserServer::reportDisableReset(std::uint32_t ring) noexcept
 {
     const auto count = ++disableResets_;
-    if (count > 4 && (count & (count - 1U)) != 0)
+    if (count > reportedDisableResets && (count & (count - 1U)) != 0)
         return;
     std::fprintf(
         stderr,
-        "%s: ring %u disabled with %zu deferred request(s) pending: "
-        "resetting the device (reset %u)\n",
+        "%s device=%s ring=%u deferred=%zu\n",
+        ringDisableResetPrefix,
         device_->name(),
         ring,
-        pendingRequests_.size(),
-        count);
+        pendingRequests_.size());
 }
 
 bool VhostUserServer::requestsAreHeld() const noexcept
