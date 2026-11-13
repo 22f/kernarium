@@ -503,13 +503,25 @@ that carries a request is consumed and dropped, because its sender may be
 waiting with interrupts off; only the GPU, whose requests are asynchronous, the
 vsock and GNSS devices, whose requests the guest never waits on, and the video
 devices, whose streams outlive a suspend, ask to keep them. A ring disable also
-resets a device that holds a deferred request, unless the device asks to keep it
-(`keepsDeferredRequestsWhileDisabled()`, which the video devices do): the
-transport then leaves the device alone, keeps what it completes while a ring is
-disabled and writes it to the ring at its enable, in the order the device
-finished it. A message that changes the memory, the
+resets a device that holds a deferred request, and says so on stderr, unless the
+device asks to keep it
+(`keepsDeferredRequestsWhileDisabled()`, which the GPU, video and camera
+devices do): the transport then leaves the device alone, keeps what it
+completes while a ring is disabled and writes it to the ring at its enable, in
+the order the device finished it. A fenced GPU command still on the host when
+the guest suspends so keeps its contexts and resources, and its answer reaches
+the guest after the enable. A message that changes the memory, the
 features, a ring's layout or base, or ends the driver (the `GET_FEATURES` that
-follows a teardown's disables included) resets such a device first. That
+follows a teardown's disables included) resets such a device first. While the
+transport waits for the front-end to acknowledge a backend request (a
+shared-memory map or unmap, a configuration change, a call), that
+`GET_FEATURES` is answered after the wait and behind every message already
+queued, rather than inside it, since a reset sends unmaps of its own; so a
+device with a shared-memory region may keep its requests too. The wait ends with
+the acknowledgement, the end of the backend-request channel, or a service stop;
+it has no deadline of its own, and a front-end that never answers leaves the
+reset waiting. A reset whose unmap is refused or whose channel has ended also
+drops every range the backend published from the host index. That
 `GET_FEATURES` also retires every ring still disabled, which the guest then
 frees: the transport reads it no more until its next `SET_VRING_KICK` or
 in-band `VRING_KICK`, whereas an enabled ring, and a disabled one no teardown

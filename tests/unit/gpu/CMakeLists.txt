@@ -788,6 +788,15 @@ if(TARGET uml_gpu_service)
             UML::PublishedFigures
         INCLUDES ${_uml_gpu_device_directory} ${CMAKE_CURRENT_SOURCE_DIR}
         UNIT_DIRECTORY)
+
+    # A guest's suspend with a fenced command still on the host: the device
+    # keeps its context, and a driver that ends resets it.
+    uml_add_gpu_unit_test(gpu-device-suspend-held-fence
+        uml_gpu_device_suspend_tests
+        virtio_gpu_suspend_tests.cpp
+        LIBRARIES uml_gpu_server_device_test_variant
+        INCLUDES ${_uml_gpu_device_directory} ${CMAKE_CURRENT_SOURCE_DIR}
+        UNIT_DIRECTORY)
 endif()
 
 if(TARGET uml_gpu_display)
