@@ -144,6 +144,22 @@ target_include_directories(uml_runtime_stall_watch PUBLIC
     ${PROJECT_SOURCE_DIR}/darwin
     ${PROJECT_SOURCE_DIR}/darwin/runtime)
 
+# What the host gives back when the system says it is short of memory: the
+# policy (a response of the host GPU's cached allocations and one guest
+# page-cache trim, rate limited) and the system's side of it, the memory
+# pressure source and the figures. The guest's trim is the emulator's.
+add_library(uml_runtime_memory_pressure OBJECT
+    ${PROJECT_SOURCE_DIR}/darwin/runtime/memory_pressure_response.cpp
+    ${PROJECT_SOURCE_DIR}/darwin/runtime/memory_pressure_system.cpp)
+add_library(UML::RuntimeMemoryPressure ALIAS uml_runtime_memory_pressure)
+uml_declare_architecture_target(uml_runtime_memory_pressure runtime)
+target_link_libraries(uml_runtime_memory_pressure PUBLIC
+    UML::PlatformContract
+    UML::RuntimeGuestStatistics)
+target_include_directories(uml_runtime_memory_pressure PUBLIC
+    ${PROJECT_SOURCE_DIR}/darwin
+    ${PROJECT_SOURCE_DIR}/darwin/runtime)
+
 # Hibernating a paused guest's RAM: the order of the fence and the image.
 add_library(uml_runtime_hibernation OBJECT
     ${PROJECT_SOURCE_DIR}/darwin/runtime/guest_hibernation.cpp)
@@ -246,6 +262,7 @@ target_sources(uml_runtime_objects INTERFACE
     $<TARGET_OBJECTS:uml_runtime_thread_fence>
     $<TARGET_OBJECTS:uml_runtime_hibernation>
     $<TARGET_OBJECTS:uml_runtime_virtual_jetsam>
+    $<TARGET_OBJECTS:uml_runtime_memory_pressure>
     $<TARGET_OBJECTS:uml_runtime_guest_statistics>
     $<TARGET_OBJECTS:uml_runtime_guest_selector>
     $<TARGET_OBJECTS:uml_runtime_guest_sync>
