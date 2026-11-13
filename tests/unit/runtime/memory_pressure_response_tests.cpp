@@ -997,6 +997,8 @@ void aRetryIsNotJoinedToAResponseThatIsRunning()
 }
 
 [[nodiscard]] std::vector<PressureReport> reportsOf(FakeActions &actions);
+[[nodiscard]] bool sameReports(const std::vector<PressureReport> &got,
+	const std::vector<PressureReport> &wanted);
 
 /* ---- The gradual trimmer follows the level; its requests are retried
  * within a finite allowance. ---- */
@@ -1230,6 +1232,135 @@ void aWarningThatMeetsTheRetriedEndOfTheTrimmerTurnsItOnAgain()
 	require((actions.calls_taken() == std::vector<std::string>{
 		"trim-on", "trim-off", "trim-off", "trim-on"}));
 	require(response.retry_delay_ns() == 0);
+}
+
+/* ---- The level the response holds returns to normal when the source is
+ * quiet. The clock is the one the policy reads, the actions' now_ns (the
+ * process's awake clock in the host, which does not run while it is
+ * suspended). ---- */
+
+void theLevelReturnsToNormalWhenTheSourceStaysQuiet()
+{
+	FakeActions actions;
+	const PressureTiming timing;
+	MemoryPressureResponse response{actions, timing};
+	require(response.quiet_delay_ns() == 0, "a normal level has no period");
+	require(response.on_level(PressureLevel::warn) == Outcome::responded);
+	require(response.quiet_delay_ns() == timing.quiet_period_ns);
+	/* A timer that fires early finds the period not over, and says when. */
+	actions.advance(timing.quiet_period_ns - second);
+	require(response.on_retry() == Outcome::nothing);
+	require(actions.calls_named("trim-off") == 0);
+	require(response.quiet_delay_ns() == second);
+	actions.advance(second);
+	require(response.on_retry() == Outcome::quiet);
+	/* The way a delivered normal level goes: the trimmer off, one line, one
+	 * report. */
+	require((actions.calls_taken() ==
+		std::vector<std::string>{"trim-on", "trim-off"}));
+	require(contains(actions.lines_taken().back(),
+		"uml: memory pressure normal (was warn)") &&
+		contains(actions.lines_taken().back(), "no level for 240 s"),
+		actions.lines_taken().back());
+	require(sameReports(reportsOf(actions), {
+		{PressureLevel::warn, PressureReaction::responding},
+		{PressureLevel::normal, PressureReaction::none},
+	}));
+	require(response.quiet_delay_ns() == 0 && response.retry_delay_ns() == 0);
+	require(response.on_retry() == Outcome::nothing,
+		"the return to normal was made twice");
+	actions.advance(timing.quiet_period_ns);
+	require(response.on_retry() == Outcome::nothing);
+	require(actions.calls_named("trim-off") == 1);
+	/* The next warning is a new episode. */
+	require(response.on_level(PressureLevel::warn) == Outcome::responded);
+	require(response.quiet_delay_ns() == timing.quiet_period_ns);
+}
+
+void aLevelDeliveredInsideThePeriodMovesItsEnd()
+{
+	FakeActions actions;
+	const PressureTiming timing;
+	MemoryPressureResponse response{actions, timing};
+	require(response.on_level(PressureLevel::warn) == Outcome::responded);
+	actions.advance(timing.quiet_period_ns - 40 * second);
+	require(response.quiet_delay_ns() == 40 * second);
+	/* Another level, from the source, starts the period again. */
+	require(response.on_level(PressureLevel::critical) == Outcome::responded);
+	/* The period runs from the delivery, and the response that follows it
+	 * takes time on the fake clock. */
+	const std::uint64_t left = response.quiet_delay_ns();
+	require(left > timing.quiet_period_ns - 10 * second &&
+		left <= timing.quiet_period_ns);
+	actions.advance(left - second);
+	require(response.on_retry() == Outcome::nothing,
+		"the period ran from the first level");
+	require(actions.calls_named("trim-off") == 0);
+	actions.advance(second);
+	require(response.on_retry() == Outcome::quiet);
+	require(actions.calls_named("trim-off") == 1);
+	require(contains(actions.lines_taken().back(),
+		"normal (was critical)"), actions.lines_taken().back());
+}
+
+void aDeliveredNormalLevelEndsThePeriod()
+{
+	FakeActions actions;
+	const PressureTiming timing;
+	MemoryPressureResponse response{actions, timing};
+	require(response.on_level(PressureLevel::warn) == Outcome::responded);
+	actions.advance(second);
+	require(response.on_level(PressureLevel::normal) == Outcome::nothing);
+	require(response.quiet_delay_ns() == 0, "the period outlived the level");
+	actions.advance(2 * timing.quiet_period_ns);
+	require(response.on_retry() == Outcome::nothing);
+	require((actions.calls_taken() ==
+		std::vector<std::string>{"trim-on", "trim-off"}));
+	require(sameReports(reportsOf(actions), {
+		{PressureLevel::warn, PressureReaction::responding},
+		{PressureLevel::normal, PressureReaction::none},
+	}), "the timer said normal a second time");
+}
+
+/* A guest the host holds is not woken for the end of the trimmer, and a timer
+ * that fires after the resume asks for nothing more. */
+void aHeldGuestIsNotTrimmedBecauseOfAStaleTimer()
+{
+	FakeActions actions;
+	const PressureTiming timing;
+	MemoryPressureResponse response{actions, timing};
+	require(response.on_level(PressureLevel::warn) == Outcome::responded);
+	/* The process was suspended and resumed: its clock did not run meanwhile,
+	 * so a timer that fires at the resume finds the period not over. */
+	require(response.on_retry() == Outcome::nothing);
+	require(actions.calls_named("trim-off") == 0);
+	/* The period ends with the guest held: the host records the end for the
+	 * resume, and the response keeps nothing pending. */
+	actions.gradual_outcome = TrimOutcome::quiesced;
+	actions.advance(timing.quiet_period_ns);
+	require(response.on_retry() == Outcome::quiet);
+	require(actions.calls_named("trim-off") == 1);
+	require(response.retry_delay_ns() == 0 && response.quiet_delay_ns() == 0);
+	/* The resume, and a timer that was left set. */
+	actions.gradual_outcome = TrimOutcome::done;
+	actions.advance(2 * timing.quiet_period_ns);
+	require(response.on_retry() == Outcome::nothing);
+	require((actions.calls_taken() ==
+		std::vector<std::string>{"trim-on", "trim-off"}),
+		"a stale timer asked the guest for something");
+}
+
+void aQuietPeriodOfZeroNeverReturnsTheLevel()
+{
+	FakeActions actions;
+	PressureTiming timing;
+	timing.quiet_period_ns = 0;
+	MemoryPressureResponse response{actions, timing};
+	require(response.on_level(PressureLevel::warn) == Outcome::responded);
+	actions.advance(1000 * second);
+	require(response.quiet_delay_ns() == 0);
+	require(response.on_retry() == Outcome::nothing);
+	require(actions.calls_named("trim-off") == 0);
 }
 
 /* ---- What the host reads of the system's level. ---- */
@@ -1826,6 +1957,83 @@ void aPendingRetryEndsWithTheWatch()
 	require(trim.calls == 1 && later.calls == 0);
 }
 
+/* What the guest trim a watch makes was asked, by kind. */
+struct KindCounts final {
+	std::atomic<int> on{0};
+	std::atomic<int> off{0};
+	std::atomic<int> once{0};
+	int busy_once = 0;
+};
+
+TrimOutcome countKinds(void *context, TrimKind kind) noexcept
+{
+	auto &counts = *static_cast<KindCounts *>(context);
+	switch (kind) {
+	case TrimKind::gradual_on:
+		counts.on.fetch_add(1);
+		return TrimOutcome::done;
+	case TrimKind::gradual_off:
+		counts.off.fetch_add(1);
+		return TrimOutcome::done;
+	case TrimKind::once:
+		break;
+	}
+	return counts.once.fetch_add(1) < counts.busy_once ? TrimOutcome::busy
+							   : TrimOutcome::done;
+}
+
+/* The system's source delivers a warning and then nothing: the watch's own
+ * timer ends the level, as a delivered normal level would. */
+void aWatchReturnsToNormalWhenTheSourceStaysQuiet()
+{
+	uml::platform::publishGpuCacheReclaimer(nullptr);
+	KindCounts counts;
+	StderrCapture capture;
+	PressureTiming timing;
+	timing.quiet_period_ns = 100 * millisecond;
+	{
+		const auto watch = uml::runtime::start_memory_pressure_response(
+			&countKinds, &counts, timing);
+		require(watch != nullptr);
+		raiseAndWait(DISPATCH_MEMORYPRESSURE_WARN);
+		require(waitUntil([&] { return counts.off.load() == 1; },
+			std::chrono::seconds{20}), "the level never returned to normal");
+		require(counts.on.load() == 1);
+		require(!waitUntil([&] { return counts.off.load() > 1; },
+			std::chrono::milliseconds{300}),
+			"the return to normal was made twice");
+	}
+	capture.restore();
+	const std::string text = capture.take();
+	require(contains(text, "normal (was warn)") &&
+		contains(text, "no level for"), text);
+}
+
+/* A retry that comes due before the end of the quiet period sets the timer
+ * itself: it does not wait for the period. */
+void aRetryDoesNotWaitForTheQuietPeriod()
+{
+	uml::platform::publishGpuCacheReclaimer(nullptr);
+	KindCounts counts;
+	counts.busy_once = 2;
+	StderrCapture capture;
+	PressureTiming timing;
+	timing.retry_interval_ns = 20 * millisecond;
+	timing.quiet_period_ns = 600 * second;
+	{
+		const auto watch = uml::runtime::start_memory_pressure_response(
+			&countKinds, &counts, timing);
+		require(watch != nullptr);
+		/* The warning sets the timer for the quiet period. */
+		raiseAndWait(DISPATCH_MEMORYPRESSURE_WARN);
+		raiseAndWait(DISPATCH_MEMORYPRESSURE_CRITICAL);
+		require(waitUntil([&] { return counts.once.load() == 3; },
+			std::chrono::seconds{20}),
+			"the retry waited for the quiet period's timer");
+	}
+	capture.restore();
+}
+
 /* ---- The observer of the reports, against the system's source. ---- */
 
 /* What an observer heard, in order, and the guest trims counted by the time it
@@ -2379,6 +2587,20 @@ int main()
 			aMergedMaskTakesItsMostSeriousFlag},
 		{"a-watch-ends-with-deliveries-queued-behind-a-held-policy-call",
 			aWatchEndsWithDeliveriesQueuedBehindAHeldPolicyCall},
+		{"the-level-returns-to-normal-when-the-source-stays-quiet",
+			theLevelReturnsToNormalWhenTheSourceStaysQuiet},
+		{"a-level-delivered-inside-the-period-moves-its-end",
+			aLevelDeliveredInsideThePeriodMovesItsEnd},
+		{"a-delivered-normal-level-ends-the-period",
+			aDeliveredNormalLevelEndsThePeriod},
+		{"a-held-guest-is-not-trimmed-because-of-a-stale-timer",
+			aHeldGuestIsNotTrimmedBecauseOfAStaleTimer},
+		{"a-quiet-period-of-zero-never-returns-the-level",
+			aQuietPeriodOfZeroNeverReturnsTheLevel},
+		{"a-watch-returns-to-normal-when-the-source-stays-quiet",
+			aWatchReturnsToNormalWhenTheSourceStaysQuiet},
+		{"a-retry-does-not-wait-for-the-quiet-period",
+			aRetryDoesNotWaitForTheQuietPeriod},
 		{"a-callback-that-meets-a-stop-and-a-start-hands-its-notification-to-no-one",
 			aCallbackThatMeetsAStopAndAStartHandsItsNotificationToNoOne},
 		{"clearing-the-observer-waits-for-a-call-in-progress",

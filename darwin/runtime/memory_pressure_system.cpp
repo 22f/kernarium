@@ -226,8 +226,10 @@ struct MemoryPressureWatch::State final {
 	Hub &hub;
 	SystemActions actions;
 	MemoryPressureResponse response;
-	/* A retry is due on the policy queue; only the queue touches it. */
+	/* The timer is set, for a retry or for the end of the quiet period; only
+	 * the policy queue touches these. */
 	bool retry_armed{};
+	bool timer_for_retry{};
 };
 
 namespace {
@@ -235,15 +237,27 @@ namespace {
 void retry_due(void *context) noexcept;
 
 /* On the policy queue, after anything that may have left a guest trim
- * pending. */
+ * pending or moved the end of the quiet period. A retry comes first: it sets
+ * the timer even when it is set for the quiet period. The quiet period's own
+ * timer is not set again for each delivery: it fires at the first deadline,
+ * on_retry() finds the period not over, and the next call sets it for what is
+ * left. */
 void arm_retry(Hub &hub, MemoryPressureWatch::State &state) noexcept
 {
-	if (state.retry_armed)
-		return;
-	const std::uint64_t delay = state.response.retry_delay_ns();
-	if (delay == 0U)
-		return;
+	std::uint64_t delay = state.response.retry_delay_ns();
+	const bool retry = delay != 0U;
+	if (retry) {
+		if (state.retry_armed && state.timer_for_retry)
+			return;
+	} else {
+		if (state.retry_armed)
+			return;
+		delay = state.response.quiet_delay_ns();
+		if (delay == 0U)
+			return;
+	}
 	state.retry_armed = true;
+	state.timer_for_retry = retry;
 	hub.retry_state = &state;
 	hub.retry_epoch = hub.epoch.load();
 	dispatch_source_set_timer(hub.retry_timer,
@@ -273,6 +287,7 @@ void retry_due(void *context) noexcept
 	    hub.retry_epoch != hub.epoch.load())
 		return;
 	state->retry_armed = false;
+	state->timer_for_retry = false;
 	(void)state->response.on_retry();
 	arm_retry(hub, *state);
 }

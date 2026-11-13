@@ -61,6 +61,7 @@ void dropped_text(FixedText &out, std::uint64_t dropped) noexcept
 		return PressureReaction::underway;
 	case MemoryPressureResponse::Outcome::nothing:
 	case MemoryPressureResponse::Outcome::retried:
+	case MemoryPressureResponse::Outcome::quiet:
 		break;
 	}
 	return PressureReaction::none;
@@ -180,7 +181,7 @@ bool MemoryPressureResponse::admit_line(LineBudget &budget,
 }
 
 void MemoryPressureResponse::log_level_change(PressureLevel from,
-	PressureLevel to) noexcept
+	PressureLevel to, bool quiet) noexcept
 {
 	std::uint64_t dropped = 0;
 	if (!admit_line(level_lines_, dropped))
@@ -193,12 +194,40 @@ void MemoryPressureResponse::log_level_change(PressureLevel from,
 	footprint_text(line, now.footprint);
 	line.text(", ").number(static_cast<std::int64_t>(now.wire_failures))
 		.text(" guest RAM wire failures");
+	if (quiet)
+		line.text("; no level for ")
+			.number(static_cast<std::int64_t>(
+				timing_.quiet_period_ns / 1'000'000'000ULL))
+			.text(" s");
 	dropped_text(line, dropped);
 	actions_.log({buffer, line.size()});
 }
 
+bool MemoryPressureResponse::quiet_due(std::uint64_t now) const noexcept
+{
+	return timing_.quiet_period_ns != 0U && level_ != PressureLevel::normal &&
+	       !running_ && elapsed(last_level_ns_, now) >= timing_.quiet_period_ns;
+}
+
+std::uint64_t MemoryPressureResponse::quiet_delay_ns() const noexcept
+{
+	const std::lock_guard lock{mutex_};
+	if (timing_.quiet_period_ns == 0U || level_ == PressureLevel::normal)
+		return 0;
+	const std::uint64_t quiet = elapsed(last_level_ns_, actions_.now_ns());
+	/* Due, and held back by a response that is running: look again soon. */
+	return quiet >= timing_.quiet_period_ns ? timing_.retry_interval_ns :
+		timing_.quiet_period_ns - quiet;
+}
+
 MemoryPressureResponse::Outcome MemoryPressureResponse::on_level(
 	PressureLevel level) noexcept
+{
+	return handle_level(level, false);
+}
+
+MemoryPressureResponse::Outcome MemoryPressureResponse::handle_level(
+	PressureLevel level, bool quiet) noexcept
 {
 	PressureLevel previous = PressureLevel::normal;
 	Outcome outcome = Outcome::nothing;
@@ -210,14 +239,18 @@ MemoryPressureResponse::Outcome MemoryPressureResponse::on_level(
 		/* Read under the mutex: calls from several threads then see the
 		 * clock in the order the mutex gives them. */
 		const std::uint64_t now = actions_.now_ns();
+		if (quiet && !quiet_due(now))
+			return Outcome::nothing;
 		previous = std::exchange(level_, level);
+		if (level != PressureLevel::normal)
+			last_level_ns_ = now;
 		if (level == PressureLevel::normal) {
 			/* The pressure is over: a request still pending is not wanted,
 			 * but the gradual trimmer is ended, unless a response that is
 			 * running ends it when it returns. */
 			retry_pending_ = false;
 			end_gradual = gradual_on_ && !running_;
-			outcome = Outcome::nothing;
+			outcome = quiet ? Outcome::quiet : Outcome::nothing;
 		} else {
 			/* The pressure is back: an end of the gradual trimmer that is
 			 * still pending is no longer wanted. */
@@ -252,7 +285,7 @@ MemoryPressureResponse::Outcome MemoryPressureResponse::on_level(
 	 * the event at once, and the response's work follows. */
 	actions_.report({level, reaction_of(outcome)});
 	if (level != previous)
-		log_level_change(previous, level);
+		log_level_change(previous, level, quiet);
 	if (end_gradual)
 		end_gradual_trim();
 	if (arm_gradual)
@@ -410,19 +443,29 @@ MemoryPressureResponse::Outcome MemoryPressureResponse::on_retry() noexcept
 	PressureLevel level = PressureLevel::normal;
 	TrimKind kind = TrimKind::once;
 	unsigned attempt = 0;
+	bool quiet = false;
 	{
 		const std::lock_guard lock{mutex_};
-		if (!retry_pending_)
-			return Outcome::nothing;
-		if (running_)
-			return Outcome::busy;
-		running_ = true;
-		level = retry_level_;
-		kind = retry_kind_;
-		--retry_attempts_left_;
-		attempt = timing_.retry_attempts - retry_attempts_left_;
-		++counts_.retries;
+		if (quiet_due(actions_.now_ns())) {
+			/* The source has delivered nothing but the normal level for the
+			 * quiet period: the level returns to normal as if it had been
+			 * delivered (the call below, with the lock released, checks again). */
+			quiet = true;
+		} else {
+			if (!retry_pending_)
+				return Outcome::nothing;
+			if (running_)
+				return Outcome::busy;
+			running_ = true;
+			level = retry_level_;
+			kind = retry_kind_;
+			--retry_attempts_left_;
+			attempt = timing_.retry_attempts - retry_attempts_left_;
+			++counts_.retries;
+		}
 	}
+	if (quiet)
+		return handle_level(PressureLevel::normal, true);
 	const PressureFigures before = actions_.figures();
 	const std::uint64_t trim_start = actions_.now_ns();
 	const TrimOutcome trim = kind == TrimKind::once ?

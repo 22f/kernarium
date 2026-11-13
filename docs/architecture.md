@@ -123,8 +123,11 @@ level included (`set_pressure_observer`, and the runtime API's
 and a second serial queue handles the deliveries one at a time, in the order
 they arrived: a level raised during a response is reported and answered after
 it, and a notification the system itself merged reads as its most serious flag.
-At most 64 deliveries wait, and the oldest is dropped beyond that. The observer
-lives for the process. Each level change and each response is one rate-limited
+At most 64 deliveries wait, and the oldest is dropped beyond that. An iPad's
+source never delivers the normal level, so the level held returns to normal
+itself, the same way and with a report, after 240 s of awake time in which the
+source delivered no level but normal (the policy's timer, no thread of its
+own). The observer lives for the process. Each level change and each response is one rate-limited
 line: the footprint, the failed guest-RAM wiring operations and, on a response
 line, the bytes each part released and the trim's duration (a warning's, the
 state of the trimmer).

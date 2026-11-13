@@ -35,6 +35,15 @@ namespace uml::runtime {
  * free where the guest runs as asked), and any level but normal cancels a
  * pending request to turn it off.
  *
+ * The system need not say when the pressure ends (an iPad's source never
+ * delivered the normal level after a critical one). The level the response
+ * holds therefore returns to normal by itself when the source has delivered
+ * no level other than normal for `PressureTiming::quiet_period_ns`, on the
+ * clock of PressureActions::now_ns (which does not run while the process is
+ * suspended, as the caller's timer does not): on_retry() makes the return, the
+ * same way the normal level does, and says so on its level line. A delivered
+ * normal level ends it at once.
+ *
  * A warning starts at most one response per `warn_interval_ns`, counted from
  * the start of the last response of either level, on the clock of
  * PressureActions::now_ns. A critical level always starts one. No response
@@ -206,6 +215,11 @@ struct PressureTiming final {
 	std::uint64_t retry_interval_ns = 1'000'000'000ULL;
 	/* How many times a busy trim is tried again; 0 for never. */
 	unsigned retry_attempts = 4;
+	/* How long the source must deliver no level but the normal one for the
+	 * response to return to normal itself; 0 for never. Three times the longest
+	 * gap seen between two critical levels of one episode (78 s, on an iPad,
+	 * where the normal level never came). */
+	std::uint64_t quiet_period_ns = 240'000'000'000ULL;
 };
 
 class MemoryPressureResponse final {
@@ -232,6 +246,8 @@ public:
 		busy,
 		/* on_retry() ran the pending guest trim again. */
 		retried,
+		/* on_retry() returned the level to normal after the quiet period. */
+		quiet,
 	};
 
 	explicit MemoryPressureResponse(PressureActions &actions,
@@ -252,10 +268,16 @@ public:
 	 * caller runs on_retry() that long after each call that may leave one. */
 	[[nodiscard]] std::uint64_t retry_delay_ns() const noexcept;
 
+	/* How long from now the quiet period ends, 0 when the level held is
+	 * normal (or the period is off). The caller runs on_retry() that long after
+	 * each call that may have moved it. */
+	[[nodiscard]] std::uint64_t quiet_delay_ns() const noexcept;
+
 	/* The pending guest trim is tried again, on the calling thread. Nothing
 	 * happens when none is pending (a later response or the normal level
 	 * took it), and a call that meets a response running returns busy and
-	 * leaves it pending. */
+	 * leaves it pending. When the quiet period has ended it returns the level
+	 * to normal instead, whatever is pending (the normal level takes it). */
 	Outcome on_retry() noexcept;
 
 	/* The response's counters, for a test or a report. */
@@ -290,7 +312,14 @@ private:
 	 * one. */
 	[[nodiscard]] bool admit_line(LineBudget &budget,
 		std::uint64_t &dropped) noexcept;
-	void log_level_change(PressureLevel from, PressureLevel to) noexcept;
+	void log_level_change(PressureLevel from, PressureLevel to,
+		bool quiet) noexcept;
+	/* on_level(), and on_retry()'s return to normal (`quiet`), which does
+	 * nothing unless the period has ended. */
+	Outcome handle_level(PressureLevel level, bool quiet) noexcept;
+	/* Whether the period has ended. Under the mutex, with the clock read
+	 * under it. */
+	[[nodiscard]] bool quiet_due(std::uint64_t now) const noexcept;
 	void respond(PressureLevel level, std::uint64_t events_skipped) noexcept;
 	/* Asks for the gradual trimmer off, after the normal level, and keeps the
 	 * request pending when it could not be sent. */
@@ -311,6 +340,8 @@ private:
 	const PressureTiming timing_;
 	mutable std::mutex mutex_;
 	PressureLevel level_{PressureLevel::normal};
+	/* When the source last delivered a level other than normal. */
+	std::uint64_t last_level_ns_{};
 	bool running_{};
 	bool started_{};
 	std::uint64_t last_start_ns_{};

@@ -964,7 +964,9 @@ enum {
 /* `level` is a KERNARIUM_RUNTIME_MEMORY_PRESSURE_ value and `response` a
  * KERNARIUM_RUNTIME_MEMORY_RESPONSE_ value. It is called once for each
  * notification the system delivers while a guest runs, the repeats and the
- * return to NORMAL included, as soon as the host has decided what it does and
+ * return to NORMAL included (also the host's own return to NORMAL after a long
+ * quiet, for a system that never delivers it), as soon as the host has decided
+ * what it does and
  * before it starts the work for that notification (a response can take
  * seconds), in the order delivered. The host handles the notifications one at a
  * time: a level raised during a response is reported after the response, and
