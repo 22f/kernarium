@@ -251,15 +251,17 @@ void theStateReceiverReportsChanges()
         "in the order they happened");
 
     // A blocked guest's opens: reported at each open, idle between, and a guest that ends closes it.
+    const auto beforeOpens = reports.states.size();
     receiver.publish(CameraState::blockedInUse);
     receiver.publish(CameraState::blockedInUse);
     receiver.publish(CameraState::idle);
     receiver.publish(CameraState::blockedInUse);
-    require((std::vector<int>(reports.states.end() - 3, reports.states.end()) == std::vector<int> {
-                KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE,
-                KERNARIUM_RUNTIME_CAMERA_STATE_IDLE,
-                KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE}),
-        "each open is reported once, with idle between");
+    require((std::vector<int>(reports.states.begin() + static_cast<std::ptrdiff_t>(beforeOpens), reports.states.end())
+                == std::vector<int> {
+                    KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE,
+                    KERNARIUM_RUNTIME_CAMERA_STATE_IDLE,
+                    KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE}),
+        "each open is reported once, with idle between, and nothing else");
     receiver.ended();
     require(reports.states.back() == KERNARIUM_RUNTIME_CAMERA_STATE_IDLE && receiver.current() == 0,
         "a guest that ends with a camera open leaves none open");

@@ -851,8 +851,18 @@ void testBlockedSaysWhenTheGuestOpensACamera()
     rig.attach(5, 1, nv12Size(640, 480));
     (void)rig.queue(5, 1);
     require(rig.states.back() == CameraState::blockedInUse, "open again");
+    const auto beforeReset = rig.states.size();
     rig.device->reset();
-    require(rig.states.back() == CameraState::idle, "a reset closes it");
+    require(rig.states.size() == beforeReset + 1 && rig.states.back() == CameraState::idle, "a reset closes it, and says so once");
+    rig.device->reset();
+    require(rig.states.size() == beforeReset + 1, "a reset with nothing open says nothing");
+    // The driver recreates its stream after the reset and the guest opens a camera again: a new open.
+    rig.create(5, 0, videoKind);
+    rig.setVideo(5, 640, 480);
+    rig.attach(5, 1, nv12Size(640, 480));
+    (void)rig.queue(5, 1);
+    require(rig.states.size() == beforeReset + 2 && rig.states.back() == CameraState::blockedInUse,
+            "an open after a reset is reported again, exactly once");
     require(rig.camera->sessionsOpened() == 0, "and none of it opened a capture session, so the system's indicator stayed off");
 }
 
