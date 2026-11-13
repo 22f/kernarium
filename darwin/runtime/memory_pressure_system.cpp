@@ -105,8 +105,11 @@ struct Hub final {
 	/* The timer of the retries, made with the hub so that arming a retry
 	 * allocates nothing of its own: a retry is wanted when the system is
 	 * short of memory. One-shot, set again for each retry and disarmed at
-	 * an unbind. */
+	 * an unbind. It is resumed by the first retry: a resumed timer source
+	 * costs the process a thread of libdispatch's, and a process that
+	 * never needs a retry keeps the one thread of the pressure source. */
 	dispatch_source_t retry_timer{};
+	bool retry_timer_resumed{};
 	/* The run that listens; touched only on the queue. */
 	MemoryPressureWatch::State *current{};
 	/* Counts every bind and unbind, so that a retry that fires after its run
@@ -157,13 +160,18 @@ void arm_retry(Hub &hub, MemoryPressureWatch::State &state) noexcept
 	dispatch_source_set_timer(hub.retry_timer,
 		dispatch_time(DISPATCH_TIME_NOW, static_cast<std::int64_t>(delay)),
 		DISPATCH_TIME_FOREVER, delay / 10U);
+	if (!hub.retry_timer_resumed) {
+		hub.retry_timer_resumed = true;
+		dispatch_resume(hub.retry_timer);
+	}
 }
 
 void disarm_retry(Hub &hub) noexcept
 {
 	hub.retry_state = nullptr;
-	dispatch_source_set_timer(hub.retry_timer, DISPATCH_TIME_FOREVER,
-		DISPATCH_TIME_FOREVER, 0);
+	if (hub.retry_timer_resumed)
+		dispatch_source_set_timer(hub.retry_timer, DISPATCH_TIME_FOREVER,
+			DISPATCH_TIME_FOREVER, 0);
 }
 
 /* On the queue, when the timer fires. A retry that was set for a run that has
@@ -219,9 +227,6 @@ Hub *make_hub() noexcept
 	dispatch_resume(hub->source);
 	dispatch_set_context(hub->retry_timer, hub);
 	dispatch_source_set_event_handler_f(hub->retry_timer, &retry_due);
-	dispatch_source_set_timer(hub->retry_timer, DISPATCH_TIME_FOREVER,
-		DISPATCH_TIME_FOREVER, 0);
-	dispatch_resume(hub->retry_timer);
 	return hub;
 }
 
