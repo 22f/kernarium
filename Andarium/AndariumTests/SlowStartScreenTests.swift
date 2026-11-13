@@ -225,9 +225,11 @@ struct SlowStartScreenTests {
     /// Simulator preference `ApplicationAccessibilityEnabled`); a run without
     /// it finds none and the test says so.
     private func screen(
-        _ fixture: Fixture, in lease: HostWindow.Lease, finding labels: [String]
+        _ fixture: Fixture, in lease: HostWindow.Lease, finding labels: [String],
+        contentSize: UIContentSizeCategory? = nil
     ) async throws -> (UIViewController, [String: NSObject]) {
         let controller = UIHostingController(rootView: BootView(kind: .normal).environment(fixture.model))
+        if let contentSize { controller.traitOverrides.preferredContentSizeCategory = contentSize }
         lease.window.rootViewController = controller
         controller.view.layoutIfNeeded()
         var found: [String: NSObject] = [:]
@@ -439,6 +441,52 @@ struct SlowStartScreenTests {
         #expect(button(labelled: "Stop", in: controller.view) == nil)
     }
 
+    // MARK: The buttons' size
+
+    /// The application's ordinary button: the end screen's Copy report is 44
+    /// points tall at the default text size, the minimum touch target.
+    private static let ordinaryButtonHeight: CGFloat = 44
+
+    /// Every content size the system offers, the smallest first.
+    private static let contentSizes: [UIContentSizeCategory] = [
+        .extraSmall, .small, .medium, .large, .extraLarge, .extraExtraLarge, .extraExtraExtraLarge,
+        .accessibilityMedium, .accessibilityLarge, .accessibilityExtraLarge, .accessibilityExtraExtraLarge,
+        .accessibilityExtraExtraExtraLarge,
+    ]
+
+    private func noticeFixture() -> Fixture {
+        let fixture = fixture()
+        begun(fixture)
+        fixture.clock.advance(185)
+        fixture.model.updateSlowStart()
+        return fixture
+    }
+
+    /// Stop alone (a build with no receiver for feedback, or none arranged): as
+    /// tall as the application's ordinary button at the default text size, no
+    /// less at any size, and as wide as its label and no more: it is not one bar
+    /// across the notice.
+    private func checkStopAlone(_ fixture: Fixture) async throws {
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        for size in Self.contentSizes {
+            let (controller, found) = try await screen(fixture, in: lease, finding: ["Stop"], contentSize: size)
+            guard let stop = found["Stop"] else {
+                Issue.record("Stop was not found at \(size.rawValue): is application accessibility on in this Simulator?")
+                return
+            }
+            let frame = stop.accessibilityFrame
+            let context = "Stop alone at \(size.rawValue): \(frame)"
+            if size == .large {
+                #expect(abs(frame.height - Self.ordinaryButtonHeight) < 0.5, "not the ordinary height: \(context)")
+                #expect(frame.width < controller.view.bounds.width * 0.6, "a bar across the notice: \(context)")
+                #expect(frame.width >= 100, "a sliver: \(context)")
+            } else {
+                #expect(frame.height >= Self.ordinaryButtonHeight - 0.5, "under the touch target: \(context)")
+            }
+        }
+    }
+
     #if FEEDBACK_MAIL
     @Test func sendFeedbackIsOfferedWhereTheReceiverIs() async throws {
         let fixture = fixture()
@@ -503,6 +551,48 @@ struct SlowStartScreenTests {
         host.dismiss(animated: false)
     }
 
+    /// Stop and Send feedback are the application's ordinary button size: 44
+    /// points tall at the default text size, side by side at one width, and no
+    /// less than the touch target at any text size, stacked where a label does
+    /// not fit beside the other.
+    @Test func theButtonsAreTheApplicationsOrdinarySizeAtTheDefaultTextSize() async throws {
+        let fixture = noticeFixture()
+        var services = SendFeedbackServices()
+        services.address = { "feedback@example.com" }
+        fixture.model.feedbackServices = services
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let (_, found) = try await screen(fixture, in: lease, finding: ["Stop", "Send feedback"], contentSize: .large)
+        guard let stop = found["Stop"], let feedback = found["Send feedback"] else {
+            Issue.record("the buttons were not found: is application accessibility on in this Simulator?")
+            return
+        }
+        let (a, b) = (stop.accessibilityFrame, feedback.accessibilityFrame)
+        let context = "Stop \(a), Send feedback \(b)"
+        #expect(abs(a.height - Self.ordinaryButtonHeight) < 0.5 && abs(b.height - Self.ordinaryButtonHeight) < 0.5, "\(context)")
+        #expect(abs(a.minY - b.minY) < 0.5 && abs(a.width - b.width) < 1, "side by side at one width: \(context)")
+        #expect(a.minX < b.minX)
+    }
+
+    @Test(arguments: SlowStartScreenTests.contentSizes)
+    func theButtonsAreNoLessThanTheTouchTargetAtEverySize(size: UIContentSizeCategory) async throws {
+        let fixture = noticeFixture()
+        var services = SendFeedbackServices()
+        services.address = { "feedback@example.com" }
+        fixture.model.feedbackServices = services
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let (_, found) = try await screen(fixture, in: lease, finding: ["Stop", "Send feedback"], contentSize: size)
+        guard let stop = found["Stop"], let feedback = found["Send feedback"] else {
+            Issue.record("the buttons were not found: is application accessibility on in this Simulator?")
+            return
+        }
+        let (a, b) = (stop.accessibilityFrame, feedback.accessibilityFrame)
+        let context = "\(size.rawValue): Stop \(a), Send feedback \(b)"
+        #expect(a.height >= Self.ordinaryButtonHeight - 0.5 && b.height >= Self.ordinaryButtonHeight - 0.5, "under the touch target: \(context)")
+        #expect(abs(a.width - b.width) < 1, "one width: \(context)")
+    }
+
     /// The mail names the step the notice shows, from the same source: while
     /// the debugger prepares the JIT the screen is at its first step.
     @Test func theMailNamesTheStepTheNoticeShows() {
@@ -535,7 +625,19 @@ struct SlowStartScreenTests {
         #expect(found["Stop"] != nil, "is application accessibility on in this Simulator?")
         #expect(button(labelled: "Send feedback", in: controller.view) == nil)
     }
+
+    @Test func stopAloneIsTheOrdinaryButtonAndNotABar() async throws {
+        let fixture = noticeFixture()
+        var services = SendFeedbackServices()
+        services.address = { nil }
+        fixture.model.feedbackServices = services
+        try await checkStopAlone(fixture)
+    }
     #else
+    @Test func stopAloneIsTheOrdinaryButtonAndNotABar() async throws {
+        try await checkStopAlone(noticeFixture())
+    }
+
     @Test func aBuildWithoutSendFeedbackHasStopAlone() async throws {
         let fixture = fixture()
         begun(fixture)
