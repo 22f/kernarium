@@ -2040,29 +2040,6 @@
         }
       }
     },
-    "Back up virtual machine data" : {
-      "comment" : "Switch: include the virtual machine's data in iCloud and computer backups.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "仮想マシンのデータをバックアップ"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "备份虚拟机数据"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "備份虛擬機器資料"
-          }
-        }
-      }
-    },
     "Backup" : {
       "comment" : "Home section about backups of the virtual machine's data.",
       "localizations" : {
@@ -4124,6 +4101,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "位於%@"
+          }
+        }
+      }
+    },
+    "Include in backups" : {
+      "comment" : "Switch: include the virtual machine's data in iCloud and computer backups.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バックアップに含める"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "包含在备份中"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "包含在備份中"
           }
         }
       }

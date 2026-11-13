@@ -167,10 +167,21 @@ manager follows the host's orientation as a rotation proposal that Android's own
 policy (auto-rotate, the foreground application's requested orientation) still
 decides on; the sub-HAL gives the framework the host's last orientation when it
 enables the sensor, and Android keeps its rotation until the host has said one.
-Without the argument the sub-HAL lists the accelerometer and the gyroscope alone
-and Android judges the accelerometer, as before. The host sends its current
+Without the argument the sub-HAL does not list the sensor and Android judges the
+accelerometer, as before. The host sends its current
 orientation at the start of each connection whose control frames say the guest
 has the sensor (`overlay/sensors/motion_protocol.hpp` has the frames).
+
+When the launch passes `androidboot.kernarium.compass=1` (a host with a
+magnetometer), the sub-HAL also lists a continuous `TYPE_MAGNETIC_FIELD` sensor
+(20 ms to 1 s) fed with the host's field in the device's frame, with the host's
+accuracy as the event's status, and says so in a 20-byte "ANC3" control frame;
+the framework declares `android.hardware.sensor.compass` from the same property
+(the `SystemConfig` topic of route p0007 reads the vendor's `kernarium_compass`
+permission directory only then). The property is supplied only by an application
+that speaks the 20-byte request, and forcing it for an older application is
+unsupported. Without the argument the image lists no magnetometer, declares no
+compass and ends the connection on a magnetic field record, as before.
 
 ### Haptics
 
@@ -365,14 +376,22 @@ otherwise; the framework overlay reads that switch
 (`config_supportsHardwareCamToggle`) and Android shows its own blocked-camera
 state. The host also sends black frames while it interrupts a camera, and the
 HAL passes them on as frames of the camera. Output sizes the host lacks that
-CTS and the camera API require (standard JPEG sizes, the YUV sizes of every
-smaller JPEG, 1920x1440 and 1280x720 for a concurrent camera) are cut from the
-smallest native video mode that covers them, scaled in the HAL and, for a
-JPEG, encoded there. A request whose outputs the host refuses or does not
-deliver within the HAL's deadline (3 s, 15 s for a request with a still) is a
-failed request (`ERROR_REQUEST`, which Camera2 and CameraX report as a failed
-capture); a request that loses only some of its outputs reports
-`ERROR_BUFFER` for those. `BURST_CAPTURE` is never declared. The candidate's
+CTS and the camera API require (standard JPEG sizes, 3840x2160 where that is the
+largest video mode, which is the recording size of the large tier, the YUV sizes
+of every smaller JPEG, 1920x1440 and 1280x720 for a concurrent camera) are cut
+from the smallest native video mode that covers them, scaled in the HAL and, for
+a JPEG, encoded there; the 3840x2160 one is cut from the mode of that size, so
+it asks the host for nothing a stream of that mode does not, and it is listed
+only when the camera's stills reach that size. A request whose
+outputs the host refuses or does not deliver within the HAL's deadline (3 s,
+15 s for a request with a still) is a failed request (`ERROR_REQUEST`, which
+Camera2 and CameraX report as a failed capture); a request that loses only some
+of its outputs reports `ERROR_BUFFER` for those. `BURST_CAPTURE` is never
+declared. A camera lists the keys it honours: the frame duration and the black
+level lock only with `MANUAL_SENSOR`, the AF regions only with autofocus, and no
+camera lists the tone map mode or curves or states the available tone map modes
+(the templates carry no tone map key). Every result carries the scene mode
+(`DISABLED`) and, with `MANUAL_SENSOR`, the black level lock. The candidate's
 smoke test is `tests/integration/android/run_android_camera.py`
 (`android-camera`).
 
@@ -387,10 +406,16 @@ and `CONFIG_VIRT_WIFI` built in (the verifier requires them). Apps see Wi-Fi
 only, the open SSID `VirtWifi`, because the product declares
 `android.hardware.wifi` and not `android.hardware.ethernet`; turning Wi-Fi or
 airplane mode off takes apps offline while adb keeps working. The platform
-validates a Wi-Fi network without probes (route `p0029`): NetworkMonitor sends
-none and reports the network validated once private DNS passes, so a blocked
-validation server never leaves a no-internet state or a sign-in notification. A
-VPN, a test network, DNS and the private DNS settings keep the stock rules. The
+validates a Wi-Fi network before it checks it (route `p0029`): NetworkMonitor
+reports it validated once private DNS passes and then probes it, again after a
+back-off while the checks fail, and without evaluating private DNS again. A
+failed check, including one that a sign-in or block page answers, shows a warning
+in the status bar and the Wi-Fi list (route `p0033`) and changes nothing else:
+a failed check never leaves the network unvalidated and no sign-in notification
+is posted. A forced re-evaluation checks a validated network; a network whose
+private DNS has failed is evaluated as the stock rules say. A VPN, a test
+network, a network under CTS's test URLs, a network the stock rules do not
+validate, DNS and the private DNS settings keep the stock rules. The
 product's one network, VirtWifi, is saved once and is never disabled for lack of
 internet (`overlay/rro/KernariumWifiOverlay`), because the platform never joins a
 disabled network again. Until the station has joined it once, a boot that finds
@@ -731,8 +756,11 @@ A guest reboot restarts the guest in the same host process, so `adb reboot`,
 Every restart reads `misc` again: `boot-recovery` boots recovery, which clears
 it, and no command boots Android. There is no bootloader, so the launcher
 behaves as a bootloader that continues and clears a `bootonce-bootloader`
-command. A guest that restarts within 15 s of booting five times in a row ends
-the launch with exit status 3.
+command. A guest that restarts five times in a row within 15 s of booting, or
+eight times in a row each within 15 s or before its boot had finished
+(`sys.boot_completed`, recovery's start or apexd's `markBootCompleted()` on the
+console, once init's output was seen there), ends the launch with exit status 3;
+restarts after a finished boot that lasted 15 s or more are not limited.
 
 `build/assemble-image.sh` owns ramdisk composition, system disk assembly and
 verification, and `tools/verify-lineage-recovery.py` checks the recovery image.

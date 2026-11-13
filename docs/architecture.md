@@ -48,8 +48,12 @@ guest restarted, or by `uml_emulator_release_guest` after a clean power-off or
 halt. A failed or host-stopped guest cannot be released and requires a fresh
 process. `uml_emulator_get_run_end` says how a run ended: the guest's own report
 (see [guest lifecycle](#guest-lifecycle)), the host's stop request ahead of it,
-or a failure when the kernel said nothing. Every run of a process uses the same
-JIT cache budget and guest CPU count.
+or a failure when the kernel said nothing; it also says whether the guest's
+console reported that an Android guest finished booting (`boot_completed`) and
+whether init's output reached the host's reading of it at all (`init_observed`),
+both read from the console where the kernel writes it
+(`runtime/console_boot_signal.hpp`). Every run of a process uses the same JIT
+cache budget and guest CPU count.
 
 The hand-back refuses with `UML_EMULATOR_RUNTIME_ERROR` while a host service
 borrows guest RAM or a kernel thread runs, and a refusal changes nothing.
@@ -809,9 +813,15 @@ provider, the GPU service with its display) and make the services and command
 line of each boot afresh; after a restart they reset the SLiRP link, ask the GPU
 service for its next connection and run the handle again, and the exit status
 is the last guest's. A guest that does not boot is not restarted for ever
-(`emulator/src/restart_loop_guard.hpp`), and a stop request ends the loop at
-once. Android's boot control block is part of the loop: every restart reads the
-misc partition again (see the
+(`emulator/src/restart_loop_guard.hpp`): five restarts in a row within 15 s of
+their boot end the loop, and so do eight in a row that came within 15 s or, for
+an Android guest whose init output the console showed (`init_observed`), before
+the boot had finished (`boot_completed`), however long it ran. The higher limit
+leaves Android's own boot-loop rescue its turn. A restart after a finished boot
+that lasted 15 s or more never counts, so a reboot suite is not limited; a
+Linux guest, or an Android console that shows nothing of init, keeps the 15 s
+rule alone. A stop request ends the loop at once. Android's boot control block
+is part of the loop: every restart reads the misc partition again (see the
 [Android boot contract](../android/lineage-24/README.md)). The Kernarium runtime
 runs the same loop inside its one `run` call
 (`Kernarium/Runtime/KernariumRestartLoop.hpp`, `kernarium-restart-loop`): a stop

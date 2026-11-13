@@ -220,6 +220,30 @@ class MediaProfiles(unittest.TestCase):
         profiles, _ = self._profiles("_camlarge2160")
         self.assertIn("2160p", profiles[1])
 
+    def test_the_recording_size_is_the_largest_video_mode_of_the_tier(self):
+        # The HAL adds a JPEG at the camera's recording size (the largest profile CTS reads), cut from the video mode
+        # of that size: that is only the host's largest mode when the media profiles stop where the tier's video does.
+        text = (REPOSITORY / "darwin/device/camera/camera_tiers.hpp").read_text()
+        limits = re.search(r"tier == CameraTier::small \? CameraTierLimits \{(\d+), (\d+),[^}]*\}\s*:\s*"
+                           r"CameraTierLimits \{(\d+), (\d+),", text)
+        self.assertIsNotNone(limits)
+        small, large = (int(limits[1]), int(limits[2])), (int(limits[3]), int(limits[4]))
+        self.assertEqual((small, large), ((1920, 1080), (3840, 2160)))
+
+        def recording_size(variant: str, camera: int):
+            profiles, _ = self._profiles(variant)
+            return max(profiles[camera].values(), key=lambda size: size[0] * size[1])
+
+        self.assertEqual(recording_size("_camsmall", 0), small)
+        self.assertEqual(recording_size("_camsmall", 1), small)
+        self.assertEqual(recording_size("_camlarge", 0), large)
+        self.assertEqual(recording_size("_camlarge2160", 0), large)
+        self.assertEqual(recording_size("_camlarge2160", 1), large)
+        self.assertEqual(recording_size("_camfront", 0), small)
+        # The large layout with a 1080p front camera keeps that camera at the small tier's size, which the HAL's
+        # cameras of that kind offer.
+        self.assertEqual(recording_size("_camlarge", 1), small)
+
     def test_a_front_camera_alone_is_camera_zero(self):
         profiles, caps = self._profiles("_camfront")
         self.assertEqual(sorted(profiles), [0])

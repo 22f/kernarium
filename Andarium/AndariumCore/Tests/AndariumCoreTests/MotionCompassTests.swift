@@ -157,6 +157,21 @@ struct MotionCompassTests {
         #expect(MotionSample(sensor: .magnetometer, x: 0, y: 0, z: 0, status: 3).status == 3)
     }
 
+    @Test func theRecordsAreTheGoldenFramesTheGuestReads() throws {
+        // The same bytes the guest's sub-HAL decodes (tests/unit/andarium reads the file too).
+        for status in UInt8(0)...3 {
+            let record = try #require(MotionSample(sensor: .magnetometer, x: 0, y: 25, z: -40, status: status).encoded)
+            #expect([UInt8](record) == (try MotionOrientationFixture.bytes("magnetic-status-\(status)")), "status \(status)")
+        }
+        let rotation = try #require(MotionSample(sensor: .gyroscope, x: 1, y: -2, z: 0.5).encoded)
+        #expect([UInt8](rotation) == (try MotionOrientationFixture.bytes("gyroscope-turn")))
+        // Gravity along z reads 9.80665 m/s^2; the zeros of x and y come out negated, which is still zero.
+        let gravity = try MotionOrientationFixture.bytes("accelerometer-gravity")
+        let acceleration = try #require(MotionSample(sensor: .accelerometer, x: 0, y: 0, z: -1).encoded)
+        #expect([UInt8](acceleration.prefix(8)) == Array(gravity.prefix(8)))
+        #expect([UInt8](acceleration.suffix(4)) == Array(gravity.suffix(4)))
+    }
+
     @Test func theFieldKeepsItsSignAndTurnsWithTheMountLikeTheRotationRate() {
         // A microtesla is a microtesla: no -9.80665, and the vector is not negated.
         let upright = MotionSample(sensor: .magnetometer, x: 20, y: -5, z: -40)

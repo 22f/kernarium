@@ -362,7 +362,7 @@ control out.
   and Erase virtual machine deletes everything the guest has stored, its snapshots and
   the adb key included.
 - **Backup.** The guest is left out of iCloud and computer backups unless the
-  user turns on Back up guest data. Its snapshots are never backed up.
+  user turns on Include in backups. Its snapshots are never backed up.
 - **Snapshots.** A snapshot is an APFS clone of `data.img` with a copy of
   `instance.json`, in `Library/Guest/Snapshots/` (`SnapshotStore`): it costs
   nothing when made and then the blocks the guest rewrites. It keeps the data
@@ -606,9 +606,12 @@ requires reopening Andarium.
   (`SessionDisplayArea`, read by `DisplayAreaProbe`), and follows a window as it
   resizes. A choice applies at the next start. Native is stored as the symbol
   and follows the screen, and a stored number that is no choice of this screen
-  goes to the nearest one. A person who never chose gets native where the
-  system lets the application use more than 4 GiB of memory, else the choice
-  nearest 1.5 (`DisplayOptions`). Native's host allocations count against the
+  goes to the nearest one. A person who never chose gets the choice nearest 1.5
+  (240 dpi) where the system holds the application to 4 GiB of memory or less,
+  else the choice nearest 2.0 (320 dpi), which is native only where native is
+  that near (`DisplayOptions`). The Retina mode an earlier version stored is no
+  choice, so everyone coming from it gets this default; a choice made on Home
+  is stored as a scale and stays. Native's host allocations count against the
   same iOS process limit as guest RAM; neither the graphics-memory estimate
   nor the memory default counts the display's pixels.
 - **JIT.** A development build on a device has a JIT row on Home, off until

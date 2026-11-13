@@ -86,6 +86,12 @@ struct MotionOrientationTests {
             "control-v2-idle": MotionDemand(orientationSensor: .idle),
             "control-v2-orientation": MotionDemand(orientationSensor: .active),
             "control-v2-all": MotionDemand(accelerometer: 20_000, gyroscope: 1_000_000, orientationSensor: .active),
+            "control-v3-idle": MotionDemand(),
+            "control-v3-magnetometer": MotionDemand(magnetometer: 50_000),
+            "control-v3-orientation-idle": MotionDemand(orientationSensor: .idle),
+            "control-v3-orientation": MotionDemand(orientationSensor: .active),
+            "control-v3-all": MotionDemand(
+                accelerometer: 20_000, gyroscope: 1_000_000, magnetometer: 40_000, orientationSensor: .active),
         ]
         var seen = 0
         for frame in try MotionOrientationFixture.frames() where frame.name.hasPrefix("control-") {
@@ -98,7 +104,7 @@ struct MotionOrientationTests {
             rejected += 1
             #expect(MotionDemand(frame: Data(frame.bytes)) == nil, "\(frame.name)")
         }
-        #expect(rejected == 3)
+        #expect(rejected == 8)
         #expect(MotionDemand(orientationSensor: .idle).acceptsOrientation)
         #expect(!MotionDemand().acceptsOrientation)
     }

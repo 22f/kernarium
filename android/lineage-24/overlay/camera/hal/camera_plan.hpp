@@ -8,6 +8,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -86,6 +87,62 @@ inline Capabilities capabilities_of(const abi::Desc& desc, const Formats& format
     return caps;
 }
 
+// android.control.maxRegions: the AE, AWB and AF regions the camera takes. The
+// host meters and focuses on one point, and a camera without autofocus has none
+// to move.
+inline std::array<std::int32_t, 3> max_regions_of(const abi::Desc& desc) noexcept
+{
+    return {1, 0, (desc.flags & abi::feature::autofocus) != 0 ? 1 : 0};
+}
+
+// Tags of camera_metadata_tags.h that unlisted_keys names; the HAL asserts them.
+namespace tag {
+constexpr std::int32_t control_ae_regions = 0x10004;
+constexpr std::int32_t control_af_regions = 0x10008;
+constexpr std::int32_t control_awb_regions = 0x1000c;
+constexpr std::int32_t sensor_frame_duration = 0xe0001;
+constexpr std::int32_t black_level_lock = 0x160000;
+constexpr std::int32_t tonemap_curve_blue = 0x130000;
+constexpr std::int32_t tonemap_curve_green = 0x130001;
+constexpr std::int32_t tonemap_curve_red = 0x130002;
+constexpr std::int32_t tonemap_mode = 0x130003;
+constexpr std::int32_t tonemap_available_tone_map_modes = 0x130005;
+} // namespace tag
+
+// The keys of the template's request and result key lists that this camera does
+// not honour; it lists them in neither. The frame duration and the black level
+// lock are the sensor keys of MANUAL_SENSOR, so a camera without the capability
+// has neither: CTS fails a camera that has every key of a capability it does
+// not list. A region key is listed only for a kind of region the camera takes.
+// The tone map mode and curves are listed by no camera: the host's camera makes
+// its own picture, so there is no curve to take and no tone map to select, and
+// CTS runs its tone map test, which wants a curve size, for any camera that
+// lists the mode. The modes that the camera states (unstated_characteristics)
+// go with the mode key.
+inline std::vector<std::int32_t> unlisted_keys(const abi::Desc& desc, const Capabilities& caps)
+{
+    std::vector<std::int32_t> keys = {tag::tonemap_mode, tag::tonemap_curve_red, tag::tonemap_curve_green,
+                                      tag::tonemap_curve_blue};
+    if (!caps.manual_sensor) {
+        keys.push_back(tag::sensor_frame_duration);
+        keys.push_back(tag::black_level_lock);
+    }
+    const auto regions = max_regions_of(desc);
+    if (regions[0] == 0) keys.push_back(tag::control_ae_regions);
+    if (regions[1] == 0) keys.push_back(tag::control_awb_regions);
+    if (regions[2] == 0) keys.push_back(tag::control_af_regions);
+    return keys;
+}
+
+// The characteristics that no V4L2 camera states. The tone map modes are the
+// characteristic half of the tone map mode key: CameraDeviceTest wants the key
+// and the modes listed together, and unlisted_keys unlists the key, so the
+// modes are neither stated nor listed, and the templates carry no tone map key.
+inline std::vector<std::int32_t> unstated_characteristics()
+{
+    return {tag::tonemap_available_tone_map_modes};
+}
+
 // The size of the array that RAW and the field of view are stated in: the Bayer
 // still's own size when the camera has one, else the description's pixel array.
 inline Size array_size(const abi::Desc& desc, const Capabilities& caps) noexcept
@@ -157,6 +214,7 @@ inline constexpr Size size_720p{1280, 720};
 inline constexpr Size size_480p{640, 480};
 inline constexpr Size size_240p{320, 240};
 inline constexpr Size size_1440p{1920, 1440};
+inline constexpr Size size_2160p{3840, 2160};
 inline constexpr Size standard_jpeg_sizes[] = {size_1080p, size_720p, size_480p, size_240p};
 
 // The distinct sizes of the video modes, in the order the node lists them.
@@ -235,7 +293,14 @@ inline std::optional<SizeSource> cut_from(const std::vector<Size>& natives, cons
 // each cut from a native video mode (cut_from):
 //  - JPEG: 1920x1080, 1280x720, 640x480 and 320x240, and 1920x1440 with 1280x720
 //    when the largest JPEG reaches 1920x1440 (a camera that streams beside another
-//    is guaranteed those);
+//    is guaranteed those); and 3840x2160 when that is the largest video mode,
+//    which is the recording size of a layout of the large tier (the camera
+//    API's mandatory "preview, record and JPEG video snapshot" combination
+//    wants a JPEG at the recording size; at the small tier that is 1080p, a
+//    size already listed, and no other mode earns a size). It is cut from the
+//    mode of that very size: the mode is one the host offers, so the picture
+//    asks the host for no capture format and no buffer that a stream of that
+//    mode does not, and it is never larger than the camera's largest JPEG;
 //  - YUV and PRIVATE: every JPEG size that is not larger than the largest video
 //    size (a LIMITED camera lists them), and the same guaranteed pair of the largest
 //    video size.
@@ -271,6 +336,11 @@ inline StreamSizes derive_sizes(const Formats& formats)
         add_cut(result.jpeg, size_1440p);
         add_cut(result.jpeg, size_720p);
     }
+    // The recording size is 3840x2160 when no mode has more pixels and that mode exists (a mode of as many pixels in another
+    // shape does not make the choice depend on the order the host lists them in).
+    const bool records_2160p = std::find(natives.begin(), natives.end(), size_2160p) != natives.end() &&
+                               largest(natives).pixels() == size_2160p.pixels();
+    if (records_2160p && size_2160p.pixels() <= most(result.jpeg)) add_cut(result.jpeg, size_2160p);
 
     for (const auto& size : natives) result.yuv.push_back(host_entry(size));
     const std::uint64_t largest_video = most(result.yuv);
@@ -348,9 +418,15 @@ inline StreamTables stream_tables(const Formats& formats, const Capabilities& ca
         add(pixel_format::yuv_420_888, entry.size, duration, 0);
         add(pixel_format::implementation_defined, entry.size, duration, 0);
     }
-    // The still path keeps the rate of the slowest preview that runs at 30 frames per second.
+    // The still path keeps the rate of the slowest preview that runs at 30 frames per second. A JPEG that the HAL cuts
+    // from a video mode cannot run faster than that mode: a mode that tops out below 30 frames per second sets its
+    // JPEGs' minimum frame duration; a host JPEG is the host's own photo and keeps the still path's.
     const std::int64_t still_duration = 33'333'333;
-    for (const auto& entry : sizes.jpeg) add(pixel_format::blob, entry.size, still_duration, jpeg_stall_ns(entry.size));
+    for (const auto& entry : sizes.jpeg) {
+        const std::int64_t duration =
+            entry.host ? still_duration : std::max(still_duration, frame_duration_of(fastest_rate(formats, entry.source)));
+        add(pixel_format::blob, entry.size, duration, jpeg_stall_ns(entry.size));
+    }
     if (caps.raw) add(pixel_format::raw16, formats.raw, still_duration, raw_stall_ns(formats.raw));
     return tables;
 }
