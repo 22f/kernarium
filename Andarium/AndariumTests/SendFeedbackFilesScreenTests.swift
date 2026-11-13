@@ -143,8 +143,9 @@ struct SendFeedbackFilesScreenTests {
         }
     }
 
-    private func eventually(seconds: Int = 10, _ condition: () -> Bool) async -> Bool {
-        let deadline = ContinuousClock.now + .seconds(seconds)
+    /// A poll that returns as soon as the condition holds; the 10 s is only its deadline.
+    private func eventually(_ condition: () -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(10)
         while ContinuousClock.now < deadline {
             if condition() { return true }
             try? await Task.sleep(for: .milliseconds(10))
@@ -639,7 +640,7 @@ struct SendFeedbackFilesScreenTests {
         defer { lease.give() }
         let controller = hostSheet(fixture, in: lease)
         var button: NSObject?
-        let drawn = await eventually(seconds: 30) {
+        let drawn = await eventually {
             controller.view.setNeedsLayout()
             controller.view.layoutIfNeeded()
             button = element(identifier: "feedback-files", in: controller.view)
@@ -654,7 +655,7 @@ struct SendFeedbackFilesScreenTests {
         #expect(await eventually { deliver != nil }, "the button opens the injected picker")
         deliver?([file])
         var row: NSObject?
-        let attached = await eventually(seconds: 30) {
+        let attached = await eventually {
             controller.view.layoutIfNeeded()
             row = element(identifier: "feedback-attachment", in: controller.view)
             return row != nil
@@ -686,7 +687,7 @@ struct SendFeedbackFilesScreenTests {
         defer { lease.give() }
         let controller = hostSheet(fixture, in: lease) { model in await model.addFiles([folder, empty]) }
         var alert: UIAlertController?
-        let shown = await eventually(seconds: 30) {
+        let shown = await eventually {
             alert = controller.presentedViewController as? UIAlertController
             return alert != nil
         }
