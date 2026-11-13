@@ -108,6 +108,44 @@ class DecisionVectors(unittest.TestCase):
         # The vectors exercise every action there is.
         self.assertEqual(seen, set(android_instance.ACTIONS))
 
+    def test_the_legacy_range_is_the_vectors(self) -> None:
+        document = json.loads(VECTORS.read_text(encoding="utf-8"))
+        self.assertEqual(
+            document["legacy_build_numbers"],
+            {
+                "first": android_instance.LEGACY_BUILD_FIRST,
+                "last": android_instance.LEGACY_BUILD_LAST,
+            },
+        )
+
+
+class BuildOrder(unittest.TestCase):
+    def test_the_old_counter_is_older_than_every_other_number(self) -> None:
+        first = android_instance.LEGACY_BUILD_FIRST
+        last = android_instance.LEGACY_BUILD_LAST
+        order = android_instance.build_order
+        ascending = [
+            first, first + 1, 2026110805, 2026110817, last,
+            1, 26, 27, 10_000, first - 1, last + 1, 9_999_999_999,
+        ]
+        keys = [order(number) for number in ascending]
+        self.assertEqual(len(set(keys)), len(keys))
+        for position, key in enumerate(keys):
+            for other in keys[position + 1:]:
+                self.assertLess(key, other)
+
+    def test_the_range_has_two_edges(self) -> None:
+        order = android_instance.build_order
+        self.assertEqual((android_instance.LEGACY_BUILD_FIRST, android_instance.LEGACY_BUILD_LAST),
+                         (2026110800, 2026110899))
+        # Both edges are in the range; the numbers just outside it are not.
+        self.assertEqual(order(2026110800)[0], order(2026110899)[0])
+        self.assertNotEqual(order(2026110799)[0], order(2026110800)[0])
+        self.assertNotEqual(order(2026110900)[0], order(2026110899)[0])
+        self.assertLess(order(2026110800), order(2026110799))
+        self.assertLess(order(2026110899), order(2026110900))
+        self.assertGreater(order(2026110799), order(2026110899))
+
 
 class TransitionVectors(unittest.TestCase):
     def test_every_transition_is_reproduced(self) -> None:

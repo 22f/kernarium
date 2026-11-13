@@ -103,7 +103,7 @@ struct AppEntry {
         let storage = TwoDiskStorage(
             locations: locations,
             release: carried?.identity ?? ReleaseIdentity(
-                releaseID: "unavailable", buildFingerprint: "unavailable", buildNumber: 1, securityPatch: "",
+                releaseID: "unavailable", buildFingerprint: "unavailable", buildNumber: BuildNumber.oldest, securityPatch: "",
                 systemDiskSHA256: String(repeating: "0", count: 64), dataLayout: 1, minimumGiB: 4, defaultGiB: 8,
                 maximumGiB: 64
             ),
@@ -255,7 +255,7 @@ struct AppEntry {
         let storage = TwoDiskStorage(
             locations: locations,
             release: ReleaseIdentity(
-                releaseID: "probe", buildFingerprint: "probe", buildNumber: 1, securityPatch: "",
+                releaseID: "probe", buildFingerprint: "probe", buildNumber: BuildNumber.oldest, securityPatch: "",
                 systemDiskSHA256: String(repeating: "0", count: 64), dataLayout: 1, minimumGiB: 4, defaultGiB: 8,
                 maximumGiB: 64
             ),
