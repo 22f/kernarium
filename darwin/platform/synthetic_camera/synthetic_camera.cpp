@@ -879,8 +879,12 @@ private:
                 if (!state.video) continue;
                 if (state.video->next <= now) {
                     due.push_back(camera);
-                    state.video->next += std::chrono::nanoseconds(1'000'000'000ull / state.video->frameRate);
-                    if (state.video->next < now) state.video->next = now;
+                    // A frame that is a period or more late starts now (no burst to catch up), and the next one is a
+                    // period after its start; produceFrame adds what its exposure takes beyond the period, so the next
+                    // deadline is always a whole frame duration after the start of this one.
+                    const auto period = std::chrono::nanoseconds(1'000'000'000ull / state.video->frameRate);
+                    if (now - state.video->next >= period) state.video->next = now;
+                    state.video->next += period;
                 }
                 if (!wake || state.video->next < *wake) wake = state.video->next;
             }

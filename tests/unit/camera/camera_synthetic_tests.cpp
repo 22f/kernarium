@@ -22,6 +22,15 @@ class Recorder final : public CameraSessionDelegate {
 public:
     void cameraFrame(std::size_t camera, CameraFrame frame) override
     {
+        if (firstFrameDelay.count() > 0) {
+            // A delegate that is slow on its first frame (the timer thread waits for it).
+            bool first;
+            {
+                std::lock_guard lock(mutex);
+                first = frames.empty();
+            }
+            if (first) std::this_thread::sleep_for(firstFrameDelay);
+        }
         std::lock_guard lock(mutex);
         frames.emplace_back(camera, std::move(frame));
         changed.notify_all();
@@ -44,6 +53,7 @@ public:
         return changed.wait_for(lock, std::chrono::seconds(10),
                                 [&] { return frames.size() >= framesWanted && stills.size() >= stillsWanted; });
     }
+    std::chrono::milliseconds firstFrameDelay {0};
     std::mutex mutex;
     std::condition_variable changed;
     std::vector<std::pair<std::size_t, CameraFrame>> frames;
@@ -712,6 +722,38 @@ void threaded()
     require(camera->sessionsOpen() == 0);
 }
 
+// The real timer's schedule when a frame is late: a frame that lasts 200 ms at 10 fps is followed by the next one a whole
+// frame duration after its own start, also when the delegate held the timer thread long enough to make that frame overdue
+// (the next deadline is counted from the frame's start, not clamped to now with only the excess added).
+void timerSchedulesWholeDurations()
+{
+    auto options = manual(SyntheticCameraProfile::tablet);
+    options.manualClock = false;
+    const auto camera = makeSyntheticCamera(options);
+    Recorder recorder;
+    recorder.firstFrameDelay = std::chrono::milliseconds(350);
+    {
+        auto session = camera->openSession(recorder);
+        CameraSettings settings;
+        settings.exposureMode = CameraExposureMode::manual;
+        settings.exposureNanoseconds = 200'000'000;
+        settings.iso = 100;
+        session->apply(0, settings);
+        require(session->startVideo(0, 640, 480, 10));
+        require(recorder.waitFor(4));
+        std::lock_guard lock(recorder.mutex);
+        for (std::size_t i = 0; i < 4; ++i)
+            require(recorder.frames[i].second.exposure.exposureNanoseconds == 200'000'000 &&
+                    recorder.frames[i].second.exposure.frameDurationNanoseconds == 200'000'000);
+        // Frame 1 was held for 350 ms, so frame 2 is overdue when it is due; frames 2 to 4 are a frame duration apart.
+        for (std::size_t i = 2; i < 4; ++i) {
+            const auto interval = recorder.frames[i].second.timestampNanoseconds - recorder.frames[i - 1].second.timestampNanoseconds;
+            require(interval >= 185'000'000 && interval <= 400'000'000);
+        }
+    }
+    require(camera->sessionsOpen() == 0);
+}
+
 } // namespace
 
 int main()
@@ -732,5 +774,6 @@ int main()
     stills();
     interruptions();
     threaded();
+    timerSchedulesWholeDurations();
     return 0;
 }
