@@ -700,8 +700,9 @@ struct FoldSessionHostingTests {
         var words: [String] {
             switch self {
             case .boot: ["Linux kernel", "System image", "Storage", "Startup"]
-            case .slowBoot:
-                ["Starting is taking longer than usual", "Stop", "Linux kernel", "System image", "Storage", "Startup"]
+            // The notice itself: the steps beneath it may need scrolling in a half shorter than the
+            // card, as in the standing pose's upper half, and a scrolled-off step is still a frame.
+            case .slowBoot: ["Starting is taking longer than usual", "Stop"]
             case .busy: ["Erasing virtual machine", "65%", "Deleting everything."]
             case .lowSpace: [SpacePauseWords.title(SpacePause(freeBytes: 820 * Limits.bytesPerMiB, stage: .notPaused))]
             case .end: ["The virtual machine stopped unexpectedly"]
