@@ -192,6 +192,30 @@ struct StartHandoverTests {
         #expect(rig.model.bootTracker.recovery && rig.model.bootTracker.isReady)
     }
 
+    /// The sink the runtime keeps for the run's console is told of the
+    /// guest's restart, which begins another boot though the console printed
+    /// no banner: the second boot's completion is its own.
+    @Test func aRestartBeginsTheConsolesNextBootWithoutABanner() async throws {
+        let rig = try rig()
+        defer { try? FileManager.default.removeItem(at: rig.directory) }
+        rig.model.phase = .booting(.normal)
+        let counted = Counted()
+        let sink = ConsoleSink { _, completed, _ in if completed { counted.add() } }
+        rig.runtime.console = sink
+        sink.feed(Data("init: init first stage started!\napexd: markBootCompleted() received by ApexService\n".utf8))
+        #expect(counted.value == 1)
+        rig.runtime.guestRestarted(.began(restart: 1))
+        sink.feed(Data("init: processing action (sys.boot_completed=1) from (/x:1)\n".utf8))
+        #expect(counted.value == 2, "the restart's boot completed without being counted")
+    }
+
+    private final class Counted: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func add() { lock.withLock { count += 1 } }
+        var value: Int { lock.withLock { count } }
+    }
+
     // MARK: The clock
 
     /// The clock the notice counts by is the runtime's: it stands still while

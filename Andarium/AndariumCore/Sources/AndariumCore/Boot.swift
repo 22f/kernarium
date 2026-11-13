@@ -79,6 +79,18 @@ public struct ConsoleScanner: Sendable {
         feed(String(decoding: data, as: UTF8.self))
     }
 
+    /// The guest restarted itself in place: what follows is another boot's.
+    /// The line the old boot left unfinished and what it counted of its own
+    /// completion are dropped, so a banner the console did not print does not
+    /// leave the next boot's completion looking like the old one's. The counts
+    /// only grow, as a reader that compares them expects.
+    public mutating func beginBoot() {
+        pending.removeAll(keepingCapacity: true)
+        discarding = false
+        completedByApex = false
+        completionCounted = false
+    }
+
     /// Counts the completion a line reports. The kernel's banner is a new
     /// boot, which has counted nothing yet.
     private mutating func noteCompletion(in line: String) {

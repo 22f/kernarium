@@ -60,6 +60,27 @@ struct ConsoleScannerTests {
         #expect(scanner.bootCompletedCount == 3)
     }
 
+    /// A boot that began without a banner the scanner could read (the app
+    /// tells it at the guest's restart) counts its own completion.
+    @Test func aRestartBeginsABootEvenWhenTheConsolePrintsNoBanner() {
+        let apex = "[   22.8] apexd: markBootCompleted() received by ApexService\n"
+        let initLine = "[   22.9] init: processing action (sys.boot_completed=1) from (/x:1)\n"
+        var scanner = ConsoleScanner()
+        _ = scanner.feed(apex)
+        #expect(scanner.bootCompletedCount == 1)
+        scanner.beginBoot()
+        _ = scanner.feed(initLine)
+        #expect(scanner.bootCompletedCount == 2)
+        // The old boot's unfinished line is not the next one's beginning.
+        var cut = ConsoleScanner()
+        _ = cut.feed("[    1.0] init: processing action (sys.boot_")
+        cut.beginBoot()
+        _ = cut.feed("completed=1) from (/x:1)\n")
+        #expect(cut.bootCompletedCount == 0)
+        // The counts only grow.
+        #expect(scanner.recoveryStartedCount == 0)
+    }
+
     @Test func theBootTrackerOfTheAppAgreesWithTheRuntimeOnWhatCompletesABoot() {
         var scanner = ConsoleScanner()
         var tracker = BootTracker()

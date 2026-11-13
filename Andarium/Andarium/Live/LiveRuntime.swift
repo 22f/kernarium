@@ -18,6 +18,12 @@ nonisolated final class ConsoleSink: @unchecked Sendable {
         self.report = report
     }
 
+    /// The guest restarted itself in place (`LiveRuntime.guestRestarted`): the
+    /// text that follows is another boot's.
+    func restarted() {
+        lock.withLock { scanner.beginBoot() }
+    }
+
     func feed(_ data: Data) {
         let (found, completed, recovery) = lock.withLock { () -> ([BootMilestone], Bool, Bool) in
             let before = (scanner.bootCompletedCount, scanner.recoveryStartedCount)
@@ -209,7 +215,8 @@ final class LiveRuntime: RuntimeDriver {
     private var bootStartedAt = Date()
     private(set) var runStartedAt: Date?
     private var thermalObserver: NSObjectProtocol?
-    private var console: ConsoleSink?
+    /// The sink of the run's console; a test sets its own.
+    var console: ConsoleSink?
 
     init(
         model: AppModel, storage: TwoDiskStorage, marker: PauseMarker, keyStore: AdbKeyStore = AdbKeyStore(),
@@ -925,8 +932,9 @@ final class LiveRuntime: RuntimeDriver {
         print("Andarium: \(event)")
         guard case .began = event, let model else { return }
         // The boot that follows is another one: it ends an update only by
-        // reaching sys.boot_completed itself.
+        // reaching sys.boot_completed itself, and its console is read afresh.
         reachedBootCompleted = false
+        console?.restarted()
         // No import outlives the restart (the browser stops its transfer
         // below and the guest's adb connections end with it), so the files of
         // the run so far are leftovers to the boot that follows. Only the
