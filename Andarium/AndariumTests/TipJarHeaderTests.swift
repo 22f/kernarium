@@ -434,6 +434,57 @@ struct TipJarHeaderTests {
         #expect(header.top - barBottom < 30, "the conversation starts \(header.top - barBottom) pt under the title bar")
     }
 
+    /// A conversation that fitted and the tip makes overflow follows its newest bubble: the thank-you
+    /// stands above the Done button, not under it. The sheet is a small phone's window at a larger text
+    /// size, where the conversation fills the sheet and the thank-you does not fit under it.
+    @Test func aTipThatOverflowsTheSheetKeepsTheNewestBubbleAboveTheBar() async throws {
+        let model = app()
+        model.tipJarServices.store.purchase = { .purchased(TipJarTransaction(productIdentifier: $0) {}) }
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let jar = try #require(model.makeTipJarModel())
+        let controller = UIHostingController(
+            rootView: TipJarSheet(jar: jar, sender: Self.content(), device: "iPhone") {}
+                .environment(model)
+                .dynamicTypeSize(.xLarge)
+                .frame(width: 375, height: Self.smallPhoneSheet)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top))
+        lease.window.rootViewController = controller
+        try #require(await eventually { controller.viewIfLoaded?.window != nil && jar.phase == .loaded })
+        try await Task.sleep(for: .seconds(1.5))
+        controller.view.layoutIfNeeded()
+        // The conversation fits the sheet before the tip, and fills it past its end after the tip: or
+        // the test says nothing.
+        func scroll() throws -> UIScrollView {
+            try #require(Self.views(of: UIScrollView.self, under: controller.view).max { $0.bounds.height < $1.bounds.height }, "the conversation")
+        }
+        func overflow() throws -> CGFloat {
+            let scroll = try scroll()
+            return scroll.contentSize.height + scroll.adjustedContentInset.top + scroll.adjustedContentInset.bottom - scroll.bounds.height
+        }
+        let before = try overflow()
+        try #require(before <= 1, "the conversation fills the sheet before the tip by \(before) pt")
+        jar.purchase(.ultra)
+        try #require(await eventually { jar.thanked })
+        try await Task.sleep(for: .seconds(1.5))
+        controller.view.layoutIfNeeded()
+        let after = try overflow()
+        try #require(after > 8, "the thank-you overflows the sheet by \(after) pt")
+        let bar = try #require(Self.views(of: UINavigationBar.self, under: controller.view).first, "the title bar")
+        let barBottom = bar.convert(bar.bounds, to: nil).maxY
+        let elements = ToolbarProbe.elements(in: lease.window, above: 5000, includeUnlabelled: true)
+        let thanks = String(localized: TipJarWords.thanksText)
+        let newest = try #require(
+            elements.first { $0.label == thanks || $0.label.hasPrefix(String(thanks.prefix(12))) }, "the thank-you: \(elements.map(\.description))")
+        let done = try #require(elements.first { $0.label == String(localized: TipJarWords.done) }, "Done: \(elements.map(\.description))")
+        let frame = newest.object.accessibilityFrame
+        #expect(frame.maxY <= done.top, "the newest bubble ends at \(frame.maxY), under Done at \(done.top)")
+        #expect(frame.minY >= barBottom, "the newest bubble starts at \(frame.minY), under the title bar at \(barBottom)")
+    }
+
+    /// The window of the test above, as tall as a 667 pt phone's sheet.
+    private static let smallPhoneSheet: CGFloat = 640
+
     /// Where purchases are not allowed the sheet says so once, in the title, over the dimmed tiers: no
     /// second line says it again, and VoiceOver reads the title one time.
     @Test func whereTipsAreNotAllowedTheTitleAloneSaysSo() async throws {

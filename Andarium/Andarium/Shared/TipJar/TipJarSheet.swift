@@ -60,6 +60,8 @@ struct TipJarSheet: View {
     /// are, and grows as the conversation does.
     @State private var conversationHeight: CGFloat = 400
     @State private var barHeight: CGFloat = 130
+    /// Where the conversation is scrolled: left to the anchors until the conversation grows.
+    @State private var position = ScrollPosition()
 
     /// The conversation, the bar, the navigation bar and the grabber.
     private var fittedHeight: CGFloat { conversationHeight + barHeight + 78 }
@@ -97,6 +99,12 @@ struct TipJarSheet: View {
             .defaultScrollAnchor(anchor, for: .initialOffset)
             .defaultScrollAnchor(anchor, for: .sizeChanges)
             .defaultScrollAnchor(.top, for: .alignment)
+            // A conversation that fitted and now overflows (the person's reply, then the thank-you)
+            // follows its newest bubble: the anchors above only keep a bottom that was already in
+            // view, and do not act on a conversation that began shorter than the sheet.
+            .scrollPosition($position)
+            .onChange(of: jar.outcome) { followTheEnd() }
+            .onChange(of: jar.purchasing) { followTheEnd() }
             .background(Color(.systemBackground))
             .navigationTitle(Text(TipJarWords.name))
             .navigationBarTitleDisplayMode(.inline)
@@ -127,6 +135,14 @@ struct TipJarSheet: View {
         .presentationSizing(FixedSheetSizing(width: 600, height: tall ? 2000 : fittedHeight))
         .accessibilityIdentifier("tipjar-sheet")
         .task { jar.start() }
+    }
+
+    private func followTheEnd() {
+        #if !APP_STORE
+        // The preview that shows the top of the conversation keeps it there.
+        if scrollsToTop { return }
+        #endif
+        position.scrollTo(edge: .bottom)
     }
 
     /// What follows the person's choice, and the problems, which are notes.
