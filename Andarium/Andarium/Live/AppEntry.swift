@@ -208,6 +208,10 @@ struct AppEntry {
                 freeSpace: watched)
             model.driver = runtime
             model.snapshotDriver = runtime
+            let calibration = markerDirectory.appendingPathComponent("Camera", isDirectory: true)
+            model.cameraReservePlanner = { policy in
+                LiveRuntime.cameraReservePlan(for: policy, calibration: calibration)
+            }
             // The listing says why a restore that began last time is still not finished.
             if let snapshotRecoveryFailure { runtime.snapshotRecoveryFailed(snapshotRecoveryFailure) }
             model.fileBrowser = FileBrowserModel(backend: runtime.makeGuestFiles(hostFree: watched))

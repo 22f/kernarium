@@ -601,6 +601,57 @@ struct MemoryPolicyTests {
         #expect(fourGiB.graphicsLineMiB(vCPUs: 1, cameraLive: true) == fourGiB.graphicsLineMiB(vCPUs: 1))
     }
 
+    /// The camera's reserve follows the layout the host's cameras make, which
+    /// the host reads again when Camera is turned on and after a run: the policy
+    /// takes the new figure and nothing else moves.
+    @Test func theCameraReserveIsReadAgainAndNothingElseMoves() {
+        var asked = 0
+        let ceiling = MemoryPolicy(
+            processorCount: 2,
+            bound: { _ in 4096 }, defaultMemory: { _ in 3072 }, safeMemory: { _ in 3584 },
+            graphicsMemory: { memory, count in MemoryPolicyTests.fallingGraphics(memory, count) },
+            cameraReserve: { _ in 154 }
+        )
+        let exact = ceiling.withCameraReserve { _ in asked += 1; return 56 }
+        #expect(asked == 2 * 57, "once for every budget of the table, as at the start")
+        // The pool while Camera is live: the budget less the layout's own figure.
+        #expect(ceiling.graphicsMemoryMiB(forMemory: 3072, vCPUs: 1, cameraLive: true) == 1010)
+        #expect(exact.graphicsMemoryMiB(forMemory: 3072, vCPUs: 1, cameraLive: true) == 1108)
+        // The warning's line follows the pool: 154 MiB leaves the default as the line, 56 MiB lets one size more.
+        #expect(ceiling.graphicsLineMiB(vCPUs: 1, cameraLive: true) == 3072)
+        #expect(exact.graphicsLineMiB(vCPUs: 1, cameraLive: true) == 3136)
+        #expect(ceiling.risk(3136, vCPUs: 1, cameraLive: true) == .graphics)
+        #expect(exact.risk(3136, vCPUs: 1, cameraLive: true) == .none)
+        // Camera off, the sizes, the defaults and the safe sizes are the same.
+        for count in 1...2 {
+            #expect(exact.graphicsLineMiB(vCPUs: count) == ceiling.graphicsLineMiB(vCPUs: count))
+            #expect(exact.maximumMiB(vCPUs: count) == ceiling.maximumMiB(vCPUs: count))
+            #expect(exact.defaultMemoryMiB(vCPUs: count) == ceiling.defaultMemoryMiB(vCPUs: count))
+            #expect(exact.safeMemoryMiB(vCPUs: count) == ceiling.safeMemoryMiB(vCPUs: count))
+            for mib in ceiling.stops(vCPUs: count) {
+                #expect(
+                    exact.graphicsMemoryMiB(forMemory: mib, vCPUs: count)
+                        == ceiling.graphicsMemoryMiB(forMemory: mib, vCPUs: count))
+            }
+        }
+        // The same figure again is the same host, and a host with no camera
+        // holds nothing: the pool is the budget and the line is the budget's.
+        #expect(exact.withCameraReserve { _ in 56 } == exact)
+        #expect(ceiling.withCameraReserve { _ in 154 } == ceiling)
+        let none = ceiling.withCameraReserve { _ in 0 }
+        #expect(none.graphicsMemoryMiB(forMemory: 3072, vCPUs: 1, cameraLive: true)
+            == none.graphicsMemoryMiB(forMemory: 3072, vCPUs: 1))
+        #expect(none.graphicsLineMiB(vCPUs: 1, cameraLive: true) == none.graphicsLineMiB(vCPUs: 1))
+        // A policy without the host's estimate has no budgets to take it from.
+        let plain = MemoryPolicy(maximumsMiB: [4096]).withCameraReserve { _ in 154 }
+        #expect(plain.graphicsMemoryMiB(forMemory: 2048, vCPUs: 1, cameraLive: true) == nil)
+        // Where the runtime lowered the default for the GPU the default is the line, whatever the reserve.
+        let held = MemoryPolicy(
+            processorCount: 1, bound: { _ in 4096 }, defaultMemory: { _ in 2048 },
+            defaultHoldsGraphics: { _ in true }, graphicsMemory: { _, _ in 1100 }, cameraReserve: { _ in 154 })
+        #expect(held.withCameraReserve { _ in 56 }.graphicsLineMiB(vCPUs: 1, cameraLive: true) == 2048)
+    }
+
     @Test func theGraphicsWordsSayItIsSeparateAndWhereGamesRunShort() {
         #expect(GraphicsMemoryWarning.separateNote.contains("separate") && GraphicsMemoryWarning.separateNote.contains("RAM"))
         #expect(GraphicsMemoryWarning.note(aboveMiB: 3072) == "Above 3 GiB, games may run out of graphics memory.")

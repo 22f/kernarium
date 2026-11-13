@@ -41,6 +41,22 @@ public enum CameraAvailability {
     }
 }
 
+/// What the runtime planned for the cameras a host presents: the memory policy
+/// with the memory a live camera session holds (`MemoryPolicy.withCameraReserve`),
+/// and whether every figure is the one the layout the runtime would run gives.
+/// It is not where the runtime could not discover the cameras and answered the
+/// most any layout holds, as the policy's own figure is before the runtime is
+/// asked.
+public struct CameraReservePlan: Equatable, Sendable {
+    public var policy: MemoryPolicy
+    public var exact: Bool
+
+    public init(policy: MemoryPolicy, exact: Bool) {
+        self.policy = policy
+        self.exact = exact
+    }
+}
+
 /// What a session's cameras do, fixed when the guest starts: the guest lists
 /// the same cameras either way.
 public enum CameraMode: Equatable, Sendable {

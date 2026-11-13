@@ -607,6 +607,31 @@ final class LiveRuntime: RuntimeDriver {
         return directory
     }
 
+    /// The policy with the memory a live camera session of this host holds out
+    /// of each budget, as the runtime composes it before the boot: the layout
+    /// of the cameras it discovers (which asks iOS for nothing and opens no
+    /// session) and the colour data in `calibration`, which the boot reads.
+    /// The runtime discovers the cameras for the first budget and keeps them
+    /// for the rest. It is the loader's ceiling, and not exact, where no
+    /// runtime can be loaded or it cannot discover the cameras. Off the main
+    /// thread: loading the runtime and discovering the cameras are not quick.
+    nonisolated static func cameraReservePlan(for policy: MemoryPolicy, calibration: URL?) -> CameraReservePlan {
+        _ = kernarium_runtime_loader_select(androidFlavor)
+        var exact = true
+        var first: UInt32 = 1
+        let planned = withOptionalCString(calibration?.path) { path in
+            policy.withCameraReserve { budgetMiB in
+                var figureIsExact: UInt32 = 0
+                let reserve = kernarium_runtime_loader_plan_camera_reserve_mib(
+                    UInt32(clamping: budgetMiB), path, first, &figureIsExact)
+                first = 0
+                exact = exact && figureIsExact != 0
+                return Int(reserve)
+            }
+        }
+        return CameraReservePlan(policy: planned, exact: exact)
+    }
+
     /// The runtime's word for the session's camera mode (KernariumRuntime.h).
     nonisolated static func cameraRuntimeMode(_ mode: CameraMode) -> UInt32 {
         switch mode {

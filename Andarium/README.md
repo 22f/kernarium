@@ -529,7 +529,12 @@ requires reopening Andarium.
   graphics budget ([camera device](../darwin/device/camera/README.md)): with
   Camera on, the VRAM the System sheet and the statistics show is the pool,
   the budget less that reserve, and the ruler's graphics warning follows the
-  pool too; the memory offered and the default are unchanged. The Simulator has
+  pool too; the memory offered and the default are unchanged. The reserve is the
+  figure the runtime answers for this device's cameras before any guest starts
+  (`plan_camera_reserve`, which asks iOS for no permission and opens no
+  session), asked when Camera is on, when the access changes and after a run;
+  the sheet shows the tier's ceiling only until that answer arrives or where
+  the runtime cannot discover the cameras. The Simulator has
   no camera: the preview states the access (`-systemCamera` reads the
   Simulator's own permission) and the non-App Store runtime serves a synthetic
   camera (`KERNARIUM_CAMERA_SOURCE`) to a run that has none, and no camera at

@@ -3,6 +3,7 @@ import AndariumCore
 import AndariumCoreTestSupport
 import AVFoundation
 import Foundation
+import os
 import Testing
 @testable import Andarium
 
@@ -163,6 +164,153 @@ struct CameraFlowTests {
         s.model.cameraAccess = .notDetermined
         s.model.setCamera(true)
         #expect(s.model.cameraShownOn && s.model.cameraAccess == .authorized)
+    }
+
+    // MARK: The memory a live session holds
+
+    /// What a planner is asked and answers, in order.
+    private final class Planner: Sendable {
+        private let state = OSAllocatedUnfairLock(initialState: (asked: 0, answers: [Int]()))
+        let exact: Bool
+
+        init(_ answers: [Int], exact: Bool = true) {
+            state.withLock { $0.answers = answers }
+            self.exact = exact
+        }
+
+        var asked: Int { state.withLock { $0.asked } }
+
+        var plan: @Sendable (MemoryPolicy) -> CameraReservePlan {
+            { policy in
+                let reserve = self.state.withLock { state -> Int in
+                    state.asked += 1
+                    return state.answers[min(state.asked, state.answers.count) - 1]
+                }
+                return CameraReservePlan(policy: policy.withCameraReserve { _ in reserve }, exact: self.exact)
+            }
+        }
+    }
+
+    /// An iPad mini 6's budget (534 MiB) with the policy's own reserve the ceiling (197 MiB).
+    private let tightPolicy = MemoryPolicy(
+        processorCount: 1, bound: { _ in 4096 }, defaultMemory: { _ in 2048 },
+        graphicsMemory: { _, _ in 534 }, cameraReserve: { _ in 197 })
+
+    private func pool(_ model: AppModel) -> Int? {
+        model.host.memory.graphicsMemoryMiB(forMemory: 2048, vCPUs: 1, cameraLive: model.cameraMode == .live)
+    }
+
+    @Test func theRuntimeIsAskedForTheReserveWhenTheChoiceTurnsOnAndThePoolFollows() async {
+        let s = setup(.authorized)
+        s.model.host.memory = tightPolicy
+        let planner = Planner([171])
+        s.model.cameraReservePlanner = planner.plan
+        #expect(pool(s.model) == 534, "off, the budget, and the runtime is not asked")
+        await s.model.refreshCameraReserve().value
+        #expect(planner.asked == 0)
+        s.model.setCamera(true)
+        await s.model.cameraReserveTask?.value
+        #expect(planner.asked == 1)
+        #expect(s.model.cameraMode == .live)
+        #expect(pool(s.model) == 363, "534 less the layout's 171, not the ceiling's 197")
+        #expect(s.model.cameraReserveIsExact)
+        // Off again: the budget is the figure, whatever the policy holds.
+        s.model.setCamera(false)
+        #expect(pool(s.model) == 534)
+    }
+
+    @Test func aReserveThatIsNotExactSaysSoAndStaysTheCeiling() async {
+        let s = setup(.authorized)
+        s.model.host.memory = tightPolicy
+        let planner = Planner([197], exact: false)
+        s.model.cameraReservePlanner = planner.plan
+        s.model.setCamera(true)
+        await s.model.cameraReserveTask?.value
+        #expect(planner.asked == 1)
+        #expect(!s.model.cameraReserveIsExact)
+        #expect(pool(s.model) == 337)
+    }
+
+    @Test func aHostThatHoldsNothingIsShownTheWholeBudgetWhileCameraIsOn() async {
+        // No camera the image can describe: the reserve is 0 and exact, and an on switch costs nothing.
+        let s = setup(.authorized)
+        s.model.host.memory = tightPolicy
+        s.model.cameraReservePlanner = Planner([0]).plan
+        s.model.setCamera(true)
+        await s.model.cameraReserveTask?.value
+        #expect(s.model.cameraReserveIsExact && pool(s.model) == 534)
+    }
+
+    @Test func theChoiceMadeBeforeIOSAnswersIsPlannedAtOnceAndTheAnswerChangesWhatTheSheetShows() async {
+        let s = setup()
+        s.model.host.memory = tightPolicy
+        let planner = Planner([124])
+        s.model.cameraReservePlanner = planner.plan
+        s.model.setCamera(true)
+        await s.model.cameraReserveTask?.value
+        let askedBeforeTheAnswer = planner.asked
+        #expect(askedBeforeTheAnswer >= 1, "asked at once, before the person has answered")
+        // Not allowed yet: the session is blocked and holds nothing, so the sheet shows the budget.
+        #expect(s.model.cameraMode == .blocked && pool(s.model) == 534)
+        s.system.answer(.authorized)
+        await s.model.cameraReserveTask?.value
+        #expect(planner.asked > askedBeforeTheAnswer, "the answer asks again")
+        #expect(s.model.cameraMode == .live && pool(s.model) == 410, "534 less 124")
+        // A refusal takes the choice and the session with it: nothing is held, nothing is asked.
+        let refused = setup()
+        refused.model.host.memory = tightPolicy
+        let refusedPlanner = Planner([124])
+        refused.model.cameraReservePlanner = refusedPlanner.plan
+        refused.model.setCamera(true)
+        refused.system.answer(.denied)
+        await refused.model.cameraReserveTask?.value
+        #expect(refused.model.cameraMode == .blocked && pool(refused.model) == 534)
+        #expect(refusedPlanner.asked == 0, "the choice was taken back before the question was put")
+    }
+
+    @Test func aDeniedDeviceAndOneWithoutACameraAskTheRuntimeNothing() async {
+        for access in [CameraAccess.denied, .restricted, .unavailable] {
+            let s = setup(access)
+            s.model.host.memory = tightPolicy
+            let planner = Planner([171])
+            s.model.cameraReservePlanner = planner.plan
+            s.model.setCamera(true)
+            await s.model.cameraReserveTask?.value
+            #expect(planner.asked == 0, "\(access)")
+            #expect(s.model.cameraMode == .blocked && pool(s.model) == 534)
+        }
+    }
+
+    @Test func theReserveIsReadAgainWhenTheAccessChangesAndAfterARun() async {
+        let s = setup(.authorized, chosen: true)
+        s.model.host.memory = tightPolicy
+        // A run taught the store that no lens takes a RAW still: 99, where a layout that may is 171.
+        let planner = Planner([171, 99, 171])
+        s.model.cameraReservePlanner = planner.plan
+        s.model.refreshPlan()
+        await s.model.cameraReserveTask?.value
+        #expect(planner.asked == 1, "the plan is computed at launch")
+        #expect(pool(s.model) == 534 - 171)
+        s.model.cameraAccessChanged(.authorized)
+        await s.model.cameraReserveTask?.value
+        #expect(planner.asked == 2, "the access changed")
+        #expect(pool(s.model) == 534 - 99, "what the run learned")
+        s.model.refreshPlan()
+        await s.model.cameraReserveTask?.value
+        #expect(planner.asked == 3, "a run ended")
+        #expect(pool(s.model) == 534 - 171)
+    }
+
+    @Test func questionsAreAnsweredInOrderAndTheLastWins() async {
+        let s = setup(.authorized, chosen: true)
+        s.model.host.memory = tightPolicy
+        let planner = Planner([99, 124, 171])
+        s.model.cameraReservePlanner = planner.plan
+        s.model.refreshCameraReserve()
+        s.model.refreshCameraReserve()
+        await s.model.refreshCameraReserve().value
+        #expect(planner.asked == 3)
+        #expect(pool(s.model) == 534 - 171)
     }
 
     // MARK: Refused, restricted, absent
@@ -491,6 +639,37 @@ struct CameraFlowTests {
             #expect(policy.graphicsMemoryMiB(forMemory: 2048, vCPUs: 1, cameraLive: true) == pool)
             #expect(policy.graphicsMemoryMiB(forMemory: 2048, vCPUs: 1) == budget)
         }
+    }
+
+    @Test func theRuntimePlansTheReserveOfThisHostsCameras() {
+        // An iPad mini 6's B, with the policy's own figure the ceiling.
+        let policy = MemoryPolicy(
+            processorCount: 1, bound: { _ in 4096 }, defaultMemory: { _ in 2048 },
+            graphicsMemory: { _, _ in 534 },
+            cameraReserve: { Int(kernarium_runtime_loader_camera_reserve_mib(UInt32(clamping: $0))) })
+        #expect(policy.graphicsMemoryMiB(forMemory: 2048, vCPUs: 1, cameraLive: true) == 337)
+        // The runtime serves the synthetic phone (a development knob; an App Store runtime has none): one
+        // stream, a RAW still and the working storage its source states.
+        let name = "KERNARIUM_CAMERA_SOURCE"
+        let before = getenv(name).map { String(cString: $0) }
+        setenv(name, "synthetic:phone", 1)
+        defer {
+            if let before { setenv(name, before, 1) } else { unsetenv(name) }
+            var again: UInt32 = 0
+            _ = kernarium_runtime_loader_plan_camera_reserve_mib(534, nil, 1, &again)
+        }
+        let plan = LiveRuntime.cameraReservePlan(for: policy, calibration: nil)
+        #expect(plan.exact, "the runtime discovers the cameras and answers its own figure")
+        #expect(plan.policy.graphicsMemoryMiB(forMemory: 2048, vCPUs: 1, cameraLive: true) == 534 - 281)
+        #expect(plan.policy.graphicsMemoryMiB(forMemory: 2048, vCPUs: 1) == 534, "off, the budget")
+        // The loader's own question agrees, and a calibration folder that does not exist teaches nothing.
+        var exact: UInt32 = 0
+        #expect(kernarium_runtime_loader_plan_camera_reserve_mib(534, "/nonexistent/Camera", 1, &exact) == 281)
+        #expect(exact == 1)
+        // A host with no camera the image can describe holds nothing, and says so as exactly.
+        setenv(name, "no-such-source", 1)
+        #expect(kernarium_runtime_loader_plan_camera_reserve_mib(534, nil, 1, &exact) == 0)
+        #expect(exact == 1)
     }
 
     @Test func theCalibrationFolderIsMadeAndKeptOutOfBackups() throws {
