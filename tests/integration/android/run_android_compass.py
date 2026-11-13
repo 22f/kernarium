@@ -103,7 +103,10 @@ FRAME_SECONDS = orient.FRAME_SECONDS
 SEND_SECONDS = orient.SEND_SECONDS
 FIELD_SECONDS = 40
 IDLE_SECONDS = 20
-STREAM_INTERVAL = 0.02
+# The feeder looks this often for a sensor that is due, and sends each at half the period the guest asked for in its
+# frame, never faster than every 10 ms: what the application does, so the guest sees the rate it asked for.
+STREAM_TICK = 0.005
+MINIMUM_STREAM_INTERVAL = 0.01
 GRAVITY = orient.GRAVITY
 # A field of a mid-latitude site in the northern hemisphere, in microtesla: 25 toward north (horizontal) and 40
 # down, so a device lying face up reads (0, 25, -40) when its y axis points north.
@@ -332,6 +335,40 @@ def parse_probe_report(text: str) -> dict:
     return report
 
 
+def stream_interval(period_us: int) -> float:
+    """Seconds between the records of a sensor the guest asked for at this period: half of it, at least 10 ms."""
+    return max(MINIMUM_STREAM_INTERVAL, period_us / 2_000_000)
+
+
+class Pacer:
+    """When each sensor's next record is due, from the latest frame's periods. A sensor that stops being in use
+    forgets its schedule; one whose period shortens is due within the new interval; a late look sends once, never a
+    burst to catch up."""
+
+    def __init__(self) -> None:
+        self.due: dict[int, float] = {}
+
+    def sensors_due(self, now: float, frame: Frame) -> list[int]:
+        wanted = ((ACCELEROMETER_TYPE, frame.accelerometer_active, frame.accelerometer_us),
+                  (GYROSCOPE_TYPE, frame.gyroscope_active, frame.gyroscope_us),
+                  (MAGNETIC_FIELD_TYPE, frame.magnetometer_active, frame.magnetometer_us))
+        sending = []
+        for kind, active, period_us in wanted:
+            if not active or period_us is None:
+                self.due.pop(kind, None)
+                continue
+            interval = stream_interval(period_us)
+            earlier = self.due.get(kind)
+            scheduled = 0.0 if earlier is None else min(earlier, now + interval)
+            if now < scheduled:
+                self.due[kind] = scheduled  # a shorter period brings the deadline in, and it stays there
+                continue
+            sending.append(kind)
+            # Keep the rate while the looks are on time; start again from now after a late one.
+            self.due[kind] = scheduled + interval if scheduled > now - interval and earlier is not None else now + interval
+        return sending
+
+
 # ---- The host's end of the connection.
 
 class Host:
@@ -461,19 +498,21 @@ class Host:
             self.streamer.start()
 
     def _stream(self) -> None:
+        pacer = Pacer()
         while not self.stopped.is_set():
             frame = self.latest()
             if frame is not None and not self.closed:
                 try:
-                    if frame.accelerometer_active:
-                        self.send(sensor_record(ACCELEROMETER_TYPE, *self.gravity))
-                    if frame.gyroscope_active:
-                        self.send(sensor_record(GYROSCOPE_TYPE, 0.0, 0.0, 0.0))
-                    if frame.magnetometer_active and self.field is not None:
-                        self.send(magnetic_record(*self.field, self.status))
+                    for kind in pacer.sensors_due(time.monotonic(), frame):
+                        if kind == ACCELEROMETER_TYPE:
+                            self.send(sensor_record(ACCELEROMETER_TYPE, *self.gravity))
+                        elif kind == GYROSCOPE_TYPE:
+                            self.send(sensor_record(GYROSCOPE_TYPE, 0.0, 0.0, 0.0))
+                        elif self.field is not None:
+                            self.send(magnetic_record(*self.field, self.status))
                 except (OSError, Failure):
                     pass
-            time.sleep(STREAM_INTERVAL)
+            time.sleep(STREAM_TICK)
 
     def closed_by_guest(self, seconds: float) -> bool:
         deadline = time.monotonic() + seconds
@@ -520,8 +559,9 @@ def launch_state(guest: Guest, compass: bool, with_orientation: bool, argument: 
         if sensors.listed.get(orient.SENSOR_NAME) != orient.ORIENTATION_TYPE:
             raise Failure(f"the sensor service lists {sensors.listed}, not {orient.SENSOR_NAME} "
                           f"(type {orient.ORIENTATION_TYPE}) for a launch that carried its argument")
-    elif orient.SENSOR_NAME in sensors.listed:
-        raise Failure(f"the sensor service lists {orient.SENSOR_NAME} for a launch without its argument")
+    elif orient.SENSOR_NAME in sensors.listed or orient.ORIENTATION_TYPE in sensors.listed.values():
+        raise Failure(f"the sensor service lists a device orientation sensor (by name or type {orient.ORIENTATION_TYPE}) "
+                      f"for a launch without its argument: {sensors.listed}")
     if compass:
         if sensors.listed.get(MAGNETOMETER) != MAGNETIC_FIELD_TYPE:
             raise Failure(f"the sensor service lists {sensors.listed}, not {MAGNETOMETER} (type 2)")
@@ -742,32 +782,48 @@ def listener_registers(guest: Guest, host: Host, probe: pathlib.Path) -> str:
 
 def rotation_vector(guest: Guest, host: Host) -> str:
     """The rotation vector the service makes from the three sensors gets events and settles on one heading for a
-    steady field (a device lying face up with its y axis to north); the heading itself is the fusion's."""
+    steady field (a device lying face up with its y axis to north); the heading itself is the fusion's. Only a
+    report of the probe's own run, valid, with a finite heading and a count that has advanced adds a sample to the
+    window: a stream that stops, or reports looked at again, never settles."""
     host.stream(field_at_heading(0.0), 3)
+    run_id = getattr(guest, "probe_run_id", None)
     recent: list[float] = []
+    counted = [0]
+    validated: list[dict] = []
 
     def check() -> str | None:
         report = probe_report(guest)
         if report is None:
             return "no report from the probe"
+        if run_id is not None and report.get("run_id") != run_id:
+            return f"the report is of run {report.get('run_id')!r}, not the probe's {run_id!r}"
+        if not report.get("valid"):
+            return "the probe says it is not valid (a sensor missing or an event out of order)"
         vector = report.get("rotation_vector") or {}
-        found = vector.get("azimuth_deg")
-        if not vector.get("count") or found is None:
+        count, found = vector.get("count"), vector.get("azimuth_deg")
+        if not finite_number(count) or count <= 0:
             return "the probe has seen no rotation vector event"
-        recent.append(found)
-        del recent[:-SETTLE_SAMPLES]
+        if not finite_number(found):
+            return f"the rotation vector's heading is {found!r}"
+        if count > counted[0]:
+            counted[0] = count
+            recent.append(found)
+            del recent[:-SETTLE_SAMPLES]
+        elif len(recent) < SETTLE_SAMPLES:
+            return f"{len(recent)} samples of the azimuth so far, and the count is not advancing ({count})"
         if len(recent) < SETTLE_SAMPLES:
             return f"{len(recent)} samples of the azimuth so far"
         spread = max(angle_difference(value, recent[-1]) for value in recent)
         if spread > SETTLE_TOLERANCE:
             return f"the azimuth is still moving: {[round(value, 1) for value in recent]}"
+        validated[:] = [report]
         return None
 
     orient.wait_for("the rotation vector", ROTATION_SECONDS, check, guest)
-    vector = (probe_report(guest) or {}).get("rotation_vector", {})
-    found = vector.get("azimuth_deg", recent[-1])
+    vector = validated[0]["rotation_vector"]
+    found = vector["azimuth_deg"]
     note = "" if angle_difference(found, 0.0) <= 10.0 else " (the field points to 0; the fusion's heading is its own)"
-    return f"{vector.get('count')} events, azimuth settled at {found:.1f}{note}"
+    return f"{vector['count']} events, azimuth settled at {found:.1f}{note}"
 
 
 def feed(guest: Guest, host: Host, seconds: float) -> str:
@@ -832,10 +888,20 @@ def probe_position(guest: Guest) -> tuple[str | None, int, int]:
     return report.get("run_id"), magnetometer["count"], magnetometer["last_ns"]
 
 
-def unchanged(guest: Guest, server: str, hal: tuple[int, int], where: str) -> None:
-    """Neither system_server nor the sensors HAL restarted: the same pids, the HAL also the same start time."""
-    if guest.system_server() != server:
-        raise Failure(f"system_server restarted {where}")
+def system_server_identity(guest: Guest) -> tuple[int, int]:
+    """system_server's pid and start time, as the sensors HAL's identity is read."""
+    pids = guest.system_server().split()
+    pid = pids[0] if pids else ""
+    if not pid.isdigit():
+        raise Failure(f"system_server is not running: pidof says {pid!r}")
+    return int(pid), parse_start_time(guest.shell(f"cat /proc/{pid}/stat"))
+
+
+def unchanged(guest: Guest, server: tuple[int, int], hal: tuple[int, int], where: str) -> None:
+    """Neither system_server nor the sensors HAL restarted: the same pid and start time of each."""
+    if system_server_identity(guest) != server:
+        raise Failure(f"system_server restarted {where}: it was (pid, start time) {server}, it is "
+                      f"{system_server_identity(guest)}")
     if sensors_hal(guest) != hal:
         raise Failure(f"the sensors HAL restarted {where}: it was (pid, start time) {hal}, it is {sensors_hal(guest)}")
 
@@ -843,8 +909,8 @@ def unchanged(guest: Guest, server: str, hal: tuple[int, int], where: str) -> No
 def refused_record(guest: Guest, host: Host) -> str:
     """A record the guest refuses ends the connection and not the guest: the next connection says the magnetometer
     is in use and a different field then reaches the same listener as a new sample, with neither system_server nor
-    the sensors HAL restarted."""
-    server = guest.system_server()
+    the sensors HAL restarted (the same pid and start time of each)."""
+    server = system_server_identity(guest)
     hal = sensors_hal(guest)
     _, count, last_ns = probe_position(guest)
     host.stream(None)
@@ -878,7 +944,7 @@ def listener_leaves(guest: Guest, host: Host) -> str:
 
 def older_wire(guest: Guest, host: Host, with_orientation: bool) -> str:
     """An image without the sensor: no "ANC3", a magnetic field record ends the connection, the guest stays up."""
-    server = guest.system_server()
+    server = system_server_identity(guest)
     hal = sensors_hal(guest)
     host.stream(None)
     host.connect()

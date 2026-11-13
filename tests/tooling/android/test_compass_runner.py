@@ -461,6 +461,87 @@ class HostTests(unittest.TestCase):
             guest.close()
 
 
+class PacingTests(unittest.TestCase):
+    """The feeder sends each sensor at half the period the guest's frame asked for, as the application does."""
+
+    def simulate(self, frame: "runner.Frame", seconds: float) -> dict[int, int]:
+        pacer = runner.Pacer()
+        sent = {runner.ACCELEROMETER_TYPE: 0, runner.GYROSCOPE_TYPE: 0, runner.MAGNETIC_FIELD_TYPE: 0}
+        for tick in range(int(seconds / runner.STREAM_TICK)):
+            for kind in pacer.sensors_due(tick * runner.STREAM_TICK, frame):
+                sent[kind] += 1
+        return sent
+
+    def test_the_interval_is_half_the_period_and_never_under_ten_milliseconds(self) -> None:
+        self.assertEqual(runner.stream_interval(10_000), 0.01)
+        self.assertEqual(runner.stream_interval(20_000), 0.01)
+        self.assertEqual(runner.stream_interval(40_000), 0.02)
+        self.assertEqual(runner.stream_interval(100_000), 0.05)
+        self.assertEqual(runner.stream_interval(1_000_000), 0.5)
+
+    def test_each_sensor_is_sent_at_its_own_rate(self) -> None:
+        frame = runner.Frame(3, 0b01111, 10_000, 40_000, 1_000_000)
+        sent = self.simulate(frame, 10.0)
+        # 100 Hz (the 10 ms floor), 50 Hz, and 2 Hz for the period of 1 s.
+        self.assertEqual(sent, {runner.ACCELEROMETER_TYPE: 1000, runner.GYROSCOPE_TYPE: 500,
+                                runner.MAGNETIC_FIELD_TYPE: 20})
+        # The old fixed 50 Hz would have sent 500 of each, 25 times the magnetometer's.
+        slow = self.simulate(runner.Frame(3, 0b01000, 10_000, 10_000, 200_000), 10.0)
+        self.assertEqual(slow, {runner.ACCELEROMETER_TYPE: 0, runner.GYROSCOPE_TYPE: 0, runner.MAGNETIC_FIELD_TYPE: 100})
+
+    def test_a_sensor_not_in_use_is_not_sent_and_starts_at_once_when_it_is(self) -> None:
+        pacer = runner.Pacer()
+        idle = runner.Frame(3, 0, 10_000, 10_000, 20_000)
+        accelerometer = runner.Frame(1, 1, 10_000, 10_000)
+        self.assertEqual(pacer.sensors_due(0.0, idle), [])
+        self.assertEqual(pacer.sensors_due(0.0, accelerometer), [runner.ACCELEROMETER_TYPE])
+        self.assertEqual(pacer.sensors_due(0.004, accelerometer), [])
+        # An older frame has no magnetometer period, and no field is sent whatever its mask says.
+        self.assertEqual(pacer.sensors_due(5.0, runner.Frame(1, 0b11, 10_000, 10_000)),
+                         [runner.ACCELEROMETER_TYPE, runner.GYROSCOPE_TYPE])
+        # Idle forgets the schedule: the sensor is due at the next look after it is in use again.
+        self.assertEqual(pacer.sensors_due(5.001, idle), [])
+        self.assertEqual(pacer.sensors_due(5.002, accelerometer), [runner.ACCELEROMETER_TYPE])
+
+    def test_a_shorter_period_is_due_within_the_new_interval(self) -> None:
+        pacer = runner.Pacer()
+        slow = runner.Frame(3, 0b01000, 10_000, 10_000, 1_000_000)
+        fast = runner.Frame(3, 0b01000, 10_000, 10_000, 20_000)
+        self.assertEqual(pacer.sensors_due(0.0, slow), [runner.MAGNETIC_FIELD_TYPE])
+        self.assertEqual(pacer.sensors_due(0.1, slow), [])
+        # The next record of the 1 s period was due at 0.5 s; the faster period must not wait for it.
+        self.assertEqual(pacer.sensors_due(0.1, fast), [])
+        self.assertEqual(pacer.sensors_due(0.111, fast), [runner.MAGNETIC_FIELD_TYPE])
+
+    def test_a_late_look_sends_once_and_does_not_burst(self) -> None:
+        pacer = runner.Pacer()
+        frame = runner.Frame(3, 0b01000, 10_000, 10_000, 20_000)
+        self.assertEqual(pacer.sensors_due(0.0, frame), [runner.MAGNETIC_FIELD_TYPE])
+        self.assertEqual(pacer.sensors_due(5.0, frame), [runner.MAGNETIC_FIELD_TYPE])
+        self.assertEqual(pacer.sensors_due(5.0, frame), [])
+        self.assertEqual(pacer.sensors_due(5.005, frame), [])
+        self.assertEqual(pacer.sensors_due(5.011, frame), [runner.MAGNETIC_FIELD_TYPE])
+
+    def test_the_host_streams_at_the_rate_the_frame_asked_for(self) -> None:
+        # A magnetometer period of 200 ms is a record every 100 ms: about ten in a second, where the old
+        # fixed 20 ms sent fifty.
+        frame = b"ANC3" + struct.pack("<4I", 0b01000, 10_000, 10_000, 200_000)
+        guest = FakeGuest(frame)
+        host = runner.Host(guest.port)
+        try:
+            host.connect()
+            self.assertIsNotNone(host.wait_frame(5))
+            host.stream((0.0, 25.0, -40.0), 3)
+            threading.Event().wait(1.0)
+            fields = [record for record in list(guest.records) if record[4] == 2]
+            self.assertGreaterEqual(len(fields), 2)
+            self.assertLessEqual(len(fields), 15)
+            self.assertEqual([record for record in guest.records if record[4] != 2], [])
+        finally:
+            host.stop()
+            guest.close()
+
+
 class FaultTests(unittest.TestCase):
     """What the host notices on a connection and the step that was running must fail on."""
 
@@ -614,8 +695,12 @@ class LaunchStateTests(unittest.TestCase):
         guest = self.sensor_guest(dump=ORIENTATION_DUMP, log=LOG_LINE % (1, 4, 1))
         self.assertIn("4 sensors", runner.launch_state(guest, True, True))
         # The log line counts four, but a launch without the orientation argument expects three and no entry for it.
-        with self.assertRaisesRegex(runner.Failure, "Host Device Orientation for a launch without its argument"):
+        with self.assertRaisesRegex(runner.Failure, "device orientation sensor .* for a launch without its argument"):
             runner.launch_state(self.sensor_guest(dump=ORIENTATION_DUMP, log=LOG_LINE % (1, 4, 1)), True, False)
+        # Whatever its name, a type-27 sensor is the orientation sensor: a launch without its argument lists none.
+        renamed = ORIENTATION_DUMP.replace("Host Device Orientation  ", "Some Other Sensor Name   ")
+        with self.assertRaisesRegex(runner.Failure, r"by name or type 27\) for a launch without its argument"):
+            runner.launch_state(self.sensor_guest(dump=renamed, log=LOG_LINE % (0, 4, 1)), True, False)
         # A launch that carried the argument needs the type-27 entry, whatever the log line says.
         with self.assertRaisesRegex(runner.Failure, r"not Host Device Orientation \(type 27\)"):
             runner.launch_state(self.sensor_guest(log=LOG_LINE % (1, 4, 1)), True, True)
@@ -688,18 +773,26 @@ class ReportGuest:
 
     serial = "127.0.0.1:5586"
 
-    def __init__(self, azimuths: list[float | None], count: int = 40, cycle: bool = False) -> None:
+    def __init__(self, azimuths: list[float | None], count: int = 40, cycle: bool = False, *, advance: bool = True,
+                 valid: bool = True, report_run: str | None = None, probe_run_id: str | None = None) -> None:
         self.azimuths, self.count, self.looks, self.cycle = list(azimuths), count, 0, cycle
+        self.advance, self.valid, self.report_run = advance, valid, report_run
+        if probe_run_id is not None:
+            self.probe_run_id = probe_run_id
 
     def alive(self) -> None:
         pass
 
     def adb_run(self, *arguments: str, timeout: float = 0) -> subprocess.CompletedProcess:
         value = self.azimuths[self.looks % len(self.azimuths) if self.cycle else min(self.looks, len(self.azimuths) - 1)]
+        # The rotation vector's count grows with every look, as events do; ``advance=False`` freezes it.
+        count = self.count + (self.looks if self.advance else 0) if value is not None else 0
         self.looks += 1
-        report = ('{"mode":"compass","valid":true,"magnetometer":{"count":50},"rotation_vector":{"count":%d,'
-                  '"azimuth_deg":%s}}' % (self.count if value is not None else 0, "null" if value is None else value))
-        return subprocess.CompletedProcess(arguments, 0, stdout=report)
+        report = {"mode": "compass", "valid": self.valid, "magnetometer": {"count": 50},
+                  "rotation_vector": {"count": count, "azimuth_deg": value}}
+        if self.report_run is not None:
+            report["run_id"] = self.report_run
+        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(report))
 
 
 class StreamingHost:
@@ -714,10 +807,10 @@ class StreamingHost:
 
 
 class RotationVectorTests(unittest.TestCase):
-    def run_step(self, azimuths: list[float | None], seconds: float = 90, cycle: bool = False) -> str:
+    def run_step(self, azimuths: list[float | None], seconds: float = 90, cycle: bool = False, **report) -> str:
         host = StreamingHost()
         with mock.patch.object(runner.orient.time, "sleep"), mock.patch.object(runner, "ROTATION_SECONDS", seconds):
-            note = runner.rotation_vector(ReportGuest(azimuths, cycle=cycle), host)
+            note = runner.rotation_vector(ReportGuest(azimuths, cycle=cycle, **report), host)
         self.assertEqual(host.streams, [(runner.field_at_heading(0.0), 3)])
         return note
 
@@ -736,6 +829,34 @@ class RotationVectorTests(unittest.TestCase):
     def test_the_azimuth_wraps_at_180_when_it_settles(self) -> None:
         self.assertIn("settled", self.run_step([179.0, -179.0, 180.0, -180.0, 179.5, -179.5]))
 
+    def test_a_stream_that_stops_after_one_event_never_settles(self) -> None:
+        # The same report looked at again is not another sample: a frozen count passes no window.
+        with self.assertRaisesRegex(runner.Failure, r"1 samples of the azimuth so far, and the count is not advancing"):
+            self.run_step([1.5], seconds=0.3, advance=False)
+        # A stream that gave a few events and stopped before the window filled does not settle either.
+        guest = ReportGuest([1.5], advance=True)
+        original = guest.adb_run
+        guest.adb_run = lambda *arguments, timeout=0: original(*arguments) if guest.looks < 3 else (
+            subprocess.CompletedProcess(arguments, 0, stdout='{"mode":"compass","valid":true,"magnetometer":'
+                                        '{"count":50},"rotation_vector":{"count":42,"azimuth_deg":1.5}}'))
+        with mock.patch.object(runner.orient.time, "sleep"), mock.patch.object(runner, "ROTATION_SECONDS", 0.3):
+            with self.assertRaisesRegex(runner.Failure, "samples of the azimuth so far, and the count is not advancing"):
+                runner.rotation_vector(guest, StreamingHost())
+
+    def test_a_report_of_another_run_or_an_invalid_one_or_a_heading_that_is_no_number_never_passes(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "the report is of run '9', not the probe's '42'"):
+            self.run_step([1.5] * 8, seconds=0.3, report_run="9", probe_run_id="42")
+        self.assertIn("settled", self.run_step([1.5] * 8, report_run="42", probe_run_id="42"))
+        with self.assertRaisesRegex(runner.Failure, "the probe says it is not valid"):
+            self.run_step([1.5] * 8, seconds=0.3, valid=False)
+        for bad in (float("nan"), float("inf")):
+            with self.subTest(bad), self.assertRaisesRegex(runner.Failure, "heading is"):
+                self.run_step([bad] * 8, seconds=0.3)
+
+    def test_the_note_comes_from_the_report_that_settled(self) -> None:
+        note = self.run_step([40.0, 20.0, 5.0, 2.0, 1.4, 1.6, 1.5, 1.5, 1.5, 1.5])
+        self.assertRegex(note, r"^\d+ events, azimuth settled at 1\.5")
+
 
 class LiveGuest:
     """A guest with a probe that reports the magnetometer, a system_server and a sensors HAL, each with an identity
@@ -748,6 +869,7 @@ class LiveGuest:
         self.report_run = run_id
         self.stage = "before"
         self.system_server_pid = {"before": "1000", "after": "1000"}
+        self.system_server_start = {"before": 777, "after": 777}
         self.hal = {"before": (439, 1234), "after": (439, 1234)}
         self.magnetometer: dict = {
             "count": 50, "last_ns": 1_000_000, "latest": list(runner.field_at_heading(0.0)), "accuracy": 3,
@@ -765,6 +887,9 @@ class LiveGuest:
         if command.startswith("ps -A"):
             return f"  {self.hal[self.stage][0]} /vendor/bin/hw/{runner.SENSORS_HAL}\n"
         if command.startswith("cat /proc/"):
+            pid = command.split("/")[2]
+            if pid == self.system_server_pid[self.stage]:
+                return f"{pid} (system_server) S 1 1 1 0 -1 4194560 1 0 0 0 5 3 0 0 20 0 8 0 {self.system_server_start[self.stage]} 9 1\n"
             return (f"{self.hal[self.stage][0]} (android.hardwar) S 1 439 439 0 -1 4194560 100 0 0 0 5 3 0 0 20 0 8 0 "
                     f"{self.hal[self.stage][1]} 99999 1\n")
         raise AssertionError(command)
@@ -938,7 +1063,8 @@ class RefusedRecordTests(unittest.TestCase):
         for label, change, message in (
                 ("a new pid", {"hal": {"after": (500, 1234)}}, "sensors HAL restarted"),
                 ("the same pid and a new start time", {"hal": {"after": (439, 9999)}}, "sensors HAL restarted"),
-                ("system_server", {"system_server_pid": {"after": "2000"}}, "system_server restarted")):
+                ("system_server", {"system_server_pid": {"after": "2000"}}, "system_server restarted"),
+                ("system_server's start time", {"system_server_start": {"after": 999}}, "system_server restarted")):
             guest = LiveGuest()
             for name, value in change.items():
                 getattr(guest, name).update(value)
@@ -979,7 +1105,8 @@ class OlderWireTests(unittest.TestCase):
         for label, change, message in (
                 ("the HAL", {"hal": {"after": (500, 1234)}}, "sensors HAL restarted"),
                 ("the HAL's start time", {"hal": {"after": (439, 5)}}, "sensors HAL restarted"),
-                ("system_server", {"system_server_pid": {"after": "2000"}}, "system_server restarted")):
+                ("system_server", {"system_server_pid": {"after": "2000"}}, "system_server restarted"),
+                ("system_server's start time", {"system_server_start": {"after": 999}}, "system_server restarted")):
             guest = LiveGuest()
             for name, value in change.items():
                 getattr(guest, name).update(value)
