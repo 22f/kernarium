@@ -39,7 +39,7 @@ private func host(maximumMiB: Int, hasCompass: Bool = false, hasCamera: Bool = f
 private func device(_ idiom: HostDevice.Idiom, hasHaptics: Bool = false) -> HostDevice {
     HostDevice(
         name: "\(idiom)", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [3072]),
-        freeStorageBytes: 40_000_000_000, idiom: idiom, hasHaptics: hasHaptics)
+        freeStorageBytes: 40_000_000_000, idiom: idiom, hasHaptics: hasHaptics, hasCompass: false, hasCamera: false)
 }
 
 private let iPhone = device(.phone, hasHaptics: true)

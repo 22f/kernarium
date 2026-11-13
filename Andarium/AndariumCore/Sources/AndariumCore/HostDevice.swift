@@ -35,12 +35,13 @@ public struct HostDevice: Equatable, Sendable {
     public enum Idiom: Equatable, Sendable { case phone, pad, mac }
 
     /// `processorCount` is the vCPU limit. Whoever builds a host says what kind
-    /// of device it is, and whether it has haptics: a default would let a
-    /// host claim "an iPhone without haptics" by leaving them out.
+    /// of device it is and whether it has haptics, a compass and a camera: a
+    /// default would let a host claim "an iPhone without a camera" by leaving
+    /// the argument out, and its notes and rows would silently go missing.
     public init(
         name: String, processorCount: Int, memory: MemoryPolicy, freeStorageBytes: UInt64,
         runsGuestGraphics: Bool = true, supportsPointer: Bool = true, idiom: Idiom, hasHaptics: Bool,
-        hasCompass: Bool = false, hasCamera: Bool = false
+        hasCompass: Bool, hasCamera: Bool
     ) {
         self.name = name
         self.processorCount = max(1, processorCount)

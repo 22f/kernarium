@@ -39,7 +39,7 @@ struct WhatsNewTests {
         HostDevice(
             name: idiom == .pad ? "iPad" : "iPhone", processorCount: 6,
             memory: MemoryPolicy(maximumsMiB: [maximumMiB]), freeStorageBytes: 40_000_000_000,
-            idiom: idiom, hasHaptics: hasHaptics, hasCamera: hasCamera)
+            idiom: idiom, hasHaptics: hasHaptics, hasCompass: false, hasCamera: hasCamera)
     }
 
     private func withDefaultsReturning<Result>(_ body: (UserDefaults) -> Result) -> Result {
