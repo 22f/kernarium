@@ -313,3 +313,17 @@ uml_add_unit_test(
     COMMAND uml_runtime_stall_watch_tests
     TIMEOUT 120)
 set_tests_properties(runtime-stall-watch PROPERTIES RUN_SERIAL TRUE)
+
+# What the host gives back when the system warns of memory pressure: the
+# policy against a clock and actions of the test's own, and the system's side
+# against a source the test raises.
+add_executable(uml_runtime_memory_pressure_response_tests
+    memory_pressure_response_tests.cpp)
+target_link_libraries(uml_runtime_memory_pressure_response_tests PRIVATE
+    UML::RuntimeMemoryPressure
+    UML::RuntimeGuestStatistics
+    UML::PlatformContract)
+uml_add_unit_test(
+    NAME runtime-memory-pressure-response
+    COMMAND uml_runtime_memory_pressure_response_tests
+    TIMEOUT 120)

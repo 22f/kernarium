@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "camera.hpp"
 #include "camera_authorization.hpp"
+#include "frame_bytes.hpp"
 #include "require.hpp"
 
 #include <set>
@@ -19,6 +20,8 @@ int main()
     require(camera != nullptr);
     const auto cameras = camera->cameras();
     require(!camera->hostModel().empty());
+    // The system's camera states the working storage its photo pipeline holds, which the reserve counts.
+    require(camera->stillWorkingBytesPerPixel() == systemCameraStillWorkingBytesPerPixel, "the system camera's working storage");
     std::set<std::string> identifiers;
     for (const auto& info : cameras) {
         require(!info.identifier.empty() && identifiers.insert(info.identifier).second);

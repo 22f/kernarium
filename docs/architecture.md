@@ -83,8 +83,26 @@ and releases what it frees (`darwin_uml_physmem_commit`/`_release`,
 footprint. Physical iOS also wires a page while it is committed; the one window
 with a held page unwired is a [hibernation](#hibernation). The kernel trims its
 page cache only at the host's request (`uml_emulator_trim_page_cache()`, every
-quiesce). The host GPU's memory is not carved out of the guest's RAM, and the
-host provides no Virtio balloon device.
+quiesce, and the system's memory warning below). The host GPU's memory is not
+carved out of the guest's RAM, and the host provides no Virtio balloon device.
+
+**Memory pressure.** When the system's memory pressure source reports a warning
+or a critical level, the runtime frees the host GPU's cached driver allocations
+and asks the guest for one page-cache trim, which unwires those pages
+(`runtime/memory_pressure_response.hpp`); the normal level does nothing. The
+trim is skipped for a guest the host has quiesced and for one with no console;
+a trim that meets another lifecycle call of the guest is retried up to four
+times, a second apart, until a response of its own or the normal level takes its
+place. A lifecycle call (quiesce, resume, stop) goes before a pressure trim,
+which gives way and is retried. A quiesce counts its trim's reply wait from its
+call, and omits its own trim only when a pressure trim reached the guest while
+it waited and used the wait up. A trim wakes a guest that suspended itself. A warning starts at most one
+response per 30 s of awake time (`CLOCK_UPTIME_RAW`) counted from the start of
+the last response, a critical level always starts one, and none starts while one
+runs. macOS and iOS, and both applications, get it through the runtime. Each
+level change and each response is one rate-limited stderr line: the footprint,
+the failed guest-RAM wiring operations and, on a response line, the bytes each
+part released and the trim's duration.
 
 **Budgets.** The process's memory limit, L, is the figure the memory budgets
 derive from. iOS enforces one per application
@@ -110,7 +128,8 @@ to be ended. [`graphics.md`](graphics.md) owns what B bounds. A live camera
 session holds host memory outside the GPU (the camera device's reserve,
 `device/camera/camera_tiers.hpp`), and the GPU's pool is B less it
 (`gpu_pool_bytes`), taken after the clamp; blocked cameras and none take
-nothing, and the applications show the pool.
+nothing, a reserve that takes all of B refuses the launch (a pool of zero is no
+limit to the renderer), and the applications show the pool.
 
 The guest side's memory follows the vCPU count, v, and that header is the one
 place that says how; every caller evaluates it:
@@ -480,13 +499,25 @@ that carries a request is consumed and dropped, because its sender may be
 waiting with interrupts off; only the GPU, whose requests are asynchronous, the
 vsock and GNSS devices, whose requests the guest never waits on, and the video
 devices, whose streams outlive a suspend, ask to keep them. A ring disable also
-resets a device that holds a deferred request, unless the device asks to keep it
-(`keepsDeferredRequestsWhileDisabled()`, which the video devices do): the
-transport then leaves the device alone, keeps what it completes while a ring is
-disabled and writes it to the ring at its enable, in the order the device
-finished it. A message that changes the memory, the
+resets a device that holds a deferred request, and says so on stderr, unless the
+device asks to keep it
+(`keepsDeferredRequestsWhileDisabled()`, which the GPU, video and camera
+devices do): the transport then leaves the device alone, keeps what it
+completes while a ring is disabled and writes it to the ring at its enable, in
+the order the device finished it. A fenced GPU command still on the host when
+the guest suspends so keeps its contexts and resources, and its answer reaches
+the guest after the enable. A message that changes the memory, the
 features, a ring's layout or base, or ends the driver (the `GET_FEATURES` that
-follows a teardown's disables included) resets such a device first. That
+follows a teardown's disables included) resets such a device first. While the
+transport waits for the front-end to acknowledge a backend request (a
+shared-memory map or unmap, a configuration change, a call), that
+`GET_FEATURES` is answered after the wait and behind every message already
+queued, rather than inside it, since a reset sends unmaps of its own; so a
+device with a shared-memory region may keep its requests too. The wait ends with
+the acknowledgement, the end of the backend-request channel, or a service stop;
+it has no deadline of its own, and a front-end that never answers leaves the
+reset waiting. A reset whose unmap is refused or whose channel has ended also
+drops every range the backend published from the host index. That
 `GET_FEATURES` also retires every ring still disabled, which the guest then
 frees: the transport reads it no more until its next `SET_VRING_KICK` or
 in-band `VRING_KICK`, whereas an enabled ring, and a disabled one no teardown
