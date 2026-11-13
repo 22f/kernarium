@@ -1845,10 +1845,12 @@ class Watch:
             if self.observer.switched or (self.observer.advanced and not self.adopted):
                 self.observer.switched = False
                 self.adopt()
+            # Whatever the observer concludes from what it saw before, a
+            # heartbeat that cannot be read for too long ends the watch.
+            code = self.watch_blind()
+            if code is not None:
+                return code
             if reason is None:
-                code = self.watch_blind()
-                if code is not None:
-                    return code
                 self.clock.wait(self.stop, WATCH_POLL)
                 continue
             code = self.replace(reason)

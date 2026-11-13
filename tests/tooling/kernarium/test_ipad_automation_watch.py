@@ -1155,6 +1155,31 @@ class VerdictBoundaryTests(unittest.TestCase):
         self.assertEqual(started.call_count, 1)
         self.assert_lock_free()
 
+    def test_a_finished_snapshot_followed_only_by_failed_reads_ends_unknown(self) -> None:
+        # Rule (R3, the reviewer's final probe): one snapshot that says the host
+        # finished, then reads that all fail. The verdict it gave is cached and
+        # every turn of the loop drops it for want of a fresh read, but the
+        # bound on how long the heartbeat may stay unreadable applies all the
+        # same: the watch ends with the cannot-observe status, and nothing was
+        # ended or started.
+        watch = automation.Watch(self.options, clock=self.clock)
+        first = [dict(self.state, finished=True)]
+        limit = self.clock.monotonic() + automation.WATCH_UNKNOWN_LIMIT + 20
+        # (the bound of the probe stops a watch that does not end by itself)
+        self.clock.hooks.append(
+            lambda clock: watch.stop.set() if clock.monotonic() > limit + 600 else None)
+        with mock.patch.object(automation, "host_state",
+                               lambda *args, **kwargs: first.pop() if first else None), \
+                mock.patch.object(automation, "end_host") as end, \
+                mock.patch.object(automation, "launch_host") as launch:
+            result = watch.run()
+        self.assertEqual(result, automation.EXIT_WATCH_CANNOT_OBSERVE)
+        self.assertEqual(watch.record.data.get("state"), automation.CANNOT_OBSERVE)
+        self.assertLess(self.clock.monotonic(), limit + 600)
+        end.assert_not_called()
+        launch.assert_not_called()
+        self.assert_lock_free()
+
     def test_an_approval_failure_in_the_last_launch_is_latched_without_a_heartbeat(self) -> None:
         # Rule (R1, the reviewer's final probe): the last launch's own log says
         # the device asked and nobody answered. The watch records that whether
