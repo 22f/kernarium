@@ -95,6 +95,22 @@ enum class PhotoOutputPreparation : std::uint8_t {
 // alone has no processed photo), which is not a different size.
 [[nodiscard]] bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested) noexcept;
 
+// What a finished capture whose photo is not the size asked for leads to. The
+// first capture after a photo output's maximum was raised on a running session
+// can be served before the output applies it, at the size it made before; the
+// capture is made again, and the photo of another size on the last attempt
+// fails the capture (the guest is told at once, and nothing of another size is
+// passed on).
+enum class StillSizeOutcome : std::uint8_t {
+    deliver,
+    retry,
+    fail,
+};
+inline constexpr unsigned stillAttemptLimit = 2;
+
+// `attempt` counts from one: the capture that finished.
+[[nodiscard]] StillSizeOutcome stillSizeOutcome(CameraStillSize resolved, CameraStillSize requested, unsigned attempt) noexcept;
+
 // Takes a photo's JPEG file into `out` if one is wanted and the file is no
 // larger than `maximumBytes` (zero: no bound). A file that is refused is not
 // copied: nothing of it is allocated, and `out` is left as it was.

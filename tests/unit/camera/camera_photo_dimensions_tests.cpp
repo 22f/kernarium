@@ -88,6 +88,42 @@ void theResolvedSizeIsTheRequestOrItIsRefused()
     require(!resolvedSizeIsRequested({4032, 0}, {4032, 3024}), "half a size is a size that differs");
 }
 
+// The captures a still takes, as the backend runs them: one more for each
+// outcome of `retry`, and the last outcome is the capture's end. `served` is
+// the size each capture was made at, in order; the last one repeats.
+StillSizeOutcome runStill(const std::vector<CameraStillSize>& served, CameraStillSize requested, unsigned& captures)
+{
+    captures = 0;
+    for (;;) {
+        const CameraStillSize resolved = served[std::min<std::size_t>(captures, served.size() - 1)];
+        ++captures;
+        const StillSizeOutcome outcome = stillSizeOutcome(resolved, requested, captures);
+        if (outcome != StillSizeOutcome::retry) return outcome;
+    }
+}
+
+void aPhotoOfAnotherSizeIsMadeAgainOnceAndThenFails()
+{
+    constexpr CameraStillSize full {8064, 6048};
+    constexpr CameraStillSize served {4032, 3024};
+    require(stillSizeOutcome(full, full, 1) == StillSizeOutcome::deliver, "the size asked for is delivered at once");
+    require(stillSizeOutcome(full, full, stillAttemptLimit) == StillSizeOutcome::deliver, "and on the last attempt");
+    require(stillSizeOutcome(served, full, 1) == StillSizeOutcome::retry, "a photo served at the size from before is made again");
+    require(stillSizeOutcome(served, full, stillAttemptLimit) == StillSizeOutcome::fail, "and on the last attempt it fails");
+    require(stillSizeOutcome({0, 0}, full, 1) == StillSizeOutcome::deliver, "no size stated (a Bayer still alone) is not a different size");
+    require(stillSizeOutcome({8064, 0}, full, 1) == StillSizeOutcome::retry, "half a size differs");
+
+    unsigned captures = 0;
+    require(runStill({full}, full, captures) == StillSizeOutcome::deliver && captures == 1, "a pipeline that has the size: one capture");
+    // The first capture after the output's maximum was raised is served at the old size.
+    require(runStill({served, full}, full, captures) == StillSizeOutcome::deliver && captures == 2,
+            "a first capture at the old size: the second is the photo");
+    // A configuration that cannot make the size fails the capture after the attempts, never by waiting for it.
+    require(runStill({served}, full, captures) == StillSizeOutcome::fail && captures == stillAttemptLimit,
+            "a size that is never made fails after the attempt limit");
+    require(stillAttemptLimit >= 2, "one retry at least");
+}
+
 // A photo output as AVFoundation treats it: its maximum is refused (it raises)
 // unless the output is attached to the session with a source whose active
 // format lists the size.
@@ -254,6 +290,7 @@ int main()
     anEmptyOrZeroSizedTableAsksForNothing();
     aCaptureWithoutAJpegTakesTheSmallestSize();
     theResolvedSizeIsTheRequestOrItIsRefused();
+    aPhotoOfAnotherSizeIsMadeAgainOnceAndThenFails();
     theOutputIsAttachedBeforeItsMaximumIsSet();
     aMaximumTheSourceRefusesDetachesTheOutput();
     anOutputThatCannotBeAttachedGetsNoMaximum();

@@ -409,6 +409,7 @@ using uml::platform::SessionState;
                       jpegSize:(uml::platform::CameraStillSize)jpegSize
                   maximumBytes:(uint64_t)maximumBytes
                        wantRaw:(BOOL)wantRaw
+                       attempt:(unsigned)attempt
                          state:(std::shared_ptr<SessionState>)state;
 @end
 
@@ -880,7 +881,9 @@ public:
         return started;
     }
 
-    bool startStill(std::size_t camera, const CameraStillRequest& request)
+    // `attempt` is the capture of this request that starts (from one): a photo that comes back at a size other than the
+    // one asked for makes the next (uml::platform::stillSizeOutcome).
+    bool startStill(std::size_t camera, const CameraStillRequest& request, unsigned attempt = 1)
     {
         const Entry& entry = entries_[camera];
         auto& running = cameras_[camera];
@@ -948,12 +951,13 @@ public:
                                                                       jpegSize:wanted
                                                                   maximumBytes:request.maximumJpegBytes
                                                                        wantRaw:request.raw
+                                                                       attempt:attempt
                                                                          state:state_];
         // The photo output holds its delegate weakly, so the session keeps it
         // until the capture finishes, or none of its callbacks would arrive.
         {
             std::lock_guard lock(photoMutex_);
-            photos_[request.token] = {camera, delegate};
+            photos_[request.token] = {camera, delegate, request, attempt};
         }
         [output capturePhotoWithSettings:settings delegate:delegate];
         refusals_.reset(camera);
@@ -1048,6 +1052,45 @@ public:
         // and stop() waits for the queue after clearing that state, so the
         // block runs before the session can end.
         if (camera < entries_.size()) dispatch_async(queue_, ^{ releaseStill(camera); });
+    }
+
+    // The capture of a request came back at a size other than the one asked for and has another attempt: it is made
+    // again on the session's queue, and the camera stays in the session for it. False when there is none to make
+    // (the request is gone, or the session is ending), and the caller fails the capture. Called by the photo delegate,
+    // under the state's mutex.
+    bool remakeStill(std::size_t camera, std::uint64_t token)
+    {
+        if (stopped_ || camera >= entries_.size()) return false;
+        {
+            std::lock_guard lock(photoMutex_);
+            const auto found = photos_.find(token);
+            if (found == photos_.end() || found->second.camera != camera) return false;
+        }
+        dispatch_async(queue_, ^{ remakeStillOnQueue(camera, token); });
+        return true;
+    }
+
+    void remakeStillOnQueue(std::size_t camera, std::uint64_t token)
+    {
+        Photo photo;
+        {
+            std::lock_guard lock(photoMutex_);
+            const auto found = photos_.find(token);
+            if (found == photos_.end()) return;
+            photo = found->second;
+        }
+        bool started = false;
+        @try {
+            started = !stopped_ && startStill(camera, photo.request, photo.attempt + 1);
+        } @catch (NSException* exception) {
+            refuse(camera, Refusal::raised, std::string("a still: ") + exception.reason.UTF8String);
+        }
+        if (started) return;
+        // The capture fails at once: the guest is told, never left to wait for it.
+        CameraStillResult failed;
+        failed.token = token;
+        std::lock_guard lock(state_->mutex);
+        if (state_->session) deliverStill(camera, std::move(failed));
     }
 
     // The device's own state now: its 3A states, white balance, zoom, lens and
@@ -1652,6 +1695,9 @@ private:
     struct Photo {
         std::size_t camera {};
         UMLPhotoDelegate* delegate {};
+        // What was asked, for the capture that follows one whose photo is not the size asked for.
+        CameraStillRequest request;
+        unsigned attempt {1};
     };
     bool stillsInFlight(std::size_t camera)
     {
@@ -1803,6 +1849,8 @@ std::unique_ptr<Camera> makeAppleCamera()
     // The largest file the host takes; zero for no bound.
     uint64_t _maximumBytes;
     BOOL _wantRaw;
+    // Which capture of the request this is (from one); a photo of another size makes the next.
+    unsigned _attempt;
     std::shared_ptr<SessionState> _state;
     uml::platform::CameraStillResult _result;
     // What the photos' metadata and the Bayer still's DNG state of the
@@ -1819,9 +1867,11 @@ std::unique_ptr<Camera> makeAppleCamera()
                       jpegSize:(uml::platform::CameraStillSize)jpegSize
                   maximumBytes:(uint64_t)maximumBytes
                        wantRaw:(BOOL)wantRaw
+                       attempt:(unsigned)attempt
                          state:(std::shared_ptr<SessionState>)state
 {
     if ((self = [super init])) {
+        _attempt = attempt;
         _camera = camera;
         _token = token;
         _wantJpeg = wantJpeg;
@@ -1914,10 +1964,18 @@ std::unique_ptr<Camera> makeAppleCamera()
         const CMVideoDimensions resolved = resolvedSettings.photoDimensions;
         const uml::platform::CameraStillSize resolvedSize {std::uint32_t(std::max(0, int(resolved.width))),
                                                            std::uint32_t(std::max(0, int(resolved.height)))};
-        if (!uml::platform::resolvedSizeIsRequested(resolvedSize, _jpegSize)) {
-            std::fprintf(stderr, "Camera: the photo resolved to %ux%u, not the %ux%u that was asked for\n", resolvedSize.width,
-                         resolvedSize.height, _jpegSize.width, _jpegSize.height);
+        const auto outcome = uml::platform::stillSizeOutcome(resolvedSize, _jpegSize, _attempt);
+        if (outcome != uml::platform::StillSizeOutcome::deliver) {
+            std::fprintf(stderr, "Camera: the photo resolved to %ux%u, not the %ux%u that was asked for (capture %u of %u)\n",
+                         resolvedSize.width, resolvedSize.height, _jpegSize.width, _jpegSize.height, _attempt,
+                         uml::platform::stillAttemptLimit);
             _result.jpeg.clear();
+            if (outcome == uml::platform::StillSizeOutcome::retry) {
+                // The photo of the first capture is dropped and the request is made again; the result is the
+                // next capture's.
+                std::lock_guard lock(_state->mutex);
+                if (_state->session && static_cast<uml::platform::AppleSession*>(_state->session)->remakeStill(_camera, _token)) return;
+            }
         }
     }
     // Whatever arrived stands; the capture failed only when nothing asked for did.
