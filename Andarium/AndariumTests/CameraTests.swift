@@ -676,7 +676,7 @@ struct CameraFlowTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let folder = root.appendingPathComponent("Camera", isDirectory: true)
         let prepared = LiveRuntime.prepareCalibrationDirectory(folder)
-        #expect(prepared == folder)
+        #expect(prepared == folder && prepared.path == folder.path, "the boot reads the folder the planner asks about")
         var isDirectory: ObjCBool = false
         #expect(FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory) && isDirectory.boolValue)
         let values = try folder.resourceValues(forKeys: [.isExcludedFromBackupKey])
