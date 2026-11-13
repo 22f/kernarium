@@ -182,6 +182,43 @@ void lossBeforeDrainNotice()
     for (unsigned waited = 0; !output.drained && waited < 600; ++waited) collect(*encoder, output, 50);
     requireWhole(output, 3, 0);
 }
+
+/* A session that is lost, or cannot get its hardware, while a property is set
+ * is not a refusal of the property, whether the property is one the stream asked
+ * for or a refinement the encoder may ignore: the configuration is exhausted, so
+ * discovery does not take a refusal for a fact of the host. A property the
+ * encoder does not know is still ignorable when it is only a refinement. */
+constexpr int kInvalidSession = -12903;       // kVTInvalidSessionErr
+constexpr int kAllocationFailed = -12904;     // kVTAllocationFailedErr
+constexpr int kPropertyNotSupported = -12900; // kVTPropertyNotSupportedErr
+
+VideoEncodeStatus configureWithFault(const char* key, int status)
+{
+    ::uml::platform::testing::failProperty(key, status);
+    auto encoder = makeVideoEncoder();
+    const auto result = static_cast<apple_encoder::ProbeEncoder&>(*encoder).configureUnchecked(settings());
+    ::uml::platform::testing::failProperty("", 0);
+    return result;
+}
+
+void anOptionalPropertyThatMeetsALostSession()
+{
+    std::puts("== a lost session at an optional property");
+    // H.264 High sets its entropy mode, which the encoder is free to ignore.
+    require(configureWithFault("H264EntropyMode", kAllocationFailed) == VideoEncodeStatus::exhausted,
+            "an allocation failure at an optional property is not a configuration that works");
+    require(configureWithFault("H264EntropyMode", kInvalidSession) == VideoEncodeStatus::exhausted,
+            "nor is a lost session");
+    require(configureWithFault("ExpectedFrameRate", kInvalidSession) == VideoEncodeStatus::exhausted,
+            "at any optional property");
+    require(configureWithFault("H264EntropyMode", kPropertyNotSupported) == VideoEncodeStatus::ok,
+            "while an optional property the encoder does not know is ignored");
+    // A required property is not a refinement.
+    require(configureWithFault("ProfileLevel", kInvalidSession) == VideoEncodeStatus::exhausted, "a lost session at a required property");
+    require(configureWithFault("ProfileLevel", kPropertyNotSupported) == VideoEncodeStatus::unsupported,
+            "and a required property the encoder does not know is a refusal");
+    require(configureWithFault("", 0) == VideoEncodeStatus::ok, "with no fault, the configuration is made");
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -199,6 +236,7 @@ int main(int argc, char** argv)
         lossesWithOutputBetweenAreEachRecovered();
         lossWithReordering();
         lossBeforeDrainNotice();
+        anOptionalPropertyThatMeetsALostSession();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());
         return 1;
