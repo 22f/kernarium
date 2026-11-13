@@ -8,6 +8,7 @@
 #include "session_record.hpp"
 #include "require.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -45,7 +46,7 @@ std::string read_file(const std::string &path)
 	return text;
 }
 
-bool has(const std::string &text, const char *part)
+bool has(const std::string &text, const std::string &part)
 {
 	return text.find(part) != std::string::npos;
 }
@@ -250,6 +251,87 @@ void test_the_record_keeps_no_serial_number()
 				  "LASTVALUE"})
 		require(!has(record, value),
 			std::string{"the record keeps a serial number: "} + value);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
+/* The ring keeps the last bytes of the output, so after a wrap its first line
+ * is cut at any byte: in the middle of `androidboot.serialno=` or of its value.
+ * The record starts at the first complete line, with the output as one write
+ * longer than the ring (which keeps its end) and as many small ones. */
+void test_a_wrapped_ring_keeps_no_serial_number()
+{
+	constexpr std::size_t ring = uml::runtime::session_kernel_output_bytes;
+	const std::string key = "androidboot.serialno=";
+	const std::string serial = "TESTSERIAL0123456";
+	const std::string echo =
+		"Kernel command line: quiet " + key + serial + " next\n";
+	const std::size_t at = echo.find(key);
+	const std::string marker = "\nring end marker\n";
+	for (const bool one_write : {true, false}) {
+		/* The ring starts `cut` bytes into the echo: before the key,
+		 * inside it, at its last byte, at the value, inside the value
+		 * and just after it. */
+		for (const std::size_t cut :
+		     {std::size_t{0}, std::size_t{3}, at - 1, at, at + 1,
+		      at + 12, at + 13, at + 20, at + key.size(),
+		      at + key.size() + 4, at + key.size() + serial.size() - 1,
+		      at + key.size() + serial.size()}) {
+			std::string input = echo;
+			const std::size_t padding =
+				ring + cut - echo.size() - marker.size();
+			for (std::size_t line = 0; line < padding / 32; ++line)
+				input += std::string(31, 'y') + '\n';
+			input += std::string(padding % 32, 'y');
+			input += marker;
+			require(input.size() == ring + cut, "a wrong test input");
+			uml::runtime::reset_session_record();
+			const std::string path = temporary_record();
+			require(uml::runtime::begin_session_record(path, {}));
+			if (one_write) {
+				(void)uml::runtime::kernel_write(
+					STDERR_FILENO, input.data(), input.size());
+			} else {
+				for (std::size_t offset = 0; offset < input.size();
+				     offset += 64)
+					(void)uml::runtime::kernel_write(
+						STDERR_FILENO, input.data() + offset,
+						std::min<std::size_t>(64, input.size() - offset));
+			}
+			uml::runtime::end_session_record(SessionEnd::kernel_exit, 143,
+				"exit");
+			const std::string record = read_file(path);
+			const std::string where = (one_write ? " (one write, cut " :
+							       " (small writes, cut ") +
+				std::to_string(cut) + "): " + record;
+			for (const char *part : {"TESTSERIAL", "SERIAL0123", "0123456"})
+				require(!has(record, part),
+					std::string{"the record keeps part of the serial number "} +
+						part + where);
+			require(has(record, "ring end marker\n"),
+				"the record lost the end of the output" + where);
+			/* A first line that is cut is dropped whole, never kept
+			 * as the part that is left of it. */
+			require(!has(record, "kernel-output\nrmand") &&
+				!has(record, "kernel-output\n" + serial),
+				"the record starts inside a line" + where);
+			uml::runtime::reset_session_record();
+			unlink(path.c_str());
+		}
+	}
+	/* The ring that dropped nothing keeps its first line, even when the output
+	 * fills it exactly. */
+	uml::runtime::reset_session_record();
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, {}));
+	std::string full = echo;
+	full.resize(ring, 'y');
+	(void)uml::runtime::kernel_write(STDERR_FILENO, full.data(), full.size());
+	uml::runtime::end_session_record(SessionEnd::kernel_exit, 143, "exit");
+	const std::string record = read_file(path);
+	require(has(record, "kernel-output\nKernel command line: quiet " + key +
+			    "<masked> next\n") && !has(record, serial),
+		"a ring that dropped nothing lost its first line: " + record);
 	uml::runtime::reset_session_record();
 	unlink(path.c_str());
 }
@@ -1177,6 +1259,7 @@ int main(int argc, char **argv)
 		test_the_console_says_when_the_boot_finished();
 		test_record_lifecycle();
 		test_the_record_keeps_no_serial_number();
+		test_a_wrapped_ring_keeps_no_serial_number();
 		test_memory_checkpoints();
 		test_network_slot();
 		/* The registration passes the golden file; a run without it
