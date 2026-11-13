@@ -185,10 +185,10 @@ nonisolated enum SendFeedbackNames {
     static let maxBytes = 200
     static let maxExtensionLength = 16
 
-    /// The name as a mail or a volume compares it: letters of any case and accents composed either
-    /// way are the same name.
+    /// The name as a mail or a volume compares it: letters of any case are the same name (a string
+    /// already equals another that spells an accent the other way, composed or not).
     static func key(_ name: String) -> String {
-        name.precomposedStringWithCanonicalMapping.lowercased()
+        name.lowercased()
     }
 
     static func fits(_ name: String) -> Bool {

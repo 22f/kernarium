@@ -112,18 +112,21 @@ enum FeedbackPreview {
             // Short words, so that the row is on the screen at the largest text size.
             feedback.form.problem = words.shortProblem
             feedback.form.details = words.shortDetails
-            await attachFile(feedback, named: "example-app.apk", megabytes: 12.4)
+            await attachFile(feedback, named: "app.apk", megabytes: 12.4)
+            await scrollToTheEnd(feedback)
         case "feedback-file-long":
             feedback.form.problem = words.shortProblem
             feedback.form.details = words.shortDetails
             await attachFile(
                 feedback, named: "example-application-release-candidate-build-2026-11-13-arm64-v8a-signed-debuggable.apk",
-                megabytes: 38.2)
+                megabytes: 12.4)
+            await scrollToTheEnd(feedback)
         case "feedback-file-names":
             feedback.form.problem = words.shortProblem
             feedback.form.details = words.shortDetails
             await attachFile(feedback, named: "\u{6D4B}\u{8BD5}\u{5E94}\u{7528}.apk", megabytes: 12.4)
-            await attachFile(feedback, named: "\u{30C6}\u{30B9}\u{30C8}\u{30A2}\u{30D7}\u{30EA}.apk", megabytes: 8.1)
+            await attachFile(feedback, named: "\u{30C6}\u{30B9}\u{30C8}\u{30A2}\u{30D7}\u{30EA}.apk", megabytes: 5.1)
+            await scrollToTheEnd(feedback)
         case "feedback-file-mixed":
             await attachAll(feedback, report: 3.2, photo: 2.4)
             await attachFile(feedback, named: "example-app.apk", megabytes: 6.8)
@@ -165,6 +168,16 @@ enum FeedbackPreview {
                 await feedback.addFiles([folder, empty])
             }
         }
+    }
+
+    /// Brings the end of the mail into view, as opening the details does, and folds them again: at a large text size
+    /// the attachments are below the fold of the sheet.
+    @MainActor
+    private static func scrollToTheEnd(_ feedback: SendFeedbackModel) async {
+        try? await Task.sleep(for: .milliseconds(600))
+        feedback.showsInformation = true
+        try? await Task.sleep(for: .milliseconds(900))
+        feedback.showsInformation = false
     }
 
     /// The alert the sheet makes for these refusals, with the model's own words.
