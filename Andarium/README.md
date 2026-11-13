@@ -738,6 +738,17 @@ requires reopening Andarium.
   in force (runtime API 36), and the session record notes it beside the counts
   of the guest's network (`NetworkRecord`), which the bug report carries in
   words.
+- **Memory low.** The runtime answers iOS's memory pressure itself
+  ([`docs/architecture.md`](../docs/architecture.md#memory-and-executable-code))
+  and reports every level it raises to the application
+  (`set_memory_pressure_callback`, runtime API 41). Only the critical level has
+  a notice: while a guest session is on screen (not Home, the boot screen or the
+  background), one notice says iOS may close Andarium
+  (`MemoryPressureNoticeState` decides; every configuration has it). It appears
+  when the level reaches critical and stays while it lasts and a little after;
+  a dismissal holds until the level has left critical and reached it again, and
+  a restart or the end of a run clears it. The notices of a session share one
+  column, which scrolls when they are together taller than its room.
 - **Session ends.** The runtime records how each session ended
   ([`docs/architecture.md`](../docs/architecture.md)). The next launch keeps
   that record as the previous session's (`PreviousSession`) and, after an end
