@@ -194,6 +194,21 @@ final class AppModel {
     /// is held at rotation zero and its display follows the scene. The scene's
     /// root sets it (`SessionOrientationPolicy`). Never a saved guest setting.
     var hostDrivesGuestRotation = false
+    /// The guest follows the device's orientation, as iOS reports it: the device
+    /// is an iPhone, whose interface stays portrait while the guest turns with
+    /// the device, or the launch states it (a Mac test). Where the interface
+    /// turns (a folding iPhone's inner display) the host drives the guest
+    /// instead. Set once, when the model is made (`AppEntry`).
+    var followsDeviceOrientation = false
+    /// What the system says of the folding display the scene is on (the iPhone
+    /// Duo); nil on every device that reports no hinge, which keeps every
+    /// layout it has. The scene's root reads it (`FoldSceneReader`) and the
+    /// layout decisions are `AndariumCore`'s (`FoldLayout.swift`).
+    var fold: FoldReading?
+    /// Where the scene is: `.plain` unless the display folds.
+    var foldPose: FoldPose { fold?.pose ?? .plain }
+    /// The session's layout on a folding display; nil elsewhere.
+    var sessionPlan: SessionPlan? { fold.flatMap(SessionPlan.init) }
 
     var sessionPreset = SessionPreset()
     var session = SessionState() {
@@ -394,7 +409,7 @@ final class AppModel {
     /// What Send feedback asks of the system (`SendFeedbackServices`); a test
     /// or the Simulator preview replaces it.
     @ObservationIgnored var feedbackServices = SendFeedbackServices()
-    /// The Send feedback sheet is open, over Info or over the session's Settings.
+    /// The Send feedback sheet is open, over Home or over the session's Settings.
     var feedbackSheetOpen = false
     #endif
     #if FOLLOW_X
@@ -408,13 +423,20 @@ final class AppModel {
     /// screen over the session asks what to do.
     var spacePause: SpacePause?
     var alert: AppAlert?
+    /// Settings' Install APK asks whether to install an app Android refused for
+    /// the version it was built for; the screens' alert shows it while the
+    /// install waits behind the overlay (`LegacyInstallFlow`).
+    var legacyInstallQuestion: LegacyInstallQuestion?
+    @ObservationIgnored private var legacyInstallAnswer: CheckedContinuation<Bool?, Never>?
+    /// Which attempt of an install the overlay listens to: what an attempt that is over reports
+    /// late (the guest's last words arrive on the main actor after the attempt has thrown) is
+    /// dropped, so it cannot write over the question's or the retry's overlay.
+    @ObservationIgnored private var installAttemptTag = 0
     /// How far the current boot has got, from the guest's console.
     var bootTracker = BootTracker()
     /// The guest's disk is being written before the run can begin.
     var preparingDisk = false
     var diskProgress: Double?
-    var motionSensorsAvailable = true
-    var motionSensorsProblem: String?
     /// The device has haptics (a Taptic Engine) for the guest's vibrator to
     /// play on. The runtime states it; an iPad, a Mac and the Simulator have
     /// none, and Capabilities then has no Haptics row.
@@ -439,7 +461,7 @@ final class AppModel {
     /// the keys, and the guest takes them back when it goes. The pointer lock
     /// goes with them.
     var guestHasKeys: Bool {
-        !sessionSettingsOpen && sheet == nil && alert == nil && !shareSheetUp
+        !sessionSettingsOpen && sheet == nil && alert == nil && legacyInstallQuestion == nil && !shareSheetUp
     }
     /// An Android application captured the pointer and the guest should have
     /// the pointer lock; the scene's root asks iOS for it.
@@ -450,6 +472,25 @@ final class AppModel {
     var inputProbe: InputProbe?
     #endif
     var microphoneState = MicrophoneState.notAsked
+    /// How far iOS lets Andarium use the device's cameras, and `unavailable`
+    /// for a device that has none.
+    var cameraAccess = CameraAccess.unavailable
+    /// The person went to Settings to allow the camera: when Andarium is
+    /// active again with access, the switch they tapped turns on.
+    var cameraAwaitsSettings = false
+    /// The Camera switch is on and iOS's question about it is on screen, or
+    /// about to be. A switch that is on while iOS has not been asked and no
+    /// question is under way is a choice made under access that has ended, and
+    /// it goes off.
+    private var cameraAsking = false
+    /// Asks iOS about the camera. The device application and the Simulator
+    /// preview's system mode have one; a preview without it takes the access
+    /// as given.
+    @ObservationIgnored var camera: CameraController?
+    /// What the host is doing for the guest's cameras, from the runtime.
+    private(set) var cameraCapture = CameraCapture.idle
+    /// The person dismissed the notice for the interruption now in force.
+    private var cameraNoticeDismissed = false
     /// The question about a permission the person is being asked, if any.
     var permissionPrompt: PermissionPrompt?
     /// The person went to Settings to allow the microphone: when Andarium is
@@ -1084,6 +1125,7 @@ final class AppModel {
         operationEpoch += 1
         operation?.cancel()
         operation = nil
+        finishLegacyInstallQuestion(nil)
         busy = nil
     }
 
@@ -1179,6 +1221,23 @@ final class AppModel {
         return file
     }
 
+    #if !APP_STORE
+    /// What the hosted tests put in place of the picked file's access, to see
+    /// when it is held. The App Store configuration leaves this out.
+    @ObservationIgnored
+    var accessPickedFileStub: (@MainActor (URL) -> (@MainActor () -> Void))?
+    #endif
+
+    /// Starts the access that a picked file's URL carries and returns what
+    /// ends it.
+    private func accessPickedFile(_ url: URL) -> @MainActor () -> Void {
+        #if !APP_STORE
+        if let accessPickedFileStub { return accessPickedFileStub(url) }
+        #endif
+        guard url.startAccessingSecurityScopedResource() else { return {} }
+        return { url.stopAccessingSecurityScopedResource() }
+    }
+
     /// Install APK: `url` is what the Files picker returned. Settings has
     /// dismissed and the install runs behind the overlay, which stays up at the
     /// end with how it went until the person closes it. A file that is not a
@@ -1197,29 +1256,29 @@ final class AppModel {
             busy = ended(title: Self.installFailure, detail: refusal.message, failed: true)
             return
         }
-        let scoped = url.startAccessingSecurityScopedResource()
+        let endAccess = accessPickedFile(url)
         // The size here is what the picker can say: an iCloud file that is not
         // down has none yet, and the install reads the real one when it has
         // the file.
         let size = UInt64(max((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0, 0))
         if let refusal = InstallRefusal(sizeBytes: size) {
-            if scoped { url.stopAccessingSecurityScopedResource() }
+            endAccess()
             busy = ended(title: Self.installFailure, detail: refusal.message, failed: true)
             return
         }
+        let detail = size > 0 ? "\(name) \u{00B7} \(Formats.size(bytes: size))" : name
         runOperation(
-            BusyState(
-                title: String(localized: "Installing app"),
-                detail: size > 0 ? "\(name) \u{00B7} \(Formats.size(bytes: size))" : name, progress: 0
-            ),
+            BusyState(title: String(localized: "Installing app"), detail: detail, progress: 0),
             failure: Self.installFailure,
             ending: { _ in (title: String(localized: "App installed"), detail: String(localized: "\(name) is installed in the virtual machine.")) },
             { [driver] update in
-                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                if let driver {
-                    try await driver.installApk(at: url, update: update)
-                } else {
-                    try await Self.playInstall(update)
+                defer { endAccess() }
+                try await self.installAskingAboutLegacyApps(detail: detail) { bypass, update in
+                    if let driver {
+                        try await driver.installApk(at: url, bypassLowTargetSdkBlock: bypass, update: update)
+                    } else {
+                        try await self.playInstall(bypassLowTargetSdkBlock: bypass, update)
+                    }
                 }
                 // 100% for a moment, then the result.
                 update(BusyUpdate(progress: 1))
@@ -1228,8 +1287,119 @@ final class AppModel {
         )
     }
 
+    /// The install, as `LegacyInstallFlow` has it: the ordinary attempt first,
+    /// which is exactly what Install APK always did. When Android refuses the
+    /// app for the version it was built for, and only then, the person is
+    /// asked; "Install anyway" sends the same file again with the package
+    /// manager's flag, once, and Cancel ends the install as a cancelled one.
+    /// The file's security scope is the caller's and spans the question; each
+    /// attempt reads the file and checks the room afresh.
+    private func installAskingAboutLegacyApps(
+        detail: String,
+        attempt: (_ bypassLowTargetSdkBlock: Bool, _ update: @escaping @Sendable (BusyUpdate) -> Void) async throws -> Void
+    ) async throws {
+        let epoch = operationEpoch
+        var flow = LegacyInstallFlow()
+        while true {
+            switch flow.step {
+            case let .attempt(bypass):
+                installAttemptTag += 1
+                let tag = installAttemptTag
+                let update: @Sendable (BusyUpdate) -> Void = { update in
+                    Task { @MainActor in
+                        guard self.installAttemptTag == tag else { return }
+                        self.apply(update, epoch: epoch)
+                    }
+                }
+                do {
+                    try await attempt(bypass, update)
+                    flow.attemptEnded(.installed)
+                } catch let refused as LegacyApkRefused {
+                    flow.attemptEnded(.tooOldTarget(refused.target))
+                }
+            case let .ask(target):
+                // The file is not being sent while the person thinks: the
+                // overlay says which file. Its Cancel stays, though the alert
+                // covers it: an alert that cannot present (another one, or
+                // a popover, is in its way) must not leave the install with
+                // no way out. That Cancel closes the question too.
+                installAttemptTag += 1
+                busy?.cancel = BusyCancel { [weak self] in self?.cancelOperation() }
+                busy?.detail = detail
+                guard let installAnyway = await askAboutLegacyInstall(target) else {
+                    flow.stopped()
+                    continue
+                }
+                flow.answered(installAnyway: installAnyway)
+                // The bar starts over for the second attempt.
+                if installAnyway { busy?.progress = 0 }
+            case let .finished(ending):
+                switch ending {
+                case .installed: return
+                case .cancelled: throw CancellationError()
+                // Today only a second too-old refusal ends this way, and
+                // `ApkInstall` words one of those as an ordinary failure
+                // itself, so these are the same words. A later route to
+                // `.failed` for another cause needs words of its own: these
+                // would name the wrong one.
+                case .failed: throw AdbFailure(message: PackageInstallMessages.message(forCode: PackageInstallAnswer.tooOldCode))
+                }
+            }
+        }
+    }
+
+    /// Opens the question and waits for the answer: true for Install anyway,
+    /// false for Cancel, nil when the install was stopped meanwhile (the guest
+    /// ended, or the task was cancelled), which takes the question away.
+    private func askAboutLegacyInstall(_ target: LegacyTarget) async -> Bool? {
+        guard !Task.isCancelled else { return nil }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool?, Never>) in
+                finishLegacyInstallQuestion(nil)
+                if Task.isCancelled {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                legacyInstallAnswer = continuation
+                legacyInstallQuestion = LegacyInstallQuestion(target: target)
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.finishLegacyInstallQuestion(nil) }
+        }
+    }
+
+    /// The alert's buttons.
+    func answerLegacyInstall(installAnyway: Bool) {
+        finishLegacyInstallQuestion(installAnyway)
+    }
+
+    private func finishLegacyInstallQuestion(_ answer: Bool?) {
+        legacyInstallQuestion = nil
+        let continuation = legacyInstallAnswer
+        legacyInstallAnswer = nil
+        continuation?.resume(returning: answer)
+    }
+
     /// The title of an install that did not happen.
     static let installFailure = String(localized: "App not installed")
+
+    #if !APP_STORE
+    /// What one attempt of the preview's install does instead of
+    /// `playInstall`, for a preview that plays how the install can end.
+    /// The App Store configuration leaves this out.
+    @ObservationIgnored
+    var previewInstallAttempt: (@Sendable (_ bypassLowTargetSdkBlock: Bool, _ update: @Sendable (BusyUpdate) -> Void) async throws -> Void)?
+    #endif
+
+    private func playInstall(bypassLowTargetSdkBlock: Bool, _ update: @Sendable (BusyUpdate) -> Void) async throws {
+        #if !APP_STORE
+        if let previewInstallAttempt {
+            try await previewInstallAttempt(bypassLowTargetSdkBlock, update)
+            return
+        }
+        #endif
+        try await Self.playInstall(update)
+    }
 
     /// The preview's install: the file goes over, the guest takes its time.
     private static func playInstall(_ update: @Sendable (BusyUpdate) -> Void) async throws {
@@ -1317,6 +1487,7 @@ final class AppModel {
         graphicsReclaim.reset()
         thermalCapWaiting = false
         dismissThermalNotice()
+        cameraCaptureChanged(.idle)
         runEnd = end
         runUptimeSeconds = uptimeSeconds
         if end.poweredOff {
@@ -1365,24 +1536,10 @@ final class AppModel {
         persistNow()
     }
 
-    /// The Gyroscope switch as the screens show it: the guest's choice, which
-    /// is on until the person turns it off, and only where the device has
-    /// sensors to share.
-    var motionSensorsOn: Bool { guest?.motionSensorsOn(available: motionSensorsAvailable) == true }
-
     /// Settings' "Use the pointer as touch".
     func setPointerAsTouch(_ on: Bool) {
         pointerAsTouch = on
         driver?.setPointerAsTouch(on)
-    }
-
-    /// The Gyroscope switch. It asks for nothing and is kept as chosen; on a
-    /// device without sensors there is nothing to turn on.
-    func setMotionSensors(_ on: Bool) {
-        guard guest != nil, !on || motionSensorsAvailable else { return }
-        guest?.motionChoice = on
-        persistNow()
-        driver?.setMotionSensors(on)
     }
 
     /// The Haptics switch as the screens show it: the guest's choice, which
@@ -1536,6 +1693,123 @@ final class AppModel {
         locationAwaitsSettings = locationAuthorization.refuses
         openSettings()
     }
+
+    // MARK: Camera
+
+    /// The Camera switch as the screens show it: the guest's choice is on and
+    /// iOS lets Andarium capture, or has not been asked yet and the question is
+    /// under way. Access that was refused or taken away, or a device without
+    /// cameras, shows it off.
+    var cameraShownOn: Bool {
+        guard guest?.camera == true else { return false }
+        return cameraAccess == .authorized || cameraAccess == .notDetermined
+    }
+
+    /// What the cameras do in the run that starts now: live only while the
+    /// switch is on and iOS lets Andarium capture. The runtime reads it at the
+    /// start and nothing changes it until the guest powers off.
+    var cameraMode: CameraMode {
+        CameraSession.mode(choice: guest?.camera == true, access: cameraAccess)
+    }
+
+    /// The Camera switch. It exists on Home, so it can only change between
+    /// runs. Turning it on asks iOS for access at once, the first time. After a
+    /// refusal there is nothing to ask: the person is told why and, where
+    /// Settings has the way out, offered Andarium's page there.
+    func setCamera(_ on: Bool) {
+        guard guest != nil else { return }
+        guard on else {
+            cameraAwaitsSettings = false
+            cameraAsking = false
+            guest?.camera = false
+            persistNow()
+            return
+        }
+        switch cameraAccess {
+        case .unavailable:
+            return
+        case .restricted, .denied:
+            permissionPrompt = .camera
+        case .notDetermined:
+            guest?.camera = true
+            cameraAsking = true
+            persistNow()
+            // The controller asks iOS and reports the answer to
+            // `cameraAccessChanged`. A preview without one has no system
+            // prompt to show and takes it as given.
+            if let camera { camera.setOn(true) } else { cameraAccessChanged(.authorized) }
+        case .authorized:
+            guest?.camera = true
+            persistNow()
+        }
+    }
+
+    /// iOS answered the camera question, or the person changed Andarium's
+    /// access in Settings. A refusal takes the choice back with it, and a
+    /// device without a camera keeps it; access the person went to Settings to
+    /// give turns the switch they tapped on.
+    func cameraAccessChanged(_ access: CameraAccess) {
+        cameraAccess = access
+        switch access {
+        case .unavailable:
+            // No camera to share is not a choice taken back: a Continuity
+            // camera that is away, or a device the guest moves to, leaves the
+            // person's switch as it was. The row shows it off and disabled,
+            // and the session is blocked (`cameraShownOn`, `cameraMode`).
+            break
+        case .restricted, .denied:
+            if guest?.camera == true {
+                guest?.camera = false
+                persistNow()
+            }
+        case .authorized:
+            if cameraAwaitsSettings, guest != nil, guest?.camera != true {
+                guest?.camera = true
+                persistNow()
+            }
+        case .notDetermined:
+            if !cameraAsking, guest?.camera == true {
+                guest?.camera = false
+                persistNow()
+            }
+        }
+        if access != .notDetermined {
+            cameraAwaitsSettings = false
+            cameraAsking = false
+        }
+    }
+
+    /// The alert's Open Settings: for a refusal, the switch the person tapped
+    /// turns on when Andarium is active again with access.
+    func openCameraSettings() {
+        cameraAwaitsSettings = cameraAccess.refuses
+        openSettings()
+    }
+
+    /// The runtime reports what the host is doing for the guest's cameras.
+    func cameraCaptureChanged(_ capture: CameraCapture) {
+        if !CameraNotice.isUp(for: capture) { cameraNoticeDismissed = false }
+        cameraCapture = capture
+    }
+
+    /// Whether the session says the camera is paused because other apps share
+    /// the screen: it goes when the interruption ends or the person dismisses
+    /// it.
+    var cameraNoticeShowing: Bool {
+        CameraNotice.isUp(for: cameraCapture) && !cameraNoticeDismissed
+    }
+
+    func dismissCameraNotice() {
+        cameraNoticeDismissed = true
+    }
+
+    #if !APP_STORE
+    /// The Simulator preview plays the notice: it has no runtime to interrupt.
+    /// The App Store configuration leaves this out.
+    func previewCameraNotice() {
+        cameraCapture = .interruptedByMultitasking
+    }
+    #endif
 
     // MARK: Statistics
 
@@ -1726,10 +2000,13 @@ final class AppModel {
         thermalNotice.dismiss()
     }
 
+    #if !APP_STORE
     /// The Simulator preview plays the notice: it has no runtime to start a cap.
+    /// The App Store configuration leaves this out.
     func previewThermalNotice() {
         thermalNotice.show()
     }
+    #endif
 
     // MARK: Network notice
 

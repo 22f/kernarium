@@ -291,9 +291,10 @@ struct SendFeedbackScreenTests {
         #expect(!fixture.app.busyOverSheet && sheet.form.attachments.isEmpty)
     }
 
-    // MARK: From Info
+    // MARK: From Home
 
-    @Test func fromInfoThereIsNoBugReportAndNoScreenshotAndTheRestWorks() throws {
+    /// Home's toolbar menu opens it, where no virtual machine runs.
+    @Test func fromHomeThereIsNoBugReportAndNoScreenshotAndTheRestWorks() throws {
         let fixture = fixture(phase: .home)
         let sheet = fixture.sheet()
         #expect(!sheet.state.running && sheet.state.showsHowToReportBug)

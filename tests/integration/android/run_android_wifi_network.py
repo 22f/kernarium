@@ -14,13 +14,14 @@ The runner shows both:
   largest threshold for both no-internet reasons; the script ran without
   SELinux denials; with the validation probes pointed at a black hole, a strict
   private DNS name that does not resolve, and VirtWifi forgotten and saved
-  again, the network stays enabled and joined for a minute and a half, and is
-  joined again after a guest suspend and wake (the host's route, `suspend` and
-  `wake` on the management console) and after a restart; a network the user
-  marked metered, or turned Auto-connect off for, keeps that after a restart
-  (the script has nothing to save once the station has joined); a forgotten
-  network is still forgotten after a restart; and Wi-Fi that was turned off is
-  still off;
+  again, the network stays enabled and joined for a minute and a half (an
+  image that validates Wi-Fi without probes counts no failed check: it must
+  then say so in its validation log), and is joined again after a guest
+  suspend and wake (the host's route, `suspend` and `wake` on the management
+  console) and after a restart; a network the user marked metered, or turned
+  Auto-connect off for, keeps that after a restart (the script has nothing to
+  save once the station has joined); a forgotten network is still forgotten
+  after a restart; and Wi-Fi that was turned off is still off;
 - upgrade (only with --previous-release): the data disk of that release, on
   which the probes and a forgotten and saved network disable VirtWifi as the
   stock platform does and which holds the network disabled, with the station
@@ -202,6 +203,21 @@ def no_internet_count(dump: str) -> int:
     return total
 
 
+UNPROBED_MARKER = "Wi-Fi is validated without probes"
+VALIDATED_WIFI = re.compile(r"^\s*NetworkAgentInfo\{[^\n]*ni\{WIFI CONNECTED[^\n]*(?<![A-Z_])IS_VALIDATED(?![A-Z_])", re.M)
+
+
+def validated_without_probes(network_stack_dump: str) -> bool:
+    """`dumpsys network_stack`: the validation log of a network says the platform validated Wi-Fi without probes
+    (route p0029 of the product's NetworkStack)."""
+    return UNPROBED_MARKER in network_stack_dump
+
+
+def wifi_validated(connectivity_dump: str) -> bool:
+    """`dumpsys connectivity`: the connected Wi-Fi network is validated."""
+    return VALIDATED_WIFI.search(connectivity_dump) is not None
+
+
 def metered_override(dump: str) -> int | None:
     """The metered override of the saved network (0 none, 1 metered, 2 not metered)."""
     match = re.search(r"^\s*meteredOverride (\d+)\s*$", dump, re.M)
@@ -330,6 +346,12 @@ class Guest:
 
     def dump(self) -> str:
         return self.shell("dumpsys wifi", timeout=180)
+
+    def network_stack_dump(self) -> str:
+        return self.shell("dumpsys network_stack", timeout=180)
+
+    def connectivity_dump(self) -> str:
+        return self.shell("dumpsys connectivity", timeout=180)
 
     def joined(self) -> bool:
         return wifi_joined(self.status())
@@ -557,8 +579,17 @@ def check_not_disabled(guest: Guest) -> str | None:
         raise Failure("the station left the network")
     counted = no_internet_count(dump)
     if counted < 1:
-        raise Failure("the platform counted no failed internet check, so the injected failures did not "
-                      "reach it and the network was never at risk")
+        # A platform that probes counts the injected failures; if it counted none they never reached it and the
+        # network was never at risk. This image validates Wi-Fi without probes (route p0029), so nothing is ever
+        # counted: what shows that the network was not at risk is the platform's own statement that it validated
+        # without probes, and the network staying enabled and joined.
+        if not validated_without_probes(guest.network_stack_dump()):
+            raise Failure("the platform counted no failed internet check and does not say that it validated Wi-Fi "
+                          "without probes, so the injected failures did not reach it and the network was never at risk")
+        # Whether the network is validated is only reported: the injected strict private DNS name does not resolve,
+        # which the platform's validation (it resolves private DNS after skipping the probes) reports as not validated.
+        state = "validated" if wifi_validated(guest.connectivity_dump()) else "not validated (the injected private DNS name does not resolve)"
+        return f"no failed internet check counted: the platform validates Wi-Fi without probes; the network stays enabled and joined, {state}"
     return f"{counted} failed internet checks counted, none disabled the network"
 
 

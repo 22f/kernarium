@@ -32,17 +32,19 @@ enum PreviewData {
             return HostDevice(
                 name: "iPhone", processorCount: 6, memory: iPhone18ProMaxMemory,
                 freeStorageBytes: gibibytes(lowSpace ? 1.2 : 41.6), supportsPointer: false,
-                idiom: .phone, hasHaptics: true
+                idiom: .phone, hasHaptics: true, hasCompass: true, hasCamera: true
             )
         case "ipad-mini-6":
             return HostDevice(
                 name: "iPad", processorCount: 6, memory: iPadMini6Memory,
-                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 118.3), idiom: .pad, hasHaptics: false
+                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 118.3), idiom: .pad, hasHaptics: false,
+                hasCompass: true, hasCamera: true
             )
         case "mac-64-gib":
             return HostDevice(
                 name: "Mac", processorCount: 8, memory: mac64GiBMemory,
-                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 412.6), idiom: .mac, hasHaptics: false
+                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 412.6), idiom: .mac, hasHaptics: false,
+                hasCompass: false, hasCamera: false
             )
         default:
             break
@@ -54,7 +56,8 @@ enum PreviewData {
                     maximumsMiB: Array(repeating: 4096, count: 8), defaultsMiB: Array(repeating: 3584, count: 8),
                     graphicsMiB: { memory, count in budget(limitMiB: 6144, memoryMiB: memory, vCPUs: count) }
                 ),
-                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 118.3), idiom: .pad, hasHaptics: false
+                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 118.3), idiom: .pad, hasHaptics: false,
+                hasCompass: true, hasCamera: true
             )
         }
         return HostDevice(
@@ -64,7 +67,7 @@ enum PreviewData {
                 graphicsMiB: { memory, count in budget(limitMiB: 4096, memoryMiB: memory, vCPUs: count) }
             ),
             freeStorageBytes: gibibytes(lowSpace ? 1.2 : 41.6), supportsPointer: false,
-            idiom: .phone, hasHaptics: true
+            idiom: .phone, hasHaptics: true, hasCompass: true, hasCamera: true
         )
     }
 

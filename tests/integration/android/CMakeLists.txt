@@ -226,6 +226,27 @@ if(UML_ANDROID_THERMAL_RELEASE AND TARGET uml-darwin-android17)
         RESOURCE_GROUPS cpus:4)
 endif()
 
+# The device-orientation sensor (android/lineage-24/overlay/sensors) and the
+# display rotation it drives: the runner plays the host application over a vsock
+# forward to the motion port, sends orientation records and reads Android's
+# rotation and sensor service, with auto-rotate on and off, applications that
+# ask for an orientation, the lock screen and the setup wizard. It boots Android
+# with the macOS launcher, so it is opt-in: name the release under test.
+set(UML_ANDROID_ORIENTATION_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-orientation test boots")
+if(UML_ANDROID_ORIENTATION_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-orientation
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_orientation.py
+            --release ${UML_ANDROID_ORIENTATION_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+        LABELS guest;boot;android
+        TIMEOUT 5400
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
 # The gamepad relay, a vendor daemon of the image's overlay
 # (android/lineage-24/overlay/gamepad): the runner plays the host application
 # over a vsock forward to the relay's port, creates a controller of each driver

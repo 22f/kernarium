@@ -41,12 +41,10 @@ final class StubDriver: RuntimeDriver {
         // The files now say the update waits for the next start.
         plan = .update(from: "r1", to: "r2")
     }
-    var motionSensors = false
     var savedGuest: Guest?
     /// The denials of the network the model told the driver, in order; nil is none.
     private(set) var networkNotices: [NetworkDenial?] = []
     func setNetworkNotice(_ denial: NetworkDenial?) { networkNotices.append(denial) }
-    func setMotionSensors(_ on: Bool) { motionSensors = on }
     /// What the Haptics switch told the driver.
     var haptics = true
     func setHaptics(_ on: Bool) { haptics = on }
@@ -135,9 +133,24 @@ final class StubDriver: RuntimeDriver {
     }
     var install: (@Sendable (@Sendable (BusyUpdate) -> Void) async throws -> Void) = { _ in }
     private(set) var installed = 0
-    func installApk(at url: URL, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
+    /// Whether each attempt carried the flag, in order.
+    private(set) var installAttempts: [Bool] = []
+    /// The file each attempt was asked to install, in order.
+    private(set) var installURLs: [URL] = []
+    /// What an install does for the attempt with or without the flag; set by a test
+    /// that tells the two apart, otherwise `install` answers both.
+    var installAttempt: (@Sendable (Bool, @Sendable (BusyUpdate) -> Void) async throws -> Void)?
+    func installApk(
+        at url: URL, bypassLowTargetSdkBlock: Bool, update: @escaping @Sendable (BusyUpdate) -> Void
+    ) async throws {
         installed += 1
-        try await install(update)
+        installAttempts.append(bypassLowTargetSdkBlock)
+        installURLs.append(url)
+        if let installAttempt {
+            try await installAttempt(bypassLowTargetSdkBlock, update)
+        } else {
+            try await install(update)
+        }
     }
 
     /// What the resume of a guest paused for space answers, and what Shut

@@ -27,7 +27,11 @@ inline constexpr std::uint16_t eventSynchronize = 0x00;
 inline constexpr std::uint16_t eventKey = 0x01;
 inline constexpr std::uint16_t eventRelative = 0x02;
 inline constexpr std::uint16_t eventAbsolute = 0x03;
+inline constexpr std::uint16_t eventSwitch = 0x05;
 inline constexpr std::uint16_t eventLed = 0x11;
+/* SW_CAMERA_LENS_COVER: the camera is covered, which Android reads as the
+ * hardware camera privacy switch being on. */
+inline constexpr std::uint16_t switchCameraLensCover = 0x09;
 /* The private registration notice that a driver sends on the status queue
  * (kernel/common/input/virtio_input_uml.h owns the wire). */
 inline constexpr std::uint16_t statusNotice = VIRTIO_INPUT_UML_EV_NOTICE;

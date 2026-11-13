@@ -116,6 +116,26 @@ class ScriptedGuest(runner.Guest):
         self.restarts += 1
 
 
+NETWORK_STACK = """\
+Validation logs (most recent first):
+100 - "VirtWifi"
+  2026-11-12T10:33:06.272454 - Wi-Fi is validated without probes, resolving private DNS
+
+useNeighborResource: false
+"""
+STOCK_NETWORK_STACK = """\
+Validation logs (most recent first):
+100 - "VirtWifi"
+  2026-11-12T10:33:06.272454 - Probing https://connectivitycheck.gstatic.com/generate_204
+"""
+CONNECTIVITY = (
+    "  NetworkAgentInfo{network{100}  handle{432902426637}  ni{WIFI CONNECTED extra: } created=2026-11-12T10:33:01.583Z "
+    "Score(Policies : TRANSPORT_PRIMARY&EVER_EVALUATED&IS_UNMETERED&EVER_VALIDATED&IS_VALIDATED ; KeepConnected : 0) "
+    "lp{{InterfaceName: wlan0}}\n")
+CONNECTIVITY_NOT_VALIDATED = CONNECTIVITY.replace("&IS_VALIDATED", "")
+NOTHING_COUNTED = " NetworkSelectionStatus NETWORK_SELECTION_ENABLED\n hasEverValidatedInternetAccess: true\n"
+
+
 class ReadingTests(unittest.TestCase):
     def test_the_station_is_joined_only_when_it_says_so(self) -> None:
         self.assertTrue(runner.wifi_joined(JOINED))
@@ -218,6 +238,75 @@ class ScriptAndOverlayTests(unittest.TestCase):
         self.assertTrue(runner.PROBE_SETTINGS["private_dns_specifier"].endswith(".invalid"))
         for key in ("captive_portal_https_url", "captive_portal_http_url", "captive_portal_fallback_url"):
             self.assertIn(runner.BLACKHOLE, runner.PROBE_SETTINGS[key])
+
+
+class UnprobedValidationTests(unittest.TestCase):
+    """The platform of this image validates Wi-Fi without probes (route p0029), so it counts no failed internet check."""
+
+    class Guest(runner.Guest):
+        def __init__(self, dump: str, network_stack: str, connectivity: str) -> None:
+            self.texts = (dump, network_stack, connectivity)
+
+        def inject_failing_checks(self) -> None:
+            pass
+
+        def forget_and_save(self) -> None:
+            pass
+
+        def wait_joined(self, seconds: float, what: str) -> None:
+            pass
+
+        def joined(self) -> bool:
+            return True
+
+        def alive(self) -> None:
+            pass
+
+        def dump(self) -> str:
+            return self.texts[0]
+
+        def network_stack_dump(self) -> str:
+            return self.texts[1]
+
+        def connectivity_dump(self) -> str:
+            return self.texts[2]
+
+    def setUp(self) -> None:
+        clock = mock.patch.object(runner, "time", FakeClock())
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def test_the_marker_and_the_validated_network_are_read(self) -> None:
+        self.assertTrue(runner.validated_without_probes(NETWORK_STACK))
+        self.assertFalse(runner.validated_without_probes(STOCK_NETWORK_STACK))
+        self.assertTrue(runner.wifi_validated(CONNECTIVITY))
+        self.assertFalse(runner.wifi_validated(CONNECTIVITY_NOT_VALIDATED))
+        self.assertFalse(runner.wifi_validated("  NetworkAgentInfo{network{101} ni{MOBILE CONNECTED} Score(IS_VALIDATED)\n"))
+
+    def test_counted_failures_pass_as_before(self) -> None:
+        guest = self.Guest(ENABLED_DUMP, "", "")
+        self.assertIn("5 failed internet checks counted", runner.check_not_disabled(guest))
+
+    def test_nothing_counted_passes_when_the_platform_validated_without_probes(self) -> None:
+        guest = self.Guest(NOTHING_COUNTED, NETWORK_STACK, CONNECTIVITY)
+        self.assertIn("validates Wi-Fi without probes", runner.check_not_disabled(guest))
+
+    def test_nothing_counted_without_the_marker_is_the_old_vacuity_failure(self) -> None:
+        guest = self.Guest(NOTHING_COUNTED, STOCK_NETWORK_STACK, CONNECTIVITY)
+        with self.assertRaisesRegex(runner.Failure, "does not say that it validated Wi-Fi without probes"):
+            runner.check_not_disabled(guest)
+
+    def test_a_network_that_is_not_validated_is_reported_not_failed(self) -> None:
+        # The injected strict private DNS name does not resolve, so the platform reports the network as not validated.
+        guest = self.Guest(NOTHING_COUNTED, NETWORK_STACK, CONNECTIVITY_NOT_VALIDATED)
+        self.assertIn("not validated", runner.check_not_disabled(guest))
+        guest = self.Guest(NOTHING_COUNTED, NETWORK_STACK, CONNECTIVITY)
+        self.assertRegex(runner.check_not_disabled(guest), r"joined, validated$")
+
+    def test_a_disabled_network_still_fails(self) -> None:
+        guest = self.Guest(DISABLED_DUMP, NETWORK_STACK, CONNECTIVITY)
+        with self.assertRaisesRegex(runner.Failure, "became NETWORK_SELECTION_PERMANENTLY_DISABLED"):
+            runner.check_not_disabled(guest)
 
 
 class UpgradeCheckTests(unittest.TestCase):

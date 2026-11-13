@@ -30,10 +30,10 @@ private func release(_ build: Int, _ ids: [String]) -> WhatsNewRelease {
 private let releases = [release(6, ["a", "b", "c"]), release(5, ["d"]), release(4, []), release(7, ["z"])]
 private let all: @Sendable (WhatsNewEntry) -> Bool = { _ in true }
 
-private func host(maximumMiB: Int) -> HostDevice {
+private func host(maximumMiB: Int, hasCompass: Bool = false, hasCamera: Bool = false) -> HostDevice {
     HostDevice(
         name: "iPhone", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [maximumMiB]),
-        freeStorageBytes: 40_000_000_000)
+        freeStorageBytes: 40_000_000_000, hasCompass: hasCompass, hasCamera: hasCamera)
 }
 
 private func device(_ idiom: HostDevice.Idiom, hasHaptics: Bool = false) -> HostDevice {
@@ -264,6 +264,36 @@ struct WhatsNewAvailabilityTests {
         #expect(launch.pending.isEmpty)
         #expect(launch.record == WhatsNewRecord(seenBuild: 6))
     }
+
+    @Test func aRequirementOfACameraIsMetOnlyWhereTheDeviceHasOne() {
+        let requirement = WhatsNewRequirement(camera: true)
+        func device(hasCamera: Bool) -> HostDevice {
+            HostDevice(
+                name: "d", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [4096]),
+                freeStorageBytes: 40_000_000_000, hasCamera: hasCamera)
+        }
+        #expect(requirement.isMet(by: device(hasCamera: true), vCPUs: 6, features: []))
+        #expect(!requirement.isMet(by: device(hasCamera: false), vCPUs: 6, features: []))
+        // A device has no camera unless it says so.
+        #expect(!requirement.isMet(by: host(maximumMiB: 8192), vCPUs: 6, features: []))
+        // Every requirement must hold: a camera is not a compass.
+        let both = WhatsNewRequirement(compass: true, camera: true)
+        #expect(!both.isMet(by: device(hasCamera: true), vCPUs: 6, features: []))
+        #expect(both.isMet(by: host(maximumMiB: 4096, hasCompass: true, hasCamera: true), vCPUs: 6, features: []))
+    }
+
+    @Test func aRequirementOfACompassIsMetOnlyWhereTheDeviceCanGiveOne() {
+        let requirement = WhatsNewRequirement(compass: true)
+        #expect(requirement.isMet(by: host(maximumMiB: 4096, hasCompass: true), vCPUs: 6, features: []))
+        #expect(!requirement.isMet(by: host(maximumMiB: 4096, hasCompass: false), vCPUs: 6, features: []))
+        // A device is not given a compass unless it says so.
+        #expect(!requirement.isMet(by: host(maximumMiB: 8192), vCPUs: 6, features: []))
+        // Both requirements must hold.
+        let both = WhatsNewRequirement(memoryAboveMiB: 4096, compass: true)
+        #expect(both.isMet(by: host(maximumMiB: 8192, hasCompass: true), vCPUs: 6, features: []))
+        #expect(!both.isMet(by: host(maximumMiB: 4096, hasCompass: true), vCPUs: 6, features: []))
+        #expect(!both.isMet(by: host(maximumMiB: 8192, hasCompass: false), vCPUs: 6, features: []))
+    }
 }
 
 struct WhatsNewStoreTests {
@@ -457,6 +487,47 @@ struct WhatsNewCatalogTests {
         #expect(throws: (any Error).self) { try decode(notes(entry: entry + #", "place": "home""#)) }
         #expect(throws: (any Error).self) {
             try decode(#"[{"build": 6, "version": "1.0 (6)", "summary": "x", "entries": [{\#(entry)}]}]"#)
+        }
+    }
+
+    @Test func aCompassRequirementDecodesAloneOrWithMemoryAndOnlyAsABoolean() throws {
+        let entry = #""id": "a", "title": "A", "text": "T", "symbol": "star""#
+        let alone = try decode(notes(entry: entry + #", "requirement": {"compass": true}"#))
+        #expect(alone.first?.entries.first?.requirement == WhatsNewRequirement(compass: true))
+        let both = try decode(notes(entry: entry + #", "requirement": {"memoryAboveMiB": 4096, "compass": true}"#))
+        #expect(both.first?.entries.first?.requirement == WhatsNewRequirement(memoryAboveMiB: 4096, compass: true))
+        #expect(throws: (any Error).self) {
+            try decode(notes(entry: entry + #", "requirement": {"compass": "yes"}"#))
+        }
+        #expect(throws: (any Error).self) {
+            try decode(notes(entry: entry + #", "requirement": {"compass": true, "gyroscope": true}"#))
+        }
+    }
+
+    @Test func aCompassRequirementOfFalseIsRefusedLikeAnyOtherInvalidOne() {
+        // `false` would read as "only on a device without a compass": no entry says that.
+        let entry = #""id": "a", "title": "A", "text": "T", "symbol": "star""#
+        #expect(throws: (any Error).self) {
+            try decode(notes(entry: entry + #", "requirement": {"compass": false}"#))
+        }
+        #expect(throws: (any Error).self) {
+            try decode(notes(entry: entry + #", "requirement": {"memoryAboveMiB": 4096, "compass": false}"#))
+        }
+    }
+
+    @Test func aCameraRequirementDecodesLikeACompassOneAndFalseOrNullIsRefused() throws {
+        let entry = #""id": "a", "title": "A", "text": "T", "symbol": "star""#
+        let alone = try decode(notes(entry: entry + #", "requirement": {"camera": true}"#))
+        #expect(alone.first?.entries.first?.requirement == WhatsNewRequirement(camera: true))
+        let both = try decode(notes(entry: entry + #", "requirement": {"memoryAboveMiB": 4096, "camera": true}"#))
+        #expect(both.first?.entries.first?.requirement == WhatsNewRequirement(memoryAboveMiB: 4096, camera: true))
+        for requirement in [
+            #"{"camera": false}"#, #"{"camera": "yes"}"#, #"{"camera": null}"#, #"{"compass": null}"#,
+            #"{"memoryAboveMiB": 4096, "camera": null}"#, #"{"camera": true, "microphone": true}"#,
+        ] {
+            #expect(throws: (any Error).self, "\(requirement)") {
+                try decode(notes(entry: entry + #", "requirement": \#(requirement)"#))
+            }
         }
     }
 

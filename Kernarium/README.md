@@ -189,9 +189,13 @@ no `KERNARIUM_HOST_FORWARD` has adbd listen on vsock alone. The request also
 states what the host has that the guest is to find (`android_host_features`,
 API 31): the runtime turns each bit it knows into one kernel argument, from the
 table in `KernariumHostFeatures.hpp` (the haptics bit becomes the hardware SKU
-`haptics`, which declares the guest's vibrator), and ignores the others;
-Kernarium sends none. The runtime validates the values
-(`KernariumAdbChannel.hpp`, `KernariumGuestTimeZone.hpp`).
+`haptics`, which declares the guest's vibrator; the orientation bit, API 37,
+becomes `androidboot.kernarium.orientation=1`, which lists the guest's
+device-orientation sensor; the compass bit, API 38, becomes
+`androidboot.kernarium.compass=1`, which lists its magnetometer), and ignores
+the others; Kernarium sends none. The
+runtime validates the values (`KernariumAdbChannel.hpp`,
+`KernariumGuestTimeZone.hpp`).
 
 ## Devices and display
 
@@ -213,6 +217,36 @@ Kernarium attaches:
   (`report_location`) and tells it when the guest powers the receiver
   (`set_location_receiver_callback`; runtime API 32). The Linux runtime keeps
   both entries and answers `-ENODEV`;
+- an Android-only Virtio camera ([the device](../darwin/device/camera/README.md)),
+  made after the GNSS receiver when the host has a front camera. The runtime
+  discovers the host's cameras, which needs no permission, and names the layout
+  that describes them as `androidboot.product.vendor.sku`, a kernel argument a
+  release's command-line file cannot set; it composes it again at each boot,
+  from the colour data the run has learned since. The boot request states the
+  mode (`android_camera_mode`, runtime API 37): live opens a capture session
+  only while a guest app has a camera open, and blocked lists the same cameras
+  with black frames, never opens a session and reports Android's camera lens
+  cover on the side keys. The application asks the system for access and states
+  live only when it has it, and nothing changes the mode before the guest powers
+  off. The camera tier follows the launch's GPU budget within the cap (the small
+  tier for every host), live cameras take their host-side memory out of the
+  GPU's pool, the colour data a Bayer still teaches is kept in
+  `android_camera_calibration_path`, the state of the capture (idle, streaming,
+  interrupted, interrupted by iPad multitasking, by system pressure) comes back
+  through `set_camera_state_callback` (a blocked guest stays idle) and
+  `set_camera_rotation` states how the device body is turned from portrait where
+  the host owns the guest's rotation: each boot derives every camera's sensor
+  orientation from it, and a change after the boot turns the picture by the
+  difference ([orientation](../darwin/device/camera/README.md#orientation)). A
+  runtime that is not an App Store build serves the synthetic camera when
+  `KERNARIUM_CAMERA_SOURCE` names it, serves the host's cameras with only the
+  back ones openable for `host:back` (the front camera is listed, so the
+  layout is an image's, every request to open it is refused before the host,
+  and the runtime says at start that the filter is installed), gives the guest
+  no cameras for any other value, a typo of that name included (never the
+  host's), and prints the ROTATE_AND_CROP settings that reach the cameras and
+  the process's footprint when a capture session opens, closes and after each
+  still. The Linux runtime keeps both entries and never calls back;
 - an Android-only hardware keyboard, mouse and pointer
   ([the devices](../darwin/device/input/README.md)), the last Virtio devices,
   unplugged until the application plugs them (`set_input_connected`) and then

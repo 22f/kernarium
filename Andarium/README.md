@@ -76,8 +76,18 @@ destination and adds nothing to the built application.
 `ITSAppUsesNonExemptEncryption` is NO in `Config/Info.plist`.
 
 The iPhone interface is portrait-only and the guest owns its rotation:
-Android turns its own display and the sensor axes stay fixed. On iPad the
-interface turns with the device in a session as it does at Home, full screen
+Android turns its own display and the sensor axes stay fixed. A guest whose
+image has a device-orientation sensor (the boot request's `orientation` host
+feature, [Kernarium](../Kernarium/README.md#automation-runs)) follows the
+device's orientation as iOS reports it, which already includes the person's
+Portrait Orientation Lock: while a session is in front the application
+observes `UIDevice` (`DeviceOrientationObserver`) and sends the orientation
+over the motion connection (`MotionOrientation.swift`), which Android treats as
+a rotation proposal that its own policy still decides on. That is the display's
+own behaviour and uses no accelerometer or gyroscope reading, which are the
+guest's separately ([Runtime](#runtime), Motion). A guest whose image has no
+such sensor judges the accelerometer as before. On iPad
+the interface turns with the device in a session as it does at Home, full screen
 or in a window, and the host drives the guest: it is held at display rotation
 zero, its display follows the scene, and the sensor axes follow the scene's
 interface orientation (`MotionMount`, `SessionOrientationPolicy`). An
@@ -85,6 +95,44 @@ application that asks for one fixed orientation is letterboxed in the other
 one, as in a window. The guest's own rotation preferences are restored when
 the host stops driving it. The display keeps the last frame's proportions
 while it turns, until Android draws the new layout.
+
+A folding iPhone (iPhone Duo) has two displays. Its cover is an iPhone's, and
+its inner display turns with the device as an iPad's does, the host driving the
+guest. The layout follows the display the system lights, which the scene's root
+reads from the hinge and the view's reserved regions (`FoldSceneReader`) and
+`AndariumCore/FoldLayout.swift` decides as pure functions; a device that
+reports no hinge keeps every layout it has. Only the inner display bent at the
+fold is placed around the hinge (`FoldPose.spreads`): flat, upright or turned,
+every screen is laid out as on an iPad of the same size and shape.
+
+- **Cover.** The guest keeps an iPhone's shape beside the strip the camera
+  keeps, which holds the side keys as an always-open column and the statistics.
+- **Inner display, upright.** The guest is one display across both halves, so
+  moving the hinge never resizes Android, and the side keys stay on its edge.
+  Bent, the statistics and notices hang from the trailing half and Andarium's
+  own pieces never sit on the fold; flat, they hang from the top of the display.
+- **Inner display, turned.** Flat, the guest fills the display, with the keys
+  on its edge and the statistics and notices at its top. Bent, the device
+  stands like a laptop: the guest is the upper half and the lower half is a
+  deck with the keys in one row and the statistics and notices above them.
+- **Other screens.** Bent, Home is one page each side of the fold; flat it is
+  Home as on an iPad, one scrolling list with Start at the foot of the screen.
+  Flat, Welcome, the boot, the busy, low-space and end cards, and the cards
+  inside a sheet (the system's) are laid out as on a display with no hinge,
+  centred in the safe area as the Start bar and the system's alerts are. While
+  the device is bent they keep to the half where the system puts its alerts,
+  and the boot of a standing device to the upper half. While bent, Welcome
+  and the end screen scroll when taller than their half. System alerts stay
+  where iOS puts them, inside the device's own safe area. A sheet turned and
+  bent rises to a little below the fold; a sheet keeps the placement it opened
+  with, and what has been typed in it, until it closes, whatever the hinge or
+  the turn does meanwhile.
+  On the cover the file browser's Import is a round button in the toolbar's
+  column beside the camera, between More and Done, and the bar keeps Export.
+
+The guest is resized only where its shape changes (the cover and the inner
+display, standing and the other turned poses), through the display's ordinary
+resize. Telling Android where the crease is is not done.
 
 While the guest's display is shown (the boot and the run) everything behind it
 is black, in the light appearance too: the scene's root view and its window
@@ -198,25 +246,30 @@ not declare because only an App Store build is uploaded.
 
 ### Send feedback
 
-Info and a running session's Settings open a sheet that writes an email to the
-developer (`Shared/Feedback/`, the system's Mail composer sends it). It is
-compiled in, under the `FEEDBACK_MAIL` condition, only in an AppStore build whose
-ignored `Config/Feedback.local.xcconfig` (from `Feedback.local.xcconfig.example`)
-names the receiver, so a fork, a sideload or a Debug or Release build holds none
-of it, and every configuration's bundle check says whether it does: it also
-fails on the local receiver's bytes in any file of a bundle that does not name
-it (never printing it), and on an `Info.plist` whose values differ from
-`Config/Info.plist` (the preprocessing changes the feedback key alone).
-Tests and captures turn it on in a Debug build with
-`FEEDBACK_ADDRESS=feedback@example.com` on the `xcodebuild` line, which the
-bundle check accepts in Debug alone; `AndariumPreview` takes that arrangement
-only, never the local receiver, and its hooks into the sheet are not in the
-AppStore product. Its logic (`Shared/Feedback/Logic`) is also built, and
-tested, by AndariumCore's tests through a symlinked target no product links.
-The feature's words are looked up in the `Feedback` string table (zh-Hans,
-zh-Hant and ja are in [Languages](#languages)); the mail's subject prefix and
-its information block are English whatever the interface language, and the bug
-report's overlay text is the app's own.
+Home's toolbar menu and a running session's Settings open a sheet that writes
+an email to the developer (`Shared/Feedback/`, the system's Mail composer sends
+it). Home's toolbar holds one menu in place of the Info button, with Info and
+Send feedback; it keeps Info's glyph and accessibility label and is on Welcome
+too, where Send feedback is reachable before a virtual machine is set up. A
+build without Send feedback keeps the plain Info button and holds no menu code
+(`Shared/HomeMenu.swift`). Info itself has no Send feedback section. The
+feature is compiled in, under the `FEEDBACK_MAIL` condition, only in an
+AppStore build whose ignored `Config/Feedback.local.xcconfig` (from
+`Feedback.local.xcconfig.example`) names the receiver, so a fork, a sideload or
+a Debug or Release build holds none of it, and every configuration's bundle
+check says whether it does: it also fails on the local receiver's bytes in any
+file of a bundle that does not name it (never printing it), and on an
+`Info.plist` whose values differ from `Config/Info.plist` (the preprocessing
+changes the feedback key alone). Tests and captures turn it on in a Debug build
+with `FEEDBACK_ADDRESS=feedback@example.com` on the `xcodebuild` line, which
+the bundle check accepts in Debug alone; `AndariumPreview` takes that
+arrangement only, never the local receiver, and its hooks into the sheet are
+not in the AppStore product. Its logic (`Shared/Feedback/Logic`) is also built,
+and tested, by AndariumCore's tests through a symlinked target no product
+links. The feature's words are looked up in the `Feedback` string table
+(zh-Hans, zh-Hant and ja are in [Languages](#languages)); the mail's subject
+prefix and its information block are English whatever the interface language,
+and the bug report's overlay text is the app's own.
 
 ### Follow developer on X
 
@@ -358,8 +411,8 @@ control out.
   The first launch of an update that carries notes shows a ribbon above Start,
   on at most three launches, that opens them; a build shows the notes up to its
   own number and no later ones. An entry can name the devices it is for (more
-  guest memory than a limit, an iPad, a device with haptics): the ribbon and its
-  sheet announce only the entries the device meets. An entry can also name a
+  guest memory than a limit, an iPad, a device with haptics, a compass or a
+  camera): the ribbon and its sheet announce only the entries the device meets. An entry can also name a
   feature the build may lack (Send feedback): a build without it shows the entry
   nowhere. Info keeps every other entry as written (`WhatsNewRules`,
   `WhatsNewStore`). A launch with a launch setting, or one a test runs, shows no
@@ -437,6 +490,44 @@ requires reopening Andarium.
   location or Location Services are off, and says Approximate location, with an
   explanation and Settings, when Precise Location is off. No test reads a real
   location.
+- **Camera.** Camera is a per-guest switch under Capabilities on Home, after
+  Microphone; it is off for a new guest and for one stored before. iOS is asked
+  for camera access only when the person turns it on. The guest always lists
+  the host's cameras (the layout is composed from them, with no permission
+  asked), and the switch decides one thing: whether the host captures. It is
+  read once, when the guest starts, as the boot request's
+  `android_camera_mode` (runtime API 37): live only while it is on and iOS
+  allows it, otherwise blocked, which gives the guest black frames, opens no
+  capture session and reports Android's camera lens cover. The row is off with
+  its reason when iOS refuses or the device restricts the camera, and turning
+  it on then explains why and, for a refusal, offers Settings. A device with no
+  camera shows the row off and disabled with a note and keeps the person's
+  choice; a device has one when it has a built-in front camera, the rule the
+  guest's layout follows, and the iPad app running on a Mac has none
+  (`CameraAvailability`). On an iPad, a session that other apps
+  share the screen with pauses the camera (black frames) and shows a notice
+  that goes with the interruption. Camera apps in the guest save a photo taken
+  sideways the right way up from the guest's accelerometer, which the guest has
+  wherever the device has sensors (see Motion below); an iPad app on a Mac and
+  the Simulator have none. Where the
+  host owns the rotation (an iPad window) it tells the runtime how the device
+  body is turned from portrait (`CameraRotation`): each start derives every
+  camera's sensor orientation from it, and a later turn turns the picture
+  ([orientation](../darwin/device/camera/README.md#orientation)). The colour
+  data a Bayer still teaches is kept in a folder of Application Support that
+  backups leave out. The memory a live session's cameras hold comes out of the
+  graphics budget ([camera device](../darwin/device/camera/README.md)): with
+  Camera on, the VRAM the System sheet and the statistics show is the pool,
+  the budget less that reserve, and the ruler's graphics warning follows the
+  pool too; the memory offered and the default are unchanged. The Simulator has
+  no camera: the preview states the access (`-systemCamera` reads the
+  Simulator's own permission) and the non-App Store runtime serves a synthetic
+  camera (`KERNARIUM_CAMERA_SOURCE`) to a run that has none, and no camera at
+  all for a value it does not know; an App Store build has neither. No test
+  captures a real camera. The default suites boot no guest; the opt-in
+  `CameraGuestTests` boots one through this runtime on the synthetic camera and
+  reads the vendor SKU, the camera IDs and the lens cover of a live and a
+  blocked session.
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
   ten fingers onto the guest's display; the hardware keyboard and mouse are
   the next item. A touch the system takes over reaches
@@ -535,11 +626,27 @@ requires reopening Andarium.
   slower than on gadgets, and a long single-process computation runs faster. An
   App Store build carries none of this: its runtime has no JIT and the
   application has no row, preference, entries or sentences.
-- **Motion.** Gyroscope needs no permission. The host reads a sensor only while
-  a guest application uses it and sends samples over private vsock port 5556
-  from the process's one Core Motion manager, which is never released (a
-  released manager crashes inside Core Motion); the system image must include
-  the [motion sub-HAL](../android/lineage-24/README.md#motion-sensors).
+- **Motion.** The guest has the device's accelerometer and gyroscope wherever
+  the device has them, with no setting and no permission. An iPad app on a Mac
+  and the Simulator have none, so nothing is read there, and Android still
+  lists both sensors. The host reads a sensor only while the guest is in front
+  and an application in it uses the sensor, and sends samples over private
+  vsock port 5556 from the process's one Core Motion manager, which is never
+  released (a released manager crashes inside Core Motion). A failure of the
+  device's sensors stops them and keeps the connection, which also carries the
+  orientation; they are tried again when the guest's demand changes or the
+  application next updates the session. The system image must include the
+  [motion sub-HAL](../android/lineage-24/README.md#motion-sensors).
+  The magnetometer, for an image that lists it (the `compass` host feature),
+  is Core Motion's calibrated device-motion field with Core Motion's accuracy
+  as Android's, read while an application uses it, with no setting and no
+  permission. Core Motion's request to move the device for calibration is no
+  failure; a start that delivers nothing in 5 s without that request, or any
+  other Core Motion error, turns it off for the rest of the run, where the
+  accelerometer and gyroscope are tried again as above. A run ends with the
+  foreground, a changed mount or a restart, not with a reconnect. From iOS 27.2
+  a motion status of denied or restricted hides it from the guest; nothing is
+  requested.
 - **Free space.** Free space is the space a write can use (`HostStorage`,
   `statfs(2)`), the one figure the watch, the start and transfer checks and
   every screen use; it leaves out the purgeable space iOS Settings counts, so
@@ -647,7 +754,13 @@ is on. `AndariumCore/Adb` speaks the protocol.
   before the first byte when the device (`TransferRoom`) or the virtual
   machine's data partition lacks room for the app and its reserve
   (`InstallRoom`), or when the file is a single .apk of 4 GiB or more, which
-  Android cannot install (`InstallRefusal.tooLarge`).
+  Android cannot install (`InstallRefusal.tooLarge`). The first attempt is
+  always the plain install. When Android's own answer is the refusal of an app
+  built for a much older version (`INSTALL_FAILED_DEPRECATED_SDK_VERSION`),
+  and for no other answer, an alert asks whether to install it anyway, and
+  Install anyway sends the same file again with the package manager's
+  `--bypass-low-target-sdk-block`, once (`LegacyInstallFlow`). Nothing else in
+  Andarium sends that flag, and the choice is kept nowhere.
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB
@@ -751,6 +864,9 @@ states the resolution; the earlier `KERNARIUM_RETINA_MODE` (`1` native, `0`
 one pixel to a point) is read where it is not stated.
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
 for iOS's thermal state in the Simulator and in automation.
+`ANDARIUM_FOLLOW_ORIENTATION` (`1` or `0`) states whether the guest follows the
+device's orientation, where the device's idiom (an iPhone follows) would
+otherwise decide.
 `ANDARIUM_INPUT_PROBE=1` is the UI tests' launch: the session opens at once
 with no guest behind it, and what the guest's keyboard and mouse would receive,
 and the touches that reach its touchscreen, go to one accessibility element

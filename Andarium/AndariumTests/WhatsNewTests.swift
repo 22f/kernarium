@@ -32,12 +32,14 @@ struct WhatsNewTests {
         try body(defaults)
     }
 
-    /// An iPhone with haptics, unless said otherwise.
-    private func host(maximumMiB: Int, idiom: HostDevice.Idiom = .phone, hasHaptics: Bool = true) -> HostDevice {
+    /// An iPhone with haptics and a camera, unless said otherwise.
+    private func host(
+        maximumMiB: Int, idiom: HostDevice.Idiom = .phone, hasHaptics: Bool = true, hasCamera: Bool = true
+    ) -> HostDevice {
         HostDevice(
             name: idiom == .pad ? "iPad" : "iPhone", processorCount: 6,
             memory: MemoryPolicy(maximumsMiB: [maximumMiB]), freeStorageBytes: 40_000_000_000,
-            idiom: idiom, hasHaptics: hasHaptics)
+            idiom: idiom, hasHaptics: hasHaptics, hasCamera: hasCamera)
     }
 
     private func withDefaultsReturning<Result>(_ body: (UserDefaults) -> Result) -> Result {
@@ -65,10 +67,11 @@ struct WhatsNewTests {
 
     // MARK: The bundled notes
 
-    /// Build 10 as written, and as an iPhone with haptics and an iPad are told it.
+    /// Build 10 as written, and as an iPhone with haptics and a camera and an
+    /// iPad with a camera are told it.
     private static let buildTenIDs = [
-        "snapshots", "resolution", "ipad-rotation", "keyboard-mouse-controllers", "location", "haptics",
-        "send-feedback", "more-fixes",
+        "snapshots", "resolution", "ipad-rotation", "keyboard-mouse-controllers", "location", "camera", "haptics",
+        "legacy-apk", "send-feedback", "more-fixes",
     ]
     private static let buildTenIDsOnAnIPhone = buildTenIDs.filter { $0 != "ipad-rotation" }
     private static let buildTenIDsOnAnIPad = buildTenIDs.filter { $0 != "haptics" }
@@ -105,13 +108,14 @@ struct WhatsNewTests {
             }
         }
         // A requirement the code does not know fails to decode, so the notes
-        // would not be here; these four entries are the ones that have any.
+        // would not be here; these five entries are the ones that have any.
         let requirements = WhatsNewCatalog.load().flatMap(\.entries).compactMap { entry in
             entry.requirement.map { (entry.id, $0) }
         }
         #expect(Dictionary(uniqueKeysWithValues: requirements) == [
             "more-memory": WhatsNewRequirement(memoryAboveMiB: 4096),
             "ipad-rotation": WhatsNewRequirement(device: .pad),
+            "camera": WhatsNewRequirement(camera: true),
             "haptics": WhatsNewRequirement(device: .haptics),
             "send-feedback": WhatsNewRequirement(feature: .sendFeedback),
         ])
@@ -120,16 +124,16 @@ struct WhatsNewTests {
     @Test func theRibbonNamesTheBundledEntriesAndCountsTheRest() throws {
         let titles = try #require(WhatsNewCatalog.load().first).entries.map(\.title)
         #expect(titles == [
-            "Snapshots", "Resolution", "Rotation on iPad", "Keyboard, mouse and controllers", "Location", "Haptics",
-            "Send feedback", "More fixes",
+            "Snapshots", "Resolution", "Rotation on iPad", "Keyboard, mouse and controllers", "Location", "Camera",
+            "Haptics", "Install older Android apps", "Send feedback", "More fixes",
         ])
         // The dot keeps to the end of its line: a no-break space before it.
         let separator = "\u{00A0}\u{00B7} "
-        #expect(WhatsNewRibbon.summary(titles, naming: 8, language: "en") == titles.joined(separator: separator))
+        #expect(WhatsNewRibbon.summary(titles, naming: 10, language: "en") == titles.joined(separator: separator))
         #expect(
             WhatsNewRibbon.summary(titles, naming: 2, language: "en")
-                == "Snapshots\(separator)Resolution\(separator)6 more")
-        #expect(WhatsNewRibbon.summary(titles, naming: 0) == "8 new features")
+                == "Snapshots\(separator)Resolution\(separator)8 more")
+        #expect(WhatsNewRibbon.summary(titles, naming: 0) == "10 new features")
     }
 
     /// A language that breaks between any two characters gets plain spaces: a
@@ -143,8 +147,8 @@ struct WhatsNewTests {
         #expect(WhatsNewRibbon.summary(["A", "B", "C"], naming: 1, language: "ja") == "A \u{00B7} 2 more")
     }
 
-    /// The ribbon lists what the device is told, in the order written: seven
-    /// entries each, but not the same seven.
+    /// The ribbon lists what the device is told, in the order written: nine
+    /// entries each, but not the same nine.
     @Test func theRibbonNamesWhatAnIPhoneAndAnIPadAreTold() {
         func ribbon(on host: HostDevice, naming named: Int) -> String {
             withDefaultsReturning { defaults in
@@ -156,13 +160,13 @@ struct WhatsNewTests {
         }
         let separator = "\u{00A0}\u{00B7} "
         #expect(ribbon(on: host(maximumMiB: 4096), naming: 4) == [
-            "Snapshots", "Resolution", "Keyboard, mouse and controllers", "Location", "3 more",
+            "Snapshots", "Resolution", "Keyboard, mouse and controllers", "Location", "5 more",
         ].joined(separator: separator))
         #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 4) == [
-            "Snapshots", "Resolution", "Rotation on iPad", "Keyboard, mouse and controllers", "3 more",
+            "Snapshots", "Resolution", "Rotation on iPad", "Keyboard, mouse and controllers", "5 more",
         ].joined(separator: separator))
-        #expect(ribbon(on: host(maximumMiB: 4096), naming: 0) == "7 new features")
-        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 0) == "7 new features")
+        #expect(ribbon(on: host(maximumMiB: 4096), naming: 0) == "9 new features")
+        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 0) == "9 new features")
     }
 
     @Test func eachKindOfDeviceIsToldItsOwnEntries() {
@@ -177,10 +181,16 @@ struct WhatsNewTests {
             }
         }
         let withoutDeviceEntries = Self.buildTenIDs.filter { $0 != "ipad-rotation" && $0 != "haptics" }
+        let withoutACamera = { (ids: [String]) in ids.filter { $0 != "camera" } }
         #expect(told(by: host(maximumMiB: 4096)) == Self.buildTenIDsOnAnIPhone)
         #expect(told(by: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false)) == Self.buildTenIDsOnAnIPad)
         #expect(told(by: host(maximumMiB: 4096, hasHaptics: false)) == withoutDeviceEntries)
-        #expect(told(by: host(maximumMiB: 4096, idiom: .mac, hasHaptics: false)) == withoutDeviceEntries)
+        // A device with no camera (a Mac running the iPad app has none) is not
+        // told about the Camera row, which would not be there.
+        #expect(told(by: host(maximumMiB: 4096, hasCamera: false)) == withoutACamera(Self.buildTenIDsOnAnIPhone))
+        #expect(
+            told(by: host(maximumMiB: 4096, idiom: .mac, hasHaptics: false, hasCamera: false))
+                == withoutACamera(withoutDeviceEntries))
     }
 
     /// A build without Send feedback (a sideload, a Debug build, an App Store
@@ -195,12 +205,12 @@ struct WhatsNewTests {
             let withoutFeedback = Self.buildTenIDs.filter { $0 != "send-feedback" }
             let toldWithoutFeedback = Self.buildTenIDsOnAnIPhone.filter { $0 != "send-feedback" }
             #expect(model.whatsNew.pendingEntries.map(\.id) == toldWithoutFeedback)
-            #expect(model.whatsNew.pending.first?.entries.count == 6)
+            #expect(model.whatsNew.pending.first?.entries.count == 8)
             // Info: the device's entries as written (Rotation on iPad, here on an
             // iPhone), but not the feature the build lacks.
             #expect(model.whatsNew.releases.first?.entries.map(\.id) == withoutFeedback)
             #expect(model.whatsNew.releases.map(\.build) == [10, 9])
-            #expect(WhatsNewRibbon.summary(model.whatsNew.pendingEntries.map(\.title), naming: 0) == "6 new features")
+            #expect(WhatsNewRibbon.summary(model.whatsNew.pendingEntries.map(\.title), naming: 0) == "8 new features")
         }
     }
 
@@ -271,6 +281,7 @@ struct WhatsNewTests {
             #expect(platform == .phone && host.idiom == .phone && host.name == "iPhone")
         }
         #expect(host.hasHaptics == CHHapticEngine.capabilitiesForHardware().supportsHaptics)
+        #expect(host.hasCamera == SystemCameraSource.hasCamera)
     }
 
     // MARK: The person's launch
@@ -320,7 +331,7 @@ struct WhatsNewTests {
             #expect(model.whatsNew.pendingEntries.map(\.id)
                 == Self.buildTenIDsOnAnIPhone + ["file-browser", "stability-fixes"])
             // Info lists the notes as written.
-            #expect(model.whatsNew.releases.map(\.entries.count) == [8, 3])
+            #expect(model.whatsNew.releases.map(\.entries.count) == [10, 3])
         }
     }
 

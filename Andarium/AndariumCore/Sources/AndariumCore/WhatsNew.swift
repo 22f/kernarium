@@ -186,14 +186,29 @@ public struct WhatsNewRequirement: Hashable, Decodable, Sendable {
     public var device: WhatsNewDevice?
     /// The build has this feature.
     public var feature: WhatsNewFeature?
+    /// `true` is an entry for a device that can give the guest a compass (an
+    /// iPhone, an iPad), which a Mac and the Simulator cannot. `false` is no
+    /// requirement and is refused.
+    public var compass: Bool?
+    /// `true` is an entry for a device that has a camera to give the guest (an
+    /// iPhone, an iPad), which the iPad app on a Mac does not. `false` is no
+    /// requirement and is refused.
+    public var camera: Bool?
 
-    public init(memoryAboveMiB: Int? = nil, device: WhatsNewDevice? = nil, feature: WhatsNewFeature? = nil) {
+    public init(
+        memoryAboveMiB: Int? = nil, device: WhatsNewDevice? = nil, feature: WhatsNewFeature? = nil,
+        compass: Bool? = nil, camera: Bool? = nil
+    ) {
         self.memoryAboveMiB = memoryAboveMiB
         self.device = device
         self.feature = feature
+        self.compass = compass
+        self.camera = camera
     }
 
-    private enum CodingKeys: String, CodingKey, CaseIterable { case memoryAboveMiB, device, feature }
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case memoryAboveMiB, device, feature, compass, camera
+    }
 
     public init(from decoder: any Decoder) throws {
         try decoder.requireOnly(CodingKeys.self)
@@ -204,7 +219,17 @@ public struct WhatsNewRequirement: Hashable, Decodable, Sendable {
             ? values.decode(Int.self, forKey: .memoryAboveMiB) : nil
         device = try values.contains(.device) ? values.decode(WhatsNewDevice.self, forKey: .device) : nil
         feature = try values.contains(.feature) ? values.decode(WhatsNewFeature.self, forKey: .feature) : nil
-        guard memoryAboveMiB != nil || device != nil || feature != nil else {
+        compass = try values.contains(.compass) ? values.decode(Bool.self, forKey: .compass) : nil
+        camera = try values.contains(.camera) ? values.decode(Bool.self, forKey: .camera) : nil
+        guard compass != false else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath, debugDescription: "\"compass\" is true or absent"))
+        }
+        guard camera != false else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath, debugDescription: "\"camera\" is true or absent"))
+        }
+        guard memoryAboveMiB != nil || device != nil || feature != nil || compass != nil || camera != nil else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: decoder.codingPath, debugDescription: "a requirement states nothing"))
         }
@@ -216,6 +241,8 @@ public struct WhatsNewRequirement: Hashable, Decodable, Sendable {
         guard isPresent(in: features) else { return false }
         if let memoryAboveMiB, host.memory.maximumMiB(vCPUs: vCPUs) <= memoryAboveMiB { return false }
         if let device, !device.isMet(by: host) { return false }
+        if compass == true, !host.hasCompass { return false }
+        if camera == true, !host.hasCamera { return false }
         return true
     }
 

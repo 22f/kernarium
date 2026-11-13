@@ -160,6 +160,17 @@ void EventQueue::queueLocked(
     guestHolds_.observe(events);
 }
 
+void EventQueue::queueSwitchLocked() noexcept
+{
+    if (!switch_ || pluggable_)
+        return;
+    const protocol::InputEvent report[] = {
+        {protocol::eventSwitch, switch_->code, switch_->on ? 1 : 0},
+        {protocol::eventSynchronize, protocol::synchronizeReport, 0},
+    };
+    queueLocked(report);
+}
+
 bool EventQueue::holdLocked(
     std::span<const protocol::InputEvent> events) noexcept
 {
@@ -245,6 +256,27 @@ bool EventQueue::enqueue(
     if (wasEmpty)
         wake();
     return false;
+}
+
+void EventQueue::setSwitch(Switch state) noexcept
+{
+    if (pluggable_)
+        return;
+    {
+        std::lock_guard lock(mutex_);
+        switch_ = state;
+        events_.clear();
+        guestHolds_.reset();
+        dropped_ = false;
+        queueSwitchLocked();
+    }
+    wake();
+}
+
+std::optional<EventQueue::Switch> EventQueue::switchState() const noexcept
+{
+    std::lock_guard lock(mutex_);
+    return switch_;
 }
 
 bool EventQueue::connected() const noexcept
@@ -452,6 +484,7 @@ void EventQueue::reset() noexcept
     reportedHoldOverflow_ = false;
     probed_ = !pluggable_;
     registered_ = !pluggable_;
+    queueSwitchLocked();
 }
 
 void EventQueue::clear() noexcept
@@ -616,7 +649,10 @@ void touchscreenEventBits(
     }
 }
 
-void sideKeyEventBits(protocol::InputConfig& config, std::uint8_t subselect)
+void sideKeyEventBits(
+    protocol::InputConfig& config,
+    std::uint8_t subselect,
+    std::optional<EventQueue::Switch> state)
 {
     if (subselect == protocol::eventKey) {
         for (std::uint16_t code = 1; code <= protocol::keyboardKeyLast;
@@ -628,6 +664,8 @@ void sideKeyEventBits(protocol::InputConfig& config, std::uint8_t subselect)
         setBit(config.value.bitmap, protocol::ledNumLock);
         setBit(config.value.bitmap, protocol::ledCapsLock);
         setBit(config.value.bitmap, protocol::ledScrollLock);
+    } else if (subselect == protocol::eventSwitch && state) {
+        setBit(config.value.bitmap, state->code);
     }
 }
 
@@ -733,7 +771,7 @@ protocol::InputConfig VirtioInputDevice::selectedConfiguration() const
             touchscreenEventBits(config, subselect_);
             break;
         case DeviceKind::keyboard:
-            sideKeyEventBits(config, subselect_);
+            sideKeyEventBits(config, subselect_, events_->switchState());
             break;
         case DeviceKind::hardwareKeyboard:
             hardwareKeyboardEventBits(config, subselect_);

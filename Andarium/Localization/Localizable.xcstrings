@@ -1212,6 +1212,28 @@
         }
       }
     },
+    "Allow camera access" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "カメラへのアクセスを許可"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许访问相机"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允許取用相機"
+          }
+        }
+      }
+    },
     "Allow location access" : {
       "localizations" : {
         "ja" : {
@@ -1369,6 +1391,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Andarium不完整"
+          }
+        }
+      }
+    },
+    "Andarium is not allowed to use the camera. Turning this on offers to open Settings." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumはカメラの使用を許可されていません。オンにすると“設定”を開くよう案内されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium未获准使用相机。打开此开关会提示你前往“设置”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium未獲允許使用相機。開啟此開關會提示你前往「設定」。"
           }
         }
       }
@@ -2087,6 +2131,72 @@
         }
       }
     },
+    "Camera" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "カメラ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相机"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相機"
+          }
+        }
+      }
+    },
+    "Camera is restricted" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "カメラが制限されています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相机受限"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相機受到限制"
+          }
+        }
+      }
+    },
+    "Camera paused while other apps are on screen" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ほかのアプリと同時に表示している間は、カメラが一時停止します"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同时显示其他App时，相机会暂停"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同時顯示其他App時，相機會暫停"
+          }
+        }
+      }
+    },
     "Cancel" : {
       "localizations" : {
         "ja" : {
@@ -2176,7 +2286,7 @@
       }
     },
     "Capabilities" : {
-      "comment" : "Home section: what the virtual machine may use of this device (location, microphone, gyroscope).",
+      "comment" : "Home section: what the virtual machine may use of this device (location, microphone, haptics).",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -3819,28 +3929,6 @@
         }
       }
     },
-    "Gyroscope" : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ジャイロスコープ"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "陀螺仪"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "陀螺儀"
-          }
-        }
-      }
-    },
     "Haptics" : {
       "comment" : "A switch under Capabilities: the virtual machine's vibration and haptic feedback play on this device's Taptic Engine. Haptics is iOS's own name (Sounds & Haptics).",
       "localizations" : {
@@ -3952,6 +4040,28 @@
         }
       }
     },
+    "Import" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "読み込む"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "导入"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "輸入"
+          }
+        }
+      }
+    },
     "Importing %@" : {
       "localizations" : {
         "ja" : {
@@ -4019,6 +4129,28 @@
         }
       }
     },
+    "Install anyway" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "それでもインストール"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍要安装"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍要安裝"
+          }
+        }
+      }
+    },
     "Install APK…" : {
       "localizations" : {
         "ja" : {
@@ -4059,6 +4191,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "安裝應用程式、ADB、統計資料和選項"
+          }
+        }
+      }
+    },
+    "Install this app anyway?" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "それでもこのアプリをインストールしますか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍要安装此应用吗？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍要安裝此應用程式嗎？"
           }
         }
       }
@@ -4170,6 +4324,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "由於Andarium的「準確位置」已關閉，iOS僅向其提供你所在的區域。虛擬機器中的應用程式只能看到較大的範圍。若要分享確切位置，請在「設定」中為Andarium開啟「準確位置」。"
+          }
+        }
+      }
+    },
+    "iOS is not allowing Andarium to use the camera. Turn on Camera for Andarium in Settings, then come back to use it." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOSはAndariumによるカメラの使用を許可していません。“設定”でAndariumの“カメラ”をオンにしてから、このアプリに戻って使用してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS不允许Andarium使用相机。请在“设置”中为Andarium打开“相机”，然后返回使用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS不允許Andarium使用相機。請在「設定」中為Andarium開啟「相機」，然後回來使用。"
           }
         }
       }
@@ -7437,6 +7613,28 @@
         }
       }
     },
+    "The camera is restricted on this device. Turning this on explains why." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このデバイスではカメラが制限されています。オンにすると理由が表示されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此设备上的相机受到限制。打开此开关会说明原因。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此裝置上的相機受到限制。開啟此開關會說明原因。"
+          }
+        }
+      }
+    },
     "The file changed while it was being copied." : {
       "localizations" : {
         "ja" : {
@@ -8826,6 +9024,51 @@
         }
       }
     },
+    "This app was built for a much older version of Android. Android blocks apps like this because they predate its newer privacy and security protections. If you install it anyway, it may not work properly." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリは、はるかに古いバージョンのAndroid向けに作られています。Androidは、新しいプライバシー保護やセキュリティ保護より前に作られたこのようなアプリのインストールをブロックします。それでもインストールすると、正しく動作しない場合があります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用是为非常旧的Android版本开发的。Android会阻止安装这类应用，因为它们是在Android推出较新的隐私和安全保护之前开发的。如果仍要安装，此应用可能无法正常运行。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式是為非常舊的Android版本所開發。Android會阻擋安裝這類應用程式，因為它們是在Android推出較新的隱私權與安全性保護之前開發的。若仍要安裝，此應用程式可能無法正常運作。"
+          }
+        }
+      }
+    },
+    "This app was built for API level %lld. Android in this virtual machine normally installs only apps built for API level %lld or later." : {
+      "comment" : "API level is Android's number for a version; both are plain numbers (7, 24).",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリはAPIレベル%1$lld向けに作られています。この仮想マシンのAndroidは、通常、APIレベル%2$lld以降向けに作られたアプリのみをインストールします。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用是为API级别%1$lld开发的。此虚拟机中的Android通常只安装为API级别%2$lld或更高级别开发的应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式是為API級別%1$lld所開發。此虛擬機器中的Android通常只會安裝為API級別%2$lld或更高級別所開發的應用程式。"
+          }
+        }
+      }
+    },
     "This app was made for a system version that this virtual machine no longer installs." : {
       "localizations" : {
         "ja" : {
@@ -8980,24 +9223,24 @@
         }
       }
     },
-    "This device has no gyroscope or accelerometer to share." : {
+    "This device has no camera to share." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このデバイスには利用可能なジャイロスコープや加速度センサーがありません。"
+            "value" : "このデバイスには利用可能なカメラがありません。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此设备没有可供使用的陀螺仪或加速度计。"
+            "value" : "此设备没有可供使用的相机。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此裝置沒有可供使用的陀螺儀或加速度計。"
+            "value" : "此裝置沒有可供使用的相機。"
           }
         }
       }
@@ -9020,6 +9263,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此裝置沒有Wi-Fi位址。請連接Wi-Fi以透過網路使用ADB。"
+          }
+        }
+      }
+    },
+    "This device’s settings, such as Screen Time or a profile, do not let apps use the camera, so Andarium cannot share it." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このデバイスの設定（“スクリーンタイム”やプロファイルなど）でアプリによるカメラの使用が許可されていないため、Andariumはカメラを共有できません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此设备的设置（例如“屏幕时间”或描述文件）不允许App使用相机，因此Andarium无法共享相机。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此裝置的設定（例如「螢幕使用時間」或描述檔）不允許App使用相機，因此Andarium無法分享相機。"
           }
         }
       }

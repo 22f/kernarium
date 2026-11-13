@@ -26,6 +26,11 @@ struct AppEntry {
     /// `systemMicrophone` does for the microphone: `simctl privacy` sets it
     /// and the system's alert asks.
     var systemLocation: Bool
+    /// The Camera switch asks the Simulator's own permission, as
+    /// `systemMicrophone` does for the microphone. The Simulator has no camera,
+    /// so the preview takes it that the device has one: `simctl privacy` sets
+    /// the access and the system's alert asks.
+    var systemCamera: Bool
     /// How many CPU readings the stats overlay and Settings' Stats rows
     /// start with, and hold: 0 is a session before its first reading. Absent,
     /// the mock readings run on.
@@ -58,6 +63,7 @@ struct AppEntry {
             bootStage: defaults.string(forKey: "bootStage").flatMap { Int($0) },
             systemMicrophone: defaults.bool(forKey: "systemMicrophone"),
             systemLocation: defaults.bool(forKey: "systemLocation"),
+            systemCamera: defaults.bool(forKey: "systemCamera"),
             statsReadings: defaults.string(forKey: "statsReadings").flatMap { Int($0) },
             statsVramMiB: defaults.string(forKey: "statsVramMiB").flatMap { Int($0) },
             device: defaults.string(forKey: "device"),
@@ -76,12 +82,16 @@ struct AppEntry {
         "home-resolution": "resolution",
         "home-capabilities": "capabilities", "home-mic-on": "capabilities", "home-mic-denied": "capabilities",
         "home-haptics-off": "capabilities",
-        "home-mic-alert": "capabilities", "home-gyroscope-unavailable": "capabilities",
+        "home-mic-alert": "capabilities",
         "home-location-on": "capabilities", "home-location-denied": "capabilities",
         "home-location-approximate": "capabilities", "home-location-restricted": "capabilities",
         "home-location-services-off": "capabilities", "home-location-alert": "capabilities",
         "home-location-approximate-alert": "capabilities", "home-location-restricted-alert": "capabilities",
         "home-location-services-off-alert": "capabilities", "home-location-ask": "capabilities",
+        "home-camera-on": "capabilities", "home-camera-denied": "capabilities",
+        "home-camera-restricted": "capabilities", "home-camera-unavailable": "capabilities",
+        "home-camera-alert": "capabilities", "home-camera-restricted-alert": "capabilities",
+        "home-camera-ask": "capabilities",
         "home-backup": "backup",
         "home-jit": "jit", "home-jit-no-debugger": "jit", "home-jit-fallback": "jit",
     ]
@@ -112,7 +122,8 @@ struct AppEntry {
     /// datastore says; other session screenshots leave it out.
     func configureTips() {
         if resetTips { try? Tips.resetDatastore() }
-        if screen == "session-tip" {
+        // The legacy install, played, shows the tip as a real session may.
+        if screen == "session-tip" || (screen == "install-legacy" && play) {
             Tips.showAllTipsForTesting()
         } else if screen.hasPrefix("session") || screen.hasPrefix("settings") || screen.hasPrefix("files")
             || screen.hasPrefix("recovery") || screen.hasPrefix("boot")
@@ -130,7 +141,7 @@ struct AppEntry {
             ?? PreviewData.host(lowSpace: lowSpace, device: device)
         var guest: Guest? = PreviewData.sampleGuest(on: host)
         if let memoryMiB { guest?.memoryMiB = memoryMiB }
-        if ["welcome", "create", "create-low-space"].contains(screen) { guest = nil }
+        if ["welcome", "welcome-menu", "create", "create-low-space"].contains(screen) { guest = nil }
         let model = AppModel(
             guest: guest, host: host, system: PreviewData.system, capabilities: .preview,
             createRequirementBytes: PreviewData.createRequirementBytes
@@ -145,6 +156,10 @@ struct AppEntry {
         // Only an iPhone has a Taptic Engine for the guest's haptics: an iPad's
         // preview, like the device, has no Haptics row.
         model.hapticsAvailable = host.hasHaptics
+        // The mock device has a camera that iOS has not been asked about; a
+        // screen states another access (and `-systemCamera` reads the
+        // Simulator's own).
+        model.cameraAccess = .notDetermined
 
         func boot(_ kind: BootKind, stage: Int, seconds: Int) {
             model.frozenBootStage = freeze ? (bootStage ?? stage) : nil
@@ -193,7 +208,8 @@ struct AppEntry {
             }
         case "home-memory-warning", "system-memory-warning":
             model.guest = PreviewData.highMemoryGuest(on: host)
-        case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit", "home-location-ask":
+        case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit", "home-location-ask",
+             "home-camera-ask":
             break
         case "home-jit":
             model.jitOn = true
@@ -209,8 +225,6 @@ struct AppEntry {
             model.microphoneState = .granted
         case "home-mic-denied", "home-mic-alert":
             model.microphoneState = .denied
-        case "home-gyroscope-unavailable":
-            model.motionSensorsAvailable = false
         case "home-haptics-off":
             model.guest?.haptics = false
         case "home-location-on":
@@ -225,6 +239,15 @@ struct AppEntry {
             model.locationAuthorization = .restricted
         case "home-location-services-off", "home-location-services-off-alert":
             model.locationAuthorization = .servicesOff
+        case "home-camera-on":
+            model.guest?.camera = true
+            model.cameraAccess = .authorized
+        case "home-camera-denied", "home-camera-alert":
+            model.cameraAccess = .denied
+        case "home-camera-restricted", "home-camera-restricted-alert":
+            model.cameraAccess = .restricted
+        case "home-camera-unavailable":
+            model.cameraAccess = .unavailable
         case "busy-create":
             model.busy = BusyState(title: String(localized: "Creating virtual machine"), detail: String(localized: "Setting up Andarium with \(Formats.size(gib: 16))."), progress: 0.42)
         case "busy-erase":
@@ -258,7 +281,8 @@ struct AppEntry {
             boot(.normal, stage: 1, seconds: 4)
         case "session", "session-tip", "session-open", "session-keyboard", "session-stats",
              "session-power", "session-setup", "session-off", "session-left", "session-volume",
-             "session-graphics-notice", "session-thermal-notice", "session-network-cellular", "session-network-wifi":
+             "session-graphics-notice", "session-thermal-notice", "session-network-cellular", "session-network-wifi",
+             "session-camera-notice":
             model.session.showStats = screen == "session-stats"
             model.session.sideKeysOpen = ["session-open", "session-off", "session-left", "session-volume"].contains(screen)
             model.sessionPreset = SessionPreset(
@@ -279,8 +303,10 @@ struct AppEntry {
             if screen == "session-thermal-notice" { model.previewThermalNotice() }
             if screen == "session-network-cellular" { model.previewNetworkNotice(.cellular) }
             if screen == "session-network-wifi" { model.previewNetworkNotice(.wifi) }
+            if screen == "session-camera-notice" { model.previewCameraNotice() }
         case "settings", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
-             "settings-feedback", "install-apk", "install-done", "install-failed", "install-not-apk", "install-bundle", "bug-report":
+             "settings-feedback", "install-apk", "install-legacy", "install-done", "install-failed", "install-not-apk", "install-bundle",
+             "bug-report":
             let session = model.session
             switch screen {
             case "settings-adb":
@@ -342,13 +368,15 @@ struct AppEntry {
         }
         if systemMicrophone { useSystemMicrophone(in: model) }
         if systemLocation { useSystemLocation(in: model) }
+        if systemCamera { useSystemCamera(in: model) }
         SnapshotPreview.apply(screen: screen, to: model)
         return model
     }
 
     /// The screens that show a guest operation on the full-screen overlay.
     private static let operationScreens: Set<String> = [
-        "bug-report", "install-apk", "install-done", "install-failed", "install-not-apk", "install-bundle",
+        "bug-report", "install-apk", "install-legacy", "install-done", "install-failed", "install-not-apk",
+        "install-bundle",
     ]
     /// The ones that show how an install ended.
     private static let resultScreens: Set<String> = [
@@ -367,6 +395,14 @@ struct AppEntry {
                 title: String(localized: "Creating bug report"),
                 detail: String(localized: "The virtual machine is collecting its logs and state. This can take several minutes."),
                 progress: 0.6, cancel: cancel
+            )
+        case "install-legacy":
+            // The first attempt is over and the question is up: the overlay
+            // keeps its Cancel, which the alert covers.
+            return BusyState(
+                title: String(localized: "Installing app"),
+                detail: "\(file) \u{00B7} \(Formats.size(bytes: PreviewData.sampleApkSizeBytes))",
+                progress: 0.8, cancel: cancel
             )
         case "install-done":
             return BusyState(
@@ -441,6 +477,18 @@ struct AppEntry {
         }
     }
 
+    /// The device's camera conversation against the Simulator's permission,
+    /// which is read again whenever the app becomes active. The Simulator has
+    /// no camera and the conversation does not need one.
+    private func useSystemCamera(in model: AppModel) {
+        model.camera = CameraController(model: model, source: SystemCameraSource(requiresCamera: false))
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in model.camera?.refresh() }
+        }
+    }
+
     /// The resolution the launch chooses and the screen it states: the preview
     /// shows a 2.3 screen on any Simulator.
     @MainActor
@@ -477,11 +525,19 @@ struct AppEntry {
             model.setLocation(true)
         case "home-location-approximate-alert":
             model.permissionPrompt = .location
+        case "home-camera-alert", "home-camera-restricted-alert", "home-camera-ask":
+            model.setCamera(true)
         case "erase":
             model.confirmingErase = true
         case "info", "info-acknowledgements", "info-license", "info-license-gpl", "whatsnew-info",
-             "whatsnew-history", "whatsnew-history-nofeedback", "feedback-info", "feedback-info-filled":
+             "whatsnew-history", "whatsnew-history-nofeedback":
             model.sheet = .info
+        #if FEEDBACK_MAIL
+        case "home-menu", "welcome-menu":
+            // Home's toolbar menu open, as a tap leaves it.
+            try? await Task.sleep(for: .milliseconds(600))
+            PreviewMenu.openToolbarMenu()
+        #endif
         case "whatsnew-open", "whatsnew-skipped-open":
             model.sheet = .whatsNew
         case "start-low-space":
@@ -503,6 +559,30 @@ struct AppEntry {
         case "install-apk" where play:
             try? await Task.sleep(for: .milliseconds(450))
             model.installPicked(PreviewData.sampleApk())
+        case "install-legacy" where play:
+            // The whole install: Android takes its time over the first
+            // attempt (`-legacyRefusalSeconds`, 8 by default: long enough to
+            // unfold a folding iPhone meanwhile) and refuses the app for its
+            // version; the answer decides the rest.
+            let refusalSeconds = UserDefaults.standard.string(forKey: "legacyRefusalSeconds").flatMap { Double($0) } ?? 8
+            model.previewInstallAttempt = { bypass, update in
+                for step in 1...10 {
+                    try await Task.sleep(for: .milliseconds(100))
+                    update(BusyUpdate(progress: Double(step) / 10 * 0.8))
+                }
+                guard bypass else {
+                    update(BusyUpdate(detail: String(localized: "The virtual machine is installing the app\u{2026}"), cancellable: false))
+                    try await Task.sleep(for: .seconds(refusalSeconds))
+                    throw LegacyApkRefused(target: LegacyTarget(appLevel: 7, requiredLevel: 24))
+                }
+                try await Task.sleep(for: .milliseconds(1200))
+            }
+            try? await Task.sleep(for: .milliseconds(450))
+            model.installPicked(PreviewData.sampleApk())
+        case "install-legacy":
+            // What Android's refusal of an app built for API level 7 asks.
+            try? await Task.sleep(for: .milliseconds(450))
+            model.legacyInstallQuestion = LegacyInstallQuestion(target: LegacyTarget(appLevel: 7, requiredLevel: 24))
         default:
             await SnapshotPreview.applyDeferred(screen: screen, to: model)
         }

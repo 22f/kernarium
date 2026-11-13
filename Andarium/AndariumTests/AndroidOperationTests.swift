@@ -10,9 +10,6 @@ import Testing
 /// result is a share sheet, a row or an alert. A stub stands for the runtime.
 /// The tests share the staging folder, which one of them sweeps, so they run
 /// one at a time.
-///
-/// The motion toggle persists and reaches the runtime driver
-/// (`motionSensorsAreOnUntilChosenOffAndTheChoiceIsPersisted`).
 @Suite(.serialized)
 @MainActor
 struct AndroidOperationTests {
@@ -58,28 +55,6 @@ struct AndroidOperationTests {
         private var open = false
         func release() { lock.withLock { open = true } }
         var isOpen: Bool { lock.withLock { open } }
-    }
-
-    @Test func motionSensorsAreOnUntilChosenOffAndTheChoiceIsPersisted() {
-        let (model, driver) = running()
-        // No choice yet: on where the device has sensors, and nothing stored.
-        #expect(model.guest?.motionChoice == nil)
-        #expect(model.motionSensorsOn)
-        model.setMotionSensors(false)
-        #expect(model.guest?.motionChoice == false)
-        #expect(driver.savedGuest?.motionChoice == false)
-        #expect(!model.motionSensorsOn)
-        #expect(!driver.motionSensors)
-        model.setMotionSensors(true)
-        #expect(model.guest?.motionChoice == true)
-        #expect(driver.savedGuest?.motionChoice == true)
-        #expect(model.motionSensorsOn)
-        #expect(driver.motionSensors)
-        // Where the device has no sensors the switch shows off, whatever was chosen.
-        model.motionSensorsAvailable = false
-        #expect(!model.motionSensorsOn)
-        model.setMotionSensors(true)
-        #expect(model.guest?.motionChoice == true && !model.motionSensorsOn)
     }
 
     // MARK: Bug report
@@ -702,21 +677,5 @@ struct PackageInstallMessagesTests {
         #expect(PackageInstallMessages.code(inFailure: "Failure [INSTALL_FAILED_OLDER_SDK]") == "FAILED_OLDER_SDK")
         #expect(PackageInstallMessages.code(inFailure: "Failure [FAILED_ABORTED: Session was abandoned]") == "FAILED_ABORTED")
         #expect(PackageInstallMessages.code(inFailure: "Failure") == nil)
-    }
-
-    @Test func theInstallServiceHasItsArguments() {
-        #expect(
-            ApkInstallOperation.service(size: 1234)
-                == "abb_exec:package\0install\0-r\0-t\0--install-reason\0" + "4\0-S\0" + "1234")
-    }
-
-    @Test func theInstallIsMarkedAsTheUsersAndTheMarkComesBeforeTheSize() throws {
-        let words = ApkInstallOperation.service(size: 1234).split(separator: "\0", omittingEmptySubsequences: false)
-        let reason = try #require(words.firstIndex(of: "--install-reason"))
-        // The reason is Android's INSTALL_REASON_USER, and `-S size` stays the tail
-        // the package manager reads the stream by.
-        #expect(words[reason + 1] == "4")
-        #expect(words.suffix(2) == ["-S", "1234"])
-        #expect(try #require(words.firstIndex(of: "-S")) > reason + 1)
     }
 }

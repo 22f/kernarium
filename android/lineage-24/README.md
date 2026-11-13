@@ -151,7 +151,7 @@ layout once, so a guest created earlier keeps its home screen.
 The product installs Android's AIDL multi-HAL service and a motion sub-HAL
 (`overlay/sensors/`) advertising an accelerometer and a gyroscope with
 continuous delivery and 10 ms minimum periods. Andarium supplies samples only
-while its Gyroscope switch is on and an application uses the sensor. The sub-HAL
+while an application uses the sensor, on a device that has it. The sub-HAL
 accepts a single stream on vsock port 5556 from host CID 2 (no guest-originated
 source) and tells the host which sensors are active.
 `overlay/sensors/motion_protocol.hpp` and
@@ -160,6 +160,17 @@ format. Axes match the mounted virtual display, Core Motion acceleration is
 multiplied by -9.80665, and events carry the guest's `CLOCK_BOOTTIME` at receipt:
 a live input path, not a synchronized recording. Andarium's
 [scene policy](../../Andarium/README.md#devices) describes windowed operation.
+
+When the launch passes `androidboot.kernarium.orientation=1`, the sub-HAL also
+lists an on-change, non-wake-up `TYPE_DEVICE_ORIENTATION` sensor, and the window
+manager follows the host's orientation as a rotation proposal that Android's own
+policy (auto-rotate, the foreground application's requested orientation) still
+decides on; the sub-HAL gives the framework the host's last orientation when it
+enables the sensor, and Android keeps its rotation until the host has said one.
+Without the argument the sub-HAL lists the accelerometer and the gyroscope alone
+and Android judges the accelerometer, as before. The host sends its current
+orientation at the start of each connection whose control frames say the guest
+has the sensor (`overlay/sensors/motion_protocol.hpp` has the frames).
 
 ### Haptics
 
@@ -223,9 +234,25 @@ receiver is open, and without the lock it would suspend and wake every second
 for as long as a client listens. The lock belongs to the HAL's process, so it
 goes with the HAL, and it holds back only Android's own autosuspend.
 
+The HAL never calls the framework from an entry point or under one of its own
+locks: every announcement, status and report is posted to the HAL's one
+reporter thread, which makes the calls in the order posted, so a framework
+thread that holds a lock of its own while it calls the HAL cannot wait on a HAL
+thread that waits for it, and no entry point waits for a delivery. A callback's
+announcement and every status are never dropped: they reach the callback they
+were posted for, in one order across callbacks, even if the HAL is closed or
+the callback replaced first, and a `start()` is refused while 64 sessions'
+statuses are still undelivered. A session's `engine_on` and `session_begin`
+come before its first location and its `session_end` and `engine_off` after the
+last. Locations, sentences and satellite reports may be dropped: a session's
+queued ones go when it is restarted, or the HAL is closed or its callback
+replaced, and only the newest 64 are kept when the framework is slow.
+
 `overlay/gnss/nmea.hpp` and `location_policy.hpp` hold the parsing and the
-rules and `gnss_engine.hpp` the session, with no Android dependency; the
-`gnss-hal-*` unit tests read the host writer's own epochs through them.
+rules, `gnss_engine.hpp` the session, `gnss_reporter.hpp` the calls to the
+framework and `gnss_hal.hpp` the state behind the AIDL entry points, with no
+Android dependency; the `gnss-hal-*` unit tests read the host writer's own
+epochs through them.
 `tests/integration/android/location/` is a probe application for the candidate
 image, never installed in a release.
 
@@ -285,17 +312,26 @@ metadata node, and the emulated camera HAL of `hardware/google/camera` (route
 `p0030`) takes the cameras, their frames, stills, RAW and per-frame metadata
 from them and writes the controls back. Its provider is the lazy service
 `android.hardware.camera.provider@2.7-service-google-lazy`
-(`ICameraProvider/internal/0`, declared once in the vendor manifest): init
-starts it when an application opens a camera or the torch, and no process
-exists while none does. The image expects the driver to register the camera
+(`ICameraProvider/internal/0`, declared once in the vendor manifest). A
+system_ext init file restarts it, for a layout with cameras, whenever
+cameraserver starts: cameraserver lists only a provider that has registered,
+nothing else starts a lazy AIDL provider, and init drops a property trigger on
+cameraserver's status in a vendor file. The provider exits when cameraserver
+holds no camera, and init starts it again through its interface line when an
+application opens a camera or the torch. A provider crash while cameraserver
+holds it leaves the guest without cameras until cameraserver starts again.
+The image expects the driver to register the camera
 nodes as `/dev/video10` and above; the codec nodes stay in `video0` to
 `video9`, which the HAL never opens. The HAL's rules (the wire, camera IDs,
 controls, Exif, concurrency) are the headers of `overlay/camera/hal/`, which
 the HAL includes and the `andarium-camera-*` unit tests compile without
 Android. The camera application is LineageOS's Aperture, without its Google
 Lens launcher and button (route `p0031`), and its lens selector lists each
-lens of the host as a camera of its own (a static overlay in
-`overlay/overlay/packages/apps/Aperture`).
+lens of the host as a camera of its own (a product overlay in
+`overlay/overlay/packages/apps/Aperture`, which the build installs as a static
+runtime overlay of the application; the application declares no overlayable
+section, so Android applies the preinstalled overlay, and the target-files
+verifier reads the overlay, not the application).
 
 The image states no camera feature of its own. The host composes a camera
 layout from the cameras it has and passes its name as
@@ -332,8 +368,13 @@ HAL passes them on as frames of the camera. Output sizes the host lacks that
 CTS and the camera API require (standard JPEG sizes, the YUV sizes of every
 smaller JPEG, 1920x1440 and 1280x720 for a concurrent camera) are cut from the
 smallest native video mode that covers them, scaled in the HAL and, for a
-JPEG, encoded there. `BURST_CAPTURE` is never declared. The candidate's smoke
-test is `tests/integration/android/run_android_camera.py` (`android-camera`).
+JPEG, encoded there. A request whose outputs the host refuses or does not
+deliver within the HAL's deadline (3 s, 15 s for a request with a still) is a
+failed request (`ERROR_REQUEST`, which Camera2 and CameraX report as a failed
+capture); a request that loses only some of its outputs reports
+`ERROR_BUFFER` for those. `BURST_CAPTURE` is never declared. The candidate's
+smoke test is `tests/integration/android/run_android_camera.py`
+(`android-camera`).
 
 ### Networking
 

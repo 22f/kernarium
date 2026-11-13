@@ -144,6 +144,49 @@ void testFillBytesAndOtherLengths()
     require(small && small->gapLength == 1024 && small->head[4] == 0x04 && small->head[5] == 0x02, "another gap length");
 }
 
+/* The picture's size is the first frame header's, big-endian, the height first;
+ * a header that is missing or cut short states none. */
+void testFrameSize()
+{
+    const auto plain = reserveExifGap(sample());
+    require(plain && plain->frameWidth == 16 && plain->frameHeight == 16, "the sample's SOF0 states 16 by 16");
+
+    // A rectangular picture of the size of a 12 MP still, in each frame type.
+    for (const std::uint8_t code : {0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc9, 0xcf}) {
+        std::vector<std::uint8_t> jpeg = {0xff, 0xd8};
+        marker(jpeg, 0xe0, {'J', 'F', 'I', 'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0});
+        marker(jpeg, code, {8, 0x0b, 0xd8, 0x0f, 0xc0, 1, 1, 0x11, 0});  // 3032 high, 4032 wide
+        marker(jpeg, 0xda, {1, 1, 0, 0, 63, 0});
+        for (const std::uint8_t byte : {0x12, 0x34, 0xff, 0xd9}) jpeg.push_back(byte);
+        const auto plan = reserveExifGap(jpeg);
+        require(plan && plan->frameWidth == 4032 && plan->frameHeight == 3032, "a frame header of any type states the size");
+    }
+
+    // The tables and the arithmetic conditioning are not frame headers.
+    std::vector<std::uint8_t> tables = {0xff, 0xd8};
+    marker(tables, 0xc4, {0, 0, 0x0b, 0xd8, 0x0f, 0xc0, 1, 1, 0x11, 0});
+    marker(tables, 0xcc, {0, 0, 0x0b, 0xd8, 0x0f, 0xc0, 1, 1, 0x11, 0});
+    marker(tables, 0xda, {1, 1, 0, 0, 63, 0});
+    for (const std::uint8_t byte : {0x12, 0xff, 0xd9}) tables.push_back(byte);
+    const auto none = reserveExifGap(tables);
+    require(none && none->frameWidth == 0 && none->frameHeight == 0, "no frame header, no size");
+
+    // The first frame header counts; a short one states nothing.
+    std::vector<std::uint8_t> twice = {0xff, 0xd8};
+    marker(twice, 0xc0, {8, 0, 4, 0, 6, 1, 1, 0x11, 0});
+    marker(twice, 0xc2, {8, 0, 9, 0, 9, 1, 1, 0x11, 0});
+    marker(twice, 0xda, {1, 1, 0, 0, 63, 0});
+    for (const std::uint8_t byte : {0x12, 0xff, 0xd9}) twice.push_back(byte);
+    const auto first = reserveExifGap(twice);
+    require(first && first->frameWidth == 6 && first->frameHeight == 4, "the first frame header");
+    std::vector<std::uint8_t> shortHeader = {0xff, 0xd8};
+    marker(shortHeader, 0xc0, {8, 0, 4});
+    marker(shortHeader, 0xda, {1, 1, 0, 0, 63, 0});
+    for (const std::uint8_t byte : {0x12, 0xff, 0xd9}) shortHeader.push_back(byte);
+    const auto cut = reserveExifGap(shortHeader);
+    require(cut && cut->frameWidth == 0 && cut->frameHeight == 0, "a frame header too short to hold a size");
+}
+
 void testRefusals()
 {
     require(!reserveExifGap({}).has_value(), "empty data");
@@ -169,6 +212,7 @@ int main()
     testSegmentsAroundTheGap();
     testOtherPicturesAreNotPassedOn();
     testFillBytesAndOtherLengths();
+    testFrameSize();
     testRefusals();
     return 0;
 }

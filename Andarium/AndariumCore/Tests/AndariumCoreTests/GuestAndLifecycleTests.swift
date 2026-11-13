@@ -121,7 +121,7 @@ struct GuestTests {
         // It is a choice of its own: the other switches are as they were.
         let off = Data(#"{"cores":2,"memoryMiB":1024,"capacityGiB":8,"microphone":true,"includeInBackups":false,"haptics":false}"#.utf8)
         let decoded = try JSONDecoder().decode(Guest.self, from: off)
-        #expect(!decoded.haptics && decoded.microphone && decoded.motionChoice == nil && !decoded.location)
+        #expect(!decoded.haptics && decoded.microphone && !decoded.location)
     }
 
     @Test func onlyTheChoicesAreStored() throws {

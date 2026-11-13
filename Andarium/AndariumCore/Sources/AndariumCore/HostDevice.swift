@@ -24,6 +24,13 @@ public struct HostDevice: Equatable, Sendable {
     public var idiom: Idiom
     /// Whether the device has a Taptic Engine to play the guest's haptics.
     public var hasHaptics: Bool
+    /// Whether the device can give the guest a compass: it has a magnetometer
+    /// that Core Motion can give calibrated, and no permission refuses it. An
+    /// iPhone or an iPad, not a Mac or the Simulator.
+    public var hasCompass: Bool
+    /// Whether the device has a camera the guest can be given: a built-in one,
+    /// and not the iPad app on a Mac.
+    public var hasCamera: Bool
 
     public enum Idiom: Equatable, Sendable { case phone, pad, mac }
 
@@ -32,7 +39,8 @@ public struct HostDevice: Equatable, Sendable {
     /// host claim "an iPhone without haptics" by leaving them out.
     public init(
         name: String, processorCount: Int, memory: MemoryPolicy, freeStorageBytes: UInt64,
-        runsGuestGraphics: Bool = true, supportsPointer: Bool = true, idiom: Idiom, hasHaptics: Bool
+        runsGuestGraphics: Bool = true, supportsPointer: Bool = true, idiom: Idiom, hasHaptics: Bool,
+        hasCompass: Bool = false, hasCamera: Bool = false
     ) {
         self.name = name
         self.processorCount = max(1, processorCount)
@@ -42,6 +50,8 @@ public struct HostDevice: Equatable, Sendable {
         self.supportsPointer = supportsPointer
         self.idiom = idiom
         self.hasHaptics = hasHaptics
+        self.hasCompass = hasCompass
+        self.hasCamera = hasCamera
     }
 
     public func hasRoom(for bytes: UInt64) -> Bool { freeStorageBytes >= bytes }

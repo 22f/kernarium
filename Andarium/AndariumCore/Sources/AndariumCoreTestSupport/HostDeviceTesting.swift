@@ -8,11 +8,12 @@ extension HostDevice {
     /// does (`HostDevice.init`).
     public init(
         name: String, processorCount: Int, memory: MemoryPolicy, freeStorageBytes: UInt64,
-        runsGuestGraphics: Bool = true, supportsPointer: Bool = true
+        runsGuestGraphics: Bool = true, supportsPointer: Bool = true, hasCompass: Bool = false,
+        hasCamera: Bool = false
     ) {
         self.init(
             name: name, processorCount: processorCount, memory: memory, freeStorageBytes: freeStorageBytes,
             runsGuestGraphics: runsGuestGraphics, supportsPointer: supportsPointer, idiom: .phone,
-            hasHaptics: false)
+            hasHaptics: false, hasCompass: hasCompass, hasCamera: hasCamera)
     }
 }

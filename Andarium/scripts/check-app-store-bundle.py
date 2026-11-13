@@ -335,6 +335,15 @@ def build_host_traces(path: Path, debug_map: bool = True) -> list[str]:
     return found
 
 
+# The permissions Andarium asks of the person, one capability each: Camera,
+# Microphone and Location.
+USAGE_DESCRIPTIONS = (
+    "NSCameraUsageDescription",
+    "NSMicrophoneUsageDescription",
+    "NSLocationWhenInUseUsageDescription",
+)
+
+
 def info_problems(info: dict) -> list[str]:
     found = []
     if info.get("ITSAppUsesNonExemptEncryption") is not False:
@@ -347,6 +356,12 @@ def info_problems(info: dict) -> list[str]:
         found.append("Info.plist: UIDeviceFamily must be [1, 2], iPhone and iPad")
     if "UIBackgroundModes" in info:
         found.append("Info.plist: the application has no background mode")
+    # The system shows these when the person turns a capability on, and ends
+    # the application at the request of a capability whose text is missing.
+    for key in USAGE_DESCRIPTIONS:
+        value = info.get(key)
+        if not isinstance(value, str) or not value.strip():
+            found.append(f"Info.plist: {key} must be a non-empty string")
     return found
 
 
@@ -400,22 +415,45 @@ DEBUG_SYMBOLS = (
     # The Simulator preview's denied-network notice (Model.previewNetworkNotice):
     # the Simulator cannot be denied the network, so the preview plays it.
     ("network notice preview", (b"20previewNetworkNotice",)),
+    # The Simulator preview's play of the legacy install
+    # (AppModel.previewInstallAttempt): the preview refuses the first attempt
+    # for its version, which the application's install never does by itself.
+    ("legacy install preview", (b"21previewInstallAttempt",)),
     # The Simulator preview's hooks into the Send feedback sheet
-    # (SendFeedbackServices.previewOpensAtLaunch and previewPrepare): the
-    # preview opens the sheet and fills a draft; the application never does.
-    ("send feedback preview", (b"20previewOpensAtLaunch", b"14previewPrepare")),
+    # (SendFeedbackServices.previewOpensAtLaunch, previewPrepare and
+    # previewKeepsConfirmation): the preview opens the sheet, fills a draft and
+    # holds the confirmation; the application never does.
+    ("send feedback preview",
+     (b"20previewOpensAtLaunch", b"14previewPrepare", b"24previewKeepsConfirmation")),
     # The UI tests' probe of the guest's keyboard and mouse
     # (Andarium/Shared/InputProbe.swift): its log, its launch, the recording
     # runtime and the session that runs without a guest.
     ("input probe", (b"10InputProbe", b"16InputProbeLaunch", b"29RecordingHardwareInputRuntime",
                      b"15beginInputProbe", b"17InputProbeReadout", b"19makeInputProbeModel",
                      b"10inputProbe")),
+    # The reading a test puts in place of the system's hinge and regions
+    # (Andarium/Shared/FoldSceneReader.swift), compiled out by APP_STORE.
+    ("fold reader stub", (b"15FoldSceneReaderC4stub",)),
+    # The picked file's access that a hosted test puts in place of the real
+    # one (AppModel.accessPickedFileStub), compiled out by APP_STORE.
+    ("picked file access stub", (b"20accessPickedFileStub",)),
     # The camera without hardware (darwin/platform/synthetic_camera): a source
     # for tests and launchers, which an App Store runtime does not build.
     # namespace uml::platform, its class and entries.
     ("synthetic camera", (b"15SyntheticCamera", b"19SyntheticCameraImpl",
                           b"19makeSyntheticCamera", b"19encodeSyntheticJpeg",
-                          b"17decodeChartMarker")),
+                          b"17decodeChartMarker",
+                          # The runtime's choice of it from the environment
+                          # (Kernarium/Runtime/KernariumCamera.hpp).
+                          b"6camera11parseSource", b"6camera12chooseSource",
+                          b"15BackCamerasOnly")),
+    # The camera's development lines (darwin/device/camera/camera_diagnostics.hpp):
+    # what ROTATE_AND_CROP asks of the host and the footprint at each capture
+    # checkpoint, printed by a launcher or a runtime that is not an App Store
+    # build, and the Simulator preview's camera and thermal notices
+    # (Model.previewCameraNotice and previewThermalNotice).
+    ("camera diagnostics", (b"17printRotateAndCrop", b"15printCheckpoint",
+                            b"19previewCameraNotice", b"20previewThermalNotice")),
     # Simulated game controllers: the scripted input and the guest end of the
     # gamepad wire (AndariumCoreTestSupport, which only tests and the probe
     # tool link) and the host reader that moved there.
@@ -443,8 +481,10 @@ DEBUG_STRINGS = (
                     b"ADB authorization is off", b"removed the boot payload")),
     ("remote framebuffer", (b"RFB 003.00",)),
     ("input probe", (b"inputProbeLog", b"inputProbeField")),
+    ("camera diagnostics", (b"ROTATE_AND_CROP", b"Camera: memory: ")),
     ("synthetic camera", (b"SyntheticPhone1,1", b"SyntheticTablet1,1",
-                          b"SyntheticLaptop1,1", b"synthetic-back-wide")),
+                          b"SyntheticLaptop1,1", b"synthetic-back-wide",
+                          b"KERNARIUM_CAMERA_SOURCE", b"is not a back camera")),
     ("JIT", (b"--jit-cache-budget=", b"--execution-engine=jit",
              b"running on gadgets, not the JIT", b"open Andarium from StikDebug",
              b"Started without JIT")),

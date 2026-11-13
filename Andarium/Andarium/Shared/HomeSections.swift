@@ -325,15 +325,16 @@ struct SnapshotsRow: View {
 
 // MARK: Capabilities
 
-/// What the guest may use of this device: the location and the microphone,
-/// which iOS asks about when they are turned on, the gyroscope, and the
-/// haptics on a device that has them.
+/// What the guest may use of this device: the location, the microphone and the
+/// camera, which iOS asks about when they are turned on, and the haptics on a
+/// device that has them. The motion sensors are always the guest's where the device
+/// has them, so there is no row for them.
 struct CapabilitiesSection: View {
     @Environment(AppModel.self) private var model
 
     /// The rows, top to bottom; VoiceOver reads them in this order.
     enum Row: CaseIterable {
-        case location, microphone, gyroscope, haptics
+        case location, microphone, camera, haptics
     }
 
     /// The rows a device shows: Haptics only where there is a Taptic Engine
@@ -351,22 +352,15 @@ struct CapabilitiesSection: View {
                     switch row {
                     case .location: LocationRow()
                     case .microphone: MicrophoneRow()
-                    case .gyroscope: GyroscopeRow()
+                    case .camera: CameraRow()
                     case .haptics: HapticsRow()
                     }
                 }
             } footer: {
-                if let reason = model.motionSensorsProblem ?? Self.gyroscopeUnavailable(available: model.motionSensorsAvailable) {
-                    SectionNote(reason)
-                }
+                ForEach(CameraWords.notes(access: model.cameraAccess), id: \.self) { SectionNote($0) }
             }
             .id("capabilities")
         }
-    }
-
-    /// Why Gyroscope cannot be turned on; nil when it can, which needs no note.
-    static func gyroscopeUnavailable(available: Bool) -> String? {
-        available ? nil : String(localized: "This device has no gyroscope or accelerometer to share.")
     }
 }
 
@@ -394,18 +388,27 @@ struct MicrophoneRow: View {
     }
 }
 
-struct GyroscopeRow: View {
+/// What the guest's camera apps see: the device's cameras, from the next
+/// start. The switch is read when the guest starts and never during a run, so
+/// it is on Home, which shows only while no guest runs.
+struct CameraRow: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        OptionRow(title: String(localized: "Gyroscope"), symbol: "gyroscope") {
-            Toggle("Gyroscope", isOn: Binding(
-                get: { model.motionSensorsOn },
-                set: { model.setMotionSensors($0) }
+        let access = model.cameraAccess
+        OptionRow(
+            title: CameraWords.title, symbol: "camera.fill",
+            detail: CameraWords.detail(for: access), dimmed: access.refuses
+        ) {
+            Toggle(CameraWords.title, isOn: Binding(
+                get: { model.cameraShownOn },
+                set: { model.setCamera($0) }
             ))
             .labelsHidden()
-            .disabled(!model.motionSensorsAvailable)
+            .disabled(!access.offered)
+            .accessibilityIdentifier("home-camera-switch")
         }
+        .accessibilityHint(CameraWords.hint(for: access))
     }
 }
 
@@ -509,6 +512,37 @@ struct LocationAccessAlert: ViewModifier {
 
 extension View {
     func locationAccessAlert() -> some View { modifier(LocationAccessAlert()) }
+}
+
+/// When iOS refuses the camera, or the device's settings restrict it, there is
+/// nothing to ask: say why, and offer Andarium's page in Settings where it has
+/// the way out.
+struct CameraAccessAlert: ViewModifier {
+    @Environment(AppModel.self) private var model
+
+    func body(content: Content) -> some View {
+        @Bindable var model = model
+        let words = CameraWords.alert(for: model.cameraAccess)
+        content.alert(
+            words?.title ?? "", isPresented: Binding(
+                get: { model.permissionPrompt == .camera && words != nil },
+                set: { if !$0, model.permissionPrompt == .camera { model.permissionPrompt = nil } }
+            )
+        ) {
+            if words?.offersSettings == true {
+                Button("Open Settings") { model.openCameraSettings() }
+                Button("Not now", role: .cancel) {}
+            } else {
+                Button("OK", role: .cancel) {}
+            }
+        } message: {
+            Text((words?.message ?? "").keepingTogether)
+        }
+    }
+}
+
+extension View {
+    func cameraAccessAlert() -> some View { modifier(CameraAccessAlert()) }
 }
 
 #if !APP_STORE

@@ -88,7 +88,7 @@ enum WhatsNewPreview {
                 graphicsMiB: { memory, _ in max(limitMiB - 900 - memory, 384) }
             ),
             freeStorageBytes: UInt64((pad ? 118.3 : 41.6) * Double(Limits.bytesPerGiB)),
-            idiom: pad ? .pad : .phone, hasHaptics: !pad
+            idiom: pad ? .pad : .phone, hasHaptics: !pad, hasCompass: true, hasCamera: true
         )
     }
 

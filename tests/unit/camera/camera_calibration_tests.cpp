@@ -8,8 +8,11 @@
 #include "scratch_directory.hpp"
 
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <string>
+#include <vector>
 
 using namespace uml::camera;
 using namespace uml::platform;
@@ -27,6 +30,9 @@ CameraColorData sample(double seed)
     data.rawHeight = 3024;
     data.illuminant1 = 17;
     data.illuminant2 = 21;
+    // The format the camera ran in when the data was learned.
+    data.anchorWidth = 1920 + std::uint32_t(seed);
+    data.anchorHeight = 1440;
     for (std::size_t index = 0; index < 9; ++index) {
         data.colorMatrix1[index] = seed + double(index) * 0.125;
         data.colorMatrix2[index] = seed - double(index) * 0.0625;
@@ -36,6 +42,36 @@ CameraColorData sample(double seed)
     data.focalLengthMillimetres = 6.86;
     data.intrinsics = {3100.5, 3101.5, 2016.0, 1512.0};
     return data;
+}
+
+// A calibration file as the store writes it, made here from its description (the test's own reference, not the store's
+// code) so that its check word is valid: the eight bytes of the version, the Bayer order, the integer fields (the
+// anchor's size last, in the current version only), the four matrices, the focal length and the intrinsics, then the CRC-32.
+std::vector<std::uint8_t> fileOf(const CameraColorData& data, const std::string& version, bool withAnchor)
+{
+    std::vector<std::uint8_t> out(version.begin(), version.end());
+    const auto put = [&out](const auto& value) {
+        const auto* bytes = reinterpret_cast<const std::uint8_t*>(&value);
+        out.insert(out.end(), bytes, bytes + sizeof(value));
+    };
+    put(std::uint32_t(data.bayer));
+    for (const auto value : {data.blackLevel, data.whiteLevel, data.rawWidth, data.rawHeight, data.illuminant1, data.illuminant2})
+        put(std::uint32_t(value));
+    if (withAnchor) {
+        put(std::uint32_t(data.anchorWidth));
+        put(std::uint32_t(data.anchorHeight));
+    }
+    for (const auto* matrix : {&data.colorMatrix1, &data.colorMatrix2, &data.forwardMatrix1, &data.forwardMatrix2})
+        for (const auto value : *matrix) put(double(value));
+    put(double(data.focalLengthMillimetres));
+    for (const auto value : data.intrinsics) put(double(value));
+    std::uint32_t crc = 0xffffffffu;
+    for (const auto byte : out) {
+        crc ^= byte;
+        for (int bit = 0; bit < 8; ++bit) crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+    }
+    put(std::uint32_t(~crc));
+    return out;
 }
 
 CameraInfo lens(CameraPosition position, CameraLensKind kind)
@@ -131,6 +167,72 @@ void testDamagedFile()
     require(after.load("M", "lens") == sample(6.0), "and it reads back");
 }
 
+// The anchor's size is stored with the data, and a file of the earlier version (which has none) is not read: the
+// lens is learned again in its anchor.
+void testTheAnchorIsStoredAndAnEarlierVersionIsIgnored()
+{
+    uml::testing::ScratchSubdirectory directory("camera-calibration-XXXXXX");
+    const auto root = directory.path();
+    {
+        CalibrationStore store(root);
+        require(store.save("M", "lens", sample(8.0)), "save");
+    }
+    {
+        CalibrationStore reopened(root);
+        const auto loaded = reopened.load("M", "lens");
+        require(loaded && loaded->anchorWidth == 1928 && loaded->anchorHeight == 1440, "the anchor's size comes back");
+    }
+    std::filesystem::path file;
+    for (const auto& entry : std::filesystem::directory_iterator(root)) file = entry.path();
+    {
+        std::fstream stream(file, std::ios::in | std::ios::out | std::ios::binary);
+        stream.seekp(7);
+        stream.put('1');
+    }
+    CalibrationStore earlier(root);
+    require(!earlier.load("M", "lens"), "a file of the version that stored no anchor is ignored");
+}
+
+// A file whose check word is valid is rejected for its version alone: the current layout under the earlier version's
+// name, and the earlier version's own layout (which has no anchor), each with the CRC-32 of what is in it. Neither is
+// the damage the check word catches, so only the store's own comparison of the version stops them.
+void testAFileOfAnotherVersionWithAValidCheckWordIsIgnored()
+{
+    uml::testing::ScratchSubdirectory directory("camera-calibration-XXXXXX");
+    const auto root = directory.path();
+    const CameraColorData data = sample(9.0);
+    {
+        CalibrationStore store(root);
+        require(store.save("M", "lens", data), "save");
+    }
+    std::filesystem::path file;
+    for (const auto& entry : std::filesystem::directory_iterator(root)) file = entry.path();
+    const auto write = [&](const std::vector<std::uint8_t>& bytes) {
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+    };
+    write(fileOf(data, "UMLCAL02", true));
+    {
+        CalibrationStore reference(root);
+        require(reference.load("M", "lens") == data, "the test's own file of the current version reads back, so its check word is valid");
+    }
+    write(fileOf(data, "UMLCAL01", true));
+    {
+        CalibrationStore version(root);
+        require(!version.load("M", "lens"), "the current layout under another version's name is ignored");
+    }
+    write(fileOf(data, "UMLCAL01", false));
+    {
+        CalibrationStore earlier(root);
+        require(!earlier.load("M", "lens"), "a file of the earlier version, in its own layout, is ignored");
+    }
+    write(fileOf(data, "UMLCAL03", true));
+    {
+        CalibrationStore later(root);
+        require(!later.load("M", "lens"), "and so is one of a later version");
+    }
+}
+
 void testUnwritableDirectory()
 {
     uml::testing::ScratchSubdirectory directory("camera-calibration-XXXXXX");
@@ -150,6 +252,8 @@ int main()
     testMemoryOnly();
     testPersistence();
     testDamagedFile();
+    testTheAnchorIsStoredAndAnEarlierVersionIsIgnored();
+    testAFileOfAnotherVersionWithAValidCheckWordIsIgnored();
     testUnwritableDirectory();
     return 0;
 }

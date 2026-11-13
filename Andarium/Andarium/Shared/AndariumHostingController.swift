@@ -29,7 +29,10 @@ extension Phase {
 /// is shown that is black, in the light appearance too. It never asks iPadOS
 /// to lock the interface: an iPad's interface turns with the device in a
 /// session as it does at Home, and the guest follows it
-/// (`SessionOrientationPolicy`).
+/// (`SessionOrientationPolicy`). It also reads the folding display a scene may
+/// be on (`FoldSceneReader`) for the layout and for the rotation rule: the
+/// inner display of a folding iPhone turns like an iPad's, its cover is an
+/// iPhone's.
 final class AndariumHostingController<Content: View>: UIHostingController<Content>, SceneGeometryObserver {
     private let model: AppModel
     /// The run's deferred edges; nil leaves SwiftUI's preference in charge.
@@ -42,6 +45,7 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
     var inputsSource: (@MainActor () -> SceneUpdateInputs?)?
     private var phaseWatcher: PhaseWatcher?
     private var pointerLockWatcher: PointerLockWatcher?
+    let foldReader = FoldSceneReader()
     /// The backing of the root view and of its window as they were before
     /// the guest's display painted them black, for the screens that follow
     /// the system appearance to get back.
@@ -61,10 +65,15 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// Whether the interface turns with the device: an iPad's does, an
-    /// iPhone's is portrait-only. The one place that decides it for this
-    /// scene's display, for the supported orientations and the guest's policy.
+    /// iPhone's is portrait-only, and a folding iPhone's inner display turns
+    /// while its cover does not (`FoldPose.interfaceRotates`); a guest that
+    /// follows the device's orientation on a device that is no iPhone (a launch
+    /// states it) keeps a portrait-only interface as an iPhone does. The one
+    /// place that decides it for this scene's display, for the supported
+    /// orientations and the guest's policy.
     private var interfaceRotates: Bool {
-        UIDevice.current.userInterfaceIdiom != .phone
+        let phoneLike = UIDevice.current.userInterfaceIdiom == .phone || model.followsDeviceOrientation
+        return model.foldPose.interfaceRotates(idiomIsPhone: phoneLike)
     }
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
@@ -88,9 +97,38 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
         deferredEdges == nil ? super.childForScreenEdgesDeferringSystemGestures : nil
     }
 
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        foldReader.hingeDidChange = { [weak self] in self?.updateFold() }
+        foldReader.attach(to: view)
+    }
+
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         updateBacking()
+    }
+
+    /// Reads the folding display again and hands it to the model, which the
+    /// screens lay out from. A display that does not fold never has a reading,
+    /// so nothing here changes anything there. A move between the cover and
+    /// the inner display changes whether the interface turns.
+    private func updateFold() {
+        let reading = foldReader.read(view)
+        guard reading != model.fold else { return }
+        let rotated = interfaceRotates
+        model.fold = reading
+        if interfaceRotates != rotated { setNeedsUpdateOfSupportedInterfaceOrientations() }
+        scheduleUpdate()
+    }
+
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        // A fold or a turn changes the window and its reserved regions
+        // together: the layout must have them when the transition completes,
+        // which is when the guest takes its new size.
+        coordinator.animate(alongsideTransition: { [weak self] _ in self?.updateFold() }) { [weak self] _ in
+            self?.updateFold()
+        }
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -154,6 +192,7 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
         super.viewDidLayoutSubviews()
         // The window may have come after the phase did.
         updateBacking()
+        updateFold()
         scheduleUpdate()
     }
 
@@ -165,15 +204,16 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
         return SceneUpdateInputs(
             scene: ObjectIdentifier(scene), driver: model.driver.map { ObjectIdentifier($0) },
             sceneSize: geometry.coordinateSpace.bounds.size, screenSize: scene.screen.bounds.size,
-            interfaceOrientation: geometry.interfaceOrientation.rawValue, phase: model.phase)
+            interfaceOrientation: geometry.interfaceOrientation.rawValue, phase: model.phase,
+            interfaceRotates: interfaceRotates)
     }
 
     /// Every layout of the root, every geometry change and every phase change
     /// asks for the update, and SwiftUI lays the root out after each redraw. An
     /// update that would find every input where the last one did has nothing
     /// to do, so it is not scheduled: what else the guest follows (the
-    /// foreground, its boot, the overlays, the sensors' switch, the location)
-    /// reaches it by its own trigger, not through the root.
+    /// foreground, its boot, the overlays, the location) reaches it by its own
+    /// trigger, not through the root.
     private func scheduleUpdate() {
         guard !updateScheduled else { return }
         if let inputs = currentInputs(), inputs == appliedInputs { return }

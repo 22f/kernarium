@@ -134,6 +134,10 @@ struct AppEntry {
             guest: guest, host: host, system: system, capabilities: .device,
             createRequirementBytes: storage.createRequirementBytes
         )
+        // An iPhone's guest follows the device's orientation; a harness launch
+        // may state it for another device (an App Store build states nothing).
+        model.followsDeviceOrientation = launch.followsDeviceOrientation
+            ?? (UIDevice.current.userInterfaceIdiom == .phone)
         #if !APP_STORE && !targetEnvironment(simulator)
         // A development build on a device can run the guest on the JIT engine
         // when a debugger prepares its memory.
@@ -199,7 +203,9 @@ struct AppEntry {
             #endif
             let runtime = LiveRuntime(
                 model: model, storage: storage, marker: marker, keyStore: adbKeyStore,
-                sessionRecord: sessionRecord, freeSpace: watched)
+                sessionRecord: sessionRecord,
+                cameraDirectory: markerDirectory.appendingPathComponent("Camera", isDirectory: true),
+                freeSpace: watched)
             model.driver = runtime
             model.snapshotDriver = runtime
             // The listing says why a restore that began last time is still not finished.
@@ -210,6 +216,7 @@ struct AppEntry {
             // Microphone choice with it.
             model.microphone?.refresh()
             model.location?.refresh()
+            model.camera?.refresh()
             #if !APP_STORE
             // A debugger attached at launch (StikDebug) is asked for what the
             // JIT row says at once: it spins until it is served, and the
@@ -389,7 +396,8 @@ struct AppEntry {
             freeStorageBytes: freeStorageBytes(),
             runsGuestGraphics: drawsGuestGraphics(),
             supportsPointer: UIDevice.current.userInterfaceIdiom != .phone,
-            idiom: idiom, hasHaptics: DeviceHaptics.isAvailable
+            idiom: idiom, hasHaptics: DeviceHaptics.isAvailable,
+            hasCompass: MotionSensors().compassAvailable, hasCamera: SystemCameraSource.hasCamera
         )
     }
 
@@ -429,6 +437,9 @@ struct AppEntry {
             },
             graphicsMemory: { memoryMiB, count in
                 Int(kernarium_runtime_loader_gpu_budget_mib(UInt32(memoryMiB), UInt32(count), launchSet))
+            },
+            cameraReserve: { budgetMiB in
+                Int(kernarium_runtime_loader_camera_reserve_mib(UInt32(clamping: budgetMiB)))
             }
         )
     }

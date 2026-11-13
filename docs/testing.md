@@ -120,7 +120,7 @@ test's header holds the mechanics.
 | `guest-v4l2-mmap-capture` | `UML_V4L2_MMAP_CAPTURE_PROBE_BINARY` | blob-backed capture buffers allocate on an idle guest |
 | `guest-futex-atomic` | `UML_FUTEX_PROBE_BINARY` | the futex contract in the [common kernel README](../kernel/common/README.md) |
 | `guest-gbm-dmabuf` | `UML_GBM_DMABUF_PROBE_BINARY` | the virtio-gpu dma-buf contract |
-| `guest-drm-vblank` | `UML_DRM_FLIP_PROBE_BINARY` | Virtio-GPU's vblank pacing |
+| `guest-drm-vblank` | `UML_DRM_FLIP_PROBE_BINARY` | Virtio-GPU's vblank pacing and the grid it keeps across idle gaps |
 | `guest-aarch32-kernel` | built from `tests/integration/aarch32/` | the kernel's AArch32 task support (needs `python3`, `as`, `ld` in the rootfs) |
 | `apple-audio-playback`, `-interruption`, `guest-virtio-sound-delay-host` | `UML_TEST_APPLE_AUDIO=ON` | the real macOS audio output, the iOS interruption behavior (which needs an iOS Simulator runtime, and runs in a simulator device it creates and deletes) and a guest's stream delay on the real output |
 
@@ -284,7 +284,15 @@ On a connected iOS device, Android runs go through Andarium
 (`tests/perf/run_ios_device_android.py`, [`Andarium/README.md`](../Andarium/README.md#automation))
 and Kernarium's device runners keep Linux; both share
 `tests/integration/support/ios_device.py`, and their tooling tests run against
-fakes, so no device is needed. Android recovery qualification uses a fresh
+fakes, so no device is needed. A device run starts with at least five free
+slots of JetsamEvent reports and of each tested process's crash reports, since
+iOS drops the next report once a kind is full: otherwise the
+[preflight](../tests/integration/support/ios_device_reports.py) copies the
+reports listed at the start to a new directory on the Mac, outside every
+checkout, checks each copy by type and size (not byte for byte), and only then
+empties the store, failing the run if the slots stay short. A report that
+arrives after that listing is moved without a checked copy, into the mover's
+own directory. Android recovery qualification uses a fresh
 disposable bundle with `TEST_RUNNER_KERNARIUM_ANDROID_BOOT_MODE=recovery`;
 never run wipe checks against an existing user bundle.
 
@@ -329,11 +337,22 @@ record's stall and network slots against the golden slots there, which
 `runtime-stall-record` and `runtime-session-record` check the runtime's writers
 against; and the notice that iOS denies the network, from the path's mapping to
 the watcher's start and stop on a fake path source);
-`andarium-motion-protocol`, `andarium-haptics-protocol`,
-`andarium-haptics-player`, `andarium-thermal-protocol`,
-`andarium-thermal-levels` and `andarium-gamepad-protocol` (unit),
-`andarium-stage-system-image`,
-`andarium-capture-screens` and `andarium-localization` (tooling) cover the motion wire format, the vibrator
+`andarium-motion-protocol`, `andarium-device-orientation`,
+`andarium-haptics-protocol`, `andarium-haptics-player`,
+`andarium-thermal-protocol`, `andarium-thermal-levels` and
+`andarium-gamepad-protocol` (unit), `andarium-stage-system-image`,
+`andarium-capture-screens` and `andarium-localization` (tooling) cover the
+motion wire format (its device-orientation records and control frames against
+the golden frames in `tests/unit/andarium/fixtures`, which `andarium-core` reads
+too) and what the orientation sensor reports and when (`andarium-core` also
+covers the magnetometer: its records, the control frame that asks for them, the
+status mapping, the failure it keeps for the run, the field's source (its
+watchdog, movement notice and stale callbacks, on a fake Core Motion and timer)
+and the final check that a reading or failure already on its way is dropped once
+the guest no longer asks for the field, on fake devices and guests; the hosted
+`CompassHostTests` cover the availability decision and the boot request's
+compass bit, and read the real manager's availability (a Simulator and a Mac
+have no magnetometer) without starting a sensor), the vibrator
 HAL's haptics wire (against those golden frames, whose path the test takes as
 its argument), timelines and state, the thermal HAL's wire and the status,
 temperature and thresholds of each severity, the gamepad relay's wire (the
@@ -341,9 +360,26 @@ ranges of every field and the frame reader), system image staging, the
 screenshot script, the String Catalogs' check and their sync with the
 compiler's extraction ([the gate after a build](../Andarium/README.md#languages)),
 and `kernarium-host-features` (unit) the table of host features the boot
-request carries to an Android guest. The application builds with Xcode
-(`AndariumPreview` is the Simulator build with mock data, `Andarium` the
-device application,
+request carries to an Android guest. `kernarium-camera` (unit) checks
+what the runtime tells an Android guest about the host's cameras (the camera
+fields of the boot request, the composed layout and its recomposition at each
+boot, the lens cover, the host memory a live session reserves (none for a
+host with no cameras), the camera state and rotation, and that an unknown or
+empty `KERNARIUM_CAMERA_SOURCE` never reaches the host's camera),
+`camera-layout` (unit) that the layout name composed from a host's cameras is
+one of the image's layouts, `camera-orientation` (unit) the sensor
+orientation of every interface orientation and facing,
+`camera-still-exposure` (unit) the exposure a still reports from a photo's
+metadata, fed literal metadata and an in-memory image, never a camera, and
+`camera-photo-dimensions` (unit) which photo size a camera is asked for, on
+fake format tables
+([Cameras](../darwin/device/camera/README.md)). The Camera setting's hosted
+tests (`CameraFlowTests`) play iOS's permission with a fake and open no camera;
+the Simulator has no camera and `simctl privacy` cannot grant or revoke one, so
+the denied, restricted and absent states are shown by the preview
+(`-systemCamera` asks the Simulator's own permission). The application builds
+with Xcode (`AndariumPreview` is the Simulator build with mock data, `Andarium`
+the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
@@ -358,9 +394,11 @@ map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
 screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`
-exist only in a build with `FEEDBACK_ADDRESS=feedback@example.com` on the
-command line, as the command above has it ([Send feedback](../Andarium/README.md#send-feedback)),
-and `FollowXRowTests` only with `FOLLOW_X_HANDLE=example_handle`
+and `HomeMenuTests` (Home's toolbar menu) exist only in a build with
+`FEEDBACK_ADDRESS=feedback@example.com` on the command line, as the command
+above has it ([Send feedback](../Andarium/README.md#send-feedback)), and
+`HomePlainInfoTests` (the plain Info button) only in a build without it;
+`FollowXRowTests` exist only with `FOLLOW_X_HANDLE=example_handle`
 ([Follow developer on X](../Andarium/README.md#follow-developer-on-x)); a run
 without them does not build them. The Mail composer, the picker and the
 guest's display are stand-ins. The hosted tests
@@ -379,6 +417,14 @@ The script and the guest end of the wire are the package's
 and `AndariumTests` link, and the test bundle carries in its own Frameworks
 folder, so a device can load it; the application never does (the App Store
 bundle check refuses a build that does).
+`DeviceOrientationTests` checks UIKit's orientation numbers against the
+application's readings, the mapping to Android's rotation, the observer's begin
+and end of the device's notifications, the path from a turn to the record a
+fake guest reads on a device without sensors, and that the Simulator and a Mac,
+which have none, hold no connection for them. The Simulator cannot turn an
+iPhone's `UIDevice` under a portrait-only interface (XCUIDevice reaches the
+interface only), so the device is injected there; the real turns are checked on
+an iPhone.
 
 `AndariumUITests` is the UI-test target of the same scheme
 (`xcodebuild test -scheme Andarium -only-testing:AndariumUITests`, with
@@ -399,6 +445,16 @@ results carry how many attempts each repeated step took. The Simulator produces
 no Escape, Delete, Caps Lock, F13, lone Shift or Globe key, and no raw mouse
 motion under the pointer lock.
 
+The folding iPhone's layout ([devices](../Andarium/README.md#devices)) is
+`andarium-core`'s `FoldLayoutTests`, one test per pose of the iPhone Duo.
+`FoldSessionHostingTests` puts the real scene root in a window of each pose's
+size through the reader's stub, so it runs on every Simulator: the guest's
+frame, nothing of Andarium's on the fold, the guest kept and resized once where
+its shape changes, and the rotation rule. `TheRealDisplay` reads the iPhone Duo
+Simulator's own display in the pose a harness put it in
+(`TEST_RUNNER_ANDARIUM_FOLD_POSE`; a harness outside the repository poses the
+Simulator, which no Xcode control does) and checks nothing without it.
+
 The opt-in suites each need a `TEST_RUNNER_ANDARIUM_*` switch that the suite's
 header names: rotation, motion compatibility, power-off and over-vsock,
 shutdown flow, low-space pause (a real guest paused through a free-space number the test
@@ -414,12 +470,16 @@ ADB-over-network hold, the background disk locks (which also requires a guest
 that was allocating buffers when the GPU was held to suspend), the resume
 after a save while the application is away, the real `HostLocation` against
 the Simulator's simulated location (the suite's header says how to grant
-access and set one) and the hardware keyboard and mouse against Android's input
-devices (`KeyboardMouseGuestTests`, which needs a kernel that follows
-configuration changes and its Android release). The storage test signs its
-helper APK with the AOSP test key, never a release key. When derived data is on
-a removable volume, macOS prompts once for access and the launch hangs until
-answered; build to the internal disk instead.
+access and set one), the cameras a booted guest sees (`CameraGuestTests`: the
+vendor SKU, the camera IDs and the lens cover of a live and a blocked session
+on the synthetic camera, with `TEST_RUNNER_KERNARIUM_CAMERA_SOURCE=synthetic`,
+on an image that has the camera HAL) and the hardware keyboard and mouse
+against Android's input devices (`KeyboardMouseGuestTests`, which needs a
+kernel that follows configuration changes and its Android release). The
+storage test signs its helper APK with the AOSP test key, never a release
+key. When derived data is on a removable volume, macOS prompts once for
+access and the launch hangs until answered; build to the internal disk
+instead.
 
 Tooling tests cover `scripts/check-privacy-manifests.py`
 (`ios-privacy-manifests`, which `package-ios-frameworks.sh` also runs on every
@@ -438,7 +498,10 @@ needs a debugger, so `run_ios_device_android.py --engine jit` is its lane.
 Unattended device automation goes through the long-lived `KernariumAutomation`
 UI-test host, because each new XCTest session on a device with a passcode needs
 the owner's approval. `Kernarium/scripts/ipad-automation.py --help` has its
-commands and failure modes. Keep all automation code in the test targets.
+commands and failure modes. Keep all automation code in the test targets. The
+host's test run records no screen video and keeps no attachments (the scheme
+sets it, and `start` refuses a built run file that does not), and its result
+bundle lives under the state directory, not in DerivedData.
 
 ### Edge gestures (device only)
 
@@ -539,10 +602,16 @@ blocker in every one of them.
   opt-in with the pinned LLVM MC.
 - `arm64-aarch32-decoder`, `arm64-a32-encoding-table`, `arm64-aarch32-corpus`,
   `arm64-a32-corpus` and `arm64-aarch32-semantics*` check the AArch32 decoder,
-  generated tables, corpus and semantic library without an engine. The
-  corpus runs of `arm64-gadget-a32-corpus` and `arm64-jit-a32-corpus` retry a
-  case that differs only by a spurious store-exclusive failure, and the
-  `-interrupted` tests provoke that failure on purpose.
+  generated tables, corpus and semantic library without an engine;
+  `arm64-aarch32-corpus` also proves the store-exclusive ranges the retry
+  compares and what it refuses. The corpus runs of `arm64-gadget-a32-corpus` and `arm64-jit-a32-corpus` retry a
+  case that differs only by a spurious store-exclusive failure (its own bytes
+  unwritten, the case's other stores in the data), and the `-interrupted`
+  tests provoke that failure on purpose. Only the gadget one runs the spill
+  suite, whose cases store between the pair: the JIT does not lose a
+  reservation there. The `-injected` tests make an attempt end as a lost
+  reservation with another register or a thread register wrong, and as other
+  faults, and require that only a plain loss is retried.
 - `guest-aarch32-engine-gadgets` and `-jit` boot the freestanding engine probe
   in `tests/integration/aarch32/engine_probe/` and count every `SIGILL`.
 
@@ -583,11 +652,13 @@ library and launcher over the storage layout
 ([storage](../android/lineage-24/README.md#static-disk-and-boot-contract),
 [block device](../darwin/device/block/README.md)). `guest-android-disks`
 (integration) boots the Linux test guest on a release and a data disk the
-library created. `gnss-hal-nmea`, `gnss-hal-policy` and `gnss-hal-engine`
-(unit) compile the guest GNSS HAL's headers
-([Location](../android/lineage-24/README.md#location)) against the host
-writer's own epochs: the reading of the stream, the reporting rules and the
-session, with a pipe for the receiver and a counting wakelock.
+library created. `gnss-hal-nmea`, `gnss-hal-policy`, `gnss-hal-engine`,
+`gnss-hal-entry` and `gnss-hal-callbacks` (unit) compile the guest GNSS HAL's
+headers ([Location](../android/lineage-24/README.md#location)) against the host
+writer's own epochs: the reading of the stream, the reporting rules, the
+session and the AIDL entry points, with a pipe for the receiver and a counting
+wakelock, and with a framework callback that does not answer, so that no entry
+point waits for one and what the framework hears is the delivery contract's.
 
 A release candidate is qualified on its image, opt-in, on every engine that
 runs Android (the Mac gadgets and JIT engines, the iPad gadgets). A `SIGILL`
@@ -642,7 +713,8 @@ anywhere is a blocker. The candidate must show:
   `CtsCameraApi25TestCases`, `CtsMediaRecorderTestCases`, the camera parts of
   `CtsAppOpsTestCases` and `CtsPermissionTestCases`, and
   `CtsSensorPrivacyTestCases` in a blocked session and in a live one. The
-  provider process exists only while a camera is open, no denial of
+  provider process runs from cameraserver's start until cameraserver holds no
+  camera, and again while an application holds one, no denial of
   `hal_camera_default` appears in the log, and the verifier's check that
   `libgooglecamerahwl_impl.so` holds the names of route `p0030` is not
   vacuous: it runs on the candidate's built library (a source tree has none)
@@ -693,6 +765,31 @@ names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's
 render rate and the frame rates at each severity, on a fresh data disk or, with
 `--instance`, over an older release's.
+`android-orientation` (integration) registers when
+`UML_ANDROID_ORIENTATION_RELEASE` names the release: the runner plays the host
+application over a vsock forward to the motion port with the
+`androidboot.kernarium.orientation=1` argument and checks that the sensor is
+listed and used by the window manager, that Android's rotation follows each
+value with auto-rotate on, stays and offers the rotation suggestion with it off,
+follows or keeps to what an application that asks for an orientation allows,
+that the setup wizard turns to a value sent before the sensor was registered
+(the first frame says the sensor is not yet in use), that the lock screen stays
+upright and the newest value turns the display at unlock, that a value said
+again changes nothing, that a turn made with a finger down waits for the finger,
+that a value sent while the screen is off turns the display once it is on (the
+sensor idle while off and in use again), and how a host that connects late or
+reconnects is served. Restarting the framework or the sensors HAL needs root,
+which a user build does not give, so the runner does not.
+`--launch-only` stops after the launch's state (the property, the sensors the
+service lists and their flags, the judge the window manager picked and what it
+holds, no SELinux denial about the property), which is what to run first on a
+new image. `--expect none` boots a release that does not list the sensor (or
+this release without the argument) and checks that nothing changed: `ANC1`
+frames, the accelerometer judging, and the display turning with accelerometer
+postures. The runner needs a JDK, which builds and signs the probe
+application.
+`android17-orientation-runner` (tooling) runs its wire, parsers, rotation rules,
+host and probe manifest without a guest.
 `android-gamepad` (integration) registers when `UML_ANDROID_GAMEPAD_RELEASE`
 names the release and `UML_ANDROID_GAMEPAD_PROBE_APK` the APK of
 [`gamepad/build-apk.sh`](../tests/integration/android/gamepad/README.md): the
@@ -705,9 +802,11 @@ guest's cost per report and the relay's memory. `android17-gamepad-runner`
 `android-camera` (integration) registers when `UML_ANDROID_CAMERA_RELEASE`
 names the release: the runner boots it with the launcher's synthetic camera
 (`--camera=synthetic|blocked`, `--camera-profile=`) and a layout on the vendor
-SKU, and checks what Android lists (features, media profiles, camera IDs),
-one preview frame and one still of the camera application, and, in a blocked
-session, that the same cameras give black frames and no still.
+SKU (`--layout auto` has the launcher compose it, as the iOS runtime does, with
+RAW once `--calibration-dir` holds colour data from an earlier session), and
+checks what Android lists (features, media profiles, camera IDs), one preview
+frame and one still of the camera application, and, in a blocked session, that
+the same cameras give black frames and no still.
 `android17-camera-runner` (tooling) runs its parsers and the expectations of
 every layout without a guest, and `android17-camera-layouts` (tooling) the
 layout set, its fallback order and the generated files.

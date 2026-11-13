@@ -134,6 +134,7 @@ def feedback(id: str, screen: str, description: str, *args: str, dark: bool = Fa
 
 SYSTEM = ("-systemMicrophone", "YES")
 SYSTEM_LOCATION = ("-systemLocation", "YES")
+SYSTEM_CAMERA = ("-systemCamera", "YES")
 
 
 def system_mic(id: str, group: str, screen: str, description: str, privacy: str, *flow: str) -> Shot:
@@ -148,6 +149,14 @@ def system_location(id: str, group: str, screen: str, description: str, privacy:
         id, group, screen, description, SYSTEM_LOCATION, privacy=privacy, service="location", flow=tuple(flow),
         alert=privacy == "reset" and screen == "home-location-ask" if alert is None else alert,
     )
+
+
+def system_camera(id: str, group: str, screen: str, description: str) -> Shot:
+    """A shot with the Camera switch on the Simulator's own permission, reset first so that it has not been asked.
+    `simctl privacy` has no camera service to grant or revoke, so only the question can be raised this way; the
+    refused and restricted states are the preview's own (`home-camera-denied`, `home-camera-restricted`). The service
+    is `all` because a reset names no camera."""
+    return Shot(id, group, screen, description, SYSTEM_CAMERA, privacy="reset", service="all", alert=True)
 
 
 def boot_stages(prefix: str, screen: str, names: list[str], what: str, dark_step: int | None = None) -> list[Shot]:
@@ -174,7 +183,7 @@ SHOTS: list[Shot] = [
     s("home-resolution-fastest", "Home", "home-resolution", "The Resolution row with the fastest choice (one guest pixel to a point): the line says Fastest.", "-displayScale", "1"),
     s("home-resolution-middle", "Home", "home-resolution", "The Resolution row with a choice between the ends: the pixels alone.", "-displayScale", "1.5"),
     s("home-resolution-one-choice", "Home", "home-resolution", "The Resolution row on a screen with one choice (native scale 1.0): the resolution without a name, and Change dimmed.", "-displayNative", "1"),
-    s("home-capabilities", "Home", "home-capabilities", "Home scrolled to Capabilities: Microphone off, Gyroscope on and, on an iPhone, Haptics on (their defaults), no notes.", dark=True),
+    s("home-capabilities", "Home", "home-capabilities", "Home scrolled to Capabilities: Location off, Microphone off, Camera off and, on an iPhone, Haptics on (their defaults), no notes.", dark=True),
     s("home-jit", "Home", "home-jit", "Home scrolled to JIT: the toggle on and a debugger attached, so the note says it is ready for the next start.", dark=True),
     s("home-jit-no-debugger", "Home", "home-jit-no-debugger", "JIT on with no debugger attached: the note says to open Andarium from StikDebug."),
     s("home-jit-fallback", "Home", "home-jit-fallback", "Home after a start that ran without the JIT it was asked for: the note says StikDebug was not connected."),
@@ -182,7 +191,6 @@ SHOTS: list[Shot] = [
     s("home-capabilities-mic-denied", "Home", "home-mic-denied", "Capabilities after iOS refused the microphone or its app permission was removed: the row is dimmed and says it is not allowed in Settings.", dark=True),
     s("home-capabilities-mic-alert", "Home", "home-mic-alert", "Turning Microphone on while iOS refuses it: the alert that offers Settings."),
     s("home-capabilities-haptics-off", "Home", "home-haptics-off", "Capabilities on an iPhone after Haptics was turned off; an iPad has no Haptics row.", dark=True),
-    s("home-capabilities-gyroscope-unavailable", "Home", "home-gyroscope-unavailable", "Capabilities on a device without a gyroscope or accelerometer: Gyroscope is disabled and the footnote says why."),
     s("home-capabilities-location-on", "Home", "home-location-on", "Capabilities with Location on, iOS having allowed it with the exact position."),
     s("home-capabilities-location-approximate", "Home", "home-location-approximate", "Location on while iOS gives only an approximate location: the line under it says Approximate location, with an info mark that explains.", dark=True),
     s("home-capabilities-location-approximate-alert", "Home", "home-location-approximate-alert", "The explanation behind Approximate location: Precise Location is off for Andarium, with Open Settings."),
@@ -192,6 +200,12 @@ SHOTS: list[Shot] = [
     s("home-capabilities-location-restricted-alert", "Home", "home-location-restricted-alert", "Turning Location on while the device restricts it: the alert explains and has only OK."),
     s("home-capabilities-location-services-off", "Home", "home-location-services-off", "Capabilities while Location Services are off for the whole device: the row is dimmed and says so."),
     s("home-capabilities-location-services-off-alert", "Home", "home-location-services-off-alert", "Turning Location on while Location Services are off: the alert explains where to turn them on."),
+    s("home-capabilities-camera-on", "Home", "home-camera-on", "Capabilities with Camera on, iOS having allowed it.", dark=True),
+    s("home-capabilities-camera-denied", "Home", "home-camera-denied", "Capabilities after iOS refused the camera or its app permission was removed: the row is dimmed and says it is not allowed in Settings.", dark=True),
+    s("home-capabilities-camera-alert", "Home", "home-camera-alert", "Turning Camera on while iOS refuses it: the alert that offers Settings.", dark=True),
+    s("home-capabilities-camera-restricted", "Home", "home-camera-restricted", "Capabilities on a device that restricts the camera (Screen Time or a profile): the row is dimmed and says it is restricted.", dark=True),
+    s("home-capabilities-camera-restricted-alert", "Home", "home-camera-restricted-alert", "Turning Camera on while the device restricts it: the alert explains and has only OK.", dark=True),
+    s("home-capabilities-camera-unavailable", "Home", "home-camera-unavailable", "Capabilities on a device with no camera (the Simulator, say): Camera is disabled and the note says there is no camera to share.", dark=True),
     s("home-backup", "Home", "home-backup", "Home scrolled to Backup: the guest-data backup toggle and a one-line note."),
     s("home-first-start-recovery", "Home", "home-new-recovery", "Home scrolled to Recovery and erase on a guest not yet started: Start in recovery is disabled until the first start.", dark=True),
     s("home-recovery-erase", "Home", "home-recovery-erase", "Home scrolled to Recovery and erase: Start in recovery and Erase virtual machine."),
@@ -258,6 +272,7 @@ SHOTS: list[Shot] = [
     s("session-thermal-notice", "Guest", "session-thermal-notice", "The notice over the running guest that the frame rate is lowered while the device is hot."),
     s("session-network-cellular", "Guest", "session-network-cellular", "The notice over the running guest that iOS denies Andarium cellular data, with the way to Settings.", dark=True),
     s("session-network-wifi", "Guest", "session-network-wifi", "The notice over the running guest that iOS denies Andarium Wi-Fi, with the way to Settings.", dark=True),
+    s("session-camera-notice", "Guest", "session-camera-notice", "The notice over the running guest that the camera is paused while other apps share the screen (iPad Split View or Slide Over).", dark=True),
     s("session-setup", "Guest", "session-setup", "The guest's own first-run setup screen."),
     s("session-off", "Guest", "session-off", "The guest's screen after it powered off."),
     s("space-pause", "Guest", "space-pause", "The running guest paused because the device is nearly out of space: the screen over it with Resume and Shut down.", dark=True),
@@ -281,28 +296,32 @@ SHOTS: list[Shot] = [
     system_location("home-location-system-refused", "Capabilities", "home-capabilities", "Location after iOS refused it: the row is dimmed and says it is not allowed in Settings.", "revoke"),
     system_location("home-location-system-settings-prompt", "Capabilities", "home-location-alert", "Turning Location on after a refusal: Andarium explains and offers Settings.", "revoke"),
     system_location("home-location-system-revoked", "Capabilities", "home-location-on", "Location on, access taken away in Settings while Andarium was in the background, Andarium active again: the switch is off and dimmed.", "grant", "background", "revoke", "foreground"),
+    system_camera("home-camera-system-prompt", "Capabilities", "home-camera-ask", "The system's own question when Camera is turned on for the first time (the Simulator's alert), if the Simulator raises one without a camera."),
     s("settings-adb", "Settings", "settings-adb", "Developer: ADB over network on, the address a computer connects to."),
     s("settings-adb-no-address", "Settings", "settings-adb-no-address", "Developer: ADB over network on with no network address."),
     s("settings-adb-off", "Settings", "settings-adb-off", "Developer: ADB over network unavailable because USB debugging is off."),
     # Operations on the guest
     s("overlay-bug-report", "Operations", "bug-report", "The full-screen progress while a bug report is made.", wait=2.0),
     s("overlay-install-apk", "Operations", "install-apk", "The full-screen progress while an app installs from Files.", wait=2.0),
+    s("alert-install-legacy", "Operations", "install-legacy", "The question over the install overlay when Android refused an app built for a much older version: Cancel and Install anyway.", wait=2.0),
     s("overlay-install-done", "Operations", "install-done", "The install overlay at its end: App installed with Done. It stays until closed."),
     s("overlay-install-failed", "Operations", "install-failed", "The install overlay at its end: App not installed, the guest's reason and OK."),
     s("overlay-install-not-apk", "Operations", "install-not-apk", "A file that is not an app, refused at once on the overlay."),
     s("overlay-install-bundle", "Operations", "install-bundle", "An app in several files, refused at once on the overlay."),
     # Send feedback: needs a Preview built with FEEDBACK_ADDRESS=feedback@example.com (see --help)
-    feedback("feedback-entrance-info", "info", "Info with Send feedback in a section of its own under the header, apart from the version.", dark=True, wait=3.0),
+    feedback("feedback-menu-home", "home-menu", "Home's toolbar menu open on a configured guest: Info, then Send feedback after a separator.", dark=True, wait=3.0),
+    feedback("feedback-menu-welcome", "welcome-menu", "The same menu open on the welcome screen, before any guest exists: Send feedback is reachable from the first screen.", dark=True, wait=3.0),
     feedback("feedback-entrance-settings", "settings-feedback", "Settings scrolled to Diagnostics: Send feedback is the first row, above Create bug report.", dark=True, wait=3.0),
     feedback("feedback-empty", "feedback", "Send feedback opened from a running session's Settings, empty: the subject and body lines, the information block folded, the card that asks for a bug report and the bar (Bug report, Screenshot, Photos, Send feedback). Send is dimmed until there is a problem."),
     feedback("feedback-filled", "feedback-filled", "Send feedback from a session with a problem and details, and three attachments (bug report, screenshot, photo) with their sizes and remove buttons and the total under them; the bar shows the bug report as attached.", dark=True),
     feedback("feedback-details", "feedback-details", "Send feedback filled, with the app and device details opened in full at the end of the mail."),
     feedback("feedback-large", "feedback-large", "Send feedback with attachments over 20 MiB: the total turns orange and says some mail services refuse mail over 20 MiB; Send still works."),
     feedback("feedback-generating", "feedback-generating", "Send feedback while the bug report is made: the app's progress overlay with Cancel over the whole sheet, Settings still open beneath."),
+    feedback("feedback-sent", "feedback-sent", "Send feedback once the mail was sent: the Feedback sent card with Done over the whole sheet."),
     feedback("feedback-discard", "feedback-discard", "Cancel after something is typed or attached: Discard or Keep editing."),
     feedback("feedback-nomail", "feedback-nomail", "Send feedback where Mail cannot send (no account): the error and the way to fix it, and every control disabled."),
-    feedback("feedback-info", "feedback-info", "Send feedback opened from Info, where no virtual machine runs: the card says a bug report and a screenshot need the virtual machine running and gives three steps; the rest of the form works.", dark=True),
-    feedback("feedback-info-filled", "feedback-info-filled", "Feedback that is not a bug, from Info: a suggestion with a photo; Send is ready."),
+    feedback("feedback-home", "feedback-home", "Send feedback opened from Home's toolbar menu, where no virtual machine runs: the card says a bug report and a screenshot need the virtual machine running and gives three steps; the rest of the form works.", dark=True),
+    feedback("feedback-home-filled", "feedback-home-filled", "Feedback that is not a bug, from Home: a suggestion with a photo; Send is ready."),
     # End: a clean power-off returns to Home; only a failed run keeps an end screen
     s("end-failed", "End", "failed", "The screen after the guest stopped unexpectedly."),
 ]
