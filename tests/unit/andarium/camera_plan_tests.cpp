@@ -177,6 +177,10 @@ void check_tables()
                 tables.stall_durations[4 * std::size_t(record_blob) + 3] == jpeg_stall_ns({3840, 2160}) &&
                 tables.stall_durations[4 * std::size_t(record_blob) + 3] > tables.stall_durations[4 * std::size_t(blob_1440) + 3],
             "a JPEG at the recording size stalls by its own pixels, more than the smaller derived one");
+    // A JPEG keeps the still path's rate (a 30 frames per second floor), host or derived, when the modes run that fast.
+    for (std::size_t i = 0; i < entries; ++i)
+        if (tables.configurations[4 * i] == pixel_format::blob)
+            require(tables.min_frame_durations[4 * i + 3] == 33'333'333, "a JPEG runs at the still path's rate");
     const int cut_blob = find(pixel_format::blob, 320, 240);
     require(cut_blob >= 0 && tables.stall_durations[4 * std::size_t(cut_blob) + 3] >= 100'000'000, "a derived JPEG stalls too");
     const int raw = find(pixel_format::raw16, 4032, 3024);
@@ -491,6 +495,22 @@ void check_record_jpeg()
             require(host || standard || entry.size == size_1440p, "no JPEG size appears that the camera had no use for");
         }
     }
+
+    // A video mode that tops out below 30 frames per second sets the minimum frame duration of the JPEGs cut from it (the
+    // 3840x2160 JPEG and the 1920x1440 one come from the slow 4K mode, 1920x1080 from the 30 fps one); the host's own
+    // photo size keeps the still path's.
+    const auto slow = vectors::formats_of({{1920, 1080, 1, 30}, {3840, 2160, 1, 15}}, {{4032, 3024}});
+    const auto slow_tables = stream_tables(slow, Capabilities {});
+    const auto blob_duration = [&](std::int32_t width, std::int32_t height) -> std::int64_t {
+        for (std::size_t i = 0; i < slow_tables.configurations.size() / 4; ++i)
+            if (slow_tables.configurations[4 * i] == pixel_format::blob && slow_tables.configurations[4 * i + 1] == width &&
+                slow_tables.configurations[4 * i + 2] == height)
+                return slow_tables.min_frame_durations[4 * i + 3];
+        return -1;
+    };
+    require(blob_duration(3840, 2160) == 66'666'666, "a JPEG cut from a 15 fps 4K mode runs at 15");
+    require(blob_duration(1920, 1440) == 66'666'666, "so does every derived size that only that mode covers");
+    require(blob_duration(1920, 1080) == 33'333'333 && blob_duration(4032, 3024) == 33'333'333, "the rest keep the still path's rate");
 
     // A camera without a video mode has no recording size to add.
     const auto none = derive_sizes(vectors::formats_of({}, {{4032, 3024}}));

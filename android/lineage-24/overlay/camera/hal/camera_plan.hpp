@@ -414,9 +414,15 @@ inline StreamTables stream_tables(const Formats& formats, const Capabilities& ca
         add(pixel_format::yuv_420_888, entry.size, duration, 0);
         add(pixel_format::implementation_defined, entry.size, duration, 0);
     }
-    // The still path keeps the rate of the slowest preview that runs at 30 frames per second.
+    // The still path keeps the rate of the slowest preview that runs at 30 frames per second. A JPEG that the HAL cuts
+    // from a video mode cannot run faster than that mode: a mode that tops out below 30 frames per second sets its
+    // JPEGs' minimum frame duration; a host JPEG is the host's own photo and keeps the still path's.
     const std::int64_t still_duration = 33'333'333;
-    for (const auto& entry : sizes.jpeg) add(pixel_format::blob, entry.size, still_duration, jpeg_stall_ns(entry.size));
+    for (const auto& entry : sizes.jpeg) {
+        const std::int64_t duration =
+            entry.host ? still_duration : std::max(still_duration, frame_duration_of(fastest_rate(formats, entry.source)));
+        add(pixel_format::blob, entry.size, duration, jpeg_stall_ns(entry.size));
+    }
     if (caps.raw) add(pixel_format::raw16, formats.raw, still_duration, raw_stall_ns(formats.raw));
     return tables;
 }
