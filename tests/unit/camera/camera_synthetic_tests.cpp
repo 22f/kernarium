@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <string>
@@ -33,6 +34,7 @@ public:
         }
         std::lock_guard lock(mutex);
         frames.emplace_back(camera, std::move(frame));
+        if (clock) returns.push_back(clock());  // when this callback returns, on the camera's clock
         changed.notify_all();
     }
     void cameraStill(std::size_t camera, CameraStillResult result) override
@@ -54,6 +56,8 @@ public:
                                 [&] { return frames.size() >= framesWanted && stills.size() >= stillsWanted; });
     }
     std::chrono::milliseconds firstFrameDelay {0};
+    std::function<std::uint64_t()> clock;
+    std::vector<std::uint64_t> returns;
     std::mutex mutex;
     std::condition_variable changed;
     std::vector<std::pair<std::size_t, CameraFrame>> frames;
@@ -395,6 +399,12 @@ void everyProfileExposes()
     session->apply(0, settings);
     laptop->pump(0, 1);
     require(std::llabs(std::int64_t(recorder.frames.back().second.exposure.exposureNanoseconds) - 8'333'333 / 2) <= 1);
+    // The excess of a long exposure cannot go into a sensitivity it does not state: the exposure takes the frame, and the
+    // sensitivity stays at its one value.
+    settings.exposureBiasStops = 3.0f;
+    session->apply(0, settings);
+    laptop->pump(0, 1);
+    require(recorder.frames.back().second.exposure.exposureNanoseconds == 33'333'333 && recorder.frames.back().second.exposure.iso == 100);
 }
 
 void zoomCamera()
@@ -722,16 +732,19 @@ void threaded()
     require(camera->sessionsOpen() == 0);
 }
 
-// The real timer's schedule when a frame is late: a frame that lasts 200 ms at 10 fps is followed by the next one a whole
-// frame duration after its own start, also when the delegate held the timer thread long enough to make that frame overdue
-// (the next deadline is counted from the frame's start, not clamped to now with only the excess added).
-void timerSchedulesWholeDurations()
+// The real timer's schedule when a frame is late. A frame that lasts 200 ms at 10 fps is followed by the next one a whole
+// frame duration after its own start, also when the delegate held the timer thread long enough to make the next frame overdue
+// (a period or more, or less), and a frame never starts before the callback that held the thread returned: its timestamp is
+// not earlier than that moment. Lower bounds only: a loaded host may start a frame late.
+void timerHeldBy(std::chrono::milliseconds hold)
 {
     auto options = manual(SyntheticCameraProfile::tablet);
     options.manualClock = false;
+    options.latencyMilliseconds = 0;
     const auto camera = makeSyntheticCamera(options);
     Recorder recorder;
-    recorder.firstFrameDelay = std::chrono::milliseconds(350);
+    recorder.firstFrameDelay = hold;
+    recorder.clock = [&camera] { return camera->now(); };
     {
         auto session = camera->openSession(recorder);
         CameraSettings settings;
@@ -745,15 +758,22 @@ void timerSchedulesWholeDurations()
         for (std::size_t i = 0; i < 4; ++i)
             require(recorder.frames[i].second.exposure.exposureNanoseconds == 200'000'000 &&
                     recorder.frames[i].second.exposure.frameDurationNanoseconds == 200'000'000);
-        // Frame 1 was held for 350 ms, so frame 2 is overdue when it is due; frames 2 to 4 are at least a frame duration apart
-        // (the timestamp is the frame's start, and the next deadline is a whole duration after it). No upper bound: a loaded
-        // host may start a frame late.
+        // Frame 2 starts after the callback of frame 1 returned.
+        require(recorder.frames[1].second.timestampNanoseconds >= recorder.returns[0]);
+        // Frames 2 to 4 are at least a frame duration apart (the timestamp is the frame's start, and the next deadline is a
+        // whole duration after it).
         for (std::size_t i = 2; i < 4; ++i) {
             const auto interval = recorder.frames[i].second.timestampNanoseconds - recorder.frames[i - 1].second.timestampNanoseconds;
             require(interval + 2'000'000 >= recorder.frames[i - 1].second.exposure.frameDurationNanoseconds);
         }
     }
     require(camera->sessionsOpen() == 0);
+}
+
+void timerSchedulesWholeDurations()
+{
+    timerHeldBy(std::chrono::milliseconds(350));  // overdue by more than a period
+    timerHeldBy(std::chrono::milliseconds(250));  // overdue by less than one
 }
 
 } // namespace

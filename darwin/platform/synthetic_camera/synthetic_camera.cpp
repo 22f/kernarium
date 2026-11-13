@@ -724,7 +724,9 @@ private:
                 run = std::clamp(run, double(info.exposureMinimumNanoseconds), double(info.exposureMaximumNanoseconds));
             exposure.exposureNanoseconds = std::max<std::uint64_t>(1, std::uint64_t(std::llround(run)));
             double iso = double(baseIso) * wanted / double(exposure.exposureNanoseconds);
+            // A camera that states no sensitivity range is stated as [base, 100] by the HAL: it runs at the base.
             if (info.isoMaximum > 0) iso = std::clamp(iso, double(info.isoMinimum), double(info.isoMaximum));
+            else iso = std::clamp(iso, double(baseIso), double(std::max<std::uint32_t>(baseIso, 100)));
             exposure.iso = std::uint32_t(std::llround(iso));
             exposure.ae = settings.exposureMode == CameraExposureMode::locked ? CameraControlState::locked
                                                                               : CameraControlState::converged;
@@ -887,14 +889,29 @@ private:
                 if (!state.video) continue;
                 if (state.video->next <= now) {
                     due.push_back(camera);
-                    // A frame that is a period or more late starts now (no burst to catch up), and the next one is a
-                    // period after its start; produceFrame adds what its exposure takes beyond the period, so the next
-                    // deadline is always a whole frame duration after the start of this one.
+                    // The frame starts at its deadline, unless the timer thread was busy then (a delegate callback that ran
+                    // past it): a thread cannot start a frame before it is back, so that one starts when the previous
+                    // work ended, which is never before that callback returned. A thread that was only asleep past the
+                    // deadline (wake-up latency) keeps the schedule, or the rate would fall by that latency every frame;
+                    // one that was asleep a period or more (a stall) starts now, with no burst to catch up. The next
+                    // frame is a period after the start, and produceFrame adds what its exposure takes beyond the
+                    // period: the next deadline is a whole frame duration after the start of this frame.
                     const auto period = std::chrono::nanoseconds(1'000'000'000ull / state.video->frameRate);
-                    if (now - state.video->next >= period) state.video->next = now;
-                    const auto late = std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - state.video->next).count());
-                    state.video->startNanoseconds = nowNanoseconds > late ? nowNanoseconds - late : nowNanoseconds;
-                    state.video->next += period;
+                    auto begin = state.video->next;
+                    std::uint64_t beginNanoseconds = nowNanoseconds;
+                    if (begin < busyEnd_) {
+                        begin = busyEnd_;
+                        beginNanoseconds = busyEndNanoseconds_;
+                    } else {
+                        const auto late = std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - begin).count());
+                        beginNanoseconds = nowNanoseconds > late ? nowNanoseconds - late : nowNanoseconds;
+                    }
+                    if (now - begin >= period) {
+                        begin = now;
+                        beginNanoseconds = nowNanoseconds;
+                    }
+                    state.video->next = begin + period;
+                    state.video->startNanoseconds = beginNanoseconds;
                 }
                 if (!wake || state.video->next < *wake) wake = state.video->next;
             }
@@ -905,6 +922,8 @@ private:
                     if (!interrupted()) produceFrame(camera);
                 }
                 lock.lock();
+                busyEnd_ = std::chrono::steady_clock::now();
+                busyEndNanoseconds_ = realNow();
                 continue;
             }
             if (wake) wake_.wait_until(lock, *wake);
@@ -919,6 +938,9 @@ private:
     std::vector<CameraState> cameras_;
     std::thread worker_;
     bool stopped_ {};
+    // When the timer thread last came back from producing frames and stills, on both clocks.
+    std::chrono::steady_clock::time_point busyEnd_ {};
+    std::uint64_t busyEndNanoseconds_ {};
 };
 
 }  // namespace
