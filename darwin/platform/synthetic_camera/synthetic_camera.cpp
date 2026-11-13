@@ -26,6 +26,12 @@ constexpr std::uint32_t markerCells = 64;
 constexpr std::uint32_t markerHeight = 8;
 constexpr std::uint8_t markerOne = 235;
 constexpr std::uint8_t markerZero = 16;
+// The marker's first row: across the middle of the picture, so that the centred crop and the scale a device makes of
+// an anchored camera's frame for a stream of another shape or size keep it.
+constexpr std::uint32_t markerTop(std::uint32_t height) noexcept
+{
+    return height > markerHeight ? ((height - markerHeight) / 2) & ~1u : 0;
+}
 // An exposure of 1/120 s at ISO 100 is the chart's unit brightness.
 constexpr double referenceExposure = 1.0 / 120.0 * 100.0;
 constexpr std::uint32_t whiteLevel = 16383;
@@ -279,23 +285,27 @@ std::uint8_t clampByte(int value) noexcept
     return std::uint8_t(std::clamp(value, 0, 255));
 }
 
-void drawMarker(std::vector<std::uint8_t>& luma, std::vector<std::uint8_t>& chroma, std::uint32_t width,
+void drawMarker(std::vector<std::uint8_t>& luma, std::vector<std::uint8_t>& chroma, std::uint32_t width, std::uint32_t height,
                 std::uint16_t tag, std::uint32_t counter)
 {
+    if (height < markerHeight || width < 2 * markerCells) return;
+    const std::uint32_t top = markerTop(height);
     const std::uint64_t first48 = (std::uint64_t(tag) << 32) | counter;
     const std::uint16_t check = std::uint16_t((first48 >> 32) ^ (first48 >> 16) ^ first48);
     const std::uint64_t bits = (first48 << 16) | check;
-    const auto cell = markerCell(width);
+    // The cells share the picture's width, so a scale of the picture keeps their edges in proportion.
     for (std::uint32_t index = 0; index < markerCells; ++index) {
         const bool one = (bits >> (markerCells - 1 - index)) & 1;
+        const std::size_t from = std::size_t(index) * width / markerCells;
+        const std::size_t to = std::size_t(index + 1) * width / markerCells;
         for (std::uint32_t y = 0; y < markerHeight; ++y)
-            std::memset(&luma[std::size_t(y) * width + std::size_t(index) * cell], one ? markerOne : markerZero, cell);
-        for (std::uint32_t y = 0; y < markerHeight / 2; ++y)
-            for (std::uint32_t x = 0; x < cell; x += 2) {
-                chroma[std::size_t(y) * width + std::size_t(index) * cell + x] = 128;
-                chroma[std::size_t(y) * width + std::size_t(index) * cell + x + 1] = 128;
-            }
+            std::memset(&luma[std::size_t(top + y) * width + from], one ? markerOne : markerZero, to - from);
     }
+    for (std::uint32_t y = 0; y < markerHeight / 2; ++y)
+        for (std::uint32_t x = 0; x + 1 < width; x += 2) {
+            chroma[std::size_t(top / 2 + y) * width + x] = 128;
+            chroma[std::size_t(top / 2 + y) * width + x + 1] = 128;
+        }
 }
 
 Picture render(const Picture& base, const Scene& scene)
@@ -356,7 +366,7 @@ Picture render(const Picture& base, const Scene& scene)
             out.chroma[at] = clampByte(out.chroma[at] + scene.tintCb);
             out.chroma[at + 1] = clampByte(out.chroma[at + 1] + scene.tintCr);
         }
-    drawMarker(out.luma, out.chroma, width, scene.tag, scene.counter);
+    drawMarker(out.luma, out.chroma, width, height, scene.tag, scene.counter);
     return out;
 }
 
@@ -1183,11 +1193,6 @@ std::unique_ptr<SyntheticCamera> makeSyntheticCamera(const SyntheticCameraOption
     return std::make_unique<SyntheticCameraImpl>(options);
 }
 
-std::uint32_t markerCell(std::uint32_t width) noexcept
-{
-    return std::max<std::uint32_t>(2, (width / markerCells) & ~1u);
-}
-
 std::uint16_t chartTag(std::size_t camera) noexcept
 {
     return std::uint16_t(0x5a00u + (camera & 0xffu));
@@ -1197,12 +1202,12 @@ ChartMarker decodeChartMarker(const std::uint8_t* luma, std::size_t stride, std:
                               std::uint32_t height) noexcept
 {
     ChartMarker marker;
-    const auto cell = markerCell(width);
-    if (luma == nullptr || height < markerHeight || width < cell * markerCells) return marker;
+    if (luma == nullptr || height < markerHeight || width < 2 * markerCells) return marker;
+    const std::size_t row = std::size_t(markerTop(height) + markerHeight / 2);
     std::uint64_t bits = 0;
     for (std::uint32_t index = 0; index < markerCells; ++index) {
         // The cell's centre.
-        const auto sample = luma[std::size_t(markerHeight / 2) * stride + std::size_t(index) * cell + cell / 2];
+        const auto sample = luma[row * stride + std::size_t(2 * index + 1) * width / (2 * markerCells)];
         bits = (bits << 1) | (sample >= 128 ? 1u : 0u);
     }
     const std::uint16_t check = std::uint16_t(bits);
