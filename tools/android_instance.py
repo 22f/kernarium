@@ -2,7 +2,11 @@
 """A guest instance of the Android release: its data disk and what it records.
 
 An instance is a directory holding the guest's writable disk, `data.img`, and
-`instance.json`, which says which release the disk was last started with. A
+`instance.json`, which says which release the disk was last started with, and
+`identity.json`, the installation's serial number and eth0 address, which the
+launcher makes (the emulator, from `--android-identity=`) and this module only
+keeps or deletes with the disk, under the installation's lock (`identity.lock`,
+see `installation_lock`). A
 launcher decides before every start whether the release it carries may run on
 that disk (`decide`) and applies the decision (`apply`); the moment it sees the
 guest reach `sys.boot_completed` it calls `booted`, which counts a pending
@@ -17,11 +21,14 @@ from __future__ import annotations
 
 __import__("sys").dont_write_bytecode = True
 
+import contextlib
 import datetime
+import fcntl
 import json
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -30,6 +37,12 @@ SCHEMA = 1
 DATA_DISK = "data.img"
 STATE_FILE = "instance.json"
 SNAPSHOT_PREFIX = "data.img.pre-"
+# The installation's identity, made beside the data disk by the emulator
+# (darwin/device/block/README.md owns the file). It lives and dies with the
+# data disk: an update, a snapshot restore and a guest's own factory reset
+# leave it, a reset or a new data disk ends it. A write of it that a crash cut
+# short leaves a name that starts with the same text.
+IDENTITY_FILE = "identity.json"
 RELEASE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -351,6 +364,55 @@ def _replace_with_clone(source: Path, destination: Path) -> None:
     os.replace(temporary, destination)
 
 
+# The lock that serializes what changes an installation's identity: a start's
+# preparation of the data disk and of its identity (the emulator takes it) and
+# this module's reset, restore and create (darwin/device/block/android_identity.hpp
+# owns the file). It is an exclusive flock on `identity.lock`, which is never
+# removed.
+LOCK_FILE = "identity.lock"
+LOCK_SECONDS = 60.0
+# The locks this process holds, by instance: flock locks the open file, so a
+# second open of the same file by the same process would wait for the first.
+_HELD: dict[str, int] = {}
+
+
+@contextlib.contextmanager
+def installation_lock(instance: Path, limit: float = LOCK_SECONDS):
+    """Hold the installation's lock, waiting up to `limit` seconds for another
+    process that holds it; re-entrant within this process."""
+    key = os.path.abspath(instance)
+    if key in _HELD:
+        yield
+        return
+    instance.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(instance / LOCK_FILE, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        deadline = time.monotonic() + limit
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise InstanceError(f"the installation stayed locked for {limit:g} s: {instance / LOCK_FILE}")
+                time.sleep(0.02)
+        _HELD[key] = descriptor
+        try:
+            yield
+        finally:
+            del _HELD[key]
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def remove_identity(instance: Path) -> None:
+    """Delete the installation's identity and what a cut-short write of it left,
+    so the next start of the data disk makes a new one."""
+    for entry in instance.glob(IDENTITY_FILE + "*"):
+        entry.unlink(missing_ok=True)
+
+
 def _new_state(release: Release, when: str) -> State:
     identity = release.identity()
     return State(
@@ -379,7 +441,44 @@ def apply(
 
     Every step leaves the instance in a state `decide` handles: the snapshot
     exists before instance.json records it, and instance.json is replaced
-    atomically."""
+    atomically. What deletes or replaces the data disk (reset, restore and
+    create) runs under the installation's lock, so that it neither interleaves
+    with a start's preparation of the disk and its identity nor leaves an
+    identity that a start made meanwhile. The decision was made before the
+    lock was taken, so a create or restore is checked again under it: another
+    start may have made what this one would delete."""
+    if decision.action in ("reset", "restore", "create"):
+        with installation_lock(instance):
+            _revalidate(instance, decision)
+            return _apply(instance, release, decision, now=now)
+    return _apply(instance, release, decision, now=now)
+
+
+def _revalidate(instance: Path, decision: Decision) -> None:
+    """Refuse a create or restore whose ground has changed since it was
+    decided, before it deletes anything. A reset is the person's explicit
+    request and deletes whatever is there."""
+    if decision.action == "create" and (instance / DATA_DISK).is_file():
+        raise InstanceError(
+            "a data disk appeared while this start waited for the installation "
+            "(another start created it): start again"
+        )
+    if decision.action == "restore":
+        state = read_state(instance)
+        pending = None if state is None else state.pending_update
+        if pending is None or not (instance / pending["snapshot"]).is_file():
+            raise InstanceError(
+                "the unfinished update ended while this start waited for the installation: start again"
+            )
+
+
+def _apply(
+    instance: Path,
+    release: Release,
+    decision: Decision,
+    *,
+    now: Callable[[], datetime.datetime] | None = None,
+) -> State:
     when = _timestamp(now)
     data = instance / DATA_DISK
     action = decision.action
@@ -388,6 +487,7 @@ def apply(
     if action == "reset":
         for entry in [data, instance / STATE_FILE, *instance.glob(SNAPSHOT_PREFIX + "*")]:
             entry.unlink(missing_ok=True)
+        remove_identity(instance)
         action = "create"
     if action == "restore":
         state = read_state(instance)
@@ -414,6 +514,9 @@ def apply(
     if action == "create":
         instance.mkdir(parents=True, exist_ok=True)
         data.unlink(missing_ok=True)
+        # A disk made at the next start is a new installation, whatever
+        # identity an earlier one left beside it.
+        remove_identity(instance)
         state = _new_state(release, when)
         write_state(instance, state)
         return state

@@ -399,7 +399,9 @@ smoke test is `tests/integration/android/run_android_camera.py`
 
 The guest's one network device, `eth0`, is the host's user-mode network (SLiRP,
 10.0.2.0/24) and the management NIC: adb is reached through the host's forward
-to 10.0.2.15, so the framework never manages `eth0`. `kernarium_net_setup`
+to 10.0.2.15, so the framework never manages `eth0`; its hardware address and
+the guest's serial number are the installation's own, which the host chooses at
+random once for each data disk. `kernarium_net_setup`
 (`overlay/tools`) prepares it at `post-fs-data` and stacks the `virt_wifi`
 device `wlan0` on it, and the kernel needs `CONFIG_MACVLAN`, `CONFIG_CFG80211`
 and `CONFIG_VIRT_WIFI` built in (the verifier requires them). Apps see Wi-Fi
@@ -856,8 +858,11 @@ topic in route `p0007` owns this policy.
 
 A guest instance is the writable half of a guest: a directory holding the data
 disk, `data.img` (the creation and growth rules are in
-[`darwin/device/block`](../../darwin/device/block/README.md)), and
-`instance.json`, which records the release the disk was last started with. The
+[`darwin/device/block`](../../darwin/device/block/README.md)), `identity.json`,
+the installation's own serial number and eth0 address (made by the host and kept
+with the disk,
+[`darwin/device/block`](../../darwin/device/block/README.md#installation-identity)),
+and `instance.json`, which records the release the disk was last started with. The
 system disk is not part of an instance. Every launcher that keeps instances,
 the macOS script and the Andarium app, applies the same rules before each
 start; [`tools/android_instance.py`](../../tools/android_instance.py) is the
@@ -919,14 +924,15 @@ Kernarium represents one Android guest as a `.kern` directory containing:
 - `guest/system.img`, the release's read-only system disk, and
   `guest/partition-layout.json`, which describes it; and
 - `guest/data.img`, the guest's writable data disk, which the runtime creates at
-  the first launch and only grows afterwards.
+  the first launch and only grows afterwards, and `guest/identity.json`, the
+  installation's identity, which the runtime makes beside it.
 
 The kernel is supplied by the runtime framework and is not bundle payload. The
 manifest is provenance rather than a runtime compatibility token. Android
 appends the host-owned display density, hardware timeout multiplier, ADB
 authorization policy, ADB host key, ADB TCP policy, and tagged-pointer option at
 launch, and launches write
-persistent guest changes only to `guest/data.img`. How Kernarium keeps,
+persistent guest changes only to `guest/data.img` and `guest/identity.json`. How Kernarium keeps,
 relaunches, and copies a bundle is in
 [`../../Kernarium/README.md`](../../Kernarium/README.md#guest-storage).
 

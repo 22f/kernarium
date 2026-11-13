@@ -129,6 +129,33 @@ struct StorageTests {
         #expect(next.cores == host.processorCount)
     }
 
+    /// The serial number and eth0 address the runtime keeps beside the data disk
+    /// belong to the installation: a start, a resize and a clean shutdown leave
+    /// them, and an erase deletes them so that the next installation has values
+    /// of its own (the content is synthetic).
+    @Test func theInstallationIdentityLastsUntilTheGuestIsErased() async throws {
+        let (storage, root) = try makeStorage()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var guest = try await storage.create(Guest.fresh(on: host))
+        let content = Data(#"{"ethernet_mac": "02:aa:bb:cc:dd:ee", "schema": 1, "serialno": "0123456789abcdef"}"#.utf8)
+        let identity = storage.locations.directory.appendingPathComponent(InstanceFiles.identityFile)
+        let leftover = storage.locations.directory.appendingPathComponent(InstanceFiles.identityFile + ".tmp-77")
+        try Data(repeating: 1, count: 4096).write(to: storage.locations.data)
+        try content.write(to: identity)
+
+        try await storage.prepareStart(guest)
+        guest.pendingCapacityGiB = guest.effectiveCapacityGiB + 8
+        try storage.save(guest)
+        try storage.bootCompleted()
+        try storage.completeRun()
+        #expect(try Data(contentsOf: identity) == content)
+
+        try Data("half".utf8).write(to: leftover)
+        try await storage.erase()
+        #expect(!FileManager.default.fileExists(atPath: identity.path))
+        #expect(!FileManager.default.fileExists(atPath: leftover.path))
+    }
+
     @Test func eraseWithNoGuestChangesNothing() async throws {
         let (storage, root) = try makeStorage()
         defer { try? FileManager.default.removeItem(at: root) }

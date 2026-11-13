@@ -108,6 +108,56 @@ struct LargeTransferFootprintTests {
         #expect(growth.footprint < Self.allowedGrowth, "the footprint grew by \(growth.footprint >> 20) MiB")
     }
 
+    /// A container of more than 4 GiB (each APK in it far below that, the
+    /// directory and the last entry past what 32-bit fields hold, so that the
+    /// archive is a ZIP64 one) goes into a session part by part, each read
+    /// from the archive as it is sent, and the footprint does not grow with it.
+    @Test func aContainerOfMoreThanFourGibIsStreamedWithoutTheFileStayingInTheFootprint() async throws {
+        let adbd = DiscardingAdbd()
+        defer { adbd.shutdown() }
+        let big: UInt64 = 5 << 29
+        var base = Data(count: 3 << 20)
+        for index in 0..<base.count { base[index] = UInt8(truncatingIfNeeded: index &* 7 &+ index >> 9) }
+        let last = Data((0..<4096).map { UInt8(truncatingIfNeeded: $0 &* 13) })
+        let toc = BundleToc(variants: [
+            BundleToc.Variant(apks: [
+                .master("splits/base-master.apk"), .split("splits/base-xxhdpi.apk", "config.xxhdpi"),
+                .split("splits/base-xxxhdpi.apk", "config.xxxhdpi"), .split("splits/base-ldrtl.apk", "config.ldrtl"),
+            ])
+        ])
+        let url = try ContainerFixture.write([
+            ContainerEntry("toc.pb", toc.build()),
+            ContainerEntry("splits/base-master.apk", base),
+            ContainerEntry("splits/base-xxhdpi.apk", zeros: big),
+            ContainerEntry("splits/base-xxxhdpi.apk", zeros: big),
+            ContainerEntry("splits/base-ldrtl.apk", last),
+        ], name: "Huge.apks")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let size = try #require(try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? UInt64)
+        #expect(size > 4 << 30)
+        let log = UpdateLog()
+        let footprint = FootprintPeak()
+        let before = FootprintPeak.current(relieving: true)
+        let outcome = try await AdbOperationRunner.run(identity: nil, clock: GuestRunClock(), connector: adbd) { session in
+            try ApkInstallOperation.run(
+                session: session, coordinator: FileCoordinatorBox(), url: url, device: "iPad", hostFree: { .max },
+                update: { update in
+                    footprint.sample()
+                    log.add(update)
+                })
+        }
+        #expect(outcome == .installed)
+        let total = UInt64(base.count) + 2 * big + UInt64(last.count)
+        #expect(adbd.installBytes == total)
+        let session = try #require(adbd.committedSessions.first)
+        #expect(session.parts.map(\.bytes) == [UInt64(base.count), big, big, UInt64(last.count)])
+        #expect(session.parts[1].digest == session.parts[2].digest)
+        let growth = footprint.growth(since: before)
+        print("LARGE_TRANSFER_FOOTPRINT container file=\(size) footprint-growth=\(growth.footprint) heap-growth=\(growth.heap) updates=\(log.progress.count)")
+        #expect(growth.heap < Self.allowedGrowth, "the live allocations grew by \(growth.heap >> 20) MiB")
+        #expect(growth.footprint < Self.allowedGrowth, "the footprint grew by \(growth.footprint >> 20) MiB")
+    }
+
     @Test func aFileImportIsStreamedWithoutTheFileStayingInTheFootprint() async throws {
         let adbd = DiscardingAdbd()
         defer { adbd.shutdown() }
