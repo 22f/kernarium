@@ -119,6 +119,20 @@ public:
 #endif
 	}
 
+	/* The hardware address the guest's interface has: the provider's
+	 * default unless this is called before the guest brings it up. Returns 0,
+	 * or a negative error for an address the provider refuses. */
+	[[nodiscard]] int set_mac(const std::array<unsigned char, 6> &mac) noexcept
+	{
+#if UML_APP_HAS_SLIRP
+		return context_ == nullptr ?
+			-EINVAL : uml_slirp_net_set_mac(context_, mac.data());
+#else
+		(void)mac;
+		return -ENOTSUP;
+#endif
+	}
+
 	/* Registered before the guest brings the interface up, so this only
 	 * validates the specification; a host port that cannot be claimed is
 	 * reported by the provider when it installs the forward. */
@@ -399,6 +413,9 @@ struct PreparedArguments {
 	std::string console_socket;
 	std::string serial_socket;
 	std::vector<std::string> net_forwards;
+	/* --net-mac=: the hardware address of the guest's network interface, in
+	 * place of the user network's default. */
+	std::optional<std::array<unsigned char, 6>> net_mac;
 	/* --vsock-forward=: loopback ports that reach guest vsock ports. Any
 	 * forward adds the Virtio vsock device, last among the devices. */
 	std::vector<uml::vsock::ForwardSpecification> vsock_forwards;
@@ -440,7 +457,8 @@ struct PreparedArguments {
 				video_encoder, hardware_input, camera, camera_profile,
 				camera_layout_auto, camera_tier,
 				camera_calibration_directory, console_socket,
-				serial_socket, net_forwards, vsock_forwards) ==
+				serial_socket, net_forwards, net_mac,
+				vsock_forwards) ==
 			std::tie(other.gpu, other.gpu_budget, other.audio,
 				 other.audio_output, other.audio_input_host,
 				 other.battery, other.gnss, other.location,
@@ -449,7 +467,8 @@ struct PreparedArguments {
 				 other.camera_profile, other.camera_layout_auto,
 				 other.camera_tier, other.camera_calibration_directory,
 				 other.console_socket, other.serial_socket,
-				 other.net_forwards, other.vsock_forwards);
+				 other.net_forwards, other.net_mac,
+				 other.vsock_forwards);
 	}
 };
 
@@ -461,6 +480,27 @@ void append_default_kernel_argument(std::vector<std::string> &arguments,
 		if (argument.starts_with(prefix))
 			return;
 	arguments.emplace_back(value);
+}
+
+/* `aa:bb:cc:dd:ee:ff` in either case, or empty for any other text. */
+std::optional<std::array<unsigned char, 6>> parse_mac_address(
+	std::string_view text)
+{
+	if (text.size() != 17U)
+		return std::nullopt;
+	std::array<unsigned char, 6> mac{};
+	for (std::size_t index = 0; index < mac.size(); ++index) {
+		const auto offset = index * 3U;
+		if (index != 0 && text[offset - 1U] != ':')
+			return std::nullopt;
+		unsigned int octet = 0;
+		const auto [end, error] = std::from_chars(
+			text.data() + offset, text.data() + offset + 2, octet, 16);
+		if (error != std::errc{} || end != text.data() + offset + 2)
+			return std::nullopt;
+		mac[index] = static_cast<unsigned char>(octet);
+	}
+	return mac;
 }
 
 template<typename Integer>
@@ -730,6 +770,19 @@ PreparedArguments prepare_host_arguments(
 					"[PROTO:][HOSTADDR:]HOSTPORT-"
 					"[GUESTADDR:]GUESTPORT");
 			prepared.net_forwards.emplace_back(value);
+		} else if (valued("--net-mac=")) {
+			const auto mac = parse_mac_address(value);
+			if (!mac || (*mac)[0] % 2U != 0U ||
+			    std::ranges::all_of(*mac, [](unsigned char byte) {
+				    return byte == 0;
+			    }))
+				throw std::invalid_argument(
+					"--net-mac requires a unicast address "
+					"aa:bb:cc:dd:ee:ff");
+			if (prepared.net_mac)
+				throw std::invalid_argument(
+					"--net-mac may be specified only once");
+			prepared.net_mac = *mac;
 		} else if (valued("--vsock-forward=")) {
 			std::string error;
 			auto forward = uml::vsock::parseForward(value, error);
@@ -1141,6 +1194,10 @@ public:
 					error.what());
 				return false;
 			}
+			if (prepared_.net_mac && network_->set_mac(*prepared_.net_mac) != 0) {
+				std::fputs("Unable to accept --net-mac\n", stderr);
+				return false;
+			}
 			for (const auto &specification : prepared_.net_forwards) {
 				if (network_->forward(specification) == 0)
 					continue;
@@ -1151,6 +1208,9 @@ public:
 			}
 		} else if (!prepared_.net_forwards.empty()) {
 			std::fputs("--net-forward requires the user network\n", stderr);
+			return false;
+		} else if (prepared_.net_mac) {
+			std::fputs("--net-mac requires the user network\n", stderr);
 			return false;
 		}
 

@@ -17,6 +17,12 @@ void *uml_slirp_net_create(void);
 void uml_slirp_net_destroy(void *context);
 int uml_slirp_net_add_forward(void *context, const char *specification);
 int uml_slirp_net_open(void *context, unsigned char mac[6], unsigned int *mtu);
+/* Sets the hardware address uml_slirp_net_open reports from the next call on,
+ * in place of the default 52:54:00:12:34:56. Returns 0, or -EINVAL for a
+ * multicast address, an all-zero one or 52:55:0a:00:02:xx, which the router
+ * and servers of the user network answer from. A caller that never calls it
+ * keeps the default. */
+int uml_slirp_net_set_mac(void *context, const unsigned char mac[6]);
 int uml_slirp_net_irq_fd(void *context);
 int uml_slirp_net_read(void *context, void *buffer, size_t capacity);
 int uml_slirp_net_write(void *context, const void *buffer, size_t length);
