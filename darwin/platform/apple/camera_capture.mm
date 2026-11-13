@@ -1262,6 +1262,14 @@ private:
                 output.videoSettings = @{(__bridge NSString*)kCVPixelBufferPixelFormatTypeKey:
                                              @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)};
                 output.alwaysDiscardsLateVideoFrames = YES;
+#if TARGET_OS_IOS
+                // The stream is delivered at the size the guest asked for. Left automatic, the output may choose
+                // preview-sized buffers (what it assumes follows from the session's other outputs) and then raises when
+                // the stream's size is set: a stream was refused wherever the session also had a photo output of the full
+                // sensor size.
+                output.automaticallyConfiguresOutputBufferDimensions = NO;
+                output.deliversPreviewSizedOutputBuffers = NO;
+#endif
                 UMLCameraOutputDelegate* delegate = [[UMLCameraOutputDelegate alloc] initWithCamera:camera state:state_];
                 [output setSampleBufferDelegate:delegate queue:outputQueue_];
                 newDelegate = delegate;
