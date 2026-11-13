@@ -1,6 +1,34 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "NSCameraUsageDescription" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium uses the camera only when you turn on Camera, so that apps in the virtual machine can use it."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumは、“カメラ”をオンにしたときだけカメラを使用し、仮想マシン内のアプリが使えるようにします。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "只有在你开启“相机”时，Andarium才会使用相机，以供虚拟机中的应用使用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "只有在你開啟「相機」時，Andarium才會使用相機，以供虛擬機器中的應用程式使用。"
+          }
+        }
+      }
+    },
     "NSLocalNetworkUsageDescription" : {
       "localizations" : {
         "en" : {

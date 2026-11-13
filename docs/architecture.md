@@ -121,7 +121,11 @@ of E and S are launch parameters defaulting to the conservative launch set in
 `runtime/guest_memory_budget.hpp`. L is the limit the system advertises to the
 process; shortage elsewhere in the system is not counted. A launch under the
 floor is never refused: B is the floor and the launch says the process is likely
-to be ended. [`graphics.md`](graphics.md) owns what B bounds.
+to be ended. [`graphics.md`](graphics.md) owns what B bounds. A live camera
+session holds host memory outside the GPU (the camera device's reserve,
+`device/camera/camera_tiers.hpp`), and the GPU's pool is B less it
+(`gpu_pool_bytes`), taken after the clamp; blocked cameras and none take
+nothing, and the applications show the pool.
 
 The guest side's memory follows the vCPU count, v, and that header is the one
 place that says how; every caller evaluates it:
