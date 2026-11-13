@@ -126,16 +126,21 @@ AndroidOptions parse_options(int argc, char *const argv[])
 	for (int index = 1; index < argc; ++index) {
 		const std::string_view argument =
 			argv[index] == nullptr ? std::string_view{} : argv[index];
-		if (argument.starts_with(adb_authorization_prefix))
+		/* UML joins its arguments with spaces, so one that holds several
+		 * words, or quotes, carries each of them to Android. */
+		if (uml::android::carriesPrefix(argument, adb_authorization_prefix))
 			throw std::invalid_argument(
 				"macOS fixes Android ADB authorization at boot");
-		if (argument.starts_with(uml::android::lcdDensityPrefix))
+		if (uml::android::carriesPrefix(argument,
+						uml::android::lcdDensityPrefix))
 			throw std::invalid_argument(
 				"the Android density follows --gpu-dpi");
-		if (argument.starts_with(uml::android::hwTimeoutMultiplierPrefix))
+		if (uml::android::carriesPrefix(
+			    argument, uml::android::hwTimeoutMultiplierPrefix))
 			throw std::invalid_argument(
 				"the Android timeout multiplier follows ncpus=");
-		if (argument.starts_with(uml::android::serialPrefix))
+		if (uml::android::carriesPrefix(argument,
+						uml::android::serialPrefix))
 			throw std::invalid_argument(
 				"the Android serial number follows --android-serialno or "
 				"--android-identity");

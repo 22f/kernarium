@@ -1093,6 +1093,55 @@ void testSerialNumber(const fs::path &directory)
 	requireThrows([&] {
 		(void)android::readKernelCommandLine(path, setsSerial);
 	});
+	/* Android's reader removes quotes before it looks at an argument, so a
+	 * quoted word sets a serial number like the plain one: the quoted legacy
+	 * word is dropped and any other quoted serial is refused, whatever the
+	 * quotes surround, and the guest gets exactly one serial. */
+	for (const char *quotedLegacy :
+	     {"\"androidboot.serialno=umlandroid17\"",
+	      "androidboot.serialno=\"umlandroid17\"",
+	      "'androidboot.serialno=umlandroid17'",
+	      "androidboot.ser\"ialno=umlandroid17"}) {
+		writeText(path, std::string{"quiet "} + quotedLegacy + " " + devices + "\n");
+		require(android::readKernelCommandLine(path, setsSerial) ==
+				std::vector<std::string>{"quiet", devices},
+			std::string{"a quoted legacy serial stays: "} + quotedLegacy);
+	}
+	for (const char *quotedOther :
+	     {"\"androidboot.serialno=0123456789abcdef\"",
+	      "androidboot.serialno=\"0123456789abcdef\"",
+	      "'androidboot.serialno=umlandroid18'",
+	      "\"androidboot.serialno=umlandroid17x\""}) {
+		writeText(path, std::string{"quiet "} + quotedOther + " " + devices + "\n");
+		requireThrows([&] {
+			(void)android::readKernelCommandLine(path, setsSerial);
+		});
+	}
+	/* A quoted group that holds a serial: the words split at the white space
+	 * the way the file's reader splits them, and the one that starts the
+	 * serial is refused. */
+	writeText(path, "\"quiet androidboot.serialno=0123456789abcdef\" " + devices + "\n");
+	requireThrows([&] {
+		(void)android::readKernelCommandLine(path, setsSerial);
+	});
+	/* A launcher with no serial of its own leaves quoted words as they are. */
+	writeText(path, "\"androidboot.serialno=umlandroid17\" " + devices + "\n");
+	require(android::readKernelCommandLine(path, leavesSerial) ==
+		std::vector<std::string>{"\"androidboot.serialno=umlandroid17\"", devices});
+
+	/* The words of a launcher argument, quotes removed. */
+	require(android::withoutQuotes("a\"b'c") == "abc");
+	require(android::carriesPrefix("androidboot.serialno=x", android::serialPrefix));
+	require(android::carriesPrefix("quiet androidboot.serialno=x", android::serialPrefix));
+	require(android::carriesPrefix("\"androidboot.serialno=x\"", android::serialPrefix));
+	require(android::carriesPrefix("a\tb\n'androidboot.serialno=x'", android::serialPrefix));
+	require(android::carriesPrefix("androidboot.ser\"ialno=x", android::serialPrefix));
+	require(!android::carriesPrefix("", android::serialPrefix));
+	require(!android::carriesPrefix("quiet", android::serialPrefix));
+	require(!android::carriesPrefix("--android-serialno=ABCDEF", android::serialPrefix));
+	require(!android::carriesPrefix("xandroidboot.serialno=x", android::serialPrefix));
+	require(!android::carriesPrefix("androidboot.serialnumber=x", android::serialPrefix));
+
 	/* The launchers' own multiplier rule is unaffected. */
 	writeText(path, "androidboot.serialno=umlandroid17 "
 			"androidboot.hw_timeout_multiplier=5 " + devices + "\n");

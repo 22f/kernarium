@@ -684,7 +684,8 @@ Build-side contracts need no Android build: `lineage24-target-files-fixtures`,
 `lineage24-first-boot-precompile` and the `lineage24-mesa-venus-*` tests run
 the producer's verifiers over fixtures, and `android-partition-boot-selection`,
 `android17-instance-rules` and `android17-macos-launcher-options` cover the host
-library and launcher over the storage layout
+library and launcher over the storage layout (`android17-launcher-arguments`,
+where the Android CLI is built, runs the executable's own argument checks)
 ([storage](../android/lineage-24/README.md#static-disk-and-boot-contract),
 [block device](../darwin/device/block/README.md)). `guest-android-disks`
 (integration) boots the Linux test guest on a release and a data disk the
