@@ -35,6 +35,11 @@ public struct ConsoleScanner: Sendable {
     /// How many times Android has reported `sys.boot_completed=1`. Recovery
     /// never does, so only a count past zero says Android itself booted.
     public private(set) var bootCompletedCount = 0
+    /// How many times the recovery image has started its service. A start the
+    /// person asked for in the launch knows it is a recovery boot; one the
+    /// guest asks for itself (`adb reboot recovery`, the menu of the recovery
+    /// image's own) is known only by this line.
+    public private(set) var recoveryStartedCount = 0
 
     public init() {}
 
@@ -47,6 +52,7 @@ public struct ConsoleScanner: Sendable {
                 if !discarding {
                     if let milestone = Self.milestone(in: pending) { found.append(milestone) }
                     if pending.contains(Self.bootCompletedLine) { bootCompletedCount += 1 }
+                    if pending.contains(Self.recoveryLine) { recoveryStartedCount += 1 }
                 }
                 pending.removeAll(keepingCapacity: true)
                 discarding = false
@@ -66,10 +72,11 @@ public struct ConsoleScanner: Sendable {
     }
 
     static let bootCompletedLine = "processing action (sys.boot_completed=1)"
+    static let recoveryLine = "init: starting service 'recovery'"
 
     static func milestone(in line: String) -> BootMilestone? {
         if line.contains(bootCompletedLine) { return .ready }
-        if line.contains("init: starting service 'recovery'") { return .ready }
+        if line.contains(recoveryLine) { return .ready }
         if line.contains("init: starting service 'surfaceflinger'") { return .screenStarting }
         if line.contains("init: init first stage started!") { return .androidStarting }
         if line.hasPrefix("Linux version ") || line.contains("] Linux version ") { return .kernelRunning }
@@ -93,6 +100,14 @@ public struct BootTracker: Equatable, Sendable {
         reached[milestone] = seconds
         return true
     }
+
+    /// Whether the boot is the recovery image's, which the guest chose to
+    /// boot (a start in the launch's recovery mode is a recovery boot from
+    /// the first).
+    public private(set) var recovery = false
+
+    /// The console showed the recovery image start.
+    public mutating func noteRecovery() { recovery = true }
 
     /// The boot screen has done its work: there is something of the guest's
     /// to show.

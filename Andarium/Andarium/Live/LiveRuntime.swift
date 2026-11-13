@@ -9,21 +9,22 @@ import UIKit
 nonisolated final class ConsoleSink: @unchecked Sendable {
     private let lock = NSLock()
     private var scanner = ConsoleScanner()
-    private let report: @Sendable ([BootMilestone], Bool) -> Void
+    private let report: @Sendable ([BootMilestone], Bool, Bool) -> Void
 
-    /// `report` gets the milestones a chunk completes and whether Android
-    /// reported `sys.boot_completed` in it.
-    init(report: @escaping @Sendable ([BootMilestone], Bool) -> Void) {
+    /// `report` gets the milestones a chunk completes, whether Android
+    /// reported `sys.boot_completed` in it and whether the recovery image
+    /// started in it.
+    init(report: @escaping @Sendable ([BootMilestone], Bool, Bool) -> Void) {
         self.report = report
     }
 
     func feed(_ data: Data) {
-        let (found, completed) = lock.withLock { () -> ([BootMilestone], Bool) in
-            let before = scanner.bootCompletedCount
+        let (found, completed, recovery) = lock.withLock { () -> ([BootMilestone], Bool, Bool) in
+            let before = (scanner.bootCompletedCount, scanner.recoveryStartedCount)
             let found = scanner.feed(data)
-            return (found, scanner.bootCompletedCount > before)
+            return (found, scanner.bootCompletedCount > before.0, scanner.recoveryStartedCount > before.1)
         }
-        if !found.isEmpty || completed { report(found, completed) }
+        if !found.isEmpty || completed || recovery { report(found, completed, recovery) }
     }
 }
 
@@ -484,8 +485,8 @@ final class LiveRuntime: RuntimeDriver {
             guard let restart = GuestRestartEvent(event: event, restartCount: restartCount) else { return }
             MainActor.assumeIsolated { self?.guestRestarted(restart) }
         }
-        let sink = ConsoleSink { milestones, bootCompleted in
-            Task { @MainActor in self.reached(milestones, bootCompleted: bootCompleted) }
+        let sink = ConsoleSink { milestones, bootCompleted, recovery in
+            Task { @MainActor in self.reached(milestones, bootCompleted: bootCompleted, recoveryStarted: recovery) }
         }
         console = sink
         kernarium_runtime_loader_set_console_output_handler { data in sink.feed(data) }
@@ -783,7 +784,7 @@ final class LiveRuntime: RuntimeDriver {
 
     // MARK: Events
 
-    private func reached(_ milestones: [BootMilestone], bootCompleted: Bool) {
+    private func reached(_ milestones: [BootMilestone], bootCompleted: Bool, recoveryStarted: Bool) {
         guard let model else { return }
         // The guest console answers, so the emulator exists and takes requests
         // for the keyboard and the mouse.
@@ -792,6 +793,9 @@ final class LiveRuntime: RuntimeDriver {
             updateKeyboardMouse()
         }
         let seconds = Int(Date().timeIntervalSince(bootStartedAt))
+        // Before the milestones: the boot screen ends at `.ready` and shows
+        // what the guest turned out to be.
+        if recoveryStarted { model.bootTracker.noteRecovery() }
         if bootCompleted {
             reachedBootCompleted = true
             partialSweep?.guestBooted()

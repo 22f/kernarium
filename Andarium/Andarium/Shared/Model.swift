@@ -1503,7 +1503,12 @@ final class AppModel {
         }
     }
 
-    func finishBoot(_ kind: BootKind) {
+    func finishBoot(_ started: BootKind) {
+        // A guest that booted its recovery image on its own (a reboot into
+        // recovery from the shell, Android's rescue after a loop of failed
+        // boots) is the session the launch's recovery mode makes; its way
+        // back, the recovery's reboot, is a restart into a normal session.
+        let kind = bootTracker.recovery ? BootKind.recovery : started
         let firstStart = plan == .firstStart
         lifecycle.finishBoot(kind)
         if driver != nil {

@@ -445,6 +445,11 @@ requires reopening Andarium.
   ended in the boot leaves the runtime's session record with the console's
   last output, which the next bug report carries as the previous session's
   record.
+- **Recovery the guest asked for.** `init: starting service 'recovery'` on the
+  console (`ConsoleScanner.recoveryStartedCount`) makes the session a recovery
+  session, as the launch's recovery mode does, whatever the start was: `adb
+  reboot recovery`, the recovery image's own menu, Android's rescue after
+  failed boots. The recovery's reboot is a restart into a normal session.
 - **Time zone.** Every start gives the guest the host's zone
   (`GuestTimeZone`, the boot request's `android_time_zone`); the system image
   applies it unless the guest's user chose a zone

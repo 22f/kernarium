@@ -61,19 +61,22 @@ struct ConsoleSinkTests {
         private let lock = NSLock()
         private var found: [BootMilestone] = []
         private var completions = 0
+        private var recoveries = 0
         var milestones: [BootMilestone] { lock.withLock { found } }
         var bootCompletions: Int { lock.withLock { completions } }
-        func add(_ more: [BootMilestone], _ completed: Bool) {
+        var recoveryStarts: Int { lock.withLock { recoveries } }
+        func add(_ more: [BootMilestone], _ completed: Bool, _ recovery: Bool) {
             lock.withLock {
                 found += more
                 if completed { completions += 1 }
+                if recovery { recoveries += 1 }
             }
         }
     }
 
     @Test func milestonesArriveFromAnyThreadInOrder() async {
         let collector = Collector()
-        let sink = ConsoleSink { collector.add($0, $1) }
+        let sink = ConsoleSink { collector.add($0, $1, $2) }
         sink.feed(Data("Linux ver".utf8))
         await Task.detached { sink.feed(Data("sion 6.18\ninit: init first stage started!\n".utf8)) }.value
         #expect(collector.milestones == [.kernelRunning, .androidStarting])
@@ -82,11 +85,13 @@ struct ConsoleSinkTests {
 
     @Test func onlyAndroidBootingIsABootCompletion() {
         let collector = Collector()
-        let sink = ConsoleSink { collector.add($0, $1) }
+        let sink = ConsoleSink { collector.add($0, $1, $2) }
         sink.feed(Data("init: starting service 'recovery'...\n".utf8))
         #expect(collector.milestones == [.ready] && collector.bootCompletions == 0)
+        // It is a recovery image's start, which the model shows as a recovery session.
+        #expect(collector.recoveryStarts == 1)
         sink.feed(Data("init: processing action (sys.boot_completed=1) from (/x:1)\n".utf8))
-        #expect(collector.bootCompletions == 1)
+        #expect(collector.bootCompletions == 1 && collector.recoveryStarts == 1)
     }
 }
 

@@ -38,6 +38,16 @@ struct ConsoleScannerTests {
         #expect(scanner.bootCompletedCount == 2)
     }
 
+    @Test func theRecoveryImageIsCountedApartFromAnAndroidBoot() {
+        var scanner = ConsoleScanner()
+        _ = scanner.feed("[    0.8] init: starting service 'recovery'...\n")
+        #expect(scanner.recoveryStartedCount == 1 && scanner.bootCompletedCount == 0)
+        _ = scanner.feed("[   22.9] init: processing action (sys.boot_completed=1) from (/x:1)\n")
+        #expect(scanner.recoveryStartedCount == 1 && scanner.bootCompletedCount == 1)
+        _ = scanner.feed("[    1.2] init: starting service 'recovery-persist'...\n")
+        #expect(scanner.recoveryStartedCount == 1)
+    }
+
     @Test func aLineSplitAcrossChunksIsStillFound() {
         var scanner = ConsoleScanner()
         #expect(scanner.feed("Linux ver").isEmpty)
@@ -80,6 +90,18 @@ struct BootTrackerTests {
         let ready = tracker.reach(.ready, atSeconds: 40)
         #expect(ready)
         #expect(tracker.isReady)
+    }
+}
+
+extension BootTrackerTests {
+    @Test func aRecoveryBootIsKnownOnceTheConsoleShowsIt() {
+        var tracker = BootTracker()
+        #expect(!tracker.recovery)
+        tracker.noteRecovery()
+        _ = tracker.reach(.ready, atSeconds: 9)
+        #expect(tracker.recovery && tracker.isReady)
+        tracker.restart()
+        #expect(!tracker.recovery && !tracker.isReady)
     }
 }
 
