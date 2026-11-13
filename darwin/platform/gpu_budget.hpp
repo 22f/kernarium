@@ -87,4 +87,13 @@ struct GpuBudget final {
 	return budget.bytes > reserved ? budget.bytes - reserved : 0;
 }
 
+/* Whether `reserved` leaves the GPU no pool. A pool of zero means no limit to
+ * the renderer, so a launch whose reserve takes the whole budget is refused
+ * rather than given none. */
+[[nodiscard]] constexpr bool gpu_pool_exhausted(
+	const GpuBudget &budget, std::uint64_t reserved) noexcept
+{
+	return reserved != 0 && reserved >= budget.bytes;
+}
+
 } // namespace uml::platform

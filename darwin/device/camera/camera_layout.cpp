@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <utility>
 
 namespace uml::camera {
 
@@ -115,6 +116,24 @@ std::vector<LayoutDimensions> allLayouts()
                     for (const bool concurrent : {false, true})
                         layouts.push_back({LayoutCameras::backAndFront, tier, flash, manual, raw, concurrent, front2160});
     return layouts;
+}
+
+std::optional<LayoutDimensions> layoutDimensionsNamed(std::string_view name)
+{
+    static const std::vector<std::pair<std::string, LayoutDimensions>> table = [] {
+        std::vector<std::pair<std::string, LayoutDimensions>> layouts;
+        for (const auto& dimensions : allLayouts()) layouts.emplace_back(layoutName(dimensions), dimensions);
+        return layouts;
+    }();
+    for (const auto& [known, dimensions] : table)
+        if (known == name) return dimensions;
+    return std::nullopt;
+}
+
+std::uint64_t liveCameraReserveMiB(CameraMode mode, std::string_view layout, const CameraUse& use, CameraTier tier)
+{
+    if (mode != CameraMode::live || !layoutHasCameras(layout)) return 0;
+    return cameraHostMemoryReserveMiB(tier, use);
 }
 
 std::vector<std::string> allLayoutNames()
@@ -235,13 +254,47 @@ LayoutDimensions layoutDimensionsOf(std::span<const CameraDescription> cameras, 
     return normalizedLayout(dimensions);
 }
 
-std::string composeLayout(const uml::platform::Camera& host, const CalibrationStore& calibration,
-                          const ArrangementOptions& options, const std::function<bool(std::string_view)>& available)
+ComposedCameras composeCameras(const uml::platform::Camera& host, const CalibrationStore& calibration,
+                               const ArrangementOptions& options, const std::function<bool(std::string_view)>& available)
 {
     const auto infos = host.cameras();
     const auto sets = host.concurrentSets();
     const auto cameras = arrangeCameras(infos, sets, host.hostModel(), calibration, options);
-    return chooseLayout(layoutDimensionsOf(cameras, options.tier), available);
+    ComposedCameras composed;
+    composed.layout = chooseLayout(layoutDimensionsOf(cameras, options.tier), available);
+    const auto dimensions = layoutDimensionsNamed(composed.layout);
+    composed.use.streams = dimensions ? layoutStreams(*dimensions) : concurrentCameras;
+    composed.use.rawStill = std::any_of(cameras.begin(), cameras.end(), [](const CameraDescription& camera) {
+        return camera.info.rawStills && (camera.raw() || !camera.calibration);
+    });
+    composed.use.stillWorkingBytesPerPixel = host.stillWorkingBytesPerPixel();
+    return composed;
+}
+
+ComposedCameras composeCamerasWithin(const uml::platform::Camera& host, const CalibrationStore& calibration,
+                                     const ArrangementOptions& options, const CameraReservation& reserved)
+{
+    ComposedCameras none;
+    none.layout = std::string(noCameraLayout);
+    none.use = reserved.use;
+    if (!reserved.cameras) return none;
+    const auto fits = [&](const CameraUse& use) {
+        return use.streams <= reserved.use.streams && (!use.rawStill || reserved.use.rawStill) &&
+            use.stillWorkingBytesPerPixel <= reserved.use.stillWorkingBytesPerPixel;
+    };
+    auto composed = composeCameras(host, calibration, options);
+    if (!layoutHasCameras(composed.layout) || fits(composed.use)) return composed;
+    auto narrower = composeCameras(host, calibration, options, [&](std::string_view name) {
+        const auto dimensions = layoutDimensionsNamed(name);
+        return dimensions && layoutStreams(*dimensions) <= reserved.use.streams;
+    });
+    return layoutHasCameras(narrower.layout) && fits(narrower.use) ? narrower : none;
+}
+
+std::string composeLayout(const uml::platform::Camera& host, const CalibrationStore& calibration,
+                          const ArrangementOptions& options, const std::function<bool(std::string_view)>& available)
+{
+    return composeCameras(host, calibration, options, available).layout;
 }
 
 } // namespace uml::camera
