@@ -480,9 +480,28 @@ if(TARGET uml_gpu_service)
     uml_add_gpu_unit_test(gpu-host-gl-upload-refusal
         uml_gpu_host_gl_upload_refusal_tests
         host_gl_upload_refusal_tests.cpp
-        LIBRARIES ${_uml_host_gl_libraries} UML::HostGpuMemory
+        LIBRARIES ${_uml_host_gl_libraries}
         INCLUDES ${_uml_gpu_device_directory}
         UNIT_DIRECTORY TIMEOUT 240)
+
+    # A draw's upload, a texture's staged upload or a buffer's update that the
+    # budget refuses is made again once after the host gave back what it
+    # could: they are not lost for memory that finished work holds, a refusal
+    # leaves nothing behind, and an upload no memory can make room for is
+    # dropped without harm.
+    foreach(_shape draw sustained upload buffer persist cycle)
+        uml_add_gpu_unit_test(gpu-host-gl-refusal-retry-${_shape}
+            uml_gpu_host_gl_refusal_retry_${_shape}_tests
+            host_gl_refusal_retry_tests.cpp
+            LIBRARIES ${_uml_host_gl_libraries}
+            INCLUDES ${_uml_gpu_device_directory}
+            UNIT_DIRECTORY TIMEOUT 240)
+    endforeach()
+    foreach(_shape sustained upload buffer persist cycle)
+        string(TOUPPER ${_shape} _define)
+        target_compile_definitions(uml_gpu_host_gl_refusal_retry_${_shape}_tests
+            PRIVATE UML_REFUSAL_RETRY_${_define}=1)
+    endforeach()
 
     # A texture shared with another context is written into its segment by a
     # read-back; one the full budget refuses is tried again at the next fence.
@@ -670,6 +689,9 @@ if(TARGET uml_gpu_service)
         gpu-host-gl-surface-and-command-storage
         gpu-host-gl-reclaim-retry gpu-host-imported-memory
         gpu-host-gl-shm-export-refusal
+        gpu-host-gl-refusal-retry-draw gpu-host-gl-refusal-retry-sustained
+        gpu-host-gl-refusal-retry-upload gpu-host-gl-refusal-retry-buffer
+        gpu-host-gl-refusal-retry-persist gpu-host-gl-refusal-retry-cycle
         PROPERTIES SKIP_RETURN_CODE 77)
 
     # The renderer and the same-process render server share one fence table.
