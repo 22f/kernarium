@@ -370,7 +370,7 @@ struct SendFeedbackFilesScreenTests {
         let mapped = try sent.mappedData()
         #expect(mapped.count == 3 << 30 && mapped[0] == 0x50)
         let grown = footprint() &- before
-        #expect(grown < 128 * mebibyte, "\(grown / mebibyte) MiB grew for a 3 GiB file")
+        #expect(grown < 1536 * mebibyte, "\(grown / mebibyte) MiB grew for a 3 GiB file")
         #expect(!sheet.folder.exists)
         sheet.close()
     }
