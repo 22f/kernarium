@@ -3,6 +3,7 @@
 import AndariumCore
 import SwiftUI
 import Testing
+import TipKit
 import UIKit
 @testable import Andarium
 
@@ -288,7 +289,7 @@ struct SideKeysTouchTests {
         try #require(await eventually { run.presented != nil }, "the tip did not show")
         try await Task.sleep(for: .milliseconds(400))
         let view = try #require(run.presented?.viewIfLoaded)
-        let labels = Self.elements(in: view).map(\.label)
+        let labels = Self.elements(in: view).map { $0.label }
         let hint = labels.contains { $0.contains("Install APK") }
         #expect(hint == (installs && mode == .normal), "installs \(installs), \(mode): the tip reads \(labels)")
         #expect(labels.contains { $0.contains("Hold Power for the power menu") }, "the keys line stays: \(labels)")

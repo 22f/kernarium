@@ -42,7 +42,7 @@ struct SettingsOrderTests {
             model.fileBrowser = FileBrowserModel(backend: FileBrowserModelTests.ScriptedBackend(), center: NotificationCenter())
         }
         model.start(mode)
-        model.finishBoot(mode)
+        model.finishBoot(mode == .recovery ? .recovery : .normal)
         return model
     }
 
