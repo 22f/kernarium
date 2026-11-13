@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 38U
+#define KERNARIUM_RUNTIME_API_VERSION 39U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -811,11 +811,10 @@ enum {
 typedef int (*kernarium_runtime_set_network_notice_function)(int notice);
 
 /* What the host is doing for the cameras of the running guest, as the
- * callback reports it (runtime API 37). */
+ * callback reports it (runtime API 37; BLOCKED_IN_USE is API 39). */
 enum {
     /* No guest app has a camera open: no capture session exists and the
-     * system's camera indicator is off. Also the state of a blocked guest,
-     * whose apps may stream black frames and never capture, and of one that
+     * system's camera indicator is off. Also the state of a guest that
      * ended. */
     KERNARIUM_RUNTIME_CAMERA_STATE_IDLE = 0,
     /* A guest app has a camera open and frames flow. */
@@ -829,6 +828,13 @@ enum {
     KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_MULTITASKING = 3,
     /* The same, because the system is under pressure (heat). */
     KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_SYSTEM_PRESSURE = 4,
+    /* The guest runs blocked (android_camera_mode) and a guest app has a
+     * camera open: no capture session exists and the system's camera
+     * indicator stays off, the guest gets black frames, and the application
+     * can say the camera is off. Reported when the app opens a camera and
+     * again at each later open, IDLE in between; a live guest never reports
+     * it. A runtime before API 39 reports a blocked guest as IDLE. */
+    KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE = 5,
 };
 
 /* `state` is a KERNARIUM_RUNTIME_CAMERA_STATE_ value. It runs on a runtime
