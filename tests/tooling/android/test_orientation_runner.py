@@ -13,7 +13,9 @@ from __future__ import annotations
 
 __import__("sys").dont_write_bytecode = True
 
+import argparse
 import importlib.util
+import io
 import math
 import shutil
 import socket
@@ -486,6 +488,23 @@ class HostTests(unittest.TestCase):
         self.assertTrue(runner.with_compass(argparse.Namespace(with_compass=True)))
         self.assertTrue(runner.with_compass(argparse.Namespace(extra_arguments=[runner.COMPASS_ARGUMENT])))
         self.assertFalse(runner.with_compass(argparse.Namespace()))
+
+    def test_the_legacy_phase_refuses_the_compass_argument_before_booting_anything(self) -> None:
+        parse = runner.build_parser().parse_args
+        for arguments in (["--expect", "none", "--with-compass"],
+                          ["--expect", "none", "--no-argument", "--with-compass"]):
+            with self.subTest(arguments):
+                self.assertIn("--with-compass needs --expect sensor", runner.unsupported_combination(parse(arguments)))
+        for arguments in (["--with-compass"], ["--expect", "sensor", "--with-compass"], ["--expect", "none"],
+                          ["--expect", "none", "--no-argument"]):
+            with self.subTest(arguments):
+                self.assertIsNone(runner.unsupported_combination(parse(arguments)))
+        # main() refuses before it resolves adb or starts a guest: no executable is needed.
+        with mock.patch.object(sys, "argv", ["run", "--expect", "none", "--with-compass"]), mock.patch.object(
+                runner.boot_android, "resolve_executable", side_effect=AssertionError("started")), mock.patch(
+                "sys.stderr", new_callable=io.StringIO) as stderr:
+            self.assertEqual(runner.main(), 2)
+        self.assertIn("needs --expect sensor", stderr.getvalue())
         self.assertEqual(runner.COMPASS_ARGUMENT, "androidboot.kernarium.compass=1")
 
     def test_an_old_guest_is_never_answered_with_an_orientation_record(self) -> None:

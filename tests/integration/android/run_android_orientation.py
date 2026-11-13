@@ -35,9 +35,11 @@ window manager judges the accelerometer, and the runner turns the display with a
 the same four postures (then the same repeat, touch, screen-off and lock-screen steps with a posture streamed
 until the next), which proves the older path is untouched and gives the rotation each posture means.
 
-``--with-compass`` also passes ``androidboot.kernarium.compass=1``, as an iPhone with a magnetometer boots: the
-guest then lists the magnetometer too and sends the 20-byte "ANC3" frame (bit 4 says the orientation sensor is
-listed) in place of "ANC2", and every step above is the same.
+``--with-compass`` (with ``--expect sensor``) also passes ``androidboot.kernarium.compass=1``, as an iPhone with a
+magnetometer boots: the guest then lists the magnetometer too and sends the 20-byte "ANC3" frame (bit 4 says
+the orientation sensor is listed) in place of "ANC2", and every step above is the same. The legacy phase
+(``--expect none``) expects ANC1 frames and no magnetometer, so the option is refused with it: an older release
+given the compass argument is run_android_compass.py's ``--expect none --with-argument``.
 
 ``--launch-only`` stops each guest once the launch's state is checked (the property, the sensor service's
 list and the sensor's flags, the sub-HAL's log line, no SELinux denial about the property, the judge the window
@@ -1389,8 +1391,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-argument", action="store_true",
                         help="do not pass androidboot.kernarium.orientation=1 (an older application)")
     parser.add_argument("--with-compass", action="store_true",
-                        help="also pass androidboot.kernarium.compass=1, as a phone with a magnetometer boots: the "
-                        "guest sends ANC3 frames and lists the magnetometer too")
+                        help="with --expect sensor, also pass androidboot.kernarium.compass=1, as a phone with a "
+                        "magnetometer boots: the guest sends ANC3 frames and lists the magnetometer too (refused "
+                        "with --expect none)")
     parser.add_argument("--phases", default="early,late",
                         help="with --expect sensor, the phases to run (early, late); default both")
     parser.add_argument("--launch-only", action="store_true",
@@ -1407,10 +1410,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def unsupported_combination(options: argparse.Namespace) -> str | None:
+    """Why this run could only fail a valid guest, or None: the legacy phase checks for ANC1 frames and no
+    magnetometer, which a guest booted with the compass argument does not give."""
+    if options.expect == "none" and options.with_compass:
+        return ("--with-compass needs --expect sensor: the legacy phase (--expect none) expects ANC1 frames and no "
+                "magnetometer; an older release given the compass argument is run_android_compass.py --expect none "
+                "--with-argument")
+    return None
+
+
 def main() -> int:
     options = build_parser().parse_args()
     if options.cpus <= 0 or options.boot_timeout <= 0:
         print("counts and timeouts must be positive", file=sys.stderr)
+        return 2
+    problem = unsupported_combination(options)
+    if problem:
+        print(problem, file=sys.stderr)
         return 2
     phases = [name for name in options.phases.split(",") if name]
     if options.expect == "sensor" and (not phases or set(phases) - {"early", "late"}):
