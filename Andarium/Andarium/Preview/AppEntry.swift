@@ -96,7 +96,7 @@ struct AppEntry {
         "home-camera-restricted": "capabilities", "home-camera-unavailable": "capabilities",
         "home-camera-alert": "capabilities", "home-camera-restricted-alert": "capabilities",
         "home-camera-ask": "capabilities",
-        "home-backup": "backup",
+        "home-backup": "backup", "home-backup-row": "backup-row",
         "home-jit": "jit", "home-jit-no-debugger": "jit", "home-jit-fallback": "jit",
     ]
 
@@ -212,8 +212,8 @@ struct AppEntry {
             }
         case "home-memory-warning", "system-memory-warning":
             model.guest = PreviewData.highMemoryGuest(on: host)
-        case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit", "home-location-ask",
-             "home-camera-ask":
+        case "home-options", "home-display", "home-capabilities", "home-backup", "home-backup-row", "system-edit",
+             "home-location-ask", "home-camera-ask":
             break
         case "home-jit":
             model.jitOn = true

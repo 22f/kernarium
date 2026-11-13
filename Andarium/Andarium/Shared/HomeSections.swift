@@ -611,6 +611,7 @@ struct BackupSection: View {
                     get: { guest.includeInBackups },
                     set: { model.guest?.includeInBackups = $0 }
                 ))
+                .id("backup-row")
             } footer: {
                 BackupNote(host: model.host, hasSnapshots: model.snapshots.count > 0)
             }
