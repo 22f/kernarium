@@ -456,6 +456,8 @@ final class AppModel {
     /// The Simulator preview's boot screen starts scrolled to its bottom, where
     /// the notice's buttons are at the largest text size.
     @ObservationIgnored var previewBootScrollsToBottom = false
+    /// The preview's frozen boot screen shows the start's own clock, which runs.
+    @ObservationIgnored var previewClockRuns = false
     #endif
     /// The time the boot screen counts a start by, in seconds: a monotonic
     /// reading that does not run while the guest is held (a background span, a

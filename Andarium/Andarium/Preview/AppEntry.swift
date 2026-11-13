@@ -301,6 +301,10 @@ struct AppEntry {
             slowBoot(.upgrade, stage: 3, seconds: 491)
         case "boot-slow-recovery":
             slowBoot(.recovery, stage: 3, seconds: 197)
+        case "boot-slow-live":
+            // The steps held, the clock running: the status line and the notice count one time.
+            slowBoot(stage: 3, seconds: 197)
+            model.previewClockRuns = true
         case "boot-slow-stop":
             // Stop chosen: the dialog that asks first.
             slowBoot(stage: 3, seconds: 197)

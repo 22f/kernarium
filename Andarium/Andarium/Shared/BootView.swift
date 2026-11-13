@@ -44,7 +44,7 @@ struct BootView: View {
         let frozen = model.frozenBootStage.map { min($0, steps.count - 1) }
         let current = frozen ?? stage
         VStack(spacing: 0) {
-            statusLine(frozen: frozen != nil)
+            statusLine(frozen: frozen != nil && !clockRuns)
             // Centred while it fits; taller than the screen (the notice, at the
             // largest text size), it scrolls from its top.
             GeometryReader { proxy in
@@ -93,6 +93,16 @@ struct BootView: View {
             try? await Task.sleep(for: .seconds(0.4))
             model.finishBoot(kind)
         }
+    }
+
+    /// The Simulator preview holds the steps still and lets the clock run, to
+    /// capture one clock on the status line and the notice at two moments.
+    private var clockRuns: Bool {
+        #if APP_STORE
+        false
+        #else
+        model.previewClockRuns
+        #endif
     }
 
     /// The guest's display shows through, dimmed, on every boot but Recovery's.
@@ -265,7 +275,7 @@ struct BootView: View {
                 .fixedSize(horizontal: false, vertical: true)
             // The time moves with the clock, as the status line's does.
             TimelineView(.periodic(from: startedAt, by: 1)) { _ in
-                let seconds = model.frozenBootStage != nil ? model.frozenElapsed : model.bootElapsedSeconds()
+                let seconds = model.frozenBootStage != nil && !clockRuns ? model.frozenElapsed : model.bootElapsedSeconds()
                 Text(verbatim: "\(stepTitle) \u{00B7} \(Formats.elapsed(seconds))")
                     .font(.subheadline.weight(.semibold))
                     .monospacedDigit()
