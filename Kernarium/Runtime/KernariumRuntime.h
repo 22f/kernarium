@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 40U
+#define KERNARIUM_RUNTIME_API_VERSION 41U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -926,6 +926,58 @@ typedef int (*kernarium_runtime_plan_camera_reserve_function)(
     const char* camera_calibration_path,
     kernarium_runtime_camera_reserve* reserve);
 
+/* The level the system's memory pressure source reported to the host (runtime
+ * API 41). The host frees what it can get back cheaply at a warning or a
+ * critical level (docs/architecture.md, "Memory pressure"). */
+enum {
+    KERNARIUM_RUNTIME_MEMORY_PRESSURE_NORMAL = 0,
+    KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING = 1,
+    KERNARIUM_RUNTIME_MEMORY_PRESSURE_CRITICAL = 2,
+};
+
+/* What the host does about that level. */
+enum {
+    /* The normal level: nothing to do. */
+    KERNARIUM_RUNTIME_MEMORY_RESPONSE_NONE = 0,
+    /* The host starts a response now: it frees its graphics caches and asks
+     * the guest to trim its page cache, which can take seconds. */
+    KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED = 1,
+    /* A warning less than 30 s after the last response began: the host does
+     * nothing for it. */
+    KERNARIUM_RUNTIME_MEMORY_RESPONSE_WITHHELD = 2,
+    /* A response is already running and covers this level. The system delivers
+     * its notifications one at a time, each after the response of the one
+     * before, so this is rare: it is the policy's answer to a level that meets
+     * a running response. */
+    KERNARIUM_RUNTIME_MEMORY_RESPONSE_UNDER_WAY = 3,
+};
+
+/* `level` is a KERNARIUM_RUNTIME_MEMORY_PRESSURE_ value and `response` a
+ * KERNARIUM_RUNTIME_MEMORY_RESPONSE_ value. It is called once for each
+ * notification the system delivers while a guest runs, the repeats and the
+ * return to NORMAL included, as soon as the host has decided what it does and
+ * before it starts the work for that notification (a response can take
+ * seconds), in the order delivered. The system delivers one notification at a
+ * time and merges the levels raised while it is handled into the next, which
+ * reports the most serious of them: a level raised during a response is
+ * reported after the response, and one that a more serious level replaced is
+ * not reported. It carries no figures. It runs on a runtime thread and must
+ * return promptly. */
+typedef void (*kernarium_runtime_memory_pressure_callback)(
+    void* context,
+    int level,
+    int response);
+/* Sets, or with a null callback clears, the one receiver of the reports
+ * (runtime API 41). It is an event and not a state: a callback set while the
+ * pressure is in force hears the next level, and a guest that ends or restarts
+ * during the pressure reports no NORMAL, so the application takes the end of
+ * the run as the end of it. It may be set before a guest runs. Once it
+ * returns, no call to the previous callback is running or will start, so its
+ * context may be released; the callback must not call this. */
+typedef void (*kernarium_runtime_set_memory_pressure_callback_function)(
+    kernarium_runtime_memory_pressure_callback callback,
+    void* context);
+
 /* The application resolves only this versioned getter after loading exactly
  * one runtime framework. The table is immutable and remains valid until
  * process exit. The selected framework owns one host runtime and its
@@ -976,6 +1028,8 @@ typedef struct kernarium_runtime_api {
         set_camera_state_callback;
     kernarium_runtime_set_camera_rotation_function set_camera_rotation;
     kernarium_runtime_plan_camera_reserve_function plan_camera_reserve;
+    kernarium_runtime_set_memory_pressure_callback_function
+        set_memory_pressure_callback;
 } kernarium_runtime_api;
 
 #if defined(__GNUC__)

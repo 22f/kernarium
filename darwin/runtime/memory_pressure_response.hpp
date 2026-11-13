@@ -39,6 +39,13 @@ namespace uml::runtime {
  * times: on_retry() runs it, and the next response (which tries for itself) or
  * the normal level replaces or ends it. A retry never changes when a warning may start.
  *
+ * Each event the system raises is also reported to the application, once and
+ * as soon as the response has decided what it does with it (PressureReport):
+ * the level, and whether a response starts, is withheld by the interval or is
+ * already running. The report comes before the response's work, which can
+ * take seconds, and the normal level is reported too, so that an application
+ * that shows the pressure can show its end. It carries no figures.
+ *
  * Each change of the level and each response (or its last retry) is one line
  * on stderr (the console of both applications). A level line carries the level
  * and the footprint; a response line the footprint before and after, the
@@ -68,6 +75,32 @@ enum class PressureLevel : std::uint8_t {
  * for none. */
 [[nodiscard]] PressureLevel pressure_level_from_dispatch(
 	std::uint64_t flags) noexcept;
+
+/* What the response does about a level the system has just reported, decided
+ * before it does it. */
+enum class PressureReaction : std::uint8_t {
+	/* The normal level: nothing is done. */
+	none = 0,
+	/* A response starts: the host frees what it can and asks the guest to
+	 * trim its page cache. */
+	responding = 1,
+	/* A warning, and the last response began less than `warn_interval_ns`
+	 * ago: nothing is done for it. */
+	withheld = 2,
+	/* A response is running and covers this event. */
+	underway = 3,
+};
+
+/* The name the lines use. */
+[[nodiscard]] std::string_view pressure_reaction_name(
+	PressureReaction reaction) noexcept;
+
+/* One event of the system's memory pressure source, as the application hears
+ * it. */
+struct PressureReport final {
+	PressureLevel level{PressureLevel::normal};
+	PressureReaction reaction{PressureReaction::none};
+};
 
 /* How the guest's page-cache trim ended. */
 enum class TrimOutcome : std::uint8_t {
@@ -118,6 +151,11 @@ public:
 	[[nodiscard]] virtual TrimOutcome trim_page_cache() noexcept = 0;
 	/* One line, without its newline. */
 	virtual void log(std::string_view line) noexcept = 0;
+	/* Tells the application what the system reported and what the host does
+	 * about it. Called once for each event, as soon as that is decided and
+	 * before the response's work, on the thread that handles the event; it
+	 * returns promptly. */
+	virtual void report(const PressureReport &report) noexcept = 0;
 };
 
 /* The response's pacing; a test shortens the retry. */
@@ -259,6 +297,18 @@ private:
 
 	std::unique_ptr<State> state_;
 };
+
+/* Receives the reports of the run's response (PressureReport), on the thread
+ * that handles the system's event, so it returns promptly. */
+using PressureObserver = void (*)(void *context,
+	const PressureReport &report) noexcept;
+
+/* Sets, or with a null observer clears, the process's one receiver of the
+ * reports. It outlives a run and hears the reports of every run after it was
+ * set, none from before. Once this returns, no call to the previous observer
+ * is running or will start, so its context may be released; the observer must
+ * not call this. */
+void set_pressure_observer(PressureObserver observer, void *context) noexcept;
 
 /* Starts the response of the run that is beginning. `trim` and `context` are
  * the guest's page-cache trim. Null when the system's source cannot be made;
