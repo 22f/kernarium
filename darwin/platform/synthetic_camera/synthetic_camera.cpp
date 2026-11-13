@@ -709,15 +709,24 @@ private:
             result.scene.gain = exposure.exposureNanoseconds / 1e9 * exposure.iso / referenceExposure;
         } else {
             // The automatic exposure holds the chart at its unit brightness, and a compensation of n stops
-            // moves the exposure by n stops: the picture's gain and the exposure the result reports agree.
-            const double stops = std::exp2(double(settings.exposureBiasStops));
-            exposure.exposureNanoseconds = std::clamp<std::uint64_t>(std::uint64_t(std::llround(double(automaticExposure) * stops)),
-                                                                     info.exposureMinimumNanoseconds,
-                                                                     info.exposureMaximumNanoseconds);
-            exposure.iso = std::max<std::uint32_t>(100, info.isoMinimum);
+            // moves the picture by n stops. The exposure takes what the frame the rate asks for and the
+            // range the camera states allow (a camera that states none runs the exposure as asked), and
+            // the sensitivity takes the rest: the exposure times the sensitivity is what the picture's
+            // gain follows, and what the result reports.
+            const std::uint32_t baseIso = std::max<std::uint32_t>(100, info.isoMinimum);
+            const double wanted = double(automaticExposure) * std::exp2(double(settings.exposureBiasStops));
+            double run = wanted;
+            if (frameRate) run = std::min(run, 1e9 / double(frameRate));
+            if (info.exposureMaximumNanoseconds > 0)
+                run = std::clamp(run, double(info.exposureMinimumNanoseconds), double(info.exposureMaximumNanoseconds));
+            exposure.exposureNanoseconds = std::max<std::uint64_t>(1, std::uint64_t(std::llround(run)));
+            double iso = double(baseIso) * wanted / double(exposure.exposureNanoseconds);
+            if (info.isoMaximum > 0) iso = std::clamp(iso, double(info.isoMinimum), double(info.isoMaximum));
+            exposure.iso = std::uint32_t(std::llround(iso));
             exposure.ae = settings.exposureMode == CameraExposureMode::locked ? CameraControlState::locked
                                                                               : CameraControlState::converged;
-            result.scene.gain = double(exposure.exposureNanoseconds) / double(automaticExposure);
+            result.scene.gain = double(exposure.exposureNanoseconds) / double(automaticExposure) * double(exposure.iso) /
+                                double(baseIso);
         }
         // A frame lasts at least as long as its exposure, whatever the rate asked for.
         if (frameRate)

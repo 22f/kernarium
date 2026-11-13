@@ -293,17 +293,35 @@ void exposureReport()
     camera->pump(0, 1);
     const auto& bright = recorder.frames.back().second;
     require(std::llabs(std::int64_t(bright.exposure.exposureNanoseconds) - 8'333'333 * 4) <= 1);
-    require(meanLuma(bright) > unitLuma);
-    // The exposure of the sensor ends where its range does, and the picture stops with it.
+    const double brightLuma = meanLuma(bright);
+    require(brightLuma > unitLuma);
+    // The automatic exposure stays inside the frame the rate asks for: a compensation that asks for more than a 30 fps
+    // frame holds (+3 stops is twice as long) runs the frame's own length, and the sensitivity takes the rest, so the
+    // exposure times the sensitivity still follows the compensation and the rate does not fall.
+    settings.exposureBiasStops = 3.0f;
+    session->apply(0, settings);
+    camera->pump(0, 2);
+    const auto& third = recorder.frames[recorder.frames.size() - 2].second;
+    const auto& fourth = recorder.frames.back().second;
+    require(third.exposure.exposureNanoseconds == 33'333'333 && third.exposure.frameDurationNanoseconds == 33'333'333);
+    require(fourth.timestampNanoseconds - third.timestampNanoseconds == 33'333'333);
+    require(std::llabs(std::int64_t(third.exposure.iso) - 200) <= 1);  // 3 stops are 2 of exposure (to the frame) and 1 of it
+    const double product = double(third.exposure.exposureNanoseconds) * third.exposure.iso;
+    require(std::fabs(product / (double(unit.exposure.exposureNanoseconds) * unit.exposure.iso) - 8.0) < 0.1);
+    require(meanLuma(third) >= brightLuma);
+    // The exposure of the sensor ends where its range does, the sensitivity where its range does, and the picture stops
+    // with them.
     const auto info = camera->cameras()[0];
     settings.exposureBiasStops = 20.0f;
     session->apply(0, settings);
     camera->pump(0, 1);
-    require(recorder.frames.back().second.exposure.exposureNanoseconds == info.exposureMaximumNanoseconds);
+    require(recorder.frames.back().second.exposure.exposureNanoseconds == 33'333'333);
+    require(recorder.frames.back().second.exposure.iso == info.isoMaximum);
     settings.exposureBiasStops = -20.0f;
     session->apply(0, settings);
     camera->pump(0, 1);
     require(recorder.frames.back().second.exposure.exposureNanoseconds == info.exposureMinimumNanoseconds);
+    require(recorder.frames.back().second.exposure.iso == info.isoMinimum);
 
     // A manual exposure longer than the frame period: the frame lasts as long as the exposure, and the next frame
     // arrives after it.
@@ -332,6 +350,41 @@ void exposureReport()
     camera->pump(0, 0);
     require(recorder.waitFor(1, 1));
     require(recorder.stills.back().second.exposure.focalLengthMillimetres == 0.0f);
+}
+
+// Every profile's every camera runs an automatic exposure that is not zero and shows a lit chart at no compensation: a
+// camera that states no exposure range (a laptop's) runs the exposure as asked and is not clamped to nothing.
+void everyProfileExposes()
+{
+    for (const auto profile : {SyntheticCameraProfile::phone, SyntheticCameraProfile::tablet, SyntheticCameraProfile::tabletDualFront,
+                               SyntheticCameraProfile::laptop}) {
+        const auto camera = makeSyntheticCamera(manual(profile));
+        Recorder recorder;
+        auto session = camera->openSession(recorder);
+        const auto cameras = camera->cameras();
+        for (std::size_t index = 0; index < cameras.size(); ++index) {
+            const auto& format = cameras[index].videoFormats.front();
+            require(session->startVideo(index, format.width, format.height, format.maximumFrameRate));
+            camera->pump(index, 1);
+            const auto& frame = recorder.frames.back().second;
+            require(frame.exposure.exposureNanoseconds == 8'333'333);
+            require(frame.exposure.iso >= 100);
+            require(frame.exposure.frameDurationNanoseconds >= frame.exposure.exposureNanoseconds);
+            require(meanLuma(frame) > 100.0);
+            session->stopVideo(index);
+        }
+    }
+    // A laptop's camera states no range: the compensation moves its exposure the same way.
+    const auto laptop = makeSyntheticCamera(manual(SyntheticCameraProfile::laptop));
+    require(laptop->cameras()[0].exposureMaximumNanoseconds == 0 && laptop->cameras()[0].isoMaximum == 0);
+    Recorder recorder;
+    auto session = laptop->openSession(recorder);
+    require(session->startVideo(0, 640, 480, 30));
+    CameraSettings settings;
+    settings.exposureBiasStops = -1.0f;
+    session->apply(0, settings);
+    laptop->pump(0, 1);
+    require(std::llabs(std::int64_t(recorder.frames.back().second.exposure.exposureNanoseconds) - 8'333'333 / 2) <= 1);
 }
 
 void zoomCamera()
@@ -668,6 +721,7 @@ int main()
     video();
     controls();
     exposureReport();
+    everyProfileExposes();
     zoomCamera();
     multiCamera();
     multiCameraFormats();

@@ -136,8 +136,9 @@ interface to the wire.
   pixels a second); a deterministic chart
   whose top row encodes the camera and the frame counter (`decodeChartMarker`);
   brightness, blur, tint and zoom that follow the settings, an automatic
-  exposure that follows the compensation, and a frame that lasts as long as its
-  exposure when that is longer than its period; JPEG and Bayer stills;
+  exposure that follows the compensation within the frame the rate allows (the
+  sensitivity takes the rest), and a frame that lasts as long as its exposure
+  when that is longer than its period; JPEG and Bayer stills;
   simulated interruptions; and, with a manual clock, frames that a test pumps.
   App Store runtimes do not build it. It is never a real camera.
 
