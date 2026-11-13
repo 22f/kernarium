@@ -26,16 +26,24 @@
 #
 # A listing the Wi-Fi service did not answer prints "No networks" with status 0,
 # like an empty one (the shell command waits four seconds for the Wi-Fi thread
-# and then gives an empty list). A look therefore finds the network absent only
-# when the command exited 0 and returned in under four seconds; a failed or
-# slower one is unknown. Unknown never saves at marker 1, because saving a stored
-# network again resets its settings (metered, auto-connect). With no marker there
-# is nothing to lose, and an unknown look still leads to the save. What can still
-# pass for absent is an answer within four seconds before the service has loaded
-# the stored networks, which it does before boot_completed; at marker 1 three
-# looks, ten seconds apart in all, must find it absent, and the cost of a miss is
-# that network's metered and auto-connect settings, reset before the marker
-# reached 2.
+# and then gives an empty list). A look therefore runs the listing under
+# `timeout` with a limit of $limit seconds, below the service's four: it finds
+# the network absent only when the command exited 0 within the limit, and a
+# failed or killed listing is unknown. No time is ever subtracted, so a step of
+# the wall clock cannot turn a timeout into an answer. Unknown never saves at
+# marker 1, because saving a stored network again resets its settings (metered,
+# auto-connect). With no marker there is nothing to lose, and an unknown look
+# still leads to the save. What can still pass for absent is an answer within
+# the limit before the service has loaded the stored networks, which it does
+# before boot_completed; at marker 1 three looks, ten seconds apart in all, must
+# find it absent, and the cost of a miss is that network's metered and
+# auto-connect settings, reset before the marker reached 2.
+#
+# Two limits remain. Another writer, the person in Wi-Fi settings, saving or
+# re-saving the network within seconds of the script's first look, with the
+# guest then stopping before the Wi-Fi service's buffered write, can leave
+# marker 2 and no stored network; and a removal between the final listing and the
+# add is undone. Tapping the network in Wi-Fi settings restores it in both.
 #
 # The platform no longer disables the network for lack of internet
 # (rro/KernariumWifiOverlay), but a data disk written by an earlier release can
@@ -47,11 +55,12 @@
 # look and is gone at the settle was removed by the user during this boot: it
 # stays removed, and the marker becomes 2. Wi-Fi that is off leaves the marker
 # alone, so the next boot with Wi-Fi on still repairs. The script sleeps at most
-# 113 s in all, plus the time its commands take.
+# 113 s in all, plus the time its commands take (a listing at most $limit s).
 
 marker=persist.sys.kernarium.virtwifi_saved
 settle=45
 looks=3
+limit=3
 tag=kernarium_wifi_network
 
 note() {
@@ -59,19 +68,18 @@ note() {
 }
 
 # Sets $state to saved when the listing holds VirtWifi (one line: id, name,
-# security type), absent when it does not and the Wi-Fi service answered (status
-# 0, in under four seconds), unknown otherwise.
+# security type), absent when it does not and the command exited 0 within $limit
+# seconds (the Wi-Fi service answered), unknown otherwise (the command failed, or
+# timeout killed it).
 look() {
-    began=$(date +%s)
-    listing=$(cmd wifi list-networks 2>/dev/null)
+    listing=$(timeout "$limit" cmd wifi list-networks 2>/dev/null)
     code=$?
-    ended=$(date +%s)
     if echo "$listing" | grep -Eq '^[0-9]+ +VirtWifi +open'; then
         state=saved
-    elif [ "$code" != 0 ] || [ $((ended - began)) -ge 4 ]; then
-        state=unknown
-    else
+    elif [ "$code" = 0 ]; then
         state=absent
+    else
+        state=unknown
     fi
 }
 

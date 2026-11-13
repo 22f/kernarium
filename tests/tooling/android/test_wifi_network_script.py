@@ -60,12 +60,18 @@ def note(state: str, call: str) -> None:
 
 
 def elapsed(state: str) -> int:
-    """The seconds the script has slept and its commands have taken."""
+    """The seconds the script has slept and its commands have taken (the monotonic clock)."""
     total = 0
     for name in ("sleeps", "extras"):
         with open(os.path.join(state, name)) as stream:
             total += sum(int(seconds) for seconds in stream.read().split())
     return total
+
+
+def duration(state: str, seconds: int) -> None:
+    """How long the call that is running takes: the stub that wraps it passes that time, or `timeout` cuts it."""
+    with open(os.path.join(state, "duration"), "w") as stream:
+        stream.write(f"{seconds}\n")
 
 
 def framework(state: str, arguments: list[str]) -> int:
@@ -74,6 +80,7 @@ def framework(state: str, arguments: list[str]) -> int:
     memory = load(path)
     now = elapsed(state)
     advance(memory, now)
+    duration(state, 0)
     status = 0
     command = arguments[:2]
     if command == ["wifi", "list-networks"]:
@@ -83,18 +90,26 @@ def framework(state: str, arguments: list[str]) -> int:
             memory["failing"] -= 1
             print("cmd: Can't find service: wifi", file=sys.stderr)
             status = 20
-        elif memory["stalled"] > 0:
-            # The Wi-Fi thread does not answer: the service gives an empty list after four seconds, status 0.
-            memory["stalled"] -= 1
-            with open(os.path.join(state, "extras"), "a") as stream:
-                stream.write("4\n")
+        elif memory["stalled"] > 0 or (memory["stall_after"] is not None and now >= memory["stall_after"]):
+            # The Wi-Fi thread does not answer: the service gives an empty list after four seconds, status 0. The
+            # wall clock steps back while the call waits, when the boot says so.
+            memory["stalled"] = max(0, memory["stalled"] - 1)
+            duration(state, 4)
+            if memory["clock_step_back"]:
+                with open(os.path.join(state, "steps"), "a") as stream:
+                    stream.write(f"{memory['clock_step_back']}\n")
             advance(memory, now + 4)
             print("No networks")
-        elif memory["listed"]:
-            print(HEADER)
-            print("0            VirtWifi                         open")
         else:
-            print("No networks")
+            if memory["listed"]:
+                print(HEADER)
+                print("0            VirtWifi                         open")
+            else:
+                print("No networks")
+            if memory["slow"] > 0:
+                # An answer that takes two seconds is still an answer.
+                memory["slow"] -= 1
+                duration(state, 2)
     elif command == ["wifi", "status"]:
         note(state, "status")
         print("Wifi is enabled" if memory["wifi_on"] else "Wifi is disabled")
@@ -193,6 +208,9 @@ class Boot:
     store_delay: int = 10            # seconds from a change to the store's write
     join_after: int | None = 5       # seconds an enabled network takes to join; None: never
     stalled_looks: int = 0           # the first listings the Wi-Fi thread does not answer: four seconds, "No networks"
+    stall_after: int | None = None   # the listings from this second on stall as well
+    slow_looks: int = 0              # the first listings that take two seconds and answer
+    clock_step_back: int = 0         # seconds the wall clock steps back during each stalled listing
     failing_looks: int = 0           # the first listings that fail: the Wi-Fi service is not up
     add_fails: bool = False          # the Wi-Fi service is not up: saving fails
     add_ignored: int = 0             # the first saves that do nothing (the service is busy)
@@ -239,14 +257,28 @@ class Guest:
         me = Path(__file__).resolve()
         state = self.state
         bodies = {
-            "cmd": f'exec "{python}" -S -E "{me}" --stub "{state}" "$@"\n',
+            # A call that `timeout` wraps is cut by it; any other call lets its whole duration pass.
+            "cmd": (
+                f'if [ -n "$UNDER_TIMEOUT" ]; then exec "{python}" -S -E "{me}" --stub "{state}" "$@"; fi\n'
+                f'"{python}" -S -E "{me}" --stub "{state}" "$@"\nrc=$?\n'
+                f'd=$(cat "{state}/duration")\n[ "$d" -gt 0 ] && echo "$d" >> "{state}/extras"\nexit $rc\n'
+            ),
+            "timeout": (
+                f'limit=$1\nshift\nout=$(UNDER_TIMEOUT=1 "$@")\nrc=$?\nd=$(cat "{state}/duration")\n'
+                f'if [ "$d" -gt "$limit" ]; then echo "$limit" >> "{state}/extras"; exit 124; fi\n'
+                f'[ "$d" -gt 0 ] && echo "$d" >> "{state}/extras"\n[ -n "$out" ] && echo "$out"\nexit $rc\n'
+            ),
             "getprop": f'echo "getprop $*" >> "{state}/calls"\ncat "{state}/properties/$1" 2>/dev/null || echo\n',
             "setprop": (
                 f'echo "setprop $*" >> "{state}/calls"\necho "$2" > "{state}/properties/$1"\n'
                 f'if [ -f "{state}/kill" ]; then rm -f "{state}/kill"; kill -9 $PPID; fi\n'
             ),
             "sleep": f'echo "$1" >> "{state}/sleeps"\n',
-            "date": f't=0\nfor s in $(cat "{state}/sleeps" "{state}/extras"); do t=$((t + s)); done\necho $t\n',
+            # The wall clock: the monotonic time less the steps back it took (the script no longer reads it).
+            "date": (
+                f't=0\nfor s in $(cat "{state}/sleeps" "{state}/extras"); do t=$((t + s)); done\n'
+                f'for s in $(cat "{state}/steps"); do t=$((t - s)); done\necho $t\n'
+            ),
             "log": f'echo "log $*" >> "{state}/calls"\n',
         }
         for name, body in bodies.items():
@@ -261,6 +293,7 @@ class Guest:
             "read_at": boot.read_at if boot.read_at is not None else 0,
             "read_done": boot.read_at is None, "store_delay": boot.store_delay, "store_due": None,
             "join_after": boot.join_after, "stalled": boot.stalled_looks, "failing": boot.failing_looks,
+            "stall_after": boot.stall_after, "slow": boot.slow_looks, "clock_step_back": boot.clock_step_back,
             "add_fails": boot.add_fails, "add_ignored": boot.add_ignored, "wifi_on": boot.wifi_on,
             "stored": self.stored, "disabled": self.disabled, "forget_at": boot.forget_at,
             "listed": self.stored and boot.read_at is None,
@@ -268,8 +301,9 @@ class Guest:
             "since": 0 if self.stored and boot.read_at is None else None, "joined": False,
         }
         save(str(self.state / "framework"), memory)
-        for name in ("sleeps", "extras", "calls"):
+        for name in ("sleeps", "extras", "calls", "steps"):
             (self.state / name).write_text("")
+        (self.state / "duration").write_text("0\n")
         if boot.kill_after_marker:
             (self.state / "kill").touch()
         done = subprocess.run(["/bin/sh", str(script)], env={"PATH": f"{self.stubs}:/usr/bin:/bin"},
@@ -338,6 +372,14 @@ CASES = (
     )),
     Case("R2: an unanswered listing, Wi-Fi off, marker 1, the network stored", "1", True, (
         (Boot(wifi_on=False, stalled_looks=9), Expect(marker="1", stored=True)),
+    )),
+    # The listing that times out takes the wall clock with it: the script reads no clock, so a step back during
+    # the call cannot make it an answer. A stored network that an earlier release left disabled must keep marker 1.
+    *(Case(f"R2: the final listing times out while the wall clock steps back {step} s", "1", True, (
+        (Boot(join_after=None, stall_after=40, clock_step_back=step), Expect(marker="1", stored=True)),
+    ), disabled=True) for step in (2, 9)),
+    Case("R2: a listing that answers in two seconds is an answer", "1", False, (
+        (Boot(slow_looks=9), Expect(adds=1, notes=2, marker="1", stored=True)),
     )),
     Case("R2: an unanswered listing at marker 1 and an empty store", "1", False, (
         (Boot(stalled_looks=1), Expect(adds=1, notes=1, marker="1", stored=True)),
@@ -464,10 +506,16 @@ class WifiNetworkScript(unittest.TestCase):
             ("marker 2 asks the Wi-Fi service", mutated(text, early, "")),
             ("a join in a boot that saved sets 2", mutated(text, settled, settled.replace('[ "$listed" = 1 ]', ":"))),
             ("an unanswered listing reads as absent", mutated(
-                text, 'elif [ "$code" != 0 ] || [ $((ended - began)) -ge 4 ]; then', "elif false; then")),
-            ("a listing of four seconds reads as absent", mutated(text, "-ge 4 ]", "-ge 5 ]")),
+                text, 'elif [ "$code" = 0 ]; then\n        state=absent', 'elif true; then\n        state=absent')),
             ("a network removed during the boot is saved again", mutated(
                 text, removed, removed.replace('[ "$listed" = 1 ]', "false"))),
+            ("the listing's time is read from the wall clock", mutated(mutated(
+                text, 'listing=$(timeout "$limit" cmd wifi list-networks 2>/dev/null)\n    code=$?\n',
+                'began=$(date +%s)\n    listing=$(cmd wifi list-networks 2>/dev/null)\n    code=$?\n'
+                'ended=$(date +%s)\n'), 'elif [ "$code" = 0 ]; then\n        state=absent',
+                'elif [ "$code" = 0 ] && [ $((ended - began)) -lt 4 ]; then\n        state=absent')),
+            ("a limit above the Wi-Fi thread's four seconds", mutated(text, "limit=3", "limit=5")),
+            ("a limit that kills an answer of two seconds", mutated(text, "limit=3", "limit=1")),
             ("a guard of two looks", mutated(text, "looks=3", "looks=2")),
             ("a guard of one look", mutated(text, "looks=3", "looks=1")),
             ("the saved network is not saved again after the settle", mutated(

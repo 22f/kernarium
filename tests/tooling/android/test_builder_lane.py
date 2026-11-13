@@ -6215,7 +6215,7 @@ def verify_wifi_network(android_root: Path) -> None:
     script = (tools / "kernarium_wifi_network.sh").read_text(encoding="utf-8")
     code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
     for needle in ("settle=", "looks=", 'wait_joined "$settle"', '"$waited" -ge "$1"', '"$tries" -lt 30',
-                   '"$seen" -lt "$looks"'):
+                   '"$seen" -lt "$looks"', 'timeout "$limit" cmd wifi list-networks'):
         if needle not in code:
             fail(f"the Wi-Fi network script no longer bounds its wait: {needle!r} is gone")
 
