@@ -2122,6 +2122,30 @@ void testTheDeviceRunsOnlyTheCamerasItsUseAllows()
     require(rig.camera->framePeak() <= inboxFramesPerCamera + 1, "and the host held one camera's frames at a time");
 }
 
+// A camera that stops gives its frames back although the session stays open (for the torch, or a still on its way), so
+// a switch to the other camera never holds both cameras' frames: the pool counts one camera's.
+void testASwitchWithTheTorchOnHoldsOneCamerasFrames()
+{
+    RigOptions options;
+    options.use = {1, true, 0};
+    Rig rig(options);
+    videoStream(rig, 1, 0, 640, 480, 3);
+    for (std::uint32_t resource = 1; resource <= 3; ++resource) (void)rig.queue(1, resource);
+    rig.setOk(1, {{UML_V4L2_CID_FLASH_LED_MODE, UML_V4L2_FLASH_LED_MODE_TORCH, {}}});
+    rig.camera->resetFramePeak();
+    rig.camera->pump(0, 3);
+    require(rig.camera->framesAlive() == inboxFramesPerCamera, "three frames of the first camera wait for the worker");
+    rig.destroy(1);
+    require(rig.camera->sessionsOpen() == 1, "the torch keeps the session open");
+    require(!rig.camera->videoRunning(0) && rig.camera->framesAlive() == 0, "and the camera that stopped holds no frame");
+    videoStream(rig, 2, 1, 640, 480, 3);
+    for (std::uint32_t resource = 1; resource <= 3; ++resource) (void)rig.queue(2, resource);
+    rig.camera->pump(1, 4);
+    require(rig.camera->framePeak() <= inboxFramesPerCamera + 1, "at no time more than one camera's inbox and the frame arriving");
+    rig.step();
+    require(rig.camera->framesAlive() == 0, "and the worker frees them");
+}
+
 // The captures the device holds at once are bounded by what they cost, not by how many the guest's pipeline has: a
 // capture that does not fit waits for the ones with the platform and then goes, in order, and none of them fails.
 void testStillsAreAdmittedByTheBytesTheyCost()
@@ -2435,6 +2459,7 @@ int main()
     testAStillThatSpansAnInterruptionFails();
     testTheMostFramesHeldAtOnceIsWhatTheReserveCounts();
     testTheDeviceRunsOnlyTheCamerasItsUseAllows();
+    testASwitchWithTheTorchOnHoldsOneCamerasFrames();
     testStillsAreAdmittedByTheBytesTheyCost();
     testAnOversizedStillFailsItsCapture();
     testBlackPicturesHoldNothingOfTheirOwn();

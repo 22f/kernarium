@@ -52,7 +52,9 @@ application's statements (the sensor orientation, the rotation that
     staging is one frame of the largest video size; the transformer's scratch
     is a scaled buffer, a rotation scratch and vImage's temporaries. The first
     buffer of each configuration is checked against the pool's buffer (a log
-    line says when one is larger).
+    line says when one is larger). A camera whose last stream stops gives
+    back the frames the worker has not taken, although the session stays open
+    for the torch or a still, so a switch holds one camera's frames.
   - The stills the device admits at once cost no more than
     `stillAdmissionBytes`. A JPEG capture holds its file twice, at most one byte
     a pixel of the size asked (a larger file fails the capture before it is

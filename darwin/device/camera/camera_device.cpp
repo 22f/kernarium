@@ -547,6 +547,13 @@ public:
         return others < options.use.streams;
     }
 
+    /* Gives back the frames of a camera that the worker has not taken yet. */
+    void dropFramesOf(std::size_t platformCamera)
+    {
+        std::lock_guard lock(inboxMutex);
+        std::erase_if(inboxFrames, [platformCamera](const InboxFrame& frame) { return frame.camera == platformCamera; });
+    }
+
     /* Brings the platform's video for a camera in line with the streams that
      * are running on it. */
     void reconfigure(Runtime& runtime)
@@ -561,6 +568,9 @@ public:
         }
         if (width == 0) {
             if (runtime.videoRunning && session) session->stopVideo(runtime.description.platformIndex);
+            // The session may stay open for a still or the torch, so the frames of a camera that stopped are given back
+            // here and not by the session's end.
+            dropFramesOf(runtime.description.platformIndex);
             runtime.videoRunning = false;
             runtime.runWidth = runtime.runHeight = runtime.runRate = 0;
             runtime.failed = false;
