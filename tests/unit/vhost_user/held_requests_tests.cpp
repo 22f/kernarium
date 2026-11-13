@@ -1128,14 +1128,16 @@ void deviceThatDoesNotOptInIsResetAtTheDisable()
 
 /* A guest that suspends over and over with a request held, to a device that
  * does not keep it, is told of every one of the first 256 resets, one line
- * each, and then only of each one whose count doubles. */
+ * each, and then only of each one whose count doubles: the 512th, and not the
+ * 257th to the 511th or the 513th. */
 void theResetAtADisableIsReportedLessOften()
 {
     auto device = std::make_unique<HoldingDevice>(HoldingDevice::Options {false, false});
     auto* recorder = device.get();
     VhostUserServer server {std::move(device)};
-    std::string said;
-    constexpr unsigned suspends = 300;
+    constexpr unsigned suspends = 513;
+    constexpr auto line = "Vhost-user: device reset at ring disable: device=holding ring=0 deferred=1\n";
+    unsigned lines = 0;
     for (unsigned suspend = 1; suspend <= suspends; ++suspend) {
         SplitRing ring;
         TestQueue requests {ring, requestQueue, requestLayout};
@@ -1148,11 +1150,16 @@ void theResetAtADisableIsReportedLessOften()
             requests.postRequest(1);
             requests.writeKickPipe();
             awaitCondition([&] { return recorder->held() == 1; });
-            said += captureStderr([&] { requests.enable(socket, false); });
+            const auto said = captureStderr([&] { requests.enable(socket, false); });
+            const bool reported = suspend <= 256 || (suspend & (suspend - 1U)) == 0;
+            const auto count = countLines(said, line);
+            require(count == (reported ? 1U : 0U) && said.size() == count * std::strlen(line),
+                    "reset " + std::to_string(suspend) + " was reported " +
+                        std::to_string(count) + " times: " + said);
+            lines += count;
         });
     }
-    const auto lines = countLines(said, "Vhost-user: device reset at ring disable: device=holding ring=0 deferred=1\n");
-    require(lines == 256, "the resets were reported " + std::to_string(lines) + " times, not 256");
+    require(lines == 257, "the resets were reported " + std::to_string(lines) + " times, not 257");
 }
 
 /* A teardown's GET_FEATURES that arrives while the server waits for the
