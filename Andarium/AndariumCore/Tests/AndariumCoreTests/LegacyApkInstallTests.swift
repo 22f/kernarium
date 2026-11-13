@@ -45,6 +45,68 @@ struct LegacyApkInstallTests {
                 == "abb_exec:package\0install\0-r\0-t\0--install-reason\0" + "4\0--bypass-low-target-sdk-block\0-S\0" + "4096")
     }
 
+    // MARK: Sessions
+
+    @Test func theSessionCommandsHaveTheirArguments() {
+        #expect(
+            PackageInstallCommand.createSession(totalBytes: 9000)
+                == "abb_exec:package\0install-create\0-r\0-t\0--install-reason\0" + "4\0-S\0" + "9000")
+        #expect(
+            PackageInstallCommand.createSession(totalBytes: 9000, bypassLowTargetSdkBlock: true)
+                == "abb_exec:package\0install-create\0-r\0-t\0--install-reason\0" + "4\0--bypass-low-target-sdk-block\0-S\0" + "9000")
+        #expect(
+            PackageInstallCommand.writeSession("1858877423", name: "base.apk", bytes: 2546)
+                == "abb_exec:package\0install-write\0-S\0" + "2546\0" + "1858877423\0base.apk\0-")
+        #expect(PackageInstallCommand.commitSession("1858877423") == "abb_exec:package\0install-commit\0" + "1858877423")
+        #expect(PackageInstallCommand.abandonSession("1858877423") == "abb_exec:package\0install-abandon\0" + "1858877423")
+    }
+
+    @Test func aSessionIsCreatedWithTheSingleInstallsFlags() {
+        // The same words as `service`, with `install-create` for `install`.
+        for bypass in [false, true] {
+            let single = PackageInstallCommand.service(size: 77, bypassLowTargetSdkBlock: bypass)
+            let created = PackageInstallCommand.createSession(totalBytes: 77, bypassLowTargetSdkBlock: bypass)
+            #expect(created == single.replacingOccurrences(of: "\0install\0", with: "\0install-create\0"))
+        }
+    }
+
+    @Test func theCreatedSessionIsReadFromItsAnswer() {
+        #expect(PackageInstallCommand.createdSession(inOutput: "Success: created install session [1858877423]\n") == "1858877423")
+        #expect(PackageInstallCommand.createdSession(inOutput: "  Success: created install session [5]\r\n") == "5")
+        for output in [
+            "", "Success\n", "Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]\n",
+            "Exception occurred while executing 'install-create':\nandroid.os.ParcelableException: java.io.IOException: Requested internal only, but not enough space\n",
+            "Success: created install session []\n", "Success: created install session [abc]\n",
+            "Success: created install session [-5]\n", "Success: created install session [0]\n",
+            "Success: created install session [99999999999]\n", "Success: created install session [2147483648]\n",
+            "Success: created install session [1 2]\n",
+        ] {
+            #expect(PackageInstallCommand.createdSession(inOutput: output) == nil, "\(output.debugDescription)")
+        }
+    }
+
+    @Test func aFileWrittenIntoASessionIsKnownByItsOwnAnswer() {
+        #expect(PackageInstallCommand.streamed(inOutput: "Success: streamed 2546 bytes\n", bytes: 2546))
+        #expect(PackageInstallCommand.streamed(inOutput: "Success: streamed 2546 bytes", bytes: 2546))
+        #expect(!PackageInstallCommand.streamed(inOutput: "Success: streamed 2546 bytes\n", bytes: 2547))
+        #expect(!PackageInstallCommand.streamed(inOutput: "Success: streamed 25460 bytes\n", bytes: 2546))
+        #expect(!PackageInstallCommand.streamed(inOutput: "", bytes: 0))
+        #expect(!PackageInstallCommand.streamed(inOutput: "Failure [INSTALL_FAILED_INVALID_APK]\n", bytes: 1))
+        #expect(PackageInstallCommand.streamed(inOutput: "Success: streamed 0 bytes\n", bytes: 0))
+    }
+
+    @Test func aPartNameIsOneShortPlainComponentThatEndsInApk() {
+        for name in ["base.apk", "0_base.apk", "split_config.arm64_v8a.apk", "a-b.c_d.apk"] {
+            #expect(PackageInstallCommand.isValidPartName(name), "\(name)")
+        }
+        for name in [
+            "", ".apk", "base", "base.APK", "a/b.apk", "../a.apk", "a b.apk", "a\0b.apk", "caf\u{E9}.apk", ".hidden.apk",
+            String(repeating: "a", count: 129) + ".apk",
+        ] {
+            #expect(!PackageInstallCommand.isValidPartName(name), "\(name.debugDescription)")
+        }
+    }
+
     // MARK: The answer
 
     private let refusal =

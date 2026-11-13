@@ -27,6 +27,82 @@ public enum PackageInstallCommand {
         words += ["-S", String(size)]
         return words.joined(separator: "\0")
     }
+
+    // MARK: Sessions
+
+    // An app in several files (splits) is installed through a session, which
+    // is how `adb install-multiple` does it: create it, write each file into
+    // it, commit. The words are those of `service`, the flags of the create
+    // are the single install's, and a session is a thing on the guest until
+    // it is committed (which ends it, whatever the answer) or abandoned.
+
+    /// `install-create` for a session whose files add up to `totalBytes`.
+    /// The flag that lifts the refusal of an app built for a much older
+    /// version belongs here and nowhere else: the session reads it when it is
+    /// created, not when it is committed.
+    public static func createSession(totalBytes: UInt64, bypassLowTargetSdkBlock: Bool = false) -> String {
+        var words = ["abb_exec:package", "install-create", "-r", "-t", "--install-reason", String(userInstallReason)]
+        if bypassLowTargetSdkBlock { words.append(Self.bypassLowTargetSdkBlock) }
+        words += ["-S", String(totalBytes)]
+        return words.joined(separator: "\0")
+    }
+
+    /// `install-write` of one file of `bytes` bytes, which then follow on the
+    /// stream (`-` is the standard input). `name` is the file's name in the
+    /// session; it must be unique there and `isValidPartName`.
+    public static func writeSession(_ session: String, name: String, bytes: UInt64) -> String {
+        ["abb_exec:package", "install-write", "-S", String(bytes), session, name, "-"].joined(separator: "\0")
+    }
+
+    /// `install-commit`: the package manager checks the files, installs the
+    /// app and answers `Success` or `Failure [CODE: text]`. A commit that
+    /// fails ends the session as well.
+    public static func commitSession(_ session: String) -> String {
+        ["abb_exec:package", "install-commit", session].joined(separator: "\0")
+    }
+
+    /// `install-abandon`: deletes a session that was not committed. After a
+    /// commit the session is gone and the package manager answers with an
+    /// exception, so a caller abandons only before it commits.
+    public static func abandonSession(_ session: String) -> String {
+        ["abb_exec:package", "install-abandon", session].joined(separator: "\0")
+    }
+
+    /// The id in `Success: created install session [1858877423]`; nil for
+    /// any other output (an exception trace, a full partition).
+    public static func createdSession(inOutput output: String) -> String? {
+        for line in output.split(whereSeparator: \.isNewline) {
+            let text = line.trimmingCharacters(in: .whitespaces)
+            guard text.hasPrefix("Success"), text.contains("created install session"),
+                  let open = text.lastIndex(of: "["), let close = text.lastIndex(of: "]"), open < close
+            else { continue }
+            let id = text[text.index(after: open)..<close]
+            if isSessionId(id) { return String(id) }
+        }
+        return nil
+    }
+
+    /// Whether the output of an `install-write` says the file arrived whole:
+    /// `Success: streamed 2546 bytes`.
+    public static func streamed(inOutput output: String, bytes: UInt64) -> Bool {
+        output.split(whereSeparator: \.isNewline).contains {
+            $0.trimmingCharacters(in: .whitespaces) == "Success: streamed \(bytes) bytes"
+        }
+    }
+
+    /// A session id is the digits of a positive 32-bit number.
+    public static func isSessionId(_ text: some StringProtocol) -> Bool {
+        !text.isEmpty && text.utf8.count <= 10 && text.utf8.allSatisfy { $0 >= 48 && $0 <= 57 } && (Int32(text) ?? 0) > 0
+    }
+
+    /// A name a file can have in a session: the package manager takes it as a
+    /// file name, so it is one short component of plain characters, and it
+    /// ends in `.apk`.
+    public static func isValidPartName(_ name: String) -> Bool {
+        name.hasSuffix(".apk") && name.utf8.count <= 128
+            && name.utf8.allSatisfy { ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122) || $0 == 46 || $0 == 45 || $0 == 95 }
+            && !name.hasPrefix(".")
+    }
 }
 
 /// The versions in the package manager's refusal of an app built for a much
