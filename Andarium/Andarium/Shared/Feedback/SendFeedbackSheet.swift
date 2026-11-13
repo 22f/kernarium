@@ -151,12 +151,14 @@ struct SendFeedbackSheet: View {
             try? await Task.sleep(for: .seconds(1.8))
             dismiss()
         }
-        #if !APP_STORE
         .task {
+            // Opened during a start, the sheet attaches its start log once; the
+            // task runs again if the view is rebuilt, and the model remembers.
             model.offerStartLog()
+            #if !APP_STORE
             await model.app.feedbackServices.previewPrepare(model)
+            #endif
         }
-        #endif
         .onDisappear { model.close() }
         .presentationSizing(.page)
     }

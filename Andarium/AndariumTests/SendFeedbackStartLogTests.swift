@@ -5,6 +5,7 @@
 import AndariumCore
 import AndariumCoreTestSupport
 import Foundation
+import SwiftUI
 import Testing
 import UIKit
 @testable import Andarium
@@ -235,6 +236,56 @@ struct SendFeedbackStartLogTests {
         sheet.form.problem = "Too slow"
         #expect(sheet.state.hasContent)
         sheet.close()
+    }
+
+    // MARK: The sheet
+
+    private func button(labelled label: String, in node: NSObject, depth: Int = 0) -> NSObject? {
+        if node.accessibilityLabel == label, node.accessibilityTraits.contains(.button) { return node }
+        guard depth < 64 else { return nil }
+        var children = (node.accessibilityElements ?? []).compactMap { $0 as? NSObject }
+        if let view = node as? UIView { children += view.subviews }
+        for child in children {
+            if let found = button(labelled: label, in: child, depth: depth + 1) { return found }
+        }
+        return nil
+    }
+
+    /// The sheet's own task makes the log, in the application as well as in the
+    /// model's tests: the sheet the notice opens shows its row, and the row's
+    /// button takes it out for good.
+    @Test func theSheetTheNoticeOpensShowsTheLogRowAndRemovesIt() async throws {
+        let fixture = try fixture()
+        try fixture.writeRecord(output: Self.output)
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let host = AndariumHostingController(
+            rootView: RootView(entry: AppEntry(overrides: LaunchOverrides())).environment(fixture.app), model: fixture.app)
+        lease.window.rootViewController = host
+        host.view.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(300))
+        fixture.app.feedbackFromBoot = true
+        func row(_ present: Bool) async throws -> NSObject? {
+            let deadline = ContinuousClock.now + .seconds(8)
+            while ContinuousClock.now < deadline {
+                let found = host.presentedViewController.flatMap { button(labelled: "Remove start log", in: $0.view) }
+                if (found != nil) == present { return found }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            return nil
+        }
+        guard let remove = try await row(true) else {
+            Issue.record("the log's row was not found: is application accessibility on in this Simulator?")
+            fixture.app.feedbackFromBoot = false
+            return
+        }
+        #expect(remove.accessibilityActivate())
+        #expect(try await row(false) == nil, "the row stays after its button was used")
+        // The row is not made again when the sheet is laid out again.
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(host.presentedViewController.flatMap { button(labelled: "Remove start log", in: $0.view) } == nil)
+        fixture.app.feedbackFromBoot = false
+        host.dismiss(animated: false)
     }
 
     // MARK: The start ends
