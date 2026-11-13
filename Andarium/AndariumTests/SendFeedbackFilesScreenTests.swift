@@ -814,7 +814,9 @@ struct SendFeedbackFilesScreenTests {
             return element(labelled: row, in: controller.view) != nil
         }
         try #require(attached, "the row was not drawn with its labels")
+        // The sizes are written with a no-break space before the unit.
         let words = nodes(in: controller.view).compactMap(\.accessibilityLabel)
+            .map { $0.replacingOccurrences(of: "\u{00A0}", with: " ") }
         #expect(words.contains { $0.contains("1 attachment") && $0.contains("25 MiB") && $0.contains("20 MiB") },
                 "the total and the warning for 25 MiB: \(words)")
         let remove = try #require(element(labelled: "Remove file", in: controller.view))
