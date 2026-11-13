@@ -11,7 +11,7 @@
  * (application_vcpu_limit), since this header holds the count the budget is
  * measured for.
  *
- *     E(v, G) = c(v, G) + t * v + E_rest
+ *     E(v, G) = c(v, G) + x(v) + t * v + E_rest
  *     c(v, G) = min(derive_budget(G, L), cap(v))      (the cap only where L != 0)
  *     G_max(v) = the largest G in {512, 576, ..., C} MiB with
  *                L - G - A - E(v, G) - S >= 384 MiB; C where L is zero
@@ -25,8 +25,10 @@
  *
  * L is the process's memory limit (platform::process_memory_limit_bytes), zero
  * for none. cap(v) is seven eighths of the cache's measured worst ceiling at v
- * vCPUs, rounded up to 16 MiB. t is the slot tags each executor keeps outside
- * the cache's ledger. A, E_rest and S come from a LaunchMemorySet.
+ * vCPUs, rounded up to 16 MiB. x(v) is the most the cache's charge exceeds its
+ * budget in a burst (gadget_cache_burst). t is the slot tags each executor
+ * keeps outside the cache's ledger. A, E_rest and S come from a
+ * LaunchMemorySet.
  *
  * C is the host's ceiling (guest_memory_ceiling_mib, for a process
  * process_guest_memory_ceiling_mib): the most RAM the host admits whatever the
@@ -127,6 +129,30 @@ inline constexpr unsigned measured_vcpu_maximum =
 	return mib * static_cast<std::size_t>(mebibyte);
 }
 
+/* x(v): the most the cache's charge, the open accounts and those asked to shed
+ * together, exceeds the cache's budget at 1 through 8 vCPUs, in MiB. The budget
+ * bounds the open accounts, and an account asked to shed keeps its bytes until
+ * its last holder lets go, so a burst of stores while shed accounts wait leaves
+ * the charge above the budget by what it stored. The table is the largest such
+ * excess (a charge-time high-water mark) of an Android guest's boot, the first
+ * launches of its applications and the simultaneous start of several of them,
+ * rounded up to 1 MiB. A guest that keeps every vCPU translating its own large
+ * address space holds a working set the budget cannot hold and exceeds it by
+ * more (tens of MiB at 4 to 8 vCPUs); that is not counted. */
+inline constexpr std::array<std::uint32_t, 8> gadget_cache_burst_mib{
+	1, 1, 1, 1, 1, 1, 1, 2};
+
+/* x(v), in bytes; a count of zero is one, and a count above the last measured
+ * one has the last one's. */
+[[nodiscard]] constexpr std::size_t gadget_cache_burst(
+	unsigned executors) noexcept
+{
+	const std::size_t count = std::max<std::size_t>(executors, 1U);
+	return static_cast<std::size_t>(gadget_cache_burst_mib[
+			std::min<std::size_t>(count, measured_vcpu_maximum) - 1U]) *
+		static_cast<std::size_t>(mebibyte);
+}
+
 /* The tags of an executor's 262,144 slots, 16 bytes each: 4 MiB, charged to no
  * account because the slot count fixes them. It is the default slot count
  * (UML_GADGET_CACHE_SLOTS); a build that chooses another does not change what
@@ -155,17 +181,19 @@ inline constexpr std::size_t slot_tag_bytes_per_executor =
 	return budget;
 }
 
-/* E(v, G): the gadget cache in effect, the slot tags of `executors` vCPUs and
- * `engine_rest`, saturating. */
+/* E(v, G): the gadget cache in effect and the most its charge exceeds that in
+ * a burst, the slot tags of `executors` vCPUs and `engine_rest`, saturating. */
 [[nodiscard]] constexpr std::uint64_t engine_memory(std::uint64_t cache_budget,
 	unsigned executors, std::uint64_t engine_rest) noexcept
 {
 	constexpr auto unlimited = std::numeric_limits<std::uint64_t>::max();
-	const std::uint64_t cache_and_tags =
-		cache_budget > unlimited - slot_tag_bytes(executors) ?
-		unlimited : cache_budget + slot_tag_bytes(executors);
-	return cache_and_tags > unlimited - engine_rest ? unlimited :
-		cache_and_tags + engine_rest;
+	const std::uint64_t fixed =
+		slot_tag_bytes(executors) + gadget_cache_burst(executors);
+	const std::uint64_t cache_and_fixed =
+		cache_budget > unlimited - fixed ? unlimited :
+		cache_budget + fixed;
+	return cache_and_fixed > unlimited - engine_rest ? unlimited :
+		cache_and_fixed + engine_rest;
 }
 
 /* A, E_rest and S of the host GPU's budget, in bytes: the launch parameters.

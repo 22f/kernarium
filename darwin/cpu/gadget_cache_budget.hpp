@@ -66,7 +66,10 @@ namespace uml::cpu::gadget_cache {
  * flight. How long a space is in flight is the time its slowest holder takes
  * to reach its next entry and let go. An idle vCPU lets go when it next runs,
  * and holds meanwhile what its window held when it went idle, which was part
- * of what was open then.
+ * of what was open then. The guest memory budget counts the most the whole
+ * has exceeded the budget by in an Android guest's bursts
+ * (runtime/guest_memory_budget.hpp, x(v)); a guest that keeps every vCPU
+ * translating its own large address space exceeds the budget by more.
  *
  * Telling the account costs an entry a read of the host's counter and a load,
  * and a store only when the epoch has moved on, once per epoch however many
