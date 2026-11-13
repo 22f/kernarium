@@ -38,6 +38,7 @@ enum FeedbackPreview {
         services.previewPrepare = { feedback in await prepare(screen: screen, feedback: feedback) }
         services.previewKeepsConfirmation = screen == "feedback-sent"
         model.feedbackServices = services
+        if overBoot(screen) { seedStartRecord(in: model) }
         guard opensSheet(screen) else { return }
         if overHome(screen) {
             model.phase = .home
@@ -49,19 +50,48 @@ enum FeedbackPreview {
         }
     }
 
+    // MARK: Start record
+
+    /// The session record a start in progress leaves, with a few lines of what
+    /// the guest printed: the sheet reads it for the start log, as it would in
+    /// the application. It is in the temporary folder, which the system clears.
+    private static func seedStartRecord(in model: AppModel) {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("andarium-preview-diagnostics", isDirectory: true)
+        let output = """
+            [   41.2] init: starting service 'servicemanager'...
+            [   41.6] init: starting service 'hwservicemanager'...
+            [   43.0] init: starting service 'vold'...
+            [   58.4] init: Service 'vold' (pid 312) exited with status 0
+            [  102.9] init: starting service 'netd'...
+            [  184.7] init: starting service 'zygote'...
+            """
+        let record = "uml-session 6\nstate running\nend running\nstatus 0\npid 4242\nstarted 1794114290\n"
+            + "boot unfinished\nrestarts 0\nkernel-output\n" + output + "\n"
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? Data(record.utf8).write(to: folder.appendingPathComponent(BugReportAttachments.sessionRecord))
+        model.diagnosticsDirectory = folder
+    }
+
     // MARK: Drafts
 
     @MainActor
     private static func prepare(screen: String, feedback: SendFeedbackModel) async {
         let words = Words()
         switch screen {
-        case "feedback", "feedback-home", "feedback-nomail":
+        case "feedback", "feedback-home", "feedback-nomail", "feedback-boot":
             break
+        case "feedback-boot-removed":
+            // The start log was taken out: the sheet does not make it again.
+            if let log = feedback.form.attachments.items.first(where: { $0.kind == .startLog }) {
+                feedback.remove(log)
+            }
         case "feedback-filled", "feedback-details", "feedback-discard",
              "feedback-boot-filled", "feedback-boot-details", "feedback-boot-finished":
             feedback.form.problem = words.problem
             feedback.form.details = words.details
-            await attachAll(feedback, report: 8.6, photo: 2.4)
+            // A start has no bug report to attach: the log is the sheet's own.
+            await attachAll(feedback, report: overBoot(screen) ? nil : 8.6, photo: 2.4)
             if screen == "feedback-details" || screen == "feedback-boot-details" { feedback.showsInformation = true }
             if screen == "feedback-boot-finished" {
                 // The start finishes while the person writes: the sheet and the

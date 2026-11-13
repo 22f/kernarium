@@ -421,7 +421,8 @@ struct AppEntry {
         case "stopped":
             // What Stop on the slow-start notice leaves: the run ended by the person.
             model.fail(RunEnd(result: -5, stoppedByUser: true), uptimeSeconds: 203)
-        case "feedback-boot", "feedback-boot-filled", "feedback-boot-details", "feedback-boot-finished":
+        case "feedback-boot", "feedback-boot-filled", "feedback-boot-details", "feedback-boot-finished",
+             "feedback-boot-removed":
             slowBoot(stage: 3, seconds: 197)
         default:
             break
