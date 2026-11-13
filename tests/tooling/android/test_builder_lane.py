@@ -1053,6 +1053,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           core_sets_vendor_prop: bool = False,
                           missing_audio_binder_policy: bool = False,
                           missing_wifi_debug_policy: bool = False,
+                          missing_camera_fence_policy: bool = False,
                           clearkey_memfd_variant: str | None = None,
                           oversize_platform_policy: bool = False,
                           media_codecs_variant: str | None = None,
@@ -2132,6 +2133,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         if missing_wifi_debug_policy
                         else "(allow hal_wifi_default persist_vendor_debug_wifi_prop_202604 "
                         "(file (read getattr map open)))\n"
+                    )
+                    + (
+                        ""
+                        if missing_camera_fence_policy
+                        else "(allow hal_camera_default hal_graphics_composer (fd (use)))\n"
                     )
                     + (
                         "(allow adbd_202604 virtual_face_hal_prop_202604 (property_service (set)))\n"
@@ -3457,6 +3463,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("core-sets-vendor-prop", {"core_sets_vendor_prop": True}),
             ("audio-binder-policy", {"missing_audio_binder_policy": True}),
             ("wifi-debug-property-policy", {"missing_wifi_debug_policy": True}),
+            ("camera-fence-policy", {"missing_camera_fence_policy": True}),
             ("clearkey-memfd-missing", {"clearkey_memfd_variant": "missing"}),
             ("clearkey-memfd-no-write", {"clearkey_memfd_variant": "no-write"}),
             ("clearkey-memfd-isolated-apps", {"clearkey_memfd_variant": "all-apps"}),
@@ -4136,6 +4143,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "audio HAL processes call each other's binder"),
             ("wifi-debug-property-policy-cause", {"missing_wifi_debug_policy": True},
              "Wi-Fi HAL read persist_vendor_debug_wifi_prop"),
+            ("camera-fence-policy-cause", {"missing_camera_fence_policy": True},
+             "camera HAL use the display composer's file descriptors"),
             ("clearkey-memfd-missing-cause", {"clearkey_memfd_variant": "missing"},
              "ClearKey DRM HAL read, write and map the memfd files"),
             ("clearkey-memfd-no-write-cause", {"clearkey_memfd_variant": "no-write"},

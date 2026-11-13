@@ -22,7 +22,9 @@ The runner checks, in this order:
   the init action the target-files verifier requires, not something this runner exercises);
 - live: the camera application previews the synthetic chart (a screenshot is not black), and the camera
   key takes one still, a complete JPEG with Exif data inside the layout's size cap; then, on the same
-  boot, it records about four seconds of video with the back camera (a movie file of at least a second
+  boot, it switches the application from photo to video mode four times with the preview running (the
+  camera service submits every request: no "Broken pipe (-32)" and no SELinux denial that names the camera
+  HAL's domain), records about four seconds of video with the back camera (a movie file of at least a second
   with a video track), previews and takes a still with the front camera when the profile has one, and the
   camera HAL has logged no failed buffer ("every buffer of the stream is in flight", a request "not
   queued completely", a buffer "never collected");
@@ -140,6 +142,21 @@ VIDEO_MINIMUM_FPS = 20.0
 VIDEO_URI = "content://media/external/video/media"
 # The camera HAL's own tags: a failed buffer is an error or a warning of one of these.
 HAL_TAGS = ("V4l2Stream", "V4l2FrameSource", "EmulatedSensorHost")
+# The photo to video switch: the application's video activity covers its photo activity while that activity's
+# preview still repeats, and the last preview buffers come back with the display composer's fence. The camera
+# service hands such a fence to the HAL with the next request, which the policy must let the HAL use (overlay/
+# sepolicy/vendor/hal_camera_default.te). A refusal shows as an SELinux denial that names the HAL's domain and as
+# the service's "Broken pipe (-32)" for the request it could not submit; the application then gets
+# ERROR_CAMERA_DEVICE and reopens the camera, which costs the switch about a second more. It happens in some
+# switches only (about two in three with the window animations off, about one in three with them on, on an
+# image without the rule), so the step makes SWITCH_ROUNDS switches, each from a freshly started application,
+# with the animations off, and restores them.
+CAMERA_HAL_DOMAIN = "hal_camera_default"
+SWITCH_ROUNDS = 4
+SWITCH_HOLD_SECONDS = 10
+SWITCH_SETTLE_SECONDS = 8
+SWITCH_MARKER_TAG = "CamSwitch"
+ANIMATION_SCALES = ("window_animation_scale", "transition_animation_scale", "animator_duration_scale")
 
 # The cameras each synthetic profile presents, and the camera IDs Android gives them
 # (android/lineage-24/overlay/camera/hal/camera_ids.hpp).
@@ -345,6 +362,24 @@ def hal_failures(text: str) -> list[str]:
                 "was not queued completely", "did not deliver", "never collected")):
             failures.append(line.strip())
     return failures
+
+
+SWITCH_DENIAL_KIND = f"an SELinux denial naming {CAMERA_HAL_DOMAIN}"
+SWITCH_REFUSAL_KIND = '"Broken pipe (-32)" from the camera service'
+
+
+def switch_failures(text: str) -> list[tuple[str, str]]:
+    """The lines of a `logcat -d` taken across a photo to video switch that show a capture request refused, as
+    (what, line): an SELinux denial that names the camera HAL's domain, and a camera service error "Broken pipe
+    (-32)" (the status of a request that binder refused to deliver to the HAL)."""
+    found: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if re.search(r"avc:\s+denied", line) and CAMERA_HAL_DOMAIN in line:
+            found.append((SWITCH_DENIAL_KIND, line))
+        elif re.search(r"\s[EWF]\s+\S*Camera\S*\s*: .*Broken pipe \(-32\)", line):
+            found.append((SWITCH_REFUSAL_KIND, line))
+    return found
 
 
 def camera_connected(text: str, package: str) -> bool:
@@ -941,6 +976,46 @@ def check_video(guest: Guest, plan: Plan) -> None:
                       f"below {VIDEO_MINIMUM_FPS:.0f}: the preview and the recording do not share one exposure")
 
 
+def check_mode_switch(guest: Guest, plan: Plan) -> None:
+    """Photo to video with the preview running, SWITCH_ROUNDS times, each from a freshly started application and
+    with the window animations off (the covering window is then scanned out at once): after each switch the log
+    since a marker holds no capture request the camera service could not submit and no SELinux denial of the
+    camera HAL's domain. The video activity covers the photo activity's preview while it repeats, which is the
+    case the policy rule for the display composer's fence is for."""
+    front = PROFILE_CAMERAS[plan.profile][0] == "front"
+    saved = {key: guest.shell(f"settings get global {key}").strip() for key in ANIMATION_SCALES}
+    for key in ANIMATION_SCALES:
+        guest.shell(f"settings put global {key} 0")
+    try:
+        for number in range(1, SWITCH_ROUNDS + 1):
+            guest.shell(f"am force-stop {CAMERA_PACKAGE}")
+            start_camera_application(guest, front=front)
+            wait_for_chart(guest, plan.camera_ids[0], "photo")
+            time.sleep(SWITCH_HOLD_SECONDS)
+            marker = f"photo to video switch {number} of {SWITCH_ROUNDS}"
+            guest.shell(f"log -t {SWITCH_MARKER_TAG} '{marker}'")
+            start_camera_application(guest, VIDEO_ACTION, front=front)
+            time.sleep(SWITCH_SETTLE_SECONDS)
+            text = guest.shell("logcat -d -b all", timeout=180)
+            after = text[text.rfind(marker):] if marker in text else ""
+            if not after:
+                raise Failure(f"the log has no marker line for the {marker}: the switch cannot be judged")
+            failures = switch_failures(after)
+            if failures:
+                # The denial is the cause and the refusal its effect; either may come first in the log.
+                first = {kind: line for kind, line in reversed(failures)}
+                kinds = [kind for kind in (SWITCH_DENIAL_KIND, SWITCH_REFUSAL_KIND) if kind in first]
+                raise Failure(f"{' and '.join(kinds)} during the {marker}: " + " | ".join(first[kind] for kind in kinds))
+            print(f"  mode switch {number} of {SWITCH_ROUNDS}: no refused capture request, no {CAMERA_HAL_DOMAIN} denial")
+    finally:
+        try:
+            for key, value in saved.items():
+                guest.shell(f"settings delete global {key}" if value in ("", "null")
+                            else f"settings put global {key} {value}")
+        except (Failure, subprocess.TimeoutExpired) as problem:
+            print(f"  mode switch: the animation scales were not restored: {problem}")
+
+
 def check_front(guest: Guest, plan: Plan) -> None:
     """With a front camera (the profile's camera "1"): the application opens it, the preview is the chart and
     the camera key takes a still."""
@@ -984,6 +1059,7 @@ def run_checks(guest: Guest, plan: Plan) -> None:
     print(f"  provider: started again by the open, pid {running}")
     check_still(guest, plan, before)
     if plan.mode == "live":
+        check_mode_switch(guest, plan)
         check_video(guest, plan)
         check_front(guest, plan)
         check_hal_log(guest)
