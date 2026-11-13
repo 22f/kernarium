@@ -806,7 +806,9 @@ std::string_view from_whole_line(std::string_view tail) noexcept
 }
 
 /* The state: the session's lines, what it says of the boot where the guest's
- * console reports one, a message and the quoted output. */
+ * console reports one, a message and the quoted output. The text is followed
+ * by newlines to the whole of the state's area (write_state), which the
+ * readers ignore; the size returned is the text's. */
 std::size_t format_state(char *buffer, SessionEnd end, int status,
 	std::string_view message, std::string_view tail) noexcept
 {
@@ -834,18 +836,25 @@ std::size_t format_state(char *buffer, SessionEnd end, int status,
 		record.text("kernel-output\n");
 		keep_tail(record, tail);
 	}
-	return record.size();
+	const std::size_t size = std::min(record.size(), session_state_max_bytes);
+	std::memset(buffer + size, '\n', session_state_max_bytes - size);
+	return size;
 }
 
-void write_state(int descriptor, const char *text, std::size_t size) noexcept
+/* Publishes a state (formatted into a buffer of session_state_max_bytes) in
+ * one pwrite that covers the whole of the state's area. The area is never
+ * shortened between two states: a ftruncate after a shorter state left a
+ * reader that came between the two calls with the new state's prefix followed
+ * by the old state's suffix. Every writer covers the same bytes, so whichever
+ * lands last is the whole of what a reader sees, a checkpoint delayed past an
+ * end included. */
+void write_state(int descriptor, const char *text) noexcept
 {
 	ssize_t written;
 	do {
-		written = pwrite(descriptor, text, size, session_state_offset);
+		written = pwrite(descriptor, text, session_state_max_bytes,
+			session_state_offset);
 	} while (written < 0 && errno == EINTR);
-	if (written == static_cast<ssize_t>(size))
-		(void)ftruncate(descriptor,
-			static_cast<off_t>(session_state_offset + size));
 }
 
 /* A checkpoint under way (it set `state_checkpointing` before it looked at
@@ -867,8 +876,8 @@ void wait_out_state_checkpoint() noexcept
 void write_record_unguarded(int descriptor, SessionEnd end, int status,
 	std::string_view message, std::string_view tail) noexcept
 {
-	write_state(descriptor, record_text,
-		format_state(record_text, end, status, message, tail));
+	(void)format_state(record_text, end, status, message, tail);
+	write_state(descriptor, record_text);
 }
 
 void write_record(SessionEnd end, int status, std::string_view message,
@@ -885,7 +894,7 @@ void write_record(SessionEnd end, int status, std::string_view message,
 	/* A checkpoint whose write lands from here on writes this record again
 	 * (checkpoint_state); it reads the size, so the record is formatted. */
 	terminal_size.store(size, std::memory_order_seq_cst);
-	write_state(descriptor, record_text, size);
+	write_state(descriptor, record_text);
 }
 
 /* Rewrites the state of a guest whose boot has not completed when the output
@@ -913,11 +922,10 @@ void checkpoint_state(int descriptor) noexcept
 		const bool done = boot_signal.completed();
 		const std::size_t quoted = done ? 0 :
 			kernel_output_tail({checkpoint_tail, sizeof(checkpoint_tail)});
-		const std::size_t size = format_state(checkpoint_text,
-			SessionEnd::running, 0, {},
+		(void)format_state(checkpoint_text, SessionEnd::running, 0, {},
 			{checkpoint_tail, quoted});
 		if (session_open.load(std::memory_order_seq_cst)) {
-			write_state(descriptor, checkpoint_text, size);
+			write_state(descriptor, checkpoint_text);
 			checkpointed_output_end.store(output_now,
 				std::memory_order_relaxed);
 			checkpointed_completed.store(done, std::memory_order_relaxed);
@@ -928,10 +936,8 @@ void checkpoint_state(int descriptor) noexcept
 			 * this write lands and before the next line writes leaves
 			 * "running" on disk, which is what a record that was never
 			 * ended says. */
-			if (const std::size_t ended =
-				    terminal_size.load(std::memory_order_seq_cst);
-			    ended != 0)
-				write_state(descriptor, record_text, ended);
+			if (terminal_size.load(std::memory_order_seq_cst) != 0)
+				write_state(descriptor, record_text);
 		}
 	}
 	state_checkpointing.clear(std::memory_order_seq_cst);
@@ -1128,6 +1134,11 @@ bool begin_session_record(std::string_view path,
 	/* The same for a checkpoint of the state. */
 	while (state_checkpointing.test_and_set(std::memory_order_seq_cst))
 		sched_yield();
+	/* The file is as long as the record is, once, before the session's first
+	 * state: that state covers all of the state's area (write_state), and no
+	 * write after it changes the length. */
+	(void)ftruncate(descriptor,
+		static_cast<off_t>(session_state_offset + session_state_max_bytes));
 	checkpointed_output_end.store(output_end.load(std::memory_order_acquire),
 		std::memory_order_relaxed);
 	checkpointed_completed.store(false, std::memory_order_relaxed);

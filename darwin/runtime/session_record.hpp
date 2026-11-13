@@ -49,6 +49,9 @@ namespace uml::runtime {
  * record quotes is that of its own boot: what an earlier boot of the process
  * printed is not in it. An end is the last write of the state: a checkpoint
  * whose write lands after it, however late, writes the end's record again.
+ * Each state is one write of the whole state area, padded with newlines that
+ * the readers ignore, and the file is cut to its size once, at the session's
+ * begin: a reader never sees one state mixed with another.
  *
  * Every memory_checkpoint_interval_ms while a session runs, a thread of the
  * record's own writes the process's footprint, its peak and what its memory
@@ -115,7 +118,8 @@ inline constexpr std::size_t session_state_offset =
 inline constexpr std::size_t session_kernel_output_bytes = 4096;
 inline constexpr std::size_t session_state_max_bytes =
 	session_kernel_output_bytes + 1024;
-/* The most the file ever holds. */
+/* The size the file has from a session's begin on: the state's area is always
+ * written whole. */
 inline constexpr std::size_t session_record_max_bytes =
 	session_state_offset + session_state_max_bytes;
 inline constexpr unsigned memory_history_recent = 24;

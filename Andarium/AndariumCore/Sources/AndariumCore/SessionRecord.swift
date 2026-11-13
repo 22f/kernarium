@@ -74,6 +74,16 @@ public struct SessionRecord: Equatable, Sendable {
     /// runtime wrote, and is neither read nor copied beyond it.
     public static let maximumBytes = 20 << 10
 
+    /// The output's own text: the runtime pads the state's area with newlines to
+    /// its full size, so the output ends with one newline, as the guest's
+    /// last line did, and not with the padding.
+    private static func withoutPadding(_ output: String) -> String {
+        guard output.hasSuffix("\n") else { return output }
+        var text = Substring(output)
+        while text.hasSuffix("\n") { text.removeLast() }
+        return text + "\n"
+    }
+
     /// Reads a record's text; nil when it is not one.
     public init?(text: String) {
         let parts = text.components(separatedBy: "\nkernel-output\n")
@@ -94,7 +104,7 @@ public struct SessionRecord: Equatable, Sendable {
         started = fields["started"].flatMap { TimeInterval($0) }.map { Date(timeIntervalSince1970: $0) }
         ended = fields["ended"].flatMap { TimeInterval($0) }.map { Date(timeIntervalSince1970: $0) }
         message = fields["message"]
-        kernelOutput = parts.count > 1 ? parts[1] : nil
+        kernelOutput = parts.count > 1 ? Self.withoutPadding(parts[1]) : nil
         memory = fields["memory"].flatMap(Self.memory(from:))
         bootFinished = fields["boot"].flatMap { ["completed": true, "unfinished": false][$0] }
         restarts = fields["restarts"].flatMap { Int($0) }

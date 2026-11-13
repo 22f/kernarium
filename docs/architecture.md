@@ -740,10 +740,12 @@ same process. An end is the last state on disk unless the process dies between
 a delayed checkpoint's write and its repair: the end formats its record before
 it writes it, and a checkpoint whose write lands after it writes that record
 again at once. The file is text of a fixed layout
-(`uml-session 6`) that never passes 17920 bytes
-(`session_record_max_bytes`): an 8 KiB memory slot, a 4 KiB stall slot, a 512-byte
-network slot and the state with the kernel output it quotes, at most 5 KiB. Each
-part is rewritten in place by its own writer, so nothing grows with the session;
+(`uml-session 6`) of 17920 bytes (`session_record_max_bytes`) from a session's
+begin: an 8 KiB memory slot, a 4 KiB stall slot, a 512-byte
+network slot and the state with the kernel output it quotes, 5 KiB. Each
+part is rewritten in place by its own writer, so nothing grows with the session,
+and each state is one write of its whole area, padded with newlines that the
+readers ignore, so a reader never sees two states mixed;
 layouts 1 to 5, which lack the figures of the run or the network slot or the
 stall slot, still parse. The
 first 8 KiB are a memory checkpoint that a thread of its own rewrites every 2 s
