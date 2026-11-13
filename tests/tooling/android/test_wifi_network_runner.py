@@ -45,7 +45,7 @@ sys.modules[SPEC.name] = runner
 SPEC.loader.exec_module(runner)
 
 sys.path.insert(0, str(REPOSITORY / "tests/integration/support"))
-import host_gpu_reset  # noqa: E402
+import gpu_suspend_log  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_builder_lane import synthetic_resource_table  # noqa: E402
@@ -2069,44 +2069,70 @@ class CrashEvidenceAcrossASuspendTests(unittest.TestCase):
 
 
 KERNEL_GPU_ERROR = "[  186.505954][   T11] [drm:virtio_gpu_dequeue_ctrl_func] *ERROR* response 0x1204 (command 0x202)\n"
+KERNEL_OUT_OF_MEMORY = "[  186.505954][   T11] [drm:virtio_gpu_dequeue_ctrl_func] *ERROR* response 0x1201 (command 0x204)\n"
 HOST_GPU_REFUSAL = "Virtio-GPU submit rejected unknown context: id=3 bytes=44\n"
+CONTEXT_REFUSED = "Virtio-GPU: the renderer refused to create context id=3\n"
+HOST_RESET_LINE = gpu_suspend_log.RESET_LINE + " ring 1 held a deferred request\n"
 
 
-class HostGpuResetTests(unittest.TestCase):
-    """A wake after which the launcher's log shows the host's GPU device reset fails the step by that name, with
-    the first line of it: the proof classifies such a run as the known host defect, not as load or Wi-Fi."""
+class SuspendGpuLogTests(unittest.TestCase):
+    """What the launcher's log says of the GPU across a suspend: the host's own reset line is the reset, any other
+    GPU error is only an error whose cause is not established; the mark stays pending through the checks that
+    follow the wake, and a failure of the whole operation yields to the diagnosis."""
 
     def setUp(self) -> None:
         patch = mock.patch.object(runner, "time", FakeClock())
         patch.start()
         self.addCleanup(patch.stop)
+        output = contextlib.redirect_stdout(io.StringIO())
+        output.__enter__()
+        self.addCleanup(output.__exit__, None, None, None)
 
-    def test_the_first_line_of_a_reset_is_found(self) -> None:
-        text = "[ 1.0][ T1] init: x\n" + KERNEL_GPU_ERROR + HOST_GPU_REFUSAL
-        self.assertEqual(host_gpu_reset.reset_line(text), KERNEL_GPU_ERROR.strip())
-        self.assertEqual(host_gpu_reset.reset_line(HOST_GPU_REFUSAL), HOST_GPU_REFUSAL.strip())
-        self.assertIsNone(host_gpu_reset.reset_line("[ 1.0][ T1] PM: suspend exit\nVirtio-GPU vhost-user transport\n"))
-        self.assertIsNone(host_gpu_reset.reset_line(""))
+    # The two labels.
+    def test_the_hosts_reset_line_is_the_reset_whatever_else_the_log_holds(self) -> None:
+        text = "[ 1.0][ T1] init: x\n" + KERNEL_GPU_ERROR + HOST_GPU_REFUSAL + HOST_RESET_LINE
+        self.assertEqual(gpu_suspend_log.diagnosis(text), f"{gpu_suspend_log.RESET_LABEL}: {HOST_RESET_LINE.strip()}")
 
-    def test_a_wake_that_shows_the_kernels_error_fails_with_the_line(self) -> None:
-        guest = SuspendingGuest(drops=False, on_wake="PM: suspend exit\n" + KERNEL_GPU_ERROR)
-        with self.assertRaisesRegex(runner.Failure, re.escape(f"{host_gpu_reset.FAILURE}: {KERNEL_GPU_ERROR.strip()}")):
+    def test_only_an_out_of_memory_error_is_a_gpu_error_and_not_a_reset(self) -> None:
+        found = gpu_suspend_log.diagnosis("PM: suspend exit\n" + KERNEL_OUT_OF_MEMORY)
+        self.assertTrue(found.startswith(f"{gpu_suspend_log.ERRORS_LABEL}: {KERNEL_OUT_OF_MEMORY.strip()}"), found)
+        self.assertIn("the cause is not established", found)
+        self.assertNotIn(gpu_suspend_log.RESET_LABEL, found)
+
+    def test_a_refusal_of_an_unknown_context_after_a_failed_creation_is_not_a_reset(self) -> None:
+        found = gpu_suspend_log.diagnosis(CONTEXT_REFUSED + HOST_GPU_REFUSAL)
+        self.assertTrue(found.startswith(f"{gpu_suspend_log.ERRORS_LABEL}: {HOST_GPU_REFUSAL.strip()}"), found)
+        self.assertNotIn(gpu_suspend_log.RESET_LABEL, found)
+
+    def test_the_first_error_line_is_quoted(self) -> None:
+        found = gpu_suspend_log.diagnosis(KERNEL_GPU_ERROR + HOST_GPU_REFUSAL)
+        self.assertTrue(found.startswith(f"{gpu_suspend_log.ERRORS_LABEL}: {KERNEL_GPU_ERROR.strip()} "), found)
+
+    def test_a_log_without_a_gpu_line_has_no_diagnosis(self) -> None:
+        self.assertIsNone(gpu_suspend_log.diagnosis("[ 1.0][ T1] PM: suspend exit\nVirtio-GPU vhost-user transport\n"))
+        self.assertIsNone(gpu_suspend_log.diagnosis(""))
+
+    def test_the_reset_phrase_inside_another_line_is_not_the_hosts_line(self) -> None:
+        echoed = "[ 5.0][ T1] note: " + HOST_RESET_LINE
+        self.assertIsNone(gpu_suspend_log.diagnosis(echoed))
+
+    # A wake that shows it, through the real method.
+    def test_a_wake_that_shows_the_hosts_reset_fails_with_the_reset_label_and_line(self) -> None:
+        guest = SuspendingGuest(drops=False, on_wake="PM: suspend exit\n" + KERNEL_GPU_ERROR + HOST_RESET_LINE)
+        with self.assertRaisesRegex(runner.Failure, re.escape(f"{gpu_suspend_log.RESET_LABEL}: {HOST_RESET_LINE.strip()}")):
             guest.suspend_and_wake()
 
-    def test_a_wake_that_shows_the_hosts_refusal_fails_with_the_line(self) -> None:
-        guest = SuspendingGuest(drops=True, on_wake=HOST_GPU_REFUSAL)
-        with self.assertRaisesRegex(runner.Failure, re.escape(f"{host_gpu_reset.FAILURE}: {HOST_GPU_REFUSAL.strip()}")):
-            guest.suspend_and_wake()
+    def test_a_wake_that_shows_only_gpu_errors_fails_as_gpu_errors(self) -> None:
+        for on_wake, line in ((KERNEL_GPU_ERROR, KERNEL_GPU_ERROR), (HOST_GPU_REFUSAL, HOST_GPU_REFUSAL)):
+            with self.subTest(line=line.strip()[:40]):
+                guest = SuspendingGuest(drops=True, on_wake=on_wake)
+                with self.assertRaises(runner.Failure) as raised:
+                    guest.suspend_and_wake()
+                self.assertTrue(str(raised.exception).startswith(f"{gpu_suspend_log.ERRORS_LABEL}: {line.strip()}"))
+                self.assertNotIn(gpu_suspend_log.RESET_LABEL, str(raised.exception))
 
-    def test_the_section_that_wakes_the_guest_fails_by_the_name(self) -> None:
-        guest = SuspendingGuest(drops=False, on_wake=KERNEL_GPU_ERROR)
-        report = runner.Report()
-        report.section("the warning shows again after a suspend and wake", guest, guest.suspend_and_wake)
-        self.assertEqual(len(report.failures), 1)
-        self.assertIn(host_gpu_reset.FAILURE, report.failures[0])
-
-    def test_lines_from_before_the_suspend_are_not_a_reset(self) -> None:
-        guest = SuspendingGuest(drops=False, before=KERNEL_GPU_ERROR + HOST_GPU_REFUSAL, on_wake="PM: suspend exit\n")
+    def test_lines_from_before_the_suspend_are_not_in_its_interval(self) -> None:
+        guest = SuspendingGuest(drops=False, before=KERNEL_GPU_ERROR + HOST_RESET_LINE, on_wake="PM: suspend exit\n")
         guest.suspend_and_wake()
 
     def test_the_launchers_log_is_read_from_the_mark(self) -> None:
@@ -2118,6 +2144,121 @@ class HostGpuResetTests(unittest.TestCase):
             log.write_text("before\n" + KERNEL_GPU_ERROR)
             self.assertEqual(runner.Guest.log_since(stand_in, size), KERNEL_GPU_ERROR)
             self.assertEqual(runner.Guest.log_size(types.SimpleNamespace(log=Path(directory) / "gone")), 0)
+
+    # Output that arrives after the step has returned.
+    class LateOutput(SuspendingGuest):
+        """The first graphics work after the wake prints its refusal while the section waits for the station."""
+
+        def __init__(self, line: str = HOST_RESET_LINE, **arguments: object) -> None:
+            super().__init__(drops=False, **arguments)
+            self.line = line
+
+        def wait_joined(self, seconds: float, what: str) -> None:
+            self.launcher_log += self.line
+
+        def dump(self) -> str:
+            return ENABLED_DUMP
+
+    def test_a_reset_that_arrives_while_the_section_waits_for_the_station_fails_the_section(self) -> None:
+        guest = self.LateOutput(on_wake="PM: suspend exit\n")
+        report = runner.Report()
+        report.section("the station joins again after a suspend and wake", guest,
+                       lambda: runner.check_suspend(guest))
+        self.assertEqual(len(report.failures), 1, report.failures)
+        self.assertIn(f"{gpu_suspend_log.RESET_LABEL}: {HOST_RESET_LINE.strip()}", report.failures[0])
+
+    def test_late_gpu_errors_fail_the_section_as_gpu_errors(self) -> None:
+        guest = self.LateOutput(line=HOST_GPU_REFUSAL, on_wake="PM: suspend exit\n")
+        report = runner.Report()
+        report.section("the station joins again after a suspend and wake", guest,
+                       lambda: runner.check_suspend(guest))
+        self.assertIn(f"{gpu_suspend_log.ERRORS_LABEL}: {HOST_GPU_REFUSAL.strip()}", report.failures[0])
+        self.assertIn("the cause is not established", report.failures[0])
+
+    def test_a_section_that_failed_for_another_reason_still_gets_the_diagnosis_first(self) -> None:
+        guest = self.LateOutput(on_wake="PM: suspend exit\n")
+
+        def body() -> None:
+            guest.suspend_and_wake()
+            guest.wait_joined(1, "x")
+            raise runner.Failure("the picture is still")
+
+        report = runner.Report()
+        report.section("a section", guest, body)
+        self.assertTrue(report.failures[0].startswith(f"a section: {gpu_suspend_log.RESET_LABEL}: "), report.failures)
+        self.assertIn("(the section had failed with: the picture is still)", report.failures[0])
+
+    def test_a_clean_section_ends_the_pending_mark_and_a_diagnosis_is_reported_once(self) -> None:
+        guest = SuspendingGuest(drops=False, on_wake="PM: suspend exit\n")
+        report = runner.Report()
+        report.section("clean", guest, guest.suspend_and_wake)
+        self.assertEqual(report.failures, [])
+        self.assertIsNone(guest.suspend_log().mark)
+        late = self.LateOutput(on_wake="PM: suspend exit\n")
+        report.section("late", late, lambda: runner.check_suspend(late))
+        report.section("the next section", late, lambda: None)
+        self.assertEqual(len(report.failures), 1, report.failures)
+
+    def test_the_mark_stays_pending_after_the_step_returns(self) -> None:
+        guest = SuspendingGuest(drops=False, on_wake="PM: suspend exit\n")
+        guest.suspend_and_wake()
+        self.assertIsNotNone(guest.suspend_log().mark)
+
+    def test_a_line_that_arrived_after_the_step_is_not_lost_to_the_next_suspend(self) -> None:
+        guest = SuspendingGuest(drops=False, on_wake="PM: suspend exit\n")
+        guest.suspend_and_wake()
+        guest.launcher_log += HOST_RESET_LINE
+        with self.assertRaisesRegex(runner.Failure, re.escape(f"before another suspend: {gpu_suspend_log.RESET_LABEL}")):
+            guest.suspend_and_wake()
+
+    # A failure of the whole operation.
+    class AdbNeverAnswers(SuspendingGuest):
+        def adb_answers(self) -> str | None:
+            return "no answer"
+
+    def test_an_adb_timeout_after_the_wake_yields_to_the_diagnosis_it_hides(self) -> None:
+        guest = self.AdbNeverAnswers(drops=False, on_wake=HOST_RESET_LINE)
+        with self.assertRaises(runner.Failure) as raised:
+            guest.suspend_and_wake()
+        text = str(raised.exception)
+        self.assertTrue(text.startswith(f"{gpu_suspend_log.RESET_LABEL}: {HOST_RESET_LINE.strip()}"), text)
+        self.assertIn("(the step had failed with: adb answers after the wake: no answer", text)
+        self.assertIsInstance(raised.exception.__cause__, runner.Failure)
+        self.assertFalse(guest.capture.expect_end)
+
+    def test_an_adb_timeout_with_no_gpu_line_is_kept_as_it_was(self) -> None:
+        guest = self.AdbNeverAnswers(drops=False, on_wake="PM: suspend exit\n")
+        with self.assertRaisesRegex(runner.Failure, r"^adb answers after the wake: no answer \(after 120 s\)$") as raised:
+            guest.suspend_and_wake()
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertFalse(guest.capture.expect_end)
+
+    def test_a_failed_resume_of_the_log_stream_yields_to_the_diagnosis_and_keeps_its_kind(self) -> None:
+        guest = SuspendingGuest(drops=False, on_wake=KERNEL_GPU_ERROR)
+        guest.capture = mock.Mock()
+        guest.capture.resumed.side_effect = runner.CaptureFailure("the old log stream did not end")
+        with self.assertRaises(runner.CaptureFailure) as raised:
+            guest.suspend_and_wake()
+        self.assertIn(gpu_suspend_log.ERRORS_LABEL, str(raised.exception))
+        self.assertIn("the old log stream did not end", str(raised.exception))
+        self.assertFalse(guest.capture.expect_end)
+
+    def test_a_failed_resume_of_the_log_stream_with_no_gpu_line_is_the_original(self) -> None:
+        guest = SuspendingGuest(drops=False, on_wake="PM: suspend exit\n")
+        guest.capture = mock.Mock()
+        failure = runner.CaptureFailure("the old log stream did not end")
+        guest.capture.resumed.side_effect = failure
+        with self.assertRaises(runner.CaptureFailure) as raised:
+            guest.suspend_and_wake()
+        self.assertIs(raised.exception, failure)
+
+    def test_an_interrupt_is_not_turned_into_a_diagnosis(self) -> None:
+        guest = SuspendingGuest(drops=False, on_wake=HOST_RESET_LINE)
+        guest.capture = mock.Mock()
+        guest.capture.resumed.side_effect = KeyboardInterrupt()
+        with self.assertRaises(KeyboardInterrupt):
+            guest.suspend_and_wake()
+        self.assertFalse(guest.capture.expect_end)
 
 
 class LogStreamDrainTests(unittest.TestCase):
@@ -2217,13 +2358,19 @@ class SimulatedGuest(StubbedGuest):
     def check(self, when: float) -> None:
         self.checks_done += 1
         if self.stock:
-            # Both probes ask the stock servers and both are answered: the check passes.
+            # The probes ask the stock servers: with the HTTPS flag unset both are asked and both are answered; with
+            # the flag at 0 the HTTP probe alone is asked. A host that reaches no stock server fails both probes.
             http, https = (runner.STOCK_HTTP_URL, runner.STOCK_HTTPS_URL)
             if self.faults.get("pass_elsewhere"):
                 http, https = "http://198.51.100.7/generate_204", "https://198.51.100.7/generate_204"
-            self.add(f"PROBE_HTTP {http} time=64ms ret=204 request={{}} headers={{}}")
-            self.add(f"PROBE_HTTPS {https} time=107ms ret=204 request={{}} headers={{}}")
-            self.conclude(when, not self.faults.get("stock_servers_unreachable"))
+            reachable = not self.faults.get("stock_servers_unreachable")
+            failure = "Probe failed with exception java.net.UnknownHostException: no route"
+            self.add(f"PROBE_HTTP {http} time=64ms ret=204 request={{}} headers={{}}" if reachable
+                     else f"PROBE_HTTP {http} {failure}")
+            if not self.https_off:
+                self.add(f"PROBE_HTTPS {https} time=107ms ret=204 request={{}} headers={{}}" if reachable
+                         else f"PROBE_HTTPS {https} {failure}")
+            self.conclude(when, reachable)
             return
         if self.scenario is None:
             self.add("PROBE_HTTPS https://192.0.2.1/generate_204 Probe failed with exception java.net.SocketTimeoutException")
@@ -2544,8 +2691,41 @@ class SimulatedSectionTests(unittest.TestCase):
             runner.check_stock_servers_clear(self.guest(pass_elsewhere=True))
 
     def test_stock_servers_that_the_host_cannot_reach_leave_the_warning(self) -> None:
+        guest = self.guest(stock_servers_unreachable=True)
         with self.assertRaisesRegex(runner.Failure, r"the stock servers leave no warning \(the host must reach them\)"):
-            runner.check_stock_servers_clear(self.guest(stock_servers_unreachable=True))
+            runner.check_stock_servers_clear(guest)
+        probes = [message for _, message in guest.log if message.startswith("PROBE_HTTP")]
+        self.assertGreaterEqual(len(probes), 2, probes)
+        self.assertTrue(all("Probe failed" in probe and "ret=204" not in probe for probe in probes), probes)
+        self.assertIn(runner.CHECK_FAILED_LINE, [message for _, message in guest.log])
+
+    def test_a_flag_that_a_deletion_left_at_zero_cannot_pass_the_stock_servers_check(self) -> None:
+        # The stock probes then ask the HTTP probe alone: no HTTPS probe of the stock URL answered 204.
+        class RetainsFlag(SimulatedGuest):
+            def delete_settings(self, keys: tuple[str, ...] | list[str]) -> None:
+                kept = self.settings.get(runner.USE_HTTPS_FLAG)
+                super().delete_settings(keys)
+                if kept is not None:
+                    self.settings[runner.USE_HTTPS_FLAG] = kept
+
+        guest = RetainsFlag(self.server, self.clock)
+        guest.settings[runner.USE_HTTPS_FLAG] = "0"
+        with self.assertRaisesRegex(runner.Failure, f"no PROBE_HTTPS of {re.escape(runner.STOCK_HTTPS_URL)} that "
+                                                    "received 204"):
+            runner.check_stock_servers_clear(guest)
+        self.assertTrue(guest.https_off)
+        self.assertFalse(any(message.startswith("PROBE_HTTPS ") for _, message in guest.log))
+
+    def test_the_stock_branch_asks_the_https_probe_unless_the_flag_is_at_zero(self) -> None:
+        for flag, https in (({}, True), ({runner.USE_HTTPS_FLAG: "0"}, False)):
+            with self.subTest(flag=flag):
+                guest = self.guest()
+                guest.rejoin_with_settings(flag, clear=runner.ALL_CHECK_SETTINGS)
+                self.clock.now += 5
+                guest.advance()
+                lines = [message for _, message in guest.log]
+                self.assertEqual(any(line.startswith("PROBE_HTTPS ") for line in lines), https, lines)
+                self.assertIn(runner.CHECK_PASSED_LINE, lines)
 
     def test_the_failed_check_of_a_black_hole_shows_only_the_warning(self) -> None:
         self.assertIn("validated, joined and enabled", runner.check_failed_check_warns(self.guest()))

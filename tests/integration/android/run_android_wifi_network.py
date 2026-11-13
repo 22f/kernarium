@@ -60,10 +60,12 @@ show Android's own Wi-Fi mark. The runner shows all of it:
   private DNS name evaluated; on the image under test the old "validated
   without probes" statement is a failure), and is joined again after
   a guest suspend and wake (the host's route, `suspend` and `wake` on the
-  management console; a wake after which the launcher's log, with the guest
-  kernel's console in it, shows the host's GPU device reset across the suspend
-  fails the step by that name and quotes the first line: it is a known host
-  defect that leaves the guest's graphics gone, not a Wi-Fi failure) and after
+  management console; the launcher's log, with the guest kernel's console in
+  it, is read from before the suspend to the end of the section, whenever its
+  lines arrive and however the section ends: the host's own reset line fails it
+  as a host GPU reset across the suspend, a known host defect that leaves the
+  guest's graphics gone, and any other GPU error line as GPU errors whose cause
+  is not established, neither a Wi-Fi failure; see gpu_suspend_log) and after
   a restart; a network the user marked metered, or turned Auto-connect off for,
   keeps that after a restart (the script has nothing to save once the station
   has joined); a forgotten network is still forgotten after a restart; and Wi-Fi
@@ -125,7 +127,7 @@ REPOSITORY = HERE.parents[2]
 ANDROID_TOOLS = REPOSITORY / "android" / "lineage-24" / "tools"
 BOOT_SCRIPT = REPOSITORY / "android" / "lineage-24" / "overlay" / "tools" / "kernarium_wifi_network.sh"
 sys.path.insert(0, str(REPOSITORY / "tests" / "integration" / "support"))
-import host_gpu_reset  # noqa: E402
+import gpu_suspend_log  # noqa: E402
 import slot_ports  # noqa: E402
 
 
@@ -1139,31 +1141,56 @@ class Guest:
 
     def log_size(self) -> int:
         """How much the launcher's own log (the host's messages and the guest kernel's console) holds now."""
-        return host_gpu_reset.log_size(self.log)
+        return gpu_suspend_log.log_size(self.log)
 
     def log_since(self, offset: int) -> str:
-        return host_gpu_reset.log_since(self.log, offset)
+        return gpu_suspend_log.log_since(self.log, offset)
+
+    def suspend_log(self) -> "gpu_suspend_log.Pending":
+        """The mark of the guest's last suspend, pending until the section that suspended it settles it."""
+        pending = self.__dict__.get("pending_suspend")
+        if pending is None:
+            pending = self.__dict__["pending_suspend"] = gpu_suspend_log.Pending(self.log_size, self.log_since)
+        return pending
+
+    def settle_suspend_log(self) -> str | None:
+        """What the launcher's log shows of the GPU since the last suspend, and the mark ended: the end of a
+        section calls it, whether the section passed or not, because output can arrive after the suspend step."""
+        pending = self.__dict__.get("pending_suspend")
+        return None if pending is None else pending.settle()
 
     def suspend_and_wake(self) -> None:
         """The route the host's quiesce takes. The log stream may end with the connection: that is expected
-        until the guest answers again, and a stream that ended starts another segment. A wake after which the
-        launcher's log shows the host's GPU device reset fails the step by that name, with the first line."""
+        until the guest answers again, and a stream that ended starts another segment. The launcher's log is
+        marked before the suspend and the mark stays pending through the checks that follow the wake, as
+        gpu_suspend_log says: it is scanned when this returns, again by the section that ends (Report.section),
+        and before another suspend takes a new mark. A failure of the whole operation (the suspend, the wait for
+        adb, the log stream's resume) is replaced by the GPU diagnosis when the log shows one, and kept otherwise."""
+        pending = self.suspend_log()
+        earlier = pending.settle()
+        if earlier is not None:
+            raise Failure(f"before another suspend: {earlier}")
         capture = self.capture
         if capture is not None:
             capture.confirm(self)
             capture.going_down()
-        mark = self.log_size()
+        pending.begin()
         try:
             self.suspend_and_wake_guest()
             if capture is not None:
                 capture.resumed(self)
-        except BaseException:
+        except BaseException as problem:
             if capture is not None:
                 capture.expect_end = False
+            found = pending.settle() if isinstance(problem, Exception) else None
+            if found is not None:
+                kind = CaptureFailure if isinstance(problem, CaptureFailure) else Failure
+                raise kind(f"{found} (the step had failed with: {problem})") from problem
             raise
-        reset = host_gpu_reset.reset_line(self.log_since(mark))
-        if reset is not None:
-            raise Failure(f"{host_gpu_reset.FAILURE}: {reset}")
+        found = pending.peek()
+        if found is not None:
+            pending.settle()
+            raise Failure(found)
 
     def suspend_and_wake_guest(self) -> None:
         # A suspend can be refused while the guest is busy (EBUSY); it is asked for again.
@@ -1306,6 +1333,11 @@ class Report:
             note = body()
         except (Failure, boot_android.LauncherError, subprocess.TimeoutExpired, OSError) as failed:
             problem = failed
+        # A suspend's GPU output can arrive after its step returned, while the section went on: the mark is
+        # scanned here whether the section passed or not, and the diagnosis is the section's failure.
+        gpu = guest.settle_suspend_log() if guest is not None else None
+        if gpu is not None:
+            problem = Failure(gpu if problem is None else f"{gpu} (the section had failed with: {problem})")
         if capture is not None:
             try:
                 crashed = capture.end(guest)
