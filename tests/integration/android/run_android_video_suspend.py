@@ -13,6 +13,12 @@ this runner shows it with the apps that use the devices:
   the management console, the suspend asked again while the guest answers
   busy, as the host's client does) and by the route Android takes itself with
   its screen off and adb disconnected, ended by a ``wake``;
+- the launcher's log from before each suspend to the end of the check that
+  follows it (output can arrive after the wake) must show no GPU error: the
+  host's own reset line fails the step as a host GPU reset across the
+  suspend, the known host defect that leaves the guest's graphics gone; the
+  guest kernel's refused commands or the host's refusal of an unknown context
+  without it fail as GPU errors, whose cause is not established;
 - after the wake the picture is moving again, no thread of the guest stays in
   uninterruptible sleep, ``screenrecord`` ends with status 0 and a file, and
   Back closes the player, which returns only if the device handed every
@@ -36,6 +42,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import functools
 import hashlib
 import importlib.util
 import os
@@ -53,6 +60,7 @@ from collections.abc import Callable
 HERE = pathlib.Path(__file__).resolve().parent
 REPOSITORY = HERE.parents[2]
 sys.path.insert(0, str(REPOSITORY / "tests" / "integration" / "support"))
+import gpu_suspend_log  # noqa: E402
 import slot_ports  # noqa: E402
 
 SPEC = importlib.util.spec_from_file_location("boot_android", REPOSITORY / "tools" / "boot_android.py")
@@ -268,6 +276,58 @@ def suspend_by_guest(guest: Guest) -> None:
 ROUTES = {"host": suspend_by_host, "guest": suspend_by_guest}
 
 
+def pending_of(guest: Guest) -> "gpu_suspend_log.Pending":
+    """The mark of the guest's last suspend, pending until the check that suspended it settles it."""
+    pending = guest.__dict__.get("pending_suspend")
+    if pending is None:
+        pending = guest.__dict__["pending_suspend"] = gpu_suspend_log.Pending(
+            lambda: gpu_suspend_log.log_size(guest.log), lambda offset: gpu_suspend_log.log_since(guest.log, offset))
+    return pending
+
+
+def suspend(guest: Guest, route: str) -> None:
+    """One suspend by `route`, and the proof that the guest answers after it. The launcher's log is marked before
+    it and the mark stays pending through the checks that follow the wake (`settles` ends it): output can arrive
+    after this returns, when the first graphics work reaches a missing context. A failure of the whole operation,
+    the route and its adb waits included, is replaced by the GPU diagnosis when the log shows one (the guest that
+    does not answer is its symptom) and kept otherwise; so is a mark an earlier suspend left pending."""
+    pending = pending_of(guest)
+    earlier = pending.begin()
+    if earlier is not None:
+        raise Failure(f"before the {route} suspend: {earlier}")
+    try:
+        ROUTES[route](guest)
+        guest.shell("echo guest-answers")
+    except Exception as problem:
+        found = pending.settle()
+        if found is not None:
+            raise Failure(f"after the {route} suspend: {found} (the step had failed with: {problem})") from problem
+        raise
+    found = pending.peek()
+    if found is not None:
+        pending.settle()
+        raise Failure(f"after the {route} suspend: {found}")
+
+
+def settles(check: Callable[..., None]) -> Callable[..., None]:
+    """A check that suspends the guest: when it ends, passed or failed, the pending mark is scanned and ended, and a
+    GPU diagnosis is the failure."""
+    @functools.wraps(check)
+    def settled(guest: Guest, *arguments: object) -> None:
+        try:
+            check(guest, *arguments)
+        except Exception as problem:
+            found = pending_of(guest).settle()
+            if found is not None:
+                raise Failure(f"{found} (the check had failed with: {problem})") from problem
+            raise
+        found = pending_of(guest).settle()
+        if found is not None:
+            raise Failure(found)
+
+    return settled
+
+
 # ---- What the apps do.
 
 def start_scrolling(guest: Guest) -> None:
@@ -326,11 +386,12 @@ def check_no_thread_in_d(guest: Guest, route: str) -> None:
     wait_for(f"no thread in uninterruptible sleep after the {route} suspend", SLEEP_SECONDS, clear, guest)
 
 
+@settles
 def check_player(guest: Guest, media_id: int, route: str) -> None:
     print(f"player across a {route} suspend")
     opened = len(guest.closes())
     play(guest, media_id)
-    ROUTES[route](guest)
+    suspend(guest, route)
     wait_for("the picture moves after the wake", MOVING_SECONDS,
              lambda: None if guest.moving() else "the picture is still", guest)
     check_no_thread_in_d(guest, route)
@@ -353,6 +414,7 @@ def check_player(guest: Guest, media_id: int, route: str) -> None:
     wait_for(f"the player returns its buffers after the {route} suspend", CLOSE_SECONDS, decoder_closed, guest)
 
 
+@settles
 def check_recording(guest: Guest, route: str) -> None:
     print(f"screenrecord across a {route} suspend")
     opened = len(guest.closes())
@@ -362,7 +424,7 @@ def check_recording(guest: Guest, route: str) -> None:
         guest.shell(f"setsid sh -c 'screenrecord --time-limit {RECORD_SECONDS} {RECORDING} >{RECORDING_STATUS} 2>&1; "
                     f"echo screenrecord-rc=$? >>{RECORDING_STATUS}' >/dev/null 2>&1 &")
         time.sleep(10)
-        ROUTES[route](guest)
+        suspend(guest, route)
 
         def finished() -> str | None:
             status = guest.shell(f"cat {RECORDING_STATUS}")

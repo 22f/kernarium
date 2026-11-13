@@ -128,11 +128,12 @@ public struct LaunchOverrides: Equatable, Sendable {
 /// version stored for it is ignored.
 ///
 /// The resolution (`ResolutionChoices`) follows the device until the person
-/// sets it: native where the system lets the application use more than
-/// `nativeDefaultAboveBytes`, and where it does not the choice nearest 1.5.
-/// A choice made on Home is kept as made and the default never replaces it.
-/// Native is stored as the symbol and not as the screen's number, which
-/// differs between devices and display zooms.
+/// sets it: the choice nearest 1.5 (240 dpi) where the system holds the
+/// application's memory to `lowMemoryAtMostBytes` or less, and the choice
+/// nearest 2.0 (320 dpi) elsewhere, native where that is the nearest. A choice
+/// made on Home is kept as made and the default never replaces it. Native is
+/// stored as the symbol and not as the screen's number, which differs between
+/// devices and display zooms.
 public struct DisplayOptions: Codable, Equatable, Sendable {
     /// The stored form's key in the defaults database.
     public static let storageKey = "andarium.display"
@@ -144,17 +145,25 @@ public struct DisplayOptions: Codable, Equatable, Sendable {
         self.chosenScale = chosenScale
     }
 
-    /// The resolution is native by default above this much memory the system
-    /// lets the application use (4 GiB).
-    public static let nativeDefaultAboveBytes: UInt64 = 4 << 30
+    /// A device whose memory limit is this much (4 GiB) or less is a
+    /// low-memory device, whose default resolution is lower.
+    public static let lowMemoryAtMostBytes: UInt64 = 4 << 30
 
-    /// The default for `memoryLimitBytes`, what the system holds the
-    /// application's memory to (`MemoryLimit.bytes`; zero where it sets none,
-    /// a Mac, which has more than the threshold): native above it, and the
-    /// choice nearest 1.5 elsewhere.
+    /// Whether `memoryLimitBytes`, what the system holds the application's
+    /// memory to (`MemoryLimit.bytes`), is a low-memory device's. Zero is no
+    /// limit, a Mac, which has more than the threshold.
+    public static func isLowMemory(_ memoryLimitBytes: UInt64) -> Bool {
+        memoryLimitBytes != 0 && memoryLimitBytes <= lowMemoryAtMostBytes
+    }
+
+    /// The default for `memoryLimitBytes`: the choice nearest 1.5 on a
+    /// low-memory device and the one nearest 2.0 elsewhere. It is `.native`
+    /// where that is the choice nearest: a screen whose native scale is 2.0, or
+    /// one with no choice that near.
     public static func defaultScale(memoryLimitBytes: UInt64, choices: ResolutionChoices) -> GuestDisplayScale {
-        if memoryLimitBytes == 0 || memoryLimitBytes > nativeDefaultAboveBytes { return .native }
-        return choices.scale(at: choices.index(nearest: .factor(ResolutionChoices.preferredMiddle)))
+        let wanted = isLowMemory(memoryLimitBytes)
+            ? ResolutionChoices.lowMemoryDefault : ResolutionChoices.highMemoryDefault
+        return choices.scale(at: choices.index(nearest: .factor(wanted)))
     }
 
     /// The resolution as the guest draws: the person's choice, else the
@@ -164,27 +173,17 @@ public struct DisplayOptions: Codable, Equatable, Sendable {
             chosenScale ?? Self.defaultScale(memoryLimitBytes: memoryLimitBytes, choices: choices))
     }
 
-    // The stored form keeps `scale`. An earlier form kept Retina mode as
-    // `retina` and `chosen` (whether the person set it): their choice of on is
-    // native and of off 1.0, and stays their choice. A form from before the
-    // default has no `chosen`: its `true` was a choice, and its `false` may
-    // only have been the old default, so it counts as no choice.
-    private enum CodingKeys: String, CodingKey { case scale, retina, chosen }
+    // The stored form keeps `scale`, which the Resolution control writes. The
+    // forms before it kept Retina mode as `retina`, and from the default on as
+    // `chosen` too; whatever they hold is no choice, so the person who comes
+    // from them gets today's default (once, since a choice made afterwards is
+    // stored as `scale`).
+    private enum CodingKeys: String, CodingKey { case scale }
 
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        if values.contains(.scale) {
-            // A value that is no scale is no choice.
-            chosenScale = try? values.decode(GuestDisplayScale.self, forKey: .scale)
-            return
-        }
-        let retina = try values.decodeIfPresent(Bool.self, forKey: .retina) ?? false
-        let chosen: Bool
-        switch try values.decodeIfPresent(Bool.self, forKey: .chosen) {
-        case let stated?: chosen = stated
-        case nil: chosen = retina
-        }
-        chosenScale = chosen ? (retina ? .native : .points) : nil
+        // A value that is no scale is no choice.
+        chosenScale = try? values.decode(GuestDisplayScale.self, forKey: .scale)
     }
 
     public func encode(to encoder: any Encoder) throws {

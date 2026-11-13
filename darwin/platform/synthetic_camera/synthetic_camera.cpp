@@ -34,6 +34,8 @@ constexpr std::uint32_t markerTop(std::uint32_t height) noexcept
 }
 // An exposure of 1/120 s at ISO 100 is the chart's unit brightness.
 constexpr double referenceExposure = 1.0 / 120.0 * 100.0;
+// What the automatic exposure runs at (1/120 s at ISO 100) without a compensation.
+constexpr std::uint64_t automaticExposure = 8'333'333;
 constexpr std::uint32_t whiteLevel = 16383;
 constexpr std::uint32_t blackLevel = 1024;
 
@@ -434,6 +436,11 @@ struct RunningVideo {
     std::uint32_t requestedHeight {};
     std::uint32_t frameRate {};
     std::uint32_t counter {};
+    // How long the last frame lasted: its period, or its exposure when that was longer.
+    std::uint64_t duration {};
+    // The start of the frame the timer is producing, on the camera's clock: its timestamp, and the instant that its
+    // deadline and the next one are counted from.
+    std::uint64_t startNanoseconds {};
     std::chrono::steady_clock::time_point next;
 };
 
@@ -610,7 +617,12 @@ public:
             // A camera the system moved out of its anchor goes on capturing in the other format, as the
             // platform's does; the client must not pass those frames on.
             if (!interrupted() || core_.movedOutOfAnchor) produceFrame(camera);
-            core_.clock += 1'000'000'000ull / rate;
+            std::uint64_t advance = 1'000'000'000ull / rate;
+            {
+                std::lock_guard lock(mutex_);
+                if (cameras_[camera].video) advance = std::max(advance, cameras_[camera].video->duration);
+            }
+            core_.clock += advance;
         }
     }
 
@@ -834,8 +846,7 @@ private:
         auto& exposure = result.exposure;
         exposure.activeCamera = std::uint32_t(camera);
         exposure.aperture = info.aperture;
-        exposure.frameDurationNanoseconds = frameRate ? 1'000'000'000ull / frameRate : 0;
-        exposure.focalLengthMillimetres = 6.9f;
+        // No focal length: the lens's own, which the device takes from the camera's description.
         exposure.noiseProfile = {1e-4f, 1e-6f, 1e-4f, 1e-6f, 1e-4f, 1e-6f, 1e-4f, 1e-6f};
         exposure.neutralPoint = {0.5f, 1.0f, 0.6f};
         // Exposure.
@@ -846,12 +857,31 @@ private:
             exposure.ae = CameraControlState::inactive;
             result.scene.gain = exposure.exposureNanoseconds / 1e9 * exposure.iso / referenceExposure;
         } else {
-            exposure.exposureNanoseconds = 8'333'333;
-            exposure.iso = std::max<std::uint32_t>(100, info.isoMinimum);
+            // The automatic exposure holds the chart at its unit brightness, and a compensation of n stops
+            // moves the picture by n stops. The exposure takes what the frame the rate asks for and the
+            // range the camera states allow (a camera that states none runs the exposure as asked), and
+            // the sensitivity takes the rest: the exposure times the sensitivity is what the picture's
+            // gain follows, and what the result reports.
+            const std::uint32_t baseIso = std::max<std::uint32_t>(100, info.isoMinimum);
+            const double wanted = double(automaticExposure) * std::exp2(double(settings.exposureBiasStops));
+            double run = wanted;
+            if (frameRate) run = std::min(run, 1e9 / double(frameRate));
+            if (info.exposureMaximumNanoseconds > 0)
+                run = std::clamp(run, double(info.exposureMinimumNanoseconds), double(info.exposureMaximumNanoseconds));
+            exposure.exposureNanoseconds = std::max<std::uint64_t>(1, std::uint64_t(std::llround(run)));
+            double iso = double(baseIso) * wanted / double(exposure.exposureNanoseconds);
+            // A camera that states no sensitivity range is stated as [base, 100] by the HAL: it runs at the base.
+            if (info.isoMaximum > 0) iso = std::clamp(iso, double(info.isoMinimum), double(info.isoMaximum));
+            else iso = std::clamp(iso, double(baseIso), double(std::max<std::uint32_t>(baseIso, 100)));
+            exposure.iso = std::uint32_t(std::llround(iso));
             exposure.ae = settings.exposureMode == CameraExposureMode::locked ? CameraControlState::locked
                                                                               : CameraControlState::converged;
-            result.scene.gain = std::pow(2.0, settings.exposureBiasStops);
+            result.scene.gain = double(exposure.exposureNanoseconds) / double(automaticExposure) * double(exposure.iso) /
+                                double(baseIso);
         }
+        // A frame lasts at least as long as its exposure, whatever the rate asked for.
+        if (frameRate)
+            exposure.frameDurationNanoseconds = std::max<std::uint64_t>(1'000'000'000ull / frameRate, exposure.exposureNanoseconds);
         // Focus.
         // A new trigger scans in any mode, and the lens ends on the chart; a manual
         // lens moves only when the distance was written anew; a locked or manual
@@ -917,12 +947,20 @@ private:
     void produceFrame(std::size_t camera)
     {
         CameraFrame frame;
+        std::uint64_t start = 0;
         {
             std::lock_guard lock(mutex_);
             auto& state = cameras_[camera];
             if (stopped_ || !state.video) return;
+            start = state.video->startNanoseconds;
             auto outcome = this->outcome(camera, state.video->frameRate);
             outcome.scene.counter = ++state.video->counter;
+            // A frame lasts as long as its exposure: a longer one delays the next (the timer has scheduled
+            // the next one a period after this one).
+            const auto period = 1'000'000'000ull / state.video->frameRate;
+            state.video->duration = outcome.exposure.frameDurationNanoseconds;
+            if (!core_.options_.manualClock && state.video->duration > period)
+                state.video->next += std::chrono::nanoseconds(state.video->duration - period);
             if (core_.movedOutOfAnchor) ++core_.framesOutsideAnchor;
             // The picture counts itself while a frame holds it.
             const auto counts = core_.frames;
@@ -944,7 +982,9 @@ private:
             frame.exposure = outcome.exposure;
         }
         const auto latency = std::uint64_t(core_.options_.latencyMilliseconds) * 1'000'000;
-        const auto now = core_.options_.manualClock ? core_.clock.load() : realNow();
+        // The timer's frame starts when it was scheduled to (or when it ran, if that was a period late): one instant for
+        // the deadline and the timestamp, not the time the frame took to render and reach the delegate.
+        const auto now = core_.options_.manualClock ? core_.clock.load() : (start != 0 ? start : realNow());
         frame.timestampNanoseconds = now > latency ? now - latency : 0;
         delegate_.cameraFrame(camera, std::move(frame));
     }
@@ -1002,6 +1042,7 @@ private:
         std::unique_lock lock(mutex_);
         while (!stopped_) {
             const auto now = std::chrono::steady_clock::now();
+            const auto nowNanoseconds = realNow();
             std::optional<std::chrono::steady_clock::time_point> wake;
             std::vector<std::size_t> due;
             std::vector<std::pair<std::size_t, CameraStillRequest>> stills;
@@ -1014,8 +1055,29 @@ private:
                 if (!state.video) continue;
                 if (state.video->next <= now) {
                     due.push_back(camera);
-                    state.video->next += std::chrono::nanoseconds(1'000'000'000ull / state.video->frameRate);
-                    if (state.video->next < now) state.video->next = now;
+                    // The frame starts at its deadline, unless the timer thread was busy then (a delegate callback that ran
+                    // past it): a thread cannot start a frame before it is back, so that one starts when the previous
+                    // work ended, which is never before that callback returned. A thread that was only asleep past the
+                    // deadline (wake-up latency) keeps the schedule, or the rate would fall by that latency every frame;
+                    // one that was asleep a period or more (a stall) starts now, with no burst to catch up. The next
+                    // frame is a period after the start, and produceFrame adds what its exposure takes beyond the
+                    // period: the next deadline is a whole frame duration after the start of this frame.
+                    const auto period = std::chrono::nanoseconds(1'000'000'000ull / state.video->frameRate);
+                    auto begin = state.video->next;
+                    std::uint64_t beginNanoseconds = nowNanoseconds;
+                    if (begin < busyEnd_) {
+                        begin = busyEnd_;
+                        beginNanoseconds = busyEndNanoseconds_;
+                    } else {
+                        const auto late = std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - begin).count());
+                        beginNanoseconds = nowNanoseconds > late ? nowNanoseconds - late : nowNanoseconds;
+                    }
+                    if (now - begin >= period) {
+                        begin = now;
+                        beginNanoseconds = nowNanoseconds;
+                    }
+                    state.video->next = begin + period;
+                    state.video->startNanoseconds = beginNanoseconds;
                 }
                 if (!wake || state.video->next < *wake) wake = state.video->next;
             }
@@ -1026,6 +1088,8 @@ private:
                     if (!interrupted()) produceFrame(camera);
                 }
                 lock.lock();
+                busyEnd_ = std::chrono::steady_clock::now();
+                busyEndNanoseconds_ = realNow();
                 continue;
             }
             if (wake) wake_.wait_until(lock, *wake);
@@ -1040,6 +1104,9 @@ private:
     std::vector<CameraState> cameras_;
     std::thread worker_;
     bool stopped_ {};
+    // When the timer thread last came back from producing frames and stills, on both clocks.
+    std::chrono::steady_clock::time_point busyEnd_ {};
+    std::uint64_t busyEndNanoseconds_ {};
 };
 
 }  // namespace
