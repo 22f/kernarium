@@ -307,7 +307,9 @@ struct AppEntry {
             if screen == "session-camera-off-notice" { model.previewCameraNotice(.blockedInUse) }
         case "settings", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
              "settings-feedback", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
-             "install-app-bundle", "bug-report":
+             "install-app-bundle", "bug-report", "install-data", "install-done-without-data", "install-done-data-not-placed",
+             "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-missing-split",
+             "install-part-too-large":
             let session = model.session
             switch screen {
             case "settings-adb":
@@ -377,11 +379,14 @@ struct AppEntry {
     /// The screens that show a guest operation on the full-screen overlay.
     private static let operationScreens: Set<String> = [
         "bug-report", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
-        "install-app-bundle",
+        "install-app-bundle", "install-data", "install-done-without-data", "install-done-data-not-placed", "install-encrypted",
+        "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-missing-split", "install-part-too-large",
     ]
     /// The ones that show how an install ended.
     private static let resultScreens: Set<String> = [
-        "install-done", "install-failed", "install-not-apk", "install-app-bundle",
+        "install-done", "install-failed", "install-not-apk", "install-app-bundle", "install-done-without-data",
+        "install-done-data-not-placed", "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged",
+        "install-missing-split", "install-part-too-large",
     ]
 
     /// A guest operation's overlay as it looks part way, or at its end: what
@@ -403,6 +408,41 @@ struct AppEntry {
                 title: String(localized: "Installing app"),
                 detail: String(localized: "Sending part \(2) of \(3)\u{2026}"),
                 progress: 0.45, cancel: cancel
+            )
+        case "install-data":
+            // The app is in; its data files are being copied, and Cancel is back for the copy.
+            return BusyState(
+                title: String(localized: "Installing app"),
+                detail: String(localized: "Copying data file \(1) of \(2)\u{2026}"),
+                progress: 0.6, cancel: cancel
+            )
+        case "install-done-without-data":
+            return BusyState(
+                title: String(localized: "App installed"),
+                detail: String(localized: "\(file) is installed in the virtual machine, but not all of its data files were copied. The app may not work without them. Install the file again to copy them."),
+                result: BusyResult(failed: false, dismiss: dismiss)
+            )
+        case "install-done-data-not-placed":
+            return BusyState(
+                title: String(localized: "App installed"),
+                detail: String(localized: "\(file) is installed in the virtual machine, but not all of its data files were copied. The app may not work without them."),
+                result: BusyResult(failed: false, dismiss: dismiss)
+            )
+        case "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-part-too-large":
+            let refusal: InstallRefusal = switch screen {
+            case "install-encrypted": .encrypted
+            case "install-damaged-or-encrypted": .damagedOrEncrypted
+            case "install-no-app": .noApp
+            case "install-part-too-large": .partTooLarge
+            default: .damaged
+            }
+            return BusyState(
+                title: AppModel.installFailure, detail: refusal.message, result: BusyResult(failed: true, dismiss: dismiss)
+            )
+        case "install-missing-split":
+            return BusyState(
+                title: AppModel.installFailure, detail: PackageInstallMessages.message(forCode: "FAILED_MISSING_SPLIT"),
+                result: BusyResult(failed: true, dismiss: dismiss)
             )
         case "install-legacy":
             // The first attempt is over and the question is up: the overlay

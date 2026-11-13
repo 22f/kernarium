@@ -775,30 +775,35 @@ is on. `AndariumCore/Adb` speaks the protocol.
   `--bypass-low-target-sdk-block`, once (`LegacyInstallFlow`). Nothing else in
   Andarium sends that flag, and the choice is kept nowhere.
 - **An app in parts** installs from one file: .apks, .xapk or .apkm, never
-  .zip, and an .aab is refused. The file is recognised by its content, a ZIP
-  central directory read in place (`ZipArchive`: bounded entry count, name
-  length and directory size, raw inflate and CRC through the system zlib,
-  nothing unpacked or copied), and its parts are classified by entry names
-  and the container's own metadata; the APKs inside are never opened. The
-  base, the configuration splits, and the ABI splits for the first of the
-  virtual machine's `ro.product.cpu.abilist` that the app has go into one
-  install session over the same connection, each part read from the archive
-  as it is written (`install-create`, `install-write -S` with the exact
-  length, `install-commit`; `ContainerInstallOperation`,
-  `PackageInstallCommand`). A session that is not committed is abandoned on a
-  fresh connection when the install fails or is cancelled, and the older-app
-  retry opens a new session with the flag, so no session outlives the
-  install. Each APK inside is held to the 4 GiB limit; the file itself may be
-  larger, and its footprint does not grow with it. A file with encrypted
-  entries, no app, or parts that do not fit together is refused, and nothing
-  is installed. An .xapk's OBB files are copied once the app is in, to
-  `Android/obb/<package>/` of internal storage and nowhere else (the path must
-  be exactly that, with a plain `.obb` name): each goes to a hidden partial
-  name as an import does, covered by the same ledger, and is moved into place
-  only after its length and checksum have been verified. Other data in the
-  file (`Android/data`, say) is not placed. The copy has its own Cancel, and a
-  stop or a failure in it leaves the app installed with a result that says
-  its data could not all be copied.
+  .zip, and an .aab is refused. The file is recognised by its content, not its
+  name: an APK under one of those names installs as an APK, and a file that is
+  not a ZIP, or is cut short, is damaged. It is read in place, never unpacked
+  or copied, under bounds on what a hostile file can ask for (the entry count,
+  the sizes, and the time, which a cancel ends; `ZipArchive`). The APKs inside
+  are never opened. A bundletool .apks is read through its table of contents:
+  the one variant made for the guest's Android is installed, with the splits
+  of the processor the guest prefers, and a universal .apks installs as one
+  APK; a table that cannot be read, or names no variant for the guest, is a
+  damaged file and nothing is guessed from the names. The other layouts are
+  classified by entry names and the container's own metadata. The parts go
+  into one install session over the same connection, each read from the
+  archive as it is written and checked when it ends; a session that was not
+  committed is abandoned on a fresh connection when the install fails or is
+  cancelled (not when the guest is gone or the session's creation was not
+  answered, which leaves it to Android), and the older-app retry opens a new
+  session with the flag. Only the package manager's whole answer being
+  `Success` installs. Each APK inside is held to the 4 GiB limit; the file
+  itself may be larger, and its footprint does not grow with it. A file with
+  encrypted entries, no app, or parts that do not fit together is refused, and
+  nothing is installed. The OBB files of an .xapk, or an .apkm that lists
+  them, are copied once the app is in, to `Android/obb/<package>/` of
+  internal storage and nowhere else, and only for a package the package
+  manager has checked against the base APK: the session is created for the
+  package the file names. Each goes to a hidden partial name as an import
+  does, covered by the same ledger, and is moved into place only after it has
+  been verified. Other data in the file (`Android/data`, say) is not placed.
+  The copy has its own Cancel, and a stop or a failure in it leaves the app
+  installed, with a result that says its data was not all copied.
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB
