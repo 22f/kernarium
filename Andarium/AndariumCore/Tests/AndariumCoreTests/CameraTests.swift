@@ -53,9 +53,71 @@ struct CameraTests {
         #expect(all.filter(\.offered) == [.notDetermined, .restricted, .denied, .authorized])
     }
 
-    @Test func onlyOtherAppsSharingTheScreenRaisesTheNotice() {
-        let all: [CameraCapture] = [.idle, .streaming, .interrupted, .interruptedByMultitasking, .interruptedBySystemPressure]
-        #expect(all.filter { CameraNotice.isUp(for: $0) } == [.interruptedByMultitasking])
+    @Test func onlyOtherAppsSharingTheScreenAndABlockedOpenRaiseANotice() {
+        let all: [CameraCapture] = [
+            .idle, .streaming, .interrupted, .interruptedByMultitasking, .interruptedBySystemPressure, .blockedInUse,
+        ]
+        #expect(all.compactMap { CameraNotice.raised(by: $0) } == [.pausedForOtherApps, .cameraOff])
+        #expect(CameraNotice.raised(by: .interruptedByMultitasking) == .pausedForOtherApps)
+        #expect(CameraNotice.raised(by: .blockedInUse) == .cameraOff)
+    }
+
+    @Test func theCameraOffNoticeFollowsTheOpenAndGoesWhenTheGuestClosesTheCamera() {
+        var state = CameraNoticeState()
+        #expect(state.showing(canTurnOn: true) == nil)
+        state.captureChanged(.blockedInUse)
+        #expect(state.showing(canTurnOn: true) == .cameraOff)
+        state.captureChanged(.idle)
+        #expect(state.showing(canTurnOn: true) == nil)
+    }
+
+    @Test func aDismissedCameraOffNoticeStaysGoneUntilTheGuestOpensTheCameraAgain() {
+        var state = CameraNoticeState()
+        state.captureChanged(.blockedInUse)
+        state.dismiss()
+        #expect(state.showing(canTurnOn: true) == nil)
+        // The runtime says nothing more for the same open, and a repeat changes nothing.
+        state.captureChanged(.blockedInUse)
+        #expect(state.showing(canTurnOn: true) == nil, "the same open does not raise it again")
+        state.captureChanged(.idle)
+        #expect(state.showing(canTurnOn: true) == nil)
+        state.captureChanged(.blockedInUse)
+        #expect(state.showing(canTurnOn: true) == .cameraOff, "a new open does")
+        // Dismissing with nothing up changes nothing for the next one.
+        state.captureChanged(.idle)
+        state.dismiss()
+        state.captureChanged(.blockedInUse)
+        #expect(state.showing(canTurnOn: true) == .cameraOff)
+    }
+
+    @Test func theCameraOffNoticeWaitsForARowThatCanBeTurnedOn() {
+        var state = CameraNoticeState()
+        state.captureChanged(.blockedInUse)
+        #expect(state.showing(canTurnOn: false) == nil, "a device with no camera to share, or a switch already on, has nothing to tell")
+        #expect(state.showing(canTurnOn: true) == .cameraOff)
+        // The other notice does not depend on the row.
+        state.captureChanged(.interruptedByMultitasking)
+        #expect(state.showing(canTurnOn: false) == .pausedForOtherApps)
+    }
+
+    @Test func aDismissedNoticeOfOneKindDoesNotHideTheOtherKind() {
+        var state = CameraNoticeState()
+        state.captureChanged(.interruptedByMultitasking)
+        state.dismiss()
+        #expect(state.showing(canTurnOn: true) == nil)
+        state.captureChanged(.blockedInUse)
+        #expect(state.showing(canTurnOn: true) == .cameraOff)
+        state.captureChanged(.streaming)
+        state.captureChanged(.interruptedByMultitasking)
+        #expect(state.showing(canTurnOn: true) == .pausedForOtherApps, "the end of a notice's state forgets its dismissal")
+    }
+
+    @Test func anInterruptionOtherThanSharingTheScreenKeepsTheStateButRaisesNothing() {
+        var state = CameraNoticeState()
+        for capture in [CameraCapture.streaming, .interrupted, .interruptedBySystemPressure] {
+            state.captureChanged(capture)
+            #expect(state.capture == capture && state.showing(canTurnOn: true) == nil)
+        }
     }
 
     @Test func theRowOffersACameraByTheLayoutsRuleAndTheIPadAppOnAMacNone() {

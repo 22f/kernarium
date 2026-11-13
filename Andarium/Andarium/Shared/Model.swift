@@ -487,10 +487,10 @@ final class AppModel {
     /// preview's system mode have one; a preview without it takes the access
     /// as given.
     @ObservationIgnored var camera: CameraController?
-    /// What the host is doing for the guest's cameras, from the runtime.
-    private(set) var cameraCapture = CameraCapture.idle
-    /// The person dismissed the notice for the interruption now in force.
-    private var cameraNoticeDismissed = false
+    /// What the host is doing for the guest's cameras, from the runtime, and
+    /// whether the person put the notice it raised away.
+    private(set) var cameraNotice = CameraNoticeState()
+    var cameraCapture: CameraCapture { cameraNotice.capture }
     /// The question about a permission the person is being asked, if any.
     var permissionPrompt: PermissionPrompt?
     /// The person went to Settings to allow the microphone: when Andarium is
@@ -1788,26 +1788,32 @@ final class AppModel {
 
     /// The runtime reports what the host is doing for the guest's cameras.
     func cameraCaptureChanged(_ capture: CameraCapture) {
-        if !CameraNotice.isUp(for: capture) { cameraNoticeDismissed = false }
-        cameraCapture = capture
+        cameraNotice.captureChanged(capture)
     }
 
-    /// Whether the session says the camera is paused because other apps share
-    /// the screen: it goes when the interruption ends or the person dismisses
-    /// it.
-    var cameraNoticeShowing: Bool {
-        CameraNotice.isUp(for: cameraCapture) && !cameraNoticeDismissed
+    /// The notice the session shows about the camera: that it is paused
+    /// because other apps share the screen, or that a guest app opened a
+    /// camera while Camera is off. Either goes when its cause ends (the
+    /// interruption ends, or the guest closes the camera) or the person
+    /// dismisses it, and the next one raises it again. Camera off is said only
+    /// where the row can be turned on: not on a device with no camera to share,
+    /// and not when the switch is on.
+    var cameraNoticeKind: CameraNotice? {
+        cameraNotice.showing(canTurnOn: cameraAccess.offered && !cameraShownOn)
     }
+
+    var cameraNoticeShowing: Bool { cameraNoticeKind != nil }
 
     func dismissCameraNotice() {
-        cameraNoticeDismissed = true
+        cameraNotice.dismiss()
     }
 
     #if !APP_STORE
-    /// The Simulator preview plays the notice: it has no runtime to interrupt.
-    /// The App Store configuration leaves this out.
-    func previewCameraNotice() {
-        cameraCapture = .interruptedByMultitasking
+    /// The Simulator preview plays a camera notice: it has no runtime to
+    /// interrupt, and its guest has no camera to open. The App Store
+    /// configuration leaves this out.
+    func previewCameraNotice(_ capture: CameraCapture = .interruptedByMultitasking) {
+        cameraNotice.captureChanged(capture)
     }
     #endif
 

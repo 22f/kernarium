@@ -2153,6 +2153,28 @@
         }
       }
     },
+    "Camera is off" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "カメラがオフです"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相机已关闭"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相機已關閉"
+          }
+        }
+      }
+    },
     "Camera is restricted" : {
       "localizations" : {
         "ja" : {
@@ -9489,6 +9511,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "再試一次"
+          }
+        }
+      }
+    },
+    "Turn on Camera in Capabilities, then start the virtual machine again." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“デバイス機能”で“カメラ”をオンにしてから、仮想マシンをもう一度起動してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在“设备功能”中打开“相机”，然后再次启动虚拟机。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "請在「裝置功能」中開啟「相機」，然後再次啟動虛擬機器。"
           }
         }
       }

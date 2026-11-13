@@ -50,14 +50,34 @@ final class CameraController {
 }
 
 /// The words of the Camera setting: the row's detail line, its alerts, the
-/// notes under Capabilities and the notice in a session. They are one place so
+/// notes under Capabilities and the notices in a session. They are one place so
 /// the text can change without touching the logic.
 enum CameraWords {
     static let title = String(localized: "Camera")
     static let denied = String(localized: "Not allowed in Settings")
     static let restricted = String(localized: "Restricted on this device")
     static let noCamera = String(localized: "This device has no camera to share.")
-    static let noticeTitle = String(localized: "Camera paused while other apps are on screen")
+    static let pausedTitle = String(localized: "Camera paused while other apps are on screen")
+    static let offTitle = String(localized: "Camera is off")
+    /// The row only changes on Home, so the notice says what is true: turn it
+    /// on there and start the virtual machine again.
+    static let offDetail = String(localized: "Turn on Camera in Capabilities, then start the virtual machine again.")
+
+    /// The notice over the session: its one line, and the line under it where
+    /// it has one.
+    static func noticeTitle(for notice: CameraNotice) -> String {
+        switch notice {
+        case .pausedForOtherApps: pausedTitle
+        case .cameraOff: offTitle
+        }
+    }
+
+    static func noticeDetail(for notice: CameraNotice) -> String? {
+        switch notice {
+        case .pausedForOtherApps: nil
+        case .cameraOff: offDetail
+        }
+    }
 
     /// The line under Camera: why it cannot be used; none otherwise.
     static func detail(for access: CameraAccess) -> String? {

@@ -74,14 +74,60 @@ public enum CameraCapture: Equatable, Sendable {
     case interruptedByMultitasking
     /// The same, because the device is hot.
     case interruptedBySystemPressure
+    /// The session is blocked and a guest app has a camera open: it gets black
+    /// frames and nothing is captured. The runtime says it once for each open.
+    case blockedInUse
 }
 
-/// The notice an iPad shows while other apps share the screen: the camera
-/// pauses then, and the guest gets black frames until they no longer do. Only
-/// that interruption raises it.
-public enum CameraNotice {
-    public static func isUp(for capture: CameraCapture) -> Bool {
-        capture == .interruptedByMultitasking
+/// A notice the session shows about the camera, over the guest.
+public enum CameraNotice: Equatable, Sendable {
+    /// An iPad shows it while other apps share the screen: the camera pauses
+    /// then, and the guest gets black frames until they no longer do.
+    case pausedForOtherApps
+    /// A guest app opened a camera while Camera is off: it got black frames.
+    /// The row decides at the start of the run and nothing changes it until
+    /// the guest powers off, so the notice says to turn it on and start the
+    /// virtual machine again.
+    case cameraOff
+
+    /// What the host's state raises, before the screens decide whether the
+    /// notice can say anything true.
+    public static func raised(by capture: CameraCapture) -> CameraNotice? {
+        switch capture {
+        case .interruptedByMultitasking: .pausedForOtherApps
+        case .blockedInUse: .cameraOff
+        case .idle, .streaming, .interrupted, .interruptedBySystemPressure: nil
+        }
+    }
+}
+
+/// The session's camera notice: what the host reports, and whether the person
+/// has put the notice away. A dismissed notice stays away for the open or the
+/// interruption that raised it; the next one raises it again.
+public struct CameraNoticeState: Equatable, Sendable {
+    public private(set) var capture = CameraCapture.idle
+    private var dismissed: CameraNotice?
+
+    public init() {}
+
+    /// The runtime reports what the host is doing for the guest's cameras.
+    public mutating func captureChanged(_ capture: CameraCapture) {
+        if CameraNotice.raised(by: capture) == nil { dismissed = nil }
+        self.capture = capture
+    }
+
+    public mutating func dismiss() {
+        dismissed = CameraNotice.raised(by: capture)
+    }
+
+    /// The notice to show now. The Camera-is-off notice tells the person to
+    /// turn the row on, so it waits for a row that can be turned on: `canTurnOn`
+    /// is false for a device with no camera to share and for a switch that is
+    /// already on.
+    public func showing(canTurnOn: Bool) -> CameraNotice? {
+        guard let notice = CameraNotice.raised(by: capture), notice != dismissed else { return nil }
+        if notice == .cameraOff, !canTurnOn { return nil }
+        return notice
     }
 }
 

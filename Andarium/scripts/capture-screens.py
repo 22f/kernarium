@@ -273,6 +273,7 @@ SHOTS: list[Shot] = [
     s("session-network-cellular", "Guest", "session-network-cellular", "The notice over the running guest that iOS denies Andarium cellular data, with the way to Settings.", dark=True),
     s("session-network-wifi", "Guest", "session-network-wifi", "The notice over the running guest that iOS denies Andarium Wi-Fi, with the way to Settings.", dark=True),
     s("session-camera-notice", "Guest", "session-camera-notice", "The notice over the running guest that the camera is paused while other apps share the screen (iPad Split View or Slide Over).", dark=True),
+    s("session-camera-off-notice", "Guest", "session-camera-off-notice", "The notice over the running guest that Camera is off after an app in the guest opened a camera, with how to turn it on (Capabilities, then start the virtual machine again).", dark=True),
     s("session-setup", "Guest", "session-setup", "The guest's own first-run setup screen."),
     s("session-off", "Guest", "session-off", "The guest's screen after it powered off."),
     s("space-pause", "Guest", "space-pause", "The running guest paused because the device is nearly out of space: the screen over it with Resume and Shut down.", dark=True),

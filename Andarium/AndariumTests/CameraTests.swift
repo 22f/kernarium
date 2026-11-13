@@ -220,7 +220,7 @@ struct CameraFlowTests {
 
     // MARK: The notice for other apps sharing the screen
 
-    @Test func theNoticeFollowsTheMultitaskingInterruptionAlone() {
+    @Test func theNoticeFollowsTheMultitaskingInterruptionAloneWhileCameraIsOn() {
         let s = setup(.authorized, chosen: true)
         #expect(!s.model.cameraNoticeShowing)
         for capture in [CameraCapture.streaming, .interrupted, .interruptedBySystemPressure] {
@@ -250,6 +250,76 @@ struct CameraFlowTests {
         s.model.cameraCaptureChanged(.interruptedByMultitasking)
         s.model.runEnded(RunEnd(result: 0), uptimeSeconds: 10)
         #expect(!s.model.cameraNoticeShowing && s.model.cameraCapture == .idle)
+    }
+
+    // MARK: The notice that Camera is off
+
+    @Test func aBlockedGuestOpeningACameraRaisesTheCameraOffNoticeAndItsCloseTakesItBack() {
+        let s = setup(.notDetermined)
+        #expect(s.model.cameraMode == .blocked && s.model.cameraNoticeKind == nil)
+        s.model.cameraCaptureChanged(.blockedInUse)
+        #expect(s.model.cameraNoticeKind == .cameraOff && s.model.cameraNoticeShowing)
+        s.model.cameraCaptureChanged(.idle)
+        #expect(s.model.cameraNoticeKind == nil)
+    }
+
+    @Test func aDismissedCameraOffNoticeIsNotRaisedAgainForTheSameOpenButIsForANewOne() {
+        let s = setup(.authorized)
+        s.model.cameraCaptureChanged(.blockedInUse)
+        s.model.dismissCameraNotice()
+        #expect(s.model.cameraNoticeKind == nil)
+        s.model.cameraCaptureChanged(.blockedInUse)
+        #expect(s.model.cameraNoticeKind == nil, "the same open does not raise it again")
+        s.model.cameraCaptureChanged(.idle)
+        s.model.cameraCaptureChanged(.blockedInUse)
+        #expect(s.model.cameraNoticeKind == .cameraOff, "a new open does")
+    }
+
+    @Test func theEndOfARunClearsTheCameraOffNotice() {
+        let s = setup(.authorized)
+        s.model.cameraCaptureChanged(.blockedInUse)
+        s.model.runEnded(RunEnd(result: 0), uptimeSeconds: 10)
+        #expect(s.model.cameraNoticeKind == nil && s.model.cameraCapture == .idle)
+        s.model.cameraCaptureChanged(.blockedInUse)
+        #expect(s.model.cameraNoticeKind == .cameraOff, "the next run's first open raises it")
+    }
+
+    @Test func theCameraOffNoticeIsRaisedWhereTheRowCanBeTurnedOnAndNowhereElse() {
+        // Camera off while iOS has not been asked, or has refused: the row can be tried.
+        for access in [CameraAccess.notDetermined, .authorized, .denied, .restricted] {
+            let s = setup(access)
+            s.model.cameraCaptureChanged(.blockedInUse)
+            #expect(s.model.cameraNoticeKind == .cameraOff, "access \(access)")
+        }
+        // A device with no camera to share has no row to turn on, and the guest has no camera to open.
+        let none = setup(.unavailable)
+        none.model.cameraCaptureChanged(.blockedInUse)
+        #expect(none.model.cameraNoticeKind == nil)
+        // With the switch on the notice would contradict the row.
+        let on = setup(.authorized, chosen: true)
+        on.model.cameraCaptureChanged(.blockedInUse)
+        #expect(on.model.cameraNoticeKind == nil)
+    }
+
+    @Test func theNoticeIsAboutTheNextStartBecauseTheRowOnlyChangesOnHome() {
+        let s = setup(.authorized)
+        s.model.cameraCaptureChanged(.blockedInUse)
+        #expect(s.model.cameraNoticeKind == .cameraOff)
+        // Turning the row on, as Home does between runs, is what the notice
+        // asks for: the session it applies to is the next one.
+        s.model.setCamera(true)
+        #expect(s.model.cameraMode == .live)
+        #expect(s.model.cameraNoticeKind == nil)
+    }
+
+    @Test func theCameraOffWordsSayWhatToDo() {
+        #expect(CameraWords.noticeTitle(for: .cameraOff) == "Camera is off")
+        #expect(CameraWords.noticeDetail(for: .cameraOff)
+            == "Turn on Camera in Capabilities, then start the virtual machine again.")
+        #expect(CameraWords.noticeTitle(for: .pausedForOtherApps) == CameraWords.pausedTitle)
+        #expect(CameraWords.noticeDetail(for: .pausedForOtherApps) == nil)
+        // The row the words name is on Home, under the section they name.
+        #expect(CameraWords.title == "Camera")
     }
 
     // MARK: The runtime's words
@@ -334,13 +404,14 @@ struct CameraFlowTests {
             (KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED, .interrupted),
             (KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_MULTITASKING, .interruptedByMultitasking),
             (KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_SYSTEM_PRESSURE, .interruptedBySystemPressure),
+            (KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE, .blockedInUse),
         ]
         for (state, capture) in said {
             #expect(LiveRuntime.cameraCapture(runtimeState: Int32(state)) == capture)
         }
         // A state this application does not know is an interruption without the notice.
         let unknown = LiveRuntime.cameraCapture(runtimeState: 99)
-        #expect(unknown == .interrupted && !CameraNotice.isUp(for: unknown))
+        #expect(unknown == .interrupted && CameraNotice.raised(by: unknown) == nil)
     }
 
     // MARK: The notes under Capabilities
@@ -367,7 +438,7 @@ struct CameraFlowTests {
     @Test func theWordsAreThoseOfTheDesign() {
         #expect(CameraWords.title == "Camera")
         #expect(CameraWords.noCamera == "This device has no camera to share.")
-        #expect(CameraWords.noticeTitle == "Camera paused while other apps are on screen")
+        #expect(CameraWords.pausedTitle == "Camera paused while other apps are on screen")
     }
 }
 
