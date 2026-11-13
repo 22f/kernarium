@@ -44,11 +44,15 @@ struct BootView: View {
         let current = frozen ?? stage
         VStack(spacing: 0) {
             statusLine(frozen: frozen != nil)
-            ScrollView {
-                content(guest: guest, system: model.system, steps: steps, current: current)
-                    .containerRelativeFrame(.vertical, alignment: .center) { length, _ in length }
+            // Centred while it fits; taller than the screen (the notice, at the
+            // largest text size), it scrolls from its top.
+            GeometryReader { proxy in
+                ScrollView {
+                    content(guest: guest, system: model.system, steps: steps, current: current)
+                        .frame(minHeight: proxy.size.height, alignment: .center)
+                }
+                .scrollBounceBehavior(.basedOnSize)
             }
-            .scrollBounceBehavior(.basedOnSize)
         }
         .onCardHalf(.boot)
         .background { backdrop }
@@ -270,6 +274,7 @@ struct BootView: View {
             } label: {
                 Text(model.slowStart.stopping ? "Stopping\u{2026}" : "Stop")
                     .lineLimit(lineLimit)
+                    .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity, minHeight: 32)
             }
             .buttonStyle(.bordered)
@@ -283,6 +288,7 @@ struct BootView: View {
                 } label: {
                     Text("Send feedback", tableName: "Feedback")
                         .lineLimit(lineLimit)
+                        .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity, minHeight: 32)
                 }
                 .buttonStyle(.bordered)
