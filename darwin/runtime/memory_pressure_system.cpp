@@ -177,15 +177,15 @@ struct Hub final {
 	MemoryPressureWatch::State *retry_state{};
 	std::uint64_t retry_epoch{};
 
-	void record(std::uint64_t flags) noexcept
+	/* `seen` is the epoch the callback sampled before it read the flags. */
+	void record(std::uint64_t flags, std::uint64_t seen) noexcept
 	{
 		const std::lock_guard lock{ring_mutex};
 		if (ring_count == ring.size()) {
 			ring_first = (ring_first + 1U) % ring.size();
 			--ring_count;
 		}
-		ring[(ring_first + ring_count) % ring.size()] =
-			{flags, epoch.load(std::memory_order_relaxed)};
+		ring[(ring_first + ring_count) % ring.size()] = {flags, seen};
 		++ring_count;
 	}
 
@@ -284,11 +284,14 @@ void retry_due(void *context) noexcept
  * serious flag (pressure_level_from_dispatch), and that residual is all that is
  * left of the ambiguity: the normal flag merged with a higher one reads as the
  * higher level, and the next event corrects it. The delivery is recorded, and
- * the policy queue handles it in its turn. */
+ * the policy queue handles it in its turn. The epoch is sampled before the
+ * flags are read, so that a callback the scheduler stops between the two, across
+ * a stop and a new start of the watch, hands its old notification to nobody. */
 void level_changed(void *context) noexcept
 {
 	Hub &hub = *static_cast<Hub *>(context);
-	hub.record(dispatch_source_get_data(hub.source));
+	const std::uint64_t seen = hub.epoch.load();
+	hub.record(dispatch_source_get_data(hub.source), seen);
 	dispatch_source_merge_data(hub.deliveries, 1);
 }
 

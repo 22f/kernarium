@@ -117,7 +117,63 @@ void countingDeliveriesHandler(void *context)
 	event_allocations.fetch_add(allocations_counted);
 }
 
+/* Holds the first read of the pressure source's flags until the test lets it
+ * go: a source callback the scheduler stops after it began, before it read
+ * what the system raised. */
+struct FlagReadHold final {
+	std::mutex gate;
+	std::condition_variable changed;
+	bool armed = false;
+	bool inside = false;
+	bool release = false;
+
+	void arm()
+	{
+		const std::lock_guard lock{gate};
+		armed = true;
+		inside = false;
+		release = false;
+	}
+
+	/* Called by the read: waits when armed, once. */
+	void hold() noexcept
+	{
+		std::unique_lock lock{gate};
+		if (!armed)
+			return;
+		armed = false;
+		inside = true;
+		changed.notify_all();
+		(void)changed.wait_for(lock, std::chrono::seconds{20},
+			[&] { return release; });
+	}
+
+	bool wait_inside()
+	{
+		std::unique_lock lock{gate};
+		return changed.wait_for(lock, std::chrono::seconds{20},
+			[&] { return inside; });
+	}
+
+	void let_go()
+	{
+		const std::lock_guard lock{gate};
+		release = true;
+		changed.notify_all();
+	}
+} flag_read_hold;
+
 } // namespace
+
+extern "C" uintptr_t dispatch_source_get_data(dispatch_source_t source)
+{
+	using Get = uintptr_t (*)(dispatch_source_t);
+	static const auto real = reinterpret_cast<Get>(
+		dlsym(RTLD_NEXT, "dispatch_source_get_data"));
+	if (source == pressure_source.load())
+		flag_read_hold.hold();
+	return real(source);
+}
 
 extern "C" void dispatch_source_set_event_handler_f(
 	dispatch_source_t source, dispatch_function_t handler)
@@ -2127,6 +2183,43 @@ void aWatchEndsWithDeliveriesQueuedBehindAHeldPolicyCall()
 	capture.restore();
 }
 
+/* A source callback that was running while the watch ended and another began
+ * is a callback of the earlier watch: what it read reaches no one. */
+void aCallbackThatMeetsAStopAndAStartHandsItsNotificationToNoOne()
+{
+	uml::platform::publishGpuCacheReclaimer(nullptr);
+	observed_trims = 0;
+	Heard first;
+	Heard second;
+	StderrCapture capture;
+	uml::runtime::set_pressure_observer(&observeInto, &first);
+	auto watch = uml::runtime::start_memory_pressure_response(
+		&countObservedTrim, nullptr);
+	require(watch != nullptr);
+	flag_read_hold.arm();
+	dispatch_source_merge_data(raisable(), DISPATCH_MEMORYPRESSURE_CRITICAL);
+	require(flag_read_hold.wait_inside(), "the callback did not run");
+	/* The callback is held at its read; the watch ends and a new one begins. */
+	watch.reset();
+	uml::runtime::set_pressure_observer(&observeInto, &second);
+	const auto next = uml::runtime::start_memory_pressure_response(
+		&countObservedTrim, nullptr);
+	require(next != nullptr);
+	flag_read_hold.let_go();
+	settle();
+	require(heardReports(first).empty());
+	require(heardReports(second).empty(),
+		"the old watch's notification reached the new watch");
+	require(observed_trims.load() == 0,
+		"the old watch's notification started a response in the new one");
+	/* The new watch hears what the system raises now, once. */
+	raiseAndWait(DISPATCH_MEMORYPRESSURE_WARN);
+	require(sameReports(heardReports(second), {
+		{PressureLevel::warn, PressureReaction::responding}}));
+	uml::runtime::set_pressure_observer(nullptr, nullptr);
+	capture.restore();
+}
+
 void clearingTheObserverWaitsForACallInProgress()
 {
 	uml::platform::publishGpuCacheReclaimer(nullptr);
@@ -2286,6 +2379,8 @@ int main()
 			aMergedMaskTakesItsMostSeriousFlag},
 		{"a-watch-ends-with-deliveries-queued-behind-a-held-policy-call",
 			aWatchEndsWithDeliveriesQueuedBehindAHeldPolicyCall},
+		{"a-callback-that-meets-a-stop-and-a-start-hands-its-notification-to-no-one",
+			aCallbackThatMeetsAStopAndAStartHandsItsNotificationToNoOne},
 		{"clearing-the-observer-waits-for-a-call-in-progress",
 			clearingTheObserverWaitsForACallInProgress},
 	};
