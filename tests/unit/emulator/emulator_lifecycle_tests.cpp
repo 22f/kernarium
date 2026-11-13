@@ -1194,11 +1194,14 @@ void aPressureTrimBesideATrimChangeIsBusyThenSent()
 std::atomic<std::int64_t> manualMilliseconds {0};
 std::atomic<int> manualReads {0};
 
+/* The time is captured before the read is published: the test moves the clock
+ * once it sees a read, and that read must already have its time. */
 std::chrono::steady_clock::time_point manualNow() noexcept
 {
-	++manualReads;
-	return std::chrono::steady_clock::time_point {
+	const std::chrono::steady_clock::time_point now {
 		std::chrono::milliseconds {manualMilliseconds.load()}};
+	++manualReads;
+	return now;
 }
 
 class ManualClock final {
