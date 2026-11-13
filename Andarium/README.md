@@ -509,7 +509,14 @@ requires reopening Andarium.
   guest's layout follows, and the iPad app running on a Mac has none
   (`CameraAvailability`). On an iPad, a session that other apps
   share the screen with pauses the camera (black frames) and shows a notice
-  that goes with the interruption. Camera apps in the guest save a photo taken
+  that goes with the interruption. When a guest app opens a camera while the
+  session is blocked, the runtime reports it
+  (`KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE`, runtime API 39) and the
+  session shows a notice that Camera is off and can be turned on only from
+  Home, for the next start. A dismissal holds for the run; an undismissed
+  notice goes shortly after the guest closes the camera and returns at a
+  later open; it is not shown on a device with no camera to share. Camera apps
+  in the guest save a photo taken
   sideways the right way up from the guest's accelerometer, which the guest has
   wherever the device has sensors (see Motion below); an iPad app on a Mac and
   the Simulator have none. Where the
@@ -649,7 +656,10 @@ requires reopening Andarium.
   accelerometer and gyroscope are tried again as above. A run ends with the
   foreground, a changed mount or a restart, not with a reconnect. From iOS 27.2
   a motion status of denied or restricted hides it from the guest; nothing is
-  requested.
+  requested. A development build launched with `ANDARIUM_COMPASS_READOUT=1`
+  prints, at most about twice a second, the Core Motion sample behind the
+  guest's field with iOS's own attitude and heading; App Store builds compile it
+  out.
 - **Free space.** Free space is the space a write can use (`HostStorage`,
   `statfs(2)`), the one figure the watch, the start and transfer checks and
   every screen use; it leaves out the purgeable space iOS Settings counts, so

@@ -156,3 +156,71 @@ struct CompassHostTests {
         #endif
     }
 }
+
+#if !APP_STORE
+/// The development build's compass readout: asked for by the launch, one line
+/// a period, and the line the compass check's driver reads.
+struct CompassReadoutTests {
+    @Test func aLaunchAsksForTheReadoutWithOneAndOnlyWithOne() {
+        #expect(CompassReadoutLaunch.requested(in: ["ANDARIUM_COMPASS_READOUT": "1"]))
+        #expect(!CompassReadoutLaunch.requested(in: [:]))
+        #expect(!CompassReadoutLaunch.requested(in: ["ANDARIUM_COMPASS_READOUT": "0"]))
+        #expect(CompassReadout.requested(environment: [:]) == nil)
+        #expect(CompassReadout.requested(environment: ["ANDARIUM_COMPASS_READOUT": "1"]) != nil)
+    }
+
+    @Test func theReadoutPrintsTheFirstSampleAndThenOneAPeriodLater() {
+        let readout = CompassReadout(period: 0.5)
+        let field = CMMagneticField(x: 1, y: 2, z: 3)
+        #expect(readout.observe(field, at: 100.0) != nil)
+        #expect(readout.observe(field, at: 100.2) == nil)
+        #expect(readout.observe(field, at: 100.499) == nil)
+        #expect(readout.observe(field, at: 100.5) != nil)
+        #expect(readout.observe(field, at: 100.6) == nil)
+    }
+
+    @Test func theSpanCoversEverySampleSinceTheLastLineAndStartsAgainAfterIt() {
+        let readout = CompassReadout(period: 0.5)
+        // The first line's extrema are its own sample.
+        #expect(
+            readout.observe(CMMagneticField(x: 1, y: -2, z: -40), at: 100.0)
+                == CompassReadout.Extrema(count: 1, low: [1, -2, -40], high: [1, -2, -40]))
+        // Samples between two lines are forwarded to the guest and not printed, but they are taken into the span.
+        #expect(readout.observe(CMMagneticField(x: 3, y: -2.5, z: -39), at: 100.1) == nil)
+        #expect(readout.observe(CMMagneticField(x: 0.5, y: -1, z: -41), at: 100.3) == nil)
+        // The next line covers those two and its own sample, component by component.
+        #expect(
+            readout.observe(CMMagneticField(x: 2, y: -2, z: -40), at: 100.5)
+                == CompassReadout.Extrema(count: 3, low: [0.5, -2.5, -41], high: [3, -1, -39]))
+        // The span started again with that line: a sample after it is the whole of the next one.
+        #expect(readout.observe(CMMagneticField(x: 9, y: 9, z: 9), at: 100.7) == nil)
+        #expect(
+            readout.observe(CMMagneticField(x: 8, y: 7, z: 6), at: 101.0)
+                == CompassReadout.Extrema(count: 2, low: [8, 7, 6], high: [9, 9, 9]))
+    }
+
+    @Test func theLineCarriesTheFieldTheGravityTheAttitudeTheSpanAndTheMount() {
+        let identity = CMRotationMatrix(m11: 1, m12: 0, m13: 0, m21: 0, m22: 1, m23: 0, m31: 0, m32: 0, m33: 1)
+        let line = CompassReadout.line(
+            timestamp: 12.5, mount: .landscapeLeft, accuracy: 2,
+            field: CMMagneticField(x: 1.5, y: -2.25, z: -40),
+            extrema: CompassReadout.Extrema(count: 1, low: [1.5, -2.25, -40], high: [1.5, -2.25, -40]),
+            gravity: CMAcceleration(x: 0, y: 0, z: -1), attitude: identity, heading: 123.456)
+        #expect(
+            line == "Andarium: compass-check: t=12.500 mount=landscapeLeft acc=2 field=1.500,-2.250,-40.000 "
+                + "grav=0.00000,0.00000,-1.00000 att=1.00000,0.00000,0.00000,0.00000,1.00000,0.00000,0.00000,0.00000,1.00000 "
+                + "heading=123.46 fmin=1.500,-2.250,-40.000 fmax=1.500,-2.250,-40.000 n=1")
+        // Nine different numbers, so that a transposed or shuffled matrix, or a swapped gravity axis, cannot print the same line.
+        let rows = CMRotationMatrix(m11: 0.1, m12: 0.2, m13: 0.3, m21: 0.4, m22: 0.5, m23: 0.6, m31: 0.7, m32: 0.8, m33: 0.9)
+        let distinct = CompassReadout.line(
+            timestamp: 0.25, mount: .portrait, accuracy: -1,
+            field: CMMagneticField(x: -7.125, y: 3.5, z: 21.75),
+            extrema: CompassReadout.Extrema(count: 7, low: [-8, 3, 20.5], high: [-7, 4.25, 22]),
+            gravity: CMAcceleration(x: 0.25, y: -0.5, z: -0.75), attitude: rows, heading: -1)
+        #expect(
+            distinct == "Andarium: compass-check: t=0.250 mount=portrait acc=-1 field=-7.125,3.500,21.750 "
+                + "grav=0.25000,-0.50000,-0.75000 att=0.10000,0.20000,0.30000,0.40000,0.50000,0.60000,0.70000,0.80000,0.90000 "
+                + "heading=-1.00 fmin=-8.000,3.000,20.500 fmax=-7.000,4.250,22.000 n=7")
+    }
+}
+#endif

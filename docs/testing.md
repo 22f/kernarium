@@ -354,7 +354,9 @@ and the final check that a reading or failure already on its way is dropped once
 the guest no longer asks for the field, on fake devices and guests; the hosted
 `CompassHostTests` cover the availability decision and the boot request's
 compass bit, and read the real manager's availability (a Simulator and a Mac
-have no magnetometer) without starting a sensor), the vibrator
+have no magnetometer) without starting a sensor; `CompassReadoutTests` cover the
+development build's compass readout: its launch setting, its rate, the span
+of every sample between two lines and its line), the vibrator
 HAL's haptics wire (against those golden frames, whose path the test takes as
 its argument), timelines and state, the thermal HAL's wire and the status,
 temperature and thresholds of each severity, the gamepad relay's wire (the
@@ -366,8 +368,9 @@ request carries to an Android guest. `kernarium-camera` (unit) checks
 what the runtime tells an Android guest about the host's cameras (the camera
 fields of the boot request, the composed layout and its recomposition at each
 boot, the lens cover, the host memory a live session reserves (none for a
-host with no cameras), the camera state and rotation, and that an unknown or
-empty `KERNARIUM_CAMERA_SOURCE` never reaches the host's camera),
+host with no cameras), the camera state (a blocked guest's open of a camera
+included) and rotation, and that an unknown or empty
+`KERNARIUM_CAMERA_SOURCE` never reaches the host's camera),
 `camera-layout` (unit) that the layout name composed from a host's cameras is
 one of the image's layouts, `camera-orientation` (unit) the sensor
 orientation of every interface orientation and facing,
@@ -376,7 +379,9 @@ metadata, fed literal metadata and an in-memory image, never a camera, and
 `camera-photo-dimensions` (unit) which photo size a camera is asked for, on
 fake format tables
 ([Cameras](../darwin/device/camera/README.md)). The Camera setting's hosted
-tests (`CameraFlowTests`) play iOS's permission with a fake and open no camera;
+tests (`CameraFlowTests`, and `CameraOffNoticeBannerTests` for the notice that
+Camera is off, drawn in a window at the largest text size) play iOS's
+permission with a fake and open no camera;
 the Simulator has no camera and `simctl privacy` cannot grant or revoke one, so
 the denied, restricted and absent states are shown by the preview
 (`-systemCamera` asks the Simulator's own permission). The application builds

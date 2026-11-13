@@ -74,14 +74,106 @@ public enum CameraCapture: Equatable, Sendable {
     case interruptedByMultitasking
     /// The same, because the device is hot.
     case interruptedBySystemPressure
+    /// The session is blocked and a guest app has a camera open: it gets black
+    /// frames and nothing is captured. The runtime says it once for each open.
+    case blockedInUse
 }
 
-/// The notice an iPad shows while other apps share the screen: the camera
-/// pauses then, and the guest gets black frames until they no longer do. Only
-/// that interruption raises it.
-public enum CameraNotice {
-    public static func isUp(for capture: CameraCapture) -> Bool {
-        capture == .interruptedByMultitasking
+/// A notice the session shows about the camera, over the guest.
+public enum CameraNotice: Hashable, Sendable {
+    /// An iPad shows it while other apps share the screen: the camera pauses
+    /// then, and the guest gets black frames until they no longer do.
+    case pausedForOtherApps
+    /// A guest app opened a camera while Camera is off: it got black frames.
+    /// The row decides at the start of the run and nothing changes it until
+    /// the guest powers off, so the notice says to shut the guest down and
+    /// turn it on.
+    case cameraOff
+
+    /// What the host's state raises, before the screens decide whether the
+    /// notice can say anything true.
+    public static func raised(by capture: CameraCapture) -> CameraNotice? {
+        switch capture {
+        case .interruptedByMultitasking: .pausedForOtherApps
+        case .blockedInUse: .cameraOff
+        case .idle, .streaming, .interrupted, .interruptedBySystemPressure: nil
+        }
+    }
+}
+
+/// The session's camera notice: what the host reports, and whether the person
+/// has put the notice away.
+///
+/// A dismissed Camera-is-off notice stays away for the rest of the run, since
+/// nothing can turn the row on before the next start, and each kind is put
+/// away on its own. A dismissed paused notice stays away until its
+/// interruption ends.
+///
+/// The guest closing its last camera does not take the Camera-is-off notice
+/// away at once: it stays for `lingerFor`, so a camera that is closed and
+/// opened again (a rotation, an app that retries) is one showing and not a
+/// notice that leaves and comes back. After that a later open shows it again.
+/// The moments come from the caller, so a test sets its own.
+public struct CameraNoticeState: Equatable, Sendable {
+    /// How long the Camera-is-off notice stays after the guest closed every
+    /// camera.
+    public static let lingerFor = Duration.seconds(2)
+
+    public private(set) var capture = CameraCapture.idle
+    private var dismissed: Set<CameraNotice> = []
+    /// When the guest closed the last camera it had open while Camera was off,
+    /// until `lingerFor` has passed or a camera opens again.
+    private var closedAt: ContinuousClock.Instant?
+
+    public init() {}
+
+    /// The runtime reports what the host is doing for the guest's cameras.
+    public mutating func captureChanged(_ capture: CameraCapture, at now: ContinuousClock.Instant) {
+        expire(at: now)
+        guard capture != self.capture else { return }
+        let before = CameraNotice.raised(by: self.capture)
+        let after = CameraNotice.raised(by: capture)
+        self.capture = capture
+        if after != .pausedForOtherApps { dismissed.remove(.pausedForOtherApps) }
+        if after == .cameraOff {
+            closedAt = nil
+        } else if before == .cameraOff {
+            closedAt = now
+        }
+    }
+
+    /// Ends the linger of a notice whose camera closed `lingerFor` ago.
+    public mutating func expire(at now: ContinuousClock.Instant) {
+        guard let closedAt, closedAt.duration(to: now) >= Self.lingerFor else { return }
+        self.closedAt = nil
+    }
+
+    /// The Camera-is-off notice is up only because the guest closed its camera
+    /// a moment ago: it goes when `expire(at:)` finds `lingerFor` has passed.
+    public var lingers: Bool { closedAt != nil }
+
+    /// The person puts the notice that is up away.
+    public mutating func dismiss() {
+        if let notice = displayed { dismissed.insert(notice) }
+    }
+
+    /// The run ended: the next one starts without a dismissal.
+    public mutating func runEnded() {
+        self = CameraNoticeState()
+    }
+
+    private var displayed: CameraNotice? {
+        CameraNotice.raised(by: capture) ?? (closedAt == nil ? nil : .cameraOff)
+    }
+
+    /// The notice to show now. The Camera-is-off notice tells the person to
+    /// turn the row on, so it waits for a row that can be turned on: `canTurnOn`
+    /// is false for a device with no camera to share and for a switch that is
+    /// already on.
+    public func showing(canTurnOn: Bool) -> CameraNotice? {
+        guard let notice = displayed, !dismissed.contains(notice) else { return nil }
+        if notice == .cameraOff, !canTurnOn { return nil }
+        return notice
     }
 }
 
