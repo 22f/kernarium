@@ -339,6 +339,89 @@ class LaunchdJobTests(ProcessTestCase):
             self.assertTrue(job["StandardOutPath"].startswith("/"))
             self.assertFalse((work / "rel-state").exists())
 
+    def test_the_job_logs_to_the_state_directory_unless_told_otherwise(self) -> None:
+        # Rule: the default log is STATE_DIR/UDID/watch-launchd.log, for both
+        # streams.
+        job = self.job()
+        expected = str(self.device.state_dir.resolve() / self.device.udid
+                       / "watch-launchd.log")
+        self.assertEqual(job["StandardOutPath"], expected)
+        self.assertEqual(job["StandardErrorPath"], expected)
+
+    def test_the_log_option_moves_both_streams_and_nothing_else(self) -> None:
+        # Rule: `--launchd-log` names the file both streams go to, wherever the
+        # state directory is; the watch the job runs is the same one, and
+        # printing creates nothing.
+        log_file = self.device.root / "job logs" / "watch.log"
+        with_option = self.job("--launchd-log", str(log_file))
+        self.assertEqual(with_option["StandardOutPath"], str(log_file))
+        self.assertEqual(with_option["StandardErrorPath"], str(log_file))
+        self.assertFalse(log_file.parent.exists())
+        self.assertFalse(self.device.state_dir.exists())
+        default = self.job()
+        for key in ("ProgramArguments", "EnvironmentVariables", "RunAtLoad",
+                    "AbandonProcessGroup", "LimitLoadToSessionType", "Label"):
+            self.assertEqual(with_option[key], default[key], key)
+        self.assertNotIn("--launchd-log", with_option["ProgramArguments"])
+        self.assertNotIn(str(log_file), with_option["ProgramArguments"])
+
+    def test_the_directory_hint_follows_the_log_option(self) -> None:
+        # Rule: the printed `mkdir -p` names the directory of the log that is
+        # used, quoted for the shell.
+        log_file = self.device.root / "job logs" / "watch.log"
+        done = self.run_script("watch", "--launchd-log", str(log_file),
+                              "--print-launchd-job", LABEL)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(shlex.split(done.stderr.split("`")[1]),
+                         ["mkdir", "-p", str(log_file.parent)])
+        self.assertNotIn(str(self.device.state_dir), done.stderr)
+
+    def test_a_relative_log_path_is_made_absolute(self) -> None:
+        # Rule (R10): launchd's working directory is not the one the job was
+        # printed in, so a relative log path is made absolute against it, and
+        # printing creates nothing.
+        with tempfile.TemporaryDirectory() as scratch:
+            work = Path(scratch).resolve() / "work"
+            work.mkdir()
+            done = subprocess.run(
+                [sys.executable, str(SCRIPT), "--device", self.device.udid,
+                 "--state-dir", str(self.device.state_dir), "watch",
+                 "--launchd-log", "../rel-logs/watch.log",
+                 "--print-launchd-job", LABEL],
+                cwd=work, env=self.device.environment, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                timeout=60)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            job = plistlib.loads(done.stdout.encode())
+            expected = str(work.parent / "rel-logs" / "watch.log")
+            self.assertEqual(job["StandardOutPath"], expected)
+            self.assertEqual(job["StandardErrorPath"], expected)
+            self.assertEqual(shlex.split(done.stderr.split("`")[1]),
+                             ["mkdir", "-p", str(work.parent / "rel-logs")])
+            self.assertFalse((work.parent / "rel-logs").exists())
+
+    def test_the_log_option_without_a_job_to_print_is_refused(self) -> None:
+        # Rule: the option belongs to the printed job; a watch that would
+        # silently ignore it is refused.
+        done = self.run_script("watch", "--launchd-log", str(self.device.root / "x.log"),
+                              timeout=30)
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("--launchd-log goes with --print-launchd-job", done.stderr)
+
+    def test_the_usage_says_where_the_job_file_and_its_log_belong(self) -> None:
+        # Rule: launchd must be able to open the job file and the log itself.
+        helped = " ".join(subprocess.run(
+            [sys.executable, str(SCRIPT), "--device", "X", "watch", "--help"],
+            stdout=subprocess.PIPE, text=True, timeout=60).stdout.split())
+        self.assertIn("launchd must be able to open the job file and the log itself, "
+                      "so both belong on a volume with ownership enabled", helped)
+        header = " ".join(subprocess.run(
+            [sys.executable, str(SCRIPT), "--help"],
+            stdout=subprocess.PIPE, text=True, timeout=60).stdout.split())
+        self.assertIn("launchd must be able to open the job file and the log itself, "
+                      "so both belong on a volume with ownership enabled", header)
+        self.assertIn("--launchd-log", header)
+
     def test_printing_the_job_creates_nothing_and_names_the_directory_to_make(self) -> None:
         # Rule (E): launchd will not make the directory the job logs to, and
         # printing makes none: the usage text names the one `mkdir`.

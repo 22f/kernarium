@@ -49,6 +49,7 @@ one started hours later does. `watch` keeps one device's host serving:
   ipad-automation.py --device UDID watch --detach
   mkdir -p STATE_DIR/UDID
   ipad-automation.py --device UDID watch --print-launchd-job LABEL > job.plist
+  ipad-automation.py --device UDID watch --print-launchd-job LABEL --launchd-log PATH
 
 The same `watch` runs in a terminal's foreground, detached by `--detach` (its
 log is watch-<time>.log in the state directory), or as a job manager's job
@@ -57,6 +58,10 @@ PATH, which runs once and is never restarted by launchd: a watch that crashes
 stays gone, its host keeps serving, and `status` shows the watch missing;
 printing creates nothing, so the `mkdir` above, for the job's log directory,
 comes before the job loads, and the job's registration is the owner's).
+launchd must be able to open the job file and the log itself, so both belong on
+a volume with ownership enabled (the internal one) while the state directory
+may be anywhere: `--launchd-log` names the log, which is otherwise
+STATE_DIR/UDID/watch-launchd.log.
 
 The watch acts only on evidence. A wrong restart ends a host that works, or
 puts an approval prompt on the device that nobody answers; a missed one costs
@@ -2309,7 +2314,10 @@ def launchd_job(options, label):
     if os.environ.get("DEVELOPER_DIR"):
         environment["DEVELOPER_DIR"] = str(
             pathlib.Path(os.environ["DEVELOPER_DIR"]).absolute())
-    log_path = str(state / options.device / "watch-launchd.log")
+    # Absolute, as every other path of the job is: launchd's working directory
+    # is not this one.
+    log_path = (os.path.abspath(options.launchd_log) if options.launchd_log
+                else str(state / options.device / "watch-launchd.log"))
     return {
         "Label": label,
         "ProgramArguments": arguments,
@@ -2533,11 +2541,19 @@ def parse(argv):
     watch.add_argument("--print-launchd-job", metavar="LABEL",
                        help="print the launchd job that runs this watch, and "
                             "exit; it creates nothing, and the job's log "
-                            "directory, STATE_DIR/UDID, must exist when it "
-                            "loads: `mkdir -p` it first. launchd never "
+                            "directory (the one of --launchd-log, by default "
+                            "STATE_DIR/UDID) must exist when it loads: "
+                            "`mkdir -p` it first. launchd never "
                             "restarts the job (it has no KeepAlive): a watch "
                             "that crashes stays gone, its host keeps serving, "
                             "and `status` shows the watch missing")
+    watch.add_argument("--launchd-log", metavar="PATH",
+                       help="the file the printed job logs to (default: "
+                            "STATE_DIR/UDID/watch-launchd.log); launchd must be "
+                            "able to open the job file and the log itself, so "
+                            "both belong on a volume with ownership enabled "
+                            "(the internal one) while the state directory may "
+                            "be anywhere")
     ios_device_reports.add_arguments(watch)
     collections_help(watch)
     commands.add_parser("status", help="report whether the host is serving")
@@ -2602,6 +2618,8 @@ def parse(argv):
         parser.error("name the device with --device or $KERNARIUM_AUTOMATION_DEVICE")
     if options.command == "tap" and (options.x is None) != (options.y is None):
         parser.error("tap needs both --x and --y")
+    if options.command == "watch" and options.launchd_log and not options.print_launchd_job:
+        parser.error("--launchd-log goes with --print-launchd-job")
     return options
 
 
