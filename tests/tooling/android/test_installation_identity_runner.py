@@ -48,6 +48,7 @@ class FakeDevice:
     def __init__(self, serial: str = SERIAL, boot_serial: str = SERIAL, address: str = ETHERNET) -> None:
         self.properties = {"ro.serialno": serial, "ro.boot.serialno": boot_serial}
         self.address = address
+        self.command_line = f"quiet androidboot.serialno={boot_serial} console=ttyS0"
 
     def getprop(self, name: str) -> str:
         return self.properties[name]
@@ -55,6 +56,8 @@ class FakeDevice:
     def shell(self, command: str, timeout: int = 30) -> str:
         if command == "ip addr show eth0":
             return listing(self.address).strip()
+        if command == "cat /proc/cmdline":
+            return self.command_line
         raise runner.Failure(f"'{command}' exited 1")
 
 
@@ -134,6 +137,16 @@ class GuestMatchesFileTests(unittest.TestCase):
             "ro.boot.serialno": FakeDevice(boot_serial="fedcba9876543210"),
             "eth0's address": FakeDevice(address=OTHER_ETHERNET),
         }
+        for name, command_line in {
+            "no serial number on the command line": "quiet console=ttyS0",
+            "the release's serial number beside the installation's":
+                f"androidboot.serialno={runner.LEGACY_SERIAL} androidboot.serialno={SERIAL}",
+            "another serial number on the command line": "androidboot.serialno=fedcba9876543210",
+            "the serial number twice": f"androidboot.serialno={SERIAL} androidboot.serialno={SERIAL}",
+        }.items():
+            device = FakeDevice()
+            device.command_line = command_line
+            cases[name] = device
         for name, device in cases.items():
             with self.subTest(name), self.assertRaises(runner.Failure):
                 self.check(device)
@@ -312,6 +325,173 @@ class RunnerLifecycleTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             runner.stop_all([Stubborn(), Fine()])  # type: ignore[list-item]
         self.assertEqual(stopped, ["fine"])
+
+
+class WifiDerivationTests(unittest.TestCase):
+    def test_the_port_gives_the_golden_vectors_the_cpp_gives(self) -> None:
+        vectors = runner.golden_vectors()
+        self.assertGreaterEqual(len(vectors), 10)
+        for ethernet, wifi in vectors:
+            self.assertEqual(runner.derive_wifi_mac(ethernet), wifi, ethernet)
+
+    def test_every_result_is_a_local_unicast_address_that_is_not_refused(self) -> None:
+        for ethernet in ["52:54:00:12:34:56", "00:00:00:00:00:00", ETHERNET, OTHER_ETHERNET,
+                         "02:15:b2:00:00:00", "52:55:0a:00:02:02"]:
+            wifi = runner.derive_wifi_mac(ethernet)
+            first = int(wifi[:2], 16)
+            self.assertEqual(first & 0x03, 0x02, ethernet)
+            self.assertNotIn(wifi, (ethernet, "02:00:00:00:00:00"), ethernet)
+            self.assertNotEqual(wifi[:14], "52:55:0a:00:02", ethernet)
+        self.assertNotEqual(runner.derive_wifi_mac(ETHERNET), runner.derive_wifi_mac(OTHER_ETHERNET))
+
+    def test_a_refused_candidate_takes_the_next_round_and_no_round_takes_the_fallback(self) -> None:
+        # The header's rules, by the key under which round 0 gives eth0's own address: the
+        # inverse of the mixer finds it.
+        def unmix(value: int) -> int:
+            def inverse(odd: int) -> int:
+                result = odd
+                for _ in range(6):
+                    result = result * (2 - odd * result) & runner.MASK64
+                return result
+            value ^= value >> 33
+            value = value * inverse(0xC4CEB9FE1A85EC53) & runner.MASK64
+            value ^= value >> 33
+            value = value * inverse(0xFF51AFD7ED558CCD) & runner.MASK64
+            return value ^ value >> 33
+
+        ethernet = "0a:11:22:33:44:55"
+        packed = int(ethernet.replace(":", ""), 16)
+        key = packed ^ unmix(unmix(packed << 16))
+        first = runner.mix64(runner.mix64(packed ^ key))
+        self.assertEqual(first >> 16, packed)
+        derived = runner.derive_wifi_mac(ethernet, key)
+        self.assertNotEqual(derived, ethernet)
+        self.assertEqual(runner.derive_wifi_mac(ethernet, key, 0), runner.LEGACY_WIFI_MAC)
+        self.assertEqual(runner.derive_wifi_mac(runner.LEGACY_WIFI_MAC, key, 0), "02:15:b2:00:00:01")
+
+
+WLAN0 = (
+    "10: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default qlen 1000\n"
+    "    link/ether {address} brd ff:ff:ff:ff:ff:ff\n"
+    "{inet}")
+INET = "    inet 10.0.2.16/24 brd 10.0.2.255 scope global wlan0\n"
+
+
+class ImageDevice(FakeDevice):
+    """A guest that carries the newer image: wlan0, the probe application and the kernel's command line."""
+
+    def __init__(self, probes, wifi: str | None = None, inet: bool = True, key_visible: bool = False,
+                 control_visible: bool = True, cmdline_has_key: bool = True, installed: bool = True,
+                 install_works: bool = True) -> None:
+        super().__init__()
+        self.probes = probes
+        self.wifi = wifi if wifi is not None else runner.derive_wifi_mac(ETHERNET)
+        self.inet = inet
+        self.key_visible = key_visible
+        self.control_visible = control_visible
+        self.cmdline_has_key = cmdline_has_key
+        self.installed = installed
+        self.install_works = install_works
+        self.serial = "127.0.0.1:1"
+        self.commands: list[str] = []
+
+    def shell(self, command: str, timeout: int = 30) -> str:
+        self.commands.append(command)
+        package = runner.property_probe_apk.PACKAGE
+        if command == "ip addr show wlan0":
+            return WLAN0.format(address=self.wifi.upper(), inet=INET if self.inet else "").strip()
+        if command == "ip -4 addr show dev wlan0":
+            return INET if self.inet else "10: wlan0: <UP>"
+        if command == "cat /proc/cmdline":
+            key = f" androidboot.kernarium.adb_key={self.probes.key}" if self.cmdline_has_key else ""
+            return "console=ttyS0" + key
+        if command == f"pm path {package} || true":
+            return f"package:/data/app/{package}/base.apk" if self.installed else ""
+        if command == f"run-as {package} getprop {runner.CONTROL_PROPERTY}":
+            return self.probes.control if self.control_visible else ""
+        if command == f"run-as {package} getprop {runner.KEY_PROPERTY}":
+            return self.probes.key if self.key_visible else ""
+        return super().shell(command, timeout)
+
+    def run(self, *arguments: str, timeout: int = 30) -> subprocess.CompletedProcess:
+        self.commands.append(" ".join(arguments))
+        return subprocess.CompletedProcess(arguments, 0 if self.install_works else 1,
+                                           "Success\n" if self.install_works else "Failure\n")
+
+
+class ImageInputTests(unittest.TestCase):
+    def setUp(self) -> None:
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.scratch = Path(scratch.name)
+        patcher = mock.patch.object(runner.property_probe_apk, "build_apk", side_effect=lambda path: path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.probes = runner.Probes(self.scratch, Path("/path with space/emulator"))
+
+    def test_the_wrapper_adds_the_probe_arguments_after_the_launchers_own(self) -> None:
+        text = self.probes.emulator.read_text()
+        self.assertIn("exec '/path with space/emulator' \"$@\" ", text)
+        self.assertIn(f"androidboot.kernarium.adb_key={self.probes.key} ", text)
+        self.assertIn(f"androidboot.kernarium.identity_probe={self.probes.control}\n", text)
+        self.assertTrue(os.access(self.probes.emulator, os.X_OK))
+        other = runner.Probes(self.scratch, Path("/emulator"))
+        self.assertNotEqual((other.key, other.control), (self.probes.key, self.probes.control))
+
+    def test_a_guest_of_the_new_image_passes_and_gives_its_wifi_address(self) -> None:
+        device = ImageDevice(self.probes)
+        self.assertEqual(runner.check_image(device, ETHERNET, self.probes), runner.derive_wifi_mac(ETHERNET))
+
+    def test_the_probe_application_is_installed_once(self) -> None:
+        device = ImageDevice(self.probes, installed=False)
+        runner.check_image(device, ETHERNET, self.probes)
+        self.assertEqual(sum(1 for command in device.commands if command.startswith("-s ")), 1)
+        device = ImageDevice(self.probes, installed=True)
+        runner.check_image(device, ETHERNET, self.probes)
+        self.assertEqual(sum(1 for command in device.commands if command.startswith("-s ")), 0)
+
+    def test_every_difference_fails(self) -> None:
+        cases = {
+            "another wlan0 address": ImageDevice(self.probes, wifi="02:aa:bb:cc:dd:01"),
+            "the old fixed wlan0 address": ImageDevice(self.probes, wifi=runner.LEGACY_WIFI_MAC),
+            "eth0's own address on wlan0": ImageDevice(self.probes, wifi=ETHERNET),
+            "no lease": ImageDevice(self.probes, inet=False),
+            "an application reads the key": ImageDevice(self.probes, key_visible=True),
+            "an application cannot read the control": ImageDevice(self.probes, control_visible=False),
+            "the kernel never had the key": ImageDevice(self.probes, cmdline_has_key=False),
+            "the probe will not install": ImageDevice(self.probes, installed=False, install_works=False),
+        }
+        for label, device in cases.items():
+            with self.subTest(label), mock.patch.object(runner, "LEASE_SECONDS", 1), \
+                    mock.patch.object(runner.time, "sleep", lambda seconds: None):
+                with self.assertRaises(runner.Failure):
+                    runner.check_image(device, ETHERNET, self.probes)
+
+    def test_a_failure_names_no_address(self) -> None:
+        device = ImageDevice(self.probes, wifi="02:aa:bb:cc:dd:01")
+        with self.assertRaises(runner.Failure) as raised:
+            runner.check_image(device, ETHERNET, self.probes)
+        message = str(raised.exception)
+        for value in (ETHERNET, "02:aa:bb:cc:dd:01", runner.derive_wifi_mac(ETHERNET), self.probes.key):
+            self.assertNotIn(value, message)
+
+    def test_a_release_gets_the_given_command_line_and_the_original_keeps_its_own(self) -> None:
+        release = self.scratch / "source"
+        (release / "boot").mkdir(parents=True)
+        (release / "boot" / "kernel-command-line.txt").write_text("old serial=1\n")
+        (release / "release-manifest.json").write_text("{}\n")
+        line = self.scratch / "new-line.txt"
+        line.write_text("new\n")
+        clone = runner.prepared_release(release, line, self.scratch)
+        self.assertEqual((clone / "boot" / "kernel-command-line.txt").read_text(), "new\n")
+        self.assertEqual((release / "boot" / "kernel-command-line.txt").read_text(), "old serial=1\n")
+        self.assertTrue((clone / "release-manifest.json").is_file())
+
+    def test_a_command_line_needs_a_release(self) -> None:
+        with mock.patch.object(sys, "argv", ["runner", "--command-line", "/x"]), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(runner.main(), 2)
+        self.assertIn("--release", stderr.getvalue())
 
 
 if __name__ == "__main__":

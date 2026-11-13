@@ -772,7 +772,12 @@ instances and check the setup wizard's flow and end state, the product's adb
 defaults, that the command Andarium's bug report sends for the guest's
 `/proc` counters (`GuestProcFiles`, its one source) reads each file or says why
 not, and that each instance's guest reports its own serial number and eth0
-address, kept across a reboot and a new launch;
+address, kept across a reboot and a new launch (`--command-line` starts the
+release with another kernel command line, such as the tracked one that carries no
+serial number; `android-installation-identity-image` registers when
+`UML_ANDROID_INSTALLATION_IDENTITY_IMAGE_RELEASE` names a release built with the
+overlay and also checks wlan0's derived address, the Wi-Fi lease and that an
+application cannot read `ro.boot.kernarium.adb_key`);
 `tests/integration/android/run_guest_android_adb_vsock.py` is the
 opt-in ADB-over-vsock counterpart of `guest-vsock-stream`.
 `android-microg-spoofing` (integration) additionally needs

@@ -33,6 +33,7 @@ ATTRIBUTES = {
     "label": 0x01010001,
     "name": 0x01010003,
     "hasCode": 0x0101000C,
+    "debuggable": 0x0101000F,
     "exported": 0x01010010,
     "screenOrientation": 0x0101001E,
     "minSdkVersion": 0x0101020C,
@@ -227,14 +228,17 @@ def decode_manifest(data: bytes) -> Node:
     return root
 
 
-def build_apk(destination: pathlib.Path, workdir: pathlib.Path | None = None) -> pathlib.Path:
-    """Writes the signed package to `destination`: a throwaway key signs it, so the result belongs to no one."""
+def build_apk(destination: pathlib.Path, workdir: pathlib.Path | None = None,
+              tree: Element | None = None) -> pathlib.Path:
+    """Writes the signed package to `destination`: a throwaway key signs it, so the result belongs to no one.
+    The package is this module's orientation probe, or the application of another manifest `tree`
+    (property_probe_apk.py)."""
     own = workdir is None
     scratch = pathlib.Path(tempfile.mkdtemp(prefix="uml-orientation-apk-")) if own else workdir
     try:
         unsigned = scratch / "probe.apk"
         with zipfile.ZipFile(unsigned, "w", zipfile.ZIP_DEFLATED) as package:
-            package.writestr("AndroidManifest.xml", encode_manifest())
+            package.writestr("AndroidManifest.xml", encode_manifest(tree))
         keystore = scratch / "throwaway.p12"
         run = lambda *command: subprocess.run(  # noqa: E731
             command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

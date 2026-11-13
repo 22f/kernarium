@@ -10,7 +10,8 @@ with the macOS launcher (tools/boot_android.py), and the runner checks that:
 
 - the file exists, is private to its owner, and the guest's `ro.serialno`,
   `ro.boot.serialno` and eth0 address are the file's, not the release's
-  `umlandroid17` or the user network's default address;
+  `umlandroid17` or the user network's default address, and the kernel's command
+  line carries one serial number, the file's;
 - eth0 is configured and the host reaches adbd through it, so the user network
   answers the guest under its own address;
 - a guest reboot (the restart loop passes the address on) and a new launch of
@@ -20,7 +21,26 @@ with the macOS launcher (tools/boot_android.py), and the runner checks that:
 The values are random per installation and are never printed: a failure names
 what differed, not what the value was, and the launcher's log tail that a
 failure prints has every serial number and hardware address masked (`mask`).
-The guest's Wi-Fi address is the image's own constant and is not checked here.
+
+Two options qualify what only a newer image carries (the accepted release has
+neither, and the default run, which passes on it, checks neither):
+
+- `--command-line FILE` starts the release with FILE as its kernel command line
+  (a clone of the release directory: the file the next image will carry, the
+  tracked android/lineage-24/support/boot/kernel-command-line.txt, which has no
+  serial number) and the same checks hold: the launcher's serial number is the
+  guest's, with none from the image to drop;
+- `--image-inputs` expects an image built with this repository's overlay, and
+  checks that wlan0's address is the one derived from eth0's
+  (overlay/tools/kernarium_wifi_mac.h, here `derive_wifi_mac`, which the golden
+  vectors tie to the C++), that it is not the old fixed one, that it is the
+  same after a reboot and a new launch and differs between installations, that
+  wlan0 holds an IPv4 lease (Wi-Fi connected), and that an application cannot
+  read `ro.boot.kernarium.adb_key`. The last check starts the emulator through
+  a wrapper that adds the key and a control argument to the kernel command line
+  (the macOS launcher passes neither): the application reads the control
+  property, which every application may, and the key, which it may not, while
+  the kernel's command line shows the key was passed.
 
 Every wait has a deadline; the guest's launcher is stopped through its own
 process on any exit.
@@ -35,6 +55,8 @@ import json
 import os
 import pathlib
 import re
+import secrets
+import shlex
 import shutil
 import signal
 import stat
@@ -47,12 +69,20 @@ from typing import Callable
 REPOSITORY = pathlib.Path(__file__).resolve().parents[3]
 LAUNCHER = REPOSITORY / "tools" / "boot_android.py"
 sys.path.insert(0, str(REPOSITORY / "tests" / "integration" / "support"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import slot_ports  # noqa: E402
+import property_probe_apk  # noqa: E402
 
 DEFAULT_ADB_PORT = 5575
 IDENTITY_FILE = "identity.json"
 LEGACY_SERIAL = "umlandroid17"
 DEFAULT_ETHERNET_MAC = "52:54:00:12:34:56"
+LEGACY_WIFI_MAC = "02:15:b2:00:00:00"
+DEFAULT_EMULATOR = REPOSITORY / ".build" / "presets" / "macos-android17" / "bin" / "uml-darwin-android17"
+GOLDEN_VECTORS = REPOSITORY / "tests" / "unit" / "andarium" / "fixtures" / "wifi-mac-golden-vectors.txt"
+KEY_PROPERTY = "ro.boot.kernarium.adb_key"
+CONTROL_PROPERTY = "ro.boot.kernarium.identity_probe"
+LEASE_SECONDS = 120
 STOP_SECONDS = 120
 SETTLE_SECONDS = 60
 TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
@@ -270,6 +300,11 @@ def check_guest_matches_file(device: Device, instance: pathlib.Path) -> Identity
         raise Failure("ro.boot.serialno is not the identity file's serial number")
     if guest.serial == LEGACY_SERIAL:
         raise Failure("the guest kept the release's fixed serial number")
+    # The release's own serial number is dropped from the command line, so the guest is given one.
+    arguments = [token for token in device.shell("cat /proc/cmdline").split()
+                 if token.startswith("androidboot.serialno=")]
+    if arguments != [f"androidboot.serialno={members['serialno']}"]:
+        raise Failure("the kernel command line does not carry exactly the installation's serial number")
     if not MAC_PATTERN.match(guest.ethernet) or guest.ethernet != members["ethernet_mac"]:
         raise Failure("eth0's address is not the identity file's")
     if guest.ethernet == DEFAULT_ETHERNET_MAC:
@@ -283,6 +318,126 @@ def check_network(device: Device) -> None:
         raise Failure("eth0 has no IPv4 address")
 
 
+# ---- What only a newer image carries (--command-line, --image-inputs).
+
+MASK64 = (1 << 64) - 1
+WIFI_KEY = 0x6B726E5F77696669  # "krn_wifi"
+WIFI_ROUNDS = 16
+
+
+def mix64(value: int) -> int:
+    """The finalizer of MurmurHash3's 64-bit hash, as in kernarium_wifi_mac.h."""
+    value ^= value >> 33
+    value = value * 0xFF51AFD7ED558CCD & MASK64
+    value ^= value >> 33
+    value = value * 0xC4CEB9FE1A85EC53 & MASK64
+    return value ^ value >> 33
+
+
+def format_mac(raw: bytes) -> str:
+    return ":".join(f"{byte:02x}" for byte in raw)
+
+
+def derive_wifi_mac(ethernet: str, key: int = WIFI_KEY, rounds: int = WIFI_ROUNDS) -> str:
+    """wlan0's address as a function of eth0's: the port of DeriveWifiMac in
+    android/lineage-24/overlay/tools/kernarium_wifi_mac.h. The golden vectors that the C++
+    unit test checks too are what ties the two."""
+    packed = int(ethernet.replace(":", ""), 16)
+    for round_number in range(rounds):
+        mixed = mix64(mix64(packed ^ key) + round_number & MASK64)
+        candidate = bytearray(mixed.to_bytes(8, "big")[:6])
+        candidate[0] = (candidate[0] | 0x02) & 0xFE
+        value = int.from_bytes(candidate, "big")
+        if value not in (packed, 0x020000000000) and value >> 8 != 0x52550A0002:
+            return format_mac(bytes(candidate))
+    return "02:15:b2:00:00:01" if packed == 0x0215B2000000 else LEGACY_WIFI_MAC
+
+
+def golden_vectors(path: pathlib.Path = GOLDEN_VECTORS) -> list[tuple[str, str]]:
+    vectors = []
+    for line in path.read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            ethernet, wifi = line.split()
+            vectors.append((ethernet, wifi))
+    return vectors
+
+
+def link_address(device: Device, name: str) -> str:
+    """A device's hardware address as `ip addr` shows it (see ethernet_address)."""
+    for line in device.shell(f"ip addr show {name}").splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] == "link/ether":
+            return fields[1].lower()
+    raise Failure(f"`ip addr` shows no hardware address for {name}")
+
+
+class Probes:
+    """What `--image-inputs` passes to the guest and asks it about: a key and a control value
+    for the kernel command line, and the application that reads them as an application."""
+
+    def __init__(self, scratch: pathlib.Path, emulator: pathlib.Path) -> None:
+        # The key is a placeholder: the macOS launcher fixes ADB authorization off, so adbd
+        # never compares it with a host's.
+        self.key = "probe" + secrets.token_hex(8)
+        self.control = secrets.token_hex(8)
+        self.emulator = scratch / "emulator-with-probes"
+        self.emulator.write_text(
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(str(emulator))} \"$@\" "
+            f"androidboot.kernarium.adb_key={self.key} "
+            f"androidboot.kernarium.identity_probe={self.control}\n")
+        self.emulator.chmod(0o700)
+        self.apk = property_probe_apk.build_apk(scratch / "property-probe.apk")
+
+
+def check_wifi(device: Device, ethernet: str) -> str:
+    """wlan0 has the address derived from eth0's, is not the image's old fixed one, and holds
+    its lease (the framework has joined the virtual network). Returns the address."""
+    wifi = link_address(device, "wlan0")
+    if wifi != derive_wifi_mac(ethernet):
+        raise Failure("wlan0's address is not the one derived from eth0's")
+    if wifi in (LEGACY_WIFI_MAC, ethernet):
+        raise Failure("wlan0 has the image's old fixed address or eth0's own")
+    wait_for("wlan0 to hold an IPv4 address", lambda: " inet " in device.shell("ip -4 addr show dev wlan0"),
+             LEASE_SECONDS)
+    return wifi
+
+
+def check_key_property(device: Device, probes: Probes) -> None:
+    """An application reads the control property and not the key, which the kernel was given."""
+    if f"androidboot.kernarium.adb_key={probes.key}" not in device.shell("cat /proc/cmdline"):
+        raise Failure("the kernel command line does not carry the probe key: the test cannot tell")
+    if "package:" not in device.shell(f"pm path {property_probe_apk.PACKAGE} || true"):
+        result = device.run("-s", device.serial, "install", str(probes.apk), timeout=120)
+        if result.returncode != 0 or "Success" not in result.stdout:
+            raise Failure("the property probe application did not install")
+    package = property_probe_apk.PACKAGE
+    if device.shell(f"run-as {package} getprop {CONTROL_PROPERTY}") != probes.control:
+        raise Failure(f"an application cannot read {CONTROL_PROPERTY}: the test cannot tell")
+    if device.shell(f"run-as {package} getprop {KEY_PROPERTY}"):
+        raise Failure(f"an application can read {KEY_PROPERTY}")
+
+
+def check_image(device: Device, ethernet: str, probes: Probes) -> str:
+    wifi = check_wifi(device, ethernet)
+    check_key_property(device, probes)
+    return wifi
+
+
+def prepared_release(release: pathlib.Path, command_line: pathlib.Path, scratch: pathlib.Path) -> pathlib.Path:
+    """A clone of the release directory whose kernel command line is `command_line`. The clone is
+    copy-on-write (APFS), so the release itself is never touched."""
+    clone = scratch / "release"
+    result = subprocess.run(["cp", "-c", "-R", str(release), str(clone)], text=True, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+    if result.returncode != 0:
+        raise Failure(f"cannot clone the release: {result.stdout.strip()}")
+    target = clone / "boot" / "kernel-command-line.txt"
+    target.unlink()
+    shutil.copyfile(command_line, target)
+    return clone
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--release", type=pathlib.Path, help="release directory (default: the accepted release)")
@@ -293,6 +448,15 @@ def build_parser() -> argparse.ArgumentParser:
                         f"when GUEST_SLOT_PORT_BASE is set, else {DEFAULT_ADB_PORT})")
     parser.add_argument("--cpus", type=int, default=4)
     parser.add_argument("--boot-timeout", type=int, default=900)
+    parser.add_argument("--scratch-dir", type=pathlib.Path,
+                        help="where the run's instances (and, with --command-line, its release clone) live "
+                        "(default: the system's temporary directory; the clone needs the release's volume)")
+    parser.add_argument("--command-line", type=pathlib.Path,
+                        help="start the release with this kernel command line (needs --release); "
+                        "the tracked file of the next image carries no serial number")
+    parser.add_argument("--image-inputs", action="store_true",
+                        help="also check what an image built with this repository's overlay carries: "
+                        "the derived Wi-Fi address and the restricted adb key property")
     return parser
 
 
@@ -312,22 +476,41 @@ def main() -> int:
     for name in TERMINATION_SIGNALS:
         signal.signal(name, terminate_on_signal)
     guests: list[Guest] = []
-    with tempfile.TemporaryDirectory(prefix="android-installation-identity-") as scratch_name:
+    if options.command_line is not None and options.release is None:
+        print("FAIL: --command-line needs --release", file=sys.stderr)
+        return 2
+    with tempfile.TemporaryDirectory(prefix="android-installation-identity-", dir=options.scratch_dir) as scratch_name:
         scratch = pathlib.Path(scratch_name)
         log_path = scratch / "launcher.log"
         try:
+            probes = None
+            if options.command_line is not None:
+                options.release = prepared_release(options.release, options.command_line, scratch)
+                print("release started with the given kernel command line")
+            if options.image_inputs:
+                probes = Probes(scratch, options.emulator or DEFAULT_EMULATOR)
+                options.emulator = probes.emulator
+
+            def image_inputs(guest: Guest, identity: Identity) -> str | None:
+                return check_image(guest.device, identity.ethernet, probes) if probes else None
+
             first = Guest(options, scratch / "first", log_path)
             guests.append(first)
             first.start()
             identity = check_guest_matches_file(first.device, first.instance)
             check_network(first.device)
+            wifi = image_inputs(first, identity)
             file_before, _ = read_identity_file(first.instance)
             print("first installation: its own serial number and eth0 address, network up")
+            if probes:
+                print("first installation: wlan0 derived from eth0, joined, the adb key unreadable by an application")
 
             first.reboot()
             if not check_guest_matches_file(first.device, first.instance).same_as(identity):
                 raise Failure("a guest reboot changed the identity")
             check_network(first.device)
+            if image_inputs(first, identity) != wifi:
+                raise Failure("a guest reboot changed wlan0's address")
             print("reboot: identity kept")
 
             first.stop()
@@ -336,6 +519,8 @@ def main() -> int:
                 raise Failure("a new launch of the instance changed the identity")
             if read_identity_file(first.instance)[0] != file_before:
                 raise Failure(f"a new launch rewrote {IDENTITY_FILE}")
+            if image_inputs(first, identity) != wifi:
+                raise Failure("a new launch changed wlan0's address")
             print("new launch of the same instance: identity kept, file untouched")
             first.stop()
 
@@ -344,11 +529,15 @@ def main() -> int:
             second.start()
             other = check_guest_matches_file(second.device, second.instance)
             check_network(second.device)
+            other_wifi = image_inputs(second, other)
             if other.serial == identity.serial:
                 raise Failure("the second installation has the first one's serial number")
             if other.ethernet == identity.ethernet:
                 raise Failure("the second installation has the first one's eth0 address")
-            print("second installation: a serial number and an eth0 address of its own")
+            if other_wifi is not None and other_wifi == wifi:
+                raise Failure("the second installation has the first one's wlan0 address")
+            print("second installation: a serial number and an eth0 address of its own"
+                  + (", and a wlan0 address" if probes else ""))
             print("PASS")
             return 0
         except (Failure, subprocess.TimeoutExpired, OSError) as problem:
