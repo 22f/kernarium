@@ -364,7 +364,7 @@ std::vector<std::string> boot_command_line(
 }
 
 /* What the identity file did, without the values: they are the installation's
- * own and no log carries them. */
+ * own and this host message carries neither. */
 void announce_identity(uml::android::IdentityOutcome outcome)
 {
 	switch (outcome) {
