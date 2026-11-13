@@ -334,9 +334,11 @@ the watcher's start and stop on a fake path source);
 `andarium-thermal-protocol`, `andarium-thermal-levels` and
 `andarium-gamepad-protocol` (unit), `andarium-stage-system-image`,
 `andarium-capture-screens` and `andarium-localization` (tooling) cover the
-motion wire format (its device-orientation records and control frames against
-the golden frames in `tests/unit/andarium/fixtures`, which `andarium-core` reads
-too) and what the orientation sensor reports and when (`andarium-core` also
+motion wire format (its device-orientation and magnetic field records and its
+control frames, "ANC3" included, against the golden frames in
+`tests/unit/andarium/fixtures`, which `andarium-core` reads too, and which
+sensors the sub-HAL lists and which records it takes for each launch property)
+and what the orientation sensor reports and when (`andarium-core` also
 covers the magnetometer: its records, the control frame that asks for them, the
 status mapping, the failure it keeps for the run, the field's source (its
 watchdog, movement notice and stale callbacks, on a fake Core Motion and timer)
@@ -748,6 +750,17 @@ that a value sent while the screen is off turns the display once it is on (the
 sensor idle while off and in use again), and how a host that connects late or
 reconnects is served. Restarting the framework or the sensors HAL needs root,
 which a user build does not give, so the runner does not.
+`android-compass` and `android-compass-absent` (integration) register when
+`UML_ANDROID_COMPASS_RELEASE` names the release and
+`UML_ANDROID_COMPASS_PROBE_APK` the motion probe (built by
+`tests/integration/android/motion/build-apk.sh`): the runner plays the host
+over a vsock forward with the `androidboot.kernarium.compass=1` argument and
+checks the magnetometer, the compass feature, the idle demand, the field a
+listener sees for each mount, the compass points and the four accuracies; the
+second boots without the argument and checks that the image lists no sensor,
+declares no feature and ends the connection on a magnetic field record.
+`android17-compass-runner` (tooling) runs its wire, oracle and parsers without a
+guest.
 `--launch-only` stops after the launch's state (the property, the sensors the
 service lists and their flags, the judge the window manager picked and what it
 holds, no SELinux denial about the property), which is what to run first on a

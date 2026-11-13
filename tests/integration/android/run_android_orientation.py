@@ -1300,6 +1300,8 @@ def start_guest(options: argparse.Namespace, adb: str, private: pathlib.Path, *,
             boot_android.data_capacity(boot_options, identity)),
         f"--vsock-forward=127.0.0.1:0-{MOTION_PORT}",
         *([] if options.no_argument else [ORIENTATION_ARGUMENT]),
+        # More kernel arguments of a runner that builds on this one (run_android_compass.py).
+        *getattr(options, "extra_arguments", ()),
     ]
     log = private / "emulator.log"
     stream = log.open("wb")
