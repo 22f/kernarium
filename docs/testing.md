@@ -824,7 +824,16 @@ instances and check the setup wizard's flow and end state, the product's adb
 defaults, that the command Andarium's bug report sends for the guest's
 `/proc` counters (`GuestProcFiles`, its one source) reads each file or says why
 not, and that each instance's guest reports its own serial number and eth0
-address, kept across a reboot and a new launch;
+address, kept across a reboot and a new launch
+(`android-installation-identity-image` registers when
+`UML_ANDROID_INSTALLATION_IDENTITY_IMAGE_RELEASE` names a release built with the
+overlay and also checks wlan0's derived address, the Wi-Fi lease, that eth0 and
+the macvlan carry no IPv6 link-local address, and that a probe application in an
+ordinary application process cannot read `ro.boot.kernarium.adb_key`; that
+the guest's adbd reads the key is proven on a Kernarium runtime guest by
+`AndariumTests/AdbOverVsockTests` (the application's own adb client; the macOS
+launcher fixes ADB authorization off, and `run_android_adb_debugging.py` cannot
+be authorized by a runtime guest, which accepts only the key its application made);
 `tests/integration/android/run_guest_android_adb_vsock.py` is the
 opt-in ADB-over-vsock counterpart of `guest-vsock-stream`.
 `android-microg-spoofing` (integration) additionally needs

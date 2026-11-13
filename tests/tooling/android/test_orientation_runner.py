@@ -842,7 +842,7 @@ class ProbeApplicationTests(unittest.TestCase):
         data = probe.encode_manifest()
         ids = list(probe.ATTRIBUTES.values())
         self.assertEqual(ids, sorted(ids))
-        self.assertIn(struct.pack("<8I", *ids), data)
+        self.assertIn(struct.pack(f"<{len(ids)}I", *ids), data)
 
     @unittest.skipUnless(shutil.which("keytool") and shutil.which("jarsigner"), "needs a JDK")
     def test_the_package_is_signed_with_a_throwaway_key(self) -> None:

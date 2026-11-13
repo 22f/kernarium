@@ -109,3 +109,15 @@ target_include_directories(uml_andarium_camera_request_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal)
 uml_add_unit_test(NAME andarium-camera-request
     COMMAND uml_andarium_camera_request_tests LABELS andarium)
+
+# The guest's Wi-Fi address as a function of eth0's
+# (android/lineage-24/overlay/tools/kernarium_wifi_mac.h): the golden vectors
+# (the guest runner reads the same file), the properties of every result and the
+# rounds that refuse a candidate.
+add_executable(uml_andarium_wifi_mac_tests wifi_mac_tests.cpp)
+target_include_directories(uml_andarium_wifi_mac_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/tools)
+uml_add_unit_test(NAME andarium-wifi-mac
+    COMMAND uml_andarium_wifi_mac_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/wifi-mac-golden-vectors.txt
+    LABELS andarium)
