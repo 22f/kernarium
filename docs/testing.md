@@ -785,6 +785,10 @@ previous release's data disk to check the one-time on-screen keyboard change.
 `screenrecord`'s encoder run across a suspend by the host's route (asked again
 while the guest is busy, as the host does) and by the guest's own on one stream
 each, and the host closes no stream by a reset.
+`android-sync` (integration) registers when `UML_ANDROID_SYNC_RELEASE` names the
+release: with SysRq off, a file the guest holds dirty reaches the host's data
+image once the management console's `sync` replies, and survives a hard kill of
+the emulator; a request that is refused leaves it in the guest only.
 `android-wifi-network` (integration) registers when
 `UML_ANDROID_WIFI_NETWORK_RELEASE` names the release: the guest's one Wi-Fi
 network stays enabled, joined and validated while the internet checks fail, and
