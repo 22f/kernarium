@@ -47,6 +47,22 @@ public enum PackageInstallCommand {
         return words.joined(separator: "\0")
     }
 
+    /// The same, for a session whose base APK must be the package `packageName`
+    /// (`--pkg`): the package manager refuses the commit of any other. It is
+    /// how an archive's unsigned claim about its app becomes a fact before
+    /// anything is placed on the strength of it. A name that is not a package
+    /// name is refused here, so that no word of the command is the archive's.
+    public static func createSession(
+        totalBytes: UInt64, bypassLowTargetSdkBlock: Bool = false, boundTo packageName: String
+    ) throws -> String {
+        guard ApkContainer.isPackageName(packageName) else { throw InstallRefusal.damaged }
+        var words = createSession(totalBytes: totalBytes, bypassLowTargetSdkBlock: bypassLowTargetSdkBlock).split(
+            separator: "\0", omittingEmptySubsequences: false).map(String.init)
+        // `-S` and its size stay the tail.
+        words.insert(contentsOf: ["--pkg", packageName], at: words.count - 2)
+        return words.joined(separator: "\0")
+    }
+
     /// `install-write` of one file of `bytes` bytes, which then follow on the
     /// stream (`-` is the standard input). `name` is the file's name in the
     /// session; it must be unique there and `isValidPartName`.
@@ -83,11 +99,11 @@ public enum PackageInstallCommand {
     }
 
     /// Whether the output of an `install-write` says the file arrived whole:
-    /// `Success: streamed 2546 bytes`.
+    /// `Success: streamed 2546 bytes`, and no failure beside it.
     public static func streamed(inOutput output: String, bytes: UInt64) -> Bool {
-        output.split(whereSeparator: \.isNewline).contains {
-            $0.trimmingCharacters(in: .whitespaces) == "Success: streamed \(bytes) bytes"
-        }
+        let lines = output.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+        if case .failure = PackageInstallResponse(output: output) { return false }
+        return lines.contains("Success: streamed \(bytes) bytes")
     }
 
     /// A session id is the digits of a positive 32-bit number.
@@ -120,6 +136,35 @@ public struct LegacyTarget: Equatable, Sendable {
     }
 }
 
+/// What the package manager answered a command that ends in `Success` or in
+/// `Failure [CODE: text]`, read once for every such answer. The text after a
+/// `Failure` is a diagnostic the package manager builds from the APK, so it can
+/// hold any line, `Success` included: success is the whole answer being the one
+/// success line (after the lines an adb client prints before it), and a
+/// `Failure` line anywhere, the first of them being the package manager's own,
+/// is the answer however many lines follow it.
+public enum PackageInstallResponse: Equatable, Sendable {
+    case success
+    /// The first line that starts with `Failure`.
+    case failure(line: String)
+    /// Neither: an exception trace, nothing, or text that is not an answer.
+    case unrecognized
+
+    /// The lines an adb client prints before the answer of a streamed install.
+    private static let prelude: Set<String> = ["Performing Streamed Install", "Performing Push Install"]
+
+    public init(output: String) {
+        let lines = output.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        if let failure = lines.first(where: { $0.lowercased().hasPrefix("failure") }) {
+            self = .failure(line: failure)
+        } else if lines.filter({ $0 == "Success" }).count == 1, lines.allSatisfy({ $0 == "Success" || Self.prelude.contains($0) }) {
+            self = .success
+        } else {
+            self = .unrecognized
+        }
+    }
+}
+
 /// What the package manager answered an install with, as far as the flow
 /// needs it: the stream's output ends in `Success` or `Failure [CODE: text]`.
 public enum PackageInstallAnswer: Equatable, Sendable {
@@ -134,19 +179,24 @@ public enum PackageInstallAnswer: Equatable, Sendable {
     /// The code of the too-old refusal, `INSTALL_` dropped.
     public static let tooOldCode = "FAILED_DEPRECATED_SDK_VERSION"
 
-    /// Reads the output. A line that starts with `Success` is a success
-    /// whatever else the output says; otherwise the last line that starts
-    /// with `Failure` is the answer. Case and the space around the words do
-    /// not matter, and the text after the code may be missing.
+    /// Reads the output as a `PackageInstallResponse` does: only the whole
+    /// answer being `Success` is a success, and the first line that starts
+    /// with `Failure` is the answer otherwise. Case and the space around the
+    /// words do not matter for a failure, and the text after the code may be
+    /// missing.
     public init(output: String) {
-        let lines = output.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
-        if lines.contains(where: { $0.lowercased().hasPrefix("success") }) {
+        let line: String
+        switch PackageInstallResponse(output: output) {
+        case .success:
             self = .installed
             return
+        case .unrecognized:
+            self = .refused(code: nil)
+            return
+        case let .failure(first):
+            line = first
         }
-        guard let line = lines.last(where: { $0.lowercased().hasPrefix("failure") }),
-              let open = line.firstIndex(of: "[")
-        else {
+        guard let open = line.firstIndex(of: "[") else {
             self = .refused(code: nil)
             return
         }

@@ -35,6 +35,13 @@ public struct ZipLimits: Equatable, Sendable {
     public init() {}
 }
 
+/// Asked at bounded intervals while an archive is parsed and its entries are
+/// read and inflated: it throws to stop the work (a cancel, a deadline). The
+/// reads and the inflating run on a thread of their own, where cancelling a
+/// task is not seen, and a hostile stream can make a long computation out of
+/// little input and less output.
+public typealias ZipCheckpoint = @Sendable () throws -> Void
+
 /// Random access to the bytes of an archive.
 public protocol ZipSource: AnyObject, Sendable {
     var size: UInt64 { get }
@@ -129,6 +136,7 @@ public struct ZipArchive: Sendable {
     public let entries: [ZipEntry]
     public let source: any ZipSource
     private let byName: [String: Int]
+    private let checkpoint: ZipCheckpoint?
 
     private static let endSignature: UInt32 = 0x0605_4b50
     private static let zip64EndSignature: UInt32 = 0x0606_4b50
@@ -138,8 +146,10 @@ public struct ZipArchive: Sendable {
     private static let localHeaderBytes = 30
     private static let centralHeaderBytes = 46
 
-    public init(source: any ZipSource, limits: ZipLimits = ZipLimits()) throws {
+    public init(source: any ZipSource, limits: ZipLimits = ZipLimits(), checkpoint: ZipCheckpoint? = nil) throws {
         self.source = source
+        self.checkpoint = checkpoint
+        try checkpoint?()
         let size = source.size
         guard size >= 22 else { throw ZipError.notAnArchive }
         // The end record is the last signature whose comment reaches the end
@@ -205,6 +215,7 @@ public struct ZipArchive: Sendable {
         parsed.reserveCapacity(Int(count))
         var position = 0
         for _ in 0..<count {
+            try checkpoint?()
             parsed.append(try Self.parseEntry(in: directory, at: &position, fileSize: size, limits: limits))
         }
         entries = try Self.checked(parsed, directoryOffset: directoryOffset)
@@ -224,14 +235,17 @@ public struct ZipArchive: Sendable {
         guard entry.size <= UInt64(limit) else { throw ZipError.tooLarge("\(entry.name) is \(entry.size) bytes") }
         let reader = try reader(for: entry, capacity: max(1, min(Int(entry.size), 64 * 1024)))
         var all = Data()
-        while let piece = try reader.read(upTo: 64 * 1024) { all.append(piece) }
+        while let piece = try reader.read(upTo: 64 * 1024) {
+            try checkpoint?()
+            all.append(piece)
+        }
         return all
     }
 
     /// A reader of the entry's decoded bytes, in pieces of `capacity` bytes at
     /// most, that checks the length and the checksum at the end.
     public func reader(for entry: ZipEntry, capacity: Int = 256 * 1024) throws -> ZipEntryReader {
-        try ZipEntryReader(source: source, entry: entry, capacity: capacity)
+        try ZipEntryReader(source: source, entry: entry, capacity: capacity, checkpoint: checkpoint)
     }
 
     // MARK: Parsing
@@ -367,8 +381,15 @@ public final class ZipEntryReader {
     private var checksum: UInt = 0
     private var streamEnded = false
     private var finished = false
+    private let checkpoint: ZipCheckpoint?
 
-    init(source: any ZipSource, entry: ZipEntry, capacity: Int) throws {
+    /// The whole entry has been given and its end was reached: the compressed
+    /// stream ended where the directory says, and the length and the checksum
+    /// match. A caller that must not act on a damaged entry (a commit) asks
+    /// this after the last piece, and does not rely on how the pieces ended.
+    public var isComplete: Bool { finished }
+
+    init(source: any ZipSource, entry: ZipEntry, capacity: Int, checkpoint: ZipCheckpoint? = nil) throws {
         precondition(capacity > 0)
         guard !entry.isEncrypted else { throw ZipError.encrypted }
         guard entry.method == 0 || entry.method == 8 else {
@@ -380,6 +401,7 @@ public final class ZipEntryReader {
         self.source = source
         self.entry = entry
         self.capacity = capacity
+        self.checkpoint = checkpoint
         output = UnsafeMutableRawPointer.allocate(byteCount: capacity, alignment: 16)
         input = UnsafeMutableRawPointer.allocate(byteCount: Self.inputCapacity, alignment: 16)
         var header = [UInt8](repeating: 0, count: 30)
@@ -397,6 +419,15 @@ public final class ZipEntryReader {
             output.deallocate()
             input.deallocate()
             throw ZipError.malformed("a local header that disagrees with the directory")
+        }
+        // The local name is the directory's: an entry is the one its directory
+        // entry names, not another that happens to be as long.
+        var localName = [UInt8](repeating: 0, count: nameLength)
+        let gotName = try localName.withUnsafeMutableBytes { try source.read(at: entry.headerOffset + 30, into: $0) }
+        guard gotName == nameLength, localName.elementsEqual(entry.name.utf8) else {
+            output.deallocate()
+            input.deallocate()
+            throw ZipError.malformed("a local name that is not the directory's")
         }
         position = start
         end = stop
@@ -428,6 +459,7 @@ public final class ZipEntryReader {
         let want = min(limit, capacity)
         guard want > 0 else { return nil }
         while !finished {
+            try checkpoint?()
             let produced = try produce(up: want)
             if produced > 0 { return Data(bytes: output, count: produced) }
         }
@@ -465,6 +497,7 @@ public final class ZipEntryReader {
         stream.pointee.next_out = output.assumingMemoryBound(to: Bytef.self)
         stream.pointee.avail_out = UInt32(want)
         while true {
+            try checkpoint?()
             if stream.pointee.avail_in == 0, position < end {
                 let count = Int(min(UInt64(Self.inputCapacity), end - position))
                 let got = try source.read(at: position, into: UnsafeMutableRawBufferPointer(start: input, count: count))
@@ -496,6 +529,7 @@ public final class ZipEntryReader {
         if let stream, !streamEnded {
             var spare: UInt8 = 0
             while true {
+                try checkpoint?()
                 if stream.pointee.avail_in == 0, position < end {
                     let count = Int(min(UInt64(Self.inputCapacity), end - position))
                     let got = try source.read(at: position, into: UnsafeMutableRawBufferPointer(start: input, count: count))

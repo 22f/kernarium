@@ -419,15 +419,104 @@ struct ZipArchiveTests {
     }
 
     @Test func aLocalHeaderThatDisagreesWithTheDirectoryIsRefused() throws {
+        // A local name of the directory's length that is another name is as
+        // wrong as one of another length: the entry is the one the directory names.
         var item = ZipFixture.Item("a", Data("hello".utf8), method: 0)
         item.localName = "b"
-        let zip = try archive(ZipFixture([item]))
-        // The names have the same length, so only the signature check is met
-        // first; a different length is the mismatch.
-        _ = zip
+        let same = try archive(ZipFixture([item]))
+        expectKind(isMalformed, { _ = try same.reader(for: #require(same.entry(named: "a"))) })
         var longer = ZipFixture.Item("a", Data("hello".utf8), method: 0)
         longer.localName = "abc"
         let second = try archive(ZipFixture([longer]))
         expectKind(isMalformed, { _ = try second.reader(for: #require(second.entry(named: "a"))) })
+        var multibyte = ZipFixture.Item("caf\u{E9}.apk", Data("hello".utf8), method: 0)
+        multibyte.localName = "cafe.apk\u{0}"
+        let third = try archive(ZipFixture([multibyte]))
+        expectKind(isMalformed, { _ = try third.reader(for: #require(third.entry(named: "caf\u{E9}.apk"))) })
+        // The same name reads.
+        let honest = try archive(ZipFixture([.init("caf\u{E9}.apk", Data("hello".utf8), method: 0)]))
+        #expect(try honest.data(of: #require(honest.entry(named: "caf\u{E9}.apk")), limit: 100) == Data("hello".utf8))
+    }
+
+    @Test func anEntryIsCompleteOnlyOnceItsEndAndChecksumWereChecked() throws {
+        let data = Data((0..<5000).map { UInt8(truncatingIfNeeded: $0 &* 7) })
+        for method: UInt16 in [0, 8] {
+            let zip = try archive(ZipFixture([.init("a", data, method: method)]))
+            let reader = try zip.reader(for: #require(zip.entry(named: "a")), capacity: 1000)
+            #expect(!reader.isComplete)
+            var got = Data()
+            while got.count < data.count, let piece = try reader.read(upTo: 1000) { got.append(piece) }
+            // Every byte is out, but the end has not been asked for.
+            #expect(got == data)
+            #expect(!reader.isComplete, "method \(method)")
+            #expect(try reader.read(upTo: 1) == nil)
+            #expect(reader.isComplete, "method \(method)")
+        }
+        var bad = ZipFixture.Item("a", data, method: 0)
+        bad.crc = 0x1234_5678
+        let zip = try archive(ZipFixture([bad]))
+        let reader = try zip.reader(for: #require(zip.entry(named: "a")), capacity: 8000)
+        _ = try reader.read(upTo: 8000)
+        expectKind(isCorrupt, { _ = try reader.read(upTo: 1) })
+        #expect(!reader.isComplete)
+    }
+
+    @Test func aCheckpointStopsTheReadsAndTheInflatingOfAHostileStream() throws {
+        // 262,144 empty deflate blocks (stored, length 0) before two bytes of
+        // output: little output, a lot of input to walk.
+        var packed = Data()
+        for _ in 0..<262_144 { packed.append(contentsOf: [0, 0, 0, 255, 255]) }
+        packed += ZipFixture.deflate(Data("{}".utf8))
+        var item = ZipFixture.Item("manifest.json", Data("{}".utf8))
+        item.storedBytes = packed
+        let bytes = ZipFixture([item]).build()
+        let source = CountingSource(bytes)
+        let stopped = Flag()
+        let zip = try ZipArchive(source: source) { if stopped.value { throw CancellationError() } }
+        // Without a stop the manifest reads (the probe the check is for).
+        #expect(try zip.data(of: zip.entries[0], limit: 1 << 20) == Data("{}".utf8))
+        let before = source.reads
+        #expect(before > 10)
+        source.onRead = { if source.reads == before + 3 { stopped.value = true } }
+        #expect(throws: CancellationError.self) { _ = try zip.data(of: zip.entries[0], limit: 1 << 20) }
+        // It stopped within a read or two of the stop, not after the other ~15.
+        #expect(source.reads - before <= 5, "\(source.reads - before) reads")
+    }
+
+    @Test func aCheckpointStopsArchiveParsingBeforeTheDirectoryIsRead() throws {
+        let bytes = ZipFixture([.init("a", Data("x".utf8))]).build()
+        #expect(throws: CancellationError.self) {
+            _ = try ZipArchive(source: ZipDataSource(bytes), checkpoint: { throw CancellationError() })
+        }
+    }
+}
+
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    var value: Bool {
+        get { lock.withLock { flag } }
+        set { lock.withLock { flag = newValue } }
+    }
+}
+
+/// A source that counts its reads and tells a hook of each.
+private final class CountingSource: ZipSource, @unchecked Sendable {
+    private let data: Data
+    private let lock = NSLock()
+    private var count = 0
+    var onRead: (@Sendable () -> Void)?
+    var size: UInt64 { UInt64(data.count) }
+    var reads: Int { lock.withLock { count } }
+
+    init(_ data: Data) { self.data = data }
+
+    func read(at offset: UInt64, into buffer: UnsafeMutableRawBufferPointer) throws -> Int {
+        lock.withLock { count += 1 }
+        onRead?()
+        guard offset < size, let base = buffer.baseAddress else { return 0 }
+        let n = min(buffer.count, data.count - Int(offset))
+        data.withUnsafeBytes { base.copyMemory(from: $0.baseAddress! + Int(offset), byteCount: n) }
+        return n
     }
 }
