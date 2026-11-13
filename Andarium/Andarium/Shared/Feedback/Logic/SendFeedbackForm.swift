@@ -26,6 +26,9 @@ nonisolated struct SendFeedbackForm: Equatable, Sendable {
     var takingScreenshot = false
     /// Picked photos and videos are being copied into the sheet's folder.
     var importingMedia = false
+    /// Picked files are being looked at, or one that cannot be used where it
+    /// is is being copied.
+    var addingFiles = false
 
     init(mailAvailable: Bool, running: Bool) {
         self.mailAvailable = mailAvailable
@@ -35,7 +38,7 @@ nonisolated struct SendFeedbackForm: Equatable, Sendable {
     var trimmedProblem: String { problem.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     /// Something is under way that the sheet waits for.
-    var isBusy: Bool { makingBugReport || takingScreenshot || importingMedia }
+    var isBusy: Bool { makingBugReport || takingScreenshot || importingMedia || addingFiles }
 
     /// The fields can be edited.
     var fieldsEnabled: Bool { mailAvailable && !makingBugReport }
@@ -45,6 +48,7 @@ nonisolated struct SendFeedbackForm: Equatable, Sendable {
     }
     var canTakeScreenshot: Bool { mailAvailable && running && !isBusy }
     var canAddMedia: Bool { mailAvailable && !isBusy }
+    var canAddFiles: Bool { mailAvailable && !isBusy }
     var canSend: Bool { mailAvailable && !isBusy && !trimmedProblem.isEmpty }
 
     /// Where a bug report would be, the way to one: only a running virtual

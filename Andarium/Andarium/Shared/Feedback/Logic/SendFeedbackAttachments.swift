@@ -7,10 +7,13 @@ import Foundation
 import UniformTypeIdentifiers
 
 /// One file that goes with the mail: staged in the sheet's folder, which is
-/// removed when the sheet closes.
+/// removed when the sheet closes, or, for a file the person picked from Files,
+/// where it is kept (`inPlace`).
 nonisolated struct SendFeedbackAttachment: Identifiable, Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         case bugReport, screenshot, photo, video
+        /// Any other file, picked from Files.
+        case file
     }
 
     let id: UUID
@@ -21,10 +24,19 @@ nonisolated struct SendFeedbackAttachment: Identifiable, Equatable, Sendable {
     var pixels: SendFeedbackPixels?
     /// A video's length.
     var durationSeconds: Int?
+    /// A picked file's name as the person knows it, for its row.
+    var displayName: String?
+    /// The name the mail carries, when it is not the file's own: a picked
+    /// file's name made safe, and any name that another attachment has.
+    var mailName: String?
+    /// `url` is the person's own file, opened where it is kept under an access
+    /// the sheet holds until the attachment is removed. It is never moved or
+    /// deleted, only released.
+    var inPlace: Bool
 
     init(
         id: UUID = UUID(), kind: Kind, url: URL, bytes: UInt64, pixels: SendFeedbackPixels? = nil,
-        durationSeconds: Int? = nil
+        durationSeconds: Int? = nil, displayName: String? = nil, mailName: String? = nil, inPlace: Bool = false
     ) {
         self.id = id
         self.kind = kind
@@ -32,13 +44,27 @@ nonisolated struct SendFeedbackAttachment: Identifiable, Equatable, Sendable {
         self.bytes = bytes
         self.pixels = pixels
         self.durationSeconds = durationSeconds
+        self.displayName = displayName
+        self.mailName = mailName
+        self.inPlace = inPlace
     }
 
-    var fileName: String { url.lastPathComponent }
+    /// The name the mail gives the file.
+    var fileName: String { mailName ?? url.lastPathComponent }
 
     /// The type the composer is told the file has.
     var mimeType: String {
-        UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+        let ext = (fileName as NSString).pathExtension.lowercased()
+        // An Android package is the common file to send, and no system type has it.
+        if ext == "apk" { return "application/vnd.android.package-archive" }
+        return UTType(filenameExtension: ext)?.preferredMIMEType ?? "application/octet-stream"
+    }
+
+    /// The file's bytes for the composer, mapped: its pages are read as the
+    /// composer copies them, never all held in memory at once, whatever the
+    /// size.
+    func mappedData() throws -> Data {
+        try Data(contentsOf: url, options: .alwaysMapped)
     }
 
     var size: String { Formats.size(bytes: bytes) }
@@ -65,19 +91,39 @@ nonisolated struct SendFeedbackAttachments: Equatable, Sendable {
     var bugReport: SendFeedbackAttachment? { items.first { $0.kind == .bugReport } }
 
     /// Adds a file at the end, except a bug report, which goes first and
-    /// replaces the one already there. Returns the file it replaced.
+    /// replaces the one already there. Returns the file it replaced. A name
+    /// another attachment has already (whatever the letters' case) is numbered
+    /// in the mail, so no two files of a mail share a name.
     @discardableResult
     mutating func add(_ attachment: SendFeedbackAttachment) -> SendFeedbackAttachment? {
-        guard attachment.kind == .bugReport else {
-            items.append(attachment)
-            return nil
-        }
+        var attachment = attachment
         var replaced: SendFeedbackAttachment?
-        if let index = items.firstIndex(where: { $0.kind == .bugReport }) {
+        if attachment.kind == .bugReport, let index = items.firstIndex(where: { $0.kind == .bugReport }) {
             replaced = items.remove(at: index)
         }
-        items.insert(attachment, at: 0)
+        attachment.mailName = uniqueName(of: attachment)
+        if attachment.kind == .bugReport {
+            items.insert(attachment, at: 0)
+        } else {
+            items.append(attachment)
+        }
         return replaced
+    }
+
+    /// The mail name `attachment` is to carry: its own while no other has it.
+    private func uniqueName(of attachment: SendFeedbackAttachment) -> String? {
+        let taken = Set(items.map { $0.fileName.lowercased() })
+        let name = attachment.fileName
+        guard taken.contains(name.lowercased()) else { return attachment.mailName }
+        var number = 2
+        while taken.contains(SendFeedbackNames.numbered(name, number).lowercased()) { number += 1 }
+        return SendFeedbackNames.numbered(name, number)
+    }
+
+    /// A file's size as it is now, for one that changed after it was picked.
+    mutating func update(_ id: SendFeedbackAttachment.ID, bytes: UInt64) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        items[index].bytes = bytes
     }
 
     @discardableResult

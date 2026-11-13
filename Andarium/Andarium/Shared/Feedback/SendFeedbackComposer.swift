@@ -28,14 +28,14 @@ enum SendFeedbackComposer {
         for attachment in request.attachments {
             // Mapped: the file's pages are read as the composer copies them,
             // not all held in the application's memory at once.
-            guard let data = try? Data(contentsOf: attachment.url, options: .alwaysMapped) else { continue }
+            guard let data = try? attachment.mappedData() else { continue }
             composer.addAttachmentData(data, mimeType: attachment.mimeType, fileName: attachment.fileName)
         }
         top.present(composer, animated: true)
         return true
     }
 
-    private static func topViewController() -> UIViewController? {
+    static func topViewController() -> UIViewController? {
         let windows = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap(\.windows)

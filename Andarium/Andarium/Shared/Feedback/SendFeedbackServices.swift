@@ -28,6 +28,12 @@ struct SendFeedbackServices {
     /// person left it, once; false when there is nothing to present from.
     var presentMail: @MainActor (SendFeedbackMailRequest, @escaping @MainActor (SendFeedbackMailResult) -> Void) -> Bool =
         SendFeedbackComposer.present
+    /// Presents the document picker over whatever is on screen, which opens
+    /// what the person chooses where it is kept, and reports the URLs once;
+    /// false when there is nothing to present from.
+    var pickFiles: @MainActor (@escaping @MainActor ([URL]) -> Void) -> Bool = SendFeedbackFilePicker.present
+    /// What the sheet asks of the file system for a picked file.
+    var files = SendFeedbackFileSystem()
     /// The virtual machine's display as it is now.
     var captureScreen: @MainActor (AppModel) -> UIImage? = { $0.driver?.captureGuestDisplay() }
     /// Seconds the virtual machine has run.

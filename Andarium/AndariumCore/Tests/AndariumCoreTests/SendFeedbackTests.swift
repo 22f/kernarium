@@ -170,7 +170,7 @@ struct SendFeedbackTests {
 
     @Test func removingAFileGivesItBackAndLowersTheTotal() {
         var set = SendFeedbackAttachments()
-        let photo = attachment(.photo, bytes: 3 << 20)
+        let photo = attachment(.photo, bytes: 3 << 20, name: "photo.bin")
         set.add(attachment(.screenshot, bytes: 1 << 20))
         set.add(photo)
         #expect(set.remove(photo.id) == photo)

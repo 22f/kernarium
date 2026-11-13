@@ -271,6 +271,23 @@ links. The feature's words are looked up in the `Feedback` string table
 prefix and its information block are English whatever the interface language,
 and the bug report's overlay text is the app's own.
 
+The sheet attaches the bug report, a screenshot, photos and videos from the
+photo library, and any number of files from Files. A file is opened where it is
+kept (the document picker in place, `Shared/Feedback/SendFeedbackFilePicker.swift`),
+never copied first: the sheet holds the access the picker gave it from the pick
+until the row is removed or the sheet closes, each start stopped once, and the
+composer maps the file from there, so a file of any size is never read into
+memory. A file that cannot be used in place (its provider has not downloaded it,
+its volume refuses mapping, access was lost) is copied into the sheet's folder
+instead, after a free-space check, under the app's progress overlay with Cancel;
+a copy that is cancelled or fails leaves nothing. Send looks at every file again:
+one that is gone or can no longer be mapped is taken out of the list, and
+nothing is sent. The mail names a file in plain ASCII (the row keeps the name as
+the person knows it) and numbers a name another attachment has. Above 20 MiB in
+all, files included, the sheet warns that a mail service may refuse the mail;
+Send is never blocked. Nothing about a picked file (name, size, place) is logged
+or kept once the sheet closes.
+
 ### Follow developer on X
 
 Info has one passive outward link more: Follow developer on X, a row in the

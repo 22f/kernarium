@@ -28,6 +28,7 @@ enum FeedbackPreview {
         services.address = { "feedback@example.com" }
         services.canSendMail = { screen != "feedback-nomail" }
         services.presentMail = { _, _ in true }
+        services.pickFiles = { _ in true }
         services.captureScreen = { _ in guestPicture() }
         services.runningSeconds = { _ in 2520 }
         services.previewOpensAtLaunch = opensSheet(screen)
@@ -64,6 +65,9 @@ enum FeedbackPreview {
             feedback.form.problem = words.problem
             feedback.form.details = words.details
             await attachAll(feedback, report: 8.6, photo: 21.4)
+        case "feedback-file", "feedback-file-mixed", "feedback-file-large", "feedback-file-copying",
+             "feedback-file-refused":
+            await prepareFiles(screen: screen, feedback: feedback, words: words)
         case "feedback-generating":
             feedback.form.problem = words.problem
             feedback.form.details = words.details
@@ -90,6 +94,44 @@ enum FeedbackPreview {
         }
     }
 
+    /// The screens of files from Files: sample files of this app's own, opened where
+    /// they are as a picked file is, and the real refusals.
+    @MainActor
+    private static func prepareFiles(screen: String, feedback: SendFeedbackModel, words: Words) async {
+        feedback.form.problem = words.fileProblem
+        feedback.form.details = words.fileDetails
+        switch screen {
+        case "feedback-file":
+            await attachAll(feedback, report: nil, screenshot: false, photo: nil)
+            await attachFile(feedback, named: "example-app.apk", megabytes: 12.4)
+        case "feedback-file-mixed":
+            await attachAll(feedback, report: 3.2, photo: 2.4)
+            await attachFile(feedback, named: "example-app.apk", megabytes: 6.8)
+        case "feedback-file-large":
+            await attachAll(feedback, report: nil, screenshot: false, photo: nil)
+            await attachFile(feedback, named: "example-app.apk", megabytes: 1_920)
+        case "feedback-file-copying":
+            await attachAll(feedback, report: nil, screenshot: false, photo: nil)
+            await attachFile(feedback, named: "example-app.apk", megabytes: 12.4)
+            // The real copy lasts as long as the file is large: hold its overlay part way.
+            feedback.fileBusy = SendFeedbackModel.copyingState(progress: 0.42, cancel: BusyCancel {})
+        default:
+            // A folder and an empty file are refused, each for its own reason.
+            let folder = SendFeedbackStaging().incoming.appendingPathComponent("Example folder", isDirectory: true)
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            if let empty = try? makeFile(named: "empty.txt", head: Data(), megabytes: 0) {
+                await feedback.addFiles([folder, empty])
+            }
+        }
+    }
+
+    @MainActor
+    private static func attachFile(_ feedback: SendFeedbackModel, named name: String, megabytes: Double) async {
+        if let file = try? makeFile(named: name, head: emptyZip, megabytes: megabytes) {
+            await feedback.addFiles([file])
+        }
+    }
+
     @MainActor
     private static func attachAll(
         _ feedback: SendFeedbackModel, report: Double?, screenshot: Bool = true, photo: Double?
@@ -113,6 +155,8 @@ enum FeedbackPreview {
         let problem = "Game freezes after the intro video"
         let details = "The game plays its intro, then the picture stops while the sound goes on. It happens every time since this morning\u{2019}s update."
         let suggestion = "Let me keep the keyboard on screen"
+        let fileProblem = "The app closes right after it opens"
+        let fileDetails = "I installed the attached app with Install APK. It opens, then closes after about a second. The same file works on my other phone."
         let suggestionDetails = "In games I type a lot, and the keyboard closes after every message. The picture shows where."
     }
 

@@ -23,10 +23,16 @@ final class SendFeedbackModel {
     @ObservationIgnored let app: AppModel
     @ObservationIgnored let staging: SendFeedbackStaging
     @ObservationIgnored let folder: SendFeedbackFolder
+    /// The access held to the files picked from Files, one per attachment.
+    @ObservationIgnored let scopes: SendFeedbackScopes
+    @ObservationIgnored private var fileCancellation: SendFeedbackCancellation?
 
     /// What is written and attached; `state` adds what the app says live.
     var form: SendFeedbackForm
     private(set) var thumbnails: [UUID: UIImage] = [:]
+    /// The overlay of a file that cannot be used where it is while it is copied;
+    /// the sheet draws it over itself. The Simulator preview sets it for a capture.
+    var fileBusy: BusyState?
     var failure: SendFeedbackFailure?
     /// Cancel asks before it discards.
     var confirmingDiscard = false
@@ -43,11 +49,13 @@ final class SendFeedbackModel {
         self.app = app
         self.staging = staging
         folder = staging.makeFolder()
+        scopes = SendFeedbackScopes(system: app.feedbackServices.files)
         form = SendFeedbackForm(mailAvailable: app.feedbackServices.canSendMail(), running: app.virtualMachineRuns)
     }
 
     deinit {
         folder.removeAll()
+        scopes.releaseAll()
     }
 
     /// The form with what the app says now: whether a virtual machine runs,
@@ -240,11 +248,153 @@ final class SendFeedbackModel {
         }
     }
 
+    // MARK: Files
+
+    /// Opens the system's document picker. What it returns is added where it
+    /// is kept (`addFiles`).
+    func pickFiles() {
+        guard state.canAddFiles else { return }
+        _ = app.feedbackServices.pickFiles { [weak self] urls in
+            guard let self else { return }
+            Task { await self.addFiles(urls) }
+        }
+    }
+
+    /// Takes in the files the picker opened where they are kept. Each one is
+    /// looked at without being read: a folder, a package, an empty file or one
+    /// that is not reachable is refused; a file the composer can map from
+    /// where it is becomes a row, with the picker's access held until the row
+    /// goes; any other (its provider has not downloaded it, its volume refuses
+    /// mapping) is copied into the sheet's folder, with the overlay and its
+    /// Cancel, and the access let go. Picking a file again attaches it again.
+    /// Send waits for all of it.
+    func addFiles(_ urls: [URL]) async {
+        guard !urls.isEmpty, !closed else { return }
+        form.addingFiles = true
+        let cancellation = SendFeedbackCancellation()
+        fileCancellation = cancellation
+        var refusals: [SendFeedbackFileRefusal] = []
+        for url in urls {
+            if cancellation.isCancelled || closed { break }
+            do {
+                try await addFile(url, cancellation: cancellation)
+            } catch let refusal as SendFeedbackFileRefusal {
+                if refusal != .cancelled { refusals.append(refusal) }
+            } catch {
+                refusals.append(.unavailable)
+            }
+        }
+        fileBusy = nil
+        fileCancellation = nil
+        form.addingFiles = false
+        // A copy that was still under way as the sheet closed may have made its folder again.
+        if closed { folder.removeAll() }
+        guard !refusals.isEmpty, !closed else { return }
+        fail(Self.fileFailureTitle(count: refusals.count), Self.fileFailureMessage(refusals, device: app.host.name))
+    }
+
+    private func addFile(_ url: URL, cancellation: SendFeedbackCancellation) async throws {
+        let id = UUID()
+        scopes.hold(id, url)
+        var keepAccess = false
+        defer { if !keepAccess { scopes.release(id) } }
+        let system = app.feedbackServices.files
+        let info = await Task.detached { system.inspect(url) }.value
+        guard !closed else { return }
+        switch info.kind {
+        case .file: break
+        case .folder, .other: throw SendFeedbackFileRefusal.notAFile
+        case .missing: throw SendFeedbackFileRefusal.unavailable
+        }
+        guard info.bytes > 0 else { throw SendFeedbackFileRefusal.empty }
+        let displayName = SendFeedbackNames.display(url.lastPathComponent)
+        if info.usableInPlace {
+            guard !closed else { return }
+            keepAccess = true
+            form.attachments.add(SendFeedbackAttachment(
+                id: id, kind: .file, url: url, bytes: info.bytes, displayName: displayName,
+                mailName: SendFeedbackFolder.safeName(url.lastPathComponent), inPlace: true))
+            return
+        }
+        let staged = try await copy(url, bytes: info.bytes, cancellation: cancellation)
+        guard !closed else {
+            folder.remove(staged)
+            return
+        }
+        form.attachments.add(SendFeedbackAttachment(
+            kind: .file, url: staged, bytes: Self.size(of: staged), displayName: displayName))
+    }
+
+    /// Copies a file that cannot be used where it is into the sheet's folder,
+    /// off the main thread, under the overlay with its Cancel.
+    private func copy(_ url: URL, bytes: UInt64, cancellation: SendFeedbackCancellation) async throws -> URL {
+        fileBusy = Self.copyingState(progress: 0, cancel: BusyCancel { [weak self] in self?.fileCancellation?.cancel() })
+        defer { fileBusy = nil }
+        let folder = folder
+        let name = SendFeedbackFolder.safeName(url.lastPathComponent)
+        return try await Task.detached(priority: .userInitiated) {
+            try folder.stageCopy(of: url, bytes: bytes, named: name, cancellation: cancellation) { [weak self] copied in
+                Task { @MainActor in self?.fileCopied(copied, of: bytes) }
+            }
+        }.value
+    }
+
+    /// The overlay of a copy at `progress` (0 to 1).
+    static func copyingState(progress: Double, cancel: BusyCancel) -> BusyState {
+        BusyState(
+            title: String(localized: "Copying file", table: "Feedback"),
+            detail: String(
+                localized: "This file can\u{2019}t be used where it is, so a copy is made first. Large files take a while.",
+                table: "Feedback"),
+            progress: progress, cancel: cancel)
+    }
+
+    private func fileCopied(_ copied: UInt64, of total: UInt64) {
+        guard fileBusy != nil, total > 0 else { return }
+        fileBusy?.progress = min(1, Double(copied) / Double(total))
+    }
+
+    private static func fileFailureTitle(count: Int) -> String {
+        count == 1
+            ? String(localized: "One item wasn\u{2019}t added", table: "Feedback")
+            : String(localized: "\(count) items weren\u{2019}t added", table: "Feedback")
+    }
+
+    /// One line for each reason a file was refused, in a fixed order.
+    private static func fileFailureMessage(_ refusals: [SendFeedbackFileRefusal], device: String) -> String {
+        var lines: [String] = []
+        if refusals.contains(.notEnoughSpace) {
+            lines.append(String(
+                localized: "There isn\u{2019}t enough free space on this \(device). Free up space, then try again.",
+                table: "Feedback"))
+        }
+        if refusals.contains(.notAFile) {
+            lines.append(String(
+                localized: "A folder or a package can\u{2019}t be attached. Compress it in Files first.",
+                table: "Feedback"))
+        }
+        if refusals.contains(.empty) {
+            lines.append(String(localized: "An empty file can\u{2019}t be attached.", table: "Feedback"))
+        }
+        if refusals.contains(.unavailable) {
+            lines.append(String(
+                localized: "A file couldn\u{2019}t be read. Check that it is still there, then try again.",
+                table: "Feedback"))
+        }
+        return lines.joined(separator: "\n")
+    }
+
     // MARK: Attachments
 
+    /// Takes a file out of the mail. A staged file is deleted; a file kept
+    /// where the person has it is only let go.
     func remove(_ attachment: SendFeedbackAttachment) {
         guard let removed = form.attachments.remove(attachment.id) else { return }
-        folder.remove(removed.url)
+        if removed.inPlace {
+            scopes.release(removed.id)
+        } else {
+            folder.remove(removed.url)
+        }
         thumbnails[removed.id] = nil
     }
 
@@ -258,13 +408,11 @@ final class SendFeedbackModel {
     /// where the person reads and may change the mail; nothing is sent from
     /// here.
     func send() {
-        guard state.canSend, !presentingMail, let address = app.feedbackAddress else { return }
-        // A file the system took away since is not offered.
-        let present = form.attachments.items.filter { FileManager.default.fileExists(atPath: $0.url.path) }
+        guard state.canSend, !presentingMail, let address = app.feedbackAddress, attachmentsAreThere() else { return }
         let request = SendFeedbackMailRequest(
             address: address, subject: SendFeedbackMail.subject(problem: form.problem),
             body: SendFeedbackMail.body(details: form.details, information: information),
-            attachments: present)
+            attachments: form.attachments.items)
         presentingMail = true
         let shown = app.feedbackServices.presentMail(request) { [weak self] result in
             self?.mailFinished(result)
@@ -275,6 +423,36 @@ final class SendFeedbackModel {
                 String(localized: "Mail not opened", table: "Feedback"),
                 String(localized: "Andarium couldn\u{2019}t open the mail composer.", table: "Feedback"))
         }
+    }
+
+    /// Looks at every file again as Send is tapped. A file that is gone, or
+    /// that the composer can no longer map from where it is (the person moved
+    /// or deleted it, its provider took it back, access was lost), is taken
+    /// out of the list and said so, and nothing is sent: a mail never goes
+    /// without a file the person added, unseen. A file that changed has the
+    /// size it has now, and what it holds now is what goes.
+    private func attachmentsAreThere() -> Bool {
+        var gone: [SendFeedbackAttachment] = []
+        for item in form.attachments.items {
+            if item.inPlace {
+                let now = app.feedbackServices.files.inspect(item.url)
+                if now.usableInPlace {
+                    if now.bytes != item.bytes { form.attachments.update(item.id, bytes: now.bytes) }
+                } else {
+                    gone.append(item)
+                }
+            } else if !FileManager.default.fileExists(atPath: item.url.path) {
+                gone.append(item)
+            }
+        }
+        guard !gone.isEmpty else { return true }
+        gone.forEach(remove)
+        fail(
+            String(localized: "Attachment not available", table: "Feedback"),
+            String(
+                localized: "A file you added is no longer available, so it was taken out of the list. Check the list, then send again.",
+                table: "Feedback"))
+        return false
     }
 
     /// The person left the composer. Sent ends the draft; saved and cancelled
@@ -303,12 +481,14 @@ final class SendFeedbackModel {
     func close() {
         guard !closed else { return }
         closed = true
+        fileCancellation?.cancel()
         app.busyOverSheet = false
         app.feedbackSheetOpen = false
         cleanUp()
     }
 
     private func cleanUp() {
+        scopes.releaseAll()
         folder.removeAll()
         try? FileManager.default.removeItem(at: staging.incoming)
         thumbnails = [:]

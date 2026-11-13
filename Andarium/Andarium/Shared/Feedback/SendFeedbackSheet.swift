@@ -9,7 +9,7 @@ import SwiftUI
 /// Send feedback, laid out as the mail it becomes: the problem is the subject
 /// line, the details are the body, the files sit in the body as Mail shows
 /// them, and the basic information closes it. One bar at the foot holds the
-/// bug report, the screenshot, the photos and videos, and Send feedback; it
+/// bug report, the screenshot, the photos and videos, the files, and Send feedback; it
 /// rides above the keyboard. A card over the bar asks for a bug report until
 /// one is attached or the card is put away.
 struct SendFeedbackSheet: View {
@@ -30,6 +30,8 @@ struct SendFeedbackSheet: View {
         static let screenshot = LocalizedStringResource("Screenshot", table: "Feedback")
         static let photos = LocalizedStringResource("Photos", table: "Feedback")
         static let addPhotos = LocalizedStringResource("Add photos or videos", table: "Feedback")
+        static let files = LocalizedStringResource("Files", table: "Feedback")
+        static let addFiles = LocalizedStringResource("Add files", table: "Feedback")
         static let attached = LocalizedStringResource("Attached", table: "Feedback")
         static let onlyWhileRunning = LocalizedStringResource(
             "Only while the virtual machine is running", table: "Feedback")
@@ -103,6 +105,8 @@ struct SendFeedbackSheet: View {
         .overlay {
             if let busy = model.app.feedbackBusy {
                 BusyOverlay(state: busy)
+            } else if let busy = model.fileBusy {
+                BusyOverlay(state: busy)
             } else if model.sent {
                 BusyOverlay(state: BusyState(
                     title: String(localized: "Feedback sent", table: "Feedback"),
@@ -111,9 +115,10 @@ struct SendFeedbackSheet: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: model.app.feedbackBusy != nil)
+        .animation(.easeInOut(duration: 0.2), value: model.fileBusy != nil)
         .animation(.easeInOut(duration: 0.2), value: model.sent)
         // Once something is typed or attached, a stray swipe loses nothing.
-        .interactiveDismissDisabled(state.hasContent || state.makingBugReport)
+        .interactiveDismissDisabled(state.hasContent || state.makingBugReport || model.fileBusy != nil)
         // An alert, not a dialog: on an iPad a dialog is a popover that leaves out
         // its cancel button, and both choices must show.
         .alert(Text("Discard this feedback?", tableName: "Feedback"), isPresented: $model.confirmingDiscard) {
@@ -268,8 +273,13 @@ struct SendFeedbackSheet: View {
                 .clipShape(.rect(cornerRadius: 9, style: .continuous))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 0) {
-                Text(Self.title(attachment.kind))
+                // A file is known by its name; the others by what they are.
+                (attachment.kind == .file
+                    ? Text(verbatim: attachment.displayName ?? attachment.fileName)
+                    : Text(Self.title(attachment.kind)))
                     .font(.subheadline.weight(.semibold))
+                    .lineLimit(attachment.kind == .file ? (typeSize.isAccessibilitySize ? 3 : 1) : nil)
+                    .truncationMode(.middle)
                 Text(Self.detail(attachment))
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -317,12 +327,13 @@ struct SendFeedbackSheet: View {
         }
     }
 
-    private static func symbol(_ kind: SendFeedbackAttachment.Kind) -> String {
+    static func symbol(_ kind: SendFeedbackAttachment.Kind) -> String {
         switch kind {
         case .bugReport: "ladybug.fill"
         case .screenshot: "camera.viewfinder"
         case .photo: "photo"
         case .video: "video.fill"
+        case .file: "doc.fill"
         }
     }
 
@@ -332,21 +343,23 @@ struct SendFeedbackSheet: View {
         case .screenshot: Words.screenshot
         case .photo: LocalizedStringResource("Photo", table: "Feedback")
         case .video: LocalizedStringResource("Video", table: "Feedback")
+        case .file: LocalizedStringResource("File", table: "Feedback")
         }
     }
 
-    private static func removeLabel(_ kind: SendFeedbackAttachment.Kind) -> LocalizedStringResource {
+    static func removeLabel(_ kind: SendFeedbackAttachment.Kind) -> LocalizedStringResource {
         switch kind {
         case .bugReport: LocalizedStringResource("Remove bug report", table: "Feedback")
         case .screenshot: LocalizedStringResource("Remove screenshot", table: "Feedback")
         case .photo: LocalizedStringResource("Remove photo", table: "Feedback")
         case .video: LocalizedStringResource("Remove video", table: "Feedback")
+        case .file: LocalizedStringResource("Remove file", table: "Feedback")
         }
     }
 
     /// The line under the title: the picture's pixels or a video's length,
     /// then the size.
-    private static func detail(_ attachment: SendFeedbackAttachment) -> String {
+    static func detail(_ attachment: SendFeedbackAttachment) -> String {
         var parts: [String] = []
         if let pixels = attachment.pixels { parts.append("\(pixels.width) \u{00D7} \(pixels.height)") }
         if let seconds = attachment.durationSeconds { parts.append(Formats.elapsed(seconds)) }
@@ -354,10 +367,11 @@ struct SendFeedbackSheet: View {
         return parts.joined(separator: " \u{00B7} ")
     }
 
-    /// What VoiceOver reads for a row: its kind, a video's length ("1 second",
-    /// "42 seconds") and its size.
-    private static func spoken(_ attachment: SendFeedbackAttachment) -> String {
+    /// What VoiceOver reads for a row: its kind, a file's name, a video's length
+    /// ("1 second", "42 seconds") and its size.
+    static func spoken(_ attachment: SendFeedbackAttachment) -> String {
         var parts = [String(localized: title(attachment.kind))]
+        if attachment.kind == .file { parts.append(attachment.displayName ?? attachment.fileName) }
         if let seconds = attachment.durationSeconds {
             parts.append(String(AttributedString(
                 localized: "^[\(seconds) second](inflect: true)", table: "Feedback").characters))
@@ -447,6 +461,8 @@ struct SendFeedbackSheet: View {
             }
             source(symbol: "photo.on.rectangle.angled", title: Words.photos, enabled: state.canAddMedia,
                    id: "feedback-photos", spoken: Words.addPhotos) { picking = true }
+            source(symbol: "doc.badge.plus", title: Words.files, enabled: state.canAddFiles,
+                   id: "feedback-files", spoken: Words.addFiles, action: model.pickFiles)
             Spacer(minLength: 8)
             sendButton(style)
         }
