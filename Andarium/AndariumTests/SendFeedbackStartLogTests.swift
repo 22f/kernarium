@@ -55,10 +55,16 @@ struct SendFeedbackStartLogTests {
         func sheet() -> SendFeedbackModel { SendFeedbackModel(app: app, staging: staging) }
 
         /// The session record a start under way leaves, with `output` as what the
-        /// guest printed.
-        func writeRecord(output: String) throws {
-            let text = "uml-session 6\nstate running\nend running\nstatus 0\npid 4242\nstarted 1794114290\n"
-                + "boot unfinished\nrestarts 0\nkernel-output\n" + output
+        /// guest printed: of this process, begun in this run (the start under way
+        /// began 3:17 before `moment`) and of the guest's `restarts`th boot. The
+        /// other arguments make the records that are not this boot's.
+        func writeRecord(
+            output: String, state: String = "running", end: String = "running", pid: Int32 = getpid(),
+            started: Int = Int(SendFeedbackStartLogTests.moment.timeIntervalSince1970) - 190, restarts: Int = 0
+        ) throws {
+            var text = "uml-session 7\nstate \(state)\nend \(end)\nstatus 0\npid \(pid)\nstarted \(started)\n"
+            if state != "running" { text += "ended \(started + 5)\n" }
+            text += "boot unfinished\nrestarts \(restarts)\nkernel-output\n" + output
             try Data(text.utf8).write(to: record)
         }
     }
@@ -86,6 +92,9 @@ struct SendFeedbackStartLogTests {
         let diagnostics = root.appendingPathComponent("diagnostics", isDirectory: true)
         try FileManager.default.createDirectory(at: diagnostics, withIntermediateDirectories: true)
         app.diagnosticsDirectory = diagnostics
+        // The run the record of this boot belongs to began with the start.
+        app.bootRecord = BootRecordBinding(
+            processID: Int(getpid()), runStarted: Self.moment.addingTimeInterval(-197))
         let composer = Composer()
         var services = SendFeedbackServices()
         services.address = { "feedback@example.com" }
@@ -159,6 +168,64 @@ struct SendFeedbackStartLogTests {
         #expect(request.attachments.map(\.url.lastPathComponent) == [Self.expectedName])
         #expect(request.body.contains("Boot: not finished"))
         sheet.close()
+    }
+
+    /// The sheet's start log of a record that is not the boot under way's quotes
+    /// none of it.
+    private func logText(_ fixture: Fixture) throws -> String {
+        let sheet = fixture.sheet()
+        sheet.offerStartLog()
+        defer { sheet.close() }
+        return try contents(of: try #require(sheet.form.attachments.items.first))
+    }
+
+    @Test func aRecordThatEndedOrIsAnotherProcessesOrBeganBeforeTheRunIsNotQuoted() throws {
+        let fixture = try fixture()
+        let quote = "[  102.9] init: starting service 'netd'..."
+        for (name, write) in [
+            ("an ended record", { try fixture.writeRecord(output: Self.output, state: "ended", end: "stopped") }),
+            ("a restart's end", { try fixture.writeRecord(output: Self.output, state: "ended", end: "restarted") }),
+            ("another process", { try fixture.writeRecord(output: Self.output, pid: getpid() + 1) }),
+            (
+                "an earlier run",
+                { try fixture.writeRecord(output: Self.output, started: Int(Self.moment.timeIntervalSince1970) - 4000) }
+            ),
+            ("an earlier boot", { try fixture.writeRecord(output: Self.output, restarts: 3) }),
+        ] as [(String, () throws -> Void)] {
+            try write()
+            let text = try logText(fixture)
+            #expect(!text.contains(quote) && text.hasSuffix("(nothing yet)\n"), "\(name)")
+        }
+        // The record of this boot is quoted.
+        try fixture.writeRecord(output: Self.output)
+        #expect(try logText(fixture).contains(quote))
+    }
+
+    @Test func aRestartOfTheGuestMovesTheBootTheLogQuotesToTheNextOne() throws {
+        let fixture = try fixture()
+        try fixture.writeRecord(output: Self.output)
+        #expect(fixture.app.startOutput()?.contains("zygote") == true)
+        // The runtime reports the restart before it begins the next record: until it does, the file holds the
+        // boot before, which has ended or says the count before.
+        fixture.app.guestRestartsCounted(1)
+        #expect(fixture.app.startOutput() == nil)
+        try fixture.writeRecord(output: Self.output, state: "ended", end: "restarted")
+        #expect(fixture.app.startOutput() == nil)
+        try fixture.writeRecord(output: "[    1.0] init: the next boot\n", restarts: 1)
+        #expect(fixture.app.startOutput() == "[    1.0] init: the next boot\n")
+    }
+
+    /// A start binds the record to its own run, of this process, and counts the restarts again from none.
+    @Test func aStartMakesTheBindingOfItsRun() throws {
+        let fixture = try fixture(phase: .home)
+        fixture.app.bootRecord = nil
+        let before = Date()
+        fixture.app.start(.normal)
+        let binding = try #require(fixture.app.bootRecord)
+        #expect(binding.processID == Int(getpid()) && binding.restarts == 0)
+        #expect(binding.runStarted >= before && binding.runStarted <= Date())
+        fixture.app.guestRestartsCounted(2)
+        #expect(fixture.app.bootRecord?.restarts == 2)
     }
 
     @Test func theLogTakesOutTheKeyTheSerialAndThePaths() throws {

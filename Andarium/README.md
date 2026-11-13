@@ -467,11 +467,14 @@ requires reopening Andarium.
   feedback opens the sheet the root presents (`feedbackFromBoot`), which stays
   up with its draft when the boot completes or the run ends. During the start
   its tip says that a bug report and a screenshot wait for the start to finish
-  and that the start log is attached, and the sheet attaches `start-log.txt`
+  and that the start log is attached, and the sheet attaches the log
   once, when it opens: the step, the time on the notice's clock, the kind of
-  start and this boot's printed output, from the session record's last 4 KiB
-  (the serial, every `adb_key=` value, the time zone, hardware addresses and
-  the application's folders are masked). Its name in the mail is
+  start and this boot's printed output, from the session record's last 4 KiB.
+  Only the running record of the boot under way counts (this process, begun in
+  this run, with the run's count of the guest's restarts: `BootRecordBinding`);
+  an ended record, another process's or an earlier boot's gives "(nothing
+  yet)". The serial, every `adb_key=` value, the time zone, hardware addresses
+  and the application's folders are masked. Its name in the mail is
   `start-log-yyyyMMdd-HHmmss.txt`, the moment it was made, in the device's
   clock and never localized (English, Gregorian, ASCII digits). It is a row the person can remove, counted in the total;
   a removed log is not made again, and the file is not refreshed while the sheet

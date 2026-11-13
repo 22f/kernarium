@@ -66,8 +66,12 @@ enum FeedbackPreview {
             [  102.9] init: starting service 'netd'...
             [  184.7] init: starting service 'zygote'...
             """
-        let record = "uml-session 6\nstate running\nend running\nstatus 0\npid 4242\nstarted 1794114290\n"
-            + "boot unfinished\nrestarts 0\nkernel-output\n" + output + "\n"
+        // The record of this process's boot under way, which the sheet quotes only for that boot.
+        let begun = Date().addingTimeInterval(-197)
+        let processID = ProcessInfo.processInfo.processIdentifier
+        model.bootRecord = BootRecordBinding(processID: Int(processID), runStarted: begun)
+        let record = "uml-session 7\nstate running\nend running\nstatus 0\npid \(processID)\n"
+            + "started \(Int(begun.timeIntervalSince1970) + 5)\nboot unfinished\nrestarts 0\nkernel-output\n" + output + "\n"
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try? Data(record.utf8).write(to: folder.appendingPathComponent(BugReportAttachments.sessionRecord))
         model.diagnosticsDirectory = folder

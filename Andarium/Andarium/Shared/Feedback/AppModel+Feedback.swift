@@ -52,13 +52,14 @@ extension AppModel {
 
     /// What the virtual machine printed in this boot, as the runtime's session
     /// record last quoted it: at most 4 KiB, from a checkpoint a few seconds
-    /// old, and the boot's own (the record's cursor starts with the boot). nil
-    /// where there is no record or it has no output yet.
+    /// old. Only the running record of the boot under way counts
+    /// (`BootRecordBinding`): the record of a session that ended, of another
+    /// process or of an earlier boot says nothing of this one. nil where there
+    /// is no such record or it has no output yet.
     func startOutput() -> String? {
-        guard let diagnosticsDirectory else { return nil }
-        let output = SessionRecord.read(at: diagnosticsDirectory.appendingPathComponent(BugReportAttachments.sessionRecord))?
-            .kernelOutput
-        return output?.isEmpty == false ? output : nil
+        guard let diagnosticsDirectory, let bootRecord else { return nil }
+        let record = SessionRecord.read(at: diagnosticsDirectory.appendingPathComponent(BugReportAttachments.sessionRecord))
+        return bootRecord.output(of: record)
     }
 
     /// Where a start that is still under way has got, for the mail written

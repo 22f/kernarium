@@ -968,7 +968,8 @@ final class LiveRuntime: RuntimeDriver {
 
     func guestRestarted(_ event: GuestRestartEvent) {
         print("Andarium: \(event)")
-        guard case .began = event, let model else { return }
+        guard case let .began(restartCount) = event, let model else { return }
+        model.guestRestartsCounted(restartCount)
         // The boot that follows is another one: it ends an update only by
         // reaching sys.boot_completed itself, and its console is read afresh.
         reachedBootCompleted = false
