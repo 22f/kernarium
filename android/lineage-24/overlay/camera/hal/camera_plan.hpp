@@ -102,6 +102,10 @@ constexpr std::int32_t control_af_regions = 0x10008;
 constexpr std::int32_t control_awb_regions = 0x1000c;
 constexpr std::int32_t sensor_frame_duration = 0xe0001;
 constexpr std::int32_t black_level_lock = 0x160000;
+constexpr std::int32_t tonemap_curve_blue = 0x130000;
+constexpr std::int32_t tonemap_curve_green = 0x130001;
+constexpr std::int32_t tonemap_curve_red = 0x130002;
+constexpr std::int32_t tonemap_mode = 0x130003;
 } // namespace tag
 
 // The keys of the template's request and result key lists that this camera does
@@ -109,9 +113,14 @@ constexpr std::int32_t black_level_lock = 0x160000;
 // lock are the sensor keys of MANUAL_SENSOR, so a camera without the capability
 // has neither: CTS fails a camera that has every key of a capability it does
 // not list. A region key is listed only for a kind of region the camera takes.
+// The tone map mode and curves are listed by no camera: the host's camera makes
+// its own picture, so there is no curve to take and no tone map to select, and
+// CTS runs its tone map test, which wants a curve size, for any camera that
+// lists the mode.
 inline std::vector<std::int32_t> unlisted_keys(const abi::Desc& desc, const Capabilities& caps)
 {
-    std::vector<std::int32_t> keys;
+    std::vector<std::int32_t> keys = {tag::tonemap_mode, tag::tonemap_curve_red, tag::tonemap_curve_green,
+                                      tag::tonemap_curve_blue};
     if (!caps.manual_sensor) {
         keys.push_back(tag::sensor_frame_duration);
         keys.push_back(tag::black_level_lock);
@@ -272,7 +281,13 @@ inline std::optional<SizeSource> cut_from(const std::vector<Size>& natives, cons
 // each cut from a native video mode (cut_from):
 //  - JPEG: 1920x1080, 1280x720, 640x480 and 320x240, and 1920x1440 with 1280x720
 //    when the largest JPEG reaches 1920x1440 (a camera that streams beside another
-//    is guaranteed those);
+//    is guaranteed those); and the size of the largest video mode, which is the
+//    camera's recording size (the camera API's mandatory "preview, record and
+//    JPEG video snapshot" combination wants a JPEG at it, and a layout of the
+//    large tier records 2160p). It is cut from the mode of that very size: the
+//    mode is one the host offers, so the picture asks the host for no capture
+//    format and no buffer that a stream of that mode does not, and it is never
+//    larger than the camera's largest JPEG;
 //  - YUV and PRIVATE: every JPEG size that is not larger than the largest video
 //    size (a LIMITED camera lists them), and the same guaranteed pair of the largest
 //    video size.
@@ -308,6 +323,8 @@ inline StreamSizes derive_sizes(const Formats& formats)
         add_cut(result.jpeg, size_1440p);
         add_cut(result.jpeg, size_720p);
     }
+    if (const Size record = largest(natives); record.pixels() != 0 && record.pixels() <= most(result.jpeg))
+        add_cut(result.jpeg, record);
 
     for (const auto& size : natives) result.yuv.push_back(host_entry(size));
     const std::uint64_t largest_video = most(result.yuv);

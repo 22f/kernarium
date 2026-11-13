@@ -146,9 +146,10 @@ void check_tables()
     const auto entries = tables.configurations.size() / 4;
     require(tables.min_frame_durations.size() == entries * 4 && tables.stall_durations.size() == entries * 4,
             "a duration for each configuration");
-    // 6 YUV sizes (the 4 video sizes, 1920x1440 and 320x240) twice, 6 JPEG sizes
-    // (the host's 3, 1920x1440, 1280x720 and 320x240), one RAW.
-    require(entries == 6 * 2 + 6 + 1, "the number of entries");
+    // 6 YUV sizes (the 4 video sizes, 1920x1440 and 320x240) twice, 7 JPEG sizes
+    // (the host's 3, 1920x1440, 1280x720, 320x240 and the recording size 3840x2160),
+    // one RAW.
+    require(entries == 6 * 2 + 7 + 1, "the number of entries");
 
     auto find = [&](std::int32_t format, std::int32_t width, std::int32_t height) -> int {
         for (std::size_t i = 0; i < entries; ++i)
@@ -170,6 +171,9 @@ void check_tables()
     const int cut = find(pixel_format::yuv_420_888, 1920, 1440);
     require(cut >= 0 && tables.min_frame_durations[4 * std::size_t(cut) + 3] == 1'000'000'000 / 60,
             "a derived size runs at the rate of the mode it is cut from");
+    const int record_blob = find(pixel_format::blob, 3840, 2160);
+    require(record_blob >= 0 && tables.stall_durations[4 * std::size_t(record_blob) + 3] >= 100'000'000,
+            "a JPEG at the recording size, which stalls as a derived one does");
     const int cut_blob = find(pixel_format::blob, 320, 240);
     require(cut_blob >= 0 && tables.stall_durations[4 * std::size_t(cut_blob) + 3] >= 100'000'000, "a derived JPEG stalls too");
     const int raw = find(pixel_format::raw16, 4032, 3024);
@@ -408,6 +412,63 @@ void check_cts_subsets()
     require(jpeg_max_size(video_only) == 1920 * 1080 * 3 / 2 + 65000 + 8, "the largest derived JPEG sets the maximum");
 }
 
+// The camera API's mandatory "preview, record and JPEG video snapshot" combination wants a JPEG at the recording size, which
+// is the size of the camera's largest video mode (the media profiles of a layout stop where the host's video stops: 1080p
+// at the small tier, 2160p at the large one). The size is made inside the budget the host already has: cut from the video
+// mode of that very size (no capture format of its own, no larger buffer than a stream of that mode takes), never larger
+// than the camera's largest JPEG, and it appears on no camera whose video stops at 1080p.
+void check_record_jpeg()
+{
+    const auto find = [](const std::vector<SizeSource>& list, const Size& size) -> const SizeSource* {
+        for (const auto& entry : list)
+            if (entry.size == size) return &entry;
+        return nullptr;
+    };
+    const auto largest_of = [](const std::vector<SizeSource>& list) {
+        std::uint64_t pixels = 0;
+        for (const auto& entry : list) pixels = std::max(pixels, entry.size.pixels());
+        return pixels;
+    };
+
+    // The large tier: video up to 4K, stills up to 12 MP.
+    const Size uhd{3840, 2160};
+    for (const auto& formats : {vectors::phone_lens_formats(), phone_formats()}) {
+        const auto sizes = derive_sizes(formats);
+        const auto* record = find(sizes.jpeg, uhd);
+        require(record != nullptr, "a camera that records 2160p has a JPEG at 2160p");
+        require(!record->host && record->source == uhd && record->window == Window({0, 0, uhd.width, uhd.height}),
+                "it is the whole frame of the 2160p video mode, scaled by nothing");
+        require(record->size.pixels() < largest_of(sizes.jpeg), "it is not the camera's largest picture");
+        require(find(sizes.yuv, uhd) && find(sizes.yuv, uhd)->host, "and the video size it comes from is a YUV size of the host");
+    }
+    // A host JPEG of that size stays the host's.
+    const auto host_uhd = derive_sizes(vectors::formats_of({{1920, 1080, 1, 30}, {3840, 2160, 1, 30}}, {{4032, 3024}, {3840, 2160}}));
+    require(find(host_uhd.jpeg, uhd) && find(host_uhd.jpeg, uhd)->host, "a size the host serves is not made here");
+
+    // 1080p video: nothing beyond what the lists have always held. Every JPEG size is the host's, one of the guaranteed
+    // sizes, or 1080p, which is the recording size there.
+    for (const auto& formats : {vectors::pad_front_formats(), vectors::laptop_formats(),
+                                vectors::formats_of({{640, 480, 1, 30}, {1920, 1080, 1, 60}}, {{4032, 3024}, {2016, 1512}})}) {
+        const auto sizes = derive_sizes(formats);
+        for (const auto& entry : sizes.jpeg) {
+            const bool host = std::find(formats.jpeg.begin(), formats.jpeg.end(), entry.size) != formats.jpeg.end();
+            const bool standard = std::find(std::begin(standard_jpeg_sizes), std::end(standard_jpeg_sizes), entry.size) !=
+                std::end(standard_jpeg_sizes);
+            require(host || standard || entry.size == size_1440p, "no JPEG size appears that a 1080p camera had no use for");
+        }
+        require(!find(sizes.jpeg, uhd) && !find(sizes.yuv, uhd), "no 2160p on a camera that stops at 1080p");
+    }
+
+    // Never larger than the camera's largest JPEG: video of 2160p over stills of 3 MP adds no 2160p picture.
+    const auto small_stills = derive_sizes(vectors::formats_of({{1920, 1080, 1, 30}, {3840, 2160, 1, 30}}, {{2016, 1512}}));
+    require(!find(small_stills.jpeg, uhd), "a recording size above the camera's stills is not a picture size");
+    for (const auto& entry : small_stills.jpeg) require(entry.size.pixels() <= largest_of(small_stills.jpeg), "the largest stays the largest");
+
+    // A camera without a video mode has no recording size to add.
+    const auto none = derive_sizes(vectors::formats_of({}, {{4032, 3024}}));
+    require(none.jpeg.size() == 1, "a camera without video lists its own picture size only");
+}
+
 // The `concurrent` feature has one definition; the vectors are the application lane's too.
 void check_concurrent_feature()
 {
@@ -485,7 +546,8 @@ KeyLists template_lists()
     const std::set<std::int32_t> keys = {tag::control_ae_regions, tag::control_af_regions, tag::sensor_frame_duration,
                                          tag::black_level_lock,   ae_lock,                 sensor_exposure_time,
                                          sensor_sensitivity,      lens_aperture,           lens_filter_density,
-                                         lens_focus_distance,     lens_ois_mode};
+                                         lens_focus_distance,     lens_ois_mode,           tag::tonemap_mode,
+                                         tag::tonemap_curve_red,  tag::tonemap_curve_green, tag::tonemap_curve_blue};
     return {keys, keys};
 }
 
@@ -559,6 +621,11 @@ void check_key_lists()
             require(lists.request.count(tag::black_level_lock) == 0 && lists.result.count(tag::black_level_lock) == 0 &&
                         lists.request.count(tag::sensor_frame_duration) == 0 && lists.result.count(tag::sensor_frame_duration) == 0,
                     "an automatic camera lists neither");
+        // CaptureRequestTest.testToneMapControl runs for a camera that lists the tone map mode and then reads
+        // android.tonemap.maxCurvePoints, a number of curve points that no host camera has (the picture is its own),
+        // and the HAL publishes none; so no camera lists the mode or a curve.
+        for (const auto key : {tag::tonemap_mode, tag::tonemap_curve_red, tag::tonemap_curve_green, tag::tonemap_curve_blue})
+            require(lists.request.count(key) == 0 && lists.result.count(key) == 0, "no tone map key is listed");
         // The exposure keys are not taken out: an automatic camera reports what it ran (CTS waives them).
         require(lists.result.count(sensor_exposure_time) != 0 && lists.result.count(sensor_sensitivity) != 0,
                 "the exposure time and sensitivity stay");
@@ -580,6 +647,7 @@ int main()
     check_derivation();
     check_centred_window();
     check_cts_subsets();
+    check_record_jpeg();
     check_concurrent_feature();
     check_key_lists();
     return 0;
