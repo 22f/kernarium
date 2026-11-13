@@ -63,6 +63,12 @@ enum class ExchangeResult {
  * reply, from another vCPU, or not at all. */
 constexpr std::string_view writebackAcknowledgement = "sysrq s ok";
 constexpr std::string_view writebackDisabled = "sysrq s disabled";
+/* The "sync" command's reply is "synced in <n> ms" once sync(2) has returned
+ * (arch/um/drivers/mconsole_kern.c mconsole_sync()). A kernel without the
+ * command answers every unknown command with an error that says so
+ * (mconsole_user.c). */
+constexpr std::string_view syncAcknowledgement = "synced";
+constexpr std::string_view unknownCommand = "Unknown command";
 constexpr std::string_view suspendAcknowledgement = "suspended";
 /* A guest reports a suspend it gave up with "Suspend failed: <errno>". EBUSY
  * (16) is the one a moment later can cure: a wake source fired while the guest
@@ -383,30 +389,73 @@ void adoptConsolePath(const std::string &path)
 	return client.receive(response, wait);
 }
 
-[[nodiscard]] bool requestWriteback(const GuestConsoleLocation &location,
-	unsigned int settleMs)
+/* The fallback of a kernel without "sync": SysRq 's', which the guest runs
+ * as an emergency sync on a workqueue and acknowledges once it is queued. */
+[[nodiscard]] GuestWriteback requestSysrqWriteback(
+	const GuestConsoleLocation &location, unsigned int settleMs)
 {
 	std::string response;
-	const auto result = exchange(location, "sysrq s", response);
-	/* The final reply comes last, after any console text. */
-	if (result == ExchangeResult::rejected &&
-	    response.ends_with(writebackDisabled)) {
-		std::fputs(
-			"Guest console refused the filesystem writeback; "
-			"the guest has magic SysRq disabled\n",
-			stderr);
-		return false;
+	switch (exchange(location, "sysrq s", response)) {
+	case ExchangeResult::notSent:
+		return GuestWriteback::unreachable;
+	case ExchangeResult::pending:
+		return GuestWriteback::unanswered;
+	case ExchangeResult::rejected:
+		/* The final reply comes last, after any console text. */
+		if (response.ends_with(writebackDisabled)) {
+			std::fputs(
+				"Guest console refused the filesystem writeback; "
+				"the guest has magic SysRq disabled\n",
+				stderr);
+		}
+		return GuestWriteback::refused;
+	case ExchangeResult::accepted:
+		break;
 	}
-	if (result != ExchangeResult::accepted ||
-	    !response.ends_with(writebackAcknowledgement))
-		return false;
+	if (!response.ends_with(writebackAcknowledgement))
+		return GuestWriteback::refused;
 	/* The guest reports that the writeback started, not that it finished, so
 	 * give it a bounded chance to reach the block layer before the host flushes
 	 * what it received. */
 	if (settleMs != 0U) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(settleMs));
 	}
-	return true;
+	return GuestWriteback::started;
+}
+
+[[nodiscard]] GuestWriteback requestWriteback(
+	const GuestConsoleLocation &location, std::chrono::milliseconds wait,
+	unsigned int settleMs)
+{
+	std::string response;
+	/* A zero receive timeout would not wait at all. */
+	switch (exchange(location, "sync", response,
+		std::max(wait, std::chrono::milliseconds {1}))) {
+	case ExchangeResult::notSent:
+		return GuestWriteback::unreachable;
+	case ExchangeResult::pending:
+		std::fprintf(stderr,
+			"Guest console: the guest did not confirm its filesystem sync "
+			"within %lld ms; it may still be writing\n",
+			static_cast<long long>(wait.count()));
+		return GuestWriteback::unanswered;
+	case ExchangeResult::rejected:
+		if (response.starts_with(unknownCommand))
+			return requestSysrqWriteback(location, settleMs);
+		std::fprintf(stderr,
+			"Guest console: the guest refused its filesystem sync (%s)\n",
+			response.c_str());
+		return GuestWriteback::refused;
+	case ExchangeResult::accepted:
+		break;
+	}
+	if (!response.starts_with(syncAcknowledgement)) {
+		std::fprintf(stderr,
+			"Guest console: the guest's filesystem sync reply is no "
+			"confirmation (%s)\n", response.c_str());
+		return GuestWriteback::refused;
+	}
+	return GuestWriteback::done;
 }
 
 } // namespace
@@ -475,17 +524,18 @@ std::vector<std::string> guest_management_console_arguments()
 	return arguments;
 }
 
-bool request_guest_writeback(unsigned int settleMs) noexcept
+GuestWriteback request_guest_writeback(std::chrono::milliseconds wait,
+	unsigned int settleMs) noexcept
 {
 	try {
 		std::lock_guard lock(consoleMutex);
 		const auto &location = guest_console_location();
 		if (!location)
-			return false;
+			return GuestWriteback::unreachable;
 		adoptConsolePath(location->console);
-		return requestWriteback(*location, settleMs);
+		return requestWriteback(*location, wait, settleMs);
 	} catch (...) {
-		return false;
+		return GuestWriteback::unreachable;
 	}
 }
 
@@ -504,18 +554,13 @@ namespace {
 /* A guest that refused a suspend, or kept refusing. It runs on and the caller
  * does not treat it as asleep: the console's own stop would halt only the
  * vCPU that takes it, since the kernel blocks signals per vCPU, so it is no
- * substitute for a suspend. */
-[[nodiscard]] GuestSuspension suspendRefused(
-	const GuestConsoleLocation &location, const std::string &response,
-	unsigned int writebackSettleMs)
+ * substitute for a suspend. A suspend that holds syncs the filesystems itself;
+ * one that was refused has not, and the caller asks for a writeback. */
+[[nodiscard]] GuestSuspension suspendRefused(const std::string &response)
 {
 	std::fprintf(stderr,
 		"Guest console: the guest could not suspend; it keeps running "
 		"(%s)\n", response.c_str());
-	/* A suspend that holds performs the sync itself and avoids spending the
-	 * iOS background budget twice; a guest that refused it has not synced, so
-	 * write its filesystems back for the host's flush. */
-	(void)requestWriteback(location, writebackSettleMs);
 	return GuestSuspension::none;
 }
 
@@ -534,15 +579,14 @@ namespace {
  * anything else is unconfirmed, and its resume wakes it.
  */
 [[nodiscard]] GuestSuspension abortSuspend(
-	const GuestConsoleLocation &location, const Client &request,
-	unsigned int writebackSettleMs)
+	const GuestConsoleLocation &location, const Client &request)
 {
 	std::string response;
 	switch (request.receive(response, std::chrono::milliseconds {0})) {
 	case ExchangeResult::accepted:
 		return suspendAccepted(response);
 	case ExchangeResult::rejected:
-		return suspendRefused(location, response, writebackSettleMs);
+		return suspendRefused(response);
 	case ExchangeResult::notSent:
 	case ExchangeResult::pending:
 		break;
@@ -559,13 +603,12 @@ namespace {
 			std::chrono::duration_cast<std::chrono::seconds>(
 				suspendDeadline).count()),
 		result == ExchangeResult::pending ? "none" : response.c_str());
-	(void)requestWriteback(location, writebackSettleMs);
 	return refused ? GuestSuspension::none : GuestSuspension::unconfirmed;
 }
 
 } // namespace
 
-GuestSuspension suspend_guest(unsigned int writebackSettleMs) noexcept
+GuestSuspension suspend_guest() noexcept
 {
 	try {
 		std::lock_guard lock(consoleMutex);
@@ -622,9 +665,9 @@ GuestSuspension suspend_guest(unsigned int writebackSettleMs) noexcept
 			return GuestSuspension::none;
 		case ExchangeResult::rejected:
 			/* The guest refused, or kept refusing. */
-			return suspendRefused(*location, response, writebackSettleMs);
+			return suspendRefused(response);
 		case ExchangeResult::pending:
-			return abortSuspend(*location, *request, writebackSettleMs);
+			return abortSuspend(*location, *request);
 		}
 		return GuestSuspension::none;
 	} catch (...) {

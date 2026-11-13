@@ -80,16 +80,42 @@ guest_console_location();
  */
 [[nodiscard]] std::vector<std::string> guest_management_console_arguments();
 
+/* How a request to write the guest's filesystems back ended. */
+enum class GuestWriteback {
+	/* No console was reachable, so nothing was sent. */
+	unreachable,
+	/* Sent, but no confirmation came within the wait: the guest may still be
+	 * writing, and what it holds dirty is unknown. */
+	unanswered,
+	/* The guest refused: it has no "sync" command and magic SysRq, which
+	 * the fallback needs, is off, or it answered with something that is no
+	 * confirmation. */
+	refused,
+	/* A kernel without "sync" accepted the "sysrq s" fallback, which only
+	 * starts an asynchronous writeback: the host waited the settling period
+	 * and cannot say whether it finished. */
+	started,
+	/* The guest wrote every filesystem back and block device out, and said
+	 * so after it had. */
+	done,
+};
+
 /*
- * Asks the guest to write its filesystems back and waits for it to accept the
- * request, then allows a bounded settling period for the writeback itself.
+ * Asks the guest to write its filesystems back and waits up to `wait` for it
+ * to say that it has ("sync"). The guest runs sync(2) in a process of its own
+ * and replies when that has returned, whatever its SysRq mask is; a guest
+ * that is busy for longer than `wait`, or that the host holds a block device
+ * of while its disk is full, gives no reply in time and the result is
+ * `unanswered`. A request that gets no reply is not repeated or followed by
+ * another: the console runs process requests one at a time.
  *
- * True means the guest confirmed the request. It is not a completion proof:
- * the guest schedules the writeback and reports that it started, so the
- * settling period is a bound rather than a guarantee. False means no console
- * answered, which is the normal result where the guest could not bind one.
+ * A kernel that answers "Unknown command" is older than the command. It is
+ * asked "sysrq s" instead, which is refused where the guest has magic SysRq
+ * off and which only starts the writeback: after its acknowledgement the host
+ * waits `settle_ms`, a bound and no guarantee, and the result is `started`.
  */
-[[nodiscard]] bool request_guest_writeback(unsigned int settle_ms) noexcept;
+[[nodiscard]] GuestWriteback request_guest_writeback(
+	std::chrono::milliseconds wait, unsigned int settle_ms) noexcept;
 
 /*
  * Enters Linux system suspend, so devices, secondary CPUs, interrupts, and
@@ -104,20 +130,20 @@ guest_console_location();
  * the first send. A guest that reports itself busy (EBUSY) is asked again every
  * 250 ms for two seconds while the deadline leaves time for the answer. Any
  * other refusal, or a busy guest that stays busy, logs that the guest keeps
- * running, writes its filesystems back, and returns none.
+ * running and returns none. The caller then asks for a writeback
+ * (request_guest_writeback): a suspend that holds syncs itself, and one that
+ * did not has left the filesystems as they were.
  *
  * A request with no reply at the deadline is aborted, not trusted, because a
  * guest whose freezer is held fails its suspend tens of seconds later. The
  * request's socket stays open, a wake is sent, and the final reply is read for
- * two seconds more, then the filesystems are written back. A reply that
- * arrived before the wake decides: "suspended" is system. After the wake, a
- * refusal is none (the guest is known to run), and "suspended" or silence is
- * unconfirmed. None also means no request reached the console. Resuming is
- * best effort and reports nothing, wakes a system or unconfirmed guest, and
- * sends nothing for none.
+ * two seconds more. A reply that arrived before the wake decides:
+ * "suspended" is system. After the wake, a refusal is none (the guest is
+ * known to run), and "suspended" or silence is unconfirmed. None also means no
+ * request reached the console. Resuming is best effort and reports nothing,
+ * wakes a system or unconfirmed guest, and sends nothing for none.
  */
-[[nodiscard]] GuestSuspension suspend_guest(
-	unsigned int writeback_settle_ms) noexcept;
+[[nodiscard]] GuestSuspension suspend_guest() noexcept;
 void resume_guest(GuestSuspension suspension) noexcept;
 
 /*

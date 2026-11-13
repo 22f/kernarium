@@ -56,15 +56,19 @@ int kernarium_runtime_loader_run(
     const kernarium_runtime_boot* boot);
 
 void kernarium_runtime_loader_request_stop(void);
-/* Flushes the guest's writable host files. Returns the number that could not
- * be flushed, or a negative value when no runtime is loaded. */
-int kernarium_runtime_loader_sync(void);
-/* Leaves the guest safely abandonable, and lets it run again. */
-int kernarium_runtime_loader_quiesce(void);
+/* Has the guest write its storage back and flushes the guest's writable host
+ * files. Returns the number that could not be flushed, or a negative value
+ * when no runtime is loaded, where `settle` reports NO_GUEST. `settle`
+ * (nullable) reports what the guest confirmed; see
+ * kernarium_runtime_sync_function. */
+int kernarium_runtime_loader_sync(kernarium_runtime_settle* settle);
+/* Leaves the guest safely abandonable. Pair it with
+ * kernarium_runtime_loader_resume. */
+int kernarium_runtime_loader_quiesce(kernarium_runtime_settle* settle);
 /* quiesce that keeps the guest's RAM in the process, where a quiesce would
  * hibernate it: for a host short of the space the image takes. Pair it with
  * kernarium_runtime_loader_resume. */
-int kernarium_runtime_loader_quiesce_resident(void);
+int kernarium_runtime_loader_quiesce_resident(kernarium_runtime_settle* settle);
 void kernarium_runtime_loader_resume(void);
 /* Holds (nonzero) or releases (zero) the guest's GPU requests; see
  * kernarium_runtime_set_gpu_hold_function. Returns the runtime's answer, or -1

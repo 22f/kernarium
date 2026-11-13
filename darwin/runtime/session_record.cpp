@@ -452,7 +452,7 @@ void write_memory_slot(int descriptor, bool beginning) noexcept
 	os_unfair_lock_lock(&history_lock);
 	Text text{slot, sizeof(slot) - 1};
 	const std::int64_t at = now();
-	text.text("uml-session 6\nmemory at ").number(at);
+	text.text("uml-session 7\nmemory at ").number(at);
 	task_vm_info_data_t info{};
 	mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
 	std::uint64_t footprint = 0;
@@ -678,6 +678,92 @@ void write_network_slot(int descriptor) noexcept
 			session_network_offset);
 	} while (written < 0 && errno == EINTR);
 	network_slot_busy.clear(std::memory_order_release);
+}
+
+/* The storage slot: how many times the guest's storage was settled and how
+ * many of those it did not confirm, and the last one. One writer at a time,
+ * and the session's begin, which blanks it, waits for the flag. */
+std::atomic_flag storage_slot_busy = ATOMIC_FLAG_INIT;
+std::uint64_t storage_settles{};
+std::uint64_t storage_unsettled{};
+bool storage_has_last{};
+SettleKind storage_last_kind{};
+GuestStorage storage_last_storage{};
+SettleSuspension storage_last_suspension{};
+std::int64_t storage_last_at{};
+
+std::string_view settle_kind_word(SettleKind kind) noexcept
+{
+	switch (kind) {
+	case SettleKind::sync:
+		return "sync";
+	case SettleKind::quiesce:
+		return "quiesce";
+	case SettleKind::quiesce_resident:
+		return "quiesce-resident";
+	}
+	return "sync";
+}
+
+std::string_view guest_storage_word(GuestStorage storage) noexcept
+{
+	switch (storage) {
+	case GuestStorage::confirmed:
+		return "confirmed";
+	case GuestStorage::no_guest:
+		return "no-guest";
+	case GuestStorage::unconfirmed:
+		return "unconfirmed";
+	case GuestStorage::refused:
+		return "refused";
+	case GuestStorage::unreachable:
+		return "unreachable";
+	}
+	return "unconfirmed";
+}
+
+std::string_view settle_suspension_word(SettleSuspension suspension) noexcept
+{
+	switch (suspension) {
+	case SettleSuspension::not_asked:
+		return "not-asked";
+	case SettleSuspension::suspended:
+		return "suspended";
+	case SettleSuspension::not_suspended:
+		return "not-suspended";
+	}
+	return "not-asked";
+}
+
+/* The storage slot, padded to its size: blank before the first settle, else a
+ * format line, the counts and the last settle. Held under
+ * `storage_slot_busy`. */
+void write_storage_slot(int descriptor) noexcept
+{
+	static char slot[session_storage_slot_bytes];
+	Text text{slot, sizeof(slot) - 1};
+	if (storage_settles != 0U) {
+		const auto n = [](std::uint64_t value) {
+			return static_cast<std::int64_t>(std::min<std::uint64_t>(
+				value, INT64_MAX));
+		};
+		text.text("storage 1\nsettles ").number(n(storage_settles))
+			.text(" unsettled ").number(n(storage_unsettled)).text("\n");
+		if (storage_has_last)
+			text.text("last ").text(settle_kind_word(storage_last_kind))
+				.text(" ").text(guest_storage_word(storage_last_storage))
+				.text(" ")
+				.text(settle_suspension_word(storage_last_suspension))
+				.text(" at ").number(storage_last_at).text("\n");
+	}
+	const std::size_t used = text.size();
+	std::memset(slot + used, ' ', sizeof(slot) - 1 - used);
+	slot[sizeof(slot) - 1] = '\n';
+	ssize_t written;
+	do {
+		written = pwrite(descriptor, slot, sizeof(slot),
+			session_storage_offset);
+	} while (written < 0 && errno == EINTR);
 }
 
 /* Waits one checkpoint interval inside libsystem_kernel alone: the thread
@@ -949,6 +1035,13 @@ bool begin_session_record(std::string_view path,
 	write_memory_slot(descriptor, true);
 	write_blank_stall_slot(descriptor);
 	write_network_slot(descriptor);
+	while (storage_slot_busy.test_and_set(std::memory_order_acquire))
+		sched_yield();
+	storage_settles = 0;
+	storage_unsettled = 0;
+	storage_has_last = false;
+	write_storage_slot(descriptor);
+	storage_slot_busy.clear(std::memory_order_release);
 	session_open.store(true, std::memory_order_release);
 	write_record(SessionEnd::running, 0, {}, {});
 	start_checkpoints();
@@ -998,6 +1091,28 @@ void set_run_figures_reader(RunFiguresReader reader) noexcept
 void set_network_counts_reader(SessionNetworkReader reader) noexcept
 {
 	network_reader.store(reader, std::memory_order_release);
+}
+
+void note_guest_settle(SettleKind kind, GuestStorage storage,
+	SettleSuspension suspension) noexcept
+{
+	if (!session_open.load(std::memory_order_acquire))
+		return;
+	const int descriptor = record_descriptor.load(std::memory_order_acquire);
+	if (descriptor < 0)
+		return;
+	while (storage_slot_busy.test_and_set(std::memory_order_acquire))
+		sched_yield();
+	++storage_settles;
+	if (!guest_storage_settled(storage))
+		++storage_unsettled;
+	storage_has_last = true;
+	storage_last_kind = kind;
+	storage_last_storage = storage;
+	storage_last_suspension = suspension;
+	storage_last_at = now();
+	write_storage_slot(descriptor);
+	storage_slot_busy.clear(std::memory_order_release);
 }
 
 void set_network_notice(NetworkNotice notice) noexcept

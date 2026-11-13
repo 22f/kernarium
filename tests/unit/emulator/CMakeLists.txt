@@ -41,6 +41,13 @@ uml_add_unit_test(
     NAME emulator-lifecycle-suspend-silent
     COMMAND uml_emulator_lifecycle_tests suspend-silent
     LABELS console)
+# The settle calls' reports where a wait runs out: a sync with no reply, the
+# older kernel's SysRq fallback and its settling period, a lifecycle call that
+# keeps the mutex.
+uml_add_unit_test(
+    NAME emulator-lifecycle-settle-timeouts
+    COMMAND uml_emulator_lifecycle_tests settle-timeouts
+    LABELS console)
 # A guest whose threads the fence cannot hold keeps its disk locks; the fence
 # spends its whole two-second budget finding that out.
 uml_add_unit_test(

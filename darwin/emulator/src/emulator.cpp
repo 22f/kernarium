@@ -53,11 +53,29 @@ namespace uml::emulator {
 
 namespace {
 
-/* The guest reports that its writeback started, not that it finished. This is
- * the bound the host waits before flushing what the guest handed it: long
- * enough for an ordinary writeback to reach the block layer, short enough to
- * fit inside the few seconds an application has when it is being put away. */
+/* A kernel without the console's "sync" command can only be asked for SysRq
+ * 's', which reports that its writeback started, not that it finished. This
+ * is the bound the host then waits before flushing what the guest handed it:
+ * long enough for an ordinary writeback to reach the block layer, short enough
+ * to fit inside the few seconds an application has when it is being put away. */
 constexpr unsigned int guest_writeback_settle_ms = 1500U;
+
+/* The waits for the guest's "sync" reply, which says the guest wrote its
+ * filesystems back and so is the only confirmation. Each is chosen for the
+ * call that makes it, so that the calls together stay inside what the SysRq
+ * request and its fixed settling period took before (2 s and 1.5 s):
+ *  - a sync alone waits at most guest_sync_wait_ms for the lifecycle lock and
+ *    the reply together, the lock for at most guest_sync_lock_wait_ms of it;
+ *  - the sync that opens a quiesce waits guest_quiesce_sync_wait_ms. It orders
+ *    the writeback before the trim, and the suspend that follows syncs again
+ *    and confirms the storage, so a guest that needs longer costs the quiesce
+ *    no more than that wait;
+ *  - the writeback after a suspend that failed waits guest_final_sync_wait_ms,
+ *    since a guest that did not answer the first is not asked again. */
+constexpr unsigned int guest_sync_wait_ms = 3500U;
+constexpr unsigned int guest_sync_lock_wait_ms = 1000U;
+constexpr unsigned int guest_quiesce_sync_wait_ms = 2000U;
+constexpr unsigned int guest_final_sync_wait_ms = 1500U;
 
 /* A guest about to be suspended hands its cold page cache and free memory to
  * the host first, since it keeps whatever it holds until it runs again. The
@@ -93,14 +111,16 @@ std::atomic<SteadyTime (*)() noexcept> lifecycle_clock{&steady_now};
 }
 
 /* What is left of the guest trim's reply-wait allowance for a call made at
- * `called`: the time the call spent waiting for the lifecycle mutex counts
- * against it. It is not an end-to-end bound of three seconds: a console user
- * that holds the console mutex once the remainder is computed delays the
- * request after it, as it did before. */
-[[nodiscard]] unsigned int trim_wait_left(SteadyTime called) noexcept
+ * `called` that took the lifecycle mutex at `locked`: the time the call spent
+ * waiting for the mutex counts against it, and the writeback that now comes
+ * first in a quiesce does not. It is not an end-to-end bound of three
+ * seconds: a console user that holds the console mutex once the remainder is
+ * computed delays the request after it, as it did before. */
+[[nodiscard]] unsigned int trim_wait_left(SteadyTime called,
+	SteadyTime locked) noexcept
 {
 	const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
-		lifecycle_now() - called).count();
+		locked - called).count();
 	if (waited >= static_cast<std::int64_t>(guest_trim_wait_ms))
 		return 0U;
 	return guest_trim_wait_ms -
@@ -111,6 +131,55 @@ std::atomic<SteadyTime (*)() noexcept> lifecycle_clock{&steady_now};
  * guest answers from its console interrupt, so a reply that has not come by
  * now is not coming soon, and the caller is not held longer for it. */
 constexpr std::chrono::milliseconds guest_memory_wait {500};
+
+/* What a call that settles the guest's storage reports of the guest. */
+struct SettleOutcome final {
+	::uml::runtime::GuestStorage storage;
+	::uml::runtime::SettleSuspension suspension;
+};
+
+/* What a writeback request that ended as `writeback` says of the guest's
+ * storage. A console that cannot be reached means there is no guest to settle
+ * when none runs, and a guest the host cannot ask when one does. */
+[[nodiscard]] ::uml::runtime::GuestStorage storage_after(
+	::uml::device::GuestWriteback writeback, bool guest_running) noexcept
+{
+	using ::uml::device::GuestWriteback;
+	using ::uml::runtime::GuestStorage;
+	switch (writeback) {
+	case GuestWriteback::done:
+		return GuestStorage::confirmed;
+	case GuestWriteback::started:
+	case GuestWriteback::unanswered:
+		return GuestStorage::unconfirmed;
+	case GuestWriteback::refused:
+		return GuestStorage::refused;
+	case GuestWriteback::unreachable:
+		break;
+	}
+	return guest_running ? GuestStorage::unreachable : GuestStorage::no_guest;
+}
+
+/* The public report's values are the runtime's, so the record and the API say
+ * the same word. */
+static_assert(static_cast<int>(::uml::runtime::GuestStorage::confirmed) ==
+	UML_EMULATOR_GUEST_STORAGE_CONFIRMED);
+static_assert(static_cast<int>(::uml::runtime::GuestStorage::no_guest) ==
+	UML_EMULATOR_GUEST_STORAGE_NO_GUEST);
+static_assert(static_cast<int>(::uml::runtime::GuestStorage::unconfirmed) ==
+	UML_EMULATOR_GUEST_STORAGE_UNCONFIRMED);
+static_assert(static_cast<int>(::uml::runtime::GuestStorage::refused) ==
+	UML_EMULATOR_GUEST_STORAGE_REFUSED);
+static_assert(static_cast<int>(::uml::runtime::GuestStorage::unreachable) ==
+	UML_EMULATOR_GUEST_STORAGE_UNREACHABLE);
+static_assert(static_cast<int>(
+	::uml::runtime::SettleSuspension::not_asked) ==
+	UML_EMULATOR_GUEST_SUSPENSION_NOT_ASKED);
+static_assert(static_cast<int>(::uml::runtime::SettleSuspension::suspended) ==
+	UML_EMULATOR_GUEST_SUSPENDED);
+static_assert(static_cast<int>(
+	::uml::runtime::SettleSuspension::not_suspended) ==
+	UML_EMULATOR_GUEST_NOT_SUSPENDED);
 
 /* A line written with write(2) alone: it takes no lock and allocates
  * nothing, so it can be written while the guest's threads are held. */
@@ -644,9 +713,49 @@ public:
 		process_address_space_changed.notify_all();
 	}
 
+	/* Writes the guest's storage back and reports it, then flushes the host's
+	 * files. The lifecycle lock is bounded: a lifecycle call that keeps it
+	 * for longer leaves the storage unconfirmed, and the host files are
+	 * flushed all the same. */
+	[[nodiscard]] int sync(SettleOutcome &outcome) noexcept
+	{
+		const SteadyTime called = lifecycle_now();
+		{
+			BoundedLifecycleLock lock{*this,
+				std::chrono::milliseconds{guest_sync_lock_wait_ms}};
+			if (!lock.held()) {
+				outcome = {::uml::runtime::GuestStorage::unconfirmed,
+					::uml::runtime::SettleSuspension::not_asked};
+			} else if (guest_suspension_ !=
+				::uml::device::GuestSuspension::none) {
+				/* Asking would end the suspend: it syncs before it
+				 * replies, and nothing writes since. */
+				outcome = quiesce_outcome_;
+			} else {
+				::uml::runtime::note_host_wake();
+				const auto waited =
+					std::chrono::duration_cast<std::chrono::milliseconds>(
+						lifecycle_now() - called);
+				const auto wait = std::max(
+					std::chrono::milliseconds{guest_sync_wait_ms} - waited,
+					std::chrono::milliseconds{1});
+				outcome = {storage_after(
+					::uml::device::request_guest_writeback(wait,
+						guest_writeback_settle_ms), guest_running()),
+					::uml::runtime::SettleSuspension::not_asked};
+			}
+		}
+		::uml::runtime::note_guest_settle(
+			::uml::runtime::SettleKind::sync, outcome.storage,
+			outcome.suspension);
+		const auto result = ::uml::runtime::sync_guest_files();
+		return static_cast<int>(result.failed);
+	}
+
 	/* `resident` keeps the guest's RAM in the process: nothing is hibernated,
 	 * and the threads are held by the handle's own fence. */
-	[[nodiscard]] int quiesce(bool resident = false) noexcept
+	[[nodiscard]] int quiesce(SettleOutcome &outcome,
+		bool resident = false) noexcept
 	{
 		/* The trim's reply wait is counted from the call: the time spent
 		 * behind a lifecycle call or a pressure trim is taken from it. The
@@ -657,24 +766,65 @@ public:
 			pressure_trims_sent_.load();
 		const SteadyTime called = lifecycle_now();
 		const LifecycleLock lock{*this};
+		const SteadyTime locked = lifecycle_now();
 		if (guest_suspension_ == ::uml::device::GuestSuspension::none) {
 			/* A console request ends a suspend the guest took itself. */
 			::uml::runtime::note_host_wake();
+			const bool running = guest_running();
+			/* The guest's data goes first: what it dirtied reaches the
+			 * host, and becomes reclaimable for the trim, before the trim
+			 * spends the time that the sync needs. Its reply is bounded,
+			 * and the fixed settling period of a kernel that can only be
+			 * asked for SysRq 's' is left to the writeback after a failed
+			 * suspend, as the suspend syncs itself. */
+			auto writeback = ::uml::device::request_guest_writeback(
+				std::chrono::milliseconds{guest_quiesce_sync_wait_ms}, 0U);
+			/* A guest that gave no reply is still syncing, and a request
+			 * now would queue behind it. */
+			const bool busy =
+				writeback == ::uml::device::GuestWriteback::unanswered;
 			/* The request is the host's promise (uml_emulator_quiesce
 			 * trims the guest first). Only a pressure trim that reached
 			 * the guest meanwhile, and used the allowance, stands for it:
 			 * elapsed time alone does not show that anyone asked. */
-			const unsigned int wait = trim_wait_left(called);
-			const bool asked = pressure_trims_sent_.load() !=
-				pressure_trims_at_call;
-			if (wait != 0U)
-				(void)::uml::device::trim_guest_page_cache(wait);
-			else if (!asked)
-				(void)::uml::device::trim_guest_page_cache(
-					guest_trim_send_wait_ms);
-			guest_suspension_ = ::uml::device::suspend_guest(
-				guest_writeback_settle_ms);
+			if (!busy) {
+				const unsigned int wait = trim_wait_left(called, locked);
+				const bool asked = pressure_trims_sent_.load() !=
+					pressure_trims_at_call;
+				if (wait != 0U)
+					(void)::uml::device::trim_guest_page_cache(wait);
+				else if (!asked)
+					(void)::uml::device::trim_guest_page_cache(
+						guest_trim_send_wait_ms);
+			}
+			guest_suspension_ = ::uml::device::suspend_guest();
+			if (guest_suspension_ == ::uml::device::GuestSuspension::system) {
+				/* The suspend syncs before it replies that the guest
+				 * reached the sleep boundary. */
+				outcome = {::uml::runtime::GuestStorage::confirmed,
+					::uml::runtime::SettleSuspension::suspended};
+			} else {
+				/* The guest runs, or may: what it holds dirty now is what
+				 * a last writeback finds. */
+				if (!busy && writeback !=
+					::uml::device::GuestWriteback::unreachable)
+					writeback = ::uml::device::request_guest_writeback(
+						std::chrono::milliseconds{guest_final_sync_wait_ms},
+						guest_writeback_settle_ms);
+				outcome = {storage_after(writeback, running),
+					::uml::runtime::SettleSuspension::not_suspended};
+				if (outcome.storage == ::uml::runtime::GuestStorage::no_guest)
+					outcome.suspension =
+						::uml::runtime::SettleSuspension::not_asked;
+			}
+			quiesce_outcome_ = outcome;
+		} else {
+			outcome = quiesce_outcome_;
 		}
+		::uml::runtime::note_guest_settle(resident ?
+			::uml::runtime::SettleKind::quiesce_resident :
+			::uml::runtime::SettleKind::quiesce, outcome.storage,
+			outcome.suspension);
 		const auto result = ::uml::runtime::sync_guest_files();
 		/* Last, with the guest asleep and its files on disk. */
 		if (guest_suspension_ == ::uml::device::GuestSuspension::system)
@@ -854,6 +1004,14 @@ public:
 			::uml::runtime::note_host_wake();
 			(void)::uml::device::wake_guest();
 		}
+	}
+
+	/* Whether a guest runs on this handle: the process-wide active run is
+	 * its own, committed once the run is admitted and withdrawn before it
+	 * returns. */
+	[[nodiscard]] bool guest_running() const noexcept
+	{
+		return ::uml::runtime::current_context() == &runtime_;
 	}
 
 	[[nodiscard]] ::uml::runtime::ExecutionEngine
@@ -1229,7 +1387,7 @@ private:
 	::uml::runtime::Context runtime_;
 	uml::network::Provider network_;
 	uml::network::ProviderContext network_context_;
-	std::mutex guest_lifecycle_mutex_;
+	std::timed_mutex guest_lifecycle_mutex_;
 	/* The lifecycle calls that have announced themselves and not ended: they
 	 * wait for the mutex or hold it. A pressure trim, which only tries the
 	 * mutex, gives way while one is counted. */
@@ -1261,6 +1419,39 @@ private:
 	private:
 		Emulator &emulator_;
 	};
+
+	/* The take of the lifecycle mutex that gives up after `wait`: counted
+	 * while it waits and while it holds the mutex, like LifecycleLock, and
+	 * not at all once it has given up. */
+	class BoundedLifecycleLock final {
+	public:
+		BoundedLifecycleLock(Emulator &emulator,
+			std::chrono::milliseconds wait) noexcept
+			: emulator_{emulator}
+		{
+			emulator_.lifecycle_calls_.fetch_add(1);
+			held_ = emulator_.guest_lifecycle_mutex_.try_lock_for(wait);
+			if (!held_)
+				emulator_.lifecycle_calls_.fetch_sub(1);
+		}
+
+		~BoundedLifecycleLock()
+		{
+			if (!held_)
+				return;
+			emulator_.lifecycle_calls_.fetch_sub(1);
+			emulator_.guest_lifecycle_mutex_.unlock();
+		}
+
+		BoundedLifecycleLock(const BoundedLifecycleLock &) = delete;
+		BoundedLifecycleLock &operator=(const BoundedLifecycleLock &) = delete;
+
+		[[nodiscard]] bool held() const noexcept { return held_; }
+
+	private:
+		Emulator &emulator_;
+		bool held_{};
+	};
 	bool guest_file_locks_released_{};
 	/* What holds the quiesced guest's threads: its hibernation, or a fence
 	 * of the handle's own where the RAM is not hibernated. Guarded by the
@@ -1272,6 +1463,11 @@ private:
 	bool guest_hold_failure_logged_{};
 	::uml::device::GuestSuspension guest_suspension_ {
 		::uml::device::GuestSuspension::none};
+	/* What the quiesce that suspended, or tried to suspend, the guest
+	 * reported; a call that finds the guest quiesced reports it again.
+	 * Guarded by the lifecycle mutex. */
+	SettleOutcome quiesce_outcome_ {::uml::runtime::GuestStorage::unconfirmed,
+		::uml::runtime::SettleSuspension::not_suspended};
 	/* A trimming change requested while the guest was quiesced. */
 	std::optional<bool> pending_page_cache_trim_;
 	::uml::runtime::HibernationMode hibernation_mode_ {
@@ -1440,33 +1636,64 @@ extern "C" void uml_emulator_request_stop(uml_emulator *emulator)
 		emulator->implementation.request_stop();
 }
 
-extern "C" int uml_emulator_sync(uml_emulator *emulator)
+namespace {
+
+/* A report is optional; one that is given must be one this build can fill. */
+[[nodiscard]] bool settle_report_usable(const uml_emulator_settle *report)
+	noexcept
 {
-	if (emulator == nullptr)
+	return report == nullptr || report->struct_size >= sizeof(*report);
+}
+
+void fill_settle_report(uml_emulator_settle *report,
+	const ::uml::emulator::SettleOutcome &outcome) noexcept
+{
+	if (report == nullptr)
+		return;
+	report->reserved = 0U;
+	report->guest_storage =
+		static_cast<uml_emulator_guest_storage>(outcome.storage);
+	report->guest_suspension =
+		static_cast<uml_emulator_guest_suspension>(outcome.suspension);
+}
+
+} // namespace
+
+extern "C" int uml_emulator_sync(uml_emulator *emulator,
+	uml_emulator_settle *settle)
+{
+	if (emulator == nullptr || !settle_report_usable(settle))
 		return -UML_EMULATOR_INVALID_ARGUMENT;
 	/* Ask the guest first. Only it can write back its own page cache, and
 	 * flushing the host before it would push down a prefix of what the guest
 	 * still holds. A guest without a management console simply does not
 	 * answer, which leaves the host flush doing what it did before. */
-	::uml::runtime::note_host_wake();
-	(void)::uml::device::request_guest_writeback(
-		::uml::emulator::guest_writeback_settle_ms);
-	const auto result = ::uml::runtime::sync_guest_files();
-	return static_cast<int>(result.failed);
+	::uml::emulator::SettleOutcome outcome {};
+	const int failed = emulator->implementation.sync(outcome);
+	fill_settle_report(settle, outcome);
+	return failed;
 }
 
-extern "C" int uml_emulator_quiesce(uml_emulator *emulator)
+extern "C" int uml_emulator_quiesce(uml_emulator *emulator,
+	uml_emulator_settle *settle)
 {
-	if (emulator == nullptr)
+	if (emulator == nullptr || !settle_report_usable(settle))
 		return -UML_EMULATOR_INVALID_ARGUMENT;
-	return emulator->implementation.quiesce();
+	::uml::emulator::SettleOutcome outcome {};
+	const int failed = emulator->implementation.quiesce(outcome);
+	fill_settle_report(settle, outcome);
+	return failed;
 }
 
-extern "C" int uml_emulator_quiesce_resident(uml_emulator *emulator)
+extern "C" int uml_emulator_quiesce_resident(uml_emulator *emulator,
+	uml_emulator_settle *settle)
 {
-	if (emulator == nullptr)
+	if (emulator == nullptr || !settle_report_usable(settle))
 		return -UML_EMULATOR_INVALID_ARGUMENT;
-	return emulator->implementation.quiesce(true);
+	::uml::emulator::SettleOutcome outcome {};
+	const int failed = emulator->implementation.quiesce(outcome, true);
+	fill_settle_report(settle, outcome);
+	return failed;
 }
 
 extern "C" void uml_emulator_resume(uml_emulator *emulator)

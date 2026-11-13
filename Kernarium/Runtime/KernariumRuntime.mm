@@ -2606,12 +2606,46 @@ void runtimeRequestStop(void)
  * still scheduled. This flushes what the guest has already handed to the host;
  * pages still dirty inside the guest are written back by the guest itself.
  */
-int runtimeSync(void)
+/* What a call reports when no guest runs: nothing to flush and nothing to
+ * settle. */
+[[nodiscard]] bool settleUsable(const kernarium_runtime_settle* settle)
 {
+    return settle == nullptr || settle->struct_size >= sizeof(*settle);
+}
+
+void reportNoGuest(kernarium_runtime_settle* settle)
+{
+    if (settle == nullptr)
+        return;
+    settle->reserved = 0U;
+    settle->guest_storage = KERNARIUM_RUNTIME_GUEST_STORAGE_NO_GUEST;
+    settle->guest_suspension = KERNARIUM_RUNTIME_GUEST_SUSPENSION_NOT_ASKED;
+}
+
+/* Fills the runtime's report from the library's, whose values it shares. */
+void reportSettle(kernarium_runtime_settle* settle, const uml_emulator_settle& report)
+{
+    if (settle == nullptr)
+        return;
+    settle->reserved = 0U;
+    settle->guest_storage = static_cast<uint32_t>(report.guest_storage);
+    settle->guest_suspension = static_cast<uint32_t>(report.guest_suspension);
+}
+
+int runtimeSync(kernarium_runtime_settle* settle)
+{
+    if (!settleUsable(settle))
+        return -EINVAL;
     std::lock_guard lock(emulatorLifecycleMutex);
-    if (activeEmulator == nullptr)
+    if (activeEmulator == nullptr) {
+        reportNoGuest(settle);
         return 0;
-    return uml_emulator_sync(activeEmulator);
+    }
+    uml_emulator_settle report {};
+    report.struct_size = sizeof(report);
+    const int failed = uml_emulator_sync(activeEmulator, &report);
+    reportSettle(settle, report);
+    return failed;
 }
 
 /*
@@ -2620,30 +2654,38 @@ int runtimeSync(void)
  * just written back. Freezing it as well means the disk it leaves behind is
  * the disk that was flushed.
  */
-int quiesceGuest(bool resident)
+int quiesceGuest(bool resident, kernarium_runtime_settle* settle)
 {
+    if (!settleUsable(settle))
+        return -EINVAL;
     /* A guest that restarts between the quiesce and the resume waits for the
      * resume before it boots: the library's quiesce of an idle handle only
      * flushes, and a guest booted behind it would run while the application
      * is away. */
     lifecycle.quiesce();
     std::lock_guard lock(emulatorLifecycleMutex);
-    if (activeEmulator == nullptr)
+    if (activeEmulator == nullptr) {
+        reportNoGuest(settle);
         return 0;
-    return resident ? uml_emulator_quiesce_resident(activeEmulator)
-                    : uml_emulator_quiesce(activeEmulator);
+    }
+    uml_emulator_settle report {};
+    report.struct_size = sizeof(report);
+    const int failed = resident ? uml_emulator_quiesce_resident(activeEmulator, &report)
+                                : uml_emulator_quiesce(activeEmulator, &report);
+    reportSettle(settle, report);
+    return failed;
 }
 
-int runtimeQuiesce(void)
+int runtimeQuiesce(kernarium_runtime_settle* settle)
 {
-    return quiesceGuest(false);
+    return quiesceGuest(false, settle);
 }
 
 /* The quiesce that keeps the guest's RAM in the process, for a host short of
  * the space a hibernation image takes. */
-int runtimeQuiesceResident(void)
+int runtimeQuiesceResident(kernarium_runtime_settle* settle)
 {
-    return quiesceGuest(true);
+    return quiesceGuest(true, settle);
 }
 
 void runtimeResume(void)

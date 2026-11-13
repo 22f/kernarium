@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 41U
+#define KERNARIUM_RUNTIME_API_VERSION 42U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -293,17 +293,65 @@ typedef int (*kernarium_runtime_prepare_jit_function)(
     uint32_t guest_processor_count);
 
 typedef void (*kernarium_runtime_request_stop_function)(void);
-/* Flushes the guest's writable host files. Safe to call from any thread while
- * a guest runs, and reports the number of files that could not be flushed. */
-typedef int (*kernarium_runtime_sync_function)(void);
-/* Leaves the guest safely abandonable: trims its cold page cache once, writes
- * its filesystems back, enters full system suspend, then flushes the host's
- * own files. Pair it with resume. */
-typedef int (*kernarium_runtime_quiesce_function)(void);
+
+/* What the guest confirmed about the writeback of its own storage when sync,
+ * quiesce or quiesce_resident returned, as uml_emulator_guest_storage states
+ * it. Only CONFIRMED and NO_GUEST mean that nothing the host cannot see is
+ * left dirty in the guest: a caller says the guest's storage is settled only
+ * for those two. */
+enum {
+    /* The guest wrote every filesystem back and said so. */
+    KERNARIUM_RUNTIME_GUEST_STORAGE_CONFIRMED = 0,
+    /* No guest was running, so there was nothing to settle. */
+    KERNARIUM_RUNTIME_GUEST_STORAGE_NO_GUEST = 1,
+    /* The guest was asked and did not confirm in time, or the host could not
+     * ask because another lifecycle call was busy. */
+    KERNARIUM_RUNTIME_GUEST_STORAGE_UNCONFIRMED = 2,
+    /* The guest refused the request. */
+    KERNARIUM_RUNTIME_GUEST_STORAGE_REFUSED = 3,
+    /* A guest was running and its management console could not be reached. */
+    KERNARIUM_RUNTIME_GUEST_STORAGE_UNREACHABLE = 4,
+};
+/* Whether the call put the guest to sleep. */
+enum {
+    /* The call does not suspend (sync), or nothing was asked. */
+    KERNARIUM_RUNTIME_GUEST_SUSPENSION_NOT_ASKED = 0,
+    /* The guest replied that it entered system suspend. */
+    KERNARIUM_RUNTIME_GUEST_SUSPENSION_SUSPENDED = 1,
+    /* The guest refused, or did not confirm that it slept: it may run. */
+    KERNARIUM_RUNTIME_GUEST_SUSPENSION_NOT_SUSPENDED = 2,
+};
+typedef struct kernarium_runtime_settle {
+    /* Set by the caller to sizeof the structure. */
+    uint32_t struct_size;
+    uint32_t reserved;
+    /* A KERNARIUM_RUNTIME_GUEST_STORAGE_ value. */
+    uint32_t guest_storage;
+    /* A KERNARIUM_RUNTIME_GUEST_SUSPENSION_ value. */
+    uint32_t guest_suspension;
+} kernarium_runtime_settle;
+
+/* Has the guest write its filesystems back, then flushes the guest's writable
+ * host files. Safe to call from any thread while a guest runs, and reports the
+ * number of files that could not be flushed: it says nothing of the guest.
+ * `settle` (nullable; the caller sets struct_size) reports what the guest
+ * confirmed. The call waits for the guest at most 3.5 s, and for another
+ * lifecycle call at most 1 s of that; it fills `settle` with NO_GUEST when
+ * no guest runs. Returns -EINVAL for a struct_size smaller than the
+ * structure. */
+typedef int (*kernarium_runtime_sync_function)(kernarium_runtime_settle* settle);
+/* Leaves the guest safely abandonable: has it write its filesystems back,
+ * trims its cold page cache once, enters full system suspend, then flushes
+ * the host's own files. Pair it with resume. `settle` (nullable) reports
+ * what the guest confirmed, as for sync, and whether it sleeps. A quiesce
+ * waits for a lifecycle call in progress, which is itself bounded; each wait
+ * for the guest is bounded: the first writeback 2 s, the trim 3 s, the suspend
+ * 10 s and a final writeback after a suspend that failed 1.5 s. */
+typedef int (*kernarium_runtime_quiesce_function)(kernarium_runtime_settle* settle);
 /* quiesce for a host that must not write what it is short of: the same
- * order and result, with the guest's RAM kept in the process and no
+ * order, result and report, with the guest's RAM kept in the process and no
  * hibernation image written where a quiesce would have written one. */
-typedef int (*kernarium_runtime_quiesce_resident_function)(void);
+typedef int (*kernarium_runtime_quiesce_resident_function)(kernarium_runtime_settle* settle);
 typedef void (*kernarium_runtime_resume_function)(void);
 typedef void (*kernarium_runtime_send_touch_function)(
     uint32_t slot,

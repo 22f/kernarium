@@ -127,6 +127,48 @@ struct uml_emulator_guest_memory {
 	uint64_t available_bytes;
 };
 
+/* What the guest confirmed about the writeback of its own storage when
+ * uml_emulator_sync, uml_emulator_quiesce or uml_emulator_quiesce_resident
+ * returned. Only the first two leave nothing dirty that the host cannot see:
+ * a caller says the guest's storage is settled only for them. */
+enum uml_emulator_guest_storage {
+	/* The guest wrote every filesystem back and said so: it replied to the
+	 * management console's sync, or it entered system suspend, which syncs
+	 * first. */
+	UML_EMULATOR_GUEST_STORAGE_CONFIRMED = 0,
+	/* No guest was running on the handle, so there was nothing to settle. */
+	UML_EMULATOR_GUEST_STORAGE_NO_GUEST = 1,
+	/* The guest was asked and did not confirm: it gave no reply in time (it
+	 * may still be writing), a kernel without the sync command only started
+	 * a writeback, or another lifecycle call kept the host from asking. */
+	UML_EMULATOR_GUEST_STORAGE_UNCONFIRMED = 2,
+	/* The guest refused the request. */
+	UML_EMULATOR_GUEST_STORAGE_REFUSED = 3,
+	/* A guest was running and the host could not reach its management
+	 * console, so nothing was asked. */
+	UML_EMULATOR_GUEST_STORAGE_UNREACHABLE = 4,
+};
+
+/* Whether the call put the guest to sleep. */
+enum uml_emulator_guest_suspension {
+	/* The call does not suspend (uml_emulator_sync), or nothing was asked. */
+	UML_EMULATOR_GUEST_SUSPENSION_NOT_ASKED = 0,
+	/* The guest replied that it entered system suspend. */
+	UML_EMULATOR_GUEST_SUSPENDED = 1,
+	/* The guest refused, or did not confirm that it slept: it may run. */
+	UML_EMULATOR_GUEST_NOT_SUSPENDED = 2,
+};
+
+/* What uml_emulator_sync and the quiesce calls report about the guest, beside
+ * the host files they could not flush (their return value). */
+struct uml_emulator_settle {
+	/* Set by the caller to sizeof the structure. */
+	uint32_t struct_size;
+	uint32_t reserved;
+	enum uml_emulator_guest_storage guest_storage;
+	enum uml_emulator_guest_suspension guest_suspension;
+};
+
 struct uml_emulator_config {
 	uint32_t abi_version;
 	uint32_t struct_size;
@@ -232,31 +274,53 @@ int uml_emulator_release_guest(struct uml_emulator *emulator);
  * admission cancels that run with -UML_EMULATOR_RUNTIME_ERROR and is not
  * inherited by a retry. */
 void uml_emulator_request_stop(struct uml_emulator *emulator);
-/* Flushes every host file the running guest can still write to, so that the
- * writes it has already issued survive the process. Like a stop request, this
- * is intended to overlap uml_emulator_run on the same handle; on an idle
- * handle it flushes whatever the previous run left open. It reports the number
- * of descriptors that could not be flushed, 0 when all of them were, and the
- * negated error constant for API failures. The guest's own page cache is
- * outside this boundary: only the guest kernel can write that back. */
-int uml_emulator_sync(struct uml_emulator *emulator);
-/* Puts the guest somewhere it can be abandoned. It has the guest hand its cold
- * page cache and free memory to the host, as uml_emulator_trim_page_cache
- * does, writes the guest's filesystems back, enters full system suspend, and
- * then flushes what the host received. A suspended guest issues no further
- * writes and its monotonic time does not advance, so a host that never runs
- * this process again leaves the disk as it was left.
+/* Has the guest write its filesystems back, then flushes every host file the
+ * running guest can still write to, so that the writes it has already issued
+ * survive the process. Like a stop request, this is intended to overlap
+ * uml_emulator_run on the same handle; on an idle handle it flushes whatever
+ * the previous run left open.
+ *
+ * The return value reports the number of descriptors that could not be
+ * flushed, 0 when all of them were, and the negated error constant for API
+ * failures: it says nothing of the guest. The guest's own page cache is
+ * outside the host's boundary, so a caller that needs to know that it reached
+ * the host passes `settle` (nullable, with struct_size set), which reports
+ * what the guest confirmed. The call waits for the guest's confirmation for
+ * at most 3.5 s, and for another lifecycle call of the handle (quiesce,
+ * resume, trimming) for at most 1 s of that: when that call is still busy, or
+ * the guest has not replied, the storage is UNCONFIRMED and the host files are
+ * flushed all the same. A guest the host has quiesced is not asked; it
+ * reports what that quiesce confirmed. -UML_EMULATOR_INVALID_ARGUMENT for a
+ * struct_size smaller than the structure. */
+int uml_emulator_sync(struct uml_emulator *emulator,
+		      struct uml_emulator_settle *settle);
+/* Puts the guest somewhere it can be abandoned. It has the guest write its
+ * filesystems back, so that what it dirtied becomes reclaimable, then hand its
+ * cold page cache and free memory to the host, as uml_emulator_trim_page_cache
+ * does, enter full system suspend, and then flushes what the host received. A
+ * suspended guest issues no further writes and its monotonic time does not
+ * advance, so a host that never runs this process again leaves the disk as it
+ * was left.
  * Reports the number of host files that could not be flushed, 0 when all of
- * them were, and the negated error constant for API failures. Pair it with
+ * them were, and the negated error constant for API failures. `settle`
+ * (nullable, with struct_size set) reports what the guest confirmed: its
+ * storage is CONFIRMED by the suspend, which syncs before it replies, or by a
+ * final writeback request when the suspend was refused or not confirmed, and
+ * the suspension says whether it sleeps. A writeback that gets no reply in
+ * time is not repeated, and the trim is then skipped, since the guest's
+ * console is busy with it. Each wait is bounded: the first writeback 2 s, the
+ * trim 3 s, the suspend 10 s and the final writeback 1.5 s. Pair it with
  * uml_emulator_resume; a guest with no management console is only flushed,
  * exactly as uml_emulator_sync would. */
-int uml_emulator_quiesce(struct uml_emulator *emulator);
+int uml_emulator_quiesce(struct uml_emulator *emulator,
+			 struct uml_emulator_settle *settle);
 /* uml_emulator_quiesce for a host that must not write what it is short of:
- * the same order and the same result, but the guest's RAM stays in the
- * process and no hibernation image is made, where a quiesce would have
- * hibernated it. A guest an earlier quiesce already hibernated stays so.
+ * the same order, the same result and the same report, but the guest's RAM
+ * stays in the process and no hibernation image is made, where a quiesce would
+ * have hibernated it. A guest an earlier quiesce already hibernated stays so.
  * Pair it with uml_emulator_resume. */
-int uml_emulator_quiesce_resident(struct uml_emulator *emulator);
+int uml_emulator_quiesce_resident(struct uml_emulator *emulator,
+				  struct uml_emulator_settle *settle);
 /* Wakes a quiesced guest. Harmless on a guest that is already running. */
 void uml_emulator_resume(struct uml_emulator *emulator);
 /* Does what a phone's power key does: ends a system suspend the guest entered
