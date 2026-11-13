@@ -569,6 +569,29 @@ void aLaterResponseOrTheNormalLevelTakesThePendingTrim()
 	require(response.on_retry() == Outcome::nothing);
 }
 
+void theNormalLevelDuringAResponseLeavesNoTrimPending()
+{
+	FakeActions actions;
+	actions.outcome = TrimOutcome::busy;
+	MemoryPressureResponse response{actions};
+	/* The way back to normal comes from another thread while the response's
+	 * trim is in the guest's hands, and the trim then reports busy. */
+	actions.inside_trim = [&] {
+		require(response.on_level(PressureLevel::normal) == Outcome::nothing);
+	};
+	require(response.on_level(PressureLevel::critical) == Outcome::responded);
+	require(response.retry_delay_ns() == 0,
+		"a trim was left for a pressure that ended");
+	require(response.on_retry() == Outcome::nothing);
+	require(actions.trims() == 1);
+
+	/* Without it the same busy trim is kept for a retry. */
+	actions.inside_trim = nullptr;
+	actions.advance(second);
+	require(response.on_level(PressureLevel::critical) == Outcome::responded);
+	require(response.retry_delay_ns() != 0);
+}
+
 void aRetryIsNotJoinedToAResponseThatIsRunning()
 {
 	FakeActions actions;
@@ -980,6 +1003,8 @@ int main()
 			aRetryDoesNotMoveTheWarnSpacing},
 		{"a-later-response-or-the-normal-level-takes-the-pending-trim",
 			aLaterResponseOrTheNormalLevelTakesThePendingTrim},
+		{"the-normal-level-during-a-response-leaves-no-trim-pending",
+			theNormalLevelDuringAResponseLeavesNoTrimPending},
 		{"a-retry-is-not-joined-to-a-response-that-is-running",
 			aRetryIsNotJoinedToAResponseThatIsRunning},
 		{"the-clock-is-read-in-the-order-of-the-mutex",

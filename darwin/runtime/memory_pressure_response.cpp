@@ -206,7 +206,9 @@ void MemoryPressureResponse::respond(PressureLevel level,
 		const std::lock_guard lock{mutex_};
 		running_ = false;
 		++counts_.responses;
-		if (trim == TrimOutcome::busy && timing_.retry_attempts != 0U) {
+		/* Not for a pressure that the normal level ended during the trim. */
+		if (trim == TrimOutcome::busy && timing_.retry_attempts != 0U &&
+		    level_ != PressureLevel::normal) {
 			retry_pending_ = true;
 			retry_level_ = level;
 			retry_attempts_left_ = timing_.retry_attempts;
