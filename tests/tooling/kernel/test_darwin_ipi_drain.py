@@ -8,7 +8,8 @@ tested too. The driver runs them on one thread as CPU0 and counts the host
 calls an idle cycle makes: a wake by the clock must not look at the IPI wake
 pipe unless a vector is pending, no cycle drains it twice, and an IPI sent
 before, during or after the wait must be handled without a lost wake and with
-at most one spurious cycle.
+at most one spurious cycle. A wait whose dispatch before it ran the handlers
+of an edge must not sleep, for a handler may have made a task runnable here.
 """
 __import__("sys").dont_write_bytecode = True
 
@@ -72,7 +73,7 @@ def main():
                 objects.append(str(work / f"{name}.o"))
                 run("cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", f"-I{fixtures}", f"-I{include}",
                     f"-I{sources}", "-c", str(sources / f"{name}.c"), "-o", objects[-1])
-            run("c++", "-std=c++20", "-Wall", "-Wextra", "-Werror", str(fixtures / "driver.cpp"), *objects,
+            run("c++", "-std=c++20", "-Wall", "-Wextra", "-Werror", f"-I{sources}", str(fixtures / "driver.cpp"), *objects,
                 "-o", str(work / "check"))
             run(str(work / "check"))
 

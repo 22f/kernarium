@@ -482,7 +482,15 @@ transport then leaves the device alone, keeps what it completes while a ring is
 disabled and writes it to the ring at its enable, in the order the device
 finished it. A message that changes the memory, the
 features, a ring's layout or base, or ends the driver (the `GET_FEATURES` that
-follows a teardown's disables included) resets such a device first. A
+follows a teardown's disables included) resets such a device first. That
+`GET_FEATURES` also retires every ring still disabled, which the guest then
+frees: the transport reads it no more until its next `SET_VRING_KICK` or
+in-band `VRING_KICK`, whereas an enabled ring, and a disabled one no teardown
+followed, stay read and are refused when their available flags are reserved. A
+write to the control or backend-request socket that fails because the
+front-end closed its end (`EPIPE`, `ECONNRESET`, `ENOTCONN`) ends the
+connection without a failure report; a write to a queue's call descriptor that
+fails still reports. A
 `VRING_KICK` is accepted whatever the state of the rings: a kick on a disabled
 ring is handled as that ring's buffers are, and a kick that asks for no
 acknowledgement gets none.
@@ -530,9 +538,16 @@ stream, that reports end of file or an error other than would-block means the
 backend is gone. The guest stops that interrupt source at once, reports it once
 per queue, and hands the device to the connection-broken path, which breaks its
 virtqueues and unregisters it so that pending and later requests fail instead of
-waiting (`guest-vhost-user-backend-gone`). Recovery ends there: a lost GPU
-backend kills the guest's Vulkan client within seconds, but a client waiting on
-a full control queue stays blocked until Mesa's own ring timeout.
+waiting (`guest-vhost-user-backend-gone`). A backend lost while the device is
+being removed, as at power off, leaves the removal to the path that began it:
+the exit call stops the connection-broken work before it removes a device, so
+that a device is unregistered once (`guest-vhost-user-power-off`). The work is
+queued by one loss report per device and holds the platform device's lock
+around its lookup of the virtio device, so an unbind cannot free what it
+breaks. Recovery
+ends there: a lost GPU backend kills the guest's Vulkan client within seconds,
+but a client waiting on a full control queue stays blocked until Mesa's own
+ring timeout.
 
 **Control socket.** A queue is kicked by a request on the control socket. Only a
 console kick asks for an answer, which the backend sends after it has run the
