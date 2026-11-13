@@ -506,6 +506,34 @@ struct ContainerGuestTests {
         await clean(operations)
     }
 
+    /// The pack of a bundle: this test's fixtures stand in for the asset slices (split APKs of the same
+    /// app that the package manager takes as splits), and the table, written from bundletool's
+    /// published `BuildApksResult`, says which are install-time and which come later.
+    @Test(.timeLimit(.minutes(10))) func anInstallTimePacksApkLandsInTheSessionAndALaterOnesDoesNot() async throws {
+        guard Self.enabled else { return }
+        let operations = try operations()
+        await clean(operations)
+        let toc = BundleToc(
+            variants: [BundleToc.Variant(minSdk: 21, apks: [.master("splits/base-master.apk")])],
+            assetModules: [
+                .installTime("levels", [.slice("asset-slices/levels-master.apk", "config.xhdpi", master: true)]),
+                .fastFollow("later", [.slice("asset-slices/later-master.apk", "config.x86_64", master: true)]),
+            ])
+        let url = try write([
+            ContainerEntry("toc.pb", toc.build()), ContainerEntry("splits/base-master.apk", try apk("base.apk")),
+            ContainerEntry("asset-slices/levels-master.apk", try apk("config.xhdpi.apk")),
+            ContainerEntry("asset-slices/later-master.apk", try apk("config.x86_64.apk")),
+        ], "packs.apks")
+        defer { try? FileManager.default.removeItem(at: url) }
+        // The fast-follow pack is left out, so the result is not the plain one.
+        #expect(try await operations.installApk(at: url, update: { _ in }) == .installedDataNotPlaced)
+        let files = try await installedFiles(operations)
+        #expect(files.count == 2 && files.contains("base.apk"), "\(files)")
+        #expect(files.contains { $0.contains("xhdpi") } && !files.contains { $0.contains("x86_64") }, "\(files)")
+        #expect(try await activeSessions(operations) == 0)
+        await clean(operations)
+    }
+
     // MARK: A container of more than 4 GiB
 
     @Test(.timeLimit(.minutes(30))) func aContainerOfMoreThanFourGibInstallsItsApksFromPastTheFourGibMark() async throws {

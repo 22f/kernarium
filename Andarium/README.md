@@ -802,7 +802,13 @@ is on. `AndariumCore/Adb` speaks the protocol.
   the one variant made for the guest's Android is installed, with the splits
   of the processor the guest prefers, and a universal .apks installs as one
   APK; a table that cannot be read, or names no variant for the guest, is a
-  damaged file and nothing is guessed from the names. The other layouts are
+  damaged file and nothing is guessed from the names. The slices of the
+  table's install-time asset packs go in the same session, as `bundletool
+  install-apks` does, for the guest's Android and processor (a language, a
+  density or a texture format is not weighed: every such slice is sent). A
+  fast-follow or on-demand pack, or one the table does not say is install-time,
+  is not installed, and the result says the app's data was not all copied.
+  The other layouts are
   classified by entry names and the container's own metadata. The parts go
   into one install session over the same connection, each read from the
   archive as it is written and checked when it ends; a session that was not

@@ -325,6 +325,94 @@ struct ContainerSessionTests {
         #expect(adbd.committedSessions.isEmpty && adbd.openSessions.isEmpty && adbd.installBytes == 0)
     }
 
+    // MARK: Asset packs
+
+    /// A bundle of one variant (a base and a language split) with the asset modules `modules`; the
+    /// APK of each slice holds its own bytes, which a test finds in the session by digest.
+    private func packBundle(_ modules: [BundleToc.AssetModule]) -> (entries: [ContainerEntry], data: [String: Data]) {
+        let toc = BundleToc(
+            variants: [BundleToc.Variant(apks: [.master("splits/base-master.apk"), .split("splits/base-en.apk", "config.en")])],
+            assetModules: modules)
+        var entries = [ContainerEntry("toc.pb", toc.build())]
+        var data: [String: Data] = [:]
+        var seed = 300
+        let paths = ["splits/base-master.apk", "splits/base-en.apk"] + modules.flatMap { $0.slices.map(\.path) }
+        for path in paths where data[path] == nil {
+            seed += 1
+            data[path] = bytes(seed, count: 12_011)
+            entries.append(ContainerEntry(path, data[path]!))
+        }
+        return (entries, data)
+    }
+
+    @Test func theApksOfAnInstallTimePackAreSentInTheSessionOfTheApp() async throws {
+        let adbd = DiscardingAdbd()
+        defer { adbd.shutdown() }
+        let bundle = packBundle([
+            .installTime("levels", [.slice("asset-slices/levels-master.apk", "levels", master: true), .slice("asset-slices/levels-more.apk", "levels.config.more")]),
+        ])
+        let url = try ContainerFixture.write(bundle.entries, name: "Packs.apks")
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await guest(on: adbd).installApk(at: url, update: { _ in }) == .installed)
+        let session = try #require(adbd.committedSessions.first)
+        #expect(adbd.committedSessions.count == 1)
+        // The base first, its split and the pack's two slices, each under a name of its own.
+        #expect(session.parts.count == 4 && session.parts.first?.name == "base.apk")
+        #expect(session.parts.first?.digest == digest(try #require(bundle.data["splits/base-master.apk"])))
+        for path in ["splits/base-en.apk", "asset-slices/levels-master.apk", "asset-slices/levels-more.apk"] {
+            #expect(session.parts.contains { $0.digest == digest(bundle.data[path]!) }, "\(path)")
+        }
+        #expect(Set(session.parts.map(\.name)).count == 4)
+        #expect(adbd.openSessions.isEmpty && adbd.abandonedSessions.isEmpty)
+    }
+
+    @Test func aPackThatIsDeliveredLaterIsNotSentAndTheResultIsNotPlainlyInstalled() async throws {
+        let adbd = DiscardingAdbd()
+        defer { adbd.shutdown() }
+        let bundle = packBundle([
+            .installTime("levels", [.slice("asset-slices/levels-master.apk", "levels", master: true)]),
+            .onDemand("extra", [.slice("asset-slices/extra-master.apk", "extra", master: true)]),
+            .fastFollow("later", [.slice("asset-slices/later-master.apk", "later", master: true)]),
+        ])
+        let url = try ContainerFixture.write(bundle.entries, name: "Packs.apks")
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await guest(on: adbd).installApk(at: url, update: { _ in }) == .installedDataNotPlaced)
+        let session = try #require(adbd.committedSessions.first)
+        #expect(session.parts.count == 3)
+        #expect(session.parts.contains { $0.digest == digest(bundle.data["asset-slices/levels-master.apk"]!) })
+        for path in ["asset-slices/extra-master.apk", "asset-slices/later-master.apk"] {
+            #expect(!session.parts.contains { $0.digest == digest(bundle.data[path]!) }, "\(path)")
+        }
+    }
+
+    // MARK: Cancel and the reading of the file
+
+    @Test func aCancelPendingWhenTheFileIsFirstReadEndsTheInstallAsTheCancelEvenForAFileThatWouldBeRefused() async throws {
+        // Read to its end, each of these is refused. The cancel the first update raises is what the
+        // reading's checkpoint reports instead, so the install ends as the cancel and not as the refusal.
+        let notAnArchive = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-Cut.xapk")
+        try bytes(9, count: 6_000).write(to: notAnArchive)
+        let noApp = try ContainerFixture.write([ContainerEntry("readme.txt", bytes(3, count: 500))], name: "Empty.apks")
+        for url in [notAnArchive, noApp] {
+            defer { try? FileManager.default.removeItem(at: url) }
+            let adbd = DiscardingAdbd()
+            defer { adbd.shutdown() }
+            let operations = try guest(on: adbd)
+            let box = TaskBox()
+            let task = Task {
+                try await operations.installApk(at: url, update: { _ in box.cancel() })
+            }
+            box.task = task
+            let result = await task.result
+            guard case let .failure(error) = result else {
+                Issue.record("installed: \(url.lastPathComponent)")
+                continue
+            }
+            #expect(error is CancellationError, "\(url.lastPathComponent): \(error)")
+            #expect(adbd.connectionCount == 0, "\(url.lastPathComponent)")
+        }
+    }
+
     // MARK: Small things
 
     @Test func anApkIsAnAppByItsExtensionWhateverTheFormOfIt() {
