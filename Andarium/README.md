@@ -796,6 +796,61 @@ is on. `AndariumCore/Adb` speaks the protocol.
   Install anyway sends the same file again with the package manager's
   `--bypass-low-target-sdk-block`, once (`LegacyInstallFlow`). Nothing else in
   Andarium sends that flag, and the choice is kept nowhere.
+- **An app in parts** installs from one file: .apks, .xapk or .apkm, never
+  .zip, and an .aab is refused. The file is recognised by its content, not its
+  name: an APK under one of those names installs as an APK, and a file that is
+  not a ZIP, or is cut short, is damaged. It is read in place, never unpacked
+  or copied, under bounds on what a hostile file can ask for (the entry count,
+  the sizes, and the time, which a cancel ends; `ZipArchive`). The APKs inside
+  are never opened. A bundletool .apks is read through its table of contents,
+  and the Android and the processor of each variant and APK are matched as
+  bundletool's matchers do, from the values and the alternatives each lists:
+  exactly one variant must fit the guest, and a sibling made for a newer
+  Android that the guest has excludes a variant (there is no falling back
+  across it; a level a variant does not state is 0). A processor or any other
+  restriction the reader has no name for, in a list of values or of
+  alternatives and whatever its wire type, never means no restriction: it
+  leaves its variant or APK out, and targeting it does not weigh on an APK
+  that would be installed (a graphics API, a device tier) refuses the file. A
+  variant for several processors together (the standalone builds of old
+  Androids) or for a density is not weighed and is not chosen. A table that
+  states a singular field twice, more than one SDK value, or a processor as
+  its own alternative is damaged. Each variant keeps its own description of an
+  APK; a path described twice in one variant is a damaged table. The parts of
+  the chosen variant were each matched to the guest by their own targeting and
+  none is dropped after that. The one variant installed
+  has the splits of the processor the guest prefers, and a universal .apks
+  installs as one APK; a table that cannot be read, or names no variant for the
+  guest, is a damaged file and nothing is guessed from the names. The slices of
+  the table's install-time asset packs go in the same session, as `bundletool
+  install-apks` does, when their own targeting fits the guest (a language or a
+  density is not weighed: every such slice is sent; a slice with a texture
+  format refuses the file, since the guest's formats are not asked, while an
+  app's own texture splits are sent). A
+  fast-follow or on-demand pack, or one the table does not say is install-time,
+  is not installed, and the result says the app's data was not all copied.
+  The other layouts are
+  classified by entry names and the container's own metadata. The parts go
+  into one install session over the same connection, each read from the
+  archive as it is written and checked when it ends; a session that was not
+  committed is abandoned on a fresh connection when the install fails or is
+  cancelled (not when the guest is gone or the session's creation was not
+  answered, which leaves it to Android), and the older-app retry opens a new
+  session with the flag. Only the package manager's whole answer being
+  `Success` installs. Each APK inside is held to the 4 GiB limit; the file
+  itself may be larger, and its footprint does not grow with it. A file with
+  encrypted entries, no app, or parts that do not fit together is refused, and
+  nothing is installed. The OBB files of an .xapk, or an .apkm that lists
+  them, are copied once the app is in, to `Android/obb/<package>/` of
+  internal storage and nowhere else, and only for a package the package
+  manager has checked against the base APK: the session is created for the
+  package the file names. Each goes to a hidden partial name as an import
+  does, covered by the same ledger, and is moved into place only after it has
+  been verified. Other data in the file (`Android/data`, say) is not placed.
+  The copy has its own Cancel, and a stop or a failure in it leaves the app
+  installed, with a result that says its data was not all copied. That
+  result is a warning, not a success: the caution symbol in the caution
+  colour, and a title of its own (`ApkInstallOutcome.words`).
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB

@@ -45,6 +45,84 @@ struct LegacyApkInstallTests {
                 == "abb_exec:package\0install\0-r\0-t\0--install-reason\0" + "4\0--bypass-low-target-sdk-block\0-S\0" + "4096")
     }
 
+    // MARK: Sessions
+
+    @Test func theSessionCommandsHaveTheirArguments() throws {
+        #expect(
+            PackageInstallCommand.createSession(totalBytes: 9000)
+                == "abb_exec:package\0install-create\0-r\0-t\0--install-reason\0" + "4\0-S\0" + "9000")
+        #expect(
+            PackageInstallCommand.createSession(totalBytes: 9000, bypassLowTargetSdkBlock: true)
+                == "abb_exec:package\0install-create\0-r\0-t\0--install-reason\0" + "4\0--bypass-low-target-sdk-block\0-S\0" + "9000")
+        // The package an archive names is checked by the package manager against the base APK.
+        #expect(
+            try PackageInstallCommand.createSession(totalBytes: 9000, bypassLowTargetSdkBlock: true, boundTo: "org.example.app")
+                == "abb_exec:package\0install-create\0-r\0-t\0--install-reason\0" + "4\0--bypass-low-target-sdk-block\0--pkg\0org.example.app\0-S\0" + "9000")
+        #expect(
+            try PackageInstallCommand.createSession(totalBytes: 9000, boundTo: "org.example.app")
+                == "abb_exec:package\0install-create\0-r\0-t\0--install-reason\0" + "4\0--pkg\0org.example.app\0-S\0" + "9000")
+        #expect(
+            PackageInstallCommand.writeSession("1858877423", name: "base.apk", bytes: 2546)
+                == "abb_exec:package\0install-write\0-S\0" + "2546\0" + "1858877423\0base.apk\0-")
+        #expect(PackageInstallCommand.commitSession("1858877423") == "abb_exec:package\0install-commit\0" + "1858877423")
+        #expect(PackageInstallCommand.abandonSession("1858877423") == "abb_exec:package\0install-abandon\0" + "1858877423")
+    }
+
+    @Test func aSessionIsCreatedWithTheSingleInstallsFlags() throws {
+        // The same words as `service`, with `install-create` for `install`.
+        for bypass in [false, true] {
+            let single = PackageInstallCommand.service(size: 77, bypassLowTargetSdkBlock: bypass)
+            let created = PackageInstallCommand.createSession(totalBytes: 77, bypassLowTargetSdkBlock: bypass)
+            #expect(created == single.replacingOccurrences(of: "\0install\0", with: "\0install-create\0"))
+        }
+    }
+
+    @Test func aPackageNameThatIsNotOneNeverReachesTheCommand() {
+        for name in ["", "org", "org.example\0--bypass-low-target-sdk-block", "org.exa mple", "org..example", "1org.example", "org.example;ls"] {
+            #expect(throws: InstallRefusal.damaged, "\(name.debugDescription)") {
+                try PackageInstallCommand.createSession(totalBytes: 1, boundTo: name)
+            }
+        }
+    }
+
+    @Test func theCreatedSessionIsReadFromItsAnswer() {
+        #expect(PackageInstallCommand.createdSession(inOutput: "Success: created install session [1858877423]\n") == "1858877423")
+        #expect(PackageInstallCommand.createdSession(inOutput: "  Success: created install session [5]\r\n") == "5")
+        for output in [
+            "", "Success\n", "Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]\n",
+            "Exception occurred while executing 'install-create':\nandroid.os.ParcelableException: java.io.IOException: Requested internal only, but not enough space\n",
+            "Success: created install session []\n", "Success: created install session [abc]\n",
+            "Success: created install session [-5]\n", "Success: created install session [0]\n",
+            "Success: created install session [99999999999]\n", "Success: created install session [2147483648]\n",
+            "Success: created install session [1 2]\n",
+        ] {
+            #expect(PackageInstallCommand.createdSession(inOutput: output) == nil, "\(output.debugDescription)")
+        }
+    }
+
+    @Test func aFileWrittenIntoASessionIsKnownByItsOwnAnswer() {
+        #expect(PackageInstallCommand.streamed(inOutput: "Success: streamed 2546 bytes\n", bytes: 2546))
+        #expect(PackageInstallCommand.streamed(inOutput: "Success: streamed 2546 bytes", bytes: 2546))
+        #expect(!PackageInstallCommand.streamed(inOutput: "Success: streamed 2546 bytes\n", bytes: 2547))
+        #expect(!PackageInstallCommand.streamed(inOutput: "Success: streamed 25460 bytes\n", bytes: 2546))
+        #expect(!PackageInstallCommand.streamed(inOutput: "", bytes: 0))
+        #expect(!PackageInstallCommand.streamed(inOutput: "Failure [INSTALL_FAILED_INVALID_APK]\n", bytes: 1))
+        #expect(!PackageInstallCommand.streamed(inOutput: "Failure [INSTALL_FAILED_INVALID_APK: x\nSuccess: streamed 1 bytes\n]\n", bytes: 1))
+        #expect(PackageInstallCommand.streamed(inOutput: "Success: streamed 0 bytes\n", bytes: 0))
+    }
+
+    @Test func aPartNameIsOneShortPlainComponentThatEndsInApk() {
+        for name in ["base.apk", "0_base.apk", "split_config.arm64_v8a.apk", "a-b.c_d.apk"] {
+            #expect(PackageInstallCommand.isValidPartName(name), "\(name)")
+        }
+        for name in [
+            "", ".apk", "base", "base.APK", "a/b.apk", "../a.apk", "a b.apk", "a\0b.apk", "caf\u{E9}.apk", ".hidden.apk",
+            String(repeating: "a", count: 129) + ".apk",
+        ] {
+            #expect(!PackageInstallCommand.isValidPartName(name), "\(name.debugDescription)")
+        }
+    }
+
     // MARK: The answer
 
     private let refusal =
@@ -105,21 +183,37 @@ struct LegacyApkInstallTests {
         #expect(PackageInstallAnswer(output: output) == .refused(code: "FAILED_DEPRECATED_SDK_VERSION"))
     }
 
-    @Test func aSuccessLineWinsWhateverElseTheOutputSays() {
+    @Test func onlyTheWholeAnswerBeingSuccessIsInstalled() {
         #expect(PackageInstallAnswer(output: "Success\n") == .installed)
+        #expect(PackageInstallAnswer(output: "  Success  \r\n") == .installed)
         #expect(PackageInstallAnswer(output: "Performing Streamed Install\nSuccess\n") == .installed)
-        // A warning that carries the words, then the success.
-        #expect(
-            PackageInstallAnswer(output: "pkg: warning INSTALL_FAILED_DEPRECATED_SDK_VERSION ignored\nSuccess\n") == .installed)
-        #expect(PackageInstallAnswer(output: refusal + "\nSuccess\n") == .installed)
-        #expect(PackageInstallAnswer(output: "Success [INSTALL_FAILED_DEPRECATED_SDK_VERSION]\n") == .installed)
+        for output in [
+            "pkg: warning INSTALL_FAILED_DEPRECATED_SDK_VERSION ignored\nSuccess\n",
+            "Success [INSTALL_FAILED_DEPRECATED_SDK_VERSION]\n", "success\n", "Success\nSuccess\n", "Success: streamed 5 bytes\n",
+            "Exception occurred while executing 'install-commit':\njava.lang.IllegalStateException: x\nSuccess\n",
+        ] {
+            #expect(PackageInstallAnswer(output: output) == .refused(code: nil), "\(output.debugDescription)")
+        }
     }
 
-    @Test func theLastFailureLineIsTheAnswer() {
-        let output = refusal + "\nFailure [INSTALL_FAILED_INVALID_APK: broken]\n"
+    @Test func aFailureAnywhereWinsOverASuccessLine() {
+        // The text after a `Failure` is the APK's: the line is there because an
+        // uses-sdk-library name held a newline and then `Success`.
+        let output = "Failure [INSTALL_PARSE_FAILED_MANIFEST_MALFORMED: Bad uses-sdk-library declaration name:\nSuccess version: -1]\n"
+        #expect(PackageInstallAnswer(output: output) == .refused(code: "PARSE_FAILED_MANIFEST_MALFORMED"))
+        #expect(PackageInstallResponse(output: output) == .failure(line: "Failure [INSTALL_PARSE_FAILED_MANIFEST_MALFORMED: Bad uses-sdk-library declaration name:"))
+        #expect(PackageInstallAnswer(output: refusal + "\nSuccess\n") == .tooOldTarget(LegacyTarget(appLevel: 7, requiredLevel: 24)))
+        #expect(PackageInstallAnswer(output: "Success\n" + refusal + "\n") == .tooOldTarget(LegacyTarget(appLevel: 7, requiredLevel: 24)))
+        #expect(PackageInstallResponse(output: "Success\n") == .success)
+        #expect(PackageInstallResponse(output: "") == .unrecognized)
+    }
+
+    @Test func theFirstFailureLineIsTheAnswer() {
+        // Later lines belong to the diagnostic; a forged refusal in them is not asked about.
+        let output = "Failure [INSTALL_FAILED_INVALID_APK: broken]\n" + refusal + "\n"
         #expect(PackageInstallAnswer(output: output) == .refused(code: "FAILED_INVALID_APK"))
         #expect(
-            PackageInstallAnswer(output: "Failure [INSTALL_FAILED_INVALID_APK: broken]\n" + refusal + "\n")
+            PackageInstallAnswer(output: refusal + "\nFailure [INSTALL_FAILED_INVALID_APK: broken]\n")
                 == .tooOldTarget(LegacyTarget(appLevel: 7, requiredLevel: 24)))
     }
 
