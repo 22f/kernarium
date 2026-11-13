@@ -887,16 +887,24 @@ enum {
     /* A warning less than 30 s after the last response began: the host does
      * nothing for it. */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_WITHHELD = 2,
-    /* A response is already running and covers this level. */
+    /* A response is already running and covers this level. The system delivers
+     * its notifications one at a time, each after the response of the one
+     * before, so this is rare: it is the policy's answer to a level that meets
+     * a running response. */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_UNDER_WAY = 3,
 };
 
 /* `level` is a KERNARIUM_RUNTIME_MEMORY_PRESSURE_ value and `response` a
- * KERNARIUM_RUNTIME_MEMORY_RESPONSE_ value. It is called for every level the
- * system reports while a guest runs, the repeats and the return to NORMAL
- * included, as soon as the host has decided what it does and before it starts
- * (a response can take seconds), in the order the levels arrived. It carries
- * no figures. It runs on a runtime thread and must return promptly. */
+ * KERNARIUM_RUNTIME_MEMORY_RESPONSE_ value. It is called once for each
+ * notification the system delivers while a guest runs, the repeats and the
+ * return to NORMAL included, as soon as the host has decided what it does and
+ * before it starts the work for that notification (a response can take
+ * seconds), in the order delivered. The system delivers one notification at a
+ * time and merges the levels raised while it is handled into the next, which
+ * reports the most serious of them: a level raised during a response is
+ * reported after the response, and one that a more serious level replaced is
+ * not reported. It carries no figures. It runs on a runtime thread and must
+ * return promptly. */
 typedef void (*kernarium_runtime_memory_pressure_callback)(
     void* context,
     int level,

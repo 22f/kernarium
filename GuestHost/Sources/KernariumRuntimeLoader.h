@@ -337,7 +337,11 @@ void kernarium_runtime_loader_set_camera_state_handler(
 int kernarium_runtime_loader_set_camera_rotation(uint32_t degrees);
 /* Receives the levels of the system's memory pressure and the host's response
  * (see kernarium_runtime_set_memory_pressure_callback_function), or none for a
- * nil handler. It may be set before a runtime is selected. */
+ * nil handler. It may be set before a runtime is selected. Each report is
+ * queued to the main queue as one block that holds the handler of its time, so
+ * the number of reports waiting is not bounded while the main queue is busy, and
+ * setting or clearing the handler does not cancel the ones already queued: they
+ * reach the handler they were queued for. */
 void kernarium_runtime_loader_set_memory_pressure_handler(
     KernariumMemoryPressureHandler _Nullable handler);
 #ifndef UML_APP_STORE_APPLICATION

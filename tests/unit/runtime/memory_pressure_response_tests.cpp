@@ -14,10 +14,12 @@
 #include "wait_until.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -54,6 +56,64 @@ void *operator new(std::size_t size, const std::nothrow_t &) noexcept
 	} catch (...) {
 		return nullptr;
 	}
+}
+
+/* The ordinary allocations of the thread that is counting, as the process's
+ * own operator new makes them: the count of a thread that does not count stays
+ * as it was. */
+thread_local bool counting_allocations = false;
+thread_local std::size_t allocations_counted = 0;
+
+void *operator new(std::size_t size)
+{
+	if (counting_allocations)
+		++allocations_counted;
+	if (void *const memory = std::malloc(size == 0 ? 1 : size))
+		return memory;
+	throw std::bad_alloc{};
+}
+
+void operator delete(void *memory) noexcept
+{
+	std::free(memory);
+}
+
+void operator delete(void *memory, std::size_t) noexcept
+{
+	std::free(memory);
+}
+
+namespace {
+
+/* The handler the response gave the pressure source, which runs through a
+ * counting wrapper: the ordinary allocations of one event's whole handling, on
+ * the thread that handles it. */
+std::atomic<dispatch_function_t> pressure_handler{nullptr};
+std::atomic<std::size_t> last_event_allocations{0};
+
+void countingPressureHandler(void *context)
+{
+	allocations_counted = 0;
+	counting_allocations = true;
+	pressure_handler.load()(context);
+	counting_allocations = false;
+	last_event_allocations.store(allocations_counted);
+}
+
+} // namespace
+
+extern "C" void dispatch_source_set_event_handler_f(
+	dispatch_source_t source, dispatch_function_t handler)
+{
+	using Set = void (*)(dispatch_source_t, dispatch_function_t);
+	static const auto real = reinterpret_cast<Set>(
+		dlsym(RTLD_NEXT, "dispatch_source_set_event_handler_f"));
+	if (handler != nullptr && source == pressure_source.load()) {
+		pressure_handler.store(handler);
+		real(source, &countingPressureHandler);
+		return;
+	}
+	real(source, handler);
 }
 
 extern "C" dispatch_source_t dispatch_source_create(
@@ -852,15 +912,18 @@ void aWarningInsideTheIntervalIsReportedAsWithheld()
 	require(actions.trims() == 3, "a withheld warning trimmed");
 }
 
-void anEventDuringAResponseIsReportedAtOnceAsUnderway()
+void aLevelMetWhileTheResponseRunsIsReportedAsUnderway()
 {
 	FakeActions actions;
 	MemoryPressureResponse response{actions};
 	std::vector<Outcome> met;
 	std::vector<PressureReport> during;
 	actions.inside_trim = [&] {
-		/* The application learns of the rise while the trim runs, not when
-		 * it ends. */
+		/* The policy is concurrent: a level met on another thread while the
+		 * trim runs is reported as underway at once. (The system delivers its
+		 * events one at a time on one queue, so this is the policy's path and
+		 * not what the system's source produces: see
+		 * aLevelRaisedWhileATrimRunsIsReportedWithItsNotification.) */
 		met.push_back(response.on_level(PressureLevel::critical));
 		during = reportsOf(actions);
 	};
@@ -1265,24 +1328,119 @@ void aClearedObserverHearsNothingMore()
 		"the cleared observer heard on");
 }
 
+/* An observer that records into storage of its own: it allocates nothing. */
+struct FixedHeard final {
+	std::array<PressureReport, 8> reports{};
+	std::atomic<int> count{0};
+};
+
+void observeFixed(void *context, const PressureReport &report) noexcept
+{
+	auto &heard = *static_cast<FixedHeard *>(context);
+	const int index = heard.count.load();
+	if (index < static_cast<int>(heard.reports.size()))
+		heard.reports[static_cast<std::size_t>(index)] = report;
+	heard.count.store(index + 1);
+}
+
+/* A report is made when the system is short of memory, so it allocates
+ * nothing: the same event is handled with and without an observer, and the
+ * ordinary allocations of its whole handling on the pressure queue's thread are
+ * the same count (an allocation the report added would show in the difference),
+ * and an event still reaches the observer while the nothrow allocations fail. */
 void aReportNeedsNoAllocation()
 {
 	uml::platform::publishGpuCacheReclaimer(nullptr);
-	Heard heard;
 	StderrCapture capture;
-	uml::runtime::set_pressure_observer(&observeInto, &heard);
-	{
-		const auto watch = uml::runtime::start_memory_pressure_response(
-			nullptr, nullptr);
-		require(watch != nullptr);
-		/* The system raises the event when it is short of memory. */
-		nothrow_allocation_fails.store(true);
-		raiseAndWait(DISPATCH_MEMORYPRESSURE_CRITICAL);
-		nothrow_allocation_fails.store(false);
-	}
+	const auto watch = uml::runtime::start_memory_pressure_response(
+		nullptr, nullptr);
+	require(watch != nullptr);
+	require(pressure_handler.load() != nullptr, "the handler was not counted");
+	/* The first events make what the handling makes once. */
+	raiseAndWait(DISPATCH_MEMORYPRESSURE_CRITICAL);
+	raiseAndWait(DISPATCH_MEMORYPRESSURE_CRITICAL);
+	raiseAndWait(DISPATCH_MEMORYPRESSURE_CRITICAL);
+	const std::size_t without_observer = last_event_allocations.load();
+
+	FixedHeard heard;
+	uml::runtime::set_pressure_observer(&observeFixed, &heard);
+	raiseAndWait(DISPATCH_MEMORYPRESSURE_CRITICAL);
+	const std::size_t with_observer = last_event_allocations.load();
+	nothrow_allocation_fails.store(true);
+	raiseAndWait(DISPATCH_MEMORYPRESSURE_CRITICAL);
+	nothrow_allocation_fails.store(false);
 	uml::runtime::set_pressure_observer(nullptr, nullptr);
 	capture.restore();
-	require(heard.reports.size() == 1, "the report was lost for want of memory");
+	require(heard.count.load() == 2, "a report was lost for want of memory");
+	require(heard.reports[0].level == PressureLevel::critical);
+	require(with_observer == without_observer,
+		"the report allocated: " + std::to_string(with_observer) + " ordinary allocations with the observer, "
+			+ std::to_string(without_observer) + " without");
+}
+
+/* The source delivers an event after the handler of the one before it ends, and
+ * a level that arrives during a trim is merged into the source: while a trim
+ * runs, nothing more is reported, and the levels raised meanwhile are reported
+ * as one when their notification is delivered, before that notification's work. */
+void aLevelRaisedWhileATrimRunsIsReportedWithItsNotification()
+{
+	uml::platform::publishGpuCacheReclaimer(nullptr);
+	struct Gate final {
+		std::mutex mutex;
+		std::condition_variable changed;
+		bool inside = false;
+		bool release = false;
+	};
+	static Gate gate;
+	static std::atomic<int> trims{0};
+	gate.inside = false;
+	gate.release = false;
+	trims.store(0);
+	StderrCapture capture;
+	FixedHeard heard;
+	uml::runtime::set_pressure_observer(&observeFixed, &heard);
+	const auto watch = uml::runtime::start_memory_pressure_response(
+		[](void *) noexcept {
+			if (trims.fetch_add(1) == 0) {
+				std::unique_lock lock{gate.mutex};
+				gate.inside = true;
+				gate.changed.notify_all();
+				(void)gate.changed.wait_for(lock, std::chrono::seconds{20},
+					[] { return gate.release; });
+			}
+			return TrimOutcome::done;
+		}, nullptr);
+	require(watch != nullptr);
+	dispatch_source_merge_data(raisable(), DISPATCH_MEMORYPRESSURE_WARN);
+	{
+		std::unique_lock lock{gate.mutex};
+		require(gate.changed.wait_for(lock, std::chrono::seconds{20},
+			[] { return gate.inside; }), "the trim never began");
+	}
+	dispatch_source_merge_data(raisable(), DISPATCH_MEMORYPRESSURE_CRITICAL);
+	dispatch_source_merge_data(raisable(), DISPATCH_MEMORYPRESSURE_NORMAL);
+	require(!waitUntil([&] { return heard.count.load() > 1; },
+		std::chrono::milliseconds{200}),
+		"a level raised during the trim was reported before the trim ended");
+	{
+		const std::lock_guard lock{gate.mutex};
+		gate.release = true;
+	}
+	gate.changed.notify_all();
+	/* Two calls on the serial queue: the notification the trim held back was
+	 * queued behind the first. */
+	dispatch_sync_f(pressure_queue.load(), nullptr, [](void *) {});
+	dispatch_sync_f(pressure_queue.load(), nullptr, [](void *) {});
+	uml::runtime::set_pressure_observer(nullptr, nullptr);
+	capture.restore();
+	require(heard.count.load() == 2,
+		"the levels raised during the trim were not reported once");
+	require(heard.reports[0].level == PressureLevel::warn
+		&& heard.reports[0].reaction == PressureReaction::responding);
+	require(heard.reports[1].level == PressureLevel::critical
+		&& heard.reports[1].reaction == PressureReaction::responding,
+		"the merged levels were not reported as the most serious, with a response");
+	require(trims.load() == 2);
 }
 
 void clearingTheObserverWaitsForACallInProgress()
@@ -1370,8 +1528,8 @@ int main()
 			aReportComesBeforeTheWorkOfTheResponse},
 		{"a-warning-inside-the-interval-is-reported-as-withheld",
 			aWarningInsideTheIntervalIsReportedAsWithheld},
-		{"an-event-during-a-response-is-reported-at-once-as-underway",
-			anEventDuringAResponseIsReportedAtOnceAsUnderway},
+		{"a-level-met-while-the-response-runs-is-reported-as-underway",
+			aLevelMetWhileTheResponseRunsIsReportedAsUnderway},
 		{"a-retry-reports-nothing", aRetryReportsNothing},
 		{"the-names-of-the-reactions-are-the-lines-words",
 			theNamesOfTheReactionsAreTheLinesWords},
@@ -1403,6 +1561,8 @@ int main()
 		{"a-cleared-observer-hears-nothing-more",
 			aClearedObserverHearsNothingMore},
 		{"a-report-needs-no-allocation", aReportNeedsNoAllocation},
+		{"a-level-raised-while-a-trim-runs-is-reported-with-its-notification",
+			aLevelRaisedWhileATrimRunsIsReportedWithItsNotification},
 		{"clearing-the-observer-waits-for-a-call-in-progress",
 			clearingTheObserverWaitsForACallInProgress},
 	};

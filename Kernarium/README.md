@@ -80,11 +80,15 @@ stored.
 
 The runtime answers the system's memory pressure itself
 ([architecture](../docs/architecture.md#memory-and-executable-code)). It also
-reports every level the system raises to the application, with whether the
+reports every level the system delivers to the application, with whether the
 host responds, withholds the response (a warning less than 30 s after the last
 response began) or is already responding, through `set_memory_pressure_callback`
-(runtime API 41): once for each event, before the response's work, and with no
-figures. Andarium shows a notice from it; Kernarium sets no callback.
+(runtime API 41): once for each notification, before that notification's work,
+and with no figures. The system merges the levels raised during a response into
+the next notification, so a level raised during a response is reported after it.
+The loader queues each report to the main queue as its own block and setting or
+clearing its handler does not cancel the ones queued. Andarium shows a notice
+from it; Kernarium sets no callback.
 
 ## Guest storage
 
