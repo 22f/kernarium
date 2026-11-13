@@ -5,12 +5,8 @@
 
 #include <mach/mach.h>
 
-#include <algorithm>
-#include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <cstdio>
-#include <thread>
 
 namespace uml::camera {
 
@@ -51,56 +47,10 @@ inline void printRotateAndCrop(std::uint32_t camera, std::uint32_t setting, std:
     std::fprintf(stderr, "Camera: camera %u: ROTATE_AND_CROP %u, picture turned %u degrees\n", camera, setting, degrees);
 }
 
-namespace detail {
-
-/* The highest footprint seen since the last checkpoint. A thread that starts
- * with the first checkpoint samples the footprint every 50 ms, so the peak a
- * capture makes between two checkpoints is read, not only the figure at one,
- * and prints a line (with the wall clock, in seconds) whenever the footprint
- * has moved 8 MiB from the last one printed. */
-inline std::atomic<std::uint64_t>& footprintPeak() noexcept
-{
-    static std::atomic<std::uint64_t> peak {0};
-    return peak;
-}
-
-inline double wallClockSeconds() noexcept
-{
-    return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
-}
-
-inline void startFootprintSampler() noexcept
-{
-    static const bool started = [] {
-        std::thread([] {
-            std::uint64_t printed = 0;
-            for (;;) {
-                const auto now = physicalFootprintBytes();
-                if ((now > printed ? now - printed : printed - now) >= (8ull << 20)) {
-                    printed = now;
-                    std::fprintf(stderr, "Camera: memory: sample t=%.3f, footprint %llu MiB\n", wallClockSeconds(), static_cast<unsigned long long>(now >> 20));
-                }
-                auto& peak = footprintPeak();
-                auto seen = peak.load(std::memory_order_relaxed);
-                while (now > seen && !peak.compare_exchange_weak(seen, now, std::memory_order_relaxed)) {
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            }
-        }).detach();
-        return true;
-    }();
-    (void)started;
-}
-
-} // namespace detail
-
 inline void printCheckpoint(CameraCheckpoint where) noexcept
 {
-    detail::startFootprintSampler();
-    const auto now = physicalFootprintBytes();
-    const auto peak = std::max(now, detail::footprintPeak().exchange(now, std::memory_order_relaxed));
-    std::fprintf(stderr, "Camera: memory: %s t=%.3f, footprint %llu MiB, peak %llu MiB since the last checkpoint\n", checkpointName(where),
-                 detail::wallClockSeconds(), static_cast<unsigned long long>(now >> 20), static_cast<unsigned long long>(peak >> 20));
+    std::fprintf(stderr, "Camera: memory: %s, footprint %llu MiB\n", checkpointName(where),
+                 static_cast<unsigned long long>(physicalFootprintBytes() >> 20));
 }
 
 } // namespace uml::camera
