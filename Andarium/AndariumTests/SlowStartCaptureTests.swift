@@ -119,8 +119,9 @@ struct SlowStartCaptureTests {
         try await Task.sleep(for: .milliseconds(1500))
         controller.view.layoutIfNeeded()
         if shape.largestText {
-            // The notice is taller than the screen here: scroll until the Stop
-            // button is the last thing on it, as a finger would.
+            // The notice is taller than the screen here: scroll until the buttons
+            // are on it (Stop a third of the way down, the paragraph's end above
+            // it and Send feedback below), as a finger would.
             let label = shape.stopping
                 ? NSLocalizedString("Stopping\u{2026}", bundle: Bundle(for: AppModel.self), comment: "")
                 : NSLocalizedString("Stop", bundle: Bundle(for: AppModel.self), comment: "")
@@ -137,7 +138,7 @@ struct SlowStartCaptureTests {
             let frame = scroll.convert(button.accessibilityFrame, from: screen.coordinateSpace)
             let top = -scroll.adjustedContentInset.top
             let bottom = max(top, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
-            scroll.contentOffset.y = min(max(frame.maxY + 24 - scroll.bounds.height, top), bottom)
+            scroll.contentOffset.y = min(max(frame.minY - scroll.bounds.height * 0.3, top), bottom)
             controller.view.layoutIfNeeded()
             try await Task.sleep(for: .milliseconds(500))
         }
