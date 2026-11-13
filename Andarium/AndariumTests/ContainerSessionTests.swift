@@ -388,8 +388,10 @@ struct ContainerSessionTests {
     // MARK: Cancel and the reading of the file
 
     @Test func aCancelPendingWhenTheFileIsFirstReadEndsTheInstallAsTheCancelEvenForAFileThatWouldBeRefused() async throws {
-        // Read to its end, each of these is refused. The cancel the first update raises is what the
-        // reading's checkpoint reports instead, so the install ends as the cancel and not as the refusal.
+        // Read to its end, each of these is refused. The cancel is raised by the update that names the file
+        // (the first one only asks for it, and a cancel there ends the coordinated read before any of the
+        // install runs), once the file is open and before it is read: what reports it to the reading is the
+        // checkpoint, so the install ends as the cancel and not as the refusal.
         let notAnArchive = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-Cut.xapk")
         try bytes(9, count: 6_000).write(to: notAnArchive)
         let noApp = try ContainerFixture.write([ContainerEntry("readme.txt", bytes(3, count: 500))], name: "Empty.apks")
@@ -400,7 +402,9 @@ struct ContainerSessionTests {
             let operations = try guest(on: adbd)
             let box = TaskBox()
             let task = Task {
-                try await operations.installApk(at: url, update: { _ in box.cancel() })
+                try await operations.installApk(at: url, update: { [name = url.lastPathComponent] in
+                    if $0.detail?.hasPrefix(name) == true { box.cancel() }
+                })
             }
             box.task = task
             let result = await task.result
