@@ -412,11 +412,14 @@ control out.
   on at most three launches, that opens them; a build shows the notes up to its
   own number and no later ones. An entry can name the devices it is for (more
   guest memory than a limit, an iPad, a device with haptics, a compass or a
-  camera): the ribbon and its sheet announce only the entries the device meets. An entry can also name a
-  feature the build may lack (Send feedback): a build without it shows the entry
-  nowhere. Info keeps every other entry as written (`WhatsNewRules`,
-  `WhatsNewStore`). A launch with a launch setting, or one a test runs, shows no
-  ribbon and keeps no record.
+  camera): the ribbon and its sheet announce only the entries the device meets.
+  An entry can also name a feature the build may lack (Send feedback): a build
+  without it shows the entry nowhere, though the notes and their strings are
+  bundled whole, so the bundle check leaves that entry's strings, and no other
+  of the notes' table, out of its search for Send feedback text. Info keeps
+  every other entry as written (`WhatsNewRules`, `WhatsNewStore`). A launch
+  with a launch setting, or one a test runs, shows no ribbon and keeps no
+  record.
 
 ## Runtime
 
