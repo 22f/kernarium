@@ -86,17 +86,21 @@ page cache only at the host's request (`uml_emulator_trim_page_cache()`, every
 quiesce, and the system's memory warning below). The host GPU's memory is not
 carved out of the guest's RAM, and the host provides no Virtio balloon device.
 
-**Memory pressure.** When the system's memory pressure source reports a warning
-or a critical level, the runtime frees the host GPU's cached driver allocations
-and asks the guest for one page-cache trim, which unwires those pages
-(`runtime/memory_pressure_response.hpp`); the normal level does nothing. The
-trim is skipped for a guest the host has quiesced and for one with no console;
-a trim that meets another lifecycle call of the guest is retried up to four
+**Memory pressure.** When the system's memory pressure source reports a warning,
+the runtime turns the guest's own page-cache trimmer on, which trims the cold
+file cache in small passes and waits for nothing; the normal level turns it off
+again, unless the application asked for it. A critical level frees the host
+GPU's cached driver allocations and asks the guest for one page-cache trim of
+all its cold cache, which unwires those pages, and leaves the trimmer on while
+the pressure lasts (`runtime/memory_pressure_response.hpp`). A request is
+skipped for a guest the host has quiesced (the resume carries the trimmer's
+state) and for one with no console;
+one that meets another lifecycle call of the guest is retried up to four
 times, a second apart, until a response of its own or the normal level takes its
-place. A lifecycle call (quiesce, resume, stop) goes before a pressure trim,
+place. A lifecycle call (quiesce, resume, stop) goes before a pressure request,
 which gives way and is retried. A quiesce counts its trim's reply wait from its
 call, and omits its own trim only when a pressure trim reached the guest while
-it waited and used the wait up. A trim wakes a guest that suspended itself. A warning starts at most one
+it waited and used the wait up. A request wakes a guest that suspended itself. A warning starts at most one
 response per 30 s of awake time (`CLOCK_UPTIME_RAW`) counted from the start of
 the last response, a critical level always starts one, and none starts while one
 runs. macOS and iOS, and both applications, get it through the runtime. Each
@@ -109,7 +113,8 @@ meanwhile into the next, so a level raised during a response is reported after
 it, as the most serious of those raised; the observer lives for the process.
 Each level change and each response is one rate-limited stderr line: the
 footprint, the failed guest-RAM wiring operations and, on a response line, the
-bytes each part released and the trim's duration.
+bytes each part released and the trim's duration (a warning's, the state of
+the trimmer).
 
 **Budgets.** The process's memory limit, L, is the figure the memory budgets
 derive from. iOS enforces one per application

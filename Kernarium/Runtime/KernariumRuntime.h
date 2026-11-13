@@ -939,8 +939,10 @@ enum {
 enum {
     /* The normal level: nothing to do. */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_NONE = 0,
-    /* The host starts a response now: it frees its graphics caches and asks
-     * the guest to trim its page cache, which can take seconds. */
+    /* The host starts a response now. A warning turns on the guest's gradual
+     * page-cache trimmer, which asks the guest for one short message; a
+     * critical level frees the host's graphics caches and asks the guest to
+     * trim all of its page cache, which can take seconds. */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED = 1,
     /* A warning less than 30 s after the last response began: the host does
      * nothing for it. */

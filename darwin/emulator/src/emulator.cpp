@@ -709,19 +709,27 @@ public:
 			(void)::uml::device::set_guest_page_cache_trim(*enabled);
 	}
 
+	/* The guest's periodic trimmer runs while the application wants it or
+	 * the memory pressure response does: ending one request leaves the
+	 * other's in place. */
 	[[nodiscard]] int set_page_cache_trimming(bool enabled) noexcept
 	{
 		const LifecycleLock lock{*this};
+		const bool on = enabled || trim_wanted_by_pressure_;
 		/* Any console request ends a suspend, so a quiesced guest
 		 * receives the change when it is resumed. */
 		if (guest_suspension_ != ::uml::device::GuestSuspension::none) {
-			pending_page_cache_trim_ = enabled;
+			trim_wanted_by_app_ = enabled;
+			pending_page_cache_trim_ = on;
 			return UML_EMULATOR_OK;
 		}
 		pending_page_cache_trim_.reset();
 		::uml::runtime::note_host_wake();
-		return guest_request_result(
-			::uml::device::set_guest_page_cache_trim(enabled));
+		const int result = guest_request_result(
+			::uml::device::set_guest_page_cache_trim(on));
+		if (result == UML_EMULATOR_OK)
+			trim_wanted_by_app_ = enabled;
+		return result;
 	}
 
 	[[nodiscard]] int trim_page_cache() noexcept
@@ -735,16 +743,17 @@ public:
 			::uml::device::trim_guest_page_cache(guest_trim_wait_ms));
 	}
 
-	/* The guest's page-cache trim for the memory pressure response, which
-	 * runs when the system says it is short of memory. A lifecycle call in
-	 * progress, or waiting for the mutex, is not waited for and goes first
-	 * (the response asks again shortly: it would otherwise be waited for, or
-	 * wait for this one), and a guest the host holds suspended is not woken
-	 * for a trim: quiescing trimmed it. The suspension is read under the
-	 * mutex on every try. */
-	[[nodiscard]] ::uml::runtime::TrimOutcome trim_for_memory_pressure()
-		noexcept
+	/* The guest's page-cache requests for the memory pressure response,
+	 * which runs when the system says it is short of memory. A lifecycle
+	 * call in progress, or waiting for the mutex, is not waited for and goes
+	 * first (the response asks again shortly: it would otherwise be waited
+	 * for, or wait for this one), and a guest the host holds suspended is not
+	 * woken for a trim: quiescing trimmed it. The suspension is read under
+	 * the mutex on every try. */
+	[[nodiscard]] ::uml::runtime::TrimOutcome trim_for_memory_pressure(
+		::uml::runtime::TrimKind kind) noexcept
 	{
+		using ::uml::runtime::TrimKind;
 		using ::uml::runtime::TrimOutcome;
 		std::unique_lock lock{guest_lifecycle_mutex_, std::try_to_lock};
 		if (!lock.owns_lock())
@@ -754,23 +763,13 @@ public:
 		 * the threads in. The response asks again shortly. */
 		if (lifecycle_calls_.load() != 0U)
 			return TrimOutcome::busy;
+		if (kind != TrimKind::once)
+			return set_trimming_for_pressure(kind == TrimKind::gradual_on);
 		if (guest_suspension_ != ::uml::device::GuestSuspension::none)
 			return TrimOutcome::quiesced;
 		::uml::runtime::note_host_wake();
-		TrimOutcome outcome = TrimOutcome::unreachable;
-		switch (::uml::device::trim_guest_page_cache(guest_trim_wait_ms)) {
-		case ::uml::device::GuestRequest::done:
-			outcome = TrimOutcome::done;
-			break;
-		case ::uml::device::GuestRequest::unanswered:
-			outcome = TrimOutcome::unanswered;
-			break;
-		case ::uml::device::GuestRequest::refused:
-			outcome = TrimOutcome::refused;
-			break;
-		case ::uml::device::GuestRequest::unreachable:
-			break;
-		}
+		const TrimOutcome outcome = trim_outcome_of(
+			::uml::device::trim_guest_page_cache(guest_trim_wait_ms));
 		/* Recorded under the mutex, after the request: a quiesce that waited
 		 * meanwhile sees that its trim was sent. */
 		if (outcome != TrimOutcome::unreachable)
@@ -778,10 +777,57 @@ public:
 		return outcome;
 	}
 
-	static ::uml::runtime::TrimOutcome trim_for_memory_pressure_of(
-		void *emulator) noexcept
+	/* The guest's periodic trimmer for the response: it stays on while the
+	 * application wants it. Under the lifecycle mutex. */
+	[[nodiscard]] ::uml::runtime::TrimOutcome set_trimming_for_pressure(
+		bool wanted) noexcept
 	{
-		return static_cast<Emulator *>(emulator)->trim_for_memory_pressure();
+		using ::uml::runtime::TrimOutcome;
+		const bool was_on = trim_wanted_by_app_ || trim_wanted_by_pressure_;
+		const bool on = trim_wanted_by_app_ || wanted;
+		if (guest_suspension_ != ::uml::device::GuestSuspension::none) {
+			trim_wanted_by_pressure_ = wanted;
+			pending_page_cache_trim_ = on;
+			return TrimOutcome::quiesced;
+		}
+		/* The guest already runs as asked, and a request would only wake
+		 * it. */
+		if (was_on == on) {
+			trim_wanted_by_pressure_ = wanted;
+			return TrimOutcome::done;
+		}
+		::uml::runtime::note_host_wake();
+		pending_page_cache_trim_.reset();
+		const TrimOutcome outcome = trim_outcome_of(
+			::uml::device::set_guest_page_cache_trim(on));
+		if (outcome != TrimOutcome::unreachable &&
+		    outcome != TrimOutcome::refused)
+			trim_wanted_by_pressure_ = wanted;
+		return outcome;
+	}
+
+	[[nodiscard]] static ::uml::runtime::TrimOutcome trim_outcome_of(
+		::uml::device::GuestRequest request) noexcept
+	{
+		using ::uml::runtime::TrimOutcome;
+		switch (request) {
+		case ::uml::device::GuestRequest::done:
+			return TrimOutcome::done;
+		case ::uml::device::GuestRequest::unanswered:
+			return TrimOutcome::unanswered;
+		case ::uml::device::GuestRequest::refused:
+			return TrimOutcome::refused;
+		case ::uml::device::GuestRequest::unreachable:
+			break;
+		}
+		return TrimOutcome::unreachable;
+	}
+
+	static ::uml::runtime::TrimOutcome trim_for_memory_pressure_of(
+		void *emulator, ::uml::runtime::TrimKind kind) noexcept
+	{
+		return static_cast<Emulator *>(emulator)->trim_for_memory_pressure(
+			kind);
 	}
 
 	/* The figures of this handle's running guest: its route is the one
@@ -985,6 +1031,9 @@ private:
 		guest_suspension_ = ::uml::device::GuestSuspension::none;
 		guest_file_locks_released_ = false;
 		pending_page_cache_trim_.reset();
+		/* The next kernel starts with its trimmer off. */
+		trim_wanted_by_app_ = false;
+		trim_wanted_by_pressure_ = false;
 	}
 
 	/* A run that begins on the handle starts from no end. */
@@ -1268,6 +1317,11 @@ private:
 		::uml::device::GuestSuspension::none};
 	/* A trimming change requested while the guest was quiesced. */
 	std::optional<bool> pending_page_cache_trim_;
+	/* Who wants the guest's periodic trimmer on: the application, through
+	 * uml_emulator_set_page_cache_trimming, and the memory pressure
+	 * response. Guarded by the lifecycle mutex. */
+	bool trim_wanted_by_app_{};
+	bool trim_wanted_by_pressure_{};
 	::uml::runtime::HibernationMode hibernation_mode_ {
 		::uml::runtime::HibernationMode::automatic};
 	/* Made by the first quiesce that hibernates. Guarded by the lifecycle
@@ -1319,9 +1373,9 @@ bool kernel_image_borrowed(const uml_emulator *emulator) noexcept
 }
 
 ::uml::runtime::TrimOutcome trim_for_memory_pressure(
-	uml_emulator *emulator) noexcept
+	uml_emulator *emulator, ::uml::runtime::TrimKind kind) noexcept
 {
-	return emulator->implementation.trim_for_memory_pressure();
+	return emulator->implementation.trim_for_memory_pressure(kind);
 }
 
 unsigned int lifecycle_calls(const uml_emulator *emulator) noexcept

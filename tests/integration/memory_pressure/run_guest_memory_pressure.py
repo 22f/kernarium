@@ -7,14 +7,17 @@ A Linux guest reads enough files to fill its page cache. The runner then
 raises the levels the system's memory pressure source reports through an
 injector inserted into the launcher (a real event needs a privileged tool):
 
-- a warning frees the host GPU's caches and trims the guest's page cache once,
-  and the launcher says so on stderr with the footprint before and after, the
-  bytes each part released, the trim's duration and the guest RAM wire
+- a warning turns the guest's own page-cache trimmer on and takes nothing
+  else, and the launcher says so on stderr with the footprint before and
+  after, the trimmer's state and the guest RAM wire failures; the guest's page
+  cache then falls gradually;
+- a second warning inside the interval does nothing;
+- a critical level frees the host GPU's caches and trims the guest's page
+  cache once, and the launcher says so with the footprint before and after,
+  the bytes each part released, the trim's duration and the guest RAM wire
   failures; the guest's page cache is smaller afterwards and the launcher's
   own footprint fell by about what the trim released;
-- a second warning inside the interval does nothing;
-- a critical level trims again at once;
-- the way back to the normal level is one line and no action.
+- the way back to the normal level is one line and turns the trimmer off.
 
 The contract is docs/architecture.md (memory and executable code) and
 runtime/memory_pressure_response.hpp.
@@ -54,8 +57,16 @@ FOOTPRINT_SHARE = 0.5
 RESPONSE_SECONDS = 60
 QUIET_SECONDS = 3
 
+# A warning's response line: the trimmer's state, nothing released.
+WARNING = re.compile(
+    r"uml: memory pressure warn: footprint (?P<before>\d+) -> "
+    r"(?P<after>\d+) MiB; guest page cache trimmed gradually "
+    r"\((?P<trim>done|unanswered|refused|no console|guest quiesced|busy)\); "
+    r"(?P<wires>\d+) guest RAM wire failures"
+)
+# A critical level's: the bytes each part released.
 RESPONSE = re.compile(
-    r"uml: memory pressure (?P<level>warn|critical): footprint "
+    r"uml: memory pressure (?P<level>critical): footprint "
     r"(?P<before>\d+) -> (?P<after>\d+) MiB; released "
     r"(?P<graphics>\d+) (?P<graphics_unit>MiB|KiB) graphics "
     r"\((?P<cached>\d+) cached allocations\), "
@@ -103,7 +114,18 @@ def mebibytes(value: str, unit: str) -> float:
 
 
 def responses(guest: Guest) -> list[re.Match[str]]:
+    """The critical levels' response lines."""
     return list(RESPONSE.finditer(guest.host_output()))
+
+
+def warnings(guest: Guest) -> list[re.Match[str]]:
+    return list(WARNING.finditer(guest.host_output()))
+
+
+def trimming(guest: Guest) -> str:
+    """The guest's periodic page-cache trimmer: Y when it runs."""
+    return guest.check_command(
+        "cat /sys/module/page_cache_trim/parameters/enabled").strip()
 
 
 def changes(guest: Guest) -> list[re.Match[str]]:
@@ -174,65 +196,88 @@ def run(arguments: argparse.Namespace) -> None:
         filled = fill_page_cache(guest)
         print(f"the guest's page cache holds {filled // 1024} MiB")
 
-        # A warning: the GPU's caches (none without a GPU) and one trim.
+        if trimming(guest) != "N":
+            raise RuntimeError("the guest's trimmer ran before any warning")
+
+        # A warning turns the guest's trimmer on and takes nothing else.
         injector.raise_level("warn")
         first = wait_for(
             guest, "no response to the warning",
-            lambda: responses(guest), RESPONSE_SECONDS)[0]
-        if first["level"] != "warn" or first["trim"] != "done":
+            lambda: warnings(guest), RESPONSE_SECONDS)[0]
+        if first["trim"] != "done":
             raise RuntimeError(f"the warning's response: {first.group(0)}")
-        released = mebibytes(first["guest"], first["guest_unit"])
+        if trimming(guest) != "Y":
+            raise RuntimeError(
+                f"the warning left the trimmer off: {first.group(0)}")
+        print(f"warn: {first.group(0)}")
+        change = changes(guest)
+        if not change or change[0]["level"] != "warn" or change[0]["was"] != "normal":
+            raise RuntimeError(f"no line for the change to warn: {change}")
+        # The page cache falls on its own, in passes.
+        gradual = wait_for(
+            guest, "the page cache did not fall gradually",
+            lambda: filled - cached_kib(guest) >= MINIMUM_RELEASE_MIB * 1024
+            and filled, RESPONSE_SECONDS)
+        print(f"the guest's page cache fell from {gradual // 1024} MiB to "
+              f"{cached_kib(guest) // 1024} MiB gradually")
+        if responses(guest):
+            raise RuntimeError(
+                "a warning trimmed all the cache at once:\n"
+                + guest.host_output())
+
+        # A second warning inside the interval does nothing.
+        injector.raise_level("warn")
+        settle(guest, QUIET_SECONDS)
+        if len(warnings(guest)) != 1:
+            raise RuntimeError(
+                "a second warning inside the interval was answered:\n"
+                + guest.host_output())
+
+        # A critical level always acts: the GPU's caches (none without a GPU)
+        # and one trim of all the cache.
+        filled = fill_page_cache(guest)
+        injector.raise_level("critical")
+        second = wait_for(
+            guest, "no response to the critical level",
+            lambda: responses(guest), RESPONSE_SECONDS)[0]
+        if second["trim"] != "done":
+            raise RuntimeError(f"the critical response: {second.group(0)}")
+        released = mebibytes(second["guest"], second["guest_unit"])
         if released < MINIMUM_RELEASE_MIB:
             raise RuntimeError(
                 f"the trim released {released} MiB of guest RAM: "
-                f"{first.group(0)}")
+                f"{second.group(0)}")
         # The host's footprint, read by the launcher before and after the
         # trim, fell too: a trim that updated only the guest's own accounting
         # would leave it.
-        fell = int(first["before"]) - int(first["after"])
+        fell = int(second["before"]) - int(second["after"])
         expected = max(MINIMUM_RELEASE_MIB, released * FOOTPRINT_SHARE)
         if fell < expected:
             raise RuntimeError(
                 f"the launcher's footprint fell by {fell} MiB, less than "
                 f"{expected:.0f} MiB of the {released:.0f} MiB the trim "
-                f"released: {first.group(0)}")
+                f"released: {second.group(0)}")
         after = cached_kib(guest)
         if filled - after < MINIMUM_RELEASE_MIB * 1024:
             raise RuntimeError(
                 f"the guest's page cache fell from {filled // 1024} to "
                 f"{after // 1024} MiB")
-        print(f"warn: {first.group(0)}")
-        print(f"the guest's page cache holds {after // 1024} MiB after it")
-        change = changes(guest)
-        if not change or change[0]["level"] != "warn" or change[0]["was"] != "normal":
-            raise RuntimeError(f"no line for the change to warn: {change}")
-
-        # A second warning inside the interval does nothing.
-        injector.raise_level("warn")
-        settle(guest, QUIET_SECONDS)
-        if len(responses(guest)) != 1:
-            raise RuntimeError(
-                "a second warning inside the interval was answered:\n"
-                + guest.host_output())
-
-        # A critical level always acts.
-        injector.raise_level("critical")
-        second = wait_for(
-            guest, "no response to the critical level",
-            lambda: len(responses(guest)) >= 2 and responses(guest)[1],
-            RESPONSE_SECONDS)
-        if second["level"] != "critical" or second["trim"] != "done":
-            raise RuntimeError(f"the critical response: {second.group(0)}")
+        if trimming(guest) != "Y":
+            raise RuntimeError("the critical level turned the trimmer off")
         print(f"critical: {second.group(0)}")
+        print(f"the guest's page cache holds {after // 1024} MiB after it")
 
-        # The way back is one line and no action.
+        # The way back is one line and turns the trimmer off.
         injector.raise_level("normal")
         wait_for(
             guest, "no line for the way back to normal",
             lambda: any(c["level"] == "normal" for c in changes(guest)),
             RESPONSE_SECONDS)
+        wait_for(
+            guest, "the trimmer stayed on after the normal level",
+            lambda: trimming(guest) == "N", RESPONSE_SECONDS)
         settle(guest, QUIET_SECONDS)
-        if len(responses(guest)) != 2:
+        if len(warnings(guest)) != 1 or len(responses(guest)) != 1:
             raise RuntimeError(
                 "the normal level was answered:\n" + guest.host_output())
         lines = [line for line in guest.host_output().splitlines()
@@ -260,8 +305,9 @@ def main() -> int:
         if not getattr(arguments, name).is_file():
             parser.error(f"--{name.replace('_', '-')} is not a file")
     run(arguments)
-    print("ok: a warning and a critical level trim the page cache, a second "
-          "warning does not, and the lines say so")
+    print("ok: a warning turns the guest's trimmer on and a second one does "
+          "nothing, a critical level trims the page cache at once, the normal "
+          "level turns the trimmer off, and the lines say so")
     return 0
 
 

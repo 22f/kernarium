@@ -256,6 +256,44 @@ void theMemoryPressureTrimAsksARunningGuest(uml_emulator *emulator,
 	}) == Requests {"trim once"});
 }
 
+/* The memory pressure response's gradual trimmer is one short message to a
+ * running guest, sent when it changes what the guest runs, and it never ends a
+ * trimmer the application asked for (nor the application's change the
+ * response's). */
+void theGradualPressureTrimmerIsOneMessageAndKeepsWhatTheApplicationAsked(
+	uml_emulator *emulator, FakeGuestConsole &console)
+{
+	using ::uml::runtime::TrimKind;
+	using ::uml::runtime::TrimOutcome;
+	using uml::emulator::testing::trim_for_memory_pressure;
+	const auto ask = [&](TrimKind kind, const Requests &expected) {
+		require(console.requests(expected.size(), [&] {
+			require(trim_for_memory_pressure(emulator, kind) ==
+				TrimOutcome::done);
+		}) == expected);
+	};
+	ask(TrimKind::gradual_on, {"trim on"});
+	/* The guest runs as asked: asking again sends nothing. */
+	ask(TrimKind::gradual_on, {});
+	ask(TrimKind::gradual_off, {"trim off"});
+	ask(TrimKind::gradual_off, {});
+
+	/* The application's trimmer stays when the response ends its own. */
+	require(console.requests(1U, [emulator] {
+		require(uml_emulator_set_page_cache_trimming(emulator, 1) ==
+			UML_EMULATOR_OK);
+	}) == Requests {"trim on"});
+	ask(TrimKind::gradual_on, {});
+	ask(TrimKind::gradual_off, {});
+	/* And the response's stays when the application ends its own. */
+	ask(TrimKind::gradual_on, {});
+	require(console.requests(1U, [emulator] {
+		require(uml_emulator_set_page_cache_trimming(emulator, 0) ==
+			UML_EMULATOR_OK);
+	}) == Requests {"trim on"});
+	ask(TrimKind::gradual_off, {"trim off"});
+}
+
 void aQuiescedGuestIsNotWokenForThePressureTrim(uml_emulator *emulator,
 	FakeGuestConsole &console)
 {
@@ -270,6 +308,35 @@ void aQuiescedGuestIsNotWokenForThePressureTrim(uml_emulator *emulator,
 	require(console.requests(1U, [emulator] {
 		uml_emulator_resume(emulator);
 	}) == Requests {"wake"});
+}
+
+/* The gradual trimmer's request to a quiesced guest waits for the resume,
+ * which carries the last of them after the wake. */
+void aQuiescedGuestHearsTheGradualPressureTrimmerOnlyAtTheResume(
+	uml_emulator *emulator, FakeGuestConsole &console)
+{
+	using ::uml::runtime::TrimKind;
+	using ::uml::runtime::TrimOutcome;
+	using uml::emulator::testing::trim_for_memory_pressure;
+	require(console.requests(2U, [emulator] {
+		require(uml_emulator_quiesce(emulator) == 0);
+	}) == Requests {"trim once", "suspend"});
+	require(console.requests(0U, [emulator] {
+		require(trim_for_memory_pressure(emulator, TrimKind::gradual_on) ==
+			TrimOutcome::quiesced);
+		require(trim_for_memory_pressure(emulator, TrimKind::gradual_off) ==
+			TrimOutcome::quiesced);
+		require(trim_for_memory_pressure(emulator, TrimKind::gradual_on) ==
+			TrimOutcome::quiesced);
+	}).empty());
+	require(console.requests(2U, [emulator] {
+		uml_emulator_resume(emulator);
+	}) == Requests {"wake", "trim on"});
+	/* Ended again, so the handle is as it was. */
+	require(console.requests(1U, [emulator] {
+		require(trim_for_memory_pressure(emulator, TrimKind::gradual_off) ==
+			TrimOutcome::done);
+	}) == Requests {"trim off"});
 }
 
 void withoutAConsoleNothingWaits(uml_emulator *emulator)
@@ -287,6 +354,13 @@ void withoutAConsoleNothingWaits(uml_emulator *emulator)
 		-UML_EMULATOR_INVALID_ARGUMENT);
 	require(uml::emulator::testing::trim_for_memory_pressure(emulator) ==
 		::uml::runtime::TrimOutcome::unreachable);
+	/* A trimmer no one could turn on has nothing to turn off. */
+	require(uml::emulator::testing::trim_for_memory_pressure(emulator,
+		::uml::runtime::TrimKind::gradual_on) ==
+		::uml::runtime::TrimOutcome::unreachable);
+	require(uml::emulator::testing::trim_for_memory_pressure(emulator,
+		::uml::runtime::TrimKind::gradual_off) ==
+		::uml::runtime::TrimOutcome::done);
 	require(uml_emulator_quiesce_resident(nullptr) ==
 		-UML_EMULATOR_INVALID_ARGUMENT);
 }
@@ -1171,6 +1245,9 @@ void aPressureTrimBesideATrimChangeIsBusyThenSent()
 	const auto outcome =
 		uml::emulator::testing::trim_for_memory_pressure(emulator.get());
 	const auto waited = std::chrono::steady_clock::now() - started;
+	/* The gradual trimmer's request is no different. */
+	const auto gradualOutcome = uml::emulator::testing::trim_for_memory_pressure(
+		emulator.get(), ::uml::runtime::TrimKind::gradual_on);
 	{
 		const std::lock_guard lock {mutex};
 		released = true;
@@ -1180,6 +1257,8 @@ void aPressureTrimBesideATrimChangeIsBusyThenSent()
 	require(outcome == ::uml::runtime::TrimOutcome::busy &&
 		waited < std::chrono::seconds {2},
 		"the pressure trim ran beside a trim change");
+	require(gradualOutcome == ::uml::runtime::TrimOutcome::busy,
+		"the gradual trimmer's request ran beside a trim change");
 	require(heard == Requests {"trim off"},
 		"the pressure trim reached the guest beside a trim change");
 	console.onRequest = nullptr;
@@ -1576,7 +1655,11 @@ int main(int argc, char **argv)
 	aQuiescedGuestHearsOnlyTheResume(emulator.get(), console);
 	aRunningGuestIsAskedAtOnce(emulator.get(), console);
 	theMemoryPressureTrimAsksARunningGuest(emulator.get(), console);
+	theGradualPressureTrimmerIsOneMessageAndKeepsWhatTheApplicationAsked(
+		emulator.get(), console);
 	aQuiescedGuestIsNotWokenForThePressureTrim(emulator.get(), console);
+	aQuiescedGuestHearsTheGradualPressureTrimmerOnlyAtTheResume(
+		emulator.get(), console);
 	theGuestsMemoryIsRead(emulator.get(), console);
 	anAnswerThatIsNotTheFiguresIsNoReading(emulator.get(), console);
 	aHibernatedGuestIsWholeBeforeItIsWoken();

@@ -85,9 +85,10 @@ public:
 		return reclaim == nullptr ? 0U : reclaim();
 	}
 
-	TrimOutcome trim_page_cache() noexcept override
+	TrimOutcome trim_page_cache(TrimKind kind) noexcept override
 	{
-		return trim_ == nullptr ? TrimOutcome::unreachable : trim_(context_);
+		return trim_ == nullptr ? TrimOutcome::unreachable :
+			trim_(context_, kind);
 	}
 
 	void log(std::string_view line) noexcept override
