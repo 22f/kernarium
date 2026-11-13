@@ -140,6 +140,20 @@ class ListingTests(unittest.TestCase):
             reports.ListedFile("Orchid-2026-01-01-000000.ips", 7),
             reports.ListedFile("Retired/Quartz-2026-01-02-000000.ips", 9)])
 
+    def test_the_entry_shape_devicectl_gives_is_accepted(self) -> None:
+        resources = {"isDirectory": False, "isHidden": False,
+                     "isReadable": True, "isSymbolicLink": False,
+                     "isWritable": True}
+        metadata = {"extendedAttributes": {}, "lastModDate": "x",
+                    "ownerGid": 0, "ownerUid": 0, "permissions": 420,
+                    "size": 12}
+        listed = reports.parse_listing(listing_text([
+            {"name": "Search", "relativePath": "A/Search", "metadata": metadata,
+             "resources": {**resources, "isDirectory": True}},
+            {"name": "x.plist", "relativePath": "A/Search/x.plist",
+             "metadata": metadata, "resources": resources}]))
+        self.assertEqual(listed, [reports.ListedFile("A/Search/x.plist", 12)])
+
     def test_only_a_valid_empty_listing_is_an_empty_store(self) -> None:
         self.assertEqual(reports.parse_listing(listing_text([])), [])
 
@@ -172,6 +186,12 @@ class ListingTests(unittest.TestCase):
             "a path that climbs": listing_text([entry("../x")]),
             "a path with dots": listing_text([entry("a/./x")]),
             "a path listed twice": listing_text([good, good]),
+            "a symbolic link": listing_text([
+                {**good, "resources": {"isDirectory": False,
+                                       "isSymbolicLink": True}}]),
+            "a symbolic link that is no boolean": listing_text([
+                {**good, "resources": {"isDirectory": False,
+                                       "isSymbolicLink": "no"}}]),
         }
         for name, text in cases.items():
             with self.subTest(name):

@@ -126,6 +126,11 @@ def parse_listing(text: str) -> list[ListedFile]:
         directory = resources.get("isDirectory")
         if not isinstance(directory, bool):
             raise not_understood("isDirectory is not a boolean")
+        # A link is neither copied nor counted reliably, and the mover would
+        # remove it: it is not a store this module can empty safely.
+        link = resources.get("isSymbolicLink", False)
+        if not isinstance(link, bool) or link:
+            raise not_understood("a symbolic link")
         if directory:
             continue
         pure = pathlib.PurePosixPath(path)
