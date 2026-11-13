@@ -133,9 +133,11 @@ struct DiscoveryHooks {
 // a process never shrinks: what was offered stays valid, so a codec's entry is
 // replaced only by one that contains it, and nothing replaces a complete
 // answer. A discovery whose thread cannot be created releases its place, keeps
-// the answer, and counts as a run. The cache file carries the session count,
-// but each process replaces it with its own measurement before it publishes.
-// `discovery()` never computes: the encoder checks against the answer it has.
+// the answer, and counts as a run. A cache hit is published at once with the
+// session counts its file carries; a count below the most the host gives is
+// measured once afterwards, in the background, and raises the published count
+// and the file's, never lowers them. `discovery()` never computes: the encoder
+// checks against the answer it has.
 class DiscoveryService {
 public:
     static constexpr unsigned kMaximumRuns = 3;

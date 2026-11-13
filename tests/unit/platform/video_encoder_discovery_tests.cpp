@@ -74,6 +74,8 @@ struct Host {
     std::uint64_t largestBitrate {100'000'000ull};
     std::atomic<unsigned> sessions {8};
     std::atomic<unsigned> loads {};
+    std::atomic<unsigned> sessionCalls {};   // measurements of the concurrent sessions
+    std::function<void()> onSessions;        // runs when sessions are measured
     std::atomic<bool> listFails {};   // the call that lists the encoders fails
     std::atomic<bool> spawnFails {};  // no thread can be created for a discovery
     std::atomic<unsigned> spawnAttempts {};
@@ -172,7 +174,11 @@ struct Host {
             }
             return stream;
         };
-        h.countSessions = [this](const VideoEncodeSettings&) { return sessions.load(); };
+        h.countSessions = [this](const VideoEncodeSettings&) {
+            ++sessionCalls;
+            if (onSessions) onSessions();
+            return sessions.load();
+        };
         h.hardwareListed = [this](VideoCodec codec) -> std::optional<bool> {
             if (codec == VideoCodec::h264) {
                 ++discoveries;
@@ -192,7 +198,8 @@ struct Host {
         h.spawn = [this](std::function<void()> task) {
             ++spawnAttempts;
             if (spawnFails) throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
-            std::thread(std::move(task)).detach();
+            std::lock_guard lock(threadsMutex_);
+            threads_.emplace_back(std::move(task));
         };
         h.load = [this]() -> std::optional<Discovery> {
             ++loads;
@@ -206,6 +213,29 @@ struct Host {
     {
         return std::any_of(asked.begin(), asked.end(), [&](const Probe& probe) { return probe.settings.input == layout; });
     }
+
+    // Waits for every discovery thread started so far, and for the ones they start.
+    void join()
+    {
+        for (;;) {
+            std::thread thread;
+            {
+                std::lock_guard lock(threadsMutex_);
+                if (threads_.empty()) return;
+                thread = std::move(threads_.back());
+                threads_.pop_back();
+            }
+            thread.join();
+        }
+    }
+
+    Host() = default;
+    Host(const Host&) = delete;
+    ~Host() { join(); }
+
+private:
+    std::mutex threadsMutex_;
+    std::vector<std::thread> threads_;
 };
 
 const VideoEncodeCapability* h264Of(const Discovery& discovery)
@@ -840,62 +870,98 @@ void aDiscoveryThatNeverGetsAThreadIsTriedABoundedNumberOfTimes()
 
 // ---- What is measured in each process.
 
-void theSessionCountIsMeasuredInEachProcess()
-{
-    // Seven of eight sessions are held elsewhere while the first process measures.
-    Host first;
-    first.sessions = 1;
-    auto service = makeDiscoveryService(first.hooks());
-    const auto measured = service->query();
-    require(measured.size() == 1 && measured[0].concurrentSessions == 1, "this process offers what it was given");
-    require(first.stored.size() == 1 && first.listedQueries == 1, "and the result is complete");
-
-    // The next process finds that result in the cache, and the host free again.
-    Host next;
-    next.sessions = 8;
-    next.cache = first.stored[0];
-    auto again = makeDiscoveryService(next.hooks());
-    const auto capabilities = again->query();
-    require(next.asked.empty() && next.stored.empty(), "a valid cache is not probed or rewritten");
-    require(capabilities.size() == 1 && capabilities[0].concurrentSessions == 8, "but the sessions are measured: the cache's figure is not a ceiling");
-}
-
-Discovery cachedH264()
+Discovery cachedH264(unsigned sessions)
 {
     Discovery cached;
     CodecDiscovery entry;
     entry.capability.codec = VideoCodec::h264;
+    entry.capability.concurrentSessions = sessions;
     entry.capability.profiles.push_back({VideoEncodeProfile::h264High, {RawVideoLayout::nv12}, 52, true});
     cached.codecs.push_back(entry);
     return cached;
 }
 
-void aCachedResultWithNoSessionIsIncomplete()
+unsigned sessionsOf(DiscoveryService& service)
 {
-    Host host;
-    host.cache = cachedH264();
-    host.sessions = 0;
-    auto service = makeDiscoveryService(host.hooks());
-    require(service->query().empty() && !service->current()->complete, "a codec that opens no session is not offered, and is uncertain");
-    require(service->current()->unansweredCodecs == std::vector<VideoCodec> {VideoCodec::h264}, "which codec");
-    host.sessions = 4;
-    host.clock += kInterval;
-    const auto later = service->query();
-    require(later.size() == 1 && later[0].concurrentSessions == 4 && service->current()->complete, "and is measured again by a later query");
-    require(host.stored.empty(), "without writing the cache");
+    return h264Of(*service.current())->concurrentSessions;
 }
 
-void aCachedResultWhoseSessionsNeverOpenIsMeasuredABoundedNumberOfTimes()
+void aCacheHitOpensNoSessionBeforeTheFirstAnswer()
 {
     Host host;
-    host.cache = cachedH264();
-    host.sessions = 0;
+    host.cache = cachedH264(1);
+    host.sessions = 8;
+    Gate gate;
+    host.onSessions = [&] { gate.wait(); };
     auto service = makeDiscoveryService(host.hooks());
-    for (unsigned query = 0; query < 10; ++query) {
-        (void)service->query();
-        host.clock += kInterval;
-    }
-    require(host.loads == DiscoveryService::kMaximumRuns, "a cache that is read again and again is bounded like a discovery");
+    auto first = std::async(std::launch::async, [&] { return service->query(); });
+    require(first.wait_for(std::chrono::seconds(10)) == std::future_status::ready,
+            "the first query is not held up by the measurement of the sessions");
+    const auto capabilities = first.get();
+    require(capabilities.size() == 1 && capabilities[0].concurrentSessions == 1, "it is answered with the count the cache carries");
+    require(host.asked.empty() && host.stored.empty() && service->current()->complete, "and nothing was probed or stored");
+    // A discovery that is still measuring is the one that runs: nothing else starts.
+    host.clock += 10 * kInterval;
+    (void)service->query();
+    require(host.discoveries == 0 && host.loads == 1, "no discovery and no second read of the file starts meanwhile");
+    gate.open();
+    host.join();
+}
+
+void aCachedCountBelowTheCapRisesInTheProcessAndInTheFile()
+{
+    // The process that found the sessions held measured one; the host has eight free now.
+    Host first;
+    first.sessions = 1;
+    auto fresh = makeDiscoveryService(first.hooks());
+    require(fresh->query().size() == 1 && first.stored.size() == 1 && first.stored[0].codecs[0].capability.concurrentSessions == 1,
+            "the first process found one and stored it");
+    first.join();
+
+    Host next;
+    next.sessions = 8;
+    next.cache = first.stored[0];
+    auto service = makeDiscoveryService(next.hooks());
+    const auto early = service->query()[0].concurrentSessions;
+    require(early == 1 || early == 8, "the answer carries the cache's count, or the raised one");
+    next.join();
+    require(sessionsOf(*service) == 8, "the count of the process rose");
+    require(next.sessionCalls == 1, "it was measured once");
+    require(next.stored.size() == 1 && next.stored[0].codecs[0].capability.concurrentSessions == 8, "and the file's count was rewritten");
+    require(next.asked.empty(), "without a trial encode");
+    (void)service->query();
+    require(next.sessionCalls == 1, "a later query measures nothing");
+}
+
+void aCountAtTheCapIsNotMeasured()
+{
+    Host host;
+    host.cache = cachedH264(16);
+    auto service = makeDiscoveryService(host.hooks());
+    require(service->query()[0].concurrentSessions == 16, "the cached count is the answer");
+    host.join();
+    require(host.sessionCalls == 0 && host.stored.empty() && host.asked.empty(), "a codec cached at the cap opens no session and rewrites nothing");
+}
+
+void aLowerMeasurementChangesNothing()
+{
+    Host host;
+    host.cache = cachedH264(4);
+    host.sessions = 2;
+    auto service = makeDiscoveryService(host.hooks());
+    (void)service->query();
+    host.join();
+    require(host.sessionCalls == 1, "the count is measured");
+    require(sessionsOf(*service) == 4, "a lower count does not lower the published one");
+    require(host.stored.empty(), "and the file is not rewritten");
+
+    Host none;
+    none.cache = cachedH264(4);
+    none.sessions = 0;
+    auto other = makeDiscoveryService(none.hooks());
+    require(other->query()[0].concurrentSessions == 4, "a measurement that opens no session is dropped");
+    none.join();
+    require(sessionsOf(*other) == 4 && none.stored.empty() && other->current()->complete, "and the answer stays complete");
 }
 
 // ---- The call that lists the encoders.
@@ -958,15 +1024,11 @@ void anUncertainCodecDoesNotExcuseAnother()
 void aCachedResultRunsNothing()
 {
     Host host;
-    Discovery cached;
-    CodecDiscovery entry;
-    entry.capability.codec = VideoCodec::h264;
-    entry.capability.profiles.push_back({VideoEncodeProfile::h264High, {RawVideoLayout::nv12}, 52, true});
-    cached.codecs.push_back(entry);
-    host.cache = cached;
+    host.cache = cachedH264(16);
     auto service = makeDiscoveryService(host.hooks());
     const auto capabilities = service->query();
     require(capabilities.size() == 1 && capabilities[0].profiles.size() == 1, "the cached capabilities");
+    host.join();
     require(host.asked.empty() && host.listedQueries == 0 && host.stored.empty(), "a valid cache is neither probed nor rewritten");
 }
 
@@ -1004,9 +1066,10 @@ int main(int argc, char** argv)
         {"aFirstDiscoveryThatCannotGetAThreadIsTriedAgain", aFirstDiscoveryThatCannotGetAThreadIsTriedAgain},
         {"aRefreshThatCannotGetAThreadKeepsTheAnswerAndIsTriedAgain", aRefreshThatCannotGetAThreadKeepsTheAnswerAndIsTriedAgain},
         {"aDiscoveryThatNeverGetsAThreadIsTriedABoundedNumberOfTimes", aDiscoveryThatNeverGetsAThreadIsTriedABoundedNumberOfTimes},
-        {"theSessionCountIsMeasuredInEachProcess", theSessionCountIsMeasuredInEachProcess},
-        {"aCachedResultWithNoSessionIsIncomplete", aCachedResultWithNoSessionIsIncomplete},
-        {"aCachedResultWhoseSessionsNeverOpenIsMeasuredABoundedNumberOfTimes", aCachedResultWhoseSessionsNeverOpenIsMeasuredABoundedNumberOfTimes},
+        {"aCacheHitOpensNoSessionBeforeTheFirstAnswer", aCacheHitOpensNoSessionBeforeTheFirstAnswer},
+        {"aCachedCountBelowTheCapRisesInTheProcessAndInTheFile", aCachedCountBelowTheCapRisesInTheProcessAndInTheFile},
+        {"aCountAtTheCapIsNotMeasured", aCountAtTheCapIsNotMeasured},
+        {"aLowerMeasurementChangesNothing", aLowerMeasurementChangesNothing},
         {"aFailedEncoderListIsNoAnswer", aFailedEncoderListIsNoAnswer},
         {"anEmptyEncoderListIsAnAnswer", anEmptyEncoderListIsAnAnswer},
         {"anUncertainCodecDoesNotExcuseAnother", anUncertainCodecDoesNotExcuseAnother},

@@ -1023,11 +1023,9 @@ DiscoveryHooks productionHooks()
 // ---- Discovery of the whole host.
 
 // The sessions that open together are what the host has free: other processes
-// hold some of them, so a count is a figure of its moment and never a ceiling
-// to keep. Each process measures it, for the discovery it computed and for one
-// it took from the cache, whose figure is that of another process and is
-// replaced here. A codec that cannot open a session is left out and is
-// unanswered.
+// hold some of them, so a count is a figure of its moment. A discovery of the
+// host measures it for each codec it found. A codec that cannot open a session
+// is left out and is unanswered.
 void measureSessions(Prober& prober, Discovery& discovery)
 {
     for (auto codec = discovery.codecs.begin(); codec != discovery.codecs.end();) {
@@ -1225,26 +1223,57 @@ private:
             }
         }
 
-        // The cache, when it has a valid answer, or a discovery of the host;
-        // the cache's figure for the sessions is replaced by this process's.
-        Discovery acquire()
+        // A count the cache carries is that of the process that wrote it, which
+        // may have found sessions held elsewhere. Where it is below the most the
+        // host gives, this process measures it once, after the answer is published
+        // and off every caller's wait. A higher count raises the published one and
+        // the file's, for the next process; a lower one changes nothing, and
+        // neither does a measurement that opens no session.
+        void raiseSessions(Discovery cached)
         {
-            if (auto cached = hooks.load()) {
-                Prober prober(hooks);
-                measureSessions(prober, *cached);
-                return std::move(*cached);
+            bool raised = false;
+            for (auto& entry : cached.codecs) {
+                auto& capability = entry.capability;
+                const auto* reference = referenceProfile(capability);
+                if (capability.concurrentSessions >= kSessionProbeLimit || !reference || reference->inputs.empty()) continue;
+                const auto held = hooks.countSessions(baseSettings(capability.codec, reference->profile, referenceInput(*reference)));
+                if (held <= capability.concurrentSessions) continue;
+                capability.concurrentSessions = held;
+                raised = true;
+                std::lock_guard lock(mutex);
+                auto next = std::make_shared<Discovery>(*result);
+                const auto published = std::find_if(next->codecs.begin(), next->codecs.end(),
+                                                    [&](const auto& other) { return other.capability.codec == capability.codec; });
+                if (published != next->codecs.end())
+                    published->capability.concurrentSessions = std::max(published->capability.concurrentSessions, held);
+                result = std::move(next);
             }
-            auto discovery = discoverHost(hooks);
-            if (discovery.complete) hooks.store(discovery);
-            else std::fprintf(stderr, "Video encoder discovery is incomplete: %u probe(s) had no answer\n", discovery.unanswered);
-            return discovery;
+            if (raised) hooks.store(cached);
         }
 
         void work()
         {
             pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
             @autoreleasepool {
-                auto discovery = acquire();
+                if (auto cached = hooks.load()) {
+                    // A cache hit is published at once with the counts its file carries,
+                    // and nothing is opened until a caller has the answer. The discovery
+                    // stays the one that runs until the sessions are measured.
+                    {
+                        std::lock_guard lock(mutex);
+                        lastRun = hooks.now();
+                        publishLocked(Discovery(*cached));
+                        condition.notify_all();
+                    }
+                    raiseSessions(std::move(*cached));
+                    std::lock_guard lock(mutex);
+                    running = false;
+                    condition.notify_all();
+                    return;
+                }
+                auto discovery = discoverHost(hooks);
+                if (discovery.complete) hooks.store(discovery);
+                else std::fprintf(stderr, "Video encoder discovery is incomplete: %u probe(s) had no answer\n", discovery.unanswered);
                 std::lock_guard lock(mutex);
                 lastRun = hooks.now();
                 publishLocked(std::move(discovery));

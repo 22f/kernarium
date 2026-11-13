@@ -51,10 +51,12 @@ accepted and each entry is one run's own description; the cache holds the
 complete run as measured. A discovery whose thread cannot be created leaves the
 answer as it is and is tried again by a later query, within the same bound. A
 running guest's device took its list when it was created and keeps it: a better
-answer changes what the encoder accepts, not what the guest was offered. The
-cache file carries the concurrent session count, but each process
-replaces it with its own measurement, because what other processes held is no
-property of the host.
+answer changes what the encoder accepts, not what the guest was offered. A
+cache hit is published at once with the concurrent session counts its file
+carries, and nothing is opened on the path of a query. What other processes held
+is no property of the host, so a count below the 16 the discovery looks for is
+measured once per process in the background: a higher one raises the published
+count and the file's, and nothing lowers either.
 
 ## Sessions
 
