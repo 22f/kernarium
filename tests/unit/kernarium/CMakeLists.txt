@@ -121,6 +121,43 @@ uml_add_unit_test(NAME kernarium-memory-pressure
     COMMAND uml_kernarium_memory_pressure_tests
     LABELS kernarium)
 
+# What the application's loader does with the reports: delivery on the main queue
+# in order, one queued block per report that a replaced handler does not cancel,
+# and a report forwarded after exit() has destroyed ordinary statics. The
+# loader's forwarders are file-local, so the test compiles the loader's source
+# in one unit with the test's head and tail.
+set(_loader_memory_pressure_source
+    ${CMAKE_CURRENT_BINARY_DIR}/loader_memory_pressure_tests_generated.mm)
+set(_loader_memory_pressure_parts
+    ${CMAKE_CURRENT_SOURCE_DIR}/loader_memory_pressure_head.mm
+    ${PROJECT_SOURCE_DIR}/GuestHost/Sources/KernariumRuntimeLoader.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/loader_memory_pressure_tests.mm)
+add_custom_command(
+    OUTPUT ${_loader_memory_pressure_source}
+    COMMAND ${CMAKE_COMMAND}
+        -DOUTPUT=${_loader_memory_pressure_source}
+        "-DINPUTS=${_loader_memory_pressure_parts}"
+        -P ${PROJECT_SOURCE_DIR}/cmake/concatenate_sources.cmake
+    DEPENDS ${_loader_memory_pressure_parts}
+        ${PROJECT_SOURCE_DIR}/cmake/concatenate_sources.cmake
+    VERBATIM)
+add_executable(uml_kernarium_loader_memory_pressure_tests
+    ${_loader_memory_pressure_source})
+target_include_directories(uml_kernarium_loader_memory_pressure_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/GuestHost/Sources
+    ${PROJECT_SOURCE_DIR}/Kernarium/Runtime
+    ${PROJECT_SOURCE_DIR}/darwin)
+target_link_libraries(uml_kernarium_loader_memory_pressure_tests PRIVATE
+    "-framework Foundation" "-framework MetalKit")
+uml_add_unit_test(NAME kernarium-loader-memory-pressure
+    COMMAND uml_kernarium_loader_memory_pressure_tests
+    TIMEOUT 60
+    LABELS kernarium)
+uml_add_unit_test(NAME kernarium-loader-memory-pressure-exit
+    COMMAND uml_kernarium_loader_memory_pressure_tests --exit
+    TIMEOUT 60
+    LABELS kernarium)
+
 # What an Android guest is told about the host's cameras: the camera fields of
 # the boot request, the layout composed from the host's cameras, the lens cover,
 # and the camera state and rotation the application and the device exchange.

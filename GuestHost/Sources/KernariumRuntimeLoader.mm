@@ -54,10 +54,14 @@ KernariumLocationReceiverHandler locationHandler;
 std::mutex cameraStateHandlerMutex;
 std::mutex cameraStateRegistrationMutex;
 KernariumCameraStateHandler cameraStateHandler;
-/* And for the memory pressure. */
-std::mutex memoryPressureHandlerMutex;
-std::mutex memoryPressureRegistrationMutex;
-KernariumMemoryPressureHandler memoryPressureHandler;
+/* And for the memory pressure, with the console handler's lifetime: the pressure
+ * queue can still deliver a report while exit() destroys ordinary statics. */
+struct MemoryPressureHandlerState final {
+    std::mutex handlerMutex;
+    std::mutex registrationMutex;
+    KernariumMemoryPressureHandler handler {nil};
+};
+MemoryPressureHandlerState& memoryPressure = *new MemoryPressureHandlerState;
 /* And for the input status. */
 std::mutex inputStatusHandlerMutex;
 std::mutex inputStatusRegistrationMutex;
@@ -184,8 +188,8 @@ void forwardMemoryPressure(void*, int level, int response)
 {
     KernariumMemoryPressureHandler handler;
     {
-        std::lock_guard lock(memoryPressureHandlerMutex);
-        handler = memoryPressureHandler;
+        std::lock_guard lock(memoryPressure.handlerMutex);
+        handler = memoryPressure.handler;
     }
     if (handler == nil)
         return;
@@ -196,11 +200,11 @@ void forwardMemoryPressure(void*, int level, int response)
 
 void updateMemoryPressureForwarder(const kernarium_runtime_api* runtime)
 {
-    std::lock_guard registration(memoryPressureRegistrationMutex);
+    std::lock_guard registration(memoryPressure.registrationMutex);
     bool wanted;
     {
-        std::lock_guard lock(memoryPressureHandlerMutex);
-        wanted = memoryPressureHandler != nil;
+        std::lock_guard lock(memoryPressure.handlerMutex);
+        wanted = memoryPressure.handler != nil;
     }
     runtime->set_memory_pressure_callback(
         wanted ? forwardMemoryPressure : nullptr, nullptr);
@@ -883,8 +887,8 @@ extern "C" void kernarium_runtime_loader_set_memory_pressure_handler(
     KernariumMemoryPressureHandler handler)
 {
     {
-        std::lock_guard lock(memoryPressureHandlerMutex);
-        memoryPressureHandler = [handler copy];
+        std::lock_guard lock(memoryPressure.handlerMutex);
+        memoryPressure.handler = [handler copy];
     }
     const kernarium_runtime_api* runtime = api();
     if (runtime != nullptr)

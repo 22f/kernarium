@@ -29,16 +29,17 @@ constexpr std::size_t line_limit = 1000;
 
 /* The process's one observer of the reports. A report is delivered with the
  * mutex held, which is what makes clearing the observer wait for a call in
- * progress. Constant-initialized and never destroyed with anything to release,
- * and a report allocates nothing: it is made when the system is short of
- * memory. */
+ * progress, and a report allocates nothing: it is made when the system is short
+ * of memory. The pressure queue outlives static destruction (a guest still runs
+ * when the process exits), so the slot is never destroyed: an event that comes
+ * after exit() has run the other destructors still finds a live mutex. */
 struct ObserverSlot final {
 	std::mutex mutex;
 	PressureObserver observer{};
 	void *context{};
 };
 
-constinit ObserverSlot observer_slot;
+[[clang::no_destroy]] constinit ObserverSlot observer_slot;
 
 class SystemActions final : public PressureActions {
 public:
