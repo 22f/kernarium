@@ -57,7 +57,7 @@ FORBIDDEN = (
 # A tip is 打赏 in Simplified Chinese and 贊助 in Traditional Chinese. Each language must not use the
 # other's word (in either script) or the earlier 小费, as a word of any other meaning.
 NOT_IN = {
-    "zh-Hans": ("小费", "小費", "打賞", "贊助"),
+    "zh-Hans": ("小费", "小費", "打賞", "贊助", "赞助"),
     "zh-Hant": ("小费", "小費", "打赏", "打賞", "赞助"),
 }
 # A number, or a placeholder for one, beside the word token: Western, full-width

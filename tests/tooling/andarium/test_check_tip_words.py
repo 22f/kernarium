@@ -120,7 +120,8 @@ def main() -> int:
         for index, (language, text) in enumerate((
                 ("zh-Hant", "一次性打賞"), ("zh-Hant", "一次性打赏"), ("zh-Hant", "一次性小費"),
                 ("zh-Hant", "一次性小费"), ("zh-Hant", "一次性赞助"), ("zh-Hans", "一次性小费"),
-                ("zh-Hans", "一次性小費"), ("zh-Hans", "一次性打賞"), ("zh-Hans", "一次性贊助"))):
+                ("zh-Hans", "一次性小費"), ("zh-Hans", "一次性打賞"), ("zh-Hans", "一次性贊助"),
+                ("zh-Hans", "一次性赞助"))):
             expect(f"tip-word-{index}", run(table(f"tip-word-{index}", {"One-time tip": {language: text}})),
                    passes=False, said=f"[{language}] uses")
 
