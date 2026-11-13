@@ -64,8 +64,9 @@ public struct GuestSettle: Equatable, Sendable {
         )
     }
 
-    /// Whether the guest left nothing dirty that the host cannot see: it
-    /// confirmed its writeback, or no guest ran.
+    /// Whether the guest reported a completed sync pass, or no guest ran.
+    /// A task can still write after that pass, so this does not say that no
+    /// dirty page remains in the guest.
     public var guestStorageSettled: Bool {
         storage == .confirmed || storage == .noGuest
     }

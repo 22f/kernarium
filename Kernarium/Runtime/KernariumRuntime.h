@@ -378,8 +378,9 @@ typedef int (*kernarium_runtime_sync_function)(kernarium_runtime_settle* settle)
  * the host's own files. Pair it with resume. `settle` (nullable) reports
  * what the guest confirmed, as for sync, and whether it sleeps. The storage
  * is confirmed by the guest's reply to a writeback request of this call, or by
- * a suspend reply that states the suspend's own sync returned. A quiesce waits for a lifecycle call in progress, which is
- * itself bounded; each wait for the guest is bounded: the first writeback 2 s,
+ * a suspend reply that states the suspend's own sync returned. A quiesce
+ * waits for a lifecycle call in progress, which is itself bounded; each wait
+ * for the guest is bounded: the first writeback 2 s,
  * the trim 3 s, the suspend 10 s (4 s more to abort one that does not
  * answer) and a final writeback after a suspend that failed 1.5 s. Returns
  * -EINVAL for a struct_size smaller than the structure, with `settle`

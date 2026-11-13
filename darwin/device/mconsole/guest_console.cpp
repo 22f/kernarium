@@ -363,16 +363,20 @@ public:
 	 * passed only takes what has arrived. A reply that is not complete by then
 	 * leaves the request pending, and the client may receive again.
 	 *
+	 * The parts that arrived before a deadline stay with the client, text and
+	 * error flag both: the next receive continues the reply and delivers it
+	 * whole, so the end of a reply that was refused at its start is still a
+	 * refusal. `response` takes nothing until the reply is complete.
+	 *
 	 * The error flag of any part makes the reply rejected, though the guest
 	 * sets it on the first part only. A datagram that is shorter than the
 	 * reply header, longer than a reply can be, or advertises more text than
-	 * it carries, is malformed. */
+	 * it carries, is malformed, and ends the reply it was part of. */
 	[[nodiscard]] ExchangeResult receive(std::string &response,
 		Deadline deadline) const
 	{
 		constexpr auto header = static_cast<ssize_t>(sizeof(Reply) -
 			maximumConsoleData);
-		bool rejected = false;
 		for (;;) {
 			const auto remaining =
 				std::chrono::duration_cast<std::chrono::microseconds>(
@@ -400,24 +404,35 @@ public:
 				return ExchangeResult::pending;
 			}
 			if (received < header ||
-			    received > static_cast<ssize_t>(sizeof(Reply)))
+			    received > static_cast<ssize_t>(sizeof(Reply))) {
+				partial_.clear();
+				partialRejected_ = false;
 				return ExchangeResult::malformed;
+			}
 			Reply reply {};
 			std::memcpy(&reply, datagram.data(),
 				static_cast<std::size_t>(received));
 			if (reply.length > maximumConsoleData ||
-			    reply.length > static_cast<std::size_t>(received - header))
+			    reply.length > static_cast<std::size_t>(received - header)) {
+				partial_.clear();
+				partialRejected_ = false;
 				return ExchangeResult::malformed;
+			}
 			auto length = static_cast<std::size_t>(reply.length);
 			/* The guest's driver counts the NUL that ends each reply in
 			 * the reply's length. It ends the text and is no part of it. */
 			if (length != 0U && reply.data[length - 1U] == '\0')
 				--length;
-			response.append(reply.data.data(), length);
-			rejected = rejected || reply.error != 0U;
-			if (reply.more == 0U)
+			partial_.append(reply.data.data(), length);
+			partialRejected_ = partialRejected_ || reply.error != 0U;
+			if (reply.more == 0U) {
+				const bool rejected = partialRejected_;
+				response.append(partial_);
+				partial_.clear();
+				partialRejected_ = false;
 				return rejected ? ExchangeResult::rejected :
 					ExchangeResult::accepted;
+			}
 		}
 	}
 
@@ -433,6 +448,10 @@ private:
 	std::string path_;
 	sockaddr_un console_ {};
 	std::unique_ptr<SocketPath> guard_;
+	/* The parts of the reply that a receive took before its deadline, and
+	 * whether any of them carried the error flag. One thread reads a client. */
+	mutable std::string partial_;
+	mutable bool partialRejected_ {false};
 };
 
 /*

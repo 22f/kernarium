@@ -141,6 +141,8 @@ struct HeldSuspend final {
 	 * arrived; nothing when it is empty. */
 	std::optional<Reply> firstReply;
 	std::chrono::milliseconds firstReplyAfter {0};
+	/* Whether that reply is the first part of a reply whose end follows. */
+	std::uint32_t firstReplyMore {0U};
 	/* Sent to the latest suspend's address right after the first wake is
 	 * answered: the final word of a suspend the wake aborted. */
 	std::optional<Reply> replyToWake;
@@ -173,7 +175,7 @@ void serveHeldSuspend(int server, const HeldSuspend &scenario,
 			firstReplyPending = false;
 			held.sent.push_back(sendReply(server, firstClient,
 				firstClientLength, scenario.firstReply->first,
-				scenario.firstReply->second));
+				scenario.firstReply->second, scenario.firstReplyMore));
 		}
 		if (!awaitRequest(server, 20))
 			continue;
@@ -272,6 +274,26 @@ void aSuspendedReplyAfterTheWakeIsUnconfirmed()
 	require(commandsOf(held.heard) == abortedAndWoken,
 		"the resume wakes an unconfirmed guest");
 	require(held.sent == std::vector<bool> {true});
+}
+
+/* A reply whose first part was a refusal is a refusal as a whole, though its
+ * last part, which carries no error flag, arrives only after the host's
+ * deadline and is read by itself: the guest is known to run and is not woken
+ * again, and nothing the tail says, "suspended, synced" included, confirms
+ * the suspend. */
+void aReplyRefusedInItsFirstPartStaysRefused()
+{
+	auto suspension = ::uml::device::GuestSuspension::system;
+	const auto held = holdSuspend(
+		{.firstReply = Reply {1U, "Suspend failed: "},
+		 .firstReplyMore = 1U,
+		 .replyToWake = enteredSyncedSuspend},
+		suspension);
+	require(suspension == ::uml::device::GuestSuspension::none,
+		"the end of a refused reply confirmed the suspend");
+	require(commandsOf(held.heard) == aborted);
+	require(held.sent == std::vector<bool> {true, true},
+		"the first part and the end reached the request's socket");
 }
 
 /* A busy refusal late in the wait does not start a wait of its own: the
@@ -1773,6 +1795,8 @@ int main(int argc, char **argv)
 		runPrivately(aSilentSuspendIsUnconfirmed);
 	} else if (selected == "suspend-suspended-after-wake") {
 		runPrivately(aSuspendedReplyAfterTheWakeIsUnconfirmed);
+	} else if (selected == "suspend-partial-refusal") {
+		runPrivately(aReplyRefusedInItsFirstPartStaysRefused);
 	} else if (selected == "suspend-retry-deadline") {
 		runPrivately(aBusyRetryCannotOutlastTheDeadline);
 	} else {

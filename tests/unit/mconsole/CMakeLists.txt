@@ -15,6 +15,11 @@ uml_add_unit_test(NAME guest-console-suspend-silent
 uml_add_unit_test(NAME guest-console-suspend-suspended-after-wake
     COMMAND uml_guest_console_tests suspend-suspended-after-wake
     LABELS console)
+# A reply refused in its first part is refused as a whole when its end arrives
+# only after the deadline.
+uml_add_unit_test(NAME guest-console-suspend-partial-refusal
+    COMMAND uml_guest_console_tests suspend-partial-refusal
+    LABELS console)
 uml_add_unit_test(NAME guest-console-suspend-retry-deadline
     COMMAND uml_guest_console_tests suspend-retry-deadline
     LABELS console)
