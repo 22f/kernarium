@@ -397,9 +397,10 @@ public final class GamepadSession: @unchecked Sendable {
     // MARK: Front
 
     private func leaveFront() {
-        guard stream != nil else { return }
         // Every controller's state is let go of, a device that is still being
-        // made included: it is given the neutral state when it is ready.
+        // made included: it is given the neutral state when it is ready. A
+        // session with no relay does it too, since the devices it makes next
+        // start from that state.
         for index in slots.indices {
             guard var slot = slots[index] else { continue }
             slot.state = slot.state.released

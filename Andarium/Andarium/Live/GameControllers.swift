@@ -339,16 +339,25 @@ nonisolated final class GameControllers: @unchecked Sendable {
     private let include: @Sendable (GCController) -> Bool
     private let readBattery: @Sendable (GCController) -> GamepadBattery
     private let batteryInterval: DispatchTimeInterval
+    private let readState: @Sendable (GCControllerLiveInput) -> GamepadState?
     private let lock = NSLock()
     private var running = false
+    private var foreground = false
+    /// Counts the times the application has gone to the back or come to the
+    /// front, under `lock`, together with the session being told: a state the
+    /// controller queue read in an earlier count is from before that
+    /// transition, and `drain` does not pass it on.
+    private var epoch: UInt64 = 0
     private var observers: [NSObjectProtocol] = []
     private var batteryTimer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "andarium-game-controllers", qos: .userInteractive)
 
     /// `center` and `discover` are where connects are announced and the
     /// connected controllers listed, `include` which of them are taken,
-    /// `readBattery` how a battery is read and `batteryInterval` how often:
-    /// a test replaces them, and the application leaves the defaults.
+    /// `readBattery` how a battery is read and `batteryInterval` how often,
+    /// and `readState` how the next buffered input state of a controller is
+    /// read (nil when none is left): a test replaces them, and the application
+    /// leaves the defaults.
     init(
         player: any HapticPlayer, engines: GameControllerEngines, opener: any GuestStreamOpener = GamepadConnector(),
         center: NotificationCenter = .default,
@@ -356,6 +365,9 @@ nonisolated final class GameControllers: @unchecked Sendable {
         include: @escaping @Sendable (GCController) -> Bool = { _ in true },
         readBattery: @escaping @Sendable (GCController) -> GamepadBattery = { GamepadInputMapper.battery($0.battery) },
         batteryInterval: DispatchTimeInterval = .seconds(30),
+        readState: @escaping @Sendable (GCControllerLiveInput) -> GamepadState? = { live in
+            live.nextInputState().map { GamepadInputMapper.state(GamepadReading(state: $0)) }
+        },
         retryDelay: DispatchTimeInterval = .seconds(1),
         wake: @escaping @Sendable () -> Void = { kernarium_runtime_loader_wake_for_input() }
     ) {
@@ -364,6 +376,7 @@ nonisolated final class GameControllers: @unchecked Sendable {
         self.include = include
         self.readBattery = readBattery
         self.batteryInterval = batteryInterval
+        self.readState = readState
         let table = table
         let session = GamepadSession(
             opener: opener, player: player, indicators: GameControllerIndicators(table: table), retryDelay: retryDelay,
@@ -397,7 +410,16 @@ nonisolated final class GameControllers: @unchecked Sendable {
             return change
         }
         if change == false { stopLooking() }
-        session.update(running: running, booted: booted, foreground: foreground)
+        // `drain` passes a state on under this lock too, so a state is queued
+        // for the session either before this transition, to be let go of by it,
+        // or after it, and then it was read after it.
+        lock.withLock {
+            if foreground != self.foreground {
+                self.foreground = foreground
+                epoch &+= 1
+            }
+            session.update(running: running, booted: booted, foreground: foreground)
+        }
         if change == true { startLooking() }
     }
 
@@ -482,10 +504,22 @@ nonisolated final class GameControllers: @unchecked Sendable {
     }
 
     /// Reads every buffered state in order, so that no tap between two
-    /// callbacks is lost; the session sends what changes a button at once.
+    /// callbacks is lost; the session sends what changes a button at once. The
+    /// callback runs on the controller queue, apart from the application's
+    /// going to the back and coming to the front, so a state may be read just
+    /// before one and reach this point after it: it is the controller's state
+    /// from before, which the guest has been told to let go of, and it is
+    /// dropped (the controller's next report is its state). A state still
+    /// waiting in iOS's queue when the callback first runs after a return is
+    /// read as new, which nothing here can tell from a report just made.
     private func drain(_ live: GCControllerLiveInput, id: Int) {
-        while let state = live.nextInputState() {
-            session.submit(GamepadInputMapper.state(GamepadReading(state: state)), for: id)
+        while true {
+            let read = lock.withLock { epoch }
+            guard let state = readState(live) else { return }
+            lock.withLock {
+                guard epoch == read else { return }
+                session.submit(state, for: id)
+            }
         }
     }
 

@@ -523,22 +523,64 @@ struct GamepadSessionTests {
         #expect(rig.guest.nextFrame() == .input(slot: 0, report: firstReport(pad, .neutral)))
     }
 
-    @Test func nothingIsSentWhileNotInFrontAndTheStateIsSentOnReturn() {
+    /// A plain gamepad whose reports carry no counter, so that they can be
+    /// compared byte for byte.
+    private func plainPad(_ id: Int) -> GamepadController {
+        GamepadController(id: id, family: .generic, name: "Pad", elements: .extended)
+    }
+
+    /// Something of every kind the guest is told: buttons, a trigger and a stick.
+    private let heldState = GamepadState(
+        buttons: [.south, .rightShoulder], leftStick: GamepadStick(x: 0.5, y: -0.25), rightTrigger: 0.8)
+
+    @Test func nothingIsSentWhileNotInFrontAndOnlyTheLetGoStateIsSentOnReturn() {
         let rig = greeted()
-        let pad = dualSense(1)
-        ready(rig, pad)
+        let pad = plainPad(1)
+        let released = firstReport(pad, .neutral)
+        #expect(ready(rig, pad, state: heldState) == .input(slot: 0, report: firstReport(pad, heldState)))
+        #expect(firstReport(pad, heldState) != released)
         rig.session.update(running: true, booted: true, foreground: false)
-        _ = rig.guest.nextFrame()
-        rig.session.submit(GamepadState(buttons: .south), for: 1)
+        #expect(framesUntilBarrier(rig) == [.input(slot: 0, report: released)])
+        // What a controller says while the application is away is not taken.
+        rig.session.submit(heldState, for: 1)
+        rig.session.submit(GamepadState(buttons: .east), for: 1)
         #expect(noFrame(rig))
         #expect(rig.wakes.count == 0)
+        // The return sends the let go state once, whatever was submitted meanwhile.
         rig.session.update(running: true, booted: true, foreground: true)
-        // The state the session holds is the let go one; the controller's next report changes it.
-        guard case .input(0, let released)? = rig.guest.nextFrame() else { Issue.record("no report"); return }
-        #expect(Array(released[8...10]) == [8, 0, 0])
-        rig.session.submit(GamepadState(buttons: .south), for: 1)
-        guard case .input(0, let report)? = rig.guest.nextFrame() else { Issue.record("no report"); return }
-        #expect(report[8] & 0x20 != 0)
+        #expect(framesUntilBarrier(rig, id: 0xbee0) == [.input(slot: 0, report: released)])
+        rig.session.update(running: true, booted: true, foreground: true)
+        #expect(noFrame(rig))
+        // Only what the controller reports after the return is its state.
+        rig.session.submit(heldState, for: 1)
+        #expect(framesUntilBarrier(rig, id: 0xbee1) == [.input(slot: 0, report: firstReport(pad, heldState))])
+    }
+
+    @Test func aButtonHeldWhenTheRelayWasGivenUpOnIsLetGoOfWhenTheApplicationLeaves() {
+        let rig = rig()
+        let pad = plainPad(1)
+        let released = firstReport(pad, .neutral)
+        rig.guest.accepting = false
+        rig.session.update(running: true, booted: true, foreground: true)
+        rig.session.connect(pad, state: heldState)
+        #expect(gamepadEventually { rig.session.hasGivenUp })
+        // No relay to tell: the controller is let go of all the same, and the button
+        // is let go of on the controller while the application is away.
+        rig.session.update(running: true, booted: true, foreground: false)
+        rig.session.settle()
+        // The guest restarts while the application is away, and the relay is reached again.
+        rig.session.restart()
+        rig.guest.accepting = true
+        rig.session.update(running: true, booted: false, foreground: false)
+        #expect(gamepadEventually { rig.guest.connections == 1 })
+        rig.guest.send(.hello(version: 1, slotCount: 8))
+        #expect(rig.guest.nextFrame() == createFrame(pad, slot: 0))
+        rig.guest.send(.created(slot: 0, result: 0))
+        rig.guest.send(.event(slot: 0, event: .start))
+        // The device is made with nothing held, and so is the return.
+        #expect(rig.guest.nextFrame() == .input(slot: 0, report: released))
+        rig.session.update(running: true, booted: false, foreground: true)
+        #expect(framesUntilBarrier(rig) == [.input(slot: 0, report: released)])
     }
 
     @Test func aRumbleReportWhileNotInFrontPlaysNothing() {

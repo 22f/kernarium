@@ -333,28 +333,61 @@ struct GameControllersTests {
         }
     }
 
+    /// A controller whose input snapshot is read through a counter, so that a
+    /// test sees a read that no report shows: the snapshot of a software
+    /// controller is neutral whatever its elements say, and a read of it gives
+    /// the guest a state that is the let go one. It takes its elements from a
+    /// software controller, as the application reads them.
+    private nonisolated final class SnapshotCountingController: GCController, @unchecked Sendable {
+        nonisolated final class Input: GCControllerLiveInput, @unchecked Sendable {
+            private let readLock = NSLock()
+            private var reads = 0
+            private let backing = GCController.withExtendedGamepad().input
+            var captures: Int { readLock.withLock { reads } }
+            override func capture() -> GCControllerInputState {
+                readLock.withLock { reads += 1 }
+                return backing.capture()
+            }
+        }
+
+        let counting = Input()
+        let software = GCController.withExtendedGamepad()
+        override var input: GCControllerLiveInput { counting }
+        override var extendedGamepad: GCExtendedGamepad? { software.extendedGamepad }
+        override var physicalInputProfile: GCPhysicalInputProfile { software.physicalInputProfile }
+    }
+
+    /// The input reports among `frames`.
+    private func inputReports(_ frames: [GamepadHostFrame]) -> [[UInt8]] {
+        frames.compactMap { frame in
+            if case .input(0, let report) = frame { return report }
+            return nil
+        }
+    }
+
     /// iOS delivers no input to an application that is not in front, and until
     /// a controller reports again what it holds for it, snapshot and element
     /// values alike, is what it was before the stretch: a button let go of
     /// meanwhile still reads as held, and nothing tells that from a button held
-    /// all along. The guest is shown the released state on the return whatever
-    /// the elements say. (The software controller keeps its elements as they
-    /// were, as a controller does that iOS has not heard from. Its snapshot is
-    /// neutral whatever its elements say, so a read of the elements is what a
-    /// regression is caught through.)
+    /// all along. The guest is shown the released state on the return, by the
+    /// return itself, and the application reads neither the elements nor the
+    /// snapshot again. (A software controller keeps its elements as they were,
+    /// as a controller does that iOS has not heard from, which is what shows a
+    /// read of them; its snapshot is neutral whatever they say, which is why a
+    /// counter shows a read of that.)
     @Test(arguments: Held.allCases)
     func whatAControllerHeldBeforeTheApplicationLeftIsReleasedOnTheReturn(held: Held) async throws {
         let relay = Relay()
-        let software = GCController.withExtendedGamepad()
-        let pad = try #require(software.extendedGamepad)
+        let controller = SnapshotCountingController()
+        let pad = try #require(controller.extendedGamepad)
         held.hold(pad)
         // What the guest holds for a state, as the device's own encoder says.
         var encoder = GamepadProfiles.profile(
-            family: .generic, name: "ExtendedGamepad", elements: GamepadInputMapper.elements(of: software.physicalInputProfile)
+            family: .generic, name: "ExtendedGamepad", elements: GamepadInputMapper.elements(of: controller.physicalInputProfile)
         ).makeEncoder()
         let releasedReport = try #require(encoder.reports(for: .neutral, after: nil).first)
 
-        let controllers = make(relay, center: NotificationCenter(), controllers: { [software] in [software] })
+        let controllers = make(relay, center: NotificationCenter(), controllers: { [controller] in [controller] })
         controllers.update(running: true, booted: false, foreground: true)
         #expect(await eventually { relay.connections == 1 })
         relay.send(.hello(version: 1, slotCount: 8))
@@ -364,19 +397,89 @@ struct GameControllersTests {
         guard case .input(0, let shown)? = await relay.next() else { Issue.record("no state was sent"); return }
         // The test holds something the guest is shown.
         #expect(shown != releasedReport, "\(held)")
-        _ = await relay.frames()
+        // The device's settle delay sends the state once more.
+        _ = await relay.frames(quiet: 0.6)
 
-        // The guest's last state: the application leaves the front and returns to it.
+        // The application leaves the front: the guest is told, once.
         controllers.update(running: true, booted: false, foreground: false)
-        var frames = await relay.frames()
-        #expect(frames.contains(.input(slot: 0, report: releasedReport)), "\(held) is let go of when the application leaves")
+        #expect(inputReports(await relay.frames()) == [releasedReport], "\(held) is let go of when the application leaves")
+        let captures = controller.counting.captures
+        // And returns to it: the guest is told again, by the return's own report, and nothing is read.
         controllers.update(running: true, booted: false, foreground: true)
-        frames += await relay.frames()
-        let last = frames.reversed().compactMap { frame -> [UInt8]? in
-            if case .input(0, let report) = frame { return report }
-            return nil
-        }.first
-        #expect(last == releasedReport, "\(held) is released on the return")
+        controllers.session.settle()
+        #expect(inputReports(await relay.frames()) == [releasedReport], "\(held) is released on the return")
+        #expect(controller.counting.captures == captures, "\(held): the snapshot is not read on the return")
+        controllers.update(running: false, booted: false, foreground: false)
+    }
+
+    /// What a state read before the application left, and passed on after its
+    /// return, is: the controller's state from before the stretch. A report
+    /// read after the return is the controller's own.
+    @Test func aStateReadBeforeTheApplicationLeftAndPassedOnAfterItsReturnIsDropped() async throws {
+        /// The reads of a controller's states: the first is held until the test
+        /// lets it go, as a callback that is slow to get on is, and then
+        /// returns the state it holds; the later ones return what they are given.
+        nonisolated final class Reads: @unchecked Sendable {
+            private let lock = NSLock()
+            private var states: [GamepadState] = []
+            let reading = DispatchSemaphore(value: 0)
+            let proceed = DispatchSemaphore(value: 0)
+            private var held = true
+            func add(_ state: GamepadState) { lock.withLock { states.append(state) } }
+            func next() -> GamepadState? {
+                let (state, wait) = lock.withLock { () -> (GamepadState?, Bool) in
+                    let wait = held && !states.isEmpty
+                    if wait { held = false }
+                    return (states.isEmpty ? nil : states.removeFirst(), wait)
+                }
+                if wait {
+                    reading.signal()
+                    proceed.wait()
+                }
+                return state
+            }
+        }
+        let relay = Relay()
+        let software = GCController.withExtendedGamepad()
+        let reads = Reads()
+        let controllers = GameControllers(
+            player: Player(), engines: GameControllerEngines(), opener: relay, center: NotificationCenter(),
+            discover: { [software] in [software] }, readState: { _ in reads.next() }, retryDelay: .milliseconds(10), wake: {})
+        controllers.update(running: true, booted: false, foreground: true)
+        #expect(await eventually { relay.connections == 1 })
+        relay.send(.hello(version: 1, slotCount: 8))
+        _ = await relay.next()
+        relay.send(.created(slot: 0, result: 0))
+        relay.send(.event(slot: 0, event: .start))
+        guard case .input(0, let neutral)? = await relay.next() else { Issue.record("no state was sent"); return }
+        _ = await relay.frames(quiet: 0.6)
+        var encoder = GamepadProfiles.profile(
+            family: .generic, name: "ExtendedGamepad", elements: GamepadInputMapper.elements(of: software.physicalInputProfile)
+        ).makeEncoder()
+        let heldState = GamepadState(buttons: .south, leftStick: GamepadStick(x: 0.5, y: -0.25), rightTrigger: 0.8)
+        let heldReport = try #require(encoder.reports(for: heldState, after: nil).first)
+        #expect(heldReport != neutral)
+
+        // The callback of iOS reads a state that holds A, and is slow to pass it on.
+        let entry = try #require(controllers.table.all.first)
+        let handler = try #require(entry.controller.input.inputStateAvailableHandler)
+        reads.add(heldState)
+        let input = entry.controller.input
+        let callback = Task.detached { handler(input) }
+        #expect(await Task.detached { reads.reading.wait(timeout: .now() + 3) == .success }.value)
+        // Meanwhile the application leaves the front and returns to it.
+        controllers.update(running: true, booted: false, foreground: false)
+        controllers.update(running: true, booted: false, foreground: true)
+        _ = await relay.frames()
+        reads.proceed.signal()
+        await callback.value
+        controllers.session.settle()
+        // What the callback read is not passed on, though the application is in front again.
+        #expect(!inputReports(await relay.frames()).contains(heldReport))
+        // A report read after the return is.
+        reads.add(heldState)
+        handler(input)
+        #expect(inputReports(await relay.frames()) == [heldReport])
         controllers.update(running: false, booted: false, foreground: false)
     }
 
