@@ -323,6 +323,39 @@ struct SideKeysTouchTests {
         #expect(text.contains { $0.label.contains("Install APK") } == installs)
     }
 
+    /// The card hugs its text, up to the third accessibility text size (the
+    /// larger sizes read as that one, so the tip stays a card), and takes no
+    /// more than the height it is given: what does not fit scrolls inside it,
+    /// so on the smallest iPhone, and in a fold's half, nothing is cut off.
+    @Test func theTipCardHugsItsTextAndScrollsBeyondItsMaxHeight() async throws {
+        let lease = try await HostWindow.take()
+        defer {
+            lease.window.traitOverrides.remove(UITraitPreferredContentSizeCategory.self)
+            lease.give()
+        }
+        func measure(_ size: UIContentSizeCategory, maxHeight: CGFloat) async throws -> (height: CGFloat, scrolls: Bool) {
+            lease.window.traitOverrides.preferredContentSizeCategory = size
+            let host = UIHostingController(rootView: SideKeysTipCard(tip: SideKeysTip(offersInstall: true), maxHeight: maxHeight))
+            lease.window.rootViewController = host
+            try await Task.sleep(for: .milliseconds(500))
+            host.view.setNeedsLayout()
+            host.view.layoutIfNeeded()
+            let fit = host.sizeThatFits(in: CGSize(width: 335, height: 4000))
+            let scroll = descendants(of: host.view).compactMap { $0 as? UIScrollView }.first
+            return (fit.height, (scroll?.contentSize.height ?? 0) > fit.height + 1)
+        }
+        let plain = try await measure(.large, maxHeight: 4000)
+        let third = try await measure(.accessibilityExtraLarge, maxHeight: 4000)
+        let fifth = try await measure(.accessibilityExtraExtraExtraLarge, maxHeight: 4000)
+        #expect(plain.height > 100 && !plain.scrolls, "the card at the ordinary size is \(plain)")
+        #expect(third.height > plain.height, "larger text makes a taller card: \(plain) \(third)")
+        #expect(abs(fifth.height - third.height) < 1, "the fifth size reads as the third: \(third) \(fifth)")
+        #expect(!third.scrolls && !fifth.scrolls, "with room the card does not scroll: \(third) \(fifth)")
+        let capped = try await measure(.accessibilityExtraExtraExtraLarge, maxHeight: 200)
+        #expect(capped.height <= 200.5 && capped.scrolls, "short of room the card scrolls inside 200 points: \(capped)")
+        #expect(SideKeysTipCard.maxHeight(in: 667) < 667 && SideKeysTipCard.maxHeight(in: 100) >= 160)
+    }
+
     /// Every accessibility element of a view tree with its label and screen
     /// frame, in the order UIKit walks them.
     static func elements(in root: UIView) -> [(label: String, frame: CGRect)] {

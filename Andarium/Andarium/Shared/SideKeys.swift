@@ -114,7 +114,7 @@ struct SideKeysOverlay: View {
                     // keys or Home, where its card takes their touches.
                     // SwiftUI dismisses its popover with the closed keys.
                     .popover(isPresented: $tipShown, arrowEdge: leading ? .leading : .trailing) {
-                        SideKeysTipCard(tip: tip)
+                        SideKeysTipCard(tip: tip, maxHeight: SideKeysTipCard.maxHeight(in: size.height))
                     }
                     .task {
                         for await shows in tip.shouldDisplayUpdates { tipShown = shows }
@@ -517,16 +517,30 @@ nonisolated struct SideKeysTip: Tip {
 
 /// The tip in its popover, drawn as TipKit draws a popover tip: the popover's
 /// own background, at most 400 points wide. A touch beside it reaches the
-/// guest, as a touch beside TipKit's does.
-private struct SideKeysTipCard: View {
+/// guest, as a touch beside TipKit's does. Its text grows with the person's
+/// text size up to the third accessibility size, and the card takes at most
+/// `maxHeight`: what does not fit scrolls inside it, so the card, the
+/// icon and the close button stay on the screen on the smallest iPhone, and
+/// in the half of a folding iPhone, at any text size.
+struct SideKeysTipCard: View {
     let tip: SideKeysTip
+    let maxHeight: CGFloat
+
+    /// The most height the card takes where the keys have `height` points: the
+    /// popover keeps its own margins from the screen's edges.
+    static func maxHeight(in height: CGFloat) -> CGFloat { max(160, height - 120) }
 
     var body: some View {
-        TipView(tip)
-            .tipBackground(.clear)
-            .frame(idealWidth: 400, maxWidth: 400)
-            .fixedSize(horizontal: false, vertical: true)
-            .presentationCompactAdaptation(.popover)
-            .presentationBackgroundInteraction(.enabled)
+        ScrollView {
+            TipView(tip)
+                .tipBackground(.clear)
+                .dynamicTypeSize(...DynamicTypeSize.accessibility3)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(maxHeight: maxHeight)
+        .frame(idealWidth: 400, maxWidth: 400)
+        .fixedSize(horizontal: false, vertical: true)
+        .presentationCompactAdaptation(.popover)
+        .presentationBackgroundInteraction(.enabled)
     }
 }
