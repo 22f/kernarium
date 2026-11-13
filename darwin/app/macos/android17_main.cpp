@@ -2,6 +2,7 @@
 
 #include "launcher.hpp"
 #include "block/android_boot.hpp"
+#include "camera/camera_layout.hpp"
 #include "options.hpp"
 
 #include <array>
@@ -37,7 +38,9 @@ constexpr std::string_view adb_authorization_prefix{
  * KernariumHostFeatures.hpp states it from the boot request). A Mac has no
  * Taptic Engine, so this launcher states none itself; a run that wants the
  * guest's vibrator for a CTS, VTS or protocol check passes the argument, which
- * is forwarded as given. A release's own command line may not carry it. */
+ * is forwarded as given. A release's own command line may not carry it, nor
+ * the camera layout (the vendor SKU), which a run passes itself or has
+ * composed (--camera-layout=auto). */
 constexpr std::string_view hardware_sku_prefix{
 	"androidboot.product.hardware.sku="};
 /* Makes the guest list a device-orientation sensor, which Android's window
@@ -267,6 +270,7 @@ std::vector<std::string> boot_command_line(
 	constexpr std::array launcher_prefixes{
 		adb_authorization_prefix,
 		hardware_sku_prefix,
+		uml::camera::layoutArgumentPrefix,
 		orientation_prefix,
 		compass_prefix,
 		uml::android::lcdDensityPrefix,

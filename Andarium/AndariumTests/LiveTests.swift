@@ -161,6 +161,14 @@ struct HostDeviceTests {
                 #expect(host.memory.graphicsMemoryMiB(forMemory: mib, vCPUs: count)
                     == Int(kernarium_runtime_loader_gpu_budget_mib(UInt32(mib), UInt32(count), launch)))
             }
+            // While Camera is on the pool is that budget less the loader's reserve for it.
+            for mib in [1536, host.memory.defaultMemoryMiB(vCPUs: count)] {
+                let budget = Int(kernarium_runtime_loader_gpu_budget_mib(UInt32(mib), UInt32(count), launch))
+                let reserve = Int(kernarium_runtime_loader_camera_reserve_mib(UInt32(budget)))
+                #expect(reserve > 0)
+                #expect(host.memory.graphicsMemoryMiB(forMemory: mib, vCPUs: count, cameraLive: true)
+                    == max(budget - reserve, 0))
+            }
             #expect(host.memory.maximumMiB(vCPUs: count)
                 == Int(kernarium_runtime_loader_maximum_guest_memory_mib(UInt32(count), maximumSet)))
             #expect(host.memory.defaultMemoryMiB(vCPUs: count) <= host.memory.maximumMiB(vCPUs: count))

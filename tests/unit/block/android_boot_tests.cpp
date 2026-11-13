@@ -1035,27 +1035,32 @@ void testHwTimeoutMultiplier(const fs::path &directory)
 
 /* Both launchers reserve the hardware SKU that tells the guest what the host
  * has (the iOS runtime's KernariumHostFeatures.hpp, and the standalone
- * launcher, which passes a host's own argument through), so a release cannot
- * state it. The other SKU properties stay the release's. */
+ * launcher, which passes a host's own argument through) and the vendor SKU
+ * that names the camera layout the host composed
+ * (camera/camera_layout.hpp), so a release cannot state either. The product
+ * axis stays the release's. */
 void testHostFeatureArguments(const fs::path &directory)
 {
-	constexpr std::array<std::string_view, 2> launcherPrefixes{
+	constexpr std::array<std::string_view, 3> launcherPrefixes{
 		"androidboot.kernarium.adb_auth=",
-		"androidboot.product.hardware.sku="};
+		"androidboot.product.hardware.sku=",
+		"androidboot.product.vendor.sku="};
 	const std::string devices{android::bootDevicesArgument};
 	const auto path = directory / "feature-command-line.txt";
 	for (const char *bad : {"androidboot.product.hardware.sku=haptics",
 				"androidboot.product.hardware.sku=",
-				"androidboot.product.hardware.sku=other"}) {
+				"androidboot.product.hardware.sku=other",
+				"androidboot.product.vendor.sku=camera",
+				"androidboot.product.vendor.sku="}) {
 		writeText(path, std::string{"quiet "} + bad + " " + devices + "\n");
 		requireThrows([&] {
 			(void)android::readKernelCommandLine(path, launcherPrefixes);
 		});
 	}
-	writeText(path, "quiet androidboot.product.vendor.sku=camera "
+	writeText(path, "quiet androidboot.hardware.sku=camera "
 			"androidboot.product.hardware.skus=1 " + devices + "\n");
 	require(android::readKernelCommandLine(path, launcherPrefixes) ==
-		std::vector<std::string>{"quiet", "androidboot.product.vendor.sku=camera",
+		std::vector<std::string>{"quiet", "androidboot.hardware.sku=camera",
 					 "androidboot.product.hardware.skus=1", devices});
 }
 

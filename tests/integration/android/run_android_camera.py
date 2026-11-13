@@ -35,7 +35,7 @@ Every wait has a deadline. The guest's launcher is stopped through its own proce
 guest is reached through the shared adb server, always named with ``-s``.
 
 The runner is opt-in: it needs the macos-android17 executable, an installed release and an adb client.
-usage: run_android_camera.py --emulator uml-darwin-android17 [--release DIR] [--layout NAME]
+usage: run_android_camera.py --emulator uml-darwin-android17 [--release DIR] [--layout NAME|auto]
        [--camera-profile phone|tablet|laptop] [--mode live|blocked|none]
 """
 
@@ -1028,14 +1028,44 @@ def check_cameraserver_restart(guest: Guest, plan: Plan) -> None:
 CAMERA_SOURCES = {"live": "synthetic", "blocked": "blocked", "none": "none"}
 
 
-def launcher_arguments(plan: Plan) -> list[str]:
+AUTO_LAYOUT = "auto"
+
+
+# The layout the launcher composes for each profile's cameras: every host is given the small tier for now
+# (darwin/device/camera/camera_tiers.hpp, largestOfferedTier), so the phone has no 2160p front camera and no
+# concurrent stream pair, whatever the launcher's graphics budget.
+AUTO_LAYOUTS = {
+    "phone": "bf-small-flash-manual-raw",
+    "tablet": "bf-small-flash-manual-raw",
+    "laptop": "front",
+}
+
+
+def auto_layout(profile: str, taught: bool) -> str:
+    """The layout the launcher composes for the profile's cameras at the tier every host is given, without
+    RAW until a Bayer still has taught the colour data (the first session of a calibration directory)."""
+    name = AUTO_LAYOUTS[profile]
+    if taught:
+        return name
+    plain = "-".join(part for part in name.split("-") if part != "raw")
+    if plain not in camera_layouts.by_name():
+        raise ValueError(f"{plain!r} is not a camera layout")
+    return plain
+
+
+def launcher_arguments(plan: Plan, auto: bool = False, calibration: pathlib.Path | None = None) -> list[str]:
     """What the plan adds to the launcher's command: the camera source and profile, and the layout,
     which the launcher forwards to the kernel as given, as the host's application states the layout it
-    composed."""
+    composed. With ``auto`` the launcher composes it from the cameras the source presents, through the
+    function the iOS runtime uses, and the run checks that Android booted with the plan's."""
+    # A guest with no camera device has no profile to give, and the launcher refuses one.
     return [
         f"--camera={CAMERA_SOURCES[plan.mode]}",
-        f"--camera-profile={plan.profile}",
-        f"{camera_layouts.SKU_BOOT_ARGUMENT}{plan.layout.name}",
+        *([] if plan.mode == "none" else [f"--camera-profile={plan.profile}"]),
+        "--camera-layout=auto" if auto else f"{camera_layouts.SKU_BOOT_ARGUMENT}{plan.layout.name}",
+        # Every host is given the small tier for now; a layout of the large tier is exercised with it.
+        *(["--camera-tier=large"] if plan.mode != "none" and plan.layout.tier == "large" else []),
+        *([f"--camera-calibration-dir={calibration}"] if calibration else []),
     ]
 
 
@@ -1063,7 +1093,7 @@ def start_guest(options: argparse.Namespace, plan: Plan, adb: str, private: path
         *boot_android.emulator_command(
             boot_options, release, instance / boot_android.android_instance.DATA_DISK, emulator,
             boot_android.data_capacity(boot_options, identity)),
-        *launcher_arguments(plan),
+        *launcher_arguments(plan, options.layout == AUTO_LAYOUT, options.calibration_dir),
     ]
     log = private / "emulator.log"
     stream = log.open("wb")
@@ -1094,7 +1124,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-profile", choices=sorted(PROFILE_CAMERAS), default="phone",
                         help="the cameras the synthetic source presents")
     parser.add_argument("--layout", help="the camera layout to state on the vendor SKU "
-                        "(default: the profile's on a host without RAW calibration, or none for --mode none)")
+                        "(default: the profile's, or none for --mode none); `auto` has the launcher compose it "
+                        "from the cameras, as the iOS runtime does, and expects the profile's")
+    parser.add_argument("--calibration-dir", type=pathlib.Path,
+                        help="where the colour data a Bayer still teaches is kept across runs; with --layout auto a "
+                        "directory that holds none yet expects the layout without RAW, one that holds some the "
+                        "profile's own")
     parser.add_argument("--mode", choices=MODES, default="live",
                         help="live: the synthetic chart; blocked: a session started with Camera off; "
                         "none: no camera device")
@@ -1157,6 +1192,17 @@ def main() -> int:
         print("counts and timeouts must be positive", file=sys.stderr)
         return 2
     layout = options.layout or ("none" if options.mode == "none" else DEFAULT_LAYOUTS[options.camera_profile])
+    if layout == AUTO_LAYOUT:
+        if options.mode == "none":
+            print("--layout auto needs a camera to compose it from", file=sys.stderr)
+            return 2
+        taught = bool(options.calibration_dir and options.calibration_dir.is_dir()
+                      and any(options.calibration_dir.iterdir()))
+        try:
+            layout = auto_layout(options.camera_profile, taught)
+        except ValueError as problem:
+            print(f"{problem}", file=sys.stderr)
+            return 2
     try:
         plan = make_plan(layout, options.camera_profile, options.mode)
     except ValueError as problem:

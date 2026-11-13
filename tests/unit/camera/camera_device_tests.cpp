@@ -8,6 +8,7 @@
 
 #include "camera_controls.hpp"
 #include "camera_device.hpp"
+#include "camera_layout.hpp"
 #include "in_process_service.hpp"
 #include "jpeg_gap.hpp"
 #include "nv12_transform.hpp"
@@ -83,8 +84,15 @@ struct Rig final {
         options.mode = rigOptions.mode;
         options.tier = rigOptions.tier;
         options.calibration = store;
-        options.onState = [this](CameraState state) { states.push_back(state); };
-        options.automaticRotation = [this] { return automaticDegrees ? *automaticDegrees : 0u; };
+        options.onState = [this](CameraState state) {
+            states.push_back(state);
+            if (onStateChange) onStateChange();
+        };
+        options.automaticRotation = [this](const uml::platform::CameraInfo&) { return automaticDegrees ? *automaticDegrees : 0u; };
+        options.onCheckpoint = [this](CameraCheckpoint where) { checkpoints.push_back(where); };
+        options.onRotateAndCrop = [this](std::uint32_t camera, std::uint32_t setting, std::uint32_t degrees) {
+            rotations.push_back({camera, setting, degrees});
+        };
         device = std::make_unique<VirtioCameraDevice>(camera, std::move(options));
         device->setGuestMapper([this](std::uint64_t offset, std::size_t size) {
             if (offset > memory.size() || size > memory.size() - offset) return std::span<std::uint8_t> {};
@@ -93,11 +101,21 @@ struct Rig final {
     }
     Rig(const Rig&) = delete;
     Rig& operator=(const Rig&) = delete;
+    // The device closes a session that is open as it goes, and says so to the
+    // recorders below, which must outlive it.
+    ~Rig() { device.reset(); }
 
     std::shared_ptr<SyntheticCamera> camera;
     std::shared_ptr<CalibrationStore> store;
     std::unique_ptr<VirtioCameraDevice> device;
     std::vector<CameraState> states;
+    /* Called on the worker where the device tells the application its state changed, which is
+     * while it handles a platform event, with the frames of its batch in hand. */
+    std::function<void()> onStateChange;
+    /* The diagnostic checkpoints the device reported, in order. */
+    std::vector<CameraCheckpoint> checkpoints;
+    /* What the device reported to onRotateAndCrop: camera, setting, degrees. */
+    std::vector<std::array<std::uint32_t, 3>> rotations;
     std::uint32_t* automaticDegrees {};
     std::vector<std::uint8_t> memory;
     std::size_t bump {16 * page};
@@ -285,6 +303,15 @@ struct Rig final {
     {
         device->drainEventSource();
         collect();
+    }
+    /* `frames` frames of a camera, one at a time: the device writes the newest
+     * frame of a camera each time it runs, so a burst of frames is one. */
+    void pumpSteps(std::size_t platformCamera, unsigned frames)
+    {
+        for (unsigned frame = 0; frame < frames; ++frame) {
+            camera->pump(platformCamera, 1);
+            step();
+        }
     }
     bool done(std::uint64_t request) const { return completed.contains(request); }
     virtio_video_camera_queue_resp result(std::uint64_t request, std::source_location where = std::source_location::current()) const
@@ -495,8 +522,8 @@ void testStreamsAndParameters()
                 stream.ycbcr_enc == 2 && stream.quantization == 1,
             "BT.709 full range at 30 frames a second");
     require(Rig::type(rig.setInterval(1, 1, 15)) == VIRTIO_VIDEO_RESP_OK_NODATA && rig.params(1).frame_rate == 15, "15 frames a second");
-    require(Rig::type(rig.setInterval(1, 1, 1000)) == VIRTIO_VIDEO_RESP_OK_NODATA && rig.params(1).frame_rate == 120,
-            "a rate above the camera's is the highest any format that covers 640 x 480 runs at");
+    require(Rig::type(rig.setInterval(1, 1, 1000)) == VIRTIO_VIDEO_RESP_OK_NODATA && rig.params(1).frame_rate == 30,
+            "a rate above the camera's is the highest it offers: the cap, 30");
     require(Rig::type(rig.setInterval(1, 0, 30)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a zero interval changes nothing");
 
     // A buffer smaller than the format is refused; one the size of it is taken.
@@ -549,16 +576,20 @@ void testVideoAndMetadata()
     for (std::uint32_t resource = 1; resource <= 3; ++resource) frames.push_back(rig.queue(1, resource));
     require(rig.camera->sessionsOpened() == 1 && rig.camera->videoRunning(0) && rig.camera->videoFrameRate(0) == 30,
             "the first video buffer starts the camera at the stream's rate");
+    require(rig.camera->sessionAnchorCalls() == 1 && rig.camera->sessionAnchors() == std::vector<std::optional<std::size_t>> {3, std::nullopt} &&
+                rig.camera->sessionLimits().maximumStillPixels == limitsOf(CameraTier::small).maximumStillPixels &&
+                rig.camera->sessionLimits().maximumFrameBytes == maximumDeliveredFrameBytes(limitsOf(CameraTier::small)) &&
+                rig.camera->sessionLimits().frameRowAlignment == captureRowAlignment,
+            "the session is told each camera's anchor (the back camera's 1920x1440 format; the front camera lists none) and what the guest may ask, once, before it starts anything");
     require(rig.states == std::vector<CameraState> {CameraState::streaming}, "the host is streaming");
 
-    rig.camera->pump(0, 3);
-    rig.step();
+    rig.pumpSteps(0, 3);
     const std::uint64_t interval = 1'000'000'000ull / 30;
     for (std::size_t index = 0; index < 3; ++index) {
         const auto frame = rig.result(frames[index]);
         require(frame.base.flags == 0 && frame.base.data_sizes[0] == nv12Size(640, 480), "a frame fills its buffer");
         require(frame.sequence == index + 1, "frames are numbered from 1 in capture order");
-        require(frame.base.timestamp == (3 - index) * interval, "the timestamp is the frame's age");
+        require(frame.base.timestamp == interval, "the timestamp is the frame's age");
         const auto picture = rig.bytes(1, std::uint32_t(index + 1), nv12Size(640, 480));
         const auto marker = decodeChartMarker(picture.data(), 640, 640, 480);
         require(marker.valid && marker.tag == chartTag(0) && marker.counter == index + 1, "the buffer holds that frame's picture");
@@ -591,6 +622,8 @@ void testVideoAndMetadata()
     require(rig.done(queued) && (rig.result(queued).base.flags & errorFlag), "a cleared buffer completes with an error");
     require(!rig.camera->videoRunning(0) && rig.camera->sessionsOpen() == 0, "with no stream left the capture is released");
     require(rig.states == std::vector<CameraState> {CameraState::streaming, CameraState::idle}, "the host is idle again");
+    require(rig.checkpoints == std::vector<CameraCheckpoint> {CameraCheckpoint::sessionOpened, CameraCheckpoint::sessionClosed},
+            "the memory checkpoints are the session opening and closing");
     rig.destroy(1);
     rig.destroy(2);
 }
@@ -648,8 +681,7 @@ void testPipeline()
         const auto first = rig.queue(1, 1);
         const auto second = rig.queue(1, 2);
         require(reference->startVideo(0, test.width, test.height, 30), test.what);
-        rig.camera->pump(0, 2);
-        rig.step();
+        rig.pumpSteps(0, 2);
         require(recorder.frames.size() == 2, test.what);
         for (std::size_t index = 0; index < 2; ++index) {
             const auto answer = rig.result(index == 0 ? first : second);
@@ -680,6 +712,10 @@ void testPipeline()
     rig.step();
     require(rig.bytes(1, 1, nv12Size(480, 640)) == expectedNv12(recorder.frames[0], 480, 640, 90), "automatic: 90 degrees");
     require(rig.bytes(1, 2, nv12Size(480, 640)) == expectedNv12(recorder.frames[1], 480, 640, 270), "automatic: now 270 degrees");
+    // What reaches the diagnostic hook: the automatic setting (4) and its turn, once per change.
+    require(rig.rotations.size() == 2 && rig.rotations[0] == std::array<std::uint32_t, 3> {0, 4, 90} &&
+                rig.rotations[1] == std::array<std::uint32_t, 3> {0, 4, 270},
+            "the rotation hook says automatic with 90 and then 270 degrees, once each");
     reference->stop();
 }
 
@@ -727,6 +763,8 @@ void testBlockedNeverOpensASession()
                     meta.flags == (VIRTIO_VIDEO_CAMERA_FRAME_F_BLACK | VIRTIO_VIDEO_CAMERA_FRAME_F_BLOCKED),
                 "metadata says black and blocked");
     }
+    // Black frames are not capture: the host is idle however many flow.
+    require(rig.states.empty(), "a blocked session with streams running is idle and reports no change");
     // A still is refused at once.
     const auto still = rig.queue(3, 1, 4321);
     require(rig.done(still), "a still in a blocked session completes at once");
@@ -763,8 +801,7 @@ void testInterruption()
         return load<virtio_video_event>(rig.completed.at(eventBuffers[index]));
     };
     const auto a = rig.queue(1, 1), b = rig.queue(1, 2);
-    rig.camera->pump(0, 2);
-    rig.step();
+    rig.pumpSteps(0, 2);
     require(rig.result(a).base.flags == 0 && rig.result(b).base.flags == 0, "frames flow");
 
     rig.camera->interrupt();
@@ -781,8 +818,7 @@ void testInterruption()
         const auto picture = rig.bytes(1, id == c ? 3u : 4u, 640 * 480);
         require(std::all_of(picture.begin(), picture.end(), [](auto byte) { return byte == 0; }), "black");
     }
-    rig.camera->pump(0, 2);
-    rig.step();
+    rig.pumpSteps(0, 2);
 
     rig.camera->resume();
     rig.step();
@@ -881,12 +917,16 @@ void testStillsAndCalibration()
                     record.jpeg_gap_offset == 6 && record.jpeg_gap_length == exifGapLength && record.active_camera == 0,
                 "describes the still and where its gap is");
         require(rig.camera->sessionsOpen() == 0 && rig.states.back() == CameraState::idle, "the capture session is released");
+        require(rig.checkpoints == std::vector<CameraCheckpoint> {CameraCheckpoint::sessionOpened, CameraCheckpoint::stillDelivered,
+                                                                  CameraCheckpoint::sessionClosed},
+                "a still is bracketed by its session's checkpoints, read while the session is open");
 
         // The first still of a lens taught the device its colour data.
         const auto learned = store->load(model, CalibrationStore::lensKey(info));
         require(learned && learned->bayer == BayerOrder::rggb && learned->rawWidth == 1008 && learned->rawHeight == 756 &&
                     learned->whiteLevel > learned->blackLevel,
                 "the lens is calibrated");
+        require(learned->anchorWidth == 1920 && learned->anchorHeight == 1440, "in the format the camera runs in, which is stored with it");
         require(!rig.device->cameras()[0].raw(), "but this guest keeps seeing what it saw at the start");
     }
 
@@ -1373,6 +1413,83 @@ void testCalibrationRawIsACourtesy()
     require((rig.result(raw).base.flags & errorFlag) != 0 && rig.result(raw).base.timestamp == 9, "and the RAW buffer fails alone");
 }
 
+/* A host that cannot take a Bayer still (the Apple session refuses the RAW request when the photo output lists no
+ * Bayer format) never learns a lens's colour data, so nothing RAW is published for it: the camera has no RAW flag, no
+ * Bayer order, size or levels, its stills capability lists JPEG only, and the layout the guest's image is chosen by
+ * has no `-raw`. The guest's half (no RAW capability, no RAW16 configuration) is pinned in andarium-camera-plan. */
+void testAHostThatCannotTakeABayerStillPublishesNoRaw()
+{
+    auto store = std::make_shared<CalibrationStore>();
+    {
+        RigOptions options;
+        options.store = store;
+        Rig learner(options);
+        learner.camera->refuseRaw(true);
+        learner.create(1, 0, stillKind);
+        require(Rig::type(learner.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+        learner.attach(1, 1, learner.params(1).plane_formats[0].plane_size);
+        const auto still = learner.queue(1, 1, 555);
+        learner.camera->pump(0, 0);
+        learner.step();
+        require(learner.done(still) && learner.result(still).base.flags == 0, "the person's photo is delivered");
+        require(!store->load(learner.camera->hostModel(), CalibrationStore::lensKey(learner.camera->cameras()[0])),
+                "and nothing was learned");
+    }
+    RigOptions options;
+    options.store = store;
+    Rig rig(options);
+    const auto cameras = rig.device->cameras();
+    require(!cameras.empty(), "the host has cameras");
+    for (const auto& camera : cameras) {
+        const auto& wire = camera.wire;
+        require(!camera.raw() && (wire.flags & VIRTIO_VIDEO_CAMERA_F_RAW) == 0, "no RAW feature");
+        require(wire.bayer_order == VIRTIO_VIDEO_CAMERA_BAYER_NONE && wire.raw_width == 0 && wire.raw_height == 0 &&
+                    wire.black_level == 0 && wire.white_level == 0 && wire.reference_illuminant1 == 0 && wire.reference_illuminant2 == 0,
+                "no Bayer order, RAW size, levels or illuminants");
+        for (const auto value : wire.color_matrix1_q16) require(value == 0, "no colour matrix");
+        const auto stills = rig.send(virtio_video_camera_query_formats {{VIRTIO_VIDEO_CMD_CAMERA_QUERY_FORMATS, 0}, camera.index, stillKind});
+        const auto head = load<virtio_video_query_capability_resp>(stills.response);
+        require(head.num_descs == 1 &&
+                    load<virtio_video_format_desc>(stills.response, sizeof(virtio_video_query_capability_resp)).format ==
+                        VIRTIO_VIDEO_FORMAT_CAMERA_JPEG,
+                "the stills capability lists JPEG alone, no RAW16");
+    }
+    const auto layout = layoutDimensionsOf(cameras, CameraTier::small);
+    require(!layout.raw && layoutName(layout).find("raw") == std::string::npos, "the layout has no RAW feature");
+    require(layoutName(layout) == "bf-small-flash-manual", "the tablet runs the layout without it");
+}
+
+/* The guest asked for a JPEG of one size: a platform picture of another size
+ * fails its buffer, and the next still, of the right size, is delivered. */
+void testAStillOfAnotherSizeFails()
+{
+    Rig rig;
+    rig.create(1, 0, stillKind);
+    rig.create(2, 0, metaKind);
+    require(Rig::type(rig.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+    const auto bufferSize = rig.params(1).plane_formats[0].plane_size;
+    rig.attach(1, 1, bufferSize);
+    rig.attach(2, 1, metaSize);
+    rig.camera->stillsOfAnotherSize(true);
+    const auto meta = rig.queue(2, 1);
+    const auto wrong = rig.queue(1, 1, 31);
+    rig.camera->pump(0, 0);
+    rig.step();
+    require(rig.done(wrong) && rig.result(wrong).base.flags == errorFlag && rig.result(wrong).base.data_sizes[0] == 0 &&
+                rig.result(wrong).base.timestamp == 31,
+            "a picture of another size fails the guest's buffer, without bytes");
+    require(rig.done(meta) && metaOf(rig, 2, 1).jpeg_gap_length == 0, "and no gap is described for it");
+    require(rig.camera->sessionsOpen() == 0, "the capture session is released");
+
+    rig.camera->stillsOfAnotherSize(false);
+    rig.attach(1, 2, bufferSize);
+    const auto right = rig.queue(1, 2, 32);
+    rig.camera->pump(0, 0);
+    rig.step();
+    require(rig.done(right) && rig.result(right).base.flags == 0 && rig.result(right).base.data_sizes[0] > 4000,
+            "the same stream takes a picture of the size it asked for");
+}
+
 /* An interruption belongs to the platform session it happened in. */
 void testInterruptionEndsWithTheSession()
 {
@@ -1835,6 +1952,290 @@ void testHostileGuest()
             "of the 20 records after the first, the last 16 are kept: the next one is the sixth");
 }
 
+/* The anchor model end to end, against a platform that runs an anchored camera in its anchor only and refuses
+ * anything outside it: every still and every stream the guest is offered works, alone and beside another camera. */
+void testEveryOfferedRunStartsInTheAnchor()
+{
+    Rig rig;
+    const auto camera = rig.device->cameras()[0];
+    require(camera.anchor == std::optional<std::size_t>(3), "the back camera is anchored in its 1920x1440 format");
+    require(camera.jpegSizes.front() == CameraStillSize({4032, 3024}) && !camera.video.empty(), "it offers 12 MP stills and video");
+    std::uint32_t stream = 10;
+    for (const auto& size : camera.jpegSizes) {
+        const auto id = stream++;
+        rig.create(id, 0, stillKind);
+        require(Rig::type(rig.setParams(id, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, size.width, size.height)) == VIRTIO_VIDEO_RESP_OK_NODATA,
+                "an offered size is accepted");
+        rig.attach(id, 1, rig.params(id).plane_formats[0].plane_size);
+        const auto buffer = rig.queue(id, 1);
+        rig.camera->pump(0, 0);
+        rig.step();
+        require(rig.done(buffer) && rig.result(buffer).base.flags == 0, "an offered still is made");
+        rig.destroy(id);
+        rig.bump = 16 * page;  // the guest's memory holds one 12 MP buffer
+    }
+    for (const auto& mode : camera.video)
+        for (const auto rate : {mode.minimumFrameRate, mode.maximumFrameRate}) {
+            const auto id = stream++;
+            videoStream(rig, id, 0, mode.width, mode.height, 1);
+            require(Rig::type(rig.setInterval(id, 1, rate)) == VIRTIO_VIDEO_RESP_OK_NODATA, "an offered rate is accepted");
+            const auto buffer = rig.queue(id, 1);
+            require(rig.camera->videoRunning(0) && rig.camera->videoFrameRate(0) == rate, "an offered size and rate start");
+            rig.camera->pump(0, 1);
+            rig.step();
+            require(rig.done(buffer) && rig.result(buffer).base.flags == 0, "and deliver");
+            rig.destroy(id);
+            rig.bump = 16 * page;
+        }
+
+    // Beside the front camera, with a 12 MP still in the middle of a stream.
+    videoStream(rig, 1, 0, 1280, 720, 2);
+    videoStream(rig, 2, 1, 640, 480, 1);
+    rig.create(3, 0, stillKind);
+    require(Rig::type(rig.setParams(3, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 4032, 3024)) == VIRTIO_VIDEO_RESP_OK_NODATA, "12 MP");
+    rig.attach(3, 1, rig.params(3).plane_formats[0].plane_size);
+    const auto back = rig.queue(1, 1);
+    const auto front = rig.queue(2, 1);
+    require(rig.camera->videoRunning(0) && rig.camera->videoRunning(1), "both cameras stream");
+    rig.camera->pump(0, 1);
+    rig.camera->pump(1, 1);
+    rig.step();
+    require(rig.done(back) && rig.done(front) && rig.result(back).base.flags == 0 && rig.result(front).base.flags == 0, "and deliver");
+    const auto still = rig.queue(3, 1, 4242);
+    rig.camera->pump(0, 0);
+    rig.step();
+    require(rig.done(still) && rig.result(still).base.flags == 0 && rig.result(still).base.timestamp == 4242,
+            "the 12 MP still is made while both cameras stream");
+    const auto after = rig.queue(1, 2);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(after) && rig.result(after).base.flags == 0 && rig.camera->videoRunning(0), "and the stream goes on");
+}
+
+/* A burst of frames from one camera is one frame to the guest: the newest. The older ones are not held. */
+void testABurstOfFramesIsTheNewestFrame()
+{
+    Rig rig;
+    rig.create(1, 0, videoKind);
+    rig.setVideo(1, 640, 480);
+    for (std::uint32_t resource = 1; resource <= 3; ++resource) rig.attach(1, resource, nv12Size(640, 480));
+    const auto first = rig.queue(1, 1), second = rig.queue(1, 2), third = rig.queue(1, 3);
+    rig.camera->pump(0, 3);
+    rig.step();
+    require(rig.done(first) && !rig.done(second) && !rig.done(third), "three frames at once fill one buffer");
+    require(rig.result(first).sequence == 1, "numbered as one frame");
+    const auto marker = decodeChartMarker(rig.bytes(1, 1, nv12Size(640, 480)).data(), 640, 640, 480);
+    require(marker.valid && marker.counter == 3, "the picture is the newest of the three");
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(second) && rig.result(second).sequence == 2, "the next frame is the next");
+}
+
+// R3 (recheck5): the reserve counts six held frames a camera (heldFramesPerCamera): the inbox's three, the one the
+// pump writes, the one arriving and the one the capture fills. The pump takes the newest frame of a camera and frees
+// the older ones before it lets go of the inbox, so the capture can refill the inbox to its limit while the pump
+// handles a platform event and no more than one frame of the pump is held beside it. (A pump that kept its whole
+// batch while the inbox refilled held seven: three, three, and the arriving one.)
+void testTheMostFramesHeldAtOnceIsWhatTheReserveCounts()
+{
+    Rig rig;
+    rig.create(1, 0, videoKind);
+    rig.setVideo(1, 640, 480);
+    for (std::uint32_t resource = 1; resource <= 3; ++resource) rig.attach(1, resource, nv12Size(640, 480));
+    for (std::uint32_t resource = 1; resource <= 3; ++resource) (void)rig.queue(1, resource);
+    // A burst of three frames waits in the inbox with an event behind it.
+    rig.camera->pump(0, 3);
+    require(rig.camera->framesAlive() == inboxFramesPerCamera, "the inbox holds the newest three");
+    rig.camera->post({uml::platform::allCameras, CameraEventKind::interrupted});
+    bool refilled = false;
+    rig.onStateChange = [&] {
+        if (refilled) return;
+        refilled = true;
+        // The capture goes on while the event is handled: more frames than the inbox holds.
+        rig.camera->pump(0, 4);
+    };
+    rig.camera->resetFramePeak();
+    rig.step();
+    require(refilled, "the event was handled with frames in the pump's hand");
+    require(rig.camera->framePeak() <= inboxFramesPerCamera + 2,
+            "at most the inbox's three, the pump's one and the arriving one are held at once");
+    require(rig.camera->framePeak() <= heldFramesPerCamera, "and so never more than the reserve counts");
+    require(rig.camera->framesAlive() <= inboxFramesPerCamera, "what is left afterwards is the inbox's");
+    rig.onStateChange = nullptr;
+}
+
+/* R5 (recheck5): the interruption ends and the system has moved the camera out of its format meanwhile. The platform
+ * session puts it back and only then says it is back, so the guest is told resumed after the repair, and the frames the
+ * capture produced meanwhile (outside the anchor) never reach it: its buffers get black ones, flagged interrupted. */
+void testARecoveryRepairsTheCameraBeforeItIsToldItIsBack()
+{
+    Rig rig;
+    EventQueue events(rig, 8);
+    videoStream(rig, 1, 0, 640, 480, 6);
+    const auto live = rig.queue(1, 1);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(live) && rig.result(live).base.flags == 0, "frames flow");
+    rig.camera->interrupt();
+    rig.step();
+    rig.camera->moveOutOfAnchor(true);
+    // The capture goes on in the wrong format while the cameras are interrupted.
+    const auto outside = rig.queue(1, 2);
+    rig.camera->pump(0, 2);
+    rig.step();
+    require(rig.camera->framesOutsideAnchor() == 2, "the platform produced frames outside the anchor");
+    require(rig.waitFor([&] { return rig.done(outside); }) && rig.result(outside).base.flags == (blackFlag | interruptedFlag),
+            "the guest's buffer got a black one, not the frame");
+    require(events.arrived().size() == 2, "the guest has only been told of the interruption");
+    rig.camera->resume();
+    rig.step();
+    require(rig.camera->repairs() == 1, "the camera was put back");
+    require(events.arrived().size() == 4 && events.arrived()[2].first == VIRTIO_VIDEO_EVENT_CAMERA_RESUMED,
+            "and then the guest is told it is back");
+    const auto after = rig.queue(1, 3);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(after) && rig.result(after).base.flags == 0 && rig.camera->framesOutsideAnchor() == 2,
+            "its next frame is live, from the anchor");
+}
+
+/* A repair the device refuses is the session's failure: the guest is never told it is back, the session is closed,
+ * and a new one opened a second later starts every camera in its anchor. */
+void testARecoveryThatFailsIsAFailureAndNeverResumes()
+{
+    Rig rig;
+    EventQueue events(rig, 8);
+    videoStream(rig, 1, 0, 640, 480, 6);
+    const auto live = rig.queue(1, 1);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(live) && rig.result(live).base.flags == 0, "frames flow");
+    rig.camera->interrupt();
+    rig.step();
+    rig.camera->moveOutOfAnchor(true);
+    rig.camera->refuseRepair(true);
+    rig.camera->resume();
+    rig.step();
+    require(rig.camera->repairs() == 0, "the device refused the repair");
+    require(rig.camera->sessionsOpen() == 0, "the failed session is closed");
+    // The camera that has the stream (camera 0); the other has none and is told its interruption ended with the session.
+    const auto resumed = [&] {
+        const auto all = events.arrived();
+        return std::count(all.begin(), all.end(), std::make_pair(std::uint32_t(VIRTIO_VIDEO_EVENT_CAMERA_RESUMED), 0u));
+    };
+    require(resumed() == 0, "the guest is never told it is back");
+    const auto black = rig.queue(1, 2);
+    require(rig.waitFor([&] { return rig.done(black); }) && rig.result(black).base.flags == (blackFlag | interruptedFlag),
+            "black frames bridge the failure");
+    // The retry opens a session whose cameras start in their anchors.
+    rig.camera->refuseRepair(false);
+    rig.camera->advanceClock(1'200'000'000);
+    require(rig.waitFor([&] { return rig.camera->videoRunning(0); }), "a new session is opened");
+    require(resumed() == 0, "and the guest is still not told it is back before the capture delivers");
+    const auto fresh = rig.queue(1, 3);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(fresh) && rig.result(fresh).base.flags == 0 && rig.camera->framesOutsideAnchor() == 0,
+            "a live frame, from the anchor");
+    require(resumed() == 1, "now it is back");
+}
+
+/* R5 (recheck6): the worker had not drained its inbox when the recovery completed, so one batch holds the interruption,
+ * a frame the capture made outside the anchor, and the resumed event. The events are handled first and clear the
+ * interruption, so a frame that was only stamped by the state of the camera when the pump took it would be delivered
+ * live. It was captured before the repair: it is never delivered, and the next frame, made in the anchor, is. */
+void testAFrameCapturedBeforeTheRepairIsNeverDeliveredAfterIt()
+{
+    Rig rig;
+    EventQueue events(rig, 8);
+    videoStream(rig, 1, 0, 640, 480, 6);
+    const auto live = rig.queue(1, 1);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(live) && rig.result(live).base.flags == 0, "frames flow");
+    const auto waiting = rig.queue(1, 2);
+    rig.camera->interrupt();
+    rig.camera->moveOutOfAnchor(true);
+    rig.camera->pump(0, 1);
+    require(rig.camera->framesOutsideAnchor() == 1, "the capture made a frame outside the anchor, which waits in the inbox");
+    rig.camera->resume();
+    require(rig.camera->repairs() == 1, "the camera is put back before the worker has run");
+    rig.step();
+    const bool done = rig.done(waiting);
+    require(!done || rig.result(waiting).base.flags != 0, "the frame from before the repair is not delivered as a live one");
+    if (!done) {
+        rig.camera->pump(0, 1);
+        rig.step();
+        require(rig.done(waiting) && rig.result(waiting).base.flags == 0, "the next frame is live");
+        const auto marker = decodeChartMarker(rig.bytes(1, 2, nv12Size(640, 480)).data(), 640, 640, 480);
+        require(marker.valid && marker.counter == 3, "and it is the frame made after the repair, not the one before it");
+    }
+    require(events.arrived().size() >= 4 && events.arrived()[2].first == VIRTIO_VIDEO_EVENT_CAMERA_RESUMED,
+            "the guest is told the camera is back");
+}
+
+/* R5 (recheck6): a capture that completes successfully on the platform's side while the camera is interrupted, or that
+ * was asked for before an interruption that has since been handled, is not delivered as a photo: it fails as a capture
+ * that went wrong does (flagged interrupted while the interruption lasts), for the guest to ask again. */
+void testAStillThatSpansAnInterruptionFails()
+{
+    for (const bool resumed : {false, true}) {
+        Rig rig;
+        rig.create(1, 0, stillKind);
+        require(Rig::type(rig.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+        rig.attach(1, 1, rig.params(1).plane_formats[0].plane_size);
+        const auto still = rig.queue(1, 1, 555);
+        require(!rig.done(still) && rig.camera->sessionsOpened() == 1, "the capture is asked for");
+        rig.camera->pump(0, 0);  // the platform completes it with a good picture
+        rig.camera->interrupt();
+        if (resumed) rig.camera->resume();
+        rig.step();
+        require(rig.done(still), "the buffer completes");
+        const auto flags = rig.result(still).base.flags;
+        require((flags & errorFlag) != 0 && rig.result(still).base.data_sizes[0] == 0, "with an error, and no picture");
+        require(((flags & interruptedFlag) != 0) == !resumed, "flagged interrupted while the interruption lasts, not after it");
+    }
+    // The interruption event waits in the inbox when the capture is asked for, so the camera is not yet known to be
+    // interrupted: the capture that the platform then completes is handled after the event, and fails with the camera.
+    {
+        Rig early;
+        early.create(1, 0, stillKind);
+        require(Rig::type(early.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+        early.attach(1, 1, early.params(1).plane_formats[0].plane_size);
+        // A stream that runs keeps the session open, so that the event reaches it.
+        videoStream(early, 2, 0, 640, 480, 2);
+        const auto running = early.queue(2, 1);
+        early.camera->pump(0, 1);
+        early.step();
+        require(early.done(running) && early.result(running).base.flags == 0, "the camera streams");
+        early.camera->post({uml::platform::allCameras, CameraEventKind::interrupted});
+        const auto still = early.queue(1, 1, 557);
+        early.camera->pump(0, 0);
+        early.step();
+        require(early.done(still) && (early.result(still).base.flags & (errorFlag | interruptedFlag)) == (errorFlag | interruptedFlag) &&
+                    early.result(still).base.data_sizes[0] == 0,
+                "a capture asked for as the interruption begins fails with it");
+    }
+    // A capture asked for after the recovery is delivered as before.
+    Rig rig;
+    rig.create(1, 0, stillKind);
+    require(Rig::type(rig.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+    rig.attach(1, 1, rig.params(1).plane_formats[0].plane_size);
+    videoStream(rig, 2, 0, 640, 480, 2);
+    const auto running = rig.queue(2, 1);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(running), "the camera streams, which keeps the session open");
+    rig.camera->interrupt();
+    rig.camera->resume();
+    rig.step();
+    const auto still = rig.queue(1, 1, 556);
+    rig.camera->pump(0, 0);
+    rig.step();
+    require(rig.done(still) && rig.result(still).base.flags == 0 && rig.result(still).base.data_sizes[0] > 4000,
+            "a capture asked for after the recovery is delivered");
+}
+
 void testService()
 {
     SyntheticCameraOptions options;
@@ -1868,6 +2269,8 @@ int main()
     testFrontCameraChoice();
     testCamerasJoin();
     testCalibrationRawIsACourtesy();
+    testAHostThatCannotTakeABayerStillPublishesNoRaw();
+    testAStillOfAnotherSizeFails();
     testInterruptionEndsWithTheSession();
     testSystemPressure();
     testResetAndTheDriverRecreates();
@@ -1879,6 +2282,13 @@ int main()
     testStillDeadlines();
     testStillsInFlight();
     testHostileGuest();
+    testEveryOfferedRunStartsInTheAnchor();
+    testABurstOfFramesIsTheNewestFrame();
+    testARecoveryRepairsTheCameraBeforeItIsToldItIsBack();
+    testARecoveryThatFailsIsAFailureAndNeverResumes();
+    testAFrameCapturedBeforeTheRepairIsNeverDeliveredAfterIt();
+    testAStillThatSpansAnInterruptionFails();
+    testTheMostFramesHeldAtOnceIsWhatTheReserveCounts();
     testService();
     return 0;
 }

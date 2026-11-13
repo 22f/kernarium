@@ -97,6 +97,17 @@ DEBUG_SUPPORT = (
     ("synthetic camera", "int _ZN3uml8platform17decodeChartMarkerEPKhmjj(void) { return 1; }\n"),
     ("synthetic camera", 'const char *fixture(void) { return "SyntheticPhone1,1"; }\n'),
     ("synthetic camera", 'const char *fixture(void) { return "synthetic-back-wide"; }\n'),
+    # The runtime's environment knob for it and the function that reads it.
+    ("synthetic camera", 'const char *knob(void) { return "KERNARIUM_CAMERA_SOURCE"; }\n'),
+    ("synthetic camera", "int _ZN9kernarium6camera11parseSourceEPKc(void) { return 1; }\n"),
+    ("synthetic camera", "int _ZN9kernarium6camera12chooseSourceIPFvvEEENSt3__110shared_ptrIN3uml8platform6CameraEEERKNS0_12SourceChoiceEOT_(void) { return 1; }\n"),
+    # The camera's development lines and the preview's camera and thermal notices.
+    ("camera diagnostics", "int _ZN3uml6camera17printRotateAndCropEjjj(void) { return 1; }\n"),
+    ("camera diagnostics", "int _ZN3uml6camera15printCheckpointENS0_16CameraCheckpointE(void) { return 1; }\n"),
+    ("camera diagnostics", 'const char *fixture(void) { return "Camera: camera %u: ROTATE_AND_CROP %u"; }\n'),
+    ("camera diagnostics", 'const char *fixture(void) { return "Camera: memory: %s, footprint"; }\n'),
+    ("camera diagnostics", "int _s8Andarium8AppModelC19previewCameraNoticeyyF(void) { return 1; }\n"),
+    ("camera diagnostics", "int _s8Andarium8AppModelC20previewThermalNoticeyyF(void) { return 1; }\n"),
     # The simulated controllers: the scripted input, the guest end of the wire
     # and the test-support module that holds them.
     ("synthetic controllers", "int _s12AndariumCore13GamepadScriptV8identityACvgZ(void) { return 1; }\n"),
@@ -313,7 +324,9 @@ def app_info(**overrides: object) -> dict:
         "ITSAppUsesNonExemptEncryption": False,
         "UIRequiredDeviceCapabilities": ["arm64", "metal"],
         "UIDeviceFamily": [1, 2],
+        "NSCameraUsageDescription": "Uses the camera only while Camera is on.",
         "NSMicrophoneUsageDescription": "Records only while Microphone is on.",
+        "NSLocationWhenInUseUsageDescription": "Shares the location only while Location is on.",
     }
     keys.update(overrides)
     return {key: value for key, value in keys.items() if value is not None}
@@ -454,6 +467,13 @@ def main() -> int:
               passes=False, expect="UIDeviceFamily")
         check(make_app(root, "background", clean, app_info(UIBackgroundModes=["audio"])),
               passes=False, expect="background mode")
+        # Each permission text the application shows is present and not empty.
+        for key in ("NSCameraUsageDescription", "NSMicrophoneUsageDescription",
+                    "NSLocationWhenInUseUsageDescription"):
+            check(make_app(root, f"no-{key}", clean, app_info(**{key: None})),
+                  passes=False, expect=f"{key} must be a non-empty string")
+            check(make_app(root, f"blank-{key}", clean, app_info(**{key: "  "})),
+                  passes=False, expect=f"{key} must be a non-empty string")
 
         # Automation knobs in the host code of the application or a framework.
         check(make_app(root, "app-knob", knob, app_info()),
