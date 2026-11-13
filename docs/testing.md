@@ -622,6 +622,22 @@ blocker in every one of them.
   `arm64-instruction-corpus-*` and `arm64-absent-*` tests that re-derive them
   from their generators, and records that need SME or FEAT_AFP/BF16 run only on
   a host that has them.
+  The runner also runs a case again, up to 16 attempts in all, when its
+  program is a load, one store-exclusive that discards its status, CLREX and
+  SVC in four straight-line words and the only difference from the pack is
+  that store's bytes unwritten: a spurious failure the architecture allows and
+  a guest's loop would absorb. Every other program runs once, and the
+  [corpus README](../tests/unit/arm64/corpus/README.md) states the rule.
+  `arm64-instruction-corpus-exclusive-interrupted` provokes the loss on the
+  gadget lane with the host interrupting the guest's thread, and
+  `-exclusive-injected` makes the first attempt end as a lost reservation and
+  as each fault the retry must refuse in both lanes, and checks the rule on
+  programs that do not execute their store. The two unit tests that run a pair
+  once, `arm64-tlb-probe-set` and `arm64-gadget-sme`, retry only a result that
+  is exactly a lost reservation: both check the status, the loaded value and
+  the watched memory, and the SME test also the other registers, SP, PC, NZCV
+  and the fault fields. Each checks its rule with results that differ in one
+  field.
 - `arm64-emitted-registers` requires that no host code names x18, which Darwin
   clears when it interrupts a thread.
 - `arm64-instruction-corpus-invalid-encoding` requires every
