@@ -267,9 +267,11 @@ final class SendFeedbackModel {
     /// goes; any other (its provider has not downloaded it, its volume refuses
     /// mapping) is copied into the sheet's folder, with the overlay and its
     /// Cancel, and the access let go. Picking a file again attaches it again.
-    /// Send waits for all of it.
+    /// Send waits for all of it. A batch that arrives while another is being
+    /// taken in is turned away (the picker is not offered meanwhile), so the
+    /// first one's Cancel stays its own.
     func addFiles(_ urls: [URL]) async {
-        guard !urls.isEmpty, !closed else { return }
+        guard !urls.isEmpty, !closed, !form.addingFiles else { return }
         form.addingFiles = true
         let cancellation = SendFeedbackCancellation()
         fileCancellation = cancellation
@@ -317,7 +319,10 @@ final class SendFeedbackModel {
             return
         }
         let staged = try await copy(url, bytes: info.bytes, cancellation: cancellation)
-        guard !closed else {
+        // A copy that finished while the main actor was busy may have been
+        // cancelled, or the sheet closed, before this runs: what the person
+        // stopped is not added.
+        guard !closed, !cancellation.isCancelled else {
             folder.remove(staged)
             return
         }
@@ -333,8 +338,9 @@ final class SendFeedbackModel {
         let folder = folder
         let name = SendFeedbackFolder.safeName(url.lastPathComponent)
         return try await Task.detached(priority: .userInitiated) {
-            try folder.stageCopy(of: url, bytes: bytes, named: name, cancellation: cancellation) { [weak self] copied in
-                Task { @MainActor in self?.fileCopied(copied, of: bytes) }
+            // The copy is awaited here, so the model outlives it: no weak reference to carry across threads.
+            try folder.stageCopy(of: url, bytes: bytes, named: name, cancellation: cancellation) { copied in
+                Task { @MainActor in self.fileCopied(copied, of: bytes) }
             }
         }.value
     }
@@ -409,10 +415,21 @@ final class SendFeedbackModel {
     /// here.
     func send() {
         guard state.canSend, !presentingMail, let address = app.feedbackAddress, attachmentsAreThere() else { return }
+        // Every file is mapped here, before the composer opens: one that cannot
+        // be (it went after the look above) is said, like any other that is gone,
+        // and the person looks at the list again.
+        let mapped: [Data]
+        switch form.attachments.mapAll() {
+        case .success(let data):
+            mapped = data
+        case .failure(let failure):
+            takeOut(form.attachments.items.filter { failure.attachments.contains($0.id) })
+            return
+        }
         let request = SendFeedbackMailRequest(
             address: address, subject: SendFeedbackMail.subject(problem: form.problem),
             body: SendFeedbackMail.body(details: form.details, information: information),
-            attachments: form.attachments.items)
+            attachments: form.attachments.items, mapped: mapped)
         presentingMail = true
         let shown = app.feedbackServices.presentMail(request) { [weak self] result in
             self?.mailFinished(result)
@@ -446,13 +463,19 @@ final class SendFeedbackModel {
             }
         }
         guard !gone.isEmpty else { return true }
+        takeOut(gone)
+        return false
+    }
+
+    /// Takes files that are no longer available out of the list and says so;
+    /// nothing is sent until the person has looked at the list again.
+    private func takeOut(_ gone: [SendFeedbackAttachment]) {
         gone.forEach(remove)
         fail(
             String(localized: "Attachment not available", table: "Feedback"),
             String(
                 localized: "A file you added is no longer available, so it was taken out of the list. Check the list, then send again.",
                 table: "Feedback"))
-        return false
     }
 
     /// The person left the composer. Sent ends the draft; saved and cancelled
@@ -488,7 +511,10 @@ final class SendFeedbackModel {
     }
 
     private func cleanUp() {
-        scopes.releaseAll()
+        // Only the access the rows own. A file still being looked at or copied
+        // keeps its own until that work ends (`addFile`), so nothing is read
+        // after its access is let go.
+        for item in form.attachments.items where item.inPlace { scopes.release(item.id) }
         folder.removeAll()
         try? FileManager.default.removeItem(at: staging.incoming)
         thumbnails = [:]

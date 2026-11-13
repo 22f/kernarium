@@ -178,10 +178,20 @@ nonisolated enum SendFeedbackNames {
         return (ext.isEmpty ? name : (name as NSString).deletingPathExtension, ext)
     }
 
-    /// `name` with `number` before its extension: `app-2.apk`.
+    /// The longest name of a file in the mail, and the longest extension kept
+    /// whole when a name is cut to it.
+    static let maxLength = 100
+    static let maxExtensionLength = 16
+
+    /// `name` with `number` before its extension: `app-2.apk`. The suffix is
+    /// inside the length limit: a name already at it loses the end of its base,
+    /// so two long names that differ only at the end stay distinct and short.
     static func numbered(_ name: String, _ number: Int) -> String {
-        let (base, ext) = split(name)
-        return ext.isEmpty ? "\(base)-\(number)" : "\(base)-\(number).\(ext)"
+        var (base, ext) = split(name)
+        // A long "extension" is part of the name, as `SendFeedbackFolder.safeName` has it.
+        if ext.count > maxExtensionLength { (base, ext) = (name, "") }
+        let suffix = "-\(number)" + (ext.isEmpty ? "" : ".\(ext)")
+        return String(base.prefix(max(1, maxLength - suffix.count))) + suffix
     }
 
     /// A file's name as the person knows it, for the row: whatever a screen

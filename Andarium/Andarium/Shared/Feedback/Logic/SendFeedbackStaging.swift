@@ -14,7 +14,9 @@ nonisolated struct SendFeedbackStaging: Sendable {
     /// cannot be read. A test gives its own figure.
     let freeBytes: @Sendable (URL) -> UInt64?
 
-    /// Room a copy leaves free, so a copy never fills the device.
+    /// Room a copy asks to be left free when it starts. The look is made once,
+    /// before the first byte: a device that fills meanwhile ends the copy as
+    /// "not enough space", with no partial file.
     static let spareBytes: UInt64 = 64 * 1_048_576
 
     init(
@@ -222,10 +224,12 @@ nonisolated final class SendFeedbackFolder: @unchecked Sendable {
         })
         while text.hasPrefix(".") { text.removeFirst() }
         guard !text.isEmpty else { return "file" }
-        guard text.count > 100 else { return text }
+        guard text.count > SendFeedbackNames.maxLength else { return text }
         let (base, ext) = SendFeedbackNames.split(text)
-        if !ext.isEmpty && ext.count <= 16 { return String(base.prefix(100 - ext.count - 1)) + "." + ext }
-        return String(text.prefix(100))
+        if !ext.isEmpty && ext.count <= SendFeedbackNames.maxExtensionLength {
+            return String(base.prefix(SendFeedbackNames.maxLength - ext.count - 1)) + "." + ext
+        }
+        return String(text.prefix(SendFeedbackNames.maxLength))
     }
 }
 

@@ -32,7 +32,11 @@ struct SendFeedbackFilesScreenTests {
         private var open = false
         func release() { lock.withLock { open = true } }
         var isOpen: Bool { lock.withLock { open } }
-        func wait() { while !isOpen { usleep(2000) } }
+        /// Waits until it is released, or 20 s: a test that never releases it fails on what it checks, and the suite goes on.
+        func wait() {
+            let deadline = ContinuousClock.now + .seconds(20)
+            while !isOpen && ContinuousClock.now < deadline { usleep(2000) }
+        }
     }
 
     /// What the stand-in for the system's access and look at a file saw.
@@ -52,6 +56,18 @@ struct SendFeedbackFilesScreenTests {
             }
         }
         func isAway(_ name: String) -> Bool { lock.withLock { away.contains(name) } }
+    }
+
+    /// What a stand-in for the look at a file saw while it ran on its worker.
+    private nonisolated final class Look: @unchecked Sendable {
+        private let lock = NSLock()
+        private var started = false
+        private var stopsSeen: Int?
+        func begin() { lock.withLock { started = true } }
+        var hasBegun: Bool { lock.withLock { started } }
+        /// How many accesses had been let go as the file was read.
+        func read(stops: Int) { lock.withLock { stopsSeen = stops } }
+        var stopsWhenRead: Int? { lock.withLock { stopsSeen } }
     }
 
     private struct Fixture {
@@ -162,6 +178,16 @@ struct SendFeedbackFilesScreenTests {
             }
         }
         return result == KERN_SUCCESS ? info.phys_footprint : 0
+    }
+
+    /// What the footprint grew by since `before`; a footprint that shrank grew by nothing.
+    private func growth(since before: UInt64) -> UInt64 {
+        let now = footprint()
+        return now > before ? now - before : 0
+    }
+
+    private func size(of url: URL) -> UInt64 {
+        UInt64((try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? UInt64) ?? 0)
     }
 
     private func isEmpty(_ folder: SendFeedbackFolder) -> Bool {
@@ -366,10 +392,10 @@ struct SendFeedbackFilesScreenTests {
         #expect(row.bytes == 3 << 30 && sheet.state.attachments.exceedsWarningSize)
         #expect(sheet.state.canSend, "the warning never blocks Send")
         sheet.send()
-        let sent = try #require(fixture.composer.request?.attachments.first)
-        let mapped = try sent.mappedData()
-        #expect(mapped.count == 3 << 30 && mapped[0] == 0x50)
-        let grown = footprint() &- before
+        let request = try #require(fixture.composer.request)
+        let mapped = try #require(request.mapped.first, "the composer is given the file mapped")
+        #expect(request.mapped.count == 1 && mapped.count == 3 << 30 && mapped[0] == 0x50)
+        let grown = growth(since: before)
         #expect(grown < 1536 * mebibyte, "\(grown / mebibyte) MiB grew for a 3 GiB file")
         #expect(!sheet.folder.exists)
         sheet.close()
@@ -402,7 +428,10 @@ struct SendFeedbackFilesScreenTests {
     @Test func theCopyShowsTheOverlayWithProgressAndCancelAndSendWaits() async throws {
         let gate = Gate()
         let fixture = try fixture(hold: gate)
-        defer { fixture.tearDown() }
+        defer {
+            gate.release()
+            fixture.tearDown()
+        }
         fixture.access.notDownloaded("slow.apk")
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
@@ -423,7 +452,10 @@ struct SendFeedbackFilesScreenTests {
     @Test func cancellingTheCopyRemovesWhatWasCopiedAndSaysNothing() async throws {
         let gate = Gate()
         let fixture = try fixture(hold: gate)
-        defer { fixture.tearDown() }
+        defer {
+            gate.release()
+            fixture.tearDown()
+        }
         fixture.access.notDownloaded("big.apk")
         let sheet = fixture.sheet()
         let file = try fixture.original("big.apk", bytes: 3_000_000)
@@ -479,7 +511,10 @@ struct SendFeedbackFilesScreenTests {
     @Test func closingTheSheetUnderACopyStopsItAndLeavesNothing() async throws {
         let gate = Gate()
         let fixture = try fixture(hold: gate)
-        defer { fixture.tearDown() }
+        defer {
+            gate.release()
+            fixture.tearDown()
+        }
         fixture.access.notDownloaded("mid.apk")
         let sheet = fixture.sheet()
         let file = try fixture.original("mid.apk")
@@ -512,6 +547,7 @@ struct SendFeedbackFilesScreenTests {
         sheet.failure = nil
         sheet.send()
         #expect(fixture.composer.request?.attachments.map(\.fileName) == ["keep.apk"], "the second try goes")
+        #expect(fixture.composer.request?.mapped == [Data(repeating: 7, count: 4096)])
         sheet.close()
     }
 
@@ -539,10 +575,11 @@ struct SendFeedbackFilesScreenTests {
         await sheet.addFiles([file])
         try Data(repeating: 2, count: 21 << 20).write(to: file)
         sheet.send()
-        let sent = try #require(fixture.composer.request?.attachments.first)
+        let request = try #require(fixture.composer.request)
+        let sent = try #require(request.attachments.first)
         #expect(sent.bytes == 21 << 20 && sheet.form.attachments.items[0].bytes == 21 << 20)
         #expect(sheet.state.attachments.exceedsWarningSize, "the total and the warning follow the file")
-        #expect(try sent.mappedData().prefix(4) == Data(repeating: 2, count: 4))
+        #expect(request.mapped.first?.prefix(4) == Data(repeating: 2, count: 4))
         #expect(sheet.failure == nil)
         sheet.close()
     }
@@ -572,6 +609,125 @@ struct SendFeedbackFilesScreenTests {
         sheet.send()
         #expect(fixture.composer.request == nil && sheet.form.attachments.isEmpty)
         #expect(sheet.failure?.title == "Attachment not available")
+        sheet.close()
+    }
+
+    // MARK: Interleavings
+
+    @Test func aFileThatCannotBeMappedAfterTheLastLookIsTakenOutAndNothingIsSent() async throws {
+        let fixture = try fixture()
+        defer { fixture.tearDown() }
+        let keep = try fixture.original("keep.apk"), lose = try fixture.original("lose.apk")
+        let sheet = fixture.sheet()
+        sheet.form.problem = "x"
+        await sheet.addFiles([keep, lose])
+        // Send's own look finds `lose` as it should be, and the file is gone right after it: the mapping is what finds out.
+        let look = fixture.app.feedbackServices.files.inspect
+        fixture.app.feedbackServices.files.inspect = { url in
+            let found = look(url)
+            if url.lastPathComponent == "lose.apk" { try? FileManager.default.removeItem(at: url) }
+            return found
+        }
+        sheet.send()
+        #expect(fixture.composer.request == nil, "a mail never goes without a file the person added, unseen")
+        #expect(sheet.form.attachments.items.map(\.fileName) == ["keep.apk"])
+        #expect(sheet.failure?.title == "Attachment not available")
+        #expect(fixture.access.stops == ["lose.apk"] && sheet.scopes.count == 1 && sheet.form.problem == "x")
+        #expect(FileManager.default.fileExists(atPath: keep.path))
+        // Looking at the list again, the person sends the rest.
+        fixture.app.feedbackServices.files.inspect = look
+        sheet.failure = nil
+        sheet.send()
+        #expect(fixture.composer.request?.attachments.map(\.fileName) == ["keep.apk"])
+        #expect(fixture.composer.request?.mapped == [Data(repeating: 7, count: 4096)])
+        sheet.close()
+    }
+
+    @Test func closingWhileAFileIsBeingLookedAtKeepsItsAccessUntilTheLookEnds() async throws {
+        let gate = Gate()
+        let fixture = try fixture()
+        defer {
+            gate.release()
+            fixture.tearDown()
+        }
+        let file = try fixture.original("looking.apk")
+        let probe = Look()
+        let access = fixture.access
+        let read = fixture.app.feedbackServices.files.inspect
+        fixture.app.feedbackServices.files.inspect = { url in
+            probe.begin()
+            gate.wait()
+            probe.read(stops: access.stops.count)
+            return read(url)
+        }
+        let sheet = fixture.sheet()
+        let adding = Task { await sheet.addFiles([file]) }
+        #expect(await eventually { probe.hasBegun })
+        sheet.close()
+        #expect(fixture.access.stops.isEmpty, "the look is still reading the file: its access stays")
+        gate.release()
+        await adding.value
+        #expect(probe.stopsWhenRead == 0, "the file was read under its access")
+        #expect(fixture.access.stops == ["looking.apk"], "let go once, when the look ended")
+        #expect(sheet.scopes.count == 0 && sheet.form.attachments.isEmpty && sheet.failure == nil && !sheet.folder.exists)
+        #expect(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    @Test func aCopyThatFinishedAfterCancelWasPressedIsNotAdded() async throws {
+        let gate = Gate()
+        let fixture = try fixture(hold: gate)
+        defer {
+            gate.release()
+            fixture.tearDown()
+        }
+        fixture.access.notDownloaded("late.apk")
+        let sheet = fixture.sheet()
+        let file = try fixture.original("late.apk", bytes: 70_000)
+        let adding = Task { await sheet.addFiles([file]) }
+        #expect(await eventually { sheet.fileBusy != nil })
+        let cancel = try #require(sheet.fileBusy?.cancel)
+        gate.release()
+        // From here the main actor is held, so the task that waits for the copy is not resumed: the copy is
+        // made and has returned by the time Cancel is pressed, which is the order a busy main actor makes.
+        let staged = sheet.folder.url.appendingPathComponent("late.apk")
+        let deadline = ContinuousClock.now + .seconds(10)
+        while ContinuousClock.now < deadline && size(of: staged) != 70_000 { usleep(2000) }
+        #expect(size(of: staged) == 70_000, "the copy is complete before Cancel")
+        usleep(300_000)  // The copy's return, which no flag shows.
+        cancel.action()
+        await adding.value
+        #expect(sheet.form.attachments.isEmpty, "what the person stopped is not added")
+        #expect(!sheet.folder.exists || isEmpty(sheet.folder), "and its copy is removed")
+        #expect(sheet.failure == nil && sheet.fileBusy == nil && !sheet.state.addingFiles && sheet.state.canAddFiles)
+        #expect(fixture.access.starts == ["late.apk"] && fixture.access.stops == ["late.apk"])
+        #expect(FileManager.default.fileExists(atPath: file.path))
+        sheet.close()
+    }
+
+    @Test func aBatchThatArrivesWhileAnotherIsTakenInIsTurnedAwayAndTheFirstKeepsItsCancel() async throws {
+        let gate = Gate()
+        let fixture = try fixture(hold: gate)
+        defer {
+            gate.release()
+            fixture.tearDown()
+        }
+        fixture.access.notDownloaded("first.apk")
+        let sheet = fixture.sheet()
+        let first = try fixture.original("first.apk", bytes: 3_000_000)
+        let second = try fixture.original("second.apk")
+        let adding = Task { await sheet.addFiles([first]) }
+        #expect(await eventually { sheet.fileBusy != nil })
+        let cancel = try #require(sheet.fileBusy?.cancel)
+        await sheet.addFiles([second])
+        #expect(sheet.form.attachments.isEmpty && fixture.access.starts == ["first.apk"], "the second batch is not taken in")
+        #expect(sheet.state.addingFiles && sheet.fileBusy != nil, "the first is still under its overlay")
+        // Cancel is still the first batch's: it stops the copy.
+        cancel.action()
+        gate.release()
+        await adding.value
+        #expect(sheet.form.attachments.isEmpty && sheet.failure == nil && !sheet.state.addingFiles)
+        #expect(!sheet.folder.exists || isEmpty(sheet.folder), "no partial copy")
+        #expect(fixture.access.starts == ["first.apk"] && fixture.access.stops == ["first.apk"])
         sheet.close()
     }
 
@@ -610,8 +766,10 @@ struct SendFeedbackFilesScreenTests {
         return [node] + children.flatMap { nodes(in: $0, depth: depth + 1) }
     }
 
-    private func element(identifier: String, in root: UIView) -> NSObject? {
-        nodes(in: root).first { ($0 as? UIAccessibilityIdentification)?.accessibilityIdentifier == identifier }
+    /// The node VoiceOver reads under `label`. Labels are what a person gets; an identifier is not
+    /// always published for every node of the hosted tree.
+    private func element(labelled label: String, in root: UIView) -> NSObject? {
+        nodes(in: root).first { $0.accessibilityLabel == label }
     }
 
     /// The sheet on the application's window, the way a person meets it. A hook of the preview opens it
@@ -643,36 +801,27 @@ struct SendFeedbackFilesScreenTests {
         let drawn = await eventually {
             controller.view.setNeedsLayout()
             controller.view.layoutIfNeeded()
-            button = element(identifier: "feedback-files", in: controller.view)
+            button = element(labelled: "Add files", in: controller.view)
             return button != nil
         }
-        let seen = nodes(in: controller.view).map {
-            "\(($0 as? UIAccessibilityIdentification)?.accessibilityIdentifier ?? "-")|\($0.accessibilityLabel ?? "-")"
-        }
-        try #require(drawn, "the sheet was not drawn; is ApplicationAccessibilityEnabled on? \(seen)")
-        #expect(button?.accessibilityLabel == "Add files", "VoiceOver names the button by what it does")
+        try #require(drawn, "the sheet was not drawn; is ApplicationAccessibilityEnabled on?")
         _ = button?.accessibilityActivate()
         #expect(await eventually { deliver != nil }, "the button opens the injected picker")
         deliver?([file])
-        var row: NSObject?
+        let row = "File, example-app.apk, 25 MiB"
         let attached = await eventually {
             controller.view.layoutIfNeeded()
-            row = element(identifier: "feedback-attachment", in: controller.view)
-            return row != nil
+            return element(labelled: row, in: controller.view) != nil
         }
-        try #require(attached, "the row was not drawn")
-        #expect(row?.accessibilityLabel == "File, example-app.apk, 25 MiB")
-        let total = try #require(element(identifier: "feedback-total", in: controller.view))
+        try #require(attached, "the row was not drawn with its labels")
         let words = nodes(in: controller.view).compactMap(\.accessibilityLabel)
-        #expect(words.contains("Remove file"), "\(words)")
-        #expect(words.contains { $0.contains("1 attachment") && $0.contains("25 MiB") && $0.contains("20 MiB") }
-                || total.accessibilityLabel?.contains("20 MiB") == true,
+        #expect(words.contains { $0.contains("1 attachment") && $0.contains("25 MiB") && $0.contains("20 MiB") },
                 "the total and the warning for 25 MiB: \(words)")
-        let remove = try #require(nodes(in: controller.view).first { $0.accessibilityLabel == "Remove file" })
+        let remove = try #require(element(labelled: "Remove file", in: controller.view))
         _ = remove.accessibilityActivate()
         #expect(await eventually {
             controller.view.layoutIfNeeded()
-            return element(identifier: "feedback-attachment", in: controller.view) == nil
+            return element(labelled: row, in: controller.view) == nil
         }, "removing the row takes it out")
         #expect(FileManager.default.fileExists(atPath: file.path), "the file itself stays")
     }

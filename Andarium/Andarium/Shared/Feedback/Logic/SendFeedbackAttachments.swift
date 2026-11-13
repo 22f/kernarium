@@ -136,6 +136,29 @@ nonisolated struct SendFeedbackAttachments: Equatable, Sendable {
         defer { items = [] }
         return items
     }
+
+    /// Every file's bytes, mapped, in the order of the list: what the composer
+    /// is given, so that a file that cannot be mapped now (it vanished between
+    /// the last look at it and here) is found before the composer opens and
+    /// not left out of the mail unseen. A failure names every file that
+    /// could not be mapped.
+    func mapAll() -> Result<[Data], SendFeedbackMappingFailure> {
+        var data: [Data] = []
+        var failed: [SendFeedbackAttachment.ID] = []
+        for item in items {
+            do {
+                data.append(try item.mappedData())
+            } catch {
+                failed.append(item.id)
+            }
+        }
+        return failed.isEmpty ? .success(data) : .failure(SendFeedbackMappingFailure(attachments: failed))
+    }
+}
+
+/// The files that could not be mapped for the composer.
+nonisolated struct SendFeedbackMappingFailure: Error, Equatable, Sendable {
+    var attachments: [SendFeedbackAttachment.ID]
 }
 
 #endif

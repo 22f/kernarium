@@ -42,6 +42,12 @@ struct SendFeedbackFilesTests {
         return result == KERN_SUCCESS ? info.phys_footprint : 0
     }
 
+    /// What the footprint grew by since `before`; a footprint that shrank grew by nothing.
+    private func growth(since before: UInt64) -> UInt64 {
+        let now = footprint()
+        return now > before ? now - before : 0
+    }
+
     private func attachment(
         _ kind: SendFeedbackAttachment.Kind, bytes: UInt64 = 1, path: String, inPlace: Bool = false, mailName: String? = nil
     ) -> SendFeedbackAttachment {
@@ -86,6 +92,33 @@ struct SendFeedbackFilesTests {
         #expect(set.bugReport?.fileName == "bugreport.zip")
     }
 
+    @Test func theListMapsEveryFileBeforeTheComposerIsGivenOneAndNamesTheOnesThatFailed() throws {
+        let root = try scratch()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let a = root.appendingPathComponent("a.bin"), b = root.appendingPathComponent("b.bin"), c = root.appendingPathComponent("c.bin")
+        try Data([1, 2, 3]).write(to: a)
+        try Data([4, 5]).write(to: b)
+        try Data([6]).write(to: c)
+        var set = SendFeedbackAttachments()
+        for (url, size) in [(a, 3), (b, 2), (c, 1)] {
+            set.add(SendFeedbackAttachment(kind: .file, url: url, bytes: UInt64(size), inPlace: true))
+        }
+        guard case .success(let data) = set.mapAll() else {
+            Issue.record("every file is there: they map")
+            return
+        }
+        #expect(data == [Data([1, 2, 3]), Data([4, 5]), Data([6])], "in the order of the list")
+        // A file that went since the last look is not skipped: it fails the whole, by name.
+        try FileManager.default.removeItem(at: b)
+        try FileManager.default.removeItem(at: c)
+        guard case .failure(let failure) = set.mapAll() else {
+            Issue.record("a file is gone: the mapping fails")
+            return
+        }
+        #expect(failure.attachments == [set.items[1].id, set.items[2].id])
+        #expect(SendFeedbackAttachments().mapAll() == .success([]), "no files, nothing to map")
+    }
+
     @Test func anApkIsTypedAsAnAndroidPackageAndTheOthersByTheirExtension() {
         #expect(attachment(.file, path: "/Files/app.APK").mimeType == "application/vnd.android.package-archive")
         #expect(attachment(.file, path: "/Files/log.txt").mimeType == "text/plain")
@@ -117,6 +150,25 @@ struct SendFeedbackFilesTests {
         // A tail that is no extension (too long) is cut like the rest.
         let odd = String(repeating: "a", count: 90) + "." + String(repeating: "b", count: 40)
         #expect(SendFeedbackFolder.safeName(odd).count == 100)
+    }
+
+    @Test func aNumberedNameStaysInsideTheLimitAndTwoLongNamesStayTwo() {
+        let long = String(repeating: "a", count: 96) + ".apk"
+        #expect(long.count == 100 && SendFeedbackNames.numbered(long, 2) == String(repeating: "a", count: 94) + "-2.apk")
+        #expect(SendFeedbackNames.numbered("app.apk", 2) == "app-2.apk" && SendFeedbackNames.numbered("app", 12) == "app-12")
+        // Two names that fill the limit meet in a set: both keep to it, and are two.
+        var set = SendFeedbackAttachments()
+        let name = SendFeedbackFolder.safeName(String(repeating: "b", count: 300) + ".apk")
+        for _ in 0..<12 {
+            set.add(SendFeedbackAttachment(kind: .file, url: URL(fileURLWithPath: "/Files/x.apk"), bytes: 1, mailName: name, inPlace: true))
+        }
+        let names = set.items.map(\.fileName)
+        #expect(names.allSatisfy { $0.count <= 100 && $0.hasSuffix(".apk") })
+        #expect(Set(names.map { $0.lowercased() }).count == 12, "no two share a name")
+        #expect(names[1].hasSuffix("-2.apk") && names[11].hasSuffix("-12.apk"))
+        // A long tail that is no extension is part of the name; the number still fits.
+        let odd = String(repeating: "c", count: 90) + "." + String(repeating: "d", count: 9)
+        #expect(SendFeedbackNames.numbered(odd + "ddddddddddd", 3).count <= 100)
     }
 
     @Test func aNameOnTheRowLosesOnlyWhatAScreenShouldNotObey() {
@@ -177,7 +229,7 @@ struct SendFeedbackFilesTests {
         let data = try item.mappedData()
         #expect(data.count == size)
         #expect(data[0] == 0x50 && data[size - 1] == 0, "the ends are there, and read on demand")
-        let grown = footprint() &- before
+        let grown = growth(since: before)
         // The process runs other tests alongside, which allocate: the bound is half the file, which a read would pass.
         #expect(grown < 1536 * mebibyte, "\(grown / mebibyte) MiB grew for a 3 GiB file")
     }
@@ -273,6 +325,11 @@ struct SendFeedbackFilesTests {
         // Two names asked for before either file is written are still two.
         let a = try folder.reserve("x.png"), b = try folder.reserve("X.png")
         #expect(a.lastPathComponent == "x.png" && b.lastPathComponent == "X-2.png")
+        // Names that fill the limit stay inside it when numbered.
+        let long = String(repeating: "n", count: 200) + ".bin"
+        let first = try folder.reserve(long), second = try folder.reserve(long)
+        #expect(first.lastPathComponent.count == 100 && second.lastPathComponent.count == 100)
+        #expect(first.lastPathComponent != second.lastPathComponent)
     }
 
     @Test func aCopyIsRefusedBeforeItsFirstByteWhenItDoesNotFitAndLeavesNothing() throws {
@@ -339,7 +396,7 @@ struct SendFeedbackFilesTests {
         let folder = folder(root)
         let before = footprint()
         let staged = try copy(folder, source)
-        let grown = footprint() &- before
+        let grown = growth(since: before)
         #expect((try FileManager.default.attributesOfItem(atPath: staged.path)[.size] as? UInt64) == 600 * mebibyte)
         // The process runs other tests alongside, which allocate: the bound is three quarters of the file, which a
         // copy that held the file would pass.
