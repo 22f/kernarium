@@ -73,6 +73,9 @@ nonisolated struct SendFeedbackForm: Equatable, Sendable {
     var canAddFiles: Bool { mailAvailable && !isBusy }
     /// Send can be tapped: it opens the mail when `missing` is nil and says what is missing otherwise.
     var canSend: Bool { mailAvailable && !isBusy }
+    /// A tap on Send would open the mail. Send looks dimmed until then, so
+    /// that nobody has to tap it to learn that a field is still empty.
+    var readyToSend: Bool { canSend && missing == nil }
 
     /// Where a bug report would be, the way to one: only a running virtual
     /// machine can make it.

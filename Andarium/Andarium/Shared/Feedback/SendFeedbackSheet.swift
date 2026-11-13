@@ -564,7 +564,7 @@ struct SendFeedbackSheet: View {
             .lineLimit(1)
             .padding(.horizontal, style == .icon ? 0 : 14)
             .frame(minWidth: 48, minHeight: 48)
-            .background(Capsule().fill(state.canSend ? Color.accentColor : Color(.systemGray3)))
+            .background(Capsule().fill(state.readyToSend ? Color.accentColor : Color(.systemGray3)))
             .contentShape(.capsule)
         }
         .buttonStyle(.plain)

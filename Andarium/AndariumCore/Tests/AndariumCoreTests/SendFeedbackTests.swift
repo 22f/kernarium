@@ -296,6 +296,22 @@ struct SendFeedbackTests {
         #expect(form.canSend && form.missing == .problem)
     }
 
+    @Test func sendLooksReadyOnlyWhenATapWouldOpenTheMail() {
+        var form = SendFeedbackForm(mailAvailable: true, running: true)
+        #expect(form.canSend && !form.readyToSend, "dimmed, and its tap still says what is missing")
+        form.problem = "It froze"
+        #expect(!form.readyToSend)
+        form.details = "  \n "
+        #expect(!form.readyToSend, "white space is not details")
+        form.details = "I opened a game"
+        #expect(form.readyToSend)
+        form.importingMedia = true
+        #expect(!form.readyToSend)
+        form.importingMedia = false
+        form.mailAvailable = false
+        #expect(!form.readyToSend)
+    }
+
     @Test func whiteSpaceAndLineBreaksAreNotWords() {
         var form = SendFeedbackForm(mailAvailable: true, running: true)
         form.problem = "  \n \t"
