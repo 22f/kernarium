@@ -106,6 +106,7 @@ constexpr std::int32_t tonemap_curve_blue = 0x130000;
 constexpr std::int32_t tonemap_curve_green = 0x130001;
 constexpr std::int32_t tonemap_curve_red = 0x130002;
 constexpr std::int32_t tonemap_mode = 0x130003;
+constexpr std::int32_t tonemap_available_tone_map_modes = 0x130005;
 } // namespace tag
 
 // The keys of the template's request and result key lists that this camera does
@@ -116,7 +117,8 @@ constexpr std::int32_t tonemap_mode = 0x130003;
 // The tone map mode and curves are listed by no camera: the host's camera makes
 // its own picture, so there is no curve to take and no tone map to select, and
 // CTS runs its tone map test, which wants a curve size, for any camera that
-// lists the mode.
+// lists the mode. The modes that the camera states (unstated_characteristics)
+// go with the mode key.
 inline std::vector<std::int32_t> unlisted_keys(const abi::Desc& desc, const Capabilities& caps)
 {
     std::vector<std::int32_t> keys = {tag::tonemap_mode, tag::tonemap_curve_red, tag::tonemap_curve_green,
@@ -130,6 +132,15 @@ inline std::vector<std::int32_t> unlisted_keys(const abi::Desc& desc, const Capa
     if (regions[1] == 0) keys.push_back(tag::control_awb_regions);
     if (regions[2] == 0) keys.push_back(tag::control_af_regions);
     return keys;
+}
+
+// The characteristics that no V4L2 camera states. The tone map modes are the
+// characteristic half of the tone map mode key: CameraDeviceTest wants the key
+// and the modes listed together, and unlisted_keys unlists the key, so the
+// modes are neither stated nor listed, and the templates carry no tone map key.
+inline std::vector<std::int32_t> unstated_characteristics()
+{
+    return {tag::tonemap_available_tone_map_modes};
 }
 
 // The size of the array that RAW and the field of view are stated in: the Bayer
@@ -323,7 +334,7 @@ inline StreamSizes derive_sizes(const Formats& formats)
         add_cut(result.jpeg, size_1440p);
         add_cut(result.jpeg, size_720p);
     }
-    if (const Size record = largest(natives); record.pixels() != 0 && record.pixels() <= most(result.jpeg))
+    if (const Size record = largest(natives); record.pixels() <= most(result.jpeg))
         add_cut(result.jpeg, record);
 
     for (const auto& size : natives) result.yuv.push_back(host_entry(size));
