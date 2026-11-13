@@ -86,7 +86,8 @@ std::optional<GuestRamUsage> guest_ram_usage() noexcept
 	const std::uint64_t ram = commitment->size();
 	const std::uint64_t released = commitment->released_bytes();
 	return GuestRamUsage {.ram_bytes = ram,
-		.held_bytes = released < ram ? ram - released : 0U};
+		.held_bytes = released < ram ? ram - released : 0U,
+		.wire_failures = commitment->wire_failures()};
 }
 
 GuestRamRetirementScope::GuestRamRetirementScope() noexcept

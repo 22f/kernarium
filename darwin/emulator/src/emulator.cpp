@@ -10,6 +10,7 @@
 #include "guest_hibernation.hpp"
 #include "guest_statistics.hpp"
 #include "kernel_signal_scope.hpp"
+#include "memory_pressure_response.hpp"
 #include "native_kernel_layout.hpp"
 #include "session_record.hpp"
 #include "stall_watch.hpp"
@@ -63,8 +64,48 @@ constexpr unsigned int guest_writeback_settle_ms = 1500U;
  * guest reclaims for at most a second and compacts for at most another, so
  * this also covers the release and the reply. A pass still running when it
  * expires finishes before the guest takes the suspend request queued behind
- * it. */
+ * it. A quiesce counts it from its call. */
 constexpr unsigned int guest_trim_wait_ms = 3000U;
+
+/* A trim that must still be sent after its allowance went to the wait for the
+ * mutex waits this long for the reply, which is the request and no more. */
+constexpr unsigned int guest_trim_send_wait_ms = 1U;
+
+using SteadyTime = std::chrono::steady_clock::time_point;
+
+[[nodiscard]] SteadyTime steady_now() noexcept
+{
+	return std::chrono::steady_clock::now();
+}
+
+#if UML_EMULATOR_TESTING
+/* The clock the lifecycle calls count their waits by; a test replaces it. */
+std::atomic<SteadyTime (*)() noexcept> lifecycle_clock{&steady_now};
+#endif
+
+[[nodiscard]] SteadyTime lifecycle_now() noexcept
+{
+#if UML_EMULATOR_TESTING
+	return lifecycle_clock.load()();
+#else
+	return steady_now();
+#endif
+}
+
+/* What is left of the guest trim's reply-wait allowance for a call made at
+ * `called`: the time the call spent waiting for the lifecycle mutex counts
+ * against it. It is not an end-to-end bound of three seconds: a console user
+ * that holds the console mutex once the remainder is computed delays the
+ * request after it, as it did before. */
+[[nodiscard]] unsigned int trim_wait_left(SteadyTime called) noexcept
+{
+	const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+		lifecycle_now() - called).count();
+	if (waited >= static_cast<std::int64_t>(guest_trim_wait_ms))
+		return 0U;
+	return guest_trim_wait_ms -
+		static_cast<unsigned int>(std::max<std::int64_t>(waited, 0));
+}
 
 /* The most a request for the guest's memory figures waits for its reply. The
  * guest answers from its console interrupt, so a reply that has not come by
@@ -534,6 +575,10 @@ public:
 		/* Declared after the recorder, so that it ends first and records an
 		 * event in progress before the session ends. */
 		std::unique_ptr<::uml::runtime::StallWatch> stall_watch;
+		/* Ends before the watch: its trim reaches this handle. A test variant
+		 * never listens to the system, whose real events would reach the
+		 * guest consoles the tests count. */
+		std::unique_ptr<::uml::runtime::MemoryPressureWatch> memory_pressure;
 #if UML_EMULATOR_TESTING
 		if (const auto entry = test_kernel_entry(kernel_view_);
 		    entry != nullptr) {
@@ -564,6 +609,10 @@ public:
 				prepared.session_record_path, arguments);
 			run_end_recorder.emplace(*this);
 			stall_watch = ::uml::runtime::start_stall_watch();
+#if !UML_EMULATOR_TESTING
+			memory_pressure = ::uml::runtime::start_memory_pressure_response(
+				&Emulator::trim_for_memory_pressure_of, this);
+#endif
 		}
 		const auto result = uml_elf_run(kernel_view_.data(),
 			kernel_view_.size(), native_layout.load_bias,
@@ -599,12 +648,30 @@ public:
 	 * and the threads are held by the handle's own fence. */
 	[[nodiscard]] int quiesce(bool resident = false) noexcept
 	{
-		std::lock_guard lock{guest_lifecycle_mutex_};
+		/* The trim's reply wait is counted from the call: the time spent
+		 * behind a lifecycle call or a pressure trim is taken from it. The
+		 * pressure trims sent so far are noted just before, to know whether
+		 * one was sent for this guest while the call waited: one that ends
+		 * between the two reads counts, as the guest was just trimmed. */
+		const std::uint64_t pressure_trims_at_call =
+			pressure_trims_sent_.load();
+		const SteadyTime called = lifecycle_now();
+		const LifecycleLock lock{*this};
 		if (guest_suspension_ == ::uml::device::GuestSuspension::none) {
 			/* A console request ends a suspend the guest took itself. */
 			::uml::runtime::note_host_wake();
-			(void)::uml::device::trim_guest_page_cache(
-				guest_trim_wait_ms);
+			/* The request is the host's promise (uml_emulator_quiesce
+			 * trims the guest first). Only a pressure trim that reached
+			 * the guest meanwhile, and used the allowance, stands for it:
+			 * elapsed time alone does not show that anyone asked. */
+			const unsigned int wait = trim_wait_left(called);
+			const bool asked = pressure_trims_sent_.load() !=
+				pressure_trims_at_call;
+			if (wait != 0U)
+				(void)::uml::device::trim_guest_page_cache(wait);
+			else if (!asked)
+				(void)::uml::device::trim_guest_page_cache(
+					guest_trim_send_wait_ms);
 			guest_suspension_ = ::uml::device::suspend_guest(
 				guest_writeback_settle_ms);
 		}
@@ -623,7 +690,7 @@ public:
 		/* A hibernation still writing leaves what it has not reached in the
 		 * process. */
 		request_hibernation_abort();
-		std::lock_guard lock{guest_lifecycle_mutex_};
+		const LifecycleLock lock{*this};
 		/* The disks, the RAM and the threads are back before the guest is
 		 * woken. A restore that fails ends the process and does not
 		 * return; where the end is replaced, nothing is woken either. */
@@ -644,7 +711,7 @@ public:
 
 	[[nodiscard]] int set_page_cache_trimming(bool enabled) noexcept
 	{
-		std::lock_guard lock{guest_lifecycle_mutex_};
+		const LifecycleLock lock{*this};
 		/* Any console request ends a suspend, so a quiesced guest
 		 * receives the change when it is resumed. */
 		if (guest_suspension_ != ::uml::device::GuestSuspension::none) {
@@ -659,13 +726,62 @@ public:
 
 	[[nodiscard]] int trim_page_cache() noexcept
 	{
-		std::lock_guard lock{guest_lifecycle_mutex_};
+		const LifecycleLock lock{*this};
 		/* Quiescing already trimmed it, and a request would wake it. */
 		if (guest_suspension_ != ::uml::device::GuestSuspension::none)
 			return UML_EMULATOR_OK;
 		::uml::runtime::note_host_wake();
 		return guest_request_result(
 			::uml::device::trim_guest_page_cache(guest_trim_wait_ms));
+	}
+
+	/* The guest's page-cache trim for the memory pressure response, which
+	 * runs when the system says it is short of memory. A lifecycle call in
+	 * progress, or waiting for the mutex, is not waited for and goes first
+	 * (the response asks again shortly: it would otherwise be waited for, or
+	 * wait for this one), and a guest the host holds suspended is not woken
+	 * for a trim: quiescing trimmed it. The suspension is read under the
+	 * mutex on every try. */
+	[[nodiscard]] ::uml::runtime::TrimOutcome trim_for_memory_pressure()
+		noexcept
+	{
+		using ::uml::runtime::TrimOutcome;
+		std::unique_lock lock{guest_lifecycle_mutex_, std::try_to_lock};
+		if (!lock.owns_lock())
+			return TrimOutcome::busy;
+		/* The mutex has no queue: a lifecycle call that announced itself
+		 * and waits for it goes first, whatever the order the system wakes
+		 * the threads in. The response asks again shortly. */
+		if (lifecycle_calls_.load() != 0U)
+			return TrimOutcome::busy;
+		if (guest_suspension_ != ::uml::device::GuestSuspension::none)
+			return TrimOutcome::quiesced;
+		::uml::runtime::note_host_wake();
+		TrimOutcome outcome = TrimOutcome::unreachable;
+		switch (::uml::device::trim_guest_page_cache(guest_trim_wait_ms)) {
+		case ::uml::device::GuestRequest::done:
+			outcome = TrimOutcome::done;
+			break;
+		case ::uml::device::GuestRequest::unanswered:
+			outcome = TrimOutcome::unanswered;
+			break;
+		case ::uml::device::GuestRequest::refused:
+			outcome = TrimOutcome::refused;
+			break;
+		case ::uml::device::GuestRequest::unreachable:
+			break;
+		}
+		/* Recorded under the mutex, after the request: a quiesce that waited
+		 * meanwhile sees that its trim was sent. */
+		if (outcome != TrimOutcome::unreachable)
+			pressure_trims_sent_.fetch_add(1);
+		return outcome;
+	}
+
+	static ::uml::runtime::TrimOutcome trim_for_memory_pressure_of(
+		void *emulator) noexcept
+	{
+		return static_cast<Emulator *>(emulator)->trim_for_memory_pressure();
 	}
 
 	/* The figures of this handle's running guest: its route is the one
@@ -729,7 +845,7 @@ public:
 
 	void wake() noexcept
 	{
-		std::lock_guard lock{guest_lifecycle_mutex_};
+		const LifecycleLock lock{*this};
 		/* A quiesced guest stays put until the host resumes it. */
 		if (guest_suspension_ == ::uml::device::GuestSuspension::none) {
 			/* The stall watch sleeps while every carrier is idle: it is
@@ -753,6 +869,12 @@ public:
 	}
 
 #if UML_EMULATOR_TESTING
+	/* The lifecycle calls that have announced themselves and not ended. */
+	[[nodiscard]] unsigned int lifecycle_calls() const noexcept
+	{
+		return lifecycle_calls_.load();
+	}
+
 	/* Whether the handle runs the linked kernel section and holds no copy. */
 	[[nodiscard]] bool kernel_image_borrowed() const noexcept
 	{
@@ -763,7 +885,7 @@ public:
 		std::unique_ptr<::uml::runtime::HibernationSteps> steps,
 		::uml::runtime::GuestHibernation::FailureHandler on_failure)
 	{
-		std::lock_guard lock{guest_lifecycle_mutex_};
+		const LifecycleLock lock{*this};
 		publish_hibernation(nullptr);
 		hibernation_ = std::make_unique<::uml::runtime::GuestHibernation>(
 			std::move(steps), on_failure);
@@ -850,7 +972,7 @@ private:
 	void reset_guest_state() noexcept
 	{
 		request_hibernation_abort();
-		std::lock_guard lock{guest_lifecycle_mutex_};
+		const LifecycleLock lock{*this};
 		/* A stop or a resume on another thread may be inside the abort
 		 * request: withdrawing the pointer waits for it to return, and
 		 * none starts after, so the object is destroyed unobserved. */
@@ -926,7 +1048,7 @@ private:
 		~RunEndRecorder()
 		{
 			{
-				std::lock_guard lock{emulator_.guest_lifecycle_mutex_};
+				const LifecycleLock lock{emulator_};
 				(void)::uml::runtime::release_guest_file_locks(true);
 				emulator_.guest_file_locks_released_ = false;
 			}
@@ -943,7 +1065,7 @@ private:
 	 * the images a process that ended in a hibernation left behind. */
 	void prepare_guest_hibernation(::uml::runtime::HibernationMode mode)
 	{
-		std::lock_guard lock{guest_lifecycle_mutex_};
+		const LifecycleLock lock{*this};
 		hibernation_mode_ = mode;
 		if (mode != ::uml::runtime::HibernationMode::off)
 			(void)::uml::runtime::remove_stale_hibernation_images(
@@ -1063,7 +1185,7 @@ private:
 	void bring_back_guest_ram() noexcept
 	{
 		request_hibernation_abort();
-		std::lock_guard lock{guest_lifecycle_mutex_};
+		const LifecycleLock lock{*this};
 		(void)bring_back_guest_locked();
 	}
 
@@ -1102,6 +1224,37 @@ private:
 	uml::network::Provider network_;
 	uml::network::ProviderContext network_context_;
 	std::mutex guest_lifecycle_mutex_;
+	/* The lifecycle calls that have announced themselves and not ended: they
+	 * wait for the mutex or hold it. A pressure trim, which only tries the
+	 * mutex, gives way while one is counted. */
+	std::atomic<unsigned int> lifecycle_calls_{0};
+	/* The pressure trims that reached the guest, sent or sent and answered;
+	 * changed with the mutex held. */
+	std::atomic<std::uint64_t> pressure_trims_sent_{0};
+
+	/* The blocking take of the lifecycle mutex: the call is counted before
+	 * it waits, and stays counted until it lets go, on every way out. */
+	class LifecycleLock final {
+	public:
+		explicit LifecycleLock(Emulator &emulator) noexcept
+			: emulator_{emulator}
+		{
+			emulator_.lifecycle_calls_.fetch_add(1);
+			emulator_.guest_lifecycle_mutex_.lock();
+		}
+
+		~LifecycleLock()
+		{
+			emulator_.lifecycle_calls_.fetch_sub(1);
+			emulator_.guest_lifecycle_mutex_.unlock();
+		}
+
+		LifecycleLock(const LifecycleLock &) = delete;
+		LifecycleLock &operator=(const LifecycleLock &) = delete;
+
+	private:
+		Emulator &emulator_;
+	};
 	bool guest_file_locks_released_{};
 	/* What holds the quiesced guest's threads: its hibernation, or a fence
 	 * of the handle's own where the RAM is not hibernated. Guarded by the
@@ -1163,6 +1316,24 @@ void use_hibernation(uml_emulator *emulator,
 bool kernel_image_borrowed(const uml_emulator *emulator) noexcept
 {
 	return emulator->implementation.kernel_image_borrowed();
+}
+
+::uml::runtime::TrimOutcome trim_for_memory_pressure(
+	uml_emulator *emulator) noexcept
+{
+	return emulator->implementation.trim_for_memory_pressure();
+}
+
+unsigned int lifecycle_calls(const uml_emulator *emulator) noexcept
+{
+	return emulator->implementation.lifecycle_calls();
+}
+
+void set_lifecycle_clock(std::chrono::steady_clock::time_point (*now)()
+	noexcept) noexcept
+{
+	::uml::emulator::lifecycle_clock.store(
+		now != nullptr ? now : &::uml::emulator::steady_now);
 }
 
 } // namespace uml::emulator::testing
