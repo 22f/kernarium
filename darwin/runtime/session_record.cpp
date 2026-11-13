@@ -43,6 +43,9 @@ constexpr std::string_view host_fault_line{
 
 std::atomic<char> output[output_size];
 std::atomic<std::uint64_t> output_end{0};
+/* Where `output_end` stood when the session began: the output of a boot starts
+ * there, so a record quotes nothing a boot before it printed. */
+std::atomic<std::uint64_t> output_start{0};
 /* What the same output says of the boot (console_boot_signal.hpp). */
 ConsoleBootSignal boot_signal;
 /* What the host that runs the guest says of its boots (set_session_boot_facts):
@@ -70,11 +73,18 @@ char tail_text[output_size];
  * Its own buffers and one writer at a time (`state_checkpointing`): the
  * checkpoint, or the session's begin, which waits for the flag. An end never
  * takes the flag; it waits a bounded time for a checkpoint under way to
- * finish (wait_out_state_checkpoint) and the checkpoint looks at
- * `session_open` again just before it writes, so the end is the last write. */
+ * finish (wait_out_state_checkpoint). The wait does not make the end the last
+ * write, since a checkpoint may be delayed past it between its last look at
+ * `session_open` and its write. What does is `terminal_size`: the end formats
+ * its record (`record_text`) and publishes its size before it writes, and a
+ * checkpoint that has written looks, and writes that record again if it is
+ * there. A write of the state that lands after an end's is thus followed by
+ * the end's, whatever the delay. */
 char checkpoint_text[session_state_max_bytes];
 char checkpoint_tail[output_size];
 std::atomic_flag state_checkpointing = ATOMIC_FLAG_INIT;
+/* The size of the end's record in `record_text`, 0 while the session runs. */
+std::atomic<std::size_t> terminal_size{0};
 std::atomic<std::uint64_t> checkpointed_output_end{0};
 std::atomic<bool> checkpointed_completed{false};
 /* The most an end waits for a checkpoint of the state under way, in
@@ -793,10 +803,12 @@ void write_state(int descriptor, const char *text, std::size_t size) noexcept
 			static_cast<off_t>(session_state_offset + size));
 }
 
-/* An end is the last write of the state: a checkpoint under way (it set
- * `state_checkpointing` before it looked at `session_open`, which the end has
- * already cleared) finishes first. The wait is bounded because an end may
- * run where the checkpoint thread no longer does. */
+/* A checkpoint under way (it set `state_checkpointing` before it looked at
+ * `session_open`, which the end has already cleared) usually finishes before
+ * the end writes. The wait is bounded because an end may run where the
+ * checkpoint thread no longer does, so the end does not rely on it:
+ * write_record's publication and the checkpoint's repair make it the last
+ * write. */
 void wait_out_state_checkpoint() noexcept
 {
 	const std::int64_t deadline = steady_ms() + state_checkpoint_wait_ms;
@@ -823,7 +835,12 @@ void write_record(SessionEnd end, int status, std::string_view message,
 	/* The last counts of the session, which no checkpoint may follow. */
 	write_network_slot(descriptor);
 	wait_out_state_checkpoint();
-	write_record_unguarded(descriptor, end, status, message, tail);
+	const std::size_t size = format_state(record_text, end, status, message,
+		tail);
+	/* A checkpoint whose write lands from here on writes this record again
+	 * (checkpoint_state); it reads the size, so the record is formatted. */
+	terminal_size.store(size, std::memory_order_seq_cst);
+	write_state(descriptor, record_text, size);
 }
 
 /* Rewrites the state of a guest whose boot has not completed when the output
@@ -859,6 +876,13 @@ void checkpoint_state(int descriptor) noexcept
 			checkpointed_output_end.store(output_now,
 				std::memory_order_relaxed);
 			checkpointed_completed.store(done, std::memory_order_relaxed);
+			/* An end that came while this write was delayed has written
+			 * its record, or will: if this write landed after it, write
+			 * it again, which is the same bytes as the end's own. */
+			if (const std::size_t ended =
+				    terminal_size.load(std::memory_order_seq_cst);
+			    ended != 0)
+				write_state(descriptor, record_text, ended);
 		}
 	}
 	state_checkpointing.clear(std::memory_order_seq_cst);
@@ -996,6 +1020,8 @@ bool begin_session_record(std::string_view path,
 		console_descriptors[slot].store(consoles[slot],
 			std::memory_order_relaxed);
 	boot_signal.reset();
+	output_start.store(output_end.load(std::memory_order_acquire),
+		std::memory_order_release);
 	if (path.empty())
 		return true;
 	const std::string name{path};
@@ -1055,6 +1081,7 @@ bool begin_session_record(std::string_view path,
 	checkpointed_output_end.store(output_end.load(std::memory_order_acquire),
 		std::memory_order_relaxed);
 	checkpointed_completed.store(false, std::memory_order_relaxed);
+	terminal_size.store(0, std::memory_order_seq_cst);
 	session_open.store(true, std::memory_order_seq_cst);
 	write_record_unguarded(descriptor, SessionEnd::running, 0, {}, {});
 	state_checkpointing.clear(std::memory_order_seq_cst);
@@ -1190,8 +1217,10 @@ bool console_init_observed() noexcept
 std::size_t kernel_output_tail(std::span<char> buffer) noexcept
 {
 	const std::uint64_t end = output_end.load(std::memory_order_acquire);
+	const std::uint64_t begun = output_start.load(std::memory_order_acquire);
 	const std::size_t count = static_cast<std::size_t>(std::min<std::uint64_t>(
-		{end, static_cast<std::uint64_t>(output_size),
+		{end > begun ? end - begun : 0,
+			static_cast<std::uint64_t>(output_size),
 			static_cast<std::uint64_t>(buffer.size())}));
 	for (std::size_t index = 0; index < count; ++index)
 		buffer[index] = output[(end - count + index) % output_size].load(
@@ -1236,6 +1265,7 @@ void reset_session_record() noexcept
 	for (auto &console : console_descriptors)
 		console.store(-1, std::memory_order_relaxed);
 	output_end.store(0, std::memory_order_release);
+	output_start.store(0, std::memory_order_release);
 	boot_signal.reset();
 	boot_reported.store(false, std::memory_order_relaxed);
 	boot_restarts.store(0, std::memory_order_relaxed);

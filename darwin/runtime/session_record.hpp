@@ -45,8 +45,10 @@ namespace uml::runtime {
  * boot has not completed the checkpoint thread rewrites the state with the
  * output so far whenever the output grew, so a process that is killed
  * mid-boot leaves where the boot had got; an end that the guest or the person
- * chose (a power-off, a restart, a stop) quotes the output too. The
- * checkpoint never follows an end.
+ * chose (a power-off, a restart, a stop) quotes the output too. The output a
+ * record quotes is that of its own boot: what an earlier boot of the process
+ * printed is not in it. An end is the last write of the state: a checkpoint
+ * whose write lands after it, however late, writes the end's record again.
  *
  * Every memory_checkpoint_interval_ms while a session runs, a thread of the
  * record's own writes the process's footprint, its peak and what its memory
@@ -277,8 +279,8 @@ ssize_t kernel_write(int descriptor, const void *buffer, std::size_t length)
  * thread. */
 [[nodiscard]] bool console_init_observed() noexcept;
 
-/* What the record holds of the kernel's output: the last bytes, oldest first,
- * copied into `buffer`. For tests. */
+/* What the record holds of the kernel's output since the session began: the
+ * last bytes, oldest first, copied into `buffer`. For tests. */
 std::size_t kernel_output_tail(std::span<char> buffer) noexcept;
 
 /* The message of the last "Darwin UML panic: " line in `output`, or empty. */

@@ -390,6 +390,55 @@ void test_boot_state_per_session()
 	unlink(path.c_str());
 }
 
+/* A boot's record quotes the output of its own boot. The console of a boot
+ * that completed is left out of its orderly end; the unfinished record of the
+ * boot after it, which is checkpointed and ended with the output so far, must
+ * not bring it back. */
+void test_a_boot_quotes_only_its_own_output()
+{
+	const TestConsole console;
+	uml::runtime::reset_session_record();
+	uml::runtime::set_session_boot_facts(true, 0);
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	console.write("init: processing action (sys.boot_completed=1) from (x)\n"
+		"PREVIOUS_BOOT_CANARY\n");
+	uml::runtime::checkpoint_session_memory();
+	uml::runtime::end_session_record(SessionEnd::restarted, 0);
+	require(!has(read_file(path), "PREVIOUS_BOOT_CANARY"),
+		"a completed boot's end quoted its console");
+	uml::runtime::set_session_boot_facts(true, 1);
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	char tail[uml::runtime::session_kernel_output_bytes];
+	require(uml::runtime::kernel_output_tail(tail) == 0,
+		"a new boot held the boot before's output");
+	console.write("init: init first stage started!\n");
+	uml::runtime::checkpoint_session_memory();
+	std::string state = read_file(path).substr(state_offset);
+	require(has(state, "\nboot unfinished\n") &&
+		has(state, "init first stage started") &&
+		!has(state, "PREVIOUS_BOOT_CANARY"),
+		"the unfinished boot quoted the boot before: " + state);
+	uml::runtime::end_session_record(SessionEnd::stopped, 0);
+	state = read_file(path).substr(state_offset);
+	require(has(state, "state ended\nend stopped\n") &&
+		has(state, "init first stage started") &&
+		!has(state, "PREVIOUS_BOOT_CANARY"),
+		"the unfinished boot's end quoted the boot before: " + state);
+	/* A boot whose first line is a crash does not take the one before into
+	 * its tail either. */
+	uml::runtime::set_session_boot_facts(true, 2);
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	console.write("Darwin UML panic: short\n");
+	uml::runtime::end_session_record(SessionEnd::failed, 1, "x");
+	state = read_file(path).substr(state_offset);
+	require(has(state, "Darwin UML panic: short") &&
+		!has(state, "init first stage started"),
+		"a later boot's end quoted an earlier boot: " + state);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
 /* The state of an unfinished boot is bounded like the end's, whatever the
  * console writes. */
 void test_boot_state_size()
@@ -1416,6 +1465,7 @@ int main(int argc, char **argv)
 		test_boot_state();
 		test_boot_unobserved();
 		test_boot_state_per_session();
+		test_a_boot_quotes_only_its_own_output();
 		test_boot_state_size();
 		test_the_end_outlasts_state_checkpoints();
 		test_record_lifecycle();
