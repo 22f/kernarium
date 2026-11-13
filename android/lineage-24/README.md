@@ -581,11 +581,12 @@ outcomes are known and not defects of the image:
   set it, and the vendor init script falls back to 5 when a launch passes none.
   The launchers refuse any value of it in a release's command line except the
   `=5` that earlier releases carry, which they drop.
-- The release's command line carries no serial number: the launchers state the
-  installation's own as `androidboot.serialno=`
-  ([`../../darwin/device/block/README.md`](../../darwin/device/block/README.md)),
-  and drop the `=umlandroid17` that earlier releases carry. A run that states none
-  gets Android's own default.
+- The release's command line carries `androidboot.serialno=umlandroid17`, the
+  fallback for a launch that states no serial number, so that the guest always
+  has exactly one. A launcher that states the installation's own
+  ([`../../darwin/device/block/README.md`](../../darwin/device/block/README.md))
+  drops the fallback and appends it; the builder and the verifier require the
+  one token.
 - The guest has a compressed swap of half its RAM (one zram entry in
   `fstab.uml`), enabled at `sys.boot_completed`. PinnerService does not lock the
   home app's files, and `kernarium_reclaim_boot_apps.sh` kills only the cached
