@@ -31,11 +31,18 @@ enum FeedbackPreview {
         services.address = { "feedback@example.com" }
         services.canSendMail = { screen != "feedback-nomail" }
         services.presentMail = { _, _ in true }
+        // The picker's own screen is the one thing captured as the system draws it; the menu's screen keeps the
+        // real picker so that a tap on Files in it opens the system's.
+        if !["feedback-file-picker", "feedback-file-menu"].contains(screen) { services.pickFiles = { _ in true } }
         services.captureScreen = { _ in guestPicture() }
         services.runningSeconds = { _ in 2520 }
         services.previewOpensAtLaunch = opensSheet(screen) && !overBoot(screen)
         services.previewOpensOverBoot = overBoot(screen)
-        services.previewPrepare = { feedback in await prepare(screen: screen, feedback: feedback) }
+        services.previewPrepare = { feedback in
+            await prepare(screen: screen, feedback: feedback)
+            // The capture run keeps a picture of the sheet only once it is open and its draft is made.
+            CaptureState.markFeedbackReady()
+        }
         services.previewKeepsConfirmation = screen == "feedback-sent"
         model.feedbackServices = services
         guard opensSheet(screen) else { return }
@@ -73,10 +80,18 @@ enum FeedbackPreview {
                 try? await Task.sleep(for: .milliseconds(500))
                 feedback.confirmingDiscard = true
             }
+        case "feedback-missing-both", "feedback-missing-problem", "feedback-missing-details":
+            // Send tapped with the problem or the details empty, as a person does it: the real alert, no composer.
+            if screen == "feedback-missing-details" { feedback.form.problem = words.problem }
+            if screen == "feedback-missing-problem" { feedback.form.details = words.details }
+            try? await Task.sleep(for: .milliseconds(500))
+            feedback.send()
         case "feedback-large":
             feedback.form.problem = words.problem
             feedback.form.details = words.details
             await attachAll(feedback, report: 8.6, photo: 21.4)
+        case let screen where screen.hasPrefix("feedback-file"):
+            await prepareFiles(screen: screen, feedback: feedback, words: words)
         case "feedback-generating":
             feedback.form.problem = words.problem
             feedback.form.details = words.details
@@ -103,6 +118,81 @@ enum FeedbackPreview {
         }
     }
 
+    /// The screens of files from Files: sample files of this app's own, opened where
+    /// they are as a picked file is, and the real refusals.
+    @MainActor
+    private static func prepareFiles(screen: String, feedback: SendFeedbackModel, words: Words) async {
+        feedback.form.problem = words.fileProblem
+        feedback.form.details = words.fileDetails
+        switch screen {
+        case "feedback-file":
+            await attachAll(feedback, report: nil, screenshot: false, photo: nil)
+            await attachFile(feedback, named: "example-app.apk", megabytes: 12.4)
+        case "feedback-file-long":
+            await attachFile(
+                feedback, named: "example-application-release-candidate-build-2026-11-13-arm64-v8a-signed-debuggable.apk",
+                megabytes: 12.4)
+        case "feedback-file-names":
+            await attachFile(feedback, named: "\u{6D4B}\u{8BD5}\u{5E94}\u{7528}.apk", megabytes: 12.4)
+            await attachFile(feedback, named: "\u{30C6}\u{30B9}\u{30C8}\u{30A2}\u{30D7}\u{30EA}.apk", megabytes: 5.1)
+        case "feedback-file-mixed":
+            await attachAll(feedback, report: 3.2, photo: 2.4)
+            await attachFile(feedback, named: "example-app.apk", megabytes: 6.8)
+        case "feedback-file-large":
+            await attachAll(feedback, report: nil, screenshot: false, photo: nil)
+            await attachFile(feedback, named: "example-app.apk", megabytes: 1_920)
+        case "feedback-file-copying":
+            // What a person has while a copy runs: the screenshot attached before; the file's row comes when the
+            // copy ends, and meanwhile Send is dimmed.
+            await attachAll(feedback, report: nil, screenshot: true, photo: nil)
+            feedback.form.addingFiles = true
+            // The real copy lasts as long as the file is large: hold its overlay part way.
+            feedback.fileBusy = SendFeedbackModel.copyingState(progress: 0.42, cancel: BusyCancel {})
+        case "feedback-file-refused-one":
+            feedback.failure = refusal([.empty], feedback)
+        case "feedback-file-refused-four":
+            feedback.failure = refusal([.notEnoughSpace, .notAFile, .empty, .unavailable], feedback)
+        case "feedback-file-gone":
+            // The real path: a file is attached, goes from where it was kept, and Send finds it out.
+            await attachAll(feedback, report: nil, screenshot: false, photo: nil)
+            if let file = try? makeFile(named: "example-app.apk", head: emptyZip, megabytes: 12.4) {
+                await feedback.addFiles([file])
+                try? FileManager.default.removeItem(at: file)
+                feedback.send()
+            }
+        case "feedback-file-picker":
+            // The system's document picker over the sheet, as a tap on Files opens it.
+            try? await Task.sleep(for: .milliseconds(1500))
+            feedback.pickFiles()
+        case "feedback-file-menu":
+            // The Add menu of the bar, open.
+            try? await Task.sleep(for: .milliseconds(1500))
+            AddMenuProbe.open()
+        default:
+            // A folder and an empty file are refused, each for its own reason.
+            let folder = SendFeedbackStaging().incoming.appendingPathComponent("Example folder", isDirectory: true)
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            if let empty = try? makeFile(named: "empty.txt", head: Data(), megabytes: 0) {
+                await feedback.addFiles([folder, empty])
+            }
+        }
+    }
+
+    /// The alert the sheet makes for these refusals, with the model's own words.
+    @MainActor
+    private static func refusal(_ reasons: [SendFeedbackFileRefusal], _ feedback: SendFeedbackModel) -> SendFeedbackFailure {
+        SendFeedbackFailure(
+            title: SendFeedbackModel.fileFailureTitle(count: reasons.count),
+            message: SendFeedbackModel.fileFailureMessage(reasons, device: feedback.app.host.name))
+    }
+
+    @MainActor
+    private static func attachFile(_ feedback: SendFeedbackModel, named name: String, megabytes: Double) async {
+        if let file = try? makeFile(named: name, head: emptyZip, megabytes: megabytes) {
+            await feedback.addFiles([file])
+        }
+    }
+
     @MainActor
     private static func attachAll(
         _ feedback: SendFeedbackModel, report: Double?, screenshot: Bool = true, photo: Double?
@@ -126,6 +216,8 @@ enum FeedbackPreview {
         let problem = "Game freezes after the intro video"
         let details = "The game plays its intro, then the picture stops while the sound goes on. It happens every time since this morning\u{2019}s update."
         let suggestion = "Let me keep the keyboard on screen"
+        let fileProblem = "The app closes right after it opens"
+        let fileDetails = "I installed the attached app with Install APK. It opens, then closes after about a second. The same file works on my other phone."
         let suggestionDetails = "In games I type a lot, and the keyboard closes after every message. The picture shows where."
     }
 
@@ -161,6 +253,28 @@ enum FeedbackPreview {
         let renderer = ImageRenderer(content: GuestHomeScreen().frame(width: size.width, height: size.height))
         renderer.scale = screen.nativeScale
         return renderer.uiImage
+    }
+}
+
+/// Opens the bar's Add menu the way VoiceOver does, by activating its button.
+@MainActor
+private enum AddMenuProbe {
+    static func open() {
+        let label = String(localized: "Add a photo or a file", table: "Feedback")
+        let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+        for window in windows {
+            if let button = nodes(in: window).first(where: { $0.accessibilityLabel == label }) {
+                _ = button.accessibilityActivate()
+                return
+            }
+        }
+    }
+
+    private static func nodes(in node: NSObject, depth: Int = 0) -> [NSObject] {
+        guard depth < 64 else { return [] }
+        var children = (node.accessibilityElements ?? []).compactMap { $0 as? NSObject }
+        if let view = node as? UIView { children += view.subviews }
+        return [node] + children.flatMap { nodes(in: $0, depth: depth + 1) }
     }
 }
 

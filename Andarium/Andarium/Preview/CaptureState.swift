@@ -12,6 +12,13 @@ import UIKit
 @MainActor
 enum CaptureState {
     private static var screen = ""
+    private static var feedbackReady = false
+
+    /// Send feedback's sheet is open and its draft made: a picture before this shows what is under the sheet.
+    static func markFeedbackReady() {
+        feedbackReady = true
+        write()
+    }
 
     static func begin(screen: String) {
         self.screen = screen
@@ -38,6 +45,7 @@ enum CaptureState {
         #if FEEDBACK_MAIL
         // The screens of Send feedback exist only in a build that has it.
         record["feedback"] = true
+        record["feedbackReady"] = feedbackReady
         #endif
         guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
               let data = try? JSONSerialization.data(withJSONObject: record) else { return }
