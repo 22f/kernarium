@@ -40,7 +40,8 @@ nonisolated enum ApkInstallOperation {
     static func run(
         session: AdbSession, coordinator: FileCoordinatorBox, url: URL, device: String,
         bypassLowTargetSdkBlock: Bool = false, hostFree: @Sendable () -> UInt64,
-        trail: ApkInstallTrail = ApkInstallTrail(), update: @escaping @Sendable (BusyUpdate) -> Void
+        trail: ApkInstallTrail = ApkInstallTrail(), data: ApkDataStep = ApkDataStep(),
+        update: @escaping @Sendable (BusyUpdate) -> Void
     ) throws -> ApkInstallOutcome {
         var result: Result<ApkInstallOutcome, Error> = .success(.installed)
         var coordinationError: NSError?
@@ -56,7 +57,7 @@ nonisolated enum ApkInstallOperation {
                 }
                 return try ContainerInstallOperation.run(
                     session: session, file: readable, name: url.lastPathComponent, device: device,
-                    bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, hostFree: hostFree, trail: trail, update: update)
+                    bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, hostFree: hostFree, trail: trail, data: data, update: update)
             }
         }
         if let coordinationError { throw coordinationError }

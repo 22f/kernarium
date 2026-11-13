@@ -381,4 +381,32 @@ struct ApkContainerTests {
             #expect(try plan(items, fileName: name).kind == .archive, "\(name)")
         }
     }
+
+    // MARK: Where data goes
+
+    @Test func aDataFileIsPlacedInTheGuestsObbFolderOfThePackageAndNowhereElse() throws {
+        let obb = "Android/obb/com.example.game/main.12.com.example.game.obb"
+        let plan = try plan([
+            xapkManifest(splits: [["file": "com.example.game.apk", "id": "base"]], expansions: [["file": obb, "install_path": obb]]),
+            item("com.example.game.apk"), item(obb, apk("obb", size: 1000)),
+        ], fileName: "Game.xapk")
+        let file = try #require(plan.data.first)
+        let place = try #require(plan.guestLocation(of: file))
+        #expect(place.folder == "/storage/emulated/0/Android/obb/com.example.game")
+        #expect(place.path == place.folder + "/main.12.com.example.game.obb")
+        // A plan built by hand cannot name another place.
+        for (folder, name) in [
+            ("Android/obb/other.package", "main.1.obb"), ("Android/data/com.example.game", "main.1.obb"),
+            ("Android/obb/com.example.game/sub", "main.1.obb"), ("Android/obb/com.example.game", "../main.1.obb"),
+            ("Android/obb/com.example.game", ".main.1.obb"), ("Android/obb/com.example.game", "main.1.txt"),
+            ("Android/obb/../com.example.game", "main.1.obb"), ("/Android/obb/com.example.game", "main.1.obb"),
+            ("Android/obb/com.example.game", "a'b.obb"),
+        ] {
+            let forged = ApkContainerPlan.DataFile(entry: obb, bytes: 1, folder: folder, name: name)
+            #expect(plan.guestLocation(of: forged) == nil, "\(folder)/\(name)")
+        }
+        var unnamed = plan
+        unnamed.packageName = nil
+        #expect(unnamed.guestLocation(of: file) == nil)
+    }
 }

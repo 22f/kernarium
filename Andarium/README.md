@@ -791,7 +791,14 @@ is on. `AndariumCore/Adb` speaks the protocol.
   install. Each APK inside is held to the 4 GiB limit; the file itself may be
   larger, and its footprint does not grow with it. A file with encrypted
   entries, no app, or parts that do not fit together is refused, and nothing
-  is installed.
+  is installed. An .xapk's OBB files are copied once the app is in, to
+  `Android/obb/<package>/` of internal storage and nowhere else (the path must
+  be exactly that, with a plain `.obb` name): each goes to a hidden partial
+  name as an import does, covered by the same ledger, and is moved into place
+  only after its length and checksum have been verified. Other data in the
+  file (`Android/data`, say) is not placed. The copy has its own Cancel, and a
+  stop or a failure in it leaves the app installed with a result that says
+  its data could not all be copied.
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB

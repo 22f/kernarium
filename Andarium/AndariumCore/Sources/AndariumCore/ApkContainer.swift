@@ -396,6 +396,20 @@ public struct ApkContainerPlan: Equatable, Sendable {
         return plan
     }
 
+    /// Where `file` goes in the guest: its folder and its full path, both
+    /// below internal storage. Nil unless the file is one the container can
+    /// place, `Android/obb/<package>/<name>.obb` with this app's package, so
+    /// that a plan built by hand cannot name any other place.
+    public func guestLocation(of file: DataFile) -> (folder: String, path: String)? {
+        guard let packageName, let place = ApkContainer.obbFolder(for: file.folder + "/" + file.name, package: packageName),
+              place.folder == file.folder, place.name == file.name
+        else { return nil }
+        let folder = GuestFilePath.child(place.folder, of: GuestFilePath.root)
+        let path = GuestFilePath.child(place.name, of: folder)
+        guard GuestFilePath.isInsideRoot(path) else { return nil }
+        return (folder, path)
+    }
+
     /// The bytes of the APKs and of the data files, and both together.
     public var apkBytes: UInt64 { candidates.reduce(0) { Self.add($0, $1.bytes) } }
     public var dataBytes: UInt64 { data.reduce(0) { Self.add($0, $1.bytes) } }

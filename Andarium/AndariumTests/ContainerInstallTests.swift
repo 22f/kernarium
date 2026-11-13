@@ -432,3 +432,202 @@ struct ContainerInstallTests {
         #expect((error as? AdbFailure)?.message == PackageInstallMessages.message(forCode: "FAILED_DEPRECATED_SDK_VERSION"))
     }
 }
+
+/// The data of an .xapk: its OBB files are copied into the app's folder of
+/// internal storage once the app is installed, each under a hidden name and
+/// moved into place whole, or the app is left installed without them.
+@Suite(.serialized)
+struct ContainerDataInstallTests {
+    private static let package = "com.example.game"
+    private static let folder = "/storage/emulated/0/Android/obb/com.example.game"
+    private static let mainName = "main.12.com.example.game.obb"
+    private static let patchName = "patch.12.com.example.game.obb"
+
+    private func guest(on adbd: DiscardingAdbd) throws -> AdbGuestOperations {
+        AdbGuestOperations(
+            identity: try throwawayIdentity(), clock: GuestRunClock(), device: "iPad", connector: adbd,
+            hostFree: { .max }, run: GuestRunMark.random())
+    }
+
+    private func ledger() throws -> (PartialSweepLedger, URL) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ledger-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try PartialSweepLedger.markSettled(in: directory)
+        return (PartialSweepLedger(directory: directory), directory)
+    }
+
+    private func manifest(_ obbs: [String], package: String = ContainerDataInstallTests.package) -> Data {
+        let expansions = obbs.map { #"{"file":"\#($0)","install_location":"EXTERNAL_STORAGE","install_path":"\#($0)"}"# }
+        return Data(#"{"xapk_version":2,"package_name":"\#(package)","split_apks":[{"file":"base.apk","id":"base"},{"file":"config.arm64_v8a.apk","id":"config.arm64_v8a"}],"expansions":[\#(expansions.joined(separator: ","))]}"#.utf8)
+    }
+
+    private struct Fixture {
+        var url: URL
+        var main: Data
+        var patch: Data
+    }
+
+    private func fixture(
+        mainCRC: UInt32? = nil, extra: [ContainerEntry] = [], obbPackage: String = ContainerDataInstallTests.package
+    ) throws -> Fixture {
+        let main = apkData(11, count: 700_003)
+        let patch = apkData(12, count: 200_017)
+        let mainPath = "Android/obb/\(obbPackage)/\(Self.mainName)"
+        let patchPath = "Android/obb/\(obbPackage)/\(Self.patchName)"
+        var mainEntry = ContainerEntry(mainPath, main)
+        mainEntry.crc = mainCRC
+        let url = try ContainerFixture.write([
+            ContainerEntry("manifest.json", manifest([mainPath, patchPath])),
+            ContainerEntry("base.apk", apkData(1)), ContainerEntry("config.arm64_v8a.apk", apkData(3)),
+            mainEntry, ContainerEntry(patchPath, patch),
+        ] + extra, name: "Game.xapk")
+        return Fixture(url: url, main: main, patch: patch)
+    }
+
+    /// The partial name and the final name of each `mv` the guest's shell was asked for.
+    private func moves(_ adbd: DiscardingAdbd) -> [(from: String, to: String)] {
+        adbd.shellCommands.compactMap { command in
+            guard let range = command.range(of: "mv -f -- '") else { return nil }
+            let words = command[range.upperBound...].components(separatedBy: "' '")
+            guard words.count >= 2, let to = words[1].components(separatedBy: "'").first else { return nil }
+            return (words[0], to)
+        }
+    }
+
+    @Test func theObbFilesAreCopiedAfterTheCommitUnderPartialNamesAndMovedIntoPlace() async throws {
+        let adbd = DiscardingAdbd()
+        defer { adbd.shutdown() }
+        adbd.hashesSyncData = true
+        let item = try fixture()
+        defer { try? FileManager.default.removeItem(at: item.url) }
+        let (partials, directory) = try ledger()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = UpdateLog()
+        let result = try await guest(on: adbd).installApk(at: item.url, partials: partials, update: { log.add($0) })
+        #expect(result == .installed)
+        // The app went in first; the data came after the commit.
+        let services = adbd.servicesOpened
+        let commit = try #require(services.firstIndex { $0.contains("install-commit") })
+        let sync = try #require(services.firstIndex(of: "sync:"))
+        #expect(commit < sync)
+        #expect(adbd.committedSessions.count == 1)
+        // Each file arrived whole under a hidden name of this folder, and was moved to its own.
+        let synced = adbd.syncedFiles
+        #expect(synced.map(\.bytes) == [UInt64(item.main.count), UInt64(item.patch.count)])
+        #expect(synced.map(\.digest) == [digest(item.main), digest(item.patch)])
+        for file in synced {
+            #expect(GuestFilePath.parent(of: file.path) == Self.folder)
+            #expect(GuestFiles.isPartial(GuestFilePath.name(of: file.path)))
+        }
+        let placed = moves(adbd)
+        #expect(placed.map(\.to) == [Self.folder + "/" + Self.mainName, Self.folder + "/" + Self.patchName])
+        #expect(placed.map(\.from) == synced.map(\.path))
+        #expect(adbd.shellCommands.filter { $0 == "mkdir -p -- '\(Self.folder)'" }.count == 2)
+        // The bar says what is going on, and the Cancel button is back for the copy.
+        #expect(log.details.contains("Copying app data 1 of 2\u{2026}") && log.details.contains("Copying app data 2 of 2\u{2026}"))
+        #expect(log.all.contains { $0.cancellable == false })
+        #expect(log.all.last { $0.cancellable != nil }?.cancellable == true)
+        let progress = log.progress
+        #expect(progress == progress.sorted() && (progress.last ?? 0) <= 0.95 + 1e-9)
+        // The ledger was told, and is settled.
+        #expect(!partials.isOwed)
+    }
+
+    @Test func dataThatIsNotAnObbOfThePackageLeavesTheAppInstalledWithoutIt() async throws {
+        let adbd = DiscardingAdbd()
+        defer { adbd.shutdown() }
+        // The only data names another app's folder: nothing is placed, and the person is told.
+        let item = try fixture(obbPackage: "com.example.other")
+        defer { try? FileManager.default.removeItem(at: item.url) }
+        let result = try await guest(on: adbd).installApk(at: item.url, update: { _ in })
+        #expect(result == .installedWithoutData)
+        #expect(adbd.committedSessions.count == 1)
+        #expect(adbd.syncedFiles.isEmpty && moves(adbd).isEmpty)
+        #expect(!adbd.shellCommands.contains { $0.hasPrefix("mkdir") })
+    }
+
+    @Test func dataBesidesTheObbIsCountedAndNotPlaced() async throws {
+        let adbd = DiscardingAdbd()
+        defer { adbd.shutdown() }
+        adbd.hashesSyncData = true
+        // The first form of an .xapk: one APK, and the data under Android/.
+        let main = apkData(11, count: 50_001)
+        let url = try ContainerFixture.write([
+            ContainerEntry("manifest.json", Data(#"{"xapk_version":1,"package_name":"com.example.game"}"#.utf8)),
+            ContainerEntry("com.example.game.apk", apkData(1)),
+            ContainerEntry("Android/obb/com.example.game/\(Self.mainName)", main),
+            ContainerEntry("Android/data/com.example.game/files/cache.bin", Data([1, 2, 3])),
+        ], name: "Old.xapk")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let result = try await guest(on: adbd).installApk(at: url, update: { _ in })
+        // The OBB file is in place; the file for Android/data is not, so the app may lack it.
+        #expect(result == .installedWithoutData)
+        #expect(moves(adbd).map(\.to) == [Self.folder + "/" + Self.mainName])
+        #expect(adbd.syncedFiles.map(\.digest) == [digest(main)])
+        #expect(!adbd.shellCommands.contains { $0.contains("Android/data") })
+    }
+
+    @Test func aCopyTheGuestRefusesRemovesItsPartialFileAndLeavesTheAppInstalled() async throws {
+        let adbd = DiscardingAdbd()
+        defer { adbd.shutdown() }
+        adbd.syncFailure = "no space left on device"
+        let item = try fixture()
+        defer { try? FileManager.default.removeItem(at: item.url) }
+        let (partials, directory) = try ledger()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let result = try await guest(on: adbd).installApk(at: item.url, partials: partials, update: { _ in })
+        #expect(result == .installedWithoutData)
+        #expect(adbd.committedSessions.count == 1 && adbd.openSessions.isEmpty)
+        // Nothing was moved to a final name; the partial file went, and the ledger knows.
+        #expect(moves(adbd).isEmpty)
+        #expect(adbd.shellCommands.contains { $0.hasPrefix("rm -f -- '\(Self.folder)/.andarium-") })
+        #expect(!partials.isOwed)
+    }
+
+    @Test func aDataFileWhoseChecksumFailsIsNeverMovedToItsName() async throws {
+        let adbd = DiscardingAdbd()
+        defer { adbd.shutdown() }
+        adbd.hashesSyncData = true
+        let item = try fixture(mainCRC: 0x0BAD_C0DE)
+        defer { try? FileManager.default.removeItem(at: item.url) }
+        let result = try await guest(on: adbd).installApk(at: item.url, update: { _ in })
+        #expect(result == .installedWithoutData)
+        #expect(moves(adbd).isEmpty)
+        #expect(adbd.syncedFiles.isEmpty)
+        #expect(adbd.shellCommands.contains { $0.hasPrefix("rm -f -- '\(Self.folder)/.andarium-") })
+    }
+
+    @Test func aCancelDuringTheCopyLeavesTheAppInstalledAndNoPartialFileOrLedgerEntry() async throws {
+        let adbd = DiscardingAdbd()
+        defer { adbd.shutdown() }
+        let item = try fixture()
+        defer { try? FileManager.default.removeItem(at: item.url) }
+        let (partials, directory) = try ledger()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let reached = Flag()
+        let gate = DispatchSemaphore(value: 0)
+        defer { gate.signal() }
+        adbd.onSynced = { seen in
+            if seen >= 100_000 {
+                reached.raise()
+                gate.wait()
+            }
+        }
+        let operations = try guest(on: adbd)
+        let task = Task { try await operations.installApk(at: item.url, partials: partials, update: { _ in }) }
+        let deadline = ContinuousClock.now + .seconds(20)
+        while !reached.isRaised, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(reached.isRaised)
+        task.cancel()
+        let result = await task.result
+        guard case let .success(outcome) = result else {
+            Issue.record("the cancel of the copy is the app installed without its data, got \(result)")
+            return
+        }
+        #expect(outcome == .installedWithoutData)
+        #expect(adbd.committedSessions.count == 1 && adbd.openSessions.isEmpty && adbd.abandonedSessions.isEmpty)
+        #expect(moves(adbd).isEmpty && adbd.syncedFiles.isEmpty)
+        #expect(adbd.shellCommands.contains { $0.hasPrefix("rm -f -- '\(Self.folder)/.andarium-") })
+        #expect(!partials.isOwed)
+    }
+}

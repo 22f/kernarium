@@ -42,8 +42,9 @@ struct BusyState: Equatable {
 nonisolated struct BusyUpdate: Sendable {
     var progress: Double?
     var detail: String?
-    /// False once the task is past the point where it can stop; true again is
-    /// never sent.
+    /// False once the task is past the point where it can stop. True again is
+    /// sent only by an install that has finished installing and goes on to copy
+    /// the app's data, which can be stopped.
     var cancellable: Bool?
 
     init(progress: Double? = nil, detail: String? = nil, cancellable: Bool? = nil) {

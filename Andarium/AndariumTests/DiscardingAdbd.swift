@@ -36,6 +36,19 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
     private var createAnswers: [String] = []
     private var commitAnswers: [String] = []
     private var pieceHook: (@Sendable (_ written: UInt64) -> Void)?
+    private var syncRecords: [SyncRecord] = []
+    private var syncSeen: UInt64 = 0
+    private var syncHook: (@Sendable (_ seen: UInt64) -> Void)?
+    private var syncError: String?
+    private var hashing = false
+
+    /// A file a `SEND` wrote: where, how long, and (with `hashesSyncData`)
+    /// the SHA-256 of what it carried.
+    struct SyncRecord: Equatable {
+        var path: String
+        var bytes: UInt64
+        var digest: String
+    }
 
     /// A file written into a session.
     struct SessionPart: Equatable {
@@ -76,6 +89,25 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
         get { lock.withLock { pieceHook } }
         set { lock.withLock { pieceHook = newValue } }
     }
+    /// Whether `SEND` keeps a digest of the bytes it carries (otherwise it
+    /// only counts them, as a large import test needs).
+    var hashesSyncData: Bool {
+        get { lock.withLock { hashing } }
+        set { lock.withLock { hashing = newValue } }
+    }
+    /// Answers every `SEND` with this failure instead of `OKAY`.
+    var syncFailure: String? {
+        get { lock.withLock { syncError } }
+        set { lock.withLock { syncError = newValue } }
+    }
+    /// Told, on the thread that serves the connection, the running total of
+    /// the bytes of `SEND` data, after each frame.
+    var onSynced: (@Sendable (_ seen: UInt64) -> Void)? {
+        get { lock.withLock { syncHook } }
+        set { lock.withLock { syncHook = newValue } }
+    }
+    /// The files `SEND` wrote, in order.
+    var syncedFiles: [SyncRecord] { lock.withLock { syncRecords } }
     /// The ids of the sessions made and neither committed nor abandoned.
     var openSessions: [String] { lock.withLock { sessions.keys.sorted() } }
     /// The sessions that were committed, in order.
@@ -310,13 +342,25 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
                 let text = String(decoding: request, as: UTF8.self)
                 let path = String(text[..<(text.lastIndex(of: ",") ?? text.endIndex)])
                 var total: UInt64 = 0
+                var hash = SHA256()
+                let hashes = lock.withLock { hashing }
                 frames: while true {
                     guard let frame = try stream.take(8) else { return }
                     let frameLength = Int(Self.le32(frame, 4))
                     switch String(decoding: frame.prefix(4), as: UTF8.self) {
                     case "DATA":
-                        guard try stream.skip(frameLength) else { return }
+                        if hashes {
+                            guard let data = try autoreleasepool(invoking: { try stream.take(frameLength) }) else { return }
+                            hash.update(data: data)
+                        } else {
+                            guard try stream.skip(frameLength) else { return }
+                        }
                         total += UInt64(frameLength)
+                        let hook = lock.withLock { () -> (@Sendable (UInt64) -> Void)? in
+                            syncSeen += UInt64(frameLength)
+                            return syncHook
+                        }
+                        hook?(lock.withLock { syncSeen })
                     case "DONE":
                         break frames
                     default:
@@ -324,8 +368,19 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
                     }
                 }
                 lengths[path] = total
-                lock.withLock { sentBytes += total }
-                try stream.send(Data("OKAY".utf8) + Self.bytes(UInt32(0)))
+                let failure = lock.withLock { () -> String? in
+                    sentBytes += total
+                    if syncError == nil {
+                        syncRecords.append(SyncRecord(
+                            path: path, bytes: total, digest: hashes ? hash.finalize().map { String(format: "%02x", $0) }.joined() : ""))
+                    }
+                    return syncError
+                }
+                if let failure {
+                    try stream.send(Data("FAIL".utf8) + Self.bytes(UInt32(failure.utf8.count)) + Data(failure.utf8))
+                } else {
+                    try stream.send(Data("OKAY".utf8) + Self.bytes(UInt32(0)))
+                }
             case "STA2":
                 guard let request = try stream.take(length) else { return }
                 let path = String(decoding: request, as: UTF8.self)

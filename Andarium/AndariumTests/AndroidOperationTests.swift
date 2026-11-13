@@ -360,6 +360,42 @@ struct AndroidOperationTests {
         #expect(await eventually { model.busy?.result != nil })
     }
 
+    @Test func anInstallThatCopiesDataGetsItsCancelButtonBackForTheCopy() async throws {
+        let (model, driver) = running()
+        let gate = Gate()
+        driver.install = { update in
+            update(BusyUpdate(progress: 0.5, detail: "The virtual machine is installing the app\u{2026}", cancellable: false))
+            try await Task.sleep(for: .milliseconds(100))
+            update(BusyUpdate(detail: "Copying app data\u{2026}", cancellable: true))
+            while !gate.isOpen { try await Task.sleep(for: .milliseconds(5)) }
+        }
+        let url = try apk(named: "Game.xapk")
+        defer { try? FileManager.default.removeItem(at: url) }
+        model.installPicked(url)
+        #expect(await eventually { model.busy?.cancel == nil })
+        #expect(await eventually { model.busy?.cancel != nil && model.busy?.detail == "Copying app data\u{2026}" })
+        // Pressing it stops the operation as it does anywhere else.
+        model.busy?.cancel?.action()
+        #expect(model.busy?.cancel == nil)
+        gate.release()
+        #expect(await eventually { model.busy?.result != nil || model.busy == nil })
+    }
+
+    @Test func anAppInstalledWithoutAllItsDataSaysSoOnTheResult() async throws {
+        let (model, driver) = running()
+        driver.installOutcome = .installedWithoutData
+        let url = try apk(named: "Game.xapk")
+        defer { try? FileManager.default.removeItem(at: url) }
+        model.installPicked(url)
+        #expect(await eventually { model.busy?.result != nil })
+        let busy = try #require(model.busy)
+        #expect(busy.title == "App installed")
+        #expect(busy.detail.hasSuffix("is installed in the virtual machine, but its data files could not all be copied. The app may not work without them."))
+        #expect(busy.result?.failed == false)
+        busy.result?.dismiss.action()
+        #expect(model.busy == nil)
+    }
+
     @Test func cancellingTheInstallLeavesNoResultAndNoAlert() async throws {
         let (model, driver) = running()
         driver.install = { _ in

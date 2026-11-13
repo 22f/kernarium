@@ -2619,6 +2619,50 @@
         }
       }
     },
+    "Copying app data %lld of %lld…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アプリのデータをコピー中（%1$lld/%2$lld）…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在复制应用数据（%1$lld/%2$lld）…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在複製應用程式資料（%1$lld/%2$lld）…"
+          }
+        }
+      }
+    },
+    "Copying app data…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アプリのデータをコピー中…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在复制应用数据…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在複製應用程式資料…"
+          }
+        }
+      }
+    },
     "Copying the report…" : {
       "localizations" : {
         "ja" : {

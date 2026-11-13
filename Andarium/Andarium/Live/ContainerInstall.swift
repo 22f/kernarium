@@ -6,16 +6,58 @@ import Foundation
 /// What an install has made in the guest that a failure or a cancel must
 /// undo, shared between the operation's thread and the cleanup that follows.
 /// A session is a thing in the guest until it is committed (which ends it,
-/// whatever the answer) or abandoned.
+/// whatever the answer) or abandoned. After the commit the app is installed,
+/// and what is left to undo is the partial file of the data being copied.
 nonisolated final class ApkInstallTrail: @unchecked Sendable {
     private let lock = NSLock()
     private var session: String?
+    private var installed = false
+    private var partial: String?
+    private var importing = false
 
     /// The id of a session that was created and has not been committed.
     var openSession: String? {
         get { lock.withLock { session } }
         set { lock.withLock { session = newValue } }
     }
+
+    /// The commit answered `Success`: the app is installed.
+    var committed: Bool {
+        get { lock.withLock { installed } }
+        set { lock.withLock { installed = newValue } }
+    }
+
+    /// The hidden file a data file is being written to, until it is moved
+    /// into place or removed.
+    var partialFile: String? {
+        get { lock.withLock { partial } }
+        set { lock.withLock { partial = newValue } }
+    }
+
+    /// The sweep ledger was told an import began and has not been told it ended.
+    var importOpen: Bool {
+        get { lock.withLock { importing } }
+        set { lock.withLock { importing = newValue } }
+    }
+}
+
+/// What the copying of an .xapk's data needs besides the connection: the
+/// guest run whose mark the partial files carry, and the ledger that says
+/// the guest may hold one (`PartialSweepLedger`; nil where a test has none).
+nonisolated struct ApkDataStep: Sendable {
+    var run = GuestRunMark.random()
+    var partials: PartialSweepLedger?
+}
+
+/// A zip entry as the source of an upload: read in pieces, never whole, and
+/// the entry's own length and checksum are checked when the last piece is
+/// asked for, so a damaged file never reaches its final name.
+nonisolated final class ZipEntrySource: AdbSource, @unchecked Sendable {
+    private let reader: ZipEntryReader
+
+    init(_ reader: ZipEntryReader) { self.reader = reader }
+
+    func read(limit: Int) throws -> Data? { try reader.read(upTo: limit) }
 }
 
 /// Install APK for a file that holds an app in parts (.apks, .xapk, .apkm):
@@ -23,20 +65,26 @@ nonisolated final class ApkInstallTrail: @unchecked Sendable {
 /// read from the archive as it is sent (the archive is neither unpacked nor
 /// copied), and the commit installs them together. A plain APK under one of
 /// those names installs as an APK. An APK of 4 GiB or more is refused as it
-/// is anywhere, but the archive may be larger than that.
+/// is anywhere, but the archive may be larger than that. An .xapk's OBB files
+/// are copied into the app's folder of internal storage once the app is in.
 nonisolated enum ContainerInstallOperation {
     static let chunkBytes = ApkInstallOperation.chunkBytes
+    /// With data to copy the bar is shared by the bytes of the parts and of
+    /// the data, and Android's own install, whose length is not known, holds
+    /// it between them; the last twentieth is the end.
+    static let dataShare = 0.95
 
     /// Installs the archive at `file`, already coordinated (`name` is its
     /// name). Returns how it ended; a failure is thrown with its words.
     static func run(
         session: AdbSession, file: URL, name: String, device: String, bypassLowTargetSdkBlock: Bool,
-        hostFree: @Sendable () -> UInt64, trail: ApkInstallTrail, update: @escaping @Sendable (BusyUpdate) -> Void
+        hostFree: @Sendable () -> UInt64, trail: ApkInstallTrail, data: ApkDataStep = ApkDataStep(),
+        update: @escaping @Sendable (BusyUpdate) -> Void
     ) throws -> ApkInstallOutcome {
         do {
             return try install(
                 session: session, file: file, name: name, device: device,
-                bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, hostFree: hostFree, trail: trail, update: update)
+                bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, hostFree: hostFree, trail: trail, data: data, update: update)
         } catch let error as ZipError {
             throw AdbFailure(message: ApkContainer.refusal(for: error).message)
         } catch let refusal as InstallRefusal {
@@ -46,7 +94,8 @@ nonisolated enum ContainerInstallOperation {
 
     private static func install(
         session: AdbSession, file: URL, name: String, device: String, bypassLowTargetSdkBlock: Bool,
-        hostFree: @Sendable () -> UInt64, trail: ApkInstallTrail, update: @escaping @Sendable (BusyUpdate) -> Void
+        hostFree: @Sendable () -> UInt64, trail: ApkInstallTrail, data: ApkDataStep,
+        update: @escaping @Sendable (BusyUpdate) -> Void
     ) throws -> ApkInstallOutcome {
         let source = try ZipFileSource(contentsOf: file)
         guard source.size > 0 else { throw AdbFailure(message: PackageInstallMessages.message(forCode: "FAILED_INVALID_APK")) }
@@ -79,8 +128,9 @@ nonisolated enum ContainerInstallOperation {
                 throw AdbFailure(message: shortage.message(device: device))
             }
             let counter = SentCounter(total: total)
+            let share = plan.data.isEmpty ? ApkInstallOperation.sendingShare : dataShare
             let throttle = ProgressThrottle { sent, all in
-                update(BusyUpdate(progress: Double(sent) / Double(max(all, 1)) * ApkInstallOperation.sendingShare))
+                update(BusyUpdate(progress: Double(sent) / Double(max(all, 1)) * share))
             }
 
             // The session, and each part written into it.
@@ -103,7 +153,7 @@ nonisolated enum ContainerInstallOperation {
 
             // The commit. It cannot be stopped, and it ends the session.
             update(BusyUpdate(
-                progress: Double(counter.sent) / Double(max(total, 1)) * ApkInstallOperation.sendingShare,
+                progress: Double(counter.sent) / Double(max(total, 1)) * share,
                 detail: String(localized: "The virtual machine is installing the app\u{2026}"), cancellable: false))
             watchdog.arm(idle: nil, overall: ApkInstallOperation.commitLimit)
             trail.openSession = nil
@@ -114,8 +164,80 @@ nonisolated enum ContainerInstallOperation {
             if let message = PackageInstallMessages.failure(inOutput: text) {
                 throw AdbFailure(message: message)
             }
-            return plan.data.isEmpty && plan.unplacedData == 0 ? .installed : .installedWithoutData
+            trail.committed = true
+            if plan.data.isEmpty { return plan.unplacedData == 0 ? .installed : .installedWithoutData }
+            return try placeData(
+                plan, archive: archive, on: connection, watchdog: watchdog, trail: trail, step: data,
+                progress: { delta in throttle.report(counter.add(delta), total) }, update: update)
         }
+    }
+
+    // MARK: The data
+
+    /// Copies the data files of an .xapk into the app's folder, each under
+    /// a hidden partial name and moved into place whole, after the app is
+    /// installed. The step can be stopped (the Cancel button is back for it),
+    /// and what stops it, or fails in it, leaves the app installed without
+    /// its data. A partial file left in the guest is `trail`'s to remove.
+    private static func placeData(
+        _ plan: ApkContainerPlan, archive: ZipArchive, on connection: AdbConnection, watchdog: AdbWatchdog,
+        trail: ApkInstallTrail, step: ApkDataStep, progress: (UInt64) -> Void,
+        update: @escaping @Sendable (BusyUpdate) -> Void
+    ) throws -> ApkInstallOutcome {
+        // Every destination is the app's own OBB folder or the step does not begin.
+        var places: [(file: ApkContainerPlan.DataFile, folder: String, path: String)] = []
+        for file in plan.data {
+            guard let place = plan.guestLocation(of: file) else { return .installedWithoutData }
+            places.append((file, place.folder, place.path))
+        }
+        update(BusyUpdate(detail: String(localized: "Copying app data\u{2026}"), cancellable: true))
+        watchdog.arm(idle: ApkInstallOperation.sendIdleLimit)
+        do {
+            if let partials = step.partials {
+                try partials.importBegan(mark: step.run)
+                trail.importOpen = true
+            }
+            for (index, place) in places.enumerated() {
+                if places.count > 1 {
+                    update(BusyUpdate(detail: String(localized: "Copying app data \(index + 1) of \(places.count)\u{2026}")))
+                }
+                guard let entry = archive.entry(named: place.file.entry) else { throw InstallRefusal.damaged }
+                let made = try connection.runShell(GuestFiles.makeFolderCommand(for: place.folder))
+                guard made.exitCode == 0 else { throw AdbError.remote("the folder for the app\u{2019}s data could not be made") }
+                let source = ZipEntrySource(try archive.reader(for: entry, capacity: GuestFiles.uploadPiece))
+                let temporary = GuestFiles.temporaryPath(
+                    in: place.folder, run: step.run, token: String(UUID().uuidString.prefix(8)).lowercased())
+                trail.partialFile = temporary
+                var reported: UInt64 = 0
+                try GuestFiles.upload(
+                    source, modified: Date(), to: place.path, temporary: temporary, replacing: true, on: connection,
+                    progress: { sent in
+                        watchdog.touch()
+                        progress(sent - reported)
+                        reported = sent
+                    })
+                trail.partialFile = nil
+            }
+        } catch {
+            // A stop, a timeout or a lost connection is the caller's to settle.
+            if watchdog.currentCause != .none { throw error }
+            if let temporary = trail.partialFile,
+               (try? connection.runShell(GuestFiles.removeCommand(for: temporary)))?.exitCode == 0 {
+                trail.partialFile = nil
+            }
+            endImport(trail, step)
+            return .installedWithoutData
+        }
+        endImport(trail, step)
+        return plan.unplacedData == 0 ? .installed : .installedWithoutData
+    }
+
+    /// Tells the ledger the data step ended, if it was told it began; its
+    /// file is in place or known to be gone.
+    private static func endImport(_ trail: ApkInstallTrail, _ step: ApkDataStep) {
+        guard trail.importOpen, trail.partialFile == nil else { return }
+        trail.importOpen = false
+        step.partials?.importEnded(mark: step.run, clean: true)
     }
 
     // MARK: Pieces

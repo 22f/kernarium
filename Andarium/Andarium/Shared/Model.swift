@@ -1111,6 +1111,9 @@ final class AppModel {
         }
         if let detail = update.detail { busy?.detail = detail }
         if update.cancellable == false { busy?.cancel = nil }
+        if update.cancellable == true, busy?.cancel == nil, busy?.result == nil {
+            busy?.cancel = BusyCancel { [weak self] in self?.cancelOperation() }
+        }
     }
 
     /// The overlay's Cancel: the operation stops and cleans up while the
