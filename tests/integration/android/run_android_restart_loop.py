@@ -3,16 +3,18 @@
 """Qualify the launcher's restart-loop guard on an Android guest: boots that never finish end the
 loop, and restarts after finished boots never do.
 
-The macOS launcher boots a guest again each time the guest restarts itself, and ends the launch
-(exit status 3) after five restarts in a row that came early. A restart is early when it comes
-within 15 s of its boot, and, for a guest whose console says when its boot ends, when the boot had
-not finished (darwin/emulator/src/restart_loop_guard.hpp). The runner shows both halves on the
+The macOS launcher boots a guest again each time the guest restarts itself. It ends the launch
+(exit status 3) after five restarts in a row within 15 s of their boot, or eight in a row that
+were early: within that window or, for a guest whose console says when its boot ends, before the
+boot had finished (darwin/emulator/src/restart_loop_guard.hpp). The runner shows both halves on the
 release under test:
 
 - the late loop: `adb reboot` 16 s after each kernel start, which is after the launcher's 15 s
   window and before Android's `sys.boot_completed`, so only the unfinished boot makes the restart
-  early. The launcher boots the guest four times again, then ends the launch with status 3 and
-  says the guest restarted five times in a row before it finished booting;
+  early. Before each reboot the runner asks Android itself whether the property is still unset,
+  independently of the console lines under test. The launcher boots the guest seven times again,
+  then ends the launch with status 3 and says the guest restarted eight times in a row before it
+  finished booting;
 - the control: `adb reboot` after each boot has finished (CTS and tradefed suites reboot this way),
   eight boots in a row with seven restarts. The launcher counts none of them, and the guest
   powers off cleanly afterwards.
@@ -59,9 +61,10 @@ def load_module(name: str, path: pathlib.Path):
 boot_android = load_module("boot_android", REPOSITORY / "tools" / "boot_android.py")
 
 DEFAULT_ADB_PORT = 5584
-# The launcher's window for an early restart, and the early restarts that end the launch.
+# The launcher's window for an early restart, and the early restarts in a row that end the launch
+# when the boots did not finish.
 WINDOW_SECONDS = 15
-LIMIT = 5
+LIMIT = 8
 GUARD_STATUS = 3
 # The late loop restarts the guest this long after each kernel start by default: past the window,
 # before the boot finishes (a warm boot of the release finishes after about 20 s).
@@ -102,15 +105,22 @@ class Launch:
         the action once for each rc file that has one, so a boot's count is not one)."""
         return [COMPLETED_LINE in segment for segment in self.segments()]
 
-    def boot_completed(self) -> bool:
-        """Whether Android says the running boot finished (the property is unset until it does)."""
+    def boot_property(self) -> str | None:
+        """What Android says of the running boot, from sys.boot_completed ("1" once it finished, ""
+        before); None when adb could not be asked."""
         subprocess.run([self.adb, "connect", self.serial], stdin=subprocess.DEVNULL,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=False)
         try:
             result = self.adb_run("shell", "getprop", "sys.boot_completed", timeout=30)
         except subprocess.TimeoutExpired:
-            return False
-        return result.returncode == 0 and result.stdout.decode(errors="replace").strip() == "1"
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.decode(errors="replace").strip()
+
+    def boot_completed(self) -> bool:
+        """Whether Android says the running boot finished."""
+        return self.boot_property() == "1"
 
     def adb_run(self, *arguments: str, timeout: float = 60) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -182,6 +192,7 @@ def late_loop(options: argparse.Namespace, adb: str, private: pathlib.Path) -> N
         seen = 0
         kernel_at: float | None = None
         restarted = 0
+        unfinished_when_restarted = 0
         deadline = time.monotonic() + LOOP_SECONDS
         while guest.process.poll() is None:
             if time.monotonic() >= deadline:
@@ -192,13 +203,18 @@ def late_loop(options: argparse.Namespace, adb: str, private: pathlib.Path) -> N
                 seen = starts
                 kernel_at = time.monotonic()
             if kernel_at is not None and restarted < seen and time.monotonic() - kernel_at >= options.restart_after:
-                if any(guest.console_completions()):
-                    raise Failure(f"boot {seen} finished before the runner restarted it at "
-                                  f"{options.restart_after} s, so the run says nothing of the guard; "
+                # Android's own answer, not the console line under test: the boot must be unfinished
+                # when it is restarted, or the run says nothing of the guard.
+                state = guest.boot_property()
+                if state == "1":
+                    raise Failure(f"boot {seen} finished (sys.boot_completed=1) before the runner restarted "
+                                  f"it at {options.restart_after} s, so the run says nothing of the guard; "
                                   "lower --restart-after")
-                if guest.reboot():
+                if state is not None and guest.reboot():
                     restarted += 1
-                    print(f"     boot {seen}: adb reboot at {time.monotonic() - kernel_at:.0f} s")
+                    unfinished_when_restarted += 1
+                    print(f"     boot {seen}: sys.boot_completed unset, adb reboot at "
+                          f"{time.monotonic() - kernel_at:.0f} s")
             time.sleep(POLL_SECONDS)
         status = guest.process.returncode
         text = guest.text()
@@ -209,9 +225,11 @@ def late_loop(options: argparse.Namespace, adb: str, private: pathlib.Path) -> N
             raise Failure(f"the guest was booted again {again} times, not {LIMIT - 1}")
         if f"restarted {LIMIT} times in a row, each before it finished booting" not in text:
             raise Failure(f"the launcher did not say why it stopped:\n{text[-1500:]}")
-        if any(guest.console_completions()):
-            raise Failure("a boot finished during the late loop, so the loop was not made of unfinished boots")
-        print(f"ok   the guest was booted {again + 1} times, then the launcher ended with status {status}")
+        if unfinished_when_restarted < LIMIT - 1:
+            raise Failure(f"only {unfinished_when_restarted} of the restarts were asked for by the runner "
+                          "with the boot's property unset: the rest came from the guest")
+        print(f"ok   the guest was booted {again + 1} times, each unfinished by Android's own word, "
+              f"then the launcher ended with status {status}")
     finally:
         stop(guest)
 

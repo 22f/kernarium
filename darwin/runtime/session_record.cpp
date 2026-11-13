@@ -1061,6 +1061,11 @@ bool console_boot_completed() noexcept
 	return boot_signal.completed();
 }
 
+bool console_init_observed() noexcept
+{
+	return boot_signal.init_observed();
+}
+
 std::size_t kernel_output_tail(std::span<char> buffer) noexcept
 {
 	const std::uint64_t end = output_end.load(std::memory_order_acquire);

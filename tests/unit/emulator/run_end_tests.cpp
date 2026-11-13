@@ -10,6 +10,7 @@
 #include "context.hpp"
 #include "emulator_test_support.hpp"
 #include "require.hpp"
+#include "restart_loop_guard.hpp"
 #include "testing.hpp"
 #include "uml_darwin_host.h"
 #include "scratch_directory.hpp"
@@ -45,9 +46,11 @@ struct Script final {
 	 * ends. */
 	int console{-1};
 	const char *console_text{};
-	/* What the handle reported while the kernel ran. */
+	/* What the handle reported while the kernel ran: when it began, and after
+	 * the console said its text. */
 	int during_result{};
 	uml_emulator_run_end during{};
+	uml_emulator_run_end during_console{};
 };
 
 Script script;
@@ -71,10 +74,16 @@ int scripted_kernel(int, char *const[], char *const[])
 		uml_emulator_get_run_end(script.emulator, &script.during);
 	if (script.request_stop)
 		uml_emulator_request_stop(script.emulator);
-	if (script.console_text != nullptr)
+	if (script.console_text != nullptr) {
 		require(::uml::runtime::kernel_write(script.console,
 			script.console_text, std::strlen(script.console_text)) > 0,
 			"the kernel could not write to its console");
+		/* The console has said it, and the run is not over: the handle
+		 * still reports no end. */
+		script.during_console = {.struct_size = sizeof(script.during_console)};
+		(void)uml_emulator_get_run_end(script.emulator,
+			&script.during_console);
+	}
 	if (script.report)
 		::uml::emulator::testing::report_guest_shutdown(
 			script.kind, script.command);
@@ -257,22 +266,40 @@ void test_the_console_says_when_the_boot_finished()
 		"init: processing action (sys.boot_completed=1) from (/system/etc/"
 		"init/hw/init.rc:1)\ninit: more\n", restart);
 	require(end.kind == UML_EMULATOR_RUN_END_RESTART &&
-		end.boot_completed == 1U,
+		end.boot_completed == 1U && end.init_observed == 1U,
 		"a restart after a finished boot did not say so");
-	require(script.during.boot_completed == 0U,
-		"a running guest reported a finished boot");
+	require(script.during_console.boot_completed == 0U &&
+		script.during_console.init_observed == 0U,
+		"a running guest reported what its console said before it ended");
 
 	/* The next boot starts again from nothing, and so does its end. */
 	end = run_saying(emulator.get(), "Linux version 6.18\n"
+		"init: init first stage started!\n"
 		"init: starting service 'zygote'...\n", restart);
 	require(end.kind == UML_EMULATOR_RUN_END_RESTART &&
-		end.boot_completed == 0U,
-		"a boot that did not finish inherited the one before it");
+		end.boot_completed == 0U && end.init_observed == 1U,
+		"a boot that did not finish inherited the one before it, or lost "
+		"the sight of its init");
+
+	/* A console that shows the kernel and nothing of init is no unfinished
+	 * boot: a healthy one looks the same. */
+	end = run_saying(emulator.get(), "Linux version 6.18\n"
+		"Freeing unused kernel memory\n", restart);
+	require(end.boot_completed == 0U && end.init_observed == 0U,
+		"a console with no init output was taken for init's");
 
 	/* Recovery is up: that is a finished boot too. */
 	end = run_saying(emulator.get(),
 		"init: starting service 'recovery'...\n", restart);
-	require(end.boot_completed == 1U, "recovery's start was not a finished boot");
+	require(end.boot_completed == 1U && end.init_observed == 1U,
+		"recovery's start was not a finished boot");
+
+	/* apexd says the system booted a moment before init's action runs; a
+	 * restart in between leaves only this line. */
+	end = run_saying(emulator.get(),
+		"apexd: markBootCompleted() received by ApexService\n", restart);
+	require(end.boot_completed == 1U && end.init_observed == 1U,
+		"apexd's word that the system booted was not a finished boot");
 
 	/* Any end reports it, and so does a guest that powers off. */
 	end = run_saying(emulator.get(),
@@ -296,8 +323,83 @@ void test_the_console_says_when_the_boot_finished()
 		.console_text = "init: processing action (sys.boot_completed=1)\n"};
 	require(run(emulator.get()) == 0, "the run with another descriptor failed");
 	close(other);
-	require(run_end(emulator.get()).boot_completed == 0U,
+	require(run_end(emulator.get()).boot_completed == 0U &&
+		run_end(emulator.get()).init_observed == 0U,
 		"output that is no console's counted as a finished boot");
+}
+
+/* The guard's view of a run: what an application passes it. */
+uml::emulator::BootCompletion completion_of(const uml_emulator_run_end &end)
+{
+	return uml::emulator::boot_completion(true, end.init_observed != 0U,
+		end.boot_completed != 0U);
+}
+
+/* One finished boot, then unfinished ones, through the real run and session
+ * functions into the guard: nothing of the first boot is inherited by the
+ * next, and the loop ends at the limit of unfinished boots in a row. */
+void test_a_finished_boot_then_unfinished_ones_reach_the_limit()
+{
+	using namespace std::chrono_literals;
+	auto emulator = make_emulator(scripted_kernel);
+	constexpr auto restart = GuestShutdownKind::restart;
+	uml::emulator::RestartLoopGuard guard;
+	const uml::emulator::RestartLoopGuard::Clock::time_point epoch{};
+
+	auto end = run_saying(emulator.get(),
+		"init: init first stage started!\n"
+		"init: processing action (sys.boot_completed=1) from (x)\n", restart);
+	guard.boot_started(epoch);
+	require(guard.may_restart(epoch + 40s, completion_of(end)),
+		"a restart after a finished boot was refused");
+	require(guard.early_restarts() == 0U, "a finished boot was counted");
+
+	for (unsigned boot = 1; boot <= uml::emulator::unfinished_restart_limit;
+	     ++boot) {
+		end = run_saying(emulator.get(),
+			"init: init first stage started!\n"
+			"init: starting service 'zygote'...\n", restart);
+		require(end.boot_completed == 0U && end.init_observed == 1U,
+			"an unfinished boot inherited the finished one's end");
+		guard.boot_started(epoch);
+		const bool again = guard.may_restart(epoch + 20s, completion_of(end));
+		require(again == (boot < uml::emulator::unfinished_restart_limit),
+			"the guard did not end the loop at the limit of unfinished boots");
+	}
+	require(guard.end_message() ==
+		"restarted 8 times in a row, each before it finished booting or "
+		"within 15 s of booting", "the late loop's message is wrong");
+}
+
+/* Healthy boots whose console the host does not read, restarted after they
+ * finished and after the window, are never limited: the host cannot tell
+ * them from unfinished ones, and counts neither. */
+void test_healthy_boots_on_an_unread_console_are_never_limited()
+{
+	using namespace std::chrono_literals;
+	auto emulator = make_emulator(scripted_kernel);
+	uml::emulator::RestartLoopGuard guard;
+	const uml::emulator::RestartLoopGuard::Clock::time_point epoch{};
+	const int other = open("/dev/null", O_WRONLY);
+	require(other >= 0, "open a console the record does not read");
+	for (const char *channel : {"ssl0=null", "ssl0=pty", "con0=null"}) {
+		for (unsigned boot = 1; boot <= 12; ++boot) {
+			/* The console bytes go to a descriptor no argument names. */
+			script = {.emulator = emulator.get(), .report = true,
+				.kind = GuestShutdownKind::restart, .console = other,
+				.console_text =
+					"init: init first stage started!\n"
+					"init: processing action (sys.boot_completed=1)\n"};
+			require(run(emulator.get(), channel) == 0, "the run failed");
+			const auto end = run_end(emulator.get());
+			require(end.boot_completed == 0U && end.init_observed == 0U,
+				"output the record does not read counted");
+			guard.boot_started(epoch);
+			require(guard.may_restart(epoch + 20s, completion_of(end)),
+				"a healthy boot on an unread console was counted");
+		}
+	}
+	close(other);
 }
 
 void test_a_finished_run_releases_its_disk_lock()
@@ -338,6 +440,8 @@ int main()
 		test_a_stop_wins_over_the_guest();
 		test_a_run_that_ran_no_guest_ends_nothing();
 		test_the_console_says_when_the_boot_finished();
+		test_a_finished_boot_then_unfinished_ones_reach_the_limit();
+		test_healthy_boots_on_an_unread_console_are_never_limited();
 		test_a_finished_run_releases_its_disk_lock();
 	} catch (const std::exception &error) {
 		std::fprintf(stderr, "run end test failed: %s\n", error.what());
