@@ -384,6 +384,11 @@ public struct InstanceFiles: Sendable {
     public static let dataDisk = "data.img"
     public static let stateFile = "instance.json"
     public static let snapshotPrefix = "data.img.pre-"
+    /// Present from the guest's creation until its first start was seen to
+    /// reach `sys.boot_completed`: a first start that ended before it, even one
+    /// that ended before the kernel ran, is still the first when the guest
+    /// starts again. A guest an earlier version made has none, and is past it.
+    public static let firstBootMarker = "first-boot-pending"
     /// The installation's serial number and eth0 address, which the runtime
     /// makes beside the data disk (`darwin/device/block/android_identity.hpp`
     /// owns the file). It belongs to the data disk's life: an update, a resize,
@@ -400,6 +405,9 @@ public struct InstanceFiles: Sendable {
 
     public var data: URL { directory.appendingPathComponent(Self.dataDisk) }
     public var state: URL { directory.appendingPathComponent(Self.stateFile) }
+    public var firstBoot: URL { directory.appendingPathComponent(Self.firstBootMarker) }
+    /// Whether the guest's first Android boot has not been seen to complete.
+    public var firstBootPending: Bool { FileManager.default.fileExists(atPath: firstBoot.path) }
     public var identity: URL { directory.appendingPathComponent(Self.identityFile) }
     /// The user's snapshots of the data (`SnapshotStore`), which an erase
     /// deletes with the rest.
@@ -478,6 +486,7 @@ public struct InstanceFiles: Sendable {
         // The record of the walk the guest owes (`PartialSweepLedger`) is the
         // disk's: a guest made after this one starts with a record of its own.
         doomed.append(PartialSweepLedger.url(in: directory))
+        doomed.append(firstBoot)
         var failure: Error?
         for url in doomed where manager.fileExists(atPath: url.path) {
             do { try manager.removeItem(at: url) } catch { failure = failure ?? error }
@@ -532,6 +541,9 @@ public struct InstanceFiles: Sendable {
             // A data disk that is made at the next start holds nothing.
             if !manager.fileExists(atPath: data.path) { try PartialSweepLedger.markSettled(in: directory) }
             let created = InstanceState(creating: release, at: when)
+            // Before the record: a guest whose record exists has the marker,
+            // and one without a record is created again.
+            try Data().write(to: firstBoot, options: .atomic)
             try write(created)
             return created
         }
@@ -581,6 +593,8 @@ public struct InstanceFiles: Sendable {
         guard var current = try readState(), current.releaseID == release.releaseID else {
             throw InstanceError.state("The virtual machine was not started with this system.")
         }
+        // Android booted: this was the guest's first boot, or it no longer is.
+        try? FileManager.default.removeItem(at: firstBoot)
         guard let snapshot = current.pendingUpdate?.snapshot else { return current }
         current.pendingUpdate = nil
         try write(current)
@@ -596,6 +610,7 @@ public struct InstanceFiles: Sendable {
         guard var current = try readState(), current.releaseID == release.releaseID else {
             throw InstanceError.state("The virtual machine was not started with this system.")
         }
+        try? FileManager.default.removeItem(at: firstBoot)
         let snapshot = current.pendingUpdate?.snapshot
         current.lastCompleted = InstanceState.Completed(
             releaseID: release.releaseID, buildIncremental: String(release.buildNumber), at: Self.timestamp(now)

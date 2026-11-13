@@ -8,7 +8,15 @@ import SwiftUI
 /// title; and the steps in one panel, with no bar or percentage of the whole
 /// (only the disk write, which knows its length, says one). First start,
 /// update, recovery and restart are variants of the same screen. A launch
-/// has one run, so there is no Cancel.
+/// has one run, so the boot has no Cancel; the notice's Stop asks first.
+///
+/// A start that has run for three minutes (`SlowStart`; eight for a first
+/// start and the first after an update) without reaching Android puts a notice
+/// above the steps: what the screen is waiting for, the step and the time, Stop
+/// (which asks first) and, where Send feedback is compiled in, Send feedback.
+/// The boot goes on behind it, and it goes away when the boot completes. There
+/// is no way to dismiss it. It sits above the steps and pushes them down;
+/// where the screen is short, the screen scrolls.
 ///
 /// A normal boot lays the guest's display out from the first frame and shows
 /// it dimmed behind this screen, so the guest is seen starting. The dim is a
@@ -36,17 +44,44 @@ struct BootView: View {
         let frozen = model.frozenBootStage.map { min($0, steps.count - 1) }
         let current = frozen ?? stage
         VStack(spacing: 0) {
-            statusLine(frozen: frozen != nil)
-            ScrollView {
-                content(guest: guest, system: model.system, steps: steps, current: current)
-                    .containerRelativeFrame(.vertical, alignment: .center) { length, _ in length }
+            statusLine(frozen: frozen != nil && !clockRuns)
+            // Centred while it fits; taller than the screen (the notice, at the
+            // largest text size), it scrolls from its top.
+            GeometryReader { proxy in
+                ScrollView {
+                    content(guest: guest, system: model.system, steps: steps, current: current)
+                        .frame(minHeight: proxy.size.height, alignment: .center)
+                }
+                .scrollBounceBehavior(.basedOnSize)
             }
-            .scrollBounceBehavior(.basedOnSize)
         }
         .onCardHalf(.boot)
         .background { backdrop }
+        // The screen is dark over the guest's display, whatever the system's
+        // appearance is. UIKit presents the Stop alert and the feedback sheet
+        // in the window's appearance, which a SwiftUI preference leaves
+        // alone: the window is asked for dark while this screen is in it.
+        // Recovery's own screen follows the system, and so does what follows
+        // the boot.
+        .background { if dimmed { DarkWindow() } }
         .environment(\.colorScheme, dimmed ? .dark : colorScheme)
         .statusBarHidden(true)
+        .task {
+            // The notice comes from the clock, not from the console: a boot
+            // whose line never comes is exactly the one it is for.
+            while !Task.isCancelled {
+                model.updateSlowStart()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+        .onChange(of: model.slowStart.showing) { _, showing in
+            guard showing else { return }
+            Self.announce(Self.slowTitle(longByNature: model.slowStart.longByNature))
+        }
+        .onChange(of: model.slowStart.stopping) { _, stopping in
+            guard stopping else { return }
+            Self.announce(String(localized: "Stopping\u{2026}"))
+        }
         .task(id: kind) {
             guard frozen == nil else { return }
             if model.driver != nil {
@@ -64,8 +99,24 @@ struct BootView: View {
         }
     }
 
+    /// The Simulator preview holds the steps still and lets the clock run, to
+    /// capture one clock on the status line and the notice at two moments.
+    private var clockRuns: Bool {
+        #if APP_STORE
+        false
+        #else
+        model.previewClockRuns
+        #endif
+    }
+
     /// The guest's display shows through, dimmed, on every boot but Recovery's.
     private var dimmed: Bool { kind != .recovery }
+
+    /// The dark screen asks for a dark alert; Recovery's follows the system's.
+    private var alertIsDark: Bool { dimmed || colorScheme == .dark }
+
+    /// The app's teal, lightened for the dark alert's buttons.
+    private static let darkAlertTint = Color(red: 0.36, green: 0.82, blue: 0.78)
 
     @ViewBuilder
     private var backdrop: some View {
@@ -113,21 +164,36 @@ struct BootView: View {
     private func statusLine(frozen: Bool) -> some View {
         HStack(spacing: 8) {
             PulsingDot()
-            Text(Self.status(kind))
+            // Stop was chosen: the line says what is happening now.
+            Text(model.slowStart.stopping ? String(localized: "Stopping\u{2026}") : Self.status(kind))
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Color.accentColor)
+                // One word, which shrinks before it would break ("Stop-/ping").
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+                .layoutPriority(1)
             Spacer()
             TimelineView(.periodic(from: startedAt, by: 1)) { timeline in
-                let seconds = frozen ? model.frozenElapsed : Int(timeline.date.timeIntervalSince(startedAt))
+                // The start's own time, which a restart of the guest in place
+                // goes on counting; this screen's, where none is kept.
+                let seconds = frozen ? model.frozenElapsed
+                    : model.slowStart.began != nil ? model.bootElapsedSeconds()
+                    : Int(timeline.date.timeIntervalSince(startedAt))
                 Text(Formats.elapsed(seconds))
                     .font(.system(.subheadline, design: .rounded).weight(.medium))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .contentTransition(.numericText())
+                    // The time keeps its width; the state beside it is the one
+                    // that wraps or shrinks.
+                    .lineLimit(1)
+                    .fixedSize()
             }
         }
         .padding(.horizontal, 24)
-        .frame(height: 44)
+        // Taller than 44 where the text is large.
+        .padding(.vertical, 6)
+        .frame(minHeight: 44)
         .frame(maxWidth: 640)
         .frame(maxWidth: .infinity)
     }
@@ -137,6 +203,10 @@ struct BootView: View {
             Text(kind == .recovery ? "Recovery" : "Andarium")
                 .font(.largeTitle.weight(.bold))
                 .padding(.horizontal, 4)
+
+            if model.slowStart.showing {
+                slowNotice(steps: steps, current: current)
+            }
 
             VStack(spacing: 0) {
                 ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
@@ -183,6 +253,143 @@ struct BootView: View {
         .padding(.vertical, 20)
         .frame(maxWidth: 520)
         .frame(maxWidth: .infinity)
+    }
+
+    // MARK: Slow start
+
+    /// The notice's title. A first start, and the first start after an update,
+    /// have no usual to be slower than.
+    static func slowTitle(longByNature: Bool) -> String {
+        longByNature
+            ? String(localized: "Starting is taking a long time")
+            : String(localized: "Starting is taking longer than usual")
+    }
+
+    /// Spoken at once, not after VoiceOver's own speech.
+    private static func announce(_ text: String) {
+        var announcement = AttributedString(text)
+        announcement.accessibilitySpeechAnnouncementPriority = .high
+        AccessibilityNotification.Announcement(announcement).post()
+    }
+
+    /// "3 minutes, 12 seconds" in the person's language, for VoiceOver.
+    static func spoken(_ seconds: Int) -> String {
+        Duration.seconds(seconds).formatted(.units(allowed: [.minutes, .seconds], width: .wide))
+    }
+
+    private func slowNotice(steps: [Step], current: Int) -> some View {
+        let stepTitle = steps[min(max(current, 0), steps.count - 1)].title
+        return VStack(alignment: .leading, spacing: 12) {
+            Label {
+                Text(Self.slowTitle(longByNature: model.slowStart.longByNature))
+                    .font(.headline)
+                    .fixedSize(horizontal: false, vertical: true)
+            } icon: {
+                Image(systemName: "hourglass")
+                    .foregroundStyle(Color.accentColor)
+            }
+            .accessibilityAddTraits(.isHeader)
+            Text("The virtual machine is still starting. You can keep waiting, or stop it. To start it again after stopping, close Andarium in the App Switcher and open it again.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            // The time moves with the clock, as the status line's does.
+            TimelineView(.periodic(from: startedAt, by: 1)) { _ in
+                let seconds = model.frozenBootStage != nil && !clockRuns ? model.frozenElapsed : model.bootElapsedSeconds()
+                Text(verbatim: "\(stepTitle) \u{00B7} \(Formats.elapsed(seconds))")
+                    .font(.subheadline.weight(.semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityLabel(Text(verbatim: "\(stepTitle), \(Self.spoken(seconds))"))
+            }
+            ViewThatFits(in: .horizontal) {
+                slowButtons(lineLimit: 1, axis: .horizontal)
+                slowButtons(lineLimit: nil, axis: .vertical)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .modifier(BootPanel(dimmed: dimmed, radius: 22))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("boot-slow-notice")
+    }
+
+    /// Side by side, at one width (`EqualWidthRow`), only where both labels fit
+    /// at their own; stacked, a label wraps. Stop's label is as wide as its
+    /// longer state, so that choosing it moves nothing.
+    @ViewBuilder
+    private func slowButtons(lineLimit: Int?, axis: Axis) -> some View {
+        let layout = axis == .horizontal ? AnyLayout(EqualWidthRow(spacing: 12)) : AnyLayout(VStackLayout(spacing: 10))
+        layout {
+            Button(role: .destructive) {
+                model.askToStop()
+            } label: {
+                ZStack {
+                    stopLabel(stopping: true, lineLimit: lineLimit, axis: axis).hidden()
+                    stopLabel(stopping: model.slowStart.stopping, lineLimit: lineLimit, axis: axis)
+                }
+                .frame(maxWidth: .infinity, minHeight: 32)
+            }
+            .buttonStyle(.bordered)
+            .tint(.red)
+            .controlSize(.large)
+            .disabled(model.slowStart.stopping)
+            .accessibilityIdentifier("boot-stop")
+            // An alert, not a confirmation dialog: on iPhone and iPad that is a
+            // popover that shows no Cancel.
+            .alert(
+                "Stop the virtual machine?",
+                isPresented: Binding(get: { model.confirmingStop }, set: { model.confirmingStop = $0 })
+            ) {
+                Button("Stop", role: .destructive) { model.stopStart() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("To start it again, close Andarium in the App Switcher and open it again.")
+            }
+            // Cancel takes the tint: the app's teal is 2.1:1 to 2.3:1 on the
+            // dark alert's glass, this one 4.1:1 to 4.7:1. After the alert,
+            // so the alert is inside it; Stop's own red is inside it too.
+            .tint(alertIsDark ? Self.darkAlertTint : Color.accentColor)
+            #if FEEDBACK_MAIL
+            if model.feedbackAddress != nil {
+                Button {
+                    model.feedbackFromBoot = true
+                } label: {
+                    Text("Send feedback", tableName: "Feedback")
+                        .fontWeight(.semibold)
+                        .lineLimit(lineLimit)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: axis == .horizontal, vertical: true)
+                        .frame(maxWidth: .infinity, minHeight: 32)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .accessibilityIdentifier("boot-send-feedback")
+            }
+            #endif
+        }
+    }
+
+    /// Stop's label in one of its two states. Side by side, "Stopping\u{2026}"
+    /// has a spinner. Stacked, the button is as wide as the notice and the text
+    /// the largest sizes make is wide: the word keeps the whole width, with no
+    /// spinner beside it (the status line and the disabled button say it), and
+    /// shrinks before it would break.
+    @ViewBuilder
+    private func stopLabel(stopping: Bool, lineLimit: Int?, axis: Axis) -> some View {
+        HStack(spacing: 8) {
+            if stopping && axis == .horizontal {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityHidden(true)
+            }
+            Text(stopping ? "Stopping\u{2026}" : "Stop")
+                .fontWeight(.semibold)
+                .lineLimit(axis == .horizontal ? lineLimit : 1)
+                .minimumScaleFactor(axis == .horizontal ? 1 : 0.5)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: axis == .horizontal, vertical: true)
+        }
     }
 
     private enum StepState { case done, active, pending }
@@ -295,6 +502,31 @@ struct BootView: View {
     }
 }
 
+/// Buttons side by side at one width: the ideal width of the widest label, so
+/// that `ViewThatFits` stacks them as soon as either needs more than half of
+/// the row, and a label that changes does not move the other.
+private struct EqualWidthRow: Layout {
+    let spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let ideals = subviews.map { $0.sizeThatFits(.unspecified) }
+        let cell = ideals.map(\.width).max() ?? 0
+        let ideal = cell * CGFloat(subviews.count) + spacing * CGFloat(max(subviews.count - 1, 0))
+        return CGSize(width: proposal.width ?? ideal, height: ideals.map(\.height).max() ?? 0)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard !subviews.isEmpty else { return }
+        let gaps = spacing * CGFloat(subviews.count - 1)
+        let cell = (bounds.width - gaps) / CGFloat(subviews.count)
+        for (index, subview) in subviews.enumerated() {
+            subview.place(
+                at: CGPoint(x: bounds.minX + CGFloat(index) * (cell + spacing), y: bounds.minY),
+                proposal: ProposedViewSize(width: cell, height: bounds.height))
+        }
+    }
+}
+
 /// The boot screen's panels: a flat translucent fill over the dimmed
 /// display, which needs no backdrop sampling, and glass over Recovery's
 /// opaque screen.
@@ -348,5 +580,56 @@ struct PulsingDot: View {
             .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: dim)
             .onAppear { dim = true }
             .accessibilityHidden(true)
+    }
+}
+
+/// Puts a dark appearance on the window the boot screen is in, for as long as
+/// it is there. Windows are counted, so a screen that replaces another in the
+/// window leaves the appearance it was given back and not the dark one.
+private struct DarkWindow: UIViewRepresentable {
+    func makeUIView(context: Context) -> WindowStyleView { WindowStyleView() }
+    func updateUIView(_ view: WindowStyleView, context: Context) {}
+
+    @MainActor
+    final class Loan {
+        weak var window: UIWindow?
+        var users = 0
+        let before: UIUserInterfaceStyle
+        init(window: UIWindow) {
+            self.window = window
+            before = window.overrideUserInterfaceStyle
+        }
+    }
+
+    @MainActor private static var loans: [ObjectIdentifier: Loan] = [:]
+
+    @MainActor static func take(_ window: UIWindow) {
+        let key = ObjectIdentifier(window)
+        let loan: Loan
+        if let held = loans[key], held.window === window {
+            loan = held
+        } else {
+            loan = Loan(window: window)
+            loans[key] = loan
+        }
+        loan.users += 1
+        window.overrideUserInterfaceStyle = .dark
+    }
+
+    @MainActor static func give(_ window: UIWindow) {
+        let key = ObjectIdentifier(window)
+        guard let loan = loans[key], loan.window === window else { return }
+        loan.users -= 1
+        guard loan.users <= 0 else { return }
+        window.overrideUserInterfaceStyle = loan.before
+        loans[key] = nil
+    }
+
+    final class WindowStyleView: UIView {
+        override func willMove(toWindow newWindow: UIWindow?) {
+            super.willMove(toWindow: newWindow)
+            if let window { DarkWindow.give(window) }
+            if let newWindow { DarkWindow.take(newWindow) }
+        }
     }
 }

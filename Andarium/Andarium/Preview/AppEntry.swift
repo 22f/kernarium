@@ -171,6 +171,27 @@ struct AppEntry {
             model.phase = .booting(kind)
         }
 
+        /// A start that has run `seconds`: the model's own clock says so, so
+        /// the notice appears as it does for a real one, and Stop (played)
+        /// ends the run as a host stop does.
+        func slowBoot(_ kind: BootKind = .normal, stage: Int, seconds: Int, stopping: Bool = false) {
+            boot(kind, stage: stage, seconds: seconds)
+            let now = model.clock()
+            model.slowStart.begin(at: now - TimeInterval(seconds), kind: kind)
+            _ = model.slowStart.update(at: now)
+            if stopping { _ = model.slowStart.requestStop() }
+        }
+
+        /// A tap on Stop comes long after the screen's first frame; a dialog
+        /// asked for in it is presented before the screen has put its
+        /// appearance on the window, and takes the system's.
+        func asksToStopOnceSettled() {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(1600))
+                model.confirmingStop = true
+            }
+        }
+
         switch screen {
         case "home-new":
             model.guest = Guest.fresh(on: host)
@@ -275,6 +296,35 @@ struct AppEntry {
             boot(.recovery, stage: 3, seconds: 7)
         case "boot-restart":
             boot(.restart, stage: 3, seconds: 8)
+        case "boot-slow":
+            slowBoot(stage: 3, seconds: 197)
+        case "boot-slow-stopping":
+            slowBoot(stage: 3, seconds: 203, stopping: true)
+        case "boot-slow-first":
+            // A first start eight minutes in: the later notice, with a plain title.
+            model.guest = model.guest?.erased
+            model.plan = .firstStart
+            slowBoot(.firstStart, stage: 3, seconds: 497)
+        case "boot-slow-upgrade":
+            model.bootFrom = PreviewData.previousSystemRelease
+            slowBoot(.upgrade, stage: 3, seconds: 491)
+        case "boot-slow-recovery":
+            slowBoot(.recovery, stage: 3, seconds: 197)
+        case "boot-slow-live":
+            // The steps held, the clock running: the status line and the notice count one time.
+            slowBoot(stage: 3, seconds: 197)
+            model.previewClockRuns = true
+        case "boot-slow-stop":
+            // Stop chosen: the dialog that asks first.
+            slowBoot(stage: 3, seconds: 197)
+            asksToStopOnceSettled()
+        case "boot-slow-recovery-stop":
+            // The same dialog over Recovery's own, light screen.
+            slowBoot(.recovery, stage: 3, seconds: 197)
+            asksToStopOnceSettled()
+        case "boot-slow-storage":
+            // The same notice over an earlier step, as a start stuck on the disk shows it.
+            slowBoot(stage: 2, seconds: 184)
         case "boot-jit":
             model.jitOn = true
             model.preparingJit = true
@@ -368,6 +418,11 @@ struct AppEntry {
         case "failed":
             // The failure path a real run takes: a crash after 42 minutes.
             model.fail()
+        case "stopped":
+            // What Stop on the slow-start notice leaves: the run ended by the person.
+            model.fail(RunEnd(result: -5, stoppedByUser: true), uptimeSeconds: 203)
+        case "feedback-boot", "feedback-boot-filled", "feedback-boot-details", "feedback-boot-finished":
+            slowBoot(stage: 3, seconds: 197)
         default:
             break
         }

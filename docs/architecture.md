@@ -761,15 +761,26 @@ A launch that passes `--session-record=PATH` gets a record of how its session
 ended (`runtime/session_record`): "running" from the boot on, overwritten by
 every end that runs code, a panic with its message and the kernel's last
 output included. A record still "running" at the next launch means the process
-was ended from outside without running, as a memory-limit end is. The file is
-text of a fixed layout (`uml-session 7`) that never passes 18176 bytes
-(`session_record_max_bytes`): an 8 KiB memory slot, a 4 KiB stall slot, a
-512-byte network slot, a 256-byte storage slot and the state with the kernel
-output it quotes, at most 5 KiB. Each part is rewritten in place by its own
-writer, so nothing grows with the session; layouts 1 to 6, which lack the
-storage slot or the figures of the run or the network slot or the stall slot,
-still parse. The storage slot counts the session's settles and those that were
-not confirmed, and names the last one's call, outcome and time: words and
+was ended from outside without running, as a memory-limit end is. For an
+Android guest the state also says whether the boot finished (`boot completed`;
+`boot unfinished` once init's output was seen without it; `boot unobserved`
+when the record saw none of init's output) and how many times the guest
+restarted before the session (`restarts N`); until the boot completes the
+checkpoint thread rewrites the state with the console's last output whenever
+that grew, so a process ended mid-boot leaves where the boot had got, and a
+stop, restart or power-off before the boot completed quotes that output too.
+The output a record quotes is its own boot's, never an earlier boot's of the
+same process. An end is the last state on disk unless the process dies between
+a delayed checkpoint's write and its repair: the end formats its record before
+it writes it, and a checkpoint whose write lands after it writes that record
+again at once. The file is text of a fixed layout (`uml-session 7`) that never
+passes 18176 bytes (`session_record_max_bytes`): an 8 KiB memory slot, a 4 KiB
+stall slot, a 512-byte network slot, a 256-byte storage slot and the state with
+the kernel output it quotes, at most 5 KiB. Each part is rewritten in place by
+its own writer, so nothing grows with the session; layouts 1 to 6, which lack
+the storage slot or the figures of the run or the network slot or the stall
+slot, still parse. The storage slot counts the session's settles and those that
+were not confirmed, and names the last one's call, outcome and time: words and
 numbers only, blank until the first. The
 first 8 KiB are a memory checkpoint that a thread of its own rewrites every 2 s
 (`memory_checkpoint_interval_ms`): the footprint, its peak and what the

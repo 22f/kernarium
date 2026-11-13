@@ -47,6 +47,57 @@ struct SessionRecordTests {
             title: "Android's kernel panicked", text: "Android stopped with a kernel panic: sysrq triggered crash."))
     }
 
+    @Test func readsWhereAnUnfinishedBootHadGot() throws {
+        let running = try #require(SessionRecord(text: record(
+            """
+            state running
+            end running
+            status 0
+            pid 7
+            started 1794114339
+            boot unfinished
+            restarts 2
+            kernel-output
+            [   31.2] init: starting service 'netd'...
+
+            """)))
+        #expect(running.running && running.bootFinished == false && running.restarts == 2)
+        #expect(running.kernelOutput?.hasPrefix("[   31.2] init: starting service 'netd'") == true)
+        #expect(running.summary.hasSuffix(
+            " Android had not finished booting and the guest had restarted 2 times in this process."))
+        let stopped = try #require(SessionRecord(text: record(
+            "state ended\nend stopped\nstatus 0\npid 7\nstarted 1794114339\nended 1794114540\nboot unfinished\nrestarts 0\n"
+        )))
+        #expect(stopped.orderly && stopped.bootFinished == false && stopped.restarts == 0)
+        #expect(stopped.summary == "The previous session ended: stopped. Android had not finished booting.")
+    }
+
+    @Test func aFinishedBootAddsNothingToTheSummary() throws {
+        let done = try #require(SessionRecord(text: record(
+            "state ended\nend powered-off\nstatus 0\npid 7\nstarted 1\nended 2\nboot completed\nrestarts 3\n")))
+        #expect(done.bootFinished == true && done.restarts == 3)
+        #expect(!done.summary.contains("finished booting"))
+    }
+
+    @Test func aBootTheRuntimeCouldNotObserveClaimsNothing() throws {
+        // The console showed none of init's output: the boot may have been
+        // fine, so the record is not read as an unfinished one.
+        let unseen = try #require(SessionRecord(text: record(
+            "state ended\nend stopped\nstatus 0\npid 7\nstarted 1\nended 2\nboot unobserved\nrestarts 1\n")))
+        #expect(unseen.bootFinished == nil && unseen.restarts == 1)
+        #expect(!unseen.summary.contains("finished booting"))
+    }
+
+    @Test func aRecordThatSaysNothingOfTheBootLeavesItUnknown() throws {
+        let plain = try #require(SessionRecord(text: record(
+            "state ended\nend powered-off\nstatus 0\npid 7\nstarted 1\nended 2\n")))
+        #expect(plain.bootFinished == nil && plain.restarts == nil)
+        #expect(!plain.summary.contains("booting"))
+        let odd = try #require(SessionRecord(text: record(
+            "state running\nend running\nboot maybe\nrestarts many\n")))
+        #expect(odd.bootFinished == nil && odd.restarts == nil)
+    }
+
     @Test func aRecordStillRunningNearTheLimitWasEndedByIOS() throws {
         let near = try #require(SessionRecord(text: record(
             "state running\nend running\nstatus 0\npid 7\nstarted 1794114339\n",
