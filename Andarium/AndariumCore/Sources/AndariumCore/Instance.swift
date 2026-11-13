@@ -23,6 +23,23 @@ public enum InstanceError: Error, Equatable, LocalizedError {
     }
 }
 
+/// How build numbers order releases: as integers, except that the numbers of
+/// the counter the first public releases were built with, `legacyRange`, are
+/// older than every number outside it.
+public enum BuildNumber {
+    public static let legacyRange: ClosedRange<Int> = 2_026_110_800...2_026_110_899
+
+    /// The oldest build number there is: a placeholder release with it is
+    /// never newer than any data.
+    public static var oldest: Int { legacyRange.lowerBound }
+
+    public static func isOlder(_ number: Int, than other: Int) -> Bool {
+        let legacy = legacyRange.contains(number)
+        if legacy != legacyRange.contains(other) { return legacy }
+        return number < other
+    }
+}
+
 /// What an instance records about the release it starts with, read from the
 /// release's manifest (schema 6) and its partition layout (schema 2).
 public struct ReleaseIdentity: Equatable, Sendable {
@@ -310,7 +327,7 @@ public enum InstanceRules {
                 }
                 return InstanceDecision(.retry, "The update starts again, its snapshot kept.")
             }
-            if release.releaseID != state.releaseID, release.buildNumber > state.buildNumber {
+            if release.releaseID != state.releaseID, BuildNumber.isOlder(state.buildNumber, than: release.buildNumber) {
                 guard snapshotExists else {
                     return InstanceDecision(.refuseConflict, "The update's snapshot is missing.")
                 }
@@ -339,7 +356,7 @@ public enum InstanceRules {
             }
             return InstanceDecision(.boot, "The system the data was last started with.")
         }
-        if release.buildNumber < state.buildNumber {
+        if BuildNumber.isOlder(release.buildNumber, than: state.buildNumber) {
             return InstanceDecision(
                 .refuseDowngrade,
                 "Build \(release.buildNumber) is older than build \(state.buildNumber), which the data was started with: update the system, or erase the virtual machine."
