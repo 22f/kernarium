@@ -2,6 +2,7 @@
 
 import Testing
 @testable import AndariumCore
+import AndariumCoreTestSupport
 
 struct FormatsTests {
     private func bytes(mib: Double) -> UInt64 { UInt64(mib * Double(Limits.bytesPerMiB)) }
@@ -521,6 +522,83 @@ struct MemoryPolicyTests {
         // A policy that is not given the host's answer has none.
         #expect(phone.graphicsMemoryMiB(forMemory: 2048, vCPUs: 1) == nil)
         #expect(MemoryPolicy(maximumsMiB: [4096]).graphicsMemoryMiB(forMemory: 2048, vCPUs: 1) == nil)
+    }
+
+    @Test func theGraphicsMemoryWhileCameraIsLiveIsTheBudgetLessTheCamerasReserve() {
+        // The runtime's figures: a reserve for every budget (one fixed figure at the tier every host gets), asked once each.
+        var reserveAsked = 0
+        let policy = MemoryPolicy(
+            processorCount: 2,
+            bound: { _ in 4096 }, defaultMemory: { _ in 2048 },
+            graphicsMemory: { memory, count in
+                // The iPad mini 6's 534 MiB for the default guest and 384 MiB at the floor.
+                memory <= 1536 ? 534 : 384
+            },
+            cameraReserve: { budget in reserveAsked += 1; return 106 }
+        )
+        #expect(reserveAsked == 2 * 57, "once for every budget of the table")
+        // Camera off, or blocked: the budget itself.
+        #expect(policy.graphicsMemoryMiB(forMemory: 1536, vCPUs: 1) == 534)
+        #expect(policy.graphicsMemoryMiB(forMemory: 1536, vCPUs: 1, cameraLive: false) == 534)
+        // Camera live: the pool the GPU is given, 428 MiB on an iPad mini 6.
+        #expect(policy.graphicsMemoryMiB(forMemory: 1536, vCPUs: 1, cameraLive: true) == 428)
+        // At the floor the reserve is taken after the clamp: the pool is below the floor.
+        #expect(policy.graphicsMemoryMiB(forMemory: 2048, vCPUs: 2) == 384)
+        #expect(policy.graphicsMemoryMiB(forMemory: 2048, vCPUs: 2, cameraLive: true) == 278)
+        // A host that states no reserve leaves the budget as it is, and one without an estimate has none.
+        let plain = MemoryPolicy(
+            processorCount: 1, bound: { _ in 4096 }, defaultMemory: { _ in 2048 }, graphicsMemory: { _, _ in 534 })
+        #expect(plain.graphicsMemoryMiB(forMemory: 1536, vCPUs: 1, cameraLive: true) == 534)
+        #expect(MemoryPolicy(maximumsMiB: [4096]).graphicsMemoryMiB(forMemory: 2048, vCPUs: 1, cameraLive: true) == nil)
+        // The pool is never negative.
+        let tiny = MemoryPolicy(
+            processorCount: 1, bound: { _ in 4096 }, defaultMemory: { _ in 2048 },
+            graphicsMemory: { _, _ in 100 }, cameraReserve: { _ in 106 })
+        #expect(tiny.graphicsMemoryMiB(forMemory: 1536, vCPUs: 1, cameraLive: true) == 0)
+        // The reserve moves neither the sizes offered nor the default.
+        #expect(policy.maximumMiB(vCPUs: 1) == plain.maximumMiB(vCPUs: 1))
+        #expect(policy.defaultMemoryMiB(vCPUs: 1) == plain.defaultMemoryMiB(vCPUs: 1))
+    }
+
+    /// While Camera is on the sheet shows the pool, the budget less the camera's
+    /// reserve, so the graphics warning's line is where the pool, not the
+    /// budget, falls under a gibibyte. The sizes and the default do not move.
+    @Test func theGraphicsWarningFollowsThePoolWhileCameraIsLive() {
+        let withCamera = MemoryPolicy(
+            processorCount: 2,
+            bound: { _ in 4096 }, defaultMemory: { _ in 3072 }, safeMemory: { _ in 3584 },
+            graphicsMemory: { memory, count in MemoryPolicyTests.fallingGraphics(memory, count) },
+            cameraReserve: { _ in 106 }
+        )
+        // Camera off, or blocked: the budget's line, as for a host without a reserve.
+        #expect(withCamera.graphicsLineMiB(vCPUs: 1) == fourGiB.graphicsLineMiB(vCPUs: 1))
+        #expect(withCamera.graphicsLineMiB(vCPUs: 1, cameraLive: false) == 3200)
+        #expect(withCamera.risk(3136, vCPUs: 1) == .none)
+        // Live at one vCPU: the pool is 1058 MiB at 3072 and 994 at 3136, so the line is the default.
+        #expect(withCamera.graphicsMemoryMiB(forMemory: 3072, vCPUs: 1, cameraLive: true) == 1058)
+        #expect(withCamera.graphicsMemoryMiB(forMemory: 3136, vCPUs: 1, cameraLive: true) == 994)
+        #expect(withCamera.graphicsLineMiB(vCPUs: 1, cameraLive: true) == 3072)
+        #expect(withCamera.risk(3072, vCPUs: 1, cameraLive: true) == .none)
+        for mib in [3136, 3200, 3584] {
+            #expect(withCamera.risk(mib, vCPUs: 1, cameraLive: true) == .graphics, "\(mib) MiB")
+            #expect(withCamera.isShortOfGraphicsMemory(mib, vCPUs: 1, cameraLive: true))
+        }
+        #expect(withCamera.risk(3648, vCPUs: 1, cameraLive: true) == .closing, "the safe size is the budget's rule")
+        // The warning is exactly the sizes above the default whose pool is under a gibibyte.
+        for count in 1...2 {
+            for mib in withCamera.stops(vCPUs: count) where mib <= withCamera.safeMemoryMiB(vCPUs: count) {
+                let pool = withCamera.graphicsMemoryMiB(forMemory: mib, vCPUs: count, cameraLive: true) ?? 0
+                #expect(
+                    (withCamera.risk(mib, vCPUs: count, cameraLive: true) == .graphics)
+                        == (pool < Limits.minimumDefaultGraphicsMemoryMiB && withCamera.isAboveDefault(mib, vCPUs: count)),
+                    "\(mib) MiB at \(count) vCPUs")
+            }
+        }
+        // The reserve moves neither the sizes offered nor the default.
+        #expect(withCamera.maximumMiB(vCPUs: 1) == fourGiB.maximumMiB(vCPUs: 1))
+        #expect(withCamera.defaultMemoryMiB(vCPUs: 1) == fourGiB.defaultMemoryMiB(vCPUs: 1))
+        // A host that states no reserve has one line.
+        #expect(fourGiB.graphicsLineMiB(vCPUs: 1, cameraLive: true) == fourGiB.graphicsLineMiB(vCPUs: 1))
     }
 
     @Test func theGraphicsWordsSayItIsSeparateAndWhereGamesRunShort() {

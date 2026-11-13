@@ -19,11 +19,29 @@ public struct HostDevice: Equatable, Sendable {
     /// Whether the device can have a mouse or trackpad whose pointer iOS shows
     /// the application: an iPad or a Mac, not an iPhone.
     public var supportsPointer: Bool
+    /// The kind of device it is: an iPhone, an iPad, or a Mac running the
+    /// application as an iPad app.
+    public var idiom: Idiom
+    /// Whether the device has a Taptic Engine to play the guest's haptics.
+    public var hasHaptics: Bool
+    /// Whether the device can give the guest a compass: it has a magnetometer
+    /// that Core Motion can give calibrated, and no permission refuses it. An
+    /// iPhone or an iPad, not a Mac or the Simulator.
+    public var hasCompass: Bool
+    /// Whether the device has a camera the guest can be given: a built-in one,
+    /// and not the iPad app on a Mac.
+    public var hasCamera: Bool
 
-    /// `processorCount` is the vCPU limit.
+    public enum Idiom: Equatable, Sendable { case phone, pad, mac }
+
+    /// `processorCount` is the vCPU limit. Whoever builds a host says what kind
+    /// of device it is and whether it has haptics, a compass and a camera: a
+    /// default would let a host claim "an iPhone without a camera" by leaving
+    /// the argument out, and its notes and rows would silently go missing.
     public init(
         name: String, processorCount: Int, memory: MemoryPolicy, freeStorageBytes: UInt64,
-        runsGuestGraphics: Bool = true, supportsPointer: Bool = true
+        runsGuestGraphics: Bool = true, supportsPointer: Bool = true, idiom: Idiom, hasHaptics: Bool,
+        hasCompass: Bool, hasCamera: Bool
     ) {
         self.name = name
         self.processorCount = max(1, processorCount)
@@ -31,6 +49,10 @@ public struct HostDevice: Equatable, Sendable {
         self.freeStorageBytes = freeStorageBytes
         self.runsGuestGraphics = runsGuestGraphics
         self.supportsPointer = supportsPointer
+        self.idiom = idiom
+        self.hasHaptics = hasHaptics
+        self.hasCompass = hasCompass
+        self.hasCamera = hasCamera
     }
 
     public func hasRoom(for bytes: UInt64) -> Bool { freeStorageBytes >= bytes }

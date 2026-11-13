@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AndariumCore
+import AndariumCoreTestSupport
 import SwiftUI
 import Testing
 import UIKit
@@ -63,19 +64,19 @@ struct CapabilitiesSectionTests {
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let with = model(hapticsAvailable: true)
-        let controller = try await host(with.model, count: 3, in: lease)
-        // Location, Microphone, then Haptics: the motion sensors have no row.
-        #expect(switches(in: controller.view).count == 3)
+        let controller = try await host(with.model, count: 4, in: lease)
+        // Location, Microphone, Camera, then Haptics: the motion sensors have no row.
+        #expect(switches(in: controller.view).count == 4)
         let without = model(hapticsAvailable: false)
-        let other = try await host(without.model, count: 2, in: lease)
-        #expect(switches(in: other.view).count == 2)
+        let other = try await host(without.model, count: 3, in: lease)
+        #expect(switches(in: other.view).count == 3)
     }
 
     @Test func theSwitchIsTheGuestsChoiceAndRoundTrips() async throws {
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let (model, driver) = model(hapticsAvailable: true)
-        let controller = try await host(model, count: 3, in: lease)
+        let controller = try await host(model, count: 4, in: lease)
         var haptics = try #require(switches(in: controller.view).last)
         // On for a new guest.
         #expect(haptics.isOn)
@@ -85,9 +86,9 @@ struct CapabilitiesSectionTests {
         #expect(await eventually { model.guest?.haptics == false })
         #expect(!driver.haptics)
         #expect(driver.savedGuest?.haptics == false)
-        // The other two are as they were.
+        // The other three are as they were.
         let others = switches(in: controller.view).dropLast()
-        #expect(others.map(\.isOn) == [false, false])
+        #expect(others.map(\.isOn) == [false, false, false])
 
         haptics = try #require(switches(in: controller.view).last)
         #expect(!haptics.isOn)
@@ -103,7 +104,7 @@ struct CapabilitiesSectionTests {
         defer { lease.give() }
         let (model, _) = model(hapticsAvailable: true)
         model.guest?.haptics = false
-        let controller = try await host(model, count: 3, in: lease)
+        let controller = try await host(model, count: 4, in: lease)
         #expect(try #require(switches(in: controller.view).last).isOn == false)
     }
 }

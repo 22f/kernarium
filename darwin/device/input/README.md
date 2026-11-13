@@ -17,7 +17,7 @@ and so is each device's bitmaps: only an addition is compatible.
 | Kind | Product | Name | Serial | Events |
 |---|---|---|---|---|
 | touchscreen | 0001 | Kernarium Touchscreen | `kernarium-touch-0` | multitouch, `INPUT_PROP_DIRECT` |
-| side keys | 0002 | Kernarium Keyboard | `kernarium-keyboard-0` | Power, the volume keys, Back, Home |
+| side keys | 0002 | Kernarium Keyboard | `kernarium-keyboard-0` | Power, the volume keys, Back, Home; `EV_SW` `SW_CAMERA_LENS_COVER` when the host states it |
 | hardware keyboard | 0003 | Kernarium Hardware Keyboard | `kernarium-hardware-keyboard-0` | `EV_KEY` exactly the codes `hid_keyboard.hpp` can produce (not `KEY_UNKNOWN`), `EV_LED` Num, Caps and Scroll Lock |
 | mouse | 0004 | Kernarium Mouse | `kernarium-mouse-0` | `EV_REL` X, Y and both wheels in steps and in high-resolution units, `EV_KEY` the five mouse buttons, `EV_LED` `LED_MISC` |
 | pointer | 0005 | Kernarium Pointer | `kernarium-pointer-0` | `EV_KEY` `BTN_TOUCH`, `BTN_TOOL_MOUSE` and the five buttons, `EV_ABS` slot (0 to 9), tracking id and position 0 to 32767; no input property |
@@ -34,6 +34,13 @@ key by its position (HID usage, through the table that transcribes the Linux
 HID driver's `hid_keyboard[]`), and take the layout from Android.
 `LED_MISC` on the mouse is how an Android application tells the host it
 captured the pointer.
+
+The side keys carry one switch when the host states it before the guest boots
+(`EventQueue::setSwitch`): `SW_CAMERA_LENS_COVER`, on in a session whose cameras
+are blocked, which Android reads as its hardware camera privacy switch
+([`darwin/device/camera`](../camera/README.md)). It is advertised only then, and
+reported as a report of its own ahead of every other event and again after a
+reset, so the guest's input core holds it from the moment it creates the device.
 
 ## Connected state
 

@@ -2,15 +2,18 @@
 #include "require.hpp"
 #include "synthetic_camera.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace uml::platform;
@@ -349,6 +352,72 @@ void multiCameraFormats()
     require(camera->videoSize(1) == Size(1920, 1080) && !camera->videoRunning(0));
 }
 
+// A camera that was given an anchor (its back camera lists capture formats) runs in it and nowhere else: a stream
+// outside the anchor, a still it does not make and an anchor a multi-camera session does not take are refused, and the
+// frames are the stream's size in the anchor's aspect ratio. A camera with none keeps the session's own rule.
+void anchoredCamera()
+{
+    using Size = std::pair<std::uint32_t, std::uint32_t>;
+    const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tablet));
+    const auto info = camera->cameras();
+    require(info[0].captureFormats.size() == 7 && info[0].videoFormats.size() == 7 && info[1].captureFormats.empty());
+    CameraStillRequest still;
+    still.jpegWidth = 1440;
+    still.jpegHeight = 1080;
+    {
+        // Without an anchor the session picks a format for each request, as it always did.
+        Recorder recorder;
+        auto session = camera->openSession(recorder);
+        require(camera->sessionAnchorCalls() == 0 && camera->sessionAnchors().empty() && camera->sessionLimits().maximumStillPixels == 0);
+        require(session->startVideo(0, 1920, 1080, 60) && session->takeStill(0, still));
+        session->stop();
+    }
+    Recorder recorder;
+    auto session = camera->openSession(recorder);
+    // The 1920x1440 format (1 to 30 fps) of the back camera, in a 12.7 MP cap.
+    const std::optional<std::size_t> anchors[] {3, std::nullopt};
+    session->setAnchors(anchors, {12'700'000, 6'220'800, 256});
+    require(camera->sessionAnchorCalls() == 1 && camera->sessionAnchors() == std::vector<std::optional<std::size_t>>(anchors, anchors + 2) &&
+                camera->sessionLimits().maximumStillPixels == 12'700'000 && camera->sessionLimits().maximumFrameBytes == 6'220'800 &&
+                camera->sessionLimits().frameRowAlignment == 256,
+            "the session records every field it was told");
+    require(!session->startVideo(0, 1920, 1080, 60), "a rate the anchor does not take");
+    require(!session->startVideo(0, 3840, 2160, 30), "a size larger than the anchor");
+    require(session->startVideo(0, 1920, 1080, 30) && camera->videoSize(0) == Size(1920, 1440),
+            "1080p is delivered in the anchor's 4:3 aspect ratio");
+    require(session->startVideo(0, 640, 480, 30) && camera->videoSize(0) == Size(640, 480), "a resize");
+    camera->pump(0, 1);
+    require(!recorder.frames.empty() && recorder.frames.back().second.width == 640 && recorder.frames.back().second.height == 480);
+    require(!session->takeStill(0, still), "a size another format makes (1440x1080) is not made by the anchor");
+    still.jpegWidth = 4224;
+    still.jpegHeight = 2376;
+    require(!session->takeStill(0, still), "nor the 16:9 size of the 12 MP video format");
+    still.jpegWidth = 4032;
+    still.jpegHeight = 3024;
+    require(session->takeStill(0, still), "a size the anchor makes");
+    camera->pump(0, 0);
+    require(recorder.stills.size() == 1);
+    // The front camera has none: it joins as the session's own rule has it, and the anchored camera stays where it is
+    // when it comes and goes.
+    require(session->startVideo(0, 1920, 1080, 30) && camera->videoSize(0) == Size(1920, 1440));
+    require(session->startVideo(1, 640, 480, 30), "a camera with no anchor beside an anchored one");
+    require(camera->videoSize(0) == Size(1920, 1440), "the anchored camera is not moved for a peer");
+    session->stopVideo(1);
+    require(camera->videoSize(0) == Size(1920, 1440), "nor back to a smaller format when the peer leaves");
+    session->stop();
+
+    // An anchor a multi-camera session does not take (the 4032x3024 format) cannot be joined.
+    Recorder second;
+    auto alone = camera->openSession(second);
+    const std::optional<std::size_t> large[] {4, std::nullopt};
+    alone->setAnchors(large, {12'700'000, 6'220'800});
+    require(alone->startVideo(0, 640, 480, 30), "alone, it runs");
+    require(!alone->startVideo(1, 640, 480, 30), "a second camera cannot join an anchor no multi-camera session takes");
+    require(camera->videoRunning(0) && !camera->videoRunning(1), "and the first runs on");
+    alone->stopVideo(0);
+    require(alone->startVideo(1, 640, 480, 30) && !alone->takeStill(0, still), "a still on it is refused too, beside a running camera");
+}
+
 // Every camera with an input counts in a multi-camera session, one that only
 // takes stills as well: it joins as a streaming camera does, the cameras that
 // stream move to formats the session takes (or the still is refused, nothing
@@ -360,8 +429,8 @@ void stillOnlyCamerasCount()
     auto session = camera->openSession(recorder);
     using Size = std::pair<std::uint32_t, std::uint32_t>;
     CameraStillRequest request;
-    request.jpegWidth = 1000;
-    request.jpegHeight = 700;
+    request.jpegWidth = 1008;
+    request.jpegHeight = 756;
     request.token = 7;
 
     // The back camera streams at a size of its own; a still on a front camera joins it.
@@ -421,8 +490,8 @@ void rawFailures()
     Recorder recorder;
     auto session = camera->openSession(recorder);
     CameraStillRequest request;
-    request.jpegWidth = 1000;
-    request.jpegHeight = 700;
+    request.jpegWidth = 1008;
+    request.jpegHeight = 756;
     request.raw = true;
     camera->refuseRaw(true);
     require(!session->takeStill(0, request));
@@ -483,8 +552,8 @@ void stills()
     auto session = camera->openSession(recorder);
     CameraStillRequest request;
     request.token = 7;
-    request.jpegWidth = 1000;
-    request.jpegHeight = 700;
+    request.jpegWidth = 1008;
+    request.jpegHeight = 756;
     require(session->takeStill(0, request));
     require(recorder.stills.empty());  // arrives on the camera's next tick
     camera->pump(0, 0);
@@ -497,6 +566,18 @@ void stills()
     for (std::size_t at = 2; at + 10 < jpeg.jpeg.size() && at < 200; ++at)
         exif |= jpeg.jpeg[at] == 0xff && jpeg.jpeg[at + 1] == 0xe1 && jpeg.jpeg[at + 4] == 'E' && jpeg.jpeg[at + 5] == 'x';
     require(exif);
+
+    // The JPEG is the size asked for, which is one the camera lists; a size it
+    // does not list is refused, even when a larger one covers it.
+    CameraStillRequest unlisted = request;
+    unlisted.token = 70;
+    unlisted.jpegWidth = 1000;
+    unlisted.jpegHeight = 700;
+    require(!session->takeStill(0, unlisted));
+    unlisted.jpegWidth = 1008;
+    unlisted.jpegHeight = 755;
+    require(!session->takeStill(0, unlisted));
+    require(recorder.stills.size() == 1);
 
     // The Bayer still, with the colour data of the sensor.
     request = {};
@@ -520,8 +601,8 @@ void stills()
         }
     require(red > blue);
     // JPEG and Bayer in one capture.
-    request.jpegWidth = 1000;
-    request.jpegHeight = 700;
+    request.jpegWidth = 1008;
+    request.jpegHeight = 756;
     request.token = 9;
     require(session->takeStill(0, request));
     camera->pump(0, 0);
@@ -552,8 +633,8 @@ void interruptions()
     camera->pump(0, 3);
     require(recorder.frames.size() == 1);  // nothing flows while interrupted
     CameraStillRequest request;
-    request.jpegWidth = 1000;
-    request.jpegHeight = 700;
+    request.jpegWidth = 1008;
+    request.jpegHeight = 756;
     require(session->takeStill(0, request));
     camera->pump(0, 0);
     require(!recorder.stills.back().second.ok);
@@ -561,6 +642,40 @@ void interruptions()
     require(recorder.events.size() == 2 && recorder.events[1].kind == CameraEventKind::resumed);
     camera->pump(0, 1);
     require(recorder.frames.size() == 2);
+}
+
+// R5 (recheck6): the end of an interruption and a restart both ask for a recovery, so a session may be asked twice. A
+// failed recovery is final for its session (the client closes it on the failure): a second one repairs nothing and
+// announces nothing, and a new session recovers as usual.
+void aFailedRecoveryIsFinalForItsSession()
+{
+    const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tablet));
+    const auto count = [](const Recorder& recorder, CameraEventKind kind) {
+        return std::count_if(recorder.events.begin(), recorder.events.end(), [kind](const CameraEvent& event) { return event.kind == kind; });
+    };
+    Recorder first;
+    auto session = camera->openSession(first);
+    require(session->startVideo(0, 640, 480, 30));
+    camera->interrupt();
+    camera->moveOutOfAnchor(true);
+    camera->refuseRepair(true);
+    camera->resume();
+    require(count(first, CameraEventKind::failed) == 1 && count(first, CameraEventKind::resumed) == 0 && camera->repairs() == 0,
+            "the repair is refused: the session failed");
+    camera->resume();
+    camera->refuseRepair(false);
+    camera->resume();
+    require(count(first, CameraEventKind::failed) == 1 && count(first, CameraEventKind::resumed) == 0 && camera->repairs() == 0,
+            "a second and a third notification, even with the device willing, repair and announce nothing");
+    session->stop();
+    Recorder second;
+    session = camera->openSession(second);
+    require(session->startVideo(0, 640, 480, 30));
+    camera->interrupt();
+    camera->moveOutOfAnchor(true);
+    camera->resume();
+    require(count(second, CameraEventKind::resumed) == 1 && count(second, CameraEventKind::failed) == 0 && camera->repairs() == 1,
+            "a new session recovers: repaired, then resumed");
 }
 
 void threaded()
@@ -575,8 +690,8 @@ void threaded()
         require(session->startVideo(0, 640, 480, 60));
         require(recorder.waitFor(4));
         CameraStillRequest request;
-        request.jpegWidth = 1000;
-        request.jpegHeight = 700;
+        request.jpegWidth = 1008;
+        request.jpegHeight = 756;
         require(session->takeStill(0, request));
         require(recorder.waitFor(4, 1));
         std::lock_guard lock(recorder.mutex);
@@ -590,6 +705,65 @@ void threaded()
     require(camera->sessionsOpen() == 0);
 }
 
+// The luma of a rectangle of a frame, averaged by area to `width` x `height` samples: what a device's scale of an
+// anchored camera's frame makes of it.
+std::vector<std::uint8_t> boxScaled(const CameraFrame& frame, std::uint32_t top, std::uint32_t rows, std::uint32_t width, std::uint32_t height)
+{
+    std::vector<std::uint8_t> out(std::size_t(width) * height);
+    for (std::uint32_t y = 0; y < height; ++y)
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const std::uint32_t x0 = x * frame.width / width, x1 = std::max(x0 + 1, (x + 1) * frame.width / width);
+            const std::uint32_t y0 = top + y * rows / height, y1 = std::max(y0 + 1, top + (y + 1) * rows / height);
+            std::uint64_t sum = 0;
+            for (std::uint32_t sy = y0; sy < y1; ++sy)
+                for (std::uint32_t sx = x0; sx < x1; ++sx) sum += frame.luma[std::size_t(sy) * frame.lumaStride + sx];
+            out[std::size_t(y) * width + x] = std::uint8_t(sum / (std::uint64_t(x1 - x0) * (y1 - y0)));
+        }
+    return out;
+}
+
+// The marker lies across the middle of the picture, so the centred crop and the scale a device makes of an anchored
+// camera's frame for a stream of another shape or size leave it readable (the V4L2 capture probe reads it there).
+void chartMarkerSurvivesCropAndScale()
+{
+    const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tablet));
+    Recorder recorder;
+    auto session = camera->openSession(recorder);
+    require(session != nullptr && session->startVideo(0, 1920, 1440, 30));
+    camera->pump(0, 1);
+    require(recorder.frames.size() == 1);
+    const auto& frame = recorder.frames.front().second;
+    require(frame.width == 1920 && frame.height == 1440);
+    const auto whole = decodeChartMarker(frame.luma.data(), frame.lumaStride, frame.width, frame.height);
+    require(whole.valid && whole.tag == chartTag(0) && whole.counter == 1);
+    // The 16:9 stream's centred crop: the rows cut away are the picture's top and bottom.
+    const std::uint32_t cropTop = (1440 - 1080) / 2;
+    const auto cropped = decodeChartMarker(frame.luma.data() + std::size_t(cropTop) * frame.lumaStride, frame.lumaStride, 1920, 1080);
+    require(cropped.valid && cropped.tag == whole.tag && cropped.counter == whole.counter);
+    // The whole picture and the crop at sizes of both shapes, whole-number and fractional ratios.
+    const struct { std::uint32_t top, rows, width, height; } streams[] = {
+        {0, 1440, 1280, 960}, {0, 1440, 960, 720}, {0, 1440, 640, 480}, {0, 1440, 480, 360}, {0, 1440, 1000, 750},
+        {cropTop, 1080, 1280, 720}, {cropTop, 1080, 960, 540}, {cropTop, 1080, 1920, 1080},
+    };
+    for (const auto& stream : streams) {
+        const auto picture = boxScaled(frame, stream.top, stream.rows, stream.width, stream.height);
+        const auto marker = decodeChartMarker(picture.data(), stream.width, stream.width, stream.height);
+        require(marker.valid && marker.tag == whole.tag && marker.counter == whole.counter);
+    }
+    // A picture of the camera's own formats reads back too, at widths the cells do not divide evenly (1440, 4032).
+    for (const auto& [width, height] : {std::pair<std::uint32_t, std::uint32_t> {640, 480}, {1280, 720}, {1440, 1080}, {1920, 1080}}) {
+        const auto other = makeSyntheticCamera(manual(SyntheticCameraProfile::tablet));
+        Recorder own;
+        auto owned = other->openSession(own);
+        require(owned != nullptr && owned->startVideo(0, width, height, 30));
+        other->pump(0, 1);
+        require(own.frames.size() == 1);
+        const auto& picture = own.frames.front().second;
+        require(picture.width == width && picture.height == height);
+        require(decodeChartMarker(picture.luma.data(), picture.lumaStride, picture.width, picture.height).valid);
+    }
+}
+
 } // namespace
 
 int main()
@@ -597,16 +771,19 @@ int main()
     profiles();
     unauthorized();
     video();
+    chartMarkerSurvivesCropAndScale();
     controls();
     zoomCamera();
     multiCamera();
     multiCameraFormats();
+    anchoredCamera();
     stillOnlyCamerasCount();
     hardwareBudget();
     rawFailures();
     interruptionOutlivesSession();
     stills();
     interruptions();
+    aFailedRecoveryIsFinalForItsSession();
     threaded();
     return 0;
 }

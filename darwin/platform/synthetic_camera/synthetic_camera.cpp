@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "synthetic_camera.hpp"
 
+#include "photo_dimensions.hpp"
+
 #include <time.h>
 
 #include <algorithm>
@@ -24,6 +26,12 @@ constexpr std::uint32_t markerCells = 64;
 constexpr std::uint32_t markerHeight = 8;
 constexpr std::uint8_t markerOne = 235;
 constexpr std::uint8_t markerZero = 16;
+// The marker's first row: across the middle of the picture, so that the centred crop and the scale a device makes of
+// an anchored camera's frame for a stream of another shape or size keep it.
+constexpr std::uint32_t markerTop(std::uint32_t height) noexcept
+{
+    return height > markerHeight ? ((height - markerHeight) / 2) & ~1u : 0;
+}
 // An exposure of 1/120 s at ISO 100 is the chart's unit brightness.
 constexpr double referenceExposure = 1.0 / 120.0 * 100.0;
 constexpr std::uint32_t whiteLevel = 16383;
@@ -41,6 +49,22 @@ std::uint64_t realNow() noexcept
 CameraVideoFormat format(std::uint32_t width, std::uint32_t height, std::uint32_t maximumRate, bool multi = true)
 {
     return {width, height, 1, maximumRate, multi};
+}
+
+// A camera that lists the capture formats of a platform: the format list, the
+// video formats the session's own rule uses (in the same order, so a format's
+// index is the same in both) and every JPEG size some format makes.
+void listFormats(CameraInfo& info, std::vector<CameraCaptureFormat> formats)
+{
+    info.captureFormats = std::move(formats);
+    info.videoFormats.clear();
+    info.stillSizes.clear();
+    for (const auto& format : info.captureFormats) {
+        info.videoFormats.push_back(
+            {format.width, format.height, 1, std::uint32_t(format.frameRates.front().maximum), format.multiCamera});
+        for (const auto& size : format.photoSizes)
+            if (std::find(info.stillSizes.begin(), info.stillSizes.end(), size) == info.stillSizes.end()) info.stillSizes.push_back(size);
+    }
 }
 
 struct Profile {
@@ -119,6 +143,17 @@ Profile profileOf(SyntheticCameraProfile which)
         back.flash = back.torch = true;
         back.rawStills = true;
         back.rawStillSize = {1008, 756};
+        // The formats an iPad mini's back camera lists, so the device anchors it: the 12 MP photos belong to the 4:3
+        // formats, and the 1080p format makes none. The front camera lists none (it has one set of facts).
+        listFormats(back, {
+            {640, 480, {{1, 60}}, {{640, 480}}, true, true},
+            {1280, 720, {{1, 120}}, {{1280, 720}}, true, true},
+            {1440, 1080, {{1, 30}}, {{1440, 1080}, {2016, 1512}, {1008, 756}}, true, true},
+            {1920, 1440, {{1, 30}}, {{1920, 1440}, {4032, 3024}, {2016, 1512}, {1008, 756}}, true, true},
+            {4032, 3024, {{1, 30}}, {{4032, 3024}, {4224, 2376}}, true, false},
+            {1920, 1080, {{1, 60}}, {{1920, 1080}, {2016, 1134}}, true, true},
+            {3840, 2160, {{1, 60}}, {{3840, 2160}}, true, false},
+        });
         CameraInfo front = lens("synthetic-front", CameraPosition::front, CameraLensKind::wide);
         front.videoFormats = {format(640, 480, 60), format(1280, 720, 60), format(1920, 1080, 60)};
         front.stillSizes = {{2016, 1512}, {1008, 756}};
@@ -250,23 +285,27 @@ std::uint8_t clampByte(int value) noexcept
     return std::uint8_t(std::clamp(value, 0, 255));
 }
 
-void drawMarker(std::vector<std::uint8_t>& luma, std::vector<std::uint8_t>& chroma, std::uint32_t width,
+void drawMarker(std::vector<std::uint8_t>& luma, std::vector<std::uint8_t>& chroma, std::uint32_t width, std::uint32_t height,
                 std::uint16_t tag, std::uint32_t counter)
 {
+    if (height < markerHeight || width < 2 * markerCells) return;
+    const std::uint32_t top = markerTop(height);
     const std::uint64_t first48 = (std::uint64_t(tag) << 32) | counter;
     const std::uint16_t check = std::uint16_t((first48 >> 32) ^ (first48 >> 16) ^ first48);
     const std::uint64_t bits = (first48 << 16) | check;
-    const auto cell = markerCell(width);
+    // The cells share the picture's width, so a scale of the picture keeps their edges in proportion.
     for (std::uint32_t index = 0; index < markerCells; ++index) {
         const bool one = (bits >> (markerCells - 1 - index)) & 1;
+        const std::size_t from = std::size_t(index) * width / markerCells;
+        const std::size_t to = std::size_t(index + 1) * width / markerCells;
         for (std::uint32_t y = 0; y < markerHeight; ++y)
-            std::memset(&luma[std::size_t(y) * width + std::size_t(index) * cell], one ? markerOne : markerZero, cell);
-        for (std::uint32_t y = 0; y < markerHeight / 2; ++y)
-            for (std::uint32_t x = 0; x < cell; x += 2) {
-                chroma[std::size_t(y) * width + std::size_t(index) * cell + x] = 128;
-                chroma[std::size_t(y) * width + std::size_t(index) * cell + x + 1] = 128;
-            }
+            std::memset(&luma[std::size_t(top + y) * width + from], one ? markerOne : markerZero, to - from);
     }
+    for (std::uint32_t y = 0; y < markerHeight / 2; ++y)
+        for (std::uint32_t x = 0; x + 1 < width; x += 2) {
+            chroma[std::size_t(top / 2 + y) * width + x] = 128;
+            chroma[std::size_t(top / 2 + y) * width + x + 1] = 128;
+        }
 }
 
 Picture render(const Picture& base, const Scene& scene)
@@ -327,7 +366,7 @@ Picture render(const Picture& base, const Scene& scene)
             out.chroma[at] = clampByte(out.chroma[at] + scene.tintCb);
             out.chroma[at + 1] = clampByte(out.chroma[at + 1] + scene.tintCr);
         }
-    drawMarker(out.luma, out.chroma, width, scene.tag, scene.counter);
+    drawMarker(out.luma, out.chroma, width, height, scene.tag, scene.counter);
     return out;
 }
 
@@ -424,10 +463,28 @@ public:
     const SyntheticCameraOptions options_;
     const Profile profile_;
     std::atomic<unsigned> opened {0};
+    std::mutex anchorMutex;
+    std::vector<std::optional<std::size_t>> anchors;  // guarded by anchorMutex
+    CameraLimits anchorLimits;                        // guarded by anchorMutex
+    std::atomic<unsigned> anchorCalls {0};
+    // The frames made and not yet freed by their owners, and the most there were at once. A frame
+    // can outlive the camera, so each holds the counts.
+    struct FrameCounts {
+        std::atomic<unsigned> alive {0};
+        std::atomic<unsigned> peak {0};
+    };
+    const std::shared_ptr<FrameCounts> frames {std::make_shared<FrameCounts>()};
     std::atomic<unsigned> open {0};
     std::atomic<std::uint64_t> clock {1'000'000'000};
     std::atomic<bool> rawRefused {false};
     std::atomic<bool> rawFails {false};
+    std::atomic<bool> stillsOfAnotherSize {false};
+    // The system moved the anchored cameras out of their formats while the cameras were
+    // interrupted; a session that opens puts them back by starting afresh.
+    std::atomic<bool> movedOutOfAnchor {false};
+    std::atomic<bool> repairRefused {false};
+    std::atomic<unsigned> repairs {0};
+    std::atomic<unsigned> framesOutsideAnchor {0};
     std::mutex mutex;  // guards the sessions list and the interrupted flag
     std::set<class Session*> sessions;
     bool interrupted {};
@@ -444,10 +501,21 @@ public:
         }
         ++core_.opened;
         ++core_.open;
+        core_.movedOutOfAnchor = false;  // a session that opens starts every camera in its anchor
         if (!core_.options_.manualClock) worker_ = std::thread([this] { run(); });
     }
 
     ~Session() override { stop(); }
+
+    void setAnchors(std::span<const std::optional<std::size_t>> formatOfCamera, const CameraLimits& limits) override
+    {
+        {
+            std::lock_guard lock(core_.anchorMutex);
+            core_.anchors.assign(formatOfCamera.begin(), formatOfCamera.end());
+            core_.anchorLimits = limits;
+        }
+        ++core_.anchorCalls;
+    }
 
     bool startVideo(std::size_t camera, std::uint32_t width, std::uint32_t height, std::uint32_t frameRate) override
     {
@@ -481,6 +549,11 @@ public:
         const auto& info = core_.profile_.cameras[camera];
         if (request.raw && (!info.rawStills || info.rawStillSize.width == 0 || core_.rawRefused)) return false;
         if (request.jpegWidth != 0 && !stillSize(info, request.jpegWidth, request.jpegHeight)) return false;
+        // An anchored camera makes the sizes its anchor makes, as the platform's output does.
+        if (const auto anchor = anchorOf(camera); anchor && request.jpegWidth != 0) {
+            const auto made = anchoredStills(camera, *anchor);
+            if (std::find(made.begin(), made.end(), CameraStillSize {request.jpegWidth, request.jpegHeight}) == made.end()) return false;
+        }
         if (request.jpegWidth == 0 && !request.raw) return false;
         // A camera that only takes stills is an input of the session too: it
         // joins as a streaming camera does, or the still is refused.
@@ -530,7 +603,9 @@ public:
                 if (stopped_ || !cameras_[camera].video) return;
                 rate = cameras_[camera].video->frameRate;
             }
-            if (!interrupted()) produceFrame(camera);
+            // A camera the system moved out of its anchor goes on capturing in the other format, as the
+            // platform's does; the client must not pass those frames on.
+            if (!interrupted() || core_.movedOutOfAnchor) produceFrame(camera);
             core_.clock += 1'000'000'000ull / rate;
         }
     }
@@ -558,7 +633,51 @@ public:
     }
     void deliver(CameraEvent event) { delegate_.cameraEvent(event); }
 
+    // The interruption is over: every anchored camera the system moved out of its format is put
+    // back, and only then is the session said to be back (recoverAnchors, which the Apple session
+    // runs too). A refused repair says the session failed instead.
+    void recover()
+    {
+        std::vector<std::size_t> running;
+        {
+            std::lock_guard lock(mutex_);
+            for (std::size_t camera = 0; camera < cameras_.size(); ++camera)
+                if (cameras_[camera].video) running.push_back(camera);
+        }
+        RecoverySteps steps;
+        steps.outOfAnchor = [this](std::size_t) { return core_.movedOutOfAnchor.load(); };
+        steps.repair = [this](std::size_t) {
+            if (core_.repairRefused) return false;
+            ++core_.repairs;
+            return true;
+        };
+        steps.announce = [this](Recovery outcome) {
+            if (outcome == Recovery::resumed) core_.movedOutOfAnchor = false;
+            deliver({allCameras, outcome == Recovery::resumed ? CameraEventKind::resumed : CameraEventKind::failed});
+        };
+        // A failed recovery is final for this session, as the Apple session's is.
+        (void)latch_.recover(running, steps);
+    }
+
 private:
+    RecoveryLatch latch_;
+
+    // The format a camera was told to run in, when it was told one.
+    std::optional<std::size_t> anchorOf(std::size_t camera) const
+    {
+        std::lock_guard lock(core_.anchorMutex);
+        const auto& info = core_.profile_.cameras[camera];
+        if (camera >= core_.anchors.size() || !core_.anchors[camera] || *core_.anchors[camera] >= info.captureFormats.size()) return std::nullopt;
+        return core_.anchors[camera];
+    }
+
+    // The sizes the anchor's format makes within the cap the device named.
+    std::vector<CameraStillSize> anchoredStills(std::size_t camera, std::size_t anchor) const
+    {
+        std::lock_guard lock(core_.anchorMutex);
+        return stillsOf(core_.profile_.cameras[camera].captureFormats[anchor], core_.anchorLimits.maximumStillPixels);
+    }
+
     // A camera has an input in the session while it streams and while a still
     // it took is on its way.
     static bool hasInput(const CameraState& state) { return state.video.has_value() || state.stillsOut > 0; }
@@ -588,16 +707,20 @@ private:
             const bool self = index == camera;
             const auto& state = cameras_[index];
             const auto& info = core_.profile_.cameras[index];
+            const auto anchor = anchorOf(index);
             if (!(self && streams) && !state.video) {
-                const bool takesMulti = std::any_of(info.videoFormats.begin(), info.videoFormats.end(),
-                                                    [](const auto& candidate) { return candidate.multiCamera; });
+                const bool takesMulti = anchor ? info.captureFormats[*anchor].multiCamera
+                                               : std::any_of(info.videoFormats.begin(), info.videoFormats.end(),
+                                                             [](const auto& candidate) { return candidate.multiCamera; });
                 if (several && !takesMulti) return false;
                 continue;
             }
             const auto askedWidth = self && streams ? width : state.video->requestedWidth;
             const auto askedHeight = self && streams ? height : state.video->requestedHeight;
             const auto askedRate = self && streams ? frameRate : state.video->frameRate;
-            const auto* pick = chooseFormat(info, askedWidth, askedHeight, askedRate, several);
+            // An anchored camera runs in its anchor, or the stream is refused.
+            const auto* pick = anchor ? anchoredFormat(info, *anchor, askedWidth, askedHeight, askedRate, several)
+                                      : chooseFormat(info, askedWidth, askedHeight, askedRate, several);
             if (pick == nullptr) return false;
             picks[index] = pick;
             cost += double(pick->width) * pick->height * askedRate;
@@ -612,10 +735,18 @@ private:
         for (const auto& [index, pick] : picks) {
             auto& state = cameras_[index];
             const bool self = index == camera && streams;
-            if (!self && state.video->width == pick->width && state.video->height == pick->height) continue;
+            const bool anchored = anchorOf(index).has_value();
+            // An anchored camera never leaves its format.
+            if (!self && (anchored || (state.video->width == pick->width && state.video->height == pick->height))) continue;
             RunningVideo video;
             video.width = pick->width;
             video.height = pick->height;
+            // The platform delivers an anchored camera's frames at the stream's size in the format's own aspect ratio.
+            if (anchored) {
+                const auto delivered = deliveredFrameSize(pick->width, pick->height, width, height);
+                video.width = delivered.width;
+                video.height = delivered.height;
+            }
             video.requestedWidth = self ? width : state.video->requestedWidth;
             video.requestedHeight = self ? height : state.video->requestedHeight;
             video.frameRate = self ? frameRate : state.video->frameRate;
@@ -633,6 +764,7 @@ private:
             if (hasInput(cameras_[index])) inputs.push_back(index);
         if (inputs.size() != 1 || !cameras_[inputs.front()].video) return;
         auto& state = cameras_[inputs.front()];
+        if (anchorOf(inputs.front())) return;  // an anchored camera never leaves its format
         const auto* pick = chooseFormat(core_.profile_.cameras[inputs.front()], state.video->requestedWidth,
                                         state.video->requestedHeight, state.video->frameRate, false);
         if (pick == nullptr || (pick->width == state.video->width && pick->height == state.video->height)) return;
@@ -647,6 +779,18 @@ private:
             return std::all_of(running.begin(), running.end(),
                                [&](auto member) { return std::find(set.begin(), set.end(), member) != set.end(); });
         });
+    }
+
+    // The anchor's video format when it covers the size at the rate (and a
+    // multi-camera session takes it when several cameras run).
+    static const CameraVideoFormat* anchoredFormat(const CameraInfo& info, std::size_t anchor, std::uint32_t width,
+                                                   std::uint32_t height, std::uint32_t frameRate, bool multiCameraOnly)
+    {
+        const auto& candidate = info.videoFormats[anchor];
+        if (candidate.width < width || candidate.height < height) return nullptr;
+        if (frameRate < candidate.minimumFrameRate || frameRate > candidate.maximumFrameRate) return nullptr;
+        if (multiCameraOnly && !candidate.multiCamera) return nullptr;
+        return &candidate;
     }
 
     // The smallest format that covers the size at the rate.
@@ -664,14 +808,12 @@ private:
         return best;
     }
 
+    // The JPEG size a request names: exactly one the camera lists, as the real
+    // camera takes it, or none.
     static const CameraStillSize* stillSize(const CameraInfo& info, std::uint32_t width, std::uint32_t height)
     {
-        const CameraStillSize* best = nullptr;
-        for (const auto& size : info.stillSizes) {
-            if (size.width < width || size.height < height) continue;
-            if (!best || std::uint64_t(size.width) * size.height < std::uint64_t(best->width) * best->height) best = &size;
-        }
-        return best;
+        const auto found = std::find(info.stillSizes.begin(), info.stillSizes.end(), CameraStillSize {width, height});
+        return found == info.stillSizes.end() ? nullptr : &*found;
     }
 
     // What the settings make of an exposure.
@@ -777,7 +919,17 @@ private:
             if (stopped_ || !state.video) return;
             auto outcome = this->outcome(camera, state.video->frameRate);
             outcome.scene.counter = ++state.video->counter;
-            auto picture = std::make_shared<Picture>(render(base(state, state.video->width, state.video->height), outcome.scene));
+            if (core_.movedOutOfAnchor) ++core_.framesOutsideAnchor;
+            // The picture counts itself while a frame holds it.
+            const auto counts = core_.frames;
+            const unsigned alive = ++counts->alive;
+            for (unsigned peak = counts->peak; alive > peak && !counts->peak.compare_exchange_weak(peak, alive);) {
+            }
+            std::shared_ptr<Picture> picture(new Picture(render(base(state, state.video->width, state.video->height), outcome.scene)),
+                                             [counts](Picture* freed) {
+                                                 delete freed;
+                                                 --counts->alive;
+                                             });
             frame.width = picture->width;
             frame.height = picture->height;
             frame.luma = picture->luma;
@@ -813,7 +965,10 @@ private:
             result.exposure = outcome.exposure;
             if (request.jpegWidth != 0) {
                 const auto* size = stillSize(info, request.jpegWidth, request.jpegHeight);
-                const auto picture = render(base(state, size->width, size->height), outcome.scene);
+                // A platform that made another size than the request names (a test
+                // hook): half of it each way.
+                const auto divisor = core_.stillsOfAnotherSize ? 2u : 1u;
+                const auto picture = render(base(state, size->width / divisor, size->height / divisor), outcome.scene);
                 result.jpeg = encodeSyntheticJpeg(picture.luma.data(), picture.width, picture.chroma.data(),
                                                   picture.width, picture.width, picture.height, request.jpegQuality);
             }
@@ -912,6 +1067,20 @@ public:
         return session;
     }
 
+    std::vector<std::optional<std::size_t>> sessionAnchors() const override
+    {
+        std::lock_guard lock(core_.anchorMutex);
+        return core_.anchors;
+    }
+    CameraLimits sessionLimits() const noexcept override
+    {
+        std::lock_guard lock(core_.anchorMutex);
+        return core_.anchorLimits;
+    }
+    unsigned sessionAnchorCalls() const noexcept override { return core_.anchorCalls; }
+    unsigned framesAlive() const noexcept override { return core_.frames->alive; }
+    unsigned framePeak() const noexcept override { return core_.frames->peak; }
+    void resetFramePeak() noexcept override { core_.frames->peak = core_.frames->alive.load(); }
     unsigned sessionsOpened() const noexcept override { return core_.opened; }
     unsigned sessionsOpen() const noexcept override { return core_.open; }
 
@@ -970,6 +1139,7 @@ public:
 
     void refuseRaw(bool refuse) override { core_.rawRefused = refuse; }
     void failRaw(bool fail) override { core_.rawFails = fail; }
+    void stillsOfAnotherSize(bool another) override { core_.stillsOfAnotherSize = another; }
 
     void resume() override
     {
@@ -979,8 +1149,12 @@ public:
             core_.interrupted = false;
             sessions.assign(core_.sessions.begin(), core_.sessions.end());
         }
-        for (auto* session : sessions) session->deliver({allCameras, CameraEventKind::resumed});
+        for (auto* session : sessions) session->recover();
     }
+    void moveOutOfAnchor(bool moved) override { core_.movedOutOfAnchor = moved; }
+    void refuseRepair(bool refuse) override { core_.repairRefused = refuse; }
+    unsigned repairs() const noexcept override { return core_.repairs; }
+    unsigned framesOutsideAnchor() const noexcept override { return core_.framesOutsideAnchor; }
 
 private:
     template<typename Function, typename Result>
@@ -1001,11 +1175,6 @@ std::unique_ptr<SyntheticCamera> makeSyntheticCamera(const SyntheticCameraOption
     return std::make_unique<SyntheticCameraImpl>(options);
 }
 
-std::uint32_t markerCell(std::uint32_t width) noexcept
-{
-    return std::max<std::uint32_t>(2, (width / markerCells) & ~1u);
-}
-
 std::uint16_t chartTag(std::size_t camera) noexcept
 {
     return std::uint16_t(0x5a00u + (camera & 0xffu));
@@ -1015,12 +1184,12 @@ ChartMarker decodeChartMarker(const std::uint8_t* luma, std::size_t stride, std:
                               std::uint32_t height) noexcept
 {
     ChartMarker marker;
-    const auto cell = markerCell(width);
-    if (luma == nullptr || height < markerHeight || width < cell * markerCells) return marker;
+    if (luma == nullptr || height < markerHeight || width < 2 * markerCells) return marker;
+    const std::size_t row = std::size_t(markerTop(height) + markerHeight / 2);
     std::uint64_t bits = 0;
     for (std::uint32_t index = 0; index < markerCells; ++index) {
         // The cell's centre.
-        const auto sample = luma[std::size_t(markerHeight / 2) * stride + std::size_t(index) * cell + cell / 2];
+        const auto sample = luma[row * stride + std::size_t(2 * index + 1) * width / (2 * markerCells)];
         bits = (bits << 1) | (sample >= 128 ? 1u : 0u);
     }
     const std::uint16_t check = std::uint16_t(bits);

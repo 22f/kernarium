@@ -365,4 +365,9 @@ bool receiveVhostUserMessage(
         stopRequested);
 }
 
+bool writeFailureMeansPeerClosed(int error) noexcept
+{
+    return error == EPIPE || error == ECONNRESET || error == ENOTCONN;
+}
+
 } // namespace uml::gpu

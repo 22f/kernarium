@@ -7,12 +7,16 @@
 // contain it.
 //
 // The chart. Every frame is an NV12 picture of a luma gradient with a 6 x 4
-// grid of colour patches and, in the top-left corner, a row of 64 marker cells
-// (each `markerCell(width)` samples wide and 8 high) that carry, most
-// significant bit first, a 16-bit tag naming the camera, a 32-bit frame counter
-// and a 16-bit check word (the exclusive or of the three 16-bit groups before
-// it). A cell is luma 235 for a one and 16 for a zero. decodeChartMarker() reads
-// them back from a picture of the camera's own size.
+// grid of colour patches and, across the middle of the picture, a row of 64
+// marker cells (the picture's width shared among them, and 8 rows high) that
+// carry, most significant bit first, a 16-bit tag naming the camera, a 32-bit
+// frame counter and a 16-bit check word (the exclusive or of the three 16-bit
+// groups before it). A cell is luma 235 for a one and 16 for a zero.
+// decodeChartMarker() reads them back from a picture of any size: the marker
+// spans the width and lies on the middle row, so the centred crop and the scale
+// a device makes of an anchored camera's frame for a stream of another shape or
+// size (the rows of a 16:9 stream of a 4:3 picture, a stream half its size)
+// leave it readable.
 
 #include "camera.hpp"
 
@@ -27,7 +31,10 @@ enum class SyntheticCameraProfile : std::uint8_t {
     // A phone: a back zoom camera over wide, ultra wide and telephoto lenses,
     // and a front camera. The wide lens has 48 MP stills and Bayer stills.
     phone,
-    // A tablet: a back wide camera and a front camera.
+    // A tablet: a back wide camera and a front camera. The back camera lists the
+    // capture formats an iPad mini's does (CameraInfo::captureFormats), so the
+    // device gives it an anchor and it runs only in it; the front camera lists
+    // none.
     tablet,
     // An iPad's: a back wide camera and two front cameras (wide and ultra wide,
     // one sensor behind both), each of which can run with the back camera. The
@@ -50,16 +57,32 @@ struct SyntheticCameraOptions {
 
 // The multi-camera rule it models, as an AVCaptureMultiCamSession asks it:
 // every camera with an input (one that streams, or has a still on its way)
-// lies in one concurrent set and runs a format a multi-camera session takes,
-// the cameras that stream moving to such a format when another joins; a join
-// that cannot is refused with nothing changed, and so is one whose cameras ask
-// for more than 200 million pixels a second together (the hardware budget).
+// lies in one concurrent set and runs a format a multi-camera session takes; a
+// join that cannot is refused with nothing changed, and so is one whose cameras
+// ask for more than 200 million pixels a second together (the hardware
+// budget). A camera that has an anchor (CameraSession::setAnchors) runs in it
+// and nowhere else: a stream outside it, a still it does not make, or an anchor
+// a multi-camera session does not take is refused. A camera with none picks the
+// smallest of its video formats that covers the stream, moving between them as
+// others join and leave.
 class SyntheticCamera : public Camera {
 public:
     // Sessions opened since the object was made, and sessions open now. A
     // blocked guest never opens one.
     [[nodiscard]] virtual unsigned sessionsOpened() const noexcept = 0;
     [[nodiscard]] virtual unsigned sessionsOpen() const noexcept = 0;
+    // What the device last told a session (CameraSession::setAnchors): the
+    // format each camera runs in and the limits, and how many times it was
+    // told. Empty, zero limits and zero before any session was told.
+    [[nodiscard]] virtual std::vector<std::optional<std::size_t>> sessionAnchors() const = 0;
+    [[nodiscard]] virtual CameraLimits sessionLimits() const noexcept = 0;
+    [[nodiscard]] virtual unsigned sessionAnchorCalls() const noexcept = 0;
+    // The frames that exist: made by a session's capture and not yet freed by
+    // whoever holds them (the capture's buffer of the real camera), the most
+    // there were at once since resetFramePeak(), and the count now.
+    [[nodiscard]] virtual unsigned framesAlive() const noexcept = 0;
+    [[nodiscard]] virtual unsigned framePeak() const noexcept = 0;
+    virtual void resetFramePeak() noexcept = 0;
     // The settings last applied to a camera, and the cameras running video.
     [[nodiscard]] virtual CameraSettings appliedSettings(std::size_t camera) const = 0;
     [[nodiscard]] virtual bool videoRunning(std::size_t camera) const = 0;
@@ -72,7 +95,20 @@ public:
     [[nodiscard]] virtual std::pair<std::uint32_t, std::uint32_t> videoSize(std::size_t camera) const = 0;
     // Interrupts every session, as the host does; no frames flow until resume().
     virtual void interrupt(CameraEventKind kind = CameraEventKind::interrupted) = 0;
+    // Ends the interruption as the platform session does: every camera the system
+    // moved out of its anchor (moveOutOfAnchor) is repaired first, and only then
+    // are the sessions told they are back; a refused repair (refuseRepair) tells
+    // them they failed instead (recoverAnchors).
     virtual void resume() = 0;
+    // The system has moved the anchored cameras out of their formats, as it may
+    // while they are interrupted; a session that opens afterwards starts afresh.
+    virtual void moveOutOfAnchor(bool moved) = 0;
+    virtual void refuseRepair(bool refuse) = 0;
+    // The cameras the sessions put back before saying they were back, and the
+    // frames a session produced while a camera was out of its anchor (the
+    // capture goes on; the client must not pass them on).
+    [[nodiscard]] virtual unsigned repairs() const noexcept = 0;
+    [[nodiscard]] virtual unsigned framesOutsideAnchor() const noexcept = 0;
     // Delivers an event to every session, as the host does, and changes
     // nothing else (a failed session or an unavailable camera, for instance).
     virtual void post(CameraEvent event) = 0;
@@ -80,12 +116,14 @@ public:
     // alone, leaving the JPEG of the same capture.
     virtual void refuseRaw(bool refuse) = 0;
     virtual void failRaw(bool fail) = 0;
+    // The platform makes a JPEG of another size than the request names (the
+    // device must fail that still, not pass the picture on).
+    virtual void stillsOfAnotherSize(bool another) = 0;
 };
 
 [[nodiscard]] std::unique_ptr<SyntheticCamera> makeSyntheticCamera(const SyntheticCameraOptions& options = {});
 
 // The chart a frame of the given size carries.
-[[nodiscard]] std::uint32_t markerCell(std::uint32_t width) noexcept;
 struct ChartMarker {
     std::uint16_t tag {};
     std::uint32_t counter {};

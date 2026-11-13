@@ -203,7 +203,9 @@ struct AppEntry {
             #endif
             let runtime = LiveRuntime(
                 model: model, storage: storage, marker: marker, keyStore: adbKeyStore,
-                sessionRecord: sessionRecord, freeSpace: watched)
+                sessionRecord: sessionRecord,
+                cameraDirectory: markerDirectory.appendingPathComponent("Camera", isDirectory: true),
+                freeSpace: watched)
             model.driver = runtime
             model.snapshotDriver = runtime
             // The listing says why a restore that began last time is still not finished.
@@ -214,6 +216,7 @@ struct AppEntry {
             // Microphone choice with it.
             model.microphone?.refresh()
             model.location?.refresh()
+            model.camera?.refresh()
             #if !APP_STORE
             // A debugger attached at launch (StikDebug) is asked for what the
             // JIT row says at once: it spins until it is served, and the
@@ -373,10 +376,16 @@ struct AppEntry {
     static func hostDevice() -> HostDevice {
         let info = ProcessInfo.processInfo
         let name: String
+        let idiom: HostDevice.Idiom
         if info.isiOSAppOnMac {
             name = "Mac"
+            idiom = .mac
+        } else if UIDevice.current.userInterfaceIdiom == .pad {
+            name = "iPad"
+            idiom = .pad
         } else {
-            name = UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
+            name = "iPhone"
+            idiom = .phone
         }
         // A guest has every processor, at most the count the memory budget is
         // measured for; the memory policy has a row for each of those counts.
@@ -386,7 +395,9 @@ struct AppEntry {
             memory: memoryPolicy(processorCount: limit),
             freeStorageBytes: freeStorageBytes(),
             runsGuestGraphics: drawsGuestGraphics(),
-            supportsPointer: UIDevice.current.userInterfaceIdiom != .phone
+            supportsPointer: UIDevice.current.userInterfaceIdiom != .phone,
+            idiom: idiom, hasHaptics: DeviceHaptics.isAvailable,
+            hasCompass: MotionSensors().compassAvailable, hasCamera: SystemCameraSource.hasCamera
         )
     }
 
@@ -426,6 +437,9 @@ struct AppEntry {
             },
             graphicsMemory: { memoryMiB, count in
                 Int(kernarium_runtime_loader_gpu_budget_mib(UInt32(memoryMiB), UInt32(count), launchSet))
+            },
+            cameraReserve: { budgetMiB in
+                Int(kernarium_runtime_loader_camera_reserve_mib(UInt32(clamping: budgetMiB)))
             }
         )
     }

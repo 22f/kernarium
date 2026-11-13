@@ -42,6 +42,16 @@ uml_add_tooling_test(
     LABELS kernarium
     TIMEOUT 60)
 
+# The host's test run records no screen video and keeps no attachments: the
+# scheme says so, `start` refuses a run file that does not, and the result
+# bundle goes under the state directory.
+uml_add_tooling_test(
+    NAME kernarium-ipad-automation-recording
+    COMMAND ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_ipad_automation_recording.py
+    LABELS kernarium
+    TIMEOUT 30)
+
 uml_add_tooling_test(
     NAME kernarium-audio-interrupter
     COMMAND ${Python3_EXECUTABLE} -B
