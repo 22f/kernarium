@@ -1120,6 +1120,11 @@ void apply_exclusive_load(const MemoryCase &test,
 	return !status.has_value() || result.registers[*status] == 0;
 }
 
+/* How many runs of store-exclusive cases there were, and how many attempts
+ * were lost and run again. */
+unsigned exclusive_runs = 0;
+unsigned exclusive_lost_attempts = 0;
+
 /* Runs a case, and a store-exclusive case again while its run is a lost
  * reservation, as a guest's loop would. The first run over a mapping the host
  * has not touched takes a page fault between the pair, which ends the
@@ -1173,6 +1178,10 @@ void apply_exclusive_load(const MemoryCase &test,
 			return lost_reservation(test, result);
 		});
 	require(!run.lost);
+	if (exclusive_status(test).has_value()) {
+		++exclusive_runs;
+		exclusive_lost_attempts += run.attempts - 1;
+	}
 	/* A run that is not a lost reservation is not retried: the store
 	 * succeeded, or the case fails here, and no later attempt can hide it. */
 	require(exclusive_succeeded(test, run.result));
@@ -2583,5 +2592,7 @@ int main()
 		std::puts("streaming programs need FEAT_SME in hardware: "
 			"not run");
 	}
+	std::printf("store-exclusive cases: %u runs, %u attempts lost and "
+		"run again\n", exclusive_runs, exclusive_lost_attempts);
 	return 0;
 }
