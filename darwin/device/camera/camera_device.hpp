@@ -85,6 +85,13 @@ struct CameraDeviceOptions {
      * automatic) and the clockwise degrees applied. It shows what reaches the
      * host; it changes nothing. */
     std::function<void(std::uint32_t camera, std::uint32_t setting, std::uint32_t degrees)> onRotateAndCrop;
+    /* Told on the transport thread, for a diagnostic line, when what a camera's
+     * controls ask of its light changes: the camera's wire index, whether the
+     * torch is on and the flash mode a still is asked to use. The platform
+     * hears of the torch in a setting and of the flash only with a still, and
+     * prints nothing for either; this shows what the guest asked. It changes
+     * nothing. */
+    std::function<void(std::uint32_t camera, bool torch, uml::platform::CameraFlashMode flash)> onFlash;
     /* Told on the transport thread at each CameraCheckpoint, for a diagnostic
      * line; it changes nothing and must not block. */
     std::function<void(CameraCheckpoint)> onCheckpoint;

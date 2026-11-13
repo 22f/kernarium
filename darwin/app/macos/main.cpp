@@ -1830,6 +1830,7 @@ private:
 		};
 		/* A development run reads what reaches the host and what it costs. */
 		options.onRotateAndCrop = uml::camera::printRotateAndCrop;
+		options.onFlash = uml::camera::printFlash;
 		options.onCheckpoint = uml::camera::printCheckpoint;
 		uml::camera::CameraSourceHandle source;
 		if (!make_camera_source(source))

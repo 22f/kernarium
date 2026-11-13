@@ -281,6 +281,7 @@ private:
 #ifndef UML_APP_STORE_RUNTIME
     /* What reaches the host and what it costs, for a development run to read. */
     options.onRotateAndCrop = uml::camera::printRotateAndCrop;
+    options.onFlash = uml::camera::printFlash;
     options.onCheckpoint = uml::camera::printCheckpoint;
 #endif
     return options;
