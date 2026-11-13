@@ -95,8 +95,16 @@ struct DecisionVectorTests {
     }
 
     private struct Document: Decodable {
+        struct Legacy: Decodable {
+            var first: Int
+            var last: Int
+        }
+        var legacyBuildNumbers: Legacy
         var cases: [Vector]
         var transitions: [Transition]
+        enum CodingKeys: String, CodingKey {
+            case legacyBuildNumbers = "legacy_build_numbers", cases, transitions
+        }
     }
 
     private static func document() throws -> Document {
@@ -158,9 +166,31 @@ struct DecisionVectorTests {
         }
     }
 
+    @Test func theLegacyRangeIsTheVectors() throws {
+        let legacy = try Self.document().legacyBuildNumbers
+        #expect(BuildNumber.legacyRange == legacy.first...legacy.last)
+        #expect(BuildNumber.legacyRange == 2_026_110_800...2_026_110_899)
+    }
+
+    @Test func theOldCounterIsOlderThanEveryOtherNumber() {
+        let ascending = [
+            2_026_110_800, 2_026_110_801, 2_026_110_805, 2_026_110_817, 2_026_110_899,
+            1, 26, 27, 10_000, 2_026_110_799, 2_026_110_900, 9_999_999_999,
+        ]
+        for (position, number) in ascending.enumerated() {
+            #expect(!BuildNumber.isOlder(number, than: number), "\(number)")
+            for other in ascending[(position + 1)...] {
+                #expect(BuildNumber.isOlder(number, than: other), "\(number) is older than \(other)")
+                #expect(!BuildNumber.isOlder(other, than: number), "\(other) is not older than \(number)")
+            }
+        }
+        #expect(ascending.allSatisfy { !BuildNumber.isOlder($0, than: BuildNumber.oldest) })
+        #expect(ascending.dropFirst().allSatisfy { BuildNumber.isOlder(BuildNumber.oldest, than: $0) })
+    }
+
     @Test func everyVectorIsReproduced() throws {
         let cases = try Self.vectors()
-        #expect(cases.count == 28)
+        #expect(cases.count == 44)
         for vector in cases {
             let state = vector.instance.map { instance in
                 var state = InstanceState(
@@ -246,6 +276,27 @@ struct InstanceFileTests {
         #expect(done.pendingUpdate == nil && done.lastCompleted?.releaseID == "rel-b")
         #expect(!FileManager.default.fileExists(atPath: snapshot.path))
         #expect(try files.decide(for: second).action == .boot)
+    }
+
+    /// The data of a release of the old counter updates to a release number,
+    /// and no way leads back.
+    @Test func aReleaseNumberUpdatesTheDataOfTheOldCounterAndNotBack() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = InstanceFiles(directory: root.appendingPathComponent("Guest"))
+        let old = release("rel-a", build: 2_026_110_817, sha: String(repeating: "a", count: 64))
+        let numbered = release("rel-b", build: 26, sha: String(repeating: "b", count: 64))
+        try files.apply(try files.decide(for: old), release: old)
+        try Data("android data".utf8).write(to: files.data)
+        try files.complete(release: old)
+
+        let update = try files.decide(for: numbered)
+        #expect(update.action == .update)
+        let updated = try files.apply(update, release: numbered)
+        #expect(updated.buildIncremental == "26" && updated.pendingUpdate?.from.buildIncremental == "2026110817")
+        try files.complete(release: numbered)
+        #expect(try files.decide(for: old).action == .refuseDowngrade)
+        #expect(try files.decide(for: release("rel-c", build: 27, sha: String(repeating: "c", count: 64))).action == .update)
     }
 
     /// The sequence that lost a week of user data: r13 settles, r15 updates and

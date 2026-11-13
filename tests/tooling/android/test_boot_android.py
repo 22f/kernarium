@@ -790,6 +790,39 @@ class BootAndroidTests(unittest.TestCase):
             self.assertEqual(state["release_id"], "rel-a")
             self.assertFalse((instance / "data.img").exists())
 
+    def test_a_release_number_updates_data_of_the_old_counter_and_not_back(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="android-launcher-") as temporary:
+            root = Path(temporary)
+            releases = root / "releases"
+            old = self.installed_release(releases, "rel-a", build=2026110817)
+            numbered = self.installed_release(releases, "rel-b", build=26)
+            instance = root / "instance"
+            self.run_main(root, old, instance)
+            (instance / "data.img").write_bytes(b"guest data")
+
+            result, _guest, popen = self.run_main(root, numbered, instance, booted=False)
+            self.assertEqual(result, 0)
+            popen.assert_called_once()
+            state = json.loads((instance / "instance.json").read_text())
+            self.assertEqual(state["release_id"], "rel-b")
+            self.assertEqual(state["build_incremental"], "26")
+            self.assertEqual(state["pending_update"]["to_release_id"], "rel-b")
+            self.assertEqual(state["pending_update"]["from"]["build_incremental"], "2026110817")
+            self.assertEqual((instance / "data.img.pre-rel-b").read_bytes(), b"guest data")
+
+            # A start that reaches boot_completed finishes the update.
+            self.run_main(root, numbered, instance, ["--retry"])
+            state = json.loads((instance / "instance.json").read_text())
+            self.assertIsNone(state["pending_update"])
+            self.assertFalse((instance / "data.img.pre-rel-b").exists())
+
+            # The old counter is older than the release number, so there is no way back.
+            before = (instance / "instance.json").read_bytes()
+            result, _guest, popen = self.run_main(root, old, instance)
+            self.assertEqual(result, 1)
+            popen.assert_not_called()
+            self.assertEqual((instance / "instance.json").read_bytes(), before)
+
     def test_dry_run_changes_nothing(self) -> None:
         with tempfile.TemporaryDirectory(prefix="android-launcher-") as temporary:
             root = Path(temporary)
