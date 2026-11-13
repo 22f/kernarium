@@ -16,7 +16,7 @@ A guest booted without it reads nothing new and declares no compass.
  1 file changed, 9 insertions(+)
 
 diff --git a/services/core/java/com/android/server/SystemConfig.java b/services/core/java/com/android/server/SystemConfig.java
-index f1cb009dab32069706c6377b393b2dc68315c334..464d5a85625a363797971ceb660dc491ca2f872c 100644
+index f1cb009dab32069706c6377b393b2dc68315c334..6a95bf51daf3745c3e16bcf160e5c897b13fc61d 100644
 --- a/services/core/java/com/android/server/SystemConfig.java
 +++ b/services/core/java/com/android/server/SystemConfig.java
 @@ -748,6 +748,15 @@ public class SystemConfig {
@@ -27,7 +27,7 @@ index f1cb009dab32069706c6377b393b2dc68315c334..464d5a85625a363797971ceb660dc491
 +        // has a magnetometer to share. Only then does the product have a compass, so its
 +        // feature is declared in a directory of its own, which nothing else reads.
 +        if (SystemProperties.getBoolean("ro.boot.kernarium.compass", false)) {
-+            readPermissions(Environment.buildPath(
++            readPermissions(parser, Environment.buildPath(
 +                    Environment.getVendorDirectory(), "etc", "permissions", "kernarium_compass"),
 +                    vendorPermissionFlag);
 +        }
