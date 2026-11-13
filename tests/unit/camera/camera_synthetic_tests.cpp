@@ -745,10 +745,12 @@ void timerSchedulesWholeDurations()
         for (std::size_t i = 0; i < 4; ++i)
             require(recorder.frames[i].second.exposure.exposureNanoseconds == 200'000'000 &&
                     recorder.frames[i].second.exposure.frameDurationNanoseconds == 200'000'000);
-        // Frame 1 was held for 350 ms, so frame 2 is overdue when it is due; frames 2 to 4 are a frame duration apart.
+        // Frame 1 was held for 350 ms, so frame 2 is overdue when it is due; frames 2 to 4 are at least a frame duration apart
+        // (the timestamp is the frame's start, and the next deadline is a whole duration after it). No upper bound: a loaded
+        // host may start a frame late.
         for (std::size_t i = 2; i < 4; ++i) {
             const auto interval = recorder.frames[i].second.timestampNanoseconds - recorder.frames[i - 1].second.timestampNanoseconds;
-            require(interval >= 185'000'000 && interval <= 400'000'000);
+            require(interval + 2'000'000 >= recorder.frames[i - 1].second.exposure.frameDurationNanoseconds);
         }
     }
     require(camera->sessionsOpen() == 0);

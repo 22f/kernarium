@@ -399,6 +399,9 @@ struct RunningVideo {
     std::uint32_t counter {};
     // How long the last frame lasted: its period, or its exposure when that was longer.
     std::uint64_t duration {};
+    // The start of the frame the timer is producing, on the camera's clock: its timestamp, and the instant that its
+    // deadline and the next one are counted from.
+    std::uint64_t startNanoseconds {};
     std::chrono::steady_clock::time_point next;
 };
 
@@ -796,10 +799,12 @@ private:
     void produceFrame(std::size_t camera)
     {
         CameraFrame frame;
+        std::uint64_t start = 0;
         {
             std::lock_guard lock(mutex_);
             auto& state = cameras_[camera];
             if (stopped_ || !state.video) return;
+            start = state.video->startNanoseconds;
             auto outcome = this->outcome(camera, state.video->frameRate);
             outcome.scene.counter = ++state.video->counter;
             // A frame lasts as long as its exposure: a longer one delays the next (the timer has scheduled
@@ -819,7 +824,9 @@ private:
             frame.exposure = outcome.exposure;
         }
         const auto latency = std::uint64_t(core_.options_.latencyMilliseconds) * 1'000'000;
-        const auto now = core_.options_.manualClock ? core_.clock.load() : realNow();
+        // The timer's frame starts when it was scheduled to (or when it ran, if that was a period late): one instant for
+        // the deadline and the timestamp, not the time the frame took to render and reach the delegate.
+        const auto now = core_.options_.manualClock ? core_.clock.load() : (start != 0 ? start : realNow());
         frame.timestampNanoseconds = now > latency ? now - latency : 0;
         delegate_.cameraFrame(camera, std::move(frame));
     }
@@ -867,6 +874,7 @@ private:
         std::unique_lock lock(mutex_);
         while (!stopped_) {
             const auto now = std::chrono::steady_clock::now();
+            const auto nowNanoseconds = realNow();
             std::optional<std::chrono::steady_clock::time_point> wake;
             std::vector<std::size_t> due;
             std::vector<std::pair<std::size_t, CameraStillRequest>> stills;
@@ -884,6 +892,8 @@ private:
                     // deadline is always a whole frame duration after the start of this one.
                     const auto period = std::chrono::nanoseconds(1'000'000'000ull / state.video->frameRate);
                     if (now - state.video->next >= period) state.video->next = now;
+                    const auto late = std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - state.video->next).count());
+                    state.video->startNanoseconds = nowNanoseconds > late ? nowNanoseconds - late : nowNanoseconds;
                     state.video->next += period;
                 }
                 if (!wake || state.video->next < *wake) wake = state.video->next;
