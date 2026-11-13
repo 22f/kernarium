@@ -27,6 +27,10 @@ typedef void (^KernariumRestartHandler)(
 /* The guest powered its GNSS receiver on (`powered` is true) or off, delivered
  * on the main queue. */
 typedef void (^KernariumLocationReceiverHandler)(BOOL powered);
+/* What the host is doing for the guest's cameras (a
+ * KERNARIUM_RUNTIME_CAMERA_STATE_ value), delivered on the main queue in the
+ * order the states happened. */
+typedef void (^KernariumCameraStateHandler)(int state);
 /* The guest's keyboard lights, an application's pointer capture or the guest's
  * registration of its keyboard or pointer changed (a
  * KERNARIUM_RUNTIME_INPUT_STATUS_ value, and whether it is on), delivered on
@@ -220,6 +224,14 @@ uint32_t kernarium_runtime_loader_gpu_budget_mib_for_limit(
     uint32_t guest_memory_mib,
     uint32_t guest_processor_count,
     kernarium_launch_memory_set parameters);
+/* The host-side memory, in MiB, that a live camera session holds out of the GPU
+ * budget B of `gpu_budget_mib` MiB: the camera device's reserve for the tier
+ * that budget gets (uml::camera::cameraHostMemoryReserveMiB,
+ * darwin/device/camera/camera_tiers.hpp). While the cameras are live the GPU's
+ * pool is B less this figure, taken after B is clamped to its floor; blocked
+ * cameras or none take nothing. The runtime applies the same figure to the pool
+ * a run gives the GPU. */
+uint32_t kernarium_runtime_loader_camera_reserve_mib(uint32_t gpu_budget_mib);
 /* The vCPU count the applications default to and offer at most on a device with
  * `physical_processor_count` physical cores (zero counts as one): every core,
  * and never more than the count the memory budget is measured for
@@ -306,6 +318,16 @@ void kernarium_runtime_loader_wake_for_input(void);
  * Returns 0, or a negated errno: -ENODEV when no runtime is loaded, -EINVAL for
  * a value the runtime does not know. */
 int kernarium_runtime_loader_set_network_notice(int notice);
+/* Receives the camera state (see
+ * kernarium_runtime_set_camera_state_callback_function), or none for a nil
+ * handler. It may be set before a runtime is selected. */
+void kernarium_runtime_loader_set_camera_state_handler(
+    KernariumCameraStateHandler _Nullable handler);
+/* Tells the camera how far the host turns the guest's picture; see
+ * kernarium_runtime_set_camera_rotation_function. Returns 0, or a negated
+ * errno: -ENODEV when no runtime is loaded, -EINVAL for a value the runtime
+ * refuses. */
+int kernarium_runtime_loader_set_camera_rotation(uint32_t degrees);
 #ifndef UML_APP_STORE_APPLICATION
 /* Whether the selected runtime is an automation build and the launch asked it,
  * through the environment, to start the background job with the guest. Always

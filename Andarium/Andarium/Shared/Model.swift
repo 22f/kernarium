@@ -472,6 +472,25 @@ final class AppModel {
     var inputProbe: InputProbe?
     #endif
     var microphoneState = MicrophoneState.notAsked
+    /// How far iOS lets Andarium use the device's cameras, and `unavailable`
+    /// for a device that has none.
+    var cameraAccess = CameraAccess.unavailable
+    /// The person went to Settings to allow the camera: when Andarium is
+    /// active again with access, the switch they tapped turns on.
+    var cameraAwaitsSettings = false
+    /// The Camera switch is on and iOS's question about it is on screen, or
+    /// about to be. A switch that is on while iOS has not been asked and no
+    /// question is under way is a choice made under access that has ended, and
+    /// it goes off.
+    private var cameraAsking = false
+    /// Asks iOS about the camera. The device application and the Simulator
+    /// preview's system mode have one; a preview without it takes the access
+    /// as given.
+    @ObservationIgnored var camera: CameraController?
+    /// What the host is doing for the guest's cameras, from the runtime.
+    private(set) var cameraCapture = CameraCapture.idle
+    /// The person dismissed the notice for the interruption now in force.
+    private var cameraNoticeDismissed = false
     /// The question about a permission the person is being asked, if any.
     var permissionPrompt: PermissionPrompt?
     /// The person went to Settings to allow the microphone: when Andarium is
@@ -1468,6 +1487,7 @@ final class AppModel {
         graphicsReclaim.reset()
         thermalCapWaiting = false
         dismissThermalNotice()
+        cameraCaptureChanged(.idle)
         runEnd = end
         runUptimeSeconds = uptimeSeconds
         if end.poweredOff {
@@ -1674,6 +1694,123 @@ final class AppModel {
         openSettings()
     }
 
+    // MARK: Camera
+
+    /// The Camera switch as the screens show it: the guest's choice is on and
+    /// iOS lets Andarium capture, or has not been asked yet and the question is
+    /// under way. Access that was refused or taken away, or a device without
+    /// cameras, shows it off.
+    var cameraShownOn: Bool {
+        guard guest?.camera == true else { return false }
+        return cameraAccess == .authorized || cameraAccess == .notDetermined
+    }
+
+    /// What the cameras do in the run that starts now: live only while the
+    /// switch is on and iOS lets Andarium capture. The runtime reads it at the
+    /// start and nothing changes it until the guest powers off.
+    var cameraMode: CameraMode {
+        CameraSession.mode(choice: guest?.camera == true, access: cameraAccess)
+    }
+
+    /// The Camera switch. It exists on Home, so it can only change between
+    /// runs. Turning it on asks iOS for access at once, the first time. After a
+    /// refusal there is nothing to ask: the person is told why and, where
+    /// Settings has the way out, offered Andarium's page there.
+    func setCamera(_ on: Bool) {
+        guard guest != nil else { return }
+        guard on else {
+            cameraAwaitsSettings = false
+            cameraAsking = false
+            guest?.camera = false
+            persistNow()
+            return
+        }
+        switch cameraAccess {
+        case .unavailable:
+            return
+        case .restricted, .denied:
+            permissionPrompt = .camera
+        case .notDetermined:
+            guest?.camera = true
+            cameraAsking = true
+            persistNow()
+            // The controller asks iOS and reports the answer to
+            // `cameraAccessChanged`. A preview without one has no system
+            // prompt to show and takes it as given.
+            if let camera { camera.setOn(true) } else { cameraAccessChanged(.authorized) }
+        case .authorized:
+            guest?.camera = true
+            persistNow()
+        }
+    }
+
+    /// iOS answered the camera question, or the person changed Andarium's
+    /// access in Settings. A refusal takes the choice back with it, and a
+    /// device without a camera keeps it; access the person went to Settings to
+    /// give turns the switch they tapped on.
+    func cameraAccessChanged(_ access: CameraAccess) {
+        cameraAccess = access
+        switch access {
+        case .unavailable:
+            // No camera to share is not a choice taken back: a Continuity
+            // camera that is away, or a device the guest moves to, leaves the
+            // person's switch as it was. The row shows it off and disabled,
+            // and the session is blocked (`cameraShownOn`, `cameraMode`).
+            break
+        case .restricted, .denied:
+            if guest?.camera == true {
+                guest?.camera = false
+                persistNow()
+            }
+        case .authorized:
+            if cameraAwaitsSettings, guest != nil, guest?.camera != true {
+                guest?.camera = true
+                persistNow()
+            }
+        case .notDetermined:
+            if !cameraAsking, guest?.camera == true {
+                guest?.camera = false
+                persistNow()
+            }
+        }
+        if access != .notDetermined {
+            cameraAwaitsSettings = false
+            cameraAsking = false
+        }
+    }
+
+    /// The alert's Open Settings: for a refusal, the switch the person tapped
+    /// turns on when Andarium is active again with access.
+    func openCameraSettings() {
+        cameraAwaitsSettings = cameraAccess.refuses
+        openSettings()
+    }
+
+    /// The runtime reports what the host is doing for the guest's cameras.
+    func cameraCaptureChanged(_ capture: CameraCapture) {
+        if !CameraNotice.isUp(for: capture) { cameraNoticeDismissed = false }
+        cameraCapture = capture
+    }
+
+    /// Whether the session says the camera is paused because other apps share
+    /// the screen: it goes when the interruption ends or the person dismisses
+    /// it.
+    var cameraNoticeShowing: Bool {
+        CameraNotice.isUp(for: cameraCapture) && !cameraNoticeDismissed
+    }
+
+    func dismissCameraNotice() {
+        cameraNoticeDismissed = true
+    }
+
+    #if !APP_STORE
+    /// The Simulator preview plays the notice: it has no runtime to interrupt.
+    /// The App Store configuration leaves this out.
+    func previewCameraNotice() {
+        cameraCapture = .interruptedByMultitasking
+    }
+    #endif
+
     // MARK: Statistics
 
     /// A view that shows the statistics appears or goes. The readings run
@@ -1863,10 +2000,13 @@ final class AppModel {
         thermalNotice.dismiss()
     }
 
+    #if !APP_STORE
     /// The Simulator preview plays the notice: it has no runtime to start a cap.
+    /// The App Store configuration leaves this out.
     func previewThermalNotice() {
         thermalNotice.show()
     }
+    #endif
 
     // MARK: Network notice
 

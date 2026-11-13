@@ -39,6 +39,26 @@ struct LocalizationTests {
         #expect(text("Virtual machine", in: language) != "Virtual machine", "\(language) says it in English")
     }
 
+    /// Each word of the Camera setting reads in the language, not in English:
+    /// the switch's reasons, its alerts and the notes under Capabilities.
+    @Test(arguments: LocalizationTests.languages)
+    func theCameraWordsAreTranslated(language: String) {
+        let words: [String.LocalizationValue] = [
+            "Camera", "Not allowed in Settings", "Restricted on this device",
+            "This device has no camera to share.",
+            "Camera paused while other apps are on screen", "Allow camera access",
+            "iOS is not allowing Andarium to use the camera. Turn on Camera for Andarium in Settings, then come back to use it.",
+            "Camera is restricted",
+            "This device\u{2019}s settings, such as Screen Time or a profile, do not let apps use the camera, so Andarium cannot share it.",
+            "Andarium is not allowed to use the camera. Turning this on offers to open Settings.",
+            "The camera is restricted on this device. Turning this on explains why.",
+        ]
+        for word in words {
+            let english = text(word, in: "en")
+            #expect(text(word, in: language) != english, "\(language) shows \"\(english)\" in English")
+        }
+    }
+
     @Test func aCountIsPluralInEnglishAndInOneFormInTheOthers() {
         #expect(text("\(1) snapshots", in: "en") == "1 snapshot")
         #expect(text("\(3) snapshots", in: "en") == "3 snapshots")
