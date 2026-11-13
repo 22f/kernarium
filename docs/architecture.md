@@ -104,9 +104,16 @@ it waited and used the wait up. A trim wakes a guest that suspended itself. A wa
 response per 30 s of awake time (`CLOCK_UPTIME_RAW`) counted from the start of
 the last response, a critical level always starts one, and none starts while one
 runs. macOS and iOS, and both applications, get it through the runtime. Each
-level change and each response is one rate-limited stderr line: the footprint,
-the failed guest-RAM wiring operations and, on a response line, the bytes each
-part released and the trim's duration.
+notification the system delivers is also reported to the application (the
+level, and whether a response starts, is withheld by the 30 s or is already
+running), once and before that notification's work, the normal level included
+(`set_pressure_observer`, and the runtime API's `set_memory_pressure_callback`).
+The system delivers one notification at a time and merges the levels raised
+meanwhile into the next, so a level raised during a response is reported after
+it, as the most serious of those raised; the observer lives for the process.
+Each level change and each response is one rate-limited stderr line: the
+footprint, the failed guest-RAM wiring operations and, on a response line, the
+bytes each part released and the trim's duration.
 
 **Budgets.** The process's memory limit, L, is the figure the memory budgets
 derive from. iOS enforces one per application

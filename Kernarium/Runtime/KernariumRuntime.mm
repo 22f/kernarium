@@ -10,6 +10,7 @@
 #include "KernariumGuestTimeZone.hpp"
 #include "KernariumHostFeatures.hpp"
 #include "KernariumKeyWake.hpp"
+#include "KernariumMemoryPressure.hpp"
 #include "KernariumLocation.hpp"
 #include "KernariumRestartLoop.hpp"
 #include "KernariumStatistics.hpp"
@@ -59,6 +60,7 @@
 #include "options.hpp"
 #include "runtime/execution_engine.hpp"
 #include "runtime/guest_memory_budget.hpp"
+#include "runtime/memory_pressure_response.hpp"
 #include "runtime/session_record.hpp"
 #include "uml/emulator.h"
 #include "uml_slirp_net.h"
@@ -390,6 +392,16 @@ kernarium::camera::Rotation& cameraRotation()
     return instance;
 }
 #endif
+
+/* The application's way to the host's response to the system's memory
+ * pressure: the one receiver of its reports, which lives as long as the
+ * process. The response reports to it through the observer installed with the
+ * first callback, for every run after. */
+kernarium::memory_pressure::Receiver& memoryPressureReceiver()
+{
+    static auto& instance = *new kernarium::memory_pressure::Receiver;
+    return instance;
+}
 
 void publishConsoleOutput(const void* buffer, std::size_t length)
 {
@@ -3135,6 +3147,25 @@ int runtimePlanCameraReserve(
     return 0;
 }
 
+void runtimeSetMemoryPressureCallback(
+    kernarium_runtime_memory_pressure_callback callback,
+    void* context)
+{
+    auto& receiver = memoryPressureReceiver();
+    /* Installed once and kept, so that the response's lock is never taken
+     * while the receiver's is held. */
+    static const bool installed = [&receiver] {
+        uml::runtime::set_pressure_observer(
+            [](void* observed, const uml::runtime::PressureReport& report) noexcept {
+                static_cast<kernarium::memory_pressure::Receiver*>(observed)->publish(report);
+            },
+            &receiver);
+        return true;
+    }();
+    (void)installed;
+    receiver.set(callback, context);
+}
+
 int runtimeSetCameraRotation(uint32_t degrees)
 {
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
@@ -3330,6 +3361,7 @@ const kernarium_runtime_api runtimeApi {
     .set_camera_state_callback = runtimeSetCameraStateCallback,
     .set_camera_rotation = runtimeSetCameraRotation,
     .plan_camera_reserve = runtimePlanCameraReserve,
+    .set_memory_pressure_callback = runtimeSetMemoryPressureCallback,
 };
 
 } // namespace

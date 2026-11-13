@@ -338,3 +338,21 @@ uml_add_unit_test(
     NAME runtime-memory-pressure-response
     COMMAND uml_runtime_memory_pressure_response_tests
     TIMEOUT 120)
+
+# A level raised after exit() has run the destructors of ordinary statics, with a
+# guest still owning its watch. The object that registers the raising handler is
+# linked ahead of the response's, which is what puts the handler after their
+# destructors.
+add_library(uml_runtime_memory_pressure_exit_first OBJECT
+    memory_pressure_exit_first.cpp)
+add_executable(uml_runtime_memory_pressure_exit_tests
+    memory_pressure_exit_tests.cpp)
+target_link_libraries(uml_runtime_memory_pressure_exit_tests PRIVATE
+    uml_runtime_memory_pressure_exit_first
+    UML::RuntimeMemoryPressure
+    UML::RuntimeGuestStatistics
+    UML::PlatformContract)
+uml_add_unit_test(
+    NAME runtime-memory-pressure-exit
+    COMMAND uml_runtime_memory_pressure_exit_tests
+    TIMEOUT 60)

@@ -78,6 +78,18 @@ bound counts none of them. The `KERNARIUM_GPU_BUDGET_*_MIB` and `KERNARIUM_GUEST
 environment variables state values for one measurement launch and are never
 stored.
 
+The runtime answers the system's memory pressure itself
+([architecture](../docs/architecture.md#memory-and-executable-code)). It also
+reports every level the system delivers to the application, with whether the
+host responds, withholds the response (a warning less than 30 s after the last
+response began) or is already responding, through `set_memory_pressure_callback`
+(runtime API 41): once for each notification, before that notification's work,
+and with no figures. The system merges the levels raised during a response into
+the next notification, so a level raised during a response is reported after it.
+The loader queues each report to the main queue as its own block and setting or
+clearing its handler does not cancel the ones queued. Andarium shows a notice
+from it; Kernarium sets no callback.
+
 ## Guest storage
 
 A Linux guest boots an image file in the application's Documents directory:
