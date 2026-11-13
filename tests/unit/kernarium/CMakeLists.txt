@@ -111,6 +111,16 @@ uml_add_unit_test(NAME kernarium-location-fix
     COMMAND uml_kernarium_location_fix_tests
     LABELS kernarium)
 
+# How the host's response to the system's memory pressure reaches the
+# application: the runtime's words for a report and the one receiver of them.
+add_executable(uml_kernarium_memory_pressure_tests memory_pressure_tests.cpp)
+target_include_directories(uml_kernarium_memory_pressure_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/Kernarium/Runtime
+    ${PROJECT_SOURCE_DIR}/darwin)
+uml_add_unit_test(NAME kernarium-memory-pressure
+    COMMAND uml_kernarium_memory_pressure_tests
+    LABELS kernarium)
+
 # What an Android guest is told about the host's cameras: the camera fields of
 # the boot request, the layout composed from the host's cameras, the lens cover,
 # and the camera state and rotation the application and the device exchange.

@@ -14,6 +14,7 @@
 #include <dispatch/dispatch.h>
 #include <mach/mach.h>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <utility>
 #include <time.h>
@@ -25,6 +26,19 @@ namespace {
 
 /* The longest line the console gets in one write. */
 constexpr std::size_t line_limit = 1000;
+
+/* The process's one observer of the reports. A report is delivered with the
+ * mutex held, which is what makes clearing the observer wait for a call in
+ * progress. Constant-initialized and never destroyed with anything to release,
+ * and a report allocates nothing: it is made when the system is short of
+ * memory. */
+struct ObserverSlot final {
+	std::mutex mutex;
+	PressureObserver observer{};
+	void *context{};
+};
+
+constinit ObserverSlot observer_slot;
 
 class SystemActions final : public PressureActions {
 public:
@@ -84,6 +98,13 @@ public:
 		/* One write, so that the line is not split among the console's
 		 * other writers. */
 		(void)write(STDERR_FILENO, buffer, size + 1);
+	}
+
+	void report(const PressureReport &report) noexcept override
+	{
+		const std::lock_guard lock{observer_slot.mutex};
+		if (observer_slot.observer != nullptr)
+			observer_slot.observer(observer_slot.context, report);
 	}
 
 private:
@@ -280,6 +301,13 @@ MemoryPressureWatch::MemoryPressureWatch(std::unique_ptr<State> state) noexcept
 }
 
 MemoryPressureWatch::~MemoryPressureWatch() = default;
+
+void set_pressure_observer(PressureObserver observer, void *context) noexcept
+{
+	const std::lock_guard lock{observer_slot.mutex};
+	observer_slot.observer = observer;
+	observer_slot.context = context;
+}
 
 std::unique_ptr<MemoryPressureWatch> start_memory_pressure_response(
 	GuestTrim trim, void *context, PressureTiming timing)
