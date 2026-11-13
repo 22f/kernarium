@@ -1023,13 +1023,17 @@ void VhostUserServer::awaitBackendAcknowledgement(
          * request's reply is still owed, and clear the requests under the
          * loop that waits here. The front-end drains the backend channel
          * while it waits for the reply, so the acknowledgement arrives and
-         * the GET_FEATURES is answered once the wait is over. */
-        const bool retiresHeldRequests =
+         * the GET_FEATURES is answered once the wait is over. It also stays
+         * behind every message already queued: those can be the ring
+         * disables that make it retire the requests, sent without a reply
+         * for it to follow, and its own reply tells the driver that the
+         * disables and everything before them have taken effect. */
+        const bool mustFollowQueued =
             static_cast<protocol::VhostRequest>(request.header.request) ==
                 protocol::VhostRequest::getFeatures &&
-            requestsAreHeld();
+            (requestsAreHeld() || !deferredFrontendMessages_.empty());
         if (answeredDuringBackendWait(request.header.request) &&
-            !retiresHeldRequests)
+            !mustFollowQueued)
             handleMessage(frontendDescriptor_, request);
         else
             deferredFrontendMessages_.push_back(std::move(request));

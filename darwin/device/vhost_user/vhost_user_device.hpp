@@ -147,7 +147,10 @@ public:
      * one before the ring's enable reaches the transport. A device that
      * names a shared-memory region may set it: the GET_FEATURES that would
      * reset the device is not answered while the transport waits for the
-     * acknowledgement of a map or unmap, but once the wait is over. */
+     * acknowledgement of a map or unmap, but once the wait is over, behind
+     * the messages queued before it. The wait ends with the acknowledgement,
+     * the end of the backend-request channel or a service stop, and has no
+     * deadline of its own. */
     [[nodiscard]] virtual bool keepsDeferredRequestsWhileDisabled() const noexcept
     {
         return false;

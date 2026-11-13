@@ -70,13 +70,16 @@ constexpr std::uint64_t negotiatedSharedMemory = negotiated |
  * answers a buffer with the oldest event the test raised, and keeps the buffer
  * while there is none. With a shared-memory region, each request also maps one
  * sixteenth-of-the-region range of its own (the request tagged `tag` maps range
- * `tag - 1`), and a reset unmaps every range still mapped. */
+ * `tag - 1`), and a reset unmaps every range still mapped. With
+ * `completesAtOnce` a request is answered by the call that maps its range, as
+ * the GPU's blob map is, instead of being held. */
 class HoldingDevice final : public VhostUserDevice {
 public:
     struct Options {
         bool keepsRequests {};
         bool answersKicksFirst {};
         bool sharedMemory {};
+        bool completesAtOnce {};
     };
 
     explicit HoldingDevice(Options options) : options_(options)
@@ -157,12 +160,14 @@ public:
         ++runs_[index];
         if (index == requestQueue) {
             const auto tag = request.empty() ? std::uint8_t {} : request[0];
-            held_.push_back({requestId, tag});
             if (options_.sharedMemory) {
                 const int duplicate = ::dup(backing_.descriptor());
                 require(duplicate >= 0);
                 queueAction(true, (tag - 1U) * rangeLength, uml::gpu::UniqueDescriptor {duplicate});
             }
+            if (options_.completesAtOnce)
+                return {VhostUserQueueAction::complete, responseTo(tag)};
+            held_.push_back({requestId, tag});
             return {VhostUserQueueAction::defer, {}};
         }
         if (events_.empty())
@@ -396,11 +401,14 @@ public:
         readAcknowledgement(socket, protocol::VhostRequest::setVringEnable);
     }
     /* The enable alone: its acknowledgement comes when the server has
-     * handled it, which can be after a backend request it raised. */
-    void sendEnable(int socket, bool on) const
+     * handled it, which can be after a backend request it raised. Without
+     * `needReply` it asks for none, as a request that is not acknowledged
+     * does. */
+    void sendEnable(int socket, bool on, bool needReply = true) const
     {
         const protocol::VringState state {.index = index_, .value = on ? 1U : 0U};
-        sendRequest(socket, protocol::VhostRequest::setVringEnable, bytesOf(state));
+        sendRequest(
+            socket, protocol::VhostRequest::setVringEnable, bytesOf(state), {}, needReply);
     }
     void writeKickPipe() const { writeKick(kick_); }
     /* An in-band kick. Whatever the kick asks for, it returns once the server
@@ -1163,6 +1171,56 @@ void getFeaturesInsideAMapWaitIsAnsweredAfterIt()
     });
 }
 
+/* A driver's teardown sends its ring disables without asking for a reply and
+ * ends with the GET_FEATURES it waits for, so that reply tells it the disables
+ * have taken effect. When they arrive while the server waits for the
+ * acknowledgement of a map, they are queued behind it, and the GET_FEATURES
+ * stays queued behind them: it is not answered in the wait, and the answer of
+ * the request that raised the map, which the device completes at once, is
+ * written to its ring before that reply, never after the driver may free the
+ * ring. */
+void getFeaturesFollowsDisablesQueuedInAMapWait()
+{
+    auto device = std::make_unique<HoldingDevice>(HoldingDevice::Options {true, false, true, true});
+    auto* recorder = device.get();
+    VhostUserServer server {std::move(device)};
+    SplitRing ring;
+    TestQueue requests {ring, requestQueue, requestLayout};
+    TestQueue events {ring, eventQueue, eventLayout};
+    std::optional<SocketPair> backendChannel;
+    std::optional<BackendAnswerer> answerer;
+
+    withServerConnection(server, [&](int socket) {
+        constexpr auto map = protocol::VhostSlaveRequest::sharedMemoryMap;
+        backendChannel = openBackendChannel(socket, negotiatedSharedMemory);
+        answerer.emplace(backendChannel->descriptors[0].get());
+        configureMemory(socket, ring.descriptor());
+        requests.start(socket, true, true);
+        events.start(socket, true, true);
+        answerer->hold(true);
+        requests.postRequest(1);
+        requests.writeKickPipe();
+        awaitCondition([&] { return answerer->count(map) == 1; });
+        const auto resets = recorder->resets();
+
+        events.sendEnable(socket, false, false);
+        requests.sendEnable(socket, false, false);
+        sendRequest(socket, protocol::VhostRequest::getFeatures, {}, {}, false);
+        pollfd answered {.fd = socket, .events = POLLIN};
+        require(::poll(&answered, 1, 100) == 0,
+                "a GET_FEATURES overtook the ring disables queued before it");
+        require(requests.usedIndex() == 0);
+
+        answerer->hold(false);
+        (void)readValueReply<std::uint64_t>(socket, protocol::VhostRequest::getFeatures);
+        require(requests.usedIndex() == 1 && requests.responseAt(0, 2) == responseTo(1),
+                "the request's answer was not written before the GET_FEATURES reply");
+        require(recorder->resets() == resets, "the queued disables reset a device with nothing held");
+        (void)readConfig(socket, 0, 1);
+        require(requests.usedIndex() == 1, "an answer was written after the GET_FEATURES reply");
+    });
+}
+
 /* A guest that suspends and never comes back, whose connection ends instead,
  * leaves a device that keeps its requests reset, with its ranges unmapped, and
  * nothing written to a ring it did not enable again. */
@@ -1231,6 +1289,7 @@ int main(int argc, char** argv)
     cases.push_back({"no-opt-in", deviceThatDoesNotOptInIsResetAtTheDisable});
     cases.push_back({"reset-report-rate", theResetAtADisableIsReportedLessOften});
     cases.push_back({"features-in-a-map-wait", getFeaturesInsideAMapWaitIsAnsweredAfterIt});
+    cases.push_back({"features-behind-queued-disables", getFeaturesFollowsDisablesQueuedInAMapWait});
     try {
         for (const auto& test : cases) {
             if (argc > 1 && std::string {argv[1]} != test.name)

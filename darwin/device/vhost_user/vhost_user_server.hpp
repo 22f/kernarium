@@ -168,8 +168,9 @@ private:
     /* Waits for the front-end's acknowledgement of the backend request
      * `request` while still answering every front-end request whose reply
      * it awaits without reading the backend channel; other requests are
-     * deferred, as is a GET_FEATURES that retires held requests. Throws
-     * unless the reply acknowledges `request` with a zero status. */
+     * deferred, as is a GET_FEATURES that retires held requests or follows
+     * a message already deferred. Throws unless the reply acknowledges
+     * `request` with a zero status. */
     void awaitBackendAcknowledgement(
         const protocol::VhostHeader& request,
         const char* channel);
