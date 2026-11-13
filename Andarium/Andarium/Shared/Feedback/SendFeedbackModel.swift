@@ -92,7 +92,7 @@ final class SendFeedbackModel {
             step: boot.step, seconds: boot.seconds, kind: kind, restarts: boot.restarts, output: app.startOutput(),
             containers: app.diagnosticsContainers)
         do {
-            let url = try folder.reserve(SendFeedbackStartLog.fileName)
+            let url = try folder.reserve(SendFeedbackStartLog.fileName(at: app.feedbackServices.now()))
             try Data(text.utf8).write(to: url)
             form.attachments.add(SendFeedbackAttachment(kind: .startLog, url: url, bytes: Self.size(of: url)))
         } catch {

@@ -28,6 +28,22 @@ struct SendFeedbackStartLogTests {
     private static let key = "QAAAAGJ4Z0n2Hq+Lx0aT/m8nR4sJ0d5bYwV9cE7uKf3PzQ1yM6hS2oXkUa8tNvB5rLq=="
     private static let serial = "K7QX2M9T4R"
 
+    /// The row's remove button, in the language of the run (the application's own words).
+    private static var removeLabel: String { String(localized: "Remove start log", table: "Feedback") }
+
+    /// 2026-11-08 05:04:50 UTC: the moment the sheets of these tests make their log.
+    private static let moment = Date(timeIntervalSince1970: 1_794_114_290)
+
+    /// The name that moment gives in the device's clock, written out here with
+    /// the Gregorian calendar and `String(format:)`, independently of the code.
+    private static var expectedName: String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let c = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: moment)
+        return String(
+            format: "start-log-%04d%02d%02d-%02d%02d%02d.txt", c.year!, c.month!, c.day!, c.hour!, c.minute!, c.second!)
+    }
+
     private struct Fixture {
         let app: AppModel
         let diagnostics: URL
@@ -79,6 +95,7 @@ struct SendFeedbackStartLogTests {
             return true
         }
         services.runningSeconds = { _ in 125 }
+        services.now = { Self.moment }
         app.feedbackServices = services
         return Fixture(
             app: app, diagnostics: diagnostics, staging: SendFeedbackStaging(root: root.appendingPathComponent("staging")),
@@ -124,11 +141,14 @@ struct SendFeedbackStartLogTests {
         sheet.offerStartLog()
         #expect(sheet.form.attachments.count == 1)
         let log = try #require(sheet.form.attachments.items.first)
-        #expect(log.kind == .startLog && log.url.lastPathComponent == "start-log.txt" && log.mimeType == "text/plain")
+        #expect(log.kind == .startLog && log.url.lastPathComponent == Self.expectedName && log.mimeType == "text/plain")
+        // The name is English, Gregorian and ASCII whatever the device's language, calendar and digits are.
+        #expect(log.url.lastPathComponent.range(of: #"^start-log-[0-9]{8}-[0-9]{6}\.txt$"#, options: .regularExpression) != nil)
         let text = try contents(of: log)
         #expect(UInt64(text.utf8.count) == log.bytes)
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         #expect(lines.starts(with: ["Start log", "Step: \(sheet.information.boot?.step ?? "?")", "Time: 3:17", "Start: ordinary start"]))
+        #expect(!lines.contains { $0.contains("Made") }, "the moment is in the name alone")
         #expect(lines.contains("[  102.9] init: starting service 'netd'..."))
         // It counts with the rest.
         #expect(sheet.form.attachments.totalBytes == log.bytes)
@@ -136,7 +156,7 @@ struct SendFeedbackStartLogTests {
         sheet.form.problem = "Too slow"
         sheet.send()
         let request = try #require(fixture.composer.request)
-        #expect(request.attachments.map(\.url.lastPathComponent) == ["start-log.txt"])
+        #expect(request.attachments.map(\.url.lastPathComponent) == [Self.expectedName])
         #expect(request.body.contains("Boot: not finished"))
         sheet.close()
     }
@@ -159,6 +179,32 @@ struct SendFeedbackStartLogTests {
         #expect(!text.contains("aa:bb:cc") && !text.contains(container))
         #expect(text.contains("adb_key=<masked>") && text.contains("serialno=<masked>"))
         #expect(text.contains("[   99.0] init: starting service 'netd'..."))
+        sheet.close()
+    }
+
+    /// The name is the moment the log was made, in the device's clock: a zone
+    /// other than the test machine's gives the other hour, and the ambient
+    /// language, calendar and digits (the run's `-testLanguage` and `-testRegion`)
+    /// change nothing: the control shows what a formatter that follows them
+    /// writes.
+    @Test func theNameIsFixedWhateverTheDevicesLanguageCalendarAndDigitsAre() throws {
+        let before = NSTimeZone.default
+        defer { NSTimeZone.default = before }
+        NSTimeZone.default = try #require(TimeZone(identifier: "Asia/Tokyo"))
+        let fixture = try fixture()
+        let sheet = fixture.sheet()
+        sheet.offerStartLog()
+        let name = try #require(sheet.form.attachments.items.first).url.lastPathComponent
+        #expect(name == "start-log-20261108-140450.txt")
+        let following = DateFormatter()
+        following.timeZone = TimeZone.current
+        following.dateFormat = "yyyyMMdd-HHmmss"
+        print("ambient", Locale.current.identifier, Locale.current.calendar.identifier, "a formatter that follows it writes", following.string(from: Self.moment), "the name has", name)
+        // Made once: neither the row's removal nor the sheet's task running again names another.
+        sheet.remove(try #require(sheet.form.attachments.items.first))
+        fixture.app.feedbackServices.now = { Self.moment.addingTimeInterval(60) }
+        sheet.offerStartLog()
+        #expect(sheet.form.attachments.isEmpty)
         sheet.close()
     }
 
@@ -268,7 +314,7 @@ struct SendFeedbackStartLogTests {
         func row(_ present: Bool) async throws -> NSObject? {
             let deadline = ContinuousClock.now + .seconds(8)
             while ContinuousClock.now < deadline {
-                let found = host.presentedViewController.flatMap { button(labelled: "Remove start log", in: $0.view) }
+                let found = host.presentedViewController.flatMap { button(labelled: Self.removeLabel, in: $0.view) }
                 if (found != nil) == present { return found }
                 try await Task.sleep(for: .milliseconds(50))
             }
@@ -283,7 +329,7 @@ struct SendFeedbackStartLogTests {
         #expect(try await row(false) == nil, "the row stays after its button was used")
         // The row is not made again when the sheet is laid out again.
         try await Task.sleep(for: .milliseconds(500))
-        #expect(host.presentedViewController.flatMap { button(labelled: "Remove start log", in: $0.view) } == nil)
+        #expect(host.presentedViewController.flatMap { button(labelled: Self.removeLabel, in: $0.view) } == nil)
         fixture.app.feedbackFromBoot = false
         host.dismiss(animated: false)
     }

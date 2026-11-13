@@ -11,8 +11,25 @@ import Foundation
 /// boot only. It is in English, for whoever reads the mail, as the information
 /// block is, and the person sees it as a row they can remove.
 nonisolated enum SendFeedbackStartLog {
-    /// A fixed ASCII name: the mail's attachments are named by it.
-    static let fileName = "start-log.txt"
+    /// The file's name in the mail: `start-log-yyyyMMdd-HHmmss.txt`, the moment
+    /// the log was made. It is never localized: the formatter names its locale
+    /// (en_US_POSIX), its calendar (Gregorian) and its digits (ASCII) itself,
+    /// and takes only the clock's time zone from the device, so the name does
+    /// not change with the interface language, the calendar or the numbering
+    /// system the person has chosen. The time zone is not part of the name.
+    static func fileName(at date: Date, in timeZone: TimeZone = .current) -> String {
+        "start-log-\(nameFormatter(in: timeZone).string(from: date)).txt"
+    }
+
+    /// The formatter of the name's date and time, fixed but for the time zone.
+    static func nameFormatter(in timeZone: TimeZone) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter
+    }
 
     /// The most of the printed output the file holds. The runtime's session
     /// record keeps 4 KiB of a boot's output (`session_kernel_output_bytes`); a
@@ -59,8 +76,12 @@ nonisolated enum SendFeedbackStartLog {
         return tail
     }
 
-    /// The kernel argument whose value the first line may be the end of.
-    private static let keyArgument = "androidboot.kernarium.adb_key"
+    /// The kernel arguments whose value is taken out, and what stands in its
+    /// place: the first line may be the end of one of them.
+    private static let sensitiveArguments: [(name: String, short: String, placeholder: String)] = [
+        ("androidboot.kernarium.adb_key", "adb_key", "<masked>"),
+        ("androidboot.kernarium.timezone", "timezone", "<time zone>"),
+    ]
 
     /// `text` with what could tell an installation apart taken out, as well as
     /// what the bug report takes out (`DiagnosticRedaction`):
@@ -70,6 +91,8 @@ nonisolated enum SendFeedbackStartLog {
     /// - the value of `serialno=` and of the property `[...serialno]: [value]`
     ///   (the runtime masks the first in the record; this is the same rule again,
     ///   for a text that did not come from it);
+    /// - the value of `timezone=` and of the property `[...timezone]: [value]`,
+    ///   which tells the region the person is in, as `<time zone>`;
     /// - any hardware address;
     /// - the application's own folders and the person's home folder;
     /// - and, where the text begins in the middle of a line, the rest of an
@@ -82,6 +105,8 @@ nonisolated enum SendFeedbackStartLog {
             (#"(adb_key\]: \[)[^\]]*"#, "$1\(masked)"),
             (#"(serialno=)\S*"#, "$1\(masked)"),
             (#"(serialno\]: \[)[^\]]*"#, "$1\(masked)"),
+            (#"(timezone=)\S*"#, "$1<time zone>"),
+            (#"(timezone\]: \[)[^\]]*"#, "$1<time zone>"),
             (#"\b[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}\b"#, "<address>"),
         ] {
             result = result.replacingOccurrences(of: pattern, with: template, options: .regularExpression)
@@ -90,10 +115,14 @@ nonisolated enum SendFeedbackStartLog {
     }
 
     /// A text cut at its start begins in the middle of a line. If the cut fell
-    /// inside the argument that carries the key, what is left is either its
-    /// name's tail and the value (`_key=AAAA...`), or the value's tail alone
-    /// (`AAAA...==`, eight characters or more with its padding): the first word is masked in
-    /// either case.
+    /// inside the argument that carries a key or a time zone, what is left is
+    /// the name's tail and the value (`_key=AAAA...`), or the value's tail alone
+    /// (`AAAA...==`, `Tokyo`): the first word is masked in either case. A value's
+    /// tail is told from an ordinary word by what surrounds it: a key's tail
+    /// looks like base64 (eight characters or more with its padding) and is not
+    /// a plain word, and any other tail is one where the line goes on with
+    /// arguments of the kernel's command line. The log's own text always begins
+    /// at a whole line, so this is for a text that does not.
     private static func maskedFirstLineFragment(_ text: String) -> String {
         let end = text.firstIndex(where: { $0 == "\n" }) ?? text.endIndex
         let line = text[..<end]
@@ -110,9 +139,15 @@ nonisolated enum SendFeedbackStartLog {
         if let equals = word.firstIndex(of: "=") {
             let name = word[..<equals]
             // A whole name is the ordinary rule's; a name's tail is a cut one.
-            if keyArgument.hasSuffix(name), !name.hasSuffix("adb_key") {
-                return String(word[...equals]) + "<masked>" + rest
+            for argument in sensitiveArguments where argument.name.hasSuffix(name) && !name.hasSuffix(argument.short) {
+                return String(word[...equals]) + argument.placeholder + rest
             }
+            return text
+        }
+        // The tail of a value (`Tokyo`, `Aires`) in a line of the command line.
+        if word.range(of: #"^[A-Za-z0-9_/+.-]+$"#, options: .regularExpression) != nil,
+           rest.contains("androidboot.") {
+            return "<masked>" + rest
         }
         return text
     }

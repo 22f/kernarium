@@ -470,8 +470,10 @@ requires reopening Andarium.
   and that the start log is attached, and the sheet attaches `start-log.txt`
   once, when it opens: the step, the time on the notice's clock, the kind of
   start and this boot's printed output, from the session record's last 4 KiB
-  (the serial, every `adb_key=` value, hardware addresses and the application's
-  folders are masked). It is a row the person can remove, counted in the total;
+  (the serial, every `adb_key=` value, the time zone, hardware addresses and
+  the application's folders are masked). Its name in the mail is
+  `start-log-yyyyMMdd-HHmmss.txt`, the moment it was made, in the device's
+  clock and never localized (English, Gregorian, ASCII digits). It is a row the person can remove, counted in the total;
   a removed log is not made again, and the file is not refreshed while the sheet
   is open. When the boot completes the tip becomes the running one and the log
   stays. The information block gains a Boot line with the step, the time and
