@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 
 /// A file Install APK turns away before anything is sent to the guest. The
 /// words are the ones the screen shows.
-public enum InstallRefusal: Equatable, Sendable {
+public enum InstallRefusal: Error, Equatable, Sendable {
     /// The file is not an app package.
     case notApk
     /// The file is an app in several parts (.apks, .xapk, .apkm), which the
@@ -13,6 +13,16 @@ public enum InstallRefusal: Equatable, Sendable {
     case bundle
     /// The file is a single .apk of `singleApkLimit` bytes or more.
     case tooLarge
+    /// The file, or an entry of it, is encrypted or password-protected.
+    case encrypted
+    /// The file is an app bundle for publishing, which is not installable.
+    case appBundle
+    /// The archive holds no app.
+    case noApp
+    /// The archive is damaged, or its parts do not fit together.
+    case damaged
+    /// The app has code for no processor this virtual machine has.
+    case noMatchingProcessor
 
     /// From this size a single .apk is a ZIP64 archive, which Android's
     /// package parser cannot read.
@@ -43,6 +53,20 @@ public enum InstallRefusal: Equatable, Sendable {
             String(
                 localized: "Android can\u{2019}t install an app from a single .apk file of \(Formats.size(bytes: Self.singleApkLimit)) or more.",
                 bundle: .module)
+        case .encrypted:
+            String(localized: "This file is encrypted, so it can\u{2019}t be installed. Choose an app file that isn\u{2019}t encrypted.", bundle: .module)
+        case .appBundle:
+            String(
+                localized: "This is an app bundle for publishing apps, which can\u{2019}t be installed. Choose an .apk, .apks, .xapk or .apkm file.",
+                bundle: .module)
+        case .noApp:
+            String(localized: "There\u{2019}s no app in this file. Choose an .apk, .apks, .xapk or .apkm file that holds an app.", bundle: .module)
+        case .damaged:
+            String(
+                localized: "This file is damaged, or the parts of the app don\u{2019}t fit together. Download it again, or choose another file.",
+                bundle: .module)
+        case .noMatchingProcessor:
+            String(localized: "This app has no code for this device\u{2019}s processor.", bundle: .module)
         }
     }
 }
