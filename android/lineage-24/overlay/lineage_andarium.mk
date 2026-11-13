@@ -137,6 +137,14 @@ PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.hardware.sensor.accelerometer.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.sensor.accelerometer.xml \
     frameworks/native/data/etc/android.hardware.sensor.gyroscope.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.sensor.gyroscope.xml
 
+# The compass is advertised only on a host with a magnetometer. The host says so
+# at boot (androidboot.kernarium.compass=1), and then the sensors HAL lists the
+# magnetometer (overlay/sensors) and SystemConfig (route p0007) reads this
+# directory, which nothing else reads. Both SKU directories are taken (the
+# camera layouts' and the haptics').
+PRODUCT_COPY_FILES += \
+    frameworks/native/data/etc/android.hardware.sensor.compass.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml
+
 PRODUCT_NAME := lineage_andarium
 PRODUCT_DEVICE := andarium
 PRODUCT_BRAND := Andarium

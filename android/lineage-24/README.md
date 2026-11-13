@@ -172,6 +172,16 @@ and Android judges the accelerometer, as before. The host sends its current
 orientation at the start of each connection whose control frames say the guest
 has the sensor (`overlay/sensors/motion_protocol.hpp` has the frames).
 
+When the launch passes `androidboot.kernarium.compass=1` (a host with a
+magnetometer), the sub-HAL also lists a continuous `TYPE_MAGNETIC_FIELD` sensor
+(20 ms to 1 s) fed with the host's field in the device's frame, with the host's
+accuracy as the event's status, and says so in a 20-byte "ANC3" control frame;
+the framework declares `android.hardware.sensor.compass` from the same property
+(the `SystemConfig` topic of route p0007 reads the vendor's `kernarium_compass`
+permission directory only then). Without the argument the image lists no
+magnetometer, declares no compass and ends the connection on a magnetic field
+record, as before.
+
 ### Haptics
 
 The vibrator exists only on a device with haptics. The host passes
