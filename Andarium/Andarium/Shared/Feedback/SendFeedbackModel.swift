@@ -350,7 +350,7 @@ final class SendFeedbackModel {
         BusyState(
             title: String(localized: "Copying file", table: "Feedback"),
             detail: String(
-                localized: "This file can\u{2019}t be used where it is, so a copy is made first. Large files take a while.",
+                localized: "Andarium makes its own copy of this file before attaching it. Large files take a while.",
                 table: "Feedback"),
             progress: progress, cancel: cancel)
     }
@@ -360,14 +360,14 @@ final class SendFeedbackModel {
         fileBusy?.progress = min(1, Double(copied) / Double(total))
     }
 
-    private static func fileFailureTitle(count: Int) -> String {
+    static func fileFailureTitle(count: Int) -> String {
         count == 1
             ? String(localized: "One item wasn\u{2019}t added", table: "Feedback")
             : String(localized: "\(count) items weren\u{2019}t added", table: "Feedback")
     }
 
     /// One line for each reason a file was refused, in a fixed order.
-    private static func fileFailureMessage(_ refusals: [SendFeedbackFileRefusal], device: String) -> String {
+    static func fileFailureMessage(_ refusals: [SendFeedbackFileRefusal], device: String) -> String {
         var lines: [String] = []
         if refusals.contains(.notEnoughSpace) {
             lines.append(String(
@@ -384,7 +384,7 @@ final class SendFeedbackModel {
         }
         if refusals.contains(.unavailable) {
             lines.append(String(
-                localized: "A file couldn\u{2019}t be read. Check that it is still there, then try again.",
+                localized: "A file couldn\u{2019}t be read. Check that it is still in Files and downloaded, then try again.",
                 table: "Feedback"))
         }
         return lines.joined(separator: "\n")
@@ -471,11 +471,19 @@ final class SendFeedbackModel {
     /// nothing is sent until the person has looked at the list again.
     private func takeOut(_ gone: [SendFeedbackAttachment]) {
         gone.forEach(remove)
-        fail(
-            String(localized: "Attachment not available", table: "Feedback"),
-            String(
-                localized: "A file you added is no longer available, so it was taken out of the list. Check the list, then send again.",
-                table: "Feedback"))
+        if gone.count == 1 {
+            fail(
+                String(localized: "Attachment not available", table: "Feedback"),
+                String(
+                    localized: "An attachment is no longer available, so it was taken out of the list. Check the list, then send again.",
+                    table: "Feedback"))
+        } else {
+            fail(
+                String(localized: "Attachments not available", table: "Feedback"),
+                String(
+                    localized: "\(gone.count) attachments are no longer available, so they were taken out of the list. Check the list, then send again.",
+                    table: "Feedback"))
+        }
     }
 
     /// The person left the composer. Sent ends the draft; saved and cancelled

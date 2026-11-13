@@ -32,6 +32,8 @@ struct SendFeedbackSheet: View {
         static let addPhotos = LocalizedStringResource("Add photos or videos", table: "Feedback")
         static let files = LocalizedStringResource("Files", table: "Feedback")
         static let addFiles = LocalizedStringResource("Add files", table: "Feedback")
+        static let add = LocalizedStringResource("Add", table: "Feedback")
+        static let addPhotoOrFile = LocalizedStringResource("Add a photo or a file", table: "Feedback")
         static let attached = LocalizedStringResource("Attached", table: "Feedback")
         static let onlyWhileRunning = LocalizedStringResource(
             "Only while the virtual machine is running", table: "Feedback")
@@ -126,13 +128,13 @@ struct SendFeedbackSheet: View {
             Button(Words.keepEditing, role: .cancel) {}
         }
         .alert(
-            model.failure?.title ?? "",
+            (model.failure?.title ?? "").keepingTogether,
             isPresented: Binding(get: { model.failure != nil }, set: { if !$0 { model.failure = nil } }),
             presenting: model.failure
         ) { _ in
             Button(Words.ok, role: .cancel) {}
         } message: { failure in
-            Text(failure.message)
+            Text(failure.message.keepingTogether)
         }
         .photosPicker(
             isPresented: $picking, selection: $picked, matching: .any(of: [.images, .videos]),
@@ -320,8 +322,9 @@ struct SendFeedbackSheet: View {
         } else {
             ZStack {
                 Rectangle().fill(Color.accentColor.gradient)
+                // A fixed size, as the tile is: a glyph that grew with the text would outgrow it.
                 Image(systemName: Self.symbol(attachment.kind))
-                    .font(.title3.weight(.semibold))
+                    .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(.white)
             }
         }
@@ -459,13 +462,56 @@ struct SendFeedbackSheet: View {
                 source(symbol: "camera.viewfinder", title: Words.screenshot, enabled: state.canTakeScreenshot,
                        id: "feedback-screenshot", action: model.takeScreenshot)
             }
-            source(symbol: "photo.on.rectangle.angled", title: Words.photos, enabled: state.canAddMedia,
-                   id: "feedback-photos", spoken: Words.addPhotos) { picking = true }
-            source(symbol: "doc.badge.plus", title: Words.files, enabled: state.canAddFiles,
-                   id: "feedback-files", spoken: Words.addFiles, action: model.pickFiles)
+            addMenu
             Spacer(minLength: 8)
             sendButton(style)
         }
+    }
+
+    /// What a button of the bar looks like: its symbol over its name.
+    private func sourceLabel(symbol: String, title: LocalizedStringResource, enabled: Bool) -> some View {
+        VStack(spacing: 3) {
+            Image(systemName: symbol)
+                .font(.system(size: 19, weight: .semibold))
+                .frame(height: 22)
+            Text(title)
+                .font(.caption2.weight(.medium))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .foregroundStyle(enabled && state.mailAvailable ? Color.accentColor : Color(.tertiaryLabel))
+        .padding(.horizontal, 3)
+        .frame(minWidth: 54, minHeight: 48)
+        .contentShape(.capsule)
+    }
+
+    /// One button for what comes from outside the app: a menu with the photo
+    /// library and Files. Each item opens its picker as it did from its own
+    /// button; the menu is the system's, anchored on the button.
+    private var addMenu: some View {
+        let enabled = state.canAddMedia || state.canAddFiles
+        return Menu {
+            Button { picking = true } label: {
+                Label(Words.photos, systemImage: "photo.on.rectangle.angled")
+            }
+            .disabled(!state.canAddMedia)
+            .accessibilityLabel(Text(Words.addPhotos))
+            .accessibilityIdentifier("feedback-photos")
+            Button(action: model.pickFiles) {
+                Label(Words.files, systemImage: "doc")
+            }
+            .disabled(!state.canAddFiles)
+            .accessibilityLabel(Text(Words.addFiles))
+            .accessibilityIdentifier("feedback-files")
+        } label: {
+            sourceLabel(symbol: "paperclip", title: Words.add, enabled: enabled)
+        }
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .disabled(!enabled)
+        .accessibilityLabel(Text(Words.addPhotoOrFile))
+        .accessibilityIdentifier("feedback-add")
+        .accessibilityShowsLargeContentViewer()
     }
 
     private func source(
@@ -474,19 +520,7 @@ struct SendFeedbackSheet: View {
         spoken: LocalizedStringResource? = nil, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            VStack(spacing: 3) {
-                Image(systemName: symbol)
-                    .font(.system(size: 19, weight: .semibold))
-                    .frame(height: 22)
-                Text(title)
-                    .font(.caption2.weight(.medium))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
-            .foregroundStyle(enabled && state.mailAvailable ? Color.accentColor : Color(.tertiaryLabel))
-            .padding(.horizontal, 3)
-            .frame(minWidth: 54, minHeight: 48)
-            .contentShape(.capsule)
+            sourceLabel(symbol: symbol, title: title, enabled: enabled)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text(spoken ?? title))
@@ -522,6 +556,7 @@ struct SendFeedbackSheet: View {
         .disabled(!state.canSend)
         .accessibilityLabel(Text("Send feedback", tableName: "Feedback"))
         .accessibilityIdentifier("feedback-send")
+        .accessibilityShowsLargeContentViewer()
         .fixedSize()
     }
 

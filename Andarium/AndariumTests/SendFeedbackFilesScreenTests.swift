@@ -308,13 +308,13 @@ struct SendFeedbackFilesScreenTests {
         sheet.takeScreenshot()
         #expect(await eventually { sheet.form.attachments.count == 1 })
         let clash = try fixture.original("Screenshot.PNG")
-        let odd = try fixture.original("My App \u{5E94}\u{7528} (v2).apk")
+        let odd = try fixture.original("My App \u{5E94}\u{7528} (v2)\u{202E}.apk")
         await sheet.addFiles([clash, odd])
         sheet.send()
         let request = try #require(fixture.composer.request)
-        #expect(request.attachments.map(\.fileName) == ["screenshot.png", "Screenshot-2.PNG", "My_App_____v2_.apk"])
+        #expect(request.attachments.map(\.fileName) == ["screenshot.png", "Screenshot-2.PNG", "My App \u{5E94}\u{7528} (v2)_.apk"])
         #expect(request.attachments[1].url == clash && request.attachments[2].url == odd, "from where they are kept")
-        #expect(request.attachments.map(\.displayName) == [nil, "Screenshot.PNG", "My App \u{5E94}\u{7528} (v2).apk"])
+        #expect(request.attachments.map(\.displayName) == [nil, "Screenshot.PNG", "My App \u{5E94}\u{7528} (v2).apk"], "the row has no control characters")
         #expect(request.attachments[2].mimeType == "application/vnd.android.package-archive")
         sheet.close()
     }
@@ -337,7 +337,7 @@ struct SendFeedbackFilesScreenTests {
             (folder, "A folder or a package can\u{2019}t be attached. Compress it in Files first."),
             (package, "A folder or a package can\u{2019}t be attached. Compress it in Files first."),
             (empty, "An empty file can\u{2019}t be attached."),
-            (missing, "A file couldn\u{2019}t be read. Check that it is still there, then try again."),
+            (missing, "A file couldn\u{2019}t be read. Check that it is still in Files and downloaded, then try again."),
         ] {
             sheet.failure = nil
             await sheet.addFiles([url])
@@ -502,7 +502,7 @@ struct SendFeedbackFilesScreenTests {
         try FileManager.default.removeItem(at: file)
         let sheet = fixture.sheet()
         await sheet.addFiles([file])
-        #expect(sheet.failure?.message == "A file couldn\u{2019}t be read. Check that it is still there, then try again.")
+        #expect(sheet.failure?.message == "A file couldn\u{2019}t be read. Check that it is still in Files and downloaded, then try again.")
         #expect(sheet.form.attachments.isEmpty && (!sheet.folder.exists || isEmpty(sheet.folder)))
         #expect(fixture.access.stops.count == 1)
         sheet.close()
@@ -542,7 +542,7 @@ struct SendFeedbackFilesScreenTests {
         #expect(fixture.composer.request == nil, "a mail never goes without a file the person added, unseen")
         #expect(sheet.form.attachments.items.map(\.fileName) == ["keep.apk"])
         #expect(sheet.failure?.title == "Attachment not available")
-        #expect(sheet.failure?.message == "A file you added is no longer available, so it was taken out of the list. Check the list, then send again.")
+        #expect(sheet.failure?.message == "An attachment is no longer available, so it was taken out of the list. Check the list, then send again.")
         #expect(fixture.access.stops == ["lose.apk"] && sheet.form.problem == "x")
         sheet.failure = nil
         sheet.send()
@@ -731,9 +731,67 @@ struct SendFeedbackFilesScreenTests {
         sheet.close()
     }
 
+    @Test func cancellingACopyKeepsWhatWasAttachedBeforeItAndDropsTheFilesThatWereNotTakenIn() async throws {
+        let gate = Gate()
+        let fixture = try fixture(hold: gate)
+        defer {
+            gate.release()
+            fixture.tearDown()
+        }
+        fixture.access.notDownloaded("slow.apk")
+        let sheet = fixture.sheet()
+        let kept = try fixture.original("kept.apk")
+        let slow = try fixture.original("slow.apk", bytes: 3_000_000)
+        let later = try fixture.original("later.apk")
+        let adding = Task { await sheet.addFiles([kept, slow, later]) }
+        #expect(await eventually { sheet.fileBusy != nil })
+        try #require(sheet.fileBusy?.cancel).action()
+        gate.release()
+        await adding.value
+        #expect(sheet.form.attachments.items.map(\.fileName) == ["kept.apk"], "what was attached before stays")
+        #expect(fixture.access.starts == ["kept.apk", "slow.apk"], "the file after the copy was never looked at")
+        #expect(fixture.access.stops == ["slow.apk"] && sheet.scopes.count == 1, "the kept file keeps its access")
+        #expect(sheet.failure == nil && !sheet.state.addingFiles && (!sheet.folder.exists || isEmpty(sheet.folder)))
+        sheet.close()
+        #expect(fixture.access.stops.sorted() == ["kept.apk", "slow.apk"])
+    }
+
+    @Test func severalAttachmentsThatAreGoneAtSendAreSaidTogetherWithTheirCount() async throws {
+        let fixture = try fixture()
+        defer { fixture.tearDown() }
+        let keep = try fixture.original("keep.apk"), one = try fixture.original("one.apk"), two = try fixture.original("two.apk")
+        let sheet = fixture.sheet()
+        sheet.form.problem = "x"
+        await sheet.addFiles([keep, one, two])
+        try FileManager.default.removeItem(at: one)
+        try FileManager.default.removeItem(at: two)
+        sheet.send()
+        #expect(fixture.composer.request == nil && sheet.form.attachments.items.map(\.fileName) == ["keep.apk"])
+        #expect(sheet.failure?.title == "Attachments not available")
+        #expect(sheet.failure?.message == "2 attachments are no longer available, so they were taken out of the list. Check the list, then send again.")
+        #expect(fixture.access.stops.sorted() == ["one.apk", "two.apk"])
+        sheet.close()
+    }
+
+    @Test func aNameInChineseOrJapaneseIsTheNameOfTheFileInTheMailAndTheRow() async throws {
+        let fixture = try fixture()
+        defer { fixture.tearDown() }
+        let chinese = try fixture.original("\u{6D4B}\u{8BD5}\u{5E94}\u{7528}.apk")
+        let japanese = try fixture.original("\u{30C6}\u{30B9}\u{30C8}\u{30A2}\u{30D7}\u{30EA}.apk")
+        let sheet = fixture.sheet()
+        sheet.form.problem = "x"
+        await sheet.addFiles([chinese, japanese])
+        sheet.send()
+        let request = try #require(fixture.composer.request)
+        #expect(request.attachments.map(\.fileName) == ["\u{6D4B}\u{8BD5}\u{5E94}\u{7528}.apk", "\u{30C6}\u{30B9}\u{30C8}\u{30A2}\u{30D7}\u{30EA}.apk"])
+        #expect(request.attachments.map(\.displayName) == request.attachments.map(\.fileName))
+        #expect(request.attachments.allSatisfy { $0.mimeType == "application/vnd.android.package-archive" })
+        sheet.close()
+    }
+
     // MARK: The picker
 
-    @Test func theFilesButtonOpensThePickerAndWhatItReturnsIsAdded() async throws {
+    @Test func pickingFilesOpensThePickerAndWhatItReturnsIsAdded() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
         var deliver: (@MainActor ([URL]) -> Void)?
@@ -785,7 +843,7 @@ struct SendFeedbackFilesScreenTests {
         return controller
     }
 
-    @Test func theBarHasAFilesButtonThatOpensThePickerAndTheRowAppearsWithItsLabelsAndCanBeRemoved() async throws {
+    @Test func theBarHasOneAddButtonAndTheRowOfAPickedFileAppearsWithItsLabelsAndCanBeRemoved() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
         let file = try fixture.original("example-app.apk", bytes: 25 << 20)
@@ -796,17 +854,23 @@ struct SendFeedbackFilesScreenTests {
         }
         let lease = try await HostWindow.take()
         defer { lease.give() }
-        let controller = hostSheet(fixture, in: lease)
-        var button: NSObject?
+        // The sheet's own model: the Files item of the Add menu is the system's, and calls this.
+        var shown: SendFeedbackModel?
+        let controller = hostSheet(fixture, in: lease, prepare: { shown = $0 })
+        var add: NSObject?
         let drawn = await eventually {
             controller.view.setNeedsLayout()
             controller.view.layoutIfNeeded()
-            button = element(labelled: "Add files", in: controller.view)
-            return button != nil
+            add = element(labelled: "Add a photo or a file", in: controller.view)
+            return add != nil && shown != nil
         }
         try #require(drawn, "the sheet was not drawn; is ApplicationAccessibilityEnabled on?")
-        _ = button?.accessibilityActivate()
-        #expect(await eventually { deliver != nil }, "the button opens the injected picker")
+        #expect(add?.accessibilityTraits.contains(.button) == true, "the Add button is a button")
+        for removed in ["Photos", "Files", "Add files", "Add photos or videos"] {
+            #expect(element(labelled: removed, in: controller.view) == nil, "\(removed) is in the menu, not on the bar")
+        }
+        shown?.pickFiles()
+        #expect(await eventually { deliver != nil }, "the Files item opens the injected picker")
         deliver?([file])
         let row = "File, example-app.apk, 25 MiB"
         let attached = await eventually {
@@ -826,6 +890,26 @@ struct SendFeedbackFilesScreenTests {
             return element(labelled: row, in: controller.view) == nil
         }, "removing the row takes it out")
         #expect(FileManager.default.fileExists(atPath: file.path), "the file itself stays")
+    }
+
+    @Test func theCopyingCardIsModalForVoiceOverAndSaysWhatItDoes() async throws {
+        let fixture = try fixture()
+        defer { fixture.tearDown() }
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let state = SendFeedbackModel.copyingState(progress: 0.42, cancel: BusyCancel {})
+        let controller = UIHostingController(rootView: BusyOverlay(state: state).environment(fixture.app).frame(width: 390, height: 844))
+        lease.window.rootViewController = controller
+        controller.view.layoutIfNeeded()
+        var modal = false
+        let drawn = await eventually {
+            controller.view.layoutIfNeeded()
+            modal = nodes(in: controller.view).contains { $0.accessibilityViewIsModal }
+            return element(labelled: "Cancel", in: controller.view) != nil
+        }
+        try #require(drawn, "the card was not drawn; is ApplicationAccessibilityEnabled on?")
+        #expect(modal, "VoiceOver reaches nothing behind the card")
+        #expect(state.title == "Copying file" && state.detail.hasPrefix("Andarium makes its own copy of this file"))
     }
 
     @Test func theAlertSaysEachReasonOnItsOwnLine() async throws {

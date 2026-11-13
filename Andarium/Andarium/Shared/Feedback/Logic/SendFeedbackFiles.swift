@@ -178,20 +178,56 @@ nonisolated enum SendFeedbackNames {
         return (ext.isEmpty ? name : (name as NSString).deletingPathExtension, ext)
     }
 
-    /// The longest name of a file in the mail, and the longest extension kept
-    /// whole when a name is cut to it.
+    /// The longest name of a file in the mail, in characters and in UTF-8 bytes (a volume's limit is
+    /// 255 bytes, and a name in Chinese or Japanese has three bytes to a character), and the longest
+    /// extension kept whole when a name is cut to it.
     static let maxLength = 100
+    static let maxBytes = 200
     static let maxExtensionLength = 16
 
-    /// `name` with `number` before its extension: `app-2.apk`. The suffix is
-    /// inside the length limit: a name already at it loses the end of its base,
-    /// so two long names that differ only at the end stay distinct and short.
+    /// The name as a mail or a volume compares it: letters of any case and accents composed either
+    /// way are the same name.
+    static func key(_ name: String) -> String {
+        name.precomposedStringWithCanonicalMapping.lowercased()
+    }
+
+    static func fits(_ name: String) -> Bool {
+        name.count <= maxLength && name.utf8.count <= maxBytes
+    }
+
+    /// `text` cut from its end to at most `characters` characters and `bytes` UTF-8 bytes.
+    static func cut(_ text: String, characters: Int, bytes: Int) -> String {
+        var result = ""
+        var count = 0
+        var used = 0
+        for character in text {
+            let size = character.utf8.count
+            if count >= characters || used + size > bytes { break }
+            result.append(character)
+            count += 1
+            used += size
+        }
+        return result
+    }
+
+    /// What a path or a header would obey, which a name never keeps: control and format characters
+    /// (the ones that reverse text among them), line and paragraph separators, and what has no meaning.
+    static func isControl(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.properties.generalCategory {
+        case .control, .format, .lineSeparator, .paragraphSeparator, .surrogate, .privateUse, .unassigned: true
+        default: false
+        }
+    }
+
+    /// `name` with `number` before its extension: `app-2.apk`. The suffix is inside the limits: a
+    /// name already at them loses the end of its base, so two long names that differ only at the end
+    /// stay distinct and short.
     static func numbered(_ name: String, _ number: Int) -> String {
         var (base, ext) = split(name)
         // A long "extension" is part of the name, as `SendFeedbackFolder.safeName` has it.
         if ext.count > maxExtensionLength { (base, ext) = (name, "") }
         let suffix = "-\(number)" + (ext.isEmpty ? "" : ".\(ext)")
-        return String(base.prefix(max(1, maxLength - suffix.count))) + suffix
+        return cut(base, characters: max(1, maxLength - suffix.count), bytes: max(1, maxBytes - suffix.utf8.count)) + suffix
     }
 
     /// A file's name as the person knows it, for the row: whatever a screen
@@ -199,12 +235,7 @@ nonisolated enum SendFeedbackNames {
     /// ones that reverse the text) taken out, the rest as it is. nil when
     /// nothing is left.
     static func display(_ name: String) -> String? {
-        let kept = name.unicodeScalars.filter { scalar in
-            switch scalar.properties.generalCategory {
-            case .control, .format, .lineSeparator, .paragraphSeparator, .surrogate, .privateUse, .unassigned: false
-            default: true
-            }
-        }
+        let kept = name.unicodeScalars.filter { !isControl($0) }
         let text = String(String.UnicodeScalarView(kept)).trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? nil : text
     }

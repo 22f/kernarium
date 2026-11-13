@@ -130,16 +130,64 @@ struct SendFeedbackFilesTests {
 
     // MARK: Names
 
-    @Test func aMailNameIsPlainAndCannotBeMangled() {
+    @Test func aMailNameKeepsTheLettersAndLosesOnlyWhatAPathOrAHeaderWouldObey() {
         func safe(_ name: String) -> String { SendFeedbackFolder.safeName(name) }
-        #expect(safe("My App (v2).apk") == "My_App__v2_.apk")
-        #expect(safe("a\"b;c,d.apk") == "a_b_c_d.apk", "quotes, semicolons and commas split a header")
+        #expect(safe("My App (v2).apk") == "My App (v2).apk", "spaces and punctuation stay")
         #expect(safe("line\nbreak\r.apk") == "line_break_.apk", "a line break ends a header")
         #expect(safe("evil\u{202E}gpj.apk") == "evil_gpj.apk", "a right-to-left override reorders what is read")
+        #expect(safe("a\u{200B}b\u{0}c.apk") == "a_b_c.apk", "zero-width and NUL characters")
         #expect(safe("a/b\\c:d.apk") == "a_b_c_d.apk", "separators")
-        #expect(safe("\u{5E94}\u{7528}\u{1F4F1}.apk") == "___.apk", "every character outside ASCII letters and digits")
         #expect(safe("..hidden.apk") == "hidden.apk" && safe("...") == "file" && safe("") == "file")
         #expect(safe("../../etc/passwd") == "_.._etc_passwd")
+    }
+
+    @Test func aNameInChineseOrJapaneseReachesTheMailAsWritten() {
+        #expect(SendFeedbackFolder.safeName("\u{6D4B}\u{8BD5}\u{5E94}\u{7528}.apk") == "\u{6D4B}\u{8BD5}\u{5E94}\u{7528}.apk")
+        #expect(SendFeedbackFolder.safeName("\u{30C6}\u{30B9}\u{30C8} (1).apk") == "\u{30C6}\u{30B9}\u{30C8} (1).apk")
+        #expect(SendFeedbackFolder.safeName("\u{5E94}\u{7528}\u{1F4F1}.apk") == "\u{5E94}\u{7528}\u{1F4F1}.apk")
+        #expect(SendFeedbackFolder.safeName("\u{6D4B}\u{8BD5}/\u{5E94}\u{7528}.apk") == "\u{6D4B}\u{8BD5}_\u{5E94}\u{7528}.apk")
+        // The mail's type follows the extension of such a name, and a name's number goes before it.
+        var set = SendFeedbackAttachments()
+        for _ in 0..<3 {
+            set.add(SendFeedbackAttachment(
+                kind: .file, url: URL(fileURLWithPath: "/Files/x.apk"), bytes: 1,
+                mailName: "\u{6D4B}\u{8BD5}\u{5E94}\u{7528}.apk", inPlace: true))
+        }
+        #expect(set.items.map(\.fileName) == ["\u{6D4B}\u{8BD5}\u{5E94}\u{7528}.apk", "\u{6D4B}\u{8BD5}\u{5E94}\u{7528}-2.apk", "\u{6D4B}\u{8BD5}\u{5E94}\u{7528}-3.apk"])
+        #expect(set.items[1].mimeType == "application/vnd.android.package-archive")
+    }
+
+    @Test func aLongNameInAnotherScriptFitsTheLimitsInCharactersAndInBytesWithItsExtension() throws {
+        let long = String(repeating: "\u{6D4B}", count: 150) + ".apk"
+        let name = SendFeedbackFolder.safeName(long)
+        #expect(name.hasSuffix(".apk") && name.count <= 100 && name.utf8.count <= 200, "\(name.count) characters, \(name.utf8.count) bytes")
+        #expect(name.hasPrefix("\u{6D4B}\u{6D4B}"))
+        let numbered = SendFeedbackNames.numbered(name, 12)
+        #expect(numbered.hasSuffix("-12.apk") && numbered.count <= 100 && numbered.utf8.count <= 200)
+        // A volume takes it: the name is under its 255 bytes.
+        let root = try scratch()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = folder(root)
+        let first = try folder.reserve(long), second = try folder.reserve(long)
+        try Data([1]).write(to: first)
+        try Data([2]).write(to: second)
+        #expect(first.lastPathComponent != second.lastPathComponent)
+        #expect(try Data(contentsOf: second) == Data([2]))
+    }
+
+    @Test func twoNamesThatAreTheSameToAVolumeAreNumberedApart() throws {
+        let root = try scratch()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = folder(root)
+        // "e" and a combining accent against the one character: one name on a volume that composes them.
+        let decomposed = "caf\u{65}\u{301}.bin", composed = "caf\u{E9}.bin"
+        let first = try folder.reserve(decomposed), second = try folder.reserve(composed)
+        #expect(SendFeedbackNames.key(decomposed) == SendFeedbackNames.key(composed))
+        #expect(first.lastPathComponent != second.lastPathComponent)
+        var set = SendFeedbackAttachments()
+        set.add(SendFeedbackAttachment(kind: .file, url: first, bytes: 1, mailName: decomposed, inPlace: true))
+        set.add(SendFeedbackAttachment(kind: .file, url: second, bytes: 1, mailName: composed, inPlace: true))
+        #expect(set.items[0].fileName != set.items[1].fileName && set.items[1].fileName.hasSuffix("-2.bin"))
     }
 
     @Test func aLongNameKeepsItsExtension() {
@@ -305,7 +353,7 @@ struct SendFeedbackFilesTests {
         let reports = Counter()
         let staged = try copy(folder, source, named: source.lastPathComponent) { reports.add("\($0)") }
         #expect(staged.deletingLastPathComponent().resolvingSymlinksInPath() == folder.url.resolvingSymlinksInPath())
-        #expect(staged.lastPathComponent == "Source_App__1_.apk")
+        #expect(staged.lastPathComponent == "Source App (1).apk")
         #expect(try Data(contentsOf: staged) == content)
         #expect(try Data(contentsOf: source) == content, "the person's file is not touched")
         #expect(reports.all.last == "3000000" && reports.all.compactMap(UInt64.init) == reports.all.compactMap(UInt64.init).sorted())

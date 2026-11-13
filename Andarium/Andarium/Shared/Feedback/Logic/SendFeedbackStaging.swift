@@ -59,8 +59,8 @@ nonisolated final class SendFeedbackFolder: @unchecked Sendable {
     let url: URL
     private let lock = NSLock()
     private let freeBytes: @Sendable (URL) -> UInt64?
-    /// The names handed out, in lower case: two names that differ only in their
-    /// letters' case are one name to a mail and to a volume that ignores case.
+    /// The names handed out, as `SendFeedbackNames.key` writes them: two names that differ only in their
+    /// letters' case or in how an accent is composed are one name to a mail and to a volume that ignores both.
     private var reserved: Set<String> = []
 
     init(url: URL, freeBytes: @escaping @Sendable (URL) -> UInt64? = SendFeedbackStaging.liveFreeBytes) {
@@ -73,14 +73,14 @@ nonisolated final class SendFeedbackFolder: @unchecked Sendable {
     func reserve(_ name: String) throws -> URL {
         try lock.withLock {
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-            let present = Set((try? FileManager.default.contentsOfDirectory(atPath: url.path))?.map { $0.lowercased() } ?? [])
+            let present = Set((try? FileManager.default.contentsOfDirectory(atPath: url.path))?.map(SendFeedbackNames.key) ?? [])
             var candidate = Self.safeName(name)
             var number = 2
-            while reserved.contains(candidate.lowercased()) || present.contains(candidate.lowercased()) {
+            while reserved.contains(SendFeedbackNames.key(candidate)) || present.contains(SendFeedbackNames.key(candidate)) {
                 candidate = SendFeedbackNames.numbered(Self.safeName(name), number)
                 number += 1
             }
-            reserved.insert(candidate.lowercased())
+            reserved.insert(SendFeedbackNames.key(candidate))
             return url.appendingPathComponent(candidate)
         }
     }
@@ -199,7 +199,7 @@ nonisolated final class SendFeedbackFolder: @unchecked Sendable {
     /// folder's: the person's own file, opened where it is, is never deleted.
     func remove(_ file: URL) {
         guard file.deletingLastPathComponent().resolvingSymlinksInPath() == url.resolvingSymlinksInPath() else { return }
-        lock.withLock { _ = reserved.remove(file.lastPathComponent.lowercased()) }
+        lock.withLock { _ = reserved.remove(SendFeedbackNames.key(file.lastPathComponent)) }
         try? FileManager.default.removeItem(at: file)
     }
 
@@ -213,23 +213,30 @@ nonisolated final class SendFeedbackFolder: @unchecked Sendable {
 
     var exists: Bool { FileManager.default.fileExists(atPath: url.path) }
 
-    /// A file name safe in a folder and in a mail: the characters of a plain
-    /// name, at most 100 of them, with a short extension kept whole.
+    /// A file name safe in a folder and in a mail: the name as the person
+    /// wrote it, in whatever script. Only what a path or a header would obey is
+    /// replaced by "_": the path separators, and every control character, among
+    /// them the ones that reverse text and break lines. A leading dot is taken
+    /// off, and the name is cut to at most 100 characters and 200 bytes (a
+    /// volume's limit is 255 bytes), with a short extension kept whole.
     static func safeName(_ name: String) -> String {
-        var text = String(name.unicodeScalars.map { scalar -> Character in
+        var text = String(String.UnicodeScalarView(name.unicodeScalars.map { scalar in
             switch scalar {
-            case "a"..."z", "A"..."Z", "0"..."9", ".", "-", "_": Character(scalar)
-            default: "_"
+            case "/", "\\", ":": return "_"
+            default: return SendFeedbackNames.isControl(scalar) ? "_" : scalar
             }
-        })
+        }))
         while text.hasPrefix(".") { text.removeFirst() }
         guard !text.isEmpty else { return "file" }
-        guard text.count > SendFeedbackNames.maxLength else { return text }
+        guard !SendFeedbackNames.fits(text) else { return text }
         let (base, ext) = SendFeedbackNames.split(text)
         if !ext.isEmpty && ext.count <= SendFeedbackNames.maxExtensionLength {
-            return String(base.prefix(SendFeedbackNames.maxLength - ext.count - 1)) + "." + ext
+            let tail = "." + ext
+            return SendFeedbackNames.cut(
+                base, characters: SendFeedbackNames.maxLength - tail.count, bytes: SendFeedbackNames.maxBytes - tail.utf8.count)
+                + tail
         }
-        return String(text.prefix(SendFeedbackNames.maxLength))
+        return SendFeedbackNames.cut(text, characters: SendFeedbackNames.maxLength, bytes: SendFeedbackNames.maxBytes)
     }
 }
 

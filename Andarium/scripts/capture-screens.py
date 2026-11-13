@@ -343,16 +343,27 @@ SHOTS: list[Shot] = [
     feedback("feedback-menu-home", "home-menu", "Home's toolbar menu open on a configured guest: Info, then Send feedback after a separator.", dark=True, wait=3.0),
     feedback("feedback-menu-welcome", "welcome-menu", "The same menu open on the welcome screen, before any guest exists: Send feedback is reachable from the first screen.", dark=True, wait=3.0),
     feedback("feedback-entrance-settings", "settings-feedback", "Settings scrolled to Diagnostics: Send feedback is the first row, above Create bug report.", dark=True, wait=3.0),
-    feedback("feedback-empty", "feedback", "Send feedback opened from a running session's Settings, empty: the subject and body lines, the information block folded, the card that asks for a bug report and the bar (Bug report, Screenshot, Photos, Send feedback). Send is dimmed until there is a problem."),
+    feedback("feedback-empty", "feedback", "Send feedback opened from a running session's Settings, empty: the subject and body lines, the information block folded, the card that asks for a bug report and the bar (Bug report, Screenshot, Add, Send feedback). Send is dimmed until there is a problem."),
     feedback("feedback-filled", "feedback-filled", "Send feedback from a session with a problem and details, and three attachments (bug report, screenshot, photo) with their sizes and remove buttons and the total under them; the bar shows the bug report as attached.", dark=True),
     feedback("feedback-details", "feedback-details", "Send feedback filled, with the app and device details opened in full at the end of the mail."),
     feedback("feedback-large", "feedback-large", "Send feedback with attachments over 20 MiB: the total turns orange and says some mail services refuse mail over 20 MiB; Send still works."),
-    feedback("feedback-file", "feedback-file", "Send feedback with one file from Files attached, an APK: a document tile, its name and size, a remove button and the total under it. The bar has a Files button beside Photos.", dark=True),
-    feedback("feedback-file-largest-text", "feedback-file", "The same sheet at the largest accessibility text size: the file's name wraps over lines, its middle kept out when it is cut, and the bar stays usable.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"),
+    feedback("feedback-file", "feedback-file", "Send feedback with one file from Files attached, an APK: a document tile, its name and size, a remove button and the total under it. The bar has three buttons, Bug report, Screenshot and Add (a paperclip whose menu offers Photos and Files).", dark=True),
+    feedback("feedback-file-bar-xxxlarge", "feedback-file", "The same sheet at the largest standard text size, where the bar's text stops growing: no label is cut in the bar.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryExtraExtraExtraLarge"),
+    feedback("feedback-file-largest-text", "feedback-file-short", "The sheet at the largest accessibility text size with a file attached, short words above it so that its row is on the screen: the tile keeps its size, the name wraps and the bar stays usable.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"),
+    feedback("feedback-file-long", "feedback-file-long", "A file with a long name (the end of the base cut in the middle, the extension kept) at the default text size."),
+    feedback("feedback-file-long-largest-text", "feedback-file-long", "The same long name at the largest accessibility text size: it wraps over up to three lines, its middle kept out when it is cut.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"),
+    feedback("feedback-file-names", "feedback-file-names", "Two files named in Chinese and in Japanese: the rows keep the names as written, and so does the mail."),
     feedback("feedback-file-mixed", "feedback-file-mixed", "Send feedback with a bug report, a screenshot, a photo and a file together, in the order they were added, one total under them."),
     feedback("feedback-file-large", "feedback-file-large", "A file of about 1.9 GiB attached: its size is its own and the total turns orange with the warning that some mail services refuse mail over 20 MiB; Send still works. The file is mapped, never read, for the size.", dark=True),
-    feedback("feedback-file-copying", "feedback-file-copying", "The card over the sheet while a file that cannot be used where it is kept (not downloaded from its cloud storage) is copied first: a progress bar and Cancel."),
-    feedback("feedback-file-refused", "feedback-file-refused", "The alert after a folder and an empty file were chosen: two items weren't added, one line for each reason."),
+    feedback("feedback-file-copying", "feedback-file-copying", "The card over the sheet while a file that cannot be used where it is kept (not downloaded from its cloud storage) is copied first: a progress bar and Cancel. Send and the bar are dimmed and the file's row is not there yet; the screenshot attached before stays.", dark=True),
+    feedback("feedback-file-copying-largest-text", "feedback-file-copying", "The copying card at the largest accessibility text size: its text scrolls between the title and Cancel, which stays on the screen.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL", dark=True),
+    feedback("feedback-file-refused", "feedback-file-refused", "The alert after a folder and an empty file were chosen: two items weren't added, one line for each reason.", dark=True),
+    feedback("feedback-file-refused-one", "feedback-file-refused-one", "The alert for one file that was not added: the title for one item and its reason."),
+    feedback("feedback-file-refused-four", "feedback-file-refused-four", "The alert for four items that were not added for four different reasons: not enough space, a folder or a package, an empty file and a file that could not be read, a line each.", dark=True),
+    feedback("feedback-file-refused-four-largest-text", "feedback-file-refused-four", "The same alert at the largest accessibility text size.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"),
+    feedback("feedback-file-gone", "feedback-file-gone", "Send, after the only file attached was deleted from where it was kept: Attachment not available, the file taken out of the list.", dark=True),
+    feedback("feedback-file-picker", "feedback-file-picker", "The system's document picker over the sheet, as a tap on Files in the Add menu opens it.", wait=20.0),
+    feedback("feedback-file-menu", "feedback-file-menu", "The bar's Add menu open: Photos and Files, anchored on the button."),
     feedback("feedback-generating", "feedback-generating", "Send feedback while the bug report is made: the app's progress overlay with Cancel over the whole sheet, Settings still open beneath."),
     feedback("feedback-sent", "feedback-sent", "Send feedback once the mail was sent: the Feedback sent card with Done over the whole sheet."),
     feedback("feedback-discard", "feedback-discard", "Cancel after something is typed or attached: Discard or Keep editing."),
@@ -460,6 +471,8 @@ def not_in_front(udid: str, pid: int, shot: Shot, *, after: bool = False) -> str
         return f"the app reported screen {state.get('screen')!r}, not {shot.screen!r}"
     if shot.feedback and state.get("feedback") is not True:
         return "this Preview has no Send feedback: build it with FEEDBACK_ADDRESS=feedback@example.com on the command line"
+    if shot.feedback and shot.screen.startswith("feedback") and state.get("feedbackReady") is not True:
+        return "the sheet of Send feedback is not open with its draft made"
     if state.get("state") != "active" and not (after and shot.alert):
         return f"the app is {state.get('state')}, not active: a system alert, another app or the Home screen is in front"
     return None

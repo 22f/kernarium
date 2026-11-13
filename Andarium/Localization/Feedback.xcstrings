@@ -47,6 +47,29 @@
         }
       }
     },
+    "%lld attachments are no longer available, so they were taken out of the list. Check the list, then send again." : {
+      "comment" : "The message of the alert when Send finds that several attachments added earlier are gone or can no longer be read, and takes them out of the list. The number is at least 2.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld件の添付ファイルが利用できなくなったため、リストから削除しました。リストを確認して、もう一度送信してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "有%lld个附件已不可用，因此已从列表中移除。请检查列表，然后再次发送。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "有%lld個附件已無法使用，因此已從列表中移除。請檢查列表，然後再傳送一次。"
+          }
+        }
+      }
+    },
     "%lld items weren’t added" : {
       "comment" : "The title of the alert when two or more chosen items could not be copied; the number is at least 2.",
       "localizations" : {
@@ -139,48 +162,25 @@
         }
       }
     },
-    "A file couldn’t be read. Check that it is still there, then try again." : {
+    "A file couldn’t be read. Check that it is still in Files and downloaded, then try again." : {
       "comment" : "A line of the alert when a chosen file could not be opened or read: it was moved or deleted, or its storage did not hand it over.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ファイルを読み込めませんでした。ファイルがまだあることを確認して、もう一度お試しください。"
+            "value" : "ファイルを読み込めませんでした。“ファイル”アプリにまだあり、ダウンロード済みであることを確認して、もう一度お試しください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "无法读取文件。请确认它仍然存在，然后重试。"
+            "value" : "无法读取文件。请确认它仍在“文件”App中且已下载，然后重试。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "無法讀取檔案。請確認它仍然存在，然後再試一次。"
-          }
-        }
-      }
-    },
-    "A file you added is no longer available, so it was taken out of the list. Check the list, then send again." : {
-      "comment" : "The text of that alert. Nothing was sent.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "追加したファイルが利用できなくなったため、リストから削除しました。リストを確認して、もう一度送信してください。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "你添加的某个文件已不可用，因此已从列表中移除。请检查列表，然后再次发送。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "你加入的某個檔案已無法使用，因此已從列表中移除。請檢查列表，然後再傳送一次。"
+            "value" : "無法讀取檔案。請確認它仍在「檔案」App中且已下載，然後再試一次。"
           }
         }
       }
@@ -203,13 +203,59 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "無法附加資料夾或套件。請先在「檔案」App中將其壓縮。"
+            "value" : "無法附加檔案夾或套件。請先在「檔案」App中將其壓縮。"
+          }
+        }
+      }
+    },
+    "Add" : {
+      "comment" : "The label of the bar's button that opens a menu to add photos, videos or files. The menu items are Photos and Files.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "追加"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入"
+          }
+        }
+      }
+    },
+    "Add a photo or a file" : {
+      "comment" : "What VoiceOver says for the bar's Add button, which opens a menu with Photos and Files.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "写真またはファイルを追加"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加照片或文件"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入照片或檔案"
           }
         }
       }
     },
     "Add files" : {
-      "comment" : "What VoiceOver says for the Files button.",
+      "comment" : "What VoiceOver says for the Files item of the bar's Add menu.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -232,7 +278,7 @@
       }
     },
     "Add photos or videos" : {
-      "comment" : "What VoiceOver says for the Photos button.",
+      "comment" : "What VoiceOver says for the Photos item of the bar's Add menu.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -250,6 +296,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "加入照片或影片"
+          }
+        }
+      }
+    },
+    "An attachment is no longer available, so it was taken out of the list. Check the list, then send again." : {
+      "comment" : "The message of the alert when Send finds that one attachment (a file, the bug report, the screenshot or a photo) added earlier is gone or can no longer be read, and takes it out of the list.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添付ファイルが利用できなくなったため、リストから削除しました。リストを確認して、もう一度送信してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "某个附件已不可用，因此已从列表中移除。请检查列表，然后再次发送。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "某個附件已無法使用，因此已從列表中移除。請檢查列表，然後再傳送一次。"
           }
         }
       }
@@ -300,6 +369,29 @@
         }
       }
     },
+    "Andarium makes its own copy of this file before attaching it. Large files take a while." : {
+      "comment" : "The detail of the card shown while a picked file is copied before it is attached, a file the system has not downloaded, for one. Andarium is the app's name.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumがこのファイルのコピーを作成してから添付します。大きなファイルは時間がかかります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium会先拷贝此文件，然后再附加。大文件需要一些时间。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium會先拷貝此檔案，然後再附加。大型檔案需要一些時間。"
+          }
+        }
+      }
+    },
     "Attached" : {
       "comment" : "What VoiceOver says for the Bug report button once a bug report is attached.",
       "localizations" : {
@@ -324,7 +416,30 @@
       }
     },
     "Attachment not available" : {
-      "comment" : "The title of the alert when Send finds that a file added earlier is gone or can no longer be read, and takes it out of the list.",
+      "comment" : "The title of the alert when Send finds that one attachment added earlier is gone or can no longer be read, and takes it out of the list.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添付ファイルを利用できません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "附件不可用"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "附件無法使用"
+          }
+        }
+      }
+    },
+    "Attachments not available" : {
+      "comment" : "The title of the alert when Send finds that several attachments added earlier are gone or can no longer be read, and takes them out of the list.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -623,7 +738,7 @@
       }
     },
     "File" : {
-      "comment" : "The title of an attached file, a row of the mail; the row shows the file's name and size under or beside it.",
+      "comment" : "What VoiceOver says first for an attached file's row, before the file's name and size; the row itself shows the name.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -646,7 +761,7 @@
       }
     },
     "Files" : {
-      "comment" : "The button of the bar that opens the Files app to add files of any kind to the mail, an Android app (APK) among them. The iOS app is named Files: 文件, 檔案, ファイル.",
+      "comment" : "The item of the bar's Add menu that opens the Files app to add files of any kind to the mail, an Android app (APK) among them. The iOS app is named Files: 文件, 檔案, ファイル.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -968,7 +1083,7 @@
       }
     },
     "Photos" : {
-      "comment" : "The button of the bar that opens the photo library to add photos or videos.",
+      "comment" : "The item of the bar's Add menu that opens the photo library to add photos or videos.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -1422,7 +1537,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此%@的可用空間不足。請釋放一些空間，然後再試一次。"
+            "value" : "此%@的可用空間不足。請釋出一些空間，然後再試一次。"
           }
         }
       }
@@ -1446,29 +1561,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "無法拷貝這些項目。請檢查此%@的可用空間，然後再試一次。"
-          }
-        }
-      }
-    },
-    "This file can’t be used where it is, so a copy is made first. Large files take a while." : {
-      "comment" : "The text of that card, under its title, above the progress and Cancel.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "このファイルはそのまま使用できないため、先にコピーを作成します。大きなファイルは時間がかかります。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "无法直接使用此文件，因此会先拷贝一份。大文件需要一些时间。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "無法直接使用此檔案，因此會先拷貝一份。大型檔案需要一些時間。"
           }
         }
       }

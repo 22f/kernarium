@@ -321,7 +321,7 @@ struct SendFeedbackTests {
         try Data(repeating: 7, count: 5).write(to: incoming)
         let adopted = try folder.adopt(incoming, named: "../My Photo (1).jpg")
         #expect(adopted.deletingLastPathComponent().standardizedFileURL == folder.url.standardizedFileURL)
-        #expect(adopted.lastPathComponent == "_My_Photo__1_.jpg")
+        #expect(adopted.lastPathComponent == "_My Photo (1).jpg")
         #expect(!FileManager.default.fileExists(atPath: incoming.path))
         #expect(try Data(contentsOf: adopted).count == 5)
         #expect(SendFeedbackFolder.safeName("...") == "file")

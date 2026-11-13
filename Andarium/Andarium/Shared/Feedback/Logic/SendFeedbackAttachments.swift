@@ -112,11 +112,11 @@ nonisolated struct SendFeedbackAttachments: Equatable, Sendable {
 
     /// The mail name `attachment` is to carry: its own while no other has it.
     private func uniqueName(of attachment: SendFeedbackAttachment) -> String? {
-        let taken = Set(items.map { $0.fileName.lowercased() })
+        let taken = Set(items.map { SendFeedbackNames.key($0.fileName) })
         let name = attachment.fileName
-        guard taken.contains(name.lowercased()) else { return attachment.mailName }
+        guard taken.contains(SendFeedbackNames.key(name)) else { return attachment.mailName }
         var number = 2
-        while taken.contains(SendFeedbackNames.numbered(name, number).lowercased()) { number += 1 }
+        while taken.contains(SendFeedbackNames.key(SendFeedbackNames.numbered(name, number))) { number += 1 }
         return SendFeedbackNames.numbered(name, number)
     }
 
