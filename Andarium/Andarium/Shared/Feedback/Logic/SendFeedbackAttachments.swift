@@ -12,6 +12,8 @@ import UniformTypeIdentifiers
 nonisolated struct SendFeedbackAttachment: Identifiable, Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         case bugReport, screenshot, photo, video
+        /// What the sheet attaches by itself when it opens during a start.
+        case startLog
         /// Any other file, picked from Files.
         case file
 
@@ -23,6 +25,7 @@ nonisolated struct SendFeedbackAttachment: Identifiable, Equatable, Sendable {
             switch self {
             case .bugReport: "bugreport-\(SendFeedbackNames.stamp(date)).zip"
             case .screenshot: "screenshot-\(SendFeedbackNames.stamp(date)).png"
+            case .startLog: "start-log-\(SendFeedbackNames.stamp(date)).txt"
             case .photo, .video, .file: nil
             }
         }

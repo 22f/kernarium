@@ -417,6 +417,7 @@ map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
 screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`,
+`SendFeedbackStartLogTests` (the sheet's tip and start log during a start),
 `SendFeedbackFilesScreenTests` (files from Files: in place, the copy of a file
 that cannot be used there, the access held and stopped once) and
 `HomeMenuTests` (Home's toolbar menu) exist only in a build with
@@ -456,7 +457,8 @@ the test moves, so no test waits three minutes: when the notice comes (also for
 a start whose boot line never comes, the case it is for), what Stop asks of the
 runtime (after the dialog's answer) and the stopped end screen's words, the
 later notice and plain title of a first start, the controls with and without
-the feedback receiver, that the sheet the notice opens outlives the boot, that
+the feedback receiver and their size (the application's ordinary 44 points at the
+default text size, no less at any size), that the sheet the notice opens outlives the boot, that
 the alert and the sheet take the appearance of the screen under them, the
 Boot line of the information block, and that the notice goes with the boot.
 `StartHandoverTests` run the real runtime object with the files' preparation

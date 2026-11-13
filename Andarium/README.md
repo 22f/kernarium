@@ -500,9 +500,27 @@ requires reopening Andarium.
   guest's files stay its own until then, and a start asked for since, Erase,
   Create, the update's Restore and a snapshot rename wait for it. Send
   feedback opens the sheet the root presents (`feedbackFromBoot`), which stays
-  up with its draft when the boot completes or the run ends; a bug report and
-  a screenshot need a running guest, and the information block gains a Boot
-  line with the step, the time and the restarts. A process that ended in the
+  up with its draft when the boot completes or the run ends. During the start
+  its tip says that a bug report and a screenshot wait for the start to finish
+  and that the start log is attached, and the sheet attaches the log
+  once, when it opens: the step, the time on the notice's clock, the kind of
+  start and this boot's printed output, from the session record's last 4 KiB.
+  Only the running record of the boot under way counts (this process, with the
+  run's count of the guest's restarts, and not the record the file held as the
+  run began: `BootRecordBinding`, which compares no clock); an ended record,
+  another process's or an earlier boot's gives "(nothing yet)". What
+  identifies the installation is masked: the serial, the adb key, the hardware
+  address and the time zone the application knows, wherever they stand, and by
+  shape every `adb_key=`, `serialno=` and `timezone=` value,
+  init's `Init cannot set 'NAME' to 'VALUE'`, any UUID, any IPv6 address
+  (`::1` stays), any colon hardware address and the application's folders. Its
+  name in the mail is
+  `start-log-yyyyMMdd-HHmmss.txt`, the moment it was made, in the device's
+  clock and never localized (English, Gregorian, ASCII digits). It is a row the person can remove, counted in the total;
+  a removed log is not made again, and the file is not refreshed while the sheet
+  is open. When the boot completes the tip becomes the running one and the log
+  stays. The information block gains a Boot line with the step, the time and
+  the restarts. A process that ended in the
   boot leaves the runtime's session record with the console's last output of
   that boot, which the next bug report carries as the previous session's
   record.

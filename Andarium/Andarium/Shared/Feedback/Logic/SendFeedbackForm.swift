@@ -25,6 +25,10 @@ nonisolated struct SendFeedbackForm: Equatable, Sendable {
     /// A virtual machine runs: the sheet was opened from the session's
     /// Settings. Without one no bug report or screenshot can be made.
     var running: Bool
+    /// The virtual machine is starting (the sheet was opened from the boot
+    /// screen's notice, and Android has not been seen to boot): no bug report or
+    /// screenshot can be made yet, and a start log is attached.
+    var starting = false
     /// The app can start a bug report now: a normal session whose runtime
     /// makes one, with the guest's adb channel and the progress overlay free
     /// (no file transfer or install is under way).
@@ -81,10 +85,26 @@ nonisolated struct SendFeedbackForm: Equatable, Sendable {
     /// machine can make it.
     var showsHowToReportBug: Bool { !running }
 
+    /// What the card above the bar says.
+    enum Tip: Equatable, Sendable {
+        /// Opened from Home: nothing runs, and the way to a bug report is to
+        /// start the virtual machine and open the sheet from its Settings.
+        case home
+        /// Opened during a start: a bug report and a screenshot wait for the
+        /// start to finish, and the start log is attached.
+        case starting
+        /// A virtual machine runs: the bug report is made from the sheet.
+        case running
+    }
+
+    var tip: Tip { running ? .running : (starting ? .starting : .home) }
+
     /// Something is typed or attached: closing asks first, and the sheet
     /// cannot be swiped away.
+    /// The start log, which the sheet attaches by itself, is not something the
+    /// person made: a sheet that holds nothing else closes without asking.
     var hasContent: Bool {
-        !trimmedProblem.isEmpty || !trimmedDetails.isEmpty || !attachments.isEmpty
+        !trimmedProblem.isEmpty || !trimmedDetails.isEmpty || attachments.items.contains { $0.kind != .startLog }
     }
 }
 
