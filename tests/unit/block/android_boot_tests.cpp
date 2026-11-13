@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iterator>
+#include <map>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -1101,7 +1102,7 @@ void testSerialNumber(const fs::path &directory)
 	     {"\"androidboot.serialno=umlandroid17\"",
 	      "androidboot.serialno=\"umlandroid17\"",
 	      "'androidboot.serialno=umlandroid17'",
-	      "androidboot.ser\"ialno=umlandroid17"}) {
+	      "androidboot.ser\"ial\"no=umlandroid17"}) {
 		writeText(path, std::string{"quiet "} + quotedLegacy + " " + devices + "\n");
 		require(android::readKernelCommandLine(path, setsSerial) ==
 				std::vector<std::string>{"quiet", devices},
@@ -1117,9 +1118,8 @@ void testSerialNumber(const fs::path &directory)
 			(void)android::readKernelCommandLine(path, setsSerial);
 		});
 	}
-	/* A quoted group that holds a serial: the words split at the white space
-	 * the way the file's reader splits them, and the one that starts the
-	 * serial is refused. */
+	/* A quoted group that holds a serial spans words: refused (see
+	 * testQuotedGroups). */
 	writeText(path, "\"quiet androidboot.serialno=0123456789abcdef\" " + devices + "\n");
 	requireThrows([&] {
 		(void)android::readKernelCommandLine(path, setsSerial);
@@ -1149,6 +1149,129 @@ void testSerialNumber(const fs::path &directory)
 		android::serialPrefix, android::hwTimeoutMultiplierPrefix};
 	require(android::readKernelCommandLine(path, setsBoth) ==
 		std::vector<std::string>{devices});
+}
+
+/* The loop of the pinned Android fs_mgr_boot_config.cpp
+ * ImportKernelCmdlineFromString: a word ends at a space outside a `"` group, and
+ * the quote characters are removed from it. */
+std::map<std::string, std::string> importedProperties(const std::string &line)
+{
+	std::map<std::string, std::string> properties;
+	std::size_t base = 0;
+	while (true) {
+		auto found = base;
+		while ((found = line.find_first_of(" \"", found)) !=
+			       std::string::npos &&
+		       line[found] == '"') {
+			if ((found = line.find('"', found + 1)) ==
+			    std::string::npos)
+				break;
+			++found;
+		}
+		std::string piece = line.substr(base, found - base);
+		piece.erase(std::remove(piece.begin(), piece.end(), '"'),
+			    piece.end());
+		const auto equals = piece.find('=');
+		if (equals != std::string::npos)
+			properties.emplace(piece.substr(0, equals),
+					   piece.substr(equals + 1));
+		if (found == std::string::npos)
+			break;
+		base = found + 1;
+	}
+	return properties;
+}
+
+/* The release's arguments as the launcher joins them with its own. */
+std::map<std::string, std::string> importedAfterLauncher(
+	const std::vector<std::string> &release)
+{
+	std::string line;
+	for (const auto &argument : release)
+		line += argument + ' ';
+	line += android::lcdDensityArgument(240) + ' ' +
+		android::hwTimeoutMultiplierArgument(8) + ' ' +
+		android::serialArgument("0123456789abcdef");
+	return importedProperties(line);
+}
+
+/* A quoted group of a release's command line is one argument to Android and
+ * several words to the reader that drops the legacy serial and multiplier, and
+ * the launcher's own arguments come after the release's: a group that spans
+ * words, or a quote that never closes, is refused before anything is dropped,
+ * and what is accepted reaches Android as the launcher wrote it. */
+void testQuotedGroups(const fs::path &directory)
+{
+	const std::string devices{android::bootDevicesArgument};
+	const auto path = directory / "quoted-groups.txt";
+	constexpr std::array<std::string_view, 3> setsAll{
+		"androidboot.kernarium.adb_auth=", android::serialPrefix,
+		android::hwTimeoutMultiplierPrefix};
+	constexpr std::array<std::string_view, 1> leavesAll{
+		"androidboot.kernarium.adb_auth="};
+	const std::string legacySerial{android::legacySerialArgument};
+	const std::string legacyMultiplier{
+		android::legacyHwTimeoutMultiplierArgument};
+
+	for (const std::string &group : std::vector<std::string>{
+		     "\"quiet " + legacySerial + "\"",
+		     "\"" + legacySerial + " quiet\"",
+		     "\"quiet " + legacyMultiplier + "\"",
+		     "\"" + legacyMultiplier + " quiet\"",
+		     "quiet \"" + legacySerial + " extra\"",
+		     "androidboot.x=\"a b\"",
+		     "\"quiet\tconsole=ttyS0\"",
+		     "\"quiet\nconsole=ttyS0\"",
+		     "\"quiet " + legacySerial,
+		     "quiet " + legacySerial + "\"",
+		     "androidboot.ser\"ialno=umlandroid17",
+		     "\"a\" \"b"}) {
+		writeText(path, group + " " + devices + "\n");
+		/* Refused for every launcher: its own arguments follow the open quote. */
+		requireThrows([&] {
+			(void)android::readKernelCommandLine(path, setsAll);
+		});
+		requireThrows([&] {
+			(void)android::readKernelCommandLine(path, leavesAll);
+		});
+	}
+
+	/* The quote may be anywhere in the file, even after the arguments the
+	 * launcher would have dropped, and the file need not end in a newline. */
+	for (const std::string &tail : std::vector<std::string>{
+		     " \"quiet\n", " \"quiet", " quiet\"", " a\"b\"c\"",
+		     " androidboot.x=\"y"}) {
+		writeText(path, legacySerial + " " + devices + tail);
+		requireThrows([&] {
+			(void)android::readKernelCommandLine(path, setsAll);
+		});
+	}
+
+	/* A quote that opens and closes inside one word is a group of no words
+	 * to span: the legacy arguments in it are dropped and Android reads the
+	 * launcher's own as written, whatever the quotes surround. */
+	for (const std::string &whole : std::vector<std::string>{
+		     "\"" + legacySerial + "\"",
+		     "androidboot.serialno=\"umlandroid17\"",
+		     "androidboot.ser\"ial\"no=umlandroid17"}) {
+		writeText(path, "quiet " + whole + " " + legacyMultiplier +
+				" \"console=ttyS0\" " + devices + "\n");
+		const auto arguments = android::readKernelCommandLine(path, setsAll);
+		require(arguments ==
+			std::vector<std::string>{"quiet", "\"console=ttyS0\"", devices});
+		const auto properties = importedAfterLauncher(arguments);
+		require(properties.at("androidboot.serialno") == "0123456789abcdef");
+		require(properties.at("androidboot.lcd_density") == "240");
+		require(properties.at("androidboot.hw_timeout_multiplier") == "3");
+		require(properties.at("console") == "ttyS0");
+	}
+	/* A launcher that keeps the release's own multiplier passes it through
+	 * whole, quotes included, and the guest gets it. */
+	writeText(path, "\"" + legacyMultiplier + "\" " + devices + "\n");
+	const auto kept = android::readKernelCommandLine(path, leavesAll);
+	require(kept == std::vector<std::string>{"\"" + legacyMultiplier + "\"", devices});
+	require(importedProperties(kept[0] + " " + kept[1]).at(
+			"androidboot.hw_timeout_multiplier") == "5");
 }
 
 /* Both launchers reserve the hardware SKU that tells the guest what the host
@@ -1259,6 +1382,7 @@ int main(int argc, char *argv[])
 	testLcdDensity(fresh("density"));
 	testHwTimeoutMultiplier(fresh("multiplier"));
 	testSerialNumber(fresh("serial"));
+	testQuotedGroups(fresh("quoted-groups"));
 	testHostFeatureArguments(fresh("feature-arguments"));
 	testKernelCommandLine(fresh("command-line"));
 	testUbdPath();

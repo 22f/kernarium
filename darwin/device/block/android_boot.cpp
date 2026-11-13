@@ -244,6 +244,24 @@ bool carriesPrefix(std::string_view text, std::string_view prefix)
 	return false;
 }
 
+/* Android's reader groups words that stand between two `"` and removes
+ * the quotes, so a group that spans white space, or a quote that never
+ * closes, is one argument there but several (or a different one) in the
+ * words read below: dropping the word that closes it would leave the
+ * quote open over every argument the launcher appends. */
+static bool hasQuotedGroup(std::string_view text)
+{
+	bool open = false;
+	for (const char character : text) {
+		if (character == '"')
+			open = !open;
+		else if (open && (character == ' ' || character == '\n' ||
+				  character == '\t'))
+			return true;
+	}
+	return open;
+}
+
 std::vector<std::string> readKernelCommandLine(
 	const std::filesystem::path &path,
 	std::span<const std::string_view> launcherPrefixes)
@@ -263,6 +281,12 @@ std::vector<std::string> readKernelCommandLine(
 	const int closed = std::fclose(file);
 	if (read != text.size() || closed != 0)
 		throw std::runtime_error("cannot read " + path.string());
+
+	/* Before any word is dropped or the launcher appends its own. */
+	if (hasQuotedGroup(text))
+		throw std::invalid_argument(
+			"the release kernel command line has a quoted group that "
+			"spans words or a quote that never closes");
 
 	std::vector<std::string> arguments;
 	bool bootDevices = false;

@@ -73,7 +73,8 @@ address of the user network's router (`52:55:0a:00:02:xx`) is never an eth0
 address. A launcher that states a value uses it and touches no file.
 `readKernelCommandLine` drops the release's `androidboot.serialno=` argument
 when the launcher sets its own, a quoted word included, so exactly one serial
-number reaches Android. The host's own messages never contain the values (the
+number reaches Android; it refuses a release command line whose `"` group spans
+words or never closes, because the launcher's arguments follow the release's. The host's own messages never contain the values (the
 session record masks the one the kernel echoes); what the guest itself reports,
 such as an Android bug report, carries them as on any Android device.
 

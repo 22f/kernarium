@@ -136,7 +136,9 @@ void validateUbdPath(const std::filesystem::path &path, std::string_view label);
 
 /* The whitespace-separated arguments of a release's kernel command-line file.
  * Throws when the file is not a readable regular file, when it holds no
- * argument, when an argument, quotes removed, starts with one of
+ * argument, when a `"` group spans white space or a `"` never closes (the
+ * words would no longer be the arguments Android reads, and the launcher's own
+ * come after them), when an argument, quotes removed, starts with one of
  * `launcherPrefixes`, which the launcher sets itself, or with one of
  * storageArgumentPrefixes(), or when it lacks bootDevicesArgument. A launcher
  * that lists hwTimeoutMultiplierPrefix has the one argument
