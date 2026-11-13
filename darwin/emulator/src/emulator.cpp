@@ -679,26 +679,31 @@ public:
 
 	/* The guest's page-cache trim for the memory pressure response, which
 	 * runs when the system says it is short of memory. A lifecycle call in
-	 * progress is not waited for: a quiesce trims the guest itself, and a
-	 * guest it holds suspended is not woken for a trim. */
+	 * progress is not waited for (the response asks again shortly: it would
+	 * otherwise be waited for, or wait for this one), and a guest the host
+	 * holds suspended is not woken for a trim: quiescing trimmed it. The
+	 * suspension is read under the mutex on every try. */
 	[[nodiscard]] ::uml::runtime::TrimOutcome trim_for_memory_pressure()
 		noexcept
 	{
+		using ::uml::runtime::TrimOutcome;
 		std::unique_lock lock{guest_lifecycle_mutex_, std::try_to_lock};
-		if (!lock.owns_lock() ||
-			guest_suspension_ != ::uml::device::GuestSuspension::none)
-			return ::uml::runtime::TrimOutcome::skipped;
+		if (!lock.owns_lock())
+			return TrimOutcome::busy;
+		if (guest_suspension_ != ::uml::device::GuestSuspension::none)
+			return TrimOutcome::quiesced;
 		::uml::runtime::note_host_wake();
 		switch (::uml::device::trim_guest_page_cache(guest_trim_wait_ms)) {
 		case ::uml::device::GuestRequest::done:
-			return ::uml::runtime::TrimOutcome::done;
+			return TrimOutcome::done;
 		case ::uml::device::GuestRequest::unanswered:
-			return ::uml::runtime::TrimOutcome::unanswered;
-		case ::uml::device::GuestRequest::unreachable:
+			return TrimOutcome::unanswered;
 		case ::uml::device::GuestRequest::refused:
+			return TrimOutcome::refused;
+		case ::uml::device::GuestRequest::unreachable:
 			break;
 		}
-		return ::uml::runtime::TrimOutcome::skipped;
+		return TrimOutcome::unreachable;
 	}
 
 	static ::uml::runtime::TrimOutcome trim_for_memory_pressure_of(

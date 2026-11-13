@@ -10,7 +10,8 @@ injector inserted into the launcher (a real event needs a privileged tool):
 - a warning frees the host GPU's caches and trims the guest's page cache once,
   and the launcher says so on stderr with the footprint before and after, the
   bytes each part released, the trim's duration and the guest RAM wire
-  failures; the guest's page cache is smaller afterwards;
+  failures; the guest's page cache is smaller afterwards and the launcher's
+  own footprint fell by about what the trim released;
 - a second warning inside the interval does nothing;
 - a critical level trims again at once;
 - the way back to the normal level is one line and no action.
@@ -44,6 +45,10 @@ GUEST_MEMORY = "1G"
 MINIMUM_FILL_KIB = 64 * 1024
 # What a response must release from the guest and from the page cache.
 MINIMUM_RELEASE_MIB = 16
+# The launcher's footprint must fall by at least this share of what the trim
+# says it released: the rest is the guest's own allocations during the trim and
+# the pages the host gives back in whole chunks.
+FOOTPRINT_SHARE = 0.5
 # A response is written within this long of its level, and a quiet period
 # (a response that must not come) lasts this long.
 RESPONSE_SECONDS = 60
@@ -55,7 +60,8 @@ RESPONSE = re.compile(
     r"(?P<graphics>\d+) (?P<graphics_unit>MiB|KiB) graphics "
     r"\((?P<cached>\d+) cached allocations\), "
     r"(?P<guest>\d+) (?P<guest_unit>MiB|KiB) guest RAM "
-    r"\(page cache trim (?P<trim>done|unanswered|not sent), "
+    r"\(page cache trim (?P<trim>done|unanswered|refused|no console|"
+    r"guest quiesced|busy), "
     r"(?P<milliseconds>\d+) ms\); (?P<wires>\d+) guest RAM wire failures"
 )
 CHANGE = re.compile(
@@ -180,6 +186,16 @@ def run(arguments: argparse.Namespace) -> None:
             raise RuntimeError(
                 f"the trim released {released} MiB of guest RAM: "
                 f"{first.group(0)}")
+        # The host's footprint, read by the launcher before and after the
+        # trim, fell too: a trim that updated only the guest's own accounting
+        # would leave it.
+        fell = int(first["before"]) - int(first["after"])
+        expected = max(MINIMUM_RELEASE_MIB, released * FOOTPRINT_SHARE)
+        if fell < expected:
+            raise RuntimeError(
+                f"the launcher's footprint fell by {fell} MiB, less than "
+                f"{expected:.0f} MiB of the {released:.0f} MiB the trim "
+                f"released: {first.group(0)}")
         after = cached_kib(guest)
         if filled - after < MINIMUM_RELEASE_MIB * 1024:
             raise RuntimeError(

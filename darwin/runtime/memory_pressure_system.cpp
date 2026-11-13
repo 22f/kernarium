@@ -13,6 +13,7 @@
 #include <cstring>
 #include <dispatch/dispatch.h>
 #include <mach/mach.h>
+#include <memory>
 #include <new>
 #include <utility>
 #include <time.h>
@@ -32,6 +33,9 @@ public:
 	{
 	}
 
+	/* The clock of the 30 s between warnings and of the lines' windows:
+	 * monotonic, and stopped while the system sleeps, so a long sleep does
+	 * not end the interval. */
 	std::uint64_t now_ns() noexcept override
 	{
 		return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -68,7 +72,7 @@ public:
 
 	TrimOutcome trim_page_cache() noexcept override
 	{
-		return trim_ == nullptr ? TrimOutcome::skipped : trim_(context_);
+		return trim_ == nullptr ? TrimOutcome::unreachable : trim_(context_);
 	}
 
 	void log(std::string_view line) noexcept override
@@ -87,45 +91,168 @@ private:
 	void *context_;
 };
 
+/*
+ * The process's memory pressure source and the serial queue that runs its
+ * handler and the retries, made on the first watch and kept. A run binds its
+ * state to it and unbinds before it returns. They are never cancelled or
+ * released: cancelling a source leaves a libdispatch worker thread behind
+ * (still there seconds later), and a run that ends leaves no thread of its own.
+ * A source that nothing is bound to drops what it delivers.
+ */
+struct Hub final {
+	dispatch_queue_t queue{};
+	dispatch_source_t source{};
+	/* The run that listens; touched only on the queue. */
+	MemoryPressureWatch::State *current{};
+	/* Counts every bind and unbind, so that a retry timer left from a run
+	 * that ended (a libdispatch timer cannot be cancelled) finds it; touched
+	 * only on the queue. */
+	std::uint64_t generation{};
+};
+
 } // namespace
 
 struct MemoryPressureWatch::State final {
-	State(GuestTrim trim, void *context) noexcept
-		: actions{trim, context}, response{actions}
+	State(Hub &hub_, GuestTrim trim, void *context,
+		PressureTiming timing) noexcept
+		: hub{hub_}, actions{trim, context}, response{actions, timing}
 	{
 	}
 
-	~State()
-	{
-		if (source != nullptr)
-			dispatch_source_cancel(source);
-		if (queue != nullptr) {
-			/* A response that is running ends before the state goes, and
-			 * none starts after the cancel. */
-			dispatch_sync_f(queue, nullptr, [](void *) {});
-			dispatch_release(queue);
-		}
-		if (source != nullptr)
-			dispatch_release(source);
-	}
+	~State();
 
 	State(const State &) = delete;
 	State &operator=(const State &) = delete;
 
-	/* On the watch's queue. The source's data is the status flags the system
-	 * raised since the last call. */
-	static void changed(void *context) noexcept
-	{
-		auto *const state = static_cast<State *>(context);
-		const std::uint64_t flags = dispatch_source_get_data(state->source);
-		(void)state->response.on_level(pressure_level_from_dispatch(flags));
-	}
-
+	Hub &hub;
 	SystemActions actions;
 	MemoryPressureResponse response;
-	dispatch_queue_t queue{};
-	dispatch_source_t source{};
+	/* A retry is due on the queue; only the queue touches it. */
+	bool retry_armed{};
 };
+
+namespace {
+
+/* What a retry's timer carries: the state it was set for, which is only
+ * compared until the hub says it is still bound. */
+struct RetryTicket final {
+	MemoryPressureWatch::State *state;
+	std::uint64_t generation;
+};
+
+void retry_due(void *context) noexcept;
+
+/* On the queue, after anything that may have left a guest trim pending. */
+void arm_retry(Hub &hub, MemoryPressureWatch::State &state) noexcept
+{
+	if (state.retry_armed)
+		return;
+	const std::uint64_t delay = state.response.retry_delay_ns();
+	if (delay == 0U)
+		return;
+	auto *const ticket =
+		new (std::nothrow) RetryTicket{&state, hub.generation};
+	if (ticket == nullptr)
+		return;
+	state.retry_armed = true;
+	dispatch_after_f(
+		dispatch_time(DISPATCH_TIME_NOW, static_cast<std::int64_t>(delay)),
+		hub.queue, ticket, &retry_due);
+}
+
+Hub *shared_hub() noexcept;
+
+void retry_due(void *context) noexcept
+{
+	const std::unique_ptr<RetryTicket> ticket{
+		static_cast<RetryTicket *>(context)};
+	Hub &hub = *shared_hub();
+	if (hub.current != ticket->state || hub.generation != ticket->generation)
+		return;
+	auto &state = *ticket->state;
+	state.retry_armed = false;
+	(void)state.response.on_retry();
+	arm_retry(hub, state);
+}
+
+/* On the queue. The source's data is the status flags the system raised since
+ * the last call. */
+void level_changed(void *context) noexcept
+{
+	Hub &hub = *static_cast<Hub *>(context);
+	const std::uint64_t flags = dispatch_source_get_data(hub.source);
+	if (hub.current == nullptr)
+		return;
+	(void)hub.current->response.on_level(pressure_level_from_dispatch(flags));
+	arm_retry(hub, *hub.current);
+}
+
+Hub *make_hub() noexcept
+{
+	auto *const hub = new (std::nothrow) Hub;
+	if (hub == nullptr)
+		return nullptr;
+	/* A queue of its own: a trim waits for the guest, and what else a shared
+	 * queue serves must not wait behind it. */
+	hub->queue = dispatch_queue_create("uml.memory-pressure",
+		dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
+			QOS_CLASS_USER_INITIATED, 0));
+	if (hub->queue == nullptr)
+		return nullptr;
+	hub->source = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0,
+		DISPATCH_MEMORYPRESSURE_NORMAL | DISPATCH_MEMORYPRESSURE_WARN |
+			DISPATCH_MEMORYPRESSURE_CRITICAL,
+		hub->queue);
+	if (hub->source == nullptr)
+		return nullptr;
+	dispatch_set_context(hub->source, hub);
+	dispatch_source_set_event_handler_f(hub->source, &level_changed);
+	dispatch_resume(hub->source);
+	return hub;
+}
+
+Hub *shared_hub() noexcept
+{
+	static Hub *const hub = make_hub();
+	return hub;
+}
+
+struct Binding final {
+	Hub *hub;
+	MemoryPressureWatch::State *state;
+};
+
+/* Both wait, on the queue, for a handler or retry that is running. */
+void bind(Hub &hub, MemoryPressureWatch::State *state) noexcept
+{
+	Binding binding{&hub, state};
+	dispatch_sync_f(hub.queue, &binding, [](void *context) {
+		auto &binding = *static_cast<Binding *>(context);
+		binding.hub->current = binding.state;
+		++binding.hub->generation;
+	});
+}
+
+void unbind(Hub &hub, MemoryPressureWatch::State *state) noexcept
+{
+	Binding binding{&hub, state};
+	dispatch_sync_f(hub.queue, &binding, [](void *context) {
+		auto &binding = *static_cast<Binding *>(context);
+		if (binding.hub->current == binding.state) {
+			binding.hub->current = nullptr;
+			++binding.hub->generation;
+		}
+	});
+}
+
+} // namespace
+
+/* A response that is running ends before the state goes, and none, nor any
+ * retry, starts after the unbind. */
+MemoryPressureWatch::State::~State()
+{
+	unbind(hub, this);
+}
 
 MemoryPressureWatch::MemoryPressureWatch(std::unique_ptr<State> state) noexcept
 	: state_{std::move(state)}
@@ -135,30 +262,16 @@ MemoryPressureWatch::MemoryPressureWatch(std::unique_ptr<State> state) noexcept
 MemoryPressureWatch::~MemoryPressureWatch() = default;
 
 std::unique_ptr<MemoryPressureWatch> start_memory_pressure_response(
-	GuestTrim trim, void *context)
+	GuestTrim trim, void *context, PressureTiming timing)
 {
+	Hub *const hub = shared_hub();
+	if (hub == nullptr)
+		return nullptr;
 	auto state = std::unique_ptr<MemoryPressureWatch::State>{
-		new (std::nothrow) MemoryPressureWatch::State{trim, context}};
+		new (std::nothrow) MemoryPressureWatch::State{*hub, trim, context, timing}};
 	if (state == nullptr)
 		return nullptr;
-	/* A queue of its own: a trim waits for the guest, and what else a shared
-	 * queue serves must not wait behind it. */
-	state->queue = dispatch_queue_create("uml.memory-pressure",
-		dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
-			QOS_CLASS_USER_INITIATED, 0));
-	if (state->queue == nullptr)
-		return nullptr;
-	state->source = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE,
-		0,
-		DISPATCH_MEMORYPRESSURE_NORMAL | DISPATCH_MEMORYPRESSURE_WARN |
-			DISPATCH_MEMORYPRESSURE_CRITICAL,
-		state->queue);
-	if (state->source == nullptr)
-		return nullptr;
-	dispatch_set_context(state->source, state.get());
-	dispatch_source_set_event_handler_f(state->source,
-		&MemoryPressureWatch::State::changed);
-	dispatch_resume(state->source);
+	bind(*hub, state.get());
 	return std::unique_ptr<MemoryPressureWatch>{
 		new (std::nothrow) MemoryPressureWatch{std::move(state)}};
 }

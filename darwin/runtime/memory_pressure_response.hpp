@@ -12,10 +12,9 @@ namespace uml::runtime {
 /*
  * What the host gives back when the system says it is short of memory.
  *
- * The system's memory pressure source (UIKit's memory warning is the same
- * event seen from an application) reports three levels. At the normal level
- * nothing is done. At a warning or a critical level the host releases what it
- * can get back cheaply, in two parts:
+ * The system's memory pressure source reports three levels. At the normal
+ * level nothing is done. At a warning or a critical level the host releases
+ * what it can get back cheaply, in two parts:
  *
  *   - the host GPU's cached driver allocations, the reclaim the GPU device
  *     already runs before it refuses a reservation (platform/
@@ -25,18 +24,29 @@ namespace uml::runtime {
  *     cannot shrink (guest RAM is wired while committed).
  *
  * A warning starts at most one response per `warn_interval`, counted from the
- * start of the last response of either level. A critical level always starts
- * one. No response starts while one is running: the event is dropped and
- * counted, since the running trim has the guest hand over all its cold page
- * cache. The translation caches, the guest's RAM and every camera or other
- * session are not touched.
+ * start of the last response of either level, on the clock of
+ * PressureActions::now_ns. A critical level always starts one. No response
+ * starts while one is running: the event is dropped and counted, since the
+ * running trim has the guest hand over all its cold page cache. The
+ * translation caches, the guest's RAM and every camera or other session are
+ * not touched.
  *
- * Each change of the level and each response is one line on stderr (the
- * console of both applications): the level, the footprint, the bytes each part
- * released, the trim's duration and the count of guest RAM pages the host could
- * not wire (the first sign of a system that is short). Each kind of line is
- * rate limited, so that a storm of events cannot flood the console; the next
- * line that passes says how many were left out.
+ * The guest trim is skipped, with no retry, for a guest the host has
+ * quiesced (it trimmed the guest when it did, and a trim would wake it) and
+ * for one with no console. When another lifecycle call of the guest is in
+ * progress (TrimOutcome::busy) the response keeps one trim pending and tries
+ * it again after `retry_interval`, up to `retry_attempts` times: on_retry()
+ * runs it, and the next response (which tries for itself) or the normal level
+ * replaces or ends it. A retry never changes when a warning may start.
+ *
+ * Each change of the level and each response (or its last retry) is one line
+ * on stderr (the console of both applications). A level line carries the level
+ * and the footprint; a response line the footprint before and after, the
+ * bytes each part released and the trim's duration. Every line carries the
+ * count of guest RAM wiring operations that failed (the first sign of a system
+ * that is short). Each kind of line is rate limited, so that a storm of
+ * events cannot flood the console; the next line that passes says how many
+ * were left out.
  *
  * MemoryPressureResponse is the policy and holds no thread, clock or system
  * call: it reads and acts through PressureActions, so a test drives it with a
@@ -65,10 +75,16 @@ enum class TrimOutcome : std::uint8_t {
 	done,
 	/* Sent, and the guest had not finished within the bound. */
 	unanswered,
-	/* Nothing was sent: no console, a kernel without the command, a guest the
-	 * host has quiesced (which trimmed it already) or a lifecycle call in
-	 * progress. */
-	skipped,
+	/* Sent, and the guest refused it, as a kernel without the command does. */
+	refused,
+	/* Not sent: there is no console to send it to. */
+	unreachable,
+	/* Not sent: the host has quiesced the guest, so the guest was trimmed
+	 * when it was suspended and a request would wake it. */
+	quiesced,
+	/* Not sent: another lifecycle call of the guest was in progress. The
+	 * only outcome the response tries again. */
+	busy,
 };
 
 [[nodiscard]] std::string_view trim_outcome_name(TrimOutcome outcome) noexcept;
@@ -81,7 +97,8 @@ struct PressureFigures final {
 	std::uint64_t guest_held{};
 	/* The footprint's graphics ledger, compressed pages included. */
 	std::uint64_t graphics{};
-	/* Guest RAM pages the host could not wire, since the guest began. */
+	/* Guest RAM wiring operations that failed, since the guest began (the
+	 * count is of operations, each over a range of pages). */
 	std::uint64_t wire_failures{};
 };
 
@@ -101,6 +118,14 @@ public:
 	[[nodiscard]] virtual TrimOutcome trim_page_cache() noexcept = 0;
 	/* One line, without its newline. */
 	virtual void log(std::string_view line) noexcept = 0;
+};
+
+/* The response's pacing; a test shortens the retry. */
+struct PressureTiming final {
+	/* How long after a trim that found the guest busy the next try is due. */
+	std::uint64_t retry_interval_ns = 1'000'000'000ULL;
+	/* How many times a busy trim is tried again; 0 for never. */
+	unsigned retry_attempts = 4;
 };
 
 class MemoryPressureResponse final {
@@ -125,10 +150,13 @@ public:
 		limited,
 		/* A response is running. */
 		busy,
+		/* on_retry() ran the pending guest trim again. */
+		retried,
 	};
 
-	explicit MemoryPressureResponse(PressureActions &actions) noexcept
-		: actions_{actions}
+	explicit MemoryPressureResponse(PressureActions &actions,
+		PressureTiming timing = {}) noexcept
+		: actions_{actions}, timing_{timing}
 	{
 	}
 
@@ -140,11 +168,22 @@ public:
 	 * that meets a response running returns at once. */
 	Outcome on_level(PressureLevel level) noexcept;
 
+	/* How long from now the pending guest trim is due, 0 when none is. The
+	 * caller runs on_retry() that long after each call that may leave one. */
+	[[nodiscard]] std::uint64_t retry_delay_ns() const noexcept;
+
+	/* The pending guest trim is tried again, on the calling thread. Nothing
+	 * happens when none is pending (a later response or the normal level
+	 * took it), and a call that meets a response running returns busy and
+	 * leaves it pending. */
+	Outcome on_retry() noexcept;
+
 	/* The response's counters, for a test or a report. */
 	struct Counts final {
 		std::uint64_t responses{};
 		std::uint64_t limited{};
 		std::uint64_t busy{};
+		std::uint64_t retries{};
 		std::uint64_t lines_dropped{};
 	};
 	[[nodiscard]] Counts counts() const noexcept;
@@ -165,20 +204,28 @@ private:
 		std::uint64_t dropped_{};
 	};
 
-	/* Whether a line of `budget` may be written now; `dropped` receives the
-	 * lines of that kind left out since the last one. */
-	[[nodiscard]] bool admit_line(LineBudget &budget, std::uint64_t now_ns,
+	/* Whether a line of `budget` may be written now (the clock is read under
+	 * the mutex, so that calls from several threads see it in order);
+	 * `dropped` receives the lines of that kind left out since the last
+	 * one. */
+	[[nodiscard]] bool admit_line(LineBudget &budget,
 		std::uint64_t &dropped) noexcept;
 	void log_level_change(PressureLevel from, PressureLevel to) noexcept;
 	void respond(PressureLevel level, std::uint64_t events_skipped) noexcept;
 
 	PressureActions &actions_;
+	const PressureTiming timing_;
 	mutable std::mutex mutex_;
 	PressureLevel level_{PressureLevel::normal};
 	bool running_{};
 	bool started_{};
 	std::uint64_t last_start_ns_{};
 	std::uint64_t skipped_{};
+	/* The one pending guest trim: the level of the response that left it,
+	 * and the tries it has left. */
+	bool retry_pending_{};
+	PressureLevel retry_level_{PressureLevel::normal};
+	unsigned retry_attempts_left_{};
 	Counts counts_{};
 	LineBudget level_lines_;
 	LineBudget response_lines_;
@@ -189,9 +236,12 @@ private:
  * lock the caller holds. */
 using GuestTrim = TrimOutcome (*)(void *context) noexcept;
 
-/* The response of a run, listening to the system's memory pressure source on
- * a queue of its own until it is destroyed. The destructor stops the source
- * and returns once a response that is running has ended. */
+/* The response of a run, listening to the system's memory pressure source until
+ * it is destroyed. The destructor returns once a response that is running has
+ * ended, and no response, retry or call of the run's `GuestTrim` starts after
+ * it. The source and its queue are the process's, made on the first watch and
+ * kept: cancelling a source leaves a libdispatch worker thread behind, and a
+ * run leaves no thread of its own. */
 class MemoryPressureWatch final {
 public:
 	~MemoryPressureWatch();
@@ -203,7 +253,7 @@ public:
 
 private:
 	friend std::unique_ptr<MemoryPressureWatch> start_memory_pressure_response(
-		GuestTrim, void *);
+		GuestTrim, void *, PressureTiming);
 	explicit MemoryPressureWatch(std::unique_ptr<State> state) noexcept;
 
 	std::unique_ptr<State> state_;
@@ -213,6 +263,6 @@ private:
  * the guest's page-cache trim. Null when the system's source cannot be made;
  * the run goes on without the response. */
 [[nodiscard]] std::unique_ptr<MemoryPressureWatch> start_memory_pressure_response(
-	GuestTrim trim, void *context);
+	GuestTrim trim, void *context, PressureTiming timing = {});
 
 } // namespace uml::runtime

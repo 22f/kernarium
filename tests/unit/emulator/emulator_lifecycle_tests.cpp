@@ -256,7 +256,7 @@ void aQuiescedGuestIsNotWokenForThePressureTrim(uml_emulator *emulator,
 	}) == Requests {"trim once", "suspend"});
 	require(console.requests(0U, [emulator] {
 		require(uml::emulator::testing::trim_for_memory_pressure(emulator) ==
-			TrimOutcome::skipped);
+			TrimOutcome::quiesced);
 	}).empty());
 	require(console.requests(1U, [emulator] {
 		uml_emulator_resume(emulator);
@@ -277,7 +277,7 @@ void withoutAConsoleNothingWaits(uml_emulator *emulator)
 	require(uml_emulator_trim_page_cache(nullptr) ==
 		-UML_EMULATOR_INVALID_ARGUMENT);
 	require(uml::emulator::testing::trim_for_memory_pressure(emulator) ==
-		::uml::runtime::TrimOutcome::skipped);
+		::uml::runtime::TrimOutcome::unreachable);
 	require(uml_emulator_quiesce_resident(nullptr) ==
 		-UML_EMULATOR_INVALID_ARGUMENT);
 }
@@ -1115,7 +1115,7 @@ void aLifecycleCallInProgressIsNotWaitedFor(const std::string &held)
 		"a request ran beside a quiesce");
 	require(waited < std::chrono::seconds {2},
 		"a request waited for a quiesce");
-	require(pressureTrim == ::uml::runtime::TrimOutcome::skipped &&
+	require(pressureTrim == ::uml::runtime::TrimOutcome::busy &&
 		trimWaited < std::chrono::seconds {2},
 		"the pressure trim ran beside a quiesce");
 	require(heard == Requests {"trim once", "suspend"},
@@ -1123,6 +1123,61 @@ void aLifecycleCallInProgressIsNotWaitedFor(const std::string &held)
 	require(console.requests(1U, [&] { uml_emulator_resume(emulator.get()); })
 		== Requests {"wake"});
 	(void)hibernationLog.take();
+}
+
+/* A foreground transition's "trim off" holds the lifecycle mutex while it
+ * waits for the guest. A pressure trim that meets it sends nothing and says it
+ * is busy, which is what the response tries again; once the call has ended the
+ * same trim is sent. */
+void aPressureTrimBesideATrimChangeIsBusyThenSent()
+{
+	const auto emulator = makeEmulator();
+	FakeGuestConsole console;
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool changing {false};
+	bool released {false};
+	console.onRequest = [&](const std::string &command) {
+		if (command != "trim off")
+			return;
+		std::unique_lock lock {mutex};
+		changing = true;
+		changed.notify_all();
+		(void)changed.wait_for(lock, std::chrono::seconds {5},
+			[&] { return released; });
+	};
+	Requests heard;
+	std::thread foreground {[&] {
+		heard = console.requests(1U, [&] {
+			require(uml_emulator_set_page_cache_trimming(
+				emulator.get(), 0) == UML_EMULATOR_OK);
+		});
+	}};
+	{
+		std::unique_lock lock {mutex};
+		require(changed.wait_for(lock, std::chrono::seconds {10},
+			[&] { return changing; }), "the change never reached the guest");
+	}
+	const auto started = std::chrono::steady_clock::now();
+	const auto outcome =
+		uml::emulator::testing::trim_for_memory_pressure(emulator.get());
+	const auto waited = std::chrono::steady_clock::now() - started;
+	{
+		const std::lock_guard lock {mutex};
+		released = true;
+	}
+	changed.notify_all();
+	foreground.join();
+	require(outcome == ::uml::runtime::TrimOutcome::busy &&
+		waited < std::chrono::seconds {2},
+		"the pressure trim ran beside a trim change");
+	require(heard == Requests {"trim off"},
+		"the pressure trim reached the guest beside a trim change");
+	console.onRequest = nullptr;
+	require(console.requests(1U, [&] {
+		require(uml::emulator::testing::trim_for_memory_pressure(
+			emulator.get()) == ::uml::runtime::TrimOutcome::done);
+	}) == Requests {"trim once"});
 }
 
 /* The wait for the reply is outside the lifecycle mutex, so a quiesce that
@@ -1219,6 +1274,7 @@ int main(int argc, char **argv)
 	aQuiescedGuestIsNotAskedForItsMemory();
 	aLifecycleCallInProgressIsNotWaitedFor("trim once");
 	aLifecycleCallInProgressIsNotWaitedFor("suspend");
+	aPressureTrimBesideATrimChangeIsBusyThenSent();
 	aQuiesceDoesNotWaitForAMemoryRequest();
 	return EXIT_SUCCESS;
 }

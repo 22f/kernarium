@@ -87,15 +87,19 @@ quiesce, and the system's memory warning below). The host GPU's memory is not
 carved out of the guest's RAM, and the host provides no Virtio balloon device.
 
 **Memory pressure.** When the system's memory pressure source reports a warning
-or a critical level (UIKit's memory warning is the same event), the runtime
-frees the host GPU's cached driver allocations and trims the guest's page cache
-once, which unwires those pages (`runtime/memory_pressure_response.hpp`); the
-normal level does nothing, and a guest the host has quiesced is not woken for
-it. A warning starts at most one response per 30 s, a critical level always
-starts one, and none starts while one runs. macOS and iOS, and both applications,
-get it through the runtime. Each level change and each response is one rate
-limited stderr line with the footprint, the bytes each part released, the
-trim's duration and the count of guest RAM pages the host could not wire.
+or a critical level, the runtime frees the host GPU's cached driver allocations
+and asks the guest for one page-cache trim, which unwires those pages
+(`runtime/memory_pressure_response.hpp`); the normal level does nothing. The
+trim is skipped for a guest the host has quiesced and for one with no console;
+a trim that meets another lifecycle call of the guest is retried up to four
+times, a second apart, until a response of its own or the normal level takes its
+place. A trim wakes a guest that suspended itself. A warning starts at most one
+response per 30 s of awake time (`CLOCK_UPTIME_RAW`) counted from the start of
+the last response, a critical level always starts one, and none starts while one
+runs. macOS and iOS, and both applications, get it through the runtime. Each
+level change and each response is one rate-limited stderr line: the footprint,
+the failed guest-RAM wiring operations and, on a response line, the bytes each
+part released and the trim's duration.
 
 **Budgets.** The process's memory limit, L, is the figure the memory budgets
 derive from. iOS enforces one per application

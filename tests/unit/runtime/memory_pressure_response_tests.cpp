@@ -5,7 +5,7 @@
  * the memory pressure source, against a source this binary substitutes: the
  * binary defines dispatch_source_create, so the response's call binds here and
  * a memory pressure source becomes one the test can raise (a real event needs
- * a privileged tool).
+ * a privileged tool). The process makes that source once, on the first watch.
  */
 #include "memory_pressure_response.hpp"
 #include "named_tests.hpp"
@@ -35,6 +35,9 @@ namespace {
  * data into: DISPATCH_SOURCE_TYPE_DATA_OR delivers the merged bits to the
  * handler as the status flags a memory pressure source delivers. */
 std::atomic<dispatch_source_t> pressure_source{nullptr};
+/* The queue the source's handler runs on: a call on it from the test, once an
+ * event was merged, returns after the handler that event started. */
+std::atomic<dispatch_queue_t> pressure_queue{nullptr};
 
 } // namespace
 
@@ -51,6 +54,7 @@ extern "C" dispatch_source_t dispatch_source_create(
 	const dispatch_source_t source =
 		real(DISPATCH_SOURCE_TYPE_DATA_OR, 0, 0, queue);
 	pressure_source.store(source);
+	pressure_queue.store(queue);
 	return source;
 }
 
@@ -60,6 +64,7 @@ using uml::runtime::MemoryPressureResponse;
 using uml::runtime::PressureActions;
 using uml::runtime::PressureFigures;
 using uml::runtime::PressureLevel;
+using uml::runtime::PressureTiming;
 using uml::runtime::TrimOutcome;
 using uml::testing::require;
 using uml::testing::waitUntil;
@@ -68,6 +73,23 @@ using Outcome = MemoryPressureResponse::Outcome;
 constexpr std::uint64_t mib = 1024ULL * 1024ULL;
 constexpr std::uint64_t second = 1'000'000'000ULL;
 constexpr std::uint64_t millisecond = 1'000'000ULL;
+
+/* The memory pressure source the first watch made. */
+dispatch_source_t raisable()
+{
+	const dispatch_source_t source = pressure_source.load();
+	require(source != nullptr, "no memory pressure source was made");
+	return source;
+}
+
+/* Raises `flags` on the source and returns once its handler has run for them:
+ * the handler is on a serial queue, so a call on that queue made after the
+ * merge waits for it. */
+void raiseAndWait(std::uint64_t flags)
+{
+	dispatch_source_merge_data(raisable(), flags);
+	dispatch_sync_f(pressure_queue.load(), nullptr, [](void *) {});
+}
 
 /* A clock, a process and a guest the test moves by hand. */
 class FakeActions final : public PressureActions {
@@ -227,24 +249,42 @@ void aWarningFreesTheGpuCachesThenTrimsOnce()
 
 void aTrimThatCouldNotBeSentOrAnsweredIsSaidSo()
 {
-	FakeActions actions;
-	actions.outcome = TrimOutcome::skipped;
-	actions.trim_bytes = 0;
-	actions.gpu_freed = 0;
-	actions.gpu_bytes = 0;
-	MemoryPressureResponse response{actions};
-	require(response.on_level(PressureLevel::critical) == Outcome::responded);
-	auto lines = actions.lines_taken();
-	require(contains(lines.back(),
-		"released 0 MiB graphics (0 cached allocations), 0 MiB guest RAM "
-		"(page cache trim not sent, 80 ms)"), lines.back());
+	/* Each ending has its own word, and only the ones nothing was sent for
+	 * say so: a refusal was sent. */
+	const struct {
+		TrimOutcome outcome;
+		const char *words;
+	} endings[] = {
+		{TrimOutcome::unreachable, "page cache trim no console, 80 ms"},
+		{TrimOutcome::quiesced, "page cache trim guest quiesced, 80 ms"},
+		{TrimOutcome::refused, "page cache trim refused, 80 ms"},
+		{TrimOutcome::busy, "page cache trim busy, 80 ms"},
+		{TrimOutcome::unanswered, "page cache trim unanswered, 80 ms"},
+		{TrimOutcome::done, "page cache trim done, 80 ms"},
+	};
+	for (const auto &ending : endings) {
+		FakeActions actions;
+		actions.outcome = ending.outcome;
+		actions.trim_bytes = 0;
+		actions.gpu_freed = 0;
+		actions.gpu_bytes = 0;
+		MemoryPressureResponse response{actions};
+		require(response.on_level(PressureLevel::critical) ==
+			Outcome::responded);
+		const auto lines = actions.lines_taken();
+		require(contains(lines.back(),
+			"released 0 MiB graphics (0 cached allocations), 0 MiB guest "
+			"RAM ("), lines.back());
+		require(contains(lines.back(), ending.words), lines.back());
+		require(!contains(lines.back(), "not sent"), lines.back());
+	}
 
 	FakeActions slow;
 	slow.outcome = TrimOutcome::unanswered;
 	slow.trim_ns = 3000 * millisecond;
 	MemoryPressureResponse patient{slow};
 	require(patient.on_level(PressureLevel::critical) == Outcome::responded);
-	lines = slow.lines_taken();
+	const auto lines = slow.lines_taken();
 	require(contains(lines.back(), "page cache trim unanswered, 3000 ms"),
 		lines.back());
 
@@ -256,8 +296,8 @@ void aTrimThatCouldNotBeSentOrAnsweredIsSaidSo()
 	};
 	MemoryPressureResponse grown{growing};
 	require(grown.on_level(PressureLevel::warn) == Outcome::responded);
-	lines = growing.lines_taken();
-	require(contains(lines.back(), "0 MiB guest RAM"), lines.back());
+	require(contains(growing.lines_taken().back(), "0 MiB guest RAM"),
+		growing.lines_taken().back());
 }
 
 void aWarningStartsOneResponsePerInterval()
@@ -366,6 +406,260 @@ void anEventOnAnotherThreadMeetsTheRunningTrim()
 	actions.inside_trim = nullptr;
 	require(response.on_level(PressureLevel::critical) == Outcome::responded);
 	require(actions.trims() == 2);
+}
+
+/* ---- A guest trim that met another lifecycle call is tried again. ---- */
+
+void aBusyTrimIsTriedAgain()
+{
+	FakeActions actions;
+	actions.outcome = TrimOutcome::busy;
+	actions.trim_bytes = 0;
+	const PressureTiming timing;
+	MemoryPressureResponse response{actions, timing};
+	require(response.retry_delay_ns() == 0, "nothing pending yet");
+	require(response.on_retry() == Outcome::nothing);
+	require(actions.trims() == 0);
+
+	/* A critical level whose trim found the guest busy keeps one pending. */
+	require(response.on_level(PressureLevel::critical) == Outcome::responded);
+	require(contains(actions.lines_taken().back(), "page cache trim busy"),
+		actions.lines_taken().back());
+	require(response.retry_delay_ns() == timing.retry_interval_ns);
+	require(actions.trims() == 1);
+
+	/* The guest is free when the retry comes: it sends the trim and the
+	 * response's last line says what it got. */
+	actions.outcome = TrimOutcome::done;
+	actions.trim_bytes = 150 * mib;
+	require(response.on_retry() == Outcome::retried);
+	require(actions.trims() == 2);
+	require(response.retry_delay_ns() == 0, "one pending trim, tried once");
+	require(contains(actions.lines_taken().back(),
+		"uml: memory pressure critical (retry 1 of 4): footprint "),
+		actions.lines_taken().back());
+	require(contains(actions.lines_taken().back(),
+		"released 150 MiB guest RAM (page cache trim done, 80 ms)"),
+		actions.lines_taken().back());
+	require(response.on_retry() == Outcome::nothing);
+	require(actions.trims() == 2);
+	require(response.counts().retries == 1);
+}
+
+void aRetryThatIsStillBusyStopsAfterItsAttempts()
+{
+	FakeActions actions;
+	actions.outcome = TrimOutcome::busy;
+	PressureTiming timing;
+	timing.retry_attempts = 3;
+	MemoryPressureResponse response{actions, timing};
+	require(response.on_level(PressureLevel::warn) == Outcome::responded);
+	const auto lines_before = actions.lines_taken().size();
+	for (unsigned attempt = 1; attempt <= 3; ++attempt) {
+		require(response.retry_delay_ns() == timing.retry_interval_ns,
+			std::to_string(attempt));
+		require(response.on_retry() == Outcome::retried);
+	}
+	/* Three tries and no more, one line for the last. */
+	require(response.retry_delay_ns() == 0);
+	require(response.on_retry() == Outcome::nothing);
+	require(actions.trims() == 4);
+	const auto lines = actions.lines_taken();
+	require(lines.size() == lines_before + 1, "a line for each try");
+	require(contains(lines.back(), "(retry 3 of 3)") &&
+		contains(lines.back(), "page cache trim busy"), lines.back());
+
+	/* No retries configured, none pending. */
+	FakeActions never;
+	never.outcome = TrimOutcome::busy;
+	PressureTiming none;
+	none.retry_attempts = 0;
+	MemoryPressureResponse once{never, none};
+	require(once.on_level(PressureLevel::critical) == Outcome::responded);
+	require(once.retry_delay_ns() == 0);
+}
+
+void aRetryIsNotForAGuestTheHostHasQuiesced()
+{
+	FakeActions actions;
+	actions.outcome = TrimOutcome::busy;
+	MemoryPressureResponse response{actions};
+	require(response.on_level(PressureLevel::critical) == Outcome::responded);
+	require(response.retry_delay_ns() != 0);
+	/* The guest was quiesced meanwhile: the trim said so, and that is the end
+	 * of it. */
+	actions.outcome = TrimOutcome::quiesced;
+	require(response.on_retry() == Outcome::retried);
+	require(response.retry_delay_ns() == 0);
+	require(actions.trims() == 2);
+	require(contains(actions.lines_taken().back(),
+		"page cache trim guest quiesced"), actions.lines_taken().back());
+	require(response.on_retry() == Outcome::nothing);
+	require(actions.trims() == 2);
+
+	/* Neither does a trim that was refused or had no console come again. */
+	for (const auto ending : {TrimOutcome::refused, TrimOutcome::unreachable,
+		     TrimOutcome::unanswered}) {
+		FakeActions other;
+		other.outcome = ending;
+		MemoryPressureResponse once{other};
+		require(once.on_level(PressureLevel::critical) == Outcome::responded);
+		require(once.retry_delay_ns() == 0);
+	}
+}
+
+void aRetryDoesNotMoveTheWarnSpacing()
+{
+	FakeActions actions;
+	actions.outcome = TrimOutcome::busy;
+	MemoryPressureResponse response{actions};
+	require(response.on_level(PressureLevel::warn) == Outcome::responded);
+	actions.advance(second);
+	actions.outcome = TrimOutcome::done;
+	require(response.on_retry() == Outcome::retried);
+	/* The interval still runs from the warning's start: the trim took 80 ms,
+	 * the retry a second after it began. */
+	actions.advance(MemoryPressureResponse::warn_interval_ns -
+		actions.trim_ns - second - actions.trim_ns - millisecond);
+	require(response.on_level(PressureLevel::warn) == Outcome::limited);
+	actions.advance(millisecond);
+	require(response.on_level(PressureLevel::warn) == Outcome::responded);
+	require(actions.trims() == 3);
+}
+
+void aLaterResponseOrTheNormalLevelTakesThePendingTrim()
+{
+	FakeActions actions;
+	actions.outcome = TrimOutcome::busy;
+	MemoryPressureResponse response{actions};
+	require(response.on_level(PressureLevel::critical) == Outcome::responded);
+	require(response.retry_delay_ns() != 0);
+
+	/* A warning the interval limits leaves it. */
+	actions.advance(second);
+	require(response.on_level(PressureLevel::warn) == Outcome::limited);
+	require(response.retry_delay_ns() != 0);
+
+	/* A response of its own tries for itself: that trim replaces the pending
+	 * one, and when it finds the guest free nothing is left to retry. */
+	actions.outcome = TrimOutcome::done;
+	actions.advance(second);
+	require(response.on_level(PressureLevel::critical) == Outcome::responded);
+	require(response.retry_delay_ns() == 0);
+	require(response.on_retry() == Outcome::nothing);
+	require(actions.trims() == 2);
+
+	/* The way back to normal ends the pressure and the retry with it. */
+	actions.outcome = TrimOutcome::busy;
+	actions.advance(second);
+	require(response.on_level(PressureLevel::critical) == Outcome::responded);
+	require(response.retry_delay_ns() != 0);
+	require(response.on_level(PressureLevel::normal) == Outcome::nothing);
+	require(response.retry_delay_ns() == 0);
+	require(response.on_retry() == Outcome::nothing);
+	require(actions.trims() == 3);
+
+	/* A response that is busy again starts a fresh set of attempts. */
+	actions.advance(second);
+	require(response.on_level(PressureLevel::critical) == Outcome::responded);
+	require(response.on_retry() == Outcome::retried);
+	require(response.on_level(PressureLevel::critical) == Outcome::responded);
+	for (unsigned attempt = 0; attempt < 4; ++attempt)
+		require(response.on_retry() == Outcome::retried);
+	require(response.on_retry() == Outcome::nothing);
+}
+
+void aRetryIsNotJoinedToAResponseThatIsRunning()
+{
+	FakeActions actions;
+	actions.outcome = TrimOutcome::busy;
+	MemoryPressureResponse response{actions};
+	require(response.on_level(PressureLevel::critical) == Outcome::responded);
+	std::vector<Outcome> met;
+	actions.inside_trim = [&] {
+		met.push_back(response.on_retry());
+		met.push_back(response.on_level(PressureLevel::critical));
+	};
+	require(response.on_retry() == Outcome::retried);
+	actions.inside_trim = nullptr;
+	require(met == (std::vector<Outcome>{Outcome::busy, Outcome::busy}));
+	require(actions.trims() == 2);
+}
+
+/* A clock that holds its first reader, as a thread the scheduler stops between
+ * reading the time and using it would. */
+class HeldClock final : public PressureActions {
+public:
+	std::uint64_t now_ns() noexcept override
+	{
+		std::unique_lock lock{mutex};
+		const unsigned reader = ++readers;
+		++inside;
+		widest = std::max(widest, inside);
+		changed.notify_all();
+		if (reader == 1U)
+			(void)changed.wait_for(lock, std::chrono::seconds{20},
+				[&] { return released; });
+		--inside;
+		return now += reader == 1U ? 0U : 2 * second;
+	}
+
+	PressureFigures figures() noexcept override { return {}; }
+	std::uint64_t reclaim_gpu() noexcept override { return 0; }
+	TrimOutcome trim_page_cache() noexcept override
+	{
+		trims.fetch_add(1);
+		return TrimOutcome::done;
+	}
+	void log(std::string_view) noexcept override {}
+
+	std::mutex mutex;
+	std::condition_variable changed;
+	std::uint64_t now = 100 * second;
+	unsigned readers = 0;
+	unsigned inside = 0;
+	unsigned widest = 0;
+	bool released = false;
+	std::atomic<unsigned> trims{0};
+};
+
+void theClockIsReadInTheOrderOfTheMutex()
+{
+	HeldClock clock;
+	MemoryPressureResponse response{clock};
+	std::thread first{[&] {
+		require(response.on_level(PressureLevel::warn) == Outcome::responded);
+	}};
+	{
+		std::unique_lock lock{clock.mutex};
+		require(clock.changed.wait_for(lock, std::chrono::seconds{20},
+			[&] { return clock.inside == 1U; }), "the first call never read");
+	}
+	/* A second event meets the first one's reading of the clock: it waits for
+	 * the policy's mutex instead of reading an older or newer time, and finds
+	 * the first one's response started when it gets the mutex. */
+	Outcome second_outcome = Outcome::nothing;
+	std::thread second_call{[&] {
+		second_outcome = response.on_level(PressureLevel::warn);
+	}};
+	require(!waitUntil([&] {
+		const std::lock_guard lock{clock.mutex};
+		return clock.readers > 1U;
+	}, std::chrono::milliseconds{300}),
+		"a second thread read the clock while the first held the mutex");
+	{
+		const std::lock_guard lock{clock.mutex};
+		clock.released = true;
+	}
+	clock.changed.notify_all();
+	first.join();
+	second_call.join();
+	require(clock.widest == 1U, "two threads read the clock at once");
+	/* Limited, or busy when it got the mutex while the response ran: the
+	 * second never starts one. */
+	require(second_outcome == Outcome::limited ||
+		second_outcome == Outcome::busy);
+	require(clock.trims == 1);
 }
 
 void aStormOfLevelChangesCannotFloodTheConsole()
@@ -490,7 +784,6 @@ void theSystemSourceReachesTheGpuAndTheGuest()
 {
 	gpu_reclaims = 0;
 	guest_trims = 0;
-	pressure_source.store(nullptr);
 	uml::platform::publishGpuCacheReclaimer(&countedGpuReclaim);
 	int context = 0;
 	StderrCapture capture;
@@ -499,25 +792,19 @@ void theSystemSourceReachesTheGpuAndTheGuest()
 			uml::runtime::start_memory_pressure_response(&countedGuestTrim,
 				&context);
 		require(watch != nullptr);
-		const dispatch_source_t source = pressure_source.load();
-		require(source != nullptr, "no memory pressure source was made");
 
 		/* Normal: nothing. */
-		dispatch_source_merge_data(source, DISPATCH_MEMORYPRESSURE_NORMAL);
-		require(waitUntil([&] { return capture.take().empty() == false; },
-			std::chrono::milliseconds{200}) == false,
-			"the normal level wrote a line");
+		raiseAndWait(DISPATCH_MEMORYPRESSURE_NORMAL);
+		require(capture.take().empty(), capture.take());
 		require(gpu_reclaims == 0 && guest_trims == 0);
 
 		/* A warning frees the caches and trims, and says so on stderr. */
-		dispatch_source_merge_data(source, DISPATCH_MEMORYPRESSURE_WARN);
-		require(waitUntil([&] {
-			return contains(capture.take(), "memory pressure warn:");
-		}, std::chrono::seconds{20}), "the warning wrote no line");
+		raiseAndWait(DISPATCH_MEMORYPRESSURE_WARN);
 		require(gpu_reclaims == 1 && guest_trims == 1 && context == 1);
 		const std::string text = capture.take();
 		require(contains(text, "memory pressure warn (was normal): footprint "),
 			text);
+		require(contains(text, "memory pressure warn: footprint "), text);
 		/* The figures are the process's own. */
 		const auto footprint = text.find("footprint ");
 		require(footprint != std::string::npos &&
@@ -528,37 +815,39 @@ void theSystemSourceReachesTheGpuAndTheGuest()
 		require(contains(text, "guest RAM wire failures"), text);
 
 		/* A second warning inside the interval does nothing. */
-		dispatch_source_merge_data(source, DISPATCH_MEMORYPRESSURE_WARN);
+		raiseAndWait(DISPATCH_MEMORYPRESSURE_WARN);
+		require(gpu_reclaims == 1 && guest_trims == 1,
+			"a second warning inside the interval acted");
+
 		/* A critical level always acts. */
-		dispatch_source_merge_data(source, DISPATCH_MEMORYPRESSURE_CRITICAL);
-		require(waitUntil([&] { return guest_trims == 2; },
-			std::chrono::seconds{20}), "the critical level did not trim");
-		require(gpu_reclaims == 2);
+		raiseAndWait(DISPATCH_MEMORYPRESSURE_CRITICAL);
+		require(gpu_reclaims == 2 && guest_trims == 2,
+			"the critical level did not act");
 	}
-	/* The watch has ended; its source and queue are gone. */
+	/* The watch has ended; the source stays with the process and answers
+	 * nothing. */
+	raiseAndWait(DISPATCH_MEMORYPRESSURE_CRITICAL);
+	require(gpu_reclaims == 2 && guest_trims == 2,
+		"a source with no watch acted");
 	capture.restore();
 	uml::platform::publishGpuCacheReclaimer(nullptr);
 }
 
 void aWatchWithNoGpuAndNoGuestStillAnswers()
 {
-	pressure_source.store(nullptr);
 	uml::platform::publishGpuCacheReclaimer(nullptr);
 	StderrCapture capture;
 	const auto watch =
 		uml::runtime::start_memory_pressure_response(nullptr, nullptr);
 	require(watch != nullptr);
-	dispatch_source_merge_data(pressure_source.load(),
-		DISPATCH_MEMORYPRESSURE_CRITICAL);
-	require(waitUntil([&] {
-		return contains(capture.take(), "page cache trim not sent");
-	}, std::chrono::seconds{20}), capture.take());
-	require(contains(capture.take(), "(0 cached allocations)"));
+	raiseAndWait(DISPATCH_MEMORYPRESSURE_CRITICAL);
+	const std::string text = capture.take();
+	require(contains(text, "page cache trim no console"), text);
+	require(contains(text, "(0 cached allocations)"), text);
 }
 
 void aWatchEndsWhileItsResponseIsRunning()
 {
-	pressure_source.store(nullptr);
 	std::mutex gate;
 	std::condition_variable changed;
 	bool inside = false;
@@ -580,8 +869,7 @@ void aWatchEndsWhileItsResponseIsRunning()
 			return TrimOutcome::done;
 		}, &hold);
 	require(watch != nullptr);
-	dispatch_source_merge_data(pressure_source.load(),
-		DISPATCH_MEMORYPRESSURE_CRITICAL);
+	dispatch_source_merge_data(raisable(), DISPATCH_MEMORYPRESSURE_CRITICAL);
 	{
 		std::unique_lock lock{gate};
 		require(changed.wait_for(lock, std::chrono::seconds{20},
@@ -597,6 +885,80 @@ void aWatchEndsWhileItsResponseIsRunning()
 	require(contains(capture.take(), "page cache trim done"));
 }
 
+/* What a guest trim that is busy a few times counts. */
+struct BusyThenFree final {
+	std::atomic<int> calls{0};
+	int busy_calls;
+};
+
+TrimOutcome busyThenFree(void *context) noexcept
+{
+	auto &trim = *static_cast<BusyThenFree *>(context);
+	return trim.calls.fetch_add(1) < trim.busy_calls ? TrimOutcome::busy
+							: TrimOutcome::done;
+}
+
+void aBusyGuestTrimIsTriedAgainByTheWatch()
+{
+	BusyThenFree trim;
+	trim.busy_calls = 2;
+	StderrCapture capture;
+	PressureTiming timing;
+	timing.retry_interval_ns = 20 * millisecond;
+	{
+		const auto watch = uml::runtime::start_memory_pressure_response(
+			&busyThenFree, &trim, timing);
+		require(watch != nullptr);
+		raiseAndWait(DISPATCH_MEMORYPRESSURE_CRITICAL);
+		/* The response's own try and two retries found the guest busy or
+		 * free; nothing comes after the one that was done. */
+		require(waitUntil([&] { return trim.calls == 3; },
+			std::chrono::seconds{20}), "the busy trim was not retried");
+		require(waitUntil([&] {
+			return contains(capture.take(), "(retry 2 of 4)");
+		}, std::chrono::seconds{20}), capture.take());
+		require(!waitUntil([&] { return trim.calls > 3; },
+			std::chrono::milliseconds{300}), "a trim that was done came again");
+	}
+	capture.restore();
+	const std::string text = capture.take();
+	require(contains(text, "page cache trim busy"), text);
+	require(contains(text, "(retry 2 of 4)") &&
+		contains(text, "page cache trim done"), text);
+	/* The first retry found it busy still and wrote nothing. */
+	require(!contains(text, "(retry 1 of 4)"), text);
+}
+
+void aPendingRetryEndsWithTheWatch()
+{
+	BusyThenFree trim;
+	trim.busy_calls = 1000;
+	BusyThenFree later;
+	later.busy_calls = 0;
+	StderrCapture capture;
+	PressureTiming timing;
+	timing.retry_interval_ns = 150 * millisecond;
+	{
+		auto watch = uml::runtime::start_memory_pressure_response(
+			&busyThenFree, &trim, timing);
+		require(watch != nullptr);
+		raiseAndWait(DISPATCH_MEMORYPRESSURE_CRITICAL);
+		require(trim.calls == 1);
+		/* The watch ends with a retry pending, and another watch of the same
+		 * process begins before the timer would have fired. */
+		watch.reset();
+		const auto next = uml::runtime::start_memory_pressure_response(
+			&busyThenFree, &later, timing);
+		require(next != nullptr);
+		std::this_thread::sleep_for(std::chrono::milliseconds{500});
+		require(trim.calls == 1, "a retry came after its watch ended");
+		require(later.calls == 0, "a retry of an earlier watch reached the next");
+	}
+	/* The process goes on, and a watch with no retry pending sees none. */
+	std::this_thread::sleep_for(std::chrono::milliseconds{200});
+	require(trim.calls == 1 && later.calls == 0);
+}
+
 } // namespace
 
 int main()
@@ -609,6 +971,19 @@ int main()
 			aWarningFreesTheGpuCachesThenTrimsOnce},
 		{"a-trim-that-could-not-be-sent-or-answered-is-said-so",
 			aTrimThatCouldNotBeSentOrAnsweredIsSaidSo},
+		{"a-busy-trim-is-tried-again", aBusyTrimIsTriedAgain},
+		{"a-retry-that-is-still-busy-stops-after-its-attempts",
+			aRetryThatIsStillBusyStopsAfterItsAttempts},
+		{"a-retry-is-not-for-a-guest-the-host-has-quiesced",
+			aRetryIsNotForAGuestTheHostHasQuiesced},
+		{"a-retry-does-not-move-the-warn-spacing",
+			aRetryDoesNotMoveTheWarnSpacing},
+		{"a-later-response-or-the-normal-level-takes-the-pending-trim",
+			aLaterResponseOrTheNormalLevelTakesThePendingTrim},
+		{"a-retry-is-not-joined-to-a-response-that-is-running",
+			aRetryIsNotJoinedToAResponseThatIsRunning},
+		{"the-clock-is-read-in-the-order-of-the-mutex",
+			theClockIsReadInTheOrderOfTheMutex},
 		{"a-warning-starts-one-response-per-interval",
 			aWarningStartsOneResponsePerInterval},
 		{"a-critical-level-always-starts-one",
@@ -627,6 +1002,9 @@ int main()
 			aWatchWithNoGpuAndNoGuestStillAnswers},
 		{"a-watch-ends-while-its-response-is-running",
 			aWatchEndsWhileItsResponseIsRunning},
+		{"a-busy-guest-trim-is-tried-again-by-the-watch",
+			aBusyGuestTrimIsTriedAgainByTheWatch},
+		{"a-pending-retry-ends-with-the-watch", aPendingRetryEndsWithTheWatch},
 	};
 	return uml::testing::runNamedTests(tests);
 }
