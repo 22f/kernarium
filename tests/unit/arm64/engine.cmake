@@ -130,6 +130,29 @@
             --assume-host-feature frintts --assume-host-feature fcma
             --assume-host-feature jscvt)
 
+    # A store-exclusive may fail without cause (a host interrupt ends the
+    # monitor the engines use), and a corpus case that discards the status
+    # runs once; the runner runs it again while the only difference from the
+    # pack is that its store wrote nothing. This lane makes that happen so the
+    # tolerance is measured and not left to the load a gate happens to run
+    # under: the host interrupts the guest's thread throughout, until a store
+    # has lost its reservation. The JIT's fused pair has no host instructions
+    # between, so a loss there is too rare for a bounded search.
+    uml_add_unit_test(NAME arm64-instruction-corpus-exclusive-interrupted
+        TIMEOUT 300
+        COMMAND uml_arm64_instruction_corpus_tests
+            ${UML_ARM64_INSTRUCTION_CORPUS}
+            --record arm64-tbi-memory --engine gadgets --interrupt)
+    # What the retry must refuse, made on purpose in both lanes: the first
+    # attempt at each such case ends as a lost reservation, which is run again
+    # and passes, or as a loss with another register or a byte outside the
+    # store wrong, a store that wrote other bytes or some of its own, and
+    # (in every attempt) a store that never writes, which each fail.
+    uml_add_unit_test(NAME arm64-instruction-corpus-exclusive-injected
+        COMMAND uml_arm64_instruction_corpus_tests
+            ${UML_ARM64_INSTRUCTION_CORPUS}
+            --record arm64-tbi-memory --inject)
+
     # A virtual CPU with FEAT_SME and without FEAT_SVE executes CNT, INC, DEC,
     # RDVL, ADDVL and ADDPL outside streaming mode for a vector length of 16
     # bytes, a deliberate departure from the architecture whose results are
