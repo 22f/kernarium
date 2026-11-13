@@ -258,7 +258,6 @@ SHOTS: list[Shot] = [
     # Running guest
     s("session", "Guest", "session", "The running guest with the side keys closed."),
     s("session-tip", "Guest", "session-tip", "The side-keys tip over the running guest: the keys line and the line that says Settings holds Install APK.", "-resetTips", "YES"),
-    s("session-tip-largest-text", "Guest", "session-tip", "The side-keys tip at the largest accessibility text size (the launch states it for the Preview alone): the card stays on the screen with all of its text.", "-resetTips", "YES", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityExtraExtraExtraLarge"),
     s("session-side-keys", "Guest", "session-open", "The side keys open: Power, volume, Back, Home and Settings."),
     s("session-left-edge", "Guest", "session-left", "The side keys on the left edge."),
     s("session-volume", "Guest", "session-volume", "The volume panel after a volume key press."),
