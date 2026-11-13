@@ -689,8 +689,9 @@ void check_case(Machine &machine, const corpus::Record &record,
 				    corpus::plan_selects(plan, record, test))
 					check_case(machine, record, test, quiet, totals, &plan);
 		const bool as_planned = totals.run != 0 && totals.skipped == 0 &&
+			/* The attempt after the injected loss may itself be a real one. */
 			(plan.retried ? totals.failed == 0 && totals.retried == totals.run &&
-						totals.lost == totals.run
+						totals.lost >= totals.run
 				      : totals.failed == totals.run && totals.retried == 0 &&
 						totals.lost == 0);
 		std::printf("  inject %-20s %-22s run %3zu  failed %3zu  retried %3zu  %s\n",

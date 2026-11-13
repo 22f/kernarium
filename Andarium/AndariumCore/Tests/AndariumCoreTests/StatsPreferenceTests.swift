@@ -82,7 +82,7 @@ struct StatsPreferenceTests {
 
     @Test func storedDisplayOptionsFromBeforeSurviveAndAreNotRewritten() throws {
         try withDefaults { defaults in
-            // What an earlier version stored: the Retina choice, no statistics.
+            // What an earlier version stored: the Retina mode, no statistics.
             let old = Data(#"{"retina":true,"chosen":true}"#.utf8)
             defaults.set(old, forKey: DisplayOptions.storageKey)
             let preference = StatsPreference(defaults: defaults)
@@ -92,7 +92,8 @@ struct StatsPreferenceTests {
             #expect(preference.isOn)
             let stored = try #require(defaults.data(forKey: DisplayOptions.storageKey))
             #expect(stored == old)
-            #expect(try JSONDecoder().decode(DisplayOptions.self, from: stored) == DisplayOptions(chosenScale: .native))
+            // It is no resolution choice now, and stays stored as it was.
+            #expect(try JSONDecoder().decode(DisplayOptions.self, from: stored) == DisplayOptions())
         }
     }
 

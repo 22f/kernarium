@@ -54,6 +54,17 @@ uml_add_unit_test(
     COMMAND uml_runtime_session_record_tests
         ${PROJECT_SOURCE_DIR}/tests/unit/andarium/fixtures/network-slot-golden.txt)
 
+# The console's word that an Android guest finished booting, which the
+# emulator reports at a run's end and an application's restart loop reads.
+add_executable(uml_runtime_console_boot_signal_tests
+    console_boot_signal_tests.cpp)
+target_include_directories(uml_runtime_console_boot_signal_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/darwin/runtime)
+uml_add_unit_test(
+    NAME runtime-console-boot-signal
+    COMMAND uml_runtime_console_boot_signal_tests
+    LABELS tsan)
+
 # The refusal to resume on a disk that changed: it ends the process, and the
 # session record says why.
 add_executable(uml_runtime_guest_resume_refusal_tests

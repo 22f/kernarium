@@ -50,7 +50,7 @@ struct ResolutionModelTests {
     }
 
     @Test func aKeptChoiceBeatsTheDefaultOnTheNextLaunch() {
-        // A Mac (no limit) is native by default, and a kept 1.0 still wins.
+        // A Mac (no limit) has 2.0 by default, and a kept 1.0 still wins.
         let kept = model(limit: 0)
         kept.chosenScale = .points
         #expect(kept.resolution == .factor(1))
@@ -60,11 +60,26 @@ struct ResolutionModelTests {
     }
 
     @Test func aPersonWhoNeverChoseGetsTheDeviceDefault() {
-        #expect(model(native: 3, limit: 8 << 30).resolution == .native)
-        #expect(model(native: 3, limit: 0).resolution == .native)
-        // An iPad mini 6: 2.0 native, held to 2,867 MiB.
+        // 320 dpi where the limit is above 4 GiB or there is none.
+        #expect(model(native: 3, limit: 8 << 30).resolution == .factor(2))
+        #expect(model(native: 3, limit: 0).resolution == .factor(2))
+        #expect(model(native: 3, limit: (4 << 30) + 1).resolution == .factor(2))
+        // 240 dpi at 4 GiB and under: an iPad mini 6, 2.0 native, held to 2,867 MiB.
         #expect(model(native: 2, limit: 2867 << 20).resolution == .factor(1.5))
         #expect(model(native: 3, limit: 4 << 30).resolution == .factor(1.5))
+        // Native is the 2.0 of a 2.0 screen.
+        #expect(model(native: 2, limit: 0).resolution == .native)
+    }
+
+    @Test func theDefaultStatesTheDensityItIsNamedFor() throws {
+        let high = model(native: 3, limit: 8 << 30)
+        high.displayPointsDidChange(phone)
+        let wide = try #require(high.resolutionLayout)
+        #expect((wide.width, wide.height, wide.dotsPerInch) == (804, 1556, 320))
+        let low = model(native: 3, limit: 2867 << 20)
+        low.displayPointsDidChange(phone)
+        let narrow = try #require(low.resolutionLayout)
+        #expect((narrow.width, narrow.height, narrow.dotsPerInch) == (603, 1167, 240))
     }
 
     @Test func theLaunchStatesTheResolutionWithoutKeepingIt() {

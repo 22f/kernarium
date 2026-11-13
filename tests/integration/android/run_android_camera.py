@@ -23,9 +23,13 @@ The runner checks, in this order:
 - live: the camera application previews the synthetic chart (a screenshot is not black), and the camera
   key takes one still, a complete JPEG with Exif data inside the layout's size cap; then, on the same
   boot, it records about four seconds of video with the back camera (a movie file of at least a second
-  with a video track), previews and takes a still with the front camera when the profile has one, and the
-  camera HAL has logged no failed buffer ("every buffer of the stream is in flight", a request "not
-  queued completely", a buffer "never collected");
+  with a video track), previews and takes a still with the front camera when the profile has one, switches
+  the application from photo to video mode (``--switch-rounds`` times, each from a freshly started
+  application whose capture is running; a round passes only when the photo activity's pause, the video
+  activity's resume and capture after them were seen, and the camera service logged no "Unable to submit
+  capture request" and the camera HAL's domain no denial of the composer's file descriptors in the whole
+  interval), and the camera HAL has logged no failed buffer ("every buffer of the stream is in flight", a
+  request "not queued completely", a buffer "never collected");
 - blocked: the same cameras are listed, the preview is not the chart on two samples, each taken only while
   the camera application is the resumed activity and the device is awake (the application is brought back
   once; a second absence fails the step), and the camera key takes nothing;
@@ -140,6 +144,26 @@ VIDEO_MINIMUM_FPS = 20.0
 VIDEO_URI = "content://media/external/video/media"
 # The camera HAL's own tags: a failed buffer is an error or a warning of one of these.
 HAL_TAGS = ("V4l2Stream", "V4l2FrameSource", "EmulatedSensorHost")
+# The photo to video switch: the application's video activity covers its photo activity while that activity's
+# preview still repeats, and the last preview buffers come back with the display composer's fence. The camera
+# service hands such a fence to the HAL with the next request, which the policy must let the HAL use (overlay/
+# sepolicy/vendor/hal_camera_default.te). A refusal shows as an SELinux denial of the camera HAL's domain using
+# the composer's file descriptor and as the camera service's "Unable to submit capture request" for the request
+# it could not submit; the application then gets ERROR_CAMERA_DEVICE and reopens the camera, which costs the
+# switch about a second more. It happens in some switches only (in six rounds each, from a freshly started
+# application, 2 were refused with the window animations on and 4 with them off, which does not tell the two
+# apart), so the step repeats the switch, each time from a freshly started application and with the animations
+# off (restored afterwards). A round counts only when the switch was seen: the photo activity's pause and the
+# video activity's resume, with capture running before and after.
+CAMERA_HAL_DOMAIN = "hal_camera_default"
+COMPOSER_HAL_DOMAIN = "hal_graphics_composer_default"
+SWITCH_ROUNDS = 4
+SWITCH_HOLD_SECONDS = 10
+SWITCH_SETTLE_SECONDS = 8
+SWITCH_OBSERVE_SECONDS = 30
+SWITCH_DRAIN_SECONDS = 5
+SWITCH_MARKER_TAG = "CamSwitch"
+ANIMATION_SCALES = ("window_animation_scale", "transition_animation_scale", "animator_duration_scale")
 
 # The cameras each synthetic profile presents, and the camera IDs Android gives them
 # (android/lineage-24/overlay/camera/hal/camera_ids.hpp).
@@ -177,13 +201,14 @@ class Plan:
     camera_ids: tuple[str, ...]
     features: frozenset[str]
     media_variant: str
+    switch_rounds: int = SWITCH_ROUNDS
 
     @property
     def still_maximum_pixels(self) -> int:
         return STILL_MAXIMUM_PIXELS[self.layout.tier or "small"]
 
 
-def make_plan(layout_name: str, profile: str, mode: str) -> Plan:
+def make_plan(layout_name: str, profile: str, mode: str, switch_rounds: int = SWITCH_ROUNDS) -> Plan:
     """The expectations of one run; a layout that does not describe the profile's cameras is refused,
     because the features would then promise cameras the guest lacks."""
     layouts = camera_layouts.by_name()
@@ -193,17 +218,19 @@ def make_plan(layout_name: str, profile: str, mode: str) -> Plan:
         raise ValueError(f"{profile!r} is not a synthetic camera profile")
     if mode not in MODES:
         raise ValueError(f"{mode!r} is not a mode")
+    if switch_rounds < 1:
+        raise ValueError("a run makes at least one photo to video switch")
     layout = layouts[layout_name]
     if mode == "none":
         if layout.cameras != "none":
             raise ValueError("the layout of a guest without a camera device is none")
-        return Plan(layout, profile, mode, (), frozenset(), layout.media_variant)
+        return Plan(layout, profile, mode, (), frozenset(), layout.media_variant, switch_rounds)
     cameras, ids = PROFILE_CAMERAS[profile]
     if layout.cameras != cameras:
         raise ValueError(
             f"the {profile} profile presents {cameras} cameras and the layout {layout_name} describes "
             f"{layout.cameras}")
-    return Plan(layout, profile, mode, ids, frozenset(layout.features), layout.media_variant)
+    return Plan(layout, profile, mode, ids, frozenset(layout.features), layout.media_variant, switch_rounds)
 
 
 # ---- Readers of what the guest prints. The tooling test feeds them text in the same layout.
@@ -345,6 +372,64 @@ def hal_failures(text: str) -> list[str]:
                 "was not queued completely", "did not deliver", "never collected")):
             failures.append(line.strip())
     return failures
+
+
+SWITCH_DENIAL_KIND = f"an SELinux denial naming {CAMERA_HAL_DOMAIN}"
+SWITCH_REFUSAL_KIND = 'the camera service\'s "Unable to submit capture request"'
+# The events of the switch: the photo activity pauses and the video activity resumes (ActivityTaskManager's
+# wm_on_paused_called and wm_on_resume_called, in the events buffer `logcat -b all` merges).
+PHOTO_PAUSED = re.compile(rf"wm_on_paused_called: \[\d+,{re.escape(CAMERA_PACKAGE)}\.CameraActivity,")
+VIDEO_RESUMED = re.compile(rf"wm_on_resume_called: \[\d+,{re.escape(CAMERA_PACKAGE)}\.VideoCamera,")
+
+
+def composer_fence_denial(line: str) -> bool:
+    """Whether a log line is the SELinux denial of the camera HAL using a file descriptor of the display composer
+    HAL: source hal_camera_default, target hal_graphics_composer_default, class fd, permission use."""
+    denied = re.search(r"avc:\s+denied\s+\{([^}]*)\}", line)
+    if not denied or "use" not in denied[1].split():
+        return False
+    fields = dict(re.findall(r"\b(scontext|tcontext|tclass)=(\S+)", line))
+    return (fields.get("tclass") == "fd"
+            and fields.get("scontext", "").split(":")[:3] == ["u", "r", CAMERA_HAL_DOMAIN]
+            and fields.get("tcontext", "").split(":")[:3] == ["u", "r", COMPOSER_HAL_DOMAIN])
+
+
+def switch_failures(text: str) -> list[tuple[str, str]]:
+    """The lines of a `logcat -d` taken across photo to video switches that show a capture request refused, as
+    (what, line): the denial of composer_fence_denial, and the camera service's (cameraserver logs under the tag
+    Camera3-Device) "Unable to submit capture request", which is what the refused binder transaction becomes.
+    Nothing else counts: the service logs "Broken pipe (-32)" for the buffers of every stream whose application
+    is stopped, and other denials are not this one."""
+    found: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if composer_fence_denial(line):
+            found.append((SWITCH_DENIAL_KIND, line))
+        elif re.search(r"\s[EWF]\s+Camera3-Device\s*: .*Unable to submit capture request", line):
+            found.append((SWITCH_REFUSAL_KIND, line))
+    return found
+
+
+def switch_observed(text: str) -> list[str]:
+    """What a `logcat -d` taken after a switch's marker lacks of the switch: the photo activity's pause and the
+    video activity's resume."""
+    missing = []
+    if not PHOTO_PAUSED.search(text):
+        missing.append(f"pause of {CAMERA_PACKAGE}.CameraActivity")
+    if not VIDEO_RESUMED.search(text):
+        missing.append(f"resume of {CAMERA_PACKAGE}.VideoCamera")
+    return missing
+
+
+def log_after(text: str, marker: str) -> str | None:
+    """The part of a `logcat -d` from the last line that holds `marker`, or None when no line holds it."""
+    index = text.rfind(marker)
+    return None if index < 0 else text[index:]
+
+
+def frames_produced(dump: str) -> int:
+    """`dumpsys media.camera`: the frames the camera service counts for all the streams it lists."""
+    return sum(int(count) for count in re.findall(r"Frames produced: (\d+)", dump))
 
 
 def camera_connected(text: str, package: str) -> bool:
@@ -941,6 +1026,108 @@ def check_video(guest: Guest, plan: Plan) -> None:
                       f"below {VIDEO_MINIMUM_FPS:.0f}: the preview and the recording do not share one exposure")
 
 
+def wait_for_capture(guest: Guest, what: str) -> None:
+    """The camera service's frame counters rise between two reads: capture is running now, not only once was."""
+    seen: list[int] = []
+
+    def producing() -> str | None:
+        count = frames_produced(guest.media_camera())
+        previous = seen[-1] if seen else None
+        seen.append(count)
+        return None if previous is not None and count > previous else f"the frame counters stand at {count}"
+
+    wait_for(f"live capture ({what})", SWITCH_OBSERVE_SECONDS, producing, guest)
+
+
+def read_switch_log(guest: Guest, marker: str) -> str:
+    """The log from the line of `marker`. A log that no longer holds the line has lost what followed it, which may
+    be an error nobody read: the switches cannot be judged then."""
+    after = log_after(guest.shell("logcat -d -b all", timeout=180), marker)
+    if after is None:
+        raise Failure(f"the log has no line for the {marker}: it was lost or never written, so the photo to video "
+                      "switches cannot be judged")
+    return after
+
+
+def refusal_failure(failures: list[tuple[str, str]], where: str) -> Failure:
+    """The denial is the cause and the refusal its effect; either may come first in the log."""
+    first = {kind: line for kind, line in reversed(failures)}
+    kinds = [kind for kind in (SWITCH_DENIAL_KIND, SWITCH_REFUSAL_KIND) if kind in first]
+    return Failure(f"{' and '.join(kinds)} {where}: " + " | ".join(first[kind] for kind in kinds))
+
+
+def restore_animation_scales(guest: Guest, saved: dict[str, str]) -> list[str]:
+    """Puts back every scale that was read, each on its own: what could not be put back, as messages."""
+    problems = []
+    for key, value in saved.items():
+        try:
+            guest.shell(f"settings delete global {key}" if value in ("", "null")
+                        else f"settings put global {key} {value}")
+        except (Failure, subprocess.TimeoutExpired) as problem:
+            problems.append(f"the animation scale {key} was not restored: {problem}")
+    return problems
+
+
+def check_mode_switch(guest: Guest, plan: Plan) -> None:
+    """Photo to video with the preview running, `plan.switch_rounds` times, each from a freshly started
+    application and with the window animations off (restored on every exit; a restore that fails fails the
+    step unless the step failed already). The video activity covers the photo activity's preview while it
+    repeats, which is the case the policy rule for the display composer's fence is for. A round passes only when
+    capture was running before the switch, the photo activity's pause and the video activity's resume were seen,
+    and capture runs after them, each within a deadline. The log is read from the previous round's marker (the
+    first from its own) on every read and once more after the last round, so what is logged between two reads,
+    or after the last, is read by the next; a log that lost that marker fails the step."""
+    saved: dict[str, str] = {}
+    try:
+        for key in ANIMATION_SCALES:
+            saved[key] = guest.shell(f"settings get global {key}").strip()
+        for key in ANIMATION_SCALES:
+            guest.shell(f"settings put global {key} 0")
+        observe_mode_switches(guest, plan)
+    except BaseException:
+        for problem in restore_animation_scales(guest, saved):
+            print(f"  mode switch: {problem}")
+        raise
+    problems = restore_animation_scales(guest, saved)
+    if problems:
+        raise Failure("; ".join(problems))
+
+
+def observe_mode_switches(guest: Guest, plan: Plan) -> None:
+    front = PROFILE_CAMERAS[plan.profile][0] == "front"
+    markers: list[str] = []
+    for number in range(1, plan.switch_rounds + 1):
+        guest.shell(f"am force-stop {CAMERA_PACKAGE}")
+        start_camera_application(guest, front=front)
+        wait_for_chart(guest, plan.camera_ids[0], "photo")
+        time.sleep(SWITCH_HOLD_SECONDS)
+        wait_for_capture(guest, f"photo, before switch {number}")
+        marker = f"photo to video switch {number} of {plan.switch_rounds}"
+        guest.shell(f"log -t {SWITCH_MARKER_TAG} '{marker}'")
+        lower = markers[-1] if markers else marker
+        markers.append(marker)
+        start_camera_application(guest, VIDEO_ACTION, front=front)
+        time.sleep(SWITCH_SETTLE_SECONDS)
+
+        def switched() -> str | None:
+            after = read_switch_log(guest, lower)
+            failures = switch_failures(after)
+            if failures:
+                raise refusal_failure(failures, f"since the {lower} (read after the {marker})")
+            missing = switch_observed(log_after(after, marker) or "")
+            return f"the log after its marker shows no {' and no '.join(missing)}" if missing else None
+
+        wait_for(f"no mode switch observed in the {marker}", SWITCH_OBSERVE_SECONDS, switched, guest)
+        wait_for_chart(guest, plan.camera_ids[0], "video")
+        wait_for_capture(guest, f"video, after the {marker}")
+        print(f"  mode switch {number} of {plan.switch_rounds}: photo activity paused, video activity resumed, "
+              f"capture before and after; no refused capture request, no {CAMERA_HAL_DOMAIN} denial")
+    time.sleep(SWITCH_DRAIN_SECONDS)
+    failures = switch_failures(read_switch_log(guest, markers[-1]))
+    if failures:
+        raise refusal_failure(failures, f"in the final read after the last switch ({markers[-1]})")
+
+
 def check_front(guest: Guest, plan: Plan) -> None:
     """With a front camera (the profile's camera "1"): the application opens it, the preview is the chart and
     the camera key takes a still."""
@@ -986,6 +1173,7 @@ def run_checks(guest: Guest, plan: Plan) -> None:
     if plan.mode == "live":
         check_video(guest, plan)
         check_front(guest, plan)
+        check_mode_switch(guest, plan)
         check_hal_log(guest)
     guest.shell(f"am force-stop {CAMERA_PACKAGE}")
     exited = wait_provider_exit(guest, "after the camera application is stopped")
@@ -1113,6 +1301,16 @@ def start_guest(options: argparse.Namespace, plan: Plan, adb: str, private: path
     return guest
 
 
+def positive_integer(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"{text!r} is not positive")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1137,6 +1335,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--adb-port", type=int, default=slot_ports.slot_port(slot_ports.ADB_OFFSET, DEFAULT_ADB_PORT),
                         help="loopback port the launcher forwards adbd to (default: the guest slot's first port "
                         f"when GUEST_SLOT_PORT_BASE is set, else {DEFAULT_ADB_PORT})")
+    parser.add_argument("--switch-rounds", type=positive_integer, default=SWITCH_ROUNDS,
+                        help="how many photo to video switches the live mode makes (each can miss a race that "
+                        f"an image without the policy rule loses only some of the time; default {SWITCH_ROUNDS})")
     parser.add_argument("--cpus", type=int, default=4)
     parser.add_argument("--memory", default="4G")
     parser.add_argument("--boot-timeout", type=int, default=900,
@@ -1204,7 +1405,7 @@ def main() -> int:
             print(f"{problem}", file=sys.stderr)
             return 2
     try:
-        plan = make_plan(layout, options.camera_profile, options.mode)
+        plan = make_plan(layout, options.camera_profile, options.mode, options.switch_rounds)
     except ValueError as problem:
         print(f"{problem}", file=sys.stderr)
         return 2
