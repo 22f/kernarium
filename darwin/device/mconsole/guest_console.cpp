@@ -50,11 +50,20 @@ struct Reply final {
 	std::array<char, maximumConsoleData> data;
 };
 
+using Clock = std::chrono::steady_clock;
+using Deadline = Clock::time_point;
+
 enum class ExchangeResult {
 	notSent,
+	/* No complete reply arrived by the deadline. */
 	pending,
 	accepted,
+	/* A part of the reply carried the error flag. */
 	rejected,
+	/* A datagram is no reply of the kind the guest's driver sends: shorter than
+	 * its header, or advertising more text than it carries. What it said
+	 * cannot be trusted either way. */
+	malformed,
 };
 
 /* The final reply of a SysRq request names its key and whether the operation
@@ -63,11 +72,13 @@ enum class ExchangeResult {
  * reply, from another vCPU, or not at all. */
 constexpr std::string_view writebackAcknowledgement = "sysrq s ok";
 constexpr std::string_view writebackDisabled = "sysrq s disabled";
-/* The "sync" command's reply is "synced in <n> ms" once sync(2) has returned
- * (arch/um/drivers/mconsole_kern.c mconsole_sync()). A kernel without the
- * command answers every unknown command with an error that says so
- * (mconsole_user.c). */
-constexpr std::string_view syncAcknowledgement = "synced";
+/* The "sync" command's reply is "synced in <n> ms", n in decimal, once sync(2)
+ * has returned (arch/um/drivers/mconsole_kern.c mconsole_sync()). A kernel
+ * without the command answers every unknown command with an error whose whole
+ * text is this (mconsole_user.c); text that merely starts with it is another
+ * refusal. */
+constexpr std::string_view syncAcknowledgementHead = "synced in ";
+constexpr std::string_view syncAcknowledgementTail = " ms";
 constexpr std::string_view unknownCommand = "Unknown command";
 constexpr std::string_view suspendAcknowledgement = "suspended";
 /* A guest reports a suspend it gave up with "Suspend failed: <errno>". EBUSY
@@ -115,7 +126,8 @@ constexpr bool ownRunDirectory = false;
 constexpr bool ownRunDirectory = true;
 #endif
 
-std::mutex consoleMutex;
+/* Timed, so that a request with a budget gives up on the console as well. */
+std::timed_mutex consoleMutex;
 bool consoleAdopted;
 std::unique_ptr<SocketPath> consoleGuard;
 std::unique_ptr<DirectoryPath> runDirectoryGuard;
@@ -305,42 +317,66 @@ public:
 		return sent == static_cast<ssize_t>(sizeof(request));
 	}
 
-	/* Collects the reply to the request, waiting up to `wait` for each part
-	 * of it. A zero wait only takes what has arrived. */
+	/* Collects the reply to the request, waiting until `deadline` for it as a
+	 * whole, every part of a multipart reply included. A deadline that has
+	 * passed only takes what has arrived. A reply that is not complete by then
+	 * leaves the request pending, and the client may receive again.
+	 *
+	 * The error flag of any part makes the reply rejected, though the guest
+	 * sets it on the first part only. A datagram that is shorter than the
+	 * reply header, or advertises more text than it carries, is malformed. */
 	[[nodiscard]] ExchangeResult receive(std::string &response,
-		std::chrono::milliseconds wait) const
+		Deadline deadline) const
 	{
-		int flags = 0;
-		if (wait.count() <= 0) {
-			flags = MSG_DONTWAIT;
-		} else {
-			const timeval timeout {
-				.tv_sec = static_cast<decltype(timeval::tv_sec)>(
-					wait.count() / 1000),
-				.tv_usec = static_cast<decltype(timeval::tv_usec)>(
-					wait.count() % 1000 * 1000)};
-			(void)::setsockopt(descriptor_, SOL_SOCKET, SO_RCVTIMEO,
-				&timeout, sizeof(timeout));
-		}
+		constexpr auto header = static_cast<ssize_t>(sizeof(Reply) -
+			maximumConsoleData);
+		bool rejected = false;
 		for (;;) {
+			const auto remaining =
+				std::chrono::duration_cast<std::chrono::microseconds>(
+					deadline - Clock::now());
+			int flags = 0;
+			if (remaining.count() <= 0) {
+				flags = MSG_DONTWAIT;
+			} else {
+				const timeval timeout {
+					.tv_sec = static_cast<decltype(timeval::tv_sec)>(
+						remaining.count() / 1000000),
+					.tv_usec = static_cast<decltype(timeval::tv_usec)>(
+						remaining.count() % 1000000)};
+				(void)::setsockopt(descriptor_, SOL_SOCKET, SO_RCVTIMEO,
+					&timeout, sizeof(timeout));
+			}
 			Reply reply {};
 			const auto received = ::recv(descriptor_, &reply, sizeof(reply),
 				flags);
-			if (received < static_cast<ssize_t>(sizeof(reply) -
-				    maximumConsoleData))
+			if (received < 0) {
+				if (errno == EINTR)
+					continue;
 				return ExchangeResult::pending;
-			auto length = std::min(
-				static_cast<std::size_t>(reply.length),
-				maximumConsoleData);
+			}
+			if (received < header ||
+			    reply.length > maximumConsoleData ||
+			    reply.length > static_cast<std::size_t>(received - header))
+				return ExchangeResult::malformed;
+			auto length = static_cast<std::size_t>(reply.length);
 			/* The guest's driver counts the NUL that ends each reply in
 			 * the reply's length. It ends the text and is no part of it. */
 			if (length != 0U && reply.data[length - 1U] == '\0')
 				--length;
 			response.append(reply.data.data(), length);
+			rejected = rejected || reply.error != 0U;
 			if (reply.more == 0U)
-				return reply.error == 0U ? ExchangeResult::accepted :
-					ExchangeResult::rejected;
+				return rejected ? ExchangeResult::rejected :
+					ExchangeResult::accepted;
 		}
+	}
+
+	/* The same, waiting up to `wait` from now. */
+	[[nodiscard]] ExchangeResult receive(std::string &response,
+		std::chrono::milliseconds wait) const
+	{
+		return receive(response, Clock::now() + wait);
 	}
 
 private:
@@ -375,31 +411,76 @@ void adoptConsolePath(const std::string &path)
 	}
 }
 
+/* Whether `text` is a count of decimal digits that fits 64 bits, and the
+ * count. No sign, no padding. */
+[[nodiscard]] bool parseByteCount(std::string_view text,
+	std::uint64_t &count) noexcept
+{
+	if (text.empty())
+		return false;
+	const auto [end, error] =
+		std::from_chars(text.data(), text.data() + text.size(), count);
+	return error == std::errc {} && end == text.data() + text.size();
+}
+
 /* Sends one command to the location's console from a client of its own and
- * collects the reply. */
+ * collects the reply, waiting until `deadline` for it. */
+[[nodiscard]] ExchangeResult exchange(
+	const GuestConsoleLocation &location,
+	std::string_view command,
+	std::string &response,
+	Deadline deadline)
+{
+	const Client client {location};
+	if (!client.send(command))
+		return ExchangeResult::notSent;
+	return client.receive(response, deadline);
+}
+
 [[nodiscard]] ExchangeResult exchange(
 	const GuestConsoleLocation &location,
 	std::string_view command,
 	std::string &response,
 	std::chrono::milliseconds wait = replyWait)
 {
-	const Client client {location};
-	if (!client.send(command))
-		return ExchangeResult::notSent;
-	return client.receive(response, wait);
+	return exchange(location, command, response, Clock::now() + wait);
+}
+
+/* Whether `text` is the "sync" command's whole reply, "synced in <n> ms", n a
+ * decimal count that fits 64 bits. Nothing else is a confirmation: a reply that
+ * only starts alike, or whose count is no number, is something else. */
+[[nodiscard]] bool isSyncAcknowledgement(std::string_view text) noexcept
+{
+	if (!text.starts_with(syncAcknowledgementHead) ||
+	    !text.ends_with(syncAcknowledgementTail) ||
+	    text.size() <= syncAcknowledgementHead.size() +
+		    syncAcknowledgementTail.size())
+		return false;
+	const auto digits = text.substr(syncAcknowledgementHead.size(),
+		text.size() - syncAcknowledgementHead.size() -
+			syncAcknowledgementTail.size());
+	std::uint64_t count = 0U;
+	return parseByteCount(digits, count);
 }
 
 /* The fallback of a kernel without "sync": SysRq 's', which the guest runs
- * as an emergency sync on a workqueue and acknowledges once it is queued. */
+ * as an emergency sync on a workqueue and acknowledges once it is queued. The
+ * request, its reply and the settling period that follows all end by
+ * `deadline`: a request that cannot be answered in time is not sent. */
 [[nodiscard]] GuestWriteback requestSysrqWriteback(
-	const GuestConsoleLocation &location, unsigned int settleMs)
+	const GuestConsoleLocation &location, Deadline deadline,
+	unsigned int settleMs)
 {
+	if (Clock::now() >= deadline)
+		return GuestWriteback::unanswered;
 	std::string response;
-	switch (exchange(location, "sysrq s", response)) {
+	switch (exchange(location, "sysrq s", response, deadline)) {
 	case ExchangeResult::notSent:
 		return GuestWriteback::unreachable;
 	case ExchangeResult::pending:
 		return GuestWriteback::unanswered;
+	case ExchangeResult::malformed:
+		return GuestWriteback::refused;
 	case ExchangeResult::rejected:
 		/* The final reply comes last, after any console text. */
 		if (response.ends_with(writebackDisabled)) {
@@ -416,21 +497,21 @@ void adoptConsolePath(const std::string &path)
 		return GuestWriteback::refused;
 	/* The guest reports that the writeback started, not that it finished, so
 	 * give it a bounded chance to reach the block layer before the host flushes
-	 * what it received. */
-	if (settleMs != 0U) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(settleMs));
-	}
+	 * what it received, as far as the request's budget allows. */
+	const auto settle = std::min(std::chrono::milliseconds {settleMs},
+		std::chrono::duration_cast<std::chrono::milliseconds>(
+			deadline - Clock::now()));
+	if (settle.count() > 0)
+		std::this_thread::sleep_for(settle);
 	return GuestWriteback::started;
 }
 
 [[nodiscard]] GuestWriteback requestWriteback(
-	const GuestConsoleLocation &location, std::chrono::milliseconds wait,
-	unsigned int settleMs)
+	const GuestConsoleLocation &location, Deadline deadline,
+	std::chrono::milliseconds wait, unsigned int settleMs)
 {
 	std::string response;
-	/* A zero receive timeout would not wait at all. */
-	switch (exchange(location, "sync", response,
-		std::max(wait, std::chrono::milliseconds {1}))) {
+	switch (exchange(location, "sync", response, deadline)) {
 	case ExchangeResult::notSent:
 		return GuestWriteback::unreachable;
 	case ExchangeResult::pending:
@@ -439,9 +520,13 @@ void adoptConsolePath(const std::string &path)
 			"within %lld ms; it may still be writing\n",
 			static_cast<long long>(wait.count()));
 		return GuestWriteback::unanswered;
+	case ExchangeResult::malformed:
+		std::fputs("Guest console: the guest's filesystem sync reply is "
+			"malformed\n", stderr);
+		return GuestWriteback::refused;
 	case ExchangeResult::rejected:
-		if (response.starts_with(unknownCommand))
-			return requestSysrqWriteback(location, settleMs);
+		if (response == unknownCommand)
+			return requestSysrqWriteback(location, deadline, settleMs);
 		std::fprintf(stderr,
 			"Guest console: the guest refused its filesystem sync (%s)\n",
 			response.c_str());
@@ -449,7 +534,7 @@ void adoptConsolePath(const std::string &path)
 	case ExchangeResult::accepted:
 		break;
 	}
-	if (!response.starts_with(syncAcknowledgement)) {
+	if (!isSyncAcknowledgement(response)) {
 		std::fprintf(stderr,
 			"Guest console: the guest's filesystem sync reply is no "
 			"confirmation (%s)\n", response.c_str());
@@ -528,12 +613,24 @@ GuestWriteback request_guest_writeback(std::chrono::milliseconds wait,
 	unsigned int settleMs) noexcept
 {
 	try {
-		std::lock_guard lock(consoleMutex);
+		/* One deadline for the whole request: the console's lock, every
+		 * reply, the fallback and its settling period. A zero wait would
+		 * not wait at all. */
+		wait = std::max(wait, std::chrono::milliseconds {1});
+		const auto deadline = Clock::now() + wait;
+		std::unique_lock lock(consoleMutex, std::defer_lock);
+		if (!lock.try_lock_until(deadline)) {
+			std::fprintf(stderr,
+				"Guest console: another request kept the console for %lld "
+				"ms; no filesystem sync was sent\n",
+				static_cast<long long>(wait.count()));
+			return GuestWriteback::busy;
+		}
 		const auto &location = guest_console_location();
 		if (!location)
 			return GuestWriteback::unreachable;
 		adoptConsolePath(location->console);
-		return requestWriteback(*location, wait, settleMs);
+		return requestWriteback(*location, deadline, wait, settleMs);
 	} catch (...) {
 		return GuestWriteback::unreachable;
 	}
@@ -589,6 +686,7 @@ namespace {
 		return suspendRefused(response);
 	case ExchangeResult::notSent:
 	case ExchangeResult::pending:
+	case ExchangeResult::malformed:
 		break;
 	}
 	std::string woken;
@@ -634,9 +732,7 @@ GuestSuspension suspend_guest() noexcept
 				result = ExchangeResult::notSent;
 				return;
 			}
-			result = request->receive(response,
-				std::chrono::duration_cast<std::chrono::milliseconds>(
-					deadline - std::chrono::steady_clock::now()));
+			result = request->receive(response, deadline);
 		};
 		ask();
 		/* A guest that was busy, as when a wake source fired while it synced,
@@ -667,6 +763,9 @@ GuestSuspension suspend_guest() noexcept
 			/* The guest refused, or kept refusing. */
 			return suspendRefused(response);
 		case ExchangeResult::pending:
+		case ExchangeResult::malformed:
+			/* A reply that is no reply proves nothing: it is aborted like
+			 * silence. */
 			return abortSuspend(*location, *request);
 		}
 		return GuestSuspension::none;
@@ -706,6 +805,7 @@ namespace {
 		case ExchangeResult::notSent:
 			return GuestRequest::unreachable;
 		case ExchangeResult::pending:
+		case ExchangeResult::malformed:
 			return GuestRequest::unanswered;
 		case ExchangeResult::rejected:
 			return GuestRequest::refused;
@@ -791,21 +891,6 @@ GuestConsoleRun::~GuestConsoleRun()
 }
 
 
-namespace {
-
-/* Whether `text` is a count of decimal digits that fits 64 bits, and the
- * count. No sign, no padding. */
-[[nodiscard]] bool parseByteCount(std::string_view text,
-	std::uint64_t &count) noexcept
-{
-	if (text.empty())
-		return false;
-	const auto [end, error] =
-		std::from_chars(text.data(), text.data() + text.size(), count);
-	return error == std::errc {} && end == text.data() + text.size();
-}
-
-} // namespace
 
 std::optional<GuestMemoryFigures> parse_guest_memory_reply(
 	std::string_view text) noexcept
@@ -895,6 +980,8 @@ GuestMemoryResult GuestMemoryQuery::await(std::chrono::milliseconds wait,
 			return GuestMemoryResult::unanswered;
 		case ExchangeResult::rejected:
 			return GuestMemoryResult::refused;
+		case ExchangeResult::malformed:
+			return GuestMemoryResult::malformed;
 		case ExchangeResult::accepted:
 			break;
 		}

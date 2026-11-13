@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fcntl.h>
 #include <filesystem>
 #include <functional>
@@ -614,6 +615,266 @@ void aSyncThatIsNotAnsweredInTimeIsUnconfirmed()
 		"each request has a reply socket of its own");
 }
 
+/* What a console that answers one "sync" did, and what came after. */
+struct OneSync final {
+	::uml::device::GuestWriteback result {};
+	std::vector<std::string> heard;
+	std::chrono::milliseconds took {};
+};
+
+/* Runs request_guest_writeback(`wait`, `settle`) against a console whose
+ * answer to the first request is `serve`'s: it is handed the descriptor and the
+ * client to answer, and the console then listens for another request for a
+ * while, which is the fallback's, and answers it with `second`, if any. */
+OneSync oneSyncAgainst(
+	std::function<void(int, const sockaddr_un &, socklen_t)> serve,
+	std::chrono::milliseconds wait, unsigned int settle = 0U,
+	std::function<void(int, const sockaddr_un &, socklen_t)> second = {})
+{
+	const ::uml::device::GuestConsoleRun run {true};
+	const int server = bindServer(consolePath());
+	OneSync one;
+	std::thread console {[&] {
+		sockaddr_un client {};
+		socklen_t clientLength {};
+		if (!awaitRequest(server, 10000))
+			return;
+		one.heard.push_back(receiveRequest(server, client, clientLength));
+		serve(server, client, clientLength);
+		for (int more = 0; more < 2 && awaitRequest(server, 250); ++more) {
+			one.heard.push_back(
+				receiveRequest(server, client, clientLength));
+			if (second)
+				second(server, client, clientLength);
+		}
+	}};
+	const auto started = std::chrono::steady_clock::now();
+	one.result = ::uml::device::request_guest_writeback(wait, settle);
+	one.took = std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::steady_clock::now() - started);
+	console.join();
+	(void)::close(server);
+	return one;
+}
+
+/* A datagram of `bytes` bytes of a reply whose header advertises `length`
+ * bytes of text, as a console that sends less than it says does. */
+void sendRawReply(int descriptor, const sockaddr_un &client,
+	socklen_t clientLength, std::uint32_t error, std::uint32_t length,
+	std::string_view text, std::size_t bytes)
+{
+	uml::testing::ConsoleReply reply {error, 0U, length, {}};
+	std::memcpy(reply.data.data(), text.data(), text.size());
+	require(::sendto(descriptor, &reply, bytes, 0,
+		reinterpret_cast<const sockaddr *>(&client), clientLength) ==
+		static_cast<ssize_t>(bytes));
+}
+
+/* Only the guest's whole reply, "synced in <n> ms", is a confirmation: text
+ * that merely starts alike, a count that is no number, a datagram that carries
+ * less than it advertises, one shorter than a header, and an error flagged in
+ * any part of the reply are not, and none of them starts the SysRq fallback,
+ * which only a reply that says "Unknown command" and nothing more does. */
+void aWritebackReplyIsValidatedStrictly()
+{
+	using ::uml::device::GuestWriteback;
+	const std::chrono::milliseconds wait {1000};
+	const auto text = [](std::uint32_t error, std::string_view reply) {
+		return [error, reply](int fd, const sockaddr_un &to, socklen_t n) {
+			(void)sendReply(fd, to, n, error, reply);
+		};
+	};
+	const auto sync = [&](std::function<void(int, const sockaddr_un &,
+		socklen_t)> serve) {
+		return oneSyncAgainst(std::move(serve), wait);
+	};
+	const std::vector<std::string> onlySync {"sync"};
+	for (const char *reply : {"synced", "synced in", "synced in  ms",
+		     "synced in NaN ms", "synced in -1 ms", "synced in 3ms",
+		     "synced in 3 ms and more", "Synced in 3 ms",
+		     "synced in 99999999999999999999999 ms", "synced in 3 ms\n"}) {
+		const auto one = sync(text(0U, reply));
+		require(one.result == GuestWriteback::refused, reply);
+		require(one.heard == onlySync, reply);
+	}
+	/* A reply the guest flags as an error is a refusal, whatever it says. */
+	{
+		const auto one = sync(text(1U, "synced in 3 ms"));
+		require(one.result == GuestWriteback::refused);
+		require(one.heard == onlySync);
+	}
+	/* A kernel that does not know the command says so, and says no more. */
+	for (const char *reply : {"Unknown command: access denied",
+		     "Unknown command.", "unknown command", "Unknown"}) {
+		const auto one = sync(text(1U, reply));
+		require(one.result == GuestWriteback::refused, reply);
+		require(one.heard == onlySync,
+			"no SysRq fallback for a refusal that is not exactly it");
+	}
+	{
+		/* No error flag: not the kernel's refusal either. */
+		const auto one = sync(text(0U, "Unknown command"));
+		require(one.result == GuestWriteback::refused);
+		require(one.heard == onlySync);
+	}
+	{
+		/* The text it says, whole, with the NUL that the guest counts in its
+		 * length, is the reply. */
+		const auto one = sync([](int fd, const sockaddr_un &to, socklen_t n) {
+			constexpr std::string_view reply {"synced in 7 ms\0", 15U};
+			sendRawReply(fd, to, n, 0U, 15U, reply,
+				12U + reply.size());
+		});
+		require(one.result == GuestWriteback::done);
+	}
+	{
+		/* A datagram that advertises 40 bytes of text and carries 6. */
+		const auto one = sync([](int fd, const sockaddr_un &to, socklen_t n) {
+			sendRawReply(fd, to, n, 0U, 40U, "synced", 12U + 6U);
+		});
+		require(one.result == GuestWriteback::refused,
+			"a truncated reply is no confirmation");
+		require(one.heard == onlySync);
+	}
+	{
+		/* One that advertises more than a reply can carry. */
+		const auto one = sync([](int fd, const sockaddr_un &to, socklen_t n) {
+			sendRawReply(fd, to, n, 0U, 9999U, "synced in 3 ms",
+				sizeof(uml::testing::ConsoleReply));
+		});
+		require(one.result == GuestWriteback::refused);
+	}
+	{
+		/* One shorter than the header. */
+		const auto one = sync([](int fd, const sockaddr_un &to, socklen_t n) {
+			sendRawReply(fd, to, n, 0U, 0U, {}, 4U);
+		});
+		require(one.result == GuestWriteback::refused);
+		require(one.heard == onlySync);
+	}
+	{
+		/* An error in the first part of a reply that goes on is kept, though
+		 * its last part carries none. */
+		const auto one = sync([](int fd, const sockaddr_un &to, socklen_t n) {
+			(void)sendReply(fd, to, n, 1U, "synced in ", 1U);
+			(void)sendReply(fd, to, n, 0U, "3 ms");
+		});
+		require(one.result == GuestWriteback::refused);
+	}
+	{
+		/* A reply in parts, none of them failed, is read whole. */
+		const auto one = sync([](int fd, const sockaddr_un &to, socklen_t n) {
+			(void)sendReply(fd, to, n, 0U, "synced in ", 1U);
+			(void)sendReply(fd, to, n, 0U, "3 ms");
+		});
+		require(one.result == GuestWriteback::done);
+	}
+	{
+		/* "Unknown command" in the kernel's own form falls back, and
+		 * SysRq's acknowledgement is only a start. */
+		const auto one = oneSyncAgainst(text(1U, "Unknown command"), wait, 0U,
+			text(0U, "sysrq s ok"));
+		require(one.result == GuestWriteback::started);
+		require(one.heard == std::vector<std::string> {"sync", "sysrq s"});
+	}
+}
+
+/* A writeback's wait is one budget from the call, shared by the wait for the
+ * console, every part of the reply, the SysRq fallback of a kernel without the
+ * command, and its settling period. */
+void aWritebackWaitsOneBudgetForEverything()
+{
+	using ::uml::device::GuestWriteback;
+	using ::uml::device::request_guest_writeback;
+	using namespace std::chrono_literals;
+	const auto later = [](std::chrono::milliseconds delay, std::uint32_t error,
+		std::string_view text, std::uint32_t more = 0U) {
+		return [=](int fd, const sockaddr_un &to, socklen_t n) {
+			std::this_thread::sleep_for(delay);
+			(void)sendReply(fd, to, n, error, text, more);
+		};
+	};
+	{
+		/* An older kernel, quick to answer both: the settling period is what
+		 * is left of the budget, not its own 1.5 s. */
+		const auto one = oneSyncAgainst(later(400ms, 1U, "Unknown command"),
+			1000ms, 1500U, later(300ms, 0U, "sysrq s ok"));
+		require(one.result == GuestWriteback::started);
+		require(one.heard == std::vector<std::string> {"sync", "sysrq s"});
+		require(one.took >= 950ms && one.took < 1400ms,
+			"the settling period ends with the budget");
+	}
+	{
+		/* An older kernel that is slow: the fallback waits only what is left
+		 * (the probe's 3 s + 1.8 s + 1.5 s took 6.3 s for 3.5 s). */
+		const auto one = oneSyncAgainst(later(700ms, 1U, "Unknown command"),
+			1000ms, 1500U, later(600ms, 0U, "sysrq s ok"));
+		require(one.result == GuestWriteback::unanswered);
+		require(one.took >= 950ms && one.took < 1400ms,
+			"the fallback's reply is waited for no longer than the budget");
+	}
+	{
+		/* A budget that the first reply uses up leaves no fallback. */
+		const auto one = oneSyncAgainst(later(1200ms, 1U, "Unknown command"),
+			1000ms, 1500U, later(0ms, 0U, "sysrq s ok"));
+		require(one.result == GuestWriteback::unanswered);
+		require(one.took < 1400ms);
+		require(one.heard == std::vector<std::string> {"sync"},
+			"nothing is sent after the budget");
+	}
+	{
+		/* A reply in many parts is waited for as one: five parts 150 ms apart
+		 * with a 400 ms budget used to take 750 ms, each part restarting the
+		 * wait. */
+		const auto one = oneSyncAgainst(
+			[](int fd, const sockaddr_un &to, socklen_t n) {
+				for (int part = 0; part < 5; ++part) {
+					std::this_thread::sleep_for(150ms);
+					(void)sendReply(fd, to, n, 0U,
+						part == 0 ? "synced in " : part == 4 ? "1 ms" : "",
+						part == 4 ? 0U : 1U);
+				}
+			}, 400ms);
+		require(one.result == GuestWriteback::unanswered);
+		require(one.took >= 350ms && one.took < 650ms,
+			"the parts of a reply share one wait");
+	}
+	{
+		/* The console may be held by another request: the wait for it counts
+		 * against the budget, and nothing is sent. */
+		const ::uml::device::GuestConsoleRun run {true};
+		const int server = bindServer(consolePath());
+		std::vector<std::string> heard;
+		std::thread console {[&] {
+			sockaddr_un client {};
+			socklen_t clientLength {};
+			while (awaitRequest(server, 1500)) {
+				heard.push_back(
+					receiveRequest(server, client, clientLength));
+				std::this_thread::sleep_for(900ms);
+				(void)sendReply(server, client, clientLength, 0U, "trimmed");
+			}
+		}};
+		std::thread trim {[] {
+			(void)::uml::device::trim_guest_page_cache(3000U);
+		}};
+		std::this_thread::sleep_for(150ms);
+		const auto started = std::chrono::steady_clock::now();
+		const auto result = request_guest_writeback(300ms, 0U);
+		const auto took =
+			std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now() - started);
+		trim.join();
+		console.join();
+		(void)::close(server);
+		require(result == GuestWriteback::busy);
+		require(took >= 250ms && took < 700ms,
+			"the wait for the console counts against the budget");
+		require(heard == std::vector<std::string> {"trim once"},
+			"nothing is sent to a console that was not free");
+	}
+}
+
 /* Turning trimming on or off is one request, which a kernel without the
  * command refuses. */
 void trimmingIsSwitchedByOneRequest()
@@ -1118,6 +1379,10 @@ int main(int argc, char **argv)
 		runPrivately(aWritebackIsOneSync);
 	} else if (selected == "writeback-timeout") {
 		runPrivately(aSyncThatIsNotAnsweredInTimeIsUnconfirmed);
+	} else if (selected == "writeback-strict") {
+		runPrivately(aWritebackReplyIsValidatedStrictly);
+	} else if (selected == "writeback-budget") {
+		runPrivately(aWritebackWaitsOneBudgetForEverything);
 	} else if (selected == "suspend-failure") {
 		runPrivately([] {
 			aBusySuspendIsRetriedUntilTheDeadline();

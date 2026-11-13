@@ -84,6 +84,9 @@ guest_console_location();
 enum class GuestWriteback {
 	/* No console was reachable, so nothing was sent. */
 	unreachable,
+	/* Another console request kept the console for the whole wait, so nothing
+	 * was sent. What the guest holds dirty is unknown. */
+	busy,
 	/* Sent, but no confirmation came within the wait: the guest may still be
 	 * writing, and what it holds dirty is unknown. */
 	unanswered,
@@ -95,24 +98,31 @@ enum class GuestWriteback {
 	 * starts an asynchronous writeback: the host waited the settling period
 	 * and cannot say whether it finished. */
 	started,
-	/* The guest wrote every filesystem back and block device out, and said
-	 * so after it had. */
+	/* The guest ran sync(2) to its return, and said so after it had. */
 	done,
 };
 
 /*
- * Asks the guest to write its filesystems back and waits up to `wait` for it
- * to say that it has ("sync"). The guest runs sync(2) in a process of its own
- * and replies when that has returned, whatever its SysRq mask is; a guest
- * that is busy for longer than `wait`, or that the host holds a block device
- * of while its disk is full, gives no reply in time and the result is
- * `unanswered`. A request that gets no reply is not repeated or followed by
- * another: the console runs process requests one at a time.
+ * Asks the guest to write its filesystems back and waits for it to say that it
+ * has ("sync"). The guest runs sync(2) in a work item of its own and replies
+ * when that has returned, whatever its SysRq mask is. Only its reply,
+ * "synced in <n> ms" with n in decimal, is a confirmation; any other text is a
+ * refusal. A guest that is busy for longer than `wait`, or that the host holds
+ * a block device of while its disk is full, gives no reply in time and the
+ * result is `unanswered`. A request that gets no reply is not repeated or
+ * followed by another.
  *
- * A kernel that answers "Unknown command" is older than the command. It is
- * asked "sysrq s" instead, which is refused where the guest has magic SysRq
- * off and which only starts the writeback: after its acknowledgement the host
- * waits `settle_ms`, a bound and no guarantee, and the result is `started`.
+ * `wait` is the whole request's budget, counted from the call and shared by
+ * everything it does: the wait for the console's lock (`busy` when another
+ * request keeps it that long), every part of the reply, and, on a kernel
+ * older than the command, the fallback request and its settling period. Each
+ * of them is cut short by what is left of it.
+ *
+ * A kernel that answers exactly "Unknown command" is older than the command.
+ * It is asked "sysrq s" instead, which is refused where the guest has magic
+ * SysRq off and which only starts the writeback: after its acknowledgement the
+ * host waits `settle_ms`, or what is left of `wait` if that is less, a bound
+ * and no guarantee, and the result is `started`.
  */
 [[nodiscard]] GuestWriteback request_guest_writeback(
 	std::chrono::milliseconds wait, unsigned int settle_ms) noexcept;
@@ -125,22 +135,24 @@ enum class GuestWriteback {
  * that fails.
  *
  * The returned mode records whether the wake request is required. The guest
- * replies to a suspend request once it has synced its filesystems, so the
- * whole request, its busy retries included, has one ten-second deadline from
- * the first send. A guest that reports itself busy (EBUSY) is asked again every
- * 250 ms for two seconds while the deadline leaves time for the answer. Any
- * other refusal, or a busy guest that stays busy, logs that the guest keeps
- * running and returns none. The caller then asks for a writeback
- * (request_guest_writeback): a suspend that holds syncs itself, and one that
- * did not has left the filesystems as they were.
+ * replies to a suspend request once it has reached the sleep boundary. That
+ * says nothing about its storage: the kernel syncs its filesystems on the way
+ * only while its sync_on_suspend is set, so a caller that needs the storage
+ * written back asks for it with request_guest_writeback and takes the answer
+ * from that. The whole request, its busy retries included, has one ten-second
+ * deadline from the first send. A guest that reports itself busy (EBUSY) is
+ * asked again every 250 ms for two seconds while the deadline leaves time for
+ * the answer. Any other refusal, or a busy guest that stays busy, logs that the
+ * guest keeps running and returns none.
  *
- * A request with no reply at the deadline is aborted, not trusted, because a
- * guest whose freezer is held fails its suspend tens of seconds later. The
- * request's socket stays open, a wake is sent, and the final reply is read for
- * two seconds more. A reply that arrived before the wake decides:
- * "suspended" is system. After the wake, a refusal is none (the guest is
- * known to run), and "suspended" or silence is unconfirmed. None also means no
- * request reached the console. Resuming is best effort and reports nothing,
+ * A request with no valid reply at the deadline is aborted, not trusted,
+ * because a guest whose freezer is held fails its suspend tens of seconds
+ * later. The request's socket stays open, a wake is sent (up to two seconds),
+ * and the final reply is read for two seconds more, so the abort takes up to
+ * four seconds beyond the deadline. A reply that arrived before the wake
+ * decides: "suspended" is system. After the wake, a refusal is none (the guest
+ * is known to run), and "suspended" or silence is unconfirmed. None also means
+ * no request reached the console. Resuming is best effort and reports nothing,
  * wakes a system or unconfirmed guest, and sends nothing for none.
  */
 [[nodiscard]] GuestSuspension suspend_guest() noexcept;

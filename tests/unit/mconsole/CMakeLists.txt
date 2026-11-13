@@ -40,6 +40,14 @@ uml_add_unit_test(NAME guest-console-writeback
 uml_add_unit_test(NAME guest-console-writeback-timeout
     COMMAND uml_guest_console_tests writeback-timeout
     LABELS console)
+# Only the whole reply "synced in <n> ms" confirms, and one budget covers the
+# console's lock, every part of a reply, the fallback and its settling period.
+uml_add_unit_test(NAME guest-console-writeback-strict
+    COMMAND uml_guest_console_tests writeback-strict
+    LABELS console)
+uml_add_unit_test(NAME guest-console-writeback-budget
+    COMMAND uml_guest_console_tests writeback-budget
+    LABELS console)
 uml_add_unit_test(NAME guest-console-trim
     COMMAND uml_guest_console_tests trim
     LABELS console)
