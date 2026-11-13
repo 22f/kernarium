@@ -1555,6 +1555,14 @@ public:
     {
         boot_.reset();
         bootIndex.store(restarts, std::memory_order_release);
+        /* What the session record says of this boot: an Android guest's
+         * console reports when the boot finished, and the record counts the
+         * restarts before it. */
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        uml::runtime::set_session_boot_facts(true, restarts);
+#else
+        uml::runtime::set_session_boot_facts(false, restarts);
+#endif
         try {
             ignoreBrokenPipes();
 #if KERNARIUM_RUNTIME_ANDROID_GUEST

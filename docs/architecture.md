@@ -700,7 +700,14 @@ A launch that passes `--session-record=PATH` gets a record of how its session
 ended (`runtime/session_record`): "running" from the boot on, overwritten by
 every end that runs code, a panic with its message and the kernel's last
 output included. A record still "running" at the next launch means the process
-was ended from outside without running, as a memory-limit end is. The file is
+was ended from outside without running, as a memory-limit end is. For an
+Android guest the state also says whether the boot finished (`boot unfinished`
+or `boot completed`, from the console's boot line) and how many times the guest
+restarted before the session (`restarts N`); while the boot is unfinished the
+checkpoint thread rewrites the state with the console's last output whenever
+that grew, so a process ended mid-boot leaves where the boot had got, and a
+stop, restart or power-off before the boot finished quotes that output too.
+The checkpoint never follows an end. The file is
 text of a fixed layout (`uml-session 6`) that never passes 17920 bytes
 (`session_record_max_bytes`): an 8 KiB memory slot, a 4 KiB stall slot, a 512-byte
 network slot and the state with the kernel output it quotes, at most 5 KiB. Each

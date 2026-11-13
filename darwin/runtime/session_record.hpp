@@ -35,7 +35,13 @@ namespace uml::runtime {
  * kernel_write records that end as host_fault when it sees the report. The
  * same output tells whether an Android guest finished booting
  * (console_boot_completed), which the emulator reports as the run's end and an
- * application's restart loop reads.
+ * application's restart loop reads. For a guest whose console reports its boot
+ * (set_session_boot_facts) the state also says "boot unfinished" or "boot
+ * completed" and "restarts N", and while the boot is unfinished the checkpoint
+ * thread rewrites the state with the output so far whenever the output grew, so
+ * a process that is killed mid-boot leaves where the boot had got; an end that
+ * the guest or the person chose (a power-off, a restart, a stop) quotes the
+ * output too while the boot is unfinished. The checkpoint never follows an end.
  *
  * Every memory_checkpoint_interval_ms while a session runs, a thread of the
  * record's own writes the process's footprint, its peak and what its memory
@@ -222,8 +228,20 @@ void end_session_record(SessionEnd end, int status,
  * that the crash report, which shows thread names, says why. */
 void record_kernel_crash() noexcept;
 
-/* Writes the memory slot now; the checkpoint thread calls it. */
+/* Writes the memory slot, the network slot and, for a guest whose boot is
+ * unfinished (set_session_boot_facts), the state with the output so far now;
+ * the checkpoint thread calls it. */
 void checkpoint_session_memory() noexcept;
+
+/* What the host that runs the guest knows of its boots, for the state the
+ * record keeps: whether the guest's console reports a finished boot (an
+ * Android guest's does, a Linux desktop guest's does not) and how many times
+ * the guest restarted in this process before the session that begins. Set it
+ * before each run; any thread. For a guest that reports its boot the state
+ * says "boot unfinished" or "boot completed" and "restarts N"; for the others
+ * it says neither and the checkpoints leave the state alone. */
+void set_session_boot_facts(bool console_reports_completion,
+	unsigned restarts) noexcept;
 
 /* Whether a session is writing to a record file. */
 [[nodiscard]] bool session_record_open() noexcept;
