@@ -34,6 +34,7 @@
 #include "uml_darwin_guest.h"
 #include "uml_darwin_static_mmu.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -286,6 +287,9 @@ struct Outcome final {
 	Seen loaded{Seen::nothing};
 	Seen stored{Seen::nothing};
 	std::uint64_t status{};
+	/* Every byte the test watches is as it was filled: both entry pages and
+	 * all four guest pages, not just the three bytes `stored` samples. */
+	bool untouched{true};
 };
 
 class Bench final {
@@ -299,26 +303,43 @@ public:
 
 	/* What the test makes the engines' store-exclusives do on purpose, to
 	 * check the retry: nothing; a loss in the first attempt of each run; a
-	 * loss in every attempt; or a store that reports failure and wrote to
-	 * the decoy page, which is no loss. */
-	enum class Fault { none, lose_first, lose_always, wrong_place };
+	 * loss in every attempt; or, in the first attempt, a store that reports
+	 * failure and is no loss, because it wrote the byte of the decoy page at
+	 * the access, the byte after the access in the entry page, or a byte of
+	 * the decoy page 17 bytes on, or because the load returned a wrong value.
+	 * Each is committed in the registers and pages before anything is
+	 * observed. */
+	enum class Fault {
+		none,
+		lose_first,
+		lose_always,
+		wrong_place,
+		wrong_load,
+		write_beside,
+		write_far,
+	};
 	void inject(Fault fault) noexcept { fault_ = fault; }
 	/* How many times the engines ran, over every run so far. */
 	[[nodiscard]] unsigned attempts() const noexcept { return attempts_; }
 
 	/* Runs `form` against an address of the probed page or another, again
-	 * while it is a store-exclusive whose outcome is a lost reservation. */
+	 * while it is a store-exclusive whose outcome is a lost reservation: it
+	 * completed with status 1, the load (if the form has one) returned what
+	 * a success loads, and none of the pages the test watches changed. An
+	 * outcome that differs in any other way is returned for the caller to
+	 * fail, not run again. */
 	[[nodiscard]] Outcome run(const Form &form, std::uint64_t probed)
 	{
 		if (!form.exclusive_status)
 			return run_once(form, probed, true);
+		const auto loads_from = probed == target ? Seen::entry : Seen::mapping;
 		unsigned attempt = 0;
 		return run_exclusive(
 			[&] { return run_once(form, probed, ++attempt == 1); },
-			[](const Outcome &outcome) {
+			[&](const Outcome &outcome) {
 				return completed(outcome.event) &&
-					outcome.status == 1 &&
-					outcome.stored == Seen::nothing;
+					outcome.status == 1 && outcome.untouched &&
+					(!form.loads || outcome.loaded == loads_from);
 			}).result;
 	}
 
@@ -425,6 +446,8 @@ private:
 		}
 		}
 
+		if (form.exclusive_status && completed(outcome.event))
+			commit_fault(first, loaded, outcome.status);
 		const auto pattern = [&](std::byte fill) {
 			std::uint64_t value = 0;
 			for (unsigned index = 0; index < form.width; ++index)
@@ -459,15 +482,61 @@ private:
 			count > 1 ? Seen::other :
 			touched[0] ? Seen::entry :
 			touched[1] ? Seen::decoy : Seen::mapping;
-		if (form.exclusive_status && completed(outcome.event) &&
-		    (fault_ == Fault::lose_always ||
-		     (fault_ == Fault::lose_first && first) ||
-		     (fault_ == Fault::wrong_place && first))) {
-			outcome.status = 1;
-			outcome.stored = fault_ == Fault::wrong_place ?
-				Seen::decoy : Seen::nothing;
-		}
+		outcome.untouched = pages_untouched();
 		return outcome;
+	}
+
+	/* Makes the run just made one that `fault_` says: the store wrote
+	 * nothing and reports status 1 (the pages are put back to their fills),
+	 * then, for a fault that is no loss, the wrong load or the one write. */
+	void commit_fault(bool first, std::uint64_t &loaded, std::uint64_t &status)
+	{
+		if (fault_ == Fault::none ||
+		    (fault_ != Fault::lose_always && !first))
+			return;
+		entry_.fill(entry_fill);
+		decoy_.fill(decoy_fill);
+		guest_.reset();
+		status = 1;
+		switch (fault_) {
+		case Fault::wrong_place:
+			decoy_.data()[offset] ^= std::byte{1};
+			break;
+		case Fault::wrong_load:
+			loaded ^= 1;
+			break;
+		case Fault::write_beside:
+			entry_.data()[offset + 1] ^= std::byte{1};
+			break;
+		case Fault::write_far:
+			decoy_.data()[offset + 17] ^= std::byte{1};
+			break;
+		case Fault::none:
+		case Fault::lose_first:
+		case Fault::lose_always:
+			break;
+		}
+	}
+
+	/* Whether every byte of the pages the test watches is as it was
+	 * filled. */
+	[[nodiscard]] bool pages_untouched() const
+	{
+		const auto filled = [](const HostPage &host, std::byte fill) {
+			return std::all_of(host.data(), host.data() + page,
+				[&](std::byte now) { return now == fill; });
+		};
+		if (!filled(entry_, entry_fill) || !filled(decoy_, decoy_fill))
+			return false;
+		for (const auto address : {target, neighbour, alias, spill}) {
+			const auto bytes = guest_.read(address, page);
+			if (!std::all_of(bytes.begin(), bytes.end(),
+				    [&](std::byte now) {
+					    return now == guest_.fill_of(address);
+				    }))
+				return false;
+		}
+		return true;
 	}
 
 	/* The executor's streaming entry (GadgetExecutor::run_sme_block and
@@ -648,10 +717,12 @@ void another_page_misses(Bench &bench, const Form &form,
 }
 
 /* The retry's own checks, made with a fault the test commits on purpose in
- * the engines' outcome. A store-exclusive that lost its reservation once is
- * run again and passes; one lost in every attempt fails after
- * exclusive_attempts runs; and a store that reports failure and wrote to
- * another place is no loss, so it is not run again and fails. */
+ * the engines' registers and pages. A store-exclusive that lost its
+ * reservation once is run again and passes; one lost in every attempt fails
+ * after exclusive_attempts runs; and a store that reports failure with a
+ * wrong load, or a write in the decoy page at the access, beside the access
+ * in the entry page, or away from it in the decoy page, is no loss, so it is
+ * not run again and fails. */
 void a_lost_reservation_is_retried_and_nothing_else(Bench &bench)
 {
 	struct Case final {
@@ -666,6 +737,9 @@ void a_lost_reservation_is_retried_and_nothing_else(Bench &bench)
 		{Bench::Fault::lose_always, false, exclusive_attempts,
 			exclusive_attempts},
 		{Bench::Fault::wrong_place, false, 1, 1},
+		{Bench::Fault::wrong_load, false, 1, 1},
+		{Bench::Fault::write_beside, false, 1, 1},
+		{Bench::Fault::write_far, false, 1, 1},
 	};
 	unsigned checked = 0;
 	for (const auto &form : forms(bench.sme())) {
