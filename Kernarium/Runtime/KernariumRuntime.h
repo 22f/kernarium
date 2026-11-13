@@ -218,7 +218,8 @@ typedef struct kernarium_runtime_gpu_budget {
  * status (0 for a power-off or a stop), a negated uml_emulator error constant
  * for a run or start-up that failed, or KERNARIUM_RUNTIME_RESULT_RESTART_LOOP.
  * For Android, 0 means the guest powered off cleanly and all its resources have
- * been released: another run may start in this process. A host stop or an unreported shutdown returns an error. */
+ * been released: another run may start in this process. A host stop or an
+ * unreported shutdown returns an error. */
 typedef int (*kernarium_runtime_run_function)(
     KernariumMetalView view,
     const kernarium_runtime_boot* boot);
