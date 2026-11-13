@@ -13,6 +13,10 @@ this runner shows it with the apps that use the devices:
   the management console, the suspend asked again while the guest answers
   busy, as the host's client does) and by the route Android takes itself with
   its screen off and adb disconnected, ended by a ``wake``;
+- a wake after which the launcher's log shows the host's GPU device reset across
+  the suspend (the guest kernel's refused commands, the host's refusal of a
+  context it no longer knows) fails the step by that name and quotes the first
+  line: a known host defect that leaves the guest's graphics gone;
 - after the wake the picture is moving again, no thread of the guest stays in
   uninterruptible sleep, ``screenrecord`` ends with status 0 and a file, and
   Back closes the player, which returns only if the device handed every
@@ -53,6 +57,7 @@ from collections.abc import Callable
 HERE = pathlib.Path(__file__).resolve().parent
 REPOSITORY = HERE.parents[2]
 sys.path.insert(0, str(REPOSITORY / "tests" / "integration" / "support"))
+import host_gpu_reset  # noqa: E402
 import slot_ports  # noqa: E402
 
 SPEC = importlib.util.spec_from_file_location("boot_android", REPOSITORY / "tools" / "boot_android.py")
@@ -268,6 +273,25 @@ def suspend_by_guest(guest: Guest) -> None:
 ROUTES = {"host": suspend_by_host, "guest": suspend_by_guest}
 
 
+def suspend(guest: Guest, route: str) -> None:
+    """One suspend by `route`, and the proof that the guest answers after it. A wake after which the launcher's log
+    shows the host's GPU device reset fails the step by that name, with the first line: it is a known host defect
+    that leaves the guest's graphics gone, so the checks that follow would fail on a guest whose applications abort."""
+    mark = host_gpu_reset.log_size(guest.log)
+    ROUTES[route](guest)
+    silent: Exception | None = None
+    try:
+        guest.shell("echo guest-answers")
+    except (Failure, subprocess.TimeoutExpired) as problem:
+        silent = problem
+    # The named defect comes before the symptom it causes: a guest that does not answer.
+    problem = host_gpu_reset.failure_since(guest.log, mark)
+    if problem is not None:
+        raise Failure(f"after the {route} suspend: {problem}")
+    if silent is not None:
+        raise silent
+
+
 # ---- What the apps do.
 
 def start_scrolling(guest: Guest) -> None:
@@ -330,7 +354,7 @@ def check_player(guest: Guest, media_id: int, route: str) -> None:
     print(f"player across a {route} suspend")
     opened = len(guest.closes())
     play(guest, media_id)
-    ROUTES[route](guest)
+    suspend(guest, route)
     wait_for("the picture moves after the wake", MOVING_SECONDS,
              lambda: None if guest.moving() else "the picture is still", guest)
     check_no_thread_in_d(guest, route)
@@ -362,7 +386,7 @@ def check_recording(guest: Guest, route: str) -> None:
         guest.shell(f"setsid sh -c 'screenrecord --time-limit {RECORD_SECONDS} {RECORDING} >{RECORDING_STATUS} 2>&1; "
                     f"echo screenrecord-rc=$? >>{RECORDING_STATUS}' >/dev/null 2>&1 &")
         time.sleep(10)
-        ROUTES[route](guest)
+        suspend(guest, route)
 
         def finished() -> str | None:
             status = guest.shell(f"cat {RECORDING_STATUS}")

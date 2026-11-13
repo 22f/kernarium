@@ -125,6 +125,7 @@ REPOSITORY = HERE.parents[2]
 ANDROID_TOOLS = REPOSITORY / "android" / "lineage-24" / "tools"
 BOOT_SCRIPT = REPOSITORY / "android" / "lineage-24" / "overlay" / "tools" / "kernarium_wifi_network.sh"
 sys.path.insert(0, str(REPOSITORY / "tests" / "integration" / "support"))
+import host_gpu_reset  # noqa: E402
 import slot_ports  # noqa: E402
 
 
@@ -223,27 +224,10 @@ WARNING_HOLD_SECONDS = 60
 SHORT_HOLD_SECONDS = 30
 PAGE_BYTES = 2048
 MAGIC, VERSION, DATA = 0xCAFEBABE, 2, 512
-# What the launcher's log holds when the host reset its GPU device across a suspend: the guest kernel's console
-# shows the host refusing the guest's commands as
-# `[drm:virtio_gpu_dequeue_ctrl_func] *ERROR* response 0x1204 (command 0x202)`, and the host says
-# `Virtio-GPU submit rejected unknown context: id=3 bytes=44`. Every context the guest holds is gone, so its
-# applications abort in the graphics stack and the framework follows.
-GPU_RESET_KERNEL = "virtio_gpu_dequeue_ctrl_func"
-GPU_RESET_HOST = "submit rejected unknown context"
-GPU_RESET_FAILURE = "host GPU reset across the suspend"
 
 
 class Failure(RuntimeError):
     pass
-
-
-def host_gpu_reset_line(text: str) -> str | None:
-    """The first line of the launcher's log that shows the host's GPU device was reset: the guest kernel's error
-    for a command refused by the host, or the host's own refusal of a context it no longer knows."""
-    for line in text.splitlines():
-        if (GPU_RESET_KERNEL in line and "ERROR" in line) or GPU_RESET_HOST in line:
-            return line.strip()[:300]
-    return None
 
 
 class CaptureFailure(Failure):
@@ -1155,15 +1139,10 @@ class Guest:
 
     def log_size(self) -> int:
         """How much the launcher's own log (the host's messages and the guest kernel's console) holds now."""
-        try:
-            return self.log.stat().st_size
-        except OSError:
-            return 0
+        return host_gpu_reset.log_size(self.log)
 
     def log_since(self, offset: int) -> str:
-        with self.log.open("rb") as stream:
-            stream.seek(offset)
-            return stream.read().decode(errors="replace")
+        return host_gpu_reset.log_since(self.log, offset)
 
     def suspend_and_wake(self) -> None:
         """The route the host's quiesce takes. The log stream may end with the connection: that is expected
@@ -1182,9 +1161,9 @@ class Guest:
             if capture is not None:
                 capture.expect_end = False
             raise
-        reset = host_gpu_reset_line(self.log_since(mark))
+        reset = host_gpu_reset.reset_line(self.log_since(mark))
         if reset is not None:
-            raise Failure(f"{GPU_RESET_FAILURE}: {reset}")
+            raise Failure(f"{host_gpu_reset.FAILURE}: {reset}")
 
     def suspend_and_wake_guest(self) -> None:
         # A suspend can be refused while the guest is busy (EBUSY); it is asked for again.

@@ -44,6 +44,9 @@ runner = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = runner
 SPEC.loader.exec_module(runner)
 
+sys.path.insert(0, str(REPOSITORY / "tests/integration/support"))
+import host_gpu_reset  # noqa: E402
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_builder_lane import synthetic_resource_table  # noqa: E402
 
@@ -2080,19 +2083,19 @@ class HostGpuResetTests(unittest.TestCase):
 
     def test_the_first_line_of_a_reset_is_found(self) -> None:
         text = "[ 1.0][ T1] init: x\n" + KERNEL_GPU_ERROR + HOST_GPU_REFUSAL
-        self.assertEqual(runner.host_gpu_reset_line(text), KERNEL_GPU_ERROR.strip())
-        self.assertEqual(runner.host_gpu_reset_line(HOST_GPU_REFUSAL), HOST_GPU_REFUSAL.strip())
-        self.assertIsNone(runner.host_gpu_reset_line("[ 1.0][ T1] PM: suspend exit\nVirtio-GPU vhost-user transport\n"))
-        self.assertIsNone(runner.host_gpu_reset_line(""))
+        self.assertEqual(host_gpu_reset.reset_line(text), KERNEL_GPU_ERROR.strip())
+        self.assertEqual(host_gpu_reset.reset_line(HOST_GPU_REFUSAL), HOST_GPU_REFUSAL.strip())
+        self.assertIsNone(host_gpu_reset.reset_line("[ 1.0][ T1] PM: suspend exit\nVirtio-GPU vhost-user transport\n"))
+        self.assertIsNone(host_gpu_reset.reset_line(""))
 
     def test_a_wake_that_shows_the_kernels_error_fails_with_the_line(self) -> None:
         guest = SuspendingGuest(drops=False, on_wake="PM: suspend exit\n" + KERNEL_GPU_ERROR)
-        with self.assertRaisesRegex(runner.Failure, re.escape(f"{runner.GPU_RESET_FAILURE}: {KERNEL_GPU_ERROR.strip()}")):
+        with self.assertRaisesRegex(runner.Failure, re.escape(f"{host_gpu_reset.FAILURE}: {KERNEL_GPU_ERROR.strip()}")):
             guest.suspend_and_wake()
 
     def test_a_wake_that_shows_the_hosts_refusal_fails_with_the_line(self) -> None:
         guest = SuspendingGuest(drops=True, on_wake=HOST_GPU_REFUSAL)
-        with self.assertRaisesRegex(runner.Failure, re.escape(f"{runner.GPU_RESET_FAILURE}: {HOST_GPU_REFUSAL.strip()}")):
+        with self.assertRaisesRegex(runner.Failure, re.escape(f"{host_gpu_reset.FAILURE}: {HOST_GPU_REFUSAL.strip()}")):
             guest.suspend_and_wake()
 
     def test_the_section_that_wakes_the_guest_fails_by_the_name(self) -> None:
@@ -2100,7 +2103,7 @@ class HostGpuResetTests(unittest.TestCase):
         report = runner.Report()
         report.section("the warning shows again after a suspend and wake", guest, guest.suspend_and_wake)
         self.assertEqual(len(report.failures), 1)
-        self.assertIn(runner.GPU_RESET_FAILURE, report.failures[0])
+        self.assertIn(host_gpu_reset.FAILURE, report.failures[0])
 
     def test_lines_from_before_the_suspend_are_not_a_reset(self) -> None:
         guest = SuspendingGuest(drops=False, before=KERNEL_GPU_ERROR + HOST_GPU_REFUSAL, on_wake="PM: suspend exit\n")
