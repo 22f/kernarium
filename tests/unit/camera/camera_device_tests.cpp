@@ -958,8 +958,9 @@ void testBlockedNeverOpensASession()
                     meta.flags == (VIRTIO_VIDEO_CAMERA_FRAME_F_BLACK | VIRTIO_VIDEO_CAMERA_FRAME_F_BLOCKED),
                 "metadata says black and blocked");
     }
-    // Black frames are not capture: the host is idle however many flow.
-    require(rig.states.empty(), "a blocked session with streams running is idle and reports no change");
+    // Black frames are not capture, but the guest has a camera open: the application hears it once, however many frames flow.
+    require(rig.states == std::vector<CameraState> {CameraState::blockedInUse},
+            "a blocked session with streams running reports the open once and nothing else");
     // A still is refused at once.
     const auto still = rig.queue(3, 1, 4321);
     require(rig.done(still), "a still in a blocked session completes at once");
@@ -978,9 +979,107 @@ void testBlockedNeverOpensASession()
     rig.destroy(1);
     rig.destroy(2);
     rig.destroy(3);
+    require(rig.states == std::vector<CameraState> {CameraState::blockedInUse, CameraState::idle},
+            "and that the guest closed every camera");
     rig.device->reset();
     require(rig.camera->sessionsOpened() == 0 && rig.camera->sessionsOpen() == 0,
             "a blocked session never opened a platform capture session");
+}
+
+/* The application says the camera is off when the guest opens one while the
+ * session is blocked: once for each open, from the first video stream or still
+ * to the last camera the guest closes, and never from a metadata stream alone. */
+void testBlockedSaysWhenTheGuestOpensACamera()
+{
+    RigOptions options;
+    options.mode = CameraMode::blocked;
+    Rig rig(options);
+    using States = std::vector<CameraState>;
+    // Listing the cameras and holding a metadata stream open is not using one.
+    rig.create(2, 0, metaKind);
+    for (std::uint32_t resource = 1; resource <= 2; ++resource) rig.attach(2, resource, metaSize);
+    (void)rig.queue(2, 1);
+    require(rig.states.empty(), "a metadata stream alone says nothing");
+
+    // The first video buffer is the open.
+    rig.create(1, 0, videoKind);
+    rig.setVideo(1, 640, 480);
+    for (std::uint32_t resource = 1; resource <= 4; ++resource) rig.attach(1, resource, nv12Size(640, 480));
+    (void)rig.queue(1, 1);
+    require(rig.states == States {CameraState::blockedInUse}, "the first video buffer reports it");
+    (void)rig.queue(1, 2);
+    rig.step();
+    require(rig.states == States {CameraState::blockedInUse}, "once for the open, however many buffers follow");
+
+    // A second camera in use is the same open; the guest closing one of them is not the end.
+    rig.create(3, 1, videoKind);
+    rig.setVideo(3, 640, 480);
+    rig.attach(3, 1, nv12Size(640, 480));
+    (void)rig.queue(3, 1);
+    require(rig.states == States {CameraState::blockedInUse}, "a second camera is not a second report");
+    rig.ok(virtio_video_queue_clear {{VIRTIO_VIDEO_CMD_QUEUE_CLEAR, 1}, output, {}});
+    require(rig.states == States {CameraState::blockedInUse}, "one camera still open");
+    rig.ok(virtio_video_queue_clear {{VIRTIO_VIDEO_CMD_QUEUE_CLEAR, 3}, output, {}});
+    require(rig.states == States {CameraState::blockedInUse, CameraState::idle}, "the last one closed ends the open");
+
+    // The guest opens again: a new open.
+    (void)rig.queue(1, 3);
+    require(rig.states == States {CameraState::blockedInUse, CameraState::idle, CameraState::blockedInUse},
+            "a new open is reported again");
+    rig.destroy(1);
+    require(rig.states.back() == CameraState::idle, "destroying the stream ends it");
+
+    // A still alone is use too, and it ends when the stream goes.
+    rig.create(4, 0, stillKind);
+    require(Rig::type(rig.setParams(4, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a still size");
+    rig.attach(4, 1, std::uint32_t(rig.params(4).plane_formats[0].plane_size));
+    const auto before = rig.states.size();
+    const auto still = rig.queue(4, 1, 99);
+    require(rig.done(still) && (rig.result(still).base.flags & errorFlag), "the still is refused at once");
+    require(rig.states.size() == before + 1 && rig.states.back() == CameraState::blockedInUse, "and it is the guest using a camera");
+    rig.destroy(4);
+    require(rig.states.back() == CameraState::idle, "the still stream going ends it");
+
+    // An open when the guest's transport resets is over, and the application is told.
+    rig.create(5, 0, videoKind);
+    rig.setVideo(5, 640, 480);
+    rig.attach(5, 1, nv12Size(640, 480));
+    (void)rig.queue(5, 1);
+    require(rig.states.back() == CameraState::blockedInUse, "open again");
+    const auto beforeReset = rig.states.size();
+    rig.device->reset();
+    require(rig.states.size() == beforeReset + 1 && rig.states.back() == CameraState::idle, "a reset closes it, and says so once");
+    rig.device->reset();
+    require(rig.states.size() == beforeReset + 1, "a reset with nothing open says nothing");
+    // The driver recreates its stream after the reset and the guest opens a camera again: a new open.
+    rig.create(5, 0, videoKind);
+    rig.setVideo(5, 640, 480);
+    rig.attach(5, 1, nv12Size(640, 480));
+    (void)rig.queue(5, 1);
+    require(rig.states.size() == beforeReset + 2 && rig.states.back() == CameraState::blockedInUse,
+            "an open after a reset is reported again, exactly once");
+    require(rig.camera->sessionsOpened() == 0, "and none of it opened a capture session, so the system's indicator stayed off");
+}
+
+/* A live session never reports the blocked state, whatever the guest does. */
+void testLiveNeverReportsBlockedUse()
+{
+    Rig rig;
+    rig.create(1, 0, videoKind);
+    rig.setVideo(1, 640, 480);
+    for (std::uint32_t resource = 1; resource <= 2; ++resource) rig.attach(1, resource, nv12Size(640, 480));
+    rig.create(2, 0, stillKind);
+    require(Rig::type(rig.setParams(2, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a still size");
+    rig.attach(2, 1, std::uint32_t(rig.params(2).plane_formats[0].plane_size));
+    (void)rig.queue(1, 1);
+    (void)rig.queue(2, 1, 5);
+    rig.step();
+    rig.ok(virtio_video_queue_clear {{VIRTIO_VIDEO_CMD_QUEUE_CLEAR, 1}, output, {}});
+    rig.destroy(2);
+    rig.destroy(1);
+    require(std::find(rig.states.begin(), rig.states.end(), CameraState::blockedInUse) == rig.states.end(),
+            "a live session reports streaming and idle, never the blocked state");
+    require(!rig.states.empty() && rig.states.front() == CameraState::streaming, "it did report the capture");
 }
 
 void testInterruption()
@@ -2878,6 +2977,8 @@ int main()
     testDecimation();
     testPipeline();
     testBlockedNeverOpensASession();
+    testBlockedSaysWhenTheGuestOpensACamera();
+    testLiveNeverReportsBlockedUse();
     testInterruption();
     testAccessDenied();
     testStillsAndCalibration();

@@ -1886,6 +1886,8 @@ private:
 			return "interrupted by multitasking";
 		case uml::camera::CameraState::interruptedBySystemPressure:
 			return "interrupted by system pressure";
+		case uml::camera::CameraState::blockedInUse:
+			return "blocked, in use";
 		}
 		return "unknown";
 	}

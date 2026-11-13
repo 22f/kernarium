@@ -21,8 +21,11 @@ application's statements (the sensor orientation, the rotation that
   indicator cannot light: the device publishes the cameras that discovery found,
   states `VIRTIO_VIDEO_CAMERA_SESSION_F_BLOCKED`, and completes every video
   buffer black and flagged blocked on a timer of its own and every still with an
-  error. A host that has not granted access behaves as an interrupted live
-  session.
+  error. It tells the application's state callback `blockedInUse` when a guest
+  app has a camera open (a video stream runs or a still is asked for; a
+  metadata stream alone is not use) and `idle` once the guest has closed every
+  camera, so each open is reported once and a live session never reports it. A
+  host that has not granted access behaves as an interrupted live session.
 - **Cameras.** Wire order is the back zoom camera (else the primary back lens),
   the front camera, the other back lenses, then external cameras, at most eight.
   A zoom camera and its lenses conflict; cameras run together where the host
@@ -234,7 +237,8 @@ the image's table), and
 `camera-source` the launcher's factories (nothing opened, no prompt).
 `camera-device` drives the device
 over both queues in front of the synthetic camera, including the invariant that
-a blocked session never opens a platform session, a hostile guest, a reset with
+a blocked session never opens a platform session and reports each open of a
+camera once, a hostile guest, a reset with
 streams and stills in flight, an event queue that retries and wakes the server,
 a ring disable that resets nothing, a still on one camera while another
 streams, a join over the hardware budget, and a capture that fails to start
