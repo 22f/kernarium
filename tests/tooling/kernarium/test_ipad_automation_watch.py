@@ -467,8 +467,10 @@ class CommandTests(WatchTestCase):
         return thread
 
     def test_a_command_waits_through_a_replacement(self) -> None:
-        # Rule: a command sent while the watch replaces the host waits for the
-        # replacement and is answered by it.
+        # Rule: a command sent while the watch is starting a host waits for it
+        # and is answered by it. The heartbeat is made to look fresh, so that
+        # only the watch's own state can hold the command back.
+        self.tune(WATCH_FRESH=1000)
         self.device.scenarios([{"kind": "serve"}, {"kind": "serve", "hold": True}])
         self.run_watch()
         first = self.watching(restarts=1)
@@ -476,11 +478,9 @@ class CommandTests(WatchTestCase):
         self.wait_record(state=automation.RESTARTING)
         self.device.wait(lambda: len(self.device.invocations()) == 2, 15,
                          "the replacement starts")
-        self.device.wait(lambda: self.device.silent_for() > automation.WATCH_FRESH,
-                         15, "the dead host's last beat is no longer fresh")
         results: list = []
         thread = self.ping(results)
-        self.device.wait(lambda: any("replacing it" in message
+        self.device.wait(lambda: any("its watch is starting" in message
                                      for message in self.messages), 15,
                          "the command says it waits")
         self.assertEqual(results, [])
@@ -488,6 +488,22 @@ class CommandTests(WatchTestCase):
         self.device.control(second, "go")
         thread.join(30)
         self.assertEqual(len(results), 1, self.messages)
+        self.assertEqual(results[0]["nonce"], second)
+
+    def test_a_command_waits_for_a_host_that_stopped_beating(self) -> None:
+        # Rule: the watch may not have noticed a host that stopped beating
+        # yet; a command does not go to it, and is answered by the successor.
+        self.tune(HEARTBEAT_STALE=3.0, WATCH_FRESH=1.0)
+        self.run_watch()
+        first = self.watching(restarts=1)
+        self.device.control(first, "silent")
+        self.device.wait(lambda: self.device.silent_for() > 1.2, 10,
+                         "the host stops beating")
+        results: list = []
+        self.ping(results).join(30)
+        self.assertEqual(len(results), 1, self.messages)
+        second = self.device.invocations()[-1]["nonce"]
+        self.assertNotEqual(second, first)
         self.assertEqual(results[0]["nonce"], second)
 
     def test_a_command_still_fails_without_a_watch(self) -> None:
@@ -504,15 +520,14 @@ class CommandTests(WatchTestCase):
 
     def test_a_command_gives_up_when_the_replacement_is_not_made(self) -> None:
         # Rule: the wait is bounded. The replacement never serves here.
-        self.tune(WATCH_COMMAND_WAIT=2, WATCH_RUNNER_WAIT=30)
+        self.tune(WATCH_COMMAND_WAIT=2, WATCH_RUNNER_WAIT=30, WATCH_FRESH=1000)
         self.device.scenarios([{"kind": "serve"}, {"kind": "up-silent"}])
         self.run_watch()
         first = self.watching(restarts=1)
         self.device.control(first, "die")
+        self.wait_record(state=automation.RESTARTING)
         self.device.wait(lambda: len(self.device.invocations()) == 2, 15,
                          "the replacement starts")
-        self.device.wait(lambda: self.device.silent_for() > automation.WATCH_FRESH,
-                         15, "the dead host's last beat is no longer fresh")
         results: list = []
         self.ping(results).join(20)
         self.assertEqual(len(results), 1)

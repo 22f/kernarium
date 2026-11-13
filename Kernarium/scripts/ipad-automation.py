@@ -73,10 +73,10 @@ screen, ends it at once with the state cannot-start; more than 6 replacements
 (--max-restarts) in an hour end it with restart-storm. Status 6: another watch
 holds this device's lock. `status` shows the watch and its last end.
 
-A command sent while the watch is replacing the host waits for the
-replacement, up to 180 s, and fails with status 3 as before when no watch
-runs or the watch has ended. A command already sent to a host that ends is not
-repeated: it may have run. `stop --force` ends the watch first, so that it
+A command sent while the watch is starting a host, or to a host that has not
+beaten for 4 s, waits for a host that beats, up to 180 s, and fails with
+status 3 as before when no watch runs or the watch has ended. A command sent to
+a host that ends while it runs is not repeated: it may have run. `stop --force` ends the watch first, so that it
 does not start the host again, and then the host; `start` refuses while a watch
 runs. Ending the watch alone (SIGTERM, or the job manager's stop) leaves a
 serving host running.
@@ -153,7 +153,7 @@ WATCH_STORM_WINDOW = 3600
 # a beat it needs before it sends, and how long `stop --force` lets the watch
 # end and `watch --detach` lets the new watch take its lock.
 WATCH_COMMAND_WAIT = 180
-WATCH_FRESH = 8
+WATCH_FRESH = 4
 WATCH_END_WAIT = 90
 WATCH_DETACH_WAIT = 20
 # How often a command waiting for its result looks at the host's heartbeat.
@@ -501,27 +501,29 @@ def watch_summary(options):
 
 
 def wait_for_replacement(options):
-    """With a watch running, a command that finds the host silent waits for
-    the replacement the watch is making; without one it returns at once and
-    fails as it always did. The wait is bounded, and ends when the watch
-    does."""
+    """With a watch running, a command waits while the watch says it is
+    starting a host, or the host has not beaten for WATCH_FRESH s (the watch
+    may not have noticed yet), until a host beats again or the watch ends; it
+    returns at once, and fails as it always did, when no watch runs. The wait
+    is bounded."""
     if watcher_pid(options) is None:
         return
     deadline = time.monotonic() + WATCH_COMMAND_WAIT
     announced = False
     while True:
-        state = host_state(options)
-        if (state is not None and not state.get("finished")
-                and time.time() - state.get("time", 0) <= WATCH_FRESH):
-            return
         if (watcher_pid(options) is None
                 or read_watch_record(options).get("state") not in ACTIVE_STATES):
+            return
+        starting = read_watch_record(options).get("state") != WATCHING
+        state = host_state(options)
+        if (not starting and state is not None and not state.get("finished")
+                and time.time() - state.get("time", 0) <= WATCH_FRESH):
             return
         if time.monotonic() >= deadline:
             raise NoHost(f"the host was still being replaced after "
                          f"{WATCH_COMMAND_WAIT} s")
         if not announced:
-            log("the host is not serving and its watch is replacing it; "
+            log("the host is not serving and its watch is starting another; "
                 f"waiting up to {WATCH_COMMAND_WAIT} s")
             announced = True
         time.sleep(1)
