@@ -105,6 +105,12 @@ private:
 
     void resetConnection() noexcept;
     void resetDeviceState() noexcept;
+    /* Drops every shared-memory range this backend published from the host
+     * index, when its device owns a region. */
+    void revokeOwnedSharedMemory() noexcept;
+    /* Says on stderr that a ring disable is resetting the device under
+     * deferred requests. */
+    void reportDisableReset(std::uint32_t ring) noexcept;
     /* Whether the device holds deferred requests across a ring disable that
      * has happened: it opts in, a request is pending and a configured ring is
      * disabled. */
@@ -165,8 +171,9 @@ private:
     /* Waits for the front-end's acknowledgement of the backend request
      * `request` while still answering every front-end request whose reply
      * it awaits without reading the backend channel; other requests are
-     * deferred. Throws unless the reply acknowledges `request` with a zero
-     * status. */
+     * deferred, as is a GET_FEATURES that retires held requests or follows
+     * a message already deferred. Throws unless the reply acknowledges
+     * `request` with a zero status. */
     void awaitBackendAcknowledgement(
         const protocol::VhostHeader& request,
         const char* channel);
@@ -203,6 +210,8 @@ private:
     std::uint64_t negotiatedFeatures_ {};
     std::uint64_t negotiatedProtocolFeatures_ {};
     bool featuresConfigured_ {};
+    /* How many ring disables reset the device under deferred requests. */
+    unsigned disableResets_ {};
     bool stopShutsDownConnection_ {};
     /* The device has a config change pending that it would not claim at the
      * last attempt, or that the last claim left partly pending (the GPU's
