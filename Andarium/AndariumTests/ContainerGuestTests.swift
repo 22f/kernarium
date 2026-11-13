@@ -20,7 +20,12 @@ import Testing
 /// `config.armeabi_v7a.apk`, `config.x86_64.apk` (one app, one signature),
 /// `old-base.apk` and `old-config.xhdpi.apk` (the same package built for API
 /// level 21) and `foreign-config.fr.apk` (a split of that package signed by
-/// another key). Every test leaves the guest as it found it, except the one
+/// another key), and for the checks of what a review found, `review-own.apk`
+/// (a signed APK of org.example.reviewown), `review-bad.apk` (an APK of
+/// org.example.reviewbad whose manifest makes the package manager's refusal
+/// hold a line that says `Success`) and `review-nested.apk` (a signed APK of
+/// org.example.reviewvictim that holds, as an asset, an APK of reviewown).
+/// Every test leaves the guest as it found it, except the one
 /// that takes real files (`ANDARIUM_CONTAINER_GUEST_SAMPLES`, below).
 @Suite(.serialized)
 struct ContainerGuestTests {
@@ -100,7 +105,13 @@ struct ContainerGuestTests {
         let arm64 = try apk("config.arm64_v8a.apk"), arm32 = try apk("config.armeabi_v7a.apk"), x86 = try apk("config.x86_64.apk")
         let kinds: [(String, [ContainerEntry])] = [
             ("bundletool.apks", [
-                ContainerEntry("toc.pb", Data([1])), ContainerEntry("splits/base-master.apk", base),
+                ContainerEntry("toc.pb", BundleToc(variants: [BundleToc.Variant(apks: [
+                    .master("splits/base-master.apk"), .split("splits/base-xhdpi.apk", "config.xhdpi"),
+                    .split("splits/base-arm64_v8a.apk", "config.arm64_v8a", abi: 3),
+                    .split("splits/base-armeabi_v7a.apk", "config.armeabi_v7a", abi: 2),
+                    .split("splits/base-x86_64.apk", "config.x86_64", abi: 5),
+                ])]).build()),
+                ContainerEntry("splits/base-master.apk", base),
                 ContainerEntry("splits/base-xhdpi.apk", density), ContainerEntry("splits/base-arm64_v8a.apk", arm64),
                 ContainerEntry("splits/base-armeabi_v7a.apk", arm32), ContainerEntry("splits/base-x86_64.apk", x86),
             ]),
@@ -308,6 +319,190 @@ struct ContainerGuestTests {
         print("CONTAINER_GUEST cancel-data folder-listing=[\(listing)]")
         #expect(!listing.contains(".andarium-") && !listing.contains(name))
         #expect(!partials.ledger.isOwed)
+        await clean(operations)
+    }
+
+    // MARK: Found by the review of the first round, and the variants of a bundle
+
+    private static let own = "org.example.reviewown"
+    private static let victim = "org.example.reviewvictim"
+    private static let badPackage = "org.example.reviewbad"
+    private static let victimFolder = "/storage/emulated/0/Android/obb/" + victim
+
+    private func installFails(_ operations: AdbGuestOperations, _ url: URL, _ what: String) async throws {
+        do {
+            let outcome = try await operations.installApk(at: url, update: { _ in })
+            Issue.record("\(what): installed (\(outcome))")
+        } catch {
+            #expect(error is AdbFailure, "\(what): \(error)")
+        }
+    }
+
+    @Test(.timeLimit(.minutes(10))) func anXapkCannotChooseAnotherAppsObbFolder() async throws {
+        guard Self.enabled else { return }
+        let operations = try operations()
+        let path = "Android/obb/\(Self.victim)/main.1.\(Self.victim).obb"
+        _ = try await shell(operations, "pm uninstall \(Self.own) >/dev/null 2>&1; mkdir -p '\(Self.victimFolder)' && printf original > '\(Self.victimFolder)/main.1.\(Self.victim).obb'")
+        // The file says it is the victim's, and carries another app's APK.
+        let url = try write([
+            ContainerEntry("manifest.json", Data(#"{"xapk_version":2,"package_name":"\#(Self.victim)","split_apks":[{"file":"base.apk","id":"base"}],"expansions":[{"file":"\#(path)","install_location":"EXTERNAL_STORAGE","install_path":"\#(path)"}]}"#.utf8)),
+            ContainerEntry("base.apk", try apk("review-own.apk")), ContainerEntry(path, Data("replaced".utf8)),
+        ], "claim.xapk")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try await installFails(operations, url, "an APK that is not the package the file names")
+        #expect(try await shell(operations, "cat '\(Self.victimFolder)/main.1.\(Self.victim).obb'") == "original")
+        #expect(try await shell(operations, "pm path \(Self.own)").isEmpty)
+        #expect(try await activeSessions(operations) == 0)
+        _ = try await shell(operations, "rm -rf '\(Self.victimFolder)'; true")
+    }
+
+    @Test(.timeLimit(.minutes(10))) func anApkmCannotChooseAnotherAppsObbFolderEither() async throws {
+        guard Self.enabled else { return }
+        let operations = try operations()
+        await clean(operations)
+        _ = try await shell(operations, "mkdir -p '\(Self.victimFolder)' && printf original > '\(Self.victimFolder)/main.1.\(Self.victim).obb'")
+        let url = try write([
+            ContainerEntry("info.json", Data(#"{"apkm_version":5,"pname":"\#(Self.victim)","obb_files":["main.2.\#(Self.victim).obb"]}"#.utf8)),
+            ContainerEntry("base.apk", try apk("base.apk")), ContainerEntry("main.2.\(Self.victim).obb", Data("replaced".utf8)),
+        ], "claim.apkm")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try await installFails(operations, url, "an APK that is not the package the file names")
+        #expect(try await shell(operations, "ls -A '\(Self.victimFolder)'") == "main.1.\(Self.victim).obb")
+        #expect(try await installedFiles(operations).isEmpty)
+        _ = try await shell(operations, "rm -rf '\(Self.victimFolder)'; true")
+    }
+
+    @Test(.timeLimit(.minutes(10))) func aRefusalWhoseDiagnosticSaysSuccessInstallsNothingAndCopiesNothing() async throws {
+        guard Self.enabled else { return }
+        let operations = try operations()
+        let folder = "/storage/emulated/0/Android/obb/" + Self.badPackage
+        let path = "Android/obb/\(Self.badPackage)/failure.obb"
+        _ = try await shell(operations, "rm -rf '\(folder)'; true")
+        let url = try write([
+            ContainerEntry("manifest.json", Data(#"{"xapk_version":2,"package_name":"\#(Self.badPackage)","split_apks":[{"file":"base.apk","id":"base"}],"expansions":[{"file":"\#(path)","install_location":"EXTERNAL_STORAGE","install_path":"\#(path)"}]}"#.utf8)),
+            ContainerEntry("base.apk", try apk("review-bad.apk")), ContainerEntry(path, Data("copied despite refusal".utf8)),
+        ], "refused.xapk")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try await installFails(operations, url, "a refused APK")
+        #expect(try await shell(operations, "pm path \(Self.badPackage)").isEmpty)
+        #expect(try await shell(operations, "ls -A '\(folder)' 2>/dev/null").isEmpty)
+        #expect(try await activeSessions(operations) == 0)
+        _ = try await shell(operations, "rm -rf '\(folder)'; true")
+    }
+
+    @Test(.timeLimit(.minutes(10))) func aCancelBetweenTheLastWriteAndTheCommitLeavesNoSession() async throws {
+        guard Self.enabled else { return }
+        let operations = try operations()
+        _ = try await shell(operations, "pm uninstall \(Self.own) >/dev/null 2>&1; true")
+        let before = try await activeSessions(operations)
+        let url = try write([ContainerEntry("base.apk", try apk("review-own.apk"))], "cancel.apks")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let box = TaskBox()
+        let task = Task {
+            try await operations.installApk(at: url, update: { update in
+                // The Cancel lands as the install announces the commit it can no longer stop.
+                if update.cancellable == false { box.cancel() }
+            })
+        }
+        box.task = task
+        let result = await task.result
+        guard case let .failure(error) = result, error is CancellationError else {
+            Issue.record("expected the cancel, got \(result)")
+            return
+        }
+        #expect(try await activeSessions(operations) == before)
+        #expect(try await shell(operations, "pm path \(Self.own)").isEmpty)
+    }
+
+    @Test(.timeLimit(.minutes(10))) func anApkThatHoldsAnApkAsAnAssetInstallsAsItself() async throws {
+        guard Self.enabled else { return }
+        let operations = try operations()
+        _ = try await shell(operations, "pm uninstall \(Self.own) >/dev/null 2>&1; pm uninstall \(Self.victim) >/dev/null 2>&1; true")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-renamed.apks")
+        try apk("review-nested.apk").write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await operations.installApk(at: url, update: { _ in }) == .installed)
+        #expect(try await shell(operations, "pm path \(Self.victim)").hasPrefix("package:"))
+        #expect(try await shell(operations, "pm path \(Self.own)").isEmpty)
+        _ = try await shell(operations, "pm uninstall \(Self.victim) >/dev/null 2>&1; true")
+    }
+
+    @Test(.timeLimit(.minutes(15))) func anApkmPlacesTheDataItsInfoListsForTheInstalledPackage() async throws {
+        guard Self.enabled else { return }
+        let operations = try operations()
+        await clean(operations)
+        let obb = incompressible(3 << 20)
+        let name = "main.1.\(Self.package).obb"
+        let url = try write([
+            ContainerEntry("info.json", Data(#"{"apkm_version":5,"pname":"\#(Self.package)","obb_files":["\#(name)"]}"#.utf8)),
+            ContainerEntry("base.apk", try apk("base.apk")), ContainerEntry("split_config.xhdpi.apk", try apk("config.xhdpi.apk")),
+            ContainerEntry(name, obb),
+        ], "data.apkm")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let partials = try Self.settledLedger()
+        defer { try? FileManager.default.removeItem(at: partials.directory) }
+        #expect(try await operations.installApk(at: url, partials: partials.ledger, update: { _ in }) == .installed)
+        #expect(try await installedFiles(operations).count == 2)
+        #expect(try await shell(operations, "ls -A '\(Self.obbFolder)'") == name)
+        #expect(try await shell(operations, "sha256sum '\(Self.obbFolder)/\(name)'").hasPrefix(digest(obb)))
+        #expect(try await shell(operations, "stat -c %s '\(Self.obbFolder)/\(name)'") == String(obb.count))
+        #expect(!partials.ledger.isOwed)
+        await clean(operations)
+    }
+
+    /// One bundle of three variants (API 21, 23 and 31), each with a master split of its own and the
+    /// processor splits shared by the two newer ones, as a real bundletool file is.
+    private func variantBundle() throws -> [ContainerEntry] {
+        typealias Apk = BundleToc.Apk
+        func abis(_ suffix: String) -> [Apk] {
+            [
+                .split("splits/base-arm64_v8a\(suffix).apk", "config.arm64_v8a", abi: 3),
+                .split("splits/base-armeabi_v7a\(suffix).apk", "config.armeabi_v7a", abi: 2),
+                .split("splits/base-x86_64\(suffix).apk", "config.x86_64", abi: 5),
+            ]
+        }
+        let density: Apk = .split("splits/base-xhdpi.apk", "config.xhdpi")
+        let toc = BundleToc(variants: [
+            BundleToc.Variant(minSdk: 21, apks: [.master("splits/base-master.apk")] + abis("") + [density]),
+            BundleToc.Variant(minSdk: 23, apks: [.master("splits/base-master_2.apk")] + abis("_2") + [density]),
+            BundleToc.Variant(minSdk: 31, apks: [.master("splits/base-master_3.apk")] + abis("_2") + [density]),
+        ])
+        let base = try apk("base.apk"), arm64 = try apk("config.arm64_v8a.apk"), arm32 = try apk("config.armeabi_v7a.apk")
+        let x86 = try apk("config.x86_64.apk"), density2 = try apk("config.xhdpi.apk")
+        return [
+            ContainerEntry("toc.pb", toc.build()),
+            ContainerEntry("splits/base-master.apk", base), ContainerEntry("splits/base-master_2.apk", base), ContainerEntry("splits/base-master_3.apk", base),
+            ContainerEntry("splits/base-arm64_v8a.apk", arm64), ContainerEntry("splits/base-arm64_v8a_2.apk", arm64),
+            ContainerEntry("splits/base-armeabi_v7a.apk", arm32), ContainerEntry("splits/base-armeabi_v7a_2.apk", arm32),
+            ContainerEntry("splits/base-x86_64.apk", x86), ContainerEntry("splits/base-x86_64_2.apk", x86),
+            ContainerEntry("splits/base-xhdpi.apk", density2),
+        ]
+    }
+
+    @Test(.timeLimit(.minutes(10))) func aBundleOfSeveralVariantsInstallsOneOfThem() async throws {
+        guard Self.enabled else { return }
+        let operations = try operations()
+        await clean(operations)
+        let url = try write(try variantBundle(), "variants.apks")
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await operations.installApk(at: url, update: { _ in }) == .installed)
+        // The base, the density split and the split of the guest's processor, once each.
+        let files = try await installedFiles(operations)
+        #expect(files.count == 3 && files.contains("base.apk"), "\(files)")
+        #expect(files.contains { $0.contains("xhdpi") } && files.contains { $0.contains("arm64") }, "\(files)")
+        #expect(try await activeSessions(operations) == 0)
+        await clean(operations)
+    }
+
+    @Test(.timeLimit(.minutes(10))) func aUniversalBundleInstallsAsOneApk() async throws {
+        guard Self.enabled else { return }
+        let operations = try operations()
+        await clean(operations)
+        let toc = BundleToc(variants: [BundleToc.Variant(minSdk: nil, apks: [.standalone("universal.apk")])])
+        let url = try write([ContainerEntry("toc.pb", toc.build()), ContainerEntry("universal.apk", try apk("base.apk"))], "universal.apks")
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await operations.installApk(at: url, update: { _ in }) == .installed)
+        #expect(try await installedFiles(operations) == ["base.apk"])
         await clean(operations)
     }
 
