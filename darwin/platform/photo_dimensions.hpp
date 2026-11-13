@@ -95,12 +95,25 @@ enum class PhotoOutputPreparation : std::uint8_t {
 // alone has no processed photo), which is not a different size.
 [[nodiscard]] bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested) noexcept;
 
-// What a finished capture whose photo is not the size asked for leads to. The
-// first capture after a photo output's maximum was raised on a running session
-// can be served before the output applies it, at the size it made before; the
-// capture is made again, and the photo of another size on the last attempt
-// fails the capture (the guest is told at once, and nothing of another size is
-// passed on).
+// Whether setting a photo output's maximum to `after` raises what it made
+// before (`before`, its own default): the pipeline is then reconfigured after
+// the session commits.
+[[nodiscard]] bool photoMaximumIsRaised(CameraStillSize before, CameraStillSize after) noexcept;
+
+// The pipeline takes this long after a raised maximum is committed before a
+// capture is served at the new size.
+inline constexpr std::uint64_t photoOutputSettleNanoseconds = 300'000'000;
+
+// How long a capture waits before it starts: the rest of the settle time
+// since `raisedAt` (host nanoseconds when the raised maximum was committed;
+// zero when it was not raised), zero once it has passed.
+[[nodiscard]] std::uint64_t stillSettleNanoseconds(std::uint64_t raisedAt, std::uint64_t now) noexcept;
+
+// What a finished capture whose photo is not the size asked for leads to. A
+// capture that starts before the settle time has passed can still be served at
+// the size the output made before; it is made again, and the photo of another
+// size on the last attempt fails the capture (the guest is told at once, and
+// nothing of another size is passed on).
 enum class StillSizeOutcome : std::uint8_t {
     deliver,
     retry,

@@ -126,6 +126,18 @@ bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested
     return (resolved.width == 0 && resolved.height == 0) || resolved == requested;
 }
 
+bool photoMaximumIsRaised(CameraStillSize before, CameraStillSize after) noexcept
+{
+    return std::uint64_t(after.width) * after.height > std::uint64_t(before.width) * before.height;
+}
+
+std::uint64_t stillSettleNanoseconds(std::uint64_t raisedAt, std::uint64_t now) noexcept
+{
+    if (raisedAt == 0) return 0;
+    const std::uint64_t elapsed = now > raisedAt ? now - raisedAt : 0;
+    return elapsed >= photoOutputSettleNanoseconds ? 0 : photoOutputSettleNanoseconds - elapsed;
+}
+
 StillSizeOutcome stillSizeOutcome(CameraStillSize resolved, CameraStillSize requested, unsigned attempt) noexcept
 {
     if (resolvedSizeIsRequested(resolved, requested)) return StillSizeOutcome::deliver;

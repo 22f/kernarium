@@ -124,6 +124,26 @@ void aPhotoOfAnotherSizeIsMadeAgainOnceAndThenFails()
     require(stillAttemptLimit >= 2, "one retry at least");
 }
 
+void aRaisedMaximumIsGivenTimeToTakeEffectBeforeTheFirstStill()
+{
+    require(photoMaximumIsRaised({4032, 3024}, {8064, 6048}), "a 48 MP maximum over the 12 MP default is a raise");
+    require(!photoMaximumIsRaised({4032, 3024}, {4032, 3024}), "the default itself is not");
+    require(!photoMaximumIsRaised({8064, 6048}, {4032, 3024}), "nor is a smaller one");
+    require(!photoMaximumIsRaised({0, 0}, {0, 0}), "nor is no size");
+    // A product that does not overflow 32 bits.
+    require(photoMaximumIsRaised({65535, 65535}, {65535, 65536}), "wide sizes compare in 64 bits");
+
+    constexpr std::uint64_t settle = photoOutputSettleNanoseconds;
+    constexpr std::uint64_t raisedAt = 5'000'000'000;
+    require(stillSettleNanoseconds(0, raisedAt) == 0, "a maximum that was not raised waits for nothing");
+    require(stillSettleNanoseconds(raisedAt, raisedAt) == settle, "a still at the commit waits the whole time");
+    require(stillSettleNanoseconds(raisedAt, raisedAt + settle / 3) == settle - settle / 3, "and the rest of it after a part");
+    require(stillSettleNanoseconds(raisedAt, raisedAt + settle) == 0, "none once it has passed");
+    require(stillSettleNanoseconds(raisedAt, raisedAt + 10 * settle) == 0, "nor long after");
+    require(stillSettleNanoseconds(raisedAt, raisedAt - 1) == settle, "a clock that reads before the commit waits the whole time");
+    require(settle > 0 && settle < 1'000'000'000, "a wait the guest does not notice as a stall");
+}
+
 // A photo output as AVFoundation treats it: its maximum is refused (it raises)
 // unless the output is attached to the session with a source whose active
 // format lists the size.
@@ -291,6 +311,7 @@ int main()
     aCaptureWithoutAJpegTakesTheSmallestSize();
     theResolvedSizeIsTheRequestOrItIsRefused();
     aPhotoOfAnotherSizeIsMadeAgainOnceAndThenFails();
+    aRaisedMaximumIsGivenTimeToTakeEffectBeforeTheFirstStill();
     theOutputIsAttachedBeforeItsMaximumIsSet();
     aMaximumTheSourceRefusesDetachesTheOutput();
     anOutputThatCannotBeAttachedGetsNoMaximum();
