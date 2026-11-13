@@ -904,8 +904,9 @@ public:
     }
 
     // `attempt` is the capture of this request that starts (from one): a photo that comes back at a size other than the
-    // one asked for makes the next (uml::platform::stillSizeOutcome).
-    bool startStill(std::size_t camera, const CameraStillRequest& request, unsigned attempt = 1)
+    // one asked for makes the next (uml::platform::stillSizeOutcome). `waited` is what the earlier attempts waited for
+    // the settle time, of which the next has what is left.
+    bool startStill(std::size_t camera, const CameraStillRequest& request, unsigned attempt = 1, std::uint64_t waited = 0)
     {
         const Entry& entry = entries_[camera];
         auto& running = cameras_[camera];
@@ -979,16 +980,30 @@ public:
         // until the capture finishes, or none of its callbacks would arrive.
         {
             std::lock_guard lock(photoMutex_);
-            photos_[request.token] = {camera, delegate, request, attempt};
+            photos_[request.token] = {camera, delegate, request, attempt, waited};
         }
         // The pipeline applies a maximum that needs the sensor's full-resolution mode some time after the session commits
         // a configuration, and a capture that starts before is served at the binned size: a still starts when that time
         // has passed (the first after the admission, and one after a stream started, resized or stopped, or after a
-        // repair), scheduled on the session's queue, which stays free for the other cameras and the stop meanwhile.
-        if (const std::uint64_t wait = stillSettleNanoseconds(running.photoMaximumCommittedAt, hostNow()); wait != 0) {
+        // repair), scheduled on the session's queue, which stays free for the other cameras and the stop meanwhile. The waits of
+        // a request are bounded (stillWaitBudgetNanoseconds): commits that keep coming fail it instead of postponing it.
+        const auto step = uml::platform::scheduledStillStep(false, true, running.photoMaximumCommittedAt, hostNow(), waited);
+        if (step.step == ScheduledStillStep::fail) {
+            // Commits kept postponing it past its budget: the guest is told at once (the caller's failure).
+            std::fprintf(stderr, "Camera: camera %zu: the still failed: the photo output's full-resolution maximum did not settle within %llu ms\n",
+                         camera, static_cast<unsigned long long>(stillWaitBudgetNanoseconds / 1000000));
+            std::lock_guard lock(photoMutex_);
+            photos_.erase(request.token);
+            return false;
+        }
+        if (step.step == ScheduledStillStep::wait) {
             std::fprintf(stderr, "Camera: camera %zu: the still starts in %llu ms, when the photo output's full-resolution maximum has taken effect\n",
-                         camera, static_cast<unsigned long long>(wait / 1000000));
-            scheduleStill(camera, request.token, output, settings, delegate, wait);
+                         camera, static_cast<unsigned long long>(step.waitNanoseconds / 1000000));
+            {
+                std::lock_guard lock(photoMutex_);
+                photos_[request.token].waited = step.waitedNanoseconds;
+            }
+            scheduleStill(camera, request.token, output, settings, delegate, step.waitNanoseconds);
             return true;
         }
         return captureStill(camera, output, settings, delegate);
@@ -1027,19 +1042,34 @@ public:
                    UMLPhotoDelegate* delegate)
     {
         bool known = false;
+        std::uint64_t waited = 0;
         {
             std::lock_guard lock(photoMutex_);
             const auto found = photos_.find(token);
             known = found != photos_.end() && found->second.camera == camera;
+            if (known) waited = found->second.waited;
         }
         const auto running = cameras_.find(camera);
         const std::uint64_t committedAt = running == cameras_.end() ? 0 : running->second.photoMaximumCommittedAt;
-        switch (scheduledStillStep(stopped_, known && running != cameras_.end(), committedAt, hostNow())) {
+        const auto step = uml::platform::scheduledStillStep(stopped_, known && running != cameras_.end(), committedAt, hostNow(), waited);
+        switch (step.step) {
         case ScheduledStillStep::drop:
             std::fprintf(stderr, "Camera: a scheduled still was dropped: the session ended or the request is gone\n");
             return;
-        case ScheduledStillStep::waitAgain:
-            scheduleStill(camera, token, output, settings, delegate, stillSettleNanoseconds(committedAt, hostNow()));
+        case ScheduledStillStep::wait: {
+            {
+                std::lock_guard lock(photoMutex_);
+                const auto found = photos_.find(token);
+                if (found != photos_.end()) found->second.waited = step.waitedNanoseconds;
+            }
+            scheduleStill(camera, token, output, settings, delegate, step.waitNanoseconds);
+            return;
+        }
+        case ScheduledStillStep::fail:
+            // Commits kept postponing it past its budget: failed once, here, and nothing is scheduled again.
+            std::fprintf(stderr, "Camera: camera %zu: the still failed: the photo output's full-resolution maximum did not settle within %llu ms\n",
+                         camera, static_cast<unsigned long long>(stillWaitBudgetNanoseconds / 1000000));
+            failStill(camera, token);
             return;
         case ScheduledStillStep::fire:
             break;
@@ -1180,7 +1210,7 @@ public:
         }
         bool started = false;
         @try {
-            started = !stopped_ && startStill(camera, photo.request, photo.attempt + 1);
+            started = !stopped_ && startStill(camera, photo.request, photo.attempt + 1, photo.waited);
         } @catch (NSException* exception) {
             refuse(camera, Refusal::raised, std::string("a still: ") + exception.reason.UTF8String);
         }
@@ -1819,6 +1849,8 @@ private:
         // What was asked, for the capture that follows one whose photo is not the size asked for.
         CameraStillRequest request;
         unsigned attempt {1};
+        // What the request has waited for the photo output's settle time, over its attempts (stillWaitBudgetNanoseconds).
+        std::uint64_t waited {};
     };
     bool stillsInFlight(std::size_t camera)
     {

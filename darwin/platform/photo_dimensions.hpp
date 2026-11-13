@@ -101,7 +101,9 @@ enum class PhotoOutputPreparation : std::uint8_t {
 // time to apply after the session commits the maximum.
 inline constexpr std::uint64_t binnedSensorStillPixels = 4032ull * 3024ull;
 
-// Whether a photo output's maximum needs the full-resolution mode.
+// Whether a photo output's maximum needs the full-resolution mode: it is above the binned size, whatever the area
+// the still cap of a tier allows. Only this wait depends on it: a photo of another size is made again
+// (stillSizeOutcome) for any maximum.
 [[nodiscard]] bool photoMaximumNeedsFullResolution(CameraStillSize maximum) noexcept;
 
 // The pipeline takes this long after such a maximum is committed before a
@@ -119,17 +121,33 @@ inline constexpr std::uint64_t photoOutputSettleNanoseconds = 300'000'000;
 // when there is nothing to wait for.
 [[nodiscard]] std::uint64_t stillSettleNanoseconds(std::uint64_t committedAt, std::uint64_t now) noexcept;
 
-// What a capture scheduled for the end of the settle time does when its time
-// comes: it starts, waits the rest of a later commit (a repair of the anchor
-// since), or is dropped because the session ended or the request is gone (a
-// stop inside the settle time).
+// How long a still may spend waiting for the settle time in all, over its attempts. Every commit of the session's
+// configuration (another camera's, a rate change while streaming) restarts the settle time, so without a bound a still
+// accepted during it could be postponed for as long as commits keep coming. A commit chain of the ordinary kinds
+// (admission, a stream start, a resize, a repair) costs a few settle times; two seconds is a fifth of the device's
+// capture timeout, which starts when the still is handed over, and leaves it room for two 48 MP captures after the wait.
+inline constexpr std::uint64_t stillWaitBudgetNanoseconds = 2'000'000'000;
+
+// What a capture does when its turn comes (when it is accepted, and again when each wait ends): it starts; waits the
+// rest of the settle time of a later commit; fails, because that wait would take it past the budget (the guest is told
+// at once, by the same failure as a photo of another size on the last attempt); or is dropped, because the session
+// ended or the request is gone (a stop inside the settle time; the device owns ending those requests).
 enum class ScheduledStillStep : std::uint8_t {
     fire,
-    waitAgain,
+    wait,
+    fail,
     drop,
 };
-[[nodiscard]] ScheduledStillStep scheduledStillStep(bool sessionEnded, bool requestKnown, std::uint64_t committedAt,
-                                                    std::uint64_t now) noexcept;
+struct ScheduledStill {
+    ScheduledStillStep step {};
+    // For `wait`: how long to wait.
+    std::uint64_t waitNanoseconds {};
+    // What the still has waited in all, with this wait: kept with the request across its waits and its attempts, so
+    // that the next attempt has what is left.
+    std::uint64_t waitedNanoseconds {};
+};
+[[nodiscard]] ScheduledStill scheduledStillStep(bool sessionEnded, bool requestKnown, std::uint64_t committedAt, std::uint64_t now,
+                                                std::uint64_t waitedNanoseconds) noexcept;
 
 // What a finished capture whose photo is not the size asked for leads to. A
 // capture that starts before the settle time has passed can still be served at
