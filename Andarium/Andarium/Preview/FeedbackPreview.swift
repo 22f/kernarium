@@ -19,6 +19,9 @@ enum FeedbackPreview {
 
     static func overHome(_ screen: String) -> Bool { screen.hasPrefix("feedback-home") }
 
+    /// The shots of the sheet the slow-start notice opens, over the boot screen.
+    static func overBoot(_ screen: String) -> Bool { screen.hasPrefix("feedback-boot") }
+
     /// Readies the model for `screen`: its phase, the sheet that stays beneath,
     /// and the services the sheet asks.
     static func configure(screen: String, model: AppModel) {
@@ -30,14 +33,15 @@ enum FeedbackPreview {
         services.presentMail = { _, _ in true }
         services.captureScreen = { _ in guestPicture() }
         services.runningSeconds = { _ in 2520 }
-        services.previewOpensAtLaunch = opensSheet(screen)
+        services.previewOpensAtLaunch = opensSheet(screen) && !overBoot(screen)
+        services.previewOpensOverBoot = overBoot(screen)
         services.previewPrepare = { feedback in await prepare(screen: screen, feedback: feedback) }
         services.previewKeepsConfirmation = screen == "feedback-sent"
         model.feedbackServices = services
         guard opensSheet(screen) else { return }
         if overHome(screen) {
             model.phase = .home
-        } else if screen == "feedback-boot" {
+        } else if overBoot(screen) {
             // The slow start's own screen stays beneath; AppEntry set it.
         } else {
             model.phase = .running(.normal)
@@ -53,11 +57,18 @@ enum FeedbackPreview {
         switch screen {
         case "feedback", "feedback-home", "feedback-nomail":
             break
-        case "feedback-filled", "feedback-details", "feedback-discard":
+        case "feedback-filled", "feedback-details", "feedback-discard",
+             "feedback-boot-filled", "feedback-boot-details", "feedback-boot-finished":
             feedback.form.problem = words.problem
             feedback.form.details = words.details
             await attachAll(feedback, report: 8.6, photo: 2.4)
-            if screen == "feedback-details" { feedback.showsInformation = true }
+            if screen == "feedback-details" || screen == "feedback-boot-details" { feedback.showsInformation = true }
+            if screen == "feedback-boot-finished" {
+                // The start finishes while the person writes: the sheet and the
+                // draft stay up over the session that follows.
+                try? await Task.sleep(for: .milliseconds(900))
+                feedback.app.finishBoot(.normal)
+            }
             if screen == "feedback-discard" {
                 try? await Task.sleep(for: .milliseconds(500))
                 feedback.confirmingDiscard = true
