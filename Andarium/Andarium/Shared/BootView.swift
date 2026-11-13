@@ -10,12 +10,13 @@ import SwiftUI
 /// update, recovery and restart are variants of the same screen. A launch
 /// has one run, so there is no Cancel.
 ///
-/// A start that has run for three minutes (`SlowStart`) without reaching
-/// Android puts a notice above the steps, which it never covers: what the
-/// screen is waiting for, the step and the time, Stop and, where Send
-/// feedback is compiled in, Send feedback. The boot goes on behind it, and
-/// it goes away when the boot completes. There is no way to dismiss it: it
-/// takes no room that the steps need.
+/// A start that has run for three minutes (`SlowStart`; eight for a first
+/// start and the first after an update) without reaching Android puts a notice
+/// above the steps: what the screen is waiting for, the step and the time, Stop
+/// (which asks first) and, where Send feedback is compiled in, Send feedback.
+/// The boot goes on behind it, and it goes away when the boot completes. There
+/// is no way to dismiss it. It sits above the steps and pushes them down;
+/// where the screen is short, the screen scrolls.
 ///
 /// A normal boot lays the guest's display out from the first frame and shows
 /// it dimmed behind this screen, so the guest is seen starting. The dim is a
@@ -52,6 +53,9 @@ struct BootView: View {
                         .frame(minHeight: proxy.size.height, alignment: .center)
                 }
                 .scrollBounceBehavior(.basedOnSize)
+                #if !APP_STORE
+                .defaultScrollAnchor(model.previewBootScrollsToBottom ? .bottom : nil)
+                #endif
             }
         }
         .onCardHalf(.boot)
@@ -68,14 +72,12 @@ struct BootView: View {
         }
         .onChange(of: model.slowStart.showing) { _, showing in
             guard showing else { return }
-            AccessibilityNotification.Announcement(Self.slowTitle).post()
+            Self.announce(Self.slowTitle(longByNature: model.slowStart.longByNature))
         }
-        #if FEEDBACK_MAIL
-        .sendFeedbackSheet(model, opensInPreview: false)
-        // A sheet cannot outlive the screen it was opened over: the boot
-        // that ends (or restarts) takes it, and its draft, away.
-        .onDisappear { model.feedbackSheetOpen = false }
-        #endif
+        .onChange(of: model.slowStart.stopping) { _, stopping in
+            guard stopping else { return }
+            Self.announce(String(localized: "Stopping\u{2026}"))
+        }
         .task(id: kind) {
             guard frozen == nil else { return }
             if model.driver != nil {
@@ -142,7 +144,8 @@ struct BootView: View {
     private func statusLine(frozen: Bool) -> some View {
         HStack(spacing: 8) {
             PulsingDot()
-            Text(Self.status(kind))
+            // Stop was chosen: the line says what is happening now.
+            Text(model.slowStart.stopping ? String(localized: "Stopping\u{2026}") : Self.status(kind))
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Color.accentColor)
             Spacer()
@@ -224,7 +227,20 @@ struct BootView: View {
 
     // MARK: Slow start
 
-    static var slowTitle: String { String(localized: "Starting is taking longer than usual") }
+    /// The notice's title. A first start, and the first start after an update,
+    /// have no usual to be slower than.
+    static func slowTitle(longByNature: Bool) -> String {
+        longByNature
+            ? String(localized: "Starting is taking a long time")
+            : String(localized: "Starting is taking longer than usual")
+    }
+
+    /// Spoken at once, not after VoiceOver's own speech.
+    private static func announce(_ text: String) {
+        var announcement = AttributedString(text)
+        announcement.accessibilitySpeechAnnouncementPriority = .high
+        AccessibilityNotification.Announcement(announcement).post()
+    }
 
     /// "3 minutes, 12 seconds" in the person's language, for VoiceOver.
     static func spoken(_ seconds: Int) -> String {
@@ -233,10 +249,9 @@ struct BootView: View {
 
     private func slowNotice(steps: [Step], current: Int) -> some View {
         let stepTitle = steps[min(max(current, 0), steps.count - 1)].title
-        let seconds = model.frozenBootStage != nil ? model.frozenElapsed : model.bootElapsedSeconds()
         return VStack(alignment: .leading, spacing: 12) {
             Label {
-                Text(Self.slowTitle)
+                Text(Self.slowTitle(longByNature: model.slowStart.longByNature))
                     .font(.headline)
                     .fixedSize(horizontal: false, vertical: true)
             } icon: {
@@ -244,15 +259,19 @@ struct BootView: View {
                     .foregroundStyle(Color.accentColor)
             }
             .accessibilityAddTraits(.isHeader)
-            Text("The virtual machine is still starting. You can keep waiting, or stop it. To start it again after stopping, close Andarium and open it again.")
+            Text("The virtual machine is still starting. You can keep waiting, or stop it. To start it again after stopping, close Andarium in the App Switcher and open it again.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text(verbatim: "\(stepTitle) \u{00B7} \(Formats.elapsed(seconds))")
-                .font(.subheadline.weight(.semibold))
-                .monospacedDigit()
-                .foregroundStyle(Color.accentColor)
-                .accessibilityLabel(Text(verbatim: "\(stepTitle), \(Self.spoken(seconds))"))
+            // The time moves with the clock, as the status line's does.
+            TimelineView(.periodic(from: startedAt, by: 1)) { _ in
+                let seconds = model.frozenBootStage != nil ? model.frozenElapsed : model.bootElapsedSeconds()
+                Text(verbatim: "\(stepTitle) \u{00B7} \(Formats.elapsed(seconds))")
+                    .font(.subheadline.weight(.semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityLabel(Text(verbatim: "\(stepTitle), \(Self.spoken(seconds))"))
+            }
             ViewThatFits(in: .horizontal) {
                 slowButtons(lineLimit: 1, axis: .horizontal)
                 slowButtons(lineLimit: nil, axis: .vertical)
@@ -265,32 +284,44 @@ struct BootView: View {
         .accessibilityIdentifier("boot-slow-notice")
     }
 
-    /// Side by side only where both labels fit at their own width (`fixedSize`
-    /// makes `ViewThatFits` see a label that would otherwise truncate); stacked,
-    /// a label wraps.
+    /// Side by side, at one width (`EqualWidthRow`), only where both labels fit
+    /// at their own; stacked, a label wraps. Stop's label is as wide as its
+    /// longer state, so that choosing it moves nothing.
     @ViewBuilder
     private func slowButtons(lineLimit: Int?, axis: Axis) -> some View {
-        let layout = axis == .horizontal ? AnyLayout(HStackLayout(spacing: 12)) : AnyLayout(VStackLayout(spacing: 10))
+        let layout = axis == .horizontal ? AnyLayout(EqualWidthRow(spacing: 12)) : AnyLayout(VStackLayout(spacing: 10))
         layout {
             Button(role: .destructive) {
-                model.stopStart()
+                model.askToStop()
             } label: {
-                Text(model.slowStart.stopping ? "Stopping\u{2026}" : "Stop")
-                    .lineLimit(lineLimit)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: axis == .horizontal, vertical: true)
-                    .frame(maxWidth: .infinity, minHeight: 32)
+                ZStack {
+                    stopLabel(stopping: true, lineLimit: lineLimit, axis: axis).hidden()
+                    stopLabel(stopping: model.slowStart.stopping, lineLimit: lineLimit, axis: axis)
+                }
+                .frame(maxWidth: .infinity, minHeight: 32)
             }
             .buttonStyle(.bordered)
+            .tint(.red)
             .controlSize(.large)
             .disabled(model.slowStart.stopping)
             .accessibilityIdentifier("boot-stop")
+            .confirmationDialog(
+                "Stop the virtual machine?",
+                isPresented: Binding(get: { model.confirmingStop }, set: { model.confirmingStop = $0 }),
+                titleVisibility: .visible
+            ) {
+                Button("Stop", role: .destructive) { model.stopStart() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("To start it again, close Andarium in the App Switcher and open it again.")
+            }
             #if FEEDBACK_MAIL
             if model.feedbackAddress != nil {
                 Button {
-                    model.feedbackSheetOpen = true
+                    model.feedbackFromBoot = true
                 } label: {
                     Text("Send feedback", tableName: "Feedback")
+                        .fontWeight(.semibold)
                         .lineLimit(lineLimit)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: axis == .horizontal, vertical: true)
@@ -301,6 +332,23 @@ struct BootView: View {
                 .accessibilityIdentifier("boot-send-feedback")
             }
             #endif
+        }
+    }
+
+    /// Stop's label in one of its two states: "Stopping\u{2026}" has a spinner.
+    @ViewBuilder
+    private func stopLabel(stopping: Bool, lineLimit: Int?, axis: Axis) -> some View {
+        HStack(spacing: 8) {
+            if stopping {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityHidden(true)
+            }
+            Text(stopping ? "Stopping\u{2026}" : "Stop")
+                .fontWeight(.semibold)
+                .lineLimit(lineLimit)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: axis == .horizontal, vertical: true)
         }
     }
 
@@ -410,6 +458,31 @@ struct BootView: View {
             return [system, kernel,
                     Step(title: storage, detail: growing ?? used, seconds: growing == nil ? 0.6 : 1.2),
                     Step(title: startup, detail: String(localized: "Starts services"), seconds: 1.8)]
+        }
+    }
+}
+
+/// Buttons side by side at one width: the ideal width of the widest label, so
+/// that `ViewThatFits` stacks them as soon as either needs more than half of
+/// the row, and a label that changes does not move the other.
+private struct EqualWidthRow: Layout {
+    let spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let ideals = subviews.map { $0.sizeThatFits(.unspecified) }
+        let cell = ideals.map(\.width).max() ?? 0
+        let ideal = cell * CGFloat(subviews.count) + spacing * CGFloat(max(subviews.count - 1, 0))
+        return CGSize(width: proposal.width ?? ideal, height: ideals.map(\.height).max() ?? 0)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard !subviews.isEmpty else { return }
+        let gaps = spacing * CGFloat(subviews.count - 1)
+        let cell = (bounds.width - gaps) / CGFloat(subviews.count)
+        for (index, subview) in subviews.enumerated() {
+            subview.place(
+                at: CGPoint(x: bounds.minX + CGFloat(index) * (cell + spacing), y: bounds.minY),
+                proposal: ProposedViewSize(width: cell, height: bounds.height))
         }
     }
 }

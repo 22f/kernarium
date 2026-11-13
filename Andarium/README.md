@@ -431,19 +431,31 @@ shutdown, a host stop or a cleanup that fails keeps the failure screen and
 requires reopening Andarium.
 
 - **Slow start.** A start still on the boot screen after three minutes
-  (`SlowStart`, by a clock a test moves) puts a notice above the steps: the
-  step under way and the time, Stop and, where Send feedback is compiled in,
-  Send feedback. The boot goes on behind it and the notice goes with the boot;
-  it has no dismissal and takes no room the steps need. The time is the
-  start's, kept through the restarts of a start that had not finished. Stop
-  asks the runtime to end the run (`RuntimeDriver.stopGuest`); a stopped
-  Android guest cannot be released, so the end is the end screen with its own
-  wording (`RunEnd.stoppedByUser`), not Home, and a stop before the runtime
-  runs ends at Home. Send feedback opens the sheet as Home does, where a bug
-  report and a screenshot need a running guest, and the information block
-  gains a Boot line with the step, the time and the restarts. A process that
-  ended in the boot leaves the runtime's session record with the console's
-  last output, which the next bug report carries as the previous session's
+  (`SlowStart`; eight for a guest's first start and the first start after an
+  update, which also get a title that does not say the start is slower than
+  usual) puts a notice above the steps: the step under way and the time, Stop
+  and, where Send feedback is compiled in, Send feedback. The boot goes on
+  behind it and the notice goes with the boot; it has no dismissal. It sits
+  above the steps and pushes them down; where the screen is short, the screen
+  scrolls. The time is the start's, on the runtime's pause-aware run clock
+  (`GuestRunClock`, which stops while the guest is held and while the
+  application is away before the runtime runs) and kept through the restarts
+  of a start that had not finished. Stop asks first (a dialog), then the
+  application states the intent at once and the runtime's stop is requested
+  off the main actor, on the queue of the runtime's other waiting calls, again
+  every second until the run has ended (`RunStop`: the runtime drops a stop
+  that arrives before its run begins). A stopped Android guest cannot be
+  released, so the end is the end screen with its own wording
+  (`RunEnd.stoppedByUser`), not Home, and a stop before the runtime runs ends
+  at Home. A start the person stopped leaves its preparation to end: the
+  guest's files stay its own until then, and a start asked for since, Erase,
+  Create, the update's Restore and a snapshot rename wait for it. Send
+  feedback opens the sheet the root presents (`feedbackFromBoot`), which stays
+  up with its draft when the boot completes or the run ends; a bug report and
+  a screenshot need a running guest, and the information block gains a Boot
+  line with the step, the time and the restarts. A process that ended in the
+  boot leaves the runtime's session record with the console's last output of
+  that boot, which the next bug report carries as the previous session's
   record.
 - **Recovery the guest asked for.** `init: starting service 'recovery'` on the
   console (`ConsoleScanner.recoveryStartedCount`) makes the session a recovery

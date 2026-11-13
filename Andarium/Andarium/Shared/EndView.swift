@@ -20,7 +20,7 @@ struct EndView: View {
             Text(stopped ? "You stopped the virtual machine" : "The virtual machine stopped unexpectedly")
                 .font(.title2.weight(.bold))
                 .multilineTextAlignment(.center)
-            Text("To start it again, close Andarium and open it again.")
+            Text("To start it again, close Andarium in the App Switcher and open it again.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

@@ -449,10 +449,17 @@ an iPhone.
 `SlowStartScreenTests` check the boot screen's slow-start notice by a clock
 the test moves, so no test waits three minutes: when the notice comes (also for
 a start whose boot line never comes, the case it is for), what Stop asks of the
-runtime and the stopped end screen's words, the controls with and without the
-feedback receiver, the Boot line of the information block, and that the notice
-goes with the boot. `GuestRecoveryTests` check that a recovery the guest asked
-for is a recovery session and its reboot a normal one.
+runtime (after the dialog's answer) and the stopped end screen's words, the
+later notice and plain title of a first start, the controls with and without
+the feedback receiver, that the sheet the notice opens outlives the boot, the
+Boot line of the information block, and that the notice goes with the boot.
+`StartHandoverTests` run the real runtime object with the files' preparation
+held, and check that a stopped start's preparation is the only one at a time,
+that what changes the files waits for it, that an old boot's console cannot
+mark the next boot, that the notice's clock stands still while the application
+is away, and that the stop is made off the main actor until the run ends.
+`GuestRecoveryTests` check that a recovery the guest asked for is a recovery
+session and its reboot a normal one.
 
 `AndariumUITests` is the UI-test target of the same scheme
 (`xcodebuild test -scheme Andarium -only-testing:AndariumUITests`, with

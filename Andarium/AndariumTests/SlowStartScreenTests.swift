@@ -139,7 +139,7 @@ struct SlowStartScreenTests {
         fixture.model.runEnded(RunEnd(result: -5, stoppedByUser: true), uptimeSeconds: 181)
         #expect(fixture.model.phase == .failed)
         #expect(fixture.model.runEnd.stoppedByUser && !fixture.model.runEnd.poweredOff)
-        #expect(fixture.model.runReport.hasSuffix("Guest ended: it was stopped from the boot screen after 3:01"))
+        #expect(fixture.model.runReport.hasSuffix("Virtual machine ended: it was stopped from the boot screen after 3:01"))
         #expect(fixture.model.slowStart == SlowStart())
     }
 
@@ -253,12 +253,96 @@ struct SlowStartScreenTests {
             Issue.record("Stop was not found: is application accessibility on in this Simulator?")
             return
         }
+        // Stop asks first: nothing reaches the runtime until the dialog's answer.
         #expect(stop.accessibilityActivate())
-        #expect(fixture.driver.guestStops == 1)
+        #expect(fixture.model.confirmingStop)
+        #expect(fixture.driver.guestStops == 0)
+        // Cancel leaves the start as it was.
+        fixture.model.confirmingStop = false
+        #expect(fixture.driver.guestStops == 0 && !fixture.model.slowStart.stopping)
+        // The answer Stop reaches the runtime, once.
+        fixture.model.stopStart()
+        #expect(fixture.driver.guestStops == 1 && !fixture.model.confirmingStop)
         // Chosen, it says so and takes no second tap.
         let (_, after) = try await screen(fixture, in: lease, finding: ["Stopping\u{2026}"])
         #expect(after["Stopping\u{2026}"] != nil)
-        #expect(fixture.driver.guestStops == 1)
+        fixture.model.askToStop()
+        #expect(!fixture.model.confirmingStop && fixture.driver.guestStops == 1)
+    }
+
+    @Test func theDialogGoesWithTheStartItWasAskedFor() {
+        let fixture = fixture()
+        // Nothing asks outside a start, or before the notice's start has begun.
+        fixture.model.askToStop()
+        #expect(!fixture.model.confirmingStop)
+        begun(fixture)
+        fixture.clock.advance(185)
+        fixture.model.updateSlowStart()
+        fixture.model.askToStop()
+        #expect(fixture.model.confirmingStop)
+        // The boot completes under it: the dialog is gone with the notice.
+        fixture.model.finishBoot(.normal)
+        #expect(!fixture.model.confirmingStop && fixture.driver.guestStops == 0)
+    }
+
+    /// The notice's time is a clock of its own on the screen: it moves with
+    /// the model's clock without anything else changing.
+    @Test func theNoticeCountsOnWhileItIsOnScreen() async throws {
+        let fixture = fixture()
+        begun(fixture)
+        fixture.clock.advance(185)
+        fixture.model.updateSlowStart()
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let controller = UIHostingController(rootView: BootView(kind: .normal).environment(fixture.model))
+        lease.window.rootViewController = controller
+        controller.view.layoutIfNeeded()
+        func label(containing part: String, in node: NSObject, depth: Int = 0) -> String? {
+            if let text = node.accessibilityLabel, text.contains(part) { return text }
+            guard depth < 64 else { return nil }
+            var children = (node.accessibilityElements ?? []).compactMap { $0 as? NSObject }
+            if let view = node as? UIView { children += view.subviews }
+            for child in children {
+                if let found = label(containing: part, in: child, depth: depth + 1) { return found }
+            }
+            return nil
+        }
+        func settle(_ part: String) async throws -> Bool {
+            let deadline = ContinuousClock.now + .seconds(5)
+            while ContinuousClock.now < deadline {
+                if label(containing: part, in: controller.view) != nil { return true }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            return false
+        }
+        guard try await settle("3 minutes, 5 seconds") else {
+            Issue.record("the notice's time was not found: is application accessibility on in this Simulator?")
+            return
+        }
+        fixture.clock.advance(5)
+        #expect(try await settle("3 minutes, 10 seconds"), "the notice's time stayed where it was")
+    }
+
+    // MARK: A first start
+
+    @Test func aFirstStartAndTheFirstAfterAnUpdateGetTheLaterNoticeAndAPlainTitle() {
+        for plan in [StartPlan.firstStart, .update(from: "r1", to: "r2")] {
+            let fixture = fixture()
+            fixture.model.plan = plan
+            fixture.driver.plan = plan
+            fixture.model.start(.normal)
+            #expect(fixture.model.slowStart.longByNature)
+            fixture.clock.advance(300)
+            #expect(!fixture.model.updateSlowStart(), "\(plan): the ordinary threshold applied")
+            fixture.clock.advance(180)
+            #expect(fixture.model.updateSlowStart() && fixture.model.slowStart.showing, "\(plan): no notice at 480 s")
+        }
+        #expect(BootView.slowTitle(longByNature: true) == "Starting is taking a long time")
+        #expect(BootView.slowTitle(longByNature: false) == "Starting is taking longer than usual")
+        // Recovery and the rest keep the ordinary three minutes.
+        let fixture = fixture()
+        fixture.model.start(.recovery)
+        #expect(!fixture.model.slowStart.longByNature)
     }
 
     @Test func aBootBeforeThreeMinutesShowsNoNotice() async throws {
@@ -293,8 +377,50 @@ struct SlowStartScreenTests {
         }
         #expect(found["Stop"] != nil)
         #expect(feedback.accessibilityActivate())
-        #expect(fixture.model.feedbackSheetOpen)
-        fixture.model.feedbackSheetOpen = false
+        // The root's own sheet, not Home's or Settings': it outlives the boot.
+        #expect(fixture.model.feedbackFromBoot && !fixture.model.feedbackSheetOpen)
+        fixture.model.feedbackFromBoot = false
+    }
+
+    /// The sheet the notice opens belongs to the root, over every phase: the
+    /// boot that completes, or a run that ends, leaves it open with the draft.
+    @Test(arguments: ["completes", "ends"]) func theSheetOutlivesTheBoot(how: String) async throws {
+        let fixture = fixture()
+        var services = SendFeedbackServices()
+        services.address = { "feedback@example.com" }
+        services.canSendMail = { true }
+        fixture.model.feedbackServices = services
+        fixture.model.phase = .booting(.normal)
+        fixture.model.slowStart.begin(at: fixture.clock.now)
+        fixture.clock.advance(185)
+        fixture.model.updateSlowStart()
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let host = AndariumHostingController(
+            rootView: RootView(entry: AppEntry(overrides: LaunchOverrides())).environment(fixture.model),
+            model: fixture.model)
+        lease.window.rootViewController = host
+        host.view.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(300))
+        fixture.model.feedbackFromBoot = true
+        func presented() async throws -> UIViewController? {
+            let deadline = ContinuousClock.now + .seconds(8)
+            while host.presentedViewController == nil, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            return host.presentedViewController
+        }
+        let sheet = try #require(try await presented(), "the sheet did not open over the boot screen")
+        if how == "completes" {
+            fixture.model.finishBoot(.normal)
+        } else {
+            fixture.model.runEnded(RunEnd(result: -11), uptimeSeconds: 190)
+        }
+        try await Task.sleep(for: .milliseconds(2500))
+        #expect(fixture.model.feedbackFromBoot, "the sheet was closed when the boot \(how)")
+        #expect(host.presentedViewController === sheet && sheet.view.window != nil, "the sheet was taken away")
+        fixture.model.feedbackFromBoot = false
+        host.dismiss(animated: false)
     }
 
     @Test func withoutAReceiverTheNoticeHasStopAlone() async throws {

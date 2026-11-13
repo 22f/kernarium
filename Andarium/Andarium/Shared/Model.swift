@@ -90,7 +90,10 @@ final class AppModel {
             if lifecycle.phase != oldValue.phase {
                 // The notice belongs to the boot screen: any other screen has
                 // no start under way to call slow.
-                if case .booting = lifecycle.phase {} else { slowStart.finish() }
+                if case .booting = lifecycle.phase {} else {
+                    slowStart.finish()
+                    confirmingStop = false
+                }
                 refreshStatistics()
                 refreshGraphicsNotice()
                 showThermalNoticeIfWaiting()
@@ -417,6 +420,10 @@ final class AppModel {
     @ObservationIgnored var feedbackServices = SendFeedbackServices()
     /// The Send feedback sheet is open, over Home or over the session's Settings.
     var feedbackSheetOpen = false
+    /// The Send feedback sheet the boot screen's notice opened is open. The
+    /// root presents it, so it stays up, with what the person typed, when the
+    /// boot ends or the run does.
+    var feedbackFromBoot = false
     #endif
     #if FOLLOW_X
     /// The handle Follow developer on X opens, from Info.plist, which only a
@@ -443,6 +450,13 @@ final class AppModel {
     /// When the start under way began and whether the boot screen says it is
     /// slow (`SlowStart`).
     var slowStart = SlowStart()
+    /// The notice's Stop asked first (`askToStop`): the dialog is up.
+    var confirmingStop = false
+    #if !APP_STORE
+    /// The Simulator preview's boot screen starts scrolled to its bottom, where
+    /// the notice's buttons are at the largest text size.
+    @ObservationIgnored var previewBootScrollsToBottom = false
+    #endif
     /// The time the boot screen counts a start by, in seconds: a monotonic
     /// reading that does not run while the guest is held (a background span, a
     /// pause for space). A runtime supplies its pause-aware clock; a test
@@ -1634,10 +1648,18 @@ final class AppModel {
         slowStart.elapsedSeconds(at: clock())
     }
 
-    /// The notice's Stop: ends the start under way. The runtime ends the run
-    /// and `runEnded` follows; the notice says Stopping meanwhile. The
+    /// The notice's Stop button: asks first, because a stop ends the virtual
+    /// machine for this launch of the app (`stopStart` does it on the answer).
+    func askToStop() {
+        guard case .booting = phase, slowStart.began != nil, !slowStart.stopping else { return }
+        confirmingStop = true
+    }
+
+    /// Ends the start under way: the answer to the dialog. The runtime ends
+    /// the run and `runEnded` follows; the notice says Stopping meanwhile. The
     /// preview, with no runtime, ends it at once as a host stop does.
     func stopStart() {
+        confirmingStop = false
         guard case .booting = phase, slowStart.requestStop() else { return }
         if let driver {
             driver.stopGuest()

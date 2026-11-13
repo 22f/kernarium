@@ -159,7 +159,7 @@ public struct RunEnd: Equatable, Sendable {
 
     public var phase: Phase { poweredOff ? .home : .failed }
 
-    /// The lines the failure screen offers to copy.
+    /// The lines the failure screen offers to copy, in the person's language.
     public func report(
         appVersion: String, system: SystemInfo, guest: Guest?, uptimeSeconds: Int?
     ) -> String {
@@ -168,18 +168,19 @@ public struct RunEnd: Equatable, Sendable {
             "\(system.kernel) · \(Formats.vcpus(guest?.cores ?? 0)) · \(Formats.size(mib: guest?.memoryMiB ?? 0))",
         ]
         let reason = if let startFailure {
-            "it could not start (\(startFailure))"
+            String(localized: "it could not start (\(startFailure))", bundle: .module)
         } else if stoppedByUser {
-            "it was stopped from the boot screen"
+            String(localized: "it was stopped from the boot screen", bundle: .module)
         } else if restartedInALoop {
-            "the guest kept restarting"
+            String(localized: "the virtual machine kept restarting", bundle: .module)
         } else {
-            "runtime result \(result)"
+            String(localized: "runtime result \(Int(result))", bundle: .module)
         }
         if let uptimeSeconds {
-            lines.append("Guest ended: \(reason) after \(Formats.elapsed(uptimeSeconds))")
+            lines.append(String(
+                localized: "Virtual machine ended: \(reason) after \(Formats.elapsed(uptimeSeconds))", bundle: .module))
         } else {
-            lines.append("Guest ended: \(reason)")
+            lines.append(String(localized: "Virtual machine ended: \(reason)", bundle: .module))
         }
         return lines.joined(separator: "\n")
     }

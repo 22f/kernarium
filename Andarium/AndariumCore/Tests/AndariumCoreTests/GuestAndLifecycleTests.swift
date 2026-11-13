@@ -312,7 +312,7 @@ struct LifecycleTests {
         let guest = Guest(cores: 2, memoryMiB: 1536, capacityGiB: 8)
         let report = RunEnd(result: -5, stoppedByUser: true)
             .report(appVersion: "1.0 (1)", system: system, guest: guest, uptimeSeconds: 197)
-        #expect(report.hasSuffix("Guest ended: it was stopped from the boot screen after 3:17"))
+        #expect(report.hasSuffix("Virtual machine ended: it was stopped from the boot screen after 3:17"))
     }
 
     @Test func cleanPowerOffAllowsAnotherStartAndFailureRequiresRelaunch() {
@@ -347,7 +347,7 @@ struct LifecycleTests {
         #expect(report == """
             Andarium 1.0 (1) · 20261031-los24-r4
             Linux 6.18.54 · 2 vCPUs · 1.5 GiB
-            Guest ended: runtime result -5 after 1:14
+            Virtual machine ended: runtime result -5 after 1:14
             """)
     }
 }

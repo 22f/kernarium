@@ -696,6 +696,52 @@
         }
       }
     },
+    "it could not start (%@)" : {
+      "comment" : "A clause of the line the end screen offers to copy, after \"Virtual machine ended:\". %@ is the reason, in English.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "起動できませんでした（%@）"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法启动（%@）"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法啟動（%@）"
+          }
+        }
+      }
+    },
+    "it was stopped from the boot screen" : {
+      "comment" : "A clause of the line the end screen offers to copy, after \"Virtual machine ended:\".",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "起動画面から停止されました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已在启动界面停止"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已在啟動畫面停止"
+          }
+        }
+      }
+    },
     "list.join" : {
       "comment" : "Joins two parts of a spoken list: a comma and a space in English, the language's own comma in Chinese and Japanese.",
       "localizations" : {
@@ -743,6 +789,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "需要A14或更新的晶片"
+          }
+        }
+      }
+    },
+    "runtime result %lld" : {
+      "comment" : "A clause of the line the end screen offers to copy, after \"Virtual machine ended:\". %lld is the number the runtime returned.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ランタイムの結果%lld"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "运行时结果%lld"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "執行階段結果%lld"
           }
         }
       }
@@ -816,6 +885,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "虛擬機器的可用空間不足，無法安裝此應用程式（需要%@，可用%@）。請在虛擬機器中釋出一些空間，或使用「調整大小」為其增加儲存空間。"
+          }
+        }
+      }
+    },
+    "the virtual machine kept restarting" : {
+      "comment" : "A clause of the line the end screen offers to copy, after \"Virtual machine ended:\".",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンが再起動を繰り返しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机一直在重新启动"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器一直在重新啟動"
           }
         }
       }
@@ -992,6 +1084,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此虛擬機器無法啟動"
+          }
+        }
+      }
+    },
+    "Virtual machine ended: %@" : {
+      "comment" : "The line of the report the end screen offers to copy that says why the run ended. %@ is a clause such as \"it was stopped from the boot screen\".",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンが終了しました：%@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机已结束：%@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器已結束：%@"
+          }
+        }
+      }
+    },
+    "Virtual machine ended: %@ after %@" : {
+      "comment" : "The same line when the run's length is known. %1$@ is the clause, %2$@ the time the run lasted, such as 3:17.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンが終了しました：%1$@（%2$@経過）"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机已结束：%1$@，已运行%2$@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器已結束：%1$@，已執行%2$@"
           }
         }
       }
