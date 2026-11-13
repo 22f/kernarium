@@ -14,9 +14,11 @@
 #include <mutex>
 #endif
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <poll.h>
@@ -107,9 +109,65 @@ void adoptReceivedDescriptors(
         describeDescriptorCeiling() + ")";
 }
 
+/* The time left to a frame whose first byte has arrived. */
+class FrameClock final {
+public:
+    explicit FrameClock(const FrameBound* bound) noexcept : bound_(bound) {}
+
+    void received() noexcept
+    {
+        if (bound_ == nullptr || running_)
+            return;
+        running_ = true;
+        deadline_ = now() + bound_->allowance;
+    }
+
+    /* `timeout`, a poll's, cut so that the poll returns by the deadline and,
+     * with a deadline running, at least every stop interval: the clock is
+     * read again then, however it is kept. */
+    [[nodiscard]] int pollTimeout(int timeout) const noexcept
+    {
+        if (!running_)
+            return timeout;
+        const auto left = std::chrono::ceil<std::chrono::milliseconds>(
+            deadline_ - now()).count();
+        const auto bounded = static_cast<int>(std::clamp<long long>(
+            left, 0, stopPollTimeoutMilliseconds));
+        return timeout < 0 ? bounded : std::min(timeout, bounded);
+    }
+
+    /* Called when a poll saw no byte: a byte that is there is read, whatever
+     * the time, so a late peer is not mistaken for a silent one. */
+    void checkExpired() const
+    {
+        if (!running_ || now() < deadline_)
+            return;
+        throw VhostUserTimeout(
+            "vhost-user frame incomplete: its remaining bytes did not arrive "
+            "within " +
+            std::to_string(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    bound_->allowance).count()) +
+            " ms of its first byte");
+    }
+
+private:
+    [[nodiscard]] std::chrono::steady_clock::time_point now() const noexcept
+    {
+        return bound_->now != nullptr
+            ? bound_->now()
+            : std::chrono::steady_clock::now();
+    }
+
+    const FrameBound* bound_;
+    bool running_ {};
+    std::chrono::steady_clock::time_point deadline_;
+};
+
 [[nodiscard]] bool waitForInput(
     int descriptor,
-    const std::atomic_bool* stopRequested)
+    const std::atomic_bool* stopRequested,
+    const FrameClock& frame)
 {
     for (;;) {
         if (stopRequested != nullptr &&
@@ -132,7 +190,8 @@ void adoptReceivedDescriptors(
         const int result = ::poll(
             &input,
             1,
-            stopRequested == nullptr ? -1 : stopPollTimeoutMilliseconds);
+            frame.pollTimeout(
+                stopRequested == nullptr ? -1 : stopPollTimeoutMilliseconds));
         if (result < 0) {
             if (errno == EINTR)
                 continue;
@@ -140,8 +199,10 @@ void adoptReceivedDescriptors(
                 "vhost-user poll failed: " +
                 std::string(std::strerror(errno)));
         }
-        if (result == 0)
+        if (result == 0) {
+            frame.checkExpired();
             continue;
+        }
         if ((input.revents & POLLNVAL) != 0)
             throw std::runtime_error("invalid vhost-user descriptor");
         return true;
@@ -153,11 +214,12 @@ bool receiveExact(
     void* destination,
     std::size_t length,
     ReceivedDescriptors& descriptors,
-    const std::atomic_bool* stopRequested)
+    const std::atomic_bool* stopRequested,
+    FrameClock& frame)
 {
     auto* bytes = static_cast<std::uint8_t*>(destination);
     while (length != 0) {
-        if (!waitForInput(descriptor, stopRequested))
+        if (!waitForInput(descriptor, stopRequested, frame))
             return false;
         alignas(cmsghdr) std::array<
             std::uint8_t,
@@ -190,6 +252,7 @@ bool receiveExact(
                 std::string(std::strerror(errno)));
         }
         adoptReceivedDescriptors(header, descriptors);
+        frame.received();
         bytes += count;
         length -= static_cast<std::size_t>(count);
     }
@@ -335,9 +398,11 @@ std::uint64_t raiseDescriptorCeiling() noexcept
 bool receiveVhostUserMessage(
     int socket,
     VhostUserMessage& message,
-    const std::atomic_bool* stopRequested)
+    const std::atomic_bool* stopRequested,
+    const FrameBound* bound)
 {
     message = VhostUserMessage {};
+    FrameClock frame {bound};
     // Every stream fragment uses recvmsg rather than falling back to recv.
     // SCM_RIGHTS may accompany any byte in a fragmented frame, and the kernel
     // installs those descriptors as soon as that fragment is consumed.
@@ -346,7 +411,8 @@ bool receiveVhostUserMessage(
             &message.header,
             sizeof(message.header),
             message.descriptors,
-            stopRequested)) {
+            stopRequested,
+            frame)) {
         return false;
     }
     if ((message.header.flags & protocol::vhostUserVersionMask) !=
@@ -362,7 +428,8 @@ bool receiveVhostUserMessage(
         message.payload.data(),
         message.payload.size(),
         message.descriptors,
-        stopRequested);
+        stopRequested,
+        frame);
 }
 
 bool writeFailureMeansPeerClosed(int error) noexcept

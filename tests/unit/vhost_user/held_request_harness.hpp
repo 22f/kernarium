@@ -348,7 +348,7 @@ public:
     TestQueue(const SplitRing& ring, std::uint32_t index, Layout layout)
         : ring_(ring), index_(index), layout_(layout) {}
 
-    void start(int socket, bool enable, bool withKickPipe)
+    void start(int socket, bool enable, bool withKickPipe, bool withCallPipe = true)
     {
         const protocol::VringState size {.index = index_, .value = queueDepth};
         sendRequestAndReadAcknowledgement(
@@ -365,23 +365,26 @@ public:
             socket, protocol::VhostRequest::setVringAddr, bytesOf(address));
         if (enable)
             this->enable(socket, true);
-        attachChannels(socket, withKickPipe);
+        attachChannels(socket, withKickPipe, withCallPipe);
     }
-    /* A new call pipe, and a kick pipe when asked. The pipes the server had
+    /* A new call pipe, unless told not to give one (the server then notifies
+     * the guest in-band), and a kick pipe when asked. The pipes the server had
      * stay open here: closing the write end of its kick pipe would end the
      * connection before the new one reached it. */
-    void attachChannels(int socket, bool withKickPipe)
+    void attachChannels(int socket, bool withKickPipe, bool withCallPipe = true)
     {
         retired_.push_back(std::move(call_));
         retired_.push_back(std::move(kick_));
-        call_ = makePipe();
         const std::uint64_t queue = index_;
-        const std::array callDescriptors {call_.writeEnd.get()};
-        sendRequestAndReadAcknowledgement(
-            socket,
-            protocol::VhostRequest::setVringCall,
-            bytesOf(queue),
-            callDescriptors);
+        if (withCallPipe) {
+            call_ = makePipe();
+            const std::array callDescriptors {call_.writeEnd.get()};
+            sendRequestAndReadAcknowledgement(
+                socket,
+                protocol::VhostRequest::setVringCall,
+                bytesOf(queue),
+                callDescriptors);
+        }
         if (!withKickPipe)
             return;
         kick_ = makePipe();
@@ -596,6 +599,49 @@ public:
         const std::lock_guard lock {mutex_};
         refusals_ = unmaps;
     }
+    /* A reply sent after the server has closed the channel is dropped, as a
+     * front end's is, instead of failing the test. */
+    void tolerateClosedChannel()
+    {
+        const int noSignal = 1;
+        require(::setsockopt(client_, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal)) == 0);
+        const std::lock_guard lock {mutex_};
+        tolerant_ = true;
+    }
+    /* The next reply goes out as its first `bytes` bytes only, and the rest
+     * when finishSplitReply() sends it: a frame that is partly there. */
+    void splitNextReplyAt(std::size_t bytes)
+    {
+        const std::lock_guard lock {mutex_};
+        splitAt_ = bytes;
+    }
+    void finishSplitReply()
+    {
+        std::vector<std::uint8_t> tail;
+        {
+            const std::lock_guard lock {mutex_};
+            tail = std::move(tail_);
+            tail_.clear();
+        }
+        require(!tail.empty(), "no reply is split");
+        (void)::send(client_, tail.data(), tail.size(), 0);
+    }
+    /* How many requests this answerer has replied to, or tried to. */
+    [[nodiscard]] unsigned answered() const
+    {
+        const std::lock_guard lock {mutex_};
+        return answered_;
+    }
+    /* Whether the server has closed its end of the channel, and nothing is
+     * left to read on it. */
+    [[nodiscard]] bool channelEnded(int timeoutMilliseconds = 2000) const
+    {
+        pollfd waiting {.fd = client_, .events = POLLIN};
+        if (::poll(&waiting, 1, timeoutMilliseconds) != 1)
+            return false;
+        char byte {};
+        return ::recv(client_, &byte, 1, MSG_PEEK | MSG_DONTWAIT) == 0;
+    }
     [[nodiscard]] unsigned count(protocol::VhostSlaveRequest request) const
     {
         const std::lock_guard lock {mutex_};
@@ -637,8 +683,29 @@ private:
                 --refusals_;
                 status = 1;
             }
+            const bool plain = !tolerant_ && splitAt_ == 0;
+            const auto splitAt = std::exchange(splitAt_, 0);
             lock.unlock();
-            replyToBackend(client_, message.header, status);
+            if (plain) {
+                replyToBackend(client_, message.header, status);
+            } else {
+                const protocol::VhostHeader reply {
+                    .request = message.header.request,
+                    .flags = protocol::vhostUserVersion | protocol::vhostUserReply,
+                    .size = sizeof(status),
+                };
+                std::array<std::uint8_t, sizeof(reply) + sizeof(status)> bytes {};
+                std::memcpy(bytes.data(), &reply, sizeof(reply));
+                std::memcpy(bytes.data() + sizeof(reply), &status, sizeof(status));
+                const auto first = splitAt == 0 ? bytes.size() : std::min(splitAt, bytes.size());
+                (void)::send(client_, bytes.data(), first, 0);
+                if (first < bytes.size()) {
+                    const std::lock_guard tailLock {mutex_};
+                    tail_.assign(bytes.begin() + static_cast<std::ptrdiff_t>(first), bytes.end());
+                }
+            }
+            const std::lock_guard answeredLock {mutex_};
+            ++answered_;
         }
     }
 
@@ -647,7 +714,11 @@ private:
     std::condition_variable changed_;
     bool held_ {};
     bool stopping_ {};
+    bool tolerant_ {};
+    std::size_t splitAt_ {};
+    std::vector<std::uint8_t> tail_;
     unsigned refusals_ {};
+    unsigned answered_ {};
     std::array<unsigned, 16> counts_ {};
     std::thread thread_;
 };
@@ -671,12 +742,15 @@ struct HeldSession {
  * requests (tags 1, 2, ...) and one event buffer, all of which the device
  * holds (and, with shared memory, has mapped a range for each), and then
  * suspended: both rings disabled. `afterEnd` runs once the connection has
- * ended, with the socket gone. */
+ * ended, with the socket gone. With `releasesBackendEnd` the test keeps no
+ * copy of the server's end of the backend channel, so that the end of the
+ * channel shows on the front end's. */
 inline void withSuspendedGuest(
     HoldingDevice::Options options,
     unsigned postedRequests,
     const std::function<void(const HeldSession&)>& body,
-    const std::function<void(const HeldSession&)>& afterEnd = {})
+    const std::function<void(const HeldSession&)>& afterEnd = {},
+    bool releasesBackendEnd = false)
 {
     auto device = std::make_unique<HoldingDevice>(options);
     auto* recorder = device.get();
@@ -695,6 +769,8 @@ inline void withSuspendedGuest(
     withServerConnection(server, [&](int socket) {
         if (options.sharedMemory) {
             backendChannel = openBackendChannel(socket, negotiatedSharedMemory);
+            if (releasesBackendEnd)
+                backendChannel->descriptors[1].reset();
             answerer.emplace(backendChannel->descriptors[0].get());
         } else {
             negotiateProtocolFeatures(socket, negotiated);

@@ -548,10 +548,19 @@ shared-memory map or unmap, a configuration change, a call), that
 `GET_FEATURES` is answered after the wait and behind every message already
 queued, rather than inside it, since a reset sends unmaps of its own; so a
 device with a shared-memory region may keep its requests too. The wait ends with
-the acknowledgement, the end of the backend-request channel, or a service stop;
-it has no deadline of its own, and a front-end that never answers leaves the
-reset waiting. A reset whose unmap is refused or whose channel has ended also
-drops every range the backend published from the host index. That
+the acknowledgement, the end of the backend-request channel, the end of the main
+socket, which aborts the operation before it writes anything the acknowledgement
+would have released, or a service stop. Once a reply the front-end waits for
+depends on the wait, because a query or a request that asks for an
+acknowledgement is queued behind it or because the connection has ended and a
+reset's unmaps are all that is left, the acknowledgement is due within ten
+seconds (`backendAcknowledgementBound`), as is the rest of a frame of either
+socket from its first byte. Past that the wait fails and the backend-request
+channel is closed: nothing a late acknowledgement would release is written, and
+the reset or the connection ends without the unmaps it can no longer wait for. A
+wait that nothing waits behind, such as a notification a suspended guest has not
+yet read, has no deadline. A reset whose unmap is refused or whose channel has
+ended also drops every range the backend published from the host index. That
 `GET_FEATURES` also retires every ring still disabled, which the guest then
 frees: the transport reads it no more until its next `SET_VRING_KICK` or
 in-band `VRING_KICK`, whereas an enabled ring, and a disabled one no teardown

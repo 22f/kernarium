@@ -6,8 +6,10 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -99,10 +101,31 @@ std::uint64_t raiseDescriptorCeiling() noexcept;
  * the socket and its shutdown for sending. */
 [[nodiscard]] bool writeFailureMeansPeerClosed(int error) noexcept;
 
-// Returns false only for an orderly peer close or a truncated stream.
+/* A wait that stayed unanswered for longer than the time it was given:
+ * thrown by receiveVhostUserMessage() for a frame that stayed incomplete, and
+ * by the server for a backend request its front-end left unacknowledged. */
+class VhostUserTimeout final : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+/* How long the rest of a frame may take once its first byte has arrived. The
+ * time starts at that byte, so a peer with nothing to say is not timed; it is
+ * read from `now`, so that one clock serves a caller and the receive it makes
+ * (a null `now` reads std::chrono::steady_clock). */
+struct FrameBound final {
+    std::chrono::steady_clock::duration allowance {};
+    std::chrono::steady_clock::time_point (*now)() noexcept {};
+};
+
+/* Returns false only for an orderly peer close or a truncated stream. A frame
+ * that stays incomplete beyond `bound` throws VhostUserTimeout; without a
+ * bound the receive waits for the rest of a frame as long as the peer leaves
+ * the socket open and nobody asks it to stop. */
 [[nodiscard]] bool receiveVhostUserMessage(
     int socket,
     VhostUserMessage& message,
-    const std::atomic_bool* stopRequested = nullptr);
+    const std::atomic_bool* stopRequested = nullptr,
+    const FrameBound* bound = nullptr);
 
 } // namespace uml::gpu
