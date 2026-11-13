@@ -617,13 +617,15 @@ final class LiveRuntime: RuntimeDriver {
 
     /// What the runtime's camera state (KernariumRuntime.h) says the host is
     /// doing. A state this application does not know counts as an interruption,
-    /// the safe reading: the notice follows only the multitasking one.
+    /// the safe reading: a notice follows only the multitasking one and a blocked
+    /// guest's open of a camera.
     nonisolated static func cameraCapture(runtimeState state: Int32) -> CameraCapture {
         switch state {
         case Int32(KERNARIUM_RUNTIME_CAMERA_STATE_IDLE): .idle
         case Int32(KERNARIUM_RUNTIME_CAMERA_STATE_STREAMING): .streaming
         case Int32(KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_MULTITASKING): .interruptedByMultitasking
         case Int32(KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_SYSTEM_PRESSURE): .interruptedBySystemPressure
+        case Int32(KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE): .blockedInUse
         default: .interrupted
         }
     }

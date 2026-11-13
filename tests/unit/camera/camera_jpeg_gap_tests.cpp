@@ -3,6 +3,7 @@
 // length field, what happens to the segments around it, and that the scan is
 // left exactly as the platform made it.
 
+#include "camera_tiers.hpp"
 #include "jpeg_gap.hpp"
 #include "require.hpp"
 
@@ -187,6 +188,30 @@ void testFrameSize()
     require(cut && cut->frameWidth == 0 && cut->frameHeight == 0, "a frame header too short to hold a size");
 }
 
+// The largest file the device takes (`maximumJpegBytes`) is the largest that, with the reserved gap in and a segment of the
+// platform's own gone, still fits the buffer the guest is told (`jpegBufferBytes`): a file with no Exif of its own grows by
+// the new segment's marker, length field and payload, and no more.
+void testTheLargestFileFillsTheGuestsBuffer()
+{
+    for (const std::uint64_t pixels : {std::uint64_t(256), std::uint64_t(1920) * 1080, std::uint64_t(4032) * 3024}) {
+        const auto bound = maximumJpegBytes(pixels);
+        std::vector<std::uint8_t> jpeg = {0xff, 0xd8};
+        marker(jpeg, 0xe0, {'J', 'F', 'I', 'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0});
+        marker(jpeg, 0xdb, std::vector<std::uint8_t>(65, 3));
+        marker(jpeg, 0xc0, {8, 0, 16, 0, 16, 1, 1, 0x11, 0});
+        marker(jpeg, 0xda, {1, 1, 0, 0, 63, 0});
+        while (jpeg.size() + 2 < bound) jpeg.push_back(0x12);
+        jpeg.push_back(0xff);
+        jpeg.push_back(0xd9);
+        require(jpeg.size() == bound, "the file is of the bound's size");
+        const auto plan = reserveExifGap(jpeg);
+        require(plan.has_value() && plan->size() == jpegBufferBytes(pixels), "the largest file fills the buffer exactly");
+        jpeg.insert(jpeg.end() - 2, std::uint8_t(0x12));
+        const auto over = reserveExifGap(jpeg);
+        require(over.has_value() && over->size() == jpegBufferBytes(pixels) + 1, "and a byte more does not fit it");
+    }
+}
+
 void testRefusals()
 {
     require(!reserveExifGap({}).has_value(), "empty data");
@@ -213,6 +238,7 @@ int main()
     testOtherPicturesAreNotPassedOn();
     testFillBytesAndOtherLengths();
     testFrameSize();
+    testTheLargestFileFillsTheGuestsBuffer();
     testRefusals();
     return 0;
 }

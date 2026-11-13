@@ -91,7 +91,8 @@ void theEnumsAreTheApplicationsWords()
     std::vector<int> seen;
     for (const auto state :
          {CameraState::idle, CameraState::streaming, CameraState::interrupted,
-          CameraState::interruptedByMultitasking, CameraState::interruptedBySystemPressure}) {
+          CameraState::interruptedByMultitasking, CameraState::interruptedBySystemPressure,
+          CameraState::blockedInUse}) {
         const int value = stateValue(state);
         for (const int earlier : seen) require(earlier != value, "distinct");
         seen.push_back(value);
@@ -101,6 +102,8 @@ void theEnumsAreTheApplicationsWords()
         KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_MULTITASKING);
     require(stateValue(CameraState::interruptedBySystemPressure) ==
         KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_SYSTEM_PRESSURE);
+    require(stateValue(CameraState::blockedInUse) == KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE &&
+            KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE == 5, "the value the application reads");
 }
 
 void aHostWithoutCamerasPresentsNone()
@@ -149,21 +152,26 @@ void aLiveSessionReservesMemoryOnlyForCamerasItHas()
 {
     using uml::camera::liveCameraReserveMiB;
     const auto tier = CameraTier::small;
-    const auto reserve = uml::camera::cameraHostMemoryReserveMiB(tier);
+    const auto ceiling = uml::camera::cameraHostMemoryReserveMiB(tier);
     const auto phone = present(
         uml::camera::makeSyntheticCameraSource(uml::camera::SyntheticProfile::phone), tier, "");
-    require(phone.hasCameras() && liveCameraReserveMiB(CameraMode::live, phone.layout, tier) == reserve,
-        "a live session with cameras holds the tier's reserve");
-    require(reserve == 154, "the figure the budget gives up");
-    require(liveCameraReserveMiB(CameraMode::blocked, phone.layout, tier) == 0, "a blocked session opens none");
+    require(ceiling == 197, "the most a session of the tier holds");
+    // The reserve follows what the device is given: this phone's front camera does not run with its back one, and its
+    // back lens teaches the store its colour data with its first still, so a RAW capture is possible from the first boot.
+    require(phone.hasCameras() && phone.layout == "bf-small-flash-manual" && phone.use.streams == 1 && phone.use.rawStill,
+        "the use the device is given");
+    const auto reserve = liveCameraReserveMiB(CameraMode::live, phone.layout, phone.reserved, tier);
+    require(reserve == uml::camera::cameraHostMemoryReserveMiB(tier, phone.reserved) && reserve > 0,
+        "a live session holds what the device lets it hold");
+    require(phone.use.stillWorkingBytesPerPixel == 11 && reserve > ceiling,
+        "the synthetic source holds working storage that a real camera's ceiling does not count");
+    require(liveCameraReserveMiB(CameraMode::blocked, phone.layout, phone.reserved, tier) == 0, "a blocked session opens none");
     // A live session that composes `none` (a host whose cameras the image cannot describe, or a source that is
     // not a name) has no device, so it holds nothing.
     const auto none = present(nullptr, tier, "");
     require(!none.hasCameras());
-    require(liveCameraReserveMiB(CameraMode::live, none.layout, tier) == 0, "a live session without cameras");
-    require(liveCameraReserveMiB(CameraMode::blocked, none.layout, tier) == 0);
-    // An unstated layout counts as having cameras, as everywhere else.
-    require(liveCameraReserveMiB(CameraMode::live, "", tier) == reserve);
+    require(liveCameraReserveMiB(CameraMode::live, none.layout, none.reserved, tier) == 0, "a live session without cameras");
+    require(liveCameraReserveMiB(CameraMode::blocked, none.layout, none.reserved, tier) == 0);
 }
 
 void theLensCoverFollowsTheSession()
@@ -184,6 +192,7 @@ void aLaterBootComposesTheLayoutAgain()
 {
     const auto phone = uml::camera::makeSyntheticCameraSource(uml::camera::SyntheticProfile::phone);
     auto presentation = present(phone, CameraTier::small, "");
+    const auto before = presentation;
     require(presentation.layout == "bf-small-flash-manual", presentation.layout);
     recompose(presentation);
     require(presentation.layout == "bf-small-flash-manual", "nothing learned, nothing changed");
@@ -209,6 +218,12 @@ void aLaterBootComposesTheLayoutAgain()
     require(presentation.layout == "bf-small-flash-manual", "the layout is composed when asked");
     recompose(presentation);
     require(presentation.layout == "bf-small-flash-manual-raw", presentation.layout);
+    // The boot after the calibration is given the use the pool was sized for, and no more.
+    require(presentation.use == before.use && presentation.reserved == before.reserved,
+        "the colour data learned moves a lens from capturing RAW to offering it, and the use is the same");
+    require(uml::camera::liveCameraReserveMiB(CameraMode::live, presentation.layout, presentation.reserved, CameraTier::small) ==
+            uml::camera::liveCameraReserveMiB(CameraMode::live, before.layout, before.reserved, CameraTier::small),
+        "so is the memory the pool gave up");
     const auto names = uml::camera::allLayoutNames();
     require(std::find(names.begin(), names.end(), presentation.layout) != names.end(),
         "a layout of the image's closed set");
@@ -217,6 +232,36 @@ void aLaterBootComposesTheLayoutAgain()
     auto none = present(nullptr, CameraTier::small, "");
     recompose(none);
     require(none.layout == "none" && none.source == nullptr && !none.hasCameras());
+}
+
+// The cameras of a later boot never exceed what the pool was reduced for, whatever the host's cameras become, and a run that
+// had none at its first discovery has none at a later boot.
+void aLaterBootIsHeldToTheFirstDiscoverysReservation()
+{
+    using uml::camera::SyntheticProfile;
+    auto presentation = present(uml::camera::makeSyntheticCameraSource(SyntheticProfile::phone), CameraTier::small, "");
+    const auto before = presentation;
+    require(presentation.hasCameras() && presentation.reservedCameras, "the first discovery's cameras are reserved for");
+    // The host's cameras narrow to the laptop's: a layout within the reservation.
+    presentation.source = uml::camera::makeSyntheticCameraSource(SyntheticProfile::laptop);
+    recompose(presentation);
+    require(presentation.layout == "front" && presentation.use.streams <= before.reserved.streams &&
+                presentation.reserved == before.reserved,
+            presentation.layout);
+    require(!presentation.use.rawStill, "and no RAW capture");
+
+    // A run whose first discovery had no cameras gets none later, whatever appears.
+    auto none = present(nullptr, CameraTier::small, "");
+    none.source = uml::camera::makeSyntheticCameraSource(SyntheticProfile::phone);
+    recompose(none);
+    require(none.layout == "none" && !none.hasCameras(), "none stays none");
+    // A first discovery of a laptop reserved no RAW: a phone that shows up later is not told its back cameras.
+    auto laptop = present(uml::camera::makeSyntheticCameraSource(SyntheticProfile::laptop), CameraTier::small, "");
+    laptop.source = uml::camera::makeSyntheticCameraSource(SyntheticProfile::phone);
+    recompose(laptop);
+    require(!laptop.hasCameras() && laptop.reserved.streams == 1 && !laptop.reserved.rawStill,
+            "a later host is held to the reservation");
+    require(laptop.layout == "none", laptop.layout);
 }
 
 struct Reports {
@@ -247,6 +292,21 @@ void theStateReceiverReportsChanges()
                 KERNARIUM_RUNTIME_CAMERA_STATE_IDLE}),
         "in the order they happened");
 
+    // A blocked guest's opens: reported at each open, idle between, and a guest that ends closes it.
+    const auto beforeOpens = reports.states.size();
+    receiver.publish(CameraState::blockedInUse);
+    receiver.publish(CameraState::blockedInUse);
+    receiver.publish(CameraState::idle);
+    receiver.publish(CameraState::blockedInUse);
+    require((std::vector<int>(reports.states.begin() + static_cast<std::ptrdiff_t>(beforeOpens), reports.states.end())
+                == std::vector<int> {
+                    KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE,
+                    KERNARIUM_RUNTIME_CAMERA_STATE_IDLE,
+                    KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE}),
+        "each open is reported once, with idle between, and nothing else");
+    receiver.ended();
+    require(reports.states.back() == KERNARIUM_RUNTIME_CAMERA_STATE_IDLE && receiver.current() == 0,
+        "a guest that ends with a camera open leaves none open");
     receiver.publish(CameraState::interrupted);
     receiver.ended();
     require(reports.states.back() == KERNARIUM_RUNTIME_CAMERA_STATE_IDLE && receiver.current() == 0,
@@ -531,6 +591,7 @@ int main()
         {"a-live-session-reserves-memory-only-for-cameras-it-has", aLiveSessionReservesMemoryOnlyForCamerasItHas},
         {"the-lens-cover-follows-the-session", theLensCoverFollowsTheSession},
         {"a-later-boot-composes-the-layout-again", aLaterBootComposesTheLayoutAgain},
+        {"a-later-boot-is-held-to-the-first-discoverys-reservation", aLaterBootIsHeldToTheFirstDiscoverysReservation},
         {"the-state-receiver-reports-changes", theStateReceiverReportsChanges},
         {"the-rotation-takes-quarter-turns", theRotationTakesQuarterTurns},
         {"the-device-options-carry-the-sessions-statements", theDeviceOptionsCarryTheSessionsStatements},

@@ -1181,22 +1181,36 @@ public:
 		 * live cameras, which the same limit holds. */
 		camera_tier_ = prepared_.camera_tier.value_or(
 			uml::camera::cameraTierForBudget(plan.budget.bytes));
-		/* Only a live session whose layout has cameras holds that memory, so
-		 * the layout is composed here, before the pool is set; each boot
-		 * composes it again (`start_camera`). */
+		/* Only a live session whose layout has cameras holds that memory, and
+		 * it holds what that layout lets it use, so the layout is composed
+		 * here, before the pool is set; each boot composes it again
+		 * (`start_camera`). */
 		std::uint64_t camera_reserve = 0;
 		if (!information_only_ &&
 		    (prepared_.camera == CameraSource::synthetic ||
 		     prepared_.camera == CameraSource::host)) {
 			uml::camera::CameraSourceHandle source;
 			std::string layout;
+			uml::camera::CameraUse use;
 			if (!make_camera_source(source) ||
-			    !camera_layout_of(prepared_.kernel, *source, layout))
+			    !camera_layout_of(prepared_.kernel, *source, layout, use))
 				return false;
 			camera_reserve = uml::camera::liveCameraReserveMiB(
-						 uml::camera::CameraMode::live, layout,
+						 uml::camera::CameraMode::live, layout, use,
 						 camera_tier_)
 				<< 20;
+			camera_reservation_ = uml::camera::CameraReservation{
+				uml::camera::layoutHasCameras(layout), use};
+		}
+		/* A pool of zero is no limit to the renderer: a reserve that leaves
+		 * none is a launch that cannot be given a pool. */
+		if (uml::platform::gpu_pool_exhausted(plan.budget, camera_reserve)) {
+			std::fprintf(stderr,
+				"uml-darwin: live cameras would hold %llu MiB, all of "
+				"the %llu MiB GPU budget\n",
+				static_cast<unsigned long long>(camera_reserve >> 20),
+				static_cast<unsigned long long>(plan.budget.bytes >> 20));
+			return false;
 		}
 		device_memory_limit_ =
 			uml::platform::gpu_pool_bytes(plan.budget, camera_reserve);
@@ -1750,11 +1764,19 @@ private:
 	/* The layout the guest is told: composed from `source` as the iOS runtime
 	 * composes it (--camera-layout=auto), or stated by the kernel arguments,
 	 * or not stated (empty). The same function, the same tier and
-	 * calibration. */
+	 * calibration. `use` is what the device is given: the composed use for a
+	 * composed layout, and the tier's ceiling for a stated one or none, which
+	 * the device does not hold to anything. A later boot's composition is held
+	 * to what the run paid for at the first (`within`, the first discovery's
+	 * reservation). */
 	[[nodiscard]] bool camera_layout_of(
 		const std::vector<std::string> &kernel,
-		const uml::platform::Camera &source, std::string &layout)
+		const uml::platform::Camera &source, std::string &layout,
+		uml::camera::CameraUse &use,
+		const uml::camera::CameraReservation *within = nullptr)
 	{
+		use = uml::camera::CameraUse{};
+		use.stillWorkingBytesPerPixel = source.stillWorkingBytesPerPixel();
 		if (prepared_.camera_layout_auto) {
 			for (const auto &argument : kernel) {
 				if (argument.starts_with(uml::camera::layoutArgumentPrefix)) {
@@ -1766,8 +1788,14 @@ private:
 			try {
 				uml::camera::ArrangementOptions arrangement;
 				arrangement.tier = camera_tier_;
-				layout = uml::camera::composeLayout(
-					source, *camera_calibration(), arrangement);
+				auto composed = within != nullptr ?
+					uml::camera::composeCamerasWithin(
+						source, *camera_calibration(), arrangement,
+						*within) :
+					uml::camera::composeCameras(
+						source, *camera_calibration(), arrangement);
+				layout = std::move(composed.layout);
+				use = composed.use;
 			} catch (const std::exception &error) {
 				std::fprintf(stderr, "Unable to compose the camera layout: %s\n",
 					error.what());
@@ -1809,7 +1837,12 @@ private:
 		/* The layout the guest is told: composed here as the iOS runtime
 		 * composes it, or stated by the kernel arguments, or not stated. */
 		std::string layout;
-		if (!camera_layout_of(kernel, *source, layout))
+		/* The pool was sized for the first composition's use: this boot's is
+		 * held to all of it, and a run that had no camera at its first
+		 * discovery has none now. */
+		if (!camera_layout_of(kernel, *source, layout, options.use,
+				      camera_reservation_ ? &*camera_reservation_ :
+							    nullptr))
 			return false;
 		if (prepared_.camera_layout_auto) {
 			kernel.emplace_back(
@@ -1853,6 +1886,8 @@ private:
 			return "interrupted by multitasking";
 		case uml::camera::CameraState::interruptedBySystemPressure:
 			return "interrupted by system pressure";
+		case uml::camera::CameraState::blockedInUse:
+			return "blocked, in use";
 		}
 		return "unknown";
 	}
@@ -1918,6 +1953,10 @@ private:
 	/* The cameras' tier: what the GPU budget B and the cap give, or the
 	 * tier --camera-tier= states. */
 	uml::camera::CameraTier camera_tier_{uml::camera::CameraTier::small};
+	/* What the GPU's pool was reduced for, from the first composition of the
+	 * run (`camera_layout_of`): none for a source that holds no memory
+	 * (blocked, or not live). */
+	std::optional<uml::camera::CameraReservation> camera_reservation_;
 	std::atomic<bool> stop_requested_{};
 };
 

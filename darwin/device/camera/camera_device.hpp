@@ -25,7 +25,8 @@ inline constexpr std::uint32_t cameraDeviceId = UML_VIRTIO_VIDEO_CAMERA_DEVICE_I
  *
  * Blocked never opens one, so the host's capture indicator cannot light: the
  * device publishes the cameras that discovery found, and every video buffer
- * completes black and flagged blocked. */
+ * completes black and flagged blocked. It reports CameraState::blockedInUse
+ * while the guest has a camera open. */
 enum class CameraMode : std::uint8_t { live, blocked };
 
 /* What the host is doing for the guest, for the application's notice. */
@@ -38,6 +39,12 @@ enum class CameraState : std::uint8_t {
     interruptedByMultitasking,
     /* The same, because the system is under pressure (heat). */
     interruptedBySystemPressure,
+    /* A blocked session, and an application in the guest has a camera open
+     * (a video stream is running, or a still was asked for): nothing is
+     * captured, the guest gets black frames, and the application can say that
+     * the camera is off. It lasts until the guest has closed every camera, so
+     * a new open reports it again. A live session never reports it. */
+    blockedInUse,
 };
 
 /* Where a diagnostic reading of the process's memory is useful, to measure
@@ -54,6 +61,14 @@ enum class CameraCheckpoint : std::uint8_t {
 struct CameraDeviceOptions {
     CameraMode mode {CameraMode::live};
     CameraTier tier {CameraTier::small};
+    /* What the device lets the host hold, which the GPU's pool was reduced for
+     * (`liveCameraReserveMiB`, with this value): at most `use.streams` cameras
+     * run at once, and a start beyond it is refused as a camera that conflicts
+     * with a running one is; stills are admitted while the captures the device
+     * holds cost no more than `stillAdmissionBytes` allows, the others waiting
+     * their turn. The default is the tier's ceiling, which a device whose
+     * budget was not taken from a composed layout is given. */
+    CameraUse use;
     /* Where learned colour data is kept; null keeps it in memory. */
     std::shared_ptr<CalibrationStore> calibration;
     /* The application's statement of a camera's sensor orientation; the
