@@ -199,9 +199,15 @@ class StartAndSuperviseTests(unittest.TestCase):
     def start(self, *extra: str) -> tuple[int, str, list]:
         calls: list = []
         errors = io.StringIO()
+        real = automation.subprocess.Popen
+
+        def popen(command, *positional, **keywords):
+            # Only the supervisor is a stand-in; `ps` and the like are real.
+            if "_supervise" in command:
+                return FakeProcess(calls, command, **keywords)
+            return real(command, *positional, **keywords)
         with mock.patch.object(
-            automation.subprocess, "Popen",
-            lambda command, **keywords: FakeProcess(calls, command, **keywords),
+            automation.subprocess, "Popen", popen,
         ), mock.patch.object(
             automation.ios_device_reports, "preflight"
         ), contextlib.redirect_stderr(errors):
@@ -278,9 +284,15 @@ class StartAndSuperviseTests(unittest.TestCase):
         self.run_file(format_two(target()))
         calls: list = []
         errors = io.StringIO()
+        real = automation.subprocess.Popen
+
+        def popen(command, *positional, **keywords):
+            # Only the supervisor is a stand-in; `ps` and the like are real.
+            if "_supervise" in command:
+                return FakeProcess(calls, command, **keywords)
+            return real(command, *positional, **keywords)
         with mock.patch.object(
-            automation.subprocess, "Popen",
-            lambda command, **keywords: FakeProcess(calls, command, **keywords),
+            automation.subprocess, "Popen", popen,
         ), mock.patch.object(
             automation.ios_device_reports, "preflight",
             side_effect=automation.ios_device_reports.DeviceError(
@@ -370,8 +382,9 @@ class StartAndSuperviseTests(unittest.TestCase):
         _, _, calls = self.start(
             "--device-reports-dir", "/somewhere/else", "--leave-device-reports")
         command = calls[0][0]
-        self.assertEqual(
-            command[command.index("--device-reports-dir") + 1], "/somewhere/else")
+        # Each collection gets a new directory of its own beneath the one named.
+        destination = command[command.index("--device-reports-dir") + 1]
+        self.assertTrue(destination.startswith("/somewhere/else/host-"), destination)
         self.assertIn("--leave-device-reports", command)
         self.run_file(format_two(target()))
         (self.state / DEVICE / "host.json").unlink()
