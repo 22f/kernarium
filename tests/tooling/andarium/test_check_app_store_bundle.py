@@ -7,6 +7,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import json
 import plistlib
 import shutil
 import subprocess
@@ -332,6 +333,32 @@ def app_info(**overrides: object) -> dict:
     return {key: value for key, value in keys.items() if value is not None}
 
 
+# The notes' entry about Send feedback, which every product bundles and one
+# without the feature hides, and the translations of its strings.
+FEEDBACK_ENTRY = {
+    "id": "send-feedback", "title": "Send feedback", "symbol": "envelope.fill",
+    "text": "Email the developer from the Info menu on Home, with a bug report if you like.",
+    "requirement": {"feature": "sendFeedback"},
+}
+FEEDBACK_POINTS_ENTRY = {
+    "id": "feedback-points", "title": "More ways to reach us", "symbol": "envelope.fill",
+    "points": ["Write to the developer from Settings", "Attach screenshots"],
+    "requirement": {"feature": "sendFeedback"},
+}
+PLAIN_ENTRY = {
+    "id": "snapshots", "title": "Snapshots", "symbol": "clock.arrow.circlepath",
+    "text": "Save the virtual machine\u2019s data and restore it later, from Home.",
+}
+NOTES_STRINGS = {
+    "Send feedback": "フィードバックを送信",
+    FEEDBACK_ENTRY["text"]: "開発者にメールを送れます。",
+    "Write to the developer from Settings": "設定から開発者に連絡できます",
+    "Attach screenshots": "スクリーンショットを添付できます",
+    "Snapshots": "スナップショット",
+    PLAIN_ENTRY["text"]: "仮想マシンのデータを保存します。",
+}
+
+
 def write_feedback_tables(app: Path, languages: tuple[str, ...] = ("ja", "zh-Hans", "zh-Hant")) -> None:
     """The Feedback strings table the build compiles in with the feature, in each language."""
     for language in languages:
@@ -339,6 +366,19 @@ def write_feedback_tables(app: Path, languages: tuple[str, ...] = ("ja", "zh-Han
         lproj.mkdir(exist_ok=True)
         (lproj / "Feedback.strings").write_bytes(
             plistlib.dumps({"Send feedback": "Feedback fixture"}, fmt=plistlib.FMT_BINARY))
+
+
+def write_notes(app: Path, entries: list[dict] | None, strings: dict[str, str],
+                languages: tuple[str, ...] = ("ja", "zh-Hans")) -> None:
+    """The What's New notes a build bundles whole (WhatsNew.json, none if `entries`
+    is None) and the compiled table of their translations in each language."""
+    if entries is not None:
+        (app / "WhatsNew.json").write_text(
+            json.dumps([{"build": 10, "version": "1.0 (10)", "entries": entries}]), encoding="utf-8")
+    for language in languages:
+        lproj = app / f"{language}.lproj"
+        lproj.mkdir(exist_ok=True)
+        (lproj / "WhatsNew.strings").write_bytes(plistlib.dumps(strings, fmt=plistlib.FMT_BINARY))
 
 
 def write_follow_x_tables(app: Path, languages: tuple[str, ...] = ("ja", "zh-Hans", "zh-Hant")) -> None:
@@ -646,6 +686,9 @@ def main() -> int:
         arranged = ["--feedback-address", "feedback@example.com"]
         check(make_app(root, "feedback-built", feature, feedback_info), passes=True,
               expect="Send feedback is compiled in", args=appstore)
+        built_notes = make_app(root, "feedback-built-notes", feature, feedback_info)
+        write_notes(built_notes, [FEEDBACK_ENTRY, PLAIN_ENTRY], NOTES_STRINGS)
+        check(built_notes, passes=True, expect="Send feedback is compiled in", args=appstore)
         check(make_app(root, "feedback-absent", clean, app_info()), passes=True,
               expect="Send feedback is not compiled in")
         check(make_app(root, "feedback-no-key", feature, app_info()), passes=False,
@@ -668,6 +711,44 @@ def main() -> int:
         (words / "en.lproj" / "Localizable.strings").write_bytes(
             plistlib.dumps({"Send feedback": "Send feedback"}, fmt=plistlib.FMT_BINARY))
         check(words, passes=False, expect="has Send feedback strings")
+        # The What's New notes bundle the entry about Send feedback in every build, and
+        # the build hides it unless it has the feature: its strings, found through the
+        # bundled notes, are the one text of the feature a product without it may hold,
+        # in the notes' table alone and by the entry's own strings alone.
+        hidden = [FEEDBACK_ENTRY, FEEDBACK_POINTS_ENTRY, PLAIN_ENTRY]
+        notes = make_app(root, "notes-hidden", clean, app_info())
+        write_notes(notes, hidden, NOTES_STRINGS)
+        check(notes, passes=True, expect="Send feedback is not compiled in")
+        for configuration in ("Debug", "Release"):
+            check(notes, passes=True, expect=f"Send feedback is not compiled in ({configuration})",
+                  args=["--feedback", "--configuration", configuration])
+        for name, other in (
+                ("key", {"Fixed Send feedback not opening": "x"}),
+                ("value", {"Snapshots": "Andarium feedback"}),
+                ("word", {"Andarium feedback": "x"})):
+            leak = make_app(root, f"notes-other-{name}", clean, app_info())
+            write_notes(leak, hidden, {**NOTES_STRINGS, **other})
+            check(leak, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings")
+            check(leak, passes=False, expect="has Send feedback strings",
+                  args=["--feedback", "--configuration", "Release"])
+        # Marked entries only: an entry with no mark, or another one, is shown in a
+        # build without the feature, and so is a table with no notes beside it.
+        for name, entries in (
+                ("unmarked", [{**FEEDBACK_ENTRY, "requirement": None}, PLAIN_ENTRY]),
+                ("other-feature", [{**FEEDBACK_ENTRY, "requirement": {"feature": "other"}}, PLAIN_ENTRY]),
+                ("other-requirement", [{**FEEDBACK_ENTRY, "requirement": {"device": "pad"}}, PLAIN_ENTRY]),
+                ("no-notes", None), ("broken-notes", None)):
+            shown = make_app(root, f"notes-{name}", clean, app_info())
+            write_notes(shown, entries, NOTES_STRINGS)
+            if name == "broken-notes":
+                (shown / "WhatsNew.json").write_text("[{", encoding="utf-8")
+            check(shown, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings")
+        # The exemption is the notes' table and nothing else.
+        elsewhere = make_app(root, "notes-elsewhere", clean, app_info())
+        write_notes(elsewhere, hidden, {"Snapshots": "スナップショット"})
+        (elsewhere / "ja.lproj" / "Localizable.strings").write_bytes(
+            plistlib.dumps({"Send feedback": "x"}, fmt=plistlib.FMT_BINARY))
+        check(elsewhere, passes=False, expect="ja.lproj/Localizable.strings: has Send feedback strings")
         # The feature's own strings table (Feedback.strings, and the stringsdict of
         # its plurals) is the feature's: a product without the receiver holds none,
         # found by the file name though the table says nothing of the feature.
