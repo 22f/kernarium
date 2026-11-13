@@ -214,6 +214,7 @@ inline constexpr Size size_720p{1280, 720};
 inline constexpr Size size_480p{640, 480};
 inline constexpr Size size_240p{320, 240};
 inline constexpr Size size_1440p{1920, 1440};
+inline constexpr Size size_2160p{3840, 2160};
 inline constexpr Size standard_jpeg_sizes[] = {size_1080p, size_720p, size_480p, size_240p};
 
 // The distinct sizes of the video modes, in the order the node lists them.
@@ -292,13 +293,14 @@ inline std::optional<SizeSource> cut_from(const std::vector<Size>& natives, cons
 // each cut from a native video mode (cut_from):
 //  - JPEG: 1920x1080, 1280x720, 640x480 and 320x240, and 1920x1440 with 1280x720
 //    when the largest JPEG reaches 1920x1440 (a camera that streams beside another
-//    is guaranteed those); and the size of the largest video mode, which is the
-//    camera's recording size (the camera API's mandatory "preview, record and
-//    JPEG video snapshot" combination wants a JPEG at it, and a layout of the
-//    large tier records 2160p). It is cut from the mode of that very size: the
-//    mode is one the host offers, so the picture asks the host for no capture
-//    format and no buffer that a stream of that mode does not, and it is never
-//    larger than the camera's largest JPEG;
+//    is guaranteed those); and 3840x2160 when that is the largest video mode,
+//    which is the recording size of a layout of the large tier (the camera
+//    API's mandatory "preview, record and JPEG video snapshot" combination
+//    wants a JPEG at the recording size; at the small tier that is 1080p, a
+//    size already listed, and no other mode earns a size). It is cut from the
+//    mode of that very size: the mode is one the host offers, so the picture
+//    asks the host for no capture format and no buffer that a stream of that
+//    mode does not, and it is never larger than the camera's largest JPEG;
 //  - YUV and PRIVATE: every JPEG size that is not larger than the largest video
 //    size (a LIMITED camera lists them), and the same guaranteed pair of the largest
 //    video size.
@@ -334,8 +336,7 @@ inline StreamSizes derive_sizes(const Formats& formats)
         add_cut(result.jpeg, size_1440p);
         add_cut(result.jpeg, size_720p);
     }
-    if (const Size record = largest(natives); record.pixels() <= most(result.jpeg))
-        add_cut(result.jpeg, record);
+    if (largest(natives) == size_2160p && size_2160p.pixels() <= most(result.jpeg)) add_cut(result.jpeg, size_2160p);
 
     for (const auto& size : natives) result.yuv.push_back(host_entry(size));
     const std::uint64_t largest_video = most(result.yuv);

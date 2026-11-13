@@ -475,11 +475,21 @@ void check_record_jpeg()
             "stills of the recording size's pixel count allow it");
     const auto short_stills = derive_sizes(vectors::formats_of({{1920, 1080, 1, 30}, {3840, 2160, 1, 30}}, {{3840, 2158}}));
     require(!find(short_stills.jpeg, uhd), "stills one row short of the recording size do not");
-    // Whatever the camera, the recording size, the largest video mode, is a JPEG size when the stills reach it.
-    for (const auto& formats : {phone_formats(), vectors::phone_lens_formats(), vectors::pad_front_formats(), vectors::laptop_formats()}) {
-        const Size record = largest(video_sizes(formats));
+    // The recording size of the large tier only: any other largest video mode (a square, a portrait or a 1440p one) adds
+    // no picture size, which would be a visible change and, for a square or portrait one, a size with no thumbnail of its
+    // aspect. Every size such a camera lists is the host's, a guaranteed one or 1080p.
+    for (const auto& formats : {vectors::formats_of({{640, 480, 1, 30}, {1024, 1024, 1, 30}}, {{1600, 1200}}),
+                                vectors::formats_of({{640, 480, 1, 30}, {1080, 1920, 1, 30}}, {{1600, 1200}}),
+                                vectors::formats_of({{1280, 720, 1, 30}, {2560, 1440, 1, 30}}, {{4032, 3024}})}) {
+        const Size largest_mode = largest(video_sizes(formats));
         const auto sizes = derive_sizes(formats);
-        require(record.pixels() > largest_of(sizes.jpeg) || find(sizes.jpeg, record), "the recording size is a JPEG size");
+        require(!find(sizes.jpeg, largest_mode), "an unusual largest video mode is not a picture size");
+        for (const auto& entry : sizes.jpeg) {
+            const bool host = std::find(formats.jpeg.begin(), formats.jpeg.end(), entry.size) != formats.jpeg.end();
+            const bool standard = std::find(std::begin(standard_jpeg_sizes), std::end(standard_jpeg_sizes), entry.size) !=
+                std::end(standard_jpeg_sizes);
+            require(host || standard || entry.size == size_1440p, "no JPEG size appears that the camera had no use for");
+        }
     }
 
     // A camera without a video mode has no recording size to add.
