@@ -176,6 +176,7 @@ void setVideoOutputSettings(AVCaptureVideoDataOutput* output, NSDictionary* sett
 {
 #if TARGET_OS_IOS
     if (output.deliversPreviewSizedOutputBuffers) {
+        std::fprintf(stderr, "Camera: a stream's output delivered preview-sized buffers: set to deliver the size asked for\n");
         output.automaticallyConfiguresOutputBufferDimensions = NO;
         output.deliversPreviewSizedOutputBuffers = NO;
     }
