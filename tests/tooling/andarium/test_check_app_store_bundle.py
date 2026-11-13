@@ -236,6 +236,23 @@ HARMLESS_PATHS = (
     '  "/nonexistent/share/locale",\n'
     "};\n"
 )
+# The document pickers (Andarium/README.md#configurations). The App Store
+# configuration refers to SwiftUI's fileImporter for one file and for several,
+# which every product the checks accept holds (`build` appends it). The other
+# configurations hold the copy-mode presenter: a type, the modifier that
+# presents it and the files of a pick, each of which the App Store check refuses.
+IN_PLACE_PICKERS = (
+    "int _s7SwiftUI4ViewPAAE12fileImporter11isPresented19allowedContentTypes12onCompletionFixture(void) { return 1; }\n"
+    "int _s7SwiftUI4ViewPAAE12fileImporter11isPresented19allowedContentTypes23allowsMultipleSelection"
+    "12onCompletionFixture(void) { return 1; }\n"
+)
+ONE_FILE_IMPORTER = IN_PLACE_PICKERS.splitlines(keepends=True)[0]
+SEVERAL_FILES_IMPORTER = IN_PLACE_PICKERS.splitlines(keepends=True)[1]
+COPY_PICKERS = (
+    ("a type", "int _s8Andarium18CopyDocumentPickerV4bodyyyF(void) { return 1; }\n"),
+    ("the modifier", "int _s7SwiftUI4ViewP8Andarium18documentCopyPicker11isPresented5typesyyF(void) { return 1; }\n"),
+    ("the files of a pick", "int _s8Andarium12PickedCopiesV4urlsSay10Foundation3URLVGvg(void) { return 1; }\n"),
+)
 MANIFEST = {
     "NSPrivacyTracking": False,
     "NSPrivacyTrackingDomains": [],
@@ -257,9 +274,12 @@ def run(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProc
     )
 
 
-def build(root: Path, name: str, source: str, extra: list[str] | None = None) -> Path:
+def build(root: Path, name: str, source: str, extra: list[str] | None = None,
+          pickers: str = IN_PLACE_PICKERS) -> Path:
+    """A library of `source` and of the document pickers `pickers` (the App
+    Store configuration's own by default)."""
     source_path = root / f"{name}.c"
-    source_path.write_text(source, encoding="utf-8")
+    source_path.write_text(source + pickers, encoding="utf-8")
     output = root / f"lib{name}.dylib"
     # A framework's install name is @rpath-relative; the default one is the
     # output path, which is the temporary directory of this test.
@@ -283,7 +303,7 @@ def build_with_debug_map(root: Path, name: str, directory: str | None = None, so
     work = root / "Volumes" / "NAME"
     work.mkdir(parents=True, exist_ok=True)
     source_path = work / f"{name}.c"
-    source_path.write_text(source, encoding="utf-8")
+    source_path.write_text(source + IN_PLACE_PICKERS, encoding="utf-8")
     objects = work / f"{name}.o"
     # A source named relative to the compilation directory is what puts that
     # directory in the debug map.
@@ -1148,6 +1168,43 @@ def main() -> int:
         # A source that cannot be read is no pass.
         check(make_app(root, "info-source-absent", clean, app_info(**base_info)), passes=False,
               expect="cannot be compared", args=["--info-source", str(root / "absent.plist")])
+
+        # The document pickers. The App Store configuration opens files in
+        # place: both of SwiftUI's importers are referred to, and no trace of the
+        # copy-mode presenter is in the application or in a framework. Whoever
+        # takes the condition away leaves the presenter in, or the importers out.
+        check(make_app(root, "pickers-in-place", clean, app_info()), passes=True,
+              expect="document pickers open the files in place")
+        for missing_name, lacking in (("one file", ONE_FILE_IMPORTER), ("several files", SEVERAL_FILES_IMPORTER)):
+            kept = IN_PLACE_PICKERS.replace(lacking, "")
+            check(make_app(root, f"pickers-lack-{missing_name.replace(' ', '-')}",
+                           build(root, f"lack-{missing_name.replace(' ', '-')}", CLEAN, pickers=kept), app_info()),
+                  passes=False, expect=f"lacks fileImporter for {missing_name}")
+        check(make_app(root, "pickers-none", build(root, "no-pickers", CLEAN, pickers=""), app_info()),
+              passes=False, expect="lacks fileImporter for one file (Install APK)")
+        for index, (what, source) in enumerate(COPY_PICKERS):
+            presenter = build(root, f"presenter{index}", CLEAN, pickers=IN_PLACE_PICKERS + source)
+            check(make_app(root, f"pickers-copy-app-{index}", presenter, app_info()), passes=False,
+                  expect="carries the copy-mode document picker")
+            check(make_app(root, f"pickers-copy-framework-{index}", clean, app_info(), framework=presenter),
+                  passes=False, expect="carries the copy-mode document picker")
+            # Without the importers too: the copy-mode picker in place of them.
+            replaced = build(root, f"replaced{index}", CLEAN, pickers=source)
+            check(make_app(root, f"pickers-replaced-{index}", replaced, app_info()), passes=False,
+                  expect="carries the copy-mode document picker")
+        # Every other configuration copies the files: its product holds the
+        # presenter, and the check says so, which shows it finds one.
+        copying = build(root, "copying", CLEAN, pickers="".join(source for _what, source in COPY_PICKERS))
+        for configuration in ("Debug", "Release"):
+            check(make_app(root, f"pickers-{configuration}-copy", copying, app_info()), passes=True,
+                  expect="document pickers copy the files", args=["--pickers", "--configuration", configuration])
+            check(make_app(root, f"pickers-{configuration}-in-place", clean, app_info()), passes=False,
+                  expect="lacks the copy-mode document picker", args=["--pickers", "--configuration", configuration])
+            # The debug library of a Debug build holds the code, as for Send feedback.
+            debug_library = make_app(root, f"pickers-{configuration}-library", clean, app_info())
+            shutil.copyfile(copying, debug_library / "Fixture.debug.dylib")
+            check(debug_library, passes=True, expect="document pickers copy the files",
+                  args=["--pickers", "--configuration", configuration])
 
         # The privacy manifests are checked too.
         check(make_app(root, "no-manifest", clean, app_info(), manifest=False),

@@ -1417,6 +1417,28 @@
         }
       }
     },
+    "Andarium couldn’t take the file from Files." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumは“ファイル”からそのファイルを取得できませんでした。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium无法从“文件”取得该文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium無法從「檔案」取得該檔案。"
+          }
+        }
+      }
+    },
     "Andarium is incomplete" : {
       "localizations" : {
         "ja" : {
