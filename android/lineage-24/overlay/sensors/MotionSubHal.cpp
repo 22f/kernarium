@@ -164,6 +164,9 @@ public:
         // Each sensor is listed with its own limits, and the host is told the
         // period within them.
         state.period = motion::clamp_period(handle, period);
+        // A shorter period starts a new deadline: the old one lies up to a
+        // whole old period ahead, and would hold the faster client back.
+        if (state.period < previous) state.next = 0;
         // The host paces its readings by the period of a sensor in use; one
         // that is not in use is told its period when it is activated.
         if (state.active && state.period != previous) sendControl();

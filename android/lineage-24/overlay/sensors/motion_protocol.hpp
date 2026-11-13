@@ -226,8 +226,9 @@ inline ControlFrame control_frame(
 // 10 Hz); whether the hardware behind Core Motion meets its other requirements
 // is Apple's and unmeasured. The resolution is a power of two, 1/8 uT, so that
 // the range (4912 uT, 39296 steps) is an exact multiple of it, which the
-// sensor service checks, and the grid it rounds every value to (a quarter of
-// the resolution) is exactly representable. The delays are the ones a frame
+// sensor service checks. The service rounds every event value to an eighth of
+// the resolution it holds for the sensor, so a test that compares a value
+// reads that resolution from the service. The delays are the ones a frame
 // brings a period into; the power is not measured, like the other host
 // sensors'.
 struct SensorAttributes {
