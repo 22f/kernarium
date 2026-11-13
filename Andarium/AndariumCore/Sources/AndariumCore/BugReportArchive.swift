@@ -231,7 +231,7 @@ public enum BugReportAttachments {
         guard let data = BoundedFile.read(url, limit: SessionRecord.maximumBytes) else { return (nil, nil) }
         guard data.count <= SessionRecord.maximumBytes else {
             let note = "\(name) was not copied: \(url.lastPathComponent) is longer than \(SessionRecord.maximumBytes) "
-                + "bytes, and the runtime writes a record of at most 17920.\n"
+                + "bytes, and the runtime writes a record of at most 18176.\n"
             return (.init(name: name, data: Data(note.utf8)), nil)
         }
         let text = String(decoding: data, as: UTF8.self)

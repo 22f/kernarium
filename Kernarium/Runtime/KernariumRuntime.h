@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 42U
+#define KERNARIUM_RUNTIME_API_VERSION 43U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -315,17 +315,79 @@ typedef int (*kernarium_runtime_prepare_jit_function)(
     uint32_t guest_processor_count);
 
 typedef void (*kernarium_runtime_request_stop_function)(void);
-/* Flushes the guest's writable host files. Safe to call from any thread while
- * a guest runs, and reports the number of files that could not be flushed. */
-typedef int (*kernarium_runtime_sync_function)(void);
-/* Leaves the guest safely abandonable: trims its cold page cache once, writes
- * its filesystems back, enters full system suspend, then flushes the host's
- * own files. Pair it with resume. */
-typedef int (*kernarium_runtime_quiesce_function)(void);
+
+/* What the guest confirmed about the writeback of its own storage when sync,
+ * quiesce or quiesce_resident returned, as uml_emulator_guest_storage states
+ * it. Only CONFIRMED and NO_GUEST mean that nothing the host cannot see was
+ * left dirty in the guest when the call returned: a caller says the guest's
+ * storage is settled only for those two. The zero value claims nothing. */
+enum {
+    /* Nothing was reported: the call did not write the report, as when it
+     * returned an error, so a report the caller zeroed still holds this. */
+    KERNARIUM_RUNTIME_GUEST_STORAGE_NOT_REPORTED = 0,
+    /* The guest ran sync(2) to its return and said so, in this call. A suspend
+     * never confirms the storage: the guest syncs on the way to suspend only
+     * while /sys/power/sync_on_suspend is set, and says nothing of it. */
+    KERNARIUM_RUNTIME_GUEST_STORAGE_CONFIRMED = 1,
+    /* No guest was running, so there was nothing to settle. */
+    KERNARIUM_RUNTIME_GUEST_STORAGE_NO_GUEST = 2,
+    /* The guest was asked and did not confirm in time, or the host could not
+     * ask because another lifecycle call or console request was busy. */
+    KERNARIUM_RUNTIME_GUEST_STORAGE_UNCONFIRMED = 3,
+    /* The guest refused the request, or its reply was no confirmation. */
+    KERNARIUM_RUNTIME_GUEST_STORAGE_REFUSED = 4,
+    /* A guest was running and its management console could not be reached. */
+    KERNARIUM_RUNTIME_GUEST_STORAGE_UNREACHABLE = 5,
+};
+/* Whether the call put the guest to sleep. */
+enum {
+    /* The call does not suspend (sync), or nothing was asked. */
+    KERNARIUM_RUNTIME_GUEST_SUSPENSION_NOT_ASKED = 0,
+    /* The guest replied that it entered system suspend. */
+    KERNARIUM_RUNTIME_GUEST_SUSPENSION_SUSPENDED = 1,
+    /* The guest refused, or did not confirm that it slept: it may run. */
+    KERNARIUM_RUNTIME_GUEST_SUSPENSION_NOT_SUSPENDED = 2,
+};
+/* What sync, quiesce and quiesce_resident report about the guest (runtime API
+ * 43). The call writes it only when it returns 0 or more. */
+typedef struct kernarium_runtime_settle {
+    /* Set by the caller to sizeof the structure. */
+    uint32_t struct_size;
+    uint32_t reserved;
+    /* A KERNARIUM_RUNTIME_GUEST_STORAGE_ value. */
+    uint32_t guest_storage;
+    /* A KERNARIUM_RUNTIME_GUEST_SUSPENSION_ value. */
+    uint32_t guest_suspension;
+} kernarium_runtime_settle;
+
+/* Has the guest write its filesystems back, then flushes the guest's writable
+ * host files. Safe to call from any thread while a guest runs, and reports the
+ * number of files that could not be flushed: it says nothing of the guest.
+ * `settle` (nullable; the caller sets struct_size) reports what the guest
+ * confirmed. The call waits for the guest at most 3.5 s, and for a lifecycle
+ * call in progress at most 1 s of that, whoever else is in the runtime; the
+ * host files are flushed all the same, and the storage is UNCONFIRMED when the
+ * guest did not reply in time. It fills `settle` with NO_GUEST when no guest
+ * runs. Returns -EINVAL for a struct_size smaller than the structure, with
+ * `settle` untouched, as for the calls below. */
+typedef int (*kernarium_runtime_sync_function)(kernarium_runtime_settle* settle);
+/* Leaves the guest safely abandonable: has it write its filesystems back,
+ * trims its cold page cache once, enters full system suspend, then flushes
+ * the host's own files. Pair it with resume. `settle` (nullable) reports
+ * what the guest confirmed, as for sync, and whether it sleeps. The storage
+ * is confirmed by the guest's reply to a writeback request of this call, never
+ * by the suspend. A quiesce waits for a lifecycle call in progress, which is
+ * itself bounded; each wait for the guest is bounded: the first writeback 2 s,
+ * the trim 3 s, the suspend 10 s (4 s more to abort one that does not
+ * answer) and a final writeback after a suspend that failed 1.5 s. Returns
+ * -EINVAL for a struct_size smaller than the structure, with `settle`
+ * untouched. */
+typedef int (*kernarium_runtime_quiesce_function)(kernarium_runtime_settle* settle);
 /* quiesce for a host that must not write what it is short of: the same
- * order and result, with the guest's RAM kept in the process and no
- * hibernation image written where a quiesce would have written one. */
-typedef int (*kernarium_runtime_quiesce_resident_function)(void);
+ * order, result, report and struct_size rule, with the guest's RAM kept in the
+ * process and no hibernation image written where a quiesce would have written
+ * one. */
+typedef int (*kernarium_runtime_quiesce_resident_function)(kernarium_runtime_settle* settle);
 typedef void (*kernarium_runtime_resume_function)(void);
 typedef void (*kernarium_runtime_send_touch_function)(
     uint32_t slot,
@@ -953,8 +1015,9 @@ typedef int (*kernarium_runtime_plan_camera_reserve_function)(
     kernarium_runtime_camera_reserve* reserve);
 
 /* The level the system's memory pressure source reported to the host (runtime
- * API 41). The host frees what it can get back cheaply at a warning or a
- * critical level (docs/architecture.md, "Memory pressure"). */
+ * API 41). At a warning the host turns on the guest's page-cache trimmer, and
+ * at a critical level it also frees what it can get back at once
+ * (docs/architecture.md, "Memory pressure"). */
 enum {
     KERNARIUM_RUNTIME_MEMORY_PRESSURE_NORMAL = 0,
     KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING = 1,
@@ -963,31 +1026,36 @@ enum {
 
 /* What the host does about that level. */
 enum {
-    /* The normal level: nothing to do. */
+    /* The normal level: no response starts (the guest's trimmer is turned
+     * off). */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_NONE = 0,
-    /* The host starts a response now: it frees its graphics caches and asks
-     * the guest to trim its page cache, which can take seconds. */
+    /* The host starts a response now. A warning turns on the guest's gradual
+     * page-cache trimmer, which asks the guest for one short message; a
+     * critical level frees the host's graphics caches and asks the guest to
+     * trim all of its page cache, which can take seconds. */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED = 1,
-    /* A warning less than 30 s after the last response began: the host does
-     * nothing for it. */
+    /* A warning less than 30 s after the last response began: no response
+     * starts for it (the guest's trimmer is still turned on if it is off). */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_WITHHELD = 2,
-    /* A response is already running and covers this level. The system delivers
-     * its notifications one at a time, each after the response of the one
-     * before, so this is rare: it is the policy's answer to a level that meets
-     * a running response. */
+    /* A response is already running, and this level starts none: a higher
+     * level that meets it is neither queued nor added to it, and a running
+     * warning's response is not upgraded. The host handles the notifications
+     * one at a time, each after the response of the one before, so this is
+     * rare. */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_UNDER_WAY = 3,
 };
 
 /* `level` is a KERNARIUM_RUNTIME_MEMORY_PRESSURE_ value and `response` a
  * KERNARIUM_RUNTIME_MEMORY_RESPONSE_ value. It is called once for each
  * notification the system delivers while a guest runs, the repeats and the
- * return to NORMAL included, as soon as the host has decided what it does and
+ * return to NORMAL included (also the host's own return to NORMAL after a long
+ * quiet, for a system that never delivers it), as soon as the host has decided
+ * what it does and
  * before it starts the work for that notification (a response can take
- * seconds), in the order delivered. The system delivers one notification at a
- * time and merges the levels raised while it is handled into the next, which
- * reports the most serious of them: a level raised during a response is
- * reported after the response, and one that a more serious level replaced is
- * not reported. It carries no figures. It runs on a runtime thread and must
+ * seconds), in the order delivered. The host handles the notifications one at a
+ * time: a level raised during a response is reported after the response, and
+ * one that the system itself merged with others is reported as the most
+ * serious of them. It carries no figures. It runs on a runtime thread and must
  * return promptly. */
 typedef void (*kernarium_runtime_memory_pressure_callback)(
     void* context,

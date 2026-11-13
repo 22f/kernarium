@@ -330,7 +330,10 @@ it on foregrounding. A key press, and a game controller's button through
 `wake_for_input` (runtime API 34), also wake a guest that suspended itself, as a
 phone wakes to its keyboard; a touch does not. The runtime side of sync,
 quiesce, resume, and wake is in
-[`../docs/architecture.md`](../docs/architecture.md#guest-lifecycle).
+[`../docs/architecture.md`](../docs/architecture.md#guest-lifecycle). The
+calls report what the guest confirmed (`kernarium_runtime_settle`), and the
+application logs the guest's storage as settled only when the guest confirmed
+its writeback or none ran (`GuestSettle`).
 
 iOS revokes the host GPU within seconds of `didEnterBackground`, and a guest
 request that reached Metal afterwards would make the guest's Vulkan device

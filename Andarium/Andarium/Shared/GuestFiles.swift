@@ -54,7 +54,8 @@ extension GuestFolderProblem: LocalizedError {
 }
 
 /// Keeps the access the document picker gave to a file open for as long as
-/// anything holds the pick, and ends it after.
+/// anything holds the pick, and ends it after. A copy-mode pick has none to
+/// keep (`PickedFolder` holds its files instead).
 nonisolated final class SecurityScope: @unchecked Sendable {
     private let url: URL
     private let started: Bool
@@ -76,17 +77,20 @@ nonisolated struct FilePick: Identifiable, Sendable {
     var size: UInt64
     var modified = Date.now
     var scope: SecurityScope? = nil
+    /// The folder of ours that holds the file when the picker made a copy of
+    /// it; the folder lives as long as a pick of it does.
+    var staged: PickedFolder? = nil
 
     var id: String { name }
 
     /// A file the picker returned, whose size may not be known yet when it is
     /// still in iCloud: the transfer reads the real one once it has the file.
-    static func picked(_ url: URL) -> FilePick {
+    static func picked(_ url: URL, staged: PickedFolder? = nil) -> FilePick {
         let scope = SecurityScope(url)
         let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
         return FilePick(
             url: url, name: url.lastPathComponent, size: UInt64(max(values?.fileSize ?? 0, 0)),
-            modified: values?.contentModificationDate ?? .now, scope: scope)
+            modified: values?.contentModificationDate ?? .now, scope: scope, staged: staged)
     }
 }
 

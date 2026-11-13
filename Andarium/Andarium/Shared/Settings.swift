@@ -64,6 +64,23 @@ struct SessionSettingsSheet: View {
         #if FEEDBACK_MAIL
         .sendFeedbackSheet(model)
         #endif
+        // A picker that failed (Install APK and the file browser's Import are
+        // here): the alert is the sheet's own, which keeps the sheet open.
+        .background {
+            Color.clear
+                .accessibilityHidden(true)
+                .alert(
+                    model.documentPickerProblem?.title ?? "",
+                    isPresented: Binding(
+                        get: { model.documentPickerProblem != nil },
+                        set: { if !$0 { model.documentPickerProblem = nil } }),
+                    presenting: model.documentPickerProblem
+                ) { _ in
+                    Button("OK", role: .cancel) {}
+                } message: { problem in
+                    Text(problem.message.keepingTogether)
+                }
+        }
         .environment(\.filesBarHeight, filesBarHeight)
         // The bar is outside the pages, so folders slide under it.
         .safeAreaBar(edge: .bottom) {
@@ -89,17 +106,38 @@ struct SessionSettingsSheet: View {
             if browsing == true { detent = .large }
         }
         .task { await model.watchSettings() }
-        .onDisappear { model.fileBrowser?.sheetClosed() }
+        .onDisappear {
+            model.fileBrowser?.sheetClosed()
+            model.documentPickerProblem = nil
+        }
         .presentationDetents([.medium, .large], selection: $detent)
         .presentationBackground(Color(.systemGroupedBackground))
         .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+        #if APP_STORE
         .fileImporter(isPresented: $importing, allowedContentTypes: InstallRefusal.pickerTypes) { result in
-            guard case .success(let url) = result else { return }
-            // Settings goes; the install, or the refusal of a file that is not
-            // an .apk, .apks, .xapk or .apkm, is on the full-screen overlay.
-            model.installPicked(url)
-            dismiss()
+            switch result {
+            case .success(let url):
+                // Settings goes; the install, or the refusal of a file that is not
+                // an .apk, .apks, .xapk or .apkm, is on the full-screen overlay.
+                model.installPicked(url)
+                dismiss()
+            case .failure(let error):
+                model.documentPickerFailed(error, title: AppModel.installFailure)
+            }
         }
+        #else
+        // Every other build takes a copy of the file (`CopyDocumentPicker`).
+        .documentCopyPicker(isPresented: $importing, types: InstallRefusal.pickerTypes) { result in
+            switch result {
+            case .success(let picked):
+                guard let url = picked.urls.first else { return }
+                model.installPicked(url, staged: picked.folder)
+                dismiss()
+            case .failure(let error):
+                model.documentPickerFailed(error, title: AppModel.installFailure)
+            }
+        }
+        #endif
     }
 
     private var fileRoute: Binding<[FolderRoute]> {

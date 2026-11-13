@@ -87,33 +87,52 @@ and releases what it frees (`darwin_uml_physmem_commit`/`_release`,
 footprint. Physical iOS also wires a page while it is committed; the one window
 with a held page unwired is a [hibernation](#hibernation). The kernel trims its
 page cache only at the host's request (`uml_emulator_trim_page_cache()`, every
-quiesce, and the system's memory warning below). The host GPU's memory is not
-carved out of the guest's RAM, and the host provides no Virtio balloon device.
+quiesce, and the system's critical memory pressure below) and, in small passes,
+while its periodic trimmer runs (a memory warning below, or the application's
+request). The host GPU's memory is not carved out of the guest's RAM, and the
+host provides no Virtio balloon device.
 
-**Memory pressure.** When the system's memory pressure source reports a warning
-or a critical level, the runtime frees the host GPU's cached driver allocations
-and asks the guest for one page-cache trim, which unwires those pages
-(`runtime/memory_pressure_response.hpp`); the normal level does nothing. The
-trim is skipped for a guest the host has quiesced and for one with no console;
-a trim that meets another lifecycle call of the guest is retried up to four
-times, a second apart, until a response of its own or the normal level takes its
-place. A lifecycle call (quiesce, resume, stop) goes before a pressure trim,
-which gives way and is retried. A quiesce counts its trim's reply wait from its
-call, and omits its own trim only when a pressure trim reached the guest while
-it waited and used the wait up. A trim wakes a guest that suspended itself. A warning starts at most one
-response per 30 s of awake time (`CLOCK_UPTIME_RAW`) counted from the start of
-the last response, a critical level always starts one, and none starts while one
-runs. macOS and iOS, and both applications, get it through the runtime. Each
-notification the system delivers is also reported to the application (the
-level, and whether a response starts, is withheld by the 30 s or is already
-running), once and before that notification's work, the normal level included
-(`set_pressure_observer`, and the runtime API's `set_memory_pressure_callback`).
-The system delivers one notification at a time and merges the levels raised
-meanwhile into the next, so a level raised during a response is reported after
-it, as the most serious of those raised; the observer lives for the process.
-Each level change and each response is one rate-limited stderr line: the
-footprint, the failed guest-RAM wiring operations and, on a response line, the
-bytes each part released and the trim's duration.
+**Memory pressure.** The guest's own page-cache trimmer is on exactly while the
+system's last memory pressure level is not normal, unless the application asked
+for it (`runtime/memory_pressure_response.hpp`). A warning turns it on: it trims
+the cold file cache in small passes, and the request is one short message that
+waits for nothing. A critical level also frees the host GPU's cached driver
+allocations and asks the guest for one page-cache trim of all its cold cache,
+which unwires those pages. The normal level turns the trimmer off. A warning
+starts at most one response per 30 s of awake time (`CLOCK_UPTIME_RAW`) counted
+from the start of the last response, a critical level always starts one, and
+none starts while one runs; the 30 s limits the responses and their report, not
+the trimmer, which a withheld warning still turns on. The emulator keeps what
+the application and the response want of the trimmer and what the guest last
+took, and a request the guest did not take (a failed send, or a quiesced guest)
+is sent by the next call or by the resume, which replays it after the wake. A
+request skipped for a guest the host has quiesced or with no console is not
+retried, except a trimmer request that could not be written; one that meets
+another lifecycle call of the guest, or a console request in flight, is retried
+up to four times, a second apart, until a response of its own or the normal
+level takes its place. A lifecycle call (quiesce, resume, stop) goes before a
+pressure request, which gives way and is retried. A quiesce counts its trim's
+reply wait from its call, and omits its own trim only when a pressure trim
+reached the guest while it waited and used the wait up. A request wakes a guest
+that suspended itself. macOS and iOS, and both applications, get it through the
+runtime. Each notification the system delivers is also reported to the
+application (the level, and whether a response starts, is withheld by the 30 s
+or is already running), once and before that notification's work, the normal
+level included (`set_pressure_observer`, and the runtime API's
+`set_memory_pressure_callback`). The source's handler only records the delivery
+and a second serial queue handles the deliveries one at a time, in the order
+they arrived: a level raised during a response is reported and answered after
+it, and a notification the system itself merged reads as its most serious flag.
+At most 64 deliveries wait, and the oldest is dropped beyond that. An iPad's
+source never delivers the normal level, so the level held returns to normal
+itself, the same way and with a report, after 240 s of device awake time (the
+clock stops while the device sleeps) in which the source delivered no level but
+normal (the policy's timer, no thread of its own); a process suspended for
+longer meets the return at its resume, which only asks the trimmer off. The
+observer lives for the process. Each level change and each response is one
+rate-limited line: the footprint, the failed guest-RAM wiring operations and,
+on a response line, the bytes each part released and the trim's duration (a
+warning's, the state of the trimmer).
 
 **Budgets.** The process's memory limit, L, is the figure the memory budgets
 derive from. iOS enforces one per application
@@ -671,11 +690,14 @@ first, which is safe.
 ## Guest lifecycle
 
 The platform layer tracks every writable host descriptor opened for the guest.
-`uml_emulator_sync()` asks the guest to write back through its management
-console, then flushes those descriptors. `uml_emulator_quiesce()` has the guest
-trim its cold page cache and hand its free memory to the host, enters full Linux
-system suspend and waits for the platform sleep boundary before flushing the
-host. `uml_emulator_quiesce_resident()` does the same and keeps the guest's RAM
+`uml_emulator_sync()` has the guest write back through the management console's
+`sync` command, then flushes those descriptors. The command runs `sync(2)` in
+the guest's process context and replies only after it returns, whatever the
+magic SysRq mask is. `uml_emulator_quiesce()` has the guest write back first,
+so that what it dirtied becomes reclaimable, then trim its cold page cache and
+hand its free memory to the host, enters full Linux system suspend and waits
+for the platform sleep boundary before flushing the host.
+`uml_emulator_quiesce_resident()` does the same and keeps the guest's RAM
 in the process where a quiesce would [hibernate](#hibernation) it, for a host
 short of the space an image takes. `uml_emulator_resume()` sends the console
 wake edge, and
@@ -689,9 +711,40 @@ busy, is not frozen and the host treats it as not suspended. A request with no
 reply at the deadline is aborted: only a "suspended" reply that arrived before
 the wake edge counts, otherwise the suspension is unconfirmed, never
 hibernated, and woken at the resume. The management console's own stop is no
-fallback, because it halts only one vCPU. Guests that need write-back boot with
-magic SysRq enabled; if the physical iOS sandbox cannot bind the console,
-host-file flushing still runs but guest write-back and freeze are unavailable.
+fallback, because it halts only one vCPU. If the physical iOS sandbox cannot
+bind the console, host-file flushing still runs but guest write-back and freeze
+are unavailable.
+
+Each of the three calls reports what the guest confirmed through a nullable
+`uml_emulator_settle`, and whether it sleeps. The guest's storage is confirmed
+only by its own reply to a `sync` request made in that call. A suspend never
+confirms it: the kernel syncs on the way to suspend only while the guest's
+`sync_on_suspend` is set, and its reply says nothing of that. Otherwise there
+was no guest, or the storage is unconfirmed (no reply in time, a busy lifecycle
+call or console, or a kernel that only started a writeback), refused, or
+unreachable (its console could not be bound). Only confirmed and no-guest are
+settled: an application never logs "settled" for another outcome (`GuestSettle`
+in `GuestHostCore`, filled from the runtime's `kernarium_runtime_settle`), and
+the session record counts them. The zero value of the storage report claims
+nothing, so a report the call never wrote is no confirmation.
+
+A reply confirms only as "synced in <n> ms" whole, in one well-formed datagram
+per part; text that starts alike, a truncated datagram and an error flagged in
+any part of the reply are refusals. A kernel without the `sync` command answers
+exactly "Unknown command", and the host then asks for `sysrq s`, which only
+starts a writeback and needs SysRq enabled (the Kernarium runtime boots its
+guests with it for that case): the result is unconfirmed. One deadline, from the
+call, covers a writeback request in full: the console's lock, every part of the
+reply, the fallback and its settling period. The header
+([`darwin/api/include/uml/emulator.h`](../darwin/api/include/uml/emulator.h))
+states each call's bounds. A quiesced guest the host holds is reported again by a later call; a
+guest whose threads could not be held, or whose suspension is unconfirmed, may
+have run and written since, so a later call asks it again. The guest runs each
+`sync` on a work item of its own, so the console's dispatcher is never blocked
+behind one, and a reply that comes after the host stopped waiting finds the
+request's own socket closed. The runtime's `sync` pins the handle instead of
+holding the lifecycle mutex, which a quiesce keeps for as long as it takes, so
+the library's own bounded wait is the only one.
 
 The kernel says how the guest ends before it shuts its drivers down, with the
 bridge import `darwin_uml_guest_shutdown()`: power-off, halt, or restart with the
@@ -708,13 +761,27 @@ A launch that passes `--session-record=PATH` gets a record of how its session
 ended (`runtime/session_record`): "running" from the boot on, overwritten by
 every end that runs code, a panic with its message and the kernel's last
 output included. A record still "running" at the next launch means the process
-was ended from outside without running, as a memory-limit end is. The file is
-text of a fixed layout (`uml-session 6`) that never passes 17920 bytes
-(`session_record_max_bytes`): an 8 KiB memory slot, a 4 KiB stall slot, a 512-byte
-network slot and the state with the kernel output it quotes, at most 5 KiB. Each
-part is rewritten in place by its own writer, so nothing grows with the session;
-layouts 1 to 5, which lack the figures of the run or the network slot or the
-stall slot, still parse. The
+was ended from outside without running, as a memory-limit end is. For an
+Android guest the state also says whether the boot finished (`boot completed`;
+`boot unfinished` once init's output was seen without it; `boot unobserved`
+when the record saw none of init's output) and how many times the guest
+restarted before the session (`restarts N`); until the boot completes the
+checkpoint thread rewrites the state with the console's last output whenever
+that grew, so a process ended mid-boot leaves where the boot had got, and a
+stop, restart or power-off before the boot completed quotes that output too.
+The output a record quotes is its own boot's, never an earlier boot's of the
+same process. An end is the last state on disk unless the process dies between
+a delayed checkpoint's write and its repair: the end formats its record before
+it writes it, and a checkpoint whose write lands after it writes that record
+again at once. The file is text of a fixed layout (`uml-session 7`) that never
+passes 18176 bytes (`session_record_max_bytes`): an 8 KiB memory slot, a 4 KiB
+stall slot, a 512-byte network slot, a 256-byte storage slot and the state with
+the kernel output it quotes, at most 5 KiB. Each part is rewritten in place by
+its own writer, so nothing grows with the session; layouts 1 to 6, which lack
+the storage slot or the figures of the run or the network slot or the stall
+slot, still parse. The storage slot counts the session's settles and those that
+were not confirmed, and names the last one's call, outcome and time: words and
+numbers only, blank until the first. The
 first 8 KiB are a memory checkpoint that a thread of its own rewrites every 2 s
 (`memory_checkpoint_interval_ms`): the footprint, its peak and what the
 process's memory limit still allows, the large terms of the footprint (guest

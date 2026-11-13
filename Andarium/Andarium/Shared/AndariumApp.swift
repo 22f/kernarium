@@ -42,6 +42,7 @@ final class AndariumProcess {
         // sweep the folder a running test stages its files in.
         BugReportStaging.sweep()
         GuestFileStaging.sweep()
+        PickedFolder.sweep()
         #if FEEDBACK_MAIL
         SendFeedbackStaging().sweep()
         #endif
@@ -130,6 +131,11 @@ struct RootView: View {
             Text(alert.message.keepingTogether)
         }
         .legacyInstallAlert()
+        #if FEEDBACK_MAIL
+        // The sheet the boot screen's notice opens: over every phase, so a
+        // draft survives the boot that ends.
+        .sendFeedbackFromBootSheet(model)
+        #endif
         #if !APP_STORE
         .task {
             // The launch's automation work happens once per model: a scene

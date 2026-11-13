@@ -364,7 +364,10 @@ final class FileBrowserModel {
             var replacing = false
             if clashing.contains(name) {
                 switch choice {
-                case .skip: continue
+                case .skip:
+                    // The file stays where it was; its copy goes now.
+                    if let url = pick.url { pick.staged?.release(url) }
+                    continue
                 case .replace:
                     // A folder is never replaced: the file goes beside it.
                     if conflict.folders.contains(name) {

@@ -792,10 +792,12 @@ verification, and `tools/verify-lineage-recovery.py` checks the recovery image.
 release. It binds the system disk and its layout, boot ranges, command line,
 target-file support, and source provenance. The Android section records the
 security patch level and the build number (`ro.build.version.incremental`),
-which a release must set numerically (`build-aosp.sh --build-number N`): it is
-both the user-visible release number and the monotonic key by which the host
-refuses a downgrade. The checked `metadata/accepted-release.env` selects one
-reviewed release without recording a builder path.
+which a release sets to its release number (`build-aosp.sh --build-number N`:
+`r26` is 26 and `r10000` is 10000, up to ten digits), and so does every proof
+build or rebuild of that release. The host orders releases by it and refuses a
+downgrade ([Guest instance storage](#guest-instance-storage)). The checked
+`metadata/accepted-release.env` selects one reviewed release without recording
+a builder path.
 
 The manifest also records, as `outer.input_trees`, the Git object ID of every
 path that [`support/release/input-paths.tsv`](support/release/input-paths.tsv)
@@ -891,8 +893,12 @@ holds decision vectors and the record's transitions that any other
 implementation must reproduce. The release's identity comes from its manifest
 and layout, never from hashing the disk at launch.
 
-The build number orders releases; the rules compare nothing else. Before a
-start:
+The build number orders releases; the rules compare nothing else. Numbers
+compare as integers, except that `2026110800` to `2026110899`, the counter
+the first public releases were built with, are older than every number outside
+that range (`LEGACY_BUILD_FIRST` and `LEGACY_BUILD_LAST` in the reference
+implementation, `BuildNumber.legacyRange` in AndariumCore, and
+`legacy_build_numbers` in the vectors). Before a start:
 
 | Case | Action |
 | --- | --- |
