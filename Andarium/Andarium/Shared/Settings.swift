@@ -30,7 +30,7 @@ struct SessionSettingsSheet: View {
         NavigationStack(path: fileRoute) {
             ScrollViewReader { proxy in
                 List {
-                    if normalSession, model.capabilities.apkInstall { apps }
+                    if offersInstall { apps }
                     if normalSession, model.capabilities.guestFiles, model.fileBrowser != nil { files }
                     if model.capabilities.statistics { stats(session) }
                     if model.host.supportsPointer { pointer }
@@ -120,6 +120,13 @@ struct SessionSettingsSheet: View {
     private var normalSession: Bool {
         if case .running(.normal) = model.phase { return true }
         return false
+    }
+
+    /// Whether this session has Install APK: the rule the side keys' tip
+    /// reads to point here, one function for both.
+    private var offersInstall: Bool {
+        guard case .running(let mode) = model.phase else { return false }
+        return model.capabilities.offersApkInstall(in: mode)
     }
 
     // MARK: File browser
