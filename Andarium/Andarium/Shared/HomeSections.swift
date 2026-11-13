@@ -325,16 +325,16 @@ struct SnapshotsRow: View {
 
 // MARK: Capabilities
 
-/// What the guest may use of this device: the location and the microphone,
-/// which iOS asks about when they are turned on, and the haptics on a device
-/// that has them. The motion sensors are always the guest's where the device
+/// What the guest may use of this device: the location, the microphone and the
+/// camera, which iOS asks about when they are turned on, and the haptics on a
+/// device that has them. The motion sensors are always the guest's where the device
 /// has them, so there is no row for them.
 struct CapabilitiesSection: View {
     @Environment(AppModel.self) private var model
 
     /// The rows, top to bottom; VoiceOver reads them in this order.
     enum Row: CaseIterable {
-        case location, microphone, haptics
+        case location, microphone, camera, haptics
     }
 
     /// The rows a device shows: Haptics only where there is a Taptic Engine
@@ -352,9 +352,12 @@ struct CapabilitiesSection: View {
                     switch row {
                     case .location: LocationRow()
                     case .microphone: MicrophoneRow()
+                    case .camera: CameraRow()
                     case .haptics: HapticsRow()
                     }
                 }
+            } footer: {
+                ForEach(CameraWords.notes(access: model.cameraAccess), id: \.self) { SectionNote($0) }
             }
             .id("capabilities")
         }
@@ -382,6 +385,30 @@ struct MicrophoneRow: View {
             .labelsHidden()
         }
         .accessibilityHint(denied ? String(localized: "Andarium is not allowed to use the microphone. Turning this on offers to open Settings.") : "")
+    }
+}
+
+/// What the guest's camera apps see: the device's cameras, from the next
+/// start. The switch is read when the guest starts and never during a run, so
+/// it is on Home, which shows only while no guest runs.
+struct CameraRow: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let access = model.cameraAccess
+        OptionRow(
+            title: CameraWords.title, symbol: "camera.fill",
+            detail: CameraWords.detail(for: access), dimmed: access.refuses
+        ) {
+            Toggle(CameraWords.title, isOn: Binding(
+                get: { model.cameraShownOn },
+                set: { model.setCamera($0) }
+            ))
+            .labelsHidden()
+            .disabled(!access.offered)
+            .accessibilityIdentifier("home-camera-switch")
+        }
+        .accessibilityHint(CameraWords.hint(for: access))
     }
 }
 
@@ -485,6 +512,37 @@ struct LocationAccessAlert: ViewModifier {
 
 extension View {
     func locationAccessAlert() -> some View { modifier(LocationAccessAlert()) }
+}
+
+/// When iOS refuses the camera, or the device's settings restrict it, there is
+/// nothing to ask: say why, and offer Andarium's page in Settings where it has
+/// the way out.
+struct CameraAccessAlert: ViewModifier {
+    @Environment(AppModel.self) private var model
+
+    func body(content: Content) -> some View {
+        @Bindable var model = model
+        let words = CameraWords.alert(for: model.cameraAccess)
+        content.alert(
+            words?.title ?? "", isPresented: Binding(
+                get: { model.permissionPrompt == .camera && words != nil },
+                set: { if !$0, model.permissionPrompt == .camera { model.permissionPrompt = nil } }
+            )
+        ) {
+            if words?.offersSettings == true {
+                Button("Open Settings") { model.openCameraSettings() }
+                Button("Not now", role: .cancel) {}
+            } else {
+                Button("OK", role: .cancel) {}
+            }
+        } message: {
+            Text((words?.message ?? "").keepingTogether)
+        }
+    }
+}
+
+extension View {
+    func cameraAccessAlert() -> some View { modifier(CameraAccessAlert()) }
 }
 
 #if !APP_STORE

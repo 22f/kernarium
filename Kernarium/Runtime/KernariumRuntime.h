@@ -74,6 +74,24 @@ enum {
     KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS = 1u << 2,
 };
 
+/* What the camera does for an Android guest this run (runtime API 37), the
+ * value of kernarium_runtime_boot.android_camera_mode. It is fixed at the
+ * start of the run and nothing changes it until the guest powers off. */
+enum {
+    /* The guest finds the host's cameras and every frame is black: the guest
+     * reports Android's hardware camera privacy switch as on (a lens cover),
+     * the host opens no capture session, and the system's camera indicator
+     * cannot light. This is also what zero, an application that states
+     * nothing, gets. */
+    KERNARIUM_RUNTIME_ANDROID_CAMERA_BLOCKED = 0,
+    /* The guest's camera apps see the host's cameras. A capture session opens
+     * only while a guest app has a camera open. The application asks the
+     * system for access first (the runtime never does) and states this only
+     * when the system has granted it: a session whose access is refused later
+     * delivers black frames as an interruption does. */
+    KERNARIUM_RUNTIME_ANDROID_CAMERA_LIVE = 1,
+};
+
 /* A boot request. Linux guests supply rootfs_path and overlay_path. Android
  * guests supply the release directory (guest/system.img, the read-only system
  * disk; guest/partition-layout.json; boot/kernel-command-line.txt), the path of
@@ -132,7 +150,20 @@ enum {
  * argument the guest's image reads for it, which the release's command-line
  * file cannot set, and ignores a bit it does not know with a line on stderr: a
  * feature never fails a boot. The runtime reads it only from a request whose
- * struct_size covers it; a Linux guest ignores it. */
+ * struct_size covers it; a Linux guest ignores it.
+ *
+ * android_camera_mode and android_camera_calibration_path (runtime API 37)
+ * give an Android guest the host's cameras. The runtime discovers them, which
+ * needs no permission, composes the camera layout that describes them
+ * (darwin/device/camera/README.md) as androidboot.product.vendor.sku, which the
+ * release's command-line file cannot set, and makes the camera device after
+ * the GNSS receiver. A host with no camera gets no device and the layout
+ * "none". The mode is one of the KERNARIUM_RUNTIME_ANDROID_CAMERA_ values; an
+ * unknown value runs as blocked, with a line on stderr, because a camera never
+ * fails a boot. The calibration path is a directory, the one the colour data a
+ * Bayer still teaches is kept in (per lens, outside the guest's disks), or null
+ * to keep it in memory. The runtime reads both only from a request whose
+ * struct_size covers them; a Linux guest ignores them. */
 typedef struct kernarium_runtime_boot {
     uint32_t struct_size;
     uint32_t width;
@@ -155,6 +186,8 @@ typedef struct kernarium_runtime_boot {
     const char* session_record_path;
     uint32_t use_jit;
     uint32_t android_host_features;
+    uint32_t android_camera_mode;
+    const char* android_camera_calibration_path;
 } kernarium_runtime_boot;
 
 /* What a launch's host GPU budget comes to, as the runtime evaluates it for
@@ -777,6 +810,58 @@ enum {
  * another value. Any thread. */
 typedef int (*kernarium_runtime_set_network_notice_function)(int notice);
 
+/* What the host is doing for the cameras of the running guest, as the
+ * callback reports it (runtime API 37). */
+enum {
+    /* No guest app has a camera open: no capture session exists and the
+     * system's camera indicator is off. Also the state of a blocked guest,
+     * whose apps may stream black frames and never capture, and of one that
+     * ended. */
+    KERNARIUM_RUNTIME_CAMERA_STATE_IDLE = 0,
+    /* A guest app has a camera open and frames flow. */
+    KERNARIUM_RUNTIME_CAMERA_STATE_STREAMING = 1,
+    /* The capture cannot run for a reason that ends by itself (another app
+     * or a call has the camera, the system has not granted access); the guest
+     * gets black frames meanwhile. */
+    KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED = 2,
+    /* The same, because other apps share the screen (iPad Split View, Slide
+     * Over or a window the system does not let capture). */
+    KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_MULTITASKING = 3,
+    /* The same, because the system is under pressure (heat). */
+    KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_SYSTEM_PRESSURE = 4,
+};
+
+/* `state` is a KERNARIUM_RUNTIME_CAMERA_STATE_ value. It runs on a runtime
+ * thread and must return promptly. */
+typedef void (*kernarium_runtime_camera_state_callback)(
+    void* context,
+    int state);
+/* Sets, or with a null callback clears, the one receiver of the camera state
+ * (runtime API 37). The state in force is reported to a new callback at once.
+ * A state is reported when it changes, and IDLE when the guest ends or
+ * restarts with a camera open. Once it returns, no call to the previous
+ * callback is running or will start, so its context may be released; the
+ * callback must not call this. A runtime without a camera keeps the entry and
+ * never calls back. */
+typedef void (*kernarium_runtime_set_camera_state_callback_function)(
+    kernarium_runtime_camera_state_callback callback,
+    void* context);
+
+/* Tells the cameras how the device body is turned (runtime API 37): the
+ * clockwise degrees from portrait, 0, 90, 180 or 270, as the device's user
+ * sees it. It matters when the host owns the rotation (an iPad window): the
+ * guest's display stays upright at rotation 0 while the device, which carries
+ * every built-in sensor, turns under it, so the sensors' mounting turns with
+ * it. Each boot reads it once and states every camera's SENSOR_ORIENTATION
+ * from it (a back camera's turned the same way, a front camera's the other
+ * way, an external camera's not at all); a later change turns the picture by
+ * the difference, as ROTATE_AND_CROP's automatic setting does. A guest whose
+ * display the guest rotates itself (an iPhone) keeps 0. Zero until the
+ * application says otherwise. Returns 0, or -EINVAL for another
+ * value. Any thread, with or without a guest. */
+typedef int (*kernarium_runtime_set_camera_rotation_function)(
+    uint32_t degrees);
+
 /* The application resolves only this versioned getter after loading exactly
  * one runtime framework. The table is immutable and remains valid until
  * process exit. The selected framework owns one host runtime and its
@@ -823,6 +908,9 @@ typedef struct kernarium_runtime_api {
         set_input_status_callback;
     kernarium_runtime_wake_for_input_function wake_for_input;
     kernarium_runtime_set_network_notice_function set_network_notice;
+    kernarium_runtime_set_camera_state_callback_function
+        set_camera_state_callback;
+    kernarium_runtime_set_camera_rotation_function set_camera_rotation;
 } kernarium_runtime_api;
 
 #if defined(__GNUC__)

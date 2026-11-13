@@ -24,6 +24,10 @@ struct JpegWithGap {
     std::span<const std::uint8_t> tail;
     std::uint32_t gapOffset {};  // of the payload, from the start of the file
     std::uint32_t gapLength {};
+    // The picture's size as its frame header (SOF) states it, in the sensor's
+    // orientation; zero when the header is missing or states no height.
+    std::uint16_t frameWidth {};
+    std::uint16_t frameHeight {};
 
     [[nodiscard]] std::size_t size() const noexcept { return head.size() + tail.size(); }
 };
@@ -34,7 +38,8 @@ struct JpegWithGap {
  * file ends at the end of image of the first picture: a gain map, a depth
  * image or any other picture after it is not passed on. Returns nothing for
  * data that is not a JPEG with a scan and an end of image. The result's
- * `tail` refers to `jpeg` and lies inside it. */
+ * `tail` refers to `jpeg` and lies inside it, and its frame size is the
+ * first frame header's. */
 [[nodiscard]] std::optional<JpegWithGap> reserveExifGap(std::span<const std::uint8_t> jpeg,
                                                         std::uint32_t gapLength = exifGapLength);
 

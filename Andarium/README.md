@@ -486,6 +486,44 @@ requires reopening Andarium.
   location or Location Services are off, and says Approximate location, with an
   explanation and Settings, when Precise Location is off. No test reads a real
   location.
+- **Camera.** Camera is a per-guest switch under Capabilities on Home, after
+  Microphone; it is off for a new guest and for one stored before. iOS is asked
+  for camera access only when the person turns it on. The guest always lists
+  the host's cameras (the layout is composed from them, with no permission
+  asked), and the switch decides one thing: whether the host captures. It is
+  read once, when the guest starts, as the boot request's
+  `android_camera_mode` (runtime API 37): live only while it is on and iOS
+  allows it, otherwise blocked, which gives the guest black frames, opens no
+  capture session and reports Android's camera lens cover. The row is off with
+  its reason when iOS refuses or the device restricts the camera, and turning
+  it on then explains why and, for a refusal, offers Settings. A device with no
+  camera shows the row off and disabled with a note and keeps the person's
+  choice; a device has one when it has a built-in front camera, the rule the
+  guest's layout follows, and the iPad app running on a Mac has none
+  (`CameraAvailability`). On an iPad, a session that other apps
+  share the screen with pauses the camera (black frames) and shows a notice
+  that goes with the interruption. Camera apps in the guest save a photo taken
+  sideways the right way up from the guest's accelerometer, which the guest has
+  wherever the device has sensors (see Motion below); an iPad app on a Mac and
+  the Simulator have none. Where the
+  host owns the rotation (an iPad window) it tells the runtime how the device
+  body is turned from portrait (`CameraRotation`): each start derives every
+  camera's sensor orientation from it, and a later turn turns the picture
+  ([orientation](../darwin/device/camera/README.md#orientation)). The colour
+  data a Bayer still teaches is kept in a folder of Application Support that
+  backups leave out. The memory a live session's cameras hold comes out of the
+  graphics budget ([camera device](../darwin/device/camera/README.md)): with
+  Camera on, the VRAM the System sheet and the statistics show is the pool,
+  the budget less that reserve, and the ruler's graphics warning follows the
+  pool too; the memory offered and the default are unchanged. The Simulator has
+  no camera: the preview states the access (`-systemCamera` reads the
+  Simulator's own permission) and the non-App Store runtime serves a synthetic
+  camera (`KERNARIUM_CAMERA_SOURCE`) to a run that has none, and no camera at
+  all for a value it does not know; an App Store build has neither. No test
+  captures a real camera. The default suites boot no guest; the opt-in
+  `CameraGuestTests` boots one through this runtime on the synthetic camera and
+  reads the vendor SKU, the camera IDs and the lens cover of a live and a
+  blocked session.
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
   ten fingers onto the guest's display; the hardware keyboard and mouse are
   the next item. A touch the system takes over reaches

@@ -24,7 +24,8 @@ extension AppModel {
         let machine = guest.map { guest in
             SendFeedbackInformation.VirtualMachine(
                 vcpus: guest.cores, memoryMiB: guest.memoryMiB, display: display,
-                graphicsMiB: host.memory.graphicsMemoryMiB(forMemory: guest.memoryMiB, vCPUs: guest.cores))
+                graphicsMiB: host.memory.graphicsMemoryMiB(
+                    forMemory: guest.memoryMiB, vCPUs: guest.cores, cameraLive: cameraMode == .live))
         }
         return SendFeedbackInformation(
             appVersion: bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?",
