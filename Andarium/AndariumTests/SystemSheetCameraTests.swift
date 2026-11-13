@@ -113,4 +113,19 @@ struct SystemSheetCameraTests {
             #expect(try await vram(of: blocked.0, in: lease) == "\u{2248} 534 MiB", "\(access)")
         }
     }
+
+    @Test func theSheetAsksTheRuntimeAgainWhenItAppears() async throws {
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let live = await model(.authorized, chosen: true, reserve: 171)
+        #expect(try await vram(of: live.0, in: lease) == "\u{2248} 363 MiB")
+        // A camera came or went without a change of access: the runtime now answers another figure.
+        live.0.cameraReservePlanner = { policy in
+            CameraReservePlan(policy: policy.withCameraReserve { _ in 124 }, exact: true)
+        }
+        // Opening the sheet asks, so the figure the person reads is the new one.
+        _ = try await vram(of: live.0, in: lease)
+        await live.0.cameraReserveTask?.value
+        #expect(try await vram(of: live.0, in: lease) == "\u{2248} 410 MiB")
+    }
 }

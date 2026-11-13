@@ -704,8 +704,9 @@ final class AppModel {
 
     /// Reads the memory a live camera session holds from the runtime again, for
     /// the sheet's graphics memory: after the Camera choice or the access to the
-    /// cameras changes, and after a run, because the cameras the host has and
-    /// the colour data they have learned decide the layout. It matters only
+    /// cameras changes, after a run, and when the System sheet opens, because
+    /// the cameras the host has and the colour data they have learned decide
+    /// the layout. It matters only
     /// while the Camera choice is on, so that is when the runtime is asked; the
     /// policy keeps its own figure meanwhile. Questions are answered in order,
     /// and the result is the task that ends with this one.
