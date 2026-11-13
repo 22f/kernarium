@@ -8,11 +8,14 @@
  *
  *   loader_memory_pressure_tests          what the loader delivers, and to whom
  *   loader_memory_pressure_tests --exit   a report forwarded after exit() has
- *                                         destroyed ordinary statics
+ *                                         destroyed ordinary statics reaches
+ *                                         the handler that was set
  *   loader_memory_pressure_tests --table  which runtime tables the loader takes
  */
 #include "KernariumMemoryPressure.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstddef>
 #include <cstdlib>
@@ -26,6 +29,11 @@ namespace {
 
 kernarium::memory_pressure::Receiver receiver;
 bool exitMode = false;
+/* What the handler of the exit mode heard: atomics, which have no destructor
+ * to run before the hook below. */
+std::atomic<int> exitHeard {0};
+std::atomic<int> exitLevel {-1};
+std::atomic<int> exitResponse {-1};
 
 void fakeSet(kernarium_runtime_memory_pressure_callback callback, void* context)
 {
@@ -164,7 +172,11 @@ void tableTests()
 } // namespace
 
 /* Registered first by the head: runs after the loader's statics were
- * destroyed, when the pressure queue may still call into the loader. */
+ * destroyed, when the pressure queue may still call into the loader. The
+ * report must still reach the handler the application set, so the hook
+ * serves the main queue (this is the main thread) until the handler has run:
+ * a handler or a lock that the loader kept in an ordinary global is gone by
+ * now, and nothing runs. */
 extern "C" void loaderTestAfterStaticDestruction(void)
 {
     if (!exitMode)
@@ -175,6 +187,16 @@ extern "C" void loaderTestAfterStaticDestruction(void)
         nullptr,
         KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING,
         KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (exitHeard.load() == 0 && std::chrono::steady_clock::now() < deadline)
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, true);
+    if (exitHeard.load() != 1 ||
+        exitLevel.load() != KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING ||
+        exitResponse.load() != KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED) {
+        std::fputs("loader memory pressure test failed: the handler did not hear the report after static destruction\n", stderr);
+        std::fflush(stderr);
+        std::_Exit(3);
+    }
     std::fputs("loader memory pressure: exit ok\n", stdout);
     std::fflush(stdout);
     std::_Exit(0);
@@ -193,9 +215,15 @@ int main(int argc, char** argv)
         if (argc > 1 && std::strcmp(argv[1], "--exit") == 0) {
             exitMode = true;
             int captured = 42;
-            kernarium_runtime_loader_set_memory_pressure_handler(^(int, int) { (void)captured; });
-            /* Exits with the handler set: the status is the handler's, 0, and
-             * 2 if it never ran. */
+            kernarium_runtime_loader_set_memory_pressure_handler(^(int level, int response) {
+                (void)captured;
+                exitLevel.store(level);
+                exitResponse.store(response);
+                exitHeard.fetch_add(1);
+            });
+            /* Exits with the handler set: the status is the hook's, 0 when the
+             * handler heard the report, 3 when it did not, and 2 if the hook
+             * never ran. */
             std::exit(2);
         }
         deliveryTests();
