@@ -53,10 +53,14 @@ public struct SlowStart: Equatable, Sendable {
     }
 
     /// A start of `kind` begins at `reading`: nothing has been said of it.
-    public mutating func begin(at reading: TimeInterval, kind: BootKind = .normal) {
+    /// `firstBootPending` says that the guest's first Android boot has not been
+    /// seen to complete (`InstanceFiles.firstBootPending`): an ordinary start
+    /// of such a guest is its first still, though the data disk exists. A
+    /// Recovery start is not the boot that completes it.
+    public mutating func begin(at reading: TimeInterval, kind: BootKind = .normal, firstBootPending: Bool = false) {
         self = SlowStart()
         began = reading
-        longByNature = Self.isLongByNature(kind)
+        longByNature = Self.isLongByNature(kind) || (kind == .normal && firstBootPending)
     }
 
     /// Android restarted the guest in place. The start continues when it was

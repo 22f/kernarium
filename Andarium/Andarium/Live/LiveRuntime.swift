@@ -325,6 +325,10 @@ final class LiveRuntime: RuntimeDriver {
         storage.startPlan()
     }
 
+    func firstBootPending() -> Bool {
+        storage.firstBootPending()
+    }
+
     func measuredUsedBytes() -> UInt64 {
         storage.measuredUsedBytes()
     }

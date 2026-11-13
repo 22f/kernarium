@@ -433,7 +433,9 @@ requires reopening Andarium.
 - **Slow start.** A start still on the boot screen after three minutes
   (`SlowStart`; eight for a guest's first start and the first start after an
   update, which also get a title that does not say the start is slower than
-  usual) puts a notice above the steps: the step under way and the time, Stop
+  usual; a first start that ended before Android booted is still the first,
+  by the guest's `first-boot-pending` record, kept until `sys.boot_completed`
+  is seen) puts a notice above the steps: the step under way and the time, Stop
   and, where Send feedback is compiled in, Send feedback. The boot goes on
   behind it and the notice goes with the boot; it has no dismissal. It sits
   above the steps and pushes them down; where the screen is short, the screen

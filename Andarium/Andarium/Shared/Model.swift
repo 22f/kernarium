@@ -1535,7 +1535,7 @@ final class AppModel {
             snapshots.cancelReads()
             frozenBootStage = nil
             bootTracker = BootTracker()
-            slowStart.begin(at: clock(), kind: kind)
+            slowStart.begin(at: clock(), kind: kind, firstBootPending: driver?.firstBootPending() ?? false)
             preparingDisk = false
             diskProgress = nil
             #if !APP_STORE

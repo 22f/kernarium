@@ -387,3 +387,74 @@ struct InstanceFileTests {
         #expect(throws: InstanceError.self) { try ReleaseIdentity(manifest: Data(old.utf8), layout: Data(layout.utf8)) }
     }
 }
+
+/// Whether a guest's first Android boot has been seen to complete, which the
+/// slow-start notice reads to give a first boot its longer time: a persisted
+/// fact, since the plan from the files says only that the data disk exists.
+struct FirstBootMarkerTests {
+    @Test func aGuestsFirstBootIsPendingUntilAndroidBootedOnce() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = InstanceFiles(directory: root)
+        let first = release()
+        #expect(!files.firstBootPending)
+        try files.apply(files.decide(for: first), release: first)
+        #expect(files.firstBootPending)
+        // The runtime made the data disk and the process ended before the
+        // kernel ran: the files say an ordinary start, and the boot is still
+        // the first.
+        try Data("data".utf8).write(to: files.data)
+        let again = try files.decide(for: first)
+        #expect(again.action == .boot && files.startPlan(for: first) == .normal)
+        try files.apply(again, release: first)
+        #expect(files.firstBootPending)
+        // Android booted.
+        try files.booted(release: first)
+        #expect(!files.firstBootPending)
+        let next = try files.decide(for: first)
+        try files.apply(next, release: first)
+        #expect(!files.firstBootPending)
+    }
+
+    @Test func aCleanEndOfTheFirstRunSaysItBootedToo() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = InstanceFiles(directory: root)
+        let first = release()
+        try files.apply(files.decide(for: first), release: first)
+        try Data("data".utf8).write(to: files.data)
+        try files.complete(release: first)
+        #expect(!files.firstBootPending)
+    }
+
+    @Test func eraseAndResetGiveTheNextGuestItsOwnFirstBoot() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = InstanceFiles(directory: root)
+        let first = release()
+        try files.apply(files.decide(for: first), release: first)
+        try Data("data".utf8).write(to: files.data)
+        try files.booted(release: first)
+        #expect(!files.firstBootPending)
+        // A reset makes a new instance: its first boot is pending.
+        let reset = try files.decide(for: first, flags: InstanceFlags(reset: true))
+        try files.apply(reset, release: first)
+        #expect(files.firstBootPending)
+        // Erasing takes the marker with the rest.
+        try files.removeAll()
+        #expect(!files.firstBootPending)
+    }
+
+    @Test func aGuestAnEarlierVersionMadeIsPastItsFirstBoot() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = InstanceFiles(directory: root)
+        let first = release()
+        try files.apply(files.decide(for: first), release: first)
+        try FileManager.default.removeItem(at: files.firstBoot)
+        try Data("data".utf8).write(to: files.data)
+        #expect(!files.firstBootPending)
+        try files.apply(files.decide(for: first), release: first)
+        #expect(!files.firstBootPending)
+    }
+}

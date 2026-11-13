@@ -216,6 +216,31 @@ struct StartHandoverTests {
         var value: Int { lock.withLock { count } }
     }
 
+    // MARK: The first boot
+
+    /// The guest's data disk exists and its record says the first boot did
+    /// not complete (an earlier start ended before Android booted): the start
+    /// the model begins is long by its nature, as the first start is.
+    @Test func aGuestWhoseFirstBootDidNotCompleteStartsWithTheLongerTime() throws {
+        let rig = try rig()
+        defer { try? FileManager.default.removeItem(at: rig.directory) }
+        let systemDirectory = try #require(Bundle.main.resourceURL).appendingPathComponent(SystemFolder.name)
+        let current = try SystemFolder.release(in: systemDirectory).identity
+        let files = InstanceFiles(directory: rig.directory)
+        try files.apply(files.decide(for: current), release: current)
+        try Data("data".utf8).write(to: files.data)
+        #expect(rig.runtime.firstBootPending())
+        rig.model.start(.normal)
+        #expect(rig.model.slowStart.longByNature && rig.model.slowStart.patience == SlowStart.firstStartThreshold)
+        rig.model.slowStart.finish()
+        rig.model.phase = .home
+        // Android booted: the next start is an ordinary one.
+        try files.booted(release: current)
+        #expect(!rig.runtime.firstBootPending())
+        rig.model.start(.normal)
+        #expect(!rig.model.slowStart.longByNature && rig.model.slowStart.patience == SlowStart.threshold)
+    }
+
     // MARK: The clock
 
     /// The clock the notice counts by is the runtime's: it stands still while

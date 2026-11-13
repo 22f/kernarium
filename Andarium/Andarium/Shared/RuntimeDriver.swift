@@ -124,6 +124,10 @@ protocol RuntimeDriver: AnyObject {
     /// What a start would be, from the guest's files; nil when they cannot be
     /// read, which a start then reports.
     func startPlan() -> StartPlan?
+    /// Whether the guest's first Android boot has not been seen to complete,
+    /// which outlasts a start that ended before it: the next start is long by
+    /// its nature (`SlowStart`) though its disk exists.
+    func firstBootPending() -> Bool
     /// What the guest's data disk occupies now, measured from its file; the
     /// guest changes it while it runs.
     func measuredUsedBytes() -> UInt64

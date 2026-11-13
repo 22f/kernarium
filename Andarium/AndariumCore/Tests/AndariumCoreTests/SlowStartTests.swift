@@ -133,6 +133,26 @@ struct SlowStartTests {
         }
     }
 
+    /// The guest's first boot is still the first when an earlier start ended
+    /// before Android booted (`InstanceFiles.firstBootPending`): an ordinary
+    /// start of it is long by its nature, a Recovery start or a restart of a
+    /// running guest is not.
+    @Test func anOrdinaryStartOfAGuestWhoseFirstBootDidNotCompleteIsLong() {
+        var start = SlowStart()
+        start.begin(at: t0, kind: .normal, firstBootPending: true)
+        #expect(start.longByNature && start.patience == SlowStart.firstStartThreshold)
+        let at200 = start.update(at: t0 + 200)
+        #expect(!at200)
+        for kind in [BootKind.recovery, .restart] {
+            var other = SlowStart()
+            other.begin(at: t0, kind: kind, firstBootPending: true)
+            #expect(!other.longByNature && other.patience == SlowStart.threshold)
+        }
+        var booted = SlowStart()
+        booted.begin(at: t0, kind: .normal, firstBootPending: false)
+        #expect(!booted.longByNature)
+    }
+
     @Test func theKindOfTheStartSurvivesRestartsOfItButNotANewBoot() {
         var start = SlowStart()
         start.begin(at: t0, kind: .firstStart)
