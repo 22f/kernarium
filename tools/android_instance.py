@@ -444,11 +444,32 @@ def apply(
     atomically. What deletes or replaces the data disk (reset, restore and
     create) runs under the installation's lock, so that it neither interleaves
     with a start's preparation of the disk and its identity nor leaves an
-    identity that a start made meanwhile."""
+    identity that a start made meanwhile. The decision was made before the
+    lock was taken, so a create or restore is checked again under it: another
+    start may have made what this one would delete."""
     if decision.action in ("reset", "restore", "create"):
         with installation_lock(instance):
+            _revalidate(instance, decision)
             return _apply(instance, release, decision, now=now)
     return _apply(instance, release, decision, now=now)
+
+
+def _revalidate(instance: Path, decision: Decision) -> None:
+    """Refuse a create or restore whose ground has changed since it was
+    decided, before it deletes anything. A reset is the person's explicit
+    request and deletes whatever is there."""
+    if decision.action == "create" and (instance / DATA_DISK).is_file():
+        raise InstanceError(
+            "a data disk appeared while this start waited for the installation "
+            "(another start created it): start again"
+        )
+    if decision.action == "restore":
+        state = read_state(instance)
+        pending = None if state is None else state.pending_update
+        if pending is None or not (instance / pending["snapshot"]).is_file():
+            raise InstanceError(
+                "the unfinished update ended while this start waited for the installation: start again"
+            )
 
 
 def _apply(

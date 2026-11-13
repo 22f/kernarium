@@ -503,6 +503,56 @@ class InstanceFiles(unittest.TestCase):
             with android_instance.installation_lock(instance, limit=0.2):
                 pass
 
+    def test_a_create_decided_before_another_start_made_the_disk_deletes_nothing(self) -> None:
+        # Two launches plan "create" while the installation is absent. The first
+        # applies its decision and its emulator makes the disk and the identity;
+        # the second then takes the lock and must not delete what the first made.
+        content = (
+            '{"ethernet_mac": "02:aa:bb:cc:dd:ee", "schema": 1, '
+            '"serialno": "0123456789abcdef"}\n'
+        )
+        with tempfile.TemporaryDirectory(prefix="android-instance-") as temporary:
+            instance = Path(temporary) / "instance"
+            rel = release("rel-a", build=100, sha="a" * 64)
+            one = android_instance.decide(None, False, False, rel)
+            two = android_instance.decide(None, False, False, rel)
+            self.assertEqual((one.action, two.action), ("create", "create"))
+            android_instance.apply(instance, rel, one, now=lambda: NOW)
+            (instance / "data.img").write_bytes(b"the first start's disk")
+            identity = instance / android_instance.IDENTITY_FILE
+            identity.write_text(content, encoding="utf-8")
+            state_before = (instance / android_instance.STATE_FILE).read_bytes()
+            with self.assertRaises(android_instance.InstanceError):
+                android_instance.apply(instance, rel, two, now=lambda: NOW)
+            self.assertEqual((instance / "data.img").read_bytes(), b"the first start's disk")
+            self.assertEqual(identity.read_text(encoding="utf-8"), content)
+            self.assertEqual((instance / android_instance.STATE_FILE).read_bytes(), state_before)
+            # What is decided afresh is a plain boot, and a person's reset still deletes.
+            state = android_instance.read_state(instance)
+            self.assertEqual(android_instance.decide(state, True, False, rel).action, "boot")
+            reset = android_instance.decide(state, True, False, rel, android_instance.Flags(reset=True))
+            android_instance.apply(instance, rel, reset, now=lambda: NOW)
+            self.assertFalse((instance / "data.img").exists() or identity.exists())
+
+    def test_a_restore_decided_before_the_update_ended_changes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="android-instance-") as temporary:
+            instance = Path(temporary) / "instance"
+            first = release("rel-a", build=100, sha="a" * 64)
+            second = release("rel-b", build=200)
+            android_instance.apply(instance, first, android_instance.decide(None, False, False, first), now=lambda: NOW)
+            (instance / "data.img").write_bytes(b"data before the update")
+            state = android_instance.read_state(instance)
+            android_instance.apply(instance, second, android_instance.decide(state, True, False, second), now=lambda: NOW)
+            (instance / "data.img").write_bytes(b"data after the update")
+            state = android_instance.read_state(instance)
+            restore = android_instance.decide(state, True, True, second, android_instance.Flags(restore_snapshot=True))
+            self.assertEqual(restore.action, "restore")
+            # The update boots to completion before the restore takes the lock.
+            android_instance.complete(instance, second, now=lambda: NOW)
+            with self.assertRaises(android_instance.InstanceError):
+                android_instance.apply(instance, second, restore, now=lambda: NOW)
+            self.assertEqual((instance / "data.img").read_bytes(), b"data after the update")
+
     def test_a_volume_without_clones_is_a_refusal(self) -> None:
         with tempfile.TemporaryDirectory(prefix="android-instance-") as temporary:
             instance = Path(temporary) / "instance"

@@ -64,7 +64,9 @@ rewritten while valid, so the values follow the disk through updates, resizes,
 snapshot restores and the guest's own factory reset and go with it when the
 instance is erased. A start holds the installation's lock (`identity.lock`, an
 exclusive flock beside the file that is never removed) from preparing the data
-disk to resolving the identity, as the tools' reset, restore and create do, so
+disk to resolving the identity, as the tools' reset, restore and create do (a
+create or restore decided before the lock is checked again under it and refused
+when another start has since made the disk), so
 the first start to find no identity makes it and every other reads that one;
 the file is read as one opened, regular file of at most 4096 bytes, and an
 address of the user network's router (`52:55:0a:00:02:xx`) is never an eth0
