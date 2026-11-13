@@ -621,26 +621,24 @@ struct EraseCard: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        VStack(spacing: 0) {
-            Button {
-                model.confirmingErase = true
-            } label: {
-                HStack(spacing: 12) {
-                    IconTile(symbol: "trash.fill", color: .red)
-                    Text("Erase virtual machine…")
-                        .foregroundStyle(.red)
-                    Spacer()
-                    if let guest = model.guest {
-                        Text(Formats.size(bytes: guest.usedBytes))
-                            .foregroundStyle(.secondary)
-                    }
+        Button {
+            model.confirmingErase = true
+        } label: {
+            HStack(spacing: 12) {
+                IconTile(symbol: "trash.fill", color: .red)
+                Text("Erase virtual machine…")
+                    .foregroundStyle(.red)
+                Spacer()
+                if let guest = model.guest {
+                    Text(Formats.size(bytes: guest.usedBytes))
+                        .foregroundStyle(.secondary)
                 }
-                .padding(.horizontal, 16)
-                .frame(minHeight: 54)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .frame(minHeight: 54)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 26))
     }
 }
