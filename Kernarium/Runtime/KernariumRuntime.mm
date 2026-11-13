@@ -2340,8 +2340,9 @@ int runtimeRun(
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
             /* The cameras' memory tier follows the launch's fixed GPU budget.
              * The cameras are discovered here, before the pool is set, because
-             * only a live session whose layout has cameras holds host memory;
-             * the guest takes the presentation over for its boots. */
+             * only a live session whose layout has cameras holds host memory,
+             * and it holds what that layout lets it use; the guest takes the
+             * presentation over for its boots. */
             request.gpuBudgetBytes = gpuBudget.budget.bytes;
             auto cameras = presentCameras(request);
             cameraReserve = uml::camera::liveCameraReserveMiB(

@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -99,15 +100,29 @@ inline constexpr std::string_view noCameraLayout = "none";
     return mode == CameraMode::blocked && layoutHasCameras(layout);
 }
 
+/* What a layout lets the host hold at once, for the reserve (`CameraUse`): two
+ * cameras that stream together only for back and front cameras with the
+ * concurrent feature, one otherwise, and a RAW still only where the layout has
+ * RAW. Flash, manual control and the front camera's 2160p hold nothing more. */
+[[nodiscard]] constexpr CameraUse cameraUseOf(const LayoutDimensions& dimensions) noexcept
+{
+    const auto layout = normalizedLayout(dimensions);
+    return {layout.cameras == LayoutCameras::backAndFront && layout.concurrent ? 2u : 1u, layout.raw};
+}
+
+/* The dimensions of a layout of the image's set by its name; nothing for a name
+ * that is not in it. */
+[[nodiscard]] std::optional<LayoutDimensions> layoutDimensionsNamed(std::string_view name);
+
 /* The host memory, in whole mebibytes, that a session's cameras hold outside
  * the GPU's pool (`cameraHostMemoryReserveMiB`): only a live session whose
- * layout has cameras holds any. A blocked session opens no capture session,
- * and a host with no cameras gets no device. The launcher and the
- * application's runtime both decide it here, once the layout is composed. */
-[[nodiscard]] constexpr std::uint64_t liveCameraReserveMiB(CameraMode mode, std::string_view layout, CameraTier tier) noexcept
-{
-    return mode == CameraMode::live && layoutHasCameras(layout) ? cameraHostMemoryReserveMiB(tier) : 0;
-}
+ * layout has cameras holds any, and it holds what that layout lets it use: the
+ * reserve follows the composed layout (`cameraUseOf`). A layout that is not
+ * stated, or is not in the image's set, holds the tier's ceiling. A blocked
+ * session opens no capture session, and a host with no cameras gets no device.
+ * The launcher and the application's runtime both decide it here, once the
+ * layout is composed. */
+[[nodiscard]] std::uint64_t liveCameraReserveMiB(CameraMode mode, std::string_view layout, CameraTier tier);
 
 /* The dimensions a host's cameras (in wire order, `arrangeCameras`) earn at a
  * tier. A host with a back camera and no front one, or with no camera that is

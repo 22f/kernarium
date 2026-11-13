@@ -2064,6 +2064,33 @@ void testTheMostFramesHeldAtOnceIsWhatTheReserveCounts()
     rig.onStateChange = nullptr;
 }
 
+// A layout whose cameras do not run together (the reserve counts one stream for it) switches from one camera to the
+// other: the camera service closes the first before it opens the second, and the session's end gives back the frames
+// that wait for the worker, so the host never holds the frames of both.
+void testASwitchBetweenCamerasHoldsOneCamerasFrames()
+{
+    Rig rig;
+    rig.create(1, 0, videoKind);
+    rig.setVideo(1, 640, 480);
+    for (std::uint32_t resource = 1; resource <= 3; ++resource) rig.attach(1, resource, nv12Size(640, 480));
+    for (std::uint32_t resource = 1; resource <= 3; ++resource) (void)rig.queue(1, resource);
+    rig.camera->resetFramePeak();
+    rig.camera->pump(0, 3);
+    require(rig.camera->framesAlive() == inboxFramesPerCamera, "three frames of the first camera wait for the worker");
+    rig.destroy(1);
+    require(!rig.camera->videoRunning(0) && rig.camera->sessionsOpen() == 0 && rig.camera->framesAlive() == 0,
+            "the camera that closed holds none: its session ended");
+    rig.create(2, 1, videoKind);
+    rig.setVideo(2, 640, 480);
+    for (std::uint32_t resource = 1; resource <= 3; ++resource) rig.attach(2, resource, nv12Size(640, 480));
+    for (std::uint32_t resource = 1; resource <= 3; ++resource) (void)rig.queue(2, resource);
+    rig.camera->pump(1, 4);
+    require(rig.camera->framesAlive() == inboxFramesPerCamera, "the second camera's newest three");
+    require(rig.camera->framePeak() <= inboxFramesPerCamera + 1, "at no time more than one camera's inbox and the frame arriving");
+    rig.step();
+    require(rig.camera->framesAlive() == 0, "and the worker frees them");
+}
+
 /* R5 (recheck5): the interruption ends and the system has moved the camera out of its format meanwhile. The platform
  * session puts it back and only then says it is back, so the guest is told resumed after the repair, and the frames the
  * capture produced meanwhile (outside the anchor) never reach it: its buffers get black ones, flagged interrupted. */
@@ -2289,6 +2316,7 @@ int main()
     testAFrameCapturedBeforeTheRepairIsNeverDeliveredAfterIt();
     testAStillThatSpansAnInterruptionFails();
     testTheMostFramesHeldAtOnceIsWhatTheReserveCounts();
+    testASwitchBetweenCamerasHoldsOneCamerasFrames();
     testService();
     return 0;
 }

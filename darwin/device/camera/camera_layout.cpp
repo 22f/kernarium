@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <utility>
 
 namespace uml::camera {
 
@@ -115,6 +116,25 @@ std::vector<LayoutDimensions> allLayouts()
                     for (const bool concurrent : {false, true})
                         layouts.push_back({LayoutCameras::backAndFront, tier, flash, manual, raw, concurrent, front2160});
     return layouts;
+}
+
+std::optional<LayoutDimensions> layoutDimensionsNamed(std::string_view name)
+{
+    static const std::vector<std::pair<std::string, LayoutDimensions>> table = [] {
+        std::vector<std::pair<std::string, LayoutDimensions>> layouts;
+        for (const auto& dimensions : allLayouts()) layouts.emplace_back(layoutName(dimensions), dimensions);
+        return layouts;
+    }();
+    for (const auto& [known, dimensions] : table)
+        if (known == name) return dimensions;
+    return std::nullopt;
+}
+
+std::uint64_t liveCameraReserveMiB(CameraMode mode, std::string_view layout, CameraTier tier)
+{
+    if (mode != CameraMode::live || !layoutHasCameras(layout)) return 0;
+    if (const auto dimensions = layoutDimensionsNamed(layout)) return cameraHostMemoryReserveMiB(tier, cameraUseOf(*dimensions));
+    return cameraHostMemoryReserveMiB(tier);
 }
 
 std::vector<std::string> allLayoutNames()

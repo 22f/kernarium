@@ -143,8 +143,8 @@ void theConservativeSumLeavesTheGPUWhatIsLeft()
 }
 
 /* A live camera session holds host memory outside the GPU (the camera
- * device's reserve, 154 MiB at the tier every host is offered:
- * camera_tiers.hpp), and the GPU's pool is B less it, taken after B is clamped
+ * device's reserve, 154 MiB at the tier every host is offered, for the layout
+ * with the most in it: camera_tiers.hpp), and the GPU's pool is B less it, taken after B is clamped
  * to the floor. */
 void aLiveCameraTakesItsReserveOutOfTheBudget()
 {

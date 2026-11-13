@@ -1181,9 +1181,10 @@ public:
 		 * live cameras, which the same limit holds. */
 		camera_tier_ = prepared_.camera_tier.value_or(
 			uml::camera::cameraTierForBudget(plan.budget.bytes));
-		/* Only a live session whose layout has cameras holds that memory, so
-		 * the layout is composed here, before the pool is set; each boot
-		 * composes it again (`start_camera`). */
+		/* Only a live session whose layout has cameras holds that memory, and
+		 * it holds what that layout lets it use, so the layout is composed
+		 * here, before the pool is set; each boot composes it again
+		 * (`start_camera`). */
 		std::uint64_t camera_reserve = 0;
 		if (!information_only_ &&
 		    (prepared_.camera == CameraSource::synthetic ||

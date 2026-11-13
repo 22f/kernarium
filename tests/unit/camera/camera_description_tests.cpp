@@ -480,6 +480,14 @@ void testHostMemoryReserve()
     require(small.jpegStill == 12'700'000ull / 2 * 3, "three copies of the JPEG");
     require(small.total() == 53'084'160ull + 3'110'400ull + 9'953'280ull + 76'200'000ull + 19'050'000ull, "the parts add up");
     require(cameraHostMemoryReserveMiB(CameraTier::small) == 154, "153.9 MiB, rounded up");
+    // The ceiling is the fullest use: both cameras streaming together and a RAW still. A layout that uses less holds less.
+    require(CameraUse {}.streams == concurrentCameras && CameraUse {}.rawStill, "the default use is the fullest");
+    require(cameraHostMemory(CameraTier::small, {2, true}).total() == small.total(), "which is the ceiling");
+    require(cameraHostMemory(CameraTier::small, {1, true}).total() == small.total() - 4'423'680ull * 6, "one stream fewer");
+    require(cameraHostMemory(CameraTier::small, {2, false}).total() == small.total() - 76'200'000ull, "no RAW still");
+    require(cameraHostMemoryReserveMiB(CameraTier::small, {1, false}) == 56 && cameraHostMemoryReserveMiB(CameraTier::small, {1, true}) == 129 &&
+                cameraHostMemoryReserveMiB(CameraTier::small, {2, false}) == 82 && cameraHostMemoryReserveMiB(CameraTier::small, {2, true}) == 154,
+            "the four figures of the small tier");
     // The tier every host gets is the small one, whatever its budget, and so is the reserve it holds.
     require(cameraHostMemoryReserveMiB(cameraTierForBudget(534ull << 20)) == 154);
     require(cameraHostMemoryReserveMiB(cameraTierForBudget(1249ull << 20)) == 154);

@@ -80,16 +80,27 @@ inline constexpr CameraTier largestOfferedTier = CameraTier::small;
     return alignedFrameBytes(limits.maximumVideoWidth, (limits.maximumVideoWidth * 3 + 3) / 4);
 }
 
+/* What a layout lets the host hold at once, which the reserve counts: the
+ * cameras that stream together (two only for back and front cameras that run
+ * together, one otherwise) and whether a Bayer RAW still, with its DNG, can be
+ * in flight beside the JPEG. The default is the fullest use there is, the
+ * ceiling of a tier. */
+struct CameraUse {
+    std::uint32_t streams {concurrentCameras};
+    bool rawStill {true};
+
+    friend bool operator==(const CameraUse&, const CameraUse&) = default;
+};
+
 /* The host-side memory a live session of a tier can hold at its worst, in
- * bytes, outside the guest's RAM. A live session takes it out of the GPU
- * budget B (gpu_pool_bytes in platform/gpu_budget.hpp), so the application's
- * memory limit holds it. The figure is one per tier, for the layout with the
- * most in it: two cameras and a Bayer still. Each part is derived from the
- * tier's limits:
+ * bytes, outside the guest's RAM, for what a layout lets it use (`CameraUse`).
+ * A live session takes it out of the GPU budget B (gpu_pool_bytes in
+ * platform/gpu_budget.hpp), so the application's memory limit holds it. Each
+ * part is derived from the tier's limits:
  *  - the capture pools: the largest capture buffer the offer lets a stream
  *    take (maximumDeliveredFrameBytes), for each frame the host holds
  *    (heldFramesPerCamera) of each camera that streams at once
- *    (concurrentCameras);
+ *    (`CameraUse::streams`);
  *  - the device's staging: one NV12 frame of the largest video size, where a frame is
  *    cropped, rotated and scaled before it is copied to the guest;
  *  - the transformer's own scratch, which the platform's transformer keeps between
@@ -97,11 +108,13 @@ inline constexpr CameraTier largestOfferedTier = CameraTier::small;
  *    scratch of one such frame each, and vImage's temporaries, measured at 3,691,696
  *    bytes for the largest scale of the small tier (a 1080p frame turned a quarter),
  *    which is 1.19 frames and counted as 1.2;
- *  - the still's transients, for one 12 MP RAW still with its DNG: the RAW
- *    pixels (2 bytes each) three times, the platform's buffer, the device's
- *    copy and the DNG that comes with it;
- *  - and the JPEG that goes with it, three copies of a half byte a pixel
- *    (the file, the device's copy and the copy that reserves the Exif gap). */
+ *  - the still's transients, for one 12 MP RAW still with its DNG, only where the
+ *    layout has RAW (`CameraUse::rawStill`): the RAW pixels (2 bytes each) three
+ *    times, the platform's buffer, the device's copy and the DNG that comes with it;
+ *  - and the JPEG that goes with a still, three copies of a half byte a pixel
+ *    (the file, the device's copy and the copy that reserves the Exif gap).
+ * Nothing the guest is offered depends on it: the offer is bounded by the same
+ * buffer (maximumDeliveredFrameBytes), whatever the layout. */
 struct CameraHostMemory {
     std::uint64_t capturePools {};
     std::uint64_t staging {};
@@ -115,25 +128,27 @@ struct CameraHostMemory {
     }
 };
 
-[[nodiscard]] constexpr CameraHostMemory cameraHostMemory(CameraTier tier) noexcept
+[[nodiscard]] constexpr CameraHostMemory cameraHostMemory(CameraTier tier, const CameraUse& use = {}) noexcept
 {
     const CameraTierLimits limits = limitsOf(tier);
     const std::uint64_t frame = std::uint64_t {limits.maximumVideoWidth} * limits.maximumVideoHeight * 3 / 2;
     return {
-        .capturePools = maximumDeliveredFrameBytes(limits) * heldFramesPerCamera * concurrentCameras,
+        .capturePools = maximumDeliveredFrameBytes(limits) * heldFramesPerCamera * use.streams,
         .staging = frame,
         .transformerScratch = frame * 2 + frame * 6 / 5,
-        .rawStill = limits.maximumStillPixels * 2 * 3,
+        .rawStill = use.rawStill ? limits.maximumStillPixels * 2 * 3 : 0,
         .jpegStill = limits.maximumStillPixels / 2 * 3,
     };
 }
 
 /* The reserve in whole mebibytes, rounded up: the figure the GPU budget gives
- * up while the cameras are live. */
-[[nodiscard]] constexpr std::uint64_t cameraHostMemoryReserveMiB(CameraTier tier) noexcept
+ * up while the cameras are live. With no `CameraUse` it is the tier's ceiling,
+ * which a layout that is not known, and the application's plan before the
+ * layout is composed, count. */
+[[nodiscard]] constexpr std::uint64_t cameraHostMemoryReserveMiB(CameraTier tier, const CameraUse& use = {}) noexcept
 {
     constexpr std::uint64_t mebibyte = 1ull << 20;
-    return (cameraHostMemory(tier).total() + mebibyte - 1) / mebibyte;
+    return (cameraHostMemory(tier, use).total() + mebibyte - 1) / mebibyte;
 }
 
 } // namespace uml::camera

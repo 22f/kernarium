@@ -350,6 +350,67 @@ void testConcurrentRuleIsTheHals()
     require(!meetsConcurrentStreams(describe({{1920, 1080}}, {{4032, 3024}})), "1080p cannot make 1920x1440");
 }
 
+// The reserve follows the composed layout: what a live session of a layout can hold outside the guest's RAM, from
+// the cameras that stream together and the RAW still it has. No layout holds more than the tier's ceiling, and the
+// ceiling is a layout's own figure: the one with both cameras running together and RAW.
+void testTheReserveFollowsTheLayout()
+{
+    const auto tier = CameraTier::small;
+    const auto ceiling = cameraHostMemoryReserveMiB(tier);
+    require(ceiling == 154, "the tier's ceiling");
+    require(cameraHostMemoryReserveMiB(tier, CameraUse {}) == ceiling, "the default use is the ceiling");
+
+    // The four figures a small-tier layout can have: one camera or two, with or without RAW.
+    require(cameraHostMemoryReserveMiB(tier, {1, false}) == 56, "one stream, no RAW: 55.9 MiB, rounded up");
+    require(cameraHostMemoryReserveMiB(tier, {1, true}) == 129, "one stream and a RAW still");
+    require(cameraHostMemoryReserveMiB(tier, {2, false}) == 82, "two streams, no RAW");
+    require(cameraHostMemoryReserveMiB(tier, {2, true}) == 154, "two streams and a RAW still");
+    require(cameraHostMemory(tier, {1, false}).rawStill == 0 && cameraHostMemory(tier, {1, true}).rawStill == 12'700'000ull * 6,
+            "the RAW term is the RAW still's alone");
+    require(cameraHostMemory(tier, {1, false}).capturePools * 2 == cameraHostMemory(tier, {2, false}).capturePools,
+            "the capture pools are those of the cameras that stream");
+
+    std::set<std::uint64_t> figures;
+    bool reachesTheCeiling = false;
+    for (const auto& dimensions : allLayouts()) {
+        const auto name = layoutName(dimensions);
+        const auto reserve = liveCameraReserveMiB(CameraMode::live, name, tier);
+        require(liveCameraReserveMiB(CameraMode::blocked, name, tier) == 0, "a blocked session holds none");
+        if (!layoutHasCameras(name)) {
+            require(reserve == 0, "no cameras, no device, no reserve");
+            continue;
+        }
+        const auto named = layoutDimensionsNamed(name);
+        require(named && layoutName(*named) == name, "every layout of the set is found by its name");
+        const bool together = dimensions.cameras == LayoutCameras::backAndFront && dimensions.concurrent;
+        require(cameraUseOf(dimensions) == CameraUse {together ? 2u : 1u, dimensions.raw}, name);
+        require((name.find("concurrent") != std::string::npos) == dimensions.concurrent, name);
+        require((name.find("raw") != std::string::npos) == dimensions.raw, name);
+        require(reserve == cameraHostMemoryReserveMiB(tier, cameraUseOf(dimensions)), name);
+        require(reserve <= ceiling, "no layout holds more than the tier's ceiling");
+        require(reserve == (together ? (dimensions.raw ? 154u : 82u) : (dimensions.raw ? 129u : 56u)), name);
+        figures.insert(reserve);
+        reachesTheCeiling = reachesTheCeiling || reserve == ceiling;
+    }
+    require(figures == std::set<std::uint64_t> {56, 82, 129, 154}, "the four figures are the layouts' all");
+    require(reachesTheCeiling, "the ceiling is a layout's own figure");
+
+    // A layout that is not stated, or is not of the image's set, holds the ceiling: nothing known to lower it.
+    require(liveCameraReserveMiB(CameraMode::live, "", tier) == ceiling);
+    require(liveCameraReserveMiB(CameraMode::live, "bf-small-flash-manual-raw-concurrent-nothing", tier) == ceiling);
+    require(!layoutDimensionsNamed("").has_value() && !layoutDimensionsNamed("bf-small-nothing").has_value());
+    require(liveCameraReserveMiB(CameraMode::live, "none", tier) == 0 && liveCameraReserveMiB(CameraMode::blocked, "", tier) == 0);
+
+    // The hosts of the synthetic profiles earn the layouts above: the iPad's pair (the front camera does not run with
+    // the back one, no RAW before it is learned) holds the least, a phone that learned RAW and runs both together the most.
+    require(liveCameraReserveMiB(CameraMode::live, "bf-small-flash-manual", tier) == 56, "a tablet's pair before RAW is learned");
+    require(liveCameraReserveMiB(CameraMode::live, "bf-small-flash-manual-raw", tier) == 129, "with RAW learned");
+    require(liveCameraReserveMiB(CameraMode::live, "bf-small-flash-manual-concurrent", tier) == 82, "a pair that runs together");
+    require(liveCameraReserveMiB(CameraMode::live, "bf-small-flash-manual-raw-concurrent", tier) == 154, "with RAW learned");
+    require(liveCameraReserveMiB(CameraMode::live, "front", tier) == 56 && liveCameraReserveMiB(CameraMode::live, "front-manual", tier) == 56,
+            "a host with a front camera alone (a laptop) holds one stream");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -361,6 +422,7 @@ int main(int argc, char** argv)
     testHostsEarnTheirLayouts();
     testComposeLayoutOfAHost();
     testConcurrentRuleIsTheHals();
+    testTheReserveFollowsTheLayout();
     std::puts("camera-layout: passed");
     return 0;
 }

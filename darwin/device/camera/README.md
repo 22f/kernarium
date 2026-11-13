@@ -38,13 +38,25 @@ application's statements (the sensor orientation, the rotation that
   exercises them.
 - **Memory.** A live session holds host memory outside the guest's RAM: the
   capture pools (six frames a camera is holding, `heldFramesPerCamera`, of the
-  largest buffer the platform delivers, for two cameras: the 4:3 frame of the
-  tier's width at the capture buffer's 256-byte row alignment), the device's
-  staging, the platform transformer's scratch (a scaled buffer, a rotation
-  scratch and vImage's temporaries) and the transients of a 12 MP RAW still
-  with its DNG and JPEG, 154 MiB at the small tier (`cameraHostMemoryReserveMiB`). The figure is one a
-  tier, for the layout with the most in it; the loader states it from the
-  budget alone. The six are a maximum of the code: the inbox keeps a camera's
+  largest buffer the platform delivers, for each camera that streams at once:
+  the 4:3 frame of the tier's width at the capture buffer's 256-byte row
+  alignment), the device's staging, the platform transformer's scratch (a scaled
+  buffer, a rotation scratch and vImage's temporaries) and the transients of a
+  still with its JPEG and, where the layout has RAW, its DNG. The reserve
+  follows the composed layout (`liveCameraReserveMiB`, from `CameraUse`): two
+  streams only for back and front cameras with the concurrent feature, one
+  otherwise, and the RAW term only in a layout with RAW. At the small tier that
+  is 56 MiB (one stream), 82 (two), 129 (one with RAW) or 154 (two with RAW,
+  the tier's ceiling, `cameraHostMemoryReserveMiB`); a layout that is not
+  stated or not of the image's set holds the ceiling. Nothing the guest is
+  offered depends on it: the offer is bounded by the capture buffer alone. The
+  loader states the ceiling from the budget alone, as the application cannot
+  compose a layout before the boot; the runtime and the launcher take the
+  layout's own figure. Cameras that do not run together are never open at
+  once (the camera service closes the first before it opens the second, and the
+  device's session ends with the first's last stream, giving its frames back),
+  so one stream's six cover a switch.
+  The six are a maximum of the code: the inbox keeps a camera's
   newest three, the pump takes the newest frame of a camera and frees the older
   ones before it lets go of the inbox, and frees each as soon as it is written;
   one more frame arrives and one is being filled. The device checks the first

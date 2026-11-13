@@ -149,12 +149,17 @@ void aLiveSessionReservesMemoryOnlyForCamerasItHas()
 {
     using uml::camera::liveCameraReserveMiB;
     const auto tier = CameraTier::small;
-    const auto reserve = uml::camera::cameraHostMemoryReserveMiB(tier);
+    const auto ceiling = uml::camera::cameraHostMemoryReserveMiB(tier);
     const auto phone = present(
         uml::camera::makeSyntheticCameraSource(uml::camera::SyntheticProfile::phone), tier, "");
-    require(phone.hasCameras() && liveCameraReserveMiB(CameraMode::live, phone.layout, tier) == reserve,
-        "a live session with cameras holds the tier's reserve");
-    require(reserve == 154, "the figure the budget gives up");
+    require(ceiling == 154, "the most a session of the tier holds");
+    // The reserve follows the composed layout: this phone's front camera does not run with its back one, and its
+    // layout has no RAW before one is learned, so one stream is all it can hold.
+    require(phone.hasCameras() && phone.layout == "bf-small-flash-manual" &&
+                liveCameraReserveMiB(CameraMode::live, phone.layout, tier) == 56,
+        "a live session holds what its layout lets it use");
+    require(liveCameraReserveMiB(CameraMode::live, "bf-small-flash-manual-raw-concurrent", tier) == ceiling,
+        "both cameras and RAW hold the tier's ceiling");
     require(liveCameraReserveMiB(CameraMode::blocked, phone.layout, tier) == 0, "a blocked session opens none");
     // A live session that composes `none` (a host whose cameras the image cannot describe, or a source that is
     // not a name) has no device, so it holds nothing.
@@ -162,8 +167,8 @@ void aLiveSessionReservesMemoryOnlyForCamerasItHas()
     require(!none.hasCameras());
     require(liveCameraReserveMiB(CameraMode::live, none.layout, tier) == 0, "a live session without cameras");
     require(liveCameraReserveMiB(CameraMode::blocked, none.layout, tier) == 0);
-    // An unstated layout counts as having cameras, as everywhere else.
-    require(liveCameraReserveMiB(CameraMode::live, "", tier) == reserve);
+    // An unstated layout counts as having cameras, as everywhere else, and holds the ceiling.
+    require(liveCameraReserveMiB(CameraMode::live, "", tier) == ceiling);
 }
 
 void theLensCoverFollowsTheSession()
