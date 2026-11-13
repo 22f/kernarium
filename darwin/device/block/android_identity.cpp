@@ -8,10 +8,12 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -161,6 +163,8 @@ private:
 
 class Descriptor final {
 public:
+	/* Takes an open descriptor. */
+	explicit Descriptor(int descriptor) noexcept : descriptor_(descriptor) {}
 	Descriptor(const std::filesystem::path &path, int flags, mode_t mode = 0)
 		: descriptor_(open(path.c_str(), flags | O_CLOEXEC, mode))
 	{
@@ -236,7 +240,9 @@ bool validEthernetMac(const MacAddress &mac) noexcept
 {
 	constexpr MacAddress none{0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
 	return (mac[0] & 0x03U) == 0x02U && mac != none &&
-	       mac != defaultEthernetMac && mac != legacyWifiMac;
+	       mac != defaultEthernetMac && mac != legacyWifiMac &&
+	       !std::equal(routerMacPrefix.begin(), routerMacPrefix.end(),
+			   mac.begin());
 }
 
 std::string formatMac(const MacAddress &mac)
@@ -294,25 +300,51 @@ InstallationIdentity generateIdentity(const RandomFill &random)
 std::optional<InstallationIdentity> readIdentityFile(
 	const std::filesystem::path &file)
 {
-	struct stat details {};
-	if (lstat(file.c_str(), &details) != 0) {
+	/* One open, and everything after it is about that open file: a name that
+	 * is replaced by a link or a pipe between a check and the read is never
+	 * looked through (O_NOFOLLOW), and a pipe with no writer does not block
+	 * (O_NONBLOCK). */
+	const int descriptor = open(
+		file.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+	if (descriptor < 0) {
 		if (errno == ENOENT)
 			return std::nullopt;
-		failWith(errno, "cannot examine " + file.string());
+		if (errno == ELOOP)
+			invalid(file, "it is a symbolic link");
+		failWith(errno, "cannot open " + file.string());
 	}
+	Descriptor guard{descriptor};
+	return readIdentityDescriptor(descriptor, file);
+}
+
+InstallationIdentity readIdentityDescriptor(
+	int descriptor, const std::filesystem::path &file)
+{
+	struct stat details {};
+	if (fstat(descriptor, &details) != 0)
+		failWith(errno, "cannot examine " + file.string());
 	if (!S_ISREG(details.st_mode))
 		invalid(file, "it is not a regular file");
 	if (details.st_size < 0 ||
 	    static_cast<std::uint64_t>(details.st_size) > maximumFileSize)
 		invalid(file, "it is too large");
-	std::string text(static_cast<std::size_t>(details.st_size), '\0');
-	std::FILE *handle = std::fopen(file.c_str(), "rb");
-	if (handle == nullptr)
-		failWith(errno, "cannot open " + file.string());
-	const auto count = std::fread(text.data(), 1, text.size(), handle);
-	const int closed = std::fclose(handle);
-	if (count != text.size() || closed != 0)
-		throw std::runtime_error("cannot read " + file.string());
+	/* Read to the end, a byte past the bound: a file that grew since fstat is
+	 * too large, one that was cut short is read as far as it goes and then
+	 * is not an identity, and a read that fails is the system's error. */
+	std::string text;
+	std::array<char, 512> chunk{};
+	for (;;) {
+		const auto count = read(descriptor, chunk.data(), chunk.size());
+		if (count < 0 && errno == EINTR)
+			continue;
+		if (count < 0)
+			failWith(errno, "cannot read " + file.string());
+		if (count == 0)
+			break;
+		text.append(chunk.data(), static_cast<std::size_t>(count));
+		if (text.size() > maximumFileSize)
+			invalid(file, "it is too large");
+	}
 
 	const auto members = FlatObjectParser{text, file}.parse();
 	if (members.size() != 3U)
@@ -352,9 +384,13 @@ void writeIdentityFile(const std::filesystem::path &file,
 			"an identity file holds a valid serial number and "
 			"ethernet address");
 	const auto content = render(identity);
+	/* A name of its own: no other writer, in this process or another, shares
+	 * it, and a leftover of a crash still starts with the file's name. */
+	std::array<std::uint8_t, 4> unique{};
+	systemRandom(unique);
 	const auto temporary = file.parent_path() /
-		(file.filename().string() + ".tmp-" + std::to_string(getpid()));
-	(void)unlink(temporary.c_str());
+		(file.filename().string() + ".tmp-" + std::to_string(getpid()) +
+		 "-" + serialFrom(unique));
 	try {
 		Descriptor descriptor{temporary, O_WRONLY | O_CREAT | O_EXCL,
 				      0600};
@@ -387,6 +423,12 @@ ResolvedIdentity resolveIdentity(const IdentityRequest &request)
 		return {request.stated, IdentityOutcome::stated};
 	if (request.file.empty())
 		return {};
+	if (request.lock == nullptr)
+		return {generateIdentity(request.random),
+			IdentityOutcome::unsaved};
+	if (request.lock->file() != installationLockFile(request.file))
+		throw std::logic_error(
+			"the lock held is another installation's");
 
 	auto outcome = IdentityOutcome::created;
 	if (!request.diskCreated) {
@@ -409,6 +451,81 @@ ResolvedIdentity resolveIdentity(const IdentityRequest &request)
 		outcome = IdentityOutcome::unsaved;
 	}
 	return {std::move(fresh), outcome};
+}
+
+std::filesystem::path installationLockFile(
+	const std::filesystem::path &identity)
+{
+	return identity.parent_path() / lockFileName;
+}
+
+InstallationLock::InstallationLock(const std::filesystem::path &identity,
+				   std::chrono::milliseconds limit)
+	: file_(installationLockFile(identity))
+{
+	descriptor_ = open(file_.c_str(),
+			   O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+	if (descriptor_ < 0)
+		failWith(errno, "cannot open " + file_.string());
+	const auto deadline = std::chrono::steady_clock::now() + limit;
+	for (;;) {
+		if (flock(descriptor_, LOCK_EX | LOCK_NB) == 0)
+			return;
+		const int error = errno;
+		if (error != EWOULDBLOCK && error != EINTR) {
+			(void)close(descriptor_);
+			descriptor_ = -1;
+			failWith(error, "cannot lock " + file_.string());
+		}
+		if (std::chrono::steady_clock::now() >= deadline) {
+			(void)close(descriptor_);
+			descriptor_ = -1;
+			failWith(ETIMEDOUT,
+				 "the installation stayed locked: " +
+					 file_.string());
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds{20});
+	}
+}
+
+std::optional<InstallationLock> acquireInstallationLock(
+	const std::filesystem::path &identity, std::chrono::milliseconds limit)
+{
+	try {
+		return std::optional<InstallationLock>{std::in_place, identity,
+						       limit};
+	} catch (const std::system_error &error) {
+		if (error.code().value() == ETIMEDOUT)
+			throw;
+		return std::nullopt;
+	}
+}
+
+InstallationLock::~InstallationLock()
+{
+	if (descriptor_ >= 0) {
+		(void)flock(descriptor_, LOCK_UN);
+		(void)close(descriptor_);
+	}
+}
+
+PreparedInstallation prepareInstallation(
+	const Layout &layout, const std::filesystem::path &dataDisk,
+	std::uint32_t gib, IdentityRequest request,
+	std::chrono::milliseconds lockLimit)
+{
+	/* A request that states values has no file and takes no lock. */
+	const bool usesFile = !request.file.empty() && !request.stated.serial &&
+			      !request.stated.ethernetMac;
+	auto held = [&]() {
+		if (!usesFile)
+			return std::optional<InstallationLock>{};
+		return acquireInstallationLock(request.file, lockLimit);
+	}();
+	const auto disk = prepareDataDisk(layout, dataDisk, gib);
+	request.diskCreated = disk.change == DataDiskChange::created;
+	request.lock = held ? &*held : nullptr;
+	return {disk, resolveIdentity(request)};
 }
 
 std::string serialArgument(std::string_view serial)

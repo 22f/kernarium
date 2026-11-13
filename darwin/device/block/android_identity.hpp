@@ -2,7 +2,10 @@
 #ifndef UML_DEVICE_BLOCK_ANDROID_IDENTITY_HPP
 #define UML_DEVICE_BLOCK_ANDROID_IDENTITY_HPP
 
+#include "android_data_disk.hpp"
+
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -18,11 +21,13 @@
  * disk through an image update, a storage resize, a snapshot restore and the
  * guest's own factory reset, and go with it when the instance is erased.
  *
- * The values are never logged and are not a tracked fixture: a test makes its
- * own. They reach the guest as the kernel argument `androidboot.serialno=`
- * (readKernelCommandLine drops the release's own) and as the hardware address
- * the user network gives eth0. The guest's Wi-Fi address is derived from
- * eth0's inside the guest and is not stored here. */
+ * The host's own messages never contain the values, and they are not a tracked
+ * fixture: a test makes its own. What the guest itself reports (an Android bug
+ * report, the kernel's echo of its command line in the console) carries them as
+ * on any Android device. They reach the guest as the kernel argument
+ * `androidboot.serialno=` (readKernelCommandLine drops the release's own) and
+ * as the hardware address the user network gives eth0. The guest's Wi-Fi
+ * address is the image's own constant and is not stored here. */
 namespace uml::android {
 
 using MacAddress = std::array<std::uint8_t, 6>;
@@ -39,6 +44,14 @@ std::filesystem::path identityFile(const std::filesystem::path &dataDisk);
 inline constexpr MacAddress defaultEthernetMac{
 	0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
 inline constexpr MacAddress legacyWifiMac{0x02, 0x15, 0xb2, 0x00, 0x00, 0x00};
+
+/* The first five bytes of the addresses the user network's own router and
+ * servers answer from (52:55:0a:00:02:xx for 10.0.2.xx, the gateway and the
+ * name server among them): a guest that had one would be told apart from them
+ * by nothing. darwin/device/network/slirp/provider.hpp keeps the same prefix
+ * for the provider's own refusal. */
+inline constexpr std::array<std::uint8_t, 5> routerMacPrefix{
+	0x52, 0x55, 0x0a, 0x00, 0x02};
 
 /* What a launcher resolved for one run: the serial number for the kernel
  * command line and the address for eth0. A member that is empty leaves the
@@ -58,7 +71,8 @@ struct InstallationIdentity {
 
 /* Whether `mac` can be eth0's address: unicast, locally administered, and none
  * of 02:00:00:00:00:00 (the platform's "no address" value), the user network's
- * default or the legacy Wi-Fi address. */
+ * default, the legacy Wi-Fi address or an address of the user network's router
+ * and servers (routerMacPrefix). */
 [[nodiscard]] bool validEthernetMac(const MacAddress &mac) noexcept;
 
 /* `aa:bb:cc:dd:ee:ff`, lower case. */
@@ -79,20 +93,67 @@ void systemRandom(std::span<std::uint8_t> bytes);
  * accepts. */
 [[nodiscard]] InstallationIdentity generateIdentity(const RandomFill &random);
 
-/* The identity file's content, or empty when `file` does not exist. Throws
- * std::invalid_argument for a file that is not a valid identity (schema 1,
- * exactly the three members, valid values) and std::system_error when it
- * cannot be read. */
+/* The identity file's content, or empty when `file` does not exist. The file
+ * is opened once, without following a link and without waiting for a writer,
+ * and what is read is the opened file: a name that is replaced meanwhile is
+ * not read through. Throws std::invalid_argument for a file that is not a
+ * valid identity (a regular file of at most 4096 bytes, schema 1, exactly the
+ * three members, valid values; a link, a pipe, a directory and a file cut
+ * short are not) and std::system_error when it cannot be read. */
 [[nodiscard]] std::optional<InstallationIdentity> readIdentityFile(
 	const std::filesystem::path &file);
 
+/* readIdentityFile's reading of a descriptor that is already open, which
+ * `name` only names in messages. */
+[[nodiscard]] InstallationIdentity readIdentityDescriptor(
+	int descriptor, const std::filesystem::path &name);
+
 /* Replaces `file` with `identity`, which must hold both members valid: the
- * new content is written beside it, flushed and renamed over it. Throws
- * std::system_error. */
+ * new content is written beside it under a name of its own, flushed and
+ * renamed over it. Throws std::system_error. */
 void writeIdentityFile(const std::filesystem::path &file,
 		       const InstallationIdentity &identity);
 
-/* What a launcher states about the identity. A value in `explicit_` is used as
+/* The identity file's directory holds `identity.lock`, which serializes what
+ * changes an installation's identity: a start's preparation of the data disk
+ * and of its identity (the macOS launcher, the Kernarium runtime), and the
+ * tools' reset, restore and create. It is an exclusive flock that is waited for
+ * up to `limit`, and the file is never removed or replaced. Whoever holds it
+ * sees the installation as no other process changes it, so the start that
+ * reads an absent identity file is the only one that makes it, and the others
+ * read what it made. std::system_error (ETIMEDOUT) when the limit passes. */
+inline constexpr std::string_view lockFileName{"identity.lock"};
+
+/* The lock file of the installation whose identity file is `identity`. */
+std::filesystem::path installationLockFile(
+	const std::filesystem::path &identity);
+
+class InstallationLock final {
+public:
+	explicit InstallationLock(
+		const std::filesystem::path &identity,
+		std::chrono::milliseconds limit = std::chrono::seconds{60});
+	~InstallationLock();
+	InstallationLock(const InstallationLock &) = delete;
+	InstallationLock &operator=(const InstallationLock &) = delete;
+
+	const std::filesystem::path &file() const noexcept { return file_; }
+
+private:
+	std::filesystem::path file_;
+	int descriptor_ = -1;
+};
+
+/* The installation's lock, or empty when it cannot be taken at all (the
+ * directory is read-only or missing): the start then takes values it does not
+ * keep, as it does for a file it cannot write. Throws std::system_error
+ * (ETIMEDOUT) when another process holds it past `limit`, which refuses the
+ * start. */
+[[nodiscard]] std::optional<InstallationLock> acquireInstallationLock(
+	const std::filesystem::path &identity,
+	std::chrono::milliseconds limit = std::chrono::seconds{60});
+
+/* What a launcher states about the identity. A value in `stated` is used as
  * given and nothing is read or written; the other member then stays unset. */
 struct IdentityRequest {
 	/* The identity file, or empty for none: the launcher then keeps the
@@ -103,6 +164,12 @@ struct IdentityRequest {
 	bool diskCreated = false;
 	InstallationIdentity stated;
 	RandomFill random = systemRandom;
+	/* The lock of `file`'s installation, which the caller took before it
+	 * prepared the data disk and holds until the identity is resolved. A
+	 * request with a file and no lock (acquireInstallationLock gave none)
+	 * reads and writes nothing and takes values it does not keep; a lock
+	 * that is another installation's throws std::logic_error. */
+	const InstallationLock *lock = nullptr;
 };
 
 enum class IdentityOutcome {
@@ -127,10 +194,30 @@ struct ResolvedIdentity {
 
 /* The identity this start gives the guest. A stated value wins and touches no
  * file. Otherwise the file decides: its identity is kept, and a new one is
- * written when the file is absent or invalid, or the data disk is new. A file
- * that cannot be written never fails the start: the new identity is used and
- * the outcome says so. */
+ * written when the file is absent or invalid, or the data disk is new. Under
+ * the installation's lock the first start to find no identity makes it and
+ * every other start reads that one. A file that cannot be written, or a lock
+ * that was not taken, never fails the start: the new identity is used and the
+ * outcome says so. */
 [[nodiscard]] ResolvedIdentity resolveIdentity(const IdentityRequest &request);
+
+/* A start's preparation of one installation, which is what both launchers do
+ * before the guest's disks are attached: the installation is locked (unless the
+ * request states values and has no file), the data disk is created, grown or
+ * left (prepareDataDisk), and the identity is resolved for it, with `diskCreated`
+ * and `lock` filled in. The lock is released when the call returns. Another
+ * start of the installation, or the tools' reset, waits for it up to `lockLimit`;
+ * a start that cannot lock the installation fails with std::system_error
+ * (ETIMEDOUT) before it touches the disk. */
+struct PreparedInstallation {
+	PreparedDataDisk disk;
+	ResolvedIdentity identity;
+};
+
+[[nodiscard]] PreparedInstallation prepareInstallation(
+	const Layout &layout, const std::filesystem::path &dataDisk,
+	std::uint32_t gib, IdentityRequest request,
+	std::chrono::milliseconds lockLimit = std::chrono::seconds{60});
 
 /* The kernel argument that gives the guest its serial number. Android init
  * imports it as ro.boot.serialno and ro.serialno, so a launcher that resolved

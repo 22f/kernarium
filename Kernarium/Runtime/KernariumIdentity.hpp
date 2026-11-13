@@ -73,20 +73,18 @@ struct Request {
     return request;
 }
 
-/* The identity this run gives the guest: what the request states, or else the
- * installation's own, kept in the file beside `dataDisk` (a new data disk
- * starts a new installation). The values stay out of every log: the outcome is
- * what the caller may say. */
-[[nodiscard]] inline uml::android::ResolvedIdentity resolve(
-    const Request& request,
-    const std::filesystem::path& dataDisk,
-    bool dataDiskCreated)
+/* What the runtime asks of the installation (uml::android::prepareInstallation,
+ * which locks it, prepares the data disk and resolves the identity): the
+ * request's stated values, or else the file beside `dataDisk`, which a new data
+ * disk replaces. The host's own messages never contain the values: the outcome
+ * is what the caller may say. */
+[[nodiscard]] inline uml::android::IdentityRequest identityRequest(
+    const Request& request, const std::filesystem::path& dataDisk)
 {
-    return uml::android::resolveIdentity({
+    return {
         .file = uml::android::identityFile(dataDisk),
-        .diskCreated = dataDiskCreated,
         .stated = request.stated,
-    });
+    };
 }
 
 } // namespace kernarium::identity

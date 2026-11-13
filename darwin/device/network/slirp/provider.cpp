@@ -269,7 +269,9 @@ int SlirpProvider::set_mac(std::span<const unsigned char, 6> mac)
 {
 	const bool zero = std::ranges::all_of(
 		mac, [](unsigned char byte) { return byte == 0; });
-	if ((mac[0] & 0x01U) != 0 || zero)
+	if ((mac[0] & 0x01U) != 0 || zero ||
+	    std::equal(router_mac_prefix.begin(), router_mac_prefix.end(),
+		       mac.begin()))
 		return -EINVAL;
 	std::lock_guard lock{start_mutex_};
 	std::ranges::copy(mac, mac_.begin());

@@ -439,19 +439,20 @@ int main(int argc, char *argv[], char *envp[])
 			 * disk. */
 			uml::android::rejectStorageArguments(
 				std::span{options.forwarded}.subspan(1));
-			const auto prepared_disk = uml::android::prepareDataDisk(
+			/* The installation is locked from the data disk's preparation
+			 * to the identity's resolution, so that a start that creates
+			 * the disk and a start that finds it do not interleave, and
+			 * the tools' reset waits for both. A new data disk is a new
+			 * installation, whatever file lies beside it. */
+			const auto installation = uml::android::prepareInstallation(
 				uml::android::readLayout(
 					release / uml::android::releaseLayout),
-				data_disk, options.data_gib);
+				data_disk, options.data_gib,
+				{.file = options.identity_file,
+				 .stated = {options.serial, std::nullopt}});
+			const auto &prepared_disk = installation.disk;
+			const auto &resolved = installation.identity;
 			announce_data_disk(prepared_disk, options.data_gib);
-			/* A new data disk is a new installation, whatever file lies
-			 * beside it. */
-			const auto resolved = uml::android::resolveIdentity({
-				.file = options.identity_file,
-				.diskCreated = prepared_disk.change ==
-					       uml::android::DataDiskChange::created,
-				.stated = {options.serial, std::nullopt},
-			});
 			announce_identity(resolved.outcome);
 			if (resolved.identity.ethernetMac)
 				options.forwarded.emplace_back(

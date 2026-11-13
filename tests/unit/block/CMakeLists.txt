@@ -42,6 +42,7 @@ uml_add_unit_test(NAME boot-initramfs-archive
 # the file.
 add_executable(uml_android_identity_tests android_identity_tests.cpp)
 target_link_libraries(uml_android_identity_tests PRIVATE UML::AndroidBoot)
+add_dependencies(uml_android_identity_tests uml_android_release_fixture)
 uml_add_unit_test(NAME android-installation-identity
-    COMMAND uml_android_identity_tests
+    COMMAND uml_android_identity_tests ${_uml_android_fixture_dir}
     LABELS android;device)

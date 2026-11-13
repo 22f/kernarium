@@ -62,9 +62,18 @@ beside the data disk: it is made at random when it is absent or invalid and
 when a start created the data disk, is private to its owner, and is never
 rewritten while valid, so the values follow the disk through updates, resizes,
 snapshot restores and the guest's own factory reset and go with it when the
-instance is erased. A launcher that states a value uses it and touches no file.
+instance is erased. A start holds the installation's lock (`identity.lock`, an
+exclusive flock beside the file that is never removed) from preparing the data
+disk to resolving the identity, as the tools' reset, restore and create do, so
+the first start to find no identity makes it and every other reads that one;
+the file is read as one opened, regular file of at most 4096 bytes, and an
+address of the user network's router (`52:55:0a:00:02:xx`) is never an eth0
+address. A launcher that states a value uses it and touches no file.
 `readKernelCommandLine` drops the release's `androidboot.serialno=` argument
-when the launcher sets its own; the values are never logged.
+when the launcher sets its own, a quoted word included, so exactly one serial
+number reaches Android. The host's own messages never contain the values (the
+session record masks the one the kernel echoes); what the guest itself reports,
+such as an Android bug report, carries them as on any Android device.
 
 ## Exactly two disks
 

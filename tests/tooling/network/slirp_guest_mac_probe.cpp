@@ -277,10 +277,21 @@ void check_refused_addresses()
 	const std::array<unsigned char, 6> zero{};
 	const std::array<unsigned char, 6> broadcast{0xff, 0xff, 0xff, 0xff, 0xff,
 						     0xff};
-	for (const auto &mac : {multicast, zero, broadcast})
+	/* The addresses the router and the name server answer from. */
+	const std::array<unsigned char, 6> gateway{0x52, 0x55, 0x0a, 0x00, 0x02, 0x02};
+	const std::array<unsigned char, 6> name_server{0x52, 0x55, 0x0a, 0x00, 0x02, 0x03};
+	const std::array<unsigned char, 6> other_server{0x52, 0x55, 0x0a, 0x00, 0x02, 0xff};
+	for (const auto &mac : {multicast, zero, broadcast, gateway, name_server,
+				other_server})
 		if (provider.set_mac(mac) != -EINVAL ||
 		    uml_slirp_net_set_mac(&provider, mac.data()) != -EINVAL)
-			fail("refused", "an address that cannot be unicast was taken");
+			fail("refused", "an address that cannot be the guest's was taken");
+	/* Only that prefix: its neighbours are ordinary addresses. */
+	const std::array<unsigned char, 6> neighbour{0x52, 0x55, 0x0a, 0x00, 0x03, 0x02};
+	if (provider.set_mac(neighbour) != 0)
+		fail("refused", "an address next to the router's was refused");
+	if (provider.set_mac(uml::network::default_guest_mac) != 0)
+		fail("refused", "the default address was refused");
 	if (uml_slirp_net_set_mac(nullptr, first_mac.data()) != -EINVAL ||
 	    uml_slirp_net_set_mac(&provider, nullptr) != -EINVAL)
 		fail("refused", "a null argument was accepted");

@@ -53,6 +53,13 @@ inline constexpr const char *nameserver_address = "10.0.2.3";
  * (SlirpProvider::set_mac). */
 inline constexpr std::array<unsigned char, 6> default_guest_mac{
 	0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
+/* The first five bytes of the addresses SLiRP's router and servers answer
+ * from (52:55:0a:00:02:xx for 10.0.2.xx): a guest address that began with them
+ * could not be told from the gateway's or the name server's.
+ * darwin/device/block/android_identity.hpp keeps the same prefix for the
+ * identity's own refusal. */
+inline constexpr std::array<unsigned char, 5> router_mac_prefix{
+	0x52, 0x55, 0x0a, 0x00, 0x02};
 inline constexpr dns::Ipv4Address nameserver_ipv4{10, 0, 2, 3};
 inline constexpr dns::Ipv4Address host_alias_ipv4{10, 0, 2, 2};
 /* A frame that needs the host's addresses (dns::needs_host_check) finds them
@@ -117,9 +124,10 @@ public:
 
     int open(std::span<unsigned char, 6> mac, unsigned int &mtu);
 	/* The hardware address the next open() gives the guest's interface, in
-	 * place of default_guest_mac. Returns 0, or -EINVAL for a multicast or an
-	 * all-zero address. DHCP and DNS answer whatever address the guest uses,
-	 * so nothing else depends on the value. */
+	 * place of default_guest_mac. Returns 0, or -EINVAL for a multicast
+	 * address, an all-zero one or one of the router's and servers' own
+	 * (router_mac_prefix). DHCP and DNS answer whatever address the guest
+	 * uses, so nothing else depends on the value. */
 	int set_mac(std::span<const unsigned char, 6> mac);
 	/* Register a host forward. It is recorded and installed on each SLiRP
 	 * instance open() creates, before that instance's worker starts: libslirp

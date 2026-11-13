@@ -83,6 +83,21 @@ void aValueThatIsNotOneIsInvalidAndNeverGuessed()
     require(readRequest(boot).invalid);
 }
 
+/* A run as the runtime makes it (prepareInstallation without the disk, whose
+ * layout this test has none of): the lock first, then the resolution of the
+ * request identityRequest makes. */
+uml::android::ResolvedIdentity resolveLocked(
+    const Request& request, const fs::path& dataDisk, bool created)
+{
+    auto asked = identityRequest(request, dataDisk);
+    asked.diskCreated = created;
+    const auto held = request.stated.serial || request.stated.ethernetMac
+        ? std::optional<android::InstallationLock> {}
+        : android::acquireInstallationLock(asked.file);
+    asked.lock = held ? &*held : nullptr;
+    return android::resolveIdentity(asked);
+}
+
 void theFileBesideTheDataDiskIsTheInstallationsIdentity()
 {
     const uml::testing::ScratchSubdirectory scratch { "uml-kernarium-identity.XXXXXX" };
@@ -93,37 +108,50 @@ void theFileBesideTheDataDiskIsTheInstallationsIdentity()
     const Request nothing;
 
     // The first start of an installation makes the file and the next keeps it.
-    const auto made = resolve(nothing, first / "data.img", true);
+    const auto made = resolveLocked(nothing, first / "data.img", true);
     require(made.outcome == android::IdentityOutcome::created);
     require(made.identity.serial && made.identity.ethernetMac);
     require(fs::exists(first / "identity.json"));
-    const auto kept = resolve(nothing, first / "data.img", false);
+    const auto kept = resolveLocked(nothing, first / "data.img", false);
     require(kept.outcome == android::IdentityOutcome::kept && kept.identity == made.identity);
 
     // An installation that has none (one that predates the identity) gets one
     // on its first start after the update, and keeps it.
-    const auto lazily = resolve(nothing, second / "data.img", false);
+    const auto lazily = resolveLocked(nothing, second / "data.img", false);
     require(lazily.outcome == android::IdentityOutcome::created);
-    require(resolve(nothing, second / "data.img", false).identity == lazily.identity);
+    require(resolveLocked(nothing, second / "data.img", false).identity == lazily.identity);
     // Two installations differ.
     require(lazily.identity.serial != made.identity.serial);
     require(lazily.identity.ethernetMac != made.identity.ethernetMac);
 
     // A data disk this start made is a new installation.
-    const auto anew = resolve(nothing, first / "data.img", true);
+    const auto anew = resolveLocked(nothing, first / "data.img", true);
     require(anew.identity.serial != made.identity.serial);
-    require(resolve(nothing, first / "data.img", false).identity == anew.identity);
+    require(resolveLocked(nothing, first / "data.img", false).identity == anew.identity);
 
     // What a request states is used as given and leaves the file alone.
     Request stated;
     stated.stated.serial = "TESTSERIAL01";
-    const auto given = resolve(stated, first / "data.img", true);
+    const auto given = resolveLocked(stated, first / "data.img", true);
     require(given.outcome == android::IdentityOutcome::stated);
     require(given.identity.serial == "TESTSERIAL01" && !given.identity.ethernetMac);
-    require(resolve(nothing, first / "data.img", false).identity == anew.identity);
+    require(resolveLocked(nothing, first / "data.img", false).identity == anew.identity);
     fs::remove(first / "identity.json");
-    require(resolve(stated, first / "data.img", false).outcome == android::IdentityOutcome::stated);
+    require(resolveLocked(stated, first / "data.img", false).outcome == android::IdentityOutcome::stated);
     require(!fs::exists(first / "identity.json"), "a stated value made a file");
+    // The request names the file beside the data disk and carries what it states.
+    const auto asked = identityRequest(stated, first / "data.img");
+    require(asked.file == first / "identity.json" && asked.stated.serial == stated.stated.serial);
+    require(identityRequest(nothing, first / "data.img").stated == android::InstallationIdentity {});
+
+    // A run that could not take the lock reads and writes nothing: values it
+    // does not keep.
+    auto direct = identityRequest(nothing, first / "data.img");
+    require(android::resolveIdentity(direct).outcome == android::IdentityOutcome::unsaved);
+    require(!fs::exists(first / "identity.json"), "an unlocked run made the file");
+    const auto missing = scratch.path() / "missing" / "data.img";
+    require(!android::acquireInstallationLock(identityRequest(nothing, missing).file),
+            "a lock was taken in a directory that is not there");
 }
 
 } // namespace

@@ -5,7 +5,8 @@ An instance is a directory holding the guest's writable disk, `data.img`, and
 `instance.json`, which says which release the disk was last started with, and
 `identity.json`, the installation's serial number and eth0 address, which the
 launcher makes (the emulator, from `--android-identity=`) and this module only
-keeps or deletes with the disk. A
+keeps or deletes with the disk, under the installation's lock (`identity.lock`,
+see `installation_lock`). A
 launcher decides before every start whether the release it carries may run on
 that disk (`decide`) and applies the decision (`apply`); the moment it sees the
 guest reach `sys.boot_completed` it calls `booted`, which counts a pending
@@ -20,11 +21,14 @@ from __future__ import annotations
 
 __import__("sys").dont_write_bytecode = True
 
+import contextlib
 import datetime
+import fcntl
 import json
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -360,6 +364,48 @@ def _replace_with_clone(source: Path, destination: Path) -> None:
     os.replace(temporary, destination)
 
 
+# The lock that serializes what changes an installation's identity: a start's
+# preparation of the data disk and of its identity (the emulator takes it) and
+# this module's reset, restore and create (darwin/device/block/android_identity.hpp
+# owns the file). It is an exclusive flock on `identity.lock`, which is never
+# removed.
+LOCK_FILE = "identity.lock"
+LOCK_SECONDS = 60.0
+# The locks this process holds, by instance: flock locks the open file, so a
+# second open of the same file by the same process would wait for the first.
+_HELD: dict[str, int] = {}
+
+
+@contextlib.contextmanager
+def installation_lock(instance: Path, limit: float = LOCK_SECONDS):
+    """Hold the installation's lock, waiting up to `limit` seconds for another
+    process that holds it; re-entrant within this process."""
+    key = os.path.abspath(instance)
+    if key in _HELD:
+        yield
+        return
+    instance.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(instance / LOCK_FILE, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        deadline = time.monotonic() + limit
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise InstanceError(f"the installation stayed locked for {limit:g} s: {instance / LOCK_FILE}")
+                time.sleep(0.02)
+        _HELD[key] = descriptor
+        try:
+            yield
+        finally:
+            del _HELD[key]
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
 def remove_identity(instance: Path) -> None:
     """Delete the installation's identity and what a cut-short write of it left,
     so the next start of the data disk makes a new one."""
@@ -395,7 +441,23 @@ def apply(
 
     Every step leaves the instance in a state `decide` handles: the snapshot
     exists before instance.json records it, and instance.json is replaced
-    atomically."""
+    atomically. What deletes or replaces the data disk (reset, restore and
+    create) runs under the installation's lock, so that it neither interleaves
+    with a start's preparation of the disk and its identity nor leaves an
+    identity that a start made meanwhile."""
+    if decision.action in ("reset", "restore", "create"):
+        with installation_lock(instance):
+            return _apply(instance, release, decision, now=now)
+    return _apply(instance, release, decision, now=now)
+
+
+def _apply(
+    instance: Path,
+    release: Release,
+    decision: Decision,
+    *,
+    now: Callable[[], datetime.datetime] | None = None,
+) -> State:
     when = _timestamp(now)
     data = instance / DATA_DISK
     action = decision.action

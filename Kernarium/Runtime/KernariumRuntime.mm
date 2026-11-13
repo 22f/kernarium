@@ -2356,22 +2356,24 @@ int runtimeRun(
         try {
             const std::filesystem::path release = boot->android_release_path;
             const std::filesystem::path dataDisk = boot->android_data_disk_path;
-            const auto prepared = uml::android::prepareDataDisk(
+            /* Locked from the data disk's preparation to the identity's
+             * resolution: a start that creates the disk and a start that
+             * finds it are not interleaved. The identity comes from the file
+             * beside the data disk unless the request states values, and a
+             * data disk this start made is a new installation. The host's own
+             * messages never carry the values. */
+            const auto prepared = uml::android::prepareInstallation(
                 uml::android::readLayout(release / uml::android::releaseLayout),
                 dataDisk,
-                boot->android_data_gib);
-            if (prepared.change != uml::android::DataDiskChange::none)
+                boot->android_data_gib,
+                kernarium::identity::identityRequest(statedIdentity, dataDisk));
+            const auto& resolved = prepared.identity;
+            if (prepared.disk.change != uml::android::DataDiskChange::none)
                 std::printf(
                     "Kernarium: %s the data disk, %u GiB\n",
-                    prepared.change == uml::android::DataDiskChange::created
+                    prepared.disk.change == uml::android::DataDiskChange::created
                         ? "created" : "grew",
-                    prepared.capacityGiB);
-            /* The installation's identity, from the file beside the data disk
-             * unless the request states values. A data disk this start made
-             * is a new installation. The values are never logged. */
-            const auto resolved = kernarium::identity::resolve(
-                statedIdentity, dataDisk,
-                prepared.change == uml::android::DataDiskChange::created);
+                    prepared.disk.capacityGiB);
             switch (resolved.outcome) {
             case uml::android::IdentityOutcome::created:
                 std::puts("Kernarium: made the installation's identity");

@@ -13,11 +13,15 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import datetime
+import fcntl
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -431,6 +435,73 @@ class InstanceFiles(unittest.TestCase):
             self.assertEqual(decision.action, "create")
             android_instance.apply(instance, second, decision, now=lambda: NOW)
             self.assertFalse(identity.exists(), "a data disk that is gone")
+
+    def test_a_reset_waits_for_a_start_that_holds_the_installation(self) -> None:
+        # A start prepares the data disk and makes its identity under the
+        # installation's lock; a reset that interleaves would leave the identity
+        # the start made after it deleted the one before. The reset runs after.
+        content = (
+            '{"ethernet_mac": "02:aa:bb:cc:dd:ee", "schema": 1, '
+            '"serialno": "0123456789abcdef"}\n'
+        )
+        with tempfile.TemporaryDirectory(prefix="android-instance-") as temporary:
+            instance = Path(temporary) / "instance"
+            first = release("rel-a", build=100, sha="a" * 64)
+            android_instance.apply(instance, first, android_instance.decide(None, False, False, first), now=lambda: NOW)
+            (instance / "data.img").write_bytes(b"android data")
+            identity = instance / android_instance.IDENTITY_FILE
+            holding = threading.Event()
+
+            def start() -> None:
+                # The emulator's side: its own open of the lock file, as another process has.
+                descriptor = os.open(instance / android_instance.LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                    holding.set()
+                    time.sleep(0.4)
+                    identity.write_text(content, encoding="utf-8")
+                finally:
+                    os.close(descriptor)
+
+            starter = threading.Thread(target=start)
+            starter.start()
+            self.assertTrue(holding.wait(10))
+            state = android_instance.read_state(instance)
+            reset = android_instance.decide(state, True, False, first, android_instance.Flags(reset=True))
+            began = time.monotonic()
+            android_instance.apply(instance, first, reset, now=lambda: NOW)
+            starter.join()
+            self.assertGreaterEqual(time.monotonic() - began, 0.3, "the reset did not wait for the start")
+            self.assertFalse(identity.exists(), "the reset left the identity a start made meanwhile")
+            self.assertTrue((instance / android_instance.LOCK_FILE).exists(), "the lock file was removed")
+
+    def test_the_lock_is_waited_for_with_a_limit_and_is_reentrant(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="android-instance-") as temporary:
+            instance = Path(temporary) / "instance"
+            with android_instance.installation_lock(instance):
+                # This process's own second use does not wait for itself.
+                with android_instance.installation_lock(instance, limit=0.1):
+                    pass
+                # Another process's (here: another open file) does.
+                other = os.open(instance / android_instance.LOCK_FILE, os.O_RDWR)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(other)
+            descriptor = os.open(instance / android_instance.LOCK_FILE, os.O_RDWR)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                began = time.monotonic()
+                with self.assertRaises(android_instance.InstanceError):
+                    with android_instance.installation_lock(instance, limit=0.2):
+                        self.fail("a held installation was locked twice")
+                self.assertLess(time.monotonic() - began, 5)
+            finally:
+                os.close(descriptor)
+            # Released, it is free again.
+            with android_instance.installation_lock(instance, limit=0.2):
+                pass
 
     def test_a_volume_without_clones_is_a_refusal(self) -> None:
         with tempfile.TemporaryDirectory(prefix="android-instance-") as temporary:
