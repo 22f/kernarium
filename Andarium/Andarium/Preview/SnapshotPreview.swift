@@ -46,7 +46,7 @@ enum SnapshotPreview {
     static func seed(for screen: String) -> PreviewSnapshotSeed {
         var seed = PreviewSnapshotSeed.sample()
         switch screen {
-        case "welcome", "create", "create-low-space", "home-new", "home-new-recovery", "boot-first",
+        case "welcome", "create", "create-low-space", "home-new", "boot-first",
              "snapshots-home-none", "snapshots-none":
             seed.items = []
             seed.total = nil
