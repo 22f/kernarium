@@ -381,6 +381,57 @@ class InstanceFiles(unittest.TestCase):
             self.assertFalse((instance / "data.img").exists())
             self.assertEqual(list(instance.glob("data.img.pre-*")), [])
 
+    def test_the_installation_identity_follows_the_data_disk(self) -> None:
+        # What the emulator keeps beside the data disk (synthetic here): an update,
+        # a retry, a restore and a start leave it, and a reset or a new data disk
+        # ends it, with what a cut-short write of it left.
+        content = (
+            '{"ethernet_mac": "02:aa:bb:cc:dd:ee", "schema": 1, '
+            '"serialno": "0123456789abcdef"}\n'
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            instance = Path(temporary) / "instance"
+            first = release("rel-a", build=100, sha="a" * 64)
+            second = release("rel-b", build=200)
+            android_instance.apply(instance, first, android_instance.decide(None, False, False, first), now=lambda: NOW)
+            (instance / "data.img").write_bytes(b"android data")
+            identity = instance / android_instance.IDENTITY_FILE
+            identity.write_text(content, encoding="utf-8")
+
+            def unchanged(step: str) -> None:
+                self.assertEqual(identity.read_text(encoding="utf-8"), content, step)
+
+            def decide(rel, **flags):
+                state = android_instance.read_state(instance)
+                return android_instance.decide(
+                    state, (instance / "data.img").exists(),
+                    any(instance.glob(android_instance.SNAPSHOT_PREFIX + "*")), rel,
+                    android_instance.Flags(**flags))
+
+            android_instance.apply(instance, second, decide(second), now=lambda: NOW)
+            unchanged("an update")
+            android_instance.apply(instance, second, decide(second, retry=True), now=lambda: NOW)
+            unchanged("a retry")
+            # The restore puts the data back and then updates again, as the rules say.
+            android_instance.apply(instance, second, decide(second, restore_snapshot=True), now=lambda: NOW)
+            unchanged("a restore")
+            android_instance.complete(instance, second, now=lambda: NOW)
+            android_instance.apply(instance, second, decide(second), now=lambda: NOW)
+            unchanged("a start")
+
+            leftover = instance / (android_instance.IDENTITY_FILE + ".tmp-123")
+            leftover.write_text("half", encoding="utf-8")
+            android_instance.apply(instance, second, decide(second, reset=True), now=lambda: NOW)
+            self.assertFalse(identity.exists() or leftover.exists(), "a reset")
+
+            (instance / "data.img").write_bytes(b"android data")
+            identity.write_text(content, encoding="utf-8")
+            (instance / "data.img").unlink()
+            decision = decide(second)
+            self.assertEqual(decision.action, "create")
+            android_instance.apply(instance, second, decision, now=lambda: NOW)
+            self.assertFalse(identity.exists(), "a data disk that is gone")
+
     def test_a_volume_without_clones_is_a_refusal(self) -> None:
         with tempfile.TemporaryDirectory(prefix="android-instance-") as temporary:
             instance = Path(temporary) / "instance"

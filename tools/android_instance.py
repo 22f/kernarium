@@ -2,7 +2,10 @@
 """A guest instance of the Android release: its data disk and what it records.
 
 An instance is a directory holding the guest's writable disk, `data.img`, and
-`instance.json`, which says which release the disk was last started with. A
+`instance.json`, which says which release the disk was last started with, and
+`identity.json`, the installation's serial number and eth0 address, which the
+launcher makes (the emulator, from `--android-identity=`) and this module only
+keeps or deletes with the disk. A
 launcher decides before every start whether the release it carries may run on
 that disk (`decide`) and applies the decision (`apply`); the moment it sees the
 guest reach `sys.boot_completed` it calls `booted`, which counts a pending
@@ -30,6 +33,12 @@ SCHEMA = 1
 DATA_DISK = "data.img"
 STATE_FILE = "instance.json"
 SNAPSHOT_PREFIX = "data.img.pre-"
+# The installation's identity, made beside the data disk by the emulator
+# (darwin/device/block/README.md owns the file). It lives and dies with the
+# data disk: an update, a snapshot restore and a guest's own factory reset
+# leave it, a reset or a new data disk ends it. A write of it that a crash cut
+# short leaves a name that starts with the same text.
+IDENTITY_FILE = "identity.json"
 RELEASE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -351,6 +360,13 @@ def _replace_with_clone(source: Path, destination: Path) -> None:
     os.replace(temporary, destination)
 
 
+def remove_identity(instance: Path) -> None:
+    """Delete the installation's identity and what a cut-short write of it left,
+    so the next start of the data disk makes a new one."""
+    for entry in instance.glob(IDENTITY_FILE + "*"):
+        entry.unlink(missing_ok=True)
+
+
 def _new_state(release: Release, when: str) -> State:
     identity = release.identity()
     return State(
@@ -388,6 +404,7 @@ def apply(
     if action == "reset":
         for entry in [data, instance / STATE_FILE, *instance.glob(SNAPSHOT_PREFIX + "*")]:
             entry.unlink(missing_ok=True)
+        remove_identity(instance)
         action = "create"
     if action == "restore":
         state = read_state(instance)
@@ -414,6 +431,9 @@ def apply(
     if action == "create":
         instance.mkdir(parents=True, exist_ok=True)
         data.unlink(missing_ok=True)
+        # A disk made at the next start is a new installation, whatever
+        # identity an earlier one left beside it.
+        remove_identity(instance)
         state = _new_state(release, when)
         write_state(instance, state)
         return state
