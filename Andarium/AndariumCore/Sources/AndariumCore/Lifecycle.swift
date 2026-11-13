@@ -135,16 +135,24 @@ public struct Lifecycle: Equatable, Sendable {
 /// How a run ended, from the runtime's result.
 public struct RunEnd: Equatable, Sendable {
     public var result: Int32
-    /// The runtime stopped a guest that kept restarting within seconds of
-    /// booting.
+    /// The runtime stopped a guest that kept restarting: five times in a row,
+    /// each before the boot finished or within seconds of booting.
     public var restartedInALoop: Bool
     /// Why the run could not begin, when it did not.
     public var startFailure: String?
+    /// The person stopped the run from the boot screen's notice. The end is
+    /// still the runtime's (a host stop of an Android guest ends the process's
+    /// guest for good), so `phase` does not change; the screen that follows
+    /// says whose choice it was.
+    public var stoppedByUser: Bool
 
-    public init(result: Int32, restartedInALoop: Bool = false, startFailure: String? = nil) {
+    public init(
+        result: Int32, restartedInALoop: Bool = false, startFailure: String? = nil, stoppedByUser: Bool = false
+    ) {
         self.result = result
         self.restartedInALoop = restartedInALoop
         self.startFailure = startFailure
+        self.stoppedByUser = stoppedByUser
     }
 
     public var poweredOff: Bool { result == 0 && !restartedInALoop && startFailure == nil }
@@ -161,6 +169,8 @@ public struct RunEnd: Equatable, Sendable {
         ]
         let reason = if let startFailure {
             "it could not start (\(startFailure))"
+        } else if stoppedByUser {
+            "it was stopped from the boot screen"
         } else if restartedInALoop {
             "the guest kept restarting"
         } else {

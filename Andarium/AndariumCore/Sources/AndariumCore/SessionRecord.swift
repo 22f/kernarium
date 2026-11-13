@@ -38,6 +38,13 @@ public struct SessionRecord: Equatable, Sendable {
     /// The guest kernel's last output before a crash, oldest line first.
     public var kernelOutput: String?
     public var memory: Memory?
+    /// Whether the guest's console had said that Android finished booting, for
+    /// a guest whose console says so; nil in a record that does not say (an
+    /// earlier runtime, or a guest that never reports it).
+    public var bootFinished: Bool?
+    /// How many times the guest had restarted in the process before this
+    /// session, for a guest whose boot the record follows.
+    public var restarts: Int?
     /// The footprint's large terms at the last checkpoint and at the
     /// session's highest one, in MiB, as the runtime words them ("guest G gpu
     /// H/B ..."); nil in a record that has none.
@@ -89,6 +96,8 @@ public struct SessionRecord: Equatable, Sendable {
         message = fields["message"]
         kernelOutput = parts.count > 1 ? parts[1] : nil
         memory = fields["memory"].flatMap(Self.memory(from:))
+        bootFinished = fields["boot"].flatMap { ["completed": true, "unfinished": false][$0] }
+        restarts = fields["restarts"].flatMap { Int($0) }
         terms = fields["terms"]
         peakTerms = fields["peak-terms"]
         let hasStalls = ["uml-session 4", "uml-session 5", "uml-session 6"].contains(String(format))
@@ -141,6 +150,17 @@ public struct SessionRecord: Equatable, Sendable {
 
     /// One line for a log or a report.
     public var summary: String {
+        summaryOfEnd + bootSentence
+    }
+
+    /// What the record adds of the boot when it did not finish.
+    private var bootSentence: String {
+        guard bootFinished == false else { return "" }
+        let times = restarts.map { $0 > 0 ? " and the guest had restarted \($0) time\($0 == 1 ? "" : "s") in this process" : "" } ?? ""
+        return " Android had not finished booting\(times)."
+    }
+
+    private var summaryOfEnd: String {
         if running {
             var line = "The previous session was still running when the process ended (pid \(processID))"
             if let memory {

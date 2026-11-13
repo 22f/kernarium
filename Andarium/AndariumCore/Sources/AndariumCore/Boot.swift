@@ -113,6 +113,17 @@ public struct BootTracker: Equatable, Sendable {
 public enum BootSteps {
     public static let count = 4
 
+    /// The step's name in English, for the text a report carries (the screen
+    /// has its own, in the person's language).
+    public static func reportName(ofStep step: Int, recovery: Bool) -> String {
+        switch step {
+        case 0: "System image"
+        case 1: "Linux kernel"
+        case 2: "Storage"
+        default: recovery ? "Recovery" : "Startup"
+        }
+    }
+
     public static func current(preparingDisk: Bool, milestone: BootMilestone) -> Int {
         if preparingDisk { return 0 }
         switch milestone {
