@@ -133,14 +133,16 @@ final class AppModel {
     // draws, from one guest pixel to a point to one to each pixel of the
     // screen. The guest's display always follows the window.
     /// What the person chose for the resolution; nil until they do. Until
-    /// then it follows the device (`DisplayOptions.defaultScale`), and once
-    /// they have the default never replaces it.
+    /// then it follows the device (`DisplayOptions.defaultScale`: 240 dpi on a
+    /// low-memory one, else 320), and once they have the default never
+    /// replaces it. A Retina mode an earlier version stored is no choice.
     var chosenScale: GuestDisplayScale?
     /// The resolution the launch states (automation): that run's alone, so it
     /// is not kept and what the person chose stays stored.
     var launchScale: GuestDisplayScale?
     /// What the system holds this application's memory to (`MemoryLimit`),
-    /// which the default resolution follows; zero where it sets none.
+    /// which the default resolution follows (`DisplayOptions.isLowMemory`);
+    /// zero where it sets none.
     var memoryLimitBytes: UInt64 = 0
     /// The native scale of the screen the window is on, as last read.
     var screenNativeScale = 1.0

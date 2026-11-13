@@ -24,7 +24,7 @@ struct ResolutionScreenTests {
     /// A model that states its screen and display, so the window the test
     /// runs in decides nothing.
     private func model(
-        native: Double, chosen: GuestDisplayScale? = nil, points: CGSize? = nil
+        native: Double, chosen: GuestDisplayScale? = nil, points: CGSize? = nil, limit: UInt64 = 0
     ) -> AppModel {
         let model = AppModel(
             guest: Guest.fresh(on: host), host: host,
@@ -37,6 +37,7 @@ struct ResolutionScreenTests {
         model.screenDidChange(nativeScale: native)
         model.displayPointsDidChange(points ?? phone)
         model.chosenScale = chosen
+        model.memoryLimitBytes = limit
         model.launchApplied = true
         return model
     }
@@ -110,6 +111,27 @@ struct ResolutionScreenTests {
         _ = try await waitFor("Resolution, 1200 by 1600, Native", in: narrow.view)
     }
 
+    /// Someone who never chose: 320 dpi on a device with more than 4 GiB (and a Mac), 240 dpi on one held to
+    /// 4 GiB or less; an end's name only where the choice is an end.
+    @Test func theRowOfSomeoneWhoNeverChoseStatesTheDefault() async throws {
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let low = UInt64(2867) << 20
+        let ipad = CGSize(width: 600, height: 800)
+        for (native, points, limit, label) in [
+            // An iPhone, native 3.0: 2.0 is not native, and 1.5 is not an end.
+            (3.0, phone, UInt64(8) << 30, "Resolution, 804 by 1556"),
+            (3.0, phone, UInt64(0), "Resolution, 804 by 1556"),
+            (3.0, phone, low, "Resolution, 603 by 1167"),
+            // An iPad mini, native 2.0: 320 dpi is native there.
+            (2.0, ipad, UInt64(8) << 30, "Resolution, 1200 by 1600, Native"),
+            (2.0, ipad, low, "Resolution, 900 by 1200"),
+        ] {
+            let controller = hostRow(model(native: native, points: points, limit: limit), in: lease)
+            _ = try await waitFor(label, in: controller.view)
+        }
+    }
+
     @Test func aScreenWithOneChoiceHasNothingToChange() async throws {
         let lease = try await HostWindow.take()
         defer { lease.give() }
@@ -150,8 +172,8 @@ struct ResolutionScreenTests {
         defer { lease.give() }
         let model = model(native: 3)
         let sheet = try await openSheet(model, in: lease)
-        // The current choice (native, by default on a Mac or a large device) is selected.
-        _ = try await waitFor("1206 by 2334, 480 dpi, Native", in: sheet.view)
+        // The current choice (320 dpi, by default on a Mac or a device with more than 4 GiB) is selected.
+        _ = try await waitFor("804 by 1556, 320 dpi", in: sheet.view)
         let expected = [
             "1206 by 2334, 480 dpi, Native", "1005 by 1945, 400 dpi", "804 by 1556, 320 dpi",
             "603 by 1167, 240 dpi", "402 by 778, 160 dpi, Fastest",
@@ -160,11 +182,26 @@ struct ResolutionScreenTests {
         let positions = expected.map { all.firstIndex(of: $0) }
         #expect(positions.allSatisfy { $0 != nil }, "\(all)")
         #expect(positions.compactMap { $0 } == positions.compactMap { $0 }.sorted(), "the sharpest is first")
-        let selected = try #require(node(labelled: expected[0], in: sheet.view))
+        let selected = try #require(node(labelled: expected[2], in: sheet.view))
         #expect(selected.accessibilityTraits.contains(.selected))
-        let other = try #require(node(labelled: expected[3], in: sheet.view))
-        #expect(!other.accessibilityTraits.contains(.selected))
+        for index in [0, 1, 3, 4] {
+            let other = try #require(node(labelled: expected[index], in: sheet.view))
+            #expect(!other.accessibilityTraits.contains(.selected), "\(expected[index])")
+        }
         // Nothing is chosen until Save.
+        #expect(model.chosenScale == nil)
+        model.sheet = nil
+    }
+
+    @Test func theSheetTicksTheLowerDefaultOnADeviceHeldToFourGiBOrLess() async throws {
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let model = model(native: 3, limit: UInt64(2867) << 20)
+        let sheet = try await openSheet(model, in: lease)
+        let selected = try await waitFor("603 by 1167, 240 dpi", in: sheet.view)
+        #expect(selected.accessibilityTraits.contains(.selected))
+        let high = try #require(node(labelled: "804 by 1556, 320 dpi", in: sheet.view))
+        #expect(!high.accessibilityTraits.contains(.selected))
         #expect(model.chosenScale == nil)
         model.sheet = nil
     }

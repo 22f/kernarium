@@ -145,10 +145,11 @@ struct AppEntry {
         #endif
         // The rulers offer no size the carried system's data disk would refuse.
         model.releaseMaximumGiB = storage.release.maximumGiB
-        // The resolution is the person's choice where they made one, else native
-        // when the system lets this application use more than 4 GiB and the
-        // choice nearest 1.5 where it does not. A value a launch states is that
-        // run's, and what the person chose stays stored.
+        // The resolution is the person's choice where they made one (a Retina
+        // mode an earlier version stored is none), else the choice nearest 1.5
+        // where the system holds this application to 4 GiB or less and the one
+        // nearest 2.0 where it does not. A value a launch states is that run's,
+        // and what the person chose stays stored.
         model.chosenScale = DisplayOptionsStore.load().chosenScale
         model.launchScale = launch.displayScale
         model.memoryLimitBytes = MemoryLimit.bytes()

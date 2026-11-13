@@ -18,9 +18,12 @@ public struct ResolutionChoices: Equatable, Sendable {
     public static let step = 0.5
     /// A step this close to native, or closer, is left out.
     public static let nearestToNative = 0.25
-    /// The scale a person who never chose gets where the device is short of
-    /// memory, or the choice nearest it.
-    public static let preferredMiddle = 1.5
+    /// The scale a person who never chose gets on a low-memory device (240
+    /// dpi), or the choice nearest it.
+    public static let lowMemoryDefault = 1.5
+    /// The scale a person who never chose gets elsewhere (320 dpi), or the
+    /// choice nearest it.
+    public static let highMemoryDefault = 2.0
 
     /// The screen's native scale, as `UIScreen.nativeScale` says it.
     public let nativeScale: Double

@@ -52,6 +52,10 @@ struct AppEntry {
     /// instead of the Simulator's own, to show another device's choices.
     var displayNative: String?
     var displayPoints: String?
+    /// What the system holds the application's memory to, in MiB, which the
+    /// default resolution follows ("2867" is an iPad mini 6's); absent, no
+    /// limit, as on a Mac.
+    var memoryLimitMiB: Int?
 
     static func fromArguments() -> AppEntry {
         let defaults = UserDefaults.standard
@@ -71,7 +75,8 @@ struct AppEntry {
             colorScheme: defaults.string(forKey: "colorScheme"),
             displayScale: defaults.string(forKey: "displayScale"),
             displayNative: defaults.string(forKey: "displayNative"),
-            displayPoints: defaults.string(forKey: "displayPoints")
+            displayPoints: defaults.string(forKey: "displayPoints"),
+            memoryLimitMiB: defaults.string(forKey: "memoryLimitMiB").flatMap { Int($0) }
         )
     }
 
@@ -91,7 +96,7 @@ struct AppEntry {
         "home-camera-restricted": "capabilities", "home-camera-unavailable": "capabilities",
         "home-camera-alert": "capabilities", "home-camera-restricted-alert": "capabilities",
         "home-camera-ask": "capabilities",
-        "home-backup": "backup",
+        "home-backup": "backup", "home-backup-row": "backup-row",
         "home-jit": "jit", "home-jit-no-debugger": "jit", "home-jit-fallback": "jit",
     ]
 
@@ -218,8 +223,8 @@ struct AppEntry {
             }
         case "home-memory-warning", "system-memory-warning":
             model.guest = PreviewData.highMemoryGuest(on: host)
-        case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit", "home-location-ask",
-             "home-camera-ask":
+        case "home-options", "home-display", "home-capabilities", "home-backup", "home-backup-row", "system-edit",
+             "home-location-ask", "home-camera-ask":
             break
         case "home-jit":
             model.jitOn = true
@@ -520,11 +525,12 @@ struct AppEntry {
         }
     }
 
-    /// The resolution the launch chooses and the screen it states: the preview
-    /// shows a 2.3 screen on any Simulator.
+    /// The resolution the launch chooses, the memory limit and the screen it
+    /// states: the preview shows a 2.3 screen on any Simulator.
     @MainActor
     private func applyDisplay(to model: AppModel) {
         model.chosenScale = displayScale.flatMap { GuestDisplayScale(text: $0) }
+        model.memoryLimitBytes = memoryLimitMiB.map { UInt64(max($0, 0)) << 20 } ?? 0
         if let native = displayNative.flatMap({ Double($0) }) {
             model.statedNativeScale = native
             model.screenDidChange(nativeScale: native)

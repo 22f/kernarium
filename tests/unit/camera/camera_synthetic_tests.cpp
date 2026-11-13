@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -25,8 +26,18 @@ class Recorder final : public CameraSessionDelegate {
 public:
     void cameraFrame(std::size_t camera, CameraFrame frame) override
     {
+        if (firstFrameDelay.count() > 0) {
+            // A delegate that is slow on its first frame (the timer thread waits for it).
+            bool first;
+            {
+                std::lock_guard lock(mutex);
+                first = frames.empty();
+            }
+            if (first) std::this_thread::sleep_for(firstFrameDelay);
+        }
         std::lock_guard lock(mutex);
         frames.emplace_back(camera, std::move(frame));
+        if (clock) returns.push_back(clock());  // when this callback returns, on the camera's clock
         changed.notify_all();
     }
     void cameraStill(std::size_t camera, CameraStillResult result) override
@@ -47,6 +58,9 @@ public:
         return changed.wait_for(lock, std::chrono::seconds(10),
                                 [&] { return frames.size() >= framesWanted && stills.size() >= stillsWanted; });
     }
+    std::chrono::milliseconds firstFrameDelay {0};
+    std::function<std::uint64_t()> clock;
+    std::vector<std::uint64_t> returns;
     std::mutex mutex;
     std::condition_variable changed;
     std::vector<std::pair<std::size_t, CameraFrame>> frames;
@@ -266,6 +280,134 @@ void controls()
     session->apply(0, settings);
     camera->pump(0, 1);
     require(recorder.frames.back().second.exposure.zoomRatio == 2.0f);
+}
+
+// What the exposure of a frame says: the lens's focal length is left to the device (the camera's own, as its
+// description states it), an automatic exposure follows the compensation and the picture with it, and a frame lasts at
+// least as long as its exposure, which delays the next one.
+void exposureReport()
+{
+    const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tablet));
+    Recorder recorder;
+    auto session = camera->openSession(recorder);
+    require(session->startVideo(0, 640, 480, 30));
+    camera->pump(0, 1);
+    const auto unit = recorder.frames.back().second;
+    require(unit.exposure.focalLengthMillimetres == 0.0f);  // none: the device states the lens's own
+    require(unit.exposure.exposureNanoseconds == 8'333'333 && unit.exposure.frameDurationNanoseconds == 33'333'333);
+    const auto unitLuma = meanLuma(unit);
+
+    CameraSettings settings;
+    settings.exposureBiasStops = -1.0f;
+    session->apply(0, settings);
+    camera->pump(0, 1);
+    const auto& half = recorder.frames.back().second;
+    require(std::llabs(std::int64_t(half.exposure.exposureNanoseconds) - 8'333'333 / 2) <= 1 && half.exposure.iso == unit.exposure.iso);
+    require(half.exposure.ae == CameraControlState::converged && half.exposure.frameDurationNanoseconds == 33'333'333);
+    require(meanLuma(half) < unitLuma * 0.7);
+    settings.exposureBiasStops = 2.0f;
+    session->apply(0, settings);
+    camera->pump(0, 1);
+    const auto& bright = recorder.frames.back().second;
+    require(std::llabs(std::int64_t(bright.exposure.exposureNanoseconds) - 8'333'333 * 4) <= 1);
+    const double brightLuma = meanLuma(bright);
+    require(brightLuma > unitLuma);
+    // The automatic exposure stays inside the frame the rate asks for: a compensation that asks for more than a 30 fps
+    // frame holds (+3 stops is twice as long) runs the frame's own length, and the sensitivity takes the rest, so the
+    // exposure times the sensitivity still follows the compensation and the rate does not fall.
+    settings.exposureBiasStops = 3.0f;
+    session->apply(0, settings);
+    camera->pump(0, 2);
+    const auto& third = recorder.frames[recorder.frames.size() - 2].second;
+    const auto& fourth = recorder.frames.back().second;
+    require(third.exposure.exposureNanoseconds == 33'333'333 && third.exposure.frameDurationNanoseconds == 33'333'333);
+    require(fourth.timestampNanoseconds - third.timestampNanoseconds == 33'333'333);
+    require(std::llabs(std::int64_t(third.exposure.iso) - 200) <= 1);  // 3 stops are 2 of exposure (to the frame) and 1 of it
+    const double product = double(third.exposure.exposureNanoseconds) * third.exposure.iso;
+    require(std::fabs(product / (double(unit.exposure.exposureNanoseconds) * unit.exposure.iso) - 8.0) < 0.1);
+    require(meanLuma(third) >= brightLuma);
+    // The exposure of the sensor ends where its range does, the sensitivity where its range does, and the picture stops
+    // with them.
+    const auto info = camera->cameras()[0];
+    settings.exposureBiasStops = 20.0f;
+    session->apply(0, settings);
+    camera->pump(0, 1);
+    require(recorder.frames.back().second.exposure.exposureNanoseconds == 33'333'333);
+    require(recorder.frames.back().second.exposure.iso == info.isoMaximum);
+    settings.exposureBiasStops = -20.0f;
+    session->apply(0, settings);
+    camera->pump(0, 1);
+    require(recorder.frames.back().second.exposure.exposureNanoseconds == info.exposureMinimumNanoseconds);
+    require(recorder.frames.back().second.exposure.iso == info.isoMinimum);
+
+    // A manual exposure longer than the frame period: the frame lasts as long as the exposure, and the next frame
+    // arrives after it.
+    settings = {};
+    settings.exposureMode = CameraExposureMode::manual;
+    settings.exposureNanoseconds = 333'346'667;
+    settings.iso = 100;
+    session->apply(0, settings);
+    camera->pump(0, 2);
+    const auto& first = recorder.frames[recorder.frames.size() - 2].second;
+    const auto& second = recorder.frames.back().second;
+    require(first.exposure.exposureNanoseconds == 333'346'667 && first.exposure.frameDurationNanoseconds == 333'346'667);
+    require(second.timestampNanoseconds - first.timestampNanoseconds == 333'346'667);
+    // A shorter one leaves the period alone.
+    settings.exposureNanoseconds = 8'333'333;
+    session->apply(0, settings);
+    camera->pump(0, 2);
+    const auto& short1 = recorder.frames[recorder.frames.size() - 2].second;
+    require(short1.exposure.frameDurationNanoseconds == 33'333'333 &&
+            recorder.frames.back().second.timestampNanoseconds - short1.timestampNanoseconds == 33'333'333);
+    // A still's exposure states no focal length either.
+    CameraStillRequest request;
+    request.jpegWidth = 640;
+    request.jpegHeight = 480;
+    require(session->takeStill(0, request));
+    camera->pump(0, 0);
+    require(recorder.waitFor(1, 1));
+    require(recorder.stills.back().second.exposure.focalLengthMillimetres == 0.0f);
+}
+
+// Every profile's every camera runs an automatic exposure that is not zero and shows a lit chart at no compensation: a
+// camera that states no exposure range (a laptop's) runs the exposure as asked and is not clamped to nothing.
+void everyProfileExposes()
+{
+    for (const auto profile : {SyntheticCameraProfile::phone, SyntheticCameraProfile::tablet, SyntheticCameraProfile::tabletDualFront,
+                               SyntheticCameraProfile::laptop}) {
+        const auto camera = makeSyntheticCamera(manual(profile));
+        Recorder recorder;
+        auto session = camera->openSession(recorder);
+        const auto cameras = camera->cameras();
+        for (std::size_t index = 0; index < cameras.size(); ++index) {
+            const auto& format = cameras[index].videoFormats.front();
+            require(session->startVideo(index, format.width, format.height, format.maximumFrameRate));
+            camera->pump(index, 1);
+            const auto& frame = recorder.frames.back().second;
+            require(frame.exposure.exposureNanoseconds == 8'333'333);
+            require(frame.exposure.iso >= 100);
+            require(frame.exposure.frameDurationNanoseconds >= frame.exposure.exposureNanoseconds);
+            require(meanLuma(frame) > 100.0);
+            session->stopVideo(index);
+        }
+    }
+    // A laptop's camera states no range: the compensation moves its exposure the same way.
+    const auto laptop = makeSyntheticCamera(manual(SyntheticCameraProfile::laptop));
+    require(laptop->cameras()[0].exposureMaximumNanoseconds == 0 && laptop->cameras()[0].isoMaximum == 0);
+    Recorder recorder;
+    auto session = laptop->openSession(recorder);
+    require(session->startVideo(0, 640, 480, 30));
+    CameraSettings settings;
+    settings.exposureBiasStops = -1.0f;
+    session->apply(0, settings);
+    laptop->pump(0, 1);
+    require(std::llabs(std::int64_t(recorder.frames.back().second.exposure.exposureNanoseconds) - 8'333'333 / 2) <= 1);
+    // The excess of a long exposure cannot go into a sensitivity it does not state: the exposure takes the frame, and the
+    // sensitivity stays at its one value.
+    settings.exposureBiasStops = 3.0f;
+    session->apply(0, settings);
+    laptop->pump(0, 1);
+    require(recorder.frames.back().second.exposure.exposureNanoseconds == 33'333'333 && recorder.frames.back().second.exposure.iso == 100);
 }
 
 void zoomCamera()
@@ -764,6 +906,50 @@ void chartMarkerSurvivesCropAndScale()
     }
 }
 
+// The real timer's schedule when a frame is late. A frame that lasts 200 ms at 10 fps is followed by the next one a whole
+// frame duration after its own start, also when the delegate held the timer thread long enough to make the next frame overdue
+// (a period or more, or less), and a frame never starts before the callback that held the thread returned: its timestamp is
+// not earlier than that moment. Lower bounds only: a loaded host may start a frame late.
+void timerHeldBy(std::chrono::milliseconds hold)
+{
+    auto options = manual(SyntheticCameraProfile::tablet);
+    options.manualClock = false;
+    options.latencyMilliseconds = 0;
+    const auto camera = makeSyntheticCamera(options);
+    Recorder recorder;
+    recorder.firstFrameDelay = hold;
+    recorder.clock = [&camera] { return camera->now(); };
+    {
+        auto session = camera->openSession(recorder);
+        CameraSettings settings;
+        settings.exposureMode = CameraExposureMode::manual;
+        settings.exposureNanoseconds = 200'000'000;
+        settings.iso = 100;
+        session->apply(0, settings);
+        require(session->startVideo(0, 640, 480, 10));
+        require(recorder.waitFor(4));
+        std::lock_guard lock(recorder.mutex);
+        for (std::size_t i = 0; i < 4; ++i)
+            require(recorder.frames[i].second.exposure.exposureNanoseconds == 200'000'000 &&
+                    recorder.frames[i].second.exposure.frameDurationNanoseconds == 200'000'000);
+        // Frame 2 starts after the callback of frame 1 returned.
+        require(recorder.frames[1].second.timestampNanoseconds >= recorder.returns[0]);
+        // Frames 2 to 4 are at least a frame duration apart (the timestamp is the frame's start, and the next deadline is a
+        // whole duration after it).
+        for (std::size_t i = 2; i < 4; ++i) {
+            const auto interval = recorder.frames[i].second.timestampNanoseconds - recorder.frames[i - 1].second.timestampNanoseconds;
+            require(interval + 2'000'000 >= recorder.frames[i - 1].second.exposure.frameDurationNanoseconds);
+        }
+    }
+    require(camera->sessionsOpen() == 0);
+}
+
+void timerSchedulesWholeDurations()
+{
+    timerHeldBy(std::chrono::milliseconds(350));  // overdue by more than a period
+    timerHeldBy(std::chrono::milliseconds(250));  // overdue by less than one
+}
+
 } // namespace
 
 int main()
@@ -773,6 +959,8 @@ int main()
     video();
     chartMarkerSurvivesCropAndScale();
     controls();
+    exposureReport();
+    everyProfileExposes();
     zoomCamera();
     multiCamera();
     multiCameraFormats();
@@ -785,5 +973,6 @@ int main()
     interruptions();
     aFailedRecoveryIsFinalForItsSession();
     threaded();
+    timerSchedulesWholeDurations();
     return 0;
 }
