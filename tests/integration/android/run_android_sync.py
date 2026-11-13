@@ -24,8 +24,10 @@ shows it on the release's own kernel and file system:
 - a suspend asked with no sync before it states in its reply whether it synced
   (``suspended, synced``, the PM core's sync having returned, or ``suspended,
   not synced``, as the guest's sync_on_suspend says), and the image holds a
-  fresh file right after a reply that says synced; ``--suspend-statement none``
-  expects a kernel without the statement, whose reply is ``suspended``;
+  fresh file right after a reply that says synced (the byte count shows that
+  the file had reached the image by the reply, not that the suspend's own sync
+  wrote it); ``--suspend-statement none`` expects a kernel without the
+  statement, whose reply is ``suspended``;
 - the emulator is killed outright, the way iOS ends a process that never runs
   again, and the image still holds it.
 
@@ -116,7 +118,15 @@ def background_edge(guest: "base.Guest") -> None:
 def suspend_states_its_sync(guest: "base.Guest", image: pathlib.Path, statement: str) -> None:
     """A suspend with no sync before it: its reply says whether the suspend
     synced (as the guest's sync_on_suspend says, when it can be read), and a
-    reply that says it did has the fresh file in the image right after it."""
+    reply that says it did has the fresh file in the image right after it.
+
+    What the byte count proves is only that the file had reached the image by
+    the reply, which a reply that says synced requires. It does not show that
+    the suspend's own sync wrote it (the guest's flusher would show the same),
+    and a reply that says not synced is not checked against the image at all:
+    the file may already be there. The Linux runner
+    (run_guest_mconsole_console_clients.py) holds write-back off and checks
+    both directions, and a suspend the guest started itself."""
     for byte in SUSPEND_PAYLOAD_BYTES_BY_ATTEMPT:
         before_write = image_payload(image, byte)
         guest.shell(f"rm -f {SUSPEND_PAYLOAD}; {write_command(byte, SUSPEND_PAYLOAD)}")

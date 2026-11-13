@@ -437,9 +437,12 @@ it. The bridge fields used below are defined by the comments in
   `suspended, synced` once the PM core's sync of this suspend has returned,
   `suspended, not synced` when there was none (a failed or given-up suspend
   replies with an error and no statement). A kernel without the statement
-  replies `suspended`, which confirms nothing, and the host reads either text
-  as the old reply. The sync runs before tasks are frozen, so a write between
-  the two is not covered (`guest-mconsole-console-clients`).
+  replies `suspended`, which confirms nothing, and so does a suspend that the
+  guest started itself and the host's request found already past its sync:
+  the statement is made only for the transition the request's own task runs.
+  The host reads either text as the old reply. The sync runs before tasks are
+  frozen, so a write between the two is not covered
+  (`guest-mconsole-console-clients`).
 - A command that answers with what the kernel prints (`sysrq`, `stack`)
   sends its client what the consoles write while it runs, whichever vCPU
   writes it, and nothing after its final reply. The final reply names the
@@ -462,7 +465,8 @@ it. The bridge fields used below are defined by the comments in
   request: that suspend replies `Suspend failed: -16` when its turn comes and
   does not put the guest to sleep, in whichever order queued requests run. A
   host-asked suspend that ends with `-EBUSY` is entered again up to three more
-  times, and a request that gives up replies `Suspend failed`.
+  times unless a suspend of the guest's own has answered the request meanwhile,
+  and a request that gives up replies `Suspend failed`.
   `guest-suspend-holds` checks the host's suspend under traffic, early wakes,
   and every guest-started wake path; `kernel-darwin-mconsole-suspend` checks
   the bookkeeping.

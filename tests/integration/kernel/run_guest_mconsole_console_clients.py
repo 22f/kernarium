@@ -41,12 +41,27 @@ A suspend states in its reply whether the suspend's own sync returned:
 ``suspended, synced`` once the PM core's sync of that suspend has returned
 and ``suspended, not synced`` when sync_on_suspend is off, a kernel before the
 statement says only ``suspended``, and the host takes the statement as the only
-confirmation a suspend gives. Two more guests dirty a file the same way and ask
-``suspend`` without a ``sync`` before it. With sync_on_suspend on, the reply
-must say synced and the image must hold the whole file right after it. With it
-off, the reply must say not synced and the image must still lack the file: the
-statement is true in both directions. ``--suspend-statement none`` expects a
-kernel without the statement (``suspended``, nothing more) and checks only that.
+confirmation a suspend gives. One more guest dirties a file the same way and
+asks ``suspend`` without a ``sync`` before it, with sync_on_suspend on, wakes
+the guest, and does it again with a second file and sync_on_suspend off, in
+that one guest. With it on, the reply must say synced and the image must hold
+the whole file right after it. With it off, the reply must say not synced and
+the image must still lack the second file: the statement and the image agree in
+both directions. ``--suspend-statement none`` expects a kernel without the
+statement (``suspended``, nothing more) and checks only that.
+
+The statement is the request's own: a suspend that the guest started itself
+(``echo mem > /sys/power/state``) and that is past its sync when the host's
+``suspend`` arrives takes the request at its entry, and the reply is the bare
+``suspended``, because the sync that ran was not the request's. One more guest
+dirties 24 MiB, starts such a suspend, and sends the console's ``suspend`` at
+growing delays after the guest printed its suspend entry (one attempt for each
+of GUEST_STARTED_DELAYS) until one overlaps the guest's own suspend: the
+guest's write succeeds and the request is answered. The reply of the first
+overlap must be ``suspended`` (``--guest-started-reply bare``, the default);
+``--guest-started-reply synced`` is the control on a kernel without the
+request binding, which must show ``suspended, synced``. A run in which no
+attempt overlaps fails as "not reproduced": it proves nothing either way.
 
 The contract is the management-console paragraph of kernel/common/README.md.
 """
@@ -70,7 +85,7 @@ import time
 REPOSITORY = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPOSITORY / "tests" / "integration" / "support"))
 
-from guest import Guest  # noqa: E402
+from guest import CommandTimeout, Guest  # noqa: E402
 
 
 CPUS = 4
@@ -95,6 +110,28 @@ WRITE_PAYLOAD = (
     f"head -c {PAYLOAD_BYTES} /dev/zero | tr '\\000' '\\{PAYLOAD_BYTE:03o}' "
     "> /mnt/disk/payload && cat /proc/meminfo | grep ^Dirty"
 )
+# The suspend that follows a suspend with sync_on_suspend off in the same
+# guest has a payload of its own, with its own byte, so that what the first
+# synced is not counted for the second.
+SECOND_PAYLOAD_BYTE = 0x5A
+WRITE_SECOND_PAYLOAD = (
+    f"head -c {PAYLOAD_BYTES} /dev/zero | tr '\\000' "
+    f"'\\{SECOND_PAYLOAD_BYTE:03o}' "
+    "> /mnt/disk/payload-second && cat /proc/meminfo | grep ^Dirty"
+)
+# The guest-started suspend has this much dirty data to sync, so that its
+# transition takes long enough for a request to arrive while it runs.
+REDIRTY = (
+    "dd if=/dev/zero of=/mnt/disk/spin bs=1M count=24 conv=notrunc "
+    "2>/dev/null && grep ^Dirty /proc/meminfo"
+)
+SUSPEND_ENTRY = "PM: suspend entry"
+SELF_SUSPEND = (
+    "(echo mem > /sys/power/state; echo $? > /tmp/self-suspend-rc) &\n"
+)
+# Seconds after the guest printed its own suspend entry at which the host's
+# suspend is sent, one attempt each.
+GUEST_STARTED_DELAYS = (0.0, 0.005, 0.02, 0.05, 0.1, 0.2, 0.4, 0.8)
 MCONSOLE_MAGIC = 0xCAFEBABE
 MCONSOLE_VERSION = 2
 MCONSOLE_DATA = 512
@@ -287,9 +324,9 @@ def require_status_prefix(guest: Guest, directory: pathlib.Path, serial: int,
                            f"{'an error' if error else 'a success'} {text!r}")
 
 
-def payload_bytes(image: pathlib.Path) -> int:
-    """How many of the image's bytes are the payload's byte."""
-    return image.read_bytes().count(bytes([PAYLOAD_BYTE]))
+def payload_bytes(image: pathlib.Path, byte: int = PAYLOAD_BYTE) -> int:
+    """How many of the image's bytes are `byte`, the payload's."""
+    return image.read_bytes().count(bytes([byte]))
 
 
 def dirty_then_kill(emulator: pathlib.Path, rootfs: pathlib.Path,
@@ -352,71 +389,87 @@ def suspend_exchange(guest: Guest, directory: pathlib.Path,
     return error, text
 
 
-def dirty_then_suspend(emulator: pathlib.Path, rootfs: pathlib.Path,
-                       engine: str, private: pathlib.Path, label: str,
-                       sync_on_suspend: bool) -> tuple[str, int]:
-    """Boots a guest with an ext4 disk whose write-back is held off, with its
-    sync_on_suspend as asked, dirties a file only the page cache holds, and
-    asks for a suspend with no sync before it. Returns the suspend's reply and
-    how many of the image's bytes are the payload's right after it, then wakes
-    the guest and ends it cleanly."""
-    image = private / f"disk-{label}.img"
+def check_payload_dirty(guest: Guest, label: str, command: str) -> None:
+    """Writes the payload and requires most of it dirty in the guest."""
+    output = guest.check_command(command, 60)
+    dirty = re.search(r"Dirty:\s+(\d+) kB", output)
+    if dirty is None or int(dirty[1]) < PAYLOAD_BYTES // 1024 // 2:
+        raise RuntimeError(
+            f"{label}: the payload is not dirty in the guest: {output!r}"
+        )
+
+
+def suspend_on_then_off(emulator: pathlib.Path, rootfs: pathlib.Path,
+                        engine: str, private: pathlib.Path
+                        ) -> list[tuple[str, str, int]]:
+    """Boots one guest with an ext4 disk whose write-back is held off. With
+    sync_on_suspend on, then off, in that guest, it dirties a file only the
+    page cache holds, asks for a suspend with no sync before it, and wakes the
+    guest. Returns, for each, the suspend's reply and how many of the image's
+    bytes are that file's byte right after the reply."""
+    image = private / "disk-suspend.img"
     with open(image, "wb") as handle:
         handle.truncate(DISK_BYTES)
+    phases = (("on", True, WRITE_PAYLOAD, PAYLOAD_BYTE),
+              ("off", False, WRITE_SECOND_PAYLOAD, SECOND_PAYLOAD_BYTE))
+    results = []
     with Guest(emulator, rootfs, "1G", "tmpfs",
                ("ncpus=2", f"ubd1={image}", "sysctl.kernel.sysrq=0"),
                init_shell=True, engine=engine) as guest:
         guest.boot_to_shell(180)
         directory = private / f"uml-kern{guest.process_id}"
-        guest.check_command(
-            f"echo {int(sync_on_suspend)} > /sys/power/sync_on_suspend", 30)
-        guest.check_command("cat /sys/power/sync_on_suspend", 30,
-                            expected=str(int(sync_on_suspend)))
         guest.check_command(DIRTY_SETUP, 60)
-        output = guest.check_command(WRITE_PAYLOAD, 60)
-        dirty = re.search(r"Dirty:\s+(\d+) kB", output)
-        if dirty is None or int(dirty[1]) < PAYLOAD_BYTES // 1024 // 2:
-            raise RuntimeError(
-                f"{label}: the payload is not dirty in the guest: {output!r}"
-            )
-        if payload_bytes(image) >= PAYLOAD_BYTES // 4:
-            raise RuntimeError(
-                f"{label}: the image holds the payload before any request"
-            )
-        try:
-            error, text = suspend_exchange(guest, directory, 1)
-            at_reply = payload_bytes(image)
-            if error:
-                raise RuntimeError(f"{label}: 'suspend' ended with an error "
-                                   f"{text!r}")
-            error, woken = exchange(guest, directory, 100, "wake")
-            if error:
-                raise RuntimeError(f"{label}: 'wake' ended with an error "
-                                   f"{woken!r}")
-        except GuestGone as gone:
-            raise gone_report(guest, gone, 0) from None
-        guest.check_command("echo alive", 60, expected="alive")
-        check_clean(guest)
+        serial = 1
+        for label, enabled, write, byte in phases:
+            label = f"sync_on_suspend {label}"
+            guest.check_command(
+                f"echo {int(enabled)} > /sys/power/sync_on_suspend", 30)
+            guest.check_command("cat /sys/power/sync_on_suspend", 30,
+                                expected=str(int(enabled)))
+            check_payload_dirty(guest, label, write)
+            # Nothing of it reached the image yet, or the reply proves
+            # nothing.
+            if payload_bytes(image, byte) >= PAYLOAD_BYTES // 4:
+                raise RuntimeError(
+                    f"{label}: the image holds the payload before any request"
+                )
+            try:
+                error, text = suspend_exchange(guest, directory, serial)
+                at_reply = payload_bytes(image, byte)
+                if error:
+                    raise RuntimeError(f"{label}: 'suspend' ended with an "
+                                       f"error {text!r}")
+                error, woken = exchange(guest, directory, serial + 100, "wake")
+                if error:
+                    raise RuntimeError(f"{label}: 'wake' ended with an error "
+                                       f"{woken!r}")
+            except GuestGone as gone:
+                raise gone_report(guest, gone, 0) from None
+            serial += 200
+            guest.check_command("echo alive", 60, expected="alive")
+            check_clean(guest)
+            results.append((label, text, at_reply))
         if not guest.shutdown(60):
-            raise RuntimeError(f"{label}: the guest did not power off")
-    return text, at_reply
+            raise RuntimeError("the guest did not power off")
+    return results
 
 
 def run_suspend_states_its_sync(emulator: pathlib.Path, rootfs: pathlib.Path,
                                 engine: str, private: pathlib.Path,
                                 statement: str) -> None:
-    """The suspend's reply says whether its sync returned, and the image shows
-    it did or did not."""
-    on_text, on_bytes = dirty_then_suspend(emulator, rootfs, engine, private,
-                                           "suspend-sync", True)
-    off_text, off_bytes = dirty_then_suspend(emulator, rootfs, engine, private,
-                                             "suspend-nosync", False)
+    """The suspend's reply says whether its sync returned, and the image
+    holds the file when it did, in one guest with the setting on and then off.
+    What the off run's image shows is only that it did not hold the file by
+    the reply: a write-back that is not the suspend's own would show the same
+    way, which the reply cannot account for."""
+    (on_label, on_text, on_bytes), (off_label, off_text, off_bytes) = \
+        suspend_on_then_off(emulator, rootfs, engine, private)
     if statement == "none":
-        for label, text in (("on", on_text), ("off", off_text)):
+        for label, text in ((on_label, on_text), (off_label, off_text)):
             if text != "suspended":
                 raise RuntimeError(
-                    f"sync_on_suspend {label}: the suspend replied {text!r}; "
-                    "a kernel without the statement replies 'suspended'"
+                    f"{label}: the suspend replied {text!r}; a kernel "
+                    "without the statement replies 'suspended'"
                 )
         print(f"suspend replied {on_text!r} with sync_on_suspend on ({on_bytes} "
               f"payload bytes of {PAYLOAD_BYTES} in the image) and "
@@ -425,7 +478,7 @@ def run_suspend_states_its_sync(emulator: pathlib.Path, rootfs: pathlib.Path,
         return
     if on_text != "suspended, synced":
         raise RuntimeError(
-            f"sync_on_suspend on: the suspend replied {on_text!r}, not "
+            f"{on_label}: the suspend replied {on_text!r}, not "
             "'suspended, synced'"
         )
     if on_bytes < PAYLOAD_BYTES:
@@ -436,19 +489,164 @@ def run_suspend_states_its_sync(emulator: pathlib.Path, rootfs: pathlib.Path,
         )
     if off_text != "suspended, not synced":
         raise RuntimeError(
-            f"sync_on_suspend off: the suspend replied {off_text!r}, not "
-            "'suspended, not synced'"
+            f"{off_label}: the suspend replied {off_text!r}, not "
+            "'suspended, not synced' (the setting was on in this guest "
+            "before)"
         )
     if off_bytes >= PAYLOAD_BYTES // 4:
         raise RuntimeError(
-            f"sync_on_suspend off: the image already held {off_bytes} of the "
-            f"payload's {PAYLOAD_BYTES} bytes after the suspend (a sync ran "
-            "that the reply denied)"
+            f"{off_label}: the image already held {off_bytes} of the "
+            f"payload's {PAYLOAD_BYTES} bytes right after a reply that said "
+            "'not synced': something wrote the file back before the reply "
+            "that the reply does not account for"
         )
     print(f"suspend replied {on_text!r}: the image held {on_bytes} payload "
-          f"bytes right after the reply, of {PAYLOAD_BYTES}; with "
-          f"sync_on_suspend off it replied {off_text!r} and the image held "
-          f"{off_bytes}")
+          f"bytes right after the reply, of {PAYLOAD_BYTES}; then, in the "
+          f"same guest with sync_on_suspend off, it replied {off_text!r} and "
+          f"the second file's image held {off_bytes}")
+
+
+def wake_until_alive(guest: Guest, directory: pathlib.Path,
+                     serial: int) -> int:
+    """Wakes the guest and waits until its shell answers twice, 1.5 s apart,
+    and returns how many wakes that took. One ends a suspend. A guest that
+    was put to sleep again by a retry of the request, after the suspend that
+    answered the request ended, is woken once more; the second answer is there
+    because such a suspend syncs and freezes for about a second before it
+    stops the shell."""
+    for wakes in range(1, 6):
+        error, text = exchange(guest, directory, serial + wakes, "wake")
+        if error:
+            raise RuntimeError(f"'wake' ended with an error {text!r}")
+        try:
+            for _ in range(2):
+                time.sleep(1.5)
+                # The kernel's own lines may be mixed into the output.
+                answer = guest.run_command("echo alive", 10)
+                if answer.return_code != 0 or "alive" not in answer.output:
+                    raise RuntimeError(
+                        f"the guest answered 'echo alive' with {answer!r}")
+            return wakes
+        except CommandTimeout:
+            continue
+    raise RuntimeError("the guest does not answer after five wakes")
+
+
+def awake_command(guest: Guest, directory: pathlib.Path, serial: int,
+                  command: str) -> tuple[str, int]:
+    """Runs `command`, and while the guest does not answer wakes it and asks
+    again (a kernel that lets the request's retry put the guest to sleep
+    again does it at a time of its own). Returns the output and how many
+    wakes that took."""
+    for wakes in range(5):
+        try:
+            return guest.check_command(command, 15), wakes
+        except CommandTimeout:
+            error, text = exchange(guest, directory, serial + wakes, "wake")
+            if error:
+                raise RuntimeError(f"'wake' ended with an error {text!r}")
+    raise RuntimeError(f"the guest does not answer {command!r}")
+
+
+def run_guest_started_suspend(emulator: pathlib.Path, rootfs: pathlib.Path,
+                              engine: str, private: pathlib.Path,
+                              expected: str) -> None:
+    """A suspend that the guest started itself, past its sync, takes the
+    host's request at its entry, and the statement in the reply is not the
+    request's: it must be the bare 'suspended' (`expected`, the control on a
+    kernel without the request binding is 'suspended, synced'). The host's
+    `suspend` is sent at growing delays after the guest printed its own suspend
+    entry; the first that overlaps the guest's suspend (the guest's write
+    succeeded, and the request was answered, not refused) decides. No overlap
+    in any attempt is 'not reproduced', which fails the run."""
+    image = private / "disk-guest-started.img"
+    with open(image, "wb") as handle:
+        handle.truncate(DISK_BYTES)
+    outcomes: list[str] = []
+    with Guest(emulator, rootfs, "1G", "tmpfs",
+               ("ncpus=2", f"ubd1={image}", "sysctl.kernel.sysrq=0"),
+               init_shell=True, engine=engine) as guest:
+        guest.boot_to_shell(180)
+        directory = private / f"uml-kern{guest.process_id}"
+        guest.check_command(DIRTY_SETUP, 60)
+        guest.check_command("cat /sys/power/sync_on_suspend", 30, expected="1")
+        for attempt, delay in enumerate(GUEST_STARTED_DELAYS):
+            awake_command(guest, directory, 4000 + attempt * 10, REDIRTY)
+            awake_command(guest, directory, 5000 + attempt * 10,
+                          "rm -f /tmp/self-suspend-rc")
+            entries = guest.output().count(SUSPEND_ENTRY)
+            guest._write(SELF_SUSPEND)
+            deadline = time.monotonic() + 30
+            while guest.output().count(SUSPEND_ENTRY) <= entries:
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        "the guest never printed its suspend entry:\n"
+                        + guest.output()[-4000:]
+                    )
+                guest.wait_for_exit(0.002)
+            time.sleep(delay)
+            try:
+                started = time.monotonic()
+                error, text = exchange(guest, directory, 1000 + attempt,
+                                       "suspend")
+                answered = time.monotonic() - started
+                wakes = wake_until_alive(guest, directory, 2000 + attempt * 10)
+            except GuestGone as gone:
+                raise gone_report(guest, gone, attempt) from None
+            check_clean(guest)
+            status, more = awake_command(
+                guest, directory, 3000 + attempt * 10,
+                "sleep 1; cat /tmp/self-suspend-rc")
+            wakes += more
+            status = status.strip().splitlines()[-1] if status.strip() else ""
+            if status != "0":
+                outcomes.append(f"{delay:g} s: the request's own suspend ran "
+                                f"first (the guest's write returned {status}, "
+                                f"the reply {text!r})")
+                continue
+            if error:
+                outcomes.append(f"{delay:g} s: after the guest's own suspend "
+                                f"entered, the request was refused {text!r}")
+                continue
+            if text != expected:
+                raise RuntimeError(
+                    f"the host's suspend overlapped the guest's own suspend "
+                    f"({delay:g} s after its entry; answered after "
+                    f"{answered:.3f} s) and was answered {text!r}, not "
+                    f"{expected!r}: "
+                    + ("the statement is the guest's own transition's sync, "
+                       "not one the request ran"
+                       if text.startswith("suspended,") else
+                       "a kernel that binds the statement to the request "
+                       "does not state it for another suspend's sync"
+                       if text == "suspended" else
+                       "an unexpected reply")
+                )
+            if wakes != 1 and expected == "suspended":
+                raise RuntimeError(
+                    f"one wake did not end the guest's sleep ({wakes} were "
+                    "needed): the request's retry put the guest to sleep "
+                    "again after the suspend that answered it ended, with "
+                    "nobody waiting to wake it"
+                )
+            for outcome in outcomes:
+                print("earlier attempt, " + outcome)
+            print(f"the host's suspend overlapped the guest's own suspend "
+                  f"{delay:g} s after its entry (attempt {attempt + 1} of "
+                  f"{len(GUEST_STARTED_DELAYS)}) and was answered {text!r} "
+                  f"after {answered:.3f} s, as expected; the guest needed "
+                  f"{wakes} wake(s) to run again")
+            # Not shut down: a control kernel may put the guest to sleep
+            # once more, and nothing here needs the guest's clean end.
+            guest.terminate()
+            if not guest.wait_for_exit(30):
+                raise RuntimeError("the emulator survived SIGKILL")
+            return
+    raise RuntimeError(
+        "not reproduced: no attempt overlapped the guest's own suspend, so "
+        "the run proves nothing about the request's statement:\n  "
+        + "\n  ".join(outcomes)
+    )
 
 
 def run_sync_reaches_the_image(emulator: pathlib.Path, rootfs: pathlib.Path,
@@ -504,7 +702,14 @@ def main() -> int:
     parser.add_argument("--only-sync", action="store_true",
                         help="run only the kill-after-request scenario")
     parser.add_argument("--only-suspend-statement", action="store_true",
-                        help="run only the suspend-statement scenario")
+                        help="run only the suspend-statement scenarios")
+    parser.add_argument("--guest-started-reply", choices=("bare", "synced"),
+                        default="bare",
+                        help="what the host's suspend, overlapping a suspend "
+                        "the guest started, is answered: the bare "
+                        "'suspended' (default), or, as the control on a "
+                        "kernel without the request binding, "
+                        "'suspended, synced'")
     parser.add_argument("--suspend-statement", choices=("stated", "none"),
                         default="stated",
                         help="whether the kernel states in its suspend reply "
@@ -531,6 +736,11 @@ def main() -> int:
         if not arguments.only_sync:
             run_suspend_states_its_sync(emulator, rootfs, arguments.engine,
                                         private, arguments.suspend_statement)
+            if arguments.suspend_statement == "stated":
+                run_guest_started_suspend(
+                    emulator, rootfs, arguments.engine, private,
+                    "suspended" if arguments.guest_started_reply == "bare"
+                    else "suspended, synced")
     finally:
         shutil.rmtree(private, ignore_errors=True)
     return 0

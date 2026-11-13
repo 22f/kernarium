@@ -12,17 +12,19 @@ sync_on_suspend instead would be a guess, since it can change while
 the sync runs.
 
 Record, for the suspend under way, that ksys_sync_helper() returned,
-and clear it when a suspend begins, under system_transition_mutex.
+and clear it when a suspend begins and again before the transition
+mutex is released, so a reader that does not come through
+enter_state() cannot find an earlier suspend's answer.
 pm_suspend_synced() reads it from the platform's enter callback, which
-runs in the task that called enter_state().  Tasks are frozen after the
-sync, so one that wrote in between leaves dirty pages the flag does not
-cover.
+runs in the task that called enter_state() with the mutex held.  Tasks
+are frozen after the sync, so one that wrote in between leaves dirty
+pages the flag does not cover.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  include/linux/suspend.h |  2 ++
- kernel/power/suspend.c  | 18 ++++++++++++++++++
- 2 files changed, 20 insertions(+)
+ kernel/power/suspend.c  | 21 +++++++++++++++++++++
+ 2 files changed, 23 insertions(+)
 
 diff --git a/include/linux/suspend.h b/include/linux/suspend.h
 index b02876f1ae38acbb59fa04359f0feb603deb12d4..f0fea3f48e5635236c1c9b21a2f20e0dde4e90fc 100644
@@ -45,10 +47,10 @@ index b02876f1ae38acbb59fa04359f0feb603deb12d4..f0fea3f48e5635236c1c9b21a2f20e0d
  static inline bool idle_should_enter_s2idle(void) { return false; }
  static inline void __init pm_states_init(void) {}
 diff --git a/kernel/power/suspend.c b/kernel/power/suspend.c
-index 9040fa0eae3df663e7da6c9d10a623efd3203781..c7ae4c28a30f5777ddd03085b781433a69f24ffb 100644
+index 9040fa0eae3df663e7da6c9d10a623efd3203781..3c4a8631be6ba23f237bf214ff261cffffc28366 100644
 --- a/kernel/power/suspend.c
 +++ b/kernel/power/suspend.c
-@@ -558,6 +558,22 @@ static void suspend_finish(void)
+@@ -558,6 +558,24 @@ static void suspend_finish(void)
  	pm_restore_console();
  }
  
@@ -59,9 +61,11 @@ index 9040fa0eae3df663e7da6c9d10a623efd3203781..c7ae4c28a30f5777ddd03085b781433a
 + *
 + * True once enter_state() has run ksys_sync_helper() to its return for the
 + * suspend that is under way: not when sync_on_suspend is off, and not for an
-+ * earlier suspend.  Tasks are frozen only after that sync, so one that wrote
-+ * in between leaves dirty pages it does not cover.  Meant for the platform's
-+ * enter callback, which runs in the task that called enter_state().
++ * earlier suspend, since it is cleared when a suspend begins and again before
++ * the transition mutex is released.  Tasks are frozen only after that sync,
++ * so one that wrote in between leaves dirty pages it does not cover.  Meant
++ * for the platform's enter callback, which runs in the task that called
++ * enter_state() and so holds the mutex.
 + */
 +bool pm_suspend_synced(void)
 +{
@@ -71,7 +75,7 @@ index 9040fa0eae3df663e7da6c9d10a623efd3203781..c7ae4c28a30f5777ddd03085b781433a
  /**
   * enter_state - Do common work needed to enter system sleep state.
   * @state: System sleep state to enter.
-@@ -591,6 +607,7 @@ static int enter_state(suspend_state_t state)
+@@ -591,6 +609,7 @@ static int enter_state(suspend_state_t state)
  	 * the suspend keeps it.
  	 */
  	pm_wakeup_clear(0);
@@ -79,7 +83,7 @@ index 9040fa0eae3df663e7da6c9d10a623efd3203781..c7ae4c28a30f5777ddd03085b781433a
  
  	if (state == PM_SUSPEND_TO_IDLE)
  		s2idle_begin();
-@@ -599,6 +616,7 @@ static int enter_state(suspend_state_t state)
+@@ -599,6 +618,7 @@ static int enter_state(suspend_state_t state)
  		trace_suspend_resume(TPS("sync_filesystems"), 0, true);
  		ksys_sync_helper();
  		trace_suspend_resume(TPS("sync_filesystems"), 0, false);
@@ -87,3 +91,11 @@ index 9040fa0eae3df663e7da6c9d10a623efd3203781..c7ae4c28a30f5777ddd03085b781433a
  	}
  
  	/* A wakeup signaled while file systems were synced ends the suspend. */
+@@ -625,6 +645,7 @@ static int enter_state(suspend_state_t state)
+ 	pm_pr_dbg("Finishing wakeup.\n");
+ 	suspend_finish();
+  Unlock:
++	WRITE_ONCE(suspend_synced, false);
+ 	mutex_unlock(&system_transition_mutex);
+ 	return error;
+ }
