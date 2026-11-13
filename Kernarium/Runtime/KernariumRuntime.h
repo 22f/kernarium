@@ -214,12 +214,11 @@ typedef struct kernarium_runtime_gpu_budget {
 /* Boots the guest and returns when it is over. A guest that restarts itself is
  * booted again inside this call, on the same view, disk and network, so the
  * call returns only when the guest powers off, the application stops it, a run
- * fails, or the guest restarts itself again and again without a boot that
- * finished. It returns the guest's own status (0 for a power-off or a stop), a
- * negated uml_emulator error constant for a run or start-up that failed, or
- * KERNARIUM_RUNTIME_RESULT_RESTART_LOOP. For Android, 0 means the guest powered
- * off cleanly and all its resources have been released: another run may start
- * in this process. A host stop or an unreported shutdown returns an error. */
+ * fails, or the restart-loop guard ends the loop. It returns the guest's own
+ * status (0 for a power-off or a stop), a negated uml_emulator error constant
+ * for a run or start-up that failed, or KERNARIUM_RUNTIME_RESULT_RESTART_LOOP.
+ * For Android, 0 means the guest powered off cleanly and all its resources have
+ * been released: another run may start in this process. A host stop or an unreported shutdown returns an error. */
 typedef int (*kernarium_runtime_run_function)(
     KernariumMetalView view,
     const kernarium_runtime_boot* boot);
