@@ -120,7 +120,7 @@ test's header holds the mechanics.
 | `guest-v4l2-mmap-capture` | `UML_V4L2_MMAP_CAPTURE_PROBE_BINARY` | blob-backed capture buffers allocate on an idle guest |
 | `guest-futex-atomic` | `UML_FUTEX_PROBE_BINARY` | the futex contract in the [common kernel README](../kernel/common/README.md) |
 | `guest-gbm-dmabuf` | `UML_GBM_DMABUF_PROBE_BINARY` | the virtio-gpu dma-buf contract |
-| `guest-drm-vblank` | `UML_DRM_FLIP_PROBE_BINARY` | Virtio-GPU's vblank pacing |
+| `guest-drm-vblank` | `UML_DRM_FLIP_PROBE_BINARY` | Virtio-GPU's vblank pacing and the grid it keeps across idle gaps |
 | `guest-aarch32-kernel` | built from `tests/integration/aarch32/` | the kernel's AArch32 task support (needs `python3`, `as`, `ld` in the rootfs) |
 | `apple-audio-playback`, `-interruption`, `guest-virtio-sound-delay-host` | `UML_TEST_APPLE_AUDIO=ON` | the real macOS audio output, the iOS interruption behavior (which needs an iOS Simulator runtime, and runs in a simulator device it creates and deletes) and a guest's stream delay on the real output |
 
@@ -284,7 +284,15 @@ On a connected iOS device, Android runs go through Andarium
 (`tests/perf/run_ios_device_android.py`, [`Andarium/README.md`](../Andarium/README.md#automation))
 and Kernarium's device runners keep Linux; both share
 `tests/integration/support/ios_device.py`, and their tooling tests run against
-fakes, so no device is needed. Android recovery qualification uses a fresh
+fakes, so no device is needed. A device run starts with at least five free
+slots of JetsamEvent reports and of each tested process's crash reports, since
+iOS drops the next report once a kind is full: otherwise the
+[preflight](../tests/integration/support/ios_device_reports.py) copies the
+reports listed at the start to a new directory on the Mac, outside every
+checkout, checks each copy by type and size (not byte for byte), and only then
+empties the store, failing the run if the slots stay short. A report that
+arrives after that listing is moved without a checked copy, into the mover's
+own directory. Android recovery qualification uses a fresh
 disposable bundle with `TEST_RUNNER_KERNARIUM_ANDROID_BOOT_MODE=recovery`;
 never run wipe checks against an existing user bundle.
 
@@ -352,9 +360,26 @@ ranges of every field and the frame reader), system image staging, the
 screenshot script, the String Catalogs' check and their sync with the
 compiler's extraction ([the gate after a build](../Andarium/README.md#languages)),
 and `kernarium-host-features` (unit) the table of host features the boot
-request carries to an Android guest. The application builds with Xcode
-(`AndariumPreview` is the Simulator build with mock data, `Andarium` the
-device application,
+request carries to an Android guest. `kernarium-camera` (unit) checks
+what the runtime tells an Android guest about the host's cameras (the camera
+fields of the boot request, the composed layout and its recomposition at each
+boot, the lens cover, the host memory a live session reserves (none for a
+host with no cameras), the camera state and rotation, and that an unknown or
+empty `KERNARIUM_CAMERA_SOURCE` never reaches the host's camera),
+`camera-layout` (unit) that the layout name composed from a host's cameras is
+one of the image's layouts, `camera-orientation` (unit) the sensor
+orientation of every interface orientation and facing,
+`camera-still-exposure` (unit) the exposure a still reports from a photo's
+metadata, fed literal metadata and an in-memory image, never a camera, and
+`camera-photo-dimensions` (unit) which photo size a camera is asked for, on
+fake format tables
+([Cameras](../darwin/device/camera/README.md)). The Camera setting's hosted
+tests (`CameraFlowTests`) play iOS's permission with a fake and open no camera;
+the Simulator has no camera and `simctl privacy` cannot grant or revoke one, so
+the denied, restricted and absent states are shown by the preview
+(`-systemCamera` asks the Simulator's own permission). The application builds
+with Xcode (`AndariumPreview` is the Simulator build with mock data, `Andarium`
+the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
@@ -445,12 +470,16 @@ ADB-over-network hold, the background disk locks (which also requires a guest
 that was allocating buffers when the GPU was held to suspend), the resume
 after a save while the application is away, the real `HostLocation` against
 the Simulator's simulated location (the suite's header says how to grant
-access and set one) and the hardware keyboard and mouse against Android's input
-devices (`KeyboardMouseGuestTests`, which needs a kernel that follows
-configuration changes and its Android release). The storage test signs its
-helper APK with the AOSP test key, never a release key. When derived data is on
-a removable volume, macOS prompts once for access and the launch hangs until
-answered; build to the internal disk instead.
+access and set one), the cameras a booted guest sees (`CameraGuestTests`: the
+vendor SKU, the camera IDs and the lens cover of a live and a blocked session
+on the synthetic camera, with `TEST_RUNNER_KERNARIUM_CAMERA_SOURCE=synthetic`,
+on an image that has the camera HAL) and the hardware keyboard and mouse
+against Android's input devices (`KeyboardMouseGuestTests`, which needs a
+kernel that follows configuration changes and its Android release). The
+storage test signs its helper APK with the AOSP test key, never a release
+key. When derived data is on a removable volume, macOS prompts once for
+access and the launch hangs until answered; build to the internal disk
+instead.
 
 Tooling tests cover `scripts/check-privacy-manifests.py`
 (`ios-privacy-manifests`, which `package-ios-frameworks.sh` also runs on every
@@ -469,7 +498,10 @@ needs a debugger, so `run_ios_device_android.py --engine jit` is its lane.
 Unattended device automation goes through the long-lived `KernariumAutomation`
 UI-test host, because each new XCTest session on a device with a passcode needs
 the owner's approval. `Kernarium/scripts/ipad-automation.py --help` has its
-commands and failure modes. Keep all automation code in the test targets.
+commands and failure modes. Keep all automation code in the test targets. The
+host's test run records no screen video and keeps no attachments (the scheme
+sets it, and `start` refuses a built run file that does not), and its result
+bundle lives under the state directory, not in DerivedData.
 
 ### Edge gestures (device only)
 
@@ -770,9 +802,11 @@ guest's cost per report and the relay's memory. `android17-gamepad-runner`
 `android-camera` (integration) registers when `UML_ANDROID_CAMERA_RELEASE`
 names the release: the runner boots it with the launcher's synthetic camera
 (`--camera=synthetic|blocked`, `--camera-profile=`) and a layout on the vendor
-SKU, and checks what Android lists (features, media profiles, camera IDs),
-one preview frame and one still of the camera application, and, in a blocked
-session, that the same cameras give black frames and no still.
+SKU (`--layout auto` has the launcher compose it, as the iOS runtime does, with
+RAW once `--calibration-dir` holds colour data from an earlier session), and
+checks what Android lists (features, media profiles, camera IDs), one preview
+frame and one still of the camera application, and, in a blocked session, that
+the same cameras give black frames and no still.
 `android17-camera-runner` (tooling) runs its parsers and the expectations of
 every layout without a guest, and `android17-camera-layouts` (tooling) the
 layout set, its fallback order and the generated files.

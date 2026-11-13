@@ -84,6 +84,7 @@ struct HomeView: View {
         #endif
         .microphoneAccessAlert()
         .locationAccessAlert()
+        .cameraAccessAlert()
         .alert("Erase virtual machine?", isPresented: $model.confirmingErase) {
             Button("Erase virtual machine", role: .destructive) { model.erase() }
             Button("Cancel", role: .cancel) {}

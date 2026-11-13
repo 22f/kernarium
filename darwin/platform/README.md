@@ -95,32 +95,100 @@ interface to the wire.
   One session is a single `AVCaptureMultiCamSession` on iOS (an
   `AVCaptureSession` on macOS) with an input and a video data output per running
   camera and a photo output once a still is asked for. Frames are NV12, full
-  range, delivered through `CameraSessionDelegate` with the exposure that made
-  them; holding a frame's `owner` holds the capture's buffer, and its `native`
-  is the platform's own handle to the picture. A camera alone may run any
-  format; every camera with an input in the session, one that only takes stills
-  as well, runs a format a multi-camera session takes (`multiCamera`) while
-  another is in it: `startVideo()` and `takeStill()` move the cameras already in
-  the session to such a format, or fail and change nothing, and fail and undo
-  the join when the session's hardware cost goes over its budget. A camera that
-  only takes stills leaves the session, with its photo output, when its last
-  still is delivered, and a camera left alone goes back to the smallest format
-  of any kind; a camera whose format changed has its settings applied again. A
-  photo output's delegate is held by the session until its capture ends.
+  range, at the stream's size scaled by the platform from the format's at its
+  aspect ratio (`deliveredFrameSize`), delivered through `CameraSessionDelegate`
+  with the exposure that made them; holding a frame's `owner` holds the
+  capture's buffer, and its `native` is the platform's own handle to the
+  picture. A camera runs in one capture format, its **anchor**, whatever it
+  is asked: a stream, a still, a still beside a stream, alone or with other
+  cameras. Discovery lists the formats as data (`CameraInfo::captureFormats`);
+  `chooseAnchor` picks the anchor once from them by the key in
+  `photo_dimensions.hpp`, and the device gives it to the session with
+  `setAnchors()` together with what the guest may ask. The session has no
+  chooser and never moves a camera to another format: a camera's active format
+  changes only when its input joins the session. A camera joins through one
+  transaction (`admit`: the input, the anchor and its rate, the video output,
+  the photo output, inside one configuration), which, when a step is refused or
+  the session's hardware cost goes over its budget, removes exactly what that
+  call added and puts the device back as it reported itself before anything
+  changed, input included (`putBackTiming`: its format, frame durations and
+  custom exposure: a long manual exposure may have made the maximum longer than
+  the rate asked for, a rate recomputed would not restore that, and a shorter
+  maximum shortens the exposure, which the durations alone do not bring back).
+  A change of size or rate on a running stream does the same (`resizeStream`).
+  When that restore is itself refused, the device holds something between the
+  old and the new: the camera's cached stream and settings are no longer known
+  (`StreamCache`), so the next request for the stream writes the format, the
+  durations and the size again (it is not answered from the cache), the
+  settings are written whatever they last were, and a request the device still
+  cannot take fails.
+  While another camera is in the session every anchor must be a
+  format a multi-camera session takes (`multiCamera`); a camera whose best
+  such format offers less than its best format does not run with others (the
+  device then publishes it as a conflict). A camera that only takes stills
+  leaves the session, with its photo output, when its last still is delivered.
+  A camera whose format changed has its settings applied again. The video
+  output's explicit size has the anchor's aspect ratio and the photo output's
+  maximum is a size the anchor lists (`outputSizesFor`), both set after the
+  output has its source. A photo output's delegate is held by the session until
+  its capture ends.
+- **Rates** are whole numbers of frames a second. A span's end within 0.15 % of
+  a whole number is that number (29.97 is 30), and the rate is programmed as the
+  span's own duration where the reciprocal would fall outside it
+  (`rateSettingFor`). The guest is offered the whole rates of the anchor up to
+  30 (`videoRateCap`); an anchor with none that low offers its slowest.
 - **Controls** arrive as one `CameraSettings` per camera, and the session
   applies what differs. A zoom camera (a virtual device) takes automatic
   exposure, focus and white balance only.
 - **Stills** are a JPEG, a Bayer still, or both from one capture. A Bayer still
   carries its DNG's colour data (`dng_color.hpp`), the only place the host
   reveals it. A part that fails leaves the others: a capture fails only when
-  nothing it asked for arrived.
+  nothing it asked for arrived. A JPEG is made at exactly the size asked for
+  (`photo_dimensions.hpp`): the capture is refused when the active format does
+  not list that size, and the photo is dropped when the platform resolved
+  another. A photo output gets its maximum size only after it is attached to the
+  session, as AVFoundation requires: the largest size the anchor lists within
+  the guest's still cap, so no larger pipeline is prepared. The guest is offered
+  the sizes the anchor makes (`stillsOf`), and a camera that only takes stills
+  runs in the same anchor. The 24 MP size (5712x4284) that AVFoundation services
+  only as a deferred photo proxy is not listed, as the backend captures
+  synchronously. A
+  still's `exposure` is the photo's own where the photo states it: the exposure
+  time, ISO, f-number, focal length and flash come from the photo's Exif
+  (`apple/photo_metadata.hpp`, `still_exposure.hpp`), and a Bayer still's
+  neutral point and noise profile from its DNG. The 3A states, white balance,
+  zoom and lens are the session's as it reports them at delivery, not as they
+  were at the exposure, and on macOS the session reports none of them, so they
+  keep their defaults. A reading the photo does not give, or gives as a number
+  that cannot be a measurement (an ISO outside 1 to 1,000,000, an exposure time
+  of zero or over an hour, a negative or wider Flash field, not finite), is
+  zero: the photo gave none, never a made-up value. A lens has one aperture and
+  one focal length, so the lens's own is used when the photo names none. The
+  flash fired is the Exif's word, then the resolved settings'.
 - **Interruptions** (another application, a call, system pressure, iPad
   multitasking) arrive as events; the session does not stop itself. System
   pressure on a running camera also caps its frame rate (20 at serious, 15 at
-  critical), as Apple advises, before the session is interrupted. A runtime
-  error is restarted once: the restart ends with a `resumed` event, and an
-  error before that ends the episode with `failed`, so that the client closes
-  the session and tries again later.
+  critical), as Apple advises, to the largest rate the camera offers below the
+  cap (`throttledRate`), before the session is interrupted; the work a
+  pressure notification queues holds what it uses (`PressureWatch`) and does
+  nothing once the stream or the session has ended, and the observer that
+  runs it (`apple/key_path_observer.h`) keeps the handler alive for as long as
+  it runs, so a stop that comes meanwhile frees nothing it is using. A runtime
+  error is restarted once, and the restart, like an interruption that ends,
+  is a recovery (`recoverAnchors`): every camera the system moved out of its
+  anchor is put back, with its outputs and settings, and only then is a
+  `resumed` event sent. A repair that is refused, and an error before the
+  restart, end the episode with `failed`, so that the client closes the
+  session and tries again later, and a failure stays for the session
+  (`RecoveryLatch`: a second notification repairs and announces nothing); the
+  client delivers nothing from a camera it has been told is interrupted, nor
+  anything captured before the repair: an output callback reads the repair
+  boundary's generation when it is entered, before it waits for the lock the
+  announcement holds, and delivers only while it is current, and a callback that
+  began later compares the sample's capture time with the repair's on the
+  capture's own clock (the session's synchronization clock, never the host's;
+  `RepairBoundary`), with no age beyond which a sample is kept; the client
+  discards what it had already been handed.
 - `nv12_transform.hpp` crops, rotates and scales NV12 pictures: the portable
   `transformNv12()` is the reference, and `Camera::makeFrameTransformer()` gives
   the host's fastest. The Apple camera's (`apple/accelerated_nv12.hpp`) scales a
@@ -143,6 +211,7 @@ interface to the wire.
   App Store runtimes do not build it. It is never a real camera.
 
 Tests: `camera-frame-transform` and `camera-dng-color` need nothing;
+`camera-key-path-observer` runs the key-value observer on a stand-in object;
 `camera-synthetic` exercises the synthetic camera through the interface; and
 `camera-apple-discovery` reads the host's own cameras on any host. The Apple
 backend's sessions are not run by a test, because a test must never capture from

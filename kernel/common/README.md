@@ -270,6 +270,11 @@ it. The bridge fields used below are defined by the comments in
   secondaries stay online; a dispatch does nothing while the IRQs are
   suspended. `guest-irq-takeover` holds CPU0's carrier and checks a vsock
   echo with every CPU busy, with CPU0 only busy and with every CPU idle.
+  CPU0's idle wait also dispatches before it sleeps, and does not sleep when
+  that dispatch collected an event (`DARWIN_IRQ_HANDLED`): a handler may have
+  made a task runnable there, which only the idle loop notices when the wait
+  returns (`kernel-darwin-ipi-drain` for the wait, `kernel-darwin-irq-edge`
+  for the result).
 - A sleeping uaccess retries its fault until the handler refuses it or the task
   is dying, as native uaccess does, so a sibling's `fork()` never fails the copy
   with `-EFAULT`.
@@ -312,6 +317,13 @@ it. The bridge fields used below are defined by the comments in
   (`guest-video-teardown`). A synchronous video command waits five seconds and
   owns its response memory, so a late answer or the removal frees it
   (`guest-video-late-answer`).
+- The virtio-uml exit call stops every command-line device's connection-broken
+  work before it removes a device, and a device being removed queues none, so a
+  backend lost during the removal at power off does not have it unregistered a
+  second time (`guest-vhost-user-power-off`). One loss report per device queues
+  the work (an atomic bit), and the work holds the platform device's lock
+  around its lookup of the virtio device, so an unbind cannot free what it
+  breaks.
 
 ## Devices
 
@@ -357,8 +369,13 @@ it. The bridge fields used below are defined by the comments in
   `DMA_BUF_IOCTL_SYNC`; CPU access must be bracketed and a producer must flush
   its commands first. The optional `guest-gbm-dmabuf` test checks it.
 - The driver paces each CRTC with the DRM vblank timer at its mode's refresh
-  rate: a flip's event and out-fence signal at the next tick. The optional
-  `guest-drm-vblank` test checks the rate.
+  rate: a flip's event and out-fence signal at the next tick. The timer runs
+  only while something holds a vblank reference. A restart after an idle stop
+  keeps the grid: the first tick is a whole number of periods after the last
+  one, and the vblank count and timestamp the core derives for the gap stay a
+  pair on that grid. A mode change, or the CRTC being turned off and on, starts
+  a new grid. The optional `guest-drm-vblank` test checks the rate, the grid
+  across idle gaps and the kernel's vblank trace.
 - A Virtio-GPU context's debug name ends in its creating process,
   `<name>|pid=<tgid>|comm=<comm>`: the thread group ID in the initial PID
   namespace and the group leader's command name (a `|` in it becomes `?`), cut

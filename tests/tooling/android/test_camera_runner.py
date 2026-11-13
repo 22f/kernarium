@@ -245,13 +245,41 @@ class PlanTests(unittest.TestCase):
 
 class LauncherTests(unittest.TestCase):
     def test_the_launcher_arguments(self) -> None:
+        # Every host is given the small tier for now, so a layout of the large tier asks the launcher for it.
         self.assertEqual(runner.launcher_arguments(runner.make_plan("bf-large-flash", "phone", "live")),
                          ["--camera=synthetic", "--camera-profile=phone",
-                          "androidboot.product.vendor.sku=bf-large-flash"])
+                          "androidboot.product.vendor.sku=bf-large-flash", "--camera-tier=large"])
+        self.assertEqual(runner.launcher_arguments(runner.make_plan("bf-small-flash", "phone", "live")),
+                         ["--camera=synthetic", "--camera-profile=phone",
+                          "androidboot.product.vendor.sku=bf-small-flash"])
+        self.assertNotIn("--camera-tier=large",
+                         runner.launcher_arguments(runner.make_plan("front", "laptop", "blocked")))
+        # With auto the launcher composes the layout and no SKU is passed.
+        self.assertEqual(runner.launcher_arguments(runner.make_plan("bf-small-flash", "phone", "live"), auto=True),
+                         ["--camera=synthetic", "--camera-profile=phone", "--camera-layout=auto"])
+        self.assertEqual(runner.launcher_arguments(runner.make_plan("bf-small-flash", "phone", "live"), auto=True,
+                                                   calibration=Path("/c"))[-1],
+                         "--camera-calibration-dir=/c")
         self.assertEqual(runner.launcher_arguments(runner.make_plan("front", "laptop", "blocked"))[0],
                          "--camera=blocked")
         self.assertEqual(runner.launcher_arguments(runner.make_plan("none", "tablet", "none"))[0],
                          "--camera=none")
+        # The launcher refuses a camera profile without a camera.
+        self.assertNotIn("--camera-profile=tablet",
+                         runner.launcher_arguments(runner.make_plan("none", "tablet", "none")))
+
+    def test_the_composed_layout_has_raw_only_once_a_still_taught_the_colour_data(self) -> None:
+        # Every host composes the small tier for now: no 2160p front camera, and no concurrent pair.
+        self.assertEqual(runner.auto_layout("phone", taught=False), "bf-small-flash-manual")
+        self.assertEqual(runner.auto_layout("phone", taught=True), "bf-small-flash-manual-raw")
+        self.assertEqual(runner.auto_layout("tablet", taught=False), "bf-small-flash-manual")
+        self.assertEqual(runner.auto_layout("tablet", taught=True), "bf-small-flash-manual-raw")
+        self.assertEqual(runner.auto_layout("laptop", taught=False), "front")
+        for profile in runner.PROFILE_CAMERAS:
+            for taught in (False, True):
+                name = runner.auto_layout(profile, taught)
+                self.assertNotIn("large", name)
+                runner.make_plan(name, profile, "live")
 
     def test_the_launcher_accepts_what_the_runner_passes(self) -> None:
         source = (REPOSITORY / "darwin/app/macos/main.cpp").read_text(encoding="utf-8")
@@ -261,6 +289,9 @@ class LauncherTests(unittest.TestCase):
             self.assertRegex(source, rf'value == "{profile}"', profile)
         self.assertIn('valued("--camera=")', source)
         self.assertIn('valued("--camera-profile=")', source)
+        self.assertIn('valued("--camera-layout=")', source)
+        self.assertIn('valued("--camera-calibration-dir=")', source)
+        self.assertIn('valued("--camera-tier=")', source)
 
     def test_the_sku_argument_becomes_the_property_the_trigger_reads(self) -> None:
         self.assertEqual(layouts.SKU_BOOT_ARGUMENT, "androidboot." + layouts.SKU_PROPERTY.removeprefix("ro.boot.") + "=")

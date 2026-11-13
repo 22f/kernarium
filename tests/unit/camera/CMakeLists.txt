@@ -26,6 +26,40 @@ target_link_libraries(uml_camera_apple_discovery_tests PRIVATE UML::AppleCamera)
 uml_add_unit_test(NAME camera-apple-discovery COMMAND uml_camera_apple_discovery_tests
     LABELS "device;camera")
 
+# What a still reports of its exposure, from a literal photo-metadata dictionary
+# (no camera is opened).
+add_executable(uml_camera_still_exposure_tests camera_still_exposure_tests.cpp)
+target_link_libraries(uml_camera_still_exposure_tests PRIVATE UML::AppleCamera
+    "-framework CoreFoundation" "-framework CoreGraphics" "-framework ImageIO")
+target_include_directories(uml_camera_still_exposure_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/darwin/platform/apple)
+uml_add_unit_test(NAME camera-still-exposure COMMAND uml_camera_still_exposure_tests
+    LABELS "device;camera")
+
+# The key-value observer of the pressure watch, on a stand-in object (no camera is
+# opened): the handler outlives a stop that comes while it runs.
+add_executable(uml_camera_key_path_observer_tests camera_key_path_observer_tests.mm)
+target_link_libraries(uml_camera_key_path_observer_tests PRIVATE UML::AppleCamera "-framework Foundation")
+target_include_directories(uml_camera_key_path_observer_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/darwin/platform/apple)
+uml_add_unit_test(NAME camera-key-path-observer COMMAND uml_camera_key_path_observer_tests
+    LABELS "device;camera")
+
+# Which photo size a camera is asked for, on tables of the shape the platform
+# lists per format (no camera is opened).
+add_executable(uml_camera_photo_dimensions_tests camera_photo_dimensions_tests.cpp)
+target_link_libraries(uml_camera_photo_dimensions_tests PRIVATE UML::PhotoDimensions)
+uml_add_unit_test(NAME camera-photo-dimensions COMMAND uml_camera_photo_dimensions_tests
+    LABELS "device;camera")
+
+# The anchor model: the one format a camera runs in, what it offers from it, the
+# session's admit and resize transactions on a fake session, and the invariants
+# over seeded generated format tables.
+add_executable(uml_camera_capture_model_tests camera_capture_model_tests.cpp)
+target_link_libraries(uml_camera_capture_model_tests PRIVATE UML::PhotoDimensions)
+uml_add_unit_test(NAME camera-capture-model COMMAND uml_camera_capture_model_tests
+    LABELS "device;camera")
+
 # The Apple host's accelerated transform against the portable one.
 add_executable(uml_camera_apple_transform_tests camera_apple_transform_tests.cpp)
 target_link_libraries(uml_camera_apple_transform_tests PRIVATE UML::AppleCamera)
@@ -61,6 +95,13 @@ target_link_libraries(uml_camera_jpeg_gap_tests PRIVATE UML::CameraDevice)
 uml_add_unit_test(NAME camera-jpeg-gap COMMAND uml_camera_jpeg_gap_tests
     LABELS "device;camera")
 
+# How the guest's camera orientation follows the device where the host owns the
+# rotation: pure arithmetic on the platform's camera description.
+add_executable(uml_camera_orientation_tests camera_orientation_tests.cpp)
+target_link_libraries(uml_camera_orientation_tests PRIVATE UML::CameraDevice)
+uml_add_unit_test(NAME camera-orientation COMMAND uml_camera_orientation_tests
+    LABELS "device;camera")
+
 add_executable(uml_camera_calibration_tests camera_calibration_tests.cpp)
 target_link_libraries(uml_camera_calibration_tests PRIVATE UML::CameraDevice)
 uml_add_unit_test(NAME camera-calibration COMMAND uml_camera_calibration_tests
@@ -94,4 +135,19 @@ if(TARGET UML::SyntheticCamera)
     target_link_libraries(uml_camera_device_tests PRIVATE UML::CameraDevice UML::SyntheticCamera)
     uml_add_unit_test(NAME camera-device COMMAND uml_camera_device_tests
         LABELS "device;camera" TIMEOUT 120)
+endif()
+
+# The layouts a host composes for the Android image: the closed set and its fallback order against the image's own
+# table (the generator's output, which the test takes as its argument), and the concurrent feature against the HAL's
+# own rule (its headers compile without Android).
+if(TARGET UML::SyntheticCamera)
+    add_executable(uml_camera_layout_tests camera_layout_tests.cpp)
+    target_include_directories(uml_camera_layout_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal
+        ${PROJECT_SOURCE_DIR}/kernel/common/video)
+    target_link_libraries(uml_camera_layout_tests PRIVATE UML::CameraDevice UML::SyntheticCamera)
+    uml_add_unit_test(NAME camera-layout
+        COMMAND uml_camera_layout_tests
+            ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/generated/layouts.tsv
+        LABELS "device;camera")
 endif()

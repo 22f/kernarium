@@ -14,6 +14,16 @@ uml_add_tooling_test(
     LABELS andarium;android
     TIMEOUT 30)
 
+# Every device run starts with free diagnostic-report slots: the counting, the
+# move off the device, the refusals and, by source structure, that each device
+# runner makes the check before it installs or launches anything.
+uml_add_tooling_test(
+    NAME ios-device-report-slots
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_device_report_slots.py
+    LABELS andarium;kernarium
+    TIMEOUT 60)
+
 uml_add_tooling_test(
     NAME andarium-android-runner
     COMMAND ${Python3_EXECUTABLE} -B

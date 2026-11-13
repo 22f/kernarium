@@ -197,6 +197,34 @@ void check_tables()
     require(without.configurations.size() == tables.configurations.size() - 4, "no RAW entry without RAW");
 }
 
+// What the host publishes for a camera it has no Bayer still for (the device's description with no RAW feature, no
+// Bayer order, no RAW size, and a node that lists no RAW format) gives no RAW anywhere in the plan: no RAW capability,
+// no RAW16 stream configuration, and the sensor array is the description's pixel array, not a Bayer size. The metadata
+// the HAL builds from these is gated on the same capability (the V4L2 characteristics, `raw`).
+void check_no_bayer_raw_host()
+{
+    auto desc = lens_desc();
+    desc.flags &= ~abi::feature::raw;
+    desc.bayer_order = abi::bayer::none;
+    desc.raw_width = desc.raw_height = 0;
+    auto formats = phone_formats();
+    formats.raw = {};
+    const auto caps = capabilities_of(desc, formats);
+    require(caps.manual_sensor && !caps.raw, "the camera keeps its manual sensor and has no RAW capability");
+    require(array_size(desc, caps) == Size({4032, 3024}) && desc.raw_width == 0, "the array is the pixel array");
+    const auto tables = stream_tables(formats, caps);
+    for (std::size_t i = 0; i + 3 < tables.configurations.size(); i += 4)
+        require(tables.configurations[i] != pixel_format::raw16, "no RAW16 stream configuration");
+    // Any one of the three missing parts is enough on its own, whatever the others say.
+    auto only_flag = lens_desc();
+    only_flag.flags &= ~abi::feature::raw;
+    require(!capabilities_of(only_flag, phone_formats()).raw, "no RAW flag");
+    auto only_order = lens_desc();
+    only_order.bayer_order = abi::bayer::none;
+    require(!capabilities_of(only_order, phone_formats()).raw, "no Bayer order");
+    require(!capabilities_of(lens_desc(), formats).raw, "no RAW format on the node");
+}
+
 void check_numbers()
 {
     const auto ranges = fps_ranges(phone_formats());
@@ -718,6 +746,7 @@ int main()
     check_concurrency();
     check_capabilities();
     check_tables();
+    check_no_bayer_raw_host();
     check_numbers();
     check_fps_ranges();
     check_derivation();
