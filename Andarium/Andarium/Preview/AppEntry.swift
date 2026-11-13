@@ -282,7 +282,8 @@ struct AppEntry {
         case "session", "session-tip", "session-open", "session-keyboard", "session-stats",
              "session-power", "session-setup", "session-off", "session-left", "session-volume",
              "session-graphics-notice", "session-thermal-notice", "session-network-cellular", "session-network-wifi",
-             "session-camera-notice", "session-camera-off-notice":
+             "session-camera-notice", "session-camera-off-notice", "session-memory-warning", "session-memory-critical",
+             "session-memory-camera", "session-memory-pressure":
             model.session.showStats = screen == "session-stats"
             model.session.sideKeysOpen = ["session-open", "session-off", "session-left", "session-volume"].contains(screen)
             model.sessionPreset = SessionPreset(
@@ -305,6 +306,14 @@ struct AppEntry {
             if screen == "session-network-wifi" { model.previewNetworkNotice(.wifi) }
             if screen == "session-camera-notice" { model.previewCameraNotice() }
             if screen == "session-camera-off-notice" { model.previewCameraNotice(.blockedInUse) }
+            // The memory notice: the warning, the critical level, both notices of
+            // the stack, and the whole episode, played by `-play` after the first
+            // frame (`applyDeferred`).
+            if screen == "session-memory-warning" || screen == "session-memory-camera" {
+                if screen == "session-memory-camera" { model.previewCameraNotice(.blockedInUse) }
+                model.previewMemoryPressure(.warning)
+            }
+            if screen == "session-memory-critical" { model.previewMemoryPressure(.critical) }
         case "settings", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
              "settings-feedback", "install-apk", "install-legacy", "install-done", "install-failed", "install-not-apk", "install-bundle",
              "bug-report":
@@ -554,6 +563,15 @@ struct AppEntry {
                 title: String(localized: "Settings not saved"),
                 message: CocoaError(.fileWriteOutOfSpace).localizedDescription
             )
+        case "session-memory-pressure" where play:
+            // The pressure as a person sees it: a warning, a rise to critical
+            // and the return to normal, four seconds apart. The notice goes
+            // three seconds after the last.
+            model.previewMemoryPressure(.warning)
+            try? await Task.sleep(for: .seconds(4))
+            model.previewMemoryPressure(.critical)
+            try? await Task.sleep(for: .seconds(4))
+            model.previewMemoryPressure(.normal)
         case "bug-report" where play:
             try? await Task.sleep(for: .milliseconds(450))
             model.createBugReport()

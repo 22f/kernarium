@@ -984,6 +984,33 @@ struct FoldSessionHostingTests {
         removeSelected()
         browser.selection = []
     }
+
+    // MARK: The memory notice
+
+    /// The notice that iOS is short of memory hangs from the top of the pose's
+    /// HUD with the other notices: inside it, inside the window, and clear of
+    /// the fold while the screen is bent.
+    @Test(arguments: Pose.allCases)
+    func theMemoryNoticeIsInTheHudOfEveryPose(_ pose: Pose) async throws {
+        let rig = try await Rig(pose, test: self)
+        defer { rig.end() }
+        let plan = try #require(rig.model.sessionPlan, "\(pose): no plan")
+        rig.model.memoryPressureChanged(.warning)
+        var found: CGRect?
+        _ = await eventually {
+            rig.controller.view.layoutIfNeeded()
+            found = rig.labelled().first { $0.label == MemoryPressureWords.lowTitle }?.frame
+            return found != nil
+        }
+        let frame = try #require(
+            found, "\(pose): the notice was not found: is application accessibility on in this Simulator?")
+        #expect(
+            plan.hud.insetBy(dx: -0.5, dy: -0.5).contains(frame), "\(pose): \(frame) is not in the HUD \(plan.hud)")
+        #expect(pose.reading.window.contains(frame), "\(pose): \(frame) is not in the window")
+        if let division = pose.reading.division, division.isActive {
+            #expect(!frame.intersects(division.frame), "\(pose): \(frame) is on the fold \(division.frame)")
+        }
+    }
 }
 
 /// The Simulator's own display, in the pose the harness put it in

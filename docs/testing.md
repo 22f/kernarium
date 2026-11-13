@@ -382,7 +382,15 @@ Camera is off, drawn in a window at the largest text size) play iOS's
 permission with a fake and open no camera;
 the Simulator has no camera and `simctl privacy` cannot grant or revoke one, so
 the denied, restricted and absent states are shown by the preview
-(`-systemCamera` asks the Simulator's own permission). The application builds
+(`-systemCamera` asks the Simulator's own permission). The notice that iOS is
+short of memory is `andarium-core`'s `MemoryPressureNoticeTests` for its rules
+and the hosted `MemoryPressureModelTests` (when a session shows it) and
+`MemoryPressureNoticeBannerTests` (its words, its frames at the largest text
+size and its place in the stack with the camera notice, the statistics capsule
+and the side keys); `FoldSessionHostingTests` puts it in every pose's HUD, and
+`runtime-memory-pressure-response` and `kernarium-memory-pressure` (unit) check
+the reports it is made from, with no memory pressure raised on the machine. The
+application builds
 with Xcode (`AndariumPreview` is the Simulator build with mock data, `Andarium`
 the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is

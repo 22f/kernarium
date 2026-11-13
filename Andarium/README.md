@@ -731,6 +731,30 @@ requires reopening Andarium.
   in force (runtime API 36), and the session record notes it beside the counts
   of the guest's network (`NetworkRecord`), which the bug report carries in
   words.
+- **Memory low.** The runtime answers iOS's memory pressure itself
+  ([`docs/architecture.md`](../docs/architecture.md#memory-and-executable-code))
+  and reports each level it raises, with whether its own response runs
+  (`set_memory_pressure_callback`, runtime API 41). While a virtual machine
+  session is on screen (running, with Andarium active: not Home, not the boot
+  screen, not the background) the session shows one notice for each pressure
+  episode (`MemoryPressureNoticeState` decides, `MemoryPressureNoticeBanner`
+  draws it, in every configuration). It appears at the first warning, stays
+  while the pressure lasts and for at least 6 s, and goes 3 s after the level
+  returns to normal; a rise to critical changes its words instead of stacking
+  another, and an episode that began out of sight shows when the session comes
+  back. A dismissal holds until the level has returned to normal and risen
+  again, so repeated warnings never bring it back, except that a rise to
+  critical after a dismissed warning shows once more. A warning says that iOS
+  asked Andarium to free memory and the virtual machine may slow down for a
+  moment; critical says that iOS may close Andarium, to close other apps or
+  shut the virtual machine down and lower its memory with Edit under Virtual
+  machine (the memory is read at the start). It joins the notices' column last,
+  under the camera notice; the column does not scroll, so at the largest text
+  size the critical words are taller than a phone's screen. Whether the host's
+  own response ran changes nothing it says. The Simulator preview plays it: `session-memory-warning`,
+  `session-memory-critical`, `session-memory-camera` (with the Camera-is-off
+  notice) and `session-memory-pressure` with `-play`, which runs a warning, a
+  rise and the return to normal.
 - **Session ends.** The runtime records how each session ended
   ([`docs/architecture.md`](../docs/architecture.md)). The next launch keeps
   that record as the previous session's (`PreviousSession`) and, after an end
