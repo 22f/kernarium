@@ -36,10 +36,15 @@ nonisolated final class PickedFolder: @unchecked Sendable {
 
     /// Whether `file` is in the application's temporary directory, where the
     /// picker puts the copies it makes. The file of a provider that handed
-    /// over the original is not: it is never moved or removed.
+    /// over the original is not: it is never moved or removed. A copy is the
+    /// directory entry itself, so both the folder that holds the entry and
+    /// what the entry names must be here: a link elsewhere to a file here, and
+    /// a link here to a file elsewhere, are no copies of the picker's.
     static func isInTemporaryDirectory(_ file: URL) -> Bool {
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path
-        return file.resolvingSymlinksInPath().path.hasPrefix(root + "/")
+        let holder = file.deletingLastPathComponent().resolvingSymlinksInPath().path
+        let target = file.resolvingSymlinksInPath().path
+        return (holder == root || holder.hasPrefix(root + "/")) && target.hasPrefix(root + "/")
     }
 
     /// Takes the copy the picker made (in the system's inbox of the

@@ -8,8 +8,11 @@ with SwiftUI's fileImporter in the App Store configuration, and present the
 copy-mode picker (Shared/CopyDocumentPicker.swift) in every other
 (Andarium/README.md#configurations). This reads the sources as the compiler
 does with APP_STORE set and not set, and fails when the condition is taken
-away, turned round or put anywhere else. The bundle check
-(Andarium/scripts/check-app-store-bundle.py) says the same of a built
+away, turned round or put anywhere else. It also reads every other source of
+the application: an in-place importer (SwiftUI's fileImporter, or the system
+picker in open mode without a copy) is either in the App Store branch of a
+split or named in PERMITTED_IN_PLACE_IMPORTERS with its reason. The bundle
+check (Andarium/scripts/check-app-store-bundle.py) says the same of a built
 application; its names for the presenter are held to the sources here.
 """
 
@@ -29,6 +32,16 @@ PRESENTER = "CopyDocumentPicker.swift"
 # What only the copy-mode presenter may mention, in the App Store view of any
 # file of the application.
 PRESENTER_NAMES = ("CopyDocumentPicker", "documentCopyPicker", "PickedCopies", "asCopy: true")
+
+# The production sources that may hold an in-place importer in a configuration
+# other than the App Store's, besides the two call sites (whose own split is
+# checked below): path from the repository root -> why it is meant. Empty. A
+# source that adds an in-place importer on purpose names it here, and the entry
+# must keep matching one.
+PERMITTED_IN_PLACE_IMPORTERS: dict[str, str] = {}
+
+SWIFTUI_IMPORTER = re.compile(r"\bfileImporter\s*\(")
+UIKIT_PICKER = re.compile(r"\bUIDocumentPickerViewController\s*\(")
 
 CONDITION = re.compile(r"^\s*#(if|elseif|else|endif)\b(.*)$")
 
@@ -80,18 +93,54 @@ def count(lines: list[str], needle: str) -> int:
     return sum(line.count(needle) for line in code(lines))
 
 
-def problems(call_sites: dict[str, str], presenter: str, others: dict[str, str]) -> list[str]:
+def code_text(lines: list[str]) -> str:
+    """The code of `lines` as one text, a trailing comment taken off each."""
+    return "\n".join(line.split("//")[0] for line in code(lines))
+
+
+def call_arguments(text: str, start: int) -> str:
+    """What is between the parentheses of the call whose opening one is at
+    `start`; the rest of the text when they never close."""
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1:index]
+    return text[start + 1:]
+
+
+def in_place_importers(lines: list[str]) -> list[str]:
+    """The in-place importers in `lines`: SwiftUI's fileImporter, and the
+    system picker made to open files that is not made to copy them (an export,
+    and a picker with asCopy true, are no in-place importer)."""
+    text = code_text(lines)
+    found = [f"fileImporter at offset {match.start()}" for match in SWIFTUI_IMPORTER.finditer(text)]
+    for match in UIKIT_PICKER.finditer(text):
+        arguments = " ".join(call_arguments(text, match.end() - 1).split())
+        if not arguments.startswith("forExporting") and "asCopy: true" not in arguments:
+            found.append(f"UIDocumentPickerViewController at offset {match.start()}")
+    return found
+
+
+def problems(
+    call_sites: dict[str, str], presenter: str, others: dict[str, str],
+    permitted: dict[str, str] = PERMITTED_IN_PLACE_IMPORTERS,
+) -> list[str]:
     """What is wrong with the pickers of these sources: `call_sites` are the two
     files that present one, `presenter` is the copy-mode file and `others` the
-    other files of the application."""
+    other files of the application. `permitted` names the files of `others`
+    that may hold an in-place importer outside the App Store branch."""
     found = []
     for name, text in call_sites.items():
         in_store, elsewhere = active(text, True), active(text, False)
         if count(in_store, ".fileImporter(") != 1:
             found.append(f"{name}: the App Store configuration must open the files in place, "
                          f"with one fileImporter (found {count(in_store, '.fileImporter(')})")
-        if count(elsewhere, ".fileImporter(") != 0:
-            found.append(f"{name}: a configuration other than the App Store's holds a fileImporter")
+        if in_place_importers(elsewhere):
+            found.append(f"{name}: a configuration other than the App Store's holds an in-place importer")
         if count(elsewhere, ".documentCopyPicker(") != 1:
             found.append(f"{name}: every other configuration must present the copy-mode picker, once "
                          f"(found {count(elsewhere, '.documentCopyPicker(')})")
@@ -102,10 +151,22 @@ def problems(call_sites: dict[str, str], presenter: str, others: dict[str, str])
         found.append(f"{PRESENTER}: the copy-mode presenter has code in the App Store configuration")
     if not code(active(presenter, False)):
         found.append(f"{PRESENTER}: the copy-mode presenter is empty in the other configurations")
+    if in_place_importers(active(presenter, False)):
+        found.append(f"{PRESENTER}: the copy-mode presenter holds an in-place importer")
     for name, text in others.items():
         for needle in PRESENTER_NAMES:
             if count(active(text, True), needle):
                 found.append(f"{name}: the App Store configuration mentions {needle}")
+        # Every other production source: an in-place importer is inside the
+        # App Store branch of a split, or named as a permitted exception.
+        if in_place_importers(active(text, False)) and name not in permitted:
+            found.append(f"{name}: an in-place importer outside the App Store branch of a split "
+                         f"(a source that means it names itself in PERMITTED_IN_PLACE_IMPORTERS)")
+    for name in permitted:
+        if name not in others:
+            found.append(f"PERMITTED_IN_PLACE_IMPORTERS names {name}, which is no production source")
+        elif not in_place_importers(active(others[name], False)):
+            found.append(f"PERMITTED_IN_PLACE_IMPORTERS names {name}, which holds no in-place importer")
     return found
 
 
@@ -145,7 +206,7 @@ def main() -> int:
     others = {
         str(path.relative_to(root)): path.read_text(encoding="utf-8")
         for path in sorted((root / "Andarium/Andarium").rglob("*.swift"))
-        if path.name not in (*CALL_SITES, PRESENTER) and path.relative_to(root / "Andarium/Andarium").parts[0] != "Preview"
+        if not (path.parent == shared and path.name in (*CALL_SITES, PRESENTER))
     }
     failures = [f"the sources: {line}" for line in problems(call_sites, presenter, others)]
     checker = load_checker(root / "Andarium/scripts/check-app-store-bundle.py")
@@ -170,6 +231,35 @@ def main() -> int:
         failures.append(f"{PRESENTER}: a presenter outside the condition passed the check")
     if not problems(call_sites, presenter, {**others, "Elsewhere.swift": "let picker = CopyDocumentPicker()\n"}):
         failures.append("a mention of the presenter outside the condition passed the check")
+
+    # Every other source: a third importer, in every configuration or outside
+    # the App Store branch, fails; one inside the App Store branch, or named as
+    # an exception, does not; an exception that matches nothing fails.
+    third = "Andarium/Andarium/Shared/Third.swift"
+    importer = "Color.clear.fileImporter(\n            isPresented: .constant(false), allowedContentTypes: [.item]) { _ in }"
+    body = "struct Third: View {\n    var body: some View {\n        %s\n    }\n}\n"
+    unconditional = body % importer
+    in_store = body % f"#if APP_STORE\n        {importer}\n        #else\n        Color.clear\n        #endif"
+    outside = body % f"#if !APP_STORE\n        {importer}\n        #else\n        Color.clear\n        #endif"
+    uikit = "let picker = UIDocumentPickerViewController(\n    forOpeningContentTypes: [.item], asCopy: false)\n"
+    exporter = "let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: false)\n"
+    third_cases = {
+        "a third unconditional importer": (unconditional, {}, True),
+        "a third importer outside the App Store branch": (outside, {}, True),
+        "a third in-place system picker": (uikit, {}, True),
+        "a third importer named as an exception": (unconditional, {third: "meant"}, False),
+        "a third importer in the App Store branch": (in_store, {}, False),
+        "an export that is no importer": (exporter, {}, False),
+        "an exception for a source with no importer": (exporter, {third: "meant"}, True),
+    }
+    for label, (text, permitted, must_fail) in third_cases.items():
+        found = problems(call_sites, presenter, {**others, third: text}, permitted)
+        if must_fail and not found:
+            failures.append(f"{label} passed the check")
+        elif not must_fail and found:
+            failures.append(f"{label} failed the check: {found}")
+    if problems(call_sites, presenter, others, {third: "meant"}) == []:
+        failures.append("an exception that names no source passed the check")
 
     for failure in failures:
         print(failure, file=sys.stderr)

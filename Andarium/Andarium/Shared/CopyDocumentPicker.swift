@@ -118,21 +118,22 @@ struct CopyDocumentPicker: UIViewControllerRepresentable {
             if let result { owner?.onCompletion(result) }
         }
 
-        /// Moves the copies into a folder of ours. One that cannot be moved
-        /// ends the pick with nothing of it left.
-        static func take(_ urls: [URL]) -> Result<PickedCopies, Error>? {
+        /// Moves the copies into a folder of ours (made in `root`, a test's own
+        /// when it gives one). A folder that cannot be made, or a copy that
+        /// cannot be moved, ends the pick with nothing of it left: the system's
+        /// copies that were not moved are ours to remove too.
+        static func take(_ urls: [URL], in root: URL = PickedFolder.directory) -> Result<PickedCopies, Error>? {
             guard !urls.isEmpty else { return nil }
             do {
-                let folder = try PickedFolder()
+                let folder = try PickedFolder(in: root)
                 do {
                     return .success(PickedCopies(urls: try urls.map(folder.adopt), folder: folder))
                 } catch {
                     folder.discard()
-                    // The system's copies that were not moved are ours to remove too.
-                    for url in urls { PickedFolder.removeUntaken(url) }
                     throw error
                 }
             } catch {
+                for url in urls { PickedFolder.removeUntaken(url) }
                 return .failure(PickedFileFailure.notTaken)
             }
         }

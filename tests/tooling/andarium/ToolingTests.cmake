@@ -58,7 +58,8 @@ uml_add_tooling_test(
 # present the copy-mode picker in every other: the sources are read as the
 # compiler reads them with and without APP_STORE, and the changes a later edit
 # could make to the condition must fail, as must a bundle-check name for the
-# presenter that no source defines.
+# presenter that no source defines and an in-place importer in any other
+# production source that the test does not name as an exception.
 uml_add_tooling_test(
     NAME andarium-document-pickers
     COMMAND ${Python3_EXECUTABLE} -B

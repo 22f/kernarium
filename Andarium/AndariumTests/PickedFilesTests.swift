@@ -39,6 +39,22 @@ private enum Copies {
 
     static func exists(_ url: URL) -> Bool { FileManager.default.fileExists(atPath: url.path) }
 
+    /// Whether the directory entry itself is a link to `target`, whatever the
+    /// target is (`exists` follows the link).
+    static func isLink(_ url: URL, to target: URL) -> Bool {
+        (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) == target.path
+    }
+
+    /// A file outside the temporary directory, where a provider that handed
+    /// over an original keeps it.
+    static func original(_ name: String = "\(UUID().uuidString).apk") throws -> URL {
+        let caches = try FileManager.default.url(
+            for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let url = caches.appendingPathComponent(name)
+        try Data(count: 10).write(to: url)
+        return url
+    }
+
     static func eventually(seconds: Int = 15, _ condition: () -> Bool) async -> Bool {
         let deadline = ContinuousClock.now + .seconds(seconds)
         while !condition(), ContinuousClock.now < deadline {
@@ -94,6 +110,49 @@ struct PickedFolderTests {
         #expect(Copies.exists(original))
         folder.release(original)
         #expect(Copies.exists(original))
+    }
+
+    /// A link outside the temporary directory to a copy inside it is the
+    /// provider's own entry, which is never moved or deleted; the copy it names
+    /// is left alone too.
+    @Test func aLinkOutsideTheTemporaryDirectoryToAFileInsideIsNoCopyAndStaysWhereItIs() throws {
+        let target = try Copies.systemCopy("Target.apk")
+        let outside = try Copies.original()
+        defer {
+            try? FileManager.default.removeItem(at: target.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: outside)
+        }
+        try FileManager.default.removeItem(at: outside)
+        try FileManager.default.createSymbolicLink(at: outside, withDestinationURL: target)
+        #expect(!PickedFolder.isInTemporaryDirectory(outside))
+        let folder = try PickedFolder()
+        #expect(try folder.adopt(outside) == outside)
+        #expect(Copies.isLink(outside, to: target), "the entry is not moved")
+        PickedFolder.removeUntaken(outside)
+        folder.release(outside)
+        #expect(Copies.isLink(outside, to: target), "the entry is not removed")
+        #expect(Copies.exists(target))
+        #expect(!Copies.exists(folder.directory.appendingPathComponent(outside.lastPathComponent)))
+    }
+
+    /// The other way: a link inside the temporary directory to a file outside
+    /// it names an original, which is never moved or deleted either.
+    @Test func aLinkInTheTemporaryDirectoryToAFileOutsideIsNoCopyAndStaysWhereItIs() throws {
+        let original = try Copies.original()
+        let inbox = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString)-Inbox", isDirectory: true)
+        try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+        let link = inbox.appendingPathComponent("Link.apk")
+        defer {
+            try? FileManager.default.removeItem(at: inbox)
+            try? FileManager.default.removeItem(at: original)
+        }
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: original)
+        #expect(!PickedFolder.isInTemporaryDirectory(link))
+        let folder = try PickedFolder()
+        #expect(try folder.adopt(link) == link)
+        PickedFolder.removeUntaken(link)
+        #expect(Copies.isLink(link, to: original) && Copies.exists(original))
     }
 
     @Test func releaseRemovesOneFileOfTheFolderAndNothingElse() throws {
@@ -261,6 +320,36 @@ struct CopyDocumentPickerTests {
         #expect(!folders.contains { Copies.exists(PickedFolder.directory.appendingPathComponent($0).appendingPathComponent(wholeName)) },
                 "no folder of the pick is left")
         controller.dismiss(animated: false)
+    }
+
+    /// The folder cannot be made (an ordinary file is where the folders go):
+    /// the pick ends in a failure, and the system's copies are removed with
+    /// it, while an original that is not in the temporary directory is not.
+    @Test func aFolderThatCannotBeMadeEndsInAFailureAndLeavesNoCopy() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PickedFilesTest-\(UUID().uuidString)")
+        try Data(count: 1).write(to: root)
+        let first = try Copies.systemCopy("first.apk")
+        let second = try Copies.systemCopy("second.apk")
+        let original = try Copies.original()
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: first.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: second.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: original)
+        }
+        #expect(throws: (any Error).self) { _ = try PickedFolder(in: root) }
+        let result = CopyDocumentPicker.Coordinator.take([first, second, original], in: root)
+        guard case let .failure(error)? = result else {
+            Issue.record("a folder that cannot be made must end the pick in a failure")
+            return
+        }
+        #expect(error is PickedFileFailure)
+        #expect(!Copies.exists(first) && !Copies.exists(second), "no copy of the pick is left behind")
+        #expect(Copies.exists(original), "an original outside the temporary directory is not ours to remove")
+        // The sweep of the next launch has nothing of the pick to find either.
+        PickedFolder.sweep(in: root)
+        #expect(!Copies.exists(first) && !Copies.exists(second))
     }
 
     @Test func anEmptyPickIsNoPick() async throws {
