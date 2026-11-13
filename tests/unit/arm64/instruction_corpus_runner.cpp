@@ -1231,10 +1231,12 @@ private:
  * lands in that window now and then (a gadget stream has about twenty host
  * instructions between the pair, the JIT's fused pair none). A guest loops on
  * the status, but a store that discards it (STXR WZR, ...) cannot, so the
- * corpus runs it once. A case of that shape whose only difference from the
- * pack is that its store wrote nothing runs again, up to exclusive_attempts
- * times in all, and must then agree completely: a store that never writes,
- * writes other bytes, or writes elsewhere still fails. */
+ * corpus runs it once. A case of the one straight-line shape below whose only
+ * difference from the pack is that its store wrote nothing runs again, up to
+ * exclusive_attempts times in all, and must then agree completely: a store
+ * that never writes, writes other bytes, or writes elsewhere still fails. A
+ * single lost attempt whose store did write the bytes it started with cannot
+ * be told from a loss, so a transient omission of that kind is not caught. */
 
 /* The store-exclusive of a program and the bytes it writes when it succeeds. */
 struct ExclusiveStore final {
@@ -1276,18 +1278,57 @@ exclusive_store(const Program &program, const arm64::CpuState &initial,
   return found;
 }
 
+/* The one program shape in which a store-exclusive is proved to execute
+ * against the case's base register: four consecutive words from the entry,
+ * `ldxr/ldxp; stxr/stxp; clrex; svc`. Nothing in it branches, so the retired
+ * four instructions are these four; the load cannot change the base the
+ * store uses. Retirement alone proves nothing: a branch over the store and a
+ * plain store in its place retire as many. Every other shape stays strict. */
+[[nodiscard]] bool straight_exclusive_pair(const Program &program,
+                                           const Retirement &retired) {
+  constexpr std::size_t length = 4;
+  if (program.words.size() != length ||
+      retired.kind != Retirement::Kind::exact || retired.minimum != length)
+    return false;
+  std::uint32_t words[length]{};
+  for (std::size_t index = 0; index < length; ++index) {
+    const auto found =
+        std::ranges::find_if(program.words, [&](const ProgramWord &item) {
+          return item.offset == program.entry + 4U * index;
+        });
+    if (found == program.words.end())
+      return false;
+    words[index] = found->word;
+  }
+  const bool scalar_load = (words[0] & 0x3fe0'7c00U) == 0x0840'7c00U;
+  const bool pair_load = (words[0] & 0xbfe0'0000U) == 0x8860'0000U;
+  if (!scalar_load && !pair_load)
+    return false;
+  const bool scalar_store = (words[1] & 0x3fe0'7c00U) == 0x0800'7c00U;
+  const bool pair_store = (words[1] & 0xbfe0'0000U) == 0x8820'0000U;
+  if (!scalar_store && !pair_store)
+    return false;
+  const auto base = (words[1] >> 5) & 31U;
+  /* The load writes Rt and, for a pair, Rt2; SP is not a destination. */
+  const bool base_kept = base == 31U ||
+                         ((words[0] & 31U) != base &&
+                          (!pair_load || ((words[0] >> 10) & 31U) != base));
+  return ((words[0] >> 5) & 31U) == base && base_kept &&
+         (words[2] & 0xffff'f0ffU) == 0xd503'305fU &&  /* CLREX */
+         (words[3] & 0xffe0'001fU) == 0xd400'0001U;    /* SVC */
+}
+
 /* The bytes a case's lost store-exclusive leaves unwritten, when the case is
- * the one-attempt shape: a straight-line program (its retirement is exact)
- * that ends in a system call after a store-exclusive whose status it
- * discards, so the loss changes nothing but those bytes. Nothing for any
- * other case, which a guest's own loop or an expected failure already
- * covers. */
+ * the one-attempt shape: the straight-line pair above, completing at its
+ * system call, whose store discards its status, so the loss changes nothing
+ * but those bytes. Nothing for any other case, which a guest's own loop or an
+ * expected failure already covers. */
 [[nodiscard]] std::optional<Footprint>
 lost_store(const CorpusCase &test_case, const Program &program,
            const arm64::CpuState &initial, const arm64::CpuState &expected) {
   if (test_case.event != Event::system_call ||
       test_case.validator != no_validator ||
-      test_case.retired.kind != Retirement::Kind::exact)
+      !straight_exclusive_pair(program, test_case.retired))
     return std::nullopt;
   const auto store = exclusive_store(program, initial, expected);
   if (!store.has_value() || store->status != 31U)
@@ -1413,11 +1454,14 @@ void inject_fault(Fault fault, const Footprint &store,
   }
 }
 
-/* A completing store-exclusive that reports its status must loop on it. One
- * that does not is run once, is lost now and then, and so fails now and then:
- * the pack is refused. The other shapes are the guest's own loop (its
- * retirement a pattern), a store that discards its status (retried by the
- * runner) and one the case expects to fail. */
+/* A structural guard against an unretried flake: a case that completes with
+ * exactly one store-exclusive at a stable base, whose status register ends 0
+ * and whose retirement is not a pattern, is refused, because it is run once
+ * and lost now and then. It does not prove a pack's control flow: a program
+ * with several store-exclusives, a changed base, an overwritten status or a
+ * pattern retirement is not examined. The other shapes are the guest's own
+ * loop, a store that discards its status (retried only in the straight-line
+ * shape above) and one the case expects to fail. */
 void require_exclusive_loop(const Record &record, const CorpusCase &test_case,
                             const Program &program,
                             const arm64::CpuState &initial,
@@ -2297,12 +2341,101 @@ private:
   static constexpr suseconds_t interval = 5;
 };
 
+/* Proves the retry's eligibility rule on programs of its own, as a pack
+ * cannot hold the ones it must refuse: only the straight-line pair is
+ * retried, and a program that retires as many instructions without reaching
+ * its store-exclusive is not. Returns whether every program was classified
+ * as it should be. */
+[[nodiscard]] bool eligibility_self_check() {
+  constexpr std::uint32_t ldxr_w4_x2 = 0x885f'7c44U;   /* ldxr w4, [x2] */
+  constexpr std::uint32_t ldxr_w4_x3 = 0x885f'7c64U;   /* ldxr w4, [x3] */
+  constexpr std::uint32_t ldxr_x2_x2 = 0xc85f'7c42U;   /* ldxr x2, [x2] */
+  constexpr std::uint32_t ldaxp_x4_x6 = 0xc87f'9844U;  /* ldaxp x4, x6, [x2] */
+  constexpr std::uint32_t ldaxp_x4_x2 = 0xc87f'8844U;  /* ldaxp x4, x2, [x2] */
+  constexpr std::uint32_t stlxr = 0x881f'fc43U;        /* stlxr wzr, w3, [x2] */
+  constexpr std::uint32_t stlxp = 0xc83f'fc5fU;        /* stlxp wzr, xzr, xzr, [x2] */
+  constexpr std::uint32_t str_w3_x2 = 0xb900'0043U;    /* str w3, [x2] */
+  constexpr std::uint32_t branch_over = 0x1400'0002U;  /* b +8 */
+  constexpr std::uint32_t clrex = 0xd503'3f5fU;
+  constexpr std::uint32_t svc = 0xd400'0001U;
+  constexpr std::uint32_t nop = 0xd503'201fU;
+
+  struct Shape final {
+    const char *name;
+    std::vector<std::uint32_t> words;
+    Event event;
+    Retirement retired;
+    bool eligible;
+  };
+  const Retirement exact4{Retirement::Kind::exact, 4U};
+  const std::vector<Shape> shapes{
+      {"scalar pair", {ldxr_w4_x2, stlxr, clrex, svc}, Event::system_call,
+       exact4, true},
+      {"pair pair", {ldaxp_x4_x6, stlxp, clrex, svc}, Event::system_call,
+       exact4, true},
+      /* The review's counterexample: four retired instructions, the store
+       * skipped, and the write done by a plain store. */
+      {"branch over the store", {branch_over, stlxr, str_w3_x2, clrex, svc},
+       Event::system_call, exact4, false},
+      {"branch after the load", {ldxr_w4_x2, branch_over, stlxr, str_w3_x2,
+                                 svc},
+       Event::system_call, exact4, false},
+      {"store after the system call", {ldxr_w4_x2, svc, stlxr, clrex},
+       Event::system_call, exact4, false},
+      {"filler between the pair", {ldxr_w4_x2, nop, stlxr, clrex, svc},
+       Event::system_call, {Retirement::Kind::exact, 5U}, false},
+      {"load replaces the base", {ldxr_x2_x2, stlxr, clrex, svc},
+       Event::system_call, exact4, false},
+      {"pair load replaces the base", {ldaxp_x4_x2, stlxp, clrex, svc},
+       Event::system_call, exact4, false},
+      {"load from another base", {ldxr_w4_x3, stlxr, clrex, svc},
+       Event::system_call, exact4, false},
+      {"no clrex", {ldxr_w4_x2, stlxr, nop, svc}, Event::system_call, exact4,
+       false},
+      {"no system call", {ldxr_w4_x2, stlxr, clrex, nop}, Event::system_call,
+       exact4, false},
+      {"retirement not exact", {ldxr_w4_x2, stlxr, clrex, svc},
+       Event::system_call, {Retirement::Kind::pattern, 4U}, false},
+      {"retirement of another count", {ldxr_w4_x2, stlxr, clrex, svc},
+       Event::system_call, {Retirement::Kind::exact, 3U}, false},
+      {"expected fault", {ldxr_w4_x2, stlxr, clrex, svc}, Event::memory_fault,
+       exact4, false},
+  };
+  bool good = true;
+  auto state = base_state(0);
+  state.registers[2] = 0x5200'0200U;
+  for (const auto &shape : shapes) {
+    Program program;
+    for (std::size_t index = 0; index < shape.words.size(); ++index)
+      program.words.push_back({static_cast<std::uint16_t>(4U * index),
+                               shape.words[index]});
+    program.entry_word = shape.words.front();
+    CorpusCase test_case;
+    test_case.event = shape.event;
+    test_case.retired = shape.retired;
+    const auto lost = lost_store(test_case, program, state, state);
+    const bool eligible = lost.has_value();
+    if (eligible != shape.eligible ||
+        (eligible && (lost->address != state.registers[2] ||
+                      lost->size != (shape.words.front() == ldaxp_x4_x6
+                                         ? 16U
+                                         : 4U)))) {
+      std::fprintf(stderr, "eligibility: %s is %s\n", shape.name,
+                   eligible ? "retried" : "not retried");
+      good = false;
+    }
+  }
+  std::printf("  eligibility      %zu programs  %s\n", shapes.size(),
+              good ? "as planned" : "NOT AS PLANNED");
+  return good;
+}
+
 /* Runs each fault plan over the selected records and reports whether the
  * runner took every fault as the plan says: a lost reservation retried until
  * the case agreed, and anything else failed in the attempt it was made in. */
 [[nodiscard]] bool inject_faults(const Corpus &corpus, const Options &options,
                                  const std::vector<const Record *> &records) {
-  bool good = true;
+  bool good = eligibility_self_check();
   auto quiet = options;
   quiet.max_failures = 0;
   for (const auto &plan : fault_plans) {
