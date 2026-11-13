@@ -347,8 +347,7 @@ control out.
 - **Storage.** A guest's files live in `Library/Guest/` of the application's
   container behind `GuestStorage`. The system disk is Android's, read-only, and
   stays in the release directory; the runtime creates the data disk `data.img`
-  at the first start, sized by the guest's capacity, and only grows it after;
-  Home disables Start in recovery until then (`StartPlan.offersRecovery`).
+  at the first start, sized by the guest's capacity, and only grows it after.
   A larger size chosen in Resize waits on Home and applies as the next start,
   of any kind, is handed to the runtime (`Lifecycle.start`), which grows the
   disk then; the guest records the new capacity at that point, so a start that
@@ -529,7 +528,12 @@ requires reopening Andarium.
   graphics budget ([camera device](../darwin/device/camera/README.md)): with
   Camera on, the VRAM the System sheet and the statistics show is the pool,
   the budget less that reserve, and the ruler's graphics warning follows the
-  pool too; the memory offered and the default are unchanged. The Simulator has
+  pool too; the memory offered and the default are unchanged. The reserve is the
+  figure the runtime answers for this device's cameras and the colour data they
+  have learned (`plan_camera_reserve`, which asks iOS for no permission and
+  opens no session), read again while Camera is on whenever either may have
+  changed; until the first answer, and where the runtime cannot discover the
+  cameras, the sheet uses the tier's ceiling. The Simulator has
   no camera: the preview states the access (`-systemCamera` reads the
   Simulator's own permission) and the non-App Store runtime serves a synthetic
   camera (`KERNARIUM_CAMERA_SOURCE`) to a run that has none, and no camera at
@@ -731,6 +735,17 @@ requires reopening Andarium.
   in force (runtime API 36), and the session record notes it beside the counts
   of the guest's network (`NetworkRecord`), which the bug report carries in
   words.
+- **Memory low.** The runtime answers iOS's memory pressure itself
+  ([`docs/architecture.md`](../docs/architecture.md#memory-and-executable-code))
+  and reports every level it raises to the application
+  (`set_memory_pressure_callback`, runtime API 41). Only the critical level has
+  a notice: while a guest session is on screen (not Home, the boot screen or the
+  background), one notice says iOS may close Andarium
+  (`MemoryPressureNoticeState` decides; every configuration has it). It appears
+  when the level reaches critical and stays while it lasts and a little after;
+  a dismissal holds until the level has left critical and reached it again, and
+  a restart or the end of a run clears it. The notices of a session share one
+  column, which scrolls when they are together taller than its room.
 - **Session ends.** The runtime records how each session ended
   ([`docs/architecture.md`](../docs/architecture.md)). The next launch keeps
   that record as the previous session's (`PreviousSession`) and, after an end
@@ -758,7 +773,10 @@ is on. `AndariumCore/Adb` speaks the protocol.
   device only and not synchronized. Its public key goes in each boot request
   (`android_adb_public_key`), which adbd authorizes for that boot.
 - **Create bug report and Install APK** are in every build, in a normal
-  session. A bug report is Android's zip with Andarium's session records and
+  session. Settings lists Install APK and the file browser first, above the
+  statistics, and the side keys' tip adds a line saying where Install APK is
+  exactly where the row is offered (`Capabilities.offersApkInstall`). A bug
+  report is Android's zip with Andarium's session records and
   MetricKit reports added under `andarium/`, the application's container paths
   taken out (`BugReportAttachments`); a zip that cannot be amended safely is
   shared as Android made it. An install streams the file to the package

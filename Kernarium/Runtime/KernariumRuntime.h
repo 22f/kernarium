@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 39U
+#define KERNARIUM_RUNTIME_API_VERSION 41U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -868,6 +868,116 @@ typedef void (*kernarium_runtime_set_camera_state_callback_function)(
 typedef int (*kernarium_runtime_set_camera_rotation_function)(
     uint32_t degrees);
 
+/* How a camera reserve was reached (runtime API 40). */
+enum {
+    /* The reserve is the layout's own: the runtime discovered the host's
+     * cameras (which asks the system for no permission and opens no capture
+     * session), read the colour data the calibration directory holds, composed
+     * the layout it would run and took the memory that layout lets a live
+     * session hold. A host with no camera the image can describe holds none:
+     * the reserve is 0, and exact. */
+    KERNARIUM_RUNTIME_CAMERA_RESERVE_EXACT = 0,
+    /* The cameras could not be discovered: the reserve is the tier's ceiling,
+     * which bounds the layouts of the system cameras at the budget's tier (a
+     * development synthetic source can hold more). */
+    KERNARIUM_RUNTIME_CAMERA_RESERVE_CEILING = 1,
+};
+
+/* What the caller of kernarium_runtime_plan_camera_reserve_function asks. */
+enum {
+    /* Discover the host's cameras again before answering, and compose every
+     * answer again: the runtime keeps the discovered source and the answers
+     * composed from it (calibration files included) until a call asks for
+     * this, so an application that asks for each of many budgets sets this on
+     * the first and not on the rest. */
+    KERNARIUM_RUNTIME_CAMERA_PLAN_DISCOVER_AGAIN = 1,
+};
+
+/* What kernarium_runtime_plan_camera_reserve_function takes and answers. The
+ * caller sets struct_size and flags. */
+typedef struct kernarium_runtime_camera_reserve {
+    uint32_t struct_size;
+    /* KERNARIUM_RUNTIME_CAMERA_PLAN_ flags. */
+    uint32_t flags;
+    /* The host memory, in whole MiB, that a live camera session holds out of
+     * the GPU budget. */
+    uint32_t reserve_mib;
+    /* A KERNARIUM_RUNTIME_CAMERA_RESERVE_ value. */
+    uint32_t basis;
+} kernarium_runtime_camera_reserve;
+
+/* The host memory a live camera session of this host would hold out of the GPU
+ * budget of `gpu_budget_mib` MiB (runtime API 40): the figure the next boot with
+ * android_camera_mode LIVE and the same calibration directory takes out of the
+ * pool it gives the GPU, while the camera source, the cameras it presents and
+ * the calibration data are as they were when the answer was composed. The
+ * application asks before the boot, to show the graphics memory the guest would
+ * have while Camera is on. The runtime composes the layout the boot would run
+ * (the cameras it discovers and the colour data in `camera_calibration_path`,
+ * null for none), at the tier the budget gets, and answers what that layout lets
+ * a session hold. It keeps the discovered source and the answers composed from
+ * it: the first call discovers, and `flags` DISCOVER_AGAIN discovers again and
+ * composes every answer again (a boot discovers for its own run). Nothing is
+ * opened and no permission is asked. A host without a camera, and a runtime
+ * without cameras (a Linux guest), answer 0. Returns 0, or a negative value for
+ * a null or short `reserve`; any thread, with or without a guest. */
+typedef int (*kernarium_runtime_plan_camera_reserve_function)(
+    uint32_t gpu_budget_mib,
+    const char* camera_calibration_path,
+    kernarium_runtime_camera_reserve* reserve);
+
+/* The level the system's memory pressure source reported to the host (runtime
+ * API 41). The host frees what it can get back cheaply at a warning or a
+ * critical level (docs/architecture.md, "Memory pressure"). */
+enum {
+    KERNARIUM_RUNTIME_MEMORY_PRESSURE_NORMAL = 0,
+    KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING = 1,
+    KERNARIUM_RUNTIME_MEMORY_PRESSURE_CRITICAL = 2,
+};
+
+/* What the host does about that level. */
+enum {
+    /* The normal level: nothing to do. */
+    KERNARIUM_RUNTIME_MEMORY_RESPONSE_NONE = 0,
+    /* The host starts a response now: it frees its graphics caches and asks
+     * the guest to trim its page cache, which can take seconds. */
+    KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED = 1,
+    /* A warning less than 30 s after the last response began: the host does
+     * nothing for it. */
+    KERNARIUM_RUNTIME_MEMORY_RESPONSE_WITHHELD = 2,
+    /* A response is already running and covers this level. The system delivers
+     * its notifications one at a time, each after the response of the one
+     * before, so this is rare: it is the policy's answer to a level that meets
+     * a running response. */
+    KERNARIUM_RUNTIME_MEMORY_RESPONSE_UNDER_WAY = 3,
+};
+
+/* `level` is a KERNARIUM_RUNTIME_MEMORY_PRESSURE_ value and `response` a
+ * KERNARIUM_RUNTIME_MEMORY_RESPONSE_ value. It is called once for each
+ * notification the system delivers while a guest runs, the repeats and the
+ * return to NORMAL included, as soon as the host has decided what it does and
+ * before it starts the work for that notification (a response can take
+ * seconds), in the order delivered. The system delivers one notification at a
+ * time and merges the levels raised while it is handled into the next, which
+ * reports the most serious of them: a level raised during a response is
+ * reported after the response, and one that a more serious level replaced is
+ * not reported. It carries no figures. It runs on a runtime thread and must
+ * return promptly. */
+typedef void (*kernarium_runtime_memory_pressure_callback)(
+    void* context,
+    int level,
+    int response);
+/* Sets, or with a null callback clears, the one receiver of the reports
+ * (runtime API 41). It is an event and not a state: a callback set while the
+ * pressure is in force hears the next level, and a guest that ends or restarts
+ * during the pressure reports no NORMAL, so the application takes the end of
+ * the run as the end of it. It may be set before a guest runs. Once it
+ * returns, no call to the previous callback is running or will start, so its
+ * context may be released; the callback must not call this. */
+typedef void (*kernarium_runtime_set_memory_pressure_callback_function)(
+    kernarium_runtime_memory_pressure_callback callback,
+    void* context);
+
 /* The application resolves only this versioned getter after loading exactly
  * one runtime framework. The table is immutable and remains valid until
  * process exit. The selected framework owns one host runtime and its
@@ -917,6 +1027,9 @@ typedef struct kernarium_runtime_api {
     kernarium_runtime_set_camera_state_callback_function
         set_camera_state_callback;
     kernarium_runtime_set_camera_rotation_function set_camera_rotation;
+    kernarium_runtime_plan_camera_reserve_function plan_camera_reserve;
+    kernarium_runtime_set_memory_pressure_callback_function
+        set_memory_pressure_callback;
 } kernarium_runtime_api;
 
 #if defined(__GNUC__)

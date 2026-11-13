@@ -223,6 +223,10 @@ public:
          * `onRotateAndCrop`. */
         std::uint32_t reportedSetting {~0u};
         std::uint32_t reportedTurn {~0u};
+        /* The torch and the still flash last reported to `onFlash`; off
+         * until the guest asks for either. */
+        bool reportedTorch {};
+        uml::platform::CameraFlashMode reportedFlash {uml::platform::CameraFlashMode::off};
     };
     /* Everything the platform hands over is stamped with the serial of the
      * last event it had handed over (`inboxSerial`): a frame or a result of
@@ -850,6 +854,17 @@ public:
         }
         if (!transformer->transform(source, crop, rotation, target)) return false;
         return transferSegments(mapper, regions.get(), resource.planes[0], staging, true);
+    }
+
+    /* Tells `onFlash` what the controls ask of the camera's light when it
+     * differs from what it was told last. */
+    void reportLight(Runtime& runtime, bool torch) const
+    {
+        const auto flash = runtime.controls.stillFlash(runtime.values);
+        if (!options.onFlash || (torch == runtime.reportedTorch && flash == runtime.reportedFlash)) return;
+        runtime.reportedTorch = torch;
+        runtime.reportedFlash = flash;
+        options.onFlash(runtime.description.index, torch, flash);
     }
 
     [[nodiscard]] std::uint32_t rotationOf(Runtime& runtime) const
@@ -1674,6 +1689,7 @@ public:
         runtime.values = std::move(next);
         // Applied as soon as the host can.
         const auto settings = runtime.controls.settings(runtime.values);
+        reportLight(runtime, settings.torch);
         if (!blocked()) {
             if (settings.torch && !session) ensureSession();
             applySettings(runtime, false);

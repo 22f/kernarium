@@ -31,6 +31,11 @@ typedef void (^KernariumLocationReceiverHandler)(BOOL powered);
  * KERNARIUM_RUNTIME_CAMERA_STATE_ value), delivered on the main queue in the
  * order the states happened. */
 typedef void (^KernariumCameraStateHandler)(int state);
+/* A level the system's memory pressure reached the host at (a
+ * KERNARIUM_RUNTIME_MEMORY_PRESSURE_ value) and what the host does about it
+ * (a KERNARIUM_RUNTIME_MEMORY_RESPONSE_ value), delivered on the main queue in
+ * the order the levels arrived. */
+typedef void (^KernariumMemoryPressureHandler)(int level, int response);
 /* The guest's keyboard lights, an application's pointer capture or the guest's
  * registration of its keyboard or pointer changed (a
  * KERNARIUM_RUNTIME_INPUT_STATUS_ value, and whether it is on), delivered on
@@ -224,16 +229,35 @@ uint32_t kernarium_runtime_loader_gpu_budget_mib_for_limit(
     uint32_t guest_memory_mib,
     uint32_t guest_processor_count,
     kernarium_launch_memory_set parameters);
-/* The host-side memory, in MiB, that a live camera session holds out of the GPU
- * budget B of `gpu_budget_mib` MiB, at most: the camera device's ceiling for
+/* The most host-side memory, in MiB, that a live camera session holds out of
+ * the GPU budget B of `gpu_budget_mib` MiB: the camera device's ceiling for
  * the tier that budget gets (uml::camera::cameraHostMemoryReserveMiB,
- * darwin/device/camera/camera_tiers.hpp), as the cameras are not composed before
- * the boot. While the cameras are live the GPU's pool is B less this figure,
- * taken after B is clamped to its floor; blocked cameras or none take nothing.
- * The runtime gives the GPU the pool of the use it composes for the host's
- * cameras (uml::camera::liveCameraReserveMiB), which is never more than this
- * one for a system camera. */
+ * darwin/device/camera/camera_tiers.hpp), which bounds the layouts of the
+ * system cameras (a development synthetic source can hold more). It needs no
+ * runtime; it is what the application plans with where the runtime cannot say
+ * the exact figure (kernarium_runtime_loader_plan_camera_reserve_mib). */
 uint32_t kernarium_runtime_loader_camera_reserve_mib(uint32_t gpu_budget_mib);
+/* The host-side memory, in MiB, that a live camera session of this host holds
+ * out of the GPU budget B of `gpu_budget_mib` MiB, as the runtime composes it
+ * (kernarium_runtime_plan_camera_reserve_function): the layout of the cameras it
+ * discovers and the colour data in `camera_calibration_path` (null for none)
+ * decides how much. While the cameras are live the GPU's pool is B less this
+ * figure, taken after B is clamped to its floor; blocked cameras or none take
+ * nothing, and a host without a camera answers 0. Discovery asks for no
+ * permission and opens no session. The runtime discovers the cameras for the
+ * first question and keeps them with the answers composed from them;
+ * `rediscover` (not 0) discovers again and composes every answer again, which
+ * a caller sets on the first of the questions it asks together. The figure is
+ * the next boot's while the camera source, the cameras and the calibration data
+ * are unchanged since it was composed. `*exact`, when
+ * not null, is set to 1 for the layout's own figure and to 0 where the figure is
+ * the ceiling, because no runtime is loaded or it could not discover the
+ * cameras. Any thread. */
+uint32_t kernarium_runtime_loader_plan_camera_reserve_mib(
+    uint32_t gpu_budget_mib,
+    const char* _Nullable camera_calibration_path,
+    uint32_t rediscover,
+    uint32_t* _Nullable exact);
 /* The vCPU count the applications default to and offer at most on a device with
  * `physical_processor_count` physical cores (zero counts as one): every core,
  * and never more than the count the memory budget is measured for
@@ -330,6 +354,15 @@ void kernarium_runtime_loader_set_camera_state_handler(
  * errno: -ENODEV when no runtime is loaded, -EINVAL for a value the runtime
  * refuses. */
 int kernarium_runtime_loader_set_camera_rotation(uint32_t degrees);
+/* Receives the levels of the system's memory pressure and the host's response
+ * (see kernarium_runtime_set_memory_pressure_callback_function), or none for a
+ * nil handler. It may be set before a runtime is selected. Each report is
+ * queued to the main queue as one block that holds the handler of its time, so
+ * the number of reports waiting is not bounded while the main queue is busy, and
+ * setting or clearing the handler does not cancel the ones already queued: they
+ * reach the handler they were queued for. */
+void kernarium_runtime_loader_set_memory_pressure_handler(
+    KernariumMemoryPressureHandler _Nullable handler);
 #ifndef UML_APP_STORE_APPLICATION
 /* Whether the selected runtime is an automation build and the launch asked it,
  * through the environment, to start the background job with the guest. Always

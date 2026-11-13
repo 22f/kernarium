@@ -48,6 +48,24 @@ void dropped_text(FixedText &out, std::uint64_t dropped) noexcept
 		.text(" earlier lines left out");
 }
 
+/* What the application is told of a call's outcome. */
+[[nodiscard]] PressureReaction reaction_of(
+	MemoryPressureResponse::Outcome outcome) noexcept
+{
+	switch (outcome) {
+	case MemoryPressureResponse::Outcome::responded:
+		return PressureReaction::responding;
+	case MemoryPressureResponse::Outcome::limited:
+		return PressureReaction::withheld;
+	case MemoryPressureResponse::Outcome::busy:
+		return PressureReaction::underway;
+	case MemoryPressureResponse::Outcome::nothing:
+	case MemoryPressureResponse::Outcome::retried:
+		break;
+	}
+	return PressureReaction::none;
+}
+
 } // namespace
 
 std::string_view pressure_level_name(PressureLevel level) noexcept
@@ -72,6 +90,21 @@ PressureLevel pressure_level_from_dispatch(std::uint64_t flags) noexcept
 	if ((flags & warn) != 0U)
 		return PressureLevel::warn;
 	return PressureLevel::normal;
+}
+
+std::string_view pressure_reaction_name(PressureReaction reaction) noexcept
+{
+	switch (reaction) {
+	case PressureReaction::none:
+		return "none";
+	case PressureReaction::responding:
+		return "responding";
+	case PressureReaction::withheld:
+		return "withheld";
+	case PressureReaction::underway:
+		return "underway";
+	}
+	return "unknown";
 }
 
 std::string_view trim_outcome_name(TrimOutcome outcome) noexcept
@@ -179,6 +212,9 @@ MemoryPressureResponse::Outcome MemoryPressureResponse::on_level(
 			outcome = Outcome::responded;
 		}
 	}
+	/* Before anything that reads the process or waits: the application hears
+	 * the event at once, and the response's work follows. */
+	actions_.report({level, reaction_of(outcome)});
 	if (level != previous)
 		log_level_change(previous, level);
 	if (outcome == Outcome::responded)

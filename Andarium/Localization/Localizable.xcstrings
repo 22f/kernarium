@@ -4416,6 +4416,29 @@
         }
       }
     },
+    "iOS may close Andarium." : {
+      "comment" : "Text of the notice shown when iOS is critically short of memory: iOS may end the Andarium app. Andarium is the app's name.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOSによってAndariumが終了される可能性があります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS可能会关闭Andarium。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS可能會關閉Andarium。"
+          }
+        }
+      }
+    },
     "It could not be asked to power off. Try again, or close Andarium and open it again." : {
       "localizations" : {
         "ja" : {
@@ -4859,6 +4882,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "記憶體%@"
+          }
+        }
+      }
+    },
+    "Memory is critically low" : {
+      "comment" : "Title of the notice shown over the running guest when iOS is critically short of memory.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "メモリが著しく不足しています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "内存严重不足"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "記憶體嚴重不足"
           }
         }
       }
@@ -5924,29 +5970,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "復原模式"
-          }
-        }
-      }
-    },
-    "Recovery and erase" : {
-      "comment" : "Home section with Start in recovery and Erase virtual machine.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "リカバリモードと消去"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "恢复模式与抹掉"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "復原模式與清除"
           }
         }
       }
@@ -7047,29 +7070,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "啟動並設定"
-          }
-        }
-      }
-    },
-    "Start in recovery" : {
-      "comment" : "Starts Android's recovery mode.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "リカバリモードで起動"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "以恢复模式启动"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "以復原模式啟動"
           }
         }
       }
@@ -9489,6 +9489,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此快照的磁碟為%lld GiB，此App版本不接受該大小。只能將其刪除。"
+          }
+        }
+      }
+    },
+    "To install an app, open Settings here and choose Install APK." : {
+      "comment" : "Second line of the side keys' tip, shown where Settings has Install APK.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アプリをインストールするには、ここで“設定”を開き、“APKをインストール”を選択します。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要安装应用，请在此打开“设置”，然后选择“安装APK”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要安裝應用程式，請在此打開「設定」，然後選擇「安裝APK」。"
           }
         }
       }

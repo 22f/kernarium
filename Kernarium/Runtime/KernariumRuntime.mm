@@ -10,6 +10,7 @@
 #include "KernariumGuestTimeZone.hpp"
 #include "KernariumHostFeatures.hpp"
 #include "KernariumKeyWake.hpp"
+#include "KernariumMemoryPressure.hpp"
 #include "KernariumLocation.hpp"
 #include "KernariumRestartLoop.hpp"
 #include "KernariumStatistics.hpp"
@@ -59,6 +60,7 @@
 #include "options.hpp"
 #include "runtime/execution_engine.hpp"
 #include "runtime/guest_memory_budget.hpp"
+#include "runtime/memory_pressure_response.hpp"
 #include "runtime/session_record.hpp"
 #include "uml/emulator.h"
 #include "uml_slirp_net.h"
@@ -92,6 +94,7 @@
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <malloc/malloc.h>
+#include <map>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -389,6 +392,16 @@ kernarium::camera::Rotation& cameraRotation()
     return instance;
 }
 #endif
+
+/* The application's way to the host's response to the system's memory
+ * pressure: the one receiver of its reports, which lives as long as the
+ * process. The response reports to it through the observer installed with the
+ * first callback, for every run after. */
+kernarium::memory_pressure::Receiver& memoryPressureReceiver()
+{
+    static auto& instance = *new kernarium::memory_pressure::Receiver;
+    return instance;
+}
 
 void publishConsoleOutput(const void* buffer, std::size_t length)
 {
@@ -1426,38 +1439,87 @@ void sayBootloaderConsumed()
 #endif
 
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
-/* The cameras this run presents: the host's, discovered once for the run, or,
- * in a runtime that is not an App Store build, the synthetic ones its
- * environment names (a value that names none gives the guest no cameras, never
- * the host's). The layout is composed again at each boot
- * (`kernarium::camera::recompose`). A host whose cameras cannot be discovered
- * has none, and a camera never fails a boot. */
+/* The platform camera that serves the cameras: the host's, or, in a runtime
+ * that is not an App Store build, the synthetic ones its environment names (a
+ * value that names none gives the guest no cameras, never the host's). */
+uml::camera::CameraSourceHandle chooseCameraSource()
+{
+#ifndef UML_APP_STORE_RUNTIME
+    const auto choice = kernarium::camera::parseSource(
+        std::getenv(kernarium::camera::sourceVariable));
+    if (choice.invalid)
+        std::fprintf(
+            stderr,
+            "Kernarium: unknown %s: the guest gets no cameras, and never "
+            "the host's\n",
+            kernarium::camera::sourceVariable);
+    return kernarium::camera::chooseSource(
+        choice, [] { return uml::camera::makeHostCameraSource(); });
+#else
+    return uml::camera::makeHostCameraSource();
+#endif
+}
+
+/* The cameras this run presents, discovered once for the run. The layout is
+ * composed again at each boot (`kernarium::camera::recompose`). A host whose
+ * cameras cannot be discovered has none, and a camera never fails a boot. */
 kernarium::camera::Presentation presentCameras(const GuestRequest& request)
 {
     const auto tier = uml::camera::cameraTierForBudget(request.gpuBudgetBytes);
     try {
-#ifndef UML_APP_STORE_RUNTIME
-        const auto choice = kernarium::camera::parseSource(
-            std::getenv(kernarium::camera::sourceVariable));
-        if (choice.invalid)
-            std::fprintf(
-                stderr,
-                "Kernarium: unknown %s: the guest gets no cameras, and never "
-                "the host's\n",
-                kernarium::camera::sourceVariable);
-        auto source = kernarium::camera::chooseSource(
-            choice, [] { return uml::camera::makeHostCameraSource(); });
-#else
-        auto source = uml::camera::makeHostCameraSource();
-#endif
         return kernarium::camera::present(
-            std::move(source), tier, request.camera.calibrationDirectory);
+            chooseCameraSource(), tier, request.camera.calibrationDirectory);
     } catch (const std::exception& error) {
         std::fprintf(
             stderr, "Kernarium: the guest gets no cameras: %s\n",
             error.what());
         return kernarium::camera::present(
             nullptr, tier, request.camera.calibrationDirectory);
+    }
+}
+
+/* The camera reserve the application plans with before a boot (runtime API
+ * 40): what a boot at `tier` with this calibration directory would hold out of
+ * the GPU's pool, while the source, the cameras and the calibration data are
+ * as they were when the answer was composed. The application asks for every
+ * size of guest memory, so the cameras are discovered once and kept, with the
+ * answers composed from them (calibration files included), until a caller asks
+ * to discover them again, which also composes every answer again (a boot
+ * discovers for its own run). A host whose cameras cannot be discovered answers
+ * the tier's ceiling. */
+kernarium::camera::ReservePlan planCameraReserve(
+    uml::camera::CameraTier tier,
+    const std::string& calibrationDirectory,
+    bool discoverAgain)
+{
+    static std::mutex mutex;
+    static uml::camera::CameraSourceHandle source;
+    static bool discovered = false;
+    static std::map<std::pair<int, std::string>, kernarium::camera::ReservePlan>
+        answers;
+    std::lock_guard lock(mutex);
+    try {
+        if (discoverAgain || !discovered) {
+            source = nullptr;
+            discovered = false;
+            answers.clear();
+            source = chooseCameraSource();
+            discovered = true;
+        }
+        const auto key = std::make_pair(static_cast<int>(tier), calibrationDirectory);
+        const auto known = answers.find(key);
+        if (known != answers.end())
+            return known->second;
+        const auto plan =
+            kernarium::camera::planReserve(source, tier, calibrationDirectory);
+        answers.emplace(key, plan);
+        return plan;
+    } catch (const std::exception& error) {
+        std::fprintf(
+            stderr,
+            "Kernarium: the camera reserve is the tier's ceiling: %s\n",
+            error.what());
+        return kernarium::camera::ceilingReserve(tier);
     }
 }
 #endif
@@ -3037,6 +3099,59 @@ void runtimeSetCameraStateCallback(
 #endif
 }
 
+int runtimePlanCameraReserve(
+    uint32_t gpuBudgetMiB,
+    const char* calibrationPath,
+    kernarium_runtime_camera_reserve* reserve)
+{
+    if (reserve == nullptr || reserve->struct_size < sizeof(*reserve))
+        return -UML_EMULATOR_INVALID_ARGUMENT;
+    const std::uint32_t size = reserve->struct_size;
+    const std::uint32_t flags = reserve->flags;
+    *reserve = {};
+    reserve->struct_size = size;
+    reserve->flags = flags;
+    reserve->basis = KERNARIUM_RUNTIME_CAMERA_RESERVE_EXACT;
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+    bool invalid = false;
+    const auto directory =
+        kernarium::camera::readCalibrationPath(calibrationPath, invalid);
+    const auto plan = planCameraReserve(
+        uml::camera::cameraTierForBudget(
+            static_cast<std::uint64_t>(gpuBudgetMiB) * mebibyte),
+        directory,
+        (flags & KERNARIUM_RUNTIME_CAMERA_PLAN_DISCOVER_AGAIN) != 0);
+    reserve->reserve_mib = plan.reserveMiB;
+    reserve->basis = plan.exact ? KERNARIUM_RUNTIME_CAMERA_RESERVE_EXACT
+                                : KERNARIUM_RUNTIME_CAMERA_RESERVE_CEILING;
+#else
+    /* A Linux guest has no cameras and holds nothing. */
+    (void)gpuBudgetMiB;
+    (void)calibrationPath;
+    (void)flags;
+#endif
+    return 0;
+}
+
+void runtimeSetMemoryPressureCallback(
+    kernarium_runtime_memory_pressure_callback callback,
+    void* context)
+{
+    auto& receiver = memoryPressureReceiver();
+    /* Installed once and kept, so that the response's lock is never taken
+     * while the receiver's is held. */
+    static const bool installed = [&receiver] {
+        uml::runtime::set_pressure_observer(
+            [](void* observed, const uml::runtime::PressureReport& report) noexcept {
+                static_cast<kernarium::memory_pressure::Receiver*>(observed)->publish(report);
+            },
+            &receiver);
+        return true;
+    }();
+    (void)installed;
+    receiver.set(callback, context);
+}
+
 int runtimeSetCameraRotation(uint32_t degrees)
 {
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
@@ -3231,6 +3346,8 @@ const kernarium_runtime_api runtimeApi {
     .set_network_notice = runtimeSetNetworkNotice,
     .set_camera_state_callback = runtimeSetCameraStateCallback,
     .set_camera_rotation = runtimeSetCameraRotation,
+    .plan_camera_reserve = runtimePlanCameraReserve,
+    .set_memory_pressure_callback = runtimeSetMemoryPressureCallback,
 };
 
 } // namespace

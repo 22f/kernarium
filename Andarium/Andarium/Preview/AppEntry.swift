@@ -77,8 +77,7 @@ struct AppEntry {
 
     /// Where Home scrolls to for a screen that shows a lower section.
     private static let scrollTargets: [String: String] = [
-        "home-options": "erase", "home-recovery-erase": "erase", "start-recovery": "erase", "erase": "erase",
-        "home-new-recovery": "erase",
+        "home-options": "erase", "home-erase": "erase", "erase": "erase",
         "home-resolution": "resolution",
         "home-capabilities": "capabilities", "home-mic-on": "capabilities", "home-mic-denied": "capabilities",
         "home-haptics-off": "capabilities",
@@ -123,7 +122,7 @@ struct AppEntry {
     func configureTips() {
         if resetTips { try? Tips.resetDatastore() }
         // The legacy install, played, shows the tip as a real session may.
-        if screen == "session-tip" || (screen == "install-legacy" && play) {
+        if screen == "session-tip" || screen == "session-tip-left" || (screen == "install-legacy" && play) {
             Tips.showAllTipsForTesting()
         } else if screen.hasPrefix("session") || screen.hasPrefix("settings") || screen.hasPrefix("files")
             || screen.hasPrefix("recovery") || screen.hasPrefix("boot")
@@ -168,7 +167,7 @@ struct AppEntry {
         }
 
         switch screen {
-        case "home-new", "home-new-recovery":
+        case "home-new":
             model.guest = Guest.fresh(on: host)
             model.plan = .firstStart
         case "home-grow":
@@ -239,7 +238,7 @@ struct AppEntry {
             model.locationAuthorization = .restricted
         case "home-location-services-off", "home-location-services-off-alert":
             model.locationAuthorization = .servicesOff
-        case "home-camera-on":
+        case "home-camera-on", "system-edit-camera":
             model.guest?.camera = true
             model.cameraAccess = .authorized
         case "home-camera-denied", "home-camera-alert":
@@ -279,16 +278,17 @@ struct AppEntry {
             model.jitOn = true
             model.jitLastStart = .noDebugger
             boot(.normal, stage: 1, seconds: 4)
-        case "session", "session-tip", "session-open", "session-keyboard", "session-stats",
+        case "session", "session-tip", "session-tip-left", "session-open", "session-keyboard", "session-stats",
              "session-power", "session-setup", "session-off", "session-left", "session-volume",
              "session-graphics-notice", "session-thermal-notice", "session-network-cellular", "session-network-wifi",
-             "session-camera-notice", "session-camera-off-notice":
-            model.session.showStats = screen == "session-stats"
+             "session-camera-notice", "session-camera-off-notice", "session-memory-critical",
+             "session-memory-camera", "session-memory-stats", "session-memory-pressure":
+            model.session.showStats = screen == "session-stats" || screen == "session-memory-stats"
             model.session.sideKeysOpen = ["session-open", "session-off", "session-left", "session-volume"].contains(screen)
             model.sessionPreset = SessionPreset(
                 volumePanel: screen == "session-volume",
                 powerMenu: screen == "session-power",
-                leftEdge: ["session-left", "session-volume"].contains(screen),
+                leftEdge: ["session-left", "session-volume", "session-tip-left"].contains(screen),
                 guestScreen: {
                     switch screen {
                     case "session-setup": .setup
@@ -305,7 +305,14 @@ struct AppEntry {
             if screen == "session-network-wifi" { model.previewNetworkNotice(.wifi) }
             if screen == "session-camera-notice" { model.previewCameraNotice() }
             if screen == "session-camera-off-notice" { model.previewCameraNotice(.blockedInUse) }
-        case "settings", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
+            // The memory notice: the critical level alone, under the camera
+            // notice, and with the statistics capsule; the whole episode is
+            // played by `-play` after the first frame (`applyDeferred`).
+            if screen == "session-memory-camera" { model.previewCameraNotice(.blockedInUse) }
+            if ["session-memory-critical", "session-memory-camera", "session-memory-stats"].contains(screen) {
+                model.previewMemoryPressure(.critical)
+            }
+        case "settings", "settings-medium", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
              "settings-feedback", "install-apk", "install-legacy", "install-done", "install-failed", "install-not-apk", "install-bundle",
              "bug-report":
             let session = model.session
@@ -517,6 +524,15 @@ struct AppEntry {
             model.sheet = .resize
         case "system-edit", "system-memory-warning":
             model.sheet = .system
+        case "system-edit-camera":
+            // The sheet shows what the runtime answers for the mock's cameras
+            // when it opens, as the device's does after launch.
+            let reserve = PreviewData.cameraReserveMiB(device: device)
+            model.cameraReservePlanner = { policy in
+                CameraReservePlan(policy: policy.withCameraReserve { _ in reserve }, exact: true)
+            }
+            await model.refreshCameraReserve().value
+            model.sheet = .system
         case "resolution-sheet":
             model.sheet = .resolution
         case "home-mic-alert":
@@ -554,6 +570,18 @@ struct AppEntry {
                 title: String(localized: "Settings not saved"),
                 message: CocoaError(.fileWriteOutOfSpace).localizedDescription
             )
+        case "session-memory-pressure" where play:
+            // The pressure as a person sees it: a warning, which shows nothing,
+            // a rise to critical, a fall back to warning and the return to
+            // normal, four seconds apart. The notice goes three seconds after
+            // the fall.
+            model.previewMemoryPressure(.warning)
+            try? await Task.sleep(for: .seconds(4))
+            model.previewMemoryPressure(.critical)
+            try? await Task.sleep(for: .seconds(4))
+            model.previewMemoryPressure(.warning)
+            try? await Task.sleep(for: .seconds(4))
+            model.previewMemoryPressure(.normal)
         case "bug-report" where play:
             try? await Task.sleep(for: .milliseconds(450))
             model.createBugReport()

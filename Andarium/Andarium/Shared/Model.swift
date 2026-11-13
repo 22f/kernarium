@@ -91,6 +91,7 @@ final class AppModel {
                 refreshStatistics()
                 refreshGraphicsNotice()
                 showThermalNoticeIfWaiting()
+                refreshMemoryNotice()
             }
             if (lifecycle.guest == nil) != (oldValue.guest == nil) { refreshNetworkWatch() }
         }
@@ -487,6 +488,16 @@ final class AppModel {
     /// preview's system mode have one; a preview without it takes the access
     /// as given.
     @ObservationIgnored var camera: CameraController?
+    /// Asks the runtime what a live camera session of this host holds out of
+    /// the GPU's budget, for every budget the memory policy has
+    /// (`MemoryPolicy.withCameraReserve`). The device application has one, and
+    /// so do the preview states that show a camera reserve; without one the
+    /// model keeps the policy's own figure, the ceiling that bounds the system
+    /// cameras.
+    @ObservationIgnored var cameraReservePlanner: (@Sendable (MemoryPolicy) -> CameraReservePlan)?
+    /// The last question to the runtime for the camera reserve, which a test
+    /// waits for.
+    @ObservationIgnored private(set) var cameraReserveTask: Task<Void, Never>?
     /// What the host is doing for the guest's cameras, from the runtime, and
     /// whether the person put the notice it raised away.
     private(set) var cameraNotice = CameraNoticeState()
@@ -554,6 +565,7 @@ final class AppModel {
                 refreshStatistics()
                 refreshGraphicsNotice()
                 refreshNetworkWatch()
+                refreshMemoryNotice()
                 #if !APP_STORE
                 refreshJit()
                 #endif
@@ -605,6 +617,20 @@ final class AppModel {
         try? await Task.sleep(for: duration)
     }
     @ObservationIgnored private var thermalNoticeTask: Task<Void, Never>?
+
+    // MARK: Memory notice state
+
+    /// What iOS says of the device's memory, from the runtime, with whether a
+    /// guest session is on screen and whether the person put the notice away.
+    private(set) var memoryNotice = MemoryPressureNoticeState()
+    /// Waits out the time the notice lingers after the pressure has passed; a
+    /// test paces it by hand.
+    @ObservationIgnored var memoryNoticeSleep: @MainActor (Duration) async -> Void = { duration in
+        try? await Task.sleep(for: duration)
+    }
+    /// The moment a report is taken at; a test sets its own.
+    @ObservationIgnored var memoryNoticeClock: @MainActor () -> ContinuousClock.Instant = { .now }
+    @ObservationIgnored private var memoryNoticeExpiry: Task<Void, Never>?
 
     // MARK: Network notice state
 
@@ -687,6 +713,32 @@ final class AppModel {
         // A record that cannot be read has no plan; the start then fails
         // with the reason.
         plan = driver.startPlan() ?? .normal
+        // A run may have taught the store a lens's colour data, which changes
+        // the layout the cameras make and so what a session holds.
+        refreshCameraReserve()
+    }
+
+    /// Reads the memory a live camera session holds from the runtime again, for
+    /// the sheet's graphics memory: after the Camera choice or the access to the
+    /// cameras changes, after a run, and when the System sheet opens, because
+    /// the cameras the host has and the colour data they have learned decide
+    /// the layout. It matters only
+    /// while the Camera choice is on, so that is when the runtime is asked; the
+    /// policy keeps its own figure meanwhile. Questions are answered in order,
+    /// and the result is the task that ends with this one.
+    @discardableResult
+    func refreshCameraReserve() -> Task<Void, Never> {
+        let before = cameraReserveTask
+        guard let planner = cameraReservePlanner, guest?.camera == true else { return before ?? Task {} }
+        let task = Task { [weak self] in
+            await before?.value
+            guard let self, self.guest?.camera == true else { return }
+            let current = self.host.memory
+            let plan = await Task.detached(priority: .utility) { planner(current) }.value
+            if self.host.memory == current, plan.policy != current { self.host.memory = plan.policy }
+        }
+        cameraReserveTask = task
+        return task
     }
 
     /// Records the guest's choices a moment after the last change, so a
@@ -1498,6 +1550,7 @@ final class AppModel {
         cameraNoticeExpiry?.cancel()
         cameraNoticeExpiry = nil
         cameraNotice.runEnded()
+        resetMemoryNotice()
         runEnd = end
         runUptimeSeconds = uptimeSeconds
         if end.poweredOff {
@@ -1535,6 +1588,9 @@ final class AppModel {
         session.showStats = showStats
         statisticsMeter = StatsMeter()
         bootTracker = BootTracker()
+        // A guest that restarts during the pressure reports no end of it, and
+        // the level the notice holds is not known across the restart.
+        resetMemoryNotice()
         lifecycle.restart()
     }
 
@@ -1744,6 +1800,7 @@ final class AppModel {
             guest?.camera = true
             cameraAsking = true
             persistNow()
+            refreshCameraReserve()
             // The controller asks iOS and reports the answer to
             // `cameraAccessChanged`. A preview without one has no system
             // prompt to show and takes it as given.
@@ -1751,6 +1808,7 @@ final class AppModel {
         case .authorized:
             guest?.camera = true
             persistNow()
+            refreshCameraReserve()
         }
     }
 
@@ -1787,6 +1845,9 @@ final class AppModel {
             cameraAwaitsSettings = false
             cameraAsking = false
         }
+        // The cameras a host has can change with the access to them (a
+        // Continuity camera that comes or goes).
+        refreshCameraReserve()
     }
 
     /// The alert's Open Settings: for a refusal, the switch the person tapped
@@ -1845,6 +1906,89 @@ final class AppModel {
     /// configuration leaves this out.
     func previewCameraNotice(_ capture: CameraCapture = .interruptedByMultitasking) {
         cameraCaptureChanged(capture)
+    }
+    #endif
+
+    // MARK: Memory notice
+
+    /// The runtime reports a level the system raised, the repeats and the
+    /// return to normal included. Only the critical level has a notice, and the
+    /// state follows every level, for the notice that ends with it; whether the
+    /// host's own response ran changes nothing the person can do.
+    func memoryPressureChanged(_ level: MemoryPressureLevel) {
+        changeMemoryNotice { $0.levelChanged(level, at: $1) }
+    }
+
+    /// A guest session is on screen: the guest runs and Andarium is the active
+    /// application. Not Home, not the boot screen, not the background.
+    private var memoryNoticeSessionOnScreen: Bool {
+        guard case .running = phase else { return false }
+        return applicationActive
+    }
+
+    /// Tells the notice whether the session is on screen.
+    func refreshMemoryNotice() {
+        let onScreen = memoryNoticeSessionOnScreen
+        changeMemoryNotice { $0.screenChanged(onScreen: onScreen, at: $1) }
+    }
+
+    /// Applies a change to the notice's state; the views are told, and the
+    /// notice's end is timed, only when it changed.
+    private func changeMemoryNotice(_ change: (inout MemoryPressureNoticeState, ContinuousClock.Instant) -> Void) {
+        var next = memoryNotice
+        change(&next, memoryNoticeClock())
+        guard next != memoryNotice else { return }
+        memoryNotice = next
+        armMemoryNoticeExpiry()
+    }
+
+    /// Times the end of a notice that is on its way out, in place of the one
+    /// before.
+    private func armMemoryNoticeExpiry() {
+        memoryNoticeExpiry?.cancel()
+        memoryNoticeExpiry = nil
+        guard let wait = memoryNotice.staysFor(at: memoryNoticeClock()) else { return }
+        memoryNoticeExpiry = Task { [weak self] in
+            await self?.memoryNoticeSleep(wait)
+            guard !Task.isCancelled else { return }
+            self?.expireMemoryNotice()
+        }
+    }
+
+    /// The level left critical and the notice's time is up.
+    private func expireMemoryNotice() {
+        memoryNoticeExpiry = nil
+        var next = memoryNotice
+        next.expire(at: memoryNoticeClock())
+        if next != memoryNotice { memoryNotice = next }
+        // A wake before the end leaves the time that is left to wait out.
+        armMemoryNoticeExpiry()
+    }
+
+    /// The run ended, or restarts: the next one starts clean.
+    private func resetMemoryNotice() {
+        memoryNoticeExpiry?.cancel()
+        memoryNoticeExpiry = nil
+        memoryNotice.runEnded()
+    }
+
+    /// Whether the session shows the notice that iOS is critically short of
+    /// memory: none while no session is on screen or the person put it away.
+    var memoryNoticeShowing: Bool { memoryNotice.isShowing }
+
+    func dismissMemoryNotice() {
+        var next = memoryNotice
+        next.dismiss()
+        if next != memoryNotice { memoryNotice = next }
+        memoryNoticeExpiry?.cancel()
+        memoryNoticeExpiry = nil
+    }
+
+    #if !APP_STORE
+    /// The Simulator preview plays the levels: it has no runtime to run short
+    /// of memory. The App Store configuration leaves this out.
+    func previewMemoryPressure(_ level: MemoryPressureLevel) {
+        memoryPressureChanged(level)
     }
     #endif
 
