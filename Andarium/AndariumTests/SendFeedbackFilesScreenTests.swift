@@ -224,7 +224,8 @@ struct SendFeedbackFilesScreenTests {
         #expect(await eventually { sheet.form.attachments.count == 1 })
         await sheet.addFiles([try fixture.original("b.bin"), try fixture.original("a.bin")])
         #expect(sheet.form.attachments.items.map(\.kind) == [.screenshot, .file, .file])
-        #expect(sheet.form.attachments.items.map(\.fileName) == ["screenshot.png", "b.bin", "a.bin"])
+        let stamp = SendFeedbackNames.stamp(sheet.form.attachments.items[0].madeAt)
+        #expect(sheet.form.attachments.items.map(\.fileName) == ["screenshot-\(stamp).png", "b.bin", "a.bin"])
         sheet.close()
     }
 
