@@ -305,6 +305,7 @@ final class SendFeedbackModel {
         closed = true
         app.busyOverSheet = false
         app.feedbackSheetOpen = false
+        app.feedbackFromBoot = false
         cleanUp()
     }
 

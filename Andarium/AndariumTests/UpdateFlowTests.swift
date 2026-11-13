@@ -27,9 +27,15 @@ final class StubDriver: RuntimeDriver {
     }
     func save(_ guest: Guest) throws { savedGuest = guest }
     func startPlan() -> StartPlan? { plan }
+    /// Whether the guest's first Android boot has not been seen to complete.
+    var firstBootIsPending = false
+    func firstBootPending() -> Bool { firstBootIsPending }
     /// What the data disk holds now; a test sets it as a run would.
     var diskUsedBytes: UInt64 = 0
     func measuredUsedBytes() -> UInt64 { diskUsedBytes }
+    /// How many times the model asked to stop the start under way.
+    private(set) var guestStops = 0
+    func stopGuest() { guestStops += 1 }
     func begin(guest: Guest, mode: StartMode, kind: BootKind) {
         begun.append((mode, kind))
         begunGuests.append(guest)

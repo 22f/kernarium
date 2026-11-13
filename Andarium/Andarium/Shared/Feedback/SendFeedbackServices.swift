@@ -38,6 +38,9 @@ struct SendFeedbackServices {
     /// Opens the sheet once Home or Settings has settled, as a launch of the
     /// Simulator preview asks; never in the application.
     var previewOpensAtLaunch = false
+    /// The same for the sheet the boot screen's notice opens, which the root
+    /// presents (`sendFeedbackFromBootSheet`).
+    var previewOpensOverBoot = false
     /// Runs when the sheet appears: the Simulator preview fills a draft with it.
     var previewPrepare: @MainActor (SendFeedbackModel) async -> Void = { _ in }
     /// Keeps the confirmation of a sent mail on screen, which closes the sheet

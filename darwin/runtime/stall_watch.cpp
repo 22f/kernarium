@@ -669,7 +669,7 @@ struct StallWatch::State final {
 
 	void run() noexcept
 	{
-		(void)pthread_setname_np("uml-stall-watch");
+		(void)pthread_setname_np(stall_watch_thread_name);
 		/* This thread's local storage exists before anything marks a wait. */
 		::uml::platform::current_wait_cell = nullptr;
 		/* The set-up is done before the measurement starts, so its time is
@@ -713,6 +713,7 @@ struct StallWatch::State final {
 				if ((woken & watch_woken_by_timer) == 0)
 					continue;
 				parked = false;
+				(void)pthread_setname_np(stall_watch_thread_name);
 				rebaseline = true;
 				deadline_ns = now_ns;
 			} else if (now_ns < deadline_ns) {
@@ -726,6 +727,7 @@ struct StallWatch::State final {
 			deadline_ns = continuous_ns() + period_ns;
 			if (quiet_ticks >= park_after_quiet_ticks && try_to_park()) {
 				parked = true;
+				(void)pthread_setname_np(stall_watch_asleep_name);
 				/* Two looks again after every sleep, the one after a wake
 				 * (which measures nothing) the first of them. */
 				quiet_ticks = 0;
