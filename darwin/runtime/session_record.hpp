@@ -243,8 +243,8 @@ void checkpoint_session_memory() noexcept;
  * Android guest's does, a Linux desktop guest's does not) and how many times
  * the guest restarted in this process before the session that begins. Set it
  * before each run; any thread. For a guest that reports its boot the state
- * says "boot unfinished" or "boot completed" and "restarts N"; for the others
- * it says neither and the checkpoints leave the state alone. */
+ * says "boot completed", "boot unfinished" or "boot unobserved" and "restarts
+ * N"; for the others it says none and the checkpoints leave the state alone. */
 void set_session_boot_facts(bool console_reports_completion,
 	unsigned restarts) noexcept;
 

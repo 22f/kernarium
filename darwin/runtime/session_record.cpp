@@ -770,7 +770,8 @@ std::size_t format_state(char *buffer, SessionEnd end, int status,
 		record.text("\nended ").number(now());
 	if (boot_reported.load(std::memory_order_relaxed))
 		record.text("\nboot ")
-			.text(boot_signal.completed() ? "completed" : "unfinished")
+			.text(boot_signal.completed() ? "completed" :
+				boot_signal.init_observed() ? "unfinished" : "unobserved")
 			.text("\nrestarts ")
 			.number(boot_restarts.load(std::memory_order_relaxed));
 	if (!message.empty())
@@ -825,7 +826,7 @@ void write_record(SessionEnd end, int status, std::string_view message,
 	write_record_unguarded(descriptor, end, status, message, tail);
 }
 
-/* Rewrites the state of a guest whose boot is unfinished when the output
+/* Rewrites the state of a guest whose boot has not completed when the output
  * grew since the last time, and once more when the boot finished, without the
  * output: the record then says the boot completed and holds nothing that
  * grows. Nothing else changes the state while the session runs, so a silent

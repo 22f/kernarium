@@ -233,20 +233,22 @@ std::size_t file_size(const std::string &path)
 
 void test_boot_state()
 {
-	const std::string stuck = "init: starting service 'netd'\n";
+	const std::string stuck = "init: init first stage started!\n"
+		"init: starting service 'netd'\n";
 	const std::string done =
 		"init: processing action (sys.boot_completed=1) from (x)\n";
 	const TestConsole console;
 
 	/* A guest that reports its boot: the state says where the boot is, the
-	 * checkpoints keep the output, and a completed boot drops it. */
+	 * checkpoints keep the output, and a completed boot drops it. Until
+	 * init's output is seen the boot is unobserved, not unfinished. */
 	uml::runtime::reset_session_record();
 	uml::runtime::set_session_boot_facts(true, 3);
 	std::string path = temporary_record();
 	require(uml::runtime::begin_session_record(path, console.arguments()));
 	std::string state = read_file(path).substr(state_offset);
 	require(state.starts_with("state running\nend running\nstatus 0\npid ") &&
-		has(state, "\nboot unfinished\nrestarts 3\n") &&
+		has(state, "\nboot unobserved\nrestarts 3\n") &&
 		!has(state, "kernel-output"),
 		"a begun boot was recorded wrong: " + state);
 	uml::runtime::checkpoint_session_memory();
@@ -324,8 +326,46 @@ void test_boot_state()
 	uml::runtime::reset_session_record();
 }
 
+/* A console that shows nothing of init, such as a kernel's lines alone, is
+ * not an unfinished boot: the record says so, and still keeps the output. */
+void test_boot_unobserved()
+{
+	const std::string kernel = "Linux version 6.18\n";
+	const std::string init = "init: init first stage started!\n";
+	const TestConsole console;
+	uml::runtime::reset_session_record();
+	uml::runtime::set_session_boot_facts(true, 0);
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	console.write(kernel);
+	uml::runtime::checkpoint_session_memory();
+	std::string state = read_file(path).substr(state_offset);
+	require(has(state, "\nboot unobserved\nrestarts 0\n") &&
+		state.ends_with("kernel-output\n" + kernel),
+		"output without init's was recorded wrong: " + state);
+	console.write(init);
+	uml::runtime::checkpoint_session_memory();
+	state = read_file(path).substr(state_offset);
+	require(has(state, "\nboot unfinished\nrestarts 0\n") &&
+		state.ends_with("kernel-output\n" + kernel + init),
+		"init's first line did not make the boot unfinished: " + state);
+	uml::runtime::end_session_record(SessionEnd::stopped, 0);
+	uml::runtime::reset_session_record();
+	uml::runtime::set_session_boot_facts(true, 0);
+	require(uml::runtime::begin_session_record(path, console.arguments()));
+	console.write(kernel);
+	uml::runtime::end_session_record(SessionEnd::stopped, 0);
+	state = read_file(path).substr(state_offset);
+	require(has(state, "state ended\nend stopped\n") &&
+		has(state, "\nboot unobserved\n") &&
+		state.ends_with("kernel-output\n" + kernel),
+		"a stop of an unobserved boot was recorded wrong: " + state);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
 /* The restart count and the boot belong to their session: the next one
- * starts unfinished again, whatever the one before did. */
+ * starts unobserved again, whatever the one before did. */
 void test_boot_state_per_session()
 {
 	const std::string done =
@@ -343,7 +383,7 @@ void test_boot_state_per_session()
 	require(uml::runtime::begin_session_record(path, console.arguments()));
 	const std::string state = read_file(path).substr(state_offset);
 	require(state.starts_with("state running\n") &&
-		has(state, "\nboot unfinished\nrestarts 1\n") &&
+		has(state, "\nboot unobserved\nrestarts 1\n") &&
 		!has(state, "kernel-output"),
 		"a restarted boot began finished: " + state);
 	uml::runtime::reset_session_record();
@@ -383,6 +423,7 @@ void test_the_end_outlasts_state_checkpoints()
 		const std::string path = temporary_record();
 		require(uml::runtime::begin_session_record(path,
 			console.arguments()));
+		console.write("init: init first stage started!\n");
 		std::atomic<bool> stop{false};
 		std::thread checkpoints{[&] {
 			std::uint64_t counter = 0;
@@ -1373,6 +1414,7 @@ int main(int argc, char **argv)
 		test_kept_output();
 		test_the_console_says_when_the_boot_finished();
 		test_boot_state();
+		test_boot_unobserved();
 		test_boot_state_per_session();
 		test_boot_state_size();
 		test_the_end_outlasts_state_checkpoints();

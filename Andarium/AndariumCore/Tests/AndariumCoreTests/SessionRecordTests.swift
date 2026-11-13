@@ -79,6 +79,15 @@ struct SessionRecordTests {
         #expect(!done.summary.contains("finished booting"))
     }
 
+    @Test func aBootTheRuntimeCouldNotObserveClaimsNothing() throws {
+        // The console showed none of init's output: the boot may have been
+        // fine, so the record is not read as an unfinished one.
+        let unseen = try #require(SessionRecord(text: record(
+            "state ended\nend stopped\nstatus 0\npid 7\nstarted 1\nended 2\nboot unobserved\nrestarts 1\n")))
+        #expect(unseen.bootFinished == nil && unseen.restarts == 1)
+        #expect(!unseen.summary.contains("finished booting"))
+    }
+
     @Test func aRecordThatSaysNothingOfTheBootLeavesItUnknown() throws {
         let plain = try #require(SessionRecord(text: record(
             "state ended\nend powered-off\nstatus 0\npid 7\nstarted 1\nended 2\n")))
