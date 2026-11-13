@@ -20,7 +20,8 @@ import Testing
 /// `config.armeabi_v7a.apk`, `config.x86_64.apk` (one app, one signature),
 /// `old-base.apk` and `old-config.xhdpi.apk` (the same package built for API
 /// level 21) and `foreign-config.fr.apk` (a split of that package signed by
-/// another key). Every test leaves the guest as it found it.
+/// another key). Every test leaves the guest as it found it, except the one
+/// that takes real files (`ANDARIUM_CONTAINER_GUEST_SAMPLES`, below).
 @Suite(.serialized)
 struct ContainerGuestTests {
     private static let environment = ProcessInfo.processInfo.environment
@@ -335,6 +336,94 @@ struct ContainerGuestTests {
         print("CONTAINER_GUEST zip64 file=\(size) footprint-growth=\(growth.footprint) heap-growth=\(growth.heap)")
         #expect(growth.footprint < LargeTransferFootprintTests.allowedGrowth)
         await clean(operations)
+    }
+
+    // MARK: Files a person supplies
+
+    /// With `ANDARIUM_CONTAINER_GUEST_SAMPLES` naming a folder of folders `1`,
+    /// `2`, ... that each hold one container file, each file goes through the
+    /// reader and then the install, and one line per file says what happened.
+    /// The lines name neither the file nor the app: the package is called by
+    /// the file's number. The apps are not started, and are left installed.
+    @Test(.timeLimit(.minutes(120))) func filesAPersonSuppliesGoThroughTheReaderAndIntoTheGuest() async throws {
+        guard Self.enabled, let folder = Self.environment["ANDARIUM_CONTAINER_GUEST_SAMPLES"] else { return }
+        let operations = try operations()
+        let abis = try await shell(operations, "getprop ro.product.cpu.abilist").split(separator: ",").map(String.init)
+        print("REAL_SAMPLE guest-abis=\(abis)")
+        func packages() async throws -> Set<String> {
+            Set(try await shell(operations, "pm list packages -3").split(whereSeparator: \.isNewline).map { String($0.dropFirst("package:".count)) })
+        }
+        var known = try await packages()
+        let numbers = ((try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? []).compactMap(Int.init).sorted()
+        for number in numbers {
+            let directory = URL(fileURLWithPath: folder).appendingPathComponent(String(number))
+            guard let url = ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []).first
+            else { continue }
+            var row = "REAL_SAMPLE \(number) kind=\(url.pathExtension.lowercased())"
+            // The reader alone.
+            do {
+                let source = try ZipFileSource(contentsOf: url)
+                row += " bytes=\(source.size)"
+                switch try ApkContainer.inspect(source, fileName: url.lastPathComponent) {
+                case .singleApk:
+                    row += " layout=single-apk"
+                case let .parts(plan):
+                    row += " layout=\(plan.kind) parts=\(plan.candidates.count) apk-bytes=\(plan.apkBytes)"
+                    row += " data-files=\(plan.data.count) unplaced-data=\(plan.unplacedData) package-from-container=\(plan.packageName != nil)"
+                    if let chosen = try? plan.selecting(guestAbis: abis) {
+                        let kinds = chosen.candidates.compactMap(\.abi)
+                        row += " chosen=\(chosen.candidates.count) chosen-bytes=\(chosen.apkBytes) chosen-processor-splits=\(kinds)"
+                        row += " dropped-processor-splits=\(plan.candidates.compactMap(\.abi).filter { !kinds.contains($0) })"
+                    } else {
+                        row += " chosen=none"
+                    }
+                }
+            } catch let refusal as InstallRefusal {
+                row += " reader-refused=\(refusal.message)"
+            } catch {
+                row += " reader-error=\(error)"
+            }
+            print(row)
+            // The install, as Settings runs it.
+            let footprint = FootprintPeak()
+            let before = FootprintPeak.current(relieving: true)
+            let started = ContinuousClock.now
+            let log = UpdateLog()
+            var line = "REAL_SAMPLE \(number) install"
+            do {
+                let outcome: ApkInstallOutcome
+                do {
+                    outcome = try await operations.installApk(at: url, update: { footprint.sample(); log.add($0) })
+                } catch let refused as LegacyApkRefused {
+                    line += " older-app-question(app-level=\(refused.target.appLevel.map(String.init) ?? "?"), required=\(refused.target.requiredLevel.map(String.init) ?? "?"))-then"
+                    outcome = try await operations.installApk(at: url, bypassLowTargetSdkBlock: true, update: { footprint.sample(); log.add($0) })
+                }
+                line += " result=\(outcome == .installed ? "installed" : "installed-without-data")"
+                line += " ui=\"<file> is installed in the virtual machine.\(outcome == .installed ? "" : " (data note)")\""
+            } catch let failure as AdbFailure {
+                line += " result=refused ui=\"\(failure.message)\""
+            } catch {
+                line += " result=error \(error)"
+            }
+            let elapsed = ContinuousClock.now - started
+            let growth = footprint.growth(since: before)
+            line += " seconds=\(Int(elapsed.components.seconds)) footprint-growth=\(growth.footprint) heap-growth=\(growth.heap)"
+            print(line)
+            // What the guest now has: the new package, by its number.
+            let now = try await packages()
+            let added = now.subtracting(known)
+            known = now
+            if added.count == 1, let package = added.first {
+                let files = try await shell(operations, "pm path \(package)").split(whereSeparator: \.isNewline).map { String($0.split(separator: "/").last ?? "") }
+                let details = try await shell(operations, "dumpsys package \(package) | grep -m1 -o 'splits=\\[[^]]*\\]'")
+                let abi = try await shell(operations, "dumpsys package \(package) | grep -m1 -o 'primaryCpuAbi=[^ ]*'")
+                let obb = try await shell(operations, "ls -A '/storage/emulated/0/Android/obb/\(package)' 2>/dev/null | wc -l")
+                print("REAL_SAMPLE \(number) guest installed-files=\(files.count) config-splits=\(files.filter { $0.hasPrefix("split_config.") }.map { $0.dropFirst("split_config.".count).dropLast(4) }.sorted()) \(abi) obb-folder-entries=\(obb) \(details.contains("splits=") ? "splits-reported" : "no-splits-line")")
+            } else {
+                print("REAL_SAMPLE \(number) guest new-packages=\(added.count)")
+            }
+            print("REAL_SAMPLE \(number) guest active-sessions=\(try await activeSessions(operations))")
+        }
     }
 
     // MARK: Helpers
