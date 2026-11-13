@@ -27,6 +27,13 @@ public struct Capabilities: Equatable, Sendable {
         self.guestFiles = guestFiles
     }
 
+    /// Whether a session started in `mode` can offer Install APK: Settings has
+    /// the row, and the side keys' tip says where it is, in a normal session
+    /// of a runtime that installs apps. Recovery runs no adb.
+    public func offersApkInstall(in mode: StartMode) -> Bool {
+        mode == .normal && apkInstall
+    }
+
     /// Everything the mock runtime pretends to do.
     public static let preview = Capabilities(
         adbOverNetwork: true, apkInstall: true, bugReport: true, statistics: true, guestFiles: true
