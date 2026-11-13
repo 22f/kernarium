@@ -611,6 +611,20 @@ def verify_target_files_fixtures(verifier: Path) -> None:
     import camera_layouts
 
     tool = load_tool(verifier)
+    # Init's tokens: what the motion-property guard compares, and what it must not mistake for a command.
+    for text, commands in (
+        ('on boot\n    setprop ro.boot.kernarium.compass 1  # a host\n',
+         [["on", "boot"], ["setprop", "ro.boot.kernarium.compass", "1"]]),
+        ('setprop "ro.boot.kernarium.compass" 1\n', [["setprop", "ro.boot.kernarium.compass", "1"]]),
+        ('"setprop" ro.boot.kernarium.orientation 1\n', [["setprop", "ro.boot.kernarium.orientation", "1"]]),
+        ("setprop \\\n    ro.boot.kernarium.compass \\\n 1\n", [["setprop", "ro.boot.kernarium.compass", "1"]]),
+        ("# setprop ro.boot.kernarium.compass 1\n", []),
+        ('setprop persist.x "a b" #c\n', [["setprop", "persist.x", "a b"]]),
+        ('setprop "$marker" 1\n', [["setprop", "$marker", "1"]]),
+        ("setprop\r\n  ro.x 1\r\n", [["setprop"], ["ro.x", "1"]]),
+    ):
+        if tool.init_commands(text) != commands:
+            fail(f"init_commands({text!r}) is {tool.init_commands(text)}, not {commands}")
     pinner_overlay_entry = tool.PINNER_OVERLAY
     wifi_overlay_entry = tool.WIFI_OVERLAY
     wifi_never = tool.WIFI_NEVER_DISABLED_THRESHOLD
@@ -5584,6 +5598,19 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 "SYSTEM/etc/init/early-orientation.rc":
                     b"on early-init\n    setprop ro.boot.kernarium.orientation 1\n"}},
              "early-orientation.rc sets ro.boot.kernarium.orientation"),
+            # Init reads a command by its tokens: a quoted word and a continued line are the command they are.
+            ("init-sets-the-quoted-compass-property", {"entries": {
+                "SYSTEM/etc/init/quoted-property.rc":
+                    b'on early-init\n    setprop "ro.boot.kernarium.compass" 1\n'}},
+             "quoted-property.rc sets ro.boot.kernarium.compass"),
+            ("init-quotes-setprop-itself", {"entries": {
+                "SYSTEM/etc/init/quoted-command.rc":
+                    b'on early-init\n    "setprop" ro.boot.kernarium.orientation 1\n'}},
+             "quoted-command.rc sets ro.boot.kernarium.orientation"),
+            ("init-continues-the-setprop-line", {"entries": {
+                "SYSTEM/etc/init/continued.rc":
+                    b"on early-init\n    setprop \\\n        ro.boot.kernarium.compass \\\n        1\n"}},
+             "continued.rc sets ro.boot.kernarium.compass"),
             ("services-jar-without-the-compass-property", {"services_jar_variant": "no-compass-marker"},
              "lacks the SystemConfig topic that reads the compass feature for a host with a magnetometer"),
             ("services-jar-without-the-compass-directory", {"services_jar_variant": "no-compass-directory-marker"},

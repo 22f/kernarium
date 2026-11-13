@@ -2955,20 +2955,86 @@ def check_compass_feature(archive: zipfile.ZipFile, infos: dict[str, zipfile.Zip
     check_motion_properties_in_init(archive, infos)
 
 
-INIT_SETPROP = re.compile(r"^\s*setprop\s+(\S+)")
+def init_commands(text: str) -> list[list[str]]:
+    """The logical commands of an init script as init's tokenizer reads them: words split at blanks, double
+    quotes group (and are dropped), a backslash continues the line at a newline and escapes inside a word, and a
+    # that starts a word comments out the rest of the line. A newline outside a quote ends the command."""
+    commands: list[list[str]] = []
+    words: list[str] = []
+    word: list[str] = []
+    in_word = in_quote = False
+    index, length = 0, len(text)
+
+    def end_word() -> None:
+        nonlocal in_word
+        if in_word:
+            words.append("".join(word))
+            word.clear()
+        in_word = False
+
+    def end_command() -> None:
+        nonlocal in_quote
+        end_word()
+        in_quote = False
+        if words:
+            commands.append(list(words))
+        words.clear()
+
+    while index < length:
+        character = text[index]
+        if character == "\\":
+            following = text[index + 1] if index + 1 < length else ""
+            if following in ("\n", "\r"):
+                # A continued line: the newline and the blanks after it are not part of the command.
+                index += 2 if following == "\n" or text[index + 1:index + 3] != "\r\n" else 3
+                while index < length and text[index] in " \t":
+                    index += 1
+                if not in_quote:
+                    end_word()
+                continue
+            word.append({"n": "\n", "r": "\r", "t": "\t"}.get(following, following))
+            in_word = True
+            index += 2
+            continue
+        if in_quote:
+            if character == '"':
+                in_quote = False
+            elif character == "\n":
+                end_command()
+            else:
+                word.append(character)
+            index += 1
+            continue
+        if character == '"':
+            in_quote = in_word = True
+        elif character == "\n":
+            end_command()
+        elif character in " \t\r":
+            end_word()
+        elif character == "#" and not in_word:
+            while index < length and text[index] != "\n":
+                index += 1
+            continue
+        else:
+            word.append(character)
+            in_word = True
+        index += 1
+    end_command()
+    return commands
 
 
 def check_motion_properties_in_init(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
     """The launch alone states what the host feeds: no init script of the image sets the properties the
-    sensors' list and the compass feature follow (build.prop is checked with every property file)."""
+    sensors' list and the compass feature follow (build.prop is checked with every property file). A command
+    is read as init reads it, so a quoted word or a continued line is the command it is."""
     for name in sorted(infos):
         if infos[name].is_dir() or not name.endswith(".rc"):
             continue
-        for line in read_small(archive, infos[name]).decode("utf-8", errors="replace").splitlines():
-            match = INIT_SETPROP.match(line.split("#", 1)[0])
-            if match and match[1] in (MOTION_ORIENTATION_PROPERTY, MOTION_COMPASS_PROPERTY):
+        for command in init_commands(read_small(archive, infos[name]).decode("utf-8", errors="replace")):
+            if len(command) >= 2 and command[0] == "setprop" and command[1] in (
+                    MOTION_ORIENTATION_PROPERTY, MOTION_COMPASS_PROPERTY):
                 fail(
-                    f"{name} sets {match[1]}: the launch alone states whether the host feeds the "
+                    f"{name} sets {command[1]}: the launch alone states whether the host feeds the "
                     "device-orientation sensor and has a magnetometer"
                 )
 
