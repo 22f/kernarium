@@ -18,7 +18,6 @@ struct SendFeedbackSheet: View {
     @State private var picked: [PhotosPickerItem] = []
     @FocusState private var focus: Field?
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.scenePhase) private var scenePhase
 
     private enum Field { case problem, details }
@@ -27,6 +26,7 @@ struct SendFeedbackSheet: View {
     /// The words more than one place uses, in the feature's table.
     private enum Words {
         static let bugReport = LocalizedStringResource("Bug report", table: "Feedback")
+        static let startLog = LocalizedStringResource("Start log", table: "Feedback")
         static let screenshot = LocalizedStringResource("Screenshot", table: "Feedback")
         static let photos = LocalizedStringResource("Photos", table: "Feedback")
         static let addPhotos = LocalizedStringResource("Add photos or videos", table: "Feedback")
@@ -69,11 +69,6 @@ struct SendFeedbackSheet: View {
                         subject
                         Divider().padding(.leading, 20)
                         bodyText
-                        // At accessibility sizes the card would cover the
-                        // mail; it scrolls with it instead.
-                        if showsCard && typeSize.isAccessibilitySize {
-                            card.padding(.horizontal, 16).padding(.bottom, 14)
-                        }
                         if !state.attachments.isEmpty { attachments }
                         information
                     }
@@ -168,9 +163,14 @@ struct SendFeedbackSheet: View {
             try? await Task.sleep(for: .seconds(1.8))
             dismiss()
         }
-        #if !APP_STORE
-        .task { await model.app.feedbackServices.previewPrepare(model) }
-        #endif
+        .task {
+            // Opened during a start, the sheet attaches its start log once; the
+            // task runs again if the view is rebuilt, and the model remembers.
+            model.offerStartLog()
+            #if !APP_STORE
+            await model.app.feedbackServices.previewPrepare(model)
+            #endif
+        }
         .onDisappear { model.close() }
         .presentationSizing(.page)
     }
@@ -347,6 +347,7 @@ struct SendFeedbackSheet: View {
         case .screenshot: "camera.viewfinder"
         case .photo: "photo"
         case .video: "video.fill"
+        case .startLog: "doc.text.fill"
         case .file: "doc.fill"
         }
     }
@@ -357,6 +358,7 @@ struct SendFeedbackSheet: View {
         case .screenshot: Words.screenshot
         case .photo: LocalizedStringResource("Photo", table: "Feedback")
         case .video: LocalizedStringResource("Video", table: "Feedback")
+        case .startLog: Words.startLog
         case .file: LocalizedStringResource("File", table: "Feedback")
         }
     }
@@ -367,6 +369,7 @@ struct SendFeedbackSheet: View {
         case .screenshot: LocalizedStringResource("Remove screenshot", table: "Feedback")
         case .photo: LocalizedStringResource("Remove photo", table: "Feedback")
         case .video: LocalizedStringResource("Remove video", table: "Feedback")
+        case .startLog: LocalizedStringResource("Remove start log", table: "Feedback")
         case .file: LocalizedStringResource("Remove file", table: "Feedback")
         }
     }
@@ -425,7 +428,7 @@ struct SendFeedbackSheet: View {
 
     private var bar: some View {
         VStack(spacing: 10) {
-            if showsCard && !typeSize.isAccessibilitySize {
+            if showsCard {
                 card.transition(.move(edge: .bottom).combined(with: .opacity))
             }
             ViewThatFits(in: .horizontal) {
@@ -438,7 +441,6 @@ struct SendFeedbackSheet: View {
             .padding(.vertical, 6)
             .glassEffect(.regular, in: .capsule)
             .disabled(!state.mailAvailable)
-            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         }
         .frame(maxWidth: 560)
         .padding(.horizontal, 12)
@@ -522,7 +524,6 @@ struct SendFeedbackSheet: View {
         .disabled(!enabled)
         .accessibilityLabel(Text(Words.addPhotoOrFile))
         .accessibilityIdentifier("feedback-add")
-        .accessibilityShowsLargeContentViewer()
     }
 
     private func source(
@@ -538,7 +539,6 @@ struct SendFeedbackSheet: View {
         .accessibilityValue(value.map { Text($0) } ?? Text(verbatim: ""))
         .accessibilityHint(hint.map { Text($0) } ?? Text(verbatim: ""))
         .accessibilityIdentifier(id)
-        .accessibilityShowsLargeContentViewer()
     }
 
     /// The control that hands the mail to Mail. Its words shorten when the
@@ -572,7 +572,6 @@ struct SendFeedbackSheet: View {
         .disabled(!state.canSend)
         .accessibilityLabel(Text("Send feedback", tableName: "Feedback"))
         .accessibilityIdentifier("feedback-send")
-        .accessibilityShowsLargeContentViewer()
         .fixedSize()
     }
 
@@ -585,7 +584,8 @@ struct SendFeedbackSheet: View {
                 .foregroundStyle(Color.accentColor)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 8) {
-                if state.running {
+                switch state.tip {
+                case .running:
                     Text(
                         "For any bug, attach a bug report. It tells us what the virtual machine and the app were doing.",
                         tableName: "Feedback")
@@ -596,7 +596,21 @@ struct SendFeedbackSheet: View {
                         .controlSize(.small)
                         .disabled(!state.canMakeBugReport)
                         .accessibilityIdentifier("feedback-create-bug-report")
-                } else {
+                case .starting:
+                    // The virtual machine is starting, so there is nothing to
+                    // start: the log of the start is what goes with the mail.
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Reporting a slow start?", tableName: "Feedback")
+                            .font(.subheadline.weight(.semibold))
+                        Text(String(
+                            localized: "A bug report and a screenshot need the virtual machine to finish starting. The start log is attached.",
+                            table: "Feedback").keepingTogether)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .accessibilityElement(children: .combine)
+                case .home:
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Reporting a bug?", tableName: "Feedback")
                             .font(.subheadline.weight(.semibold))

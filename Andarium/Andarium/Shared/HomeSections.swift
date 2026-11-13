@@ -75,8 +75,7 @@ struct OptionRow<Control: View>: View {
             IconTile(symbol: symbol, color: dimmed ? .gray : .accentColor)
                 .opacity(dimmed ? 0.55 : 1)
             VStack(alignment: .leading, spacing: 1) {
-                // A long title wraps (a translation, or a large text size) rather
-                // than being cut.
+                // A long title (a translation) wraps rather than being cut.
                 Text(title)
                     .fixedSize(horizontal: false, vertical: true)
                     .opacity(dimmed ? 0.55 : 1)
@@ -187,11 +186,8 @@ extension VerticalAlignment {
 /// One row of the Virtual machine section: the icon tile, the title with one
 /// line under it, anything further under that line in the same column (a bar,
 /// a note), and the row's button at the end. The text column reads as one
-/// accessibility element; the button is the other. At accessibility text
-/// sizes the button moves under the text, which then has the whole width.
+/// accessibility element; the button is the other.
 struct SystemRow<Below: View>: View {
-    @Environment(\.dynamicTypeSize) private var typeSize
-
     let symbol: String
     let title: String
     let subtitle: String
@@ -202,14 +198,6 @@ struct SystemRow<Below: View>: View {
     @ViewBuilder var below: Below
 
     var body: some View {
-        Group {
-            if typeSize.isAccessibilitySize { stacked } else { inline }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-    }
-
-    private var inline: some View {
         HStack(alignment: .headerCenter, spacing: 12) {
             tile
             VStack(alignment: .leading, spacing: 8) {
@@ -221,22 +209,8 @@ struct SystemRow<Below: View>: View {
             .accessibilityElement(children: .combine)
             capsule
         }
-    }
-
-    private var stacked: some View {
-        HStack(alignment: .top, spacing: 12) {
-            tile
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 8) {
-                    heading
-                    below
-                }
-                .accessibilityElement(children: .combine)
-                capsule
-            }
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
     }
 
     private var tile: some View {
@@ -611,7 +585,6 @@ struct BackupSection: View {
                     get: { guest.includeInBackups },
                     set: { model.guest?.includeInBackups = $0 }
                 ))
-                .id("backup-row")
             } footer: {
                 BackupNote(host: model.host, hasSnapshots: model.snapshots.count > 0)
             }

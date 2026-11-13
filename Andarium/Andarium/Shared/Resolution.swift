@@ -100,7 +100,6 @@ struct ResolutionRow: View {
 struct ResolutionSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var draft: Int?
 
     var body: some View {
@@ -146,7 +145,7 @@ struct ResolutionSheet: View {
                 }
             }
         }
-        .presentationDetents(typeSize.isAccessibilitySize ? [.large] : [.height(height(of: choices))])
+        .presentationDetents([.height(height(of: choices))])
         .presentationSizing(FixedSheetSizing(width: 540, height: height(of: choices) + 10))
     }
 

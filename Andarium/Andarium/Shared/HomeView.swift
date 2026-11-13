@@ -464,8 +464,8 @@ struct WelcomeView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        // While the device is bent a half can be shorter than the column at an
-        // accessibility size: it scrolls only then.
+        // While the device is bent a half can be shorter than the column: it
+        // scrolls only then.
         column
             .scrollsWhenTall()
             .frame(maxWidth: .infinity, maxHeight: .infinity)

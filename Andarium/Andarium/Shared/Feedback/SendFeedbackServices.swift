@@ -38,6 +38,8 @@ struct SendFeedbackServices {
     var captureScreen: @MainActor (AppModel) -> UIImage? = { $0.driver?.captureGuestDisplay() }
     /// Seconds the virtual machine has run.
     var runningSeconds: @MainActor (AppModel) -> Int? = { $0.driver?.runningSeconds() }
+    /// The moment a file the sheet makes by itself is named for.
+    var now: @MainActor () -> Date = { Date() }
     #if !APP_STORE
     // The Simulator preview's hooks. The App Store product has neither the
     // properties nor the code that reads them.

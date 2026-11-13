@@ -10,7 +10,6 @@ import SwiftUI
 /// A tap opens the notes; the close button, or a swipe down, puts it away.
 /// Start stays where it always is and is never covered.
 struct WhatsNewRibbon: View {
-    @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
 
@@ -34,19 +33,13 @@ struct WhatsNewRibbon: View {
         HStack(spacing: 10) {
             Button(action: open) {
                 HStack(spacing: 12) {
-                    if !typeSize.isAccessibilitySize {
-                        WhatsNewDeck(symbol: entries.first?.symbol ?? "sparkles", count: entries.count)
-                            .accessibilityHidden(true)
-                    }
+                    WhatsNewDeck(symbol: entries.first?.symbol ?? "sparkles", count: entries.count)
+                        .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 1) {
                         HStack(spacing: 5) {
-                            // Left out at the accessibility sizes, as the
-                            // deck is: there it wraps the title.
-                            if !typeSize.isAccessibilitySize {
-                                Image(systemName: "sparkles")
-                                    .foregroundStyle(Color.accentColor)
-                                    .symbolEffect(.bounce, value: sparkle)
-                            }
+                            Image(systemName: "sparkles")
+                                .foregroundStyle(Color.accentColor)
+                                .symbolEffect(.bounce, value: sparkle)
                             Text("What\u{2019}s New")
                                 .foregroundStyle(.primary)
                         }
@@ -57,7 +50,6 @@ struct WhatsNewRibbon: View {
                     }
                     Spacer(minLength: 0)
                 }
-                .padding(.leading, typeSize.isAccessibilitySize ? 8 : 0)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -86,7 +78,7 @@ struct WhatsNewRibbon: View {
         .frame(minHeight: 52)
         // On a dark ground the tint needs more of the accent to read as jade.
         .glassEffect(
-            .regular.tint(Color.accentColor.opacity(colorScheme == .dark ? 0.42 : 0.24)).interactive(), in: shape)
+            .regular.tint(Color.accentColor.opacity(colorScheme == .dark ? 0.42 : 0.24)).interactive(), in: .capsule)
         .offset(y: pull)
         // A swipe that moves the ribbon is not also a tap on it.
         .highPriorityGesture(swipe)
@@ -105,28 +97,15 @@ struct WhatsNewRibbon: View {
         }
     }
 
-    private var shape: AnyShape {
-        typeSize.isAccessibilitySize
-            ? AnyShape(RoundedRectangle(cornerRadius: 26, style: .continuous)) : AnyShape(Capsule())
-    }
-
     /// The names on one line: all of them when they fit, else the first few
-    /// and how many more. At the accessibility sizes the line may wrap, onto
-    /// three lines at most, and names the most titles (three, or two when
-    /// there are more) that leave the count in view; the count alone is what
-    /// is left when not even one name does.
+    /// and how many more.
     @ViewBuilder private var summary: some View {
         let titles = entries.map { WhatsNewWords.localized($0.title) }
-        if typeSize.isAccessibilitySize {
-            let named = titles.count <= 3 ? titles.count : 2
-            WholeInThreeLines(candidates: (0...named).reversed().map { Self.summary(titles, naming: $0) })
-        } else {
-            ViewThatFits(in: .horizontal) {
-                ForEach(Array(stride(from: titles.count, through: 1, by: -1)), id: \.self) { named in
-                    Text(Self.summary(titles, naming: named)).lineLimit(1)
-                }
-                Text(Self.summary(titles, naming: 0)).lineLimit(1)
+        ViewThatFits(in: .horizontal) {
+            ForEach(Array(stride(from: titles.count, through: 1, by: -1)), id: \.self) { named in
+                Text(Self.summary(titles, naming: named)).lineLimit(1)
             }
+            Text(Self.summary(titles, naming: 0)).lineLimit(1)
         }
     }
 
@@ -199,39 +178,5 @@ struct WhatsNewDeck: View {
             IconTile(symbol: symbol)
         }
         .frame(width: 30 + CGFloat(behind) * Self.step, alignment: .leading)
-    }
-}
-
-/// Text whole on at most three lines: the first of `candidates`, fullest
-/// first, that is no taller than three lines at the width and size it is
-/// shown in, and the last, the shortest, when none is. `lineLimit` alone
-/// would cut the fullest one short and lose the end of it, which is the count.
-private struct WholeInThreeLines: View {
-    let candidates: [String]
-
-    var body: some View {
-        ThreeLines {
-            // Three lines of the fullest text set the room: in the font and
-            // language every candidate is shown in. It is never drawn.
-            Text(candidates[0]).lineLimit(3, reservesSpace: true).hidden()
-            ViewThatFits(in: .vertical) {
-                ForEach(candidates, id: \.self) { Text($0).fixedSize(horizontal: false, vertical: true) }
-            }
-        }
-    }
-}
-
-/// Lays out a hidden text that is three lines tall, then the content asked to
-/// fit that height, and is as tall as the content turns out to be.
-private struct ThreeLines: Layout {
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let room = subviews[0].sizeThatFits(ProposedViewSize(width: proposal.width, height: nil)).height
-        return subviews[1].sizeThatFits(ProposedViewSize(width: proposal.width, height: room))
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let room = subviews[0].sizeThatFits(ProposedViewSize(width: bounds.width, height: nil)).height
-        subviews[1].place(
-            at: bounds.origin, anchor: .topLeading, proposal: ProposedViewSize(width: bounds.width, height: room))
     }
 }
