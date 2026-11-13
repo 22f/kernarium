@@ -323,9 +323,11 @@ enum {
     /* Nothing was reported: the call did not write the report, as when it
      * returned an error, so a report the caller zeroed still holds this. */
     KERNARIUM_RUNTIME_GUEST_STORAGE_NOT_REPORTED = 0,
-    /* The guest ran sync(2) to its return and said so, in this call. A suspend
-     * never confirms the storage: the guest syncs on the way to suspend only
-     * while /sys/power/sync_on_suspend is set, and says nothing of it. */
+    /* The guest ran sync(2) to its return and said so, in this call: it
+     * answered the sync request, or its suspend reply stated that the
+     * suspend's own sync had returned. A suspend reply that says nothing of
+     * it, as an older kernel's, confirms nothing: the guest syncs on the way to
+     * suspend only while /sys/power/sync_on_suspend is set. */
     KERNARIUM_RUNTIME_GUEST_STORAGE_CONFIRMED = 1,
     /* No guest was running, so there was nothing to settle. */
     KERNARIUM_RUNTIME_GUEST_STORAGE_NO_GUEST = 2,
@@ -373,8 +375,8 @@ typedef int (*kernarium_runtime_sync_function)(kernarium_runtime_settle* settle)
  * trims its cold page cache once, enters full system suspend, then flushes
  * the host's own files. Pair it with resume. `settle` (nullable) reports
  * what the guest confirmed, as for sync, and whether it sleeps. The storage
- * is confirmed by the guest's reply to a writeback request of this call, never
- * by the suspend. A quiesce waits for a lifecycle call in progress, which is
+ * is confirmed by the guest's reply to a writeback request of this call, or by
+ * a suspend reply that states the suspend's own sync returned. A quiesce waits for a lifecycle call in progress, which is
  * itself bounded; each wait for the guest is bounded: the first writeback 2 s,
  * the trim 3 s, the suspend 10 s (4 s more to abort one that does not
  * answer) and a final writeback after a suspend that failed 1.5 s. Returns

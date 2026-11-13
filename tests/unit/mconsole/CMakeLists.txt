@@ -18,6 +18,11 @@ uml_add_unit_test(NAME guest-console-suspend-suspended-after-wake
 uml_add_unit_test(NAME guest-console-suspend-retry-deadline
     COMMAND uml_guest_console_tests suspend-retry-deadline
     LABELS console)
+# A suspend's reply states whether the suspend synced: only the two whole
+# texts do, and a kernel that says only "suspended" states nothing.
+uml_add_unit_test(NAME guest-console-suspend-statement
+    COMMAND uml_guest_console_tests suspend-statement
+    LABELS console)
 # A guest that reports itself busy is asked again for two seconds; any other
 # refusal, or one that stays busy, leaves it running with no stop.
 uml_add_unit_test(NAME guest-console-suspend-failure

@@ -80,7 +80,14 @@ constexpr std::string_view writebackDisabled = "sysrq s disabled";
 constexpr std::string_view syncAcknowledgementHead = "synced in ";
 constexpr std::string_view syncAcknowledgementTail = " ms";
 constexpr std::string_view unknownCommand = "Unknown command";
+/* The suspend's reply (arch/um/drivers/mconsole_kern.c
+ * um_suspend_notify_entered()) says whether the suspend's own sync returned.
+ * A kernel without the statement replies "suspended". Each text still holds
+ * the word an older host looks for, and only these two whole texts state
+ * anything: another that merely holds the word is no statement. */
 constexpr std::string_view suspendAcknowledgement = "suspended";
+constexpr std::string_view suspendSynced = "suspended, synced";
+constexpr std::string_view suspendNotSynced = "suspended, not synced";
 /* A guest reports a suspend it gave up with "Suspend failed: <errno>". EBUSY
  * (16) is the one a moment later can cure: a wake source fired while the guest
  * synced its filesystems, or another power transition held the lock. */
@@ -692,10 +699,16 @@ GuestWriteback request_guest_writeback(std::chrono::milliseconds wait,
 
 namespace {
 
-/* A guest that accepted a suspend: it said it reached the sleep boundary. */
-[[nodiscard]] GuestSuspension suspendAccepted(const std::string &response)
+/* A guest that accepted a suspend: it said it reached the sleep boundary,
+ * and a kernel with the statement said whether its sync returned. */
+[[nodiscard]] GuestSuspension suspendAccepted(const std::string &response,
+	GuestSuspendSync &sync)
 {
-	if (response.find(suspendAcknowledgement) == std::string::npos) {
+	if (response == suspendSynced) {
+		sync = GuestSuspendSync::synced;
+	} else if (response == suspendNotSynced) {
+		sync = GuestSuspendSync::skipped;
+	} else if (response.find(suspendAcknowledgement) == std::string::npos) {
 		std::fputs("Guest console returned an unexpected suspend reply\n",
 			stderr);
 	}
@@ -730,12 +743,13 @@ namespace {
  * anything else is unconfirmed, and its resume wakes it.
  */
 [[nodiscard]] GuestSuspension abortSuspend(
-	const GuestConsoleLocation &location, const Client &request)
+	const GuestConsoleLocation &location, const Client &request,
+	GuestSuspendSync &sync)
 {
 	std::string response;
 	switch (request.receive(response, std::chrono::milliseconds {0})) {
 	case ExchangeResult::accepted:
-		return suspendAccepted(response);
+		return suspendAccepted(response, sync);
 	case ExchangeResult::rejected:
 		return suspendRefused(response);
 	case ExchangeResult::notSent:
@@ -762,8 +776,11 @@ namespace {
 
 } // namespace
 
-GuestSuspension suspend_guest() noexcept
+GuestSuspension suspend_guest(GuestSuspendSync *sync) noexcept
 {
+	GuestSuspendSync stated = GuestSuspendSync::unstated;
+	if (sync != nullptr)
+		*sync = stated;
 	try {
 		std::lock_guard lock(consoleMutex);
 		const auto &location = guest_console_location();
@@ -810,21 +827,27 @@ GuestSuspension suspend_guest() noexcept
 				break;
 			ask();
 		}
+		GuestSuspension suspension = GuestSuspension::none;
 		switch (result) {
 		case ExchangeResult::accepted:
-			return suspendAccepted(response);
+			suspension = suspendAccepted(response, stated);
+			break;
 		case ExchangeResult::notSent:
-			return GuestSuspension::none;
+			break;
 		case ExchangeResult::rejected:
 			/* The guest refused, or kept refusing. */
-			return suspendRefused(response);
+			suspension = suspendRefused(response);
+			break;
 		case ExchangeResult::pending:
 		case ExchangeResult::malformed:
 			/* A reply that is no reply proves nothing: it is aborted like
 			 * silence. */
-			return abortSuspend(*location, *request);
+			suspension = abortSuspend(*location, *request, stated);
+			break;
 		}
-		return GuestSuspension::none;
+		if (sync != nullptr)
+			*sync = stated;
+		return suspension;
 	} catch (...) {
 		return GuestSuspension::none;
 	}

@@ -717,9 +717,11 @@ are unavailable.
 
 Each of the three calls reports what the guest confirmed through a nullable
 `uml_emulator_settle`, and whether it sleeps. The guest's storage is confirmed
-only by its own reply to a `sync` request made in that call. A suspend never
-confirms it: the kernel syncs on the way to suspend only while the guest's
-`sync_on_suspend` is set, and its reply says nothing of that. Otherwise there
+only by an explicit statement of its own in that call: its reply to a `sync`
+request, or a suspend reply that states the suspend's own sync returned
+(`suspended, synced`). A suspend reply without the statement, as every older
+kernel's, confirms nothing: the kernel syncs on the way to suspend only while
+the guest's `sync_on_suspend` is set. Otherwise there
 was no guest, or the storage is unconfirmed (no reply in time, a busy lifecycle
 call or console, or a kernel that only started a writeback), refused, or
 unreachable (its console could not be bound). Only confirmed and no-guest are

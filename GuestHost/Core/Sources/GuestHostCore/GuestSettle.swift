@@ -16,8 +16,10 @@ public struct GuestSettle: Equatable, Sendable {
         /// Nothing was reported: the call did not fill the report, as when it
         /// failed.
         case notReported = 0
-        /// The guest ran sync(2) to its return and said so, in that call. A
-        /// suspend never confirms the storage.
+        /// The guest ran sync(2) to its return and said so, in that call: it
+        /// answered the sync request, or its suspend reply stated that the
+        /// suspend's own sync had returned. A suspend reply that says nothing
+        /// of it confirms nothing.
         case confirmed = 1
         /// No guest was running: there was nothing to settle.
         case noGuest = 2

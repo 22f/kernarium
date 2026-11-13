@@ -23,6 +23,20 @@ enum class GuestSuspension {
 	unconfirmed,
 };
 
+/* What the guest's reply to a suspend said about the suspend's own sync of
+ * its filesystems. */
+enum class GuestSuspendSync {
+	/* No statement: a kernel older than the statement, or a reply that is not
+	 * exactly one of the two below. Nothing is confirmed. */
+	unstated,
+	/* "suspended, synced": the guest ran sync(2) for this suspend and it had
+	 * returned before the reply. */
+	synced,
+	/* "suspended, not synced": the guest did not sync for this suspend, as
+	 * with its sync_on_suspend off. */
+	skipped,
+};
+
 /*
  * UML's own management console is the only channel that reaches the guest
  * kernel while it runs, and the only way to make it write back pages it has
@@ -136,11 +150,14 @@ enum class GuestWriteback {
  * that fails.
  *
  * The returned mode records whether the wake request is required. The guest
- * replies to a suspend request once it has reached the sleep boundary. That
- * says nothing about its storage: the kernel syncs its filesystems on the way
- * only while its sync_on_suspend is set, so a caller that needs the storage
- * written back asks for it with request_guest_writeback and takes the answer
- * from that. The whole request, its busy retries included, has one ten-second
+ * replies to a suspend request once it has reached the sleep boundary, and a
+ * kernel with the statement says in the reply whether the suspend synced its
+ * filesystems: `sync`, if not null, receives it, and it is unstated for every
+ * other outcome. The kernel syncs on the way only while its sync_on_suspend is
+ * set, and before it freezes tasks, so the statement covers what was dirty
+ * then. A caller that needs the storage written back asks for it with
+ * request_guest_writeback as well, and takes a kernel's silence as nothing
+ * confirmed. The whole request, its busy retries included, has one ten-second
  * deadline from the first send. A guest that reports itself busy (EBUSY) is
  * asked again every 250 ms for two seconds while the deadline leaves time for
  * the answer. Any other refusal, or a busy guest that stays busy, logs that the
@@ -156,7 +173,8 @@ enum class GuestWriteback {
  * no request reached the console. Resuming is best effort and reports nothing,
  * wakes a system or unconfirmed guest, and sends nothing for none.
  */
-[[nodiscard]] GuestSuspension suspend_guest() noexcept;
+[[nodiscard]] GuestSuspension suspend_guest(
+	GuestSuspendSync *sync = nullptr) noexcept;
 void resume_guest(GuestSuspension suspension) noexcept;
 
 /*
