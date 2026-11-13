@@ -1098,7 +1098,7 @@ final class AppModel {
     /// `finished` does not run for a cancelled operation.
     func runOperation<Output: Sendable>(
         _ state: BusyState, failure: String,
-        ending: ((Output) -> (title: String, detail: String))? = nil,
+        ending: ((Output) -> BusyWords)? = nil,
         failed: (@MainActor (String) -> Void)? = nil,
         _ work: @escaping @MainActor (@escaping @Sendable (BusyUpdate) -> Void) async throws -> Output,
         finished: @escaping @MainActor (Output) -> Void = { _ in }
@@ -1137,7 +1137,7 @@ final class AppModel {
             operation = nil
             if let ending, let result {
                 let words = ending(result)
-                busy = ended(title: words.title, detail: words.detail, failed: false)
+                busy = ended(title: words.title, detail: words.detail, style: words.style)
             } else if ending != nil, let failureWords {
                 busy = ended(title: failure, detail: failureWords, failed: true)
             } else {
@@ -1152,9 +1152,13 @@ final class AppModel {
     /// The overlay of an operation that is over: how it ended, and the button
     /// that closes it.
     private func ended(title: String, detail: String, failed: Bool) -> BusyState {
+        ended(title: title, detail: detail, style: failed ? .failure : .success)
+    }
+
+    private func ended(title: String, detail: String, style: BusyResult.Style) -> BusyState {
         BusyState(
             title: title, detail: detail,
-            result: BusyResult(failed: failed, dismiss: BusyCancel { [weak self] in self?.busy = nil })
+            result: BusyResult(style: style, dismiss: BusyCancel { [weak self] in self?.busy = nil })
         )
     }
 
@@ -1340,22 +1344,7 @@ final class AppModel {
         runOperation(
             BusyState(title: String(localized: "Installing app"), detail: detail, progress: 0),
             failure: Self.installFailure,
-            ending: { (outcome: ApkInstallOutcome) in
-                switch outcome {
-                case .installed:
-                    (title: String(localized: "App installed"), detail: String(localized: "\(name) is installed in the virtual machine."))
-                case .installedWithoutData:
-                    (
-                        title: String(localized: "App installed"),
-                        detail: String(localized: "\(name) is installed in the virtual machine, but not all of its data files were copied. The app may not work without them. Install the file again to copy them.")
-                    )
-                case .installedDataNotPlaced:
-                    (
-                        title: String(localized: "App installed"),
-                        detail: String(localized: "\(name) is installed in the virtual machine, but not all of its data files were copied. The app may not work without them.")
-                    )
-                }
-            },
+            ending: { (outcome: ApkInstallOutcome) in outcome.words(fileName: name) },
             { [driver] update in
                 defer { endAccess() }
                 let outcome = try await self.installAskingAboutLegacyApps(detail: detail) { bypass, update in

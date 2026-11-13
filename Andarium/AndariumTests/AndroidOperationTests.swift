@@ -2,6 +2,7 @@
 import AndariumCore
 import AndariumCoreTestSupport
 import Foundation
+import SwiftUI
 import Testing
 @testable import Andarium
 
@@ -383,7 +384,7 @@ struct AndroidOperationTests {
         // The app is in, so the person is told what the cancel left: the result, not a vanished overlay.
         #expect(await eventually { model.busy?.result != nil })
         let busy = try #require(model.busy)
-        #expect(busy.title == "App installed" && busy.result?.failed == false)
+        #expect(busy.title == "App installed, some data missing" && busy.result?.style == .warning)
         #expect(busy.detail.hasSuffix("is installed in the virtual machine, but not all of its data files were copied. The app may not work without them. Install the file again to copy them."))
         #expect(model.alert == nil)
     }
@@ -396,9 +397,9 @@ struct AndroidOperationTests {
         model.installPicked(url)
         #expect(await eventually { model.busy?.result != nil })
         let busy = try #require(model.busy)
-        #expect(busy.title == "App installed")
+        #expect(busy.title == "App installed, some data missing")
         #expect(busy.detail.hasSuffix("is installed in the virtual machine, but not all of its data files were copied. The app may not work without them. Install the file again to copy them."))
-        #expect(busy.result?.failed == false)
+        #expect(busy.result?.style == .warning && busy.result?.failed == false)
         busy.result?.dismiss.action()
         #expect(model.busy == nil)
     }
@@ -411,11 +412,46 @@ struct AndroidOperationTests {
         model.installPicked(url)
         #expect(await eventually { model.busy?.result != nil })
         let busy = try #require(model.busy)
-        #expect(busy.title == "App installed")
+        #expect(busy.title == "App installed, some data missing")
         #expect(busy.detail.hasSuffix("is installed in the virtual machine, but not all of its data files were copied. The app may not work without them."))
-        #expect(busy.result?.failed == false)
+        #expect(busy.result?.style == .warning && busy.result?.failed == false)
         busy.result?.dismiss.action()
         #expect(model.busy == nil)
+    }
+
+    /// The three ways an install ends are three presentations: the plain check, the warning for an app that
+    /// is in with some of its data missing (both of its outcomes), and the failure.
+    @Test func anInstallEndsAsASuccessAWarningOrAFailureAndTheyLookDifferent() async throws {
+        var styles: [BusyResult.Style] = []
+        var titles: [String] = []
+        for outcome in [ApkInstallOutcome.installed, .installedWithoutData, .installedDataNotPlaced] {
+            let (model, driver) = running()
+            driver.installOutcome = outcome
+            let url = try apk(named: "Game.xapk")
+            defer { try? FileManager.default.removeItem(at: url) }
+            model.installPicked(url)
+            #expect(await eventually { model.busy?.result != nil })
+            let busy = try #require(model.busy)
+            styles.append(try #require(busy.result?.style))
+            titles.append(busy.title)
+        }
+        #expect(styles == [.success, .warning, .warning])
+        #expect(titles == ["App installed", "App installed, some data missing", "App installed, some data missing"])
+        // A refusal is the failure.
+        let (model, driver) = running()
+        driver.install = { _ in throw AdbFailure(message: PackageInstallMessages.message(forCode: "FAILED_VERSION_DOWNGRADE")) }
+        let url = try apk(named: "a.apk")
+        defer { try? FileManager.default.removeItem(at: url) }
+        model.installPicked(url)
+        #expect(await eventually { model.busy?.result != nil })
+        #expect(model.busy?.result?.style == .failure)
+        // The words of an outcome say the same on their own, and the card draws the three differently.
+        #expect(ApkInstallOutcome.installed.words(fileName: "x").style == .success)
+        #expect(ApkInstallOutcome.installedWithoutData.words(fileName: "x").style == .warning)
+        #expect(ApkInstallOutcome.installedDataNotPlaced.words(fileName: "x").style == .warning)
+        let drawn = [BusyResult.Style.success, .warning, .failure].map { (BusyOverlay.symbol(for: $0), BusyOverlay.color(for: $0)) }
+        #expect(drawn[0].0 == "checkmark.circle.fill" && drawn[1].0 == "exclamationmark.triangle.fill" && drawn[2].0 == "exclamationmark.triangle.fill")
+        #expect(drawn[1].1 == .orange && drawn[2].1 == .red && drawn[0].1 != drawn[1].1 && drawn[1].1 != drawn[2].1)
     }
 
     @Test func cancellingTheInstallLeavesNoResultAndNoAlert() async throws {

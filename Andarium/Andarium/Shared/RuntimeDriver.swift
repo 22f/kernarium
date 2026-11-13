@@ -18,10 +18,35 @@ struct BusyCancel: Equatable {
 /// How an operation ended, when its overlay stays up to say so until the
 /// person closes it.
 struct BusyResult: Equatable {
-    /// The operation did not do what was asked.
-    var failed: Bool
+    /// How the card presents the end: the operation did what was asked (a
+    /// check), did it but not all of it (a warning, in the colour the app's
+    /// cautions have), or did not do it (a failure).
+    enum Style: Equatable {
+        case success, warning, failure
+    }
+
+    var style: Style
     /// Closes the overlay.
     let dismiss: BusyCancel
+
+    /// The operation did not do what was asked.
+    var failed: Bool { style == .failure }
+
+    init(style: Style, dismiss: BusyCancel) {
+        self.style = style
+        self.dismiss = dismiss
+    }
+
+    init(failed: Bool, dismiss: BusyCancel) {
+        self.init(style: failed ? .failure : .success, dismiss: dismiss)
+    }
+}
+
+/// The words an operation ends with on its card, and how the card presents them.
+struct BusyWords: Equatable {
+    var title: String
+    var detail: String
+    var style = BusyResult.Style.success
 }
 
 /// A long task the screens wait for: creating or erasing a guest, or one of

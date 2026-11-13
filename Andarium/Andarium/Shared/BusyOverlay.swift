@@ -83,12 +83,27 @@ struct BusyOverlay: View {
         }
     }
 
+    /// A check for what was done, the app's caution symbol in its caution colour for what was done in part,
+    /// and the same symbol in red for what was not done.
+    static func symbol(for style: BusyResult.Style) -> String {
+        style == .success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+    }
+
+    static func color(for style: BusyResult.Style) -> Color {
+        switch style {
+        case .success: Color.accentColor
+        case .warning: Color.orange
+        case .failure: Color.red
+        }
+    }
+
     @ViewBuilder
     private func ended(_ result: BusyResult, scrolls: Bool) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Image(systemName: result.failed ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+            // The symbol is decorative: the title says it, as the app's other cautions do.
+            Image(systemName: Self.symbol(for: result.style))
                 .font(.title3)
-                .foregroundStyle(result.failed ? Color.red : Color.accentColor)
+                .foregroundStyle(Self.color(for: result.style))
                 .accessibilityHidden(true)
             Text(state.title.keepingTogether)
                 .font(.title3.weight(.bold))

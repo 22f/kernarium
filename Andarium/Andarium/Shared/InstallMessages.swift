@@ -109,6 +109,31 @@ nonisolated enum ApkInstallOutcome: Equatable, Sendable {
     case installedDataNotPlaced
 }
 
+extension ApkInstallOutcome {
+    /// What the install's card says, and how it presents it. An app that is in
+    /// with some of its data not copied is a warning, with a title of its own, so
+    /// that it is not taken for a plain success.
+    func words(fileName name: String) -> BusyWords {
+        switch self {
+        case .installed:
+            BusyWords(title: String(localized: "App installed"), detail: String(localized: "\(name) is installed in the virtual machine."))
+        case .installedWithoutData:
+            BusyWords(
+                title: Self.warningTitle,
+                detail: String(localized: "\(name) is installed in the virtual machine, but not all of its data files were copied. The app may not work without them. Install the file again to copy them."),
+                style: .warning)
+        case .installedDataNotPlaced:
+            BusyWords(
+                title: Self.warningTitle,
+                detail: String(localized: "\(name) is installed in the virtual machine, but not all of its data files were copied. The app may not work without them."),
+                style: .warning)
+        }
+    }
+
+    /// The title of the card of an install whose app is in but whose data is not all there.
+    static var warningTitle: String { String(localized: "App installed, some data missing") }
+}
+
 /// The package manager refused an app for the version of Android it was built
 /// for, and the first attempt is over: Settings' Install APK asks the person
 /// before it sends the file again. Carries the ordinary failure words, so a

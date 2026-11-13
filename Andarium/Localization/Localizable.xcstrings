@@ -1926,6 +1926,29 @@
         }
       }
     },
+    "App installed, some data missing" : {
+      "comment" : "Title of the card an install ends on when the app is in but some of its data files (an OBB file of an .xapk or .apkm, say) were not copied or are not copied at all. It shows with a warning symbol, in place of \"App installed\", so that it is not taken for a plain success.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "データの一部なしでインストールしました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "应用已安装，部分数据缺失"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "應用程式已安裝，部分資料缺失"
+          }
+        }
+      }
+    },
     "App not installed" : {
       "localizations" : {
         "ja" : {
