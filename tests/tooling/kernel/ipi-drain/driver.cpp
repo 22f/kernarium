@@ -24,6 +24,7 @@
 #include <vector>
 
 extern "C" {
+#include "irq.h"
 void os_init_smp(void);
 void os_idle_sleep(void);
 int os_send_ipi(int cpu, int vector);
@@ -122,7 +123,13 @@ void darwin_release_embedded_thread(void) {}
 void darwin_timer_kernel_checkpoint(void) {}
 int darwin_irq_idle_begin(void) { return 0; }
 void darwin_irq_idle_end(void) {}
-int darwin_irq_dispatch(int, unsigned long long, struct uml_pt_regs *) { return 0; }
+// The dispatch before the wait is a call's first in a cycle, the one after the
+// wait its second. A result of DARWIN_IRQ_HANDLED says it collected an edge.
+static std::atomic<int> dispatch_calls{0};
+static int first_dispatch_result = 1;
+int darwin_irq_dispatch(int, unsigned long long, struct uml_pt_regs *) {
+	return dispatch_calls++ == 0 ? first_dispatch_result : 1;
+}
 int os_set_fd_block(int fd, int blocking) {
 	int flags = fcntl(fd, F_GETFL);
 	return fcntl(fd, F_SETFL, blocking ? flags & ~O_NONBLOCK : flags | O_NONBLOCK);
@@ -157,6 +164,7 @@ static Cycle cycle(double deadline_ms) {
 	handled.clear();
 	timer_fired = false;
 	polls = reads = selects = 0;
+	dispatch_calls = 0;
 	long long start = os_nsecs();
 	tracked = true;
 	os_idle_sleep();
@@ -185,6 +193,22 @@ int main() {
 		Cycle c = cycle(2);
 		std::printf("deadline wake: %.2f ms, polls %d, reads %d\n", c.ms, c.polls, c.reads);
 		assert(quiet(c, 2));
+	}
+	// A dispatch before the wait that ran the handlers of an edge may have made
+	// a task runnable on this CPU, and the idle loop reads the flag that says
+	// so only when the wait returns: the wait must not sleep. One that found
+	// nothing leaves the wait to sleep until its deadline.
+	first_dispatch_result = DARWIN_IRQ_HANDLED;
+	{
+		Cycle c = cycle(300);
+		std::printf("handled edge before the wait: %.2f ms\n", c.ms);
+		assert(c.ms < 150 && !c.timer);
+	}
+	first_dispatch_result = 1;
+	assert(quiet(cycle(2), 2));
+	{
+		Cycle c = cycle(100);
+		assert(c.timer && c.ms >= 50);
 	}
 	// So does a wake by the host's stop descriptor, which is not the pipe.
 	assert(write(stop_pipe[1], "s", 1) == 1);
