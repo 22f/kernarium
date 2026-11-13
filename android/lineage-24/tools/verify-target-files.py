@@ -657,6 +657,13 @@ WIFI_HAL_DEBUG_PROPERTY_READ = re.compile(
     rb"\(file \([^)]*\bread\b[^)]*\)\)\)$",
     re.MULTILINE,
 )
+# The camera HAL uses the display composer's file descriptors: the present fence that a preview buffer
+# comes back with once an activity covers its surface (overlay/sepolicy/vendor/hal_camera_default.te).
+CAMERA_HAL_COMPOSER_FENCE = re.compile(
+    rb"^\(allow hal_camera_default(?:_[0-9]{6})? hal_graphics_composer(?:_[0-9]{6})? "
+    rb"\(fd \([^)]*\buse\b[^)]*\)\)\)$",
+    re.MULTILINE,
+)
 # adbd reports its host in this property and init holds a userspace wakelock while
 # it is 1 (adbd's p0011 topic, overlay/config/init.vendor.rc,
 # overlay/sepolicy/system_ext/private). The property is system-owned: adbd is a core
@@ -3923,6 +3930,8 @@ def check_kernel_policy(
         fail("vendor policy does not let the audio HAL processes call each other's binder")
     if not WIFI_HAL_DEBUG_PROPERTY_READ.search(vendor_policy):
         fail("vendor policy does not let the Wi-Fi HAL read persist_vendor_debug_wifi_prop")
+    if not CAMERA_HAL_COMPOSER_FENCE.search(vendor_policy):
+        fail("vendor policy does not let the camera HAL use the display composer's file descriptors")
     check_clearkey_memfd_policy(vendor_policy)
     check_userdata_grow_policy(vendor_policy)
     check_network_setup_policy(
