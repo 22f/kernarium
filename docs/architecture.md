@@ -557,11 +557,12 @@ because the connection has ended and a reset's unmaps are all that is left, the
 wait has a budget of ten seconds (`backendAcknowledgementBound`). Its own polls
 spend it, each at most the interval it asked for plus 25 ms, not the clock: an
 interval in which the whole process could not run, as for an application the
-system suspended, costs one poll, and an awake front-end that stays silent gets
-ten seconds of real time. A frame received during such a wait, from either
-socket, has the same time from its first byte, within the wait's budget when it
-has one; ordinary request reception is not timed. Past that the wait fails, says
-so on stderr, and closes the backend-request channel: nothing a late
+system suspended, costs one poll. An awake front-end that stays silent gets ten
+seconds of charged poll time; real time is longer by the work between polls and
+by an overrun beyond a poll's cap. A frame received during such a wait, from
+either socket, has the same time from its first byte, within the wait's budget
+when it has one; ordinary request reception is not timed. Past that the wait
+fails, says so on stderr, and closes the backend-request channel: nothing a late
 acknowledgement would release is written, the reset or the connection ends
 without the unmaps it can no longer wait for, and the guest's driver drops the
 device. A wait that nothing waits behind, such as a notification a suspended
