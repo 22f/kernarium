@@ -541,6 +541,7 @@ final class SendFeedbackModel {
         fileCancellation?.cancel()
         app.busyOverSheet = false
         app.feedbackSheetOpen = false
+        app.feedbackFromBoot = false
         cleanUp()
     }
 

@@ -951,8 +951,9 @@ typedef int (*kernarium_runtime_plan_camera_reserve_function)(
     kernarium_runtime_camera_reserve* reserve);
 
 /* The level the system's memory pressure source reported to the host (runtime
- * API 41). The host frees what it can get back cheaply at a warning or a
- * critical level (docs/architecture.md, "Memory pressure"). */
+ * API 41). At a warning the host turns on the guest's page-cache trimmer, and
+ * at a critical level it also frees what it can get back at once
+ * (docs/architecture.md, "Memory pressure"). */
 enum {
     KERNARIUM_RUNTIME_MEMORY_PRESSURE_NORMAL = 0,
     KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING = 1,
@@ -961,31 +962,36 @@ enum {
 
 /* What the host does about that level. */
 enum {
-    /* The normal level: nothing to do. */
+    /* The normal level: no response starts (the guest's trimmer is turned
+     * off). */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_NONE = 0,
-    /* The host starts a response now: it frees its graphics caches and asks
-     * the guest to trim its page cache, which can take seconds. */
+    /* The host starts a response now. A warning turns on the guest's gradual
+     * page-cache trimmer, which asks the guest for one short message; a
+     * critical level frees the host's graphics caches and asks the guest to
+     * trim all of its page cache, which can take seconds. */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED = 1,
-    /* A warning less than 30 s after the last response began: the host does
-     * nothing for it. */
+    /* A warning less than 30 s after the last response began: no response
+     * starts for it (the guest's trimmer is still turned on if it is off). */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_WITHHELD = 2,
-    /* A response is already running and covers this level. The system delivers
-     * its notifications one at a time, each after the response of the one
-     * before, so this is rare: it is the policy's answer to a level that meets
-     * a running response. */
+    /* A response is already running, and this level starts none: a higher
+     * level that meets it is neither queued nor added to it, and a running
+     * warning's response is not upgraded. The host handles the notifications
+     * one at a time, each after the response of the one before, so this is
+     * rare. */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_UNDER_WAY = 3,
 };
 
 /* `level` is a KERNARIUM_RUNTIME_MEMORY_PRESSURE_ value and `response` a
  * KERNARIUM_RUNTIME_MEMORY_RESPONSE_ value. It is called once for each
  * notification the system delivers while a guest runs, the repeats and the
- * return to NORMAL included, as soon as the host has decided what it does and
+ * return to NORMAL included (also the host's own return to NORMAL after a long
+ * quiet, for a system that never delivers it), as soon as the host has decided
+ * what it does and
  * before it starts the work for that notification (a response can take
- * seconds), in the order delivered. The system delivers one notification at a
- * time and merges the levels raised while it is handled into the next, which
- * reports the most serious of them: a level raised during a response is
- * reported after the response, and one that a more serious level replaced is
- * not reported. It carries no figures. It runs on a runtime thread and must
+ * seconds), in the order delivered. The host handles the notifications one at a
+ * time: a level raised during a response is reported after the response, and
+ * one that the system itself merged with others is reported as the most
+ * serious of them. It carries no figures. It runs on a runtime thread and must
  * return promptly. */
 typedef void (*kernarium_runtime_memory_pressure_callback)(
     void* context,

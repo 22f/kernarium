@@ -12,48 +12,78 @@ namespace uml::runtime {
 /*
  * What the host gives back when the system says it is short of memory.
  *
- * The system's memory pressure source reports three levels. At the normal
- * level nothing is done. At a warning or a critical level the host releases
- * what it can get back cheaply, in two parts:
+ * The system's memory pressure source reports three levels. A warning takes
+ * nothing a person could notice, and a critical level takes what it can get
+ * back at once:
  *
- *   - the host GPU's cached driver allocations, the reclaim the GPU device
- *     already runs before it refuses a reservation (platform/
- *     gpu_cache_reclaim.hpp); and
- *   - one trim of the guest's page cache, which unwires those pages and takes
+ *   - a warning turns the guest's own page-cache trimmer on (TrimKind::
+ *     gradual_on): it trims the cold file cache in small passes a few seconds
+ *     apart and backs off while the pages it took are read back. The host sends
+ *     the request and does not wait for the guest's answer. The normal level
+ *     turns the trimmer off, unless the application asked for it
+ *     (uml_emulator_set_page_cache_trimming).
+ *   - a critical level frees the host GPU's cached driver allocations
+ *     (platform/gpu_cache_reclaim.hpp) and has the guest trim all of its cold
+ *     page cache once (TrimKind::once), which unwires those pages and takes
  *     them out of the process's footprint, the only memory the iOS compressor
- *     cannot shrink (guest RAM is wired while committed).
+ *     cannot shrink (guest RAM is wired while committed), and leaves the
+ *     gradual trimmer on while the pressure lasts.
+ *
+ * The gradual trimmer is on exactly while the last level is not normal. The
+ * interval below limits the responses and their report, not that state: a
+ * warning it withholds still asks for the trimmer to be on (the request is
+ * free where the guest runs as asked), and any level but normal cancels a
+ * pending request to turn it off.
+ *
+ * The system need not say when the pressure ends (an iPad's source never
+ * delivered the normal level after a critical one). The level the response
+ * holds therefore returns to normal by itself when the source has delivered
+ * no level other than normal for `PressureTiming::quiet_period_ns`, on the
+ * clock of PressureActions::now_ns (which stops while the device sleeps, not
+ * while the process alone is suspended): on_retry() makes the return, the same
+ * way the normal level does, and says so on its level line. A process
+ * suspended for longer than the period meets the return at its resume, which
+ * asks the trimmer off and nothing else; a level still present is delivered
+ * again. A delivered normal level ends the period at once.
  *
  * A warning starts at most one response per `warn_interval_ns`, counted from
  * the start of the last response of either level, on the clock of
  * PressureActions::now_ns. A critical level always starts one. No response
- * starts while one is running: the event is dropped and counted, since the
- * running trim has the guest hand over all its cold page cache. The
- * translation caches, the guest's RAM and every camera or other session are
- * not touched.
+ * starts while one is running: the event is dropped and counted, a higher level
+ * is not queued and a running warning's response is not upgraded. The
+ * translation caches, the guest's RAM and
+ * every camera or other session are not touched.
  *
- * The guest trim is skipped, with no retry, for a guest the host has
- * quiesced (it trimmed the guest when it did, and a trim would wake it) and
- * for one with no console. When another lifecycle call of the guest is in
- * progress (TrimOutcome::busy) the response keeps one trim pending and tries
+ * The guest requests are skipped, with no retry, for a guest the host has
+ * quiesced (it trimmed the guest when it did, and a request would wake it; the
+ * gradual trimmer's state is kept for the resume) and for one with no console
+ * (TrimOutcome::unreachable), except that a gradual request that could not be
+ * written is tried again. When another lifecycle call of the guest is in
+ * progress (TrimOutcome::busy) the response keeps one request pending and tries
  * it again after `PressureTiming::retry_interval_ns`, up to `retry_attempts`
  * times: on_retry() runs it, and the next response (which tries for itself) or
- * the normal level replaces or ends it. A retry never changes when a warning may start.
+ * the normal level replaces or ends it. A trim of all the cache that was tried
+ * again and went through is followed by the gradual trimmer's request, with
+ * attempts of its own and without repeating the trim. A retry never changes
+ * when a warning may start.
  *
  * Each event the system raises is also reported to the application, once and
  * as soon as the response has decided what it does with it (PressureReport):
  * the level, and whether a response starts, is withheld by the interval or is
- * already running. The report comes before the response's work, which can
- * take seconds, and the normal level is reported too, so that an application
- * that shows the pressure can show its end. It carries no figures.
+ * already running. The report is made by the call that handles the event,
+ * before that response's work, and the system's watch makes those calls one at
+ * a time in the order the events arrived. The normal level is reported too, so
+ * that an application that shows the pressure can show its end. It carries no
+ * figures.
  *
  * Each change of the level and each response (or its last retry) is one line
  * on stderr (the console of both applications). A level line carries the level
- * and the footprint; a response line the footprint before and after, the
- * bytes each part released and the trim's duration. Every line carries the
- * count of guest RAM wiring operations that failed (the first sign of a system
- * that is short). Each kind of line is rate limited, so that a storm of
- * events cannot flood the console; the next line that passes says how many
- * were left out.
+ * and the footprint; a critical response line the footprint before and after,
+ * the bytes each part released and the trim's duration, and a warning's the
+ * state of the gradual trimmer. Every line carries the count of guest RAM
+ * wiring operations that failed (the first sign of a system that is short).
+ * Each kind of line is rate limited, so that a storm of events cannot flood the
+ * console; the next line that passes says how many were left out.
  *
  * MemoryPressureResponse is the policy and holds no thread, clock or system
  * call: it reads and acts through PressureActions, so a test drives it with a
@@ -79,15 +109,21 @@ enum class PressureLevel : std::uint8_t {
 /* What the response does about a level the system has just reported, decided
  * before it does it. */
 enum class PressureReaction : std::uint8_t {
-	/* The normal level: nothing is done. */
+	/* The normal level: no response starts (the gradual trimmer is turned
+	 * off). */
 	none = 0,
-	/* A response starts: the host frees what it can and asks the guest to
-	 * trim its page cache. */
+	/* A response starts: a warning turns the guest's gradual trimmer on, a
+	 * critical level frees the graphics caches and has the guest trim all of
+	 * its page cache. */
 	responding = 1,
 	/* A warning, and the last response began less than `warn_interval_ns`
-	 * ago: nothing is done for it. */
+	 * ago: no response starts for it. The gradual trimmer is still asked to
+	 * be on. */
 	withheld = 2,
-	/* A response is running and covers this event. */
+	/* A response is running (or being tried again) and this event starts none
+	 * of its own: a critical level that meets a running warning's response is
+	 * not upgraded. The system delivers its notifications one at a time, each
+	 * after the response of the one before, so this does not arise from it. */
 	underway = 3,
 };
 
@@ -104,8 +140,11 @@ struct PressureReport final {
 
 /* How the guest's page-cache trim ended. */
 enum class TrimOutcome : std::uint8_t {
-	/* The guest trimmed. */
+	/* The guest trimmed, or already ran as asked. */
 	done,
+	/* Sent, and its answer was not waited for (the gradual trimmer's two
+	 * short requests). */
+	sent,
 	/* Sent, and the guest had not finished within the bound. */
 	unanswered,
 	/* Sent, and the guest refused it, as a kernel without the command does. */
@@ -121,6 +160,19 @@ enum class TrimOutcome : std::uint8_t {
 };
 
 [[nodiscard]] std::string_view trim_outcome_name(TrimOutcome outcome) noexcept;
+
+/* What a guest trim asks of the guest. */
+enum class TrimKind : std::uint8_t {
+	/* All of the cold page cache and the free memory, now, and the reply is
+	 * waited for, bounded ("trim once"). */
+	once,
+	/* The guest's periodic trimmer on ("trim on"): the request is one short
+	 * message that is not waited for, and the trimming is the guest's, in small
+	 * passes that back off while what they took is read back. */
+	gradual_on,
+	/* The periodic trimmer off ("trim off"). */
+	gradual_off,
+};
 
 /* What the response reads of the process at one moment. */
 struct PressureFigures final {
@@ -147,8 +199,9 @@ public:
 	/* Frees the host GPU's cached driver allocations; returns how many it
 	 * freed, 0 with no GPU. */
 	[[nodiscard]] virtual std::uint64_t reclaim_gpu() noexcept = 0;
-	/* Has the guest trim its page cache and waits for it, bounded. */
-	[[nodiscard]] virtual TrimOutcome trim_page_cache() noexcept = 0;
+	/* Asks the guest for `kind` of trim. "Once" waits for the trim, bounded;
+	 * the gradual trimmer's requests wait for nothing. */
+	[[nodiscard]] virtual TrimOutcome trim_page_cache(TrimKind kind) noexcept = 0;
 	/* One line, without its newline. */
 	virtual void log(std::string_view line) noexcept = 0;
 	/* Tells the application what the system reported and what the host does
@@ -164,6 +217,11 @@ struct PressureTiming final {
 	std::uint64_t retry_interval_ns = 1'000'000'000ULL;
 	/* How many times a busy trim is tried again; 0 for never. */
 	unsigned retry_attempts = 4;
+	/* How long the source must deliver no level but the normal one for the
+	 * response to return to normal itself; 0 for never. Three times the longest
+	 * gap seen between two critical levels of one episode (78 s, on an iPad,
+	 * where the normal level never came). */
+	std::uint64_t quiet_period_ns = 240'000'000'000ULL;
 };
 
 class MemoryPressureResponse final {
@@ -190,6 +248,8 @@ public:
 		busy,
 		/* on_retry() ran the pending guest trim again. */
 		retried,
+		/* on_retry() returned the level to normal after the quiet period. */
+		quiet,
 	};
 
 	explicit MemoryPressureResponse(PressureActions &actions,
@@ -210,10 +270,16 @@ public:
 	 * caller runs on_retry() that long after each call that may leave one. */
 	[[nodiscard]] std::uint64_t retry_delay_ns() const noexcept;
 
+	/* How long from now the quiet period ends, 0 when the level held is
+	 * normal (or the period is off). The caller runs on_retry() that long after
+	 * each call that may have moved it. */
+	[[nodiscard]] std::uint64_t quiet_delay_ns() const noexcept;
+
 	/* The pending guest trim is tried again, on the calling thread. Nothing
 	 * happens when none is pending (a later response or the normal level
 	 * took it), and a call that meets a response running returns busy and
-	 * leaves it pending. */
+	 * leaves it pending. When the quiet period has ended it returns the level
+	 * to normal instead, whatever is pending (the normal level takes it). */
 	Outcome on_retry() noexcept;
 
 	/* The response's counters, for a test or a report. */
@@ -248,31 +314,60 @@ private:
 	 * one. */
 	[[nodiscard]] bool admit_line(LineBudget &budget,
 		std::uint64_t &dropped) noexcept;
-	void log_level_change(PressureLevel from, PressureLevel to) noexcept;
+	void log_level_change(PressureLevel from, PressureLevel to,
+		bool quiet) noexcept;
+	/* on_level(), and on_retry()'s return to normal (`quiet`), which does
+	 * nothing unless the period has ended. */
+	Outcome handle_level(PressureLevel level, bool quiet) noexcept;
+	/* Whether the period has ended. Under the mutex, with the clock read
+	 * under it. */
+	[[nodiscard]] bool quiet_due(std::uint64_t now) const noexcept;
 	void respond(PressureLevel level, std::uint64_t events_skipped) noexcept;
+	/* Asks for the gradual trimmer off, after the normal level, and keeps the
+	 * request pending when it could not be sent. */
+	void end_gradual_trim() noexcept;
+	/* Asks for the gradual trimmer on, for a warning that starts no response,
+	 * and keeps the request pending when it could not be sent. */
+	void arm_gradual_trim() noexcept;
+	/* A gradual request of `kind`, noted. */
+	[[nodiscard]] TrimOutcome ask_gradual(TrimKind kind) noexcept;
+	/* Records what became of a request of `kind`: an ON that was asked is
+	 * owed an OFF until one has been taken. Under the mutex. */
+	void note_request(TrimKind kind, TrimOutcome outcome) noexcept;
+	/* Leaves the request pending after a request that did not go through, for
+	 * `level`, with the full attempts. Under the mutex. */
+	void keep_pending(PressureLevel level, TrimKind kind) noexcept;
 
 	PressureActions &actions_;
 	const PressureTiming timing_;
 	mutable std::mutex mutex_;
 	PressureLevel level_{PressureLevel::normal};
+	/* When the source last delivered a level other than normal. */
+	std::uint64_t last_level_ns_{};
 	bool running_{};
 	bool started_{};
 	std::uint64_t last_start_ns_{};
 	std::uint64_t skipped_{};
-	/* The one pending guest trim: the level of the response that left it,
-	 * and the tries it has left. */
+	/* The one pending guest request: the level of the response that left it,
+	 * what it asks and the tries it has left. A pending request for a trim of
+	 * all the cache is followed by the gradual trimmer's, which has attempts of
+	 * its own. */
 	bool retry_pending_{};
 	PressureLevel retry_level_{PressureLevel::normal};
+	TrimKind retry_kind_{TrimKind::once};
 	unsigned retry_attempts_left_{};
+	/* The gradual trimmer was asked on and no request to turn it off has been
+	 * taken since: the normal level owes it an off. */
+	bool gradual_on_{};
 	Counts counts_{};
 	LineBudget level_lines_;
 	LineBudget response_lines_;
 };
 
-/* The step the runtime cannot take itself: the host's request to the guest,
- * which the emulator layer owns. Called on the response's thread, never with a
- * lock the caller holds. */
-using GuestTrim = TrimOutcome (*)(void *context) noexcept;
+/* The step the runtime cannot take itself: the host's requests to the guest
+ * (the kinds of TrimKind), which the emulator layer owns. Called on the
+ * response's thread, never with a lock the caller holds. */
+using GuestTrim = TrimOutcome (*)(void *context, TrimKind kind) noexcept;
 
 /* The response of a run, listening to the system's memory pressure source until
  * it is destroyed. The destructor returns once a response that is running has

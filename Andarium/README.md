@@ -203,6 +203,13 @@ everything that exists for automation or only pretends:
   no debugging or automation support (the `kernarium-ios-device-android-app-store`
   preset, packaged with `package-ios-frameworks.sh --app-store --runtimes
   android`; [`Kernarium/README.md`](../Kernarium/README.md#automation-runs)).
+- It opens the files of Install APK and of the file browser's Import in place
+  (SwiftUI's `fileImporter`); every other configuration presents the document
+  picker in copy mode (`Shared/CopyDocumentPicker.swift`, compiled out by
+  `APP_STORE`), moves each copy at once into a folder of its own under
+  `tmp/PickedFiles/` and removes it when the install or import that uses it is
+  over (Install anyway and Try Again still find it) and at the next launch. A
+  picker that fails shows an alert in every configuration.
 - Its Archive action uses it, and the archive is the build TestFlight and the
   App Store offer to Macs.
 - It refuses an embedded artifact that is behind the archived commit: a build
@@ -219,7 +226,8 @@ everything that exists for automation or only pretends:
   build on a missing Info.plist key, an environment knob, a symbol or log text
   of the debugging and automation support, the JIT (its symbols and text and
   the `brk #0xf00d` instruction), a test bundle or XCTest framework, a
-  trace of the build host, a harness console line, or a privacy manifest that
+  trace of the build host, a harness console line, the copy-mode document
+  picker or a missing in-place importer, or a privacy manifest that
   does not cover a binary
   ([`scripts/check-privacy-manifests.py`](../scripts/check-privacy-manifests.py));
   the script's header is the complete list.
@@ -466,6 +474,43 @@ disk then holds and where Start boots again in the same process; an unclean
 shutdown, a host stop or a cleanup that fails keeps the failure screen and
 requires reopening Andarium.
 
+- **Slow start.** A start still on the boot screen after three minutes
+  (`SlowStart`; eight for a guest's first start and the first start after an
+  update, which also get a title that does not say the start is slower than
+  usual; a first start that ended before Android booted is still the first,
+  by the guest's `first-boot-pending` record, kept until `sys.boot_completed`
+  is seen) puts a notice above the steps: the step under way and the time, Stop
+  and, where Send feedback is compiled in, Send feedback. The boot goes on
+  behind it and the notice goes with the boot; it has no dismissal. It sits
+  above the steps and pushes them down; where the screen is short, the screen
+  scrolls. The time is the start's, on the runtime's pause-aware run clock
+  (`GuestRunClock`, which stops while the guest is held and while the
+  application is away before the runtime runs) and kept through the restarts
+  of a start that had not finished. Stop asks first (an alert with Stop and Cancel, in the
+  screen's own appearance: the boot's dark screen asks the window for dark, so the
+  alert and the Send feedback sheet over it are dark whatever the system's is, and Recovery's
+  light screen leaves them to the system), then the
+  application states the intent at once and the runtime's stop is requested
+  off the main actor, on the queue of the runtime's other waiting calls, again
+  every second until the run has ended (`RunStop`: the runtime drops a stop
+  that arrives before its run begins). A stopped Android guest cannot be
+  released, so the end is the end screen with its own wording
+  (`RunEnd.stoppedByUser`), not Home, and a stop before the runtime runs ends
+  at Home. A start the person stopped leaves its preparation to end: the
+  guest's files stay its own until then, and a start asked for since, Erase,
+  Create, the update's Restore and a snapshot rename wait for it. Send
+  feedback opens the sheet the root presents (`feedbackFromBoot`), which stays
+  up with its draft when the boot completes or the run ends; a bug report and
+  a screenshot need a running guest, and the information block gains a Boot
+  line with the step, the time and the restarts. A process that ended in the
+  boot leaves the runtime's session record with the console's last output of
+  that boot, which the next bug report carries as the previous session's
+  record.
+- **Recovery the guest asked for.** `init: starting service 'recovery'` on the
+  console (`ConsoleScanner.recoveryStartedCount`) makes the session a recovery
+  session, as the launch's recovery mode does, whatever the start was: `adb
+  reboot recovery`, the recovery image's own menu, Android's rescue after
+  failed boots. The recovery's reboot is a restart into a normal session.
 - **Time zone.** Every start gives the guest the host's zone
   (`GuestTimeZone`, the boot request's `android_time_zone`); the system image
   applies it unless the guest's user chose a zone

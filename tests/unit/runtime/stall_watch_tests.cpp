@@ -32,6 +32,7 @@
 #include <iterator>
 #include <memory>
 #include <random>
+#include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <poll.h>
 #include <pthread.h>
@@ -530,6 +531,42 @@ unsigned long looks_after(const std::string &path, int thermal_level)
 	}
 }
 
+/* Whether the watch's thread has named itself asleep: it has made its last
+ * look and makes no more until a timer of the carriers wakes it. */
+bool the_watch_is_asleep()
+{
+	thread_act_array_t threads;
+	mach_msg_type_number_t count = 0;
+	if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS)
+		return false;
+	bool asleep = false;
+	for (mach_msg_type_number_t index = 0; index < count; ++index) {
+		char name[64]{};
+		const pthread_t thread = pthread_from_mach_thread_np(threads[index]);
+		if (thread != nullptr)
+			(void)pthread_getname_np(thread, name, sizeof(name));
+		asleep = asleep ||
+			std::strcmp(name, uml::runtime::stall_watch_asleep_name) == 0;
+		(void)mach_port_deallocate(mach_task_self(), threads[index]);
+	}
+	(void)vm_deallocate(mach_task_self(),
+		reinterpret_cast<vm_address_t>(threads),
+		count * sizeof(thread_act_t));
+	return asleep;
+}
+
+/* Returns once the watch has gone to sleep, however long a loaded host takes
+ * to give it the two quiet looks it needs; the bound only ends a watch that
+ * never sleeps. */
+void wait_until_the_watch_sleeps()
+{
+	const auto began = std::chrono::steady_clock::now();
+	while (!the_watch_is_asleep()) {
+		require(milliseconds_since(began) < 60000, "the watch did not go to sleep");
+		sleep_ms(5);
+	}
+}
+
 void the_watch_sleeps_while_every_carrier_is_idle()
 {
 	Session session{"uml-stall-sleep.XXXXXX"};
@@ -551,7 +588,7 @@ void the_watch_sleeps_while_every_carrier_is_idle()
 	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
 	require(watch != nullptr, "a watch without a record");
 	/* Two quiet looks, and it sleeps. */
-	sleep_ms(800);
+	wait_until_the_watch_sleeps();
 	const unsigned long first = looks_after(session.path, 1);
 	require(first >= 2, "the watch made no look at the idle carriers");
 	/* A second of carriers waking every 30 and 45 ms: no look at all. */

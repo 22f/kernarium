@@ -27,6 +27,18 @@ struct SendFeedbackTests {
         SendFeedbackAttachment(kind: kind, url: URL(fileURLWithPath: "/staged/\(name)"), bytes: bytes)
     }
 
+    @Test func aStartThatIsStillBootingSaysWhereItIs() {
+        var info = information(running: nil)
+        info.boot = .init(step: "Startup", seconds: 197, restarts: 0)
+        #expect(info.lines.contains("Boot: not finished, at Startup after 3 min"))
+        info.boot = .init(step: "Linux kernel", seconds: 2_700, restarts: 3)
+        #expect(info.lines.contains("Boot: not finished, at Linux kernel after 45 min, restarted 3 times"))
+        info.boot = .init(step: "Storage", seconds: 90, restarts: 1)
+        #expect(info.lines.contains("Boot: not finished, at Storage after 1 min, restarted 1 time"))
+        // Not booting: no line.
+        #expect(!information().lines.contains { $0.hasPrefix("Boot:") })
+    }
+
     // MARK: The mail
 
     @Test func theSubjectIsThePrefixAndTheProblemOnOneLine() {
