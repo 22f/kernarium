@@ -2,6 +2,7 @@
 #include "require.hpp"
 #include "synthetic_camera.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -12,6 +13,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace uml::platform;
@@ -703,6 +705,65 @@ void threaded()
     require(camera->sessionsOpen() == 0);
 }
 
+// The luma of a rectangle of a frame, averaged by area to `width` x `height` samples: what a device's scale of an
+// anchored camera's frame makes of it.
+std::vector<std::uint8_t> boxScaled(const CameraFrame& frame, std::uint32_t top, std::uint32_t rows, std::uint32_t width, std::uint32_t height)
+{
+    std::vector<std::uint8_t> out(std::size_t(width) * height);
+    for (std::uint32_t y = 0; y < height; ++y)
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const std::uint32_t x0 = x * frame.width / width, x1 = std::max(x0 + 1, (x + 1) * frame.width / width);
+            const std::uint32_t y0 = top + y * rows / height, y1 = std::max(y0 + 1, top + (y + 1) * rows / height);
+            std::uint64_t sum = 0;
+            for (std::uint32_t sy = y0; sy < y1; ++sy)
+                for (std::uint32_t sx = x0; sx < x1; ++sx) sum += frame.luma[std::size_t(sy) * frame.lumaStride + sx];
+            out[std::size_t(y) * width + x] = std::uint8_t(sum / (std::uint64_t(x1 - x0) * (y1 - y0)));
+        }
+    return out;
+}
+
+// The marker lies across the middle of the picture, so the centred crop and the scale a device makes of an anchored
+// camera's frame for a stream of another shape or size leave it readable (the V4L2 capture probe reads it there).
+void chartMarkerSurvivesCropAndScale()
+{
+    const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tablet));
+    Recorder recorder;
+    auto session = camera->openSession(recorder);
+    require(session != nullptr && session->startVideo(0, 1920, 1440, 30));
+    camera->pump(0, 1);
+    require(recorder.frames.size() == 1);
+    const auto& frame = recorder.frames.front().second;
+    require(frame.width == 1920 && frame.height == 1440);
+    const auto whole = decodeChartMarker(frame.luma.data(), frame.lumaStride, frame.width, frame.height);
+    require(whole.valid && whole.tag == chartTag(0) && whole.counter == 1);
+    // The 16:9 stream's centred crop: the rows cut away are the picture's top and bottom.
+    const std::uint32_t cropTop = (1440 - 1080) / 2;
+    const auto cropped = decodeChartMarker(frame.luma.data() + std::size_t(cropTop) * frame.lumaStride, frame.lumaStride, 1920, 1080);
+    require(cropped.valid && cropped.tag == whole.tag && cropped.counter == whole.counter);
+    // The whole picture and the crop at sizes of both shapes, whole-number and fractional ratios.
+    const struct { std::uint32_t top, rows, width, height; } streams[] = {
+        {0, 1440, 1280, 960}, {0, 1440, 960, 720}, {0, 1440, 640, 480}, {0, 1440, 480, 360}, {0, 1440, 1000, 750},
+        {cropTop, 1080, 1280, 720}, {cropTop, 1080, 960, 540}, {cropTop, 1080, 1920, 1080},
+    };
+    for (const auto& stream : streams) {
+        const auto picture = boxScaled(frame, stream.top, stream.rows, stream.width, stream.height);
+        const auto marker = decodeChartMarker(picture.data(), stream.width, stream.width, stream.height);
+        require(marker.valid && marker.tag == whole.tag && marker.counter == whole.counter);
+    }
+    // A picture of the camera's own formats reads back too, at widths the cells do not divide evenly (1440, 4032).
+    for (const auto& [width, height] : {std::pair<std::uint32_t, std::uint32_t> {640, 480}, {1280, 720}, {1440, 1080}, {1920, 1080}}) {
+        const auto other = makeSyntheticCamera(manual(SyntheticCameraProfile::tablet));
+        Recorder own;
+        auto owned = other->openSession(own);
+        require(owned != nullptr && owned->startVideo(0, width, height, 30));
+        other->pump(0, 1);
+        require(own.frames.size() == 1);
+        const auto& picture = own.frames.front().second;
+        require(picture.width == width && picture.height == height);
+        require(decodeChartMarker(picture.luma.data(), picture.lumaStride, picture.width, picture.height).valid);
+    }
+}
+
 } // namespace
 
 int main()
@@ -710,6 +771,7 @@ int main()
     profiles();
     unauthorized();
     video();
+    chartMarkerSurvivesCropAndScale();
     controls();
     zoomCamera();
     multiCamera();

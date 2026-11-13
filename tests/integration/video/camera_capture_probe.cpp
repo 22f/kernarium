@@ -181,8 +181,9 @@ std::uint64_t boottime_ns()
 }
 
 // ---------------------------------------------------------------------------
-// The chart (darwin/platform/synthetic_camera): a row of 64 cells in the top
-// left corner carries the camera's tag, a frame counter and a check word.
+// The chart (darwin/platform/synthetic_camera): a row of 64 cells across the
+// middle of the picture carries the camera's tag, a frame counter and a check
+// word; a centred crop and a scale of the picture keep it.
 // ---------------------------------------------------------------------------
 
 struct Marker {
@@ -196,11 +197,12 @@ Marker decode_marker(const std::uint8_t* luma, std::size_t stride, std::uint32_t
     constexpr std::uint32_t cells = 64;
     constexpr std::uint32_t cell_height = 8;
     Marker marker;
-    const std::uint32_t cell = std::max<std::uint32_t>(2, (width / cells) & ~1u);
-    if (height < cell_height || width < cell * cells) return marker;
+    if (height < cell_height || width < 2 * cells) return marker;
+    // The marker's rows begin at the first even row of the frame's middle; its cells share the width.
+    const std::size_t row = (((height - cell_height) / 2) & ~1u) + cell_height / 2;
     std::uint64_t bits = 0;
     for (std::uint32_t index = 0; index < cells; ++index)
-        bits = (bits << 1) | (luma[std::size_t(cell_height / 2) * stride + std::size_t(index) * cell + cell / 2] >= 128 ? 1u : 0u);
+        bits = (bits << 1) | (luma[row * stride + std::size_t(2 * index + 1) * width / (2 * cells)] >= 128 ? 1u : 0u);
     const std::uint16_t check = std::uint16_t(bits);
     const std::uint64_t first48 = bits >> 16;
     marker.tag = std::uint16_t(first48 >> 32);
@@ -1047,7 +1049,7 @@ void test_two_files(const Camera& camera)
     CHECK(second.queue_all() && second.stream_on(), "second file: %s", std::strerror(errno));
     VideoStats a, b;
     run_video(first, 6, a, "file 1");
-    // The second file's 4:3 frames are cut from the camera's 16:9 picture, which crops the chart's marker.
+    // The second file's 4:3 frames can be cut from a 16:9 picture, which crops the sides of the chart's marker.
     run_video(second, 6, b, "file 2", false);
     run_video(first, 3, a, "file 1 again");
     CHECK(first.stream_off() && second.stream_off(), "STREAMOFF");
