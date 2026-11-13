@@ -181,7 +181,8 @@ A test of a suspend contract, such as `guest-video-suspend` for the Virtio video
 devices, suspends the guest both as the host's quiesce does and as the guest does
 by itself, with a stream in progress as well as idle. `vhost-user-held-requests`
 checks the transport's rules for a device that holds requests across a ring
-disable. A driver path that only a misbehaving device reaches, such as a device
+disable, and `gpu-device-suspend-held-fence` the Virtio-GPU device's fenced
+command across one, on a renderer the test controls. A driver path that only a misbehaving device reaches, such as a device
 that was reset during a suspend (`guest-video-camera-reset`) or is late to stop
 a stream (`guest-video-camera-slow-clear`, `guest-video-camera-slow-stop`), is
 reached by serving the guest the production device behind the test-only shim of

@@ -481,10 +481,12 @@ waiting with interrupts off; only the GPU, whose requests are asynchronous, the
 vsock and GNSS devices, whose requests the guest never waits on, and the video
 devices, whose streams outlive a suspend, ask to keep them. A ring disable also
 resets a device that holds a deferred request, unless the device asks to keep it
-(`keepsDeferredRequestsWhileDisabled()`, which the video devices do): the
-transport then leaves the device alone, keeps what it completes while a ring is
-disabled and writes it to the ring at its enable, in the order the device
-finished it. A message that changes the memory, the
+(`keepsDeferredRequestsWhileDisabled()`, which the GPU, video and camera
+devices do): the transport then leaves the device alone, keeps what it
+completes while a ring is disabled and writes it to the ring at its enable, in
+the order the device finished it. A fenced GPU command still on the host when
+the guest suspends so keeps its contexts and resources, and its answer reaches
+the guest after the enable. A message that changes the memory, the
 features, a ring's layout or base, or ends the driver (the `GET_FEATURES` that
 follows a teardown's disables included) resets such a device first. While the
 transport waits for the front-end to acknowledge a backend request (a
