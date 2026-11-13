@@ -77,8 +77,7 @@ struct AppEntry {
 
     /// Where Home scrolls to for a screen that shows a lower section.
     private static let scrollTargets: [String: String] = [
-        "home-options": "erase", "home-recovery-erase": "erase", "start-recovery": "erase", "erase": "erase",
-        "home-new-recovery": "erase",
+        "home-options": "erase", "home-erase": "erase", "erase": "erase",
         "home-resolution": "resolution",
         "home-capabilities": "capabilities", "home-mic-on": "capabilities", "home-mic-denied": "capabilities",
         "home-haptics-off": "capabilities",
@@ -168,7 +167,7 @@ struct AppEntry {
         }
 
         switch screen {
-        case "home-new", "home-new-recovery":
+        case "home-new":
             model.guest = Guest.fresh(on: host)
             model.plan = .firstStart
         case "home-grow":

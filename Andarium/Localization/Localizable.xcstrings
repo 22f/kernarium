@@ -5906,29 +5906,6 @@
         }
       }
     },
-    "Recovery and erase" : {
-      "comment" : "Home section with Start in recovery and Erase virtual machine.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "リカバリモードと消去"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "恢复模式与抹掉"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "復原模式與清除"
-          }
-        }
-      }
-    },
     "Remove %@" : {
       "localizations" : {
         "ja" : {
@@ -7003,29 +6980,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "啟動並設定"
-          }
-        }
-      }
-    },
-    "Start in recovery" : {
-      "comment" : "Starts Android's recovery mode.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "リカバリモードで起動"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "以恢复模式启动"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "以復原模式啟動"
           }
         }
       }

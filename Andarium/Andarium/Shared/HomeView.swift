@@ -129,7 +129,7 @@ struct HomeView: View {
                         developmentSections
                         guestSections
                     }
-                    RecoveryErasePanel()
+                    EraseCard()
                         .id("erase")
                 }
                 .padding(.horizontal, pages.upright ? 20 : 28)
@@ -165,7 +165,7 @@ struct HomeView: View {
             SystemSection()
             developmentSections
             guestSections
-            RecoveryErasePanel()
+            EraseCard()
                 .id("erase")
         }
         .padding(.horizontal, 16)
@@ -174,14 +174,14 @@ struct HomeView: View {
     }
 
     /// iPad in portrait or a tall window: the controls across the top, the
-    /// options and Recovery and erase beneath.
+    /// options and the Erase card beneath.
     private var tallLayout: some View {
         VStack(spacing: 28) {
             notices
             SystemSection()
             developmentSections
             guestSections
-            RecoveryErasePanel()
+            EraseCard()
                 .id("erase")
         }
         .frame(maxWidth: 680)
@@ -201,7 +201,7 @@ struct HomeView: View {
             .frame(maxWidth: 520)
             VStack(spacing: 22) {
                 guestSections
-                RecoveryErasePanel()
+                EraseCard()
                     .id("erase")
             }
             .frame(maxWidth: 400)
@@ -368,8 +368,7 @@ struct HomeView: View {
     }
 }
 
-/// The main action starts Android normally. Recovery lives in the Recovery
-/// and Erase section.
+/// The main action starts Android normally.
 struct StartButton: View {
     @Environment(AppModel.self) private var model
 
@@ -616,57 +615,33 @@ struct UnfinishedUpdateCard: View {
     }
 }
 
-/// Recovery and erasing the guest share one section. Its title is not
-/// "Restore", the name of the unfinished-update card's button.
-struct RecoveryErasePanel: View {
+/// Erasing the guest: the one row, in a card of its own after the sections,
+/// with no heading and the spacing the other cards have.
+struct EraseCard: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Recovery and erase")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.leading, 18)
-            VStack(spacing: 0) {
-                Button {
-                    model.start(.recovery)
-                } label: {
-                    HStack(spacing: 12) {
-                        IconTile(symbol: "wrench.adjustable.fill", color: .gray)
-                        Text("Start in recovery")
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.tertiary)
+        VStack(spacing: 0) {
+            Button {
+                model.confirmingErase = true
+            } label: {
+                HStack(spacing: 12) {
+                    IconTile(symbol: "trash.fill", color: .red)
+                    Text("Erase virtual machine…")
+                        .foregroundStyle(.red)
+                    Spacer()
+                    if let guest = model.guest {
+                        Text(Formats.size(bytes: guest.usedBytes))
+                            .foregroundStyle(.secondary)
                     }
-                    .padding(.horizontal, 16)
-                    .frame(minHeight: 54)
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .disabled(!model.plan.offersRecovery || !model.host.runsGuestGraphics)
-                Divider().padding(.leading, 58)
-                Button {
-                    model.confirmingErase = true
-                } label: {
-                    HStack(spacing: 12) {
-                        IconTile(symbol: "trash.fill", color: .red)
-                        Text("Erase virtual machine…")
-                            .foregroundStyle(.red)
-                        Spacer()
-                        if let guest = model.guest {
-                            Text(Formats.size(bytes: guest.usedBytes))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .frame(minHeight: 54)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
+                .padding(.horizontal, 16)
+                .frame(minHeight: 54)
+                .contentShape(Rectangle())
             }
-            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 26))
+            .buttonStyle(.plain)
         }
+        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 26))
     }
 }
 

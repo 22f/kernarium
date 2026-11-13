@@ -397,15 +397,15 @@ struct UpdateFlowTests {
         #expect(failed.guest?.usedBytes == 3 * Limits.bytesPerGiB)
     }
 
-    @Test func homeOffersRecoveryOnceTheFirstStartHasHappened() {
+    @Test func theFirstStartLastsUntilTheRunHasCreatedTheDataDisk() {
         let (model, driver) = model(plan: .firstStart)
-        #expect(!model.plan.offersRecovery)
+        #expect(model.plan == .firstStart)
         model.start(.normal)
         model.finishBoot(.firstStart)
         // The runtime created the data disk during the start.
         driver.plan = .normal
         model.runEnded(RunEnd(result: 0), uptimeSeconds: 60)
-        #expect(model.plan.offersRecovery)
+        #expect(model.plan == .normal)
     }
 
     @Test func cleanShutdownReturnsHomeAndStartsANewSession() {

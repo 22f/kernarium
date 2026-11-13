@@ -347,8 +347,7 @@ control out.
 - **Storage.** A guest's files live in `Library/Guest/` of the application's
   container behind `GuestStorage`. The system disk is Android's, read-only, and
   stays in the release directory; the runtime creates the data disk `data.img`
-  at the first start, sized by the guest's capacity, and only grows it after;
-  Home disables Start in recovery until then (`StartPlan.offersRecovery`).
+  at the first start, sized by the guest's capacity, and only grows it after.
   A larger size chosen in Resize waits on Home and applies as the next start,
   of any kind, is handed to the runtime (`Lifecycle.start`), which grows the
   disk then; the guest records the new capacity at that point, so a start that
