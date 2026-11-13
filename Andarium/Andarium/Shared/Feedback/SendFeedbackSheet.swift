@@ -544,7 +544,12 @@ struct SendFeedbackSheet: View {
     /// The control that hands the mail to Mail. Its words shorten when the
     /// bar cannot hold them; its accessibility name never does.
     private func sendButton(_ style: SendStyle) -> some View {
-        Button(action: model.send) {
+        Button {
+            // An alert that says what is missing would give the focus back to the field that had it
+            // when it closes, after the first empty field was asked for: let go of it first.
+            if state.missing != nil { focus = nil }
+            model.send()
+        } label: {
             Group {
                 switch style {
                 case .words:
