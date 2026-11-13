@@ -11,7 +11,9 @@ with the macOS launcher (tools/boot_android.py), and the runner checks that:
 - the file exists, is private to its owner, and the guest's `ro.serialno`,
   `ro.boot.serialno` and eth0 address are the file's, not the release's
   `umlandroid17` or the user network's default address, and the kernel's command
-  line carries one serial number, the file's;
+  line carries one serial number, the file's (the release's own token stays in
+  the image as the fallback of a launch that states no serial number, and the
+  launcher drops it when it states one);
 - eth0 is configured and the host reaches adbd through it, so the user network
   answers the guest under its own address;
 - a guest reboot (the restart loop passes the address on) and a new launch of
@@ -20,27 +22,36 @@ with the macOS launcher (tools/boot_android.py), and the runner checks that:
 
 The values are random per installation and are never printed: a failure names
 what differed, not what the value was, and the launcher's log tail that a
-failure prints has every serial number and hardware address masked (`mask`).
+failure prints has every serial number, hardware address and adb key masked (`mask`).
 
-Two options qualify what only a newer image carries (the accepted release has
-neither, and the default run, which passes on it, checks neither):
+`--image-inputs` qualifies what only a newer image carries (the accepted release has none of it,
+and the default run, which passes on it, checks none of it; it only prints, for eth0, buried_eth0
+and wlan0, whether the guest's own listing holds an IPv6 link-local address):
 
-- `--command-line FILE` starts the release with FILE as its kernel command line
-  (a clone of the release directory: the file the next image will carry, the
-  tracked android/lineage-24/support/boot/kernel-command-line.txt, which has no
-  serial number) and the same checks hold: the launcher's serial number is the
-  guest's, with none from the image to drop;
-- `--image-inputs` expects an image built with this repository's overlay, and
-  checks that wlan0's address is the one derived from eth0's
-  (overlay/tools/kernarium_wifi_mac.h, here `derive_wifi_mac`, which the golden
-  vectors tie to the C++), that it is not the old fixed one, that it is the
-  same after a reboot and a new launch and differs between installations, that
-  wlan0 holds an IPv4 lease (Wi-Fi connected), and that an application cannot
-  read `ro.boot.kernarium.adb_key`. The last check starts the emulator through
-  a wrapper that adds the key and a control argument to the kernel command line
-  (the macOS launcher passes neither): the application reads the control
-  property, which every application may, and the key, which it may not, while
-  the kernel's command line shows the key was passed.
+- wlan0's address is the one derived from eth0's (overlay/tools/kernarium_wifi_mac.h, here
+  `derive_wifi_mac`, which the golden vectors and a differential run of the header tie to the C++),
+  not the old fixed one nor eth0's, the same after a reboot and a new launch, and different
+  between installations; wlan0 holds an IPv4 lease (Wi-Fi connected);
+- eth0 and buried_eth0 carry no IPv6 link-local address, in the guest's own listing and in the
+  interface listing an application calls (`NetworkInterface`);
+- an ordinary application cannot read `ro.boot.kernarium.adb_key`. The emulator is started through
+  a wrapper that adds a placeholder key and a control argument to the kernel command line (the macOS
+  launcher passes neither). A probe application (property_probe_apk.py) is started with
+  `am broadcast`, so it runs in a normal application process of the domain `untrusted_app_29`; the
+  runner records that context, requires that the application reads the control property, which every
+  application may, and not the key, and requires a positive control in the same boot: root reads
+  the key (`su`), or, on an image with no `su`, the kernel command line carries it, which the
+  result then names as inferred. The probe targets API 29, the highest a host can sign without
+  Android's tools, so it answers for applications of that target.
+
+What a launcher run proves is the property's type and the address's absence in this boot. It does
+not prove that adbd reads the key and authorizes the host: the macOS launcher fixes ADB
+authorization off and refuses `androidboot.kernarium.adb_auth`, so adbd never compares the
+placeholder with a host key. That is proven only on a guest that the Kernarium runtime started
+with authorization on (the iOS Simulator product or the macOS runtime), by
+`run_android_adb_debugging.py --serial HOST:PORT` against it on a fresh data partition, which
+checks the key rule: a second key stays unauthorized with no prompt while debugging is off, and the
+host's own key is never refused.
 
 Every wait has a deadline; the guest's launcher is stopped through its own
 process on any exit.
@@ -82,6 +93,11 @@ DEFAULT_EMULATOR = REPOSITORY / ".build" / "presets" / "macos-android17" / "bin"
 GOLDEN_VECTORS = REPOSITORY / "tests" / "unit" / "andarium" / "fixtures" / "wifi-mac-golden-vectors.txt"
 KEY_PROPERTY = "ro.boot.kernarium.adb_key"
 CONTROL_PROPERTY = "ro.boot.kernarium.identity_probe"
+# The interfaces whose IPv6 link-local addresses the run reports; eth0 and the macvlan, which the
+# image's network setup turns IPv6 off on, must have none (wlan0's is the framework's).
+LINK_NAMES = ("eth0", "buried_eth0", "wlan0")
+LOWER_DEVICES = ("eth0", "buried_eth0")
+PROBE_SECONDS = 60
 LEASE_SECONDS = 120
 STOP_SECONDS = 120
 SETTLE_SECONDS = 60
@@ -89,6 +105,7 @@ TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 MAC_PATTERN = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 ANY_MAC = re.compile(r"(?i)(?<![0-9a-z])(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}(?![0-9a-z])")
 SERIAL_ASSIGNMENT = re.compile(r"(?i)(serialno\W{0,4})[0-9a-z]{6,20}")
+KEY_ASSIGNMENT = re.compile(r"(?i)(adb_key\]?\s*[=:]\s*\[?)[^\s\]\"']+")
 MASKED = "<masked>"
 
 
@@ -97,17 +114,19 @@ class Failure(RuntimeError):
 
 
 def mask(text: str, known: tuple[str, ...] = ()) -> str:
-    """The text with every serial number and hardware address replaced: the values this
-    run knows (the identity files'), any address, and whatever follows `serialno`."""
+    """The text with every serial number, hardware address and adb key replaced: the values
+    this run knows (the identity files' and the probe's), any address, and whatever follows
+    `serialno` or `adb_key`."""
     for value in known:
         if value:
             text = text.replace(value, MASKED)
-    return SERIAL_ASSIGNMENT.sub(r"\1" + MASKED, ANY_MAC.sub(MASKED, text))
+    return KEY_ASSIGNMENT.sub(r"\1" + MASKED, SERIAL_ASSIGNMENT.sub(r"\1" + MASKED, ANY_MAC.sub(MASKED, text)))
 
 
-def known_values(instances: list[pathlib.Path]) -> tuple[str, ...]:
-    """The serial numbers and addresses of the identity files that exist, best effort."""
-    values: list[str] = []
+def known_values(instances: list[pathlib.Path], probes: "Probes | None" = None) -> tuple[str, ...]:
+    """The serial numbers and addresses of the identity files that exist, best effort, and the
+    values the run put on the kernel command line itself."""
+    values: list[str] = [probes.key, probes.control] if probes else []
     for instance in instances:
         try:
             members = json.loads((instance / IDENTITY_FILE).read_text())
@@ -318,7 +337,7 @@ def check_network(device: Device) -> None:
         raise Failure("eth0 has no IPv4 address")
 
 
-# ---- What only a newer image carries (--command-line, --image-inputs).
+# ---- What only a newer image carries (--image-inputs).
 
 MASK64 = (1 << 64) - 1
 WIFI_KEY = 0x6B726E5F77696669  # "krn_wifi"
@@ -433,7 +452,7 @@ class Probes:
             f"androidboot.kernarium.adb_key={self.key} "
             f"androidboot.kernarium.identity_probe={self.control}\n")
         self.emulator.chmod(0o700)
-        self.apk = property_probe_apk.build_apk(scratch / "property-probe.apk")
+        self.apk = property_probe_apk.build_apk(scratch / "property-probe.apk", CONTROL_PROPERTY, KEY_PROPERTY)
 
 
 def check_wifi(device: Device, ethernet: str) -> str:
@@ -449,39 +468,128 @@ def check_wifi(device: Device, ethernet: str) -> str:
     return wifi
 
 
-def check_key_property(device: Device, probes: Probes) -> None:
-    """An application reads the control property and not the key, which the kernel was given."""
-    if f"androidboot.kernarium.adb_key={probes.key}" not in device.shell("cat /proc/cmdline"):
-        raise Failure("the kernel command line does not carry the probe key: the test cannot tell")
-    if "package:" not in device.shell(f"pm path {property_probe_apk.PACKAGE} || true"):
-        result = device.run("-s", device.serial, "install", str(probes.apk), timeout=120)
+def link_local_interfaces(device: Device) -> dict[str, bool]:
+    """Whether the guest's own listing (`ip addr`) holds an IPv6 link-local address for each of
+    LINK_NAMES: only yes or no, never an address."""
+    found = {name: False for name in LINK_NAMES}
+    current = None
+    for line in device.shell("ip addr show").splitlines():
+        header = re.match(r"^\d+: ([^:@]+)[:@]", line)
+        if header:
+            current = header.group(1)
+            continue
+        fields = line.split()
+        if current in found and fields[:1] == ["inet6"] and len(fields) > 1 and fields[1].lower().startswith("fe80:"):
+            found[current] = True
+    return found
+
+
+def report_link_local(device: Device) -> dict[str, bool]:
+    """Prints a line for each of the three interfaces (no address) and returns what it found."""
+    found = link_local_interfaces(device)
+    for name in LINK_NAMES:
+        print(f"{name}: IPv6 link-local address in the guest's listing: {'yes' if found[name] else 'no'}")
+    return found
+
+
+def check_lower_devices(device: Device) -> None:
+    """eth0 and buried_eth0 carry no IPv6 link-local address (wlan0's is the framework's)."""
+    found = link_local_interfaces(device)
+    for name in LOWER_DEVICES:
+        if found[name]:
+            raise Failure(f"{name} has an IPv6 link-local address in the guest's listing")
+
+
+class ProbeResult:
+    """What the probe application reported, the values the runner may print."""
+
+    def __init__(self, fields: dict[str, str]) -> None:
+        self.context = fields.get("context", "")
+        self.control = fields.get("control") == "readable"
+        self.key = fields.get("key") == "readable"
+        self.links = {}
+        for item in fields.get("links", "").split():
+            name, _, state = item.partition("=")
+            self.links[name] = state == "yes"
+        self.complete = "done" in fields
+
+    @property
+    def domain(self) -> str:
+        """The SELinux context without its categories (user, role, type and sensitivity level)."""
+        return ":".join(self.context.split(":")[:4])
+
+
+def parse_probe_result(text: str) -> ProbeResult:
+    fields = {}
+    for line in text.splitlines():
+        name, separator, value = line.partition("=")
+        fields[name.strip() if separator else line.strip()] = value.strip()
+    return ProbeResult(fields)
+
+
+def run_probe_application(device: Device, apk: pathlib.Path) -> ProbeResult:
+    """Installs the probe once, starts it with `am broadcast` (the zygote forks a normal
+    application process for the receiver) and reads the result file it wrote."""
+    package = property_probe_apk.PACKAGE
+    if "package:" not in device.shell(f"pm path {package} || true"):
+        result = device.run("-s", device.serial, "install", str(apk), timeout=120)
         if result.returncode != 0 or "Success" not in result.stdout:
             raise Failure("the property probe application did not install")
-    package = property_probe_apk.PACKAGE
-    if device.shell(f"run-as {package} getprop {CONTROL_PROPERTY}") != probes.control:
-        raise Failure(f"an application cannot read {CONTROL_PROPERTY}: the test cannot tell")
-    if device.shell(f"run-as {package} getprop {KEY_PROPERTY}"):
+    device.shell(f"run-as {package} rm -f {property_probe_apk.RESULT_FILE}")
+    broadcast = device.shell(f"am broadcast -n {property_probe_apk.COMPONENT}")
+    if "Broadcast completed" not in broadcast:
+        raise Failure("the probe broadcast was not delivered")
+    holder: list[ProbeResult] = []
+
+    def written() -> bool:
+        holder.append(parse_probe_result(device.shell(f"run-as {package} cat {property_probe_apk.RESULT_FILE}")))
+        return holder[-1].complete
+
+    wait_for("the probe application to write its result", written, PROBE_SECONDS)
+    return holder[-1]
+
+
+def root_reads_key(device: Device, probes: "Probes") -> bool | None:
+    """Whether root reads the key in this boot: True or False, None where the image has no `su`."""
+    try:
+        return device.shell(f"su 0 getprop {KEY_PROPERTY}") == probes.key
+    except Failure:
+        return None
+
+
+def check_key_property(device: Device, probes: "Probes") -> str:
+    """An ordinary application reads the control property and not the key, which the kernel was
+    given in this same boot. Returns the line the run prints."""
+    boot = boot_id(device)
+    if f"androidboot.kernarium.adb_key={probes.key}" not in device.shell("cat /proc/cmdline"):
+        raise Failure("the kernel command line does not carry the probe key: the test cannot tell")
+    result = run_probe_application(device, probes.apk)
+    if not result.domain.startswith("u:r:untrusted_app_"):
+        raise Failure(f"the probe application did not run as an ordinary application (its domain is {result.domain})")
+    if not result.control:
+        raise Failure(f"the application cannot read {CONTROL_PROPERTY}: the test cannot tell")
+    rooted = root_reads_key(device, probes)
+    if rooted is False:
+        raise Failure(f"root does not read {KEY_PROPERTY} in this boot: the image dropped the property")
+    if result.key:
         raise Failure(f"an application can read {KEY_PROPERTY}")
+    if boot_id(device) != boot:
+        raise Failure("the guest rebooted while the probe ran: the control and the key are not of one boot")
+    for name in LOWER_DEVICES:
+        if result.links.get(name, False):
+            raise Failure(f"the application's interface listing shows an IPv6 link-local address for {name}")
+        if name not in result.links:
+            raise Failure(f"the application's interface listing has no {name}: the test cannot tell")
+    control = "root reads the key" if rooted else "the key is on the kernel command line (inferred: no su)"
+    return (f"the probe ran as {result.domain}: it reads the control property and not the key in a boot where "
+            f"{control}; its interface listing shows no link-local address for eth0 or buried_eth0")
 
 
 def check_image(device: Device, ethernet: str, probes: Probes) -> str:
     wifi = check_wifi(device, ethernet)
-    check_key_property(device, probes)
+    check_lower_devices(device)
+    print(check_key_property(device, probes))
     return wifi
-
-
-def prepared_release(release: pathlib.Path, command_line: pathlib.Path, scratch: pathlib.Path) -> pathlib.Path:
-    """A clone of the release directory whose kernel command line is `command_line`. The clone is
-    copy-on-write (APFS), so the release itself is never touched."""
-    clone = scratch / "release"
-    result = subprocess.run(["cp", "-c", "-R", str(release), str(clone)], text=True, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
-    if result.returncode != 0:
-        raise Failure(f"cannot clone the release: {result.stdout.strip()}")
-    target = clone / "boot" / "kernel-command-line.txt"
-    target.unlink()
-    shutil.copyfile(command_line, target)
-    return clone
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -494,12 +602,6 @@ def build_parser() -> argparse.ArgumentParser:
                         f"when GUEST_SLOT_PORT_BASE is set, else {DEFAULT_ADB_PORT})")
     parser.add_argument("--cpus", type=int, default=4)
     parser.add_argument("--boot-timeout", type=int, default=900)
-    parser.add_argument("--scratch-dir", type=pathlib.Path,
-                        help="where the run's instances (and, with --command-line, its release clone) live "
-                        "(default: the system's temporary directory; the clone needs the release's volume)")
-    parser.add_argument("--command-line", type=pathlib.Path,
-                        help="start the release with this kernel command line (needs --release); "
-                        "the tracked file of the next image carries no serial number")
     parser.add_argument("--image-inputs", action="store_true",
                         help="also check what an image built with this repository's overlay carries: "
                         "the derived Wi-Fi address and the restricted adb key property")
@@ -522,17 +624,11 @@ def main() -> int:
     for name in TERMINATION_SIGNALS:
         signal.signal(name, terminate_on_signal)
     guests: list[Guest] = []
-    if options.command_line is not None and options.release is None:
-        print("FAIL: --command-line needs --release", file=sys.stderr)
-        return 2
-    with tempfile.TemporaryDirectory(prefix="android-installation-identity-", dir=options.scratch_dir) as scratch_name:
+    probes: Probes | None = None
+    with tempfile.TemporaryDirectory(prefix="android-installation-identity-") as scratch_name:
         scratch = pathlib.Path(scratch_name)
         log_path = scratch / "launcher.log"
         try:
-            probes = None
-            if options.command_line is not None:
-                options.release = prepared_release(options.release, options.command_line, scratch)
-                print("release started with the given kernel command line")
             if options.image_inputs:
                 probes = Probes(scratch, options.emulator or DEFAULT_EMULATOR)
                 options.emulator = probes.emulator
@@ -545,11 +641,14 @@ def main() -> int:
             first.start()
             identity = check_guest_matches_file(first.device, first.instance)
             check_network(first.device)
+            print("first installation: its own serial number and eth0 address, network up")
+            if probes is None:
+                report_link_local(first.device)
             wifi = image_inputs(first, identity)
             file_before, _ = read_identity_file(first.instance)
-            print("first installation: its own serial number and eth0 address, network up")
             if probes:
-                print("first installation: wlan0 derived from eth0, joined, the adb key unreadable by an application")
+                print("first installation: wlan0 derived from eth0, joined, the lower devices without IPv6, "
+                      "the adb key unreadable by an application")
 
             first.reboot()
             if not check_guest_matches_file(first.device, first.instance).same_as(identity):
@@ -587,7 +686,7 @@ def main() -> int:
             print("PASS")
             return 0
         except (Failure, subprocess.TimeoutExpired, OSError) as problem:
-            known = known_values([scratch / "first", scratch / "second"])
+            known = known_values([scratch / "first", scratch / "second"], probes)
             print(f"FAIL: {mask(str(problem), known)}", file=sys.stderr)
             if log_path.is_file():
                 tail = "\n".join(log_path.read_text(errors="replace").splitlines()[-30:])

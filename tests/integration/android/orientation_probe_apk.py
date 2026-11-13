@@ -229,16 +229,18 @@ def decode_manifest(data: bytes) -> Node:
 
 
 def build_apk(destination: pathlib.Path, workdir: pathlib.Path | None = None,
-              tree: Element | None = None) -> pathlib.Path:
+              tree: Element | None = None, files: dict[str, bytes] | None = None) -> pathlib.Path:
     """Writes the signed package to `destination`: a throwaway key signs it, so the result belongs to no one.
-    The package is this module's orientation probe, or the application of another manifest `tree`
-    (property_probe_apk.py)."""
+    The package is this module's orientation probe, or the application of another manifest `tree` with the
+    other entries `files` names, such as classes.dex (property_probe_apk.py)."""
     own = workdir is None
     scratch = pathlib.Path(tempfile.mkdtemp(prefix="uml-orientation-apk-")) if own else workdir
     try:
         unsigned = scratch / "probe.apk"
         with zipfile.ZipFile(unsigned, "w", zipfile.ZIP_DEFLATED) as package:
             package.writestr("AndroidManifest.xml", encode_manifest(tree))
+            for name, content in (files or {}).items():
+                package.writestr(name, content)
         keystore = scratch / "throwaway.p12"
         run = lambda *command: subprocess.run(  # noqa: E731
             command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

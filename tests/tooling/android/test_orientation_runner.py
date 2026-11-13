@@ -844,20 +844,6 @@ class ProbeApplicationTests(unittest.TestCase):
         self.assertEqual(ids, sorted(ids))
         self.assertIn(struct.pack(f"<{len(ids)}I", *ids), data)
 
-    def test_the_property_probe_is_a_debuggable_application_with_no_code(self) -> None:
-        # run_android_installation_identity.py runs getprop in this application's domain through run-as,
-        # which needs the debuggable flag.
-        import property_probe_apk
-        tree = probe.decode_manifest(probe.encode_manifest(property_probe_apk.manifest_tree()))
-        self.assertEqual(tree.tag, "manifest")
-        self.assertEqual(tree.attributes["package"], property_probe_apk.PACKAGE)
-        application = tree.children[1]
-        self.assertEqual(application.tag, "application")
-        self.assertIs(application.attributes["debuggable"], True)
-        self.assertIs(application.attributes["hasCode"], False)
-        self.assertEqual(application.children, [])
-        self.assertEqual(tree.children[0].attributes["targetSdkVersion"], probe.TARGET_SDK)
-
     @unittest.skipUnless(shutil.which("keytool") and shutil.which("jarsigner"), "needs a JDK")
     def test_the_package_is_signed_with_a_throwaway_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -58,7 +58,8 @@ endif()
 
 # The same runner with --image-inputs, for a release built from this
 # repository's overlay: wlan0's address derived from eth0's, the Wi-Fi joined,
-# and the adb key that no application may read. The accepted release predates
+# no IPv6 link-local address on eth0 and the macvlan, and the adb key that no
+# application may read. The accepted release predates
 # these image inputs and fails it, so it names its own release.
 set(UML_ANDROID_INSTALLATION_IDENTITY_IMAGE_RELEASE "" CACHE PATH
     "Installed Android release directory, built with the installation identity image inputs, that android-installation-identity-image boots")

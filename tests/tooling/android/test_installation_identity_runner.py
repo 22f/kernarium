@@ -12,6 +12,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -19,10 +20,13 @@ import os
 from pathlib import Path
 import random
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
+import zlib
 from unittest import mock
 
 
@@ -288,6 +292,7 @@ class RunnerLifecycleTests(unittest.TestCase):
                     "first-serial" if device.number == 0 else "second-serial", "unused",
                     "02:11:22:33:44:55" if device.number == 0 else "06:11:22:33:44:55")), \
                 mock.patch.object(runner, "check_network", lambda _device: None), \
+                mock.patch.object(runner, "report_link_local", lambda _device: {}), \
                 mock.patch.object(runner, "read_identity_file", lambda _instance: (b"unchanged", {})):
             result, text, escaped = self.run_main(Guest)
         self.assertFalse(escaped, "a disconnect timeout escaped the cleanup")
@@ -456,14 +461,29 @@ WLAN0 = (
     "    link/ether {address} brd ff:ff:ff:ff:ff:ff\n"
     "{inet}")
 INET = "    inet 10.0.2.16/24 brd 10.0.2.255 scope global wlan0\n"
+LINK_LOCAL_LINE = "    inet6 fe80::1234:5678:9abc:def0/64 scope link\n"
+APP_CONTEXT = "u:r:untrusted_app_29:s0:c123,c256,c512,c768"
+
+
+def full_listing(link_local: dict[str, bool]) -> str:
+    """What `ip addr show` prints for the interfaces the runner looks at, with synthetic MACs."""
+    lines = ["1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536\n    inet 127.0.0.1/8 scope host lo\n"]
+    for number, name in enumerate(("eth0", "buried_eth0", "wlan0"), start=2):
+        lines.append(f"{number}: {name}: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500\n"
+                     "    link/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff\n"
+                     + (LINK_LOCAL_LINE if link_local.get(name) else ""))
+    return "".join(lines).strip()
 
 
 class ImageDevice(FakeDevice):
-    """A guest that carries the newer image: wlan0, the probe application and the kernel's command line."""
+    """A guest that carries the newer image: wlan0, the lower devices, the probe application and the
+    kernel's command line."""
 
     def __init__(self, probes, wifi: str | None = None, inet: bool = True, key_visible: bool = False,
                  control_visible: bool = True, cmdline_has_key: bool = True, installed: bool = True,
-                 install_works: bool = True) -> None:
+                 install_works: bool = True, context: str = APP_CONTEXT, su: str = "root",
+                 root_link_local: dict[str, bool] | None = None, app_links: dict[str, bool] | None = None,
+                 broadcast_works: bool = True, writes_result: bool = True, reboots: bool = False) -> None:
         super().__init__()
         self.probes = probes
         self.wifi = wifi if wifi is not None else runner.derive_wifi_mac(ETHERNET)
@@ -473,25 +493,55 @@ class ImageDevice(FakeDevice):
         self.cmdline_has_key = cmdline_has_key
         self.installed = installed
         self.install_works = install_works
+        self.context = context
+        self.su = su  # "root": root reads the key; "none": the image has no su; "dropped": root reads nothing
+        self.root_link_local = root_link_local or {"wlan0": True}
+        self.app_links = app_links if app_links is not None else {
+            "dummy0": True, "eth0": False, "wlan0": True, "lo": False, "buried_eth0": False}
+        self.broadcast_works = broadcast_works
+        self.writes_result = writes_result
+        self.reboots = reboots
+        self.boots = 0
         self.serial = "127.0.0.1:1"
         self.commands: list[str] = []
+
+    def result_text(self) -> str:
+        links = " ".join(f"{name}={'yes' if found else 'no'}" for name, found in self.app_links.items()) + " "
+        return "\n".join([
+            f"context={self.context}", f"links={links}",
+            f"control={'readable' if self.control_visible else 'empty'}",
+            f"key={'readable' if self.key_visible else 'empty'}", "done"])
 
     def shell(self, command: str, timeout: int = 30) -> str:
         self.commands.append(command)
         package = runner.property_probe_apk.PACKAGE
+        result_file = runner.property_probe_apk.RESULT_FILE
         if command == "ip addr show wlan0":
             return WLAN0.format(address=self.wifi.upper(), inet=INET if self.inet else "").strip()
+        if command == "ip addr show":
+            return full_listing(self.root_link_local)
         if command == "ip -4 addr show dev wlan0":
             return INET if self.inet else "10: wlan0: <UP>"
         if command == "cat /proc/cmdline":
             key = f" androidboot.kernarium.adb_key={self.probes.key}" if self.cmdline_has_key else ""
             return "console=ttyS0" + key
+        if command == "cat /proc/sys/kernel/random/boot_id":
+            self.boots += 1
+            return f"boot-{self.boots if self.reboots else 0}"
         if command == f"pm path {package} || true":
             return f"package:/data/app/{package}/base.apk" if self.installed else ""
-        if command == f"run-as {package} getprop {runner.CONTROL_PROPERTY}":
-            return self.probes.control if self.control_visible else ""
-        if command == f"run-as {package} getprop {runner.KEY_PROPERTY}":
-            return self.probes.key if self.key_visible else ""
+        if command == f"run-as {package} rm -f {result_file}":
+            return ""
+        if command == f"am broadcast -n {runner.property_probe_apk.COMPONENT}":
+            return "Broadcast completed: result=0" if self.broadcast_works else "Error: no such component"
+        if command == f"run-as {package} cat {result_file}":
+            if not self.writes_result:
+                raise runner.Failure(f"'{command}' exited 1")
+            return self.result_text()
+        if command == f"su 0 getprop {runner.KEY_PROPERTY}":
+            if self.su == "none":
+                raise runner.Failure(f"'{command}' exited 127")
+            return self.probes.key if self.su == "root" else ""
         return super().shell(command, timeout)
 
     def run(self, *arguments: str, timeout: int = 30) -> subprocess.CompletedProcess:
@@ -500,15 +550,261 @@ class ImageDevice(FakeDevice):
                                            "Success\n" if self.install_works else "Failure\n")
 
 
+OPCODE_UNITS = {0x0E: 1, 0x12: 1, 0x0A: 1, 0x0C: 1, 0x1A: 2, 0x22: 2, 0x1F: 2, 0x20: 2, 0x23: 2, 0x38: 2, 0x29: 2,
+                0x4D: 2, 0x6E: 3, 0x70: 3, 0x71: 3, 0x72: 3}
+TYPE_INDEXED = {0x22, 0x1F}  # new-instance, check-cast (21c); 0x20 and 0x23 are 22c
+METHOD_INDEXED = {0x6E, 0x70, 0x71, 0x72}
+
+
+def uleb128(data: bytes, offset: int) -> tuple[int, int]:
+    value = shift = 0
+    while True:
+        byte = data[offset]
+        offset += 1
+        value |= (byte & 0x7F) << shift
+        shift += 7
+        if not byte & 0x80:
+            return value, offset
+
+
+class DexReader:
+    """An independent reader of the DEX the probe's code is assembled into: it checks the layout
+    rules (sorted tables, alignment, the map, the digests) and walks the instructions."""
+
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        (self.magic, self.checksum, self.signature, self.file_size, self.header_size, self.endian,
+         self.link_size, self.link_off, self.map_off) = struct.unpack_from("<8sI20sIIIIII", data, 0)
+        names = ("string_ids", "type_ids", "proto_ids", "field_ids", "method_ids", "class_defs", "data")
+        self.sections = {}
+        for number, name in enumerate(names):
+            self.sections[name] = struct.unpack_from("<II", data, 0x38 + 8 * number)
+        count, offset = self.sections["string_ids"]
+        self.strings = []
+        for index in range(count):
+            (position,) = struct.unpack_from("<I", data, offset + 4 * index)
+            size, position = uleb128(data, position)
+            end = data.index(b"\0", position)
+            self.strings.append(data[position:end])
+            assert size == len(data[position:end].decode("utf-8")), "utf16_size"
+        count, offset = self.sections["type_ids"]
+        self.types = [struct.unpack_from("<I", data, offset + 4 * i)[0] for i in range(count)]
+        count, offset = self.sections["proto_ids"]
+        self.protos = [struct.unpack_from("<III", data, offset + 12 * i) for i in range(count)]
+        count, offset = self.sections["method_ids"]
+        self.methods = [struct.unpack_from("<HHI", data, offset + 8 * i) for i in range(count)]
+        count, offset = self.sections["class_defs"]
+        self.class_defs = [struct.unpack_from("<IIIIIIII", data, offset + 32 * i) for i in range(count)]
+
+    def descriptor(self, type_index: int) -> str:
+        return self.strings[self.types[type_index]].decode()
+
+    def type_list(self, offset: int) -> list[int]:
+        if not offset:
+            return []
+        (size,) = struct.unpack_from("<I", self.data, offset)
+        return list(struct.unpack_from(f"<{size}H", self.data, offset + 4))
+
+    def method_name(self, index: int) -> str:
+        class_index, proto_index, name_index = self.methods[index]
+        _, return_type, parameters = self.protos[proto_index]
+        arguments = "".join(self.descriptor(item) for item in self.type_list(parameters))
+        return (f"{self.descriptor(class_index)}.{self.strings[name_index].decode()}"
+                f"({arguments}){self.descriptor(return_type)}")
+
+    def code(self, offset: int) -> tuple[tuple[int, int, int], list[int]]:
+        registers, ins, outs, tries, debug, size = struct.unpack_from("<HHHHII", self.data, offset)
+        assert tries == 0 and debug == 0
+        return (registers, ins, outs), list(struct.unpack_from(f"<{size}H", self.data, offset + 16))
+
+    def class_methods(self) -> dict[str, tuple[int, int]]:
+        """Method name to (access flags, code offset), for the one class."""
+        offset = self.class_defs[0][6]
+        sizes = []
+        for _ in range(4):
+            value, offset = uleb128(self.data, offset)
+            sizes.append(value)
+        found = {}
+        for count in sizes[2:]:
+            index = 0
+            for _ in range(count):
+                step, offset = uleb128(self.data, offset)
+                access, offset = uleb128(self.data, offset)
+                code, offset = uleb128(self.data, offset)
+                index += step
+                found[self.method_name(index)] = (access, code)
+        return found
+
+
+class PropertyProbeApplicationTests(unittest.TestCase):
+    PACKAGE = runner.property_probe_apk.PACKAGE
+
+    def dex(self) -> DexReader:
+        return DexReader(runner.property_probe_apk.property_probe_dex.build_dex(
+            self.PACKAGE, runner.CONTROL_PROPERTY, runner.KEY_PROPERTY))
+
+    def test_the_layout_follows_the_formats_rules(self) -> None:
+        reader = self.dex()
+        data = reader.data
+        self.assertEqual(reader.magic, b"dex\n035\0")
+        self.assertEqual((reader.file_size, reader.header_size, reader.endian), (len(data), 0x70, 0x12345678))
+        self.assertEqual(reader.checksum, zlib.adler32(data[12:]) & 0xFFFFFFFF)
+        self.assertEqual(reader.signature, hashlib.sha1(data[32:]).digest())
+        self.assertEqual(reader.strings, sorted(set(reader.strings)))
+        self.assertEqual(reader.types, sorted(set(reader.types)))
+        self.assertEqual(reader.sections["field_ids"][0], 0)
+        protos = [(ret, reader.type_list(params)) for _, ret, params in reader.protos]
+        self.assertEqual(protos, sorted(protos))
+        self.assertEqual(len({(ret, tuple(params)) for ret, params in protos}), len(protos))
+        for _, proto, name in reader.methods:
+            self.assertLess(proto, len(reader.protos))
+            self.assertLess(name, len(reader.strings))
+        self.assertEqual(reader.methods, sorted(reader.methods, key=lambda m: (m[0], m[2], m[1])))
+        self.assertEqual(len(set(reader.methods)), len(reader.methods))
+        for shorty, return_type, parameters in reader.protos:
+            expected = "".join("L" if reader.descriptor(i)[0] in "L[" else reader.descriptor(i)
+                               for i in [return_type, *reader.type_list(parameters)])
+            self.assertEqual(reader.strings[shorty].decode(), expected)
+        self.assertEqual(reader.sections["data"][1] % 4, 0)
+        self.assertEqual(reader.sections["data"][0] % 4, 0)
+        self.assertEqual(reader.sections["data"][1] + reader.sections["data"][0], len(data))
+
+    def test_the_map_lists_every_section_in_offset_order(self) -> None:
+        reader = self.dex()
+        (count,) = struct.unpack_from("<I", reader.data, reader.map_off)
+        entries = [struct.unpack_from("<HHII", reader.data, reader.map_off + 4 + 12 * i) for i in range(count)]
+        self.assertEqual(reader.map_off % 4, 0)
+        self.assertEqual([offset for _, _, _, offset in entries], sorted(offset for _, _, _, offset in entries))
+        kinds = {kind: (size, offset) for kind, _, size, offset in entries}
+        self.assertEqual(kinds[0x0000], (1, 0))
+        self.assertEqual(kinds[0x0001], (len(reader.strings), reader.sections["string_ids"][1]))
+        self.assertEqual(kinds[0x0002], (len(reader.types), reader.sections["type_ids"][1]))
+        self.assertEqual(kinds[0x0003], (len(reader.protos), reader.sections["proto_ids"][1]))
+        self.assertEqual(kinds[0x0005], (len(reader.methods), reader.sections["method_ids"][1]))
+        self.assertEqual(kinds[0x0006], (1, reader.sections["class_defs"][1]))
+        self.assertEqual(kinds[0x1000], (1, reader.map_off))
+        self.assertEqual(kinds[0x2000][0], 1)
+        self.assertEqual(kinds[0x2001][0], 2)
+        self.assertEqual(kinds[0x2002][0], len(reader.strings))
+        self.assertEqual(kinds[0x2001][1] % 4, 0)
+        self.assertEqual(kinds[0x1001][1] % 4, 0)
+
+    def test_the_class_is_a_broadcast_receiver_with_a_constructor_and_onreceive(self) -> None:
+        reader = self.dex()
+        _, flags, superclass, interfaces, source, annotations, class_data, static = reader.class_defs[0]
+        self.assertEqual(reader.descriptor(reader.class_defs[0][0]), "Lorg/example/andarium/propertyprobe/Probe;")
+        self.assertEqual(reader.descriptor(superclass), "Landroid/content/BroadcastReceiver;")
+        self.assertEqual((flags, interfaces, source, annotations, static), (1, 0, 0xFFFFFFFF, 0, 0))
+        methods = reader.class_methods()
+        prefix = "Lorg/example/andarium/propertyprobe/Probe;."
+        self.assertEqual(sorted(methods), [prefix + "<init>()V",
+                                           prefix + "onReceive(Landroid/content/Context;Landroid/content/Intent;)V"])
+        self.assertEqual(methods[prefix + "<init>()V"][0], 0x10001)
+        self.assertEqual(methods[prefix + "onReceive(Landroid/content/Context;Landroid/content/Intent;)V"][0], 1)
+
+    def test_every_instruction_is_whole_and_every_index_and_branch_lands(self) -> None:
+        reader = self.dex()
+        for name, (_, offset) in reader.class_methods().items():
+            (registers, ins, outs), units = reader.code(offset)
+            self.assertLessEqual(ins, registers, name)
+            position, starts, branches = 0, set(), []
+            while position < len(units):
+                starts.add(position)
+                opcode = units[position] & 0xFF
+                self.assertIn(opcode, OPCODE_UNITS, f"{name}: opcode {opcode:#x}")
+                width = OPCODE_UNITS[opcode]
+                if opcode == 0x1A:
+                    self.assertLess(units[position + 1], len(reader.strings))
+                elif opcode in TYPE_INDEXED or opcode in (0x20, 0x23):
+                    self.assertLess(units[position + 1], len(reader.types))
+                elif opcode in METHOD_INDEXED:
+                    self.assertLess(units[position + 1], len(reader.methods))
+                    count = units[position] >> 12
+                    self.assertLessEqual(count, outs if name.endswith("onReceive(Landroid/content/Context;Landroid/content/Intent;)V") else 1)
+                    for number in range(count):
+                        # the registers of the call (4 bits each, C D E F then G)
+                        packed = units[position + 2] | (units[position] >> 8 & 0xF) << 16
+                        self.assertLess((packed >> 4 * number) & 0xF, registers)
+                elif opcode in (0x38, 0x29):
+                    offset_signed = units[position + 1] - 0x10000 if units[position + 1] & 0x8000 else units[position + 1]
+                    branches.append(position + offset_signed)
+                position += width
+            self.assertEqual(position, len(units), f"{name}: the instructions end inside an instruction")
+            for target in branches:
+                self.assertIn(target, starts, f"{name}: a branch lands inside an instruction")
+            self.assertEqual(units[-1] & 0xFF, 0x0E, f"{name} does not end with return-void")
+
+    def test_the_script_runs_as_the_application_and_never_writes_the_key(self) -> None:
+        text = runner.property_probe_apk.property_probe_dex.script(self.PACKAGE, runner.CONTROL_PROPERTY, runner.KEY_PROPERTY)
+        self.assertIn(f"/data/data/{self.PACKAGE}/files", text)
+        self.assertIn(f"getprop {runner.CONTROL_PROPERTY}", text)
+        self.assertIn(f"getprop {runner.KEY_PROPERTY}", text)
+        self.assertIn("id -Z", text)
+        self.assertIn("key=readable", text)
+        # The key's value is tested for being non-empty, never echoed.
+        self.assertNotRegex(text, rf"echo[^;]*\$\(getprop {runner.KEY_PROPERTY}\)")
+        self.assertIn(text.replace("\\", ""), self.dex().data.decode("latin-1"))
+
+    def test_the_manifest_declares_a_debuggable_application_with_the_internet_permission_and_one_receiver(self) -> None:
+        import orientation_probe_apk as binary_xml
+        tree = binary_xml.decode_manifest(binary_xml.encode_manifest(runner.property_probe_apk.manifest_tree()))
+        self.assertEqual(tree.attributes["package"], self.PACKAGE)
+        sdk, permission, application = tree.children
+        self.assertEqual(sdk.attributes["targetSdkVersion"], binary_xml.TARGET_SDK)
+        self.assertEqual(permission.attributes["name"], "android.permission.INTERNET")
+        self.assertEqual(application.tag, "application")
+        self.assertIs(application.attributes["debuggable"], True)
+        self.assertNotIn("hasCode", application.attributes)
+        (receiver,) = application.children
+        self.assertEqual((receiver.tag, receiver.attributes["name"], receiver.attributes["exported"]),
+                         ("receiver", runner.property_probe_apk.RECEIVER, True))
+        self.assertEqual(receiver.children, [])
+        self.assertEqual(runner.property_probe_apk.COMPONENT, f"{self.PACKAGE}/{runner.property_probe_apk.RECEIVER}")
+
+    @unittest.skipUnless(shutil.which("keytool") and shutil.which("jarsigner"), "needs a JDK")
+    def test_the_package_holds_the_manifest_and_the_code_and_is_signed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            apk = runner.property_probe_apk.build_apk(Path(directory) / "probe.apk", runner.CONTROL_PROPERTY,
+                                                      runner.KEY_PROPERTY, Path(directory))
+            with zipfile.ZipFile(apk) as package:
+                names = package.namelist()
+                self.assertIn("AndroidManifest.xml", names)
+                self.assertIn("classes.dex", names)
+                self.assertEqual(package.read("classes.dex"), self.dex().data)
+            result = subprocess.run(["jarsigner", "-verify", str(apk)], capture_output=True, text=True, check=False)
+            self.assertIn("jar verified", result.stdout)
+
+
+class ProbeResultTests(unittest.TestCase):
+    def test_the_result_file_is_read_into_fields(self) -> None:
+        result = runner.parse_probe_result(ImageDevice(None).result_text())
+        self.assertTrue(result.complete)
+        self.assertEqual(result.domain, "u:r:untrusted_app_29:s0")
+        self.assertTrue(result.control)
+        self.assertFalse(result.key)
+        self.assertEqual(result.links, {"dummy0": True, "eth0": False, "wlan0": True, "lo": False, "buried_eth0": False})
+
+    def test_a_result_without_its_last_line_is_not_complete(self) -> None:
+        text = ImageDevice(None).result_text().replace("\ndone", "")
+        self.assertFalse(runner.parse_probe_result(text).complete)
+
+
 class ImageInputTests(unittest.TestCase):
     def setUp(self) -> None:
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         self.scratch = Path(scratch.name)
-        patcher = mock.patch.object(runner.property_probe_apk, "build_apk", side_effect=lambda path: path)
+        patcher = mock.patch.object(runner.property_probe_apk, "build_apk", side_effect=lambda path, *names: path)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.probes = runner.Probes(self.scratch, Path("/path with space/emulator"))
+
+    def check(self, device: ImageDevice) -> tuple[str, str]:
+        """check_image's result and what it printed."""
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            wifi = runner.check_image(device, ETHERNET, self.probes)
+        return wifi, output.getvalue()
 
     def test_the_wrapper_adds_the_probe_arguments_after_the_launchers_own(self) -> None:
         text = self.probes.emulator.read_text()
@@ -520,16 +816,30 @@ class ImageInputTests(unittest.TestCase):
         self.assertNotEqual((other.key, other.control), (self.probes.key, self.probes.control))
 
     def test_a_guest_of_the_new_image_passes_and_gives_its_wifi_address(self) -> None:
-        device = ImageDevice(self.probes)
-        self.assertEqual(runner.check_image(device, ETHERNET, self.probes), runner.derive_wifi_mac(ETHERNET))
+        wifi, printed = self.check(ImageDevice(self.probes))
+        self.assertEqual(wifi, runner.derive_wifi_mac(ETHERNET))
+        self.assertIn("ran as u:r:untrusted_app_29:s0", printed)
+        self.assertIn("root reads the key", printed)
+        self.assertNotIn("c123", printed)
+
+    def test_an_image_without_su_passes_and_says_the_control_is_inferred(self) -> None:
+        _, printed = self.check(ImageDevice(self.probes, su="none"))
+        self.assertIn("inferred", printed)
 
     def test_the_probe_application_is_installed_once(self) -> None:
         device = ImageDevice(self.probes, installed=False)
-        runner.check_image(device, ETHERNET, self.probes)
+        self.check(device)
         self.assertEqual(sum(1 for command in device.commands if command.startswith("-s ")), 1)
         device = ImageDevice(self.probes, installed=True)
-        runner.check_image(device, ETHERNET, self.probes)
+        self.check(device)
         self.assertEqual(sum(1 for command in device.commands if command.startswith("-s ")), 0)
+
+    def test_the_application_is_started_as_a_broadcast_receiver_not_run_as(self) -> None:
+        device = ImageDevice(self.probes)
+        self.check(device)
+        package = runner.property_probe_apk.PACKAGE
+        self.assertIn(f"am broadcast -n {runner.property_probe_apk.COMPONENT}", device.commands)
+        self.assertFalse([command for command in device.commands if command.startswith(f"run-as {package} getprop")])
 
     def test_every_difference_fails(self) -> None:
         cases = {
@@ -540,39 +850,96 @@ class ImageInputTests(unittest.TestCase):
             "an application reads the key": ImageDevice(self.probes, key_visible=True),
             "an application cannot read the control": ImageDevice(self.probes, control_visible=False),
             "the kernel never had the key": ImageDevice(self.probes, cmdline_has_key=False),
+            "root does not read the key": ImageDevice(self.probes, su="dropped"),
             "the probe will not install": ImageDevice(self.probes, installed=False, install_works=False),
+            "the broadcast is not delivered": ImageDevice(self.probes, broadcast_works=False),
+            "the probe writes no result": ImageDevice(self.probes, writes_result=False),
+            "the probe is run-as, not an application": ImageDevice(self.probes, context="u:r:runas_app:s0:c1"),
+            "the probe is shell": ImageDevice(self.probes, context="u:r:shell:s0"),
+            "the boot changes while it runs": ImageDevice(self.probes, reboots=True),
+            "eth0 has a link-local address": ImageDevice(self.probes, root_link_local={"eth0": True}),
+            "buried_eth0 has a link-local address": ImageDevice(self.probes, root_link_local={"buried_eth0": True}),
+            "an application sees eth0's": ImageDevice(self.probes, app_links={"eth0": True, "buried_eth0": False}),
+            "an application sees buried_eth0's": ImageDevice(self.probes, app_links={"eth0": False, "buried_eth0": True}),
+            "an application's listing lacks the lower devices": ImageDevice(self.probes, app_links={"wlan0": True}),
         }
         for label, device in cases.items():
             with self.subTest(label), mock.patch.object(runner, "LEASE_SECONDS", 1), \
+                    mock.patch.object(runner, "PROBE_SECONDS", 1), \
                     mock.patch.object(runner.time, "sleep", lambda seconds: None):
                 with self.assertRaises(runner.Failure):
-                    runner.check_image(device, ETHERNET, self.probes)
+                    self.check(device)
 
-    def test_a_failure_names_no_address(self) -> None:
-        device = ImageDevice(self.probes, wifi="02:aa:bb:cc:dd:01")
-        with self.assertRaises(runner.Failure) as raised:
-            runner.check_image(device, ETHERNET, self.probes)
-        message = str(raised.exception)
-        for value in (ETHERNET, "02:aa:bb:cc:dd:01", runner.derive_wifi_mac(ETHERNET), self.probes.key):
-            self.assertNotIn(value, message)
+    def test_wlan0_may_hold_a_link_local_address(self) -> None:
+        self.check(ImageDevice(self.probes, root_link_local={"wlan0": True}, app_links={
+            "eth0": False, "buried_eth0": False, "wlan0": True}))
 
-    def test_a_release_gets_the_given_command_line_and_the_original_keeps_its_own(self) -> None:
-        release = self.scratch / "source"
-        (release / "boot").mkdir(parents=True)
-        (release / "boot" / "kernel-command-line.txt").write_text("old serial=1\n")
-        (release / "release-manifest.json").write_text("{}\n")
-        line = self.scratch / "new-line.txt"
-        line.write_text("new\n")
-        clone = runner.prepared_release(release, line, self.scratch)
-        self.assertEqual((clone / "boot" / "kernel-command-line.txt").read_text(), "new\n")
-        self.assertEqual((release / "boot" / "kernel-command-line.txt").read_text(), "old serial=1\n")
-        self.assertTrue((clone / "release-manifest.json").is_file())
+    def test_a_failure_names_no_address_and_no_key(self) -> None:
+        for device in (ImageDevice(self.probes, wifi="02:aa:bb:cc:dd:01"), ImageDevice(self.probes, key_visible=True)):
+            with self.assertRaises(runner.Failure) as raised:
+                self.check(device)
+            message = str(raised.exception)
+            for value in (ETHERNET, "02:aa:bb:cc:dd:01", runner.derive_wifi_mac(ETHERNET), self.probes.key,
+                          self.probes.control):
+                self.assertNotIn(value, message)
 
-    def test_a_command_line_needs_a_release(self) -> None:
-        with mock.patch.object(sys, "argv", ["runner", "--command-line", "/x"]), \
-                contextlib.redirect_stderr(io.StringIO()) as stderr:
-            self.assertEqual(runner.main(), 2)
-        self.assertIn("--release", stderr.getvalue())
+    def test_the_default_run_reports_each_interface_with_no_address(self) -> None:
+        device = ImageDevice(self.probes, root_link_local={"eth0": True, "buried_eth0": True})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            found = runner.report_link_local(device)
+        self.assertEqual(found, {"eth0": True, "buried_eth0": True, "wlan0": False})
+        self.assertEqual(output.getvalue().splitlines(), [
+            "eth0: IPv6 link-local address in the guest's listing: yes",
+            "buried_eth0: IPv6 link-local address in the guest's listing: yes",
+            "wlan0: IPv6 link-local address in the guest's listing: no"])
+        self.assertNotIn("fe80", output.getvalue())
+
+
+class ImageFailureOutputTests(unittest.TestCase):
+    """main() with --image-inputs: what a failure prints never holds the probe's key."""
+
+    def test_the_probe_key_is_masked_in_the_message_and_the_log_tail(self) -> None:
+        key = "probe" + "aaaabbbbccccdddd"
+
+        class Failing(runner.Guest):
+            def start(self) -> None:
+                self.log.write_text(
+                    f"emulator args: androidboot.kernarium.adb_key={key} androidboot.kernarium.identity_probe=aaaabbbbccccdddd\n"
+                    f"[ro.boot.kernarium.adb_key]: [{key}]\nadb_key: {key}\nthe key {key} again\n")
+                raise runner.Failure(f"an application can read ro.boot.kernarium.adb_key={key}")
+
+            def stop(self) -> None:
+                pass
+
+        output = io.StringIO()
+        with mock.patch.object(runner, "Guest", Failing), \
+                mock.patch.object(runner.property_probe_apk, "build_apk", side_effect=lambda path, *names: path), \
+                mock.patch.object(runner.secrets, "token_hex", return_value="aaaabbbbccccdddd"), \
+                mock.patch.object(sys, "argv", [str(SCRIPT), "--image-inputs"]), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            result = runner.main()
+        self.assertEqual(result, 1)
+        text = output.getvalue()
+        self.assertIn("FAIL:", text)
+        self.assertNotIn(key, text)
+        self.assertNotIn("aaaabbbbccccdddd", text)
+        self.assertIn("launcher log tail", text)
+        self.assertIn("adb_key=", text)
+
+
+class MaskKeyTests(unittest.TestCase):
+    def test_key_assignments_are_masked_in_every_form_and_the_property_name_is_not(self) -> None:
+        text = ("androidboot.kernarium.adb_key=QUFBQUJC\n[ro.boot.kernarium.adb_key]: [QUFBQUJC]\n"
+                "adb_key: QUFBQUJC\nan application can read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop\n")
+        masked = runner.mask(text)
+        self.assertNotIn("QUFBQUJC", masked)
+        self.assertIn("an application can read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop", masked)
+
+    def test_the_run_knows_the_probe_values(self) -> None:
+        class Holder:
+            key, control = "probekey0123", "ctl4567"
+        self.assertEqual(set(runner.known_values([], Holder())), {"probekey0123", "ctl4567"})
 
 
 if __name__ == "__main__":
