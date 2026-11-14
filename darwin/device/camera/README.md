@@ -153,8 +153,12 @@ application's statements (the sensor orientation, the rotation that
   camera (its mounting, what its connections and photo output were set to, its
   aspect ratio: `darwin/platform/camera_presentation.hpp`) is reported under the
   guest's number of the camera (`CameraDeviceOptions::onCameraPresentation`) and
-  kept in the same slot. The platform session opens at the first use of a
-  camera, so a run that used none names none.
+  kept in the same slot, with the orientation of the guest's own description
+  (the application may turn it for a tablet's boot layout) and the platform's
+  as a second number where they differ. A still the platform refuses carries the
+  photo output's last compensation reading and when it was taken. The platform
+  session opens at the first use of a camera, so a run that used none names
+  none.
 - **Metadata.** A meta stream completes one `virtio_video_camera_meta` per
   exposure, with the sequence the frames and stills carry; black frames get a
   record too. The exposure time, ISO, aperture, focal length, neutral point and
