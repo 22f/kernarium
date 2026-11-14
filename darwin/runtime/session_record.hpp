@@ -124,7 +124,10 @@ inline constexpr std::size_t session_state_offset =
  * line. What identifies the installation is masked wherever the state quotes
  * it: the serial number, the adb key and the time zone that the session's
  * kernel arguments state (by their assignments and by value) and any hardware
- * address in its colon spelling, as the application's start log masks them. */
+ * address in its colon spelling, as the application's start log masks them.
+ * The values are matched on the text as the record stores it, after what it
+ * drops or replaces, and on word boundaries: a longer word that holds one is
+ * kept. */
 inline constexpr std::size_t session_kernel_output_bytes = 4096;
 inline constexpr std::size_t session_state_max_bytes =
 	session_kernel_output_bytes + 1024;

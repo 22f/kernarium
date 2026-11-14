@@ -85,6 +85,11 @@ char tail_text[output_size];
  * the end's, whatever the delay. */
 char checkpoint_text[session_state_max_bytes];
 char checkpoint_tail[output_size];
+/* What a state's text is matched on before it is stored (keep_masked): one per
+ * writer of a state, because the end may format its record while a checkpoint
+ * formats its own. */
+char record_scratch[session_state_max_bytes];
+char checkpoint_scratch[session_state_max_bytes];
 std::atomic_flag state_checkpointing = ATOMIC_FLAG_INIT;
 /* The size of the end's record in `record_text`, 0 while the session runs. */
 std::atomic<std::size_t> terminal_size{0};
@@ -1004,6 +1009,20 @@ void keep_earlier(Mask &best, const Mask &other) noexcept
 		(character >= 'a' && character <= 'f');
 }
 
+/* What continues a word of the adb key (base64: letters, digits, `+`, `/`, and
+ * `=` as the padding that ends it). A key that stands against one is part of a
+ * longer word and no key. An `=` in front of it is an assignment's, not the
+ * padding of a word before it, so it does not continue the word there. */
+[[nodiscard]] bool key_before(char character) noexcept
+{
+	return word_character(character) || character == '+' || character == '/';
+}
+
+[[nodiscard]] bool key_after(char character) noexcept
+{
+	return key_before(character) || character == '=';
+}
+
 /* The value of the assignment `name` (up to the next white space) at or after
  * `from`. */
 Mask by_name(std::string_view text, std::size_t from, std::string_view name,
@@ -1018,30 +1037,31 @@ Mask by_name(std::string_view text, std::size_t from, std::string_view name,
 		replacement};
 }
 
-/* `value` where it stands at or after `from` and no character of `inside`'s
- * kind stands against it. */
-template <class Inside>
+/* `value` where it stands at or after `from`, with no character of `before`'s
+ * kind in front of it and none of `after`'s behind it: a longer word that
+ * holds it is not the value. */
+template <class Before, class After>
 Mask by_value(std::string_view text, std::size_t from, std::string_view value,
-	std::string_view replacement, Inside inside) noexcept
+	std::string_view replacement, Before before, After after) noexcept
 {
 	if (value.empty())
 		return {};
 	for (auto at = text.find(value, from); at != std::string_view::npos;
 	     at = text.find(value, at + 1)) {
-		const std::size_t after = at + value.size();
-		if ((at == 0 || !inside(text[at - 1])) &&
-		    (after == text.size() || !inside(text[after])))
-			return {at, after, replacement};
+		const std::size_t end = at + value.size();
+		if ((at == 0 || !before(text[at - 1])) &&
+		    (end == text.size() || !after(text[end])))
+			return {at, end, replacement};
 	}
 	return {};
 }
 
 /* The start of `value` at the end of the text, `shortest` characters or more:
  * a write that ended inside it, whose rest the next write brings. */
-template <class Inside>
+template <class Before>
 Mask by_partial_value(std::string_view text, std::size_t from,
 	std::string_view value, std::size_t shortest, std::string_view replacement,
-	Inside inside) noexcept
+	Before before) noexcept
 {
 	if (value.size() < 2 || shortest == 0)
 		return {};
@@ -1050,7 +1070,7 @@ Mask by_partial_value(std::string_view text, std::size_t from,
 	for (std::size_t length = most; length >= shortest; --length) {
 		const std::size_t at = text.size() - length;
 		if (text.compare(at, length, value.substr(0, length)) == 0 &&
-		    (at == 0 || !inside(text[at - 1])))
+		    (at == 0 || !before(text[at - 1])))
 			return {at, text.size(), replacement};
 	}
 	return {};
@@ -1080,21 +1100,21 @@ Mask by_address(std::string_view text, std::size_t from) noexcept
  * values wherever they stand, and any hardware address. */
 Mask next_mask(std::string_view text, std::size_t from) noexcept
 {
-	const auto none = [](char) noexcept { return false; };
 	Mask best;
 	keep_earlier(best, by_name(text, from, "serialno=", masked_value));
 	keep_earlier(best, by_name(text, from, "adb_key=", masked_value));
 	keep_earlier(best, by_name(text, from, "timezone=", masked_zone));
-	keep_earlier(best, by_value(text, from, known_key.view(), masked_value, none));
+	keep_earlier(best, by_value(text, from, known_key.view(), masked_value,
+				key_before, key_after));
 	keep_earlier(best, by_value(text, from, known_serial.view(), masked_value,
-				alphanumeric));
+				word_character, word_character));
 	keep_earlier(best, by_value(text, from, known_zone.view(), masked_zone,
-				zone_character));
+				zone_character, zone_character));
 	keep_earlier(best, by_address(text, from));
 	keep_earlier(best, by_partial_value(text, from, known_key.view(),
-				known_key_shortest, masked_value, none));
+				known_key_shortest, masked_value, key_before));
 	keep_earlier(best, by_partial_value(text, from, known_serial.view(),
-				known_serial_shortest, masked_value, alphanumeric));
+				known_serial_shortest, masked_value, word_character));
 	keep_earlier(best, by_partial_value(text, from, known_zone.view(),
 				known_zone_shortest, masked_zone, zone_character));
 	return best;
@@ -1104,17 +1124,23 @@ Mask next_mask(std::string_view text, std::size_t from) noexcept
  * installation. The kernel echoes its command line, which carries the guest's
  * serial number (`androidboot.serialno=`), the host's adb key and the guest's
  * time zone; the record and the bug report archive that copies it do not keep
- * the values, only that they were there. */
-void keep_masked(Text &record, std::string_view text, bool lines) noexcept
+ * the values, only that they were there. The masks are matched on the text as
+ * it is stored (`scratch`, which holds at most a state's bytes): a byte that
+ * the record drops, as a carriage return, must not join the two halves of a
+ * value that the guest printed apart. */
+void keep_masked(Text &record, char *scratch, std::string_view text,
+	bool lines) noexcept
 {
+	const std::string_view stored = Text::printable_text(scratch,
+		session_state_max_bytes, text, lines);
 	std::size_t from = 0;
-	for (Mask mask = next_mask(text, from); mask.start != std::string_view::npos;
-	     mask = next_mask(text, from)) {
-		record.printable(text.substr(from, mask.start - from), lines);
+	for (Mask mask = next_mask(stored, from); mask.start != std::string_view::npos;
+	     mask = next_mask(stored, from)) {
+		record.text(stored.substr(from, mask.start - from));
 		record.text(mask.replacement);
 		from = mask.end;
 	}
-	record.printable(text.substr(from), lines);
+	record.text(stored.substr(from));
 }
 
 /* `tail` from its first complete line when the ring has dropped output of the
@@ -1139,8 +1165,8 @@ std::string_view from_whole_line(std::string_view tail) noexcept
  * console reports one, a message and the quoted output. The text is followed
  * by newlines to the whole of the state's area (write_state), which the
  * readers ignore; the size returned is the text's. */
-std::size_t format_state(char *buffer, SessionEnd end, int status,
-	std::string_view message, std::string_view tail) noexcept
+std::size_t format_state(char *buffer, char *scratch, SessionEnd end,
+	int status, std::string_view message, std::string_view tail) noexcept
 {
 	Text record{buffer, session_state_max_bytes};
 	record.text("state ")
@@ -1160,13 +1186,13 @@ std::size_t format_state(char *buffer, SessionEnd end, int status,
 			.number(boot_restarts.load(std::memory_order_relaxed));
 	if (!message.empty()) {
 		record.text("\nmessage ");
-		keep_masked(record, message, false);
+		keep_masked(record, scratch, message, false);
 	}
 	record.text("\n");
 	tail = from_whole_line(tail);
 	if (!tail.empty()) {
 		record.text("kernel-output\n");
-		keep_masked(record, tail, true);
+		keep_masked(record, scratch, tail, true);
 	}
 	const std::size_t size = std::min(record.size(), session_state_max_bytes);
 	std::memset(buffer + size, '\n', session_state_max_bytes - size);
@@ -1208,7 +1234,8 @@ void wait_out_state_checkpoint() noexcept
 void write_record_unguarded(int descriptor, SessionEnd end, int status,
 	std::string_view message, std::string_view tail) noexcept
 {
-	(void)format_state(record_text, end, status, message, tail);
+	(void)format_state(record_text, record_scratch, end, status, message,
+		tail);
 	write_state(descriptor, record_text);
 }
 
@@ -1221,8 +1248,8 @@ void write_record(SessionEnd end, int status, std::string_view message,
 	/* The last counts of the session, which no checkpoint may follow. */
 	write_network_slot(descriptor);
 	wait_out_state_checkpoint();
-	const std::size_t size = format_state(record_text, end, status, message,
-		tail);
+	const std::size_t size = format_state(record_text, record_scratch, end,
+		status, message, tail);
 	/* A checkpoint whose write lands from here on writes this record again
 	 * (checkpoint_state); it reads the size, so the record is formatted. */
 	terminal_size.store(size, std::memory_order_seq_cst);
@@ -1254,8 +1281,8 @@ void checkpoint_state(int descriptor) noexcept
 		const bool done = boot_signal.completed();
 		const std::size_t quoted = done ? 0 :
 			kernel_output_tail({checkpoint_tail, sizeof(checkpoint_tail)});
-		(void)format_state(checkpoint_text, SessionEnd::running, 0, {},
-			{checkpoint_tail, quoted});
+		(void)format_state(checkpoint_text, checkpoint_scratch,
+			SessionEnd::running, 0, {}, {checkpoint_tail, quoted});
 		if (session_open.load(std::memory_order_seq_cst)) {
 			write_state(descriptor, checkpoint_text);
 			checkpointed_output_end.store(output_now,
