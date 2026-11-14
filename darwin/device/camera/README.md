@@ -142,6 +142,14 @@ application's statements (the sensor orientation, the rotation that
   once. A host that lists no formats has no anchors and offers what it states.
   A camera opened while another's still is in flight, which the two conflict
   over, is refused until that still is delivered or has run out its ten seconds.
+  A still that does not end in a picture is reported to the device's owner
+  (`CameraDeviceOptions::onStillFailure`) with the stage it stopped at, the
+  camera, the sizes asked for, resolved and encoded, and what the platform
+  said of the capture (`darwin/platform/camera_still_failure.hpp`); the runtime keeps
+  the last few in the session record's camera slot. A whole request that waited
+  for the host's budget until its time ran out is one of them. One that an
+  interruption or a blocked session ends, and one that delivered its JPEG
+  (whatever its RAW did), report nothing.
 - **Metadata.** A meta stream completes one `virtio_video_camera_meta` per
   exposure, with the sequence the frames and stills carry; black frames get a
   record too. The exposure time, ISO, aperture, focal length, neutral point and

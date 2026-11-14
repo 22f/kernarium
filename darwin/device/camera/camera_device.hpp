@@ -95,6 +95,17 @@ struct CameraDeviceOptions {
     /* Told on the transport thread at each CameraCheckpoint, for a diagnostic
      * line; it changes nothing and must not block. */
     std::function<void(CameraCheckpoint)> onCheckpoint;
+    /* Told on the transport thread, once for each capture the guest asked for
+     * that did not end in a picture, why: the stage it stopped at, the camera,
+     * the sizes asked for, resolved and encoded and what the platform said of
+     * the capture (`uml::platform::CameraStillFailure`; numbers and fixed
+     * words, never a name or a message). The runtime keeps the last few in its
+     * session record. A capture that the camera's interruption or a blocked
+     * session ends is not one of them, and neither is one that delivered its
+     * JPEG, whatever happened to its RAW. It changes nothing. The worker waits
+     * for it, so it is brief: the runtime's writes the session record, a
+     * synchronous write, once for each. */
+    std::function<void(const uml::platform::CameraStillFailure&)> onStillFailure;
     /* Called on the transport thread when the state changes. */
     std::function<void(CameraState)> onState;
     /* The clock frame ages are measured on; the platform's where empty. */
