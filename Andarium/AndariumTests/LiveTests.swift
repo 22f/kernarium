@@ -319,7 +319,7 @@ struct DefaultGuestTests {
             #expect((1...8).map { policy.defaultMemoryMiB(vCPUs: $0) } == defaults, "limit \(limitMiB) MiB")
             #expect((1...8).map { policy.safeMemoryMiB(vCPUs: $0) } == safe, "limit \(limitMiB) MiB")
             // A limit sets the budget a guest of the default size launches with: the
-            // loader's evaluation, the guest's memory with no limit, never under 384 MiB
+            // loader's evaluation, the guest's memory with no limit, never under 352 MiB
             // otherwise.
             for count in 1...8 {
                 let memory = policy.defaultMemoryMiB(vCPUs: count)
@@ -333,8 +333,8 @@ struct DefaultGuestTests {
                     #expect((budget ?? 0) >= Limits.minimumDefaultGraphicsMemoryMiB, "limit \(limitMiB) MiB at \(count) vCPUs")
                 }
                 // The sheet warns about graphics memory above the default where the
-                // runtime lowered the default to keep a gibibyte for the GPU, and
-                // elsewhere from the first size whose estimate is under a gibibyte:
+                // runtime lowered the default to keep 992 MiB for the GPU, and
+                // elsewhere from the first size whose estimate is under 992 MiB:
                 // the loader's own flag and evaluation of every size on the picker.
                 let holds = kernarium_runtime_loader_default_guest_memory_holds_gpu_budget_for_limit(
                     UInt64(limitMiB) << 20, UInt32(count), launch) != 0
@@ -345,14 +345,15 @@ struct DefaultGuestTests {
                     #expect(memory < policy.safeMemoryMiB(vCPUs: count))
                 }
                 for size in policy.stops(vCPUs: count) where size > memory && size <= policy.safeMemoryMiB(vCPUs: count) {
-                    let short = (policy.graphicsMemoryMiB(forMemory: size, vCPUs: count) ?? 0) < 1024
+                    let short = (policy.graphicsMemoryMiB(forMemory: size, vCPUs: count) ?? 0)
+                        < Limits.minimumDefaultGraphicsMemoryMiB
                     #expect((policy.risk(size, vCPUs: count) == .graphics) == (holds || short),
                             "limit \(limitMiB) MiB, \(size) MiB at \(count) vCPUs")
                 }
             }
             // Where the default is lowered for the GPU (the limits that offer 4 GiB and a
             // default under it), the line is the default. Where the cap of 4 GiB holds the
-            // default, it is where B falls under a gibibyte.
+            // default, it is where B falls under 992 MiB.
             switch limitMiB {
             case 4700:
                 #expect((1...8).map { policy.graphicsLineMiB(vCPUs: $0) } == defaults)
