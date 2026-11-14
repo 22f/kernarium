@@ -1708,8 +1708,9 @@ final class AppModel {
         confirmingStop = true
     }
 
-    /// Ends the start under way: the answer to the dialog. The runtime ends
-    /// the run and `runEnded` follows; the notice says Stopping meanwhile. The
+    /// Ends the start under way: the answer to the dialog. The guest is asked
+    /// to write back first and the runtime then ends the run, and `runEnded`
+    /// follows; the notice says Stopping the whole time. The
     /// preview, with no runtime, ends it at once as a host stop does.
     func stopStart() {
         confirmingStop = false

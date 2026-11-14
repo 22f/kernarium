@@ -416,9 +416,10 @@ final class LiveRuntime: RuntimeDriver {
     }
 
     /// The person stopped the start. The application states the intent at once
-    /// and asks nothing of the runtime on the main actor: the request goes
-    /// through the queue of the runtime's other waiting calls, and is made
-    /// again until the run ends (`RunStop`).
+    /// and asks nothing of the runtime on the main actor: the guest is asked to
+    /// write its storage back and then stopped, through the queue of the
+    /// runtime's other waiting calls, and the stop is made again until the run
+    /// ends (`RunStop`).
     func stopGuest() {
         userStopped = true
         if runActive, let stop = runStop {
@@ -1670,23 +1671,54 @@ final class LivePauseEffects: PauseEffects {
     /// see that moment. It goes through the queue of the other runtime calls
     /// that wait, so it comes after a hold that was asked for before it.
     ///
-    /// `request` is the runtime's stop, and `interval` how long after one it is
-    /// made again; a test supplies its own.
+    /// The first delivery that reaches a guest asks it to write its storage
+    /// back first (`settle`), once and for at most `StopSettle.bound`, because
+    /// the host's stop ends the guest at once and what it has not written is
+    /// lost. A delivery that finds no guest yet goes on to the host's stop, and
+    /// the next one asks again; a run that has ended is asked nothing.
+    ///
+    /// `settle` and `request` are the runtime's, and `interval` how long after
+    /// a request it is made again; `settle` returns whether it reached a guest.
+    /// A test supplies its own.
     func deliverStop(
         _ stop: RunStop, every interval: DispatchTimeInterval = .seconds(1),
+        settle: (@Sendable () -> Bool)? = nil,
         request: @escaping @Sendable () -> Void = { kernarium_runtime_loader_request_stop() }
     ) {
-        Self.deliver(stop, on: queue, every: interval, request: request)
+        let settle = settle ?? { Self.settleBeforeStop(for: stop) }
+        Self.deliver(stop, on: queue, every: interval, settle: settle, request: request)
     }
 
     private nonisolated static func deliver(
         _ stop: RunStop, on queue: DispatchQueue, every interval: DispatchTimeInterval,
-        request: @escaping @Sendable () -> Void
+        settle: @escaping @Sendable () -> Bool, request: @escaping @Sendable () -> Void
     ) {
         queue.async {
-            guard stop.deliver(request) else { return }
-            queue.asyncAfter(deadline: .now() + interval) { deliver(stop, on: queue, every: interval, request: request) }
+            guard stop.deliver(settle: settle, request) else { return }
+            queue.asyncAfter(deadline: .now() + interval) {
+                deliver(stop, on: queue, every: interval, settle: settle, request: request)
+            }
         }
+    }
+
+    /// The runtime's write-back of the guest's storage, for the Stop of the run
+    /// `stop` belongs to (`StopSettle` bounds it): the guest confirms it, or
+    /// says it cannot, or there is none to ask, and the host's stop follows in
+    /// each case. Returns whether a guest was reached.
+    nonisolated static func settleBeforeStop(for stop: RunStop) -> Bool {
+        let outcome = StopSettle.run(for: stop) { GuestSettle.sync() }
+        // A stop that finds no guest is made again each second: only the one
+        // that reached a guest is worth a line.
+        guard outcome.reachedGuest else { return false }
+        switch outcome {
+        case let .answered(settle):
+            print("Andarium: " + settle.logLine(reason: "stop"))
+        case .timedOut:
+            print("Andarium: guest storage NOT confirmed on stop: no answer in time")
+        case .runEnded:
+            break
+        }
+        return true
     }
 
     /// Writes the guest's storage back and suspends it with its RAM left in
