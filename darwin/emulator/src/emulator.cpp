@@ -813,7 +813,8 @@ public:
 					(void)::uml::device::trim_guest_page_cache(
 						guest_trim_send_wait_ms);
 			}
-			guest_suspension_ = ::uml::device::suspend_guest();
+			auto suspend_sync = ::uml::device::GuestSuspendSync::unstated;
+			guest_suspension_ = ::uml::device::suspend_guest(&suspend_sync);
 			/* A suspension that was uncertain stays so for the wake at the
 			 * resume, whatever this suspend says. */
 			if (guest_suspension_ == ::uml::device::GuestSuspension::none &&
@@ -821,10 +822,16 @@ public:
 				guest_suspension_ = earlier;
 			if (guest_suspension_ == ::uml::device::GuestSuspension::system) {
 				/* The suspend's reply says the guest reached the sleep
-				 * boundary and nothing of its storage: the kernel syncs on
-				 * the way only while its sync_on_suspend is set. The
-				 * storage is what the writeback above reported. */
-				outcome = {storage_after(first, running),
+				 * boundary. It confirms the storage only when it also
+				 * states that the suspend's own sync returned (a kernel
+				 * without the statement, or one whose sync_on_suspend is
+				 * off, does not): that sync followed the writeback above,
+				 * so it stands whatever the writeback reported. Otherwise
+				 * the storage is what the writeback reported. */
+				const bool synced = suspend_sync ==
+					::uml::device::GuestSuspendSync::synced;
+				outcome = {synced ? ::uml::runtime::GuestStorage::confirmed :
+					storage_after(first, running),
 					::uml::runtime::SettleSuspension::suspended};
 			} else {
 				/* The guest runs, or may: what it holds dirty now is what

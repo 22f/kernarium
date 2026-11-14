@@ -696,7 +696,12 @@ uml_add_guest_integration_test(
 # with SysRq off ends the same command with an error that says so. With
 # SysRq off, a file the guest holds dirty reaches the image on the host once
 # the console's sync replies, and survives a hard kill; a guest that was not
-# asked loses it, and so does one whose kernel refuses the request.
+# asked loses it, and so does one whose kernel refuses the request. A suspend
+# asked with no sync before it states in its reply whether its own sync
+# returned, and the image holds the file exactly when the reply says so, with
+# the setting on and then off in one guest. A suspend the guest started itself,
+# which the host's request overlaps, is answered with the bare "suspended": its
+# sync is not the request's.
 uml_add_guest_integration_test(
     NAME guest-mconsole-console-clients
     SCRIPT kernel/run_guest_mconsole_console_clients.py

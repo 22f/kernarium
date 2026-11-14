@@ -866,12 +866,18 @@ each, and the host closes no stream by a reset.
 `android-sync` (integration) registers when `UML_ANDROID_SYNC_RELEASE` names the
 release: with SysRq off, a file the guest holds dirty reaches the host's data
 image once the management console's `sync` replies, and survives a hard kill of
-the emulator; a request that is refused leaves it in the guest only. The host's
-side of the settle calls is covered on any host by `guest-console-writeback`
-(with `-timeout`, `-strict` for the reply grammar and `-budget` for the one
-deadline), `emulator-lifecycle` (what each call reports, and when a saved answer
-is repeated), `kernarium-settle-plumbing` (the runtime's report envelope, the
-handle a sync pins and the loader's forwarding) and `runtime-session-record`.
+the emulator; a request that is refused leaves it in the guest only; a `suspend`
+asked with no sync before it states in its reply that it synced and the image
+holds the file (`--suspend-statement none` for a kernel before the statement).
+The host's side of the settle calls is covered on any host by
+`guest-console-writeback` (with `-timeout`, `-strict` for the reply grammar and
+`-budget` for the one deadline), `guest-console-suspend-statement` (the reply's
+statement, and that no other wording confirms),
+`guest-console-suspend-partial-refusal` (a reply refused in its first part stays
+refused when its end arrives late), `emulator-lifecycle` (what each call
+reports, and when a saved answer is repeated), `kernarium-settle-plumbing` (the
+runtime's report envelope, the handle a sync pins and the loader's forwarding)
+and `runtime-session-record`.
 `android-wifi-network` (integration) registers when
 `UML_ANDROID_WIFI_NETWORK_RELEASE` names the release: the guest's one Wi-Fi
 network stays enabled, joined and validated while the internet checks fail, and

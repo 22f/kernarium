@@ -12,6 +12,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <string_view>
+#include <sys/event.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -43,6 +44,8 @@ struct Real final {
 	ssize_t (*pwrite)(int, const void *, size_t, off_t){};
 	int (*fsync)(int){};
 	int (*setname)(const char *){};
+	int (*kevent)(int, const struct kevent *, int, struct kevent *, int,
+		const timespec *){};
 };
 
 Real real;
@@ -58,6 +61,54 @@ int kernel_pselect(int count, fd_set *readable, fd_set *writable,
 	const ScopedHostWait wait{HostWait::idle};
 	const CarrierIdle carrier{timeout, CarrierIdle::Limit::relative};
 	return real.pselect(count, readable, writable, failed, timeout, mask);
+}
+
+/* The limit of the kernel's idle kevent: the relative NOTE_NSECONDS timer its
+ * change list adds or its timeout, whichever ends first. False for a timer of
+ * any other shape, whose wait then is not counted idle, so the stall watch
+ * keeps sampling the carrier instead of trusting a deadline it cannot read. */
+bool idle_limit(const struct kevent *changes, int change_count,
+	const timespec *timeout, timespec &timer, const timespec *&limit) noexcept
+{
+	limit = timeout;
+	for (int index = 0; changes != nullptr && index < change_count; ++index) {
+		const struct kevent &change = changes[index];
+		if (change.filter != EVFILT_TIMER || (change.flags & EV_ADD) == 0)
+			continue;
+		const auto unit = change.fflags &
+			(NOTE_SECONDS | NOTE_USECONDS | NOTE_NSECONDS | NOTE_MACHTIME);
+		if (unit != NOTE_NSECONDS || change.data < 0 ||
+		    (change.fflags & (NOTE_ABSOLUTE | NOTE_MACH_CONTINUOUS_TIME)) != 0)
+			return false;
+		timer = {static_cast<time_t>(change.data / 1'000'000'000),
+			static_cast<long>(change.data % 1'000'000'000)};
+		if (limit == nullptr || timer.tv_sec < limit->tv_sec ||
+		    (timer.tv_sec == limit->tv_sec && timer.tv_nsec < limit->tv_nsec))
+			limit = &timer;
+	}
+	return true;
+}
+
+/* A vCPU's idle wait is a kevent() whose timer is in its change list, so the
+ * call carries no timeout. Only a call that asks for events and may block is
+ * a wait: a change list alone, and an immediate poll, wait for nothing. */
+int kernel_kevent(int queue, const struct kevent *changes, int change_count,
+	struct kevent *events, int event_count, const timespec *timeout)
+{
+	if (event_count <= 0 ||
+	    (timeout != nullptr && timeout->tv_sec == 0 && timeout->tv_nsec == 0))
+		return real.kevent(queue, changes, change_count, events, event_count,
+			timeout);
+	/* The mark is made first and undone last, as in pselect. */
+	const ScopedHostWait wait{HostWait::idle};
+	timespec timer{};
+	const timespec *limit = nullptr;
+	if (!idle_limit(changes, change_count, timeout, timer, limit))
+		return real.kevent(queue, changes, change_count, events, event_count,
+			timeout);
+	const CarrierIdle carrier{limit, CarrierIdle::Limit::relative};
+	return real.kevent(queue, changes, change_count, events, event_count,
+		timeout);
 }
 
 int kernel_pause()
@@ -177,6 +228,7 @@ void *kernel_wait_import(const char *name) noexcept
 			slot(real.pselect)},
 		{"pselect", reinterpret_cast<void *>(&kernel_pselect),
 			slot(real.pselect)},
+		{"kevent", reinterpret_cast<void *>(&kernel_kevent), slot(real.kevent)},
 		{"pause", reinterpret_cast<void *>(&kernel_pause), slot(real.pause)},
 		{"pthread_cond_wait", reinterpret_cast<void *>(&kernel_cond_wait),
 			slot(real.cond_wait)},
