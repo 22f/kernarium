@@ -428,14 +428,16 @@ network, a network under CTS's test URLs, a network the stock rules do not
 validate, DNS and the private DNS settings keep the stock rules. The
 product's one network, VirtWifi, is saved once and is never disabled for lack of
 internet (`overlay/rro/KernariumWifiOverlay`), because the platform never joins a
-disabled network again. Until the station has joined it once, a boot that finds
-Wi-Fi on and VirtWifi saved but not joined saves it again, which enables it
-(`overlay/tools/kernarium_wifi_network.sh`). Wi-Fi that is off stays off and a
-forgotten network stays forgotten. There is no SoftAP, Wi-Fi Direct, Aware or RTT,
-and `wificond` is not shipped. A VPN application that allows bypass carries the
-traffic of the applications it covers because netd puts the UID range rule of
-such a VPN ahead of the implicit network rules that the firewall installs for
-the default network (route `p0032`).
+disabled network again. Until a boot has found VirtWifi stored and joined, a
+boot saves it when the saved list lacks it and saves it again when Wi-Fi is on
+and nothing joined, which enables it
+(`overlay/tools/kernarium_wifi_network.sh`); a guest that stops before the
+Wi-Fi service has stored the network gets it back at the next boot. Wi-Fi that
+is off stays off and a network forgotten after that boot stays forgotten. There is
+no SoftAP, Wi-Fi Direct, Aware or RTT, and `wificond` is not shipped. A VPN
+application that allows bypass carries the traffic of the applications it covers
+because netd puts the UID range rule of such a VPN ahead of the implicit network
+rules that the firewall installs for the default network (route `p0032`).
 
 ### Audio, settings and lock screen defaults
 

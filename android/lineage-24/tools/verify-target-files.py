@@ -771,16 +771,19 @@ NET_SETUP_TRANSITION = re.compile(
 # After boot completes a script saves the virtual Wi-Fi network (VirtWifi, open) once, in a
 # core domain of its own on system_ext (overlay/tools/kernarium_wifi_network.sh,
 # overlay/sepolicy/system_ext/private).
-# Until the station has joined it once (the marker then reads 2), a boot that finds Wi-Fi on,
-# the network still saved and nothing joined after a settle time saves it again, which enables
-# a network an earlier release left disabled for lack of internet. It never turns Wi-Fi on or
-# connects: the user's switch decides whether the saved network is joined, and a network the
-# user forgets stays forgotten.
+# Until a boot has found the network stored and joined (the marker then reads 2) the saved list
+# decides on every boot: a boot saves the network when the list lacks it, and saves it again when
+# it finds Wi-Fi on and nothing joined after a settle time, which enables a network an earlier
+# release left disabled for lack of internet. The Wi-Fi service writes its store some time after
+# a save or a join, so a boot that saved leaves the marker at 1. The script never turns Wi-Fi on
+# or connects: the user's switch decides whether the saved network is joined. What it decides is
+# tested on the tracked file (tests/tooling/android/test_wifi_network_script.py); the checks here
+# are presence checks of the image's copy.
 WIFI_NETWORK_SERVICE = ("kernarium_wifi_network", "/system_ext/bin/kernarium_wifi_network.sh")
 WIFI_NETWORK_TRIGGER = "property:sys.boot_completed=1"
 WIFI_NETWORK_MARKER = "persist.sys.kernarium.virtwifi_saved"
 WIFI_NETWORK_MARKER_TYPE = "kernarium_wifi_network_prop"
-# The marker holds 1 (saved) and 2 (joined), so its property type must accept both.
+# The marker holds 1 (saved, no join seen) and 2 (joined), so its property type must accept both.
 WIFI_NETWORK_MARKER_VALUES = ("1", "2")
 WIFI_NETWORK_SCRIPT_REQUIRED = (
     "cmd wifi add-network VirtWifi open",
