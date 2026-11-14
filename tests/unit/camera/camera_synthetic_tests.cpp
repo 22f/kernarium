@@ -125,6 +125,9 @@ void profiles()
             require(identifiers.insert(info.identifier).second);
             require(!info.videoFormats.empty() && !info.stillSizes.empty());
             require(info.pixelArrayWidth > 0 && info.sensorOrientation % 90 == 0);
+            // Every camera's zoom range holds 1.0, and a single lens's 1.0 is its own full field of view.
+            require(info.zoomMinimum <= 1.0f && info.zoomMaximum >= 1.0f, "a camera's zoom range holds 1.0");
+            if (info.lens != CameraLensKind::zoom) require(info.zoomMinimum == 1.0f, "a single lens's widest view is its ratio 1.0");
         }
         for (const auto& set : camera->concurrentSets()) {
             require(set.size() > 1);
