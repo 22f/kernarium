@@ -2,15 +2,16 @@
 
 import Foundation
 
-/// What the person's Stop does with the guest before the host stops it: asks
-/// it to write its storage back and waits for its answer, for as long as a
-/// lifecycle edge's work may take (`PauseController.edgeBudget`) and no
-/// longer. A guest that cannot answer (no console yet, a runtime that is not
-/// there, a guest that does not reply) costs the bound at most, and the host's
-/// stop follows it either way.
+/// What a host-side end of a running guest (the person's Stop, a screen that
+/// closes) does with the guest before the host stops it: asks it to write its
+/// storage back and waits for its answer, for as long as a lifecycle edge's
+/// work may take (four seconds in both applications) and no longer. A guest
+/// that cannot answer (no console yet, a runtime that is not there, a guest
+/// that does not reply) costs the bound at most, and the host's stop follows
+/// it either way.
 public enum StopSettle {
     /// How long the stop waits for the guest.
-    public static let bound = PauseController.edgeBudget
+    public static let bound = DispatchTimeInterval.seconds(4)
 
     /// What the write-back of one stop came to.
     public enum Outcome: Equatable, Sendable {

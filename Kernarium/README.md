@@ -335,6 +335,18 @@ calls report what the guest confirmed (`kernarium_runtime_settle`), and the
 application logs the guest's storage as settled only when the guest confirmed
 its writeback or none ran (`GuestSettle`).
 
+Every host-side end of the running guest asks it to write back first: the
+screen closing and Shut down below both come to `EmulatorLauncher.stop()`,
+which states the intent at once and, off the main actor, has the guest write
+its storage back (the runtime's `sync`, once, for four seconds at most) before
+the host stops it, again until the run has ended (`RunStop`, `StopSettle` and
+`GuestStopDelivery`: [GuestHost](../GuestHost/README.md)). A delivery that
+finds no guest goes on to the host's stop and the next asks again. Termination
+quiesces the guest as above, and nothing else ends a run from the host. A
+write-back worker that passed the run's check and is delayed past the run's
+end can ask the next run for one write-back, and the four seconds do not
+bound the host-file flush.
+
 iOS revokes the host GPU within seconds of `didEnterBackground`, and a guest
 request that reached Metal afterwards would make the guest's Vulkan device
 lost for good. The application therefore holds the guest's GPU requests
@@ -401,10 +413,11 @@ purgeable space iOS Settings counts.
   down. A guest that does not hold still is called so, with Shut down and
   Check again.
 - Resume reads the space again and wakes the guest at 1.5 GiB or more. Shut
-  down is the run's stop, the same as leaving the guest: the suspension
-  already wrote the guest's storage back, nothing is asked of the guest, and
-  the run ends with the notice that the guest shut down. Kernarium has no
-  clean power-off request.
+  down is the run's stop, the same as leaving the guest, with the guest's
+  write-back first: a guest the suspension holds answers what the suspension
+  confirmed, one that ran on is asked, the screen says Shutting down, and the
+  run ends with the notice that the guest shut down. Kernarium has no clean
+  power-off request.
 - No lifecycle edge wakes a paused guest. While `BackgroundController
   .spaceHeld`, an edge holds the guest's GPU and does nothing else, in every
   background mode, so the guest stays suspended and resident in the
