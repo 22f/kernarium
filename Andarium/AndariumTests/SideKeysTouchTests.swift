@@ -229,7 +229,9 @@ struct SideKeysTouchTests {
         defer { run.end() }
         let model = run.model
 
-        try #require(await eventually { run.presented != nil }, "the tip did not show")
+        // The popover passes a touch to the screen under it until its card is
+        // in place, so the card is looked at once it has appeared.
+        try #require(await eventually { run.presented?.isBeingPresented == false }, "the tip did not show")
         let card = try #require(run.tipCard)
         let far = run.beside[0]
         let onCard = CGPoint(x: card.midX, y: card.midY)
