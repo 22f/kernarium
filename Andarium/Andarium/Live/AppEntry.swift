@@ -54,8 +54,13 @@ struct AppEntry {
     func configureTips() {
         #if !APP_STORE
         // The input probe's UI tests tap the side keys and Settings; a tip's
-        // popover over them is no part of what they check.
-        if InputProbeLaunch.requested(in: ProcessInfo.processInfo.environment) {
+        // popover over them is no part of what they check, but for the one
+        // that checks the first tap on the keys with the tip up.
+        let environment = ProcessInfo.processInfo.environment
+        if InputProbeLaunch.showsTip(in: environment) {
+            try? Tips.resetDatastore()
+            Tips.showTipsForTesting([SideKeysTip.self])
+        } else if InputProbeLaunch.requested(in: environment) {
             Tips.hideAllTipsForTesting()
         }
         #endif

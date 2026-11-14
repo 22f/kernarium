@@ -1071,7 +1071,8 @@ and the touches that reach its touchscreen, go to one accessibility element
 (`inputProbeLog`) instead of the runtime; Settings carries a text field
 (`inputProbeField`) that takes the keys a sheet keeps. The probe's guest
 registers each device it is plugged; `unregistered` makes it one that never
-does. The launch states "Use the pointer as touch" off, hides the tips and keeps
+does. The launch states "Use the pointer as touch" off, hides the tips (but for
+`ANDARIUM_INPUT_PROBE_TIP=1`, which shows the side keys' tip anew) and keeps
 nothing.
 `ANDARIUM_GUEST_INSTANCE=<name>` runs an isolated guest under
 `Library/TestGuests/<name>`, for tests that need a fresh guest while the
