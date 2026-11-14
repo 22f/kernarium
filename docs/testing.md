@@ -770,10 +770,11 @@ on an M4 or newer Mac.
 
 Build-side contracts need no Android build: `lineage24-target-files-fixtures`,
 `lineage24-builder-lane`, `lineage24-release-contract`,
-`lineage24-first-boot-precompile` and the `lineage24-mesa-venus-*` tests run
-the producer's verifiers over fixtures, and `android-partition-boot-selection`,
-`android17-instance-rules` and `android17-macos-launcher-options` cover the host
-library and launcher over the storage layout (`android17-launcher-arguments`,
+`lineage24-camera-app-contract`, `lineage24-first-boot-precompile` and the
+`lineage24-mesa-venus-*` tests run the producer's verifiers over fixtures, and
+`android-partition-boot-selection`, `android17-instance-rules` and
+`android17-macos-launcher-options` cover the host library and launcher over the
+storage layout (`android17-launcher-arguments`,
 where the Android CLI is built, runs the executable's own argument checks)
 ([storage](../android/lineage-24/README.md#static-disk-and-boot-contract),
 [block device](../darwin/device/block/README.md)). `guest-android-disks`
@@ -844,8 +845,9 @@ anywhere is a blocker. The candidate must show:
   `hal_camera_default` appears in the log, and the verifier's check that
   `libgooglecamerahwl_impl.so` holds the names of route `p0030` is not
   vacuous: it runs on the candidate's built library (a source tree has none)
-  and is shown to fail on the stock one
-  ([Camera](../android/lineage-24/README.md#camera)).
+  and is shown to fail on the stock one. The camera application shows a lens
+  button for each back lens and offers no pinch zoom, zoom slider or Zoom
+  action ([Camera](../android/lineage-24/README.md#camera)).
 
 `android-oobe`, `android-adb-debugging`, `android-guest-proc` and
 `android-installation-identity` (integration) each register only when

@@ -339,12 +339,20 @@ nodes as `/dev/video10` and above; the codec nodes stay in `video0` to
 controls, Exif, concurrency) are the headers of `overlay/camera/hal/`, which
 the HAL includes and the `andarium-camera-*` unit tests compile without
 Android. The camera application is LineageOS's Aperture, without its Google
-Lens launcher and button (route `p0031`), and its lens selector lists each
-lens of the host as a camera of its own (a product overlay in
-`overlay/overlay/packages/apps/Aperture`, which the build installs as a static
-runtime overlay of the application; the application declares no overlayable
-section, so Android applies the preinstalled overlay, and the target-files
-verifier reads the overlay, not the application).
+Lens launcher and button, with lens buttons labelled by focal length and with
+a switch for free zoom (route `p0031`). Its lens selector lists each lens of
+the host as a camera of its own and the camera has no free zoom: a button for
+each lens, ordered ultra wide, main, telephoto, and labelled by the ratio of
+its 35 mm-equivalent focal length to the main back camera's, snapped to 0.5,
+1, 2, 2.5, 3, 4 or 5 when within 20 %. Pinch to zoom (the front camera's too),
+the zoom slider and the Zoom action of the hardware keys are off, the volume
+keys keep their other actions (the shutter by default), and a tap on the
+active button does nothing. A product overlay in
+`overlay/overlay/packages/apps/Aperture` sets the switch and ignores camera
+ID 2, which only a host that publishes the wide lens twice has. The build
+installs it as a static runtime overlay of the application; the application
+declares no overlayable section, so Android applies the preinstalled overlay,
+and the target-files verifier reads the overlay, not the application.
 
 The image states no camera feature of its own. The host composes a camera
 layout from the cameras it has and passes its name as
