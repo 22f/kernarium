@@ -763,9 +763,9 @@ struct SendFeedbackScreenTests {
         #expect(model.form.attachments.count == 1)
         #expect(staged.allSatisfy { FileManager.default.fileExists(atPath: $0.path) }, "the files wait for the close")
         // The toolbar's close button does nothing, and no question about discarding comes up.
-        for item in ToolbarProbe.barItems(under: root) where item.title == "Cancel" || item.accessibilityLabel == "Cancel" {
-            #expect(!item.isEnabled, "the close button is off under the notice")
-        }
+        let bar = ToolbarProbe.barItems(under: root)
+        #expect(!bar.isEmpty, "the sheet's bar holds the close button")
+        #expect(bar.allSatisfy { !$0.isEnabled }, "the close button is off under the notice: \(ToolbarProbe.describe(under: root))")
         model.confirmingDiscard = false
         #expect(sheet.presentedViewController == nil)
         // The notice's button closes the notice and the sheet together.
