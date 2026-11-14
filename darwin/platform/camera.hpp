@@ -10,6 +10,7 @@
 // openSession() fails when the system has not granted access, and nothing in
 // this interface asks for it (camera_authorization.hpp does, at a user's act).
 
+#include "camera_presentation.hpp"
 #include "camera_still_failure.hpp"
 #include "nv12_transform.hpp"
 
@@ -75,6 +76,12 @@ struct CameraCaptureFormat {
     // CameraInfo::zoomMaximum, which is the device's largest over all its formats; zero where the host states none.
     // Advice as well: a camera whose format has no recommendation is stated up to it.
     float maximumZoom {};
+    // The dynamic aspect ratios the device lists for the format (a mask of
+    // aspectRatioBit; zero for a format with none) and, once the format is
+    // described as the guest is offered it (presentedFormatOf), the one the
+    // device is held at.
+    std::uint8_t aspectRatios {};
+    CameraAspectRatio pinnedRatio {};
     friend bool operator==(const CameraCaptureFormat&, const CameraCaptureFormat&) = default;
 };
 
@@ -353,6 +360,16 @@ public:
     virtual void cameraFrame(std::size_t camera, CameraFrame frame) = 0;
     virtual void cameraStill(std::size_t camera, CameraStillResult result) = 0;
     virtual void cameraEvent(CameraEvent event) = 0;
+    // What the session stated of a camera and set on its connections, once from
+    // discovery on and again whenever one of them changes (camera_presentation.hpp):
+    // for a diagnostic record; it changes nothing. A session calls it on its own
+    // threads, in order for one camera, and the delegate returns quickly. The
+    // default ignores it.
+    virtual void cameraPresentation(std::size_t camera, const CameraPresentation& presentation)
+    {
+        (void)camera;
+        (void)presentation;
+    }
 };
 
 // One capture session over the cameras of a host. The Apple backend runs a

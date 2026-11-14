@@ -813,9 +813,10 @@ void write_storage_slot(int descriptor) noexcept
 	} while (written < 0 && errno == EINTR);
 }
 
-/* The camera slot: how many stills of the guest's cameras did not end in a
- * picture, and why for the last few. One writer at a time, and the session's
- * begin, which blanks it, waits for the flag. */
+/* The camera slot: how the platform presented each of the guest's cameras
+ * (note_camera_presentation), how many stills of the guest's cameras did not
+ * end in a picture, and why for the last few. One writer at a time, and the
+ * session's begin, which blanks it, waits for the flag. */
 std::atomic_flag camera_slot_busy = ATOMIC_FLAG_INIT;
 struct CameraNote final {
 	std::int64_t at{};
@@ -823,6 +824,9 @@ struct CameraNote final {
 };
 CameraNote camera_recent[session_camera_failures_kept];
 std::uint64_t camera_failures{};
+/* The newest note of each camera, by the guest's number of it. */
+uml::platform::CameraPresentation camera_presented[session_cameras_kept];
+bool camera_presented_has[session_cameras_kept];
 
 /* "WxH" for a size, or "-" for one that is not known. */
 void camera_size(FixedText &text, std::uint32_t width,
@@ -833,6 +837,20 @@ void camera_size(FixedText &text, std::uint32_t width,
 		return;
 	}
 	text.number(width).text("x").number(height);
+}
+
+/* An angle or a mirroring, or "-" where the platform stated none (negative). */
+void camera_figure(FixedText &text, std::int64_t value) noexcept
+{
+	if (value < 0)
+		text.text("-");
+	else
+		text.number(value);
+}
+
+void camera_yes_no(FixedText &text, bool value) noexcept
+{
+	text.text(value ? "yes" : "no");
 }
 
 /* One failure's line. A reader takes the words as they are written. */
@@ -853,50 +871,234 @@ void camera_failure_line(FixedText &text, const CameraNote &note) noexcept
 		.text(uml::platform::factName(failure.compensationSupported))
 		.text(" enabled ")
 		.text(uml::platform::factName(failure.compensationEnabled))
-		.text(" error ")
+		.text(" exif ");
+	if (failure.hostExifOrientation == 0)
+		text.text("-");
+	else
+		text.number(failure.hostExifOrientation);
+	text.text(" error ")
 		.text(uml::platform::errorDomainName(failure.errorDomain));
 	if (failure.errorDomain != uml::platform::CameraErrorDomain::none)
 		text.text(" ").number(failure.errorCode);
 	text.text("\n");
 }
 
-/* The camera slot, padded to its size: blank before the first failure, else a
- * format line, the count and the newest failures that fit, oldest first. Held
- * under `camera_slot_busy`. */
+/* The lines that state how a camera is presented, in the order a reader takes
+ * them: the camera as discovered and given its anchor, the device's aspect
+ * ratio (only where its anchor lists ratios), the video connection, the photo
+ * output and the refusals of its admissions (only where there were some).
+ * Each is written when it has something to say. */
+enum class CameraLineKind : std::uint8_t {
+	mount, ratio, video, photo, refused
+};
+constexpr std::size_t camera_line_kinds = 5;
+constexpr std::size_t camera_line_size = 320;
+struct CameraLine final {
+	char text[camera_line_size];
+	std::size_t size{};
+	bool present{};
+};
+
+void camera_line(FixedText &text, CameraLineKind kind,
+	const uml::platform::CameraPresentation &c) noexcept
+{
+	using uml::platform::factName;
+	text.text(" camera ").number(c.camera);
+	switch (kind) {
+	case CameraLineKind::mount:
+		text.text(" ").text(uml::platform::cameraPositionName(c.position))
+			.text(" type ").number(static_cast<std::uint8_t>(c.deviceType))
+			.text(" angles");
+		for (const auto angle : c.coordinatorAngles) {
+			text.text(" ");
+			camera_figure(text, angle);
+		}
+		text.text(" stated ").number(c.stated).text(" turn ")
+			.number(c.turn).text(" earlier ");
+		camera_yes_no(text, c.earlier);
+		text.text(" anchor ");
+		camera_size(text, c.anchorWidth, c.anchorHeight);
+		text.text(" ratios ").number(c.anchorRatios).text(" fov ");
+		camera_figure(text, c.anchorFieldOfView);
+		if (c.position == uml::platform::CameraPosition::front) {
+			text.text(" fronts ").number(c.frontDevices).text(" square ");
+			camera_yes_no(text, c.squareFormats);
+			text.text(" dynamic ");
+			camera_yes_no(text, c.dynamicRatios);
+		}
+		break;
+	case CameraLineKind::ratio:
+		text.text(" pinned ")
+			.text(uml::platform::aspectRatioName(c.ratioPinned))
+			.text(" now ")
+			.text(uml::platform::aspectRatioName(c.ratioNow))
+			.text(" dims ");
+		camera_size(text, c.ratioWidth, c.ratioHeight);
+		text.text(" error ");
+		if (c.ratioError == uml::platform::ratioPending)
+			text.text("pending");
+		else
+			text.number(c.ratioError);
+		break;
+	case CameraLineKind::video:
+		text.text(" default ");
+		camera_figure(text, c.videoDefaultAngle);
+		text.text(" set ");
+		camera_figure(text, c.videoAngle);
+		text.text(" supported ").text(factName(c.videoAngleSupported))
+			.text(" mirror ");
+		camera_figure(text, c.videoDefaultMirrored);
+		text.text(" ");
+		camera_figure(text, c.videoMirrored);
+		text.text(" asked ");
+		camera_size(text, c.videoAskedWidth, c.videoAskedHeight);
+		text.text(" first ");
+		camera_size(text, c.videoFirstWidth, c.videoFirstHeight);
+		break;
+	case CameraLineKind::photo:
+		text.text(" compensation supported ")
+			.text(factName(c.compensationSupported)).text(" enabled ")
+			.text(factName(c.compensationEnabled)).text(" default ");
+		camera_figure(text, c.photoDefaultAngle);
+		text.text(" set ");
+		camera_figure(text, c.photoAngle);
+		text.text(" mirror ");
+		camera_figure(text, c.photoDefaultMirrored);
+		text.text(" ");
+		camera_figure(text, c.photoMirrored);
+		text.text(" max ");
+		camera_size(text, c.photoMaximumWidth, c.photoMaximumHeight);
+		text.text(" exif ");
+		if (c.exifOrientation == 0)
+			text.text("-");
+		else
+			text.number(c.exifOrientation);
+		text.text(" center ").text(factName(c.centerStageActive))
+			.text(" distortion ").text(factName(c.distortionCorrected));
+		break;
+	case CameraLineKind::refused:
+		text.text(" count ").number(c.refusals).text(" last ");
+		camera_figure(text, c.lastRefusal);
+		break;
+	}
+	text.text("\n");
+}
+
+constexpr std::string_view camera_line_word(CameraLineKind kind) noexcept
+{
+	switch (kind) {
+	case CameraLineKind::mount: return "mount";
+	case CameraLineKind::ratio: return "ratio";
+	case CameraLineKind::video: return "video";
+	case CameraLineKind::photo: return "photo";
+	case CameraLineKind::refused: break;
+	}
+	return "refused";
+}
+
+/* The camera slot, padded to its size: blank before the first note or failure,
+ * else a format line, the count of failed stills and the lines that fit, in
+ * this order of importance: the front cameras' and the imitating ones' (the
+ * ones the guest sees turned or mirrored), the two newest failures, the other
+ * cameras' mounting and then their other lines, and the older failures, newest
+ * first (so that a longer line costs the oldest). Written in the order the
+ * cameras are numbered, then the failures, oldest first. Held under
+ * `camera_slot_busy`. */
 void write_camera_slot(int descriptor) noexcept
 {
 	static char slot[session_camera_slot_bytes];
+	static CameraLine lines[session_cameras_kept][camera_line_kinds];
+	static CameraLine failures[session_camera_failures_kept];
+	static bool taken[session_cameras_kept][camera_line_kinds];
+	static bool taken_failure[session_camera_failures_kept];
 	Text text{slot, sizeof(slot) - 1};
-	if (camera_failures != 0U) {
+	bool any_note = false;
+	for (std::size_t camera = 0; camera < session_cameras_kept; ++camera)
+		any_note = any_note || camera_presented_has[camera];
+	if (camera_failures != 0U || any_note) {
 		const auto n = [](std::uint64_t value) {
 			return static_cast<std::int64_t>(std::min<std::uint64_t>(
 				value, INT64_MAX));
 		};
 		text.text("camera 1\nstills failed ").number(n(camera_failures))
 			.text("\n");
+		std::size_t room = sizeof(slot) - 1 - text.size();
+		/* The lines of each camera, as written for the camera's last note. */
+		for (std::size_t camera = 0; camera < session_cameras_kept; ++camera) {
+			const auto &c = camera_presented[camera];
+			for (std::size_t kind = 0; kind < camera_line_kinds; ++kind) {
+				auto &line = lines[camera][kind];
+				taken[camera][kind] = false;
+				line.size = 0;
+				const auto which = static_cast<CameraLineKind>(kind);
+				line.present = camera_presented_has[camera] &&
+					(which == CameraLineKind::mount ||
+					(which == CameraLineKind::ratio && c.ratioKnown) ||
+					(which == CameraLineKind::video && c.videoKnown) ||
+					(which == CameraLineKind::photo && c.photoKnown) ||
+					(which == CameraLineKind::refused && c.refusals != 0));
+				if (!line.present)
+					continue;
+				Text probe{line.text, sizeof(line.text)};
+				probe.text(camera_line_word(which));
+				camera_line(probe, which, c);
+				line.size = probe.size();
+			}
+		}
+		/* The failures, the newest first: the line of the failure `age`
+		 * places from the newest (1 being the newest) is failures[age - 1]. */
 		const std::size_t kept = static_cast<std::size_t>(std::min<
 			std::uint64_t>(camera_failures, session_camera_failures_kept));
-		const std::size_t room = sizeof(slot) - 1 - text.size();
-		/* The failure that is `age` places from the newest, 1 being the
-		 * newest. */
-		const auto recent = [](std::size_t age) -> const CameraNote & {
-			return camera_recent[(camera_failures - age) %
-				session_camera_failures_kept];
-		};
-		/* The newest that fit, so that a longer line costs the oldest. */
-		std::size_t fitting = 0;
-		std::size_t taken = 0;
-		while (fitting < kept) {
-			char line[320];
-			Text probe{line, sizeof(line)};
-			camera_failure_line(probe, recent(fitting + 1));
-			if (probe.size() > room - taken)
-				break;
-			taken += probe.size();
-			++fitting;
+		for (std::size_t age = 1; age <= kept; ++age) {
+			auto &line = failures[age - 1];
+			taken_failure[age - 1] = false;
+			Text probe{line.text, sizeof(line.text)};
+			camera_failure_line(probe, camera_recent[(camera_failures - age) %
+				session_camera_failures_kept]);
+			line.size = probe.size();
 		}
-		for (std::size_t age = fitting; age > 0; --age)
-			camera_failure_line(text, recent(age));
+		const auto take = [&](CameraLine &line, bool &flag) {
+			if (flag || line.size == 0 || line.size > room)
+				return;
+			room -= line.size;
+			flag = true;
+		};
+		const auto front = [&](std::size_t camera) {
+			const auto &c = camera_presented[camera];
+			return c.position == uml::platform::CameraPosition::front ||
+				c.earlier;
+		};
+		for (std::size_t camera = 0; camera < session_cameras_kept; ++camera)
+			if (front(camera))
+				for (std::size_t kind = 0; kind < camera_line_kinds; ++kind)
+					take(lines[camera][kind], taken[camera][kind]);
+		/* The newest failures that fit: the first that does not ends it. */
+		std::size_t counted = 0;
+		for (std::size_t age = 1; age <= kept && counted < 2; ++age, ++counted) {
+			take(failures[age - 1], taken_failure[age - 1]);
+			if (!taken_failure[age - 1])
+				break;
+		}
+		for (std::size_t camera = 0; camera < session_cameras_kept; ++camera)
+			if (!front(camera))
+				take(lines[camera][0], taken[camera][0]);
+		for (std::size_t camera = 0; camera < session_cameras_kept; ++camera)
+			if (!front(camera))
+				for (std::size_t kind = 1; kind < camera_line_kinds; ++kind)
+					take(lines[camera][kind], taken[camera][kind]);
+		for (std::size_t age = counted + 1; age <= kept; ++age) {
+			take(failures[age - 1], taken_failure[age - 1]);
+			if (!taken_failure[age - 1])
+				break;
+		}
+		for (std::size_t camera = 0; camera < session_cameras_kept; ++camera)
+			for (std::size_t kind = 0; kind < camera_line_kinds; ++kind)
+				if (taken[camera][kind])
+					text.text({lines[camera][kind].text,
+						lines[camera][kind].size});
+		for (std::size_t age = kept; age > 0; --age)
+			if (taken_failure[age - 1])
+				text.text({failures[age - 1].text, failures[age - 1].size});
 	}
 	const std::size_t used = text.size();
 	std::memset(slot + used, ' ', sizeof(slot) - 1 - used);
@@ -1600,6 +1802,7 @@ bool begin_session_record(std::string_view path,
 	while (camera_slot_busy.test_and_set(std::memory_order_acquire))
 		sched_yield();
 	camera_failures = 0;
+	std::memset(camera_presented_has, 0, sizeof(camera_presented_has));
 	write_camera_slot(descriptor);
 	camera_slot_busy.clear(std::memory_order_release);
 	/* The same for a checkpoint of the state, which also reads the values the
@@ -1704,6 +1907,24 @@ void note_camera_still_failure(
 	camera_recent[camera_failures % session_camera_failures_kept] = {
 		.at = now(), .failure = failure};
 	++camera_failures;
+	write_camera_slot(descriptor);
+	camera_slot_busy.clear(std::memory_order_release);
+}
+
+void note_camera_presentation(
+	const uml::platform::CameraPresentation &presentation) noexcept
+{
+	if (presentation.camera >= session_cameras_kept)
+		return;
+	if (!session_open.load(std::memory_order_acquire))
+		return;
+	const int descriptor = record_descriptor.load(std::memory_order_acquire);
+	if (descriptor < 0)
+		return;
+	while (camera_slot_busy.test_and_set(std::memory_order_acquire))
+		sched_yield();
+	camera_presented[presentation.camera] = presentation;
+	camera_presented_has[presentation.camera] = true;
 	write_camera_slot(descriptor);
 	camera_slot_busy.clear(std::memory_order_release);
 }

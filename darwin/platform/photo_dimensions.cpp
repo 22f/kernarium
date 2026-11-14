@@ -147,6 +147,36 @@ std::uint32_t sensorOrientationOf(CameraPosition position, double portraitAngle)
     return std::uint32_t(quarters < 0 ? quarters + 4 : quarters) * 90;
 }
 
+PresentedMounting presentedMountingOf(CameraPosition position, double portraitAngle) noexcept
+{
+    const std::uint32_t stated = sensorOrientationOf(position, portraitAngle);
+    if (position != CameraPosition::front || !std::isfinite(portraitAngle) || (stated != 0 && stated != 180))
+        return {stated, 0, false};
+    return {90, (stated + 270) % 360, true};
+}
+
+std::optional<VideoFormatFacts> presentedFormatOf(const VideoFormatFacts& listed, std::uint32_t connectionTurn)
+{
+    if (listed.aspectRatios == 0) return listed;
+    const CameraAspectRatio needed =
+        connectionTurn % 180 == 90 ? CameraAspectRatio::r3x4 : CameraAspectRatio::r4x3;
+    if ((listed.aspectRatios & aspectRatioBit(needed)) == 0) return std::nullopt;
+    if (listed.width == 0 || listed.width != listed.height || listed.width % 4 != 0) return std::nullopt;
+    VideoFormatFacts presented = listed;
+    presented.height = listed.width / 4 * 3;
+    presented.pinnedRatio = needed;
+    presented.photoSizes.clear();
+    for (const auto& size : listed.photoSizes)
+        if (size.width > size.height && std::uint64_t(size.width) * 3 == std::uint64_t(size.height) * 4)
+            presented.photoSizes.push_back(size);
+    return presented;
+}
+
+float pinnedFieldOfView(float portraitCrop, float landscapeCrop) noexcept
+{
+    return std::max(portraitCrop, landscapeCrop);
+}
+
 bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested) noexcept
 {
     return (resolved.width == 0 && resolved.height == 0) || resolved == requested;
@@ -630,6 +660,7 @@ std::string_view refusalName(Refusal reason) noexcept
     case Refusal::rawUnavailable: return "no Bayer RAW format";
     case Refusal::raised: return "the platform raised";
     case Refusal::notRestored: return "the device could not be put back as it was";
+    case Refusal::ratioMoved: return "the device's aspect ratio is not the one pinned";
     }
     return "unknown";
 }

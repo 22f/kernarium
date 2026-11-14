@@ -45,6 +45,37 @@ using VideoFormatFacts = CameraCaptureFormat;
 // know, states 90 whatever the angle.
 [[nodiscard]] std::uint32_t sensorOrientationOf(CameraPosition position, double portraitAngle) noexcept;
 
+// How a camera is presented to the guest: the orientation stated for it, the clockwise turn the backend sets on its
+// video connection (the platform turns the buffers itself) and whether the camera imitates an earlier front camera.
+//
+// A built-in front camera whose rotation coordinator states portrait 0 or 180 is mounted with its sensor's top at the
+// device's top, where earlier front cameras were mounted with it at the side (their portrait angle is 90). The
+// platform lets such a camera behave like those: its video connection turns buffers by a fixed angle and its photo
+// output turns its processed stills (the output's compensation, left on). The guest is told 90, the value of the
+// earlier front cameras, which Android's size convention (a landscape size for a portrait sensor mounted at the side)
+// takes; the video connection is turned by `portraitAngle - 90`, so that the buffers are upright where the earlier
+// cameras' are. Every other camera states sensorOrientationOf, is turned by 0 and imitates nothing; so does a camera
+// whose angle is not finite.
+struct PresentedMounting {
+    std::uint32_t stated {};
+    std::uint32_t connectionTurn {};
+    bool emulatesEarlierFront {};
+    friend bool operator==(const PresentedMounting&, const PresentedMounting&) = default;
+};
+[[nodiscard]] PresentedMounting presentedMountingOf(CameraPosition position, double portraitAngle) noexcept;
+
+// A device format as the guest is offered it. A format that lists no dynamic aspect ratio is as listed. A square
+// format that lists them is described by the crop the device is held at (pinned, never changed while a stream or a
+// still runs): 3x4 where the video connection is turned a quarter turn, 4x3 where it is not, which both give a
+// landscape frame after the turn, N x 3N/4 for the N x N format, and its photo sizes are the listed ones that are
+// landscape 4:3. A format that lists ratios and cannot be described, because it is not square, its side is not
+// divisible by four or it lacks the ratio needed, is dropped (nothing): a picture of another shape is never offered.
+[[nodiscard]] std::optional<VideoFormatFacts> presentedFormatOf(const VideoFormatFacts& listed, std::uint32_t connectionTurn);
+
+// The field of view of a pinned crop, in degrees: the larger of the 3x4 and the 4x3 crop's, uncorrected for
+// geometric distortion, so that the cropped view is never stated narrower than it is.
+[[nodiscard]] float pinnedFieldOfView(float portraitCrop, float landscapeCrop) noexcept;
+
 // ---------------------------------------------------------------------------
 // Photo sizes
 // ---------------------------------------------------------------------------
@@ -652,6 +683,7 @@ enum class Refusal : std::uint8_t {
     rawUnavailable,
     raised,
     notRestored,
+    ratioMoved,
 };
 [[nodiscard]] std::string_view refusalName(Refusal reason) noexcept;
 

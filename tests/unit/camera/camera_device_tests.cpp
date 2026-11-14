@@ -286,6 +286,10 @@ struct Rig final {
         options.automaticRotation = [this](const uml::platform::CameraInfo&) { return automaticDegrees ? *automaticDegrees : 0u; };
         options.onCheckpoint = [this](CameraCheckpoint where) { checkpoints.push_back(where); };
         options.onStillFailure = [this](const CameraStillFailure& failure) { stillFailures.push_back(failure); };
+        options.onCameraPresentation = [this](const CameraPresentation& presentation) {
+            presentations.push_back(presentation);
+            if (presentationThrows) throw std::runtime_error("the owner's record failed");
+        };
         options.onRotateAndCrop = [this](std::uint32_t camera, std::uint32_t setting, std::uint32_t degrees) {
             rotations.push_back({camera, setting, degrees});
         };
@@ -319,6 +323,9 @@ struct Rig final {
     std::vector<CameraCheckpoint> checkpoints;
     /* What the device told onStillFailure, in order. */
     std::vector<CameraStillFailure> stillFailures;
+    /* What the device told onCameraPresentation, in order; the owner may be made to fail. */
+    std::vector<CameraPresentation> presentations;
+    bool presentationThrows {};
     /* What the device reported to onRotateAndCrop: camera, setting, degrees. */
     std::vector<std::array<std::uint32_t, 3>> rotations;
     /* What the device reported to onFlash. */
@@ -3325,6 +3332,42 @@ void testOnlyACaptureThatEndedInNoPictureIsReported()
     }
 }
 
+/* What the platform says of how it presents a camera goes to the owner under the guest's number of the camera, in the
+ * order it came, with nothing else changed; a camera the guest does not see is not told, and an owner that fails does
+ * not fail the platform. */
+void testThePlatformsPresentationReachesTheOwnerUnderTheGuestsNumber()
+{
+    Rig rig;
+    stillStream(rig, 1, 0, 1008, 756, 1);
+    (void)rig.queue(1, 1, 61);
+    require(rig.watched->sink != nullptr, "the session is open");
+    const auto infos = rig.camera->cameras();
+    require(infos.size() >= 2, "the profile has a back and a front camera");
+    for (std::size_t platform = 0; platform < infos.size(); ++platform) {
+        CameraPresentation note;
+        note.camera = 99;
+        note.position = infos[platform].position;
+        note.stated = std::uint16_t(100 + platform);
+        note.refusals = 7;
+        rig.watched->sink->cameraPresentation(platform, note);
+    }
+    require(rig.presentations.size() == infos.size(), "every camera the guest sees is told once");
+    std::set<std::uint32_t> numbers;
+    for (std::size_t told = 0; told < rig.presentations.size(); ++told) {
+        const auto& note = rig.presentations[told];
+        require(note.camera < infos.size() && numbers.insert(note.camera).second, "each under its own number of the guest's");
+        require(note.stated == 100 + told && note.position == infos[told].position && note.refusals == 7,
+                "and as the platform said it");
+    }
+    rig.presentations.clear();
+    CameraPresentation lost;
+    rig.watched->sink->cameraPresentation(infos.size() + 5, lost);
+    require(rig.presentations.empty(), "a camera the guest does not see is not told");
+    rig.presentationThrows = true;
+    rig.watched->sink->cameraPresentation(0, lost);
+    require(rig.presentations.size() == 1, "an owner that fails is told, and the platform goes on");
+}
+
 void testService()
 {
     SyntheticCameraOptions options;
@@ -3343,6 +3386,7 @@ void testService()
 
 int main()
 {
+    testThePlatformsPresentationReachesTheOwnerUnderTheGuestsNumber();
     testHandshake();
     testStreamsAndParameters();
     testVideoAndMetadata();

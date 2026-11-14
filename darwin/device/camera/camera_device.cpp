@@ -735,6 +735,22 @@ public:
         }
         wake();
     }
+    /* What the platform says of how it presents a camera goes to the owner's record as it comes, under the guest's number
+     * of the camera, on the platform's thread: it never touches the device's state (`wireOfPlatform` is fixed once the
+     * device is made), and a camera the guest does not see is not told. */
+    void cameraPresentation(std::size_t camera, const uml::platform::CameraPresentation& presentation) override
+    {
+        if (!options.onCameraPresentation) return;
+        const auto wire = wireOfPlatform.find(camera);
+        if (wire == wireOfPlatform.end()) return;
+        uml::platform::CameraPresentation told = presentation;
+        told.camera = wire->second;
+        try {
+            options.onCameraPresentation(told);
+        } catch (...) {
+            // The owner's record must not fail the platform's capture.
+        }
+    }
 
     // ------------------------------------------------------------------------
     // Exposures and their metadata

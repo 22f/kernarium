@@ -125,9 +125,22 @@ interface to the wire.
   platform's statement of its mounting, the rotation coordinator's angle for
   portrait (`sensorOrientationOf`; an external camera states 90), never a value
   per position, and every frame and still is delivered in that orientation,
-  unturned and unmirrored where its connection accepts the setting, whatever
-  turn, mirroring or still compensation the system would apply by default; a
-  Mac's cameras state 0 and take none of this. Every camera's zoom range holds
+  unmirrored, whatever turn, mirroring or still compensation the system would
+  apply by default; a Mac's cameras state 0 and take none of this. A built-in
+  front camera mounted with its sensor's top at the device's top (portrait 0 or
+  180) is presented like an earlier front camera instead
+  (`presentedMountingOf`): the guest is told 90, the video connection is turned
+  by the difference before the output's size is set, and the photo output keeps
+  its orientation compensation on, which turns the stills; a connection or an
+  output that does not hold this refuses the camera, and a still that does not
+  come out in the orientation stated is never delivered. A square format that
+  lists dynamic aspect ratios is described by the crop the device is pinned at
+  at each admission and repair (3x4 for a quarter turn, else 4x3, a landscape
+  frame of N x 3N/4), never changed while a stream or a still runs
+  (`presentedFormatOf`). The session reports each camera's mounting, the
+  settings of its connections and photo output and its aspect ratio as numbers
+  to its delegate (`camera_presentation.hpp`), and keeps the last of each camera
+  for the sessions that follow in the process. Every camera's zoom range holds
   1.0 (Android's rule): a single lens states its own factors, so its 1.0 is its
   own full field of view, and only a zoom camera is scaled by the host's display
   multiplier (`zoomRatioScale`), as the triple camera's ultra wide lens at 0.5.
