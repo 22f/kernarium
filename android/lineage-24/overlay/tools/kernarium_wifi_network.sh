@@ -61,13 +61,20 @@
 # again would turn Auto-connect back on. Before that save the script reads the
 # network's Auto-connect from the Wi-Fi service's dump (`dumpsys wifi`; no
 # `cmd wifi` command shows it). Off leaves the network alone and the marker at
-# 1, and the script logs it: a boot with Auto-connect on joins and sets 2. Only
-# a dump that shows VirtWifi with Auto-connect off, and never on, counts; a dump
-# that fails, is cut short at $dumplimit seconds or does not show the network
-# repairs as before. A network that is disabled and has Auto-connect off too is
-# left disabled until the user turns Auto-connect on, and the next boot repairs
-# it. The script sleeps at most 113 s in all, plus the time its commands take (a
-# listing at most $limit s, a dump at most $dumplimit s).
+# 1, and the script logs it: a boot with Auto-connect on joins and sets 2. The
+# dump is read for the network ID of the open VirtWifi row of the final listing,
+# and only the Auto-connect values printed under a configuration header of that
+# ID count (another configuration of the same name, or a name that contains the
+# text of a header, has another ID). Only a dump that shows Auto-connect off for
+# that configuration, and never on, counts; a dump that fails, is denied or does
+# not show it repairs as before, and so does a listing whose row is not one line.
+# A dump cut after that configuration's own off value still reads as off, the
+# value being the network's. dumpsys's own timeout prints a banner and exits 0,
+# so it is given a longer one than the script's `timeout` ($dumplimit seconds),
+# which ends a slow dump. A network that is disabled and has Auto-connect off
+# too is left disabled until the user turns Auto-connect on, and the next boot
+# repairs it. The script sleeps at most 113 s in all, plus the time its commands
+# take (a listing at most $limit s, a dump at most $dumplimit s).
 
 marker=persist.sys.kernarium.virtwifi_saved
 settle=45
@@ -81,13 +88,14 @@ note() {
 }
 
 # Sets $state to saved when the listing holds VirtWifi (one line: id, name,
-# security type), absent when it does not and the command exited 0 within $limit
+# security type, kept in $row), absent when it does not and the command exited 0 within $limit
 # seconds (the Wi-Fi service answered), unknown otherwise (the command failed, or
 # timeout killed it).
 look() {
     listing=$(timeout "$limit" cmd wifi list-networks 2>/dev/null)
     code=$?
-    if echo "$listing" | grep -Eq '^[0-9]+ +VirtWifi +open'; then
+    row=$(echo "$listing" | grep -E '^[0-9]+ +VirtWifi +open')
+    if [ -n "$row" ]; then
         state=saved
     elif [ "$code" = 0 ]; then
         state=absent
@@ -97,23 +105,32 @@ look() {
 }
 
 # Sets $autojoin to off when the Wi-Fi service's dump shows Auto-connect off for
-# VirtWifi and never on (the dump prints each saved network more than once, under
-# a header line that names its SSID), and to on otherwise.
+# the configuration of the open VirtWifi row in $row (the final listing's) and
+# never on, and to on otherwise. A header line of the dump (`* ID: n SSID: ...`,
+# possibly after the text of a map entry) names a configuration's ID; the
+# Auto-connect lines that follow belong to it until the next header. The ID is
+# not taken from the header's SSID text, which a name can imitate.
 autojoin_state() {
     autojoin=on
+    case "$row" in
+        '' | *'
+'*) return ;;
+    esac
+    netid=${row%% *}
     mine=0
     off=0
     on=0
-    lines=$(timeout "$dumplimit" dumpsys wifi 2>/dev/null |
-        grep -E 'ID: [0-9]+ SSID: |allowAutojoin=')
+    lines=$(timeout "$dumplimit" dumpsys -t $((dumplimit + 10)) wifi 2>/dev/null |
+        grep -E '\* ID: [0-9]+ SSID: |allowAutojoin=')
     saved_ifs=$IFS
     IFS='
 '
     set -f
     for line in $lines; do
         case "$line" in
-            *'SSID: "VirtWifi"'*) mine=1 ;;
-            *' SSID: '*) mine=0 ;;
+            *'* ID: '[0-9]*' SSID: '*)
+                rest=${line#*'* ID: '}
+                if [ "${rest%%[!0-9]*}" = "$netid" ]; then mine=1; else mine=0; fi ;;
             *allowAutojoin=true*) [ "$mine" = 1 ] && on=1 ;;
             *allowAutojoin=false*) [ "$mine" = 1 ] && off=1 ;;
         esac

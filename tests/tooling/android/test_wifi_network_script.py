@@ -8,20 +8,22 @@ under `sh` with stub `cmd`, `dumpsys`, `getprop`, `setprop`, `sleep`, `date` and
 that the platform reads once (a save before the read is rejected) and writes some
 time after a save, a join, a forget or a change of Auto-connect (a pending write
 keeps its deadline), a list in memory, a station that joins an enabled network
-that has Auto-connect on, a user who forgets it or turns Auto-connect off, a
-dump that shows each saved network's Auto-connect, a listing that stalls for four
-seconds and prints what an empty one does, and the persistent marker. Each case boots that framework once or more and states what
-the script did: the saves it asked for, the lines it logged, the marker, what
-the store holds afterwards and how long it slept. A guest stops when the script
-is killed right after it wrote the marker, or a set time after it ended. The
-stubs keep time by the seconds the script sleeps and the commands take, so
-nothing waits.
+that has Auto-connect on, a user who forgets it or turns Auto-connect off, a dump
+that shows each saved configuration's Auto-connect under a header with its ID
+(and that the service can stall part-way), a listing that stalls for four
+seconds and prints what an empty one does, and the persistent marker. Each case
+boots that framework once or more and states what the script did: the saves it
+asked for, the lines it logged, the marker, what the store holds afterwards and
+how long it slept. A guest stops when the script is killed right after it wrote
+the marker, or a set time after it ended. The stubs keep time by the seconds the
+script sleeps and the commands take, so nothing waits.
 
 The test checks itself: mutants of the script (marker 1 final, marker 2 set by a
 boot that saved, a stalled listing read as absent, a network removed during the
 boot saved again, a guard of fewer looks, no early end at marker 2, a repair that
-ignores Auto-connect, an unreadable dump read as off, another network's
-Auto-connect counted) must each fail a case.
+ignores Auto-connect, an unreadable dump read as off, another configuration's
+Auto-connect counted, a header's SSID text naming the configuration) must each
+fail a case.
 
 `test_wifi_network_script.py --script FILE` prints what a script gets wrong.
 """
@@ -34,8 +36,14 @@ import os
 import sys
 
 CLOCK_LIMIT = 600
-DUMP_OK, DUMP_FAILS, DUMP_SLOW, DUMP_DENIED = 0, 1, 2, 3     # what `dumpsys wifi` does
+# What `dumpsys wifi` does: fails, says nothing for twelve seconds, says the caller may not, or prints its first
+# lines and then stalls (up to a configuration's header, or through its first Auto-connect line).
+DUMP_OK, DUMP_FAILS, DUMP_SLOW, DUMP_DENIED, DUMP_CUT_BEFORE, DUMP_CUT_AFTER, DUMP_LATE = 0, 1, 2, 3, 4, 5, 6
+LATE = "--late--"   # in a stub's output: what follows is printed only after the call's whole duration
 OTHER_NONE, OTHER_ON, OTHER_OFF = 0, 1, 2                    # another saved network, and its Auto-connect
+# The other network's name: an ordinary one, the same name (with another security type), a name that holds the text
+# of a header, and a name that ends with a quote.
+OTHER_NAMES = ("Elsewhere", "VirtWifi", 'X SSID: "VirtWifi"', 'VirtWifi"')
 HEADER = "Network Id      SSID                         Security type"
 
 
@@ -105,16 +113,22 @@ def framework(state: str, arguments: list[str]) -> int:
             advance(memory, now + 4)
             print("No networks")
         else:
+            rows = []
             if memory["listed"]:
+                rows.append((target_id(memory), "VirtWifi", "open"))
+            if memory["other"]:
+                rows.append((other_id(memory), OTHER_NAMES[memory["other_name"]], "wpa2"))
+            if rows:
                 print(HEADER)
-                print("0            VirtWifi                         open")
+                for number, name, security in sorted(rows):
+                    print(f"{number:<12} {name:<32} {security}")
             else:
                 print("No networks")
             if memory["slow"] > 0:
                 # An answer that takes two seconds is still an answer.
                 memory["slow"] -= 1
                 duration(state, 2)
-    elif command == ["dumpsys", "wifi"]:
+    elif arguments[:1] == ["dumpsys"] and arguments[-1:] == ["wifi"]:
         status = dump(state, memory)
     elif command == ["wifi", "status"]:
         note(state, "status")
@@ -146,9 +160,18 @@ def framework(state: str, arguments: list[str]) -> int:
     return status
 
 
+def target_id(memory: dict) -> int:
+    """VirtWifi's network ID: 0, or 1 when the boot gives the other network the first ID."""
+    return 1 if memory["swap_ids"] else 0
+
+
+def other_id(memory: dict) -> int:
+    return 0 if memory["swap_ids"] else 1
+
+
 def dump(state: str, memory: dict) -> int:
     """`dumpsys wifi`: the saved networks' configurations, each printed more than once, as the Wi-Fi service prints
-    them, with Auto-connect on a line of its own after a header line that names the network."""
+    them, with Auto-connect on a line of its own after a header line that names the configuration's ID and SSID."""
     note(state, "dump")
     mode = memory["dump_state"]
     if mode == DUMP_FAILS:
@@ -159,21 +182,33 @@ def dump(state: str, memory: dict) -> int:
         return 0
     if mode == DUMP_SLOW:
         duration(state, 12)
+        return 0
     networks = []
     if memory["listed"]:
-        networks.append(("VirtWifi", memory["autojoin"]))
+        networks.append((target_id(memory), "VirtWifi", memory["autojoin"]))
     if memory["other"]:
-        networks.append(("Elsewhere", memory["other"] == OTHER_ON))
-    print('mWifiInfo SSID: "VirtWifi", BSSID: 02:00:00:00:00:00, Supplicant state: COMPLETED')
+        networks.append((other_id(memory), OTHER_NAMES[memory["other_name"]], memory["other"] == OTHER_ON))
+    lines = ['mWifiInfo SSID: "VirtWifi", BSSID: 02:00:00:00:00:00, Supplicant state: COMPLETED']
     for section, order in enumerate((networks, networks[::-1])):
-        print("Dump of WifiConfigManager")
-        for number, (name, on) in enumerate(order):
-            lead = "mPerId={0=" if section and not number else ""
-            print(f'{lead}* ID: {number} SSID: "{name}" PROVIDER-NAME: null BSSID: null HIDDEN: false')
-            print(" Protocols: RSN")
-            print(f" lcuid=0 allowAutojoin={str(on).lower()} mAllowedAutoJoinInAdvancedProtection=true")
-            print("lastConnected: 2026-11-14T03:34:22.375")
-    print('mScanResultMatchInfoMapForCurrentUser={ScanResultMatchInfo: SSID: "VirtWifi", from scan result: false')
+        lines.append("Dump of WifiConfigManager")
+        for position, (number, name, on) in enumerate(order):
+            # A map prints its first entry after its name and the others after a comma.
+            lead = ("mPerId={" if not position else ", ") + f"{number}=" if section else ""
+            lines.append(f'{lead}* ID: {number} SSID: "{name}" PROVIDER-NAME: null BSSID: null HIDDEN: false')
+            lines.append(" Protocols: RSN")
+            lines.append(f" lcuid=0 allowAutojoin={str(on).lower()} mAllowedAutoJoinInAdvancedProtection=true")
+            lines.append("lastConnected: 2026-11-14T03:34:22.375")
+    lines.append('mScanResultMatchInfoMapForCurrentUser={ScanResultMatchInfo: SSID: "VirtWifi", from scan result: false')
+    if mode in (DUMP_CUT_BEFORE, DUMP_CUT_AFTER):
+        # The service stalls part-way: what it had written is all `timeout` leaves.
+        first = next(number for number, line in enumerate(lines) if "allowAutojoin=" in line)
+        lines = lines[:first + (mode == DUMP_CUT_AFTER)]
+        duration(state, 12)
+    if mode == DUMP_LATE:
+        # The whole dump, after twelve seconds: too late for `timeout`.
+        lines = [LATE] + lines
+        duration(state, 12)
+    print("\n".join(lines))
     return 0
 
 
@@ -269,6 +304,8 @@ class Boot:
     autojoin_off_at: int | None = None   # when the user turns Auto-connect off for the network
     autojoin_start: bool | None = None   # the store holds Auto-connect on (True) or off (False) from the boot on
     other: int = OTHER_NONE          # another saved network, with Auto-connect on or off
+    other_name: int = 0              # the index of its name in OTHER_NAMES
+    swap_ids: bool = False           # the other network has the first ID and VirtWifi the second
     dump_state: int = DUMP_OK        # `dumpsys wifi` fails, takes twelve seconds or says the caller may not
     kill_after_marker: bool = False  # the guest stops right after the script wrote the marker
     stop_after: int = 30             # seconds the guest runs on after the script ends before it stops
@@ -313,10 +350,12 @@ class Guest:
         python = sys.executable
         me = Path(__file__).resolve()
         state = self.state
+        # What a call prints after LATE comes only when its whole duration passes: `timeout` cuts it off.
         service_call = (
             f'if [ -n "$UNDER_TIMEOUT" ]; then exec "{python}" -S -E "{me}" --stub "{state}" "$@"; fi\n'
-            f'"{python}" -S -E "{me}" --stub "{state}" "$@"\nrc=$?\n'
-            f'd=$(cat "{state}/duration")\n[ "$d" -gt 0 ] && echo "$d" >> "{state}/extras"\nexit $rc\n'
+            f'out=$("{python}" -S -E "{me}" --stub "{state}" "$@")\nrc=$?\n'
+            f'd=$(cat "{state}/duration")\n[ "$d" -gt 0 ] && echo "$d" >> "{state}/extras"\n'
+            f'[ -n "$out" ] && echo "$out" | sed "/^{LATE}$/d"\nexit $rc\n'
         )
         bodies = {
             # A call that `timeout` wraps is cut by it; any other call lets its whole duration pass.
@@ -324,8 +363,10 @@ class Guest:
             "dumpsys": service_call.replace('"$@"', 'dumpsys "$@"'),
             "timeout": (
                 f'limit=$1\nshift\nout=$(UNDER_TIMEOUT=1 "$@")\nrc=$?\nd=$(cat "{state}/duration")\n'
-                f'if [ "$d" -gt "$limit" ]; then echo "$limit" >> "{state}/extras"; exit 124; fi\n'
-                f'[ "$d" -gt 0 ] && echo "$d" >> "{state}/extras"\n[ -n "$out" ] && echo "$out"\nexit $rc\n'
+                f'if [ "$d" -gt "$limit" ]; then echo "$limit" >> "{state}/extras"; '
+                f'[ -n "$out" ] && echo "$out" | sed "/^{LATE}$/,\\$d"; exit 124; fi\n'
+                f'[ "$d" -gt 0 ] && echo "$d" >> "{state}/extras"\n'
+                f'[ -n "$out" ] && echo "$out" | sed "/^{LATE}$/d"\nexit $rc\n'
             ),
             "getprop": f'echo "getprop $*" >> "{state}/calls"\ncat "{state}/properties/$1" 2>/dev/null || echo\n',
             "setprop": (
@@ -354,6 +395,7 @@ class Guest:
         memory = {
             "autojoin_stored": self.autojoin_stored, "autojoin": self.autojoin_stored or not listed,
             "autojoin_off_at": boot.autojoin_off_at, "other": boot.other, "dump_state": boot.dump_state,
+            "other_name": boot.other_name, "swap_ids": boot.swap_ids,
             "read_at": boot.read_at if boot.read_at is not None else 0,
             "read_done": boot.read_at is None, "store_delay": boot.store_delay, "store_due": None,
             "join_after": boot.join_after, "stalled": boot.stalled_looks, "failing": boot.failing_looks,
@@ -522,12 +564,36 @@ CASES = (
     Case("another network with Auto-connect on, VirtWifi with it off", "1", True, (
         (Boot(other=OTHER_ON), Expect(notes=1, marker="1", stored=True, autojoin_off=True)),
     ), autojoin_off=True),
+    # The configuration is the open VirtWifi row's ID, not a header's SSID text: another configuration of the same
+    # name (another security type), a name that holds the text of a header and a name that ends with a quote have
+    # other IDs, whichever of them comes first.
+    *(Case(f"another configuration ({what}) with Auto-connect on, VirtWifi with it off, {order} IDs", "1", True, (
+        (Boot(other=OTHER_ON, other_name=name, swap_ids=swapped),
+         Expect(notes=1, marker="1", stored=True, autojoin_off=True)),
+    ), autojoin_off=True) for what, name in (("the same name", 1), ("a name with header text", 2),
+                                             ("a name with a quote", 3))
+      for order, swapped in (("in order", False), ("swapped", True))),
+    *(Case(f"another configuration ({what}) with Auto-connect off, VirtWifi disabled with it on", "1", True, (
+        (Boot(other=OTHER_OFF, other_name=name, swap_ids=swapped), Expect(adds=1, notes=1, marker="1", stored=True)),
+    ), disabled=True) for what, name in (("the same name", 1), ("a name with header text", 2))
+      for swapped in (False, True)),
+    # A dump the service stalls part-way leaves what it wrote. Cut through the configuration's own off value it
+    # still reads as off (the value is the network's); cut before it, or through an on value, it repairs.
+    Case("marker 1, Auto-connect off and a dump cut after VirtWifi's own off value", "1", True, (
+        (Boot(dump_state=DUMP_CUT_AFTER), Expect(notes=1, marker="1", stored=True, autojoin_off=True)),
+    ), autojoin_off=True),
+    Case("marker 1, Auto-connect off and a dump cut before VirtWifi's value", "1", True, (
+        (Boot(dump_state=DUMP_CUT_BEFORE), Expect(adds=1, notes=1, marker="1", stored=True)),
+    ), autojoin_off=True),
+    Case("marker 1, a disabled network with Auto-connect on and a dump cut after its value", "1", True, (
+        (Boot(dump_state=DUMP_CUT_AFTER), Expect(adds=1, notes=1, marker="1", stored=True)),
+    ), disabled=True),
     # A dump that does not show it is no sign of the user's choice: the repair stays what it was.
     *(Case(f"marker 1, Auto-connect off and {what}", "1", True, (
         (Boot(dump_state=state), Expect(adds=1, notes=1, marker="1", stored=True)),
     ), autojoin_off=True) for what, state in (
-        ("a dump that fails", DUMP_FAILS), ("a dump that takes twelve seconds", DUMP_SLOW),
-        ("a dump that is denied", DUMP_DENIED))),
+        ("a dump that fails", DUMP_FAILS), ("a dump that says nothing for twelve seconds", DUMP_SLOW),
+        ("a dump that comes after twelve seconds", DUMP_LATE), ("a dump that is denied", DUMP_DENIED))),
     Case("a Wi-Fi service that is not up, no marker", "", False, (
         (Boot(add_fails=True), Expect(status=1, adds=30, marker="", stored=False)),
     )),
@@ -632,9 +698,14 @@ class WifiNetworkScript(unittest.TestCase):
             ("Auto-connect is not looked at", mutated(text, 'if [ "$autojoin" = off ]; then', "if false; then")),
             ("an unreadable dump reads as off", mutated(
                 text, '[ "$off" = 1 ] && [ "$on" = 0 ] && autojoin=off', '[ "$on" = 0 ] && autojoin=off')),
-            ("another network's Auto-connect counts", mutated(
-                text, "*' SSID: '*) mine=0 ;;", "*' SSID: '*) mine=1 ;;")),
-            ("the dump has no time limit", mutated(text, 'timeout "$dumplimit" dumpsys wifi', "dumpsys wifi")),
+            ("another configuration's Auto-connect counts", mutated(
+                text, 'if [ "${rest%%[!0-9]*}" = "$netid" ]; then mine=1; else mine=0; fi',
+                "mine=1")),
+            ("a header's SSID text names the configuration", mutated(
+                text, 'if [ "${rest%%[!0-9]*}" = "$netid" ]; then mine=1; else mine=0; fi',
+                """case "$line" in *'SSID: "VirtWifi"'*) mine=1 ;; *) mine=0 ;; esac""")),
+            ("the dump has no time limit", mutated(
+                text, 'timeout "$dumplimit" dumpsys -t', "dumpsys -t")),
         )
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             results = list(pool.map(lambda mutant: problems_of(mutant[1], stop_at_first=True), mutants))
