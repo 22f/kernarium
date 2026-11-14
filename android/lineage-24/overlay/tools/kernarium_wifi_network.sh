@@ -106,10 +106,12 @@ look() {
 
 # Sets $autojoin to off when the Wi-Fi service's dump shows Auto-connect off for
 # the configuration of the open VirtWifi row in $row (the final listing's) and
-# never on, and to on otherwise. A header line of the dump (`* ID: n SSID: ...`,
-# possibly after the text of a map entry) names a configuration's ID; the
-# Auto-connect lines that follow belong to it until the next header. The ID is
-# not taken from the header's SSID text, which a name can imitate.
+# never on, and to on otherwise. A header line of the dump (`ID: n SSID: ...`,
+# with a star before the ID for the connected configuration only) starts the line
+# or follows the `=` of a map entry, and names a configuration's ID; the
+# Auto-connect lines that follow belong to it until the next header. Other lines
+# that hold such text (a log line, or a scan entry, with a name that imitates it)
+# are no header, and the ID is not taken from a header's SSID text.
 autojoin_state() {
     autojoin=on
     case "$row" in
@@ -121,15 +123,15 @@ autojoin_state() {
     off=0
     on=0
     lines=$(timeout "$dumplimit" dumpsys -t $((dumplimit + 10)) wifi 2>/dev/null |
-        grep -E '\* ID: [0-9]+ SSID: |allowAutojoin=')
+        grep -E '(^|=)(\* )?ID: [0-9]+ SSID: |allowAutojoin=')
     saved_ifs=$IFS
     IFS='
 '
     set -f
     for line in $lines; do
         case "$line" in
-            *'* ID: '[0-9]*' SSID: '*)
-                rest=${line#*'* ID: '}
+            *'ID: '[0-9]*' SSID: '*)
+                rest=${line#*'ID: '}
                 if [ "${rest%%[!0-9]*}" = "$netid" ]; then mine=1; else mine=0; fi ;;
             *allowAutojoin=true*) [ "$mine" = 1 ] && on=1 ;;
             *allowAutojoin=false*) [ "$mine" = 1 ] && off=1 ;;

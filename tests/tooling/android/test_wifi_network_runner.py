@@ -36,6 +36,9 @@ import unittest
 from unittest import mock
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import wifi_dump_fixtures  # noqa: E402
+
 REPOSITORY = Path(__file__).resolve().parents[3]
 SCRIPT = REPOSITORY / "tests/integration/android/run_android_wifi_network.py"
 SPEC = importlib.util.spec_from_file_location("run_android_wifi_network", SCRIPT)
@@ -1138,6 +1141,31 @@ class UpgradeSectionTests(unittest.TestCase):
                                     listing=[LISTING, "Network Id      SSID                         Security type\n"])
         with self.assertRaisesRegex(runner.Failure, "VirtWifi is not saved after the restart"):
             runner.check_autojoin_kept(guest, WAITS, left_alone=True)
+
+    def test_the_values_of_each_dump_the_service_printed_are_read_under_the_networks_own_id(self) -> None:
+        for name, (number, on) in sorted(wifi_dump_fixtures.STATES.items()):
+            with self.subTest(name):
+                values = runner.configuration_autojoin(wifi_dump_fixtures.DUMPS[name], number)
+                self.assertTrue(values)
+                self.assertEqual(values, [on] * len(values))
+        # Other configurations have their own, and a line that holds a header's text names no configuration.
+        two = wifi_dump_fixtures.DUMPS["unconnected-off-two-more"]
+        self.assertEqual([runner.configuration_autojoin(two, number) for number in (0, 1, 2, 7)],
+                         [[True] * 4, [True] * 4, [False] * 4, []])
+        decoy = wifi_dump_fixtures.DUMPS["synthetic-decoy-in-block"]
+        self.assertEqual([runner.configuration_autojoin(decoy, number) for number in (0, 7)], [[False] * 4, []])
+
+    def test_the_step_reads_the_dumps_the_service_printed_after_the_restart(self) -> None:
+        before = wifi_dump_fixtures.DUMPS["connected-off"]
+        for name, (number, on) in sorted(wifi_dump_fixtures.STATES.items()):
+            row = f"Network Id      SSID                         Security type\n{number}            VirtWifi    open\n"
+            guest = self.autojoin_guest([before, wifi_dump_fixtures.DUMPS[name]], [LEFT_ALONE], listing=[LISTING, row])
+            with self.subTest(name):
+                if on:
+                    with self.assertRaisesRegex(runner.Failure, "Auto-connect is on again after a restart"):
+                        runner.check_autojoin_kept(guest, WAITS, left_alone=True)
+                else:
+                    self.assertIsNone(runner.check_autojoin_kept(guest, WAITS, left_alone=True))
 
     def test_the_left_alone_line_is_read_as_what_it_says(self) -> None:
         self.assertTrue(runner.left_alone_logged(LEFT_ALONE))
