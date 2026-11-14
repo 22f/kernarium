@@ -264,15 +264,15 @@ struct MemoryPolicyTests {
     /// of the engine, 149 of headroom), takes the result down to 0.5 GiB, holds
     /// it to at least 1.5 GiB and never above the bound (the safe size); the
     /// default is that size held to 4 GiB, and where the bound reaches 4096 it
-    /// is also the most that leaves the host GPU a gibibyte. `AndariumTests`
+    /// is also the most that leaves the host GPU 992 MiB. `AndariumTests`
     /// asks the loader for the same rows, so these stay the rule's. The bounds
     /// end at 9152, the ceiling of an iOS device's window.
     static let defaultFixtures: [(limitMiB: Int, bounds: [Int], defaults: [Int], safe: [Int])] = [
         // Below 1.5 GiB the bound wins: the default is never above what the picker offers.
-        (1536, [960, 960, 896, 896, 896, 896, 896, 896], [960, 960, 896, 896, 896, 896, 896, 896],
-            [960, 960, 896, 896, 896, 896, 896, 896]),
-        (2048, [1472, 1472, 1408, 1408, 1344, 1344, 1344, 1344], [1472, 1472, 1408, 1408, 1344, 1344, 1344, 1344],
-            [1472, 1472, 1408, 1408, 1344, 1344, 1344, 1344]),
+        (1536, [960, 960, 960, 960, 960, 960, 960, 896], [960, 960, 960, 960, 960, 960, 960, 896],
+            [960, 960, 960, 960, 960, 960, 960, 896]),
+        (2048, [1472, 1472, 1408, 1408, 1408, 1408, 1408, 1344], [1472, 1472, 1408, 1408, 1408, 1408, 1408, 1344],
+            [1472, 1472, 1408, 1408, 1408, 1408, 1408, 1344]),
         // The lower clamp: the conservative 1216 to 1024 MiB come up to 1536, under the bound.
         (2304, [1728, 1728, 1664, 1664, 1600, 1600, 1600, 1600], Array(repeating: 1536, count: 8),
             Array(repeating: 1536, count: 8)),
@@ -283,11 +283,11 @@ struct MemoryPolicyTests {
             Array(repeating: 2048, count: 8)),
         (4096, [3520, 3520, 3456, 3456, 3392, 3392, 3392, 3392], Array(repeating: 2560, count: 8),
             Array(repeating: 2560, count: 8)),
-        // A limit that offers 4096 at one to three vCPUs only: the default keeps the GPU a gibibyte at every count,
+        // A limit that offers 4096 at one to three vCPUs only: the default keeps the GPU 992 MiB at every count,
         // 2560 where the safe size is 3584 at one and two and 3072 after.
         (4700, [4160, 4096, 4096, 4032, 4032, 4032, 3968, 3968], Array(repeating: 2560, count: 8),
             [3584, 3584, 3072, 3072, 3072, 3072, 3072, 3072]),
-        // A limit that offers more than 4096 everywhere: 3584 MiB would leave the GPU 697 to 870 MiB, so a new guest
+        // A limit that offers more than 4096 everywhere: 3584 MiB would leave the GPU 665 to 838 MiB, so a new guest
         // gets 3072 and the safe size stays at 3584.
         (5120, [4544, 4544, 4480, 4480, 4416, 4416, 4416, 4416], Array(repeating: 3072, count: 8),
             Array(repeating: 3584, count: 8)),
@@ -531,8 +531,8 @@ struct MemoryPolicyTests {
             processorCount: 2,
             bound: { _ in 4096 }, defaultMemory: { _ in 2048 },
             graphicsMemory: { memory, count in
-                // The iPad mini 6's 534 MiB for the default guest and 384 MiB at the floor.
-                memory <= 1536 ? 534 : 384
+                // The iPad mini 6's 534 MiB for the default guest and 352 MiB at the floor.
+                memory <= 1536 ? 534 : 352
             },
             cameraReserve: { budget in reserveAsked += 1; return 106 }
         )
@@ -543,8 +543,8 @@ struct MemoryPolicyTests {
         // Camera live: the pool the GPU is given, 428 MiB on an iPad mini 6.
         #expect(policy.graphicsMemoryMiB(forMemory: 1536, vCPUs: 1, cameraLive: true) == 428)
         // At the floor the reserve is taken after the clamp: the pool is below the floor.
-        #expect(policy.graphicsMemoryMiB(forMemory: 2048, vCPUs: 2) == 384)
-        #expect(policy.graphicsMemoryMiB(forMemory: 2048, vCPUs: 2, cameraLive: true) == 278)
+        #expect(policy.graphicsMemoryMiB(forMemory: 2048, vCPUs: 2) == 352)
+        #expect(policy.graphicsMemoryMiB(forMemory: 2048, vCPUs: 2, cameraLive: true) == 246)
         // A host that states no reserve leaves the budget as it is, and one without an estimate has none.
         let plain = MemoryPolicy(
             processorCount: 1, bound: { _ in 4096 }, defaultMemory: { _ in 2048 }, graphicsMemory: { _, _ in 534 })
@@ -562,21 +562,21 @@ struct MemoryPolicyTests {
 
     /// While Camera is on the sheet shows the pool, the budget less the camera's
     /// reserve, so the graphics warning's line is where the pool, not the
-    /// budget, falls under a gibibyte. The sizes and the default do not move.
+    /// budget, falls under 992 MiB. The sizes and the default do not move.
     @Test func theGraphicsWarningFollowsThePoolWhileCameraIsLive() {
         let withCamera = MemoryPolicy(
             processorCount: 2,
             bound: { _ in 4096 }, defaultMemory: { _ in 3072 }, safeMemory: { _ in 3584 },
             graphicsMemory: { memory, count in MemoryPolicyTests.fallingGraphics(memory, count) },
-            cameraReserve: { _ in 106 }
+            cameraReserve: { _ in 114 }
         )
         // Camera off, or blocked: the budget's line, as for a host without a reserve.
         #expect(withCamera.graphicsLineMiB(vCPUs: 1) == fourGiB.graphicsLineMiB(vCPUs: 1))
         #expect(withCamera.graphicsLineMiB(vCPUs: 1, cameraLive: false) == 3200)
         #expect(withCamera.risk(3136, vCPUs: 1) == .none)
-        // Live at one vCPU: the pool is 1058 MiB at 3072 and 994 at 3136, so the line is the default.
-        #expect(withCamera.graphicsMemoryMiB(forMemory: 3072, vCPUs: 1, cameraLive: true) == 1058)
-        #expect(withCamera.graphicsMemoryMiB(forMemory: 3136, vCPUs: 1, cameraLive: true) == 994)
+        // Live at one vCPU: the pool is 1050 MiB at 3072 and 986 at 3136, so the line is the default.
+        #expect(withCamera.graphicsMemoryMiB(forMemory: 3072, vCPUs: 1, cameraLive: true) == 1050)
+        #expect(withCamera.graphicsMemoryMiB(forMemory: 3136, vCPUs: 1, cameraLive: true) == 986)
         #expect(withCamera.graphicsLineMiB(vCPUs: 1, cameraLive: true) == 3072)
         #expect(withCamera.risk(3072, vCPUs: 1, cameraLive: true) == .none)
         for mib in [3136, 3200, 3584] {
@@ -584,7 +584,7 @@ struct MemoryPolicyTests {
             #expect(withCamera.isShortOfGraphicsMemory(mib, vCPUs: 1, cameraLive: true))
         }
         #expect(withCamera.risk(3648, vCPUs: 1, cameraLive: true) == .closing, "the safe size is the budget's rule")
-        // The warning is exactly the sizes above the default whose pool is under a gibibyte.
+        // The warning is exactly the sizes above the default whose pool is under 992 MiB.
         for count in 1...2 {
             for mib in withCamera.stops(vCPUs: count) where mib <= withCamera.safeMemoryMiB(vCPUs: count) {
                 let pool = withCamera.graphicsMemoryMiB(forMemory: mib, vCPUs: count, cameraLive: true) ?? 0
@@ -661,9 +661,9 @@ struct MemoryPolicyTests {
     /// The graphics memory (B) of a device that offers 4 GiB but leaves the
     /// GPU only what the process limit does after the guest, as the runtime's
     /// formula does: it falls by the guest's size and by 64 MiB per vCPU, and
-    /// is at least 384 MiB.
+    /// is at least 352 MiB.
     private static func fallingGraphics(_ memory: Int, _ count: Int) -> Int {
-        max(384, 4300 - memory - 64 * count)
+        max(352, 4300 - memory - 64 * count)
     }
 
     /// A device whose default the runtime did not lower for the GPU (the
@@ -721,11 +721,11 @@ struct MemoryPolicyTests {
     /// allowance over it (`runtime/guest_memory_budget.hpp`; the `LiveTests`
     /// hold it to the loader).
     private static func runtimeB(limit: Int, memory: Int, count: Int) -> Int {
-        let caps = [128, 160, 192, 224, 240, 240, 272, 272]
+        let caps = [160, 192, 224, 256, 272, 272, 304, 304]
         let bursts = [1, 1, 1, 1, 1, 1, 1, 2]
         let index = min(max(count, 1), caps.count) - 1
         let engine = 320 + caps[index] + bursts[index] + 4 * count
-        return max(limit - 64 - memory - engine - 149, 384)
+        return max(limit - 64 - memory - engine - 149, 352)
     }
 
     /// A limit of 5120 MiB: 4544 to 4416 offered, a new guest of 3 GiB because
@@ -803,7 +803,7 @@ struct MemoryPolicyTests {
         let mini = MemoryPolicy(
             processorCount: 6,
             bound: { _ in 2176 }, defaultMemory: { _ in 1536 }, safeMemory: { _ in 1536 },
-            graphicsMemory: { memory, count in max(384, 2600 - memory - 128 * count) }
+            graphicsMemory: { memory, count in max(352, 2600 - memory - 128 * count) }
         )
         let reference = MemoryPolicy(
             maximumsMiB: Array(repeating: 2176, count: 6), defaultsMiB: Array(repeating: 1536, count: 6)

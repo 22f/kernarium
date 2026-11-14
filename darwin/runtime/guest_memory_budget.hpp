@@ -14,21 +14,21 @@
  *     E(v, G) = c(v, G) + x(v) + t * v + E_rest
  *     c(v, G) = min(derive_budget(G, L), cap(v))      (the cap only where L != 0)
  *     G_max(v) = the largest G in {512, 576, ..., C} MiB with
- *                L - G - A - E(v, G) - S >= 384 MiB; C where L is zero
+ *                L - G - A - E(v, G) - S >= 352 MiB; C where L is zero
  *     conservative(v) = G_max(v) under the launch set, in 512 MiB steps and
  *                  at least 1536 MiB, and never above G_max(v) under the
  *                  maximum set
  *     default(v) = conservative(v) held to 4096 MiB, and on a device whose
  *                  G_max(1) under the maximum set reaches 4096 MiB also no
  *                  more than the largest 512 MiB step of G with B(G, v) >=
- *                  1024 MiB under the launch set
+ *                  992 MiB under the launch set
  *
  * L is the process's memory limit (platform::process_memory_limit_bytes), zero
  * for none. cap(v) is seven eighths of the cache's measured worst ceiling at v
- * vCPUs, rounded up to 16 MiB. x(v) is the most the cache's charge exceeds its
- * budget in a burst (gadget_cache_burst). t is the slot tags each executor
- * keeps outside the cache's ledger. A, E_rest and S come from a
- * LaunchMemorySet.
+ * vCPUs, rounded up to 16 MiB, plus 32 MiB. x(v) is the most the cache's
+ * charge exceeds its budget in a burst (gadget_cache_burst). t is the slot
+ * tags each executor keeps outside the cache's ledger. A, E_rest and S come
+ * from a LaunchMemorySet.
  *
  * C is the host's ceiling (guest_memory_ceiling_mib, for a process
  * process_guest_memory_ceiling_mib): the most RAM the host admits whatever the
@@ -80,7 +80,7 @@ inline constexpr std::uint32_t device_window_guest_memory_maximum_mib = 9152;
 
 /* The default guest RAM of a new guest: a multiple of 512 MiB within this
  * range (default_guest_memory_mib). Its top is no cap on what is offered: it
- * is the largest default, and the line the rule that keeps a gibibyte for the
+ * is the largest default, and the line the rule that keeps 992 MiB for the
  * host GPU applies from. */
 inline constexpr std::uint32_t default_guest_memory_minimum_mib = 1536;
 inline constexpr std::uint32_t default_guest_memory_maximum_mib = 4096;
@@ -88,17 +88,20 @@ inline constexpr std::uint32_t default_guest_memory_step_mib = 512;
 
 /* The host GPU's budget B a new guest keeps where the device lets a guest have
  * the top of the range (default_guest_memory_mib). */
-inline constexpr std::uint64_t default_gpu_budget_minimum_mib = 1024;
+inline constexpr std::uint64_t default_gpu_budget_minimum_mib = 992;
 
 /* The most the arm64 gadget cache may hold at 1 through 8 vCPUs: seven eighths
  * of the worst ceiling any session reached in the Android and KDE loads that
- * were measured on the Mac and the iPad, rounded up to 16 MiB. The cap sits
- * under those loads' worst ceilings, so the budget's own shedding
- * (cpu/gadget_cache_budget.hpp) bounds the cache there. Geekbench's multi-core
+ * were measured on the Mac and the iPad, rounded up to 16 MiB, and 32 MiB
+ * more, which a game that holds most of the cache needs to keep its code
+ * through its launch (Asphalt's reached about 240 MiB at 6 vCPUs on a phone).
+ * The cap is then at or above those loads' worst ceilings at every count, so
+ * none that was measured is held by it; the budget's relief rule
+ * (cpu/gadget_cache_budget.hpp) still bounds a burst. Geekbench's multi-core
  * peaks at 8 vCPUs, 71 to 94 MiB, stay far below it, and forcing the budget to
  * 64 MiB there cost no measurable score. */
 inline constexpr std::array<std::uint32_t, 8> gadget_cache_cap_mib{
-	128, 160, 192, 224, 240, 240, 272, 272};
+	160, 192, 224, 256, 272, 272, 304, 304};
 /* Each vCPU above the last measured one adds this to the cap. */
 inline constexpr std::uint32_t gadget_cache_cap_further_executor_mib = 16;
 
@@ -422,7 +425,7 @@ namespace detail {
  * and graphics_guest_memory_mib. Both fall with the vCPU count, so the default
  * does too. That bound is never under 2048 MiB with the launch set, since
  * every limit that offers 4096 MiB at one vCPU leaves a guest of 2048 more
- * than 1024 for the GPU at every count the applications offer; for a set that
+ * than 992 for the GPU at every count the applications offer; for a set that
  * leaves none in the range, or for a limit that offers less than 4096 MiB or
  * none at all, the default is the conservative one. A guest above the
  * conservative one is likely to be ended by the system; one between the two is

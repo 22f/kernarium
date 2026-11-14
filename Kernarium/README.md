@@ -71,7 +71,7 @@ offer such a size. The settings ask the loader
 (`kernarium_runtime_loader_maximum_guest_memory_mib`) for the RAM bound and a
 new configuration's guest RAM
 (`kernarium_runtime_loader_default_guest_memory_mib` at the loaded vCPU count,
-which stops at 4 GiB and also keeps the GPU 1 GiB on a device that offers 4
+which stops at 4 GiB and also keeps the GPU 992 MiB on a device that offers 4
 GiB), because the runtime framework is loaded once per process. The parameters
 default to the conservative launch set the default is measured with; the RAM
 bound counts none of them. The `KERNARIUM_GPU_BUDGET_*_MIB` and `KERNARIUM_GUEST_MEMORY_MIB`

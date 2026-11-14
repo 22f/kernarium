@@ -267,10 +267,10 @@ struct DefaultGuestTests {
             #expect(GuestProcessorLimit.vCPUs(physicalProcessorCount: cores) == expected)
         }
         for (limitMiB, bounds, defaults, safe) in [
-            (1536, [960, 960, 896, 896, 896, 896, 896, 896], [960, 960, 896, 896, 896, 896, 896, 896],
-             [960, 960, 896, 896, 896, 896, 896, 896]),
-            (2048, [1472, 1472, 1408, 1408, 1344, 1344, 1344, 1344], [1472, 1472, 1408, 1408, 1344, 1344, 1344, 1344],
-             [1472, 1472, 1408, 1408, 1344, 1344, 1344, 1344]),
+            (1536, [960, 960, 960, 960, 960, 960, 960, 896], [960, 960, 960, 960, 960, 960, 960, 896],
+             [960, 960, 960, 960, 960, 960, 960, 896]),
+            (2048, [1472, 1472, 1408, 1408, 1408, 1408, 1408, 1344], [1472, 1472, 1408, 1408, 1408, 1408, 1408, 1344],
+             [1472, 1472, 1408, 1408, 1408, 1408, 1408, 1344]),
             (2304, [1728, 1728, 1664, 1664, 1600, 1600, 1600, 1600], Array(repeating: 1536, count: 8),
              Array(repeating: 1536, count: 8)),
             (2867, [2304, 2304, 2240, 2240, 2176, 2176, 2176, 2176], Array(repeating: 1536, count: 8),
@@ -329,8 +329,8 @@ struct DefaultGuestTests {
                 if limitMiB == 0 {
                     #expect(budget == memory)
                 } else if bounds[0] >= Limits.defaultMemoryRangeMiB.upperBound {
-                    // On a device that offers 4 GiB, a new guest keeps a gibibyte for the GPU.
-                    #expect((budget ?? 0) >= 1024, "limit \(limitMiB) MiB at \(count) vCPUs")
+                    // On a device that offers 4 GiB, a new guest keeps 992 MiB for the GPU.
+                    #expect((budget ?? 0) >= Limits.minimumDefaultGraphicsMemoryMiB, "limit \(limitMiB) MiB at \(count) vCPUs")
                 }
                 // The sheet warns about graphics memory above the default where the
                 // runtime lowered the default to keep a gibibyte for the GPU, and

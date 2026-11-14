@@ -47,9 +47,9 @@ public enum Limits {
     /// of its vCPU count instead.
     public static let defaultMemoryRangeMiB = 1536...4096
     /// The graphics memory (VRAM) a new guest keeps where the device has room
-    /// for it (`default_gpu_budget_minimum_mib`): a guest above the default
-    /// is warned about only where its estimate is under this.
-    public static let minimumDefaultGraphicsMemoryMiB = 1024
+    /// for it (`default_gpu_budget_minimum_mib`, 992 MiB): a guest above the
+    /// default is warned about only where its estimate is under this.
+    public static let minimumDefaultGraphicsMemoryMiB = 992
 
     /// Free space a new guest needs for Android's first start, on top of the
     /// space its storage takes.

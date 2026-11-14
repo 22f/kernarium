@@ -267,7 +267,7 @@ struct SystemControls: View {
         let bottom = stops.first ?? Limits.minimumMemoryMiB
         let steps = (1024 - bottom % 1024) % 1024 / Limits.memoryStepMiB
         // Sizes past the graphics line (what a new guest gets, or more where
-        // the graphics memory does not fall below a gibibyte above it) turn
+        // the graphics memory does not fall below 992 MiB above it) turn
         // orange, and past the size where iOS is likely to close Andarium red
         // where that is a higher one; the line beneath says why while the
         // chosen size is one of them, the worse risk alone. Both sizes follow

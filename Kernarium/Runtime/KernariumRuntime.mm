@@ -2485,7 +2485,7 @@ int runtimeRun(
             /* GPU memory is charged to the application like guest RAM: the GPU's
              * budget is what the application's memory limit leaves after the
              * guest, the gadget cache and the launch's allowances, and at least
-             * 384 MiB. The application has already warned the user when the limit
+             * 352 MiB. The application has already warned the user when the limit
              * leaves less than the floor (runtimePlanGpuBudget); the guest boots
              * with the floor. */
             const auto gpuBudget = planGpuBudget(

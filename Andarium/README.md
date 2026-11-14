@@ -376,9 +376,9 @@ control out.
   of graphics memory (VRAM, the host GPU's budget): the System sheet turns the
   ticks past it orange and warns that games may (`GraphicsMemoryWarning`), and
   Home says nothing. The line is the default where the runtime lowered the
-  default to keep the GPU 1 GiB
+  default to keep the GPU 992 MiB
   (`kernarium_runtime_loader_default_guest_memory_holds_gpu_budget`), and
-  elsewhere the largest size whose estimate of VRAM is still 1 GiB or more
+  elsewhere the largest size whose estimate of VRAM is still 992 MiB or more
   (`Limits.minimumDefaultGraphicsMemoryMiB`), so a range above 4 GiB warns
   only where the estimate falls. The sheet also shows the loader's estimate of
   VRAM for the chosen memory and vCPUs and says it is separate from the

@@ -84,7 +84,7 @@ enum PreviewData {
 
     /// The same for a memory limit of 5120 MiB, which an iPhone 18 Pro Max is
     /// assumed to have: 4096 MiB at every count, a default of 3 GiB that keeps
-    /// the GPU a gibibyte and 3.5 GiB above which iOS is likely to close the
+    /// the GPU 992 MiB and 3.5 GiB above which iOS is likely to close the
     /// application.
     static let iPhone18ProMaxMemory = MemoryPolicy(
         maximumsMiB: Array(repeating: 4096, count: 6), defaultsMiB: Array(repeating: 3072, count: 6),
@@ -117,16 +117,16 @@ enum PreviewData {
 
     /// B for a mock: L less A (64), E_rest (320), S (149), the gadget cache at
     /// its cap of the vCPU count, the burst allowance over it and 4 MiB of
-    /// slot tags per vCPU and the guest, and at least 384 MiB. The cap and the
+    /// slot tags per vCPU and the guest, and at least 352 MiB. The cap and the
     /// allowance are the tables in `runtime/guest_memory_budget.hpp`, which
     /// hold for the guests the sheet offers (1.5 GiB and up).
     private static func budget(limitMiB: Int, memoryMiB: Int, vCPUs: Int) -> Int {
-        let caps = [128, 160, 192, 224, 240, 240, 272, 272]
+        let caps = [160, 192, 224, 256, 272, 272, 304, 304]
         let bursts = [1, 1, 1, 1, 1, 1, 1, 2]
         let index = min(max(vCPUs, 1), caps.count) - 1
         let engine = 320 + caps[index] + bursts[index] + 4 * max(vCPUs, 1)
         let available = limitMiB - 64 - memoryMiB - engine - 149
-        return max(available, 384)
+        return max(available, 352)
     }
 
     /// A mock size, in gibibytes.

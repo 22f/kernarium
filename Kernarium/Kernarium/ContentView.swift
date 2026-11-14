@@ -513,7 +513,7 @@ private struct GuestRestartingBadge: View {
 }
 
 /// The warning shown at launch when the application's memory limit leaves the
-/// host GPU less than its 384 MiB floor once the guest, the gadget cache and
+/// host GPU less than its 352 MiB floor once the guest, the gadget cache and
 /// the launch's allowances are counted. The guest boots anyway, with the
 /// floor, and the system is likely to end the application.
 struct GPUBudgetWarning: Equatable {
