@@ -81,7 +81,6 @@ DEBUG_SUPPORT = (
     # The Simulator preview's hooks into the Send feedback sheet.
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV20previewOpensAtLaunchSbvg(void) { return 1; }\n"),
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV14previewPrepareyyAA0aD5ModelCYaYbcvg(void) { return 1; }\n"),
-    ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV24previewKeepsConfirmationSbvg(void) { return 1; }\n"),
     # The Simulator preview's hooks into the Buy me tokens sheet.
     ("tip jar preview", "int _s8Andarium14TipJarServicesV16previewOpensSheetSbvg(void) { return 1; }\n"),
     ("tip jar preview", "int _s8Andarium14TipJarServicesV12previewPlaysyyAA0aB5ModelCYaYbcvg(void) { return 1; }\n"),
@@ -497,7 +496,7 @@ def write_notes(app: Path, entries: list[dict] | None, strings: dict[str, str],
     is None) and the compiled table of their translations in each language."""
     if entries is not None:
         (app / "WhatsNew.json").write_text(
-            json.dumps([{"build": 10, "version": "1.0 (10)", "entries": entries}]), encoding="utf-8")
+            json.dumps([{"build": 11, "version": "1.0 (11)", "entries": entries}]), encoding="utf-8")
     for language in languages:
         lproj = app / f"{language}.lproj"
         lproj.mkdir(exist_ok=True)

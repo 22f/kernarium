@@ -289,10 +289,16 @@ report's overlay text is the app's own.
 Send needs both a problem (the mail's subject) and details (its body); white
 space counts as empty, and a file or the start log is neither. Send stays
 enabled while one is empty: its tap opens no composer and shows one alert that
-names what is missing, and the first empty field takes the focus after OK.
+names what is missing, and the first empty field takes the focus after OK. Once
+the mail is sent, the Feedback sent notice stays over the sheet, which keeps what
+was sent and takes no touch; the notice's Done closes both and ends the draft,
+and a swipe down or the toolbar's close does nothing meanwhile.
 
 The sheet attaches the bug report, a screenshot, photos and videos from the
-photo library, and any number of files from Files. The bar has three buttons:
+photo library, and any number of files from Files, except an Android package
+(`.apk`, `.apks`, `.xapk`, `.apkm`, told by the name or the type a provider
+gives, never by opening it), which mail services reject: one alert per pick
+says so and asks for a download link in the details. The bar has three buttons:
 Bug report, Screenshot and Add, a paperclip whose menu offers Photos and Files
 (the system's menu, anchored on the button). A file is opened where it is kept
 (the document picker in place,
@@ -606,8 +612,8 @@ control out.
   closes the sheet and Home says what happened, Start being next. The preview
   plays the same screens on mock snapshots (`-screen snapshots-…`).
 - **Release notes.** `Shared/WhatsNew.json` bundles the notes per build,
-  from build 9 (build 5, the first public release, and builds 6 to 8 have
-  none).
+  from build 9 (build 5, the first public release, and builds 6 to 8 and
+  10 have none).
   The first launch of an update that carries notes shows a ribbon above Start,
   on at most three launches, that opens them; a build shows the notes up to its
   own number and no later ones. An entry can name the devices it is for (more
@@ -713,14 +719,18 @@ requires reopening Andarium.
   [Android README](../android/lineage-24/README.md) owns the HAL.
 - **Heat.** The application tells the guest's thermal HAL how hot the device is
   over vsock 5559 (`ThermalSession`; the wire is `ThermalProtocol`, whose
-  golden frames the HAL's test shares in `tests/unit/andarium/fixtures`). The
-  severity is the hottest iOS thermal state of the last 120 s: it rises at once
-  and falls 120 s after the hotter state ended. Fair is Android's light,
-  serious its severe and critical its critical, and the host never sends a
-  level that shuts the guest down. At severe and above Android lowers the
-  guest's frame rate to 30, and the first time in a run that this starts the
-  session screen says so once. There is no switch. A system without the HAL
-  hears nothing and shows no notice; the
+  golden frames the HAL's test shares in `tests/unit/andarium/fixtures`).
+  Android hears of heat from iOS's serious state: nominal and fair are none
+  (fair is not reported because it would not change the frame rate), serious
+  is Android's severe, critical is its critical, and the host never sends a
+  level that shuts the guest down. The severity is the hottest reported state
+  of the last 120 s: it rises at once and falls 120 s after the hotter state
+  ended, so a state that flickers around serious is one steady cap. From severe
+  up Android lowers the guest's frame rate to 30, and the first time in a run
+  that this starts the session screen says so once. The session and
+  stall records, the statistics and the feedback information keep iOS's real
+  state. There is no switch. A system without the HAL hears nothing and shows
+  no notice; the
   [Android README](../android/lineage-24/README.md) owns the HAL.
 - **Game controllers.** Each game controller iOS has connected is a HID
   device in the guest, made through the guest's relay over vsock 5558
@@ -1002,15 +1012,11 @@ requires reopening Andarium.
   words.
 - **Memory low.** The runtime answers iOS's memory pressure itself
   ([`docs/architecture.md`](../docs/architecture.md#memory-and-executable-code))
-  and reports every level it raises to the application
-  (`set_memory_pressure_callback`, runtime API 41). Only the critical level has
-  a notice: while a guest session is on screen (not Home, the boot screen or the
-  background), one notice says iOS may close Andarium
-  (`MemoryPressureNoticeState` decides; every configuration has it). It appears
-  when the level reaches critical and stays while it lasts and a little after;
-  a dismissal holds until the level has left critical and reached it again, and
-  a restart or the end of a run clears it. The notices of a session share one
-  column, which scrolls when they are together taller than its room.
+  and the session record keeps its level. The application shows no notice for
+  it at any level and registers no handler for it: the level is the system's,
+  not a measure of how near Andarium is to its own limit. The notices of a
+  session share one column, which scrolls when they are together taller than
+  its room.
 - **Session ends.** The runtime records how each session ended
   ([`docs/architecture.md`](../docs/architecture.md)). The next launch keeps
   that record as the previous session's (`PreviousSession`) and, after an end
@@ -1229,7 +1235,8 @@ additionally reads `KERNARIUM_ANDROID_ADB_AUTH`
 states the resolution; the earlier `KERNARIUM_RETINA_MODE` (`1` native, `0`
 one pixel to a point) is read where it is not stated.
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
-for iOS's thermal state in the Simulator and in automation.
+for iOS's thermal state in the Simulator and in automation; `serious` and
+`critical` reach the guest as heat.
 `ANDARIUM_REVIEW_ASK_SECONDS` and `ANDARIUM_REVIEW_ASK_RESET=1` set the rating
 prompt's counter and clear its record, in a build that has the prompt
 ([Rating prompt](#rating-prompt)).

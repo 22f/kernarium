@@ -82,17 +82,17 @@ void deliveryTests()
 
     /* The reports reach the handler on the main queue, in order, and none
      * before the queue runs. */
-    receiver.publish({uml::runtime::PressureLevel::warn, uml::runtime::PressureReaction::responding});
-    receiver.publish({uml::runtime::PressureLevel::warn, uml::runtime::PressureReaction::withheld});
+    receiver.publish({uml::runtime::PressureLevel::warn, uml::runtime::PressureReaction::none});
     receiver.publish({uml::runtime::PressureLevel::critical, uml::runtime::PressureReaction::responding});
+    receiver.publish({uml::runtime::PressureLevel::critical, uml::runtime::PressureReaction::underway});
     receiver.publish({uml::runtime::PressureLevel::normal, uml::runtime::PressureReaction::none});
     check(heard.empty(), "a report reached the handler before the main queue ran");
 
     dispatch_async(dispatch_get_main_queue(), ^{
         const std::vector<std::pair<int, int>> expected {
-            {KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING, KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED},
-            {KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING, KERNARIUM_RUNTIME_MEMORY_RESPONSE_WITHHELD},
+            {KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING, KERNARIUM_RUNTIME_MEMORY_RESPONSE_NONE},
             {KERNARIUM_RUNTIME_MEMORY_PRESSURE_CRITICAL, KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED},
+            {KERNARIUM_RUNTIME_MEMORY_PRESSURE_CRITICAL, KERNARIUM_RUNTIME_MEMORY_RESPONSE_UNDER_WAY},
             {KERNARIUM_RUNTIME_MEMORY_PRESSURE_NORMAL, KERNARIUM_RUNTIME_MEMORY_RESPONSE_NONE},
         };
         check(heard == expected, "the reports did not arrive in order, once each");

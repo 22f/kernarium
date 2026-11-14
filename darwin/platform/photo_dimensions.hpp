@@ -33,6 +33,19 @@ namespace uml::platform {
 using VideoFormatFacts = CameraCaptureFormat;
 
 // ---------------------------------------------------------------------------
+// Orientation
+// ---------------------------------------------------------------------------
+
+// A camera's SENSOR_ORIENTATION from the platform's statement for it: `portraitAngle` is the clockwise turn, in
+// degrees, that makes the camera's unrotated, unmirrored pictures upright with the device held in portrait (the
+// rotation coordinator's angle for portrait), and the backend delivers every frame and still in that orientation. The
+// mounting differs between cameras (an iPhone 15 Pro Max's front camera is upright with the port on the left, its back
+// cameras with the port on the right) and between models, so no position has a fixed value. The angle is rounded to a
+// quarter turn, and an angle that is not finite states 0. An external camera, whose mounting the platform does not
+// know, states 90 whatever the angle.
+[[nodiscard]] std::uint32_t sensorOrientationOf(CameraPosition position, double portraitAngle) noexcept;
+
+// ---------------------------------------------------------------------------
 // Photo sizes
 // ---------------------------------------------------------------------------
 

@@ -3,6 +3,7 @@
 import Darwin
 import Foundation
 import Testing
+import UniformTypeIdentifiers
 
 @testable import AndariumCore
 @testable import AndariumFeedbackLogic
@@ -70,7 +71,7 @@ struct SendFeedbackFilesTests {
     @Test func aFileIsAnAttachmentLikeTheOthersAndCountsInTheTotalAndTheWarning() {
         var set = SendFeedbackAttachments()
         set.add(attachment(.photo, bytes: 5, path: "/staged/photo.png"))
-        set.add(attachment(.file, bytes: 20 * mebibyte, path: "/Files/app.apk", inPlace: true))
+        set.add(attachment(.file, bytes: 20 * mebibyte, path: "/Files/trace.zip", inPlace: true))
         set.add(attachment(.bugReport, bytes: 3, path: "/staged/report.zip"))
         #expect(set.items.map(\.kind) == [.bugReport, .photo, .file], "a report first, the rest in the order added")
         #expect(set.totalBytes == 20 * mebibyte + 8)
@@ -127,13 +128,57 @@ struct SendFeedbackFilesTests {
         #expect(SendFeedbackAttachments().mapAll() == .success([]), "no files, nothing to map")
     }
 
-    @Test func anApkIsTypedAsAnAndroidPackageAndTheOthersByTheirExtension() {
-        #expect(attachment(.file, path: "/Files/app.APK").mimeType == "application/vnd.android.package-archive")
-        #expect(attachment(.file, path: "/Files/log.txt").mimeType == "text/plain")
+    @Test func aFileIsTypedByItsExtension() {
+        #expect(attachment(.file, path: "/Files/log.TXT").mimeType == "text/plain")
+        #expect(attachment(.file, path: "/Files/trace.zip").mimeType == "application/zip")
         #expect(attachment(.file, path: "/Files/blob.unknownext").mimeType == "application/octet-stream")
         #expect(attachment(.file, path: "/Files/noextension").mimeType == "application/octet-stream")
         // The mail's name decides, not the place the file is kept.
         #expect(attachment(.file, path: "/Files/x.bin", mailName: "y.zip").mimeType == "application/zip")
+    }
+
+    // MARK: Android packages
+
+    @Test(arguments: [
+        "app.apk", "APP.APK", "App.Apk", "bundle.apks", "Bundle.APKS", "x.xapk", "X.XAPK", "y.apkm", "Y.ApkM",
+        "my.app.release.v2.apk", ".apk", "name with spaces.apk ", "evil\u{202E}gpj.apk", "\u{6D4B}\u{8BD5}.apk",
+    ])
+    func anAndroidPackageIsToldByTheEndOfItsNameWhateverTheCase(name: String) {
+        #expect(SendFeedbackAndroidPackage.matches(name: name), "\(name)")
+    }
+
+    @Test(arguments: [
+        "", "apk", "apks", "apk.txt", "myapk", "capk", "xapkm", "app.apk.zip", "app.apk.txt", "notes.apks.bak", "a.apkx",
+        "a.xapks", "photo.jpg", "archive.zip", "trace.tar.gz", "package.apk-backup", "apk-notes.md",
+    ])
+    func aNameThatOnlyContainsApkIsAnOrdinaryFile(name: String) {
+        #expect(!SendFeedbackAndroidPackage.matches(name: name), "\(name)")
+    }
+
+    @Test func aContentTypeThatNamesAPackageCountsWhateverTheNameIs() throws {
+        let package = try #require(UTType(mimeType: "application/vnd.android.package-archive"))
+        #expect(SendFeedbackAndroidPackage.matches(name: "installer", contentType: package))
+        #expect(SendFeedbackAndroidPackage.matches(name: "installer.bin", contentType: package))
+        #expect(!SendFeedbackAndroidPackage.matches(name: "installer", contentType: .zip))
+        #expect(!SendFeedbackAndroidPackage.matches(name: "installer", contentType: .data))
+        #expect(!SendFeedbackAndroidPackage.matches(name: "installer", contentType: nil))
+        #expect(SendFeedbackAndroidPackage.matches(name: "installer.apk", contentType: .zip), "the name is enough")
+    }
+
+    @Test func nothingIsOpenedToTellABundleFromAnotherArchive() throws {
+        // A real ZIP named .apks is a package, and a file that holds an APK under another name is not: the
+        // classifier reads names and types, never content, so it works on a file that does not exist.
+        #expect(SendFeedbackAndroidPackage.matches(name: "/nowhere/at/all/bundle.apks"))
+        #expect(!SendFeedbackAndroidPackage.matches(name: "/nowhere/at/all/bundle.zip"))
+    }
+
+    @Test func aFileThatIsLookedAtCarriesItsContentType() throws {
+        let root = try scratch()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("trace.zip")
+        try Data([1, 2, 3]).write(to: file)
+        #expect(SendFeedbackFileInspection.read(file).contentType?.conforms(to: .zip) == true)
+        #expect(SendFeedbackFileInspection.read(root.appendingPathComponent("gone.zip")).contentType == nil)
     }
 
     // MARK: Names
@@ -270,7 +315,7 @@ struct SendFeedbackFilesTests {
         #expect(!inspection(.folder).usableInPlace && !inspection(.missing).usableInPlace && !inspection(.other).usableInPlace)
     }
 
-    /// An APK can be several gigabytes: its size is a `stat`, and the composer's
+    /// A file can be several gigabytes: its size is a `stat`, and the composer's
     /// mapping reads nothing until the composer does.
     @Test func aFileOfSeveralGiBIsInspectedAndMappedWithoutBeingReadIntoMemory() throws {
         let root = try scratch()

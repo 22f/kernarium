@@ -8,6 +8,7 @@ import Darwin
 import Foundation
 import SwiftUI
 import Testing
+import UniformTypeIdentifiers
 import UIKit
 @testable import Andarium
 
@@ -56,6 +57,10 @@ struct SendFeedbackFilesScreenTests {
             }
         }
         func isAway(_ name: String) -> Bool { lock.withLock { away.contains(name) } }
+        private var typed: [String: UTType] = [:]
+        /// The content type the provider gives a file, whatever its name.
+        func gives(_ type: UTType, to name: String) { lock.withLock { typed[name] = type } }
+        func type(of name: String) -> UTType? { lock.withLock { typed[name] } }
     }
 
     /// What a stand-in for the look at a file saw while it ran on its worker.
@@ -134,6 +139,7 @@ struct SendFeedbackFilesScreenTests {
             inspect: { url in
                 var found = SendFeedbackFileInspection.read(url)
                 if access.isAway(url.lastPathComponent) { found.isLocal = false }
+                if let type = access.type(of: url.lastPathComponent) { found.contentType = type }
                 return found
             })
         app.feedbackServices = services
@@ -199,7 +205,7 @@ struct SendFeedbackFilesScreenTests {
     @Test func aPickedFileStaysWhereItIsIsNotCopiedAndHoldsItsAccess() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
-        let file = try fixture.original("app-release.apk", bytes: 12_345)
+        let file = try fixture.original("app-release.zip", bytes: 12_345)
         let sheet = fixture.sheet()
         sheet.form.problem = "Crash"
         sheet.form.details = "Details"
@@ -207,10 +213,10 @@ struct SendFeedbackFilesScreenTests {
         let row = try #require(sheet.form.attachments.items.first)
         #expect(sheet.form.attachments.count == 1)
         #expect(row.kind == .file && row.inPlace && row.url == file && row.bytes == 12_345)
-        #expect(row.displayName == "app-release.apk" && row.fileName == "app-release.apk")
+        #expect(row.displayName == "app-release.zip" && row.fileName == "app-release.zip")
         #expect(!sheet.folder.exists, "no copy: nothing was staged")
         #expect(!FileManager.default.fileExists(atPath: fixture.staging.root.path))
-        #expect(fixture.access.starts == ["app-release.apk"] && fixture.access.stops.isEmpty && sheet.scopes.count == 1)
+        #expect(fixture.access.starts == ["app-release.zip"] && fixture.access.stops.isEmpty && sheet.scopes.count == 1)
         #expect(sheet.thumbnails.isEmpty, "a plain file has no picture")
         #expect(!sheet.state.addingFiles && sheet.state.canSend && sheet.fileBusy == nil && sheet.failure == nil)
         sheet.close()
@@ -232,12 +238,12 @@ struct SendFeedbackFilesScreenTests {
     @Test func removingAFileLetsGoOfItsAccessAndNeverDeletesTheOriginal() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
-        let file = try fixture.original("keep-me.apk", bytes: 2000, fill: 9)
+        let file = try fixture.original("keep-me.zip", bytes: 2000, fill: 9)
         let sheet = fixture.sheet()
         await sheet.addFiles([file])
         sheet.remove(try #require(sheet.form.attachments.items.first))
         #expect(sheet.form.attachments.isEmpty && sheet.scopes.count == 0)
-        #expect(fixture.access.starts == ["keep-me.apk"] && fixture.access.stops == ["keep-me.apk"])
+        #expect(fixture.access.starts == ["keep-me.zip"] && fixture.access.stops == ["keep-me.zip"])
         #expect(try Data(contentsOf: file) == Data(repeating: 9, count: 2000), "the person's file is still there, whole")
         sheet.close()
         #expect(fixture.access.stops.count == 1, "closed, nothing more to stop")
@@ -246,41 +252,62 @@ struct SendFeedbackFilesScreenTests {
     @Test func closingStopsEveryAccessOnceAndLeavesTheFilesAlone() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
-        let one = try fixture.original("one.apk"), two = try fixture.original("two.apk")
+        let one = try fixture.original("one.zip"), two = try fixture.original("two.zip")
         let sheet = fixture.sheet()
         await sheet.addFiles([one, two])
         sheet.remove(try #require(sheet.form.attachments.items.first))
         sheet.close()
         sheet.close()
-        #expect(fixture.access.starts.sorted() == ["one.apk", "two.apk"])
-        #expect(fixture.access.stops.sorted() == ["one.apk", "two.apk"], "each exactly once")
+        #expect(fixture.access.starts.sorted() == ["one.zip", "two.zip"])
+        #expect(fixture.access.stops.sorted() == ["one.zip", "two.zip"], "each exactly once")
         #expect(FileManager.default.fileExists(atPath: one.path) && FileManager.default.fileExists(atPath: two.path))
     }
 
     @Test func aSheetLetGoWithoutClosingStillStopsItsAccess() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
-        let file = try fixture.original("gone-with-the-sheet.apk")
+        let file = try fixture.original("gone-with-the-sheet.zip")
         do {
             let sheet = fixture.sheet()
             await sheet.addFiles([file])
             #expect(fixture.access.stops.isEmpty)
         }
-        #expect(await eventually { fixture.access.stops == ["gone-with-the-sheet.apk"] })
+        #expect(await eventually { fixture.access.stops == ["gone-with-the-sheet.zip"] })
         #expect(FileManager.default.fileExists(atPath: file.path))
     }
 
-    @Test func aSentMailLetsGoOfTheFiles() async throws {
+    @Test func aSentMailKeepsTheAccessUnderTheNoticeAndLetsGoOnceWhenTheSheetCloses() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
         sheet.form.details = "Details"
-        await sheet.addFiles([try fixture.original("sent.apk")])
+        await sheet.addFiles([try fixture.original("sent.zip")])
         sheet.send()
         #expect(fixture.access.stops.isEmpty, "the composer maps the file: the access stays until it is over")
         fixture.composer.leave(.sent)
-        #expect(fixture.access.stops == ["sent.apk"] && sheet.scopes.count == 0)
+        #expect(fixture.access.stops.isEmpty && sheet.scopes.count == 1, "the notice is over the list: the files wait for the close")
+        sheet.close()
+        #expect(fixture.access.stops == ["sent.zip"] && sheet.scopes.count == 0)
+        sheet.close()
+        sheet.applicationEnteredBackground()
+        #expect(fixture.access.stops.count == 1, "each access is stopped once")
+    }
+
+    @Test func aSentMailLetsGoOfTheAccessAtOnceWhenTheApplicationLeavesTheForeground() async throws {
+        let fixture = try fixture()
+        defer { fixture.tearDown() }
+        let sheet = fixture.sheet()
+        sheet.form.problem = "x"
+        sheet.form.details = "Details"
+        await sheet.addFiles([try fixture.original("sent.zip")])
+        sheet.applicationEnteredBackground()
+        #expect(fixture.access.stops.isEmpty, "a draft that was not sent keeps its files in the background")
+        sheet.send()
+        fixture.composer.leave(.sent)
+        sheet.applicationEnteredBackground()
+        #expect(fixture.access.stops == ["sent.zip"] && sheet.scopes.count == 0)
+        #expect(sheet.form.attachments.count == 1, "the row under the notice stays")
         sheet.close()
         #expect(fixture.access.stops.count == 1)
     }
@@ -288,12 +315,12 @@ struct SendFeedbackFilesScreenTests {
     @Test func aFileThePickerHandedUsTwiceIsAttachedTwiceWithNamesOfItsOwn() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
-        let file = try fixture.original("app.apk")
+        let file = try fixture.original("app.zip")
         let sheet = fixture.sheet()
         await sheet.addFiles([file])
         await sheet.addFiles([file])
-        #expect(sheet.form.attachments.items.map(\.fileName) == ["app.apk", "app-2.apk"])
-        #expect(sheet.form.attachments.items.map(\.displayName) == ["app.apk", "app.apk"])
+        #expect(sheet.form.attachments.items.map(\.fileName) == ["app.zip", "app-2.zip"])
+        #expect(sheet.form.attachments.items.map(\.displayName) == ["app.zip", "app.zip"])
         #expect(fixture.access.starts.count == 2 && sheet.scopes.count == 2)
         sheet.remove(sheet.form.attachments.items[0])
         #expect(fixture.access.stops.count == 1 && FileManager.default.fileExists(atPath: file.path))
@@ -315,16 +342,16 @@ struct SendFeedbackFilesScreenTests {
         // whatever the letters' case, is numbered, not the screenshot.
         let stamp = SendFeedbackNames.stamp(sheet.form.attachments.items[0].madeAt)
         let clash = try fixture.original("Screenshot-\(stamp).PNG")
-        let odd = try fixture.original("My App \u{5E94}\u{7528} (v2)\u{202E}.apk")
+        let odd = try fixture.original("My App \u{5E94}\u{7528} (v2)\u{202E}.zip")
         await sheet.addFiles([clash, odd])
         sheet.send()
         let request = try #require(fixture.composer.request)
         #expect(request.attachments.map(\.fileName) == [
-            "screenshot-\(stamp).png", "Screenshot-\(stamp)-2.PNG", "My App \u{5E94}\u{7528} (v2)_.apk",
+            "screenshot-\(stamp).png", "Screenshot-\(stamp)-2.PNG", "My App \u{5E94}\u{7528} (v2)_.zip",
         ])
         #expect(request.attachments[1].url == clash && request.attachments[2].url == odd, "from where they are kept")
-        #expect(request.attachments.map(\.displayName) == [nil, "Screenshot-\(stamp).PNG", "My App \u{5E94}\u{7528} (v2).apk"], "the row has no control characters")
-        #expect(request.attachments[2].mimeType == "application/vnd.android.package-archive")
+        #expect(request.attachments.map(\.displayName) == [nil, "Screenshot-\(stamp).PNG", "My App \u{5E94}\u{7528} (v2).zip"], "the row has no control characters")
+        #expect(request.attachments[2].mimeType == "application/zip")
         sheet.close()
     }
 
@@ -340,7 +367,7 @@ struct SendFeedbackFilesScreenTests {
             try Data([1]).write(to: directory.appendingPathComponent("inside.bin"))
         }
         let empty = try fixture.original("empty.txt", bytes: 0)
-        let missing = fixture.library.appendingPathComponent("never-was.apk")
+        let missing = fixture.library.appendingPathComponent("never-was.zip")
         let sheet = fixture.sheet()
         for (url, line) in [
             (folder, "A folder or a package can\u{2019}t be attached. Compress it in Files first."),
@@ -368,9 +395,9 @@ struct SendFeedbackFilesScreenTests {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let sheet = fixture.sheet()
         await sheet.addFiles([
-            folder, try fixture.original("empty.txt", bytes: 0), try fixture.original("good.apk"), folder,
+            folder, try fixture.original("empty.txt", bytes: 0), try fixture.original("good.zip"), folder,
         ])
-        #expect(sheet.form.attachments.items.map(\.fileName) == ["good.apk"])
+        #expect(sheet.form.attachments.items.map(\.fileName) == ["good.zip"])
         #expect(sheet.failure?.title == "3 items weren\u{2019}t added")
         #expect(sheet.failure?.message == """
             A folder or a package can\u{2019}t be attached. Compress it in Files first.
@@ -383,12 +410,12 @@ struct SendFeedbackFilesScreenTests {
 
     // MARK: Large files
 
-    /// An APK can be several gigabytes: added and given to the composer from where it is, with
+    /// A file can be several gigabytes: added and given to the composer from where it is, with
     /// its size known, and not one byte of it in memory.
     @Test func aFileOfSeveralGiBIsAddedAndHandedOverWithoutBeingReadIntoMemory() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
-        let big = fixture.library.appendingPathComponent("big.apk")
+        let big = fixture.library.appendingPathComponent("big.zip")
         try Data([0x50]).write(to: big)
         let handle = try FileHandle(forWritingTo: big)
         try handle.truncate(atOffset: 3 << 30)
@@ -416,17 +443,17 @@ struct SendFeedbackFilesScreenTests {
     @Test func aFileNotDownloadedIsCopiedAndItsAccessLetGoRightAfter() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
-        let file = try fixture.original("cloud.apk", bytes: 70_000, fill: 3)
-        fixture.access.notDownloaded("cloud.apk")
+        let file = try fixture.original("cloud.zip", bytes: 70_000, fill: 3)
+        fixture.access.notDownloaded("cloud.zip")
         let sheet = fixture.sheet()
         await sheet.addFiles([file])
         let row = try #require(sheet.form.attachments.items.first)
         #expect(row.kind == .file && !row.inPlace && row.bytes == 70_000)
         #expect(row.url.deletingLastPathComponent().resolvingSymlinksInPath() == sheet.folder.url.resolvingSymlinksInPath())
         #expect(try Data(contentsOf: row.url) == Data(repeating: 3, count: 70_000))
-        #expect(row.displayName == "cloud.apk" && row.fileName == "cloud.apk")
+        #expect(row.displayName == "cloud.zip" && row.fileName == "cloud.zip")
         #expect(try Data(contentsOf: file) == Data(repeating: 3, count: 70_000), "the original is untouched")
-        #expect(fixture.access.starts == ["cloud.apk"] && fixture.access.stops == ["cloud.apk"], "released once the copy was made")
+        #expect(fixture.access.starts == ["cloud.zip"] && fixture.access.stops == ["cloud.zip"], "released once the copy was made")
         #expect(sheet.scopes.count == 0 && sheet.fileBusy == nil && !sheet.state.addingFiles)
         // Removing a copy deletes the copy, not the original.
         sheet.remove(row)
@@ -442,11 +469,11 @@ struct SendFeedbackFilesScreenTests {
             gate.release()
             fixture.tearDown()
         }
-        fixture.access.notDownloaded("slow.apk")
+        fixture.access.notDownloaded("slow.zip")
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
         sheet.form.details = "Details"
-        let file = try fixture.original("slow.apk")
+        let file = try fixture.original("slow.zip")
         let adding = Task { await sheet.addFiles([file]) }
         #expect(await eventually { sheet.fileBusy != nil })
         let busy = try #require(sheet.fileBusy)
@@ -467,10 +494,10 @@ struct SendFeedbackFilesScreenTests {
             gate.release()
             fixture.tearDown()
         }
-        fixture.access.notDownloaded("big.apk")
+        fixture.access.notDownloaded("big.zip")
         let sheet = fixture.sheet()
-        let file = try fixture.original("big.apk", bytes: 3_000_000)
-        let later = try fixture.original("later.apk")
+        let file = try fixture.original("big.zip", bytes: 3_000_000)
+        let later = try fixture.original("later.zip")
         let adding = Task { await sheet.addFiles([file, later]) }
         #expect(await eventually { sheet.fileBusy != nil })
         try #require(sheet.fileBusy?.cancel).action()
@@ -479,7 +506,7 @@ struct SendFeedbackFilesScreenTests {
         #expect(sheet.form.attachments.isEmpty, "the rest of the batch is not added either")
         #expect(sheet.failure == nil && sheet.fileBusy == nil && !sheet.state.addingFiles)
         #expect(!sheet.folder.exists || isEmpty(sheet.folder), "no partial copy")
-        #expect(fixture.access.starts == ["big.apk"] && fixture.access.stops == ["big.apk"])
+        #expect(fixture.access.starts == ["big.zip"] && fixture.access.stops == ["big.zip"])
         #expect(FileManager.default.fileExists(atPath: file.path))
         #expect(sheet.state.canAddFiles, "the person can try again")
         sheet.close()
@@ -488,15 +515,15 @@ struct SendFeedbackFilesScreenTests {
     @Test func aCopyThatDoesNotFitIsRefusedWithTheRoomMessageAndLeavesNothing() async throws {
         let fixture = try fixture(free: 1000)
         defer { fixture.tearDown() }
-        fixture.access.notDownloaded("huge.apk")
-        let file = try fixture.original("huge.apk", bytes: 5000)
+        fixture.access.notDownloaded("huge.zip")
+        let file = try fixture.original("huge.zip", bytes: 5000)
         let sheet = fixture.sheet()
         await sheet.addFiles([file])
         #expect(sheet.form.attachments.isEmpty)
         #expect(sheet.failure?.title == "One item wasn\u{2019}t added")
         #expect(sheet.failure?.message == "There isn\u{2019}t enough free space on this iPhone. Free up space, then try again.")
         #expect(!sheet.folder.exists, "no file, no folder")
-        #expect(fixture.access.starts == ["huge.apk"] && fixture.access.stops == ["huge.apk"])
+        #expect(fixture.access.starts == ["huge.zip"] && fixture.access.stops == ["huge.zip"])
         #expect(FileManager.default.fileExists(atPath: file.path))
         sheet.close()
     }
@@ -505,7 +532,7 @@ struct SendFeedbackFilesScreenTests {
         let fixture = try fixture()
         defer { fixture.tearDown() }
         // The inspection says the bytes are not here; the provider then fails to give the file.
-        let file = fixture.library.appendingPathComponent("vanishing.apk")
+        let file = fixture.library.appendingPathComponent("vanishing.zip")
         try Data(repeating: 1, count: 100).write(to: file)
         fixture.app.feedbackServices.files.inspect = { _ in
             SendFeedbackFileInspection(kind: .file, bytes: 100, isLocal: false, mappable: true)
@@ -526,16 +553,16 @@ struct SendFeedbackFilesScreenTests {
             gate.release()
             fixture.tearDown()
         }
-        fixture.access.notDownloaded("mid.apk")
+        fixture.access.notDownloaded("mid.zip")
         let sheet = fixture.sheet()
-        let file = try fixture.original("mid.apk")
+        let file = try fixture.original("mid.zip")
         let adding = Task { await sheet.addFiles([file]) }
         #expect(await eventually { sheet.fileBusy != nil })
         sheet.close()
         gate.release()
         await adding.value
         #expect(sheet.form.attachments.isEmpty && sheet.failure == nil && !sheet.folder.exists)
-        #expect(fixture.access.stops == ["mid.apk"] && sheet.scopes.count == 0)
+        #expect(fixture.access.stops == ["mid.zip"] && sheet.scopes.count == 0)
         #expect(FileManager.default.fileExists(atPath: file.path))
     }
 
@@ -544,7 +571,7 @@ struct SendFeedbackFilesScreenTests {
     @Test func aFileDeletedBeforeSendIsTakenOutAndNothingIsSent() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
-        let keep = try fixture.original("keep.apk"), lose = try fixture.original("lose.apk")
+        let keep = try fixture.original("keep.zip"), lose = try fixture.original("lose.zip")
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
         sheet.form.details = "Details"
@@ -552,13 +579,13 @@ struct SendFeedbackFilesScreenTests {
         try FileManager.default.removeItem(at: lose)
         sheet.send()
         #expect(fixture.composer.request == nil, "a mail never goes without a file the person added, unseen")
-        #expect(sheet.form.attachments.items.map(\.fileName) == ["keep.apk"])
+        #expect(sheet.form.attachments.items.map(\.fileName) == ["keep.zip"])
         #expect(sheet.failure?.title == "Attachment not available")
         #expect(sheet.failure?.message == "An attachment is no longer available, so it was taken out of the list. Check the list, then send again.")
-        #expect(fixture.access.stops == ["lose.apk"] && sheet.form.problem == "x")
+        #expect(fixture.access.stops == ["lose.zip"] && sheet.form.problem == "x")
         sheet.failure = nil
         sheet.send()
-        #expect(fixture.composer.request?.attachments.map(\.fileName) == ["keep.apk"], "the second try goes")
+        #expect(fixture.composer.request?.attachments.map(\.fileName) == ["keep.zip"], "the second try goes")
         #expect(fixture.composer.request?.mapped == [Data(repeating: 7, count: 4096)])
         sheet.close()
     }
@@ -566,23 +593,23 @@ struct SendFeedbackFilesScreenTests {
     @Test func aFileTheProviderTookBackBeforeSendIsTakenOutToo() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
-        let file = try fixture.original("evicted.apk")
+        let file = try fixture.original("evicted.zip")
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
         sheet.form.details = "Details"
         await sheet.addFiles([file])
-        fixture.access.notDownloaded("evicted.apk")
+        fixture.access.notDownloaded("evicted.zip")
         sheet.send()
         #expect(fixture.composer.request == nil && sheet.form.attachments.isEmpty)
         #expect(sheet.failure?.title == "Attachment not available")
-        #expect(fixture.access.stops == ["evicted.apk"] && FileManager.default.fileExists(atPath: file.path))
+        #expect(fixture.access.stops == ["evicted.zip"] && FileManager.default.fileExists(atPath: file.path))
         sheet.close()
     }
 
     @Test func aFileThatChangedBeforeSendGoesAsItIsNowWithItsNewSize() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
-        let file = try fixture.original("rebuilt.apk", bytes: 1000, fill: 1)
+        let file = try fixture.original("rebuilt.zip", bytes: 1000, fill: 1)
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
         sheet.form.details = "Details"
@@ -601,7 +628,7 @@ struct SendFeedbackFilesScreenTests {
     @Test func aFileThatBecameEmptyBeforeSendIsTakenOut() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
-        let file = try fixture.original("emptied.apk")
+        let file = try fixture.original("emptied.zip")
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
         sheet.form.details = "Details"
@@ -633,7 +660,7 @@ struct SendFeedbackFilesScreenTests {
     @Test func aFileThatCannotBeMappedAfterTheLastLookIsTakenOutAndNothingIsSent() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
-        let keep = try fixture.original("keep.apk"), lose = try fixture.original("lose.apk")
+        let keep = try fixture.original("keep.zip"), lose = try fixture.original("lose.zip")
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
         sheet.form.details = "Details"
@@ -642,20 +669,20 @@ struct SendFeedbackFilesScreenTests {
         let look = fixture.app.feedbackServices.files.inspect
         fixture.app.feedbackServices.files.inspect = { url in
             let found = look(url)
-            if url.lastPathComponent == "lose.apk" { try? FileManager.default.removeItem(at: url) }
+            if url.lastPathComponent == "lose.zip" { try? FileManager.default.removeItem(at: url) }
             return found
         }
         sheet.send()
         #expect(fixture.composer.request == nil, "a mail never goes without a file the person added, unseen")
-        #expect(sheet.form.attachments.items.map(\.fileName) == ["keep.apk"])
+        #expect(sheet.form.attachments.items.map(\.fileName) == ["keep.zip"])
         #expect(sheet.failure?.title == "Attachment not available")
-        #expect(fixture.access.stops == ["lose.apk"] && sheet.scopes.count == 1 && sheet.form.problem == "x")
+        #expect(fixture.access.stops == ["lose.zip"] && sheet.scopes.count == 1 && sheet.form.problem == "x")
         #expect(FileManager.default.fileExists(atPath: keep.path))
         // Looking at the list again, the person sends the rest.
         fixture.app.feedbackServices.files.inspect = look
         sheet.failure = nil
         sheet.send()
-        #expect(fixture.composer.request?.attachments.map(\.fileName) == ["keep.apk"])
+        #expect(fixture.composer.request?.attachments.map(\.fileName) == ["keep.zip"])
         #expect(fixture.composer.request?.mapped == [Data(repeating: 7, count: 4096)])
         sheet.close()
     }
@@ -667,7 +694,7 @@ struct SendFeedbackFilesScreenTests {
             gate.release()
             fixture.tearDown()
         }
-        let file = try fixture.original("looking.apk")
+        let file = try fixture.original("looking.zip")
         let probe = Look()
         let access = fixture.access
         let read = fixture.app.feedbackServices.files.inspect
@@ -685,7 +712,7 @@ struct SendFeedbackFilesScreenTests {
         gate.release()
         await adding.value
         #expect(probe.stopsWhenRead == 0, "the file was read under its access")
-        #expect(fixture.access.stops == ["looking.apk"], "let go once, when the look ended")
+        #expect(fixture.access.stops == ["looking.zip"], "let go once, when the look ended")
         #expect(sheet.scopes.count == 0 && sheet.form.attachments.isEmpty && sheet.failure == nil && !sheet.folder.exists)
         #expect(FileManager.default.fileExists(atPath: file.path))
     }
@@ -697,16 +724,16 @@ struct SendFeedbackFilesScreenTests {
             gate.release()
             fixture.tearDown()
         }
-        fixture.access.notDownloaded("late.apk")
+        fixture.access.notDownloaded("late.zip")
         let sheet = fixture.sheet()
-        let file = try fixture.original("late.apk", bytes: 70_000)
+        let file = try fixture.original("late.zip", bytes: 70_000)
         let adding = Task { await sheet.addFiles([file]) }
         #expect(await eventually { sheet.fileBusy != nil })
         let cancel = try #require(sheet.fileBusy?.cancel)
         gate.release()
         // From here the main actor is held, so the task that waits for the copy is not resumed: the copy is
         // made and has returned by the time Cancel is pressed, which is the order a busy main actor makes.
-        let staged = sheet.folder.url.appendingPathComponent("late.apk")
+        let staged = sheet.folder.url.appendingPathComponent("late.zip")
         let deadline = ContinuousClock.now + .seconds(10)
         while ContinuousClock.now < deadline && size(of: staged) != 70_000 { usleep(2000) }
         #expect(size(of: staged) == 70_000, "the copy is complete before Cancel")
@@ -716,7 +743,7 @@ struct SendFeedbackFilesScreenTests {
         #expect(sheet.form.attachments.isEmpty, "what the person stopped is not added")
         #expect(!sheet.folder.exists || isEmpty(sheet.folder), "and its copy is removed")
         #expect(sheet.failure == nil && sheet.fileBusy == nil && !sheet.state.addingFiles && sheet.state.canAddFiles)
-        #expect(fixture.access.starts == ["late.apk"] && fixture.access.stops == ["late.apk"])
+        #expect(fixture.access.starts == ["late.zip"] && fixture.access.stops == ["late.zip"])
         #expect(FileManager.default.fileExists(atPath: file.path))
         sheet.close()
     }
@@ -728,15 +755,15 @@ struct SendFeedbackFilesScreenTests {
             gate.release()
             fixture.tearDown()
         }
-        fixture.access.notDownloaded("first.apk")
+        fixture.access.notDownloaded("first.zip")
         let sheet = fixture.sheet()
-        let first = try fixture.original("first.apk", bytes: 3_000_000)
-        let second = try fixture.original("second.apk")
+        let first = try fixture.original("first.zip", bytes: 3_000_000)
+        let second = try fixture.original("second.zip")
         let adding = Task { await sheet.addFiles([first]) }
         #expect(await eventually { sheet.fileBusy != nil })
         let cancel = try #require(sheet.fileBusy?.cancel)
         await sheet.addFiles([second])
-        #expect(sheet.form.attachments.isEmpty && fixture.access.starts == ["first.apk"], "the second batch is not taken in")
+        #expect(sheet.form.attachments.isEmpty && fixture.access.starts == ["first.zip"], "the second batch is not taken in")
         #expect(sheet.state.addingFiles && sheet.fileBusy != nil, "the first is still under its overlay")
         // Cancel is still the first batch's: it stops the copy.
         cancel.action()
@@ -744,7 +771,7 @@ struct SendFeedbackFilesScreenTests {
         await adding.value
         #expect(sheet.form.attachments.isEmpty && sheet.failure == nil && !sheet.state.addingFiles)
         #expect(!sheet.folder.exists || isEmpty(sheet.folder), "no partial copy")
-        #expect(fixture.access.starts == ["first.apk"] && fixture.access.stops == ["first.apk"])
+        #expect(fixture.access.starts == ["first.zip"] && fixture.access.stops == ["first.zip"])
         sheet.close()
     }
 
@@ -755,28 +782,28 @@ struct SendFeedbackFilesScreenTests {
             gate.release()
             fixture.tearDown()
         }
-        fixture.access.notDownloaded("slow.apk")
+        fixture.access.notDownloaded("slow.zip")
         let sheet = fixture.sheet()
-        let kept = try fixture.original("kept.apk")
-        let slow = try fixture.original("slow.apk", bytes: 3_000_000)
-        let later = try fixture.original("later.apk")
+        let kept = try fixture.original("kept.zip")
+        let slow = try fixture.original("slow.zip", bytes: 3_000_000)
+        let later = try fixture.original("later.zip")
         let adding = Task { await sheet.addFiles([kept, slow, later]) }
         #expect(await eventually { sheet.fileBusy != nil })
         try #require(sheet.fileBusy?.cancel).action()
         gate.release()
         await adding.value
-        #expect(sheet.form.attachments.items.map(\.fileName) == ["kept.apk"], "what was attached before stays")
-        #expect(fixture.access.starts == ["kept.apk", "slow.apk"], "the file after the copy was never looked at")
-        #expect(fixture.access.stops == ["slow.apk"] && sheet.scopes.count == 1, "the kept file keeps its access")
+        #expect(sheet.form.attachments.items.map(\.fileName) == ["kept.zip"], "what was attached before stays")
+        #expect(fixture.access.starts == ["kept.zip", "slow.zip"], "the file after the copy was never looked at")
+        #expect(fixture.access.stops == ["slow.zip"] && sheet.scopes.count == 1, "the kept file keeps its access")
         #expect(sheet.failure == nil && !sheet.state.addingFiles && (!sheet.folder.exists || isEmpty(sheet.folder)))
         sheet.close()
-        #expect(fixture.access.stops.sorted() == ["kept.apk", "slow.apk"])
+        #expect(fixture.access.stops.sorted() == ["kept.zip", "slow.zip"])
     }
 
     @Test func severalAttachmentsThatAreGoneAtSendAreSaidTogetherWithTheirCount() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
-        let keep = try fixture.original("keep.apk"), one = try fixture.original("one.apk"), two = try fixture.original("two.apk")
+        let keep = try fixture.original("keep.zip"), one = try fixture.original("one.zip"), two = try fixture.original("two.zip")
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
         sheet.form.details = "Details"
@@ -784,27 +811,27 @@ struct SendFeedbackFilesScreenTests {
         try FileManager.default.removeItem(at: one)
         try FileManager.default.removeItem(at: two)
         sheet.send()
-        #expect(fixture.composer.request == nil && sheet.form.attachments.items.map(\.fileName) == ["keep.apk"])
+        #expect(fixture.composer.request == nil && sheet.form.attachments.items.map(\.fileName) == ["keep.zip"])
         #expect(sheet.failure?.title == "Attachments not available")
         #expect(sheet.failure?.message == "2 attachments are no longer available, so they were taken out of the list. Check the list, then send again.")
-        #expect(fixture.access.stops.sorted() == ["one.apk", "two.apk"])
+        #expect(fixture.access.stops.sorted() == ["one.zip", "two.zip"])
         sheet.close()
     }
 
     @Test func aNameInChineseOrJapaneseIsTheNameOfTheFileInTheMailAndTheRow() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
-        let chinese = try fixture.original("\u{6D4B}\u{8BD5}\u{5E94}\u{7528}.apk")
-        let japanese = try fixture.original("\u{30C6}\u{30B9}\u{30C8}\u{30A2}\u{30D7}\u{30EA}.apk")
+        let chinese = try fixture.original("\u{6D4B}\u{8BD5}\u{5E94}\u{7528}.zip")
+        let japanese = try fixture.original("\u{30C6}\u{30B9}\u{30C8}\u{30A2}\u{30D7}\u{30EA}.zip")
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
         sheet.form.details = "Details"
         await sheet.addFiles([chinese, japanese])
         sheet.send()
         let request = try #require(fixture.composer.request)
-        #expect(request.attachments.map(\.fileName) == ["\u{6D4B}\u{8BD5}\u{5E94}\u{7528}.apk", "\u{30C6}\u{30B9}\u{30C8}\u{30A2}\u{30D7}\u{30EA}.apk"])
+        #expect(request.attachments.map(\.fileName) == ["\u{6D4B}\u{8BD5}\u{5E94}\u{7528}.zip", "\u{30C6}\u{30B9}\u{30C8}\u{30A2}\u{30D7}\u{30EA}.zip"])
         #expect(request.attachments.map(\.displayName) == request.attachments.map(\.fileName))
-        #expect(request.attachments.allSatisfy { $0.mimeType == "application/vnd.android.package-archive" })
+        #expect(request.attachments.allSatisfy { $0.mimeType == "application/zip" })
         sheet.close()
     }
 
@@ -823,7 +850,7 @@ struct SendFeedbackFilesScreenTests {
         let sheet = fixture.sheet()
         sheet.pickFiles()
         #expect(opened == 1)
-        deliver?([try fixture.original("picked.apk")])
+        deliver?([try fixture.original("picked.zip")])
         #expect(await eventually { sheet.form.attachments.count == 1 })
         #expect(sheet.form.attachments.items[0].inPlace)
         // Nothing opens while something else is under way.
@@ -832,6 +859,174 @@ struct SendFeedbackFilesScreenTests {
         #expect(opened == 1)
         sheet.form.takingScreenshot = false
         sheet.close()
+    }
+
+    // MARK: Android packages
+
+    private static let packageTitle = "APK files can\u{2019}t be sent by mail"
+    private static let packageOne = "Mail services reject messages that carry an APK, so this file was not attached. "
+        + "Paste a download link for the app in the details instead."
+    private static let packageMany = "Mail services reject messages that carry an APK, so these files were not attached. "
+        + "Paste a download link for the app in the details instead."
+
+    @Test(arguments: ["app.apk", "App.APK", "bundle.apks", "bundle.XAPK", "bundle.apkm", "my.app.release.v2.apk"])
+    func anAndroidPackageIsNeverAttachedAndTheAlertSaysWhyAndAsksForALink(name: String) async throws {
+        let fixture = try fixture()
+        defer { fixture.tearDown() }
+        let file = try fixture.original(name, bytes: 5000)
+        let sheet = fixture.sheet()
+        await sheet.addFiles([file])
+        #expect(sheet.form.attachments.isEmpty && !sheet.form.addingFiles)
+        #expect(sheet.failure?.title == Self.packageTitle && sheet.failure?.message == Self.packageOne)
+        #expect(sheet.failure?.focusesDetails == true, "the details are ready for the link once the alert closes")
+        // The person's file is left alone, the access the pick carried is let go, and nothing was copied.
+        #expect(FileManager.default.fileExists(atPath: file.path))
+        #expect(fixture.access.starts == [name] && fixture.access.stops == [name] && sheet.scopes.count == 0)
+        #expect(!sheet.folder.exists)
+        sheet.close()
+    }
+
+    @Test func aPackageTypedAsOneByItsProviderIsRefusedWhateverItsNameIs() async throws {
+        let fixture = try fixture()
+        defer { fixture.tearDown() }
+        let file = try fixture.original("installer")
+        fixture.access.gives(try #require(UTType(mimeType: "application/vnd.android.package-archive")), to: "installer")
+        let sheet = fixture.sheet()
+        await sheet.addFiles([file])
+        #expect(sheet.form.attachments.isEmpty && sheet.failure?.title == Self.packageTitle)
+        sheet.close()
+    }
+
+    @Test func filesWhoseNamesOnlyContainApkAreAttachedLikeAnyOther() async throws {
+        let fixture = try fixture()
+        defer { fixture.tearDown() }
+        let names = ["apk.txt", "myapk", "app.apk.zip", "notes on apk", "bundle.apks.bak"]
+        let sheet = fixture.sheet()
+        await sheet.addFiles(try names.map { try fixture.original($0) })
+        #expect(sheet.form.attachments.items.map(\.fileName) == names)
+        #expect(sheet.failure == nil)
+        sheet.close()
+    }
+
+    @Test func aMixedPickAttachesTheOtherFilesInOrderAndOneAlertNamesThePackage() async throws {
+        let fixture = try fixture()
+        defer { fixture.tearDown() }
+        let sheet = fixture.sheet()
+        await sheet.addFiles([
+            try fixture.original("trace.zip"), try fixture.original("app.apk"), try fixture.original("notes.txt"),
+        ])
+        #expect(sheet.form.attachments.items.map(\.fileName) == ["trace.zip", "notes.txt"])
+        #expect(sheet.failure?.title == Self.packageTitle && sheet.failure?.message == Self.packageOne)
+        // The mail carries what was attached and never a package.
+        sheet.form.problem = "x"
+        sheet.form.details = "y"
+        sheet.send()
+        #expect(fixture.composer.request?.attachments.map(\.fileName) == ["trace.zip", "notes.txt"])
+        sheet.close()
+    }
+
+    @Test func severalPackagesInOnePickAreOneAlertInThePlural() async throws {
+        let fixture = try fixture()
+        defer { fixture.tearDown() }
+        let sheet = fixture.sheet()
+        await sheet.addFiles([
+            try fixture.original("a.apk"), try fixture.original("b.apks"), try fixture.original("c.xapk"),
+            try fixture.original("d.apkm"),
+        ])
+        #expect(sheet.form.attachments.isEmpty)
+        #expect(sheet.failure?.title == Self.packageTitle && sheet.failure?.message == Self.packageMany)
+        #expect(sheet.failure?.focusesDetails == true)
+        sheet.close()
+    }
+
+    @Test func packagesBesideOtherRefusalsAreOneAlertWithALineEach() async throws {
+        let fixture = try fixture()
+        defer { fixture.tearDown() }
+        let folder = fixture.library.appendingPathComponent("A Folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let sheet = fixture.sheet()
+        await sheet.addFiles([folder, try fixture.original("empty.txt", bytes: 0), try fixture.original("app.apk")])
+        #expect(sheet.failure?.title == "3 items weren\u{2019}t added")
+        #expect(sheet.failure?.message == [
+            "A folder or a package can\u{2019}t be attached. Compress it in Files first.",
+            "An empty file can\u{2019}t be attached.", Self.packageOne,
+        ].joined(separator: "\n"))
+        #expect(sheet.failure?.focusesDetails == true)
+        // Without a package the alert asks for nothing more.
+        await sheet.addFiles([folder])
+        #expect(sheet.failure?.focusesDetails == false)
+        sheet.close()
+    }
+
+    @Test func aDraftThatAlreadyListsAPackageLosesItAsTheSheetOpensWithTheSameAlert() async throws {
+        let fixture = try fixture()
+        defer { fixture.tearDown() }
+        let sheet = fixture.sheet()
+        // A draft an earlier build made: a staged package, one kept where it is, and an ordinary file.
+        let staged = try sheet.folder.reserve("old.apk")
+        try Data([1, 2, 3]).write(to: staged)
+        sheet.form.attachments.add(SendFeedbackAttachment(kind: .file, url: staged, bytes: 3, displayName: "old.apk"))
+        let kept = try fixture.original("older.APKS")
+        sheet.form.attachments.add(SendFeedbackAttachment(
+            kind: .file, url: kept, bytes: 4096, displayName: "older.APKS", inPlace: true))
+        sheet.form.attachments.add(SendFeedbackAttachment(
+            kind: .file, url: try fixture.original("trace.zip"), bytes: 4096, displayName: "trace.zip", inPlace: true))
+        sheet.refuseAndroidPackagesInDraft()
+        #expect(sheet.form.attachments.items.map(\.displayName) == ["trace.zip"])
+        #expect(!FileManager.default.fileExists(atPath: staged.path), "the staged copy goes")
+        #expect(FileManager.default.fileExists(atPath: kept.path), "the person's own file stays")
+        #expect(sheet.failure?.title == Self.packageTitle && sheet.failure?.message == Self.packageMany)
+        // A draft without one is left alone, and so is the second look.
+        sheet.failure = nil
+        sheet.refuseAndroidPackagesInDraft()
+        #expect(sheet.failure == nil && sheet.form.attachments.count == 1)
+        sheet.close()
+    }
+
+    /// The alert as the system draws it, over the sheet: the title, the text, one OK; once, however many were
+    /// picked. OK leaves the details ready to type in.
+    @Test func theAlertIsOneOKOverTheSheetAndLeavesTheDetailsReady() async throws {
+        let fixture = try fixture()
+        defer { fixture.tearDown() }
+        let packages = [try fixture.original("a.apk"), try fixture.original("b.apks"), try fixture.original("c.apkm")]
+        let log = try fixture.original("trace.zip")
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let controller = hostSheet(fixture, in: lease) { model in
+            model.form.problem = "The app closes"
+            model.form.details = "It closes after a second."
+            await model.addFiles([log] + packages)
+        }
+        var alert: UIAlertController?
+        let shown = await eventually {
+            alert = controller.presentedViewController as? UIAlertController
+            return alert != nil
+        }
+        try #require(shown, "the alert was not presented; is ApplicationAccessibilityEnabled on?")
+        #expect(alert?.title == Self.packageTitle)
+        #expect(alert?.message == Self.packageMany)
+        #expect(alert?.actions.map(\.title) == ["OK"])
+        // OK closes it, nothing else comes up, and the focus goes to the details.
+        let action = try #require(alert?.actions.first)
+        typealias Handler = @convention(block) (UIAlertAction) -> Void
+        let handler = unsafeBitCast(try #require(action.value(forKey: "handler") as AnyObject?), to: Handler.self)
+        handler(action)
+        alert?.dismiss(animated: false)
+        #expect(await eventually { controller.presentedViewController == nil })
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(controller.presentedViewController == nil, "one alert for the whole pick")
+        let details = await eventually {
+            (self.firstResponder(in: controller.view) as? UITextView)?.text == "It closes after a second."
+        }
+        #expect(details, "the details take the focus once the alert is closed")
+    }
+
+    private func firstResponder(in view: UIView) -> UIView? {
+        if view.isFirstResponder { return view }
+        for subview in view.subviews {
+            if let found = firstResponder(in: subview) { return found }
+        }
+        return nil
     }
 
     // MARK: The sheet as it is drawn
@@ -865,7 +1060,7 @@ struct SendFeedbackFilesScreenTests {
     @Test func theBarHasOneAddButtonAndTheRowOfAPickedFileAppearsWithItsLabelsAndCanBeRemoved() async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
-        let file = try fixture.original("example-app.apk", bytes: 25 << 20)
+        let file = try fixture.original("example-app.zip", bytes: 25 << 20)
         var deliver: (@MainActor ([URL]) -> Void)?
         fixture.app.feedbackServices.pickFiles = { picked in
             deliver = picked
@@ -891,7 +1086,7 @@ struct SendFeedbackFilesScreenTests {
         shown?.pickFiles()
         #expect(await eventually { deliver != nil }, "the Files item opens the injected picker")
         deliver?([file])
-        let row = "File, example-app.apk, 25 MiB"
+        let row = "File, example-app.zip, 25 MiB"
         let attached = await eventually {
             controller.view.layoutIfNeeded()
             return element(labelled: row, in: controller.view) != nil
@@ -966,7 +1161,7 @@ struct SendFeedbackFilesScreenTests {
     ) async throws {
         let fixture = try fixture()
         defer { fixture.tearDown() }
-        let file = try fixture.original("example-app.apk", bytes: 1 << 20)
+        let file = try fixture.original("example-app.zip", bytes: 1 << 20)
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let controller = hostSheet(fixture, in: lease) { model in
@@ -990,8 +1185,8 @@ struct SendFeedbackFilesScreenTests {
 
     @Test func theRowSpeaksItsKindItsNameAndItsSizeAndFilesHaveTheirOwnWords() {
         let file = SendFeedbackAttachment(
-            kind: .file, url: URL(fileURLWithPath: "/Files/a b.apk"), bytes: 2_097_152, displayName: "a b.apk", inPlace: true)
-        #expect(SendFeedbackSheet.spoken(file) == "File, a b.apk, 2 MiB")
+            kind: .file, url: URL(fileURLWithPath: "/Files/a b.zip"), bytes: 2_097_152, displayName: "a b.zip", inPlace: true)
+        #expect(SendFeedbackSheet.spoken(file) == "File, a b.zip, 2 MiB")
         let nameless = SendFeedbackAttachment(
             kind: .file, url: URL(fileURLWithPath: "/Files/x.bin"), bytes: 10, mailName: "x.bin", inPlace: true)
         #expect(SendFeedbackSheet.spoken(nameless) == "File, x.bin, 10 B")

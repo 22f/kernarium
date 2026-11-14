@@ -396,15 +396,16 @@ the Simulator has no camera and `simctl privacy` cannot grant or revoke one, so
 the denied, restricted and absent states are shown by the preview
 (`-systemCamera` asks the Simulator's own permission).
 
-The notice that iOS is critically short of memory is checked by `andarium-core`'s
-`MemoryPressureNoticeTests` (its rules), the hosted `MemoryPressureModelTests`
-and `MemoryPressureNoticeBannerTests` (its words, and its place in the notice
-column with the other notices, the statistics capsule and the side keys) and
-`FoldSessionHostingTests` (every pose's HUD). The reports it is made from are
-checked by `runtime-memory-pressure-response`, `runtime-memory-pressure-exit` (a
-report after `exit()` destroyed ordinary statics), `kernarium-memory-pressure`
-and `kernarium-loader-memory-pressure` with its `-exit` case, with no memory
-pressure raised on the machine.
+The session's notices stack in one column: the hosted `SessionNoticesTests`
+check their order, their place clear of the statistics capsule and the side keys,
+the scrolling of a column taller than its room and that the application shows
+nothing for memory pressure (no notice on screen, none of its words in any
+language), and `FoldSessionHostingTests` checks a notice in every pose's HUD. The
+runtime's own answer to memory pressure and the reports of it are checked by
+`runtime-memory-pressure-response`, `runtime-memory-pressure-exit` (a report
+after `exit()` destroyed ordinary statics), `kernarium-memory-pressure` and
+`kernarium-loader-memory-pressure` with its `-exit` case, with no memory pressure
+raised on the machine.
 
 The application builds with Xcode (`AndariumPreview` is the Simulator build with
 mock data, `Andarium` the device application,
@@ -1002,8 +1003,16 @@ frame and one still of the camera application, photo-to-video switches
 with capture running and the window animations off, and each seen: the photo
 activity's pause, the video activity's resume and capture after them) that
 refuse no capture request and draw no SELinux denial of the camera HAL's use of
-the display composer's file descriptors, and, in a blocked session, that the
-same cameras give black frames and no still.
+the display composer's file descriptors, three recordings of the video mode
+whose audio track holds what its time stamps span and ends with its video (the
+runner's bounds): a plain one; one during which the thread that serves the
+Virtio sound device is held (`uml_audio_hold`, which the runner inserts into the
+launcher), so that the video goes on while the audio input has nothing to read,
+and the input's log must say it made the time up; and one during which the
+emulator process is stopped, whose two tracks must show gaps of about the same
+length with no burst of made-up audio after them. The audio capture is seen to
+run before either is injected. In a blocked session the runner checks instead
+that the same cameras give black frames and no still.
 `android17-camera-runner` (tooling) runs its parsers and the expectations of
 every layout without a guest, and `android17-camera-layouts` (tooling) the
 layout set, its fallback order and the generated files.

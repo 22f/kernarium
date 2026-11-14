@@ -42,6 +42,10 @@ nonisolated struct SendFeedbackForm: Equatable, Sendable {
     /// Picked files are being looked at, or one that cannot be used where it
     /// is is being copied.
     var addingFiles = false
+    /// The mail was sent. The sheet stays as it was under the notice that says
+    /// so, until the person closes the notice: nothing is edited, attached or
+    /// sent again, and the sheet asks no question about what it holds.
+    var sent = false
 
     init(mailAvailable: Bool, running: Bool) {
         self.mailAvailable = mailAvailable
@@ -67,16 +71,19 @@ nonisolated struct SendFeedbackForm: Equatable, Sendable {
     var isBusy: Bool { makingBugReport || takingScreenshot || importingMedia || addingFiles }
 
     /// The fields can be edited.
-    var fieldsEnabled: Bool { mailAvailable && !makingBugReport }
+    var fieldsEnabled: Bool { mailAvailable && !makingBugReport && !sent }
+
+    /// Nothing is under way and the mail has not gone: a button may act.
+    private var idle: Bool { !isBusy && !sent }
 
     var canMakeBugReport: Bool {
-        mailAvailable && running && bugReportPossible && !isBusy && attachments.bugReport == nil
+        mailAvailable && running && bugReportPossible && idle && attachments.bugReport == nil
     }
-    var canTakeScreenshot: Bool { mailAvailable && running && !isBusy }
-    var canAddMedia: Bool { mailAvailable && !isBusy }
-    var canAddFiles: Bool { mailAvailable && !isBusy }
+    var canTakeScreenshot: Bool { mailAvailable && running && idle }
+    var canAddMedia: Bool { mailAvailable && idle }
+    var canAddFiles: Bool { mailAvailable && idle }
     /// Send can be tapped: it opens the mail when `missing` is nil and says what is missing otherwise.
-    var canSend: Bool { mailAvailable && !isBusy }
+    var canSend: Bool { mailAvailable && idle }
     /// A tap on Send would open the mail. Send looks dimmed until then, so
     /// that nobody has to tap it to learn that a field is still empty.
     var readyToSend: Bool { canSend && missing == nil }

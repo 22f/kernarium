@@ -279,14 +279,6 @@ final class LiveRuntime: RuntimeDriver {
         kernarium_runtime_loader_set_camera_state_handler { @Sendable [weak model] state in
             MainActor.assumeIsolated { model?.cameraCaptureChanged(Self.cameraCapture(runtimeState: state)) }
         }
-        // The runtime answers the system's memory pressure itself and reports
-        // each level it raises, delivered on the main queue in order; the
-        // session says so at the critical level while it is on screen. What
-        // the runtime does about a level changes nothing the person can do.
-        kernarium_runtime_loader_set_memory_pressure_handler { @Sendable [weak model] level, _ in
-            guard let level = Self.memoryPressureLevel(runtimeLevel: level) else { return }
-            MainActor.assumeIsolated { model?.memoryPressureChanged(level) }
-        }
         model.hapticsAvailable = hapticsAvailable
         self.keyboardMouse.setPointerAsTouch(model.pointerAsTouch)
         observeLifecycle()
@@ -818,19 +810,6 @@ final class LiveRuntime: RuntimeDriver {
         case Int32(KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_SYSTEM_PRESSURE): .interruptedBySystemPressure
         case Int32(KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE): .blockedInUse
         default: .interrupted
-        }
-    }
-
-    /// The level the runtime reports (KernariumRuntime.h), or nil for a value
-    /// this application does not know: it is ignored, for it would end a
-    /// notice that is up or clear a dismissal if it were read as normal. A
-    /// runtime of another API version is not loaded, so none is expected.
-    nonisolated static func memoryPressureLevel(runtimeLevel level: Int32) -> MemoryPressureLevel? {
-        switch level {
-        case Int32(KERNARIUM_RUNTIME_MEMORY_PRESSURE_NORMAL): .normal
-        case Int32(KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING): .warning
-        case Int32(KERNARIUM_RUNTIME_MEMORY_PRESSURE_CRITICAL): .critical
-        default: nil
         }
     }
 

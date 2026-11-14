@@ -367,6 +367,20 @@ struct SendFeedbackTests {
         #expect(form.canSend && form.canMakeBugReport && form.canTakeScreenshot && form.canAddMedia)
     }
 
+    @Test func onceTheMailIsSentNothingIsEditedAttachedOrSentAgain() {
+        var form = SendFeedbackForm(mailAvailable: true, running: true)
+        form.problem = "x"
+        form.details = "y"
+        form.attachments.add(attachment(.photo, bytes: 10))
+        #expect(form.fieldsEnabled && form.canSend && form.readyToSend && form.canMakeBugReport
+                && form.canTakeScreenshot && form.canAddMedia && form.canAddFiles)
+        form.sent = true
+        #expect(!form.fieldsEnabled && !form.canSend && !form.readyToSend && !form.canMakeBugReport
+                && !form.canTakeScreenshot && !form.canAddMedia && !form.canAddFiles)
+        #expect(form.hasContent && form.problem == "x" && form.attachments.count == 1,
+                "what was sent is still the sheet's, under the notice")
+    }
+
     @Test func withoutMailEveryControlIsOff() {
         var form = SendFeedbackForm(mailAvailable: false, running: true)
         form.problem = "x"
