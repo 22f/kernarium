@@ -579,10 +579,29 @@ SWITCH_UNRELATED_DENIALS = (
 MEDIA_SCALE = 90000
 
 
+def audio_track(aac_frames: int, stretch: float = 1.0, rate: int = 48000, entry: bool = True,
+                samples: bool = True) -> bytes:
+    """An audio `trak` box as the recorder writes it: its `mdhd` time scale is the sample rate, its `stts` has one
+    entry of `aac_frames` samples, each lasting `stretch` times the 1024 audio samples of an AAC frame, and, with
+    `entry`, its `stsd` has an `mp4a` sample entry that states the sample rate."""
+    delta = round(1024 * stretch)
+    mdhd = struct.pack(">B3xIIII", 0, 0, 0, rate, aac_frames * delta) + b"\x00" * 4
+    handler = box(b"hdlr", b"\x00\x00\x00\x00\x00\x00\x00\x00soun" + b"\x00" * 12)
+    stts = box(b"stts", struct.pack(">BxxxI", 0, 1) + struct.pack(">II", aac_frames, delta))
+    # The fixed part of an audio sample entry: six reserved bytes and the data reference index, the version,
+    # revision and vendor, the channel count, sample size and two reserved fields, and the 16.16 sample rate.
+    mp4a = box(b"mp4a", b"\x00" * 6 + struct.pack(">H", 1) + b"\x00" * 8 + struct.pack(">HHHH", 1, 16, 0, 0)
+               + struct.pack(">I", rate << 16))
+    stsd = box(b"stsd", struct.pack(">BxxxI", 0, 1) + mp4a) if entry else b""
+    stbl = box(b"stbl", stsd + stts) if samples else b""
+    return box(b"trak", box(b"mdia", box(b"mdhd", mdhd) + handler + (box(b"minf", stbl) if samples else b"")))
+
+
 def movie(seconds: float, scale: int = 1000, video: bool = True, version: int = 0, fps: float = 30.0,
-          samples: bool = True) -> bytes:
+          samples: bool = True, audio: bytes = b"") -> bytes:
     """A finished movie: `mvhd`, and one track whose `mdhd` has MEDIA_SCALE ticks a second and, for a video
-    track with `samples`, an `stts` of one entry of seconds * fps frames."""
+    track with `samples`, an `stts` of one entry of seconds * fps frames; with `audio` (an `audio_track`) a second
+    track follows."""
     if version == 1:
         mvhd = struct.pack(">B3xQQIQ", 1, 0, 0, scale, int(seconds * scale)) + b"\x00" * 80
     else:
@@ -596,7 +615,12 @@ def movie(seconds: float, scale: int = 1000, video: bool = True, version: int = 
     stts = box(b"stts", struct.pack(">BxxxI", 0, 1) + struct.pack(">II", frames, delta))
     track = box(b"mdia", box(b"mdhd", mdhd) + handler + (box(b"minf", box(b"stbl", stts)) if video and samples else b""))
     return (box(b"ftyp", b"isom\x00\x00\x02\x00isom") + box(b"mdat", b"\x00" * 40)
-            + box(b"moov", box(b"mvhd", mvhd) + box(b"trak", track)))
+            + box(b"moov", box(b"mvhd", mvhd) + box(b"trak", track) + audio))
+
+
+def sound(seconds: float = 3.5, stretch: float = 1.0, rate: int = 48000, **options) -> bytes:
+    """An audio track that holds `seconds` of audio under a time line of `stretch` times as much."""
+    return audio_track(round(seconds * rate / 1024), stretch, rate, **options)
 
 
 class VideoAndFrontTests(unittest.TestCase):
@@ -636,6 +660,44 @@ class VideoAndFrontTests(unittest.TestCase):
         no_samples = runner.parse_mp4(movie(3.0, samples=False))
         self.assertEqual((no_samples.frames, no_samples.fps), (0, 0.0))
 
+    def test_the_audio_track_of_a_movie(self) -> None:
+        info = runner.parse_mp4(movie(4.0, audio=sound(3.0)))
+        self.assertTrue(info.audio)
+        self.assertEqual((info.audio_samples, info.audio_rate), (141, 48000))
+        self.assertAlmostEqual(info.audio_coded_seconds, 3.008, places=3)
+        self.assertAlmostEqual(info.audio_seconds, 3.008, places=3)
+        self.assertAlmostEqual(info.audio_stretch, 1.0, places=3)
+        # The video track's own numbers are those of a movie without audio.
+        self.assertEqual((info.frames, info.video_seconds), (120, 4.0))
+        none = runner.parse_mp4(movie(4.0))
+        self.assertEqual((none.audio, none.audio_samples, none.audio_rate, none.audio_stretch), (False, 0, 0, 0.0))
+
+    def test_a_stamped_time_without_audio_behind_it_is_the_stretch(self) -> None:
+        for stretch in (1.0, 1.29, 1.39, 4.74):
+            with self.subTest(stretch=stretch):
+                info = runner.parse_mp4(movie(5.0, audio=sound(3.0, stretch)))
+                self.assertAlmostEqual(info.audio_coded_seconds, 3.008, places=3)
+                self.assertAlmostEqual(info.audio_seconds, 3.008 * stretch, places=2)
+                self.assertAlmostEqual(info.audio_stretch, stretch, places=3)
+
+    def test_the_sample_rate_is_the_sample_entrys_and_else_the_time_scale(self) -> None:
+        for rate in (44100, 48000):
+            info = runner.parse_mp4(movie(4.0, audio=sound(3.0, rate=rate)))
+            self.assertEqual(info.audio_rate, rate)
+            self.assertAlmostEqual(info.audio_coded_seconds, info.audio_samples * 1024 / rate)
+        # Without a sample entry the track's time scale, which the recorder sets to the sample rate, stands in.
+        self.assertEqual(runner.parse_mp4(movie(4.0, audio=sound(3.0, rate=44100, entry=False))).audio_rate, 44100)
+        # A sample entry too short to hold the rate is no entry.
+        short = bytearray(movie(4.0, audio=sound(3.0, rate=44100)))
+        at = bytes(short).index(b"mp4a") - 4
+        short[at:at + 4] = struct.pack(">I", 20)
+        self.assertEqual(runner.parse_mp4(bytes(short)).audio_rate, 44100)
+
+    def test_an_audio_track_without_a_sample_table_has_no_stretch(self) -> None:
+        info = runner.parse_mp4(movie(4.0, audio=sound(3.0, samples=False)))
+        self.assertTrue(info.audio)
+        self.assertEqual((info.audio_samples, info.audio_seconds, info.audio_rate, info.audio_stretch), (0, 0.0, 0, 0.0))
+
     def test_a_sample_table_that_does_not_fit_is_refused(self) -> None:
         whole = bytearray(movie(2.0))
         at = bytes(whole).index(b"stts") + 8
@@ -667,7 +729,9 @@ class FakeGuest:
         self.front_holds = front_holds
         self.rows: dict[str, dict[str, str]] = {"1": {"_id": "1", "_data": "/sdcard/old.mp4"}}
         self.recording = False
-        self.movie = movies if movies is not None else movie(3.5)
+        self.movie = movies if movies is not None else movie(3.5, audio=sound(3.0))
+        # The seconds for which the runner stopped the emulator process, each time it did.
+        self.frozen: list[float] = []
         self.still_files = {"IMG_old.jpg"}
         self.log = ""
         # The log of a mode switch step. The video mode's start by round number n logs the events of the switch
@@ -757,6 +821,9 @@ class FakeGuest:
 
     def screenshot(self):
         return self.chart
+
+    def freeze(self, seconds: float) -> None:
+        self.frozen.append(seconds)
 
     def videos(self):
         return dict(self.rows), "Row: 0 ..."
@@ -1028,8 +1095,10 @@ class VideoAndFrontFlowTests(unittest.TestCase):
         plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.run_step(runner.check_video, plan, FakeGuest(plan, movies=movie(4.0, fps=29.97)))
+            self.run_step(runner.check_video, plan, FakeGuest(plan, movies=movie(4.0, fps=29.97, audio=sound(3.0))))
         self.assertRegex(out.getvalue(), r"video: new\.mp4 4\.00 s, 119 frames over 3\.97 s = 30\.0 fps average")
+        self.assertRegex(out.getvalue(), r"audio: 141 AAC frames = 3\.01 s of audio over a 3\.01 s time line at 48000 Hz, "
+                                         r"stretch 1\.000")
 
     def test_a_movie_below_the_frame_rate_floor_fails_after_it_is_printed(self) -> None:
         plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
@@ -1050,6 +1119,27 @@ class VideoAndFrontFlowTests(unittest.TestCase):
             with self.subTest(what=what), self.assertRaisesRegex(runner.Failure, what):
                 self.run_step(runner.check_video, plan, FakeGuest(plan, movies=data))
 
+    def test_the_audio_of_a_recording_must_hold_what_its_time_stamps_span(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        for stretch in (1.0, 1.007, 1.05):
+            with self.subTest(stretch=stretch):
+                self.run_step(runner.check_video, plan, FakeGuest(plan, movies=movie(4.0, audio=sound(3.0, stretch))))
+        for stretch in (1.06, 1.29, 1.39, 4.74):
+            out = io.StringIO()
+            with self.subTest(stretch=stretch), contextlib.redirect_stdout(out), self.assertRaisesRegex(
+                    runner.Failure, rf"holds 3\.01 s of audio under a [0-9.]+ s time line \(stretch {stretch}\d*, above 1\.05\)"
+                                    r".*plays the clip too fast"):
+                self.run_step(runner.check_video, plan, FakeGuest(plan, movies=movie(4.0, audio=sound(3.0, stretch))))
+            self.assertIn(f"stretch {stretch}", out.getvalue())  # printed before the check
+        self.assertEqual(runner.AUDIO_STRETCH_MAXIMUM, 1.05)
+
+    def test_a_recording_without_audio_or_its_sample_table_fails(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        for data, what in ((movie(4.0), "has no audio track"),
+                           (movie(4.0, audio=sound(3.0, samples=False)), "no sample table for its audio track")):
+            with self.subTest(what=what), self.assertRaisesRegex(runner.Failure, what):
+                self.run_step(runner.check_video, plan, FakeGuest(plan, movies=data))
+
     def test_no_new_movie_fails_with_the_query(self) -> None:
         plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
         guest = FakeGuest(plan)
@@ -1058,6 +1148,53 @@ class VideoAndFrontFlowTests(unittest.TestCase):
         with mock.patch.object(runner, "VIDEO_SECONDS", 0.2), self.assertRaisesRegex(
                 runner.Failure, "MediaStore lists no new movie"):
             self.run_step(runner.check_video, plan, guest)
+
+    def test_the_stall_step_records_a_second_movie_while_the_emulator_stands_still(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        guest = FakeGuest(plan, movies=movie(6.0, fps=15.0, audio=sound(4.5)))  # the video has a gap: no frame rate floor
+        sleeps: list[float] = []
+        out = io.StringIO()
+        with mock.patch.object(runner.time, "sleep", sleeps.append), contextlib.redirect_stdout(out):
+            runner.check_video_stall(guest, plan)
+        self.assertEqual(guest.frozen, [runner.FREEZE_SECONDS])
+        self.assertEqual(guest.commands.count(f"input keyevent {runner.CAMERA_KEYCODE}"), 2)
+        # The recording ran FREEZE_HOLD_SECONDS from the start key to the stop key: before, during and after the stop.
+        hold = [seconds for seconds in sleeps if seconds != 3]
+        self.assertEqual(hold, [runner.FREEZE_AFTER_SECONDS, runner.FREEZE_HOLD_SECONDS - runner.FREEZE_AFTER_SECONDS
+                                - runner.FREEZE_SECONDS])
+        self.assertEqual((runner.FREEZE_HOLD_SECONDS, runner.FREEZE_AFTER_SECONDS, runner.FREEZE_SECONDS), (6, 2.0, 1.5))
+        self.assertRegex(out.getvalue(), r"video with the emulator stopped for 1\.5 s: new\.mp4 6\.00 s, 90 frames")
+        self.assertRegex(out.getvalue(), r"audio: 211 AAC frames = 4\.50 s of audio over a 4\.50 s time line")
+
+    def test_the_stall_step_fails_for_a_stretched_audio_track_and_not_for_the_video(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        with self.assertRaisesRegex(runner.Failure, r"stretch 1\.39\d*, above 1\.05"):
+            self.run_step(runner.check_video_stall, plan,
+                          FakeGuest(plan, movies=movie(6.0, fps=15.0, audio=sound(4.5, 1.39))))
+        for data, what in ((movie(6.0), "has no audio track"), (movie(0.4, audio=sound(0.3)), "lasts 0.40 s"),
+                           (movie(6.0, video=False, audio=sound(4.5)), "no video track")):
+            with self.subTest(what=what), self.assertRaisesRegex(runner.Failure, what):
+                self.run_step(runner.check_video_stall, plan, FakeGuest(plan, movies=data))
+
+    def test_the_guest_stops_its_emulator_process_and_continues_it_whatever_happens(self) -> None:
+        for fail in (False, True):
+            events: list[tuple] = []
+            guest = runner.Guest("adb", "127.0.0.1:1", mock.Mock(pid=4242), Path("emulator.log"), Path("private"))
+
+            def sleep(seconds: float) -> None:
+                events.append(("sleep", seconds))
+                if fail:
+                    raise KeyboardInterrupt
+
+            with self.subTest(fail=fail), mock.patch.object(runner.os, "kill", lambda pid, signal: events.append(
+                    ("kill", pid, signal))), mock.patch.object(runner.time, "sleep", sleep):
+                if fail:
+                    with self.assertRaises(KeyboardInterrupt):
+                        guest.freeze(1.5)
+                else:
+                    guest.freeze(1.5)
+            self.assertEqual(events, [("kill", 4242, runner.signal.SIGSTOP), ("sleep", 1.5),
+                                      ("kill", 4242, runner.signal.SIGCONT)])
 
     def test_the_laptop_records_with_its_front_camera(self) -> None:
         plan = runner.make_plan("front", "laptop", "live")
@@ -1097,6 +1234,7 @@ class VideoAndFrontFlowTests(unittest.TestCase):
         run_checks = source[source.index("def run_checks"):source.index("def cameraserver_restart_skip")]
         # The switches follow the other live steps, which see the state they always saw.
         self.assertRegex(run_checks, r'if plan.mode == "live":\n\s+check_video\(guest, plan\)\n'
+                         r'\s+check_video_stall\(guest, plan\)\n'
                          r'\s+check_front\(guest, plan\)\n\s+check_mode_switch\(guest, plan\)\n'
                          r'\s+check_hal_log\(guest\)')
 
