@@ -80,7 +80,9 @@ show Android's own Wi-Fi mark. The runner shows all of it:
   a failed check warns, and Auto-connect turned off after the repair stays off
   across a restart: the next boot, which has no join to wait for, reads
   Auto-connect from the Wi-Fi service's dump and logs that it left the network
-  alone (the line also proves its own domain reads the dump). The data disk of
+  alone (the line also proves its own domain reads the dump). The setting is the
+  one the dump prints under VirtWifi's own configuration, which it must show,
+  and the script's service must have ended on that boot. The data disk of
   a release that never disables the network, with the network joined, the
   user's metered setting and the probes at a black hole, boots the release under
   test: nothing saves the network again, the setting and the join are kept, a
@@ -407,6 +409,21 @@ def metered_override(dump: str) -> int | None:
 def autojoin_values(dump: str) -> list[bool]:
     """Auto-connect of the saved network, one value for each time `dumpsys wifi` prints it."""
     return [value == "true" for value in re.findall(r"\ballowAutojoin=(true|false)\b", dump)]
+
+
+def configuration_autojoin(dump: str, network: int) -> list[bool]:
+    """Auto-connect of the saved network with this ID, one value for each time `dumpsys wifi` prints it. Only the
+    values under a configuration header (`* ID: n SSID: ...`) of that ID count, as the boot script reads them:
+    a header for another ID ends the configuration, and the SSID text of a header is never searched."""
+    values: list[bool] = []
+    current: int | None = None
+    for line in dump.splitlines():
+        header = re.search(r"\* ID: (\d+) SSID: ", line)
+        if header:
+            current = int(header[1])
+        elif current == network:
+            values += [value == "true" for value in re.findall(r"\ballowAutojoin=(true|false)\b", line)]
+    return values
 
 
 def avc_denials(log: str, domain: str) -> list[str]:
@@ -1537,18 +1554,33 @@ def check_metered_kept(guest: Guest, waits: Waits) -> str | None:
     return None
 
 
+def script_ended(guest: Guest) -> str | None:
+    """None once init reports the boot script's service stopped. init sets the state (init.svc.<name>) when it
+    starts the service on this boot and the reboot clears it, so 'stopped' is a run that began and ended on the
+    current boot; init exposes no exit status, so a script that ends early at marker 2 ends like one that ran."""
+    state = guest.script_service()
+    return None if state == "stopped" else f"the boot script's service is {state or 'not started'!r}, not 'stopped'"
+
+
 def check_autojoin_kept(guest: Guest, waits: Waits, left_alone: bool | None = None) -> str | None:
     """Auto-connect turned off is a choice of the user's that no boot undoes (saving the network replaces it).
 
+    The setting is the one the Wi-Fi service's dump prints under VirtWifi's own configuration (the ID of its row
+    in the saved list), which must be there after the restart: a dump without it shows nothing. The boot script's
+    service must have started and ended on that boot.
+
     `left_alone` is what the boot after the restart must log. A boot at marker 1 has no join to wait for (Auto-connect
     off keeps the station away), so the script reads Auto-connect from the Wi-Fi service's dump and says it left the
-    network alone: True requires that line, which is also the proof that the script's own domain reads the dump. A
+    network alone: True requires that line, which is also the proof that the script's own domain can read the dump. A
     boot at marker 2 ends at once and logs nothing: False requires none. None accepts either, for a disk whose
     marker the shell cannot read. The script's lines are looked for at every poll and kept once seen, because the
     main log buffer is small."""
     guest.shell(f"cmd wifi add-network {SSID} open -d")
     def autojoin_off() -> str | None:
-        values = autojoin_values(guest.dump())
+        network = network_id(guest.listing())
+        if network is None:
+            return "VirtWifi is not saved"
+        values = configuration_autojoin(guest.dump(), network)
         return None if values and not any(values) else "still on"
 
     wait_for("Auto-connect is off", 60, autojoin_off, guest)
@@ -1561,11 +1593,19 @@ def check_autojoin_kept(guest: Guest, waits: Waits, left_alone: bool | None = No
         if time.monotonic() >= deadline:
             break
         time.sleep(POLL_SECONDS)
-    dump = guest.dump()
-    if any(autojoin_values(dump)):
+    network = network_id(guest.listing())
+    if network is None:
+        raise Failure("VirtWifi is not saved after the restart")
+    values = configuration_autojoin(guest.dump(), network)
+    if not values:
+        raise Failure("the Wi-Fi service's dump shows no Auto-connect for VirtWifi's configuration after the "
+                      "restart: nothing shows that the setting was kept")
+    if any(values):
         raise Failure("Auto-connect is on again after a restart: the boot script saved the network again")
     if repaired:
         raise Failure("the boot script saved the network again although the user turned Auto-connect off")
+    wait_for("the boot script ends on this boot", waits.repair, lambda: script_ended(guest), guest,
+             interval=POLL_SECONDS)
     if left_alone is True and not said:
         raise Failure("the boot script did not say that it left the network alone: it did not read Auto-connect "
                       "from the Wi-Fi service's dump in its own domain, or it found the network joined")

@@ -6216,7 +6216,7 @@ def verify_wifi_network(android_root: Path) -> None:
     code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
     for needle in ("settle=", "looks=", 'wait_joined "$settle"', '"$waited" -ge "$1"', '"$tries" -lt 30',
                    '"$seen" -lt "$looks"', 'timeout "$limit" cmd wifi list-networks',
-                   'timeout "$dumplimit" dumpsys wifi'):
+                   'timeout "$dumplimit" dumpsys -t'):
         if needle not in code:
             fail(f"the Wi-Fi network script no longer bounds its wait: {needle!r} is gone")
 
