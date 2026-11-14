@@ -59,7 +59,6 @@ void dropped_text(FixedText &out, std::uint64_t dropped) noexcept
 		return PressureReaction::underway;
 	case MemoryPressureResponse::Outcome::nothing:
 	case MemoryPressureResponse::Outcome::retried:
-	case MemoryPressureResponse::Outcome::released:
 	case MemoryPressureResponse::Outcome::quiet:
 		break;
 	}
@@ -239,16 +238,12 @@ MemoryPressureResponse::Outcome MemoryPressureResponse::handle_level(
 			last_level_ns_ = now;
 		if (level != PressureLevel::critical) {
 			/* The pressure that asks for the trimmer is over, or has eased: a
-			 * request still pending is not wanted, but the trimmer is ended
-			 * (when its hold has ended), unless a response that is running
-			 * ends it when it returns. */
+			 * request still pending is not wanted, but the trimmer is ended,
+			 * unless a response that is running ends it when it returns. */
 			retry_pending_ = false;
-			if (!running_)
-				end_gradual = release_trimmer(level, now);
+			end_gradual = gradual_on_ && !running_;
 			outcome = quiet ? Outcome::quiet : Outcome::nothing;
 		} else {
-			last_critical_ns_ = now;
-			critical_seen_ = true;
 			/* The pressure is back: an end of the gradual trimmer that is
 			 * still pending is no longer wanted. */
 			if (retry_pending_ && retry_kind_ == TrimKind::gradual_off)
@@ -281,32 +276,7 @@ MemoryPressureResponse::Outcome MemoryPressureResponse::handle_level(
 std::uint64_t MemoryPressureResponse::retry_delay_ns() const noexcept
 {
 	const std::lock_guard lock{mutex_};
-	if (!retry_pending_)
-		return 0;
-	if (retry_due_ns_ != 0U) {
-		const std::uint64_t now = actions_.now_ns();
-		/* The hold's end, or just past it: due now. */
-		return retry_due_ns_ > now ? retry_due_ns_ - now : 1U;
-	}
-	return timing_.retry_interval_ns;
-}
-
-bool MemoryPressureResponse::release_trimmer(PressureLevel level,
-	std::uint64_t now) noexcept
-{
-	if (!gradual_on_)
-		return false;
-	if (timing_.trimmer_hold_ns == 0U || !critical_seen_ ||
-	    elapsed(last_critical_ns_, now) >= timing_.trimmer_hold_ns)
-		return true;
-	/* Within the hold: the end waits for it, however the level moves, and a
-	 * critical level takes it back. */
-	retry_pending_ = true;
-	retry_level_ = level;
-	retry_kind_ = TrimKind::gradual_off;
-	retry_attempts_left_ = timing_.retry_attempts;
-	retry_due_ns_ = last_critical_ns_ + timing_.trimmer_hold_ns;
-	return false;
+	return retry_pending_ ? timing_.retry_interval_ns : 0U;
 }
 
 void MemoryPressureResponse::note_request(TrimKind kind,
@@ -332,7 +302,6 @@ void MemoryPressureResponse::keep_pending(PressureLevel level,
 	retry_level_ = level;
 	retry_kind_ = kind;
 	retry_attempts_left_ = timing_.retry_attempts;
-	retry_due_ns_ = 0;
 }
 
 TrimOutcome MemoryPressureResponse::ask_gradual(TrimKind kind) noexcept
@@ -359,7 +328,7 @@ void MemoryPressureResponse::arm_gradual_trim() noexcept
 	{
 		const std::lock_guard lock{mutex_};
 		if (level_ != PressureLevel::critical)
-			end = !running_ && release_trimmer(level_, actions_.now_ns());
+			end = !running_ && gradual_on_;
 		else if (transient(outcome) && !running_ && !retry_pending_)
 			keep_pending(level_, TrimKind::gradual_on);
 	}
@@ -391,7 +360,7 @@ void MemoryPressureResponse::respond(std::uint64_t events_skipped) noexcept
 			if (transient(gradual))
 				keep_pending(PressureLevel::critical, TrimKind::gradual_on);
 		} else {
-			end_after = release_trimmer(level_, actions_.now_ns());
+			end_after = gradual_on_;
 		}
 	}
 	if (end_after)
@@ -428,8 +397,7 @@ MemoryPressureResponse::Outcome MemoryPressureResponse::on_retry() noexcept
 	bool quiet = false;
 	{
 		const std::lock_guard lock{mutex_};
-		const std::uint64_t now = actions_.now_ns();
-		if (quiet_due(now)) {
+		if (quiet_due(actions_.now_ns())) {
 			/* The source has delivered nothing but the normal level for the
 			 * quiet period: the level returns to normal as if it had been
 			 * delivered (the call below, with the lock released, checks again). */
@@ -437,24 +405,14 @@ MemoryPressureResponse::Outcome MemoryPressureResponse::on_retry() noexcept
 		} else {
 			if (!retry_pending_)
 				return Outcome::nothing;
-			/* The end of the trimmer that the hold keeps is not due yet. */
-			if (retry_due_ns_ != 0U && now < retry_due_ns_)
-				return Outcome::nothing;
 			if (running_)
 				return Outcome::busy;
 			running_ = true;
 			level = retry_level_;
 			kind = retry_kind_;
-			if (retry_due_ns_ != 0U) {
-				/* The hold has ended: this is the end's first try, with the
-				 * attempts of a request of its own, and not a retry. */
-				retry_due_ns_ = 0;
-				retry_attempts_left_ = timing_.retry_attempts;
-			} else {
-				--retry_attempts_left_;
-				attempt = timing_.retry_attempts - retry_attempts_left_;
-				++counts_.retries;
-			}
+			--retry_attempts_left_;
+			attempt = timing_.retry_attempts - retry_attempts_left_;
+			++counts_.retries;
 		}
 	}
 	if (quiet)
@@ -474,15 +432,13 @@ MemoryPressureResponse::Outcome MemoryPressureResponse::on_retry() noexcept
 		retry_pending_ = false;
 		if (pending && transient(trim) && retry_attempts_left_ != 0U) {
 			retry_pending_ = true;
-			retry_due_ns_ = 0;
 			again = true;
 		}
 		if (level_ != PressureLevel::critical)
 			/* The pressure eased while the request was in the guest's hands:
 			 * an off is owed, but one that was itself retried is not asked a
 			 * second time here. */
-			end_after = kind != TrimKind::gradual_off &&
-				    release_trimmer(level_, actions_.now_ns());
+			end_after = kind != TrimKind::gradual_off && gradual_on_;
 		else if (kind == TrimKind::gradual_off && !again)
 			/* It came back while the end was being retried, and the event
 			 * found a retry running. */
@@ -495,11 +451,6 @@ MemoryPressureResponse::Outcome MemoryPressureResponse::on_retry() noexcept
 	/* A retry that failed says nothing until its last. */
 	if (again)
 		return Outcome::retried;
-	/* The end after the hold is a request of its own: the level line said
-	 * what the system did. */
-	if (attempt == 0U)
-		return Outcome::released;
-
 	std::uint64_t dropped = 0;
 	if (!admit_line(response_lines_, dropped))
 		return Outcome::retried;

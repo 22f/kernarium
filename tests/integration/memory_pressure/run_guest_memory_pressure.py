@@ -7,20 +7,19 @@ A Linux guest reads enough files to fill its page cache. The runner then
 raises the levels the system's memory pressure source reports through an
 injector inserted into the launcher (a real event needs a privileged tool):
 
-- a warning and the way back to the normal level touch nothing in the guest
-  (the launcher sends it no command) and write one line for the change;
+- a warning and the way back to the normal level, with the trimmer off, touch
+  nothing in the guest (the launcher sends it no command) and write one line
+  for the change;
 - a critical level frees the host GPU's caches (none without a GPU) and asks
   for the guest's gradual page-cache trimmer, never for a trim of all the
   cache ("trim once"): the launcher sends the guest "trim on" and says so with
   the footprint before and after, the bytes of graphics released, the
   trimmer's state and the guest RAM wire failures; the guest's page cache then
   falls eventually, in passes;
-- a critical level while the trimmer is on sends the guest nothing, and
-  restarts the hold;
-- a warning or the normal level after a critical one leaves the trimmer on
-  until the hold (30 s after the last critical level) has ended, then turns it
-  off ("trim off"), so that levels alternating inside the hold switch it at
-  most once.
+- a critical level while the trimmer is on sends the guest nothing;
+- a warning or the normal level after a critical one turns the trimmer off at
+  once ("trim off"), and levels that alternate quickly are followed as they
+  come ("trim on", "trim off", "trim on").
 
 The commands the launcher sends the guest are read from the injector's record,
 not inferred from what the launcher writes.
@@ -59,14 +58,9 @@ MINIMUM_RELEASE_MIB = 16
 # (a response that must not come) lasts this long.
 RESPONSE_SECONDS = 60
 QUIET_SECONDS = 3
-# The trimmer stays on for this long after the last critical level, and a
-# level meant to fall inside the hold is raised well inside it, counted from
-# before the critical level was raised.
-HOLD_SECONDS = 30
-INSIDE_HOLD_SECONDS = 20
-# While the page cache is waited on, the critical level is raised again this
-# often: each one restarts the hold and sends the guest nothing.
-RENEW_SECONDS = 10
+# The trimmer is turned off at once by a warning or the normal level; the wait
+# for it is only the guest's own delay.
+OFF_SECONDS = 20
 
 # A critical level's response: the graphics released, and the trimmer's state.
 RESPONSE = re.compile(
@@ -239,7 +233,6 @@ def run(arguments: argparse.Namespace) -> None:
 
         # A critical level frees the GPU's caches (none without a GPU) and asks
         # for the gradual trimmer, never for a trim of all the cache.
-        last = time.monotonic()
         injector.raise_level("critical")
         first = wait_for(
             guest, "no response to the critical level",
@@ -258,111 +251,80 @@ def run(arguments: argparse.Namespace) -> None:
         print(f"critical: {first.group(0)}")
 
         # The page cache falls on its own, in passes: a fall that eventually
-        # comes, not a drop at the critical level. The critical level is raised
-        # again every few seconds meanwhile, so that the trimmer is not asked
-        # off while it is waited on; with the trimmer on, each one sends
-        # nothing.
-        deadline = time.monotonic() + RESPONSE_SECONDS
-        while True:
-            guest.check_command("true", 30)
-            fallen = filled - cached_kib(guest)
-            if fallen >= MINIMUM_RELEASE_MIB * 1024:
-                break
-            now = time.monotonic()
-            if now > deadline:
-                raise RuntimeError(
-                    f"the page cache did not fall eventually after the "
-                    f"critical level; the launcher wrote:\n"
-                    f"{guest.host_output()}")
-            if now - last >= RENEW_SECONDS:
-                last = now
-                injector.raise_level("critical")
-            time.sleep(0.1)
+        # comes, not a drop at the critical level. The trimmer stays on while
+        # the level held is critical.
+        fallen = wait_for(
+            guest, "the page cache did not fall eventually after the critical "
+            "level",
+            lambda: filled - cached_kib(guest) >= MINIMUM_RELEASE_MIB * 1024
+            and filled - cached_kib(guest), RESPONSE_SECONDS)
         print(f"the guest's page cache eventually fell by "
               f"{fallen // 1024} MiB")
-        if commands(directory) != ["trim on"]:
-            raise RuntimeError(
-                f"a critical level with the trimmer on sent the guest "
-                f"{commands(directory)}")
-        if "trim once" in commands(directory):
-            raise RuntimeError(
-                "the critical level sent the guest a trim of all the cache")
+        if trimming(guest) != "Y":
+            raise RuntimeError("the trimmer was turned off under a critical level")
 
-        # A warning inside the hold leaves the trimmer on until the hold ends,
-        # and then turns it off.
-        injector.raise_level("warn")
-        inside = time.monotonic() - last
-        if inside >= INSIDE_HOLD_SECONDS:
-            raise RuntimeError(
-                f"the warning came {inside:.0f} s after the last critical "
-                f"level, not inside its {HOLD_SECONDS} s hold")
-        settle(guest, QUIET_SECONDS)
-        if trimming(guest) != "Y" or commands(directory) != ["trim on"]:
-            raise RuntimeError(
-                f"a warning inside the hold ended the trimmer: "
-                f"{commands(directory)}")
-        wait_for(
-            guest, "the trimmer stayed on after the hold",
-            lambda: trimming(guest) == "N", RESPONSE_SECONDS)
-        ended = time.monotonic() - last
-        if ended < HOLD_SECONDS - 2:
-            raise RuntimeError(
-                f"the trimmer was turned off {ended:.0f} s after the last "
-                f"critical level, inside its {HOLD_SECONDS} s hold")
-        if commands(directory) != ["trim on", "trim off"]:
-            raise RuntimeError(
-                f"the end of the hold sent the guest {commands(directory)}")
-        print(f"the trimmer was turned off {ended:.0f} s after the last "
-              f"critical level, after the warning inside the hold")
-
-        # A critical level turns the trimmer on again, and the way back to
-        # normal inside the hold leaves it on until the hold ends too.
+        # A second critical level, with the trimmer on, frees the GPU's caches
+        # again and sends the guest nothing.
         count = len(responses(guest))
-        last = time.monotonic()
         injector.raise_level("critical")
         wait_for(
             guest, "no response to the second critical level",
             lambda: len(responses(guest)) > count, RESPONSE_SECONDS)
-        wait_for(
-            guest, "the second critical level left the trimmer off",
-            lambda: trimming(guest) == "Y", RESPONSE_SECONDS)
-        injector.raise_level("normal")
-        inside = time.monotonic() - last
-        if inside >= INSIDE_HOLD_SECONDS:
-            raise RuntimeError(
-                f"the normal level came {inside:.0f} s after the critical "
-                f"level, not inside its {HOLD_SECONDS} s hold")
         settle(guest, QUIET_SECONDS)
-        if trimming(guest) != "Y" or commands(directory) != [
-                "trim on", "trim off", "trim on"]:
+        if commands(directory) != ["trim on"]:
             raise RuntimeError(
-                f"the normal level inside the hold ended the trimmer: "
+                f"a critical level with the trimmer on sent the guest "
                 f"{commands(directory)}")
+
+        # A warning after it is the pressure easing: the trimmer is turned off
+        # at once, and the warning has no response line.
+        injector.raise_level("warn")
         wait_for(
-            guest, "the trimmer stayed on after the hold",
-            lambda: trimming(guest) == "N", RESPONSE_SECONDS)
-        ended = time.monotonic() - last
-        if ended < HOLD_SECONDS - 2:
+            guest, "the trimmer stayed on after the warning",
+            lambda: trimming(guest) == "N", OFF_SECONDS)
+        if commands(directory) != ["trim on", "trim off"]:
             raise RuntimeError(
-                f"the trimmer was turned off {ended:.0f} s after the "
-                f"critical level, inside its {HOLD_SECONDS} s hold")
+                f"the warning sent the guest {commands(directory)}")
+        print("the warning after the critical level turned the trimmer off")
+
+        # Levels that alternate quickly are followed as they come.
+        injector.raise_level("critical")
+        injector.raise_level("warn")
+        injector.raise_level("critical")
+        settle(guest, QUIET_SECONDS)
+        wait_for(
+            guest, "the trimmer was off under a critical level",
+            lambda: trimming(guest) == "Y", OFF_SECONDS)
+        if commands(directory) != [
+                "trim on", "trim off", "trim on", "trim off", "trim on"]:
+            raise RuntimeError(
+                f"the alternating levels sent the guest {commands(directory)}")
+        print("critical, warning and critical turned the trimmer on, off and on")
+
+        # The way back to normal turns it off at once.
+        injector.raise_level("normal")
+        wait_for(
+            guest, "the trimmer stayed on after the normal level",
+            lambda: trimming(guest) == "N", OFF_SECONDS)
         settle(guest, QUIET_SECONDS)
         if commands(directory) != [
-                "trim on", "trim off", "trim on", "trim off"]:
+                "trim on", "trim off", "trim on", "trim off", "trim on",
+                "trim off"]:
             raise RuntimeError(
                 f"the host's requests were {commands(directory)}")
-        print(f"the way back to normal, {inside:.0f} s after the critical "
-              f"level, turned the trimmer off {ended:.0f} s after it")
+        if "trim once" in commands(directory):
+            raise RuntimeError("a level sent the guest a trim of all the cache")
 
-        # One line for each change of level (warn, normal, critical, warn,
-        # critical, normal) and one for each critical level's response.
+        # Every line is a change of level or a critical level's response: a
+        # warning has no response line of its own.
         lines = [line for line in guest.host_output().splitlines()
                  if "uml: memory pressure" in line]
-        if len(lines) != 6 + len(responses(guest)):
+        stray = [line for line in lines
+                 if not CHANGE.search(line) and not RESPONSE.search(line)]
+        if stray or len(responses(guest)) < 3:
             raise RuntimeError(
-                "expected a line for each of the six changes and for each "
-                "response (a warning and the way back have none):\n"
-                + "\n".join(lines))
+                "expected only level changes and the critical levels' "
+                "responses:\n" + "\n".join(lines))
         if not guest.shutdown(60) or guest.return_code != 0:
             raise RuntimeError(
                 f"the power-off did not end the process with 0: "
@@ -382,11 +344,12 @@ def main() -> int:
         if not getattr(arguments, name).is_file():
             parser.error(f"--{name.replace('_', '-')} is not a file")
     run(arguments)
-    print("ok: a warning and the normal level touch nothing, a critical level "
-          "turns the guest's trimmer on and never trims all the cache, the "
-          "trimmer is turned off only after the hold that follows the last "
-          "critical level, the commands the guest was sent are exactly "
-          "those, and the lines say so")
+    print("ok: a warning and the normal level touch nothing while the trimmer "
+          "is off, a critical level turns the guest's trimmer on and never "
+          "trims all the cache, a warning or the normal level after it turns "
+          "the trimmer off at once, alternating levels are followed as they "
+          "come, the commands the guest was sent are exactly those, and the "
+          "lines say so")
     return 0
 
 

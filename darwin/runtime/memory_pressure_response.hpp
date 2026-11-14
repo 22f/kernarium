@@ -23,17 +23,15 @@ namespace uml::runtime {
  *     it took are read back. The host sends the request and does not wait for
  *     the guest's answer. It also frees the host GPU's cached driver
  *     allocations (platform/gpu_cache_reclaim.hpp) each time.
- *   - a warning and the normal level touch neither the guest nor the GPU. They
- *     end the trimmer a critical level turned on, unless the application asked
- *     for it (uml_emulator_set_page_cache_trimming).
+ *   - a warning and the normal level free nothing and start no response. They
+ *     turn off the trimmer a critical level turned on, unless the application
+ *     asked for it (uml_emulator_set_page_cache_trimming).
  *
- * The trimmer is on, for the pressure, from a critical level until
- * `PressureTiming::trimmer_hold_ns` after the last one. A warning or the normal
- * level asks it off: at once when the hold has ended, otherwise when it ends
- * (the request is kept pending and on_retry() makes it). A critical level inside
- * the hold cancels the request, so levels that alternate switch the trimmer on
- * and off at most once per hold, which the guest's passes (two seconds apart,
- * backing off) can follow.
+ * The trimmer is on, for the pressure, exactly while the level held is
+ * critical: a critical level turns it on, and a warning, the normal level and
+ * the quiet period's return turn it off at once. Each request is one short
+ * message, and none is sent while the guest already runs as asked, so levels
+ * that alternate are followed as they come.
  *
  * The system need not say when the pressure ends (an iPad's source never
  * delivered the normal level after a critical one). The level the response
@@ -209,10 +207,6 @@ struct PressureTiming final {
 	/* How many times a request that did not go through is tried again; 0 for
 	 * never. */
 	unsigned retry_attempts = 4;
-	/* How long the guest's trimmer stays on after the last critical level,
-	 * whatever level follows it; 0 for no hold. The guest's own passes are two
-	 * seconds apart. */
-	std::uint64_t trimmer_hold_ns = 30'000'000'000ULL;
 	/* How long the source must deliver no level but the normal one for the
 	 * response to return to normal itself; 0 for never. Three times the longest
 	 * gap seen between two critical levels of one episode (78 s, on an iPad,
@@ -228,8 +222,8 @@ public:
 
 	/* What a call to on_level() did. */
 	enum class Outcome : std::uint8_t {
-		/* A warning or the normal level (the trimmer's end, when due, was
-		 * asked for). */
+		/* A warning or the normal level (the trimmer was asked off, when it was
+		 * on). */
 		nothing,
 		/* A critical level's response ran. */
 		responded,
@@ -237,8 +231,6 @@ public:
 		busy,
 		/* on_retry() ran the pending guest request again. */
 		retried,
-		/* on_retry() asked the trimmer off once the hold had ended. */
-		released,
 		/* on_retry() returned the level to normal after the quiet period. */
 		quiet,
 	};
@@ -258,9 +250,8 @@ public:
 	Outcome on_level(PressureLevel level) noexcept;
 
 	/* How long from now the pending guest request is due, 0 when none is: a
-	 * retry after `retry_interval_ns`, or the trimmer's end when the hold that
-	 * keeps it ends. The caller runs on_retry() that long after each call that
-	 * may leave one. */
+	 * retry after `retry_interval_ns`. The caller runs on_retry() that long after
+	 * each call that may leave one. */
 	[[nodiscard]] std::uint64_t retry_delay_ns() const noexcept;
 
 	/* How long from now the quiet period ends, 0 when the level held is
@@ -270,9 +261,8 @@ public:
 
 	/* The pending guest request is tried again, on the calling thread. Nothing
 	 * happens when none is pending (a later response or a level that no longer
-	 * asks for it took it) or when the hold that keeps the trimmer's end has not
-	 * ended, and a call that meets a response running returns busy and leaves it
-	 * pending. When the quiet period has ended it returns the level to normal
+	 * asks for it took it), and a call that meets a response running returns
+	 * busy and leaves it pending. When the quiet period has ended it returns the level to normal
 	 * instead, whatever is pending (the normal level takes it). */
 	Outcome on_retry() noexcept;
 
@@ -317,12 +307,6 @@ private:
 	[[nodiscard]] bool quiet_due(std::uint64_t now) const noexcept;
 	/* A critical level's response. */
 	void respond(std::uint64_t events_skipped) noexcept;
-	/* The level held no longer asks for the gradual trimmer. Returns whether
-	 * to end it now; within the hold after the last critical level it leaves the
-	 * end pending until the hold ends, and returns false. Under the mutex, with
-	 * the clock read under it. */
-	[[nodiscard]] bool release_trimmer(PressureLevel level,
-		std::uint64_t now) noexcept;
 	/* Asks for the gradual trimmer off, after a level that no longer asks for
 	 * it, and keeps the request pending when it could not be sent. */
 	void end_gradual_trim() noexcept;
@@ -344,20 +328,14 @@ private:
 	PressureLevel level_{PressureLevel::normal};
 	/* When the source last delivered a level other than normal. */
 	std::uint64_t last_level_ns_{};
-	/* When the source last delivered a critical level, once it has. */
-	std::uint64_t last_critical_ns_{};
-	bool critical_seen_{};
 	bool running_{};
 	std::uint64_t skipped_{};
 	/* The one pending guest request: the level of the response that left it,
-	 * what it asks (the trimmer on or off) and the tries it has left. The end
-	 * of the trimmer that the hold keeps is pending too, with the time the hold
-	 * ends (`retry_due_ns_`, 0 for a request that is due). */
+	 * what it asks (the trimmer on or off) and the tries it has left. */
 	bool retry_pending_{};
 	PressureLevel retry_level_{PressureLevel::normal};
 	TrimKind retry_kind_{TrimKind::gradual_on};
 	unsigned retry_attempts_left_{};
-	std::uint64_t retry_due_ns_{};
 	/* The gradual trimmer was asked on and no request to turn it off has been
 	 * taken since: a level that no longer asks for it owes it an off. */
 	bool gradual_on_{};

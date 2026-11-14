@@ -1020,7 +1020,8 @@ typedef int (*kernarium_runtime_plan_camera_reserve_function)(
 /* The level the system's memory pressure source reported to the host (runtime
  * API 41). At a critical level the host turns on the guest's page-cache
  * trimmer and frees the host's graphics caches; a warning and the normal level
- * touch neither (docs/architecture.md, "Memory pressure"). */
+ * turn that trimmer off again and do nothing else (docs/architecture.md,
+ * "Memory pressure"). */
 enum {
     KERNARIUM_RUNTIME_MEMORY_PRESSURE_NORMAL = 0,
     KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING = 1,
