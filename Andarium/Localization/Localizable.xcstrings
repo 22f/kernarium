@@ -1549,28 +1549,6 @@
         }
       }
     },
-    "Andarium's update didn't finish" : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andariumのアップデートが完了していません"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium的更新未完成"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium的更新未完成"
-          }
-        }
-      }
-    },
     "Andarium’s unfinished update ends." : {
       "comment" : "Added when restoring a snapshot ends the update that did not finish.",
       "localizations" : {
@@ -1612,6 +1590,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Andarium未完成的更新會保留自己的拷貝，直到更新結束。回復快照會終止該更新。"
+          }
+        }
+      }
+    },
+    "Andarium’s update didn’t finish" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumのアップデートが完了していません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium的更新未完成"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium的更新未完成"
           }
         }
       }
@@ -6040,7 +6040,7 @@
         }
       }
     },
-    "Puts the virtual machine's apps and files in iCloud and computer backups of this %@." : {
+    "Puts the virtual machine’s apps and files in iCloud and computer backups of this %@." : {
       "comment" : "%@ is the device name: iPhone, iPad or Mac.",
       "localizations" : {
         "ja" : {

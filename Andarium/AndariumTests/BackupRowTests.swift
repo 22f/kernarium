@@ -73,7 +73,7 @@ struct BackupRowTests {
             // The row's own text beside it, and the section's note under it.
             #expect(labelled.contains { $0.accessibilityValue == nil && $0.accessibilityTraits.contains(.staticText) })
             #expect(all.contains("Backup"))
-            #expect(all.contains { $0.hasPrefix("Puts the virtual machine's apps and files in iCloud") })
+            #expect(all.contains { $0.hasPrefix("Puts the virtual machine’s apps and files in iCloud") })
         }
     }
 }
