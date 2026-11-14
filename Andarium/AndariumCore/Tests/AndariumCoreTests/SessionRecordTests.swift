@@ -47,6 +47,76 @@ struct SessionRecordTests {
             title: "Android's kernel panicked", text: "Android stopped with a kernel panic: sysrq triggered crash."))
     }
 
+    @Test func readsWhereAnUnfinishedBootHadGot() throws {
+        let running = try #require(SessionRecord(text: record(
+            """
+            state running
+            end running
+            status 0
+            pid 7
+            started 1794114339
+            boot unfinished
+            restarts 2
+            kernel-output
+            [   31.2] init: starting service 'netd'...
+
+            """)))
+        #expect(running.running && running.bootFinished == false && running.restarts == 2)
+        #expect(running.kernelOutput?.hasPrefix("[   31.2] init: starting service 'netd'") == true)
+        #expect(running.summary.hasSuffix(
+            " Android had not finished booting and the guest had restarted 2 times in this process."))
+        let stopped = try #require(SessionRecord(text: record(
+            "state ended\nend stopped\nstatus 0\npid 7\nstarted 1794114339\nended 1794114540\nboot unfinished\nrestarts 0\n"
+        )))
+        #expect(stopped.orderly && stopped.bootFinished == false && stopped.restarts == 0)
+        #expect(stopped.summary == "The previous session ended: stopped. Android had not finished booting.")
+    }
+
+    @Test func aFinishedBootAddsNothingToTheSummary() throws {
+        let done = try #require(SessionRecord(text: record(
+            "state ended\nend powered-off\nstatus 0\npid 7\nstarted 1\nended 2\nboot completed\nrestarts 3\n")))
+        #expect(done.bootFinished == true && done.restarts == 3)
+        #expect(!done.summary.contains("finished booting"))
+    }
+
+    @Test func aBootTheRuntimeCouldNotObserveClaimsNothing() throws {
+        // The console showed none of init's output: the boot may have been
+        // fine, so the record is not read as an unfinished one.
+        let unseen = try #require(SessionRecord(text: record(
+            "state ended\nend stopped\nstatus 0\npid 7\nstarted 1\nended 2\nboot unobserved\nrestarts 1\n")))
+        #expect(unseen.bootFinished == nil && unseen.restarts == 1)
+        #expect(!unseen.summary.contains("finished booting"))
+    }
+
+    @Test func aRecordThatSaysNothingOfTheBootLeavesItUnknown() throws {
+        let plain = try #require(SessionRecord(text: record(
+            "state ended\nend powered-off\nstatus 0\npid 7\nstarted 1\nended 2\n")))
+        #expect(plain.bootFinished == nil && plain.restarts == nil)
+        #expect(!plain.summary.contains("booting"))
+        let odd = try #require(SessionRecord(text: record(
+            "state running\nend running\nboot maybe\nrestarts many\n")))
+        #expect(odd.bootFinished == nil && odd.restarts == nil)
+    }
+
+    /// The runtime writes every state over the whole of its area and pads it
+    /// with newlines, so a shorter state never leaves the end of a longer one.
+    @Test func newlinesThatPadTheStateAreNotPartOfIt() throws {
+        let padding = String(repeating: "\n", count: 3000)
+        let unfinished = try #require(SessionRecord(text: record(
+            "state running\nend running\nstatus 0\npid 7\nstarted 1794114339\nboot unfinished\nrestarts 2\n"
+                + "kernel-output\n[   31.2] init: starting service 'netd'\n[   31.3] init: next\n" + padding)))
+        #expect(unfinished.running && unfinished.bootFinished == false && unfinished.restarts == 2)
+        #expect(unfinished.kernelOutput == "[   31.2] init: starting service 'netd'\n[   31.3] init: next\n")
+        let completed = try #require(SessionRecord(text: record(
+            "state running\nend running\nstatus 0\npid 7\nstarted 1794114339\nboot completed\nrestarts 2\n"
+                + padding)))
+        #expect(completed.bootFinished == true && completed.kernelOutput == nil && completed.processID == 7)
+        // A line the guest left unfinished stays as it is.
+        let cut = try #require(SessionRecord(text: record(
+            "state ended\nend failed\nstatus 1\npid 7\nstarted 1794114339\nended 1794114340\nkernel-output\n[ 1.0] ab")))
+        #expect(cut.kernelOutput == "[ 1.0] ab")
+    }
+
     @Test func aRecordStillRunningNearTheLimitWasEndedByIOS() throws {
         let near = try #require(SessionRecord(text: record(
             "state running\nend running\nstatus 0\npid 7\nstarted 1794114339\n",
@@ -120,24 +190,27 @@ struct SessionRecordTests {
     /// run in an 8 KiB one, carry the same slots, and the reader takes the
     /// same fields from both. A layout 6 record of the largest size the
     /// runtime writes is read whole.
-    @Test func aLayout5AndALayout6RecordReadAlike() throws {
+    @Test func aLayout5ALayout6AndALayout7RecordReadAlike() throws {
         let columns = "h 484 6100 43 4090 1250 900 238 258 790 614"
         let figures = " 2000 120 45 2 1 12 5000 1 2 3 158 5900 5000 74 3000 11800"
         let names = " span frames gap thermal pressure compressed internal reliefs shed renewals largest"
             + " cpu vcpu perf mhz energy"
-        for layout in [5, 6] {
+        for layout in [5, 6, 7] {
             var memory = """
                 uml-session \(layout)
                 memory at 1794210239 footprint 6441524416 peak 6442458280 available 926528
                 terms guest 4090 gpu 1262/1251 age 0 graphics 905 media 0 cache 238 heaps 260 malloc 812/700 age 4 other 650 internal 5200 compressed 0
                 peak-terms at 1794210239 footprint 6143 guest 4090 gpu 1262/1251 age 0 graphics 905 media 0 cache 238 heaps 260 malloc 812/700 age 4 other 650 internal 5200 compressed 0
-                history seconds footprint available guest gpu graphics cache heaps malloc other\(layout == 6 ? names : "")
-                \(columns)\(layout == 6 ? figures : "")
+                history seconds footprint available guest gpu graphics cache heaps malloc other\(layout >= 6 ? names : "")
+                \(columns)\(layout >= 6 ? figures : "")
 
                 """
-            memory = NetworkRecordTests.padded(String(memory.dropLast()), to: layout == 6 ? 8192 : 4096)
+            memory = NetworkRecordTests.padded(String(memory.dropLast()), to: layout >= 6 ? 8192 : 4096)
+            // Layout 7 has the storage slot, blank until the first settle,
+            // between the network slot and the state.
             let text = memory + NetworkRecordTests.padded(try StallRecordTests.golden(), to: 4096)
                 + NetworkRecordTests.padded(try NetworkRecordTests.golden(), to: 512)
+                + (layout == 7 ? NetworkRecordTests.padded("", to: 256) : "")
                 + "state running\nend running\nstatus 0\npid 20373\nstarted 1794209753\n"
             let record = try #require(SessionRecord(text: text), "layout \(layout)")
             #expect(record.running && record.nearMemoryLimit && record.processID == 20373, "layout \(layout)")
@@ -145,20 +218,99 @@ struct SessionRecordTests {
             #expect(record.terms?.hasPrefix("guest 4090 gpu 1262/1251") == true)
             #expect(record.peakTerms?.hasPrefix("at 1794210239 footprint 6143 guest 4090") == true)
             #expect(record.stalls?.total == 37 && record.network?.tcp?.attempts == 12, "layout \(layout)")
+            // An earlier layout has no storage slot; a blank one makes no claim.
+            #expect(record.storage == nil, "layout \(layout)")
         }
-        #expect(SessionRecord.maximumBytes >= 17920)
-        var largest = "uml-session 6\nmemory at 1 footprint 2 peak 3\n"
+        #expect(SessionRecord.maximumBytes >= 18176)
+        var largest = "uml-session 7\nmemory at 1 footprint 2 peak 3\n"
         largest = NetworkRecordTests.padded(String(largest.dropLast()), to: 8192)
         largest += NetworkRecordTests.padded("stalls 1 base 1 at 1 total 0 shown 0", to: 4096)
         largest += NetworkRecordTests.padded("network 1\nnet-notice denials 0 now none", to: 512)
+        largest += NetworkRecordTests.padded("", to: 256)
         largest += "state running\nend running\nstatus 0\npid 3\n"
-        largest += String(repeating: "k", count: 17920 - largest.utf8.count)
-        #expect(largest.utf8.count == 17920 && SessionRecord(text: largest)?.running == true)
+        largest += String(repeating: "k", count: 18176 - largest.utf8.count)
+        #expect(largest.utf8.count == 18176 && SessionRecord(text: largest)?.running == true)
+    }
+
+    /// The runtime's storage slot as Andarium reads it: the golden fixture the
+    /// runtime's own test checks its writer against
+    /// (`tests/unit/andarium/fixtures/storage-slot-golden.txt`).
+    static func storageGolden() throws -> String {
+        var url = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { url.deleteLastPathComponent() }
+        url.append(path: "tests/unit/andarium/fixtures/storage-slot-golden.txt")
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    /// A whole layout 7 record with `storage` in the storage slot.
+    static func layout7(storage: String) throws -> String {
+        var memory = "uml-session 7\nmemory at 1794114290 footprint 2147483648 peak 2415919104 available 900000000\n"
+        memory = NetworkRecordTests.padded(String(memory.dropLast()), to: 8192)
+        return memory + NetworkRecordTests.padded(try StallRecordTests.golden(), to: 4096)
+            + NetworkRecordTests.padded(try NetworkRecordTests.golden(), to: 512)
+            + NetworkRecordTests.padded(storage, to: 256)
+            + "state running\nend running\nstatus 0\npid 77\n"
+    }
+
+    @Test func theGoldenStorageSlotParses() throws {
+        let slot = try #require(StorageRecord(text: try Self.storageGolden()))
+        #expect(slot.settles == 4 && slot.unsettled == 2)
+        let last = try #require(slot.last)
+        #expect(last.call == "quiesce" && last.storage == "confirmed" && last.suspension == "suspended")
+        #expect(last.at == Date(timeIntervalSince1970: 1_794_114_290) && last.settled)
+    }
+
+    @Test func aLayout7RecordCarriesTheStorageSlot() throws {
+        let session = try #require(
+            SessionRecord(text: try Self.layout7(storage: try Self.storageGolden().trimmingCharacters(in: .newlines))))
+        #expect(session.processID == 77 && session.running)
+        #expect(session.storage?.settles == 4 && session.storage?.unsettled == 2)
+        // The other slots are read as they are in layout 6.
+        #expect(session.stalls?.total == 37 && session.network?.tcp?.attempts == 12)
+        #expect(session.memory?.footprintBytes == 2 << 30)
+    }
+
+    @Test func aBlankStorageSlotMakesNoClaim() throws {
+        // A session that never settled the guest says nothing of it: neither
+        // that its storage was settled nor that it was not.
+        let session = try #require(SessionRecord(text: try Self.layout7(storage: "")))
+        #expect(session.storage == nil && session.running && session.processID == 77)
+    }
+
+    @Test func aLayout6RecordHasNoStorageSlotEvenWithAStorageLookingLine() throws {
+        let six = "uml-session 6\nmemory at 1 footprint 2 peak 3\nstate ended\nend powered-off\n"
+            + "storage 1\nsettles 3 unsettled 3\nlast sync unreachable not-asked at 5\n"
+        let session = try #require(SessionRecord(text: six))
+        #expect(session.storage == nil && session.end == "powered-off")
+    }
+
+    @Test func anUnsettledLastOutcomeIsNotSettled() throws {
+        let text = "storage 1\nsettles 1 unsettled 1\nlast sync unreachable not-asked at 1794114290\n"
+        let slot = try #require(StorageRecord(text: text))
+        #expect(slot.settles == 1 && slot.unsettled == 1 && slot.last?.settled == false)
+        // A guest that was not running has nothing to settle.
+        let none = try #require(
+            StorageRecord(text: "storage 1\nsettles 1 unsettled 0\nlast sync no-guest not-asked at 1794114290\n"))
+        #expect(none.last?.settled == true)
+    }
+
+    @Test func aStorageSlotOfAnotherVersionOrWithoutCountsIsNotRead() {
+        #expect(StorageRecord(text: "") == nil)
+        #expect(StorageRecord(text: "storage 2\nsettles 1 unsettled 0\n") == nil)
+        #expect(StorageRecord(text: "settles 1 unsettled 0\n") == nil)
+        #expect(StorageRecord(text: "storage 1\nsettles 1\n") == nil)
+        // A last line this reader cannot read leaves the counts.
+        let slot = StorageRecord(text: "storage 1\nsettles 2 unsettled 1\nlast sync\n")
+        #expect(slot?.settles == 2 && slot?.last == nil)
+        // A later runtime may add lines and fields.
+        let later = StorageRecord(
+            text: "storage 1\nsettles 2 unsettled 1\nlast quiesce refused not-suspended at 7 extra 1\nnew line\n")
+        #expect(later?.last?.storage == "refused")
     }
 
     @Test func otherTextIsNoRecord() {
         #expect(SessionRecord(text: "") == nil)
-        #expect(SessionRecord(text: "uml-session 7\nstate ended\nend powered-off\n") == nil)
+        #expect(SessionRecord(text: "uml-session 8\nstate ended\nend powered-off\n") == nil)
         #expect(SessionRecord(text: "uml-session 2\nstatus 0\n") == nil)
         #expect(SessionRecord.read(at: URL(fileURLWithPath: "/nonexistent/session.txt")) == nil)
     }

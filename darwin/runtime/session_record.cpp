@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "session_record.hpp"
 
+#include "console_boot_signal.hpp"
 #include "fixed_text.hpp"
 #include "platform/host_wait.hpp"
 
@@ -42,6 +43,19 @@ constexpr std::string_view host_fault_line{
 
 std::atomic<char> output[output_size];
 std::atomic<std::uint64_t> output_end{0};
+/* Where `output_end` stood when the session began: the output of a boot starts
+ * there, so a record quotes nothing a boot before it printed. */
+std::atomic<std::uint64_t> output_start{0};
+/* Set when the ring dropped output from its head: a write longer than the ring
+ * keeps only its last bytes, while output_end counts only what was kept. */
+std::atomic<bool> output_clipped{false};
+/* What the same output says of the boot (console_boot_signal.hpp). */
+ConsoleBootSignal boot_signal;
+/* What the host that runs the guest says of its boots (set_session_boot_facts):
+ * whether this guest's console reports a finished boot, and how many times the
+ * guest restarted before the session that begins. */
+std::atomic<bool> boot_reported{false};
+std::atomic<std::uint32_t> boot_restarts{0};
 std::atomic<int> console_descriptors[console_slots] = {-1, -1, -1, -1};
 
 std::atomic<int> record_descriptor{-1};
@@ -56,11 +70,42 @@ std::atomic<bool> crash_recorded{false};
 char record_text[session_state_max_bytes];
 char tail_text[output_size];
 
+/* The state while the boot of a guest that reports it is unfinished: the
+ * checkpoint thread rewrites it, with the output so far, whenever the output
+ * grew, so a process that is killed mid-boot leaves where the boot had got.
+ * Its own buffers and one writer at a time (`state_checkpointing`): the
+ * checkpoint, or the session's begin, which waits for the flag. An end never
+ * takes the flag; it waits a bounded time for a checkpoint under way to
+ * finish (wait_out_state_checkpoint). The wait does not make the end the last
+ * write, since a checkpoint may be delayed past it between its last look at
+ * `session_open` and its write. What does is `terminal_size`: the end formats
+ * its record (`record_text`) and publishes its size before it writes, and a
+ * checkpoint that has written looks, and writes that record again if it is
+ * there. A write of the state that lands after an end's is thus followed by
+ * the end's, whatever the delay. */
+char checkpoint_text[session_state_max_bytes];
+char checkpoint_tail[output_size];
+/* What a state's text is matched on before it is stored (keep_masked): one per
+ * writer of a state, because the end may format its record while a checkpoint
+ * formats its own. */
+char record_scratch[session_state_max_bytes];
+char checkpoint_scratch[session_state_max_bytes];
+std::atomic_flag state_checkpointing = ATOMIC_FLAG_INIT;
+/* The size of the end's record in `record_text`, 0 while the session runs. */
+std::atomic<std::size_t> terminal_size{0};
+std::atomic<std::uint64_t> checkpointed_output_end{0};
+std::atomic<bool> checkpointed_completed{false};
+/* The most an end waits for a checkpoint of the state under way, in
+ * milliseconds. */
+constexpr unsigned state_checkpoint_wait_ms = 50;
+
 /* The record's first bytes are a fixed slot that only the checkpoints write,
  * the next are the stall slot that only the stall watch writes, the network
  * slot after it is written by the checkpoints and the session's begin and
- * end, and the rest is the session's state that only its begin and its end
- * write, so none ever overwrites another's bytes, whichever finishes last. */
+ * end, the storage slot after that is written by the settle calls
+ * (note_guest_settle) and the session's begin, and the rest is the session's
+ * state that only its begin and its end write, so none ever overwrites
+ * another's bytes, whichever finishes last. */
 constexpr std::size_t memory_slot_size = session_memory_slot_bytes;
 constexpr std::size_t stall_slot_offset = session_memory_slot_bytes;
 std::atomic<bool> checkpoint_thread_started{false};
@@ -173,6 +218,7 @@ void keep_output(const void *data, std::size_t length) noexcept
 	if (length > output_size) {
 		bytes += length - output_size;
 		length = output_size;
+		output_clipped.store(true, std::memory_order_release);
 	}
 	const std::uint64_t start =
 		output_end.fetch_add(length, std::memory_order_acq_rel);
@@ -449,7 +495,7 @@ void write_memory_slot(int descriptor, bool beginning) noexcept
 	os_unfair_lock_lock(&history_lock);
 	Text text{slot, sizeof(slot) - 1};
 	const std::int64_t at = now();
-	text.text("uml-session 6\nmemory at ").number(at);
+	text.text("uml-session 7\nmemory at ").number(at);
 	task_vm_info_data_t info{};
 	mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
 	std::uint64_t footprint = 0;
@@ -677,6 +723,94 @@ void write_network_slot(int descriptor) noexcept
 	network_slot_busy.clear(std::memory_order_release);
 }
 
+/* The storage slot: how many times the guest's storage was settled and how
+ * many of those it did not confirm, and the last one. One writer at a time,
+ * and the session's begin, which blanks it, waits for the flag. */
+std::atomic_flag storage_slot_busy = ATOMIC_FLAG_INIT;
+std::uint64_t storage_settles{};
+std::uint64_t storage_unsettled{};
+bool storage_has_last{};
+SettleKind storage_last_kind{};
+GuestStorage storage_last_storage{};
+SettleSuspension storage_last_suspension{};
+std::int64_t storage_last_at{};
+
+std::string_view settle_kind_word(SettleKind kind) noexcept
+{
+	switch (kind) {
+	case SettleKind::sync:
+		return "sync";
+	case SettleKind::quiesce:
+		return "quiesce";
+	case SettleKind::quiesce_resident:
+		return "quiesce-resident";
+	}
+	return "sync";
+}
+
+std::string_view guest_storage_word(GuestStorage storage) noexcept
+{
+	switch (storage) {
+	case GuestStorage::not_reported:
+		break;
+	case GuestStorage::confirmed:
+		return "confirmed";
+	case GuestStorage::no_guest:
+		return "no-guest";
+	case GuestStorage::unconfirmed:
+		return "unconfirmed";
+	case GuestStorage::refused:
+		return "refused";
+	case GuestStorage::unreachable:
+		return "unreachable";
+	}
+	return "unconfirmed";
+}
+
+std::string_view settle_suspension_word(SettleSuspension suspension) noexcept
+{
+	switch (suspension) {
+	case SettleSuspension::not_asked:
+		return "not-asked";
+	case SettleSuspension::suspended:
+		return "suspended";
+	case SettleSuspension::not_suspended:
+		return "not-suspended";
+	}
+	return "not-asked";
+}
+
+/* The storage slot, padded to its size: blank before the first settle, else a
+ * format line, the counts and the last settle. Held under
+ * `storage_slot_busy`. */
+void write_storage_slot(int descriptor) noexcept
+{
+	static char slot[session_storage_slot_bytes];
+	Text text{slot, sizeof(slot) - 1};
+	if (storage_settles != 0U) {
+		const auto n = [](std::uint64_t value) {
+			return static_cast<std::int64_t>(std::min<std::uint64_t>(
+				value, INT64_MAX));
+		};
+		text.text("storage 1\nsettles ").number(n(storage_settles))
+			.text(" unsettled ").number(n(storage_unsettled)).text("\n");
+		if (storage_has_last)
+			text.text("last ").text(settle_kind_word(storage_last_kind))
+				.text(" ").text(guest_storage_word(storage_last_storage))
+				.text(" ")
+				.text(settle_suspension_word(storage_last_suspension))
+				.text(" at ").number(storage_last_at).text("\n");
+	}
+	const std::size_t used = text.size();
+	std::memset(slot + used, ' ', sizeof(slot) - 1 - used);
+	slot[sizeof(slot) - 1] = '\n';
+	ssize_t written;
+	do {
+		written = pwrite(descriptor, slot, sizeof(slot),
+			session_storage_offset);
+	} while (written < 0 && errno == EINTR);
+}
+
 /* Waits one checkpoint interval inside libsystem_kernel alone: the thread
  * fence defers a thread inside libsystem_c (nanosleep, usleep) on every pass,
  * and so never holds this uml-* thread. */
@@ -728,15 +862,313 @@ void start_checkpoints() noexcept
 	(void)pthread_sigmask(SIG_SETMASK, &previous, nullptr);
 }
 
-void write_record(SessionEnd end, int status, std::string_view message,
-	std::string_view tail) noexcept
+/* What tells this installation from another, as the kernel's own arguments
+ * state it when the session begins: the Android guest's serial number, the
+ * host's adb public key and the time zone the guest was given. The kernel
+ * echoes its command line, and init prints a property it cannot set with its
+ * value, so the output the record quotes can carry them in places no rule
+ * knows by name: the record takes out the values themselves, wherever they
+ * stand. Static, so that an end formats nothing it must allocate; written only
+ * by the session's begin, under `state_checkpointing`, and read by whoever
+ * formats a state. A value that does not fit or is too short to tell from an
+ * ordinary word is not kept; the names below mask its assignments all the
+ * same. */
+template <std::size_t Capacity>
+class KnownValue final {
+public:
+	void clear() noexcept
+	{
+		length_ = 0;
+	}
+
+	void set(std::string_view value, std::size_t shortest) noexcept
+	{
+		length_ = 0;
+		if (value.size() < shortest || value.size() > Capacity)
+			return;
+		std::memcpy(text_, value.data(), value.size());
+		length_ = value.size();
+	}
+
+	[[nodiscard]] std::string_view view() const noexcept
+	{
+		return {text_, length_};
+	}
+
+private:
+	char text_[Capacity]{};
+	std::size_t length_{};
+};
+
+/* The longest adb key the runtime accepts is 1024 characters
+ * (kernarium::adb::maximumKeyLength); a serial number has 6 to 20, and a time
+ * zone's name stays well under 64. */
+constexpr std::size_t known_key_capacity = 1024;
+constexpr std::size_t known_serial_capacity = 64;
+constexpr std::size_t known_zone_capacity = 64;
+/* The values a text must hold to be taken out by value, and the start of one
+ * that is taken out at the end of a text: shorter ones are ordinary words. */
+constexpr std::size_t known_key_shortest = 8;
+constexpr std::size_t known_serial_shortest = 4;
+constexpr std::size_t known_zone_shortest = 4;
+KnownValue<known_key_capacity> known_key;
+KnownValue<known_serial_capacity> known_serial;
+KnownValue<known_zone_capacity> known_zone;
+
+/* What stands where a value was taken out; the same words the application's
+ * start log puts (`SendFeedbackStartLog.masked`). */
+constexpr std::string_view masked_value{"<masked>"};
+constexpr std::string_view masked_zone{"<time zone>"};
+constexpr std::string_view masked_address{"<address>"};
+
+/* The arguments whose value is an identity value. */
+constexpr std::string_view serial_argument{"androidboot.serialno="};
+constexpr std::string_view key_argument{"androidboot.kernarium.adb_key="};
+constexpr std::string_view zone_argument{"androidboot.kernarium.timezone="};
+
+/* The word after `name` in `argument` (the kernel takes several words in one
+ * argument), without a pair of quotes around it; empty when none. */
+std::string_view argument_value(std::string_view argument,
+	std::string_view name) noexcept
 {
-	const int descriptor = record_descriptor.load(std::memory_order_acquire);
-	if (descriptor < 0)
+	for (auto at = argument.find(name); at != std::string_view::npos;
+	     at = argument.find(name, at + 1)) {
+		if (at != 0 && argument[at - 1] != ' ' && argument[at - 1] != '\t')
+			continue;
+		auto value = argument.substr(at + name.size());
+		value = value.substr(0, value.find_first_of(" \t"));
+		if (value.size() >= 2 && (value.front() == '"' || value.front() == '\'') &&
+		    value.back() == value.front())
+			value = value.substr(1, value.size() - 2);
+		return value;
+	}
+	return {};
+}
+
+/* The session's own values, from its arguments. Clears the ones an earlier
+ * session had. */
+void learn_known_values(std::span<const std::string> arguments) noexcept
+{
+	known_key.clear();
+	known_serial.clear();
+	known_zone.clear();
+	for (const std::string &argument : arguments) {
+		if (const auto value = argument_value(argument, key_argument);
+		    !value.empty())
+			known_key.set(value, known_key_shortest);
+		if (const auto value = argument_value(argument, serial_argument);
+		    !value.empty())
+			known_serial.set(value, known_serial_shortest);
+		/* A zone with no `/` (UTC) is too short a word to take out of a
+		 * text. */
+		if (const auto value = argument_value(argument, zone_argument);
+		    value.find('/') != std::string_view::npos)
+			known_zone.set(value, 1);
+	}
+}
+
+/* One piece of the text to replace: [start, end) becomes `replacement`. */
+struct Mask final {
+	std::size_t start{std::string_view::npos};
+	std::size_t end{};
+	std::string_view replacement;
+};
+
+/* The earlier of two masks, the longer when they start together. */
+void keep_earlier(Mask &best, const Mask &other) noexcept
+{
+	if (other.start == std::string_view::npos)
 		return;
-	/* The last counts of the session, which no checkpoint may follow. */
-	write_network_slot(descriptor);
-	Text record{record_text, sizeof(record_text)};
+	if (best.start == std::string_view::npos || other.start < best.start ||
+	    (other.start == best.start && other.end > best.end))
+		best = other;
+}
+
+[[nodiscard]] bool alphanumeric(char character) noexcept
+{
+	return (character >= '0' && character <= '9') ||
+		(character >= 'A' && character <= 'Z') ||
+		(character >= 'a' && character <= 'z');
+}
+
+[[nodiscard]] bool word_character(char character) noexcept
+{
+	return alphanumeric(character) || character == '_';
+}
+
+[[nodiscard]] bool zone_character(char character) noexcept
+{
+	return alphanumeric(character) || character == '_' || character == '/' ||
+		character == '+' || character == '-';
+}
+
+[[nodiscard]] bool hex_digit(char character) noexcept
+{
+	return (character >= '0' && character <= '9') ||
+		(character >= 'A' && character <= 'F') ||
+		(character >= 'a' && character <= 'f');
+}
+
+/* What continues a word of the adb key (base64: letters, digits, `+`, `/`, and
+ * `=` as the padding that ends it). A key that stands against one is part of a
+ * longer word and no key. An `=` in front of it is an assignment's, not the
+ * padding of a word before it, so it does not continue the word there. */
+[[nodiscard]] bool key_before(char character) noexcept
+{
+	return word_character(character) || character == '+' || character == '/';
+}
+
+[[nodiscard]] bool key_after(char character) noexcept
+{
+	return key_before(character) || character == '=';
+}
+
+/* The value of the assignment `name` (up to the next white space) at or after
+ * `from`. */
+Mask by_name(std::string_view text, std::size_t from, std::string_view name,
+	std::string_view replacement) noexcept
+{
+	const auto at = text.find(name, from);
+	if (at == std::string_view::npos)
+		return {};
+	const std::size_t value = at + name.size();
+	const auto stop = text.find_first_of(" \t\r\n", value);
+	return {value, stop == std::string_view::npos ? text.size() : stop,
+		replacement};
+}
+
+/* `value` where it stands at or after `from`, with no character of `before`'s
+ * kind in front of it and none of `after`'s behind it: a longer word that
+ * holds it is not the value. */
+template <class Before, class After>
+Mask by_value(std::string_view text, std::size_t from, std::string_view value,
+	std::string_view replacement, Before before, After after) noexcept
+{
+	if (value.empty())
+		return {};
+	for (auto at = text.find(value, from); at != std::string_view::npos;
+	     at = text.find(value, at + 1)) {
+		const std::size_t end = at + value.size();
+		if ((at == 0 || !before(text[at - 1])) &&
+		    (end == text.size() || !after(text[end])))
+			return {at, end, replacement};
+	}
+	return {};
+}
+
+/* The start of `value` at the end of the text, `shortest` characters or more:
+ * a write that ended inside it, whose rest the next write brings. */
+template <class Before>
+Mask by_partial_value(std::string_view text, std::size_t from,
+	std::string_view value, std::size_t shortest, std::string_view replacement,
+	Before before) noexcept
+{
+	if (value.size() < 2 || shortest == 0)
+		return {};
+	const std::size_t most =
+		std::min(value.size() - 1, text.size() - std::min(from, text.size()));
+	for (std::size_t length = most; length >= shortest; --length) {
+		const std::size_t at = text.size() - length;
+		if (text.compare(at, length, value.substr(0, length)) == 0 &&
+		    (at == 0 || !before(text[at - 1])))
+			return {at, text.size(), replacement};
+	}
+	return {};
+}
+
+/* A hardware address in its colon spelling (`aa:bb:cc:dd:ee:ff`) as a word of
+ * its own, which names an installation's network interface whichever it is. */
+Mask by_address(std::string_view text, std::size_t from) noexcept
+{
+	constexpr std::size_t length = 17;
+	for (std::size_t at = from; at + length <= text.size(); ++at) {
+		if (at != 0 && word_character(text[at - 1]))
+			continue;
+		bool address = true;
+		for (std::size_t index = 0; index < length && address; ++index)
+			address = index % 3 == 2 ? text[at + index] == ':' :
+						   hex_digit(text[at + index]);
+		if (address &&
+		    (at + length == text.size() || !word_character(text[at + length])))
+			return {at, at + length, masked_address};
+	}
+	return {};
+}
+
+/* The first thing at or after `from` that the record does not keep: the value
+ * of an assignment of the serial number, the adb key or the time zone, those
+ * values wherever they stand, and any hardware address. */
+Mask next_mask(std::string_view text, std::size_t from) noexcept
+{
+	Mask best;
+	keep_earlier(best, by_name(text, from, "serialno=", masked_value));
+	keep_earlier(best, by_name(text, from, "adb_key=", masked_value));
+	keep_earlier(best, by_name(text, from, "timezone=", masked_zone));
+	keep_earlier(best, by_value(text, from, known_key.view(), masked_value,
+				key_before, key_after));
+	keep_earlier(best, by_value(text, from, known_serial.view(), masked_value,
+				word_character, word_character));
+	keep_earlier(best, by_value(text, from, known_zone.view(), masked_zone,
+				zone_character, zone_character));
+	keep_earlier(best, by_address(text, from));
+	keep_earlier(best, by_partial_value(text, from, known_key.view(),
+				known_key_shortest, masked_value, key_before));
+	keep_earlier(best, by_partial_value(text, from, known_serial.view(),
+				known_serial_shortest, masked_value, word_character));
+	keep_earlier(best, by_partial_value(text, from, known_zone.view(),
+				known_zone_shortest, masked_zone, zone_character));
+	return best;
+}
+
+/* `text` as the record keeps it: printable, without what identifies the
+ * installation. The kernel echoes its command line, which carries the guest's
+ * serial number (`androidboot.serialno=`), the host's adb key and the guest's
+ * time zone; the record and the bug report archive that copies it do not keep
+ * the values, only that they were there. The masks are matched on the text as
+ * it is stored (`scratch`, which holds at most a state's bytes): a byte that
+ * the record drops, as a carriage return, must not join the two halves of a
+ * value that the guest printed apart. */
+void keep_masked(Text &record, char *scratch, std::string_view text,
+	bool lines) noexcept
+{
+	const std::string_view stored = Text::printable_text(scratch,
+		session_state_max_bytes, text, lines);
+	std::size_t from = 0;
+	for (Mask mask = next_mask(stored, from); mask.start != std::string_view::npos;
+	     mask = next_mask(stored, from)) {
+		record.text(stored.substr(from, mask.start - from));
+		record.text(mask.replacement);
+		from = mask.end;
+	}
+	record.text(stored.substr(from));
+}
+
+/* `tail` from its first complete line when the ring has dropped output of the
+ * boot: its first bytes are then the middle of a line, perhaps of
+ * `androidboot.serialno=` or of its value, which keep_masked cannot know to
+ * mask. A tail that begins where the boot's output begins (`output_start`, the
+ * session's first byte) starts at its first line, and so does one the ring has
+ * dropped nothing of. */
+std::string_view from_whole_line(std::string_view tail) noexcept
+{
+	const std::uint64_t end = output_end.load(std::memory_order_acquire);
+	const std::uint64_t begun = output_start.load(std::memory_order_acquire);
+	if (!output_clipped.load(std::memory_order_acquire) &&
+	    end - begun <= output_size)
+		return tail;
+	const auto newline = tail.find('\n');
+	return newline == std::string_view::npos ? std::string_view{} :
+						   tail.substr(newline + 1);
+}
+
+/* The state: the session's lines, what it says of the boot where the guest's
+ * console reports one, a message and the quoted output. The text is followed
+ * by newlines to the whole of the state's area (write_state), which the
+ * readers ignore; the size returned is the text's. */
+std::size_t format_state(char *buffer, char *scratch, SessionEnd end,
+	int status, std::string_view message, std::string_view tail) noexcept
+{
+	Text record{buffer, session_state_max_bytes};
 	record.text("state ")
 		.text(end == SessionEnd::running ? "running" : "ended")
 		.text("\nend ").text(session_end_name(end))
@@ -746,19 +1178,128 @@ void write_record(SessionEnd end, int status, std::string_view message,
 		.number(session_started.load(std::memory_order_relaxed));
 	if (end != SessionEnd::running)
 		record.text("\nended ").number(now());
-	if (!message.empty())
-		record.text("\nmessage ").printable(message, false);
+	if (boot_reported.load(std::memory_order_relaxed))
+		record.text("\nboot ")
+			.text(boot_signal.completed() ? "completed" :
+				boot_signal.init_observed() ? "unfinished" : "unobserved")
+			.text("\nrestarts ")
+			.number(boot_restarts.load(std::memory_order_relaxed));
+	if (!message.empty()) {
+		record.text("\nmessage ");
+		keep_masked(record, scratch, message, false);
+	}
 	record.text("\n");
-	if (!tail.empty())
-		record.text("kernel-output\n").printable(tail, true);
+	tail = from_whole_line(tail);
+	if (!tail.empty()) {
+		record.text("kernel-output\n");
+		keep_masked(record, scratch, tail, true);
+	}
+	const std::size_t size = std::min(record.size(), session_state_max_bytes);
+	std::memset(buffer + size, '\n', session_state_max_bytes - size);
+	return size;
+}
+
+/* Publishes a state (formatted into a buffer of session_state_max_bytes) in
+ * one pwrite that covers the whole of the state's area. The area is never
+ * shortened between two states: a ftruncate after a shorter state left a
+ * reader that came between the two calls with the new state's prefix followed
+ * by the old state's suffix. Every writer covers the same bytes, so whichever
+ * lands last is the whole of what a reader sees, a checkpoint delayed past an
+ * end included. */
+void write_state(int descriptor, const char *text) noexcept
+{
 	ssize_t written;
 	do {
-		written = pwrite(descriptor, record_text, record.size(),
+		written = pwrite(descriptor, text, session_state_max_bytes,
 			session_state_offset);
 	} while (written < 0 && errno == EINTR);
-	if (written == static_cast<ssize_t>(record.size()))
-		(void)ftruncate(descriptor,
-			static_cast<off_t>(session_state_offset + record.size()));
+}
+
+/* A checkpoint under way (it set `state_checkpointing` before it looked at
+ * `session_open`, which the end has already cleared) usually finishes before
+ * the end writes. The wait is bounded because an end may run where the
+ * checkpoint thread no longer does, so the end does not rely on it:
+ * write_record's publication and the checkpoint's repair make it the last
+ * write. */
+void wait_out_state_checkpoint() noexcept
+{
+	const std::int64_t deadline = steady_ms() + state_checkpoint_wait_ms;
+	while (state_checkpointing.test(std::memory_order_seq_cst) &&
+	       steady_ms() < deadline)
+		sched_yield();
+}
+
+/* The session's begin and its ends; the begin's is written under
+ * `state_checkpointing` (begin_session_record). */
+void write_record_unguarded(int descriptor, SessionEnd end, int status,
+	std::string_view message, std::string_view tail) noexcept
+{
+	(void)format_state(record_text, record_scratch, end, status, message,
+		tail);
+	write_state(descriptor, record_text);
+}
+
+void write_record(SessionEnd end, int status, std::string_view message,
+	std::string_view tail) noexcept
+{
+	const int descriptor = record_descriptor.load(std::memory_order_acquire);
+	if (descriptor < 0)
+		return;
+	/* The last counts of the session, which no checkpoint may follow. */
+	write_network_slot(descriptor);
+	wait_out_state_checkpoint();
+	const std::size_t size = format_state(record_text, record_scratch, end,
+		status, message, tail);
+	/* A checkpoint whose write lands from here on writes this record again
+	 * (checkpoint_state); it reads the size, so the record is formatted. */
+	terminal_size.store(size, std::memory_order_seq_cst);
+	write_state(descriptor, record_text);
+}
+
+/* Rewrites the state of a guest whose boot has not completed when the output
+ * grew since the last time, and once more when the boot finished, without the
+ * output: the record then says the boot completed and holds nothing that
+ * grows. Nothing else changes the state while the session runs, so a silent
+ * boot costs no write. */
+void checkpoint_state(int descriptor) noexcept
+{
+	if (!boot_reported.load(std::memory_order_relaxed) ||
+	    !session_open.load(std::memory_order_seq_cst))
+		return;
+	const bool completed = boot_signal.completed();
+	const std::uint64_t output_now = output_end.load(std::memory_order_acquire);
+	if (checkpointed_completed.load(std::memory_order_relaxed) ||
+	    (!completed &&
+		    output_now == checkpointed_output_end.load(
+			    std::memory_order_relaxed)))
+		return;
+	if (state_checkpointing.test_and_set(std::memory_order_seq_cst))
+		return;
+	/* The flag is held: an end that clears `session_open` from here on waits
+	 * for this write, and one that did before is seen now. */
+	if (session_open.load(std::memory_order_seq_cst)) {
+		const bool done = boot_signal.completed();
+		const std::size_t quoted = done ? 0 :
+			kernel_output_tail({checkpoint_tail, sizeof(checkpoint_tail)});
+		(void)format_state(checkpoint_text, checkpoint_scratch,
+			SessionEnd::running, 0, {}, {checkpoint_tail, quoted});
+		if (session_open.load(std::memory_order_seq_cst)) {
+			write_state(descriptor, checkpoint_text);
+			checkpointed_output_end.store(output_now,
+				std::memory_order_relaxed);
+			checkpointed_completed.store(done, std::memory_order_relaxed);
+			/* An end that came while this write was delayed has written
+			 * its record, or will: if this write landed after it, write
+			 * it again, which is the same bytes as the end's own. The
+			 * window that remains is accepted: a process that dies after
+			 * this write lands and before the next line writes leaves
+			 * "running" on disk, which is what a record that was never
+			 * ended says. */
+			if (terminal_size.load(std::memory_order_seq_cst) != 0)
+				write_state(descriptor, record_text);
+		}
+	}
+	state_checkpointing.clear(std::memory_order_seq_cst);
 }
 
 std::string_view output_tail() noexcept
@@ -771,7 +1312,7 @@ std::string_view output_tail() noexcept
 void end_session(SessionEnd end, int status, std::string_view message,
 	bool quote_output) noexcept
 {
-	if (!session_open.exchange(false, std::memory_order_acq_rel))
+	if (!session_open.exchange(false, std::memory_order_seq_cst))
 		return;
 	write_record(end, status, message,
 		quote_output ? output_tail() : std::string_view{});
@@ -799,7 +1340,7 @@ void record_host_fault() noexcept
 {
 	if (crash_recorded.exchange(true, std::memory_order_acq_rel))
 		return;
-	if (!session_open.exchange(false, std::memory_order_acq_rel))
+	if (!session_open.exchange(false, std::memory_order_seq_cst))
 		return;
 	const auto tail = output_tail();
 	const auto registers = host_fault_message(tail);
@@ -892,6 +1433,10 @@ bool begin_session_record(std::string_view path,
 	for (std::size_t slot = 0; slot < console_slots; ++slot)
 		console_descriptors[slot].store(consoles[slot],
 			std::memory_order_relaxed);
+	boot_signal.reset();
+	output_start.store(output_end.load(std::memory_order_acquire),
+		std::memory_order_release);
+	output_clipped.store(false, std::memory_order_release);
 	if (path.empty())
 		return true;
 	const std::string name{path};
@@ -945,8 +1490,32 @@ bool begin_session_record(std::string_view path,
 	write_memory_slot(descriptor, true);
 	write_blank_stall_slot(descriptor);
 	write_network_slot(descriptor);
-	session_open.store(true, std::memory_order_release);
-	write_record(SessionEnd::running, 0, {}, {});
+	/* The storage slot of the session before is blank before any settle of
+	 * this one is noted. */
+	while (storage_slot_busy.test_and_set(std::memory_order_acquire))
+		sched_yield();
+	storage_settles = 0;
+	storage_unsettled = 0;
+	storage_has_last = false;
+	write_storage_slot(descriptor);
+	storage_slot_busy.clear(std::memory_order_release);
+	/* The same for a checkpoint of the state, which also reads the values the
+	 * record takes out of what it quotes. */
+	while (state_checkpointing.test_and_set(std::memory_order_seq_cst))
+		sched_yield();
+	learn_known_values(kernel_arguments);
+	/* The file is as long as the record is, once, before the session's first
+	 * state: that state covers all of the state's area (write_state), and no
+	 * write after it changes the length. */
+	(void)ftruncate(descriptor,
+		static_cast<off_t>(session_state_offset + session_state_max_bytes));
+	checkpointed_output_end.store(output_end.load(std::memory_order_acquire),
+		std::memory_order_relaxed);
+	checkpointed_completed.store(false, std::memory_order_relaxed);
+	terminal_size.store(0, std::memory_order_seq_cst);
+	session_open.store(true, std::memory_order_seq_cst);
+	write_record_unguarded(descriptor, SessionEnd::running, 0, {}, {});
+	state_checkpointing.clear(std::memory_order_seq_cst);
 	start_checkpoints();
 	return true;
 }
@@ -983,6 +1552,7 @@ void checkpoint_session_memory() noexcept
 	if (descriptor >= 0) {
 		write_memory_slot(descriptor, false);
 		write_network_slot(descriptor);
+		checkpoint_state(descriptor);
 	}
 }
 
@@ -996,6 +1566,36 @@ void set_network_counts_reader(SessionNetworkReader reader) noexcept
 	network_reader.store(reader, std::memory_order_release);
 }
 
+void note_guest_settle(SettleKind kind, GuestStorage storage,
+	SettleSuspension suspension) noexcept
+{
+	if (!session_open.load(std::memory_order_acquire))
+		return;
+	const int descriptor = record_descriptor.load(std::memory_order_acquire);
+	if (descriptor < 0)
+		return;
+	while (storage_slot_busy.test_and_set(std::memory_order_acquire))
+		sched_yield();
+	++storage_settles;
+	if (!guest_storage_settled(storage))
+		++storage_unsettled;
+	storage_has_last = true;
+	storage_last_kind = kind;
+	storage_last_storage = storage;
+	storage_last_suspension = suspension;
+	storage_last_at = now();
+	write_storage_slot(descriptor);
+	storage_slot_busy.clear(std::memory_order_release);
+}
+
+void set_session_boot_facts(bool console_reports_completion,
+	unsigned restarts) noexcept
+{
+	boot_reported.store(console_reports_completion,
+		std::memory_order_relaxed);
+	boot_restarts.store(restarts, std::memory_order_relaxed);
+}
+
 void set_network_notice(NetworkNotice notice) noexcept
 {
 	const auto before =
@@ -1007,8 +1607,13 @@ void set_network_notice(NetworkNotice notice) noexcept
 void end_session_record(SessionEnd end, int status,
 	std::string_view message) noexcept
 {
-	end_session(end, status, message, end != SessionEnd::powered_off &&
-		end != SessionEnd::restarted && end != SessionEnd::stopped);
+	/* An end the guest or the person chose quotes no output, unless the boot
+	 * of a guest that reports it had not finished: that is where it stuck. */
+	const bool unfinished_boot = boot_reported.load(std::memory_order_relaxed) &&
+		!boot_signal.completed();
+	end_session(end, status, message, unfinished_boot ||
+		(end != SessionEnd::powered_off && end != SessionEnd::restarted &&
+			end != SessionEnd::stopped));
 }
 
 void record_kernel_crash() noexcept
@@ -1021,7 +1626,7 @@ void record_kernel_crash() noexcept
 	const auto message = panic_message(tail);
 	if (!message.empty())
 		name_thread(message);
-	if (!session_open.exchange(false, std::memory_order_acq_rel))
+	if (!session_open.exchange(false, std::memory_order_seq_cst))
 		return;
 	write_record(message.empty() ? SessionEnd::kernel_abort :
 		SessionEnd::guest_panic, SIGABRT, message, tail);
@@ -1032,6 +1637,7 @@ ssize_t kernel_write(int descriptor, const void *buffer, std::size_t length)
 {
 	if (length != 0 && buffer != nullptr && kept(descriptor)) {
 		keep_output(buffer, length);
+		boot_signal.feed(buffer, length);
 		/* The fault ends the process as soon as the handler returns. */
 		if (descriptor == STDERR_FILENO &&
 		    std::string_view{static_cast<const char *>(buffer), length}
@@ -1051,11 +1657,23 @@ void *kernel_output_import(const char *name) noexcept
 		reinterpret_cast<void *>(&kernel_write) : nullptr;
 }
 
+bool console_boot_completed() noexcept
+{
+	return boot_signal.completed();
+}
+
+bool console_init_observed() noexcept
+{
+	return boot_signal.init_observed();
+}
+
 std::size_t kernel_output_tail(std::span<char> buffer) noexcept
 {
 	const std::uint64_t end = output_end.load(std::memory_order_acquire);
+	const std::uint64_t begun = output_start.load(std::memory_order_acquire);
 	const std::size_t count = static_cast<std::size_t>(std::min<std::uint64_t>(
-		{end, static_cast<std::uint64_t>(output_size),
+		{end > begun ? end - begun : 0,
+			static_cast<std::uint64_t>(output_size),
 			static_cast<std::uint64_t>(buffer.size())}));
 	for (std::size_t index = 0; index < count; ++index)
 		buffer[index] = output[(end - count + index) % output_size].load(
@@ -1100,7 +1718,16 @@ void reset_session_record() noexcept
 	for (auto &console : console_descriptors)
 		console.store(-1, std::memory_order_relaxed);
 	output_end.store(0, std::memory_order_release);
+	output_start.store(0, std::memory_order_release);
+	output_clipped.store(false, std::memory_order_release);
+	boot_signal.reset();
+	boot_reported.store(false, std::memory_order_relaxed);
+	boot_restarts.store(0, std::memory_order_relaxed);
 	crash_recorded.store(false, std::memory_order_release);
+	while (state_checkpointing.test_and_set(std::memory_order_seq_cst))
+		sched_yield();
+	learn_known_values({});
+	state_checkpointing.clear(std::memory_order_seq_cst);
 }
 
 } // namespace uml::runtime

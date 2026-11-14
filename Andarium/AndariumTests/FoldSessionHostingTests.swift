@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AndariumCore
+import AndariumCoreTestSupport
 import SwiftUI
 import Testing
 import UIKit
@@ -421,6 +422,25 @@ struct FoldSessionHostingTests {
         }
     }
 
+    /// A session that began on the cover is unfolded: the keys come up on the
+    /// inner display, closed, with their tip over them, as at the start of a
+    /// session there. The tip's popover must not take a touch meant for the
+    /// keys it points at (UIKit's popover dismisses itself on the first touch
+    /// outside its card), whichever inner pose the device is unfolded to.
+    @Test(arguments: [Pose.uprightBook, .uprightFlat, .turnedFlat])
+    func theTipAtAnUnfoldLetsATouchOnTheKeysThrough(_ pose: Pose) async throws {
+        let rig = try await Rig(.cover, test: self)
+        defer { rig.end() }
+        await rig.move(to: pose, test: self)
+        let found = await eventually { rig.lease.window.rootViewController?.presentedViewController != nil }
+        try #require(found, "\(pose): the tip did not show at the unfold")
+        let popover = try #require(rig.lease.window.rootViewController?.presentedViewController?.popoverPresentationController)
+        let screen = try #require(popover.presentingViewController.view)
+        #expect(
+            await eventually { popover.passthroughViews?.contains { $0 === screen } ?? false },
+            "\(pose): the popover takes the touch on the keys: \(String(describing: popover.passthroughViews))")
+    }
+
     // MARK: Folding, turning and bending
 
     /// Every change the walk makes, with the size the guest's display takes
@@ -655,21 +675,23 @@ struct FoldSessionHostingTests {
 
     /// A popup of the app: what sits over a screen, and the screen it sits on.
     enum Popup: CaseIterable, CustomStringConvertible, Sendable {
-        case boot, busy, lowSpace, end
+        case boot, slowBoot, busy, lowSpace, end, stopped
 
         var description: String {
             switch self {
             case .boot: "boot"
+            case .slowBoot: "boot with the slow-start notice"
             case .busy: "busy card"
             case .lowSpace: "low-space card"
             case .end: "end card"
+            case .stopped: "stopped end card"
             }
         }
 
         var phase: Phase {
             switch self {
-            case .boot: .booting(.normal)
-            case .end: .failed
+            case .boot, .slowBoot: .booting(.normal)
+            case .end, .stopped: .failed
             case .busy, .lowSpace: .home
             }
         }
@@ -681,6 +703,13 @@ struct FoldSessionHostingTests {
                 model.busy = BusyState(title: "Erasing virtual machine", detail: "Deleting everything.", progress: 0.65)
             case .lowSpace:
                 model.spacePause = SpacePause(freeBytes: 820 * Limits.bytesPerMiB, stage: .notPaused)
+            case .slowBoot:
+                // A start that has run 3 minutes 17 seconds, by the model's own clock.
+                let now = model.clock()
+                model.slowStart.begin(at: now - 197)
+                _ = model.slowStart.update(at: now)
+            case .stopped:
+                model.runEnd = RunEnd(result: -5, stoppedByUser: true)
             case .boot, .end:
                 break
             }
@@ -690,9 +719,13 @@ struct FoldSessionHostingTests {
         var words: [String] {
             switch self {
             case .boot: ["Linux kernel", "System image", "Storage", "Startup"]
+            // The notice itself: the steps beneath it may need scrolling in a half shorter than the
+            // card, as in the standing pose's upper half, and a scrolled-off step is still a frame.
+            case .slowBoot: ["Starting is taking longer than usual", "Stop"]
             case .busy: ["Erasing virtual machine", "65%", "Deleting everything."]
             case .lowSpace: [SpacePauseWords.title(SpacePause(freeBytes: 820 * Limits.bytesPerMiB, stage: .notPaused))]
             case .end: ["The virtual machine stopped unexpectedly"]
+            case .stopped: ["You stopped the virtual machine"]
             }
         }
     }
@@ -726,7 +759,7 @@ struct FoldSessionHostingTests {
             #expect(near(shown, plain), "\(pose): the \(popup) is at \(shown), not as with no hinge at \(plain)")
         } else {
             let halves = try #require(FoldHalves(pose.reading))
-            let place = popup == .boot && pose == .turnedBook ? halves.first : halves.card
+            let place = (popup == .boot || popup == .slowBoot) && pose == .turnedBook ? halves.first : halves.card
             #expect(!shown.intersects(band), "\(pose): the \(popup) is on the fold at \(shown)")
             #expect(place.insetBy(dx: -1, dy: -1).contains(shown), "\(pose): the \(popup) \(shown) is not on \(place)")
         }
@@ -982,6 +1015,42 @@ struct FoldSessionHostingTests {
         #expect(!selected.contains(importLabel), "\(pose): with a selection the bar's labels are \(selected)")
         removeSelected()
         browser.selection = []
+    }
+
+    // MARK: The memory notice
+
+    /// The notice that iOS is critically short of memory hangs from the top of
+    /// the pose's HUD with the other notices: its words and its button inside
+    /// the HUD, inside the window, and clear of the fold while the screen is
+    /// bent.
+    @Test(arguments: Pose.allCases)
+    func theMemoryNoticeIsInTheHudOfEveryPose(_ pose: Pose) async throws {
+        let rig = try await Rig(pose, test: self)
+        defer { rig.end() }
+        let plan = try #require(rig.model.sessionPlan, "\(pose): no plan")
+        rig.model.memoryPressureChanged(.critical)
+        var parts: (title: CGRect, detail: CGRect, dismiss: CGRect)?
+        _ = await eventually {
+            rig.controller.view.layoutIfNeeded()
+            let labelled = rig.labelled()
+            guard let title = labelled.first(where: { $0.label == MemoryPressureWords.title })?.frame,
+                let detail = labelled.first(where: { $0.label == MemoryPressureWords.detail })?.frame,
+                // The notice is the last of the column: its button is the lowest Dismiss.
+                let dismiss = labelled.filter({ $0.label == NetworkWords.dismissLabel }).map(\.frame)
+                    .max(by: { $0.minY < $1.minY })
+            else { return false }
+            parts = (title, detail, dismiss)
+            return true
+        }
+        let found = try #require(
+            parts, "\(pose): the notice was not found: is application accessibility on in this Simulator?")
+        let frame = found.title.union(found.detail).union(found.dismiss)
+        #expect(
+            plan.hud.insetBy(dx: -0.5, dy: -0.5).contains(frame), "\(pose): \(frame) is not in the HUD \(plan.hud)")
+        #expect(pose.reading.window.contains(frame), "\(pose): \(frame) is not in the window")
+        if let division = pose.reading.division, division.isActive {
+            #expect(!frame.intersects(division.frame), "\(pose): \(frame) is on the fold \(division.frame)")
+        }
     }
 }
 

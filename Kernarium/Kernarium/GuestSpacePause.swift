@@ -239,9 +239,11 @@ final class GuestSpacePause: ObservableObject {
         }
     }
 
-    /// Shut down: the run ends the way leaving the guest does. The suspension
-    /// already wrote the guest's storage back, so nothing is asked of the
-    /// guest. The run ending takes the screen away.
+    /// Shut down: the run ends the way leaving the guest does, with the guest
+    /// asked to write its storage back first. A guest the suspension holds
+    /// reports what the suspension confirmed, which costs nothing; one that
+    /// did not hold still is asked. The screen says Shutting down meanwhile,
+    /// and the run ending takes it away.
     func shutDown() {
         guard var current = pause, current.stage != .pausing,
               current.working == nil else { return }

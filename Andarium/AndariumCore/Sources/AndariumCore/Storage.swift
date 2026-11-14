@@ -221,6 +221,13 @@ public struct TwoDiskStorage: GuestStorage {
         try files.apply(files.decide(for: release, flags: InstanceFlags(restoreSnapshot: true)), release: release)
     }
 
+    /// Whether the guest's first Android boot has not been seen to complete
+    /// (`InstanceFiles.firstBootMarker`): a start of it is long by its nature
+    /// even when an earlier one ended, and the data disk exists.
+    public func firstBootPending() -> Bool {
+        files.firstBootPending
+    }
+
     /// Records that the guest reached `sys.boot_completed`, at the moment the
     /// application first sees it. A pending update counts as applied from then
     /// on: its snapshot is dropped and a newer system updates from the data as

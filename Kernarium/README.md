@@ -71,12 +71,24 @@ offer such a size. The settings ask the loader
 (`kernarium_runtime_loader_maximum_guest_memory_mib`) for the RAM bound and a
 new configuration's guest RAM
 (`kernarium_runtime_loader_default_guest_memory_mib` at the loaded vCPU count,
-which stops at 4 GiB and also keeps the GPU 1 GiB on a device that offers 4
+which stops at 4 GiB and also keeps the GPU 992 MiB on a device that offers 4
 GiB), because the runtime framework is loaded once per process. The parameters
 default to the conservative launch set the default is measured with; the RAM
 bound counts none of them. The `KERNARIUM_GPU_BUDGET_*_MIB` and `KERNARIUM_GUEST_MEMORY_MIB`
 environment variables state values for one measurement launch and are never
 stored.
+
+The runtime answers the system's memory pressure itself
+([architecture](../docs/architecture.md#memory-and-executable-code)). It also
+reports every level the system delivers to the application, with whether the
+host responds, withholds the response (a warning less than 30 s after the last
+response began) or is already responding, through `set_memory_pressure_callback`
+(runtime API 41): once for each notification, before that notification's work,
+and with no figures. The system merges the levels raised during a response into
+the next notification, so a level raised during a response is reported after it.
+The loader queues each report to the main queue as its own block and setting or
+clearing its handler does not cancel the ones queued. Andarium shows a notice
+from it; Kernarium sets no callback.
 
 ## Guest storage
 
@@ -195,7 +207,11 @@ device-orientation sensor; the compass bit, API 38, becomes
 `androidboot.kernarium.compass=1`, which lists its magnetometer), and ignores
 the others; Kernarium sends none. The
 runtime validates the values (`KernariumAdbChannel.hpp`,
-`KernariumGuestTimeZone.hpp`).
+`KernariumGuestTimeZone.hpp`). An Android guest has its own serial number and
+eth0 address, which the runtime keeps in `identity.json` beside the data disk
+([the identity](../darwin/device/block/README.md#installation-identity)); a
+request states values only for a run that needs fixed ones
+(`android_serial_number` and `android_ethernet_mac`, API 42).
 
 ## Devices and display
 
@@ -217,6 +233,45 @@ Kernarium attaches:
   (`report_location`) and tells it when the guest powers the receiver
   (`set_location_receiver_callback`; runtime API 32). The Linux runtime keeps
   both entries and answers `-ENODEV`;
+- an Android-only Virtio camera ([the device](../darwin/device/camera/README.md)),
+  made after the GNSS receiver when the host has a front camera. The runtime
+  discovers the host's cameras, which needs no permission, and names the layout
+  that describes them as `androidboot.product.vendor.sku`, a kernel argument a
+  release's command-line file cannot set; it composes it again at each boot,
+  from the colour data the run has learned since. The boot request states the
+  mode (`android_camera_mode`, runtime API 37): live opens a capture session
+  only while a guest app has a camera open, and blocked lists the same cameras
+  with black frames, never opens a session and reports Android's camera lens
+  cover on the side keys. The application asks the system for access and states
+  live only when it has it, and nothing changes the mode before the guest powers
+  off. The camera tier follows the launch's GPU budget within the cap (the small
+  tier for every host), live cameras take their host-side memory out of the
+  GPU's pool (the use the composed layout lets a session hold, which the
+  application asks for before the boot with `plan_camera_reserve`, runtime API
+  40: the runtime discovers the cameras without a permission or a session,
+  keeps them and the answers composed from them until asked to discover again,
+  and answers the figure the next boot would take while the source, the
+  cameras and the calibration data are unchanged, or the tier's ceiling, saying
+  so, where it cannot discover them; a host with no camera and a Linux guest
+  answer 0), the colour data a Bayer
+  still teaches is kept in
+  `android_camera_calibration_path`, the state of the capture (idle, streaming,
+  interrupted, interrupted by iPad multitasking, by system pressure, and, for a
+  blocked guest, blocked in use while an app has a camera open, which opens no
+  session; runtime API 39) comes back through `set_camera_state_callback` and
+  `set_camera_rotation` states how the device body is turned from portrait where
+  the host owns the guest's rotation: each boot derives every camera's sensor
+  orientation from it, and a change after the boot turns the picture by the
+  difference ([orientation](../darwin/device/camera/README.md#orientation)). A
+  runtime that is not an App Store build serves the synthetic camera when
+  `KERNARIUM_CAMERA_SOURCE` names it, serves the host's cameras with only the
+  back ones openable for `host:back` (the front camera is listed, so the
+  layout is an image's, every request to open it is refused before the host,
+  and the runtime says at start that the filter is installed), gives the guest
+  no cameras for any other value, a typo of that name included (never the
+  host's), and prints the ROTATE_AND_CROP settings that reach the cameras and
+  the process's footprint when a capture session opens, closes and after each
+  still. The Linux runtime keeps both entries and never calls back;
 - an Android-only hardware keyboard, mouse and pointer
   ([the devices](../darwin/device/input/README.md)), the last Virtio devices,
   unplugged until the application plugs them (`set_input_connected`) and then
@@ -275,7 +330,22 @@ it on foregrounding. A key press, and a game controller's button through
 `wake_for_input` (runtime API 34), also wake a guest that suspended itself, as a
 phone wakes to its keyboard; a touch does not. The runtime side of sync,
 quiesce, resume, and wake is in
-[`../docs/architecture.md`](../docs/architecture.md#guest-lifecycle).
+[`../docs/architecture.md`](../docs/architecture.md#guest-lifecycle). The
+calls report what the guest confirmed (`kernarium_runtime_settle`), and the
+application logs the guest's storage as settled only when the guest confirmed
+its writeback or none ran (`GuestSettle`).
+
+Every host-side end of the running guest asks it to write back first: the
+screen closing and Shut down below both come to `EmulatorLauncher.stop()`,
+which states the intent at once and, off the main actor, has the guest write
+its storage back (the runtime's `sync`, once, for four seconds at most) before
+the host stops it, again until the run has ended (`RunStop`, `StopSettle` and
+`GuestStopDelivery`: [GuestHost](../GuestHost/README.md)). A delivery that
+finds no guest goes on to the host's stop and the next asks again. Termination
+quiesces the guest as above, and nothing else ends a run from the host. A
+write-back worker that passed the run's check and is delayed past the run's
+end can ask the next run for one write-back, and the four seconds do not
+bound the host-file flush.
 
 iOS revokes the host GPU within seconds of `didEnterBackground`, and a guest
 request that reached Metal afterwards would make the guest's Vulkan device
@@ -343,10 +413,11 @@ purgeable space iOS Settings counts.
   down. A guest that does not hold still is called so, with Shut down and
   Check again.
 - Resume reads the space again and wakes the guest at 1.5 GiB or more. Shut
-  down is the run's stop, the same as leaving the guest: the suspension
-  already wrote the guest's storage back, nothing is asked of the guest, and
-  the run ends with the notice that the guest shut down. Kernarium has no
-  clean power-off request.
+  down is the run's stop, the same as leaving the guest, with the guest's
+  write-back first: a guest the suspension holds answers what the suspension
+  confirmed, one that ran on is asked, the screen says Shutting down, and the
+  run ends with the notice that the guest shut down. Kernarium has no clean
+  power-off request.
 - No lifecycle edge wakes a paused guest. While `BackgroundController
   .spaceHeld`, an edge holds the guest's GPU and does nothing else, in every
   background mode, so the guest stays suspended and resident in the

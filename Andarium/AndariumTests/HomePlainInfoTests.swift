@@ -3,6 +3,7 @@
 #if !FEEDBACK_MAIL && !TIP_JAR && !APP_REVIEW
 
 import AndariumCore
+import AndariumCoreTestSupport
 import SwiftUI
 import Testing
 import UIKit

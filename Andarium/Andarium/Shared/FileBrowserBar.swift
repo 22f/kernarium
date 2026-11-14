@@ -250,21 +250,44 @@ private extension View {
     }
 }
 
-/// The system document picker, or what the preview shows in its place.
+/// The system document picker, or what the preview shows in its place. The
+/// App Store configuration opens the files in place (`fileImporter`); every
+/// other build takes copies (`CopyDocumentPicker`).
 struct ImportPickerPresenter: ViewModifier {
     @Bindable var browser: FileBrowserModel
+    /// Optional: the bar shown without a model is the phone's.
+    @Environment(AppModel.self) private var model: AppModel?
 
     func body(content: Content) -> some View {
         if let standIn = browser.backend.importPickerStandIn(deliver: { browser.received($0) }) {
             content.sheet(isPresented: $browser.picking) { standIn }
         } else {
+            #if APP_STORE
             content.fileImporter(
                 isPresented: $browser.picking, allowedContentTypes: [.item], allowsMultipleSelection: true
             ) { result in
-                guard case let .success(urls) = result else { return }
-                browser.received(urls.map(FilePick.picked))
+                switch result {
+                case let .success(urls): browser.received(urls.map { FilePick.picked($0) })
+                case let .failure(error): failed(error)
+                }
             }
+            #else
+            content.documentCopyPicker(
+                isPresented: $browser.picking, types: [.item], allowsMultipleSelection: true
+            ) { result in
+                switch result {
+                case let .success(picked):
+                    browser.received(picked.urls.map { FilePick.picked($0, staged: picked.folder) })
+                case let .failure(error): failed(error)
+                }
+            }
+            #endif
         }
+    }
+
+    private func failed(_ error: Error) {
+        browser.picking = false
+        model?.documentPickerFailed(error, title: String(localized: "Not imported"))
     }
 }
 

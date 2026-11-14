@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <utility>
 #include <vector>
 
@@ -18,6 +20,8 @@ constexpr std::uint16_t tagExifIfd = 34665;
 constexpr std::uint16_t tagFocalLength = 37386;
 constexpr std::uint16_t tagBlackLevel = 50714;
 constexpr std::uint16_t tagWhiteLevel = 50717;
+constexpr std::uint16_t tagAsShotNeutral = 50728;
+constexpr std::uint16_t tagNoiseProfile = 51041;
 constexpr std::uint16_t tagColorMatrix1 = 50721;
 constexpr std::uint16_t tagColorMatrix2 = 50722;
 constexpr std::uint16_t tagCalibrationIlluminant1 = 50778;
@@ -118,6 +122,15 @@ public:
             const auto denominator = std::int32_t(u32(at + 4));
             return denominator ? double(std::int32_t(u32(at))) / denominator : 0.0;
         }
+        case 12: {
+            // IEEE-754 binary64, in the file's byte order.
+            std::uint64_t bits = 0;
+            for (std::size_t byte = 0; byte < 8; ++byte)
+                bits |= std::uint64_t(u8(at + byte)) << (little_ ? byte * 8 : (7 - byte) * 8);
+            double value = 0;
+            std::memcpy(&value, &bits, sizeof value);
+            return value;
+        }
         default: return 0.0;
         }
     }
@@ -153,6 +166,7 @@ struct Reader {
     CameraColorData data;
     bool haveColor {};
     unsigned visited {};
+    DngExposureData exposureData;
 
     void directory(std::uint32_t offset)
     {
@@ -175,6 +189,8 @@ struct Reader {
                 }
                 break;
             case tagWhiteLevel: data.whiteLevel = std::uint32_t(tiff.number(entry, 0)); break;
+            case tagAsShotNeutral: neutral(entry); break;
+            case tagNoiseProfile: noise(entry); break;
             case tagCfaPattern: {
                 const auto order = orderOf(tiff, entry);
                 if (order != BayerOrder::none) data.bayer = order;
@@ -205,6 +221,47 @@ struct Reader {
         if (next != 0) directory(next);
     }
 
+    // Three channels, as a rational or a real; a value that is not finite and
+    // positive leaves the whole point absent.
+    void neutral(const Tiff::Entry& entry)
+    {
+        if (entry.count != 3 || (entry.type != 5 && entry.type != 10 && entry.type != 11 && entry.type != 12)) return;
+        std::array<float, 3> point {};
+        for (std::size_t index = 0; index < 3; ++index) {
+            const double value = tiff.number(entry, index);
+            if (!std::isfinite(value) || value <= 0.0 || value > 1e6) return;
+            point[index] = float(value);
+        }
+        exposureData.neutralPoint = point;
+    }
+
+    // Pairs of doubles, one pair for the whole sensor or one per colour plane
+    // (red, green, blue) or per CFA position; the scale is positive and the
+    // offset is not negative.
+    void noise(const Tiff::Entry& entry)
+    {
+        if (entry.type != 12 || entry.count == 0 || entry.count % 2 != 0) return;
+        const std::size_t pairs = entry.count / 2;
+        if (pairs != 1 && pairs != 3 && pairs != 4) return;
+        std::array<std::array<float, 2>, 4> channel {};
+        for (std::size_t pair = 0; pair < pairs; ++pair) {
+            const double scale = tiff.number(entry, pair * 2);
+            const double offset = tiff.number(entry, pair * 2 + 1);
+            if (!std::isfinite(scale) || !std::isfinite(offset) || scale <= 0.0 || offset < 0.0 || scale > 1e6 || offset > 1e12)
+                return;
+            channel[pair] = {float(scale), float(offset)};
+        }
+        // One profile covers every position; three are red, green and blue.
+        if (pairs == 1) channel = {channel[0], channel[0], channel[0], channel[0]};
+        else if (pairs == 3) channel = {channel[0], channel[1], channel[1], channel[2]};
+        std::array<float, 8> profile {};
+        for (std::size_t index = 0; index < 4; ++index) {
+            profile[index * 2] = channel[index][0];
+            profile[index * 2 + 1] = channel[index][1];
+        }
+        exposureData.noiseProfile = profile;
+    }
+
     void exifDirectory()
     {
         if (exif == 0) return;
@@ -224,11 +281,20 @@ std::optional<CameraColorData> parseDngColorData(std::span<const std::uint8_t> d
 {
     const Tiff tiff(dng);
     if (!tiff.valid()) return std::nullopt;
-    Reader reader {tiff, {}, false, 0, 0, 0, {}, 0};
+    Reader reader {tiff, {}, false, 0, {}, 0, 0, {}, 0};
     reader.directory(tiff.firstDirectory());
     reader.exifDirectory();
     if (!reader.haveColor) return std::nullopt;
     return reader.data;
+}
+
+DngExposureData parseDngExposureData(std::span<const std::uint8_t> dng)
+{
+    const Tiff tiff(dng);
+    if (!tiff.valid()) return {};
+    Reader reader {tiff, {}, false, 0, {}, 0, 0, {}, 0};
+    reader.directory(tiff.firstDirectory());
+    return reader.exposureData;
 }
 
 } // namespace uml::platform

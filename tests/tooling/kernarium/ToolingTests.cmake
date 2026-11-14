@@ -42,6 +42,36 @@ uml_add_tooling_test(
     LABELS kernarium
     TIMEOUT 60)
 
+# The host's test run records no screen video and keeps no attachments: the
+# scheme says so, `start` refuses a run file that does not, and the result
+# bundle goes under the state directory.
+uml_add_tooling_test(
+    NAME kernarium-ipad-automation-recording
+    COMMAND ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_ipad_automation_recording.py
+    LABELS kernarium
+    TIMEOUT 30)
+
+# `watch` keeps the host serving: it adopts a serving host and replaces one that
+# is shown to be dead, and where it cannot tell (a heartbeat it cannot read, an
+# approval the device may have asked for, what is left of the old host) it
+# replaces nothing and ends with a status of its own. The tests run the real
+# script and its supervisor against fake `xcrun` and `xcodebuild` executables
+# in a scratch folder.
+uml_add_tooling_test(
+    NAME kernarium-ipad-automation-watch
+    COMMAND ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_ipad_automation_watch.py
+    LABELS kernarium
+    TIMEOUT 600)
+
+uml_add_tooling_test(
+    NAME kernarium-ipad-automation-watch-process
+    COMMAND ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_ipad_automation_watch_process.py
+    LABELS kernarium
+    TIMEOUT 600)
+
 uml_add_tooling_test(
     NAME kernarium-audio-interrupter
     COMMAND ${Python3_EXECUTABLE} -B
@@ -65,3 +95,12 @@ if(TARGET uml-initramfs)
         LABELS kernarium;boot
         TIMEOUT 60)
 endif()
+
+# Every host-side end of a running guest goes through the launcher's stop, which
+# has the guest write back first.
+uml_add_tooling_test(
+    NAME kernarium-host-stop-paths
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_host_stop_paths.py
+    LABELS kernarium
+    TIMEOUT 30)

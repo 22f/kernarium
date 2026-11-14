@@ -113,6 +113,20 @@ struct GadgetA32Entry : EntryDefaults {
 	}
 };
 
+/* Whether the executor asks for its run to end at this return from
+ * translated code (the gadget executor's renewal_pending()): an address space
+ * it holds was shed or closed, and it lets go of that at the start of its next
+ * run, which begins as soon as this one has ended. An executor without the
+ * notion never asks. */
+template<typename Executor>
+[[nodiscard]] inline bool renewal_pending(const Executor &executor) noexcept
+{
+	if constexpr (requires { executor.renewal_pending(); })
+		return executor.renewal_pending();
+	else
+		return false;
+}
+
 /* The translated engines intentionally share only this boundary adapter.  It
  * owns no translation state and does not select an engine, so each engine can
  * retain its own cache, compiler, and execution implementation. */
@@ -162,6 +176,14 @@ template<typename Entry, bool PollCallback, typename Executor>
 		};
 	};
 
+	/* Whether to end the run, as a spent budget does, at this return from
+	 * translated code, so that an address space shed or closed meanwhile is
+	 * let go of by the next run and not held, and grown, until this one is
+	 * over. A run that retires one instruction at a time ends on its own. */
+	const auto renewal_ends_run = [&]() noexcept {
+		return !request.single_step && renewal_pending(executor);
+	};
+
 	std::size_t retired = 0;
 	try {
 		for (;;) {
@@ -206,7 +228,8 @@ template<typename Entry, bool PollCallback, typename Executor>
 				 event == EngineEvent::interrupt))
 				return finish(ExitReason::single_step, retired);
 			if (event == EngineEvent::continued) {
-				if (retired < request.instruction_budget)
+				if (retired < request.instruction_budget &&
+					!renewal_ends_run())
 					continue;
 				return finish(ExitReason::instruction_budget, retired);
 			}
@@ -227,7 +250,8 @@ template<typename Entry, bool PollCallback, typename Executor>
 				 */
 				if (interrupt_pending())
 					return finish(ExitReason::interrupt, retired);
-				if (retired < request.instruction_budget)
+				if (retired < request.instruction_budget &&
+					!renewal_ends_run())
 					continue;
 				return finish(ExitReason::instruction_budget, retired);
 			case EngineEvent::illegal_instruction:

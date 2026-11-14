@@ -16,12 +16,12 @@ struct BusyOverlay: View {
     var body: some View {
         ZStack {
             Color.black.opacity(0.32).ignoresSafeArea()
-            VStack(alignment: .leading, spacing: 14) {
-                if let result = state.result {
-                    ended(result)
-                } else {
-                    running
-                }
+            // The card is as tall as its text. Where the text does not fit the screen (a long text in another
+            // language) the text scrolls between the title and the button, so that the button stays on the
+            // screen and the card can be closed.
+            ViewThatFits(in: .vertical) {
+                content(scrolls: false)
+                content(scrolls: true)
             }
             .padding(20)
             .frame(maxWidth: sizeClass == .regular ? 520 : 360)
@@ -32,10 +32,39 @@ struct BusyOverlay: View {
         .transition(.opacity)
         .animation(.easeInOut(duration: 0.2), value: state.cancel != nil)
         .accessibilityElement(children: .contain)
+        // The card is what the person is to deal with: VoiceOver reaches nothing behind it, and says what is
+        // happening when it appears, for a task (a copy of a large file) that can take minutes.
+        .accessibilityAddTraits(.isModal)
+        .onAppear { AccessibilityNotification.Announcement(state.title).post() }
+    }
+
+    private func content(scrolls: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let result = state.result {
+                ended(result, scrolls: scrolls)
+            } else {
+                running(scrolls: scrolls)
+            }
+        }
+    }
+
+    /// The card's text: whole, or in a scroll view that takes the height the screen leaves.
+    @ViewBuilder
+    private func detail(scrolls: Bool) -> some View {
+        let text = Text(state.detail.keepingTogether)
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        if scrolls {
+            ScrollView { text.frame(maxWidth: .infinity, alignment: .leading) }
+                .scrollBounceBehavior(.basedOnSize)
+        } else {
+            text
+        }
     }
 
     @ViewBuilder
-    private var running: some View {
+    private func running(scrolls: Bool) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(state.title.keepingTogether)
                 .font(.title3.weight(.bold))
@@ -49,10 +78,7 @@ struct BusyOverlay: View {
             }
         }
         ProgressBar(value: state.progress ?? 0)
-        Text(state.detail.keepingTogether)
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+        detail(scrolls: scrolls)
         if let cancel = state.cancel {
             Button("Cancel", role: .cancel, action: cancel.action)
                 .buttonStyle(.bordered)
@@ -61,20 +87,32 @@ struct BusyOverlay: View {
         }
     }
 
+    /// A check for what was done, the app's caution symbol in its caution colour for what was done in part,
+    /// and the same symbol in red for what was not done.
+    static func symbol(for style: BusyResult.Style) -> String {
+        style == .success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+    }
+
+    static func color(for style: BusyResult.Style) -> Color {
+        switch style {
+        case .success: Color.accentColor
+        case .warning: Color.orange
+        case .failure: Color.red
+        }
+    }
+
     @ViewBuilder
-    private func ended(_ result: BusyResult) -> some View {
+    private func ended(_ result: BusyResult, scrolls: Bool) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Image(systemName: result.failed ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+            // The symbol is decorative: the title says it, as the app's other cautions do.
+            Image(systemName: Self.symbol(for: result.style))
                 .font(.title3)
-                .foregroundStyle(result.failed ? Color.red : Color.accentColor)
+                .foregroundStyle(Self.color(for: result.style))
                 .accessibilityHidden(true)
             Text(state.title.keepingTogether)
                 .font(.title3.weight(.bold))
         }
-        Text(state.detail.keepingTogether)
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+        detail(scrolls: scrolls)
         Button(result.failed ? "OK" : "Done", action: result.dismiss.action)
             .buttonStyle(.borderedProminent)
             .frame(maxWidth: .infinity, alignment: .trailing)

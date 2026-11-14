@@ -2,6 +2,7 @@
 
 #import "KernariumRuntimeLoader.h"
 
+#include "../../darwin/device/camera/camera_tiers.hpp"
 #include "../../darwin/platform/apple/os_memory_limit.hpp"
 #include "../../darwin/runtime/guest_memory_budget.hpp"
 
@@ -49,6 +50,18 @@ KernariumRestartHandler restartHandler;
 std::mutex locationHandlerMutex;
 std::mutex locationRegistrationMutex;
 KernariumLocationReceiverHandler locationHandler;
+/* And for the camera state. */
+std::mutex cameraStateHandlerMutex;
+std::mutex cameraStateRegistrationMutex;
+KernariumCameraStateHandler cameraStateHandler;
+/* And for the memory pressure, with the console handler's lifetime: the pressure
+ * queue can still deliver a report while exit() destroys ordinary statics. */
+struct MemoryPressureHandlerState final {
+    std::mutex handlerMutex;
+    std::mutex registrationMutex;
+    KernariumMemoryPressureHandler handler {nil};
+};
+MemoryPressureHandlerState& memoryPressure = *new MemoryPressureHandlerState;
 /* And for the input status. */
 std::mutex inputStatusHandlerMutex;
 std::mutex inputStatusRegistrationMutex;
@@ -139,6 +152,62 @@ void updateLocationReceiverForwarder(const kernarium_runtime_api* runtime)
     }
     runtime->set_location_receiver_callback(
         wanted ? forwardLocationReceiver : nullptr, nullptr);
+}
+
+/* Runs on a runtime thread, inside the runtime's call, so it only hands the
+ * state to the main queue. */
+void forwardCameraState(void*, int state)
+{
+    KernariumCameraStateHandler handler;
+    {
+        std::lock_guard lock(cameraStateHandlerMutex);
+        handler = cameraStateHandler;
+    }
+    if (handler == nil)
+        return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        handler(state);
+    });
+}
+
+void updateCameraStateForwarder(const kernarium_runtime_api* runtime)
+{
+    std::lock_guard registration(cameraStateRegistrationMutex);
+    bool wanted;
+    {
+        std::lock_guard lock(cameraStateHandlerMutex);
+        wanted = cameraStateHandler != nil;
+    }
+    runtime->set_camera_state_callback(
+        wanted ? forwardCameraState : nullptr, nullptr);
+}
+
+/* Runs on a runtime thread, inside the runtime's call, so it only hands the
+ * report to the main queue. */
+void forwardMemoryPressure(void*, int level, int response)
+{
+    KernariumMemoryPressureHandler handler;
+    {
+        std::lock_guard lock(memoryPressure.handlerMutex);
+        handler = memoryPressure.handler;
+    }
+    if (handler == nil)
+        return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        handler(level, response);
+    });
+}
+
+void updateMemoryPressureForwarder(const kernarium_runtime_api* runtime)
+{
+    std::lock_guard registration(memoryPressure.registrationMutex);
+    bool wanted;
+    {
+        std::lock_guard lock(memoryPressure.handlerMutex);
+        wanted = memoryPressure.handler != nil;
+    }
+    runtime->set_memory_pressure_callback(
+        wanted ? forwardMemoryPressure : nullptr, nullptr);
 }
 
 /* Runs on a runtime thread, inside the runtime's call, so it only hands the
@@ -315,7 +384,11 @@ __attribute__((constructor)) void isolateGuestTimerFromApplicationThreads()
         api->send_pointer == nullptr ||
         api->send_mouse == nullptr ||
         api->set_input_status_callback == nullptr ||
-        api->set_network_notice == nullptr) {
+        api->set_network_notice == nullptr ||
+        api->set_camera_state_callback == nullptr ||
+        api->set_camera_rotation == nullptr ||
+        api->plan_camera_reserve == nullptr ||
+        api->set_memory_pressure_callback == nullptr) {
         std::fputs("Kernarium: runtime API validation failed\n", stderr);
         return false;
     }
@@ -367,6 +440,8 @@ __attribute__((constructor)) void isolateGuestTimerFromApplicationThreads()
     updateConsoleOutputForwarder(api);
     updateRestartForwarder(api);
     updateLocationReceiverForwarder(api);
+    updateCameraStateForwarder(api);
+    updateMemoryPressureForwarder(api);
     updateInputStatusForwarder(api);
 #ifndef UML_APP_STORE_APPLICATION
     /* Optional: only a runtime built for automation has it. */
@@ -431,22 +506,37 @@ extern "C" void kernarium_runtime_loader_request_stop(void)
         runtime->request_stop();
 }
 
-extern "C" int kernarium_runtime_loader_sync(void)
+/* With no runtime loaded there is no guest, so nothing to settle: a report that
+ * fits says NO_GUEST, and one that does not is refused as the runtime refuses
+ * it. */
+static int noRuntime(kernarium_runtime_settle* settle)
 {
-    const kernarium_runtime_api* runtime = api();
-    return runtime == nullptr ? -1 : runtime->sync();
+    if (settle != nullptr) {
+        if (settle->struct_size < sizeof(*settle))
+            return -EINVAL;
+        settle->reserved = 0U;
+        settle->guest_storage = KERNARIUM_RUNTIME_GUEST_STORAGE_NO_GUEST;
+        settle->guest_suspension = KERNARIUM_RUNTIME_GUEST_SUSPENSION_NOT_ASKED;
+    }
+    return -1;
 }
 
-extern "C" int kernarium_runtime_loader_quiesce(void)
+extern "C" int kernarium_runtime_loader_sync(kernarium_runtime_settle* settle)
 {
     const kernarium_runtime_api* runtime = api();
-    return runtime == nullptr ? -1 : runtime->quiesce();
+    return runtime == nullptr ? noRuntime(settle) : runtime->sync(settle);
 }
 
-extern "C" int kernarium_runtime_loader_quiesce_resident(void)
+extern "C" int kernarium_runtime_loader_quiesce(kernarium_runtime_settle* settle)
 {
     const kernarium_runtime_api* runtime = api();
-    return runtime == nullptr ? -1 : runtime->quiesce_resident();
+    return runtime == nullptr ? noRuntime(settle) : runtime->quiesce(settle);
+}
+
+extern "C" int kernarium_runtime_loader_quiesce_resident(kernarium_runtime_settle* settle)
+{
+    const kernarium_runtime_api* runtime = api();
+    return runtime == nullptr ? noRuntime(settle) : runtime->quiesce_resident(settle);
 }
 
 extern "C" void kernarium_runtime_loader_resume(void)
@@ -722,6 +812,40 @@ extern "C" uint32_t kernarium_runtime_loader_gpu_budget_mib(
         parameters);
 }
 
+extern "C" uint32_t kernarium_runtime_loader_camera_reserve_mib(
+    uint32_t gpuBudgetMiB)
+{
+    return static_cast<uint32_t>(uml::camera::cameraHostMemoryReserveMiB(
+        uml::camera::cameraTierForBudget(
+            static_cast<uint64_t>(gpuBudgetMiB) << 20)));
+}
+
+extern "C" uint32_t kernarium_runtime_loader_plan_camera_reserve_mib(
+    uint32_t gpuBudgetMiB,
+    const char* calibrationPath,
+    uint32_t rediscover,
+    uint32_t* exact)
+{
+    const auto ceiling = [&]() -> uint32_t {
+        if (exact != nullptr)
+            *exact = 0;
+        return kernarium_runtime_loader_camera_reserve_mib(gpuBudgetMiB);
+    };
+    const kernarium_runtime_api* runtime = api();
+    if (runtime == nullptr)
+        return ceiling();
+    kernarium_runtime_camera_reserve plan {};
+    plan.struct_size = sizeof(plan);
+    if (rediscover != 0)
+        plan.flags = KERNARIUM_RUNTIME_CAMERA_PLAN_DISCOVER_AGAIN;
+    if (runtime->plan_camera_reserve(gpuBudgetMiB, calibrationPath, &plan) != 0 ||
+        plan.basis != KERNARIUM_RUNTIME_CAMERA_RESERVE_EXACT)
+        return ceiling();
+    if (exact != nullptr)
+        *exact = 1;
+    return plan.reserve_mib;
+}
+
 extern "C" int kernarium_runtime_loader_set_microphone(int enabled)
 {
     const kernarium_runtime_api* runtime = api();
@@ -787,6 +911,36 @@ extern "C" void kernarium_runtime_loader_set_location_receiver_handler(
     const kernarium_runtime_api* runtime = api();
     if (runtime != nullptr)
         updateLocationReceiverForwarder(runtime);
+}
+
+extern "C" void kernarium_runtime_loader_set_camera_state_handler(
+    KernariumCameraStateHandler handler)
+{
+    {
+        std::lock_guard lock(cameraStateHandlerMutex);
+        cameraStateHandler = [handler copy];
+    }
+    const kernarium_runtime_api* runtime = api();
+    if (runtime != nullptr)
+        updateCameraStateForwarder(runtime);
+}
+
+extern "C" void kernarium_runtime_loader_set_memory_pressure_handler(
+    KernariumMemoryPressureHandler handler)
+{
+    {
+        std::lock_guard lock(memoryPressure.handlerMutex);
+        memoryPressure.handler = [handler copy];
+    }
+    const kernarium_runtime_api* runtime = api();
+    if (runtime != nullptr)
+        updateMemoryPressureForwarder(runtime);
+}
+
+extern "C" int kernarium_runtime_loader_set_camera_rotation(uint32_t degrees)
+{
+    const kernarium_runtime_api* runtime = api();
+    return runtime == nullptr ? -ENODEV : runtime->set_camera_rotation(degrees);
 }
 
 extern "C" void kernarium_runtime_loader_set_input_status_handler(

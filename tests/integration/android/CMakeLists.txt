@@ -37,6 +37,46 @@ if(UML_ANDROID_ADB_DEBUGGING_RELEASE AND TARGET uml-darwin-android17)
         RESOURCE_GROUPS cpus:4)
 endif()
 
+# Every installation's serial number and eth0 address (identity.json beside the
+# data disk): the guest reports the file's values, a reboot and a new launch
+# keep them, and a second instance gets its own. It boots Android three times
+# with the macOS launcher, so it is opt-in: name the release under test.
+set(UML_ANDROID_INSTALLATION_IDENTITY_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-installation-identity test boots")
+if(UML_ANDROID_INSTALLATION_IDENTITY_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-installation-identity
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_installation_identity.py
+            --release ${UML_ANDROID_INSTALLATION_IDENTITY_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+        LABELS guest;boot;android
+        TIMEOUT 3600
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
+# The same runner with --image-inputs, for a release built from this
+# repository's overlay: wlan0's address derived from eth0's, the Wi-Fi joined,
+# no IPv6 link-local address on eth0 and the macvlan, and the adb key that no
+# application may read. The accepted release predates
+# these image inputs and fails it, so it names its own release.
+set(UML_ANDROID_INSTALLATION_IDENTITY_IMAGE_RELEASE "" CACHE PATH
+    "Installed Android release directory, built with the installation identity image inputs, that android-installation-identity-image boots")
+if(UML_ANDROID_INSTALLATION_IDENTITY_IMAGE_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-installation-identity-image
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_installation_identity.py
+            --release ${UML_ANDROID_INSTALLATION_IDENTITY_IMAGE_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+            --image-inputs
+        LABELS guest;boot;android
+        TIMEOUT 3600
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
 # A fresh guest starts in Setup Wizard; the runner completes the wizard through
 # its pages and checks that the harness helper (boot_android.py --provision)
 # reaches the same end state. It boots Android twice with the macOS launcher, so
@@ -147,23 +187,26 @@ if(UML_ANDROID_VIDEO_SUSPEND_RELEASE AND TARGET uml-darwin-android17)
 endif()
 
 # The guest's one Wi-Fi network (the Wi-Fi module's overlay and the boot script
-# of android/lineage-24): with the internet checks failing, the network stays
-# enabled and joined, and joins again after a suspend and after a restart; a
-# joined network keeps its settings, a forgotten one stays forgotten and Wi-Fi
-# that is off stays off. With a previous release named, a data disk that it
-# left with the network disabled is repaired by the first boot of the release
-# under test, once. It boots Android with the macOS launcher, so it is opt-in:
-# name the release under test, and the previous release for the upgrade section.
+# of android/lineage-24, and the validation of routes p0029 and p0033): with the
+# internet checks failing, the network stays enabled and joined, validated, and
+# shows only Android's Wi-Fi mark, also when a sign-in or block page answers the
+# probe; it joins again after a suspend and after a restart; a joined network
+# keeps its settings, a forgotten one stays forgotten and Wi-Fi that is off
+# stays off. With previous releases named, the data disk of each is booted by the
+# release under test: one that a release left with the network disabled is
+# repaired once, and one that never disables it is left alone, and a failed check
+# shows only the warning on both. It boots Android with the macOS launcher, so
+# it is opt-in: name the release under test, and the previous releases (a
+# ;-separated list) for the upgrade sections.
 set(UML_ANDROID_WIFI_NETWORK_RELEASE "" CACHE PATH
     "Installed Android release directory that the android-wifi-network test boots")
-set(UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE "" CACHE PATH
-    "Installed Android release whose data disk the android-wifi-network test upgrades (empty: no upgrade section)")
+set(UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE "" CACHE STRING
+    "Installed Android release directories (a ;-separated list) whose data disks the android-wifi-network test upgrades (empty: no upgrade section)")
 if(UML_ANDROID_WIFI_NETWORK_RELEASE AND TARGET uml-darwin-android17)
     set(wifi_network_previous)
-    if(UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE)
-        set(wifi_network_previous
-            --previous-release ${UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE})
-    endif()
+    foreach(previous_release IN LISTS UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE)
+        list(APPEND wifi_network_previous --previous-release ${previous_release})
+    endforeach()
     uml_add_integration_test(
         NAME android-wifi-network
         COMMAND ${Python3_EXECUTABLE}
@@ -172,7 +215,27 @@ if(UML_ANDROID_WIFI_NETWORK_RELEASE AND TARGET uml-darwin-android17)
             --emulator $<TARGET_FILE:uml-darwin-android17>
             ${wifi_network_previous}
         LABELS guest;boot;android
-        TIMEOUT 5400
+        TIMEOUT 9000
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
+# The launcher's restart-loop guard on an Android guest: a guest restarted after
+# the launcher's 15 s window but before its boot finishes ends the launch with
+# status 3 after eight boots, and restarts after finished boots (a reboot
+# suite's) are never limited. It boots Android with the macOS launcher, so it
+# is opt-in: name the release under test.
+set(UML_ANDROID_RESTART_LOOP_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-restart-loop test boots")
+if(UML_ANDROID_RESTART_LOOP_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-restart-loop
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_restart_loop.py
+            --release ${UML_ANDROID_RESTART_LOOP_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+        LABELS guest;boot;android
+        TIMEOUT 3600
         PROCESSORS 4
         RESOURCE_GROUPS cpus:4)
 endif()
@@ -247,6 +310,43 @@ if(UML_ANDROID_ORIENTATION_RELEASE AND TARGET uml-darwin-android17)
         RESOURCE_GROUPS cpus:4)
 endif()
 
+# The magnetometer (android/lineage-24/overlay/sensors) and the compass feature:
+# the runner plays the host application over a vsock forward to the motion port
+# with the androidboot.kernarium.compass=1 argument, and a foreground client (the
+# motion probe, tests/integration/android/motion/build-apk.sh) registers a
+# listener for the field the runner sends for each mount. A second boot without
+# the argument checks that the image lists no sensor and declares no feature. It
+# boots Android with the macOS launcher, so it is opt-in: name the release under
+# test and the probe application's APK.
+set(UML_ANDROID_COMPASS_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-compass test boots")
+set(UML_ANDROID_COMPASS_PROBE_APK "" CACHE FILEPATH
+    "AndariumMotionProbe.apk built by tests/integration/android/motion/build-apk.sh")
+if(UML_ANDROID_COMPASS_RELEASE AND UML_ANDROID_COMPASS_PROBE_APK AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-compass
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_compass.py
+            --release ${UML_ANDROID_COMPASS_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+            --probe-apk ${UML_ANDROID_COMPASS_PROBE_APK}
+        LABELS guest;boot;android
+        TIMEOUT 2400
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+    uml_add_integration_test(
+        NAME android-compass-absent
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_compass.py
+            --release ${UML_ANDROID_COMPASS_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+            --expect none
+        LABELS guest;boot;android
+        TIMEOUT 1800
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
 # The gamepad relay, a vendor daemon of the image's overlay
 # (android/lineage-24/overlay/gamepad): the runner plays the host application
 # over a vsock forward to the relay's port, creates a controller of each driver
@@ -267,6 +367,25 @@ if(UML_ANDROID_GAMEPAD_RELEASE AND UML_ANDROID_GAMEPAD_PROBE_APK AND TARGET uml-
             --release ${UML_ANDROID_GAMEPAD_RELEASE}
             --emulator $<TARGET_FILE:uml-darwin-android17>
             --probe-apk ${UML_ANDROID_GAMEPAD_PROBE_APK}
+        LABELS guest;boot;android
+        TIMEOUT 3600
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
+# The management console's sync on an Android guest, whose init leaves SysRq
+# off: a file the guest holds dirty reaches the host's data image once sync
+# replies, and survives a hard kill of the emulator. It boots Android with the
+# macOS launcher, so it is opt-in: name the release under test.
+set(UML_ANDROID_SYNC_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-sync test boots")
+if(UML_ANDROID_SYNC_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-sync
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_sync.py
+            --release ${UML_ANDROID_SYNC_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
         LABELS guest;boot;android
         TIMEOUT 3600
         PROCESSORS 4

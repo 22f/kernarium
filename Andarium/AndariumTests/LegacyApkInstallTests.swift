@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AndariumCore
+import AndariumCoreTestSupport
 import CryptoKit
 import Foundation
 import SwiftUI
@@ -33,7 +34,7 @@ private func fileDigest(_ url: URL) -> String? {
 }
 
 /// An adb identity for the production path; the fake adbd never asks it to sign.
-private func throwawayIdentity() throws -> AdbKeyStore.Identity {
+func throwawayIdentity() throws -> AdbKeyStore.Identity {
     var failure: Unmanaged<CFError>?
     let attributes: [CFString: Any] = [
         kSecAttrKeyType: kSecAttrKeyTypeRSA, kSecAttrKeySizeInBits: 2048, kSecAttrIsPermanent: false,

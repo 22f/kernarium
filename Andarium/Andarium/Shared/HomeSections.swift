@@ -75,8 +75,7 @@ struct OptionRow<Control: View>: View {
             IconTile(symbol: symbol, color: dimmed ? .gray : .accentColor)
                 .opacity(dimmed ? 0.55 : 1)
             VStack(alignment: .leading, spacing: 1) {
-                // A long title wraps (a translation, or a large text size) rather
-                // than being cut.
+                // A long title (a translation) wraps rather than being cut.
                 Text(title)
                     .fixedSize(horizontal: false, vertical: true)
                     .opacity(dimmed ? 0.55 : 1)
@@ -187,11 +186,8 @@ extension VerticalAlignment {
 /// One row of the Virtual machine section: the icon tile, the title with one
 /// line under it, anything further under that line in the same column (a bar,
 /// a note), and the row's button at the end. The text column reads as one
-/// accessibility element; the button is the other. At accessibility text
-/// sizes the button moves under the text, which then has the whole width.
+/// accessibility element; the button is the other.
 struct SystemRow<Below: View>: View {
-    @Environment(\.dynamicTypeSize) private var typeSize
-
     let symbol: String
     let title: String
     let subtitle: String
@@ -202,14 +198,6 @@ struct SystemRow<Below: View>: View {
     @ViewBuilder var below: Below
 
     var body: some View {
-        Group {
-            if typeSize.isAccessibilitySize { stacked } else { inline }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-    }
-
-    private var inline: some View {
         HStack(alignment: .headerCenter, spacing: 12) {
             tile
             VStack(alignment: .leading, spacing: 8) {
@@ -221,22 +209,8 @@ struct SystemRow<Below: View>: View {
             .accessibilityElement(children: .combine)
             capsule
         }
-    }
-
-    private var stacked: some View {
-        HStack(alignment: .top, spacing: 12) {
-            tile
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 8) {
-                    heading
-                    below
-                }
-                .accessibilityElement(children: .combine)
-                capsule
-            }
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
     }
 
     private var tile: some View {
@@ -325,16 +299,16 @@ struct SnapshotsRow: View {
 
 // MARK: Capabilities
 
-/// What the guest may use of this device: the location and the microphone,
-/// which iOS asks about when they are turned on, and the haptics on a device
-/// that has them. The motion sensors are always the guest's where the device
+/// What the guest may use of this device: the location, the microphone and the
+/// camera, which iOS asks about when they are turned on, and the haptics on a
+/// device that has them. The motion sensors are always the guest's where the device
 /// has them, so there is no row for them.
 struct CapabilitiesSection: View {
     @Environment(AppModel.self) private var model
 
     /// The rows, top to bottom; VoiceOver reads them in this order.
     enum Row: CaseIterable {
-        case location, microphone, haptics
+        case location, microphone, camera, haptics
     }
 
     /// The rows a device shows: Haptics only where there is a Taptic Engine
@@ -352,9 +326,12 @@ struct CapabilitiesSection: View {
                     switch row {
                     case .location: LocationRow()
                     case .microphone: MicrophoneRow()
+                    case .camera: CameraRow()
                     case .haptics: HapticsRow()
                     }
                 }
+            } footer: {
+                ForEach(CameraWords.notes(access: model.cameraAccess), id: \.self) { SectionNote($0) }
             }
             .id("capabilities")
         }
@@ -382,6 +359,30 @@ struct MicrophoneRow: View {
             .labelsHidden()
         }
         .accessibilityHint(denied ? String(localized: "Andarium is not allowed to use the microphone. Turning this on offers to open Settings.") : "")
+    }
+}
+
+/// What the guest's camera apps see: the device's cameras, from the next
+/// start. The switch is read when the guest starts and never during a run, so
+/// it is on Home, which shows only while no guest runs.
+struct CameraRow: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let access = model.cameraAccess
+        OptionRow(
+            title: CameraWords.title, symbol: "camera.fill",
+            detail: CameraWords.detail(for: access), dimmed: access.refuses
+        ) {
+            Toggle(CameraWords.title, isOn: Binding(
+                get: { model.cameraShownOn },
+                set: { model.setCamera($0) }
+            ))
+            .labelsHidden()
+            .disabled(!access.offered)
+            .accessibilityIdentifier("home-camera-switch")
+        }
+        .accessibilityHint(CameraWords.hint(for: access))
     }
 }
 
@@ -487,6 +488,37 @@ extension View {
     func locationAccessAlert() -> some View { modifier(LocationAccessAlert()) }
 }
 
+/// When iOS refuses the camera, or the device's settings restrict it, there is
+/// nothing to ask: say why, and offer Andarium's page in Settings where it has
+/// the way out.
+struct CameraAccessAlert: ViewModifier {
+    @Environment(AppModel.self) private var model
+
+    func body(content: Content) -> some View {
+        @Bindable var model = model
+        let words = CameraWords.alert(for: model.cameraAccess)
+        content.alert(
+            words?.title ?? "", isPresented: Binding(
+                get: { model.permissionPrompt == .camera && words != nil },
+                set: { if !$0, model.permissionPrompt == .camera { model.permissionPrompt = nil } }
+            )
+        ) {
+            if words?.offersSettings == true {
+                Button("Open Settings") { model.openCameraSettings() }
+                Button("Not now", role: .cancel) {}
+            } else {
+                Button("OK", role: .cancel) {}
+            }
+        } message: {
+            Text((words?.message ?? "").keepingTogether)
+        }
+    }
+}
+
+extension View {
+    func cameraAccessAlert() -> some View { modifier(CameraAccessAlert()) }
+}
+
 #if !APP_STORE
 
 // MARK: JIT
@@ -526,13 +558,13 @@ struct BackupOption: View {
     @Binding var isOn: Bool
 
     var body: some View {
-        OptionRow(title: String(localized: "Back up virtual machine data"), symbol: "icloud.fill") {
-            Toggle("Back up virtual machine data", isOn: $isOn).labelsHidden()
+        OptionRow(title: String(localized: "Include in backups"), symbol: "icloud.fill") {
+            Toggle("Include in backups", isOn: $isOn).labelsHidden()
         }
     }
 }
 
-/// What the Back up guest data row does to iCloud and computer backups.
+/// What the Include in backups row does to iCloud and computer backups.
 /// Snapshots are never in a backup, which the note says once there are some.
 struct BackupNote: View {
     let host: HostDevice

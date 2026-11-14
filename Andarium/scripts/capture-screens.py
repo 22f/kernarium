@@ -166,6 +166,7 @@ def icp(id: str, screen: str, description: str, *args: str, dark: bool = False, 
 
 SYSTEM = ("-systemMicrophone", "YES")
 SYSTEM_LOCATION = ("-systemLocation", "YES")
+SYSTEM_CAMERA = ("-systemCamera", "YES")
 
 
 def system_mic(id: str, group: str, screen: str, description: str, privacy: str, *flow: str) -> Shot:
@@ -180,6 +181,14 @@ def system_location(id: str, group: str, screen: str, description: str, privacy:
         id, group, screen, description, SYSTEM_LOCATION, privacy=privacy, service="location", flow=tuple(flow),
         alert=privacy == "reset" and screen == "home-location-ask" if alert is None else alert,
     )
+
+
+def system_camera(id: str, group: str, screen: str, description: str) -> Shot:
+    """A shot with the Camera switch on the Simulator's own permission, reset first so that it has not been asked.
+    `simctl privacy` has no camera service to grant or revoke, so only the question can be raised this way; the
+    refused and restricted states are the preview's own (`home-camera-denied`, `home-camera-restricted`). The service
+    is `all` because a reset names no camera."""
+    return Shot(id, group, screen, description, SYSTEM_CAMERA, privacy="reset", service="all", alert=True)
 
 
 def boot_stages(prefix: str, screen: str, names: list[str], what: str, dark_step: int | None = None) -> list[Shot]:
@@ -199,14 +208,17 @@ def boot_stages(prefix: str, screen: str, names: list[str], what: str, dark_step
 
 SHOTS: list[Shot] = [
     # Home
-    s("home", "Home", "home", "Home with a configured guest: Virtual machine (matched rows: CPU and memory with Edit, Resolution with Change, then Storage with its usage bar and Resize, and Snapshots), JIT (in the builds that have it), Capabilities, Backup, Recovery and erase, and the Start bar.", dark=True),
+    s("home", "Home", "home", "Home with a configured guest: Virtual machine (matched rows: CPU and memory with Edit, Resolution with Change, then Storage with its usage bar and Resize, and Snapshots), JIT (in the builds that have it), Capabilities, Backup, Erase virtual machine, and the Start bar.", dark=True),
     s("home-welcome", "Home", "welcome", "Home before any guest exists: the welcome and Set up virtual machine. First screen of the initial setup."),
     s("home-first-start", "Home", "home-new", "A guest just created and not yet started: Home as it is before the first start."),
-    s("home-resolution", "Home", "home-resolution", "Home scrolled to Virtual machine: the Resolution row between CPU and memory and Storage, with the guest's pixels and, where the choice is an end, its name (Native), and Change.", dark=True),
+    s("home-resolution", "Home", "home-resolution", "Home scrolled to Virtual machine: the Resolution row between CPU and memory and Storage, with the guest's pixels (nobody has chosen, and the device states no memory limit: 320 dpi) and, where the choice is an end, its name, and Change.", dark=True),
+    s("home-resolution-low-memory", "Home", "home-resolution", "The Resolution row of someone who never chose, on a device the system holds to 2,867 MiB of memory (an iPad mini 6's): 240 dpi, the pixels alone.", "-memoryLimitMiB", "2867"),
+    s("home-resolution-native-2", "Home", "home-resolution", "The Resolution row of someone who never chose, on a 744 x 1133 point screen of native scale 2.0 with no memory limit: 320 dpi is native there, so the line says Native.", "-displayNative", "2", "-displayPoints", "744x1133"),
+    s("home-resolution-native-2-low-memory", "Home", "home-resolution", "The same screen held to 2,867 MiB: 240 dpi, the pixels alone.", "-displayNative", "2", "-displayPoints", "744x1133", "-memoryLimitMiB", "2867"),
     s("home-resolution-fastest", "Home", "home-resolution", "The Resolution row with the fastest choice (one guest pixel to a point): the line says Fastest.", "-displayScale", "1"),
     s("home-resolution-middle", "Home", "home-resolution", "The Resolution row with a choice between the ends: the pixels alone.", "-displayScale", "1.5"),
     s("home-resolution-one-choice", "Home", "home-resolution", "The Resolution row on a screen with one choice (native scale 1.0): the resolution without a name, and Change dimmed.", "-displayNative", "1"),
-    s("home-capabilities", "Home", "home-capabilities", "Home scrolled to Capabilities: Location off, Microphone off and, on an iPhone, Haptics on (their defaults), no notes.", dark=True),
+    s("home-capabilities", "Home", "home-capabilities", "Home scrolled to Capabilities: Location off, Microphone off, Camera off and, on an iPhone, Haptics on (their defaults), no notes.", dark=True),
     s("home-jit", "Home", "home-jit", "Home scrolled to JIT: the toggle on and a debugger attached, so the note says it is ready for the next start.", dark=True),
     s("home-jit-no-debugger", "Home", "home-jit-no-debugger", "JIT on with no debugger attached: the note says to open Andarium from StikDebug."),
     s("home-jit-fallback", "Home", "home-jit-fallback", "Home after a start that ran without the JIT it was asked for: the note says StikDebug was not connected."),
@@ -223,9 +235,14 @@ SHOTS: list[Shot] = [
     s("home-capabilities-location-restricted-alert", "Home", "home-location-restricted-alert", "Turning Location on while the device restricts it: the alert explains and has only OK."),
     s("home-capabilities-location-services-off", "Home", "home-location-services-off", "Capabilities while Location Services are off for the whole device: the row is dimmed and says so."),
     s("home-capabilities-location-services-off-alert", "Home", "home-location-services-off-alert", "Turning Location on while Location Services are off: the alert explains where to turn them on."),
-    s("home-backup", "Home", "home-backup", "Home scrolled to Backup: the guest-data backup toggle and a one-line note."),
-    s("home-first-start-recovery", "Home", "home-new-recovery", "Home scrolled to Recovery and erase on a guest not yet started: Start in recovery is disabled until the first start.", dark=True),
-    s("home-recovery-erase", "Home", "home-recovery-erase", "Home scrolled to Recovery and erase: Start in recovery and Erase virtual machine."),
+    s("home-capabilities-camera-on", "Home", "home-camera-on", "Capabilities with Camera on, iOS having allowed it.", dark=True),
+    s("home-capabilities-camera-denied", "Home", "home-camera-denied", "Capabilities after iOS refused the camera or its app permission was removed: the row is dimmed and says it is not allowed in Settings.", dark=True),
+    s("home-capabilities-camera-alert", "Home", "home-camera-alert", "Turning Camera on while iOS refuses it: the alert that offers Settings.", dark=True),
+    s("home-capabilities-camera-restricted", "Home", "home-camera-restricted", "Capabilities on a device that restricts the camera (Screen Time or a profile): the row is dimmed and says it is restricted.", dark=True),
+    s("home-capabilities-camera-restricted-alert", "Home", "home-camera-restricted-alert", "Turning Camera on while the device restricts it: the alert explains and has only OK.", dark=True),
+    s("home-capabilities-camera-unavailable", "Home", "home-camera-unavailable", "Capabilities on a device with no camera (the Simulator, say): Camera is disabled and the note says there is no camera to share.", dark=True),
+    s("home-backup", "Home", "home-backup", "Home scrolled to Backup: the Include in backups switch and the note under it."),
+    s("home-erase", "Home", "home-erase", "Home scrolled to the end: Erase virtual machine in a card of its own, with no heading.", dark=True),
     s("home-storage-grow", "Home", "home-grow", "Virtual machine with a larger storage size chosen: the Storage row's bar outlines the new size and the note under it says the growth takes effect at the next start.", dark=True),
     s("home-storage-max", "Home", "home-max", "Virtual machine with storage at its largest size (128 GiB, in 4 GiB steps): the note under the Storage bar says so and Resize is dimmed.", dark=True),
     s("home-update", "Home", "home-update", "A system update waiting: the card above the Start bar."),
@@ -249,12 +266,19 @@ SHOTS: list[Shot] = [
     s("system-edit", "Sheets", "system-edit", "The System sheet, opened from Edit: vCPUs and memory with the device's limits, and beneath them the estimated VRAM (graphics memory) with the note that it is separate from the guest's RAM. A guest at the default memory shows no warning.", dark=True),
     s("system-edit-memory-high", "Sheets", "system-memory-warning", "The System sheet with memory above what a new guest gets (the most the device offers): the ticks past the default are orange, the line beneath the ruler says iOS is likely to close Andarium above it and the VRAM estimate is orange.", dark=True),
     s("system-edit-vram-warning", "Sheets", "system-edit", "The System sheet on a device whose default is held below the line where iOS is likely to close Andarium (an iPhone 18 Pro Max mock) with memory between the two: the ticks past the default are orange and beyond the closing size red, the line beneath says games may run out of graphics memory and the VRAM estimate is orange. Home shows no notice at this size.", "-device", "iphone-18-pro-max", "-memoryMiB", "3584", dark=True),
+    s("system-edit-camera-off", "Sheets", "system-edit", "The System sheet on an iPad mini 6 mock with Camera off: the VRAM estimate is the GPU's whole budget.", "-device", "ipad-mini-6"),
+    s("system-edit-camera-on", "Sheets", "system-edit-camera", "The System sheet on an iPad mini 6 mock with Camera on and allowed: the VRAM estimate is the budget less what the layout of the cameras holds (the runtime's figure for them, 171 MiB in this mock; the ceiling, 197 MiB, where the runtime cannot say).", "-device", "ipad-mini-6"),
+    s("system-edit-camera-off-phone", "Sheets", "system-edit", "The System sheet on an iPhone 18 Pro Max mock with Camera off: the VRAM estimate is the GPU's whole budget.", "-device", "iphone-18-pro-max"),
+    s("system-edit-camera-on-phone", "Sheets", "system-edit-camera", "The System sheet on an iPhone 18 Pro Max mock with Camera on and allowed: the VRAM estimate is the budget less what the layout of the cameras holds (197 MiB, the ceiling, in this mock).", "-device", "iphone-18-pro-max"),
     s("system-edit-ipad-mini", "Sheets", "system-edit", "The System sheet on an iPad mini 6 mock at its default memory (1.5 GiB): the two sizes coincide, so no graphics warning shows and the VRAM estimate is plain.", "-device", "ipad-mini-6"),
     s("system-edit-memory-mac-64", "Sheets", "system-edit", "The System sheet on a Mac mock with 64 GiB and a guest of 24 GiB: the memory ruler has about a thousand positions, so its labels thin out to round numbers of gibibytes that do not touch, and no short ticks are drawn.", "-device", "mac-64-gib", "-memoryMiB", "24576"),
-    s("resolution-sheet", "Sheets", "resolution-sheet", "The Resolution sheet, opened from Change: every choice with its pixels, and under them its density and, at the ends, Native and Fastest; the current choice is ticked.", dark=True),
+    s("resolution-sheet", "Sheets", "resolution-sheet", "The Resolution sheet, opened from Change: every choice with its pixels, and under them its density and, at the ends, Native and Fastest; the current choice is ticked (nobody has chosen, and the device states no memory limit: 320 dpi).", dark=True),
+    s("resolution-sheet-low-memory", "Sheets", "resolution-sheet", "The sheet of someone who never chose, on a device held to 2,867 MiB of memory: 240 dpi is ticked.", "-memoryLimitMiB", "2867"),
+    s("resolution-sheet-native-2", "Sheets", "resolution-sheet", "The sheet of someone who never chose, on a screen of native scale 2.0 with no memory limit: 1.0, 1.5 and native, with native (320 dpi) ticked.", "-displayNative", "2", "-displayPoints", "744x1133"),
+    s("resolution-sheet-native-2-low-memory", "Sheets", "resolution-sheet", "The same screen held to 2,867 MiB: 240 dpi is ticked.", "-displayNative", "2", "-displayPoints", "744x1133", "-memoryLimitMiB", "2867"),
     s("resolution-sheet-middle", "Sheets", "resolution-sheet", "The Resolution sheet with a choice between the ends ticked.", "-displayScale", "2"),
-    s("resolution-sheet-native-2-3", "Sheets", "resolution-sheet", "The sheet on a screen whose native scale is 2.3: 1.0, 1.5, 2.0 and 2.3.", "-displayNative", "2.3"),
-    s("resolution-sheet-native-2-61", "Sheets", "resolution-sheet", "The sheet on a screen whose native scale is 2.61: 2.5 is left out for being near native, so 1.0, 1.5, 2.0 and 2.61.", "-displayNative", "2.61"),
+    s("resolution-sheet-native-2-3", "Sheets", "resolution-sheet", "The sheet on a screen whose native scale is 2.3: 1.0, 1.5, 2.0 and 2.3, with 2.0 ticked.", "-displayNative", "2.3"),
+    s("resolution-sheet-native-2-61", "Sheets", "resolution-sheet", "The sheet on a screen whose native scale is 2.61: 2.5 is left out for being near native, so 1.0, 1.5, 2.0 and 2.61, with 2.0 ticked.", "-displayNative", "2.61"),
     s("erase-alert", "Alerts", "erase", "Erase virtual machine: the standard destructive confirmation over Home. Confirming returns to the first-launch screen (home-welcome).", dark=True),
     s("info", "Info", "info", "Info: the app and version, System info (Build, Android version, Security patch, Kernel, Architecture, Supported architectures), Project on GitHub and Acknowledgements.", dark=True),
     icp("info-icp", "info-bottom", "Info scrolled to its end in mainland China's storefront: the filing number as one centred footnote line in the secondary colour, below every section, a link to MIIT's filing site.", "-icpStorefront", "CHN", dark=True),
@@ -273,12 +297,28 @@ SHOTS: list[Shot] = [
     s("boot-first-start", "Boot", "boot-first", "First start: Storage prepares the disk and Startup sets up for the first time."),
     s("boot-update", "Boot", "boot-upgrade", "The first start after an update: Startup updates the apps."),
     s("boot-restart", "Boot", "boot-restart", "The guest restarting."),
+    s("boot-slow", "Boot", "boot-slow", "A start that has run 3 minutes 17 seconds, still at Startup: the notice above the steps says it is taking longer than usual, that it can be waited out or stopped, and that stopping needs Andarium closed in the App Switcher and opened again to start again; a red Stop and, in a build with Send feedback, Send feedback, both of one width. The steps stay in view below it.", dark=True),
+    s("boot-slow-clock-early", "Boot", "boot-slow-live", "The notice over a start that began 3 minutes 17 seconds ago, the clock running, 3 seconds after the launch: the status line and the notice show one time.", wait=3.0),
+    s("boot-slow-clock-later", "Boot", "boot-slow-live", "The same launch 9 seconds after it: the status line and the notice have both moved on by the same seconds.", wait=9.0),
+    s("boot-slow-first-start", "Boot", "boot-slow-first", "A first start 8 minutes 17 seconds in: the notice comes at eight minutes and its title does not say the start is slower than usual; the first-start note stays under the steps."),
+    s("boot-slow-update", "Boot", "boot-slow-upgrade", "The first start after an update, 8 minutes 11 seconds in: the same later notice and plain title, with the update note under the steps."),
+    s("boot-slow-recovery", "Boot", "boot-slow-recovery", "A Recovery start 3 minutes 17 seconds in: the notice over Recovery's opaque screen, with the ordinary title.", dark=True),
+    s("boot-slow-stop-dialog", "Boot", "boot-slow-stop", "Stop chosen on the notice: the dialog asks Stop the virtual machine?, says that Andarium has to be closed in the App Switcher and opened again to start it, and offers Stop (red) and Cancel. The alert is dark, as the screen under it is, whatever the system's appearance is.", dark=True),
+    s("boot-slow-recovery-stop-dialog", "Boot", "boot-slow-recovery-stop", "Stop chosen on a Recovery start's notice: the same dialog over Recovery's own screen, which follows the system's appearance, and so does the dialog.", dark=True),
+    s("boot-slow-storage", "Boot", "boot-slow-storage", "The notice over an earlier step (Storage under way): the step and the time name where the start is.", "-bootStage", "2"),
+    s("boot-slow-stopping", "Boot", "boot-slow-stopping", "Stop confirmed: the status line says Stopping\u2026, Stop's label says it too (with a spinner where the buttons are side by side) and is disabled until the run ends, and the buttons keep their size."),
+    feedback("feedback-boot", "feedback-boot", "Send feedback opened from the slow-start notice: the sheet the root presents over the boot screen. The card says a bug report and a screenshot need the virtual machine to finish starting and that the start log is attached; the log is a row of its own with its size and a remove button, and the information block carries the start's step, time and restarts."),
+    feedback("feedback-boot-filled", "feedback-boot-filled", "The same sheet with a typed problem, details and a photo: the start log stays the first row, counted in the total."),
+    feedback("feedback-boot-details", "feedback-boot-details", "The same sheet with the information block expanded: the Boot line says the step and time of the start."),
+    feedback("feedback-boot-removed", "feedback-boot-removed", "The same sheet after the start log was taken out: no row, no total, and the sheet does not attach it again."),
+    feedback("feedback-boot-finished", "feedback-boot-finished", "The sheet opened over the boot screen with a typed draft, after the start finished: it is still open, with the draft and the start log, over the running session, where the card now offers the bug report."),
     s("boot-jit", "Boot", "boot-jit", "The debugger preparing the JIT: the System image step says Preparing JIT."),
     s("boot-jit-fallback", "Boot", "boot-jit-fallback", "A boot that ran without the JIT it was asked for: a note under the steps says why."),
     *boot_stages("boot-recovery", "boot-recovery", ["System image", "Linux kernel", "Storage", "Recovery"], "Recovery boot (opaque, own stage list, no progress bar)", dark_step=3),
     # Running guest
     s("session", "Guest", "session", "The running guest with the side keys closed."),
-    s("session-tip", "Guest", "session-tip", "The side-keys tip over the running guest.", "-resetTips", "YES"),
+    s("session-tip", "Guest", "session-tip", "The side-keys tip over the running guest: the keys line and the line that says Settings holds Install APK.", "-resetTips", "YES"),
+    s("session-tip-left", "Guest", "session-tip-left", "The side-keys tip beside the keys on the left edge: the popover opens to the right of them.", "-resetTips", "YES"),
     s("session-side-keys", "Guest", "session-open", "The side keys open: Power, volume, Back, Home and Settings."),
     s("session-left-edge", "Guest", "session-left", "The side keys on the left edge."),
     s("session-volume", "Guest", "session-volume", "The volume panel after a volume key press."),
@@ -292,6 +332,11 @@ SHOTS: list[Shot] = [
     s("session-thermal-notice", "Guest", "session-thermal-notice", "The notice over the running guest that the frame rate is lowered while the device is hot."),
     s("session-network-cellular", "Guest", "session-network-cellular", "The notice over the running guest that iOS denies Andarium cellular data, with the way to Settings.", dark=True),
     s("session-network-wifi", "Guest", "session-network-wifi", "The notice over the running guest that iOS denies Andarium Wi-Fi, with the way to Settings.", dark=True),
+    s("session-camera-notice", "Guest", "session-camera-notice", "The notice over the running guest that the camera is paused while other apps share the screen (iPad Split View or Slide Over).", dark=True),
+    s("session-camera-off-notice", "Guest", "session-camera-off-notice", "The notice over the running guest that Camera is off after an app in the guest opened a camera, with how to turn it on (shut down, then Capabilities).", dark=True),
+    s("session-memory-critical", "Guest", "session-memory-critical", "The notice over the running guest that memory is critically low and iOS may close Andarium.", dark=True),
+    s("session-memory-camera", "Guest", "session-memory-camera", "The memory notice under the Camera-is-off notice, both up at once in one column.", dark=True),
+    s("session-memory-stats", "Guest", "session-memory-stats", "The memory notice below the statistics capsule.", dark=True),
     s("session-setup", "Guest", "session-setup", "The guest's own first-run setup screen."),
     s("session-off", "Guest", "session-off", "The guest's screen after it powered off."),
     s("space-pause", "Guest", "space-pause", "The running guest paused because the device is nearly out of space: the screen over it with Resume and Shut down.", dark=True),
@@ -302,7 +347,8 @@ SHOTS: list[Shot] = [
     s("recovery", "Guest", "recovery", "Recovery running."),
     s("recovery-side-keys", "Guest", "recovery-open", "Recovery with the side keys open."),
     # Settings during a session
-    s("settings", "Settings", "settings", "Settings at full height: Stats, Apps, File browser, Developer and Diagnostics.", dark=True),
+    s("settings", "Settings", "settings", "Settings at full height: Apps (Install APK) and File browser first, then Stats, Developer and Diagnostics.", dark=True),
+    s("settings-medium", "Settings", "settings-medium", "Settings as the side keys open it, at the medium detent: Apps (Install APK) and File browser at the top of the first screenful.", dark=True),
     s("settings-stats", "Settings", "settings-stats", "Settings scrolled to Stats: CPU, Memory and VRAM with bars of their share, and Frame rate.", dark=True),
     s("settings-stats-short", "Settings", "settings-stats", "Settings scrolled to Stats after three CPU readings: the bars fill from the right.", "-statsReadings", "3"),
     system_mic("home-mic-system-prompt", "Capabilities", "home-mic-alert", "The system's own question when Microphone is turned on for the first time (the Simulator's alert).", "reset"),
@@ -315,6 +361,7 @@ SHOTS: list[Shot] = [
     system_location("home-location-system-refused", "Capabilities", "home-capabilities", "Location after iOS refused it: the row is dimmed and says it is not allowed in Settings.", "revoke"),
     system_location("home-location-system-settings-prompt", "Capabilities", "home-location-alert", "Turning Location on after a refusal: Andarium explains and offers Settings.", "revoke"),
     system_location("home-location-system-revoked", "Capabilities", "home-location-on", "Location on, access taken away in Settings while Andarium was in the background, Andarium active again: the switch is off and dimmed.", "grant", "background", "revoke", "foreground"),
+    system_camera("home-camera-system-prompt", "Capabilities", "home-camera-ask", "The system's own question when Camera is turned on for the first time (the Simulator's alert), if the Simulator raises one without a camera."),
     s("settings-adb", "Settings", "settings-adb", "Developer: ADB over network on, the address a computer connects to."),
     s("settings-adb-no-address", "Settings", "settings-adb-no-address", "Developer: ADB over network on with no network address."),
     s("settings-adb-off", "Settings", "settings-adb-off", "Developer: ADB over network unavailable because USB debugging is off."),
@@ -325,17 +372,44 @@ SHOTS: list[Shot] = [
     s("overlay-install-done", "Operations", "install-done", "The install overlay at its end: App installed with Done. It stays until closed."),
     s("overlay-install-failed", "Operations", "install-failed", "The install overlay at its end: App not installed, the guest's reason and OK."),
     s("overlay-install-not-apk", "Operations", "install-not-apk", "A file that is not an app, refused at once on the overlay."),
-    s("overlay-install-bundle", "Operations", "install-bundle", "An app in several files, refused at once on the overlay."),
+    s("overlay-install-parts", "Operations", "install-parts", "The full-screen progress while an app that comes in parts (.apks, .xapk, .apkm) is sent, part by part.", wait=2.0),
+    s("overlay-install-app-bundle", "Operations", "install-app-bundle", "A file named .apks, .xapk or .apkm that holds an app bundle for publishing apps, refused once it is read."),
+    s("overlay-install-data", "Operations", "install-data", "The install overlay while an app's data files are copied, after the app is in: Cancel is back and the line counts the file.", wait=2.0),
+    s("overlay-install-done-without-data", "Operations", "install-done-without-data", "The install overlay at its end when the copy of the data files was stopped or failed: a warning (the caution symbol in orange, the title App installed, some data missing), not the plain success; the app is in, and installing the file again copies them.", dark=True),
+    s("overlay-install-done-data-not-placed", "Operations", "install-done-data-not-placed", "The install overlay at its end when some of the file's data is of a kind that is not copied, or a pack that is delivered later is left out: the same warning card, without the line about installing again."),
+    s("overlay-install-done-container", "Operations", "install-done-container", "The install overlay at its end for an app in parts that installed whole: the plain success (the check, the title App installed), to set beside the warning."),
+    s("overlay-install-encrypted", "Operations", "install-encrypted", "A file whose entries are encrypted, refused once it is read."),
+    s("overlay-install-damaged-or-encrypted", "Operations", "install-damaged-or-encrypted", "An .apkm that is not a ZIP, which may be damaged or the encrypted kind, refused once it is read."),
+    s("overlay-install-no-app", "Operations", "install-no-app", "An archive that holds no app, refused once it is read."),
+    s("overlay-install-damaged", "Operations", "install-damaged", "A file that is damaged, cut short, or whose parts do not fit together, refused once it is read."),
+    s("overlay-install-missing-split", "Operations", "install-missing-split", "The package manager's refusal of an app that lacks parts it requires."),
+    s("overlay-install-part-too-large", "Operations", "install-part-too-large", "An app with a part of 4 GiB or more, which Android cannot install, refused once the file is read."),
     # Send feedback: needs a Preview built with FEEDBACK_ADDRESS=feedback@example.com (see --help)
     feedback("feedback-menu-home", "home-menu", "Home's toolbar menu open on a configured guest: Info, then Send feedback after a separator.", dark=True, wait=3.0),
     feedback("feedback-menu-welcome", "welcome-menu", "The same menu open on the welcome screen, before any guest exists: Send feedback is reachable from the first screen.", dark=True, wait=3.0),
     feedback("feedback-entrance-settings", "settings-feedback", "Settings scrolled to Diagnostics: Send feedback is the first row, above Create bug report.", dark=True, wait=3.0),
-    feedback("feedback-empty", "feedback", "Send feedback opened from a running session's Settings, empty: the subject and body lines, the information block folded, the card that asks for a bug report and the bar (Bug report, Screenshot, Photos, Send feedback). Send is dimmed until there is a problem."),
+    feedback("feedback-empty", "feedback", "Send feedback opened from a running session's Settings, empty: the subject and body lines, the information block folded, the card that asks for a bug report and the bar (Bug report, Screenshot, Add, Send feedback). Send is enabled: a tap with the problem or the details empty says which."),
     feedback("feedback-filled", "feedback-filled", "Send feedback from a session with a problem and details, and three attachments (bug report, screenshot, photo) with their sizes and remove buttons and the total under them; the bar shows the bug report as attached.", dark=True),
     feedback("feedback-details", "feedback-details", "Send feedback filled, with the app and device details opened in full at the end of the mail."),
     feedback("feedback-large", "feedback-large", "Send feedback with attachments over 20 MiB: the total turns orange and says some mail services refuse mail over 20 MiB; Send still works."),
+    feedback("feedback-file", "feedback-file", "Send feedback with one file from Files attached, an APK: a document tile, its name and size, a remove button and the total under it. The bar has three buttons, Bug report, Screenshot and Add (a paperclip whose menu offers Photos and Files).", dark=True),
+    feedback("feedback-file-bar-xxxlarge", "feedback-file", "The same sheet at the largest standard text size: no label is cut in the bar.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryXXXL"),
+    feedback("feedback-file-long", "feedback-file-long", "A file with a long name (the end of the base cut in the middle, the extension kept) at the default text size."),
+    feedback("feedback-file-names", "feedback-file-names", "Two files named in Chinese and in Japanese: the rows keep the names as written, and so does the mail."),
+    feedback("feedback-file-mixed", "feedback-file-mixed", "Send feedback with a bug report, a screenshot, a photo and a file together, in the order they were added, one total under them."),
+    feedback("feedback-file-large", "feedback-file-large", "A file of about 1.9 GiB attached: its size is its own and the total turns orange with the warning that some mail services refuse mail over 20 MiB; Send still works. The file is mapped, never read, for the size.", dark=True),
+    feedback("feedback-file-copying", "feedback-file-copying", "The card over the sheet while a file that cannot be used where it is kept (not downloaded from its cloud storage) is copied first: a progress bar and Cancel. Send and the bar are dimmed and the file's row is not there yet; the screenshot attached before stays.", dark=True),
+    feedback("feedback-file-refused", "feedback-file-refused", "The alert after a folder and an empty file were chosen: two items weren't added, one line for each reason.", dark=True),
+    feedback("feedback-file-refused-one", "feedback-file-refused-one", "The alert for one file that was not added: the title for one item and its reason."),
+    feedback("feedback-file-refused-four", "feedback-file-refused-four", "The alert for four items that were not added for four different reasons: not enough space, a folder or a package, an empty file and a file that could not be read, a line each.", dark=True),
+    feedback("feedback-file-gone", "feedback-file-gone", "Send, after the only file attached was deleted from where it was kept: Attachment not available, the file taken out of the list.", dark=True),
+    feedback("feedback-file-picker", "feedback-file-picker", "The system's document picker over the sheet, as a tap on Files in the Add menu opens it.", wait=20.0),
+    feedback("feedback-file-menu", "feedback-file-menu", "The bar's Add menu open: Photos and Files, anchored on the button."),
     feedback("feedback-generating", "feedback-generating", "Send feedback while the bug report is made: the app's progress overlay with Cancel over the whole sheet, Settings still open beneath."),
     feedback("feedback-sent", "feedback-sent", "Send feedback once the mail was sent: the Feedback sent card with Done over the whole sheet."),
+    feedback("feedback-missing-both", "feedback-missing-both", "Send tapped with the problem and the details both empty: Can't send yet, and what to write in each.", dark=True),
+    feedback("feedback-missing-problem", "feedback-missing-problem", "Send tapped with the details written and the problem empty: the alert asks for the Problem line."),
+    feedback("feedback-missing-details", "feedback-missing-details", "Send tapped with the problem written and the details empty: the alert asks for what was done and what happened."),
     feedback("feedback-discard", "feedback-discard", "Cancel after something is typed or attached: Discard or Keep editing."),
     feedback("feedback-nomail", "feedback-nomail", "Send feedback where Mail cannot send (no account): the error and the way to fix it, and every control disabled."),
     feedback("feedback-home", "feedback-home", "Send feedback opened from Home's toolbar menu, where no virtual machine runs: the card says a bug report and a screenshot need the virtual machine running and gives three steps; the rest of the form works.", dark=True),
@@ -356,6 +430,7 @@ SHOTS: list[Shot] = [
     tipjar("tipjar-prices", "tipjar", "The tiers with four prices of very different widths, as different storefronts format them.", "-tipPrices", "mixed"),
     # End: a clean power-off returns to Home; only a failed run keeps an end screen
     s("end-failed", "End", "failed", "The screen after the guest stopped unexpectedly."),
+    s("end-stopped", "End", "stopped", "The screen after Stop on the slow-start notice: it says the person stopped the virtual machine and that Andarium must be closed in the App Switcher and opened again to start it; no fault mark, the report block starts Virtual machine ended.", dark=True),
 ]
 
 
@@ -455,6 +530,8 @@ def not_in_front(udid: str, pid: int, shot: Shot, *, after: bool = False) -> str
         return f"the app reported screen {state.get('screen')!r}, not {shot.screen!r}"
     if shot.feedback and state.get("feedback") is not True:
         return "this Preview has no Send feedback: build it with FEEDBACK_ADDRESS=feedback@example.com on the command line"
+    if shot.feedback and shot.screen.startswith("feedback") and state.get("feedbackReady") is not True:
+        return "the sheet of Send feedback is not open with its draft made"
     if shot.tipjar and state.get("tipjar") is not True:
         return "this Preview has no Buy me tokens: build it with the four TIP_ settings of the arrangement on the command line"
     if shot.icp and state.get("icp") is not True:

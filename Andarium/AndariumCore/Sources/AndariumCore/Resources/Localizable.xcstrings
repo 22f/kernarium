@@ -218,6 +218,28 @@
         }
       }
     },
+    "Android can’t install an app with a part of %@ or more." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidでは、%@以上のパーツを含むアプリをインストールできません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android无法安装包含大小为%@或以上部分的应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android無法安裝包含大小為%@或以上部分的應用程式。"
+          }
+        }
+      }
+    },
     "Android could not resume" : {
       "comment" : "Title of Home's card after a start that could not bring back the memory Android saved when it was paused.",
       "localizations" : {
@@ -493,28 +515,6 @@
         }
       }
     },
-    "Apps that come in several files can’t be installed yet. Choose a single .apk file." : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "複数のファイルで構成されたアプリはまだインストールできません。単一の.apkファイルを選択してください。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "暂不支持安装由多个文件组成的应用。请选择单个.apk文件。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "目前尚不支援安裝由多個檔案組成的應用程式。請選擇單一.apk檔案。"
-          }
-        }
-      }
-    },
     "arm64, %lld KiB pages" : {
       "comment" : "The architecture row of the Info sheet: the CPU architecture, then the size of a memory page, as in arm64, 4 KiB pages.",
       "localizations" : {
@@ -696,6 +696,52 @@
         }
       }
     },
+    "it could not start (%@)" : {
+      "comment" : "A clause of the line the end screen offers to copy, after \"Virtual machine ended:\". %@ is the reason, in English.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "起動できませんでした（%@）"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法启动（%@）"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法啟動（%@）"
+          }
+        }
+      }
+    },
+    "it was stopped from the boot screen" : {
+      "comment" : "A clause of the line the end screen offers to copy, after \"Virtual machine ended:\".",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "起動画面から停止されました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已在启动界面停止"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已在啟動畫面停止"
+          }
+        }
+      }
+    },
     "list.join" : {
       "comment" : "Joins two parts of a spoken list: a comma and a space in English, the language's own comma in Chinese and Japanese.",
       "localizations" : {
@@ -743,6 +789,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "需要A14或更新的晶片"
+          }
+        }
+      }
+    },
+    "runtime result %lld" : {
+      "comment" : "A clause of the line the end screen offers to copy, after \"Virtual machine ended:\". %lld is the number the runtime returned.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ランタイムの結果%lld"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "运行时结果%lld"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "執行階段結果%lld"
           }
         }
       }
@@ -816,6 +885,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "虛擬機器的可用空間不足，無法安裝此應用程式（需要%@，可用%@）。請在虛擬機器中釋出一些空間，或使用「調整大小」為其增加儲存空間。"
+          }
+        }
+      }
+    },
+    "the virtual machine kept restarting" : {
+      "comment" : "A clause of the line the end screen offers to copy, after \"Virtual machine ended:\".",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンが再起動を繰り返しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机一直在重新启动"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器一直在重新啟動"
           }
         }
       }
@@ -908,6 +1000,50 @@
         }
       }
     },
+    "There’s no app in this file. Choose an .apk, .apks, .xapk or .apkm file that holds an app." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このファイルにはアプリが含まれていません。アプリを含む.apk、.apks、.xapk、.apkmのいずれかのファイルを選択してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此文件中没有应用。请选择包含应用的.apk、.apks、.xapk或.apkm文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此檔案中沒有應用程式。請選擇包含應用程式的.apk、.apks、.xapk或.apkm檔案。"
+          }
+        }
+      }
+    },
+    "This app has no code for this device’s processor. Choose a version of the app made for ARM processors." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリには、このデバイスのプロセッサ用のコードがありません。ARMプロセッサ用のバージョンのアプリを選択してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用没有适用于此设备处理器的代码。请选择适用于ARM处理器的应用版本。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式沒有適用於此裝置處理器的程式碼。請選擇適用於ARM處理器的應用程式版本。"
+          }
+        }
+      }
+    },
     "This app version is older than the one the virtual machine last started with, and its data does not go back. Install a newer version of Andarium, or erase the virtual machine to start again with this one." : {
       "localizations" : {
         "ja" : {
@@ -952,24 +1088,112 @@
         }
       }
     },
-    "This isn’t an app. Choose a file that ends in .apk." : {
+    "This file is damaged or encrypted, so it can’t be installed. Download it again, or choose another file." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "これはアプリではありません。.apkで終わるファイルを選択してください。"
+            "value" : "このファイルは破損しているか暗号化されているため、インストールできません。もう一度ダウンロードするか、別のファイルを選択してください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "这不是应用。请选择以.apk结尾的文件。"
+            "value" : "此文件已损坏或已加密，因此无法安装。请重新下载，或选择其他文件。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "這不是應用程式。請選擇以.apk結尾的檔案。"
+            "value" : "此檔案已損毀或已加密，因此無法安裝。請重新下載，或選擇其他檔案。"
+          }
+        }
+      }
+    },
+    "This file is damaged, or the parts of the app don’t fit together. Download it again, or choose another file." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このファイルが破損しているか、アプリの各パーツが一致していません。もう一度ダウンロードするか、別のファイルを選択してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此文件已损坏，或应用的各个部分不匹配。请重新下载，或选择其他文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此檔案已損毀，或應用程式的各個部分不相符。請重新下載，或選擇其他檔案。"
+          }
+        }
+      }
+    },
+    "This file is encrypted, so it can’t be installed. Choose an app file that isn’t encrypted." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このファイルは暗号化されているため、インストールできません。暗号化されていないアプリのファイルを選択してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此文件已加密，因此无法安装。请选择未加密的应用文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此檔案已加密，因此無法安裝。請選擇未加密的應用程式檔案。"
+          }
+        }
+      }
+    },
+    "This is an app bundle for publishing apps, which can’t be installed. Choose an .apk, .apks, .xapk or .apkm file." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "これはアプリを公開するためのアプリバンドルで、インストールできません。.apk、.apks、.xapk、.apkmのいずれかのファイルを選択してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这是用于发布应用的应用包，无法安装。请选择.apk、.apks、.xapk或.apkm文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "這是用於發布應用程式的應用程式套件，無法安裝。請選擇.apk、.apks、.xapk或.apkm檔案。"
+          }
+        }
+      }
+    },
+    "This isn’t an app. Choose a file that ends in .apk, .apks, .xapk or .apkm." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "これはアプリではありません。.apk、.apks、.xapk、.apkmのいずれかで終わるファイルを選択してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这不是应用。请选择以.apk、.apks、.xapk或.apkm结尾的文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "這不是應用程式。請選擇以.apk、.apks、.xapk或.apkm結尾的檔案。"
           }
         }
       }
@@ -992,6 +1216,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此虛擬機器無法啟動"
+          }
+        }
+      }
+    },
+    "Virtual machine ended: %@" : {
+      "comment" : "The line of the report the end screen offers to copy that says why the run ended. %@ is a clause such as \"it was stopped from the boot screen\".",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンが終了しました：%@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机已结束：%@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器已結束：%@"
+          }
+        }
+      }
+    },
+    "Virtual machine ended: %@ after %@" : {
+      "comment" : "The same line when the run's length is known. %1$@ is the clause, %2$@ the time the run lasted, such as 3:17.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンが終了しました：%1$@（%2$@経過）"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机已结束：%1$@，已运行%2$@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器已結束：%1$@，已執行%2$@"
           }
         }
       }

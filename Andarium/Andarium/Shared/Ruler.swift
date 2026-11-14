@@ -217,20 +217,25 @@ nonisolated struct HatchPattern: Shape {
 /// with the bound said beneath it. The third is the estimate of the guest's
 /// graphics memory (VRAM) for the chosen memory and vCPUs, which the host
 /// reads from the runtime (`MemoryPolicy.graphicsMemoryMiB`); it is left out
-/// where the host gives none.
+/// where the host gives none. While Camera is on (`cameraLive`) it is the pool
+/// the GPU is given, less what the camera's host-side memory takes out of it.
 struct SystemControls: View {
     @Binding var guest: Guest
     let host: HostDevice
+    var cameraLive = false
 
     var body: some View {
         VStack(spacing: 0) {
             processor
             Divider().padding(.leading, 58)
             memory
-            if let vram = host.memory.graphicsMemoryMiB(forMemory: guest.memoryMiB, vCPUs: guest.cores) {
+            if let vram = host.memory.graphicsMemoryMiB(
+                forMemory: guest.memoryMiB, vCPUs: guest.cores, cameraLive: cameraLive)
+            {
                 Divider().padding(.leading, 58)
                 GraphicsMemoryRow(
-                    estimateMiB: vram, warns: host.memory.risk(guest.memoryMiB, vCPUs: guest.cores) != .none
+                    estimateMiB: vram,
+                    warns: host.memory.risk(guest.memoryMiB, vCPUs: guest.cores, cameraLive: cameraLive) != .none
                 )
             }
         }
@@ -262,15 +267,17 @@ struct SystemControls: View {
         let bottom = stops.first ?? Limits.minimumMemoryMiB
         let steps = (1024 - bottom % 1024) % 1024 / Limits.memoryStepMiB
         // Sizes past the graphics line (what a new guest gets, or more where
-        // the graphics memory does not fall below a gibibyte above it) turn
+        // the graphics memory does not fall below 992 MiB above it) turn
         // orange, and past the size where iOS is likely to close Andarium red
         // where that is a higher one; the line beneath says why while the
         // chosen size is one of them, the worse risk alone. Both sizes follow
         // the vCPU count as the top does.
-        let graphicsLineMiB = host.memory.graphicsLineMiB(vCPUs: guest.cores)
+        // While Camera is on (`cameraLive`) the line follows the pool the
+        // VRAM row shows, not the budget.
+        let graphicsLineMiB = host.memory.graphicsLineMiB(vCPUs: guest.cores, cameraLive: cameraLive)
         let safeMiB = host.memory.safeMemoryMiB(vCPUs: guest.cores)
         let distinct = safeMiB > graphicsLineMiB
-        let risk = host.memory.risk(guest.memoryMiB, vCPUs: guest.cores)
+        let risk = host.memory.risk(guest.memoryMiB, vCPUs: guest.cores, cameraLive: cameraLive)
         return ControlRow(title: String(localized: "Memory"), symbol: "memorychip", value: Formats.size(mib: guest.memoryMiB)) {
             Ruler(
                 index: Binding(

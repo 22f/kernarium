@@ -2,13 +2,21 @@
 
 #include "KernariumRuntime.h"
 #include "KernariumAdbChannel.hpp"
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+#include "KernariumCamera.hpp"
+#endif
 #include "KernariumConsoleInput.hpp"
 #include "KernariumConsoleOutput.hpp"
 #include "KernariumGuestTimeZone.hpp"
 #include "KernariumHostFeatures.hpp"
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+#include "KernariumIdentity.hpp"
+#endif
 #include "KernariumKeyWake.hpp"
+#include "KernariumMemoryPressure.hpp"
 #include "KernariumLocation.hpp"
 #include "KernariumRestartLoop.hpp"
+#include "KernariumSettle.hpp"
 #include "KernariumStatistics.hpp"
 #if KERNARIUM_AUTOMATION_HARNESS
 #include "KernariumHarness.hpp"
@@ -32,6 +40,9 @@
 #include "audio/protocol.hpp"
 #include "battery/in_process_service.hpp"
 #include "battery/protocol.hpp"
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+#include "camera/in_process_service.hpp"
+#endif
 #include "console/in_process_service.hpp"
 #include "console/protocol.hpp"
 #include "gnss/in_process_service.hpp"
@@ -53,6 +64,7 @@
 #include "options.hpp"
 #include "runtime/execution_engine.hpp"
 #include "runtime/guest_memory_budget.hpp"
+#include "runtime/memory_pressure_response.hpp"
 #include "runtime/session_record.hpp"
 #include "uml/emulator.h"
 #include "uml_slirp_net.h"
@@ -86,6 +98,7 @@
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <malloc/malloc.h>
+#include <map>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -164,6 +177,10 @@ std::atomic_bool runtimeActive;
  * kernarium::console::InputRegistry.
  */
 std::mutex emulatorLifecycleMutex;
+/* The emulator that runs, for a sync, which must not wait for the mutex above.
+ * Process lifetime, like the callers it serves: a sync still pinned while the
+ * process exits must not unpin a destroyed mutex. */
+kernarium::settle::Gate& emulatorGate = *new kernarium::settle::Gate;
 /* A held key repeats, so an ordinary key sends the guest one wake edge a second
  * at most. */
 kernarium::input::KeyWakePolicy keyWakePolicy {std::chrono::seconds(1)};
@@ -367,6 +384,33 @@ const std::shared_ptr<uml::audio::MicrophoneSwitch>& microphoneSwitch()
     return instance;
 }
 
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+/* The application's way to the camera: the one receiver of the camera state
+ * and the rotation it states. They live as long as the process, so a device of
+ * any boot, and a call that arrives between two boots, reach them. */
+kernarium::camera::StateReceiver& cameraStateReceiver()
+{
+    static auto& instance = *new kernarium::camera::StateReceiver;
+    return instance;
+}
+
+kernarium::camera::Rotation& cameraRotation()
+{
+    static auto& instance = *new kernarium::camera::Rotation;
+    return instance;
+}
+#endif
+
+/* The application's way to the host's response to the system's memory
+ * pressure: the one receiver of its reports, which lives as long as the
+ * process. The response reports to it through the observer installed with the
+ * first callback, for every run after. */
+kernarium::memory_pressure::Receiver& memoryPressureReceiver()
+{
+    static auto& instance = *new kernarium::memory_pressure::Receiver;
+    return instance;
+}
+
 void publishConsoleOutput(const void* buffer, std::size_t length)
 {
     kernarium::console::output().publish(buffer, length);
@@ -439,6 +483,14 @@ public:
                 "Kernarium: unable to bring the user network up again: %d\n",
                 opened);
         }
+    }
+
+    /* The hardware address the guest's eth0 has, in place of the provider's
+     * default, from the guest's next open on. */
+    [[nodiscard]] bool setEthernetAddress(
+        const std::array<std::uint8_t, 6>& address) noexcept
+    {
+        return uml_slirp_net_set_mac(context_, address.data()) == 0;
     }
 
     [[nodiscard]] void* context() const noexcept { return context_; }
@@ -762,12 +814,17 @@ class ActiveEmulatorRegistration final {
 public:
     explicit ActiveEmulatorRegistration(uml_emulator* emulator)
     {
-        std::scoped_lock lock(emulatorLifecycleMutex, activeEmulatorMutex);
-        activeEmulator = emulator;
+        {
+            std::scoped_lock lock(emulatorLifecycleMutex, activeEmulatorMutex);
+            activeEmulator = emulator;
+        }
+        emulatorGate.open(emulator);
     }
 
     ~ActiveEmulatorRegistration()
     {
+        /* Waits for a sync that is still using the handle. */
+        emulatorGate.close();
         std::scoped_lock lock(emulatorLifecycleMutex, activeEmulatorMutex);
         activeEmulator = nullptr;
     }
@@ -1150,7 +1207,9 @@ void appendKernelCommandLine(
     uint32_t guestProcessorCount,
     std::string_view adbPublicKey,
     std::string_view timeZone,
-    std::uint32_t hostFeatures)
+    std::uint32_t hostFeatures,
+    std::string_view cameraLayout,
+    const std::optional<std::string>& serial)
 {
     const auto path = storage.release() / uml::android::releaseCommandLine;
     constexpr std::string_view adbAuthorizationPrefix {
@@ -1161,7 +1220,13 @@ void appendKernelCommandLine(
         adbAuthorizationPrefix,
         kernarium::adb::keyPrefix,
         kernarium::adb::tcpPrefix,
-        kernarium::timezone::prefix};
+        kernarium::timezone::prefix,
+        uml::camera::layoutArgumentPrefix};
+    /* A run that has the installation's serial number drops the release's
+     * fixed one; a run that has none leaves the release's command line as it
+     * is. */
+    if (serial)
+        launcherPrefixes.push_back(uml::android::serialPrefix);
     for (const auto prefix : kernarium::hostfeatures::launcherPrefixes())
         launcherPrefixes.push_back(prefix);
     for (auto& argument :
@@ -1227,6 +1292,16 @@ void appendKernelCommandLine(
     for (auto& argument :
          kernarium::hostfeatures::kernelArguments(hostFeatures))
         arguments.push_back(std::move(argument));
+    /* The layout that describes the host's cameras, which the release's file
+     * cannot state. */
+    if (!cameraLayout.empty()) {
+        arguments.emplace_back(
+            std::string {uml::camera::layoutArgumentPrefix} +
+            std::string {cameraLayout});
+    }
+    /* Android init imports this as ro.boot.serialno and ro.serialno. */
+    if (serial)
+        arguments.emplace_back(uml::android::serialArgument(*serial));
 }
 
 #endif
@@ -1350,6 +1425,15 @@ struct GuestRequest final {
     /* The host features an Android guest is told, the known bits of the boot
      * request's android_host_features; a Linux guest ignores them. */
     std::uint32_t hostFeatures {};
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+    /* What the boot request states about the guest's cameras, and the host GPU
+     * budget in bytes that sets their memory tier. */
+    kernarium::camera::Request camera;
+    std::uint64_t gpuBudgetBytes {};
+    /* The installation's serial number and eth0 address, the ones this run
+     * resolved; empty values leave the guest with what it has without them. */
+    uml::android::InstallationIdentity identity;
+#endif
     /* Where the run records how the session ended, empty for nowhere. */
     std::string sessionRecordPath;
     /* The JIT cache budget of a run on the JIT engine, in bytes, or zero for
@@ -1387,6 +1471,92 @@ void sayBootloaderConsumed()
 }
 #endif
 
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+/* The platform camera that serves the cameras: the host's, or, in a runtime
+ * that is not an App Store build, the synthetic ones its environment names (a
+ * value that names none gives the guest no cameras, never the host's). */
+uml::camera::CameraSourceHandle chooseCameraSource()
+{
+#ifndef UML_APP_STORE_RUNTIME
+    const auto choice = kernarium::camera::parseSource(
+        std::getenv(kernarium::camera::sourceVariable));
+    if (choice.invalid)
+        std::fprintf(
+            stderr,
+            "Kernarium: unknown %s: the guest gets no cameras, and never "
+            "the host's\n",
+            kernarium::camera::sourceVariable);
+    return kernarium::camera::chooseSource(
+        choice, [] { return uml::camera::makeHostCameraSource(); });
+#else
+    return uml::camera::makeHostCameraSource();
+#endif
+}
+
+/* The cameras this run presents, discovered once for the run. The layout is
+ * composed again at each boot (`kernarium::camera::recompose`). A host whose
+ * cameras cannot be discovered has none, and a camera never fails a boot. */
+kernarium::camera::Presentation presentCameras(const GuestRequest& request)
+{
+    const auto tier = uml::camera::cameraTierForBudget(request.gpuBudgetBytes);
+    try {
+        return kernarium::camera::present(
+            chooseCameraSource(), tier, request.camera.calibrationDirectory);
+    } catch (const std::exception& error) {
+        std::fprintf(
+            stderr, "Kernarium: the guest gets no cameras: %s\n",
+            error.what());
+        return kernarium::camera::present(
+            nullptr, tier, request.camera.calibrationDirectory);
+    }
+}
+
+/* The camera reserve the application plans with before a boot (runtime API
+ * 40): what a boot at `tier` with this calibration directory would hold out of
+ * the GPU's pool, while the source, the cameras and the calibration data are
+ * as they were when the answer was composed. The application asks for every
+ * size of guest memory, so the cameras are discovered once and kept, with the
+ * answers composed from them (calibration files included), until a caller asks
+ * to discover them again, which also composes every answer again (a boot
+ * discovers for its own run). A host whose cameras cannot be discovered answers
+ * the tier's ceiling. */
+kernarium::camera::ReservePlan planCameraReserve(
+    uml::camera::CameraTier tier,
+    const std::string& calibrationDirectory,
+    bool discoverAgain)
+{
+    static std::mutex mutex;
+    static uml::camera::CameraSourceHandle source;
+    static bool discovered = false;
+    static std::map<std::pair<int, std::string>, kernarium::camera::ReservePlan>
+        answers;
+    std::lock_guard lock(mutex);
+    try {
+        if (discoverAgain || !discovered) {
+            source = nullptr;
+            discovered = false;
+            answers.clear();
+            source = chooseCameraSource();
+            discovered = true;
+        }
+        const auto key = std::make_pair(static_cast<int>(tier), calibrationDirectory);
+        const auto known = answers.find(key);
+        if (known != answers.end())
+            return known->second;
+        const auto plan =
+            kernarium::camera::planReserve(source, tier, calibrationDirectory);
+        answers.emplace(key, plan);
+        return plan;
+    } catch (const std::exception& error) {
+        std::fprintf(
+            stderr,
+            "Kernarium: the camera reserve is the tier's ceiling: %s\n",
+            error.what());
+        return kernarium::camera::ceilingReserve(tier);
+    }
+}
+#endif
+
 /*
  * A launch's guest: what kernarium::restart::run drives.
  *
@@ -1417,10 +1587,27 @@ public:
     /* The handle every boot runs on; it outlives the guest's last boot. */
     void attach(uml_emulator* emulator) noexcept { emulator_ = emulator; }
 
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+    /* The run's cameras, discovered before the first boot (the GPU's pool
+     * follows them); each boot composes the layout again. */
+    void adoptCameras(kernarium::camera::Presentation cameras)
+    {
+        cameras_ = std::move(cameras);
+    }
+#endif
+
     bool startBoot(unsigned restarts) override
     {
         boot_.reset();
         bootIndex.store(restarts, std::memory_order_release);
+        /* What the session record says of this boot: an Android guest's
+         * console reports when the boot finished, and the record counts the
+         * restarts before it. */
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        uml::runtime::set_session_boot_facts(true, restarts);
+#else
+        uml::runtime::set_session_boot_facts(false, restarts);
+#endif
         try {
             ignoreBrokenPipes();
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
@@ -1487,10 +1674,24 @@ public:
             break;
         }
         end.command = information.restart_command;
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        // Only an Android guest's console says when its boot finishes.
+        end.completion = uml::emulator::boot_completion(
+            true, information.init_observed != 0U,
+            information.boot_completed != 0U);
+#endif
         return true;
     }
 
-    void stopBoot() noexcept override { boot_.reset(); }
+    void stopBoot() noexcept override
+    {
+        boot_.reset();
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        /* No camera is open any more; the device is gone, so nothing
+         * reports after this. */
+        cameraStateReceiver().ended();
+#endif
+    }
 
     void resetLink() noexcept override { network_.resetLink(); }
 
@@ -1573,6 +1774,8 @@ private:
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
         /* The GNSS receiver. */
         std::optional<uml::gnss::InProcessService> gnss;
+        /* The cameras, when the host has any. */
+        std::unique_ptr<uml::gpu::InProcessVhostUserService> camera;
         /* The hardware keyboard, mouse and pointer, the last Virtio devices
          * of the boot. */
         std::unique_ptr<uml::input::virtio::InProcessInputService>
@@ -1712,6 +1915,34 @@ private:
         arguments.emplace_back(uml::gpu::virtioDeviceArgument(
             boot->gnss->service->takeConnectionName(),
             uml::gnss::protocol::deviceId));
+        /* The cameras, after the GNSS receiver. A session that is blocked
+         * lists the same cameras and delivers black frames, and its side keys
+         * report Android's camera lens cover; a host with no camera gets no
+         * device and no cover. */
+        kernarium::camera::recompose(cameras_);
+        std::printf(
+            "Kernarium: cameras: layout %s, %s, %s, device turned %u degrees\n",
+            cameras_.layout.c_str(),
+            cameras_.tier == uml::camera::CameraTier::small
+                ? "small tier" : "large tier",
+            request_.camera.mode == uml::camera::CameraMode::live
+                ? "live" : "blocked",
+            cameraRotation().degrees());
+        if (cameras_.hasCameras()) {
+            boot->camera = uml::camera::makeInProcessCameraService(
+                cameras_.source,
+                kernarium::camera::deviceOptions(
+                    cameras_, request_.camera.mode,
+                    cameraStateReceiver(), cameraRotation()),
+                sharedMemoryRegions_);
+            arguments.emplace_back(uml::gpu::virtioDeviceArgument(
+                boot->camera->takeConnectionName(),
+                uml::camera::cameraDeviceId));
+        }
+        if (uml::camera::lensCoverAdvertised(
+                request_.camera.mode, cameras_.layout))
+            boot->keyboard->setSwitch(
+                {uml::input::virtio::protocol::switchCameraLensCover, true});
         /* The hardware keyboard, mouse and pointer come last and stay
          * unplugged until the application plugs them; they are found by name,
          * never by the device's index. */
@@ -1752,7 +1983,9 @@ private:
             request_.guestProcessorCount,
             request_.adbPublicKey,
             request_.timeZone,
-            request_.hostFeatures);
+            request_.hostFeatures,
+            cameras_.layout,
+            request_.identity.serial);
 #else
         /* A sealed ext4 derivative is attached read-only; the per-run /init
          * mounts either kind of image beneath the overlay. */
@@ -1820,6 +2053,8 @@ private:
     }
 
     uml::android::BootSelection androidBoot_ {};
+    /* The run's cameras, discovered before the first boot (`adoptCameras`). */
+    kernarium::camera::Presentation cameras_;
 #endif
 
     const GuestRequest request_;
@@ -2105,6 +2340,30 @@ int runtimeRun(
                     unknown);
             request.hostFeatures = boot->android_host_features & ~unknown;
         }
+        /* The identity a request states is kept as given: a value that is not
+         * valid fails the run, since the caller wants exactly that one. */
+        const auto statedIdentity = kernarium::identity::readRequest(*boot);
+        if (statedIdentity.invalid) {
+            std::fputs(
+                "Kernarium: invalid Android serial number or ethernet "
+                "address\n",
+                stderr);
+            return -UML_EMULATOR_INVALID_ARGUMENT;
+        }
+        /* The camera is read the same way, and never fails a boot: what is not
+         * a mode or a path is dropped, with a line. */
+        request.camera = kernarium::camera::readRequest(*boot);
+        if (request.camera.unknownMode)
+            std::fprintf(
+                stderr,
+                "Kernarium: ignoring unknown camera mode %u; the cameras are "
+                "blocked\n",
+                boot->android_camera_mode);
+        if (request.camera.invalidCalibrationPath)
+            std::fputs(
+                "Kernarium: ignoring an invalid camera calibration path; "
+                "colour data stays in memory\n",
+                stderr);
         if (boot->android_data_disk_path == nullptr ||
             boot->android_release_path == nullptr) {
             std::fputs("Kernarium: incomplete Android bundle\n", stderr);
@@ -2115,16 +2374,43 @@ int runtimeRun(
         try {
             const std::filesystem::path release = boot->android_release_path;
             const std::filesystem::path dataDisk = boot->android_data_disk_path;
-            const auto prepared = uml::android::prepareDataDisk(
+            /* Locked from the data disk's preparation to the identity's
+             * resolution: a start that creates the disk and a start that
+             * finds it are not interleaved. The identity comes from the file
+             * beside the data disk unless the request states values, and a
+             * data disk this start made is a new installation. The host's own
+             * messages never carry the values. */
+            const auto prepared = uml::android::prepareInstallation(
                 uml::android::readLayout(release / uml::android::releaseLayout),
                 dataDisk,
-                boot->android_data_gib);
-            if (prepared.change != uml::android::DataDiskChange::none)
+                boot->android_data_gib,
+                kernarium::identity::identityRequest(statedIdentity, dataDisk));
+            const auto& resolved = prepared.identity;
+            if (prepared.disk.change != uml::android::DataDiskChange::none)
                 std::printf(
                     "Kernarium: %s the data disk, %u GiB\n",
-                    prepared.change == uml::android::DataDiskChange::created
+                    prepared.disk.change == uml::android::DataDiskChange::created
                         ? "created" : "grew",
-                    prepared.capacityGiB);
+                    prepared.disk.capacityGiB);
+            switch (resolved.outcome) {
+            case uml::android::IdentityOutcome::created:
+                std::puts("Kernarium: made the installation's identity");
+                break;
+            case uml::android::IdentityOutcome::replaced:
+                std::puts(
+                    "Kernarium: replaced an identity file that was not valid");
+                break;
+            case uml::android::IdentityOutcome::unsaved:
+                std::puts(
+                    "Kernarium: the identity file cannot be kept; this start "
+                    "uses values it will not keep");
+                break;
+            case uml::android::IdentityOutcome::fixed:
+            case uml::android::IdentityOutcome::stated:
+            case uml::android::IdentityOutcome::kept:
+                break;
+            }
+            request.identity = resolved.identity;
             request.androidStorage.emplace(release, dataDisk);
         } catch (const std::exception& error) {
             std::fprintf(
@@ -2175,6 +2461,16 @@ int runtimeRun(
             guestProcessorCount);
 
         AppNetwork network;
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        if (request.identity.ethernetMac &&
+            !network.setEthernetAddress(*request.identity.ethernetMac)) {
+            std::fputs(
+                "Kernarium: the user network refused the guest's ethernet "
+                "address\n",
+                stderr);
+            return -UML_EMULATOR_INVALID_ARGUMENT;
+        }
+#endif
         const PublishNetworkCounts publishedCounts {network};
         auto networkCallbacks = network.callbacks();
         const auto destroy = &uml_emulator_destroy;
@@ -2189,13 +2485,43 @@ int runtimeRun(
             /* GPU memory is charged to the application like guest RAM: the GPU's
              * budget is what the application's memory limit leaves after the
              * guest, the gadget cache and the launch's allowances, and at least
-             * 384 MiB. The application has already warned the user when the limit
+             * 352 MiB. The application has already warned the user when the limit
              * leaves less than the floor (runtimePlanGpuBudget); the guest boots
              * with the floor. */
             const auto gpuBudget = planGpuBudget(
                 boot, guestMemoryMiB, guestProcessorCount,
                 request.jitCacheBudget != 0);
-            const std::uint64_t deviceMemoryLimit = gpuBudget.budget.bytes;
+            /* The pool the GPU service gets is the budget less the host-side
+             * memory of a live camera session, which the same limit holds. */
+            std::uint64_t cameraReserve = 0;
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+            /* The cameras' memory tier follows the launch's fixed GPU budget.
+             * The cameras are discovered here, before the pool is set, because
+             * only a live session whose layout has cameras holds host memory,
+             * and it holds what that layout lets it use; the guest takes the
+             * presentation over for its boots. */
+            request.gpuBudgetBytes = gpuBudget.budget.bytes;
+            auto cameras = presentCameras(request);
+            cameraReserve = uml::camera::liveCameraReserveMiB(
+                                request.camera.mode, cameras.layout,
+                                cameras.reserved, cameras.tier) *
+                mebibyte;
+#endif
+            /* A pool of zero is no limit to the renderer: a reserve that
+             * leaves none is a launch that cannot be given a pool. */
+            if (uml::platform::gpu_pool_exhausted(
+                    gpuBudget.budget, cameraReserve)) {
+                std::fprintf(
+                    stderr,
+                    "Kernarium: live cameras would hold %llu MiB, all of the "
+                    "%llu MiB GPU budget\n",
+                    static_cast<unsigned long long>(cameraReserve >> 20),
+                    static_cast<unsigned long long>(
+                        gpuBudget.budget.bytes >> 20));
+                return -UML_EMULATOR_INVALID_ARGUMENT;
+            }
+            const std::uint64_t deviceMemoryLimit =
+                uml::platform::gpu_pool_bytes(gpuBudget.budget, cameraReserve);
             if (gpuBudget.budget.short_of_floor) {
                 std::fprintf(
                     stderr,
@@ -2210,8 +2536,15 @@ int runtimeRun(
 #else
             std::printf(
                 "Kernarium: GPU budget %llu MiB of a %llu MiB limit\n",
-                static_cast<unsigned long long>(deviceMemoryLimit >> 20),
+                static_cast<unsigned long long>(
+                    gpuBudget.budget.bytes >> 20),
                 static_cast<unsigned long long>(gpuBudget.process_limit >> 20));
+            if (cameraReserve != 0)
+                std::printf(
+                    "Kernarium: live cameras hold %llu MiB of it: GPU pool "
+                    "%llu MiB\n",
+                    static_cast<unsigned long long>(cameraReserve >> 20),
+                    static_cast<unsigned long long>(deviceMemoryLimit >> 20));
 #endif
             /* The display outlives the guest: the GPU service keeps the view and
              * the frame mirror, and hands each boot its own connection. */
@@ -2264,6 +2597,9 @@ int runtimeRun(
                 gpuService,
                 sharedMemoryRegions,
                 network};
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+            guest.adoptCameras(std::move(cameras));
+#endif
             const uml_emulator_config config {
                 .abi_version = UML_EMULATOR_ABI_VERSION,
                 .struct_size = sizeof(uml_emulator_config),
@@ -2358,13 +2694,18 @@ void runtimeRequestStop(void)
  * so the guest's writable images have to reach stable storage while the app is
  * still scheduled. This flushes what the guest has already handed to the host;
  * pages still dirty inside the guest are written back by the guest itself.
+ *
+ * A sync does not take the lifecycle mutex, which a quiesce or a resume holds
+ * for seconds: it pins the handle, and the library bounds how long it waits for
+ * its own lifecycle lock, so the call's promise holds whoever else is in the
+ * runtime.
  */
-int runtimeSync(void)
+int runtimeSync(kernarium_runtime_settle* settle)
 {
-    std::lock_guard lock(emulatorLifecycleMutex);
-    if (activeEmulator == nullptr)
-        return 0;
-    return uml_emulator_sync(activeEmulator);
+    return kernarium::settle::sync(emulatorGate, settle,
+        [](uml_emulator* emulator, uml_emulator_settle* report) {
+            return uml_emulator_sync(emulator, report);
+        });
 }
 
 /*
@@ -2373,30 +2714,33 @@ int runtimeSync(void)
  * just written back. Freezing it as well means the disk it leaves behind is
  * the disk that was flushed.
  */
-int quiesceGuest(bool resident)
+int quiesceGuest(bool resident, kernarium_runtime_settle* settle)
 {
+    if (!kernarium::settle::usable(settle))
+        return -EINVAL;
     /* A guest that restarts between the quiesce and the resume waits for the
      * resume before it boots: the library's quiesce of an idle handle only
      * flushes, and a guest booted behind it would run while the application
      * is away. */
     lifecycle.quiesce();
     std::lock_guard lock(emulatorLifecycleMutex);
-    if (activeEmulator == nullptr)
-        return 0;
-    return resident ? uml_emulator_quiesce_resident(activeEmulator)
-                    : uml_emulator_quiesce(activeEmulator);
+    return kernarium::settle::run(settle, activeEmulator,
+        [resident](uml_emulator* emulator, uml_emulator_settle* report) {
+            return resident ? uml_emulator_quiesce_resident(emulator, report)
+                            : uml_emulator_quiesce(emulator, report);
+        });
 }
 
-int runtimeQuiesce(void)
+int runtimeQuiesce(kernarium_runtime_settle* settle)
 {
-    return quiesceGuest(false);
+    return quiesceGuest(false, settle);
 }
 
 /* The quiesce that keeps the guest's RAM in the process, for a host short of
  * the space a hibernation image takes. */
-int runtimeQuiesceResident(void)
+int runtimeQuiesceResident(kernarium_runtime_settle* settle)
 {
-    return quiesceGuest(true);
+    return quiesceGuest(true, settle);
 }
 
 void runtimeResume(void)
@@ -2845,6 +3189,81 @@ void runtimeSetLocationReceiverCallback(
         callback(context, 1);
 }
 
+void runtimeSetCameraStateCallback(
+    kernarium_runtime_camera_state_callback callback,
+    void* context)
+{
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+    cameraStateReceiver().set(callback, context);
+#else
+    /* A Linux guest has no cameras and never calls back. */
+    (void)callback;
+    (void)context;
+#endif
+}
+
+int runtimePlanCameraReserve(
+    uint32_t gpuBudgetMiB,
+    const char* calibrationPath,
+    kernarium_runtime_camera_reserve* reserve)
+{
+    if (reserve == nullptr || reserve->struct_size < sizeof(*reserve))
+        return -UML_EMULATOR_INVALID_ARGUMENT;
+    const std::uint32_t size = reserve->struct_size;
+    const std::uint32_t flags = reserve->flags;
+    *reserve = {};
+    reserve->struct_size = size;
+    reserve->flags = flags;
+    reserve->basis = KERNARIUM_RUNTIME_CAMERA_RESERVE_EXACT;
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+    bool invalid = false;
+    const auto directory =
+        kernarium::camera::readCalibrationPath(calibrationPath, invalid);
+    const auto plan = planCameraReserve(
+        uml::camera::cameraTierForBudget(
+            static_cast<std::uint64_t>(gpuBudgetMiB) * mebibyte),
+        directory,
+        (flags & KERNARIUM_RUNTIME_CAMERA_PLAN_DISCOVER_AGAIN) != 0);
+    reserve->reserve_mib = plan.reserveMiB;
+    reserve->basis = plan.exact ? KERNARIUM_RUNTIME_CAMERA_RESERVE_EXACT
+                                : KERNARIUM_RUNTIME_CAMERA_RESERVE_CEILING;
+#else
+    /* A Linux guest has no cameras and holds nothing. */
+    (void)gpuBudgetMiB;
+    (void)calibrationPath;
+    (void)flags;
+#endif
+    return 0;
+}
+
+void runtimeSetMemoryPressureCallback(
+    kernarium_runtime_memory_pressure_callback callback,
+    void* context)
+{
+    auto& receiver = memoryPressureReceiver();
+    /* Installed once and kept, so that the response's lock is never taken
+     * while the receiver's is held. */
+    static const bool installed = [&receiver] {
+        uml::runtime::set_pressure_observer(
+            [](void* observed, const uml::runtime::PressureReport& report) noexcept {
+                static_cast<kernarium::memory_pressure::Receiver*>(observed)->publish(report);
+            },
+            &receiver);
+        return true;
+    }();
+    (void)installed;
+    receiver.set(callback, context);
+}
+
+int runtimeSetCameraRotation(uint32_t degrees)
+{
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+    return cameraRotation().set(degrees) ? 0 : -EINVAL;
+#else
+    return degrees < 360 && degrees % 90 == 0 ? 0 : -EINVAL;
+#endif
+}
+
 int runtimeReportLocation(const kernarium_runtime_location_fix* fix)
 {
     std::shared_ptr<uml::gnss::Endpoint> endpoint;
@@ -3028,6 +3447,10 @@ const kernarium_runtime_api runtimeApi {
     .set_input_status_callback = runtimeSetInputStatusCallback,
     .wake_for_input = runtimeWakeForInput,
     .set_network_notice = runtimeSetNetworkNotice,
+    .set_camera_state_callback = runtimeSetCameraStateCallback,
+    .set_camera_rotation = runtimeSetCameraRotation,
+    .plan_camera_reserve = runtimePlanCameraReserve,
+    .set_memory_pressure_callback = runtimeSetMemoryPressureCallback,
 };
 
 } // namespace

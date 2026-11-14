@@ -275,6 +275,14 @@ public:
 		return account_;
 	}
 
+	/* How the asking executor's window sees this address space at epoch
+	 * `now` (gadget_cache::place_use()). */
+	[[nodiscard]] gadget_cache::PlaceUse use(std::uint64_t now) const
+	{
+		return gadget_cache::place_use(attached_, account_, closed(),
+			now);
+	}
+
 	/* ---- Bodies ---- */
 
 	/* The pages a build will cover, held in the page index until unpinned,

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import AndariumCore
+import AndariumCoreTestSupport
 import Foundation
 import Testing
 import UIKit
@@ -225,17 +226,18 @@ struct CapabilitiesFlowTests {
 
     // MARK: The order of the rows
 
-    /// Location sits above Microphone, as the person asked, and Haptics comes
-    /// last; the section draws its rows in this order, which VoiceOver reads.
-    @Test func capabilitiesAreListedLocationMicrophoneHaptics() {
-        #expect(CapabilitiesSection.Row.allCases == [.location, .microphone, .haptics])
-        #expect(CapabilitiesSection.rows(hapticsAvailable: true) == [.location, .microphone, .haptics])
+    /// Location sits above Microphone, Camera follows Microphone and Haptics
+    /// comes last; the section draws its rows in this order, which VoiceOver
+    /// reads.
+    @Test func capabilitiesAreListedLocationMicrophoneCameraHaptics() {
+        #expect(CapabilitiesSection.Row.allCases == [.location, .microphone, .camera, .haptics])
+        #expect(CapabilitiesSection.rows(hapticsAvailable: true) == [.location, .microphone, .camera, .haptics])
     }
 
     /// An iPad, a Mac and the Simulator have no Taptic Engine: nothing to
     /// switch, so no row (and no disabled one).
     @Test func hapticsHasNoRowWithoutADeviceThatHasThem() {
-        #expect(CapabilitiesSection.rows(hapticsAvailable: false) == [.location, .microphone])
+        #expect(CapabilitiesSection.rows(hapticsAvailable: false) == [.location, .microphone, .camera])
         #expect(!setup().model.hapticsAvailable)
     }
 

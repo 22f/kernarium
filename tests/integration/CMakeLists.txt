@@ -306,7 +306,9 @@ if(UML_DRM_FLIP_PROBE_BINARY)
     if(NOT EXISTS "${UML_DRM_FLIP_PROBE_BINARY}")
         message(FATAL_ERROR "The vblank pacing test requires its compiled guest probe")
     endif()
-    # A four-vCPU guest with the GPU; the probe takes the card's first output.
+    # A four-vCPU guest with the GPU; the probe takes the card's first output,
+    # checks the pacing rate, and checks that the vblank timer keeps its grid
+    # across idle gaps, flips and mode changes against the kernel's trace.
     uml_add_guest_integration_test(
         NAME guest-drm-vblank
         SCRIPT gpu/run_gpu_guest.py
@@ -318,7 +320,7 @@ if(UML_DRM_FLIP_PROBE_BINARY)
 do
     sleep 1
 done'"
-            --command "timeout 60 /usr/local/libexec/drm-flip-probe"
+            --command "timeout 150 /usr/local/libexec/drm-flip-probe"
             --
             ncpus=4 --execution-engine=jit --gpu --gpu-display=vnc
             --gpu-vnc-bind=127.0.0.1 --gpu-vnc-port=0
@@ -527,6 +529,7 @@ uml_add_guest_integration_test(
 add_subdirectory(aarch32)
 add_subdirectory(android)
 add_subdirectory(exclusive)
+add_subdirectory(memory_pressure)
 add_subdirectory(no_sve)
 add_subdirectory(restart)
 add_subdirectory(sme)
@@ -690,7 +693,15 @@ uml_add_guest_integration_test(
 # "sysrq s" as the host asks for it before a suspend, ends with its final reply
 # again and again while three other vCPUs keep printing, that reply names the
 # command and says it ran, and the guest runs on with no fault. A guest booted
-# with SysRq off ends the same command with an error that says so.
+# with SysRq off ends the same command with an error that says so. With
+# SysRq off, a file the guest holds dirty reaches the image on the host once
+# the console's sync replies, and survives a hard kill; a guest that was not
+# asked loses it, and so does one whose kernel refuses the request. A suspend
+# asked with no sync before it states in its reply whether its own sync
+# returned, and the image holds the file exactly when the reply says so, with
+# the setting on and then off in one guest. A suspend the guest started itself,
+# which the host's request overlaps, is answered with the bare "suspended": its
+# sync is not the request's.
 uml_add_guest_integration_test(
     NAME guest-mconsole-console-clients
     SCRIPT kernel/run_guest_mconsole_console_clients.py
@@ -736,6 +747,15 @@ uml_add_guest_integration_test(
 uml_add_guest_integration_test(
     NAME guest-vhost-user-backend-gone
     SCRIPT kernel/run_guest_vhost_user_backend_gone.py
+    LABELS guest;kernel;smoke
+    TIMEOUT 300
+    CPUS 2)
+
+# A backend that goes while the guest powers off, inside the removal of its
+# device, must not have the device unregistered twice.
+uml_add_guest_integration_test(
+    NAME guest-vhost-user-power-off
+    SCRIPT kernel/run_guest_vhost_user_power_off.py
     LABELS guest;kernel;smoke
     TIMEOUT 300
     CPUS 2)

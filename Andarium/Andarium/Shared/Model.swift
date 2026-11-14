@@ -88,9 +88,16 @@ final class AppModel {
         // The readings run while the guest does.
         didSet {
             if lifecycle.phase != oldValue.phase {
+                // The notice belongs to the boot screen: any other screen has
+                // no start under way to call slow.
+                if case .booting = lifecycle.phase {} else {
+                    slowStart.finish()
+                    confirmingStop = false
+                }
                 refreshStatistics()
                 refreshGraphicsNotice()
                 showThermalNoticeIfWaiting()
+                refreshMemoryNotice()
             }
             if (lifecycle.guest == nil) != (oldValue.guest == nil) { refreshNetworkWatch() }
         }
@@ -129,14 +136,16 @@ final class AppModel {
     // draws, from one guest pixel to a point to one to each pixel of the
     // screen. The guest's display always follows the window.
     /// What the person chose for the resolution; nil until they do. Until
-    /// then it follows the device (`DisplayOptions.defaultScale`), and once
-    /// they have the default never replaces it.
+    /// then it follows the device (`DisplayOptions.defaultScale`: 240 dpi on a
+    /// low-memory one, else 320), and once they have the default never
+    /// replaces it. A Retina mode an earlier version stored is no choice.
     var chosenScale: GuestDisplayScale?
     /// The resolution the launch states (automation): that run's alone, so it
     /// is not kept and what the person chose stays stored.
     var launchScale: GuestDisplayScale?
     /// What the system holds this application's memory to (`MemoryLimit`),
-    /// which the default resolution follows; zero where it sets none.
+    /// which the default resolution follows (`DisplayOptions.isLowMemory`);
+    /// zero where it sets none.
     var memoryLimitBytes: UInt64 = 0
     /// The native scale of the screen the window is on, as last read.
     var screenNativeScale = 1.0
@@ -411,6 +420,10 @@ final class AppModel {
     @ObservationIgnored var feedbackServices = SendFeedbackServices()
     /// The Send feedback sheet is open, over Home or over the session's Settings.
     var feedbackSheetOpen = false
+    /// The Send feedback sheet the boot screen's notice opened is open. The
+    /// root presents it, so it stays up, with what the person typed, when the
+    /// boot ends or the run does.
+    var feedbackFromBoot = false
     #endif
     #if TIP_JAR
     /// What Buy me tokens asks of the App Store and of the build
@@ -446,6 +459,8 @@ final class AppModel {
     /// screen over the session asks what to do.
     var spacePause: SpacePause?
     var alert: AppAlert?
+    /// What a Files picker's failure says, over Settings (`documentPickerFailed`).
+    var documentPickerProblem: AppAlert?
     /// Settings' Install APK asks whether to install an app Android refused for
     /// the version it was built for; the screens' alert shows it while the
     /// install waits behind the overlay (`LegacyInstallFlow`).
@@ -457,6 +472,24 @@ final class AppModel {
     @ObservationIgnored private var installAttemptTag = 0
     /// How far the current boot has got, from the guest's console.
     var bootTracker = BootTracker()
+    /// When the start under way began and whether the boot screen says it is
+    /// slow (`SlowStart`).
+    var slowStart = SlowStart()
+    /// The notice's Stop asked first (`askToStop`): the dialog is up.
+    var confirmingStop = false
+    #if !APP_STORE
+    /// The preview's frozen boot screen shows the start's own clock, which runs.
+    @ObservationIgnored var previewClockRuns = false
+    #endif
+    /// What tells the runtime's session record of the boot under way from any
+    /// other (`BootRecordBinding`): made as a start begins, and counted on at
+    /// each restart of the guest in place. nil before the first start.
+    @ObservationIgnored var bootRecord: BootRecordBinding?
+    /// The time the boot screen counts a start by, in seconds: a monotonic
+    /// reading that does not run while the guest is held (a background span, a
+    /// pause for space). A runtime supplies its pause-aware clock; a test
+    /// replaces it.
+    @ObservationIgnored var clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     /// The guest's disk is being written before the run can begin.
     var preparingDisk = false
     var diskProgress: Double?
@@ -495,6 +528,43 @@ final class AppModel {
     var inputProbe: InputProbe?
     #endif
     var microphoneState = MicrophoneState.notAsked
+    /// How far iOS lets Andarium use the device's cameras, and `unavailable`
+    /// for a device that has none.
+    var cameraAccess = CameraAccess.unavailable
+    /// The person went to Settings to allow the camera: when Andarium is
+    /// active again with access, the switch they tapped turns on.
+    var cameraAwaitsSettings = false
+    /// The Camera switch is on and iOS's question about it is on screen, or
+    /// about to be. A switch that is on while iOS has not been asked and no
+    /// question is under way is a choice made under access that has ended, and
+    /// it goes off.
+    private var cameraAsking = false
+    /// Asks iOS about the camera. The device application and the Simulator
+    /// preview's system mode have one; a preview without it takes the access
+    /// as given.
+    @ObservationIgnored var camera: CameraController?
+    /// Asks the runtime what a live camera session of this host holds out of
+    /// the GPU's budget, for every budget the memory policy has
+    /// (`MemoryPolicy.withCameraReserve`). The device application has one, and
+    /// so do the preview states that show a camera reserve; without one the
+    /// model keeps the policy's own figure, the ceiling that bounds the system
+    /// cameras.
+    @ObservationIgnored var cameraReservePlanner: (@Sendable (MemoryPolicy) -> CameraReservePlan)?
+    /// The last question to the runtime for the camera reserve, which a test
+    /// waits for.
+    @ObservationIgnored private(set) var cameraReserveTask: Task<Void, Never>?
+    /// What the host is doing for the guest's cameras, from the runtime, and
+    /// whether the person put the notice it raised away.
+    private(set) var cameraNotice = CameraNoticeState()
+    var cameraCapture: CameraCapture { cameraNotice.capture }
+    /// Waits out the time the Camera-is-off notice stays after the guest closed
+    /// its camera; a test paces it by hand.
+    @ObservationIgnored var cameraNoticeSleep: @MainActor (Duration) async -> Void = { duration in
+        try? await Task.sleep(for: duration)
+    }
+    /// The moment a report is taken at; a test sets its own.
+    @ObservationIgnored var cameraNoticeClock: @MainActor () -> ContinuousClock.Instant = { .now }
+    @ObservationIgnored private var cameraNoticeExpiry: Task<Void, Never>?
     /// The question about a permission the person is being asked, if any.
     var permissionPrompt: PermissionPrompt?
     /// The person went to Settings to allow the microphone: when Andarium is
@@ -550,6 +620,7 @@ final class AppModel {
                 refreshStatistics()
                 refreshGraphicsNotice()
                 refreshNetworkWatch()
+                refreshMemoryNotice()
                 #if !APP_STORE
                 refreshJit()
                 #endif
@@ -601,6 +672,20 @@ final class AppModel {
         try? await Task.sleep(for: duration)
     }
     @ObservationIgnored private var thermalNoticeTask: Task<Void, Never>?
+
+    // MARK: Memory notice state
+
+    /// What iOS says of the device's memory, from the runtime, with whether a
+    /// guest session is on screen and whether the person put the notice away.
+    private(set) var memoryNotice = MemoryPressureNoticeState()
+    /// Waits out the time the notice lingers after the pressure has passed; a
+    /// test paces it by hand.
+    @ObservationIgnored var memoryNoticeSleep: @MainActor (Duration) async -> Void = { duration in
+        try? await Task.sleep(for: duration)
+    }
+    /// The moment a report is taken at; a test sets its own.
+    @ObservationIgnored var memoryNoticeClock: @MainActor () -> ContinuousClock.Instant = { .now }
+    @ObservationIgnored private var memoryNoticeExpiry: Task<Void, Never>?
 
     // MARK: Network notice state
 
@@ -688,6 +773,32 @@ final class AppModel {
         // A record that cannot be read has no plan; the start then fails
         // with the reason.
         plan = driver.startPlan() ?? .normal
+        // A run may have taught the store a lens's colour data, which changes
+        // the layout the cameras make and so what a session holds.
+        refreshCameraReserve()
+    }
+
+    /// Reads the memory a live camera session holds from the runtime again, for
+    /// the sheet's graphics memory: after the Camera choice or the access to the
+    /// cameras changes, after a run, and when the System sheet opens, because
+    /// the cameras the host has and the colour data they have learned decide
+    /// the layout. It matters only
+    /// while the Camera choice is on, so that is when the runtime is asked; the
+    /// policy keeps its own figure meanwhile. Questions are answered in order,
+    /// and the result is the task that ends with this one.
+    @discardableResult
+    func refreshCameraReserve() -> Task<Void, Never> {
+        let before = cameraReserveTask
+        guard let planner = cameraReservePlanner, guest?.camera == true else { return before ?? Task {} }
+        let task = Task { [weak self] in
+            await before?.value
+            guard let self, self.guest?.camera == true else { return }
+            let current = self.host.memory
+            let plan = await Task.detached(priority: .utility) { planner(current) }.value
+            if self.host.memory == current, plan.policy != current { self.host.memory = plan.policy }
+        }
+        cameraReserveTask = task
+        return task
     }
 
     /// Records the guest's choices a moment after the last change, so a
@@ -1036,14 +1147,16 @@ final class AppModel {
     /// alert. `finished` runs once the overlay has gone. With `ending`, the
     /// overlay stays up instead and says how the operation ended (its words
     /// on success; `failure` and the error's on failure) until the person
-    /// closes it; cancelling still takes the overlay away.
+    /// closes it; cancelling takes the overlay away, except that an operation
+    /// which returns its outcome after the cancel (an install whose app was in
+    /// by then) shows that outcome.
     ///
     /// `failed` says how a failure ends instead of the alert, for a task
     /// started from a sheet, where an alert of the screens could not show.
     /// `finished` does not run for a cancelled operation.
     func runOperation<Output: Sendable>(
         _ state: BusyState, failure: String,
-        ending: ((Output) -> (title: String, detail: String))? = nil,
+        ending: ((Output) -> BusyWords)? = nil,
         failed: (@MainActor (String) -> Void)? = nil,
         _ work: @escaping @MainActor (@escaping @Sendable (BusyUpdate) -> Void) async throws -> Output,
         finished: @escaping @MainActor (Output) -> Void = { _ in }
@@ -1082,7 +1195,7 @@ final class AppModel {
             operation = nil
             if let ending, let result {
                 let words = ending(result)
-                busy = ended(title: words.title, detail: words.detail, failed: false)
+                busy = ended(title: words.title, detail: words.detail, style: words.style)
             } else if ending != nil, let failureWords {
                 busy = ended(title: failure, detail: failureWords, failed: true)
             } else {
@@ -1097,9 +1210,13 @@ final class AppModel {
     /// The overlay of an operation that is over: how it ended, and the button
     /// that closes it.
     private func ended(title: String, detail: String, failed: Bool) -> BusyState {
+        ended(title: title, detail: detail, style: failed ? .failure : .success)
+    }
+
+    private func ended(title: String, detail: String, style: BusyResult.Style) -> BusyState {
         BusyState(
             title: title, detail: detail,
-            result: BusyResult(failed: failed, dismiss: BusyCancel { [weak self] in self?.busy = nil })
+            result: BusyResult(style: style, dismiss: BusyCancel { [weak self] in self?.busy = nil })
         )
     }
 
@@ -1112,6 +1229,9 @@ final class AppModel {
         }
         if let detail = update.detail { busy?.detail = detail }
         if update.cancellable == false { busy?.cancel = nil }
+        if update.cancellable == true, busy?.cancel == nil, busy?.result == nil {
+            busy?.cancel = BusyCancel { [weak self] in self?.cancelOperation() }
+        }
     }
 
     /// The overlay's Cancel: the operation stops and cleans up while the
@@ -1249,11 +1369,14 @@ final class AppModel {
 
     /// Install APK: `url` is what the Files picker returned. Settings has
     /// dismissed and the install runs behind the overlay, which stays up at the
-    /// end with how it went until the person closes it. A file that is not a
-    /// single .apk, or is one Android cannot take by its size, is refused on the
-    /// same overlay, at once. The file's security scope is held to the end of
-    /// the install.
-    func installPicked(_ url: URL) {
+    /// end with how it went until the person closes it. A file that is not an
+    /// .apk, .apks, .xapk or .apkm, or is an .apk that Android cannot take by
+    /// its size, is refused on the same overlay, at once; an archive of an
+    /// app's parts is read, and refused or installed, by the operation. The
+    /// file's security scope is held to the end of the install. `staged` is the
+    /// folder of ours that holds a copy the picker made: it is removed at each
+    /// refusal and when the install is over, across Install anyway too.
+    func installPicked(_ url: URL, staged: PickedFolder? = nil) {
         guard busy == nil else { return }
         guard fileBrowser?.busy != true else {
             alert = AppAlert(
@@ -1270,7 +1393,9 @@ final class AppModel {
         // down has none yet, and the install reads the real one when it has
         // the file.
         let size = UInt64(max((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0, 0))
-        if let refusal = InstallRefusal(sizeBytes: size) {
+        // The size limit is an .apk's: an archive may be larger, and each APK
+        // inside it is held to the limit by the operation.
+        if InstallRefusal.isPlainApk(fileName: name), let refusal = InstallRefusal(sizeBytes: size) {
             endAccess()
             busy = ended(title: Self.installFailure, detail: refusal.message, failed: true)
             return
@@ -1279,19 +1404,25 @@ final class AppModel {
         runOperation(
             BusyState(title: String(localized: "Installing app"), detail: detail, progress: 0),
             failure: Self.installFailure,
-            ending: { _ in (title: String(localized: "App installed"), detail: String(localized: "\(name) is installed in the virtual machine.")) },
+            ending: { (outcome: ApkInstallOutcome) in outcome.words(fileName: name) },
             { [driver] update in
-                defer { endAccess() }
-                try await self.installAskingAboutLegacyApps(detail: detail) { bypass, update in
+                defer {
+                    endAccess()
+                    staged?.discard()
+                }
+                let outcome = try await self.installAskingAboutLegacyApps(detail: detail) { bypass, update in
                     if let driver {
-                        try await driver.installApk(at: url, bypassLowTargetSdkBlock: bypass, update: update)
+                        return try await driver.installApk(at: url, bypassLowTargetSdkBlock: bypass, update: update)
                     } else {
                         try await self.playInstall(bypassLowTargetSdkBlock: bypass, update)
+                        return self.previewInstallOutcome
                     }
                 }
-                // 100% for a moment, then the result.
-                update(BusyUpdate(progress: 1))
+                // 100% for a moment, then the result. Nothing is left to stop, so
+                // the Cancel that came back for an app's data goes.
+                update(BusyUpdate(progress: 1, cancellable: false))
                 try? await Task.sleep(for: .milliseconds(500))
+                return outcome
             }
         )
     }
@@ -1305,10 +1436,11 @@ final class AppModel {
     /// attempt reads the file and checks the room afresh.
     private func installAskingAboutLegacyApps(
         detail: String,
-        attempt: (_ bypassLowTargetSdkBlock: Bool, _ update: @escaping @Sendable (BusyUpdate) -> Void) async throws -> Void
-    ) async throws {
+        attempt: (_ bypassLowTargetSdkBlock: Bool, _ update: @escaping @Sendable (BusyUpdate) -> Void) async throws -> ApkInstallOutcome
+    ) async throws -> ApkInstallOutcome {
         let epoch = operationEpoch
         var flow = LegacyInstallFlow()
+        var outcome = ApkInstallOutcome.installed
         while true {
             switch flow.step {
             case let .attempt(bypass):
@@ -1321,7 +1453,7 @@ final class AppModel {
                     }
                 }
                 do {
-                    try await attempt(bypass, update)
+                    outcome = try await attempt(bypass, update)
                     flow.attemptEnded(.installed)
                 } catch let refused as LegacyApkRefused {
                     flow.attemptEnded(.tooOldTarget(refused.target))
@@ -1344,7 +1476,7 @@ final class AppModel {
                 if installAnyway { busy?.progress = 0 }
             case let .finished(ending):
                 switch ending {
-                case .installed: return
+                case .installed: return outcome
                 case .cancelled: throw CancellationError()
                 // Today only a second too-old refusal ends this way, and
                 // `ApkInstall` words one of those as an ordinary failure
@@ -1392,12 +1524,26 @@ final class AppModel {
     /// The title of an install that did not happen.
     static let installFailure = String(localized: "App not installed")
 
+    /// The Files picker of Install APK or of the file browser's Import failed:
+    /// the person is told, where nothing would otherwise happen. Settings,
+    /// which both pickers are in, shows it over itself (`SessionSettingsSheet`):
+    /// an alert of the screens beneath it would close the sheet to be shown.
+    func documentPickerFailed(_ error: Error, title: String) {
+        documentPickerProblem = AppAlert(title: title, message: error.localizedDescription)
+    }
+
     #if !APP_STORE
     /// What one attempt of the preview's install does instead of
     /// `playInstall`, for a preview that plays how the install can end.
     /// The App Store configuration leaves this out.
     @ObservationIgnored
     var previewInstallAttempt: (@Sendable (_ bypassLowTargetSdkBlock: Bool, _ update: @Sendable (BusyUpdate) -> Void) async throws -> Void)?
+    /// How the preview's install ends. The App Store configuration leaves
+    /// this out, and its install always ends as installed.
+    @ObservationIgnored
+    var previewInstallOutcome = ApkInstallOutcome.installed
+    #else
+    private var previewInstallOutcome: ApkInstallOutcome { .installed }
     #endif
 
     private func playInstall(bypassLowTargetSdkBlock: Bool, _ update: @Sendable (BusyUpdate) -> Void) async throws {
@@ -1439,6 +1585,13 @@ final class AppModel {
             snapshots.cancelReads()
             frozenBootStage = nil
             bootTracker = BootTracker()
+            slowStart.begin(at: clock(), kind: kind, firstBootPending: driver?.firstBootPending() ?? false)
+            // The record the file holds now is not the run's: the runtime rewrites it for the run, after this.
+            bootRecord = BootRecordBinding(
+                processID: Int(ProcessInfo.processInfo.processIdentifier),
+                recordAtStart: diagnosticsDirectory.flatMap {
+                    SessionRecord.read(at: $0.appendingPathComponent(BugReportAttachments.sessionRecord))
+                })
             preparingDisk = false
             diskProgress = nil
             #if !APP_STORE
@@ -1462,7 +1615,12 @@ final class AppModel {
         }
     }
 
-    func finishBoot(_ kind: BootKind) {
+    func finishBoot(_ started: BootKind) {
+        // A guest that booted its recovery image on its own (a reboot into
+        // recovery from the shell, Android's rescue after a loop of failed
+        // boots) is the session the launch's recovery mode makes; its way
+        // back, the recovery's reboot, is a restart into a normal session.
+        let kind = bootTracker.recovery ? BootKind.recovery : started
         let firstStart = plan == .firstStart
         lifecycle.finishBoot(kind)
         if driver != nil {
@@ -1502,6 +1660,10 @@ final class AppModel {
         graphicsReclaim.reset()
         thermalCapWaiting = false
         dismissThermalNotice()
+        cameraNoticeExpiry?.cancel()
+        cameraNoticeExpiry = nil
+        cameraNotice.runEnded()
+        resetMemoryNotice()
         runEnd = end
         runUptimeSeconds = uptimeSeconds
         if end.poweredOff {
@@ -1523,6 +1685,13 @@ final class AppModel {
         #endif
     }
 
+    /// The runtime began to boot the guest again in place for the `count`th time
+    /// in this run: the session record of the boot that follows says that
+    /// number, and the record of the boot before is not this boot's.
+    func guestRestartsCounted(_ count: Int) {
+        bootRecord?.restarts = count
+    }
+
     /// Android's own Restart boots the guest again in place. ADB and the
     /// install list belong to the run that ended.
     func restart() {
@@ -1542,7 +1711,52 @@ final class AppModel {
         session.showStats = showStats
         statisticsMeter = StatsMeter()
         bootTracker = BootTracker()
+        // A guest that restarts during the pressure reports no end of it, and
+        // the level the notice holds is not known across the restart.
+        resetMemoryNotice()
+        // A restart before the start finished is the same start; a running
+        // session's restart begins a boot of its own.
+        var unfinished = false
+        if case .booting = phase { unfinished = true }
         lifecycle.restart()
+        slowStart.guestRestarted(at: clock(), startUnfinished: unfinished)
+    }
+
+    // MARK: Slow start
+
+    /// The boot screen looked at the clock: puts the notice up once a start
+    /// has run for `SlowStart.threshold`. Returns whether it just appeared.
+    @discardableResult
+    func updateSlowStart() -> Bool {
+        guard case .booting = phase else { return false }
+        return slowStart.update(at: clock())
+    }
+
+    /// The seconds the start under way has run, as the status line and the
+    /// notice both show them.
+    func bootElapsedSeconds() -> Int {
+        slowStart.elapsedSeconds(at: clock())
+    }
+
+    /// The notice's Stop button: asks first, because a stop ends the virtual
+    /// machine for this launch of the app (`stopStart` does it on the answer).
+    func askToStop() {
+        guard case .booting = phase, slowStart.began != nil, !slowStart.stopping else { return }
+        confirmingStop = true
+    }
+
+    /// Ends the start under way: the answer to the dialog. The guest is asked
+    /// to write back first and the runtime then ends the run, and `runEnded`
+    /// follows; the notice says Stopping the whole time. The
+    /// preview, with no runtime, ends it at once as a host stop does.
+    func stopStart() {
+        confirmingStop = false
+        guard case .booting = phase, slowStart.requestStop() else { return }
+        if let driver {
+            driver.stopGuest()
+        } else {
+            runEnded(RunEnd(result: -5, stoppedByUser: true), uptimeSeconds: bootElapsedSeconds())
+        }
     }
 
     func factoryReset() {
@@ -1710,6 +1924,238 @@ final class AppModel {
         locationAwaitsSettings = locationAuthorization.refuses
         openSettings()
     }
+
+    // MARK: Camera
+
+    /// The Camera switch as the screens show it: the guest's choice is on and
+    /// iOS lets Andarium capture, or has not been asked yet and the question is
+    /// under way. Access that was refused or taken away, or a device without
+    /// cameras, shows it off.
+    var cameraShownOn: Bool {
+        guard guest?.camera == true else { return false }
+        return cameraAccess == .authorized || cameraAccess == .notDetermined
+    }
+
+    /// What the cameras do in the run that starts now: live only while the
+    /// switch is on and iOS lets Andarium capture. The runtime reads it at the
+    /// start and nothing changes it until the guest powers off.
+    var cameraMode: CameraMode {
+        CameraSession.mode(choice: guest?.camera == true, access: cameraAccess)
+    }
+
+    /// The Camera switch. It exists on Home, so it can only change between
+    /// runs. Turning it on asks iOS for access at once, the first time. After a
+    /// refusal there is nothing to ask: the person is told why and, where
+    /// Settings has the way out, offered Andarium's page there.
+    func setCamera(_ on: Bool) {
+        guard guest != nil else { return }
+        guard on else {
+            cameraAwaitsSettings = false
+            cameraAsking = false
+            guest?.camera = false
+            persistNow()
+            return
+        }
+        switch cameraAccess {
+        case .unavailable:
+            return
+        case .restricted, .denied:
+            permissionPrompt = .camera
+        case .notDetermined:
+            guest?.camera = true
+            cameraAsking = true
+            persistNow()
+            refreshCameraReserve()
+            // The controller asks iOS and reports the answer to
+            // `cameraAccessChanged`. A preview without one has no system
+            // prompt to show and takes it as given.
+            if let camera { camera.setOn(true) } else { cameraAccessChanged(.authorized) }
+        case .authorized:
+            guest?.camera = true
+            persistNow()
+            refreshCameraReserve()
+        }
+    }
+
+    /// iOS answered the camera question, or the person changed Andarium's
+    /// access in Settings. A refusal takes the choice back with it, and a
+    /// device without a camera keeps it; access the person went to Settings to
+    /// give turns the switch they tapped on.
+    func cameraAccessChanged(_ access: CameraAccess) {
+        cameraAccess = access
+        switch access {
+        case .unavailable:
+            // No camera to share is not a choice taken back: a Continuity
+            // camera that is away, or a device the guest moves to, leaves the
+            // person's switch as it was. The row shows it off and disabled,
+            // and the session is blocked (`cameraShownOn`, `cameraMode`).
+            break
+        case .restricted, .denied:
+            if guest?.camera == true {
+                guest?.camera = false
+                persistNow()
+            }
+        case .authorized:
+            if cameraAwaitsSettings, guest != nil, guest?.camera != true {
+                guest?.camera = true
+                persistNow()
+            }
+        case .notDetermined:
+            if !cameraAsking, guest?.camera == true {
+                guest?.camera = false
+                persistNow()
+            }
+        }
+        if access != .notDetermined {
+            cameraAwaitsSettings = false
+            cameraAsking = false
+        }
+        // The cameras a host has can change with the access to them (a
+        // Continuity camera that comes or goes).
+        refreshCameraReserve()
+    }
+
+    /// The alert's Open Settings: for a refusal, the switch the person tapped
+    /// turns on when Andarium is active again with access.
+    func openCameraSettings() {
+        cameraAwaitsSettings = cameraAccess.refuses
+        openSettings()
+    }
+
+    /// The runtime reports what the host is doing for the guest's cameras.
+    func cameraCaptureChanged(_ capture: CameraCapture) {
+        var next = cameraNotice
+        next.captureChanged(capture, at: cameraNoticeClock())
+        guard next != cameraNotice else { return }
+        cameraNotice = next
+        cameraNoticeExpiry?.cancel()
+        cameraNoticeExpiry = nil
+        guard next.lingers else { return }
+        cameraNoticeExpiry = Task { [weak self] in
+            await self?.cameraNoticeSleep(CameraNoticeState.lingerFor)
+            guard !Task.isCancelled else { return }
+            self?.expireCameraNotice()
+        }
+    }
+
+    /// The guest closed its camera `lingerFor` ago and has not opened one
+    /// since: the notice goes.
+    private func expireCameraNotice() {
+        cameraNoticeExpiry = nil
+        var next = cameraNotice
+        next.expire(at: cameraNoticeClock())
+        if next != cameraNotice { cameraNotice = next }
+    }
+
+    /// The notice the session shows about the camera: that it is paused
+    /// because other apps share the screen, or that a guest app opened a
+    /// camera while Camera is off. The paused notice goes when the
+    /// interruption ends; Camera off goes a moment after the guest closes its
+    /// camera and returns at a later open. A dismissed Camera-is-off notice
+    /// stays away for the rest of the run. Camera off is said only where the
+    /// row can be turned on: not on a device with no camera to share, and not
+    /// when the switch is on.
+    var cameraNoticeKind: CameraNotice? {
+        cameraNotice.showing(canTurnOn: cameraAccess.offered && !cameraShownOn)
+    }
+
+    var cameraNoticeShowing: Bool { cameraNoticeKind != nil }
+
+    func dismissCameraNotice() {
+        cameraNotice.dismiss()
+    }
+
+    #if !APP_STORE
+    /// The Simulator preview plays a camera notice: it has no runtime to
+    /// interrupt, and its guest has no camera to open. The App Store
+    /// configuration leaves this out.
+    func previewCameraNotice(_ capture: CameraCapture = .interruptedByMultitasking) {
+        cameraCaptureChanged(capture)
+    }
+    #endif
+
+    // MARK: Memory notice
+
+    /// The runtime reports a level the system raised, the repeats and the
+    /// return to normal included. Only the critical level has a notice, and the
+    /// state follows every level, for the notice that ends with it; whether the
+    /// host's own response ran changes nothing the person can do.
+    func memoryPressureChanged(_ level: MemoryPressureLevel) {
+        changeMemoryNotice { $0.levelChanged(level, at: $1) }
+    }
+
+    /// A guest session is on screen: the guest runs and Andarium is the active
+    /// application. Not Home, not the boot screen, not the background.
+    private var memoryNoticeSessionOnScreen: Bool {
+        guard case .running = phase else { return false }
+        return applicationActive
+    }
+
+    /// Tells the notice whether the session is on screen.
+    func refreshMemoryNotice() {
+        let onScreen = memoryNoticeSessionOnScreen
+        changeMemoryNotice { $0.screenChanged(onScreen: onScreen, at: $1) }
+    }
+
+    /// Applies a change to the notice's state; the views are told, and the
+    /// notice's end is timed, only when it changed.
+    private func changeMemoryNotice(_ change: (inout MemoryPressureNoticeState, ContinuousClock.Instant) -> Void) {
+        var next = memoryNotice
+        change(&next, memoryNoticeClock())
+        guard next != memoryNotice else { return }
+        memoryNotice = next
+        armMemoryNoticeExpiry()
+    }
+
+    /// Times the end of a notice that is on its way out, in place of the one
+    /// before.
+    private func armMemoryNoticeExpiry() {
+        memoryNoticeExpiry?.cancel()
+        memoryNoticeExpiry = nil
+        guard let wait = memoryNotice.staysFor(at: memoryNoticeClock()) else { return }
+        memoryNoticeExpiry = Task { [weak self] in
+            await self?.memoryNoticeSleep(wait)
+            guard !Task.isCancelled else { return }
+            self?.expireMemoryNotice()
+        }
+    }
+
+    /// The level left critical and the notice's time is up.
+    private func expireMemoryNotice() {
+        memoryNoticeExpiry = nil
+        var next = memoryNotice
+        next.expire(at: memoryNoticeClock())
+        if next != memoryNotice { memoryNotice = next }
+        // A wake before the end leaves the time that is left to wait out.
+        armMemoryNoticeExpiry()
+    }
+
+    /// The run ended, or restarts: the next one starts clean.
+    private func resetMemoryNotice() {
+        memoryNoticeExpiry?.cancel()
+        memoryNoticeExpiry = nil
+        memoryNotice.runEnded()
+    }
+
+    /// Whether the session shows the notice that iOS is critically short of
+    /// memory: none while no session is on screen or the person put it away.
+    var memoryNoticeShowing: Bool { memoryNotice.isShowing }
+
+    func dismissMemoryNotice() {
+        var next = memoryNotice
+        next.dismiss()
+        if next != memoryNotice { memoryNotice = next }
+        memoryNoticeExpiry?.cancel()
+        memoryNoticeExpiry = nil
+    }
+
+    #if !APP_STORE
+    /// The Simulator preview plays the levels: it has no runtime to run short
+    /// of memory. The App Store configuration leaves this out.
+    func previewMemoryPressure(_ level: MemoryPressureLevel) {
+        memoryPressureChanged(level)
+    }
+    #endif
 
     // MARK: Statistics
 
@@ -1900,10 +2346,13 @@ final class AppModel {
         thermalNotice.dismiss()
     }
 
+    #if !APP_STORE
     /// The Simulator preview plays the notice: it has no runtime to start a cap.
+    /// The App Store configuration leaves this out.
     func previewThermalNotice() {
         thermalNotice.show()
     }
+    #endif
 
     // MARK: Network notice
 

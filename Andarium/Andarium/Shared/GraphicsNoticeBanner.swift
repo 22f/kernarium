@@ -40,15 +40,48 @@ struct GraphicsNoticeBanner: View {
 }
 
 /// The banners over the top of the session when the model has a notice to
-/// show: iOS denying Andarium the network, Android's graphics memory and the
-/// lowered frame rate, one below the other, below the statistics capsule when
-/// that is up.
+/// show: iOS denying Andarium the network, the guest's graphics memory, the
+/// lowered frame rate, the camera (paused for other apps sharing the
+/// screen, or off when the guest opens it) and iOS being critically short of
+/// memory, one below the other in that order, below the statistics capsule when
+/// that is up. The stack is one column at the top, each banner as wide as its
+/// words, clear of the side keys and the capsule.
+///
+/// The column is plain while it fits the room it is given, so a tap beside the
+/// banners reaches the guest. When the notices are together taller than the
+/// room (a short window), it scrolls instead, no wider than the banners and no
+/// taller than the room, so every Dismiss can be reached and the side keys stay
+/// tappable.
 struct SessionNoticesOverlay: View {
     @Environment(AppModel.self) private var model
+
+    /// The side padding every banner draws itself with.
+    private static let bannerInset: CGFloat = 24
 
     var body: some View {
         let denial = model.networkDenialShowing
         let showing = denial != nil || model.graphicsNotice.isShowing || model.thermalNotice.isShowing
+            || model.cameraNoticeShowing || model.memoryNoticeShowing
+        ViewThatFits(in: .vertical) {
+            column(denial: denial)
+            ScrollView(.vertical) {
+                // The scroll view is as wide as the glass, and not the
+                // padding around it, which would take touches too.
+                column(denial: denial)
+                    .padding(.horizontal, -Self.bannerInset)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .padding(.horizontal, Self.bannerInset)
+        }
+        .padding(.top, showing ? StatsPlacement.noticeTop(statsShowing: model.session.showStats) : 0)
+        .animation(.easeInOut(duration: 0.2), value: denial)
+        .animation(.easeInOut(duration: 0.2), value: model.graphicsNotice.isShowing)
+        .animation(.easeInOut(duration: 0.2), value: model.thermalNotice.isShowing)
+        .animation(.easeInOut(duration: 0.2), value: model.cameraNoticeKind)
+        .animation(.easeInOut(duration: 0.2), value: model.memoryNoticeShowing)
+    }
+
+    private func column(denial: NetworkDenial?) -> some View {
         VStack(spacing: StatsPlacement.noticeGap) {
             if let denial {
                 NetworkNoticeBanner(
@@ -65,10 +98,14 @@ struct SessionNoticesOverlay: View {
                 ThermalNoticeBanner { model.dismissThermalNotice() }
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
+            if let notice = model.cameraNoticeKind {
+                CameraNoticeBanner(notice: notice) { model.dismissCameraNotice() }
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+            if model.memoryNoticeShowing {
+                MemoryPressureNoticeBanner { model.dismissMemoryNotice() }
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
         }
-        .padding(.top, showing ? StatsPlacement.noticeTop(statsShowing: model.session.showStats) : 0)
-        .animation(.easeInOut(duration: 0.2), value: denial)
-        .animation(.easeInOut(duration: 0.2), value: model.graphicsNotice.isShowing)
-        .animation(.easeInOut(duration: 0.2), value: model.thermalNotice.isShowing)
     }
 }

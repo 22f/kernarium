@@ -222,6 +222,9 @@ class FeedbackShotTests(unittest.TestCase):
                 mock.patch.object(self.script, "app_state", return_value=state):
             self.assertIn("FEEDBACK_ADDRESS", self.script.not_in_front("UDID", 7, shot))
             state["feedback"] = True
+            # The sheet is kept for a picture only once it is open and its draft is made.
+            self.assertIn("draft", self.script.not_in_front("UDID", 7, shot))
+            state["feedbackReady"] = True
             self.assertIsNone(self.script.not_in_front("UDID", 7, shot))
 
     def test_the_other_shots_ask_nothing_of_the_build(self):
@@ -258,7 +261,7 @@ class TipJarShotTests(unittest.TestCase):
 
     def test_a_feedback_shot_does_not_need_the_tip_jar(self):
         shot = next(shot for shot in self.script.SHOTS if shot.feedback)
-        state = {"pid": 7, "screen": shot.screen, "state": "active", "feedback": True}
+        state = {"pid": 7, "screen": shot.screen, "state": "active", "feedback": True, "feedbackReady": True}
         with mock.patch.object(self.script, "alive", return_value=True), \
                 mock.patch.object(self.script, "app_state", return_value=state):
             self.assertIsNone(self.script.not_in_front("UDID", 7, shot))

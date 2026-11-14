@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import AndariumCore
+import AndariumCoreTestSupport
 import Foundation
+import SwiftUI
 import Testing
 @testable import Andarium
 
@@ -359,6 +361,99 @@ struct AndroidOperationTests {
         #expect(await eventually { model.busy?.result != nil })
     }
 
+    @Test func anInstallThatCopiesDataGetsItsCancelButtonBackForTheCopy() async throws {
+        let (model, driver) = running()
+        let gate = Gate()
+        driver.install = { update in
+            update(BusyUpdate(progress: 0.5, detail: "The virtual machine is installing the app\u{2026}", cancellable: false))
+            try await Task.sleep(for: .milliseconds(100))
+            update(BusyUpdate(detail: "Copying app data\u{2026}", cancellable: true))
+            // What the real driver does with a cancel once the app is in: it does not throw, it says what is left.
+            while !gate.isOpen { try? await Task.sleep(for: .milliseconds(5)) }
+        }
+        driver.installOutcome = .installedWithoutData
+        let url = try apk(named: "Game.xapk")
+        defer { try? FileManager.default.removeItem(at: url) }
+        model.installPicked(url)
+        #expect(await eventually { model.busy?.cancel == nil })
+        #expect(await eventually { model.busy?.cancel != nil && model.busy?.detail == "Copying app data\u{2026}" })
+        // Pressing it stops the operation as it does anywhere else.
+        model.busy?.cancel?.action()
+        #expect(model.busy?.cancel == nil)
+        gate.release()
+        // The app is in, so the person is told what the cancel left: the result, not a vanished overlay.
+        #expect(await eventually { model.busy?.result != nil })
+        let busy = try #require(model.busy)
+        #expect(busy.title == "App installed, some data missing" && busy.result?.style == .warning)
+        #expect(busy.detail.hasSuffix("is installed in the virtual machine, but not all of its data files were copied. The app may not work without them. Install the file again to copy them."))
+        #expect(model.alert == nil)
+    }
+
+    @Test func anAppInstalledWithoutAllItsDataSaysSoOnTheResult() async throws {
+        let (model, driver) = running()
+        driver.installOutcome = .installedWithoutData
+        let url = try apk(named: "Game.xapk")
+        defer { try? FileManager.default.removeItem(at: url) }
+        model.installPicked(url)
+        #expect(await eventually { model.busy?.result != nil })
+        let busy = try #require(model.busy)
+        #expect(busy.title == "App installed, some data missing")
+        #expect(busy.detail.hasSuffix("is installed in the virtual machine, but not all of its data files were copied. The app may not work without them. Install the file again to copy them."))
+        #expect(busy.result?.style == .warning && busy.result?.failed == false)
+        busy.result?.dismiss.action()
+        #expect(model.busy == nil)
+    }
+
+    @Test func dataThatIsNeverCopiedIsNotToldToInstallAgain() async throws {
+        let (model, driver) = running()
+        driver.installOutcome = .installedDataNotPlaced
+        let url = try apk(named: "Game.xapk")
+        defer { try? FileManager.default.removeItem(at: url) }
+        model.installPicked(url)
+        #expect(await eventually { model.busy?.result != nil })
+        let busy = try #require(model.busy)
+        #expect(busy.title == "App installed, some data missing")
+        #expect(busy.detail.hasSuffix("is installed in the virtual machine, but not all of its data files were copied. The app may not work without them."))
+        #expect(busy.result?.style == .warning && busy.result?.failed == false)
+        busy.result?.dismiss.action()
+        #expect(model.busy == nil)
+    }
+
+    /// The three ways an install ends are three presentations: the plain check, the warning for an app that
+    /// is in with some of its data missing (both of its outcomes), and the failure.
+    @Test func anInstallEndsAsASuccessAWarningOrAFailureAndTheyLookDifferent() async throws {
+        var styles: [BusyResult.Style] = []
+        var titles: [String] = []
+        for outcome in [ApkInstallOutcome.installed, .installedWithoutData, .installedDataNotPlaced] {
+            let (model, driver) = running()
+            driver.installOutcome = outcome
+            let url = try apk(named: "Game.xapk")
+            defer { try? FileManager.default.removeItem(at: url) }
+            model.installPicked(url)
+            #expect(await eventually { model.busy?.result != nil })
+            let busy = try #require(model.busy)
+            styles.append(try #require(busy.result?.style))
+            titles.append(busy.title)
+        }
+        #expect(styles == [.success, .warning, .warning])
+        #expect(titles == ["App installed", "App installed, some data missing", "App installed, some data missing"])
+        // A refusal is the failure.
+        let (model, driver) = running()
+        driver.install = { _ in throw AdbFailure(message: PackageInstallMessages.message(forCode: "FAILED_VERSION_DOWNGRADE")) }
+        let url = try apk(named: "a.apk")
+        defer { try? FileManager.default.removeItem(at: url) }
+        model.installPicked(url)
+        #expect(await eventually { model.busy?.result != nil })
+        #expect(model.busy?.result?.style == .failure)
+        // The words of an outcome say the same on their own, and the card draws the three differently.
+        #expect(ApkInstallOutcome.installed.words(fileName: "x").style == .success)
+        #expect(ApkInstallOutcome.installedWithoutData.words(fileName: "x").style == .warning)
+        #expect(ApkInstallOutcome.installedDataNotPlaced.words(fileName: "x").style == .warning)
+        let drawn = [BusyResult.Style.success, .warning, .failure].map { (BusyOverlay.symbol(for: $0), BusyOverlay.color(for: $0)) }
+        #expect(drawn[0].0 == "checkmark.circle.fill" && drawn[1].0 == "exclamationmark.triangle.fill" && drawn[2].0 == "exclamationmark.triangle.fill")
+        #expect(drawn[1].1 == .orange && drawn[2].1 == .red && drawn[0].1 != drawn[1].1 && drawn[1].1 != drawn[2].1)
+    }
+
     @Test func cancellingTheInstallLeavesNoResultAndNoAlert() async throws {
         let (model, driver) = running()
         driver.install = { _ in
@@ -389,11 +484,10 @@ struct AndroidOperationTests {
         #expect(model.busy == nil)
     }
 
-    @Test func anythingButASingleApkIsRefusedAtOnceOnTheSameOverlay() throws {
+    @Test func aFileThatIsNotAnAppIsRefusedAtOnceOnTheSameOverlay() throws {
         let (model, driver) = running()
         let expected: [(String, InstallRefusal)] = [
-            ("Trip.zip", .notApk), ("app.apks", .bundle), ("app.xapk", .bundle), ("app.apkm", .bundle),
-            ("notes.txt", .notApk),
+            ("Trip.zip", .notApk), ("app.aab", .notApk), ("app.apk.zip", .notApk), ("notes.txt", .notApk),
         ]
         for (name, refusal) in expected {
             let url = try apk(named: name)
@@ -620,9 +714,9 @@ struct PackageInstallMessagesTests {
             "FAILED_VERSION_DOWNGRADE": "A newer version of this app is already installed.",
             "FAILED_OLDER_SDK": "This app needs a newer system than this virtual machine runs.",
             "FAILED_DEPRECATED_SDK_VERSION": "This app was made for a system version that this virtual machine no longer installs.",
-            "FAILED_NO_MATCHING_ABIS": "This app has no code for this device\u{2019}s processor.",
+            "FAILED_NO_MATCHING_ABIS": "This app has no code for this device\u{2019}s processor. Choose a version of the app made for ARM processors.",
             "FAILED_INSUFFICIENT_STORAGE": "The virtual machine doesn\u{2019}t have enough free space. Free some up in the virtual machine, or give it more storage with Resize.",
-            "FAILED_MISSING_SPLIT": "This app comes in several parts, which Andarium can\u{2019}t install yet.",
+            "FAILED_MISSING_SPLIT": "Some parts of this app are missing. Choose an .apks, .xapk or .apkm file that holds all of them.",
             "FAILED_MISSING_SHARED_LIBRARY": "The app needs a system library this virtual machine doesn\u{2019}t have.",
             "FAILED_DUPLICATE_PERMISSION": "The app conflicts with an app that\u{2019}s already installed.",
             "FAILED_CONFLICTING_PROVIDER": "The app conflicts with an app that\u{2019}s already installed.",
@@ -647,6 +741,18 @@ struct PackageInstallMessagesTests {
     @Test func successIsNil() {
         #expect(PackageInstallMessages.failure(inOutput: "Success\n") == nil)
         #expect(PackageInstallMessages.failure(inOutput: "Performing Streamed Install\nSuccess\n") == nil)
+    }
+
+    @Test func aSuccessLineInsideAFailureIsStillTheFailure() {
+        // The diagnostic of an APK's own manifest: a name that is a newline and `Success`.
+        let output = "Failure [INSTALL_PARSE_FAILED_MANIFEST_MALFORMED: Bad uses-sdk-library declaration name:\nSuccess version: -1]\n"
+        #expect(PackageInstallMessages.failure(inOutput: output) == "The file isn\u{2019}t a valid app.")
+        #expect(PackageInstallMessages.failure(inOutput: "Failure [INSTALL_FAILED_OLDER_SDK: x\nSuccess\n]\n")
+            == PackageInstallMessages.message(forCode: "FAILED_OLDER_SDK"))
+        // Anything but the answer being Success is not one.
+        #expect(PackageInstallMessages.failure(inOutput: "warning: x\nSuccess\n") == "The virtual machine couldn\u{2019}t install the app.")
+        #expect(PackageInstallMessages.failure(inOutput: "Exception occurred while executing 'install-commit':\njava.lang.IllegalStateException: x\nSuccess\n")
+            == "The virtual machine couldn\u{2019}t install the app.")
     }
 
     @Test func theStorageExceptionOfCreateSessionIsTheStorageMessage() {

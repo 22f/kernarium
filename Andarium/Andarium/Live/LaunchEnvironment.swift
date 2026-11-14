@@ -80,6 +80,25 @@ nonisolated enum InputProbeLaunch {
     static func guestRegisters(in environment: [String: String]) -> Bool {
         environment[environmentName] != unregisteredValue
     }
+
+    /// `ANDARIUM_INPUT_PROBE_TIP=1` leaves the side keys' tip on, newly shown
+    /// at the launch, where the probe hides the tips.
+    static let tipEnvironmentName = "ANDARIUM_INPUT_PROBE_TIP"
+
+    static func showsTip(in environment: [String: String]) -> Bool {
+        requested(in: environment) && environment[tipEnvironmentName] == "1"
+    }
+}
+
+/// The development build's compass check (`ANDARIUM_COMPASS_READOUT=1`): the
+/// application prints the device motion sample the guest's field comes from,
+/// with iOS's own attitude and heading from it (`CompassReadout`).
+nonisolated enum CompassReadoutLaunch {
+    static let environmentName = "ANDARIUM_COMPASS_READOUT"
+
+    static func requested(in environment: [String: String]) -> Bool {
+        environment[environmentName] == "1"
+    }
 }
 
 extension AppEntry {
@@ -90,6 +109,7 @@ extension AppEntry {
         overrides.isEmpty && JitPreference.stated(in: environment) == nil
             && ThermalOverride.stated(in: environment) == nil
             && !InputProbeLaunch.requested(in: environment)
+            && !CompassReadoutLaunch.requested(in: environment)
             && environment["XCTestConfigurationFilePath"] == nil
     }
 

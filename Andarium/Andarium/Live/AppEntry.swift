@@ -54,8 +54,13 @@ struct AppEntry {
     func configureTips() {
         #if !APP_STORE
         // The input probe's UI tests tap the side keys and Settings; a tip's
-        // popover over them is no part of what they check.
-        if InputProbeLaunch.requested(in: ProcessInfo.processInfo.environment) {
+        // popover over them is no part of what they check, but for the one
+        // that checks the first tap on the keys with the tip up.
+        let environment = ProcessInfo.processInfo.environment
+        if InputProbeLaunch.showsTip(in: environment) {
+            try? Tips.resetDatastore()
+            Tips.showTipsForTesting([SideKeysTip.self])
+        } else if InputProbeLaunch.requested(in: environment) {
             Tips.hideAllTipsForTesting()
         }
         #endif
@@ -103,7 +108,7 @@ struct AppEntry {
         let storage = TwoDiskStorage(
             locations: locations,
             release: carried?.identity ?? ReleaseIdentity(
-                releaseID: "unavailable", buildFingerprint: "unavailable", buildNumber: 1, securityPatch: "",
+                releaseID: "unavailable", buildFingerprint: "unavailable", buildNumber: BuildNumber.oldest, securityPatch: "",
                 systemDiskSHA256: String(repeating: "0", count: 64), dataLayout: 1, minimumGiB: 4, defaultGiB: 8,
                 maximumGiB: 64
             ),
@@ -145,10 +150,11 @@ struct AppEntry {
         #endif
         // The rulers offer no size the carried system's data disk would refuse.
         model.releaseMaximumGiB = storage.release.maximumGiB
-        // The resolution is the person's choice where they made one, else native
-        // when the system lets this application use more than 4 GiB and the
-        // choice nearest 1.5 where it does not. A value a launch states is that
-        // run's, and what the person chose stays stored.
+        // The resolution is the person's choice where they made one (a Retina
+        // mode an earlier version stored is none), else the choice nearest 1.5
+        // where the system holds this application to 4 GiB or less and the one
+        // nearest 2.0 where it does not. A value a launch states is that run's,
+        // and what the person chose stays stored.
         model.chosenScale = DisplayOptionsStore.load().chosenScale
         model.launchScale = launch.displayScale
         model.memoryLimitBytes = MemoryLimit.bytes()
@@ -205,11 +211,19 @@ struct AppEntry {
                 Self.answerSpaceScreenFromHarness(model: model, directory: locations.directory)
             }
             #endif
+            // The colour data's folder: the boot reads it and the planner asks the runtime
+            // about it, and the planner's figure is the boot's only while they are one value.
+            let calibration = markerDirectory.appendingPathComponent("Camera", isDirectory: true)
             let runtime = LiveRuntime(
                 model: model, storage: storage, marker: marker, keyStore: adbKeyStore,
-                sessionRecord: sessionRecord, freeSpace: watched)
+                sessionRecord: sessionRecord,
+                cameraDirectory: calibration,
+                freeSpace: watched)
             model.driver = runtime
             model.snapshotDriver = runtime
+            model.cameraReservePlanner = { policy in
+                LiveRuntime.cameraReservePlan(for: policy, calibration: calibration)
+            }
             // The listing says why a restore that began last time is still not finished.
             if let snapshotRecoveryFailure { runtime.snapshotRecoveryFailed(snapshotRecoveryFailure) }
             model.fileBrowser = FileBrowserModel(backend: runtime.makeGuestFiles(hostFree: watched))
@@ -218,6 +232,7 @@ struct AppEntry {
             // Microphone choice with it.
             model.microphone?.refresh()
             model.location?.refresh()
+            model.camera?.refresh()
             #if !APP_STORE
             // A debugger attached at launch (StikDebug) is asked for what the
             // JIT row says at once: it spins until it is served, and the
@@ -253,7 +268,7 @@ struct AppEntry {
         let storage = TwoDiskStorage(
             locations: locations,
             release: ReleaseIdentity(
-                releaseID: "probe", buildFingerprint: "probe", buildNumber: 1, securityPatch: "",
+                releaseID: "probe", buildFingerprint: "probe", buildNumber: BuildNumber.oldest, securityPatch: "",
                 systemDiskSHA256: String(repeating: "0", count: 64), dataLayout: 1, minimumGiB: 4, defaultGiB: 8,
                 maximumGiB: 64
             ),
@@ -381,10 +396,16 @@ struct AppEntry {
     static func hostDevice() -> HostDevice {
         let info = ProcessInfo.processInfo
         let name: String
+        let idiom: HostDevice.Idiom
         if info.isiOSAppOnMac {
             name = "Mac"
+            idiom = .mac
+        } else if UIDevice.current.userInterfaceIdiom == .pad {
+            name = "iPad"
+            idiom = .pad
         } else {
-            name = UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
+            name = "iPhone"
+            idiom = .phone
         }
         // A guest has every processor, at most the count the memory budget is
         // measured for; the memory policy has a row for each of those counts.
@@ -395,7 +416,8 @@ struct AppEntry {
             freeStorageBytes: freeStorageBytes(),
             runsGuestGraphics: drawsGuestGraphics(),
             supportsPointer: UIDevice.current.userInterfaceIdiom != .phone,
-            hasCompass: MotionSensors().compassAvailable
+            idiom: idiom, hasHaptics: DeviceHaptics.isAvailable,
+            hasCompass: MotionSensors().compassAvailable, hasCamera: SystemCameraSource.hasCamera
         )
     }
 
@@ -435,6 +457,9 @@ struct AppEntry {
             },
             graphicsMemory: { memoryMiB, count in
                 Int(kernarium_runtime_loader_gpu_budget_mib(UInt32(memoryMiB), UInt32(count), launchSet))
+            },
+            cameraReserve: { budgetMiB in
+                Int(kernarium_runtime_loader_camera_reserve_mib(UInt32(clamping: budgetMiB)))
             }
         )
     }

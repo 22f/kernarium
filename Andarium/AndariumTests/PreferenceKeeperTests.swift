@@ -86,12 +86,67 @@ struct PreferenceKeeperTests {
         }
     }
 
-    @Test func aStoredRetinaChoiceMigratesWhenTheOptionsAreRead() async throws {
+    /// The bytes the released build wrote (`DisplayOptions` before the Resolution control), as the store reads
+    /// them: no choice, whatever they hold.
+    @Test func aStoredRetinaModeIsNoChoiceWhenTheOptionsAreRead() async throws {
         try await withDefaults { defaults in
-            defaults.set(Data(#"{"retina":false,"chosen":true}"#.utf8), forKey: DisplayOptions.storageKey)
-            #expect(DisplayOptionsStore.load(from: defaults) == DisplayOptions(chosenScale: .points))
+            for json in [
+                #"{"retina":false,"chosen":true}"#, #"{"retina":true,"chosen":true}"#,
+                #"{"retina":false,"chosen":false}"#, #"{"retina":true}"#, #"{"retina":false}"#,
+            ] {
+                defaults.set(Data(json.utf8), forKey: DisplayOptions.storageKey)
+                #expect(DisplayOptionsStore.load(from: defaults) == DisplayOptions(), "\(json)")
+            }
+            defaults.removeObject(forKey: DisplayOptions.storageKey)
+            #expect(DisplayOptionsStore.load(from: defaults) == DisplayOptions())
+            // The Resolution control's form stays the person's choice.
+            for (json, scale) in [
+                (#"{"scale":"native"}"#, GuestDisplayScale.native), (#"{"scale":1}"#, .points),
+                (#"{"scale":2.5}"#, .factor(2.5)),
+            ] {
+                defaults.set(Data(json.utf8), forKey: DisplayOptions.storageKey)
+                #expect(DisplayOptionsStore.load(from: defaults) == DisplayOptions(chosenScale: scale), "\(json)")
+            }
+        }
+    }
+
+    /// Someone from the released build gets the default at their next launch, and what they choose after it is
+    /// kept through the real keeper and read back at the launch after.
+    @Test func aChoiceMadeAfterTheMigrationSurvivesASaveAndAReload() async throws {
+        try await withDefaults { defaults in
             defaults.set(Data(#"{"retina":true,"chosen":true}"#.utf8), forKey: DisplayOptions.storageKey)
+            let first = model()
+            first.chosenScale = DisplayOptionsStore.load(from: defaults).chosenScale
+            first.memoryLimitBytes = 8 << 30
+            first.screenNativeScale = 3
+            #expect(first.chosenScale == nil && first.resolution == .factor(2))
+            let keeper = PreferenceKeeper(model: first, defaults: defaults)
+            keeper.start()
+
+            // A statistics toggle writes the display options too: still no choice.
+            first.session.showStats = true
+            try await written(by: keeper)
+            #expect(DisplayOptionsStore.load(from: defaults) == DisplayOptions())
+
+            first.chooseResolution(.factor(2.5))
+            try await written(by: keeper)
+            let stored = try #require(defaults.data(forKey: DisplayOptions.storageKey))
+            #expect(String(decoding: stored, as: UTF8.self) == #"{"scale":2.5}"#)
+
+            // The next launch, on a device whose limit changed the default.
+            let second = model()
+            second.chosenScale = DisplayOptionsStore.load(from: defaults).chosenScale
+            second.memoryLimitBytes = 2 << 30
+            second.screenNativeScale = 3
+            #expect(second.chosenScale == .factor(2.5))
+            #expect(second.resolution == .factor(2.5))
+            // Native, and one pixel to a point, are kept as the choice too.
+            first.chooseResolution(.native)
+            try await written(by: keeper)
             #expect(DisplayOptionsStore.load(from: defaults) == DisplayOptions(chosenScale: .native))
+            first.chooseResolution(.points)
+            try await written(by: keeper)
+            #expect(DisplayOptionsStore.load(from: defaults) == DisplayOptions(chosenScale: .points))
         }
     }
 

@@ -5,17 +5,23 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
+#include <sys/event.h>
 #include <thread>
 #include <time.h>
 #include <unistd.h>
+// The backend's private header: the entry points and the ident of the idle
+// queue's trigger.
 extern "C" {
+#include "irq.h"
+}
+extern "C" {
+#include "irq.h"
 int os_setup_epoll(); int os_add_epoll_fd(int,int,void*);
 int os_del_epoll_fd(int); int os_waiting_for_events_epoll(); void os_close_epoll_fd();
 void *os_epoll_get_data_pointer(int); int os_epoll_triggered(int,int);
 int darwin_irq_set_notification(int,int); int os_irq_wake_pending();
-int darwin_irq_idle_begin(void); void darwin_irq_idle_end(void);
-int darwin_irq_dispatch(int,unsigned long long,void*);
 void panic(const char*,...) { std::abort(); }
 }
 // The notification thread names itself first; every pass of its loop reads the
@@ -35,8 +41,12 @@ long long os_nsecs(void) {
 // collects what has arrived, as the real one does until a kevent() returns
 // nothing, and then lingers before it returns, as the real one does before the
 // token is released.
+// With `poll_events' the handler also polls as the real one does, until a poll
+// returns nothing: `collected' counts the events it took, and a descriptor in
+// `inject_fd' gets a byte after the first poll, so that the next pass has one.
 static std::atomic<int> dispatches{0}, wakes{0}, shot{-1}, shot_result{-1};
-static std::atomic<bool> stress{false};
+static std::atomic<bool> stress{false}, poll_events{false};
+static std::atomic<int> collected{0}, inject_fd{-1};
 static std::atomic<long> arrived{0}, taken{0};
 static std::atomic<int> linger{0};
 extern "C" void sigio_handler(int,void*,void*,void*) {
@@ -44,6 +54,13 @@ extern "C" void sigio_handler(int,void*,void*,void*) {
  int cpu = shot.exchange(-1);
  // A CPU that dispatches while another does must not, whatever its time.
  if (cpu>=0) shot_result = darwin_irq_dispatch(cpu,1ULL<<62,nullptr);
+ if (poll_events) {
+  int count;
+  while ((count = os_waiting_for_events_epoll()) > 0) collected += count;
+  assert(count==0);
+  int fd = inject_fd.exchange(-1);
+  if (fd>=0) assert(write(fd,"i",1)==1);
+ }
  if (stress) {
   for (long seen; taken < (seen = arrived.load()); ) taken = seen;
   for (volatile int i=0;i<linger;i=i+1) {}
@@ -55,19 +72,32 @@ static bool wait_for_wake(int count) {
  for (int i=0;i<5000 && wakes<count;i++) sleep_ms(1);
  return wakes>=count;
 }
-// Whether SIGUSR2 is pending (blocked) for this thread.
-static int signal_pending() {
- sigset_t pending; sigemptyset(&pending); assert(sigpending(&pending)==0);
- return sigismember(&pending,SIGUSR2);
+// CPU0's idle queue, as its carrier makes it: the trigger the notification
+// thread posts to end the idle wait, registered before the first entry.
+static int idle_queue=-1;
+static int idle_begin() { return darwin_irq_idle_begin(idle_queue); }
+// Whether the trigger is pending in the queue. A queue is readable while it
+// holds an event, and polling it takes none.
+static int trigger_pending() {
+ pollfd queue{idle_queue,POLLIN,0};
+ assert(poll(&queue,1,0)>=0);
+ return (queue.revents&POLLIN)!=0;
 }
-// Wait for SIGUSR2 to be pending, then consume it (its handler does nothing).
-static bool wait_for_signal() {
- for (int i=0;i<5000 && !signal_pending();i++) sleep_ms(1);
- if (!signal_pending()) return false;
- sigset_t only, previous; sigemptyset(&only); sigaddset(&only,SIGUSR2);
- assert(pthread_sigmask(SIG_UNBLOCK,&only,&previous)==0);
- assert(pthread_sigmask(SIG_BLOCK,&only,nullptr)==0);
- return !signal_pending();
+// Wait for the trigger to be pending, then consume it, as a wait returns it. A
+// later trigger, for an edge the thread read after this one, may be pending
+// again as soon as this returns: the queue holds one, like a signal did.
+static bool wait_for_trigger() {
+ for (int i=0;i<5000 && !trigger_pending();i++) sleep_ms(1);
+ if (!trigger_pending()) return false;
+ struct kevent event; timespec zero{0,0};
+ assert(kevent(idle_queue,nullptr,0,&event,1,&zero)==1);
+ assert(event.filter==EVFILT_USER && event.ident==DARWIN_IRQ_IDLE_WAKE_IDENT);
+ return true;
+}
+// Whether SIGUSR2 is blocked for this thread, as CPU0's first idle entry leaves it.
+static int sigusr2_blocked() {
+ sigset_t mask; sigemptyset(&mask); assert(pthread_sigmask(SIG_SETMASK,nullptr,&mask)==0);
+ return sigismember(&mask,SIGUSR2);
 }
 // Dispatch as a running CPU0 does at its tick until the notification thread has
 // nothing unserved, which it shows by taking no wake in a quiet spell.
@@ -84,6 +114,9 @@ static void settle() {
  assert(!"the notification thread settles");
 }
 int main() {
+ idle_queue=kqueue(); assert(idle_queue>=0);
+ struct kevent wake; EV_SET(&wake,DARWIN_IRQ_IDLE_WAKE_IDENT,EVFILT_USER,EV_ADD|EV_CLEAR,0,0,nullptr);
+ assert(kevent(idle_queue,&wake,1,nullptr,0,nullptr)==0);
  int fds[2]; assert(pipe(fds)==0); int token=1, next=2;
  assert(os_add_epoll_fd(1,fds[0],&token)==0);
  assert(write(fds[1],"a",1)==1);
@@ -127,6 +160,32 @@ int main() {
  // dispatches once more after it releases the token; CPU0 did not wait.
  shot=0; shot_result=-1; assert(darwin_irq_dispatch(1,t0+80*ms,nullptr)==1 && shot_result==0 && dispatches==6);
  assert(darwin_irq_dispatch(0,t0+81*ms,nullptr)==1 && dispatches==7);
+ // What a dispatch returns: DARWIN_IRQ_HANDLED when a poll of its handler
+ // collected an event, in any pass of it, and 1 otherwise. The edge is taken
+ // once; the descriptor stays readable and the next dispatch finds nothing.
+ {
+  int hp[2]; assert(pipe(hp)==0 && os_add_epoll_fd(1,hp[0],&token)==0);
+  char byte; poll_events=true; collected=0;
+  assert(darwin_irq_dispatch(0,t0+90*ms,nullptr)==1 && collected==0);
+  assert(write(hp[1],"p",1)==1);
+  assert(darwin_irq_dispatch(0,t0+91*ms,nullptr)==DARWIN_IRQ_HANDLED && collected==1);
+  assert(darwin_irq_dispatch(0,t0+92*ms,nullptr)==1 && collected==1);
+  assert(darwin_irq_dispatch(0,t0+93*ms,nullptr)==1 && collected==1);
+  // The first pass collects an event and a retry, which another CPU's attempt
+  // during the pass asks for, finds nothing: the result keeps the first's.
+  assert(read(hp[0],&byte,1)==1 && write(hp[1],"q",1)==1);
+  shot=0; shot_result=-1; collected=0; int before=dispatches;
+  assert(darwin_irq_dispatch(1,t0+130*ms,nullptr)==DARWIN_IRQ_HANDLED && shot_result==0 && dispatches-before==2 && collected==1);
+  assert(darwin_irq_dispatch(0,t0+131*ms,nullptr)==1 && collected==1);
+  // The first pass finds nothing and the event comes during it: the retry's
+  // poll collects it and the result is that pass's.
+  assert(read(hp[0],&byte,1)==1);
+  shot=0; shot_result=-1; collected=0; before=dispatches; inject_fd=hp[1];
+  assert(darwin_irq_dispatch(1,t0+170*ms,nullptr)==DARWIN_IRQ_HANDLED && shot_result==0 && dispatches-before==2 && collected==1);
+  assert(darwin_irq_dispatch(0,t0+171*ms,nullptr)==1 && collected==1);
+  poll_events=false;
+  assert(os_del_epoll_fd(hp[0])==0); close(hp[0]); close(hp[1]);
+ }
  // An edge nobody dispatches after is handed to an idle secondary after 20 ms,
  // again after each interval, and no more once the dispatches go on, as a
  // running CPU0's do at its tick.
@@ -146,27 +205,29 @@ int main() {
  }
  assert(wakes==settled);
  // CPU0's idle wait, in both orders of an edge and the wait. The wait ends on
- // SIGUSR2, which stays blocked on the carrier outside the wait.
+ // a trigger of CPU0's queue; no signal does, and SIGUSR2 stays blocked on the
+ // carrier from its first idle entry on.
  char drained[64];
  // Pending before the wait: the edge is there when CPU0 enters it, which then
  // must not sleep. The 20 ms takeover wake shows the thread has seen the edge.
  int idle[2]; assert(pipe(idle)==0 && os_add_epoll_fd(1,idle[0],&next)==0);
  settle();
  int before=wakes; assert(write(idle[1],"d",1)==1 && wait_for_wake(before+1));
- assert(signal_pending()==0);
- assert(darwin_irq_idle_begin()==1 && signal_pending()==0);
- darwin_irq_idle_end(); assert(darwin_irq_idle_begin()==0);
- // Valid before the edge: the thread signals, once, and nothing is left for the
+ assert(trigger_pending()==0 && !sigusr2_blocked());
+ assert(idle_begin()==1 && trigger_pending()==0 && sigusr2_blocked());
+ darwin_irq_idle_end(); assert(idle_begin()==0);
+ // Valid before the edge: the thread triggers, once, and nothing is left for the
  // next entry.
- assert(write(idle[1],"e",1)==1 && wait_for_signal());
- darwin_irq_idle_end(); assert(darwin_irq_idle_begin()==0 && !signal_pending());
- // An edge after CPU0 left the wait is left for its next entry and signals
- // nobody; the signal that came late is held until a wait unblocks it.
+ assert(write(idle[1],"e",1)==1 && wait_for_trigger());
+ sleep_ms(50); assert(!trigger_pending());
+ darwin_irq_idle_end(); assert(idle_begin()==0 && !trigger_pending());
+ // An edge after CPU0 left the wait is left for its next entry and triggers
+ // nothing.
  darwin_irq_idle_end();
  assert(darwin_irq_dispatch(0,(unsigned long long)os_nsecs(),nullptr)==1);
  assert(write(idle[1],"f",1)==1);
- sleep_ms(50); assert(!signal_pending());
- assert(darwin_irq_idle_begin()==1);
+ sleep_ms(50); assert(!trigger_pending());
+ assert(idle_begin()==1);
  darwin_irq_idle_end();
  assert(read(idle[0],drained,sizeof drained)==3);
  // While CPU0 is not idle the thread does not wake for every edge: it parks
@@ -185,21 +246,21 @@ int main() {
   assert(read(idle[0],drained,sizeof drained)>=1);
  }
  // CPU0 enters its idle wait while the thread is parked on an edge: the entry
- // ends the park, so the next edge signals at once and not at the takeover
+ // ends the park, so the next edge triggers at once and not at the takeover
  // deadline, which would have woken an idle secondary first. Host scheduling
  // may delay the thread, so a tenth of the rounds may be late.
  {
   const int rounds=100; int late=0;
   for (int r=0;r<rounds;r++) {
    darwin_irq_idle_end();
-   while (signal_pending()) wait_for_signal();
+   while (trigger_pending()) wait_for_trigger();
    assert(darwin_irq_dispatch(0,(unsigned long long)os_nsecs(),nullptr)==1);
    assert(write(idle[1],"i",1)==1);
    sleep_ms(2);
-   if (darwin_irq_idle_begin()!=1) assert(wait_for_signal());
-   while (signal_pending()) wait_for_signal();
+   if (idle_begin()!=1) assert(wait_for_trigger());
+   while (trigger_pending()) wait_for_trigger();
    int before_edge=wakes;
-   assert(write(idle[1],"j",1)==1 && wait_for_signal());
+   assert(write(idle[1],"j",1)==1 && wait_for_trigger());
    if (wakes!=before_edge) late++;
    darwin_irq_idle_end();
    assert(read(idle[0],drained,sizeof drained)>=2);
@@ -226,11 +287,11 @@ int main() {
    // CPU0 enters the wait now, or after the edge, or leaves it before the thread looks.
    bool woken=false;
    for (int spin=0;spin<5000 && !woken;spin++) {
-    woken = darwin_irq_idle_begin()==1 || signal_pending();
+    woken = idle_begin()==1 || trigger_pending();
     if (!woken) { if (r%3==0) darwin_irq_idle_end(); sleep_ms(1); }
    }
    assert(woken);
-   while (signal_pending()) wait_for_signal();
+   while (trigger_pending()) wait_for_trigger();
    darwin_irq_idle_end();
    assert(read(idle[0],drained,sizeof drained)>=1);
   }
@@ -243,7 +304,7 @@ int main() {
  sleep_ms(5);
  os_close_epoll_fd();
  // CPU0 may still idle once after the thread stopped; the queue is gone.
- (void)darwin_irq_idle_begin(); darwin_irq_idle_end();
+ (void)idle_begin(); darwin_irq_idle_end();
  assert(os_setup_epoll()==0);
  assert(os_add_epoll_fd(1,idle[0],&next)==0);
  assert(read(idle[0],drained,sizeof drained)>=1);
@@ -275,5 +336,5 @@ int main() {
   }
   holder.join(); stress=false;
  }
- os_close_epoll_fd(); puts("PASS IRQ reentry, MOD rearm, wake source, drain/refill, EOF, early registration, dispatch token, takeover wake, idle wait wake, parked thread, token handshake, shutdown");
+ os_close_epoll_fd(); puts("PASS IRQ reentry, MOD rearm, wake source, drain/refill, EOF, early registration, dispatch token and its result, takeover wake, idle wait wake, parked thread, token handshake, shutdown");
 }

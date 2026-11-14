@@ -23,6 +23,23 @@ public enum InstanceError: Error, Equatable, LocalizedError {
     }
 }
 
+/// How build numbers order releases: as integers, except that the numbers of
+/// the counter the first public releases were built with, `legacyRange`, are
+/// older than every number outside it.
+public enum BuildNumber {
+    public static let legacyRange: ClosedRange<Int> = 2_026_110_800...2_026_110_899
+
+    /// The oldest build number there is: a placeholder release with it is
+    /// never newer than any data.
+    public static var oldest: Int { legacyRange.lowerBound }
+
+    public static func isOlder(_ number: Int, than other: Int) -> Bool {
+        let legacy = legacyRange.contains(number)
+        if legacy != legacyRange.contains(other) { return legacy }
+        return number < other
+    }
+}
+
 /// What an instance records about the release it starts with, read from the
 /// release's manifest (schema 6) and its partition layout (schema 2).
 public struct ReleaseIdentity: Equatable, Sendable {
@@ -310,7 +327,7 @@ public enum InstanceRules {
                 }
                 return InstanceDecision(.retry, "The update starts again, its snapshot kept.")
             }
-            if release.releaseID != state.releaseID, release.buildNumber > state.buildNumber {
+            if release.releaseID != state.releaseID, BuildNumber.isOlder(state.buildNumber, than: release.buildNumber) {
                 guard snapshotExists else {
                     return InstanceDecision(.refuseConflict, "The update's snapshot is missing.")
                 }
@@ -339,7 +356,7 @@ public enum InstanceRules {
             }
             return InstanceDecision(.boot, "The system the data was last started with.")
         }
-        if release.buildNumber < state.buildNumber {
+        if BuildNumber.isOlder(release.buildNumber, than: state.buildNumber) {
             return InstanceDecision(
                 .refuseDowngrade,
                 "Build \(release.buildNumber) is older than build \(state.buildNumber), which the data was started with: update the system, or erase the virtual machine."
@@ -378,12 +395,24 @@ enum CloneFile {
     }
 }
 
-/// An instance's files: `data.img`, `instance.json` and the snapshot of an
-/// update, in one directory.
+/// An instance's files: `data.img`, `instance.json`, the installation's
+/// identity and the snapshot of an update, in one directory.
 public struct InstanceFiles: Sendable {
     public static let dataDisk = "data.img"
     public static let stateFile = "instance.json"
     public static let snapshotPrefix = "data.img.pre-"
+    /// Present from the guest's creation until its first start was seen to
+    /// reach `sys.boot_completed`: a first start that ended before it, even one
+    /// that ended before the kernel ran, is still the first when the guest
+    /// starts again. A guest an earlier version made has none, and is past it.
+    public static let firstBootMarker = "first-boot-pending"
+    /// The installation's serial number and eth0 address, which the runtime
+    /// makes beside the data disk (`darwin/device/block/android_identity.hpp`
+    /// owns the file). It belongs to the data disk's life: an update, a resize,
+    /// a snapshot restore and the guest's own factory reset leave it, and an
+    /// erase deletes it, so the next installation gets values of its own. The
+    /// temporary name a write of it uses starts with the same text.
+    public static let identityFile = "identity.json"
 
     public var directory: URL
 
@@ -393,6 +422,10 @@ public struct InstanceFiles: Sendable {
 
     public var data: URL { directory.appendingPathComponent(Self.dataDisk) }
     public var state: URL { directory.appendingPathComponent(Self.stateFile) }
+    public var firstBoot: URL { directory.appendingPathComponent(Self.firstBootMarker) }
+    /// Whether the guest's first Android boot has not been seen to complete.
+    public var firstBootPending: Bool { FileManager.default.fileExists(atPath: firstBoot.path) }
+    public var identity: URL { directory.appendingPathComponent(Self.identityFile) }
     /// The user's snapshots of the data (`SnapshotStore`), which an erase
     /// deletes with the rest.
     public var snapshots: URL { directory.appendingPathComponent(SnapshotStore.directoryName, isDirectory: true) }
@@ -456,20 +489,21 @@ public struct InstanceFiles: Sendable {
         return formatter.string(from: date)
     }
 
-    /// Deletes the data disk, the record, the copies an update left and the
-    /// user's snapshots, trying each of them; the first failure is thrown once
-    /// the rest are done.
+    /// Deletes the data disk, the record, the installation's identity, the
+    /// copies an update left and the user's snapshots, trying each of them;
+    /// the first failure is thrown once the rest are done.
     public func removeAll() throws {
         let manager = FileManager.default
         var doomed = [data, state]
         for entry in (try? manager.contentsOfDirectory(atPath: directory.path)) ?? []
-        where entry.hasPrefix(Self.snapshotPrefix) {
+        where entry.hasPrefix(Self.snapshotPrefix) || entry.hasPrefix(Self.identityFile) {
             doomed.append(directory.appendingPathComponent(entry))
         }
         doomed.append(snapshots)
         // The record of the walk the guest owes (`PartialSweepLedger`) is the
         // disk's: a guest made after this one starts with a record of its own.
         doomed.append(PartialSweepLedger.url(in: directory))
+        doomed.append(firstBoot)
         var failure: Error?
         for url in doomed where manager.fileExists(atPath: url.path) {
             do { try manager.removeItem(at: url) } catch { failure = failure ?? error }
@@ -515,9 +549,18 @@ public struct InstanceFiles: Sendable {
         if action == .create {
             try manager.createDirectory(at: directory, withIntermediateDirectories: true)
             try? manager.removeItem(at: data)
+            // A disk made at the next start is a new installation, whatever
+            // identity an earlier one left beside it.
+            for entry in (try? manager.contentsOfDirectory(atPath: directory.path)) ?? []
+            where entry.hasPrefix(Self.identityFile) {
+                try? manager.removeItem(at: directory.appendingPathComponent(entry))
+            }
             // A data disk that is made at the next start holds nothing.
             if !manager.fileExists(atPath: data.path) { try PartialSweepLedger.markSettled(in: directory) }
             let created = InstanceState(creating: release, at: when)
+            // Before the record: a guest whose record exists has the marker,
+            // and one without a record is created again.
+            try Data().write(to: firstBoot, options: .atomic)
             try write(created)
             return created
         }
@@ -567,6 +610,8 @@ public struct InstanceFiles: Sendable {
         guard var current = try readState(), current.releaseID == release.releaseID else {
             throw InstanceError.state("The virtual machine was not started with this system.")
         }
+        // Android booted: this was the guest's first boot, or it no longer is.
+        try? FileManager.default.removeItem(at: firstBoot)
         guard let snapshot = current.pendingUpdate?.snapshot else { return current }
         current.pendingUpdate = nil
         try write(current)
@@ -582,6 +627,7 @@ public struct InstanceFiles: Sendable {
         guard var current = try readState(), current.releaseID == release.releaseID else {
             throw InstanceError.state("The virtual machine was not started with this system.")
         }
+        try? FileManager.default.removeItem(at: firstBoot)
         let snapshot = current.pendingUpdate?.snapshot
         current.lastCompleted = InstanceState.Completed(
             releaseID: release.releaseID, buildIncremental: String(release.buildNumber), at: Self.timestamp(now)

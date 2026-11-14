@@ -819,7 +819,7 @@ struct KernariumTests {
         // A limit under the range's bottom keeps the default on the
         // maximum, which is on the stepper's steps.
         let tight = defaults(limitMiB: 2048)
-        #expect(tight == [1472, 1472, 1408, 1408, 1344, 1344, 1344, 1344])
+        #expect(tight == [1472, 1472, 1408, 1408, 1408, 1408, 1408, 1344])
         for vCPUs in 1...8 {
             #expect(EmulatorConfiguration.systemDefaultGuestMemory(vCPUs) ==
                 Int(kernarium_runtime_loader_default_guest_memory_mib(
@@ -1079,7 +1079,7 @@ struct KernariumTests {
         #expect(
             maximums(kernarium_launch_memory_set(
                 application_mib: 56, engine_mib: 563, headroom_mib: 64
-            )) == [1664, 1600, 1536, 1536, 1536, 1536, 1472, 1472]
+            )) == [1664, 1600, 1536, 1536, 1536, 1472, 1472, 1472]
         )
         #expect(
             maximums(kernarium_launch_memory_set(
@@ -1376,7 +1376,7 @@ struct KernariumTests {
         plan.struct_size = UInt32(
             MemoryLayout<kernarium_runtime_gpu_budget>.size
         )
-        plan.budget_bytes = 384 << 20
+        plan.budget_bytes = 352 << 20
         plan.process_limit_bytes = 2867 << 20
         plan.guest_memory_bytes = 2048 << 20
         plan.available_bytes = 273 << 20
@@ -1388,7 +1388,7 @@ struct KernariumTests {
         #expect(warning?.limitMiB == 2867)
         #expect(warning?.guestMemoryMiB == 2048)
         #expect(warning?.availableMiB == 273)
-        #expect(warning?.floorMiB == 384)
+        #expect(warning?.floorMiB == 352)
         #expect(warning?.message.contains("2867 MiB") == true)
         #expect(warning?.message.contains("273 MiB") == true)
         #expect(warning?.message.contains("likely") == true)

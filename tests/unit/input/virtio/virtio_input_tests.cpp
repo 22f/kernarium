@@ -661,6 +661,77 @@ void keyboardAdvertisesBackAndHomeAndNothingElseAbove127()
     require(!bit(touchKeys, protocol::keyHomepage));
 }
 
+// The camera's lens cover is a switch of the side keys: advertised only when
+// the host states it, reported before anything else, and again after every
+// reset, so a guest that probes late or restarts reads the state.
+void sideKeysReportALensCoverSwitchOnlyWhenTheHostStatesOne()
+{
+    require(protocol::eventSwitch == 0x05);
+    require(protocol::switchCameraLensCover == 0x09);
+
+    auto plain = std::make_shared<EventQueue>();
+    VirtioInputDevice withoutSwitch(DeviceKind::keyboard, plain);
+    select(withoutSwitch, protocol::configEventBits, protocol::eventSwitch);
+    require(configuration(withoutSwitch).size == 0);
+    protocol::InputEvent event {};
+    require(!plain->take(event));
+
+    for (const bool covered : {true, false}) {
+        auto events = std::make_shared<EventQueue>();
+        events->setSwitch({protocol::switchCameraLensCover, covered});
+        VirtioInputDevice device(DeviceKind::keyboard, events);
+        select(device, protocol::configEventBits, protocol::eventSwitch);
+        const auto bits = configuration(device);
+        require(bit(bits, protocol::switchCameraLensCover));
+        require(bits.size == 2);
+        // Nothing else grows: the keys and LEDs are what they were.
+        select(device, protocol::configEventBits, protocol::eventKey);
+        require(bit(configuration(device), protocol::keyHomepage));
+        select(device, protocol::configEventBits, 0x02); // EV_REL
+        require(configuration(device).size == 0);
+
+        for (int round = 0; round < 3; ++round) {
+            require(events->take(event));
+            require(event.type == protocol::eventSwitch);
+            require(event.code == protocol::switchCameraLensCover);
+            require(event.value == (covered ? 1 : 0));
+            require(events->take(event));
+            require(event.type == protocol::eventSynchronize);
+            require(!events->take(event));
+            // The guest resets the device; the state is reported again, once.
+            events->reset();
+        }
+    }
+}
+
+void aSwitchIsReportedAheadOfTheKeysAndOnlyForAFixedDevice()
+{
+    auto events = std::make_shared<EventQueue>();
+    events->setSwitch({protocol::switchCameraLensCover, true});
+    const protocol::InputEvent key[] = {
+        {protocol::eventKey, protocol::keyBack, 1},
+        {protocol::eventSynchronize, protocol::synchronizeReport, 0},
+    };
+    require(!events->enqueue(key));
+    protocol::InputEvent event {};
+    require(events->take(event) && event.type == protocol::eventSwitch);
+    require(events->take(event) && event.type == protocol::eventSynchronize);
+    require(events->take(event) && event.type == protocol::eventKey && event.code == protocol::keyBack);
+    // A second statement replaces the first and does not queue it twice.
+    events->setSwitch({protocol::switchCameraLensCover, false});
+    require(events->take(event) && event.type == protocol::eventSwitch && event.value == 0);
+    require(events->take(event) && event.type == protocol::eventSynchronize);
+    require(!events->take(event));
+
+    // A pluggable device has none.
+    auto mouse = std::make_shared<EventQueue>(EventQueue::Attachment::pluggable);
+    mouse->setSwitch({protocol::switchCameraLensCover, true});
+    require(!mouse->switchState());
+    VirtioInputDevice device(DeviceKind::mouse, mouse);
+    select(device, protocol::configEventBits, protocol::eventSwitch);
+    require(configuration(device).size == 0);
+}
+
 void keyboardDeliversBackAndHomeAsKeyEvents()
 {
     auto events = std::make_shared<EventQueue>();
@@ -1587,6 +1658,8 @@ int main()
     keyboardAdvertisesEvdevKeysAndLeds();
     keyboardAdvertisesBackAndHomeAndNothingElseAbove127();
     keyboardDeliversBackAndHomeAsKeyEvents();
+    sideKeysReportALensCoverSwitchOnlyWhenTheHostStatesOne();
+    aSwitchIsReportedAheadOfTheKeysAndOnlyForAFixedDevice();
     eventQueueDefersAndThenReturnsOneWireEvent();
     everyKindKeepsItsPermanentIdentity();
     hardwareKeyboardAdvertisesExactlyTheTablesKeys();

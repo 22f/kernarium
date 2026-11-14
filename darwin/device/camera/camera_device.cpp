@@ -20,6 +20,7 @@
 #include <deque>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -44,7 +45,7 @@ constexpr std::size_t maximumStreams = 32;
 constexpr std::size_t maximumHeld = 128;
 constexpr std::size_t maximumControls = 256;
 constexpr std::size_t metaBacklogLimit = 16;
-constexpr std::size_t inboxFrameLimit = 3;
+constexpr std::size_t inboxFrameLimit = inboxFramesPerCamera;
 /* A group of still buffers whose last buffer has not arrived this long after
  * its first completes with an error. */
 constexpr std::uint64_t groupTimeoutNanoseconds = 2'000'000'000;
@@ -52,11 +53,19 @@ constexpr std::uint64_t groupTimeoutNanoseconds = 2'000'000'000;
  * complete with an error: a long exposure, a flash and a 48 MP capture need
  * more than the assembly of a group does. */
 constexpr std::uint64_t captureTimeoutNanoseconds = 10'000'000'000;
+/* A capture the guest gave up on stays charged until the platform ends it. One
+ * that the platform still holds this long after the guest's deadline is taken
+ * as lost: the session is closed, which ends every capture it holds. */
+constexpr std::uint64_t abandonedCaptureNanoseconds = 30'000'000'000;
 /* How long a session that failed to open waits before it is tried again. */
 constexpr std::uint64_t sessionRetryNanoseconds = 1'000'000'000;
 constexpr std::uint32_t userIdent = 0;
 constexpr std::uint32_t groupTimerIdent = 0xffffff00u;
 constexpr std::uint32_t reservedStreamIds = 0xffff0000u;
+/* The black pictures are written to a guest's buffer from a chunk of the
+ * device's own, a plane at a time, so no stream or picture size holds a
+ * picture of its own. The chunk is among the device's fixed allocations. */
+constexpr std::size_t blackChunkBytes = 64 * 1024;
 constexpr std::uint32_t defaultVideoWidth = 1280;
 constexpr std::uint32_t defaultVideoHeight = 720;
 
@@ -143,7 +152,6 @@ public:
         bool timerArmed {};
         std::uint64_t lastDelivered {};
         bool delivered {};
-        std::vector<std::uint8_t> black;
         std::uint64_t framesOut {};
         std::uint64_t framesDropped {};
     };
@@ -157,7 +165,23 @@ public:
         std::vector<Member> members;
         std::uint64_t deadline {};
         std::uint64_t token {};
+        /* The platform events there were when the capture was asked for (the
+         * inbox's serial): a result that comes after a later boundary of its
+         * camera (an interruption, a recovery) is from a capture that spans it. */
+        std::uint64_t fireSerial {};
         bool fired {};
+        /* The guest's deadline passed with the platform still holding the
+         * capture: the buffers have failed, and the group stays, with its
+         * cost, until the platform ends the capture (`deliverStill`) or the
+         * session does. */
+        bool expired {};
+        /* The group is whole and waits for the captures the device holds to
+         * leave room for its cost (`stillBudget`). */
+        bool waiting {};
+        /* The order in which groups became whole: they are admitted in it. */
+        std::uint64_t whole {};
+        /* What the capture holds while it is with the host (`stillCosts`). */
+        std::uint64_t cost {};
     };
     enum class Interruption : std::uint8_t { none, interrupted, multitasking, pressure };
     struct Runtime {
@@ -173,6 +197,12 @@ public:
         std::uint64_t sequence {};
         std::optional<CameraExposure> latest;
         Interruption interruption {Interruption::none};
+        /* The inbox serial of the last platform event handled for this camera that
+         * began or ended an interruption, or ended a session. A frame the platform
+         * handed over before it (a lower serial) was captured before the
+         * recovery it announces, whatever the camera's state is by the time the
+         * frame is taken. */
+        std::uint64_t boundary {};
         /* The capture is starting and has not delivered a frame yet. */
         bool resuming {};
         bool videoRunning {};
@@ -186,14 +216,33 @@ public:
         std::uint32_t runHeight {};
         std::uint32_t runRate {};
         std::uint32_t calibrationAttempts {};
+        /* The first buffer of this configuration's capture has been compared
+         * with what the reserve counts. */
+        bool bufferChecked {};
+        /* The ROTATE_AND_CROP setting and the turn last reported to
+         * `onRotateAndCrop`. */
+        std::uint32_t reportedSetting {~0u};
+        std::uint32_t reportedTurn {~0u};
+        /* The torch and the still flash last reported to `onFlash`; off
+         * until the guest asks for either. */
+        bool reportedTorch {};
+        uml::platform::CameraFlashMode reportedFlash {uml::platform::CameraFlashMode::off};
     };
+    /* Everything the platform hands over is stamped with the serial of the
+     * last event it had handed over (`inboxSerial`): a frame or a result of
+     * serial n came after event n and before event n + 1. */
     struct InboxFrame {
         std::size_t camera {};
         CameraFrame frame;
+        std::uint64_t serial {};
     };
     struct InboxStill {
         std::size_t camera {};
         CameraStillResult result;
+    };
+    struct InboxEvent {
+        CameraEvent event;
+        std::uint64_t serial {};
     };
 
     std::shared_ptr<uml::platform::Camera> host;
@@ -212,16 +261,31 @@ public:
     std::uint64_t nextToken {1};
     uml::gpu::UniqueDescriptor queue;
     std::vector<std::uint8_t> staging;
+    /* A chunk of black luma and one of neutral chroma, made at the first black
+     * picture. */
+    std::vector<std::uint8_t> blackLuma;
+    std::vector<std::uint8_t> blackChroma;
+    /* The most the captures the device admits at once may cost together, from
+     * `options.use` and the platform's source (`stillAdmissionBytes`). */
+    std::uint64_t stillBudget {};
+    std::uint64_t wholeCount {};
+    bool firingWaiting {};
     std::unique_ptr<uml::platform::Nv12Transformer> transformer;
     CameraState reported {CameraState::idle};
     std::uint64_t lastRetry {};
     bool sessionFailed {};
+    /* The format each platform camera runs in, which a session is told when it opens. */
+    std::vector<std::optional<std::size_t>> anchors;
 
     // The platform's side: any thread, under the mutex.
     std::mutex inboxMutex;
     std::deque<InboxFrame> inboxFrames;
+    /* The platform cameras whose video the device runs: a frame of any other is
+     * a late callback of a capture that has stopped, and is not kept. */
+    std::set<std::size_t> framesOpen;
     std::deque<InboxStill> inboxStills;
-    std::deque<CameraEvent> inboxEvents;
+    std::deque<InboxEvent> inboxEvents;
+    std::uint64_t inboxSerial {};
     // Last: it is destroyed first, and no callback outlives it.
     std::unique_ptr<uml::platform::CameraSession> session;
 
@@ -231,6 +295,9 @@ public:
         if (!host) throw std::invalid_argument("a platform camera is required");
         if (queue.get() < 0) throw std::runtime_error("Virtio camera event queue failed");
         calibration = options.calibration ? options.calibration : std::make_shared<CalibrationStore>();
+        options.use.streams = std::max<std::uint32_t>(options.use.streams, 1);
+        options.use.stillWorkingBytesPerPixel = host->stillWorkingBytesPerPixel();
+        stillBudget = stillAdmissionBytes(limits, options.use);
         model = host->hostModel();
         transformer = host->makeFrameTransformer();
         if (!transformer) throw std::invalid_argument("the platform camera has no frame transformer");
@@ -240,9 +307,11 @@ public:
         const auto infos = host->cameras();
         const auto sets = host->concurrentSets();
         auto cameras = arrangeCameras(infos, sets, model, *calibration, arrangement);
+        anchors = anchorsByPlatformCamera(cameras, infos.size());
         const bool blocked = options.mode == CameraMode::blocked;
         runtimes.reserve(cameras.size());
         for (auto& camera : cameras) {
+            if (const auto line = anchorSummary(camera); !line.empty()) std::fprintf(stderr, "%s\n", line.c_str());
             wireOfPlatform[camera.platformIndex] = camera.index;
             const auto orientation = camera.sensorOrientation;
             runtimes.emplace_back(std::move(camera), blocked, orientation);
@@ -396,6 +465,9 @@ public:
         session = host->openSession(*this);
         sessionFailed = session == nullptr;
         if (session) {
+            // The format each camera runs in, whatever the guest asks.
+            session->setAnchors(anchors, offerRulesOf(limits).limits);
+            checkpoint(CameraCheckpoint::sessionOpened);
             // A session that opens runs; what interrupted the last one is over.
             // A camera with a stream waiting for frames starts its capture again
             // on its next turn, which is now.
@@ -405,6 +477,7 @@ public:
                 runtime.appliedValid = false;
                 runtime.videoRunning = false;
                 runtime.videoRetry = 0;
+                runtime.bufferChecked = false;
                 settle(runtime);
                 updateBlackTimers(runtime);
             }
@@ -421,10 +494,25 @@ public:
             runtime.videoRunning = false;
             runtime.appliedValid = false;
         }
-        std::lock_guard lock(inboxMutex);
-        inboxFrames.clear();
-        inboxStills.clear();
-        inboxEvents.clear();
+        {
+            std::lock_guard lock(inboxMutex);
+            inboxFrames.clear();
+            framesOpen.clear();
+            inboxStills.clear();
+            inboxEvents.clear();
+        }
+        checkpoint(CameraCheckpoint::sessionClosed);
+    }
+
+    /* A diagnostic reading, never allowed to fail the device (it also runs
+     * from the destructor). */
+    void checkpoint(CameraCheckpoint where) noexcept
+    {
+        if (!options.onCheckpoint) return;
+        try {
+            options.onCheckpoint(where);
+        } catch (...) {
+        }
     }
 
     [[nodiscard]] bool sessionNeeded() const
@@ -457,6 +545,46 @@ public:
         return stream.kind == VIRTIO_VIDEO_CAMERA_STREAM_VIDEO && stream.started;
     }
 
+    /* Whether a camera holds a capture of the platform now: its video runs or a
+     * still it asked for is with the platform. */
+    [[nodiscard]] bool holdsCapture(const Runtime& runtime) const
+    {
+        if (runtime.videoRunning) return true;
+        return std::any_of(groups.begin(), groups.end(), [&](const auto& group) {
+            return group.fired && group.camera == runtime.description.index;
+        });
+    }
+
+    /* Whether the camera may hold a capture: it does already, or fewer than
+     * `CameraDeviceOptions::use.streams` other cameras do. A camera beyond that
+     * is refused as the platform refuses one that conflicts with a running one,
+     * whatever the layout the guest was told or the platform would allow. */
+    [[nodiscard]] bool admitsCamera(const Runtime& runtime) const
+    {
+        if (holdsCapture(runtime)) return true;
+        std::size_t others = 0;
+        for (const auto& other : runtimes)
+            if (&other != &runtime && holdsCapture(other)) ++others;
+        return others < options.use.streams;
+    }
+
+    /* A camera's video is about to run: its frames are kept. */
+    void openFramesOf(std::size_t platformCamera)
+    {
+        std::lock_guard lock(inboxMutex);
+        framesOpen.insert(platformCamera);
+    }
+
+    /* A camera's video has stopped or is not run: the frames the worker has not
+     * taken are given back, and a callback of the platform that is in progress
+     * (it has not reached the inbox) finds the camera closed and keeps nothing. */
+    void closeFramesOf(std::size_t platformCamera)
+    {
+        std::lock_guard lock(inboxMutex);
+        framesOpen.erase(platformCamera);
+        std::erase_if(inboxFrames, [platformCamera](const InboxFrame& frame) { return frame.camera == platformCamera; });
+    }
+
     /* Brings the platform's video for a camera in line with the streams that
      * are running on it. */
     void reconfigure(Runtime& runtime)
@@ -471,6 +599,9 @@ public:
         }
         if (width == 0) {
             if (runtime.videoRunning && session) session->stopVideo(runtime.description.platformIndex);
+            // The session may stay open for a still or the torch, so the frames of a camera that stopped are given back
+            // here and not by the session's end, and its callbacks that are still running keep nothing.
+            closeFramesOf(runtime.description.platformIndex);
             runtime.videoRunning = false;
             runtime.runWidth = runtime.runHeight = runtime.runRate = 0;
             runtime.failed = false;
@@ -486,13 +617,25 @@ public:
         }
         if (runtime.videoRunning && runtime.runWidth == width && runtime.runHeight == height && runtime.runRate == rate) return;
         const bool wasFailed = runtime.failed;
-        const bool ok = session->startVideo(runtime.description.platformIndex, width, height, rate);
-        runtime.videoRunning = ok;
+        const bool wasRunning = runtime.videoRunning;
+        bool ok = false;
+        if (admitsCamera(runtime)) {
+            openFramesOf(runtime.description.platformIndex);
+            ok = session->startVideo(runtime.description.platformIndex, width, height, rate);
+        }
+        if (ok) {
+            runtime.runWidth = width;
+            runtime.runHeight = height;
+            runtime.runRate = rate;
+        } else if (!wasRunning) {
+            closeFramesOf(runtime.description.platformIndex);
+        }
+        // What the platform runs is charged until it has stopped, whatever the streams want: a change it refused leaves
+        // the capture it was to replace running (the platform's rollback keeps it), and the stream's end stops it.
+        runtime.videoRunning = ok || wasRunning;
         runtime.failed = !ok;
-        runtime.runWidth = width;
-        runtime.runHeight = height;
-        runtime.runRate = rate;
         runtime.videoRetry = now();
+        if (ok) runtime.bufferChecked = false;
         if (ok) {
             // The capture has to deliver before the stream has a picture of its own.
             runtime.resuming = true;
@@ -521,11 +664,21 @@ public:
             if (runtime.interruption == Interruption::pressure) pressure = true;
             if (runtime.interruption == Interruption::interrupted || runtime.failed) interrupted = true;
         }
+        bool blockedUse = false;
         for (const auto& [id, stream] : streams) {
             (void)id;
             active |= startedVideo(stream);
+            // A video stream that runs, or a still that was asked for. A
+            // metadata stream is queued for every camera the guest opens and
+            // does not say a client is using it.
+            blockedUse |= stream.started && stream.kind != VIRTIO_VIDEO_CAMERA_STREAM_META;
         }
-        CameraState state = !active ? CameraState::idle : multitasking ? CameraState::interruptedByMultitasking
+        // A blocked session never captures, so nothing is "streaming" however many
+        // black frames the guest's streams get; the application hears that a
+        // guest app has a camera open (blockedInUse), once for each open.
+        CameraState state = blocked() ? (blockedUse ? CameraState::blockedInUse : CameraState::idle)
+            : !active ? CameraState::idle
+            : multitasking ? CameraState::interruptedByMultitasking
             : pressure ? CameraState::interruptedBySystemPressure
             : interrupted ? CameraState::interrupted : CameraState::streaming;
         if (state == reported) return;
@@ -548,6 +701,10 @@ public:
     {
         {
             std::lock_guard lock(inboxMutex);
+            // A frame of a camera whose video has stopped is a callback that was
+            // in progress when it did: the capture is not counted any more, so
+            // its frame is not kept.
+            if (!framesOpen.contains(camera)) return;
             // Frames beyond a few are old by the time the worker takes them,
             // and each holds the capture's buffer: keep the newest.
             std::size_t held = 0;
@@ -557,7 +714,7 @@ public:
                                                  [camera](const auto& entry) { return entry.camera == camera; });
                 inboxFrames.erase(oldest);
             }
-            inboxFrames.push_back({camera, std::move(frame)});
+            inboxFrames.push_back({camera, std::move(frame), inboxSerial});
         }
         wake();
     }
@@ -573,7 +730,7 @@ public:
     {
         {
             std::lock_guard lock(inboxMutex);
-            inboxEvents.push_back(platformEvent);
+            inboxEvents.push_back({platformEvent, ++inboxSerial});
         }
         wake();
     }
@@ -699,16 +856,42 @@ public:
         return transferSegments(mapper, regions.get(), resource.planes[0], staging, true);
     }
 
-    [[nodiscard]] std::uint32_t rotationOf(const Runtime& runtime) const
+    /* Tells `onFlash` what the controls ask of the camera's light when it
+     * differs from what it was told last. */
+    void reportLight(Runtime& runtime, bool torch) const
+    {
+        const auto flash = runtime.controls.stillFlash(runtime.values);
+        if (!options.onFlash || (torch == runtime.reportedTorch && flash == runtime.reportedFlash)) return;
+        runtime.reportedTorch = torch;
+        runtime.reportedFlash = flash;
+        options.onFlash(runtime.description.index, torch, flash);
+    }
+
+    [[nodiscard]] std::uint32_t rotationOf(Runtime& runtime) const
     {
         const auto setting = runtime.controls.rotateAndCrop(runtime.values);
-        if (setting >= 1 && setting <= 3) return setting * 90;
-        if (setting == 4 && options.automaticRotation) return options.automaticRotation() % 360 / 90 * 90;
-        return 0;
+        std::uint32_t degrees = 0;
+        if (setting >= 1 && setting <= 3)
+            degrees = setting * 90;
+        else if (setting == 4 && options.automaticRotation)
+            degrees = options.automaticRotation(runtime.description.info) % 360 / 90 * 90;
+        if (options.onRotateAndCrop && (setting != runtime.reportedSetting || degrees != runtime.reportedTurn)) {
+            runtime.reportedSetting = setting;
+            runtime.reportedTurn = degrees;
+            options.onRotateAndCrop(runtime.description.index, setting, degrees);
+        }
+        return degrees;
     }
 
     void deliverFrame(Runtime& runtime, const CameraFrame& frame)
     {
+        if (!runtime.bufferChecked) {
+            runtime.bufferChecked = true;
+            std::fprintf(stderr, "%s\n",
+                         bufferCheckLine(runtime.description.index, frame.width, frame.height,
+                                         frame.luma.size() + frame.chroma.size(), frame.lumaStride,
+                                         maximumDeliveredFrameBytes(limits)).c_str());
+        }
         const auto sequence = ++runtime.sequence;
         runtime.latest = frame.exposure;
         const auto time = now();
@@ -760,16 +943,7 @@ public:
         auto& resource = stream.resources.at(held.resource);
         const auto size = videoPlaneSize(stream);
         bool ok = false;
-        if (!resource.planes.empty() && resource.capacity >= size) {
-            if (stream.black.size() != size) {
-                stream.black.assign(size, 0);
-                uml::platform::Nv12Target target {stream.black.data(), pitchOf(stream),
-                                                  stream.black.data() + std::size_t(pitchOf(stream)) * stream.height, pitchOf(stream),
-                                                  stream.width, stream.height};
-                uml::platform::fillNv12Black(target);
-            }
-            ok = transferSegments(mapper, regions.get(), resource.planes[0], stream.black, true);
-        }
+        if (!resource.planes.empty() && resource.capacity >= size) ok = writeBlack(stream, resource);
         const auto sequence = ++runtime->sequence;
         const std::uint32_t metaFlags = blackMetaFlags(*runtime);
         ++stream.framesOut;
@@ -777,6 +951,30 @@ public:
         CameraExposure black;
         black.activeCamera = std::uint32_t(runtime->description.platformIndex);
         pushMeta(*runtime, metaOf(*runtime, sequence, black, metaFlags), now());
+    }
+
+    /* Writes a black picture to a guest's buffer: the luma plane and then the
+     * chroma plane, each from the chunk of black the device keeps, so a picture
+     * of any size, and any number of streams, hold nothing of their own. */
+    [[nodiscard]] bool writeBlack(const Stream& stream, const Resource& resource)
+    {
+        if (blackLuma.empty()) {
+            // A black picture of full-range BT.709 (`fillNv12Black`): luma 0 and neutral chroma.
+            blackLuma.assign(blackChunkBytes, 0);
+            blackChroma.assign(blackChunkBytes, 128);
+        }
+        const std::uint64_t lumaBytes = std::uint64_t(pitchOf(stream)) * stream.height;
+        const std::uint64_t total = lumaBytes + lumaBytes / 2;
+        for (std::uint64_t offset = 0; offset < total;) {
+            const bool inLuma = offset < lumaBytes;
+            const auto& chunk = inLuma ? blackLuma : blackChroma;
+            const std::uint64_t end = inLuma ? lumaBytes : total;
+            const std::size_t length = std::size_t(std::min<std::uint64_t>(chunk.size(), end - offset));
+            auto data = std::span<std::uint8_t>(const_cast<std::uint8_t*>(chunk.data()), length);
+            if (!transferSegments(mapper, regions.get(), resource.planes[0], data, true, offset)) return false;
+            offset += length;
+        }
+        return true;
     }
 
     void arm(Stream& stream)
@@ -824,12 +1022,17 @@ public:
         for (const auto& member : group.members) complete(member.stream, member.held, member.held.cookie, VIRTIO_VIDEO_DEQUEUE_FLAG_ERR | extra);
     }
 
+    /* A capture that ends makes room for the captures that wait for it. */
     void eraseGroup(std::uint64_t token)
     {
         std::erase_if(groups, [token](const auto& group) { return group.fired && group.token == token; });
+        fireWaiting();
     }
 
-    /* One timer, set for the earliest deadline a group has. */
+    /* One timer, set for the earliest deadline a group has: a group that is
+     * still gathering its buffers, one that waits for room or has a capture with
+     * the platform, and one the guest gave up on, which is held to the platform's
+     * own end of the capture. */
     void armGroupTimer()
     {
         struct kevent change {};
@@ -838,7 +1041,7 @@ public:
             ::kevent(queue.get(), &change, 1, nullptr, 0, nullptr);
             return;
         }
-        std::uint64_t earliest = groups.front().deadline;
+        std::uint64_t earliest = ~std::uint64_t {};
         for (const auto& group : groups) earliest = std::min(earliest, group.deadline);
         const auto time = now();
         const std::uint64_t wait = earliest > time ? earliest - time : 0;
@@ -857,6 +1060,8 @@ public:
         else if (runtime.interruption != Interruption::none) refusal = VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED;
         if (refusal != 0) {
             complete(stream.id, held, held.cookie, VIRTIO_VIDEO_DEQUEUE_FLAG_ERR | refusal);
+            // A blocked session's still is the guest's use of a camera too.
+            if (blocked()) reportState();
             return;
         }
         const bool more = (held.flags & VIRTIO_VIDEO_CAMERA_QUEUE_F_GROUP_MORE) != 0 && held.cookie != 0;
@@ -874,7 +1079,129 @@ public:
         }
         found->members.push_back({stream.id, held});
         if (more) return;
-        fire(*found, runtime);
+        admit(*found, runtime);
+    }
+
+    /* Whether the first still of this lens also teaches its colour data: it has
+     * RAW stills, the store has none of its colour data yet, the capture is at
+     * unit zoom and it has not been tried three times. The capture then asks for
+     * a RAW with the JPEG, whatever the layout lists. */
+    [[nodiscard]] bool teachesColour(const Runtime& runtime) const
+    {
+        return runtime.description.info.rawStills && !runtime.description.calibration && runtime.calibrationAttempts < 3 &&
+            std::fabs(runtime.controls.settings(runtime.values).zoomRatio - 1.0f) < 1e-3f;
+    }
+
+    /* What a group's capture holds while it is with the host
+     * (`jpegCaptureBytes`, `rawCaptureBytes`), for the sizes of its pictures. */
+    [[nodiscard]] std::uint64_t costOf(const Group& group, const Runtime& runtime) const
+    {
+        bool jpeg = false, raw = false;
+        std::uint64_t jpegPixels = 0, rawPixels = 0;
+        for (const auto& member : group.members) {
+            const auto& stream = streams.at(member.stream);
+            if (stream.format == VIRTIO_VIDEO_FORMAT_CAMERA_JPEG) {
+                jpeg = true;
+                jpegPixels = std::uint64_t(stream.width) * stream.height;
+            } else {
+                raw = true;
+                rawPixels = std::uint64_t(stream.width) * stream.height;
+            }
+        }
+        if (!raw && teachesColour(runtime)) {
+            raw = true;
+            const auto& size = runtime.description.info.rawStillSize;
+            rawPixels = size.width != 0 ? std::uint64_t(size.width) * size.height : limits.maximumStillPixels;
+        }
+        return (jpeg ? jpegCaptureBytes(jpegPixels, options.use.stillWorkingBytesPerPixel) : 0) +
+            (raw ? rawCaptureBytes(rawPixels) : 0);
+    }
+
+    /* What the captures with the platform cost together. */
+    [[nodiscard]] std::uint64_t capturesCost() const
+    {
+        std::uint64_t cost = 0;
+        for (const auto& group : groups)
+            if (group.fired) cost += group.cost;
+        return cost;
+    }
+
+    /* Whether a waiting group is older than `group`. */
+    [[nodiscard]] bool olderWaits(const Group& group) const
+    {
+        return std::any_of(groups.begin(), groups.end(), [&](const auto& other) { return other.waiting && other.whole < group.whole; });
+    }
+
+    /* A whole group's capture starts at once if the captures the device holds
+     * leave room for it and no older group waits; otherwise it waits, and the
+     * groups start in the order they became whole. Its time is the capture's
+     * from the request, whether it waits or runs. A capture that costs more than
+     * the device admits at all is refused before it starts. */
+    void admit(Group& group, Runtime& runtime)
+    {
+        group.cost = costOf(group, runtime);
+        group.whole = ++wholeCount;
+        group.deadline = now() + captureTimeoutNanoseconds;
+        if (group.cost > stillBudget) {
+            failGroup(group, 0);
+            const auto order = group.whole;
+            std::erase_if(groups, [order](const auto& other) { return other.whole == order; });
+            armGroupTimer();
+            releaseSessionIfIdle();
+            reportState();
+            return;
+        }
+        const auto held = capturesCost();
+        if (olderWaits(group) || (held != 0 && held + group.cost > stillBudget)) {
+            group.waiting = true;
+            armGroupTimer();
+            return;
+        }
+        fire(group, runtime);
+    }
+
+    void fireWaiting()
+    {
+        if (firingWaiting) return;
+        firingWaiting = true;
+        bool refused = false;
+        for (;;) {
+            // The oldest group that waits goes first.
+            auto next = groups.end();
+            for (auto group = groups.begin(); group != groups.end(); ++group)
+                if (group->waiting && (next == groups.end() || group->whole < next->whole)) next = group;
+            if (next == groups.end()) break;
+            auto* runtime = runtimeOf(next->camera);
+            if (runtime == nullptr) {
+                failGroup(*next, 0);
+                groups.erase(next);
+                continue;
+            }
+            // Members may have gone while it waited.
+            if (next->members.empty()) {
+                groups.erase(next);
+                continue;
+            }
+            next->cost = costOf(*next, *runtime);
+            // A control changed while it waited (a zoom back to 1 adds the colour data of an uncalibrated lens): the capture
+            // may now cost more than the device admits at all, which is refused as it is at the request.
+            if (next->cost > stillBudget) {
+                failGroup(*next, 0);
+                groups.erase(next);
+                refused = true;
+                continue;
+            }
+            const auto held = capturesCost();
+            if (held != 0 && held + next->cost > stillBudget) break;
+            next->waiting = false;
+            fire(*next, *runtime);
+        }
+        firingWaiting = false;
+        armGroupTimer();
+        if (refused) {
+            releaseSessionIfIdle();
+            reportState();
+        }
     }
 
     /* The captures a camera has with the platform. */
@@ -896,6 +1223,7 @@ public:
                 jpeg = true;
                 request.jpegWidth = stream.width;
                 request.jpegHeight = stream.height;
+                request.maximumJpegBytes = maximumJpegBytes(std::uint64_t(stream.width) * stream.height);
             } else {
                 if (raw) refusal = 1;
                 raw = true;
@@ -905,9 +1233,7 @@ public:
         request.jpegQuality = runtime.controls.jpegQuality(runtime.values);
         request.flash = runtime.controls.stillFlash(runtime.values);
         // The first still of an uncalibrated lens also teaches its colour data.
-        const auto& info = runtime.description.info;
-        if (!raw && info.rawStills && !runtime.description.calibration && runtime.calibrationAttempts < 3 &&
-            std::fabs(runtime.controls.settings(runtime.values).zoomRatio - 1.0f) < 1e-3f) {
+        if (!raw && teachesColour(runtime)) {
             request.raw = true;
             request.speedPrioritized = true;
             calibrationRaw = true;
@@ -916,9 +1242,15 @@ public:
         if (raw) request.speedPrioritized = true;
         // A guest holds at most a pipeline's worth of captures with the platform.
         if (capturesInFlight(runtime.description.index) >= limits.buffers) refusal = 1;
+        // A camera beyond the cameras the device lets hold a capture at once is refused.
+        if (refusal == 0 && !admitsCamera(runtime)) refusal = 1;
         if (refusal == 0 && !ensureSession()) refusal = 1;
         group.token = request.token = nextToken++;
         group.fired = true;
+        {
+            std::lock_guard lock(inboxMutex);
+            group.fireSerial = inboxSerial;
+        }
         if (refusal == 0) {
             applySettings(runtime, false);
             bool taken = session->takeStill(runtime.description.platformIndex, request);
@@ -935,22 +1267,47 @@ public:
             eraseGroup(group.token);
             releaseSessionIfIdle();
         } else {
-            // The group is whole; the capture has its own time.
-            group.deadline = now() + captureTimeoutNanoseconds;
             armGroupTimer();
         }
         reportState();
+    }
+
+    /* Gives the memory of a result back, the capacity and not only the size: the
+     * capture's cost is spent again only after this. */
+    static void freePayload(CameraStillResult& result) noexcept
+    {
+        std::vector<std::uint8_t>().swap(result.jpeg);
+        std::vector<std::uint16_t>().swap(result.raw);
     }
 
     void deliverStill(std::size_t platformCamera, CameraStillResult& result)
     {
         auto* group = groupOfToken(result.token);
         const auto wire = wireOfPlatform.find(platformCamera);
-        if (!group || wire == wireOfPlatform.end()) return;
+        if (!group || wire == wireOfPlatform.end()) {
+            freePayload(result);
+            return;
+        }
         auto& runtime = runtimes[wire->second];
-        if (!result.ok) {
-            failGroup(*group, runtime.interruption != Interruption::none ? std::uint32_t(VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED) : 0u);
+        // The guest gave up on this capture: its buffers have failed, and the platform's end of it releases its charge.
+        if (group->expired) {
+            freePayload(result);
             eraseGroup(result.token);
+            releaseSessionIfIdle();
+            reportState();
+            return;
+        }
+        // A capture that was asked for before an interruption or recovery of its
+        // camera that has been handled since spans it, and one that completes while
+        // the camera is interrupted was not taken in a repaired camera: neither is
+        // delivered, whatever the platform says of it. They fail as a capture that
+        // went wrong does, for the guest to ask again.
+        const bool spansBoundary = group->fireSerial < runtime.boundary;
+        if (!result.ok || spansBoundary || runtime.interruption != Interruption::none) {
+            failGroup(*group, runtime.interruption != Interruption::none ? std::uint32_t(VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED) : 0u);
+            freePayload(result);
+            eraseGroup(result.token);
+            checkpoint(CameraCheckpoint::stillDelivered);
             releaseSessionIfIdle();
             reportState();
             return;
@@ -958,8 +1315,15 @@ public:
         // A Bayer still teaches the lens's colour data, which reaches the guest
         // at its next start.
         if (result.color.bayer != uml::platform::BayerOrder::none && !runtime.description.calibration) {
-            runtime.description.calibration = result.color;
-            calibration->save(model, CalibrationStore::lensKey(runtime.description.info), result.color);
+            // Learned in the camera's anchor, which is the only format it runs in.
+            auto color = result.color;
+            if (runtime.description.anchor) {
+                const auto& anchor = runtime.description.info.captureFormats[*runtime.description.anchor];
+                color.anchorWidth = anchor.width;
+                color.anchorHeight = anchor.height;
+            }
+            runtime.description.calibration = color;
+            calibration->save(model, CalibrationStore::lensKey(runtime.description.info), color);
         }
         const auto sequence = ++runtime.sequence;
         auto meta = metaOf(runtime, sequence, result.exposure, VIRTIO_VIDEO_CAMERA_FRAME_F_STILL);
@@ -970,7 +1334,22 @@ public:
             std::uint32_t size = 0;
             bool ok = false;
             if (stream.format == VIRTIO_VIDEO_FORMAT_CAMERA_JPEG) {
-                if (auto plan = reserveExifGap(result.jpeg); plan && plan->size() <= resource.capacity && !resource.planes.empty()) {
+                // A file larger than the host takes fails the capture, before anything of it is copied to the guest.
+                const auto largest = maximumJpegBytes(std::uint64_t(stream.width) * stream.height);
+                if (result.jpeg.size() > largest) {
+                    std::fprintf(stderr, "Virtio camera stream %u: the still's file is %zu bytes, more than the %llu a %ux%u still may take\n",
+                                 stream.id, result.jpeg.size(), static_cast<unsigned long long>(largest), stream.width, stream.height);
+                    result.jpeg.clear();
+                }
+                auto plan = reserveExifGap(result.jpeg);
+                // The guest asked for this size and gets this size or an error: a
+                // platform picture of another size is not the one it configured.
+                if (plan && (plan->frameWidth != stream.width || plan->frameHeight != stream.height)) {
+                    std::fprintf(stderr, "Virtio camera stream %u: the still is %ux%u, not the %ux%u that was asked for\n", stream.id,
+                                 unsigned(plan->frameWidth), unsigned(plan->frameHeight), stream.width, stream.height);
+                    plan.reset();
+                }
+                if (plan && plan->size() <= resource.capacity && !resource.planes.empty()) {
                     // The scan is the end of the platform's own bytes, written from where they lie.
                     const std::span<std::uint8_t> tail(result.jpeg.data() + (plan->tail.data() - result.jpeg.data()), plan->tail.size());
                     ok = transferSegments(mapper, regions.get(), resource.planes[0], plan->head, true) &&
@@ -985,7 +1364,9 @@ public:
             complete(stream.id, member.held, member.held.cookie, ok ? 0 : VIRTIO_VIDEO_DEQUEUE_FLAG_ERR, ok ? size : 0, sequence);
         }
         pushMeta(runtime, meta, 0);
+        freePayload(result);
         eraseGroup(result.token);
+        checkpoint(CameraCheckpoint::stillDelivered);
         releaseSessionIfIdle();
         reportState();
     }
@@ -1017,31 +1398,104 @@ public:
     void expireGroups()
     {
         const auto time = now();
+        bool lost = false;
         for (std::size_t index = 0; index < groups.size();) {
             auto& group = groups[index];
             if (group.deadline > time) {
                 ++index;
                 continue;
             }
+            if (group.expired) {
+                // The platform did not end a capture the guest gave up on long ago.
+                lost = true;
+                ++index;
+                continue;
+            }
             failGroup(group, 0);
+            if (group.fired) {
+                // The platform still holds the capture, and cannot be told to drop one: the charge stays until it ends
+                // it, or the session does.
+                group.expired = true;
+                group.members.clear();
+                group.deadline = time + abandonedCaptureNanoseconds;
+                ++index;
+                continue;
+            }
             groups.erase(groups.begin() + std::ptrdiff_t(index));
         }
+        if (lost) {
+            // A completion may have reached the inbox after the pump took its batch: the capture it ends is finished, not
+            // lost, and its session is healthy. What is still unfinished past its time was lost.
+            deliverQueuedResultsOfAbandoned(time);
+            lost = std::any_of(groups.begin(), groups.end(), [time](const auto& group) { return group.expired && group.deadline <= time; });
+        }
+        if (lost) abandonSession();
+        fireWaiting();
         armGroupTimer();
         releaseSessionIfIdle();
         reportState();
+    }
+
+    /* Delivers the results already in the inbox of the captures the guest gave up on whose time has run out. The inbox is
+     * read under its lock and the results are delivered after it is let go. */
+    void deliverQueuedResultsOfAbandoned(std::uint64_t time)
+    {
+        std::vector<InboxStill> finished;
+        {
+            std::lock_guard lock(inboxMutex);
+            for (auto still = inboxStills.begin(); still != inboxStills.end();) {
+                const auto* group = groupOfToken(still->result.token);
+                if (group != nullptr && group->expired && group->deadline <= time) {
+                    finished.push_back(std::move(*still));
+                    still = inboxStills.erase(still);
+                } else {
+                    ++still;
+                }
+            }
+        }
+        for (auto& still : finished) deliverStill(still.camera, still.result);
+    }
+
+    /* Ends the platform's session, and with it every capture it holds: the ones
+     * the guest is waiting for fail, and the ones it gave up on are released. */
+    void endFiredGroups(std::uint32_t extra)
+    {
+        for (std::size_t index = 0; index < groups.size();) {
+            if (!groups[index].fired) {
+                ++index;
+                continue;
+            }
+            failGroup(groups[index], extra);
+            groups.erase(groups.begin() + std::ptrdiff_t(index));
+        }
+    }
+
+    /* A capture was lost to the platform: the session is closed and opened again by whatever needs it next, and the cameras
+     * with a stream start their video again. */
+    void abandonSession()
+    {
+        closeSession();
+        endFiredGroups(VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED);
+        endInterruptions();
     }
 
     // ------------------------------------------------------------------------
     // Platform events
     // ------------------------------------------------------------------------
 
-    void handlePlatformEvent(const CameraEvent& platformEvent)
+    void handlePlatformEvent(const InboxEvent& inboxEvent)
     {
+        const CameraEvent& platformEvent = inboxEvent.event;
         const auto each = [&](auto&& body) {
+            const auto bounded = [&](Runtime& runtime) {
+                // Whatever the platform handed over before this event is from before it.
+                runtime.boundary = inboxEvent.serial;
+                body(runtime);
+            };
             if (platformEvent.camera == uml::platform::allCameras) {
-                for (auto& runtime : runtimes) body(runtime);
+                for (auto& runtime : runtimes) bounded(runtime);
             } else if (const auto wire = wireOfPlatform.find(platformEvent.camera); wire != wireOfPlatform.end()) {
-                body(runtimes[wire->second]);
+                bounded(runtimes[wire->second]);
             }
         };
         switch (platformEvent.kind) {
@@ -1084,9 +1538,12 @@ public:
                 markDown(runtime, VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED);
             });
             closeSession();
+            // The captures the session held are gone with it.
+            endFiredGroups(VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED);
             sessionFailed = true;
             lastRetry = now();
             each([&](Runtime& runtime) { updateBlackTimers(runtime); });
+            fireWaiting();
             break;
         }
         reportState();
@@ -1095,21 +1552,39 @@ public:
     /* Takes what the platform produced since the last pass. */
     void pump()
     {
-        std::deque<InboxFrame> frames;
+        std::vector<InboxFrame> newest;
         std::deque<InboxStill> stills;
-        std::deque<CameraEvent> platformEvents;
+        std::deque<InboxEvent> platformEvents;
         {
             std::lock_guard lock(inboxMutex);
-            frames.swap(inboxFrames);
+            // Only the newest frame of a camera is kept, and the older ones are
+            // freed here, before the lock is let go: a frame is stale by the time
+            // the worker takes it, and each holds the capture's buffer. So the
+            // pump holds one frame a camera while the inbox refills to its limit,
+            // which is the count the reserve assumes (heldFramesPerCamera).
+            for (auto& entry : inboxFrames) {
+                const auto same = std::find_if(newest.begin(), newest.end(), [&](const InboxFrame& kept) { return kept.camera == entry.camera; });
+                if (same != newest.end()) *same = std::move(entry);
+                else newest.push_back(std::move(entry));
+            }
+            inboxFrames.clear();
             stills.swap(inboxStills);
             platformEvents.swap(inboxEvents);
         }
         for (const auto& platformEvent : platformEvents) handlePlatformEvent(platformEvent);
         for (auto& still : stills) deliverStill(still.camera, still.result);
-        for (auto& entry : frames) {
+        for (auto& entry : newest) {
             const auto wire = wireOfPlatform.find(entry.camera);
             if (wire == wireOfPlatform.end()) continue;
             auto& runtime = runtimes[wire->second];
+            // A frame the platform handed over before the last interruption or
+            // recovery of its camera was captured before the repair, however the
+            // pump came by it (it waited in the inbox, or in this batch, while the
+            // event was handled): it is not the camera's picture now.
+            if (entry.serial < runtime.boundary) {
+                entry.frame = CameraFrame {};
+                continue;
+            }
             if (runtime.resuming && runtime.interruption == Interruption::none) {
                 runtime.resuming = false;
                 settle(runtime);
@@ -1117,6 +1592,8 @@ public:
             }
             if (blackMode(runtime)) continue;
             deliverFrame(runtime, entry.frame);
+            // Its buffer goes back to the capture as soon as the guest has the frame.
+            entry.frame = CameraFrame {};
         }
     }
 
@@ -1144,7 +1621,7 @@ public:
             break;
         case VIRTIO_VIDEO_CAMERA_STREAM_STILL:
             if (stream.format == VIRTIO_VIDEO_FORMAT_CAMERA_JPEG)
-                p.plane_formats[0] = {std::uint32_t(std::uint64_t(stream.width) * stream.height * 3 / 2 + exifGapLength), 0};
+                p.plane_formats[0] = {std::uint32_t(jpegBufferBytes(std::uint64_t(stream.width) * stream.height)), 0};
             else
                 p.plane_formats[0] = {rawPitch(2 * stream.width) * stream.height, rawPitch(2 * stream.width)};
             break;
@@ -1212,6 +1689,7 @@ public:
         runtime.values = std::move(next);
         // Applied as soon as the host can.
         const auto settings = runtime.controls.settings(runtime.values);
+        reportLight(runtime, settings.torch);
         if (!blocked()) {
             if (settings.torch && !session) ensureSession();
             applySettings(runtime, false);

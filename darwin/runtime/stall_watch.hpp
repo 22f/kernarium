@@ -8,6 +8,13 @@
 
 namespace uml::runtime {
 
+/* The name of the watch's thread, and the name it takes while it sleeps, so
+ * that a sample of the process shows which it is in. The sleeping name is set
+ * once the watch has decided to sleep, after its last look, and the awake
+ * name again when a timer of the carriers wakes it. */
+inline constexpr char stall_watch_thread_name[] = "uml-stall-watch";
+inline constexpr char stall_watch_asleep_name[] = "uml-stall-watch (asleep)";
+
 /*
  * The watch that records why a guest's vCPUs stopped running.
  *

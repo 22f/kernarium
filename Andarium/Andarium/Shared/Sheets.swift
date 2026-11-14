@@ -85,7 +85,7 @@ struct SystemSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                SystemControls(guest: draftBinding, host: model.host)
+                SystemControls(guest: draftBinding, host: model.host, cameraLive: model.cameraMode == .live)
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
                 .padding(.bottom, 24)
@@ -93,6 +93,9 @@ struct SystemSheet: View {
             .background(Color(.systemGroupedBackground))
             .navigationTitle("System")
             .navigationBarTitleDisplayMode(.inline)
+            // A camera that came without a change of access is planned for
+            // before the person reads the figure.
+            .onAppear { model.refreshCameraReserve() }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel", role: .cancel) { dismiss() }

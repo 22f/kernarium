@@ -57,7 +57,10 @@ application that must:
     texts are the String Catalog table Feedback, which the build compiles in
     with the feature and no other: a product without it has no Feedback
     strings table, found by the file name whatever it holds, and a product
-    with it has the table in Japanese and both Chinese; and
+    with it has the table in Japanese and both Chinese. The What's New
+    notes are the one exception: the entry about Send feedback is bundled
+    in every product and hidden by one without it, so the strings of that
+    entry, and no other string of the notes' table, may stay; and
   - carry Buy me tokens (Andarium/README.md#buy-me-tokens) only when the build
     names its four product identifiers: the feature is compiled in exactly where
     the ignored local configuration holds all four, in this configuration alone.
@@ -111,7 +114,12 @@ application that must:
     address of MIIT's filing site and the key, whose value is the number the
     build named, and the number in no other file. The local number is in no
     file of a bundle whose build does not name it, as UTF-8 or as the UTF-16 of
-    a property list, and is never printed.
+    a property list, and is never printed; and
+  - open the files of the two document pickers (Install APK and the file
+    browser's Import) in place, through SwiftUI's fileImporter, and hold no
+    trace of the copy-mode presenter every other configuration uses
+    (Andarium/README.md#configurations): the application refers to both
+    importers and to none of the presenter's types.
 
 The knob scan reads bytes, so it does not see a Swift string of up to 15 bytes
 (ANDARIUM_START is one): the compiler keeps those in instruction immediates.
@@ -131,11 +139,13 @@ configuration, so a build that breaks one of these rules fails. In every other
 configuration a phase runs `--feedback`, which checks Send feedback alone,
 another `--tip-jar`, which checks Buy me tokens alone, a third `--review`,
 which checks Review on the App Store alone, a fourth `--follow-x`, which
-checks Follow developer on X alone, and a fifth `--icp`, which checks the ICP
-filing number alone: there the feature is absent unless a test or capture
-script arranged it with the example address, identifiers, placeholder, handle
-or number, in Debug alone. Each prints one line that says whether
-its feature is compiled in.
+checks Follow developer on X alone, a fifth `--icp`, which checks the ICP
+filing number alone, and a sixth `--pickers`: there each feature is absent
+unless a test or capture script arranged it with the example address,
+identifiers, placeholder, handle or number, in Debug alone. Each of the five
+prints one line that says whether its feature is compiled in; the sixth checks
+that the product holds the copy-mode presenter, the proof that the check above
+finds it.
 """
 
 from __future__ import annotations
@@ -145,6 +155,7 @@ __import__("sys").dont_write_bytecode = True
 import argparse
 import contextlib
 import dataclasses
+import json
 import os
 import plistlib
 import re
@@ -210,6 +221,14 @@ FEEDBACK_FRAGMENTS = (
     b"SendFeedback", b"MFMailCompose", b"PhotosUI.framework", *FEEDBACK_REQUIRED)
 # Words the feature puts in a String Catalog.
 FEEDBACK_WORDS = ("Send feedback", "Andarium feedback")
+# The What's New notes (Shared/WhatsNew.json, bundled whole in every build) have
+# an entry about Send feedback, marked with the feature it is about. A build
+# without the feature hides the entry at run time (WhatsNewFeature in
+# AndariumCore), so its strings stay in that table, which a String Catalog
+# compiles whole, and are the one place the words may remain.
+NOTES_FILE = "WhatsNew.json"
+NOTES_TABLE = "WhatsNew"
+NOTES_FEATURE = "sendFeedback"
 # The feature's own table (Localization/Feedback.xcstrings), which a String
 # Catalog compiles to Feedback.strings, and to Feedback.stringsdict for a plural,
 # in each language's directory; and the languages that table has besides English.
@@ -308,6 +327,21 @@ GITHUB_HANDLE_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))
 # files that no bundle carries.
 DEVELOPER_ASSETS = {"name": b"DeveloperAvatar", "github": b"GitHubLogo"}
 DEVELOPER_FILES = frozenset({"github-logo.svg", "developer-avatar.jpeg"})
+# The document pickers of Install APK and the file browser's Import. The App
+# Store configuration opens the files in place with SwiftUI's fileImporter, one
+# call for a single file and one for several, which the application refers to
+# by these mangled names (the name of each, the first parameters and the
+# completion; Swift writes a name's length before it). Every other
+# configuration presents the copy-mode picker instead (Shared/CopyDocumentPicker.swift,
+# compiled out by APP_STORE): a type of it, its modifier and the files of a
+# pick. The scan reads the host code, as the others do.
+PICKER_IN_PLACE = {
+    "fileImporter for one file (Install APK)":
+        b"12fileImporter11isPresented19allowedContentTypes12onCompletion",
+    "fileImporter for several files (Import)":
+        b"12fileImporter11isPresented19allowedContentTypes23allowsMultipleSelection12onCompletion",
+}
+PICKER_COPY = (b"18CopyDocumentPicker", b"18documentCopyPicker", b"12PickedCopies")
 # Domains and top-level domains that name no mailbox (RFC 2606, RFC 6761).
 PLACEHOLDER_DOMAINS = ("example.com", "example.org", "example.net")
 PLACEHOLDER_TLDS = ("example", "invalid", "localhost", "test")
@@ -459,6 +493,15 @@ def build_host_traces(path: Path, debug_map: bool = True) -> list[str]:
     return found
 
 
+# The permissions Andarium asks of the person, one capability each: Camera,
+# Microphone and Location.
+USAGE_DESCRIPTIONS = (
+    "NSCameraUsageDescription",
+    "NSMicrophoneUsageDescription",
+    "NSLocationWhenInUseUsageDescription",
+)
+
+
 def info_problems(info: dict) -> list[str]:
     found = []
     if info.get("ITSAppUsesNonExemptEncryption") is not False:
@@ -471,6 +514,12 @@ def info_problems(info: dict) -> list[str]:
         found.append("Info.plist: UIDeviceFamily must be [1, 2], iPhone and iPad")
     if "UIBackgroundModes" in info:
         found.append("Info.plist: the application has no background mode")
+    # The system shows these when the person turns a capability on, and ends
+    # the application at the request of a capability whose text is missing.
+    for key in USAGE_DESCRIPTIONS:
+        value = info.get(key)
+        if not isinstance(value, str) or not value.strip():
+            found.append(f"Info.plist: {key} must be a non-empty string")
     return found
 
 
@@ -563,7 +612,21 @@ DEBUG_SYMBOLS = (
     # namespace uml::platform, its class and entries.
     ("synthetic camera", (b"15SyntheticCamera", b"19SyntheticCameraImpl",
                           b"19makeSyntheticCamera", b"19encodeSyntheticJpeg",
-                          b"17decodeChartMarker")),
+                          b"17decodeChartMarker",
+                          # The runtime's choice of it from the environment
+                          # (Kernarium/Runtime/KernariumCamera.hpp).
+                          b"6camera11parseSource", b"6camera12chooseSource",
+                          b"15BackCamerasOnly")),
+    # The camera's development lines (darwin/device/camera/camera_diagnostics.hpp):
+    # what ROTATE_AND_CROP asks of the host and the footprint at each capture
+    # checkpoint, printed by a launcher or a runtime that is not an App Store
+    # build, and the Simulator preview's camera and thermal notices
+    # (Model.previewCameraNotice and previewThermalNotice).
+    ("camera diagnostics", (b"17printRotateAndCrop", b"15printCheckpoint",
+                            b"19previewCameraNotice", b"20previewThermalNotice")),
+    # The development build's compass check (Live/MotionSensors.swift,
+    # CompassReadout, and its launch setting in Live/LaunchEnvironment.swift).
+    ("compass readout", (b"14CompassReadout", b"20CompassReadoutLaunch")),
     # Simulated game controllers: the scripted input and the guest end of the
     # gamepad wire (AndariumCoreTestSupport, which only tests and the probe
     # tool link) and the host reader that moved there.
@@ -591,8 +654,11 @@ DEBUG_STRINGS = (
                     b"ADB authorization is off", b"removed the boot payload")),
     ("remote framebuffer", (b"RFB 003.00",)),
     ("input probe", (b"inputProbeLog", b"inputProbeField")),
+    ("camera diagnostics", (b"ROTATE_AND_CROP", b"Camera: memory: ")),
+    ("compass readout", (b"Andarium: compass-check: ",)),
     ("synthetic camera", (b"SyntheticPhone1,1", b"SyntheticTablet1,1",
-                          b"SyntheticLaptop1,1", b"synthetic-back-wide")),
+                          b"SyntheticLaptop1,1", b"synthetic-back-wide",
+                          b"KERNARIUM_CAMERA_SOURCE", b"is not a back camera")),
     ("JIT", (b"--jit-cache-budget=", b"--execution-engine=jit",
              b"running on gadgets, not the JIT", b"open Andarium from StikDebug",
              b"Started without JIT")),
@@ -930,18 +996,46 @@ def info_source_problems(app: Path, source: Path) -> list[str]:
     return found
 
 
+def hidden_notes(app: Path) -> frozenset[str]:
+    """The strings (title, text and points) of the entries of the bundled What's
+    New notes that are about Send feedback, which the notes' table holds under
+    their English text. Empty if the notes are missing or unreadable, so
+    nothing is then exempt."""
+    try:
+        releases = json.loads((app / NOTES_FILE).read_text(encoding="utf-8"))
+        entries = [entry for release in releases for entry in release["entries"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        return frozenset()
+    found: set[str] = set()
+    for entry in entries:
+        requirement = entry.get("requirement") if isinstance(entry, dict) else None
+        if not isinstance(requirement, dict) or requirement.get("feature") != NOTES_FEATURE:
+            continue
+        points = entry.get("points")
+        for note in (entry.get("title"), entry.get("text"), *(points if isinstance(points, list) else ())):
+            if isinstance(note, str):
+                found.add(note)
+    return frozenset(found)
+
+
 def feedback_strings(app: Path) -> list[str]:
-    """The String Catalog tables of the application that mention Send feedback."""
+    """The String Catalog tables of the application that mention Send feedback,
+    leaving out the strings of the notes' entry about it (`hidden_notes`) and
+    nothing else of the notes' table."""
     found = []
+    hidden = hidden_notes(app)
     for path in sorted(app.glob("*.lproj/*.strings")):
         try:
             with path.open("rb") as handle:
                 table = plistlib.load(handle)
         except (OSError, plistlib.InvalidFileException, ValueError):
             continue
-        if isinstance(table, dict) and any(
-                word in text for key, value in table.items() for text in (str(key), str(value))
-                for word in FEEDBACK_WORDS):
+        if not isinstance(table, dict):
+            continue
+        if path.stem == NOTES_TABLE:
+            table = {key: value for key, value in table.items() if str(key) not in hidden}
+        if any(word in text for key, value in table.items() for text in (str(key), str(value))
+               for word in FEEDBACK_WORDS):
             found.append(str(path.relative_to(app)))
     return found
 
@@ -1594,6 +1688,8 @@ def planned_scans(options: argparse.Namespace) -> set[Scan]:
     is walked for itself, so a drift costs a walk and never an answer."""
     if options.runtime or options.host_traces:
         return set()
+    if options.pickers and not (options.feedback or options.follow_x or options.icp):
+        return set()
     if options.feedback or options.follow_x or options.icp:
         feedback, follow_x, icp, tip, review = options.feedback, options.follow_x, options.icp, False, False
     elif options.tip_jar:
@@ -1623,6 +1719,36 @@ def planned_scans(options: argparse.Namespace) -> set[Scan]:
         local = options.review_local_id
         scans |= value_scans([local[2:] if local.startswith("id") else local])
     return scans
+
+
+def picker_problems(app: Path, configuration: str) -> list[str]:
+    """Whether the product's document pickers are the configuration's. The App
+    Store configuration opens files in place: it refers to both importers and
+    holds none of the copy-mode presenter. Every other configuration holds the
+    presenter, which is what shows the scan can find it."""
+    copy: set[bytes] = set()
+    in_place: set[str] = set()
+    for binary in feedback_files(app):
+        code = host_code(binary)
+        if code is None:
+            continue
+        data = without_debug_map(*code, PATH_STABS)
+        copy.update(fragment for fragment in PICKER_COPY if fragment in data)
+        in_place.update(name for name, fragment in PICKER_IN_PLACE.items() if fragment in data)
+    if configuration != "AppStore":
+        if copy:
+            return []
+        return [f"the application lacks the copy-mode document picker ({configuration} copies the files "
+                "the pickers hand over)"]
+    problems = []
+    if copy:
+        problems.append(
+            "the application carries the copy-mode document picker "
+            f"({', '.join(sorted(item.decode() for item in copy))}); the App Store configuration opens files in place")
+    problems.extend(
+        f"the application lacks {name}: the App Store configuration opens files in place"
+        for name in PICKER_IN_PLACE if name not in in_place)
+    return problems
 
 
 def main() -> int:
@@ -1706,6 +1832,10 @@ def main() -> int:
         "--developer-local-github", default="",
         help="the build setting DEVELOPER_GITHUB_HANDLE: the local configuration's own GitHub handle, "
              "whose profile address no file may hold")
+    parser.add_argument(
+        "--pickers", action="store_true",
+        help="check the document pickers alone, for a configuration other than AppStore: "
+             "the product holds the copy-mode presenter")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--runtime", action="store_true",
@@ -1729,7 +1859,7 @@ def check(options: argparse.Namespace) -> int:
             app, options.configuration, tip_expected(options.configuration, products), developer,
             options.developer_local_github)
 
-    if options.feedback or options.follow_x or options.icp:
+    if options.feedback or options.follow_x or options.icp or options.pickers:
         found = []
         if options.info_source is not None:
             found.extend(info_source_problems(app, options.info_source))
@@ -1752,6 +1882,11 @@ def check(options: argparse.Namespace) -> int:
             found.extend(more)
             lines.append(f"{app.name}: ICP filing number is {'compiled in' if compiled else 'not compiled in'}"
                          f" ({options.configuration})")
+        if options.pickers:
+            more = picker_problems(app, options.configuration)
+            found.extend(more)
+            if not more:
+                lines.append(f"{app.name}: document pickers copy the files ({options.configuration})")
         for line in found:
             print(line, file=sys.stderr)
         for line in lines:
@@ -1829,6 +1964,10 @@ def check(options: argparse.Namespace) -> int:
         app, options.configuration, options.follow_x_handle, options.developer_x_handle, options.developer_x)
     problems.extend(follow)
     print(f"{app.name}: Follow developer on X is {'compiled in' if compiled else 'not compiled in'}")
+    pickers = picker_problems(app, options.configuration)
+    problems.extend(pickers)
+    if not pickers:
+        print(f"{app.name}: document pickers open the files in place")
 
     tip, tip_compiled = tip_problems(
         app, options.configuration, products, split_products(options.tip_local_products))

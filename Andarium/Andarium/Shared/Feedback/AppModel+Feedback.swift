@@ -24,7 +24,8 @@ extension AppModel {
         let machine = guest.map { guest in
             SendFeedbackInformation.VirtualMachine(
                 vcpus: guest.cores, memoryMiB: guest.memoryMiB, display: display,
-                graphicsMiB: host.memory.graphicsMemoryMiB(forMemory: guest.memoryMiB, vCPUs: guest.cores))
+                graphicsMiB: host.memory.graphicsMemoryMiB(
+                    forMemory: guest.memoryMiB, vCPUs: guest.cores, cameraLive: cameraMode == .live))
         }
         return SendFeedbackInformation(
             appVersion: bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?",
@@ -37,8 +38,40 @@ extension AppModel {
             virtualMachine: machine,
             androidRelease: system.release,
             runningSeconds: virtualMachineRuns ? feedbackServices.runningSeconds(self) : nil,
+            boot: bootingInformation(),
             freeSpaceBytes: host.freeStorageBytes,
             thermalState: Self.thermalName(ProcessInfo.processInfo.thermalState))
+    }
+
+    /// The virtual machine is starting: the boot screen is up and Android has
+    /// not been seen to boot.
+    var virtualMachineStarts: Bool {
+        if case .booting = phase { return true }
+        return false
+    }
+
+    /// What the virtual machine printed in this boot, as the runtime's session
+    /// record last quoted it: at most 4 KiB, from a checkpoint a few seconds
+    /// old. Only the running record of the boot under way counts
+    /// (`BootRecordBinding`): the record of a session that ended, of another
+    /// process, of an earlier boot or left in the file as the run began says
+    /// nothing of this one. nil where there is no such record or it has no
+    /// output yet.
+    func startOutput() -> String? {
+        guard let diagnosticsDirectory, let bootRecord else { return nil }
+        let record = SessionRecord.read(at: diagnosticsDirectory.appendingPathComponent(BugReportAttachments.sessionRecord))
+        return bootRecord.output(of: record)
+    }
+
+    /// Where a start that is still under way has got, for the mail written
+    /// from the boot screen's notice; nil in any other state.
+    private func bootingInformation() -> SendFeedbackInformation.Boot? {
+        guard case let .booting(kind) = phase else { return nil }
+        // The boot screen's own step, so the mail names the one the notice shows.
+        let step = liveBootStage()
+        return SendFeedbackInformation.Boot(
+            step: BootSteps.reportName(ofStep: min(step, BootSteps.count - 1), recovery: kind == .recovery),
+            seconds: bootElapsedSeconds(), restarts: slowStart.restarts)
     }
 
     private static var buildConfiguration: String {

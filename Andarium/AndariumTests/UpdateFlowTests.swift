@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import AndariumCore
+import AndariumCoreTestSupport
 import Foundation
 import Testing
 @testable import Andarium
@@ -26,9 +27,18 @@ final class StubDriver: RuntimeDriver {
     }
     func save(_ guest: Guest) throws { savedGuest = guest }
     func startPlan() -> StartPlan? { plan }
+    /// Whether the guest's first Android boot has not been seen to complete.
+    var firstBootIsPending = false
+    func firstBootPending() -> Bool { firstBootIsPending }
     /// What the data disk holds now; a test sets it as a run would.
     var diskUsedBytes: UInt64 = 0
     func measuredUsedBytes() -> UInt64 { diskUsedBytes }
+    /// The values that tell this installation apart, as a run's driver knows them.
+    var identifiers = GuestIdentifiers.none
+    func guestIdentifiers() -> GuestIdentifiers { identifiers }
+    /// How many times the model asked to stop the start under way.
+    private(set) var guestStops = 0
+    func stopGuest() { guestStops += 1 }
     func begin(guest: Guest, mode: StartMode, kind: BootKind) {
         begun.append((mode, kind))
         begunGuests.append(guest)
@@ -139,9 +149,11 @@ final class StubDriver: RuntimeDriver {
     /// What an install does for the attempt with or without the flag; set by a test
     /// that tells the two apart, otherwise `install` answers both.
     var installAttempt: (@Sendable (Bool, @Sendable (BusyUpdate) -> Void) async throws -> Void)?
+    /// How an install that does not throw ends.
+    var installOutcome = ApkInstallOutcome.installed
     func installApk(
         at url: URL, bypassLowTargetSdkBlock: Bool, update: @escaping @Sendable (BusyUpdate) -> Void
-    ) async throws {
+    ) async throws -> ApkInstallOutcome {
         installed += 1
         installAttempts.append(bypassLowTargetSdkBlock)
         installURLs.append(url)
@@ -150,6 +162,7 @@ final class StubDriver: RuntimeDriver {
         } else {
             try await install(update)
         }
+        return installOutcome
     }
 
     /// What the resume of a guest paused for space answers, and what Shut
@@ -396,15 +409,15 @@ struct UpdateFlowTests {
         #expect(failed.guest?.usedBytes == 3 * Limits.bytesPerGiB)
     }
 
-    @Test func homeOffersRecoveryOnceTheFirstStartHasHappened() {
+    @Test func theFirstStartLastsUntilTheRunHasCreatedTheDataDisk() {
         let (model, driver) = model(plan: .firstStart)
-        #expect(!model.plan.offersRecovery)
+        #expect(model.plan == .firstStart)
         model.start(.normal)
         model.finishBoot(.firstStart)
         // The runtime created the data disk during the start.
         driver.plan = .normal
         model.runEnded(RunEnd(result: 0), uptimeSeconds: 60)
-        #expect(model.plan.offersRecovery)
+        #expect(model.plan == .normal)
     }
 
     @Test func cleanShutdownReturnsHomeAndStartsANewSession() {

@@ -611,11 +611,53 @@ def verify_target_files_fixtures(verifier: Path) -> None:
     import camera_layouts
 
     tool = load_tool(verifier)
+    # Init's tokens: what the motion-property guard compares, and what it must not mistake for a command.
+    for text, commands in (
+        ('on boot\n    setprop ro.boot.kernarium.compass 1  # a host\n',
+         [["on", "boot"], ["setprop", "ro.boot.kernarium.compass", "1"]]),
+        ('setprop "ro.boot.kernarium.compass" 1\n', [["setprop", "ro.boot.kernarium.compass", "1"]]),
+        ('"setprop" ro.boot.kernarium.orientation 1\n', [["setprop", "ro.boot.kernarium.orientation", "1"]]),
+        ("setprop \\\n    ro.boot.kernarium.compass \\\n 1\n", [["setprop", "ro.boot.kernarium.compass", "1"]]),
+        ("# setprop ro.boot.kernarium.compass 1\n", []),
+        ('setprop persist.x "a b" #c\n', [["setprop", "persist.x", "a b"]]),
+        ('setprop "$marker" 1\n', [["setprop", "$marker", "1"]]),
+        ("setprop\r\n  ro.x 1\r\n", [["setprop"], ["ro.x", "1"]]),
+    ):
+        if tool.init_commands(text) != commands:
+            fail(f"init_commands({text!r}) is {tool.init_commands(text)}, not {commands}")
+    # The camera HAL's grant on the composer's file descriptors, in the forms the compiled vendor policy has (the
+    # attribute, and the six-digit version of a platform symbol) and in the near misses it must not accept.
+    camera_fence = b"(allow hal_camera_default hal_graphics_composer (fd (use)))"
+    for accepted, line in (
+        ("the rule", camera_fence),
+        ("more permissions", camera_fence.replace(b"(use)", b"(use getattr)")),
+        ("versioned names", b"(allow hal_camera_default_202604 hal_graphics_composer_202604 (fd (use)))"),
+    ):
+        if not tool.CAMERA_HAL_COMPOSER_FENCE.search(b"(type x)\n" + line + b"\n"):
+            fail(f"the camera fence check rejects {accepted}")
+    for rejected, line in (
+        ("another numeric source symbol", camera_fence.replace(b"hal_camera_default ", b"hal_camera_default_2 ")),
+        ("another numeric target symbol", camera_fence.replace(b"hal_graphics_composer ", b"hal_graphics_composer_2 ")),
+        ("a five-digit source suffix", camera_fence.replace(b"hal_camera_default ", b"hal_camera_default_20260 ")),
+        ("a seven-digit target suffix", camera_fence.replace(b"composer ", b"composer_2026040 ")),
+        ("a named source suffix", camera_fence.replace(b"hal_camera_default ", b"hal_camera_default_xx ")),
+        ("the composer's type", camera_fence.replace(b"hal_graphics_composer ", b"hal_graphics_composer_default ")),
+        ("the camera attribute", camera_fence.replace(b"hal_camera_default ", b"hal_camera ")),
+        ("another permission", camera_fence.replace(b"(use)", b"(getattr)")),
+        ("another class", camera_fence.replace(b"(fd (use))", b"(file (use))")),
+        ("a dontaudit", camera_fence.replace(b"(allow", b"(dontaudit")),
+        ("a neverallow", camera_fence.replace(b"(allow", b"(neverallow")),
+        ("a comment", b";;" + camera_fence),
+        ("two rules on a line", camera_fence + b" " + camera_fence),
+    ):
+        if tool.CAMERA_HAL_COMPOSER_FENCE.search(b"(type x)\n" + line + b"\n"):
+            fail(f"the camera fence check accepts {rejected}")
     pinner_overlay_entry = tool.PINNER_OVERLAY
     wifi_overlay_entry = tool.WIFI_OVERLAY
     wifi_never = tool.WIFI_NEVER_DISABLED_THRESHOLD
     wifi_permanent, wifi_temporary = tool.WIFI_NO_INTERNET_THRESHOLDS
     statistics_apks = tool.STATISTICS_APKS
+    wifi_tracker_apks = tool.WIFI_TRACKER_APKS
     # The Setup Wizard overlay's artwork, as the build would carry it: the raw animation unchanged and
     # the compiled vector holding its path data as strings.
     wizard_art_root = verifier.parents[1] / "overlay/overlay/packages/apps/SetupWizard/app/src/main/res"
@@ -924,6 +966,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             "<name>android.hardware.vibrator</name><version>4</version>"
             "<fqname>IVibrator/default</fqname></hal></manifest>"
         )
+        # What the motion sub-HAL's bytes hold: the log line that names both properties (its prefix is the
+        # one the older runner reads) and the magnetometer's name.
+        good_motion_orientation_text = b"Andarium motion: ro.boot.kernarium.orientation=%d, %zu sensors"
+        good_motion_sub_hal_text = (
+            good_motion_orientation_text + b", ro.boot.kernarium.compass=%d\0Host Magnetometer\0")
         good_vibrator_rc = (
             "service vendor.vibrator-andarium /vendor/bin/hw/android.hardware.vibrator-service.andarium\n"
             "    interface aidl android.hardware.vibrator.IVibrator/default\n"
@@ -1053,6 +1100,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           core_sets_vendor_prop: bool = False,
                           missing_audio_binder_policy: bool = False,
                           missing_wifi_debug_policy: bool = False,
+                          camera_fence_variant: str | None = None,
                           clearkey_memfd_variant: str | None = None,
                           oversize_platform_policy: bool = False,
                           media_codecs_variant: str | None = None,
@@ -1107,9 +1155,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           services_jar_variant: str | None = None,
                           input_flinger_variant: str | None = None,
                           network_stack_variant: str | None = None,
+                          wifi_tracker_variant: str | None = None,
                           ota_certificates: str | None = None,
                           signed: bool = False,
                           adbd_launch_unreadable: bool = False,
+                          adb_key_variant: str | None = None,
                           venus_policy_variant: str | None = None,
                           vendor_property_variant: str | None = None,
                           audio_ring_variant: str | None = None,
@@ -1833,6 +1883,14 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     "(typeattributeset coredomain (adbd init system_server lmkd"
                     + (" hal_audio_default" if audio_ring_variant == "core-hal" else "")
                     + "))\n"
+                    # The concrete types that run applications, as the platform lists them.
+                    + "(typeattributeset appdomain (runas_app untrusted_app untrusted_app_34 "
+                    "untrusted_app_30 untrusted_app_29 untrusted_app_25 gmscore_app mediaprovider_app "
+                    "platform_app platform_app_36 priv_app priv_app_36 isolated_app ephemeral_app "
+                    "system_app sdk_sandbox_34 sdk_sandbox_audit sdk_sandbox_next shell))\n"
+                    + "(typeattributeset untrusted_app_all (runas_app untrusted_app untrusted_app_34 "
+                    "untrusted_app_30 untrusted_app_29 untrusted_app_25))\n"
+                    + "(typeattributeset sdk_sandbox_all (sdk_sandbox_34 sdk_sandbox_audit sdk_sandbox_next))\n"
                     + "(typeattributeset domain ("
                     + ("" if adbd_launch_unreadable else "adbd ")
                     + "init system_server vendor_init untrusted_app surfaceflinger lmkd hal_audio_default"
@@ -1901,6 +1959,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         if missing_adb_prop_context
                         else "sys.kernarium.adb.host_connected    "
                         "u:object_r:kernarium_adb_host_prop:s0 exact bool\n"
+                    )
+                    + (
+                        ""
+                        if adb_key_variant == "bootloader-label"
+                        else "ro.boot.kernarium.adb_key    "
+                        "u:object_r:kernarium_adb_key_prop:s0 exact string\n"
                     )
                     + (
                         ""
@@ -2091,6 +2155,22 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     )
                     + (
                         ""
+                        if adbd_launch_unreadable or adb_key_variant in ("adbd-unreadable", "bootloader-label")
+                        else "(allow adbd kernarium_adb_key_prop (file (getattr open read map)))\n"
+                    )
+                    + {
+                        "untrusted-app-reads": "(allow untrusted_app kernarium_adb_key_prop (file (getattr open read map)))\n",
+                        "appdomain-reads": "(allow appdomain kernarium_adb_key_prop (file (getattr open read map)))\n",
+                        "untrusted-app-34-reads": "(allow untrusted_app_34 kernarium_adb_key_prop (file (getattr open read map)))\n",
+                        "untrusted-app-29-reads": "(allow untrusted_app_29_202604 kernarium_adb_key_prop_202604 (file (read)))\n",
+                        "runas-app-reads": "(allow runas_app kernarium_adb_key_prop (file (open read)))\n",
+                        "sdk-sandbox-reads": "(allow sdk_sandbox_audit kernarium_adb_key_prop (file (read)))\n",
+                        "shell-reads": "(allow shell kernarium_adb_key_prop (file (read)))\n",
+                        "generated-attribute-reads": "(typeattributeset base_typeattr_77 (untrusted_app_34 gmscore_app))\n"
+                        "(allow base_typeattr_77 kernarium_adb_key_prop (file (read)))\n",
+                    }.get(adb_key_variant or "", "")
+                    + (
+                        ""
                         if missing_adb_prop_policy
                         else "(allow adbd kernarium_adb_host_prop (property_service (set)))\n"
                     )
@@ -2133,6 +2213,18 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         else "(allow hal_wifi_default persist_vendor_debug_wifi_prop_202604 "
                         "(file (read getattr map open)))\n"
                     )
+                    + {
+                        None: "(allow hal_camera_default hal_graphics_composer (fd (use)))\n",
+                        "missing": "",
+                        # A numeric suffix is the version of a platform symbol (_202604, six digits); on a
+                        # vendor type or any other length it is a different symbol, which the rule does not cover.
+                        "source-other-type": "(type hal_camera_default_2)\n"
+                        "(allow hal_camera_default_2 hal_graphics_composer (fd (use)))\n",
+                        "target-other-type": "(type hal_graphics_composer_2)\n"
+                        "(allow hal_camera_default hal_graphics_composer_2 (fd (use)))\n",
+                        "source-short-suffix": "(allow hal_camera_default_20260 hal_graphics_composer (fd (use)))\n",
+                        "target-long-suffix": "(allow hal_camera_default hal_graphics_composer_2026040 (fd (use)))\n",
+                    }[camera_fence_variant]
                     + (
                         "(allow adbd_202604 virtual_face_hal_prop_202604 (property_service (set)))\n"
                         if core_sets_vendor_prop
@@ -2144,6 +2236,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         if net_policy_variant == "missing-transition"
                         else "(typetransition init_202604 kernarium_net_setup_exec process "
                         "kernarium_net_setup)\n"
+                    )
+                    # The network setup domain turns IPv6 off through the sysctl files.
+                    + (
+                        ""
+                        if net_policy_variant == "no-sysctl-write"
+                        else "(allow kernarium_net_setup proc_net_202604 (file (open write)))\n"
                     )
                     # The gamepad relay: init enters its domain through its executable's label, and
                     # the domain may use the uhid node and vsock, as an unconstrained vsock user.
@@ -2272,6 +2370,19 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     '<manifest version="1.0" type="device"/>\n',
                 )
                 def application_payload(apk: str) -> bytes:
+                    # Settings and SystemUI store their dex files uncompressed; the key that the p0033
+                    # WifiTrackerLib topic's predicate reads is in the bytes.
+                    if apk in wifi_tracker_apks:
+                        variant = "settings-no-marker" if "/Settings/" in apk else "systemui-no-marker"
+                        users = io.BytesIO()
+                        with zipfile.ZipFile(users, "w", zipfile.ZIP_STORED) as application:
+                            application.writestr("AndroidManifest.xml", release_manifest)
+                            application.writestr(
+                                "classes.dex",
+                                b"dex\n039\x00"
+                                + (b"" if wifi_tracker_variant == variant else b"networkProbesAttempted\x00"),
+                            )
+                        return users.getvalue()
                     # LineageParts and the Setup Wizard are real archives, so the check that
                     # LineageOS's statistics uploader is gone has members to search; the other
                     # applications stay the placeholder release archive.
@@ -2599,7 +2710,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         archive.writestr(f"{artifact}.vdex", b"vdex")
                 archive.writestr("VENDOR/bin/hw/android.hardware.sensors-service.multihal", synthetic_aarch64_elf())
                 archive.writestr("VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so",
-                                 synthetic_aarch64_elf() + b"Andarium motion: ro.boot.kernarium.orientation=%d\0")
+                                 synthetic_aarch64_elf() + good_motion_sub_hal_text)
+                # The compass feature, in the directory SystemConfig reads for a host with a magnetometer.
+                archive.writestr("VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml",
+                                 '<permissions><feature name="android.hardware.sensor.compass"/></permissions>')
                 archive.writestr("VENDOR/etc/sensors/hals.conf",
                                  "/vendor/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so\n")
                 archive.writestr("VENDOR/etc/init/android.hardware.sensors-service-multihal.rc",
@@ -2984,7 +3098,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                             + (b"" if services_jar_variant == "no-marker"
                                else b"kernarium: USB debugging is now \x00")
                             + (b"" if services_jar_variant == "no-display-marker"
-                               else b"RefreshRateThrottling: using the map of the default configuration\x00"),
+                               else b"RefreshRateThrottling: using the map of the default configuration\x00")
+                            + (b"" if services_jar_variant == "no-compass-marker"
+                               else b"ro.boot.kernarium.compass\x00")
+                            + (b"" if services_jar_variant == "no-compass-directory-marker"
+                               else b"kernarium_compass\x00")
                         )
                     archive.writestr("SYSTEM/framework/services.jar", services_jar.getvalue())
                 # libinputflinger.so holds the p0022 pointer capture LED topic's dump line.
@@ -2996,7 +3114,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                            else b"      PointerCaptureLed: %s\n\x00"),
                     )
                 # NetworkStack's APK stores its dex file uncompressed; the p0029 NetworkMonitor topic's
-                # validation log line is in the bytes.
+                # validation log lines are in the bytes.
                 if network_stack_variant != "missing":
                     network_stack = io.BytesIO()
                     with zipfile.ZipFile(network_stack, "w", zipfile.ZIP_STORED) as apk:
@@ -3005,7 +3123,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                             "classes.dex",
                             b"dex\n039\x00"
                             + (b"" if network_stack_variant == "no-marker"
-                               else b"Wi-Fi is validated without probes\x00"),
+                               else b"Wi-Fi is validated before its internet check\x00")
+                            + (b"" if network_stack_variant in ("no-marker", "no-check-marker")
+                               else b"Wi-Fi internet check failed, the network stays validated\x00"),
                         )
                     archive.writestr("SYSTEM/priv-app/NetworkStack/NetworkStack.apk", network_stack.getvalue())
                 # The OTA certificates, the system's and the recovery's: an unsigned build of either variant holds
@@ -3400,6 +3520,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("net-library", {"missing_net_library": True}),
             ("net-policy-label", {"net_policy_variant": "missing-label"}),
             ("net-policy-transition", {"net_policy_variant": "missing-transition"}),
+            ("net-policy-sysctl-write", {"net_policy_variant": "no-sysctl-write"}),
             ("wifi-network-missing-rc", {"wifi_network_variant": "missing-rc"}),
             ("wifi-network-missing-service", {"wifi_network_variant": "missing-service"}),
             ("wifi-network-not-oneshot", {"wifi_network_variant": "not-oneshot"}),
@@ -3457,6 +3578,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("core-sets-vendor-prop", {"core_sets_vendor_prop": True}),
             ("audio-binder-policy", {"missing_audio_binder_policy": True}),
             ("wifi-debug-property-policy", {"missing_wifi_debug_policy": True}),
+            ("camera-fence-policy", {"camera_fence_variant": "missing"}),
+            ("camera-fence-source-other-type", {"camera_fence_variant": "source-other-type"}),
+            ("camera-fence-target-other-type", {"camera_fence_variant": "target-other-type"}),
+            ("camera-fence-source-short-suffix", {"camera_fence_variant": "source-short-suffix"}),
+            ("camera-fence-target-long-suffix", {"camera_fence_variant": "target-long-suffix"}),
             ("clearkey-memfd-missing", {"clearkey_memfd_variant": "missing"}),
             ("clearkey-memfd-no-write", {"clearkey_memfd_variant": "no-write"}),
             ("clearkey-memfd-isolated-apps", {"clearkey_memfd_variant": "all-apps"}),
@@ -3577,6 +3703,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("input-flinger-without-the-pointer-capture-led", {"input_flinger_variant": "no-marker"}),
             ("missing-input-flinger", {"input_flinger_variant": "missing"}),
             ("network-stack-without-the-wifi-topic", {"network_stack_variant": "no-marker"}),
+            ("network-stack-without-the-wifi-check-report", {"network_stack_variant": "no-check-marker"}),
+            ("settings-without-the-wifi-tracker-topic", {"wifi_tracker_variant": "settings-no-marker"}),
+            ("system-ui-without-the-wifi-tracker-topic", {"wifi_tracker_variant": "systemui-no-marker"}),
             ("signed-with-the-test-key", {"signed": True, "ota_certificates": "build"}),
             ("signed-with-the-test-key-path", {"signed": True, "ota_certificates": "test-key-path"}),
             ("signed-with-an-extra-certificate", {"signed": True, "ota_certificates": "extra"}),
@@ -3587,6 +3716,16 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("missing-services-jar", {"services_jar_variant": "missing"}),
             ("missing-network-stack", {"network_stack_variant": "missing"}),
             ("adbd-cannot-read-launch-properties", {"adbd_launch_unreadable": True}),
+            ("adb-key-with-the-bootloader-type", {"adb_key_variant": "bootloader-label"}),
+            ("adb-key-adbd-cannot-read", {"adb_key_variant": "adbd-unreadable"}),
+            ("adb-key-untrusted-app-reads", {"adb_key_variant": "untrusted-app-reads"}),
+            ("adb-key-appdomain-reads", {"adb_key_variant": "appdomain-reads"}),
+            ("adb-key-untrusted-app-34-reads", {"adb_key_variant": "untrusted-app-34-reads"}),
+            ("adb-key-untrusted-app-29-reads", {"adb_key_variant": "untrusted-app-29-reads"}),
+            ("adb-key-runas-app-reads", {"adb_key_variant": "runas-app-reads"}),
+            ("adb-key-sdk-sandbox-reads", {"adb_key_variant": "sdk-sandbox-reads"}),
+            ("adb-key-shell-reads", {"adb_key_variant": "shell-reads"}),
+            ("adb-key-generated-attribute-reads", {"adb_key_variant": "generated-attribute-reads"}),
             ("missing-cas-plugin-64", {"cas_hal_variant": "no-plugin64"}),
             ("missing-cas-plugin-32", {"cas_hal_variant": "no-plugin32"}),
             ("lineage-discrete-ops-list-only", {"discrete_ops_variant": "lineage-list-only"}),
@@ -3936,6 +4075,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "do not label /vendor/bin/kernarium_net_setup"),
             ("net-policy-transition-cause", {"net_policy_variant": "missing-transition"},
              "does not move init into the network setup domain"),
+            ("net-policy-sysctl-write-cause", {"net_policy_variant": "no-sysctl-write"},
+             "does not let kernarium_net_setup open and write proc_net files"),
             ("wifi-network-missing-rc-cause", {"wifi_network_variant": "missing-rc"},
              "SYSTEM_EXT/etc/init/kernarium_wifi_network.rc"),
             ("wifi-network-missing-service-cause", {"wifi_network_variant": "missing-service"},
@@ -4136,6 +4277,16 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "audio HAL processes call each other's binder"),
             ("wifi-debug-property-policy-cause", {"missing_wifi_debug_policy": True},
              "Wi-Fi HAL read persist_vendor_debug_wifi_prop"),
+            ("camera-fence-policy-cause", {"camera_fence_variant": "missing"},
+             "camera HAL use the display composer's file descriptors"),
+            ("camera-fence-source-other-type-cause", {"camera_fence_variant": "source-other-type"},
+             "camera HAL use the display composer's file descriptors"),
+            ("camera-fence-target-other-type-cause", {"camera_fence_variant": "target-other-type"},
+             "camera HAL use the display composer's file descriptors"),
+            ("camera-fence-source-short-suffix-cause", {"camera_fence_variant": "source-short-suffix"},
+             "camera HAL use the display composer's file descriptors"),
+            ("camera-fence-target-long-suffix-cause", {"camera_fence_variant": "target-long-suffix"},
+             "camera HAL use the display composer's file descriptors"),
             ("clearkey-memfd-missing-cause", {"clearkey_memfd_variant": "missing"},
              "ClearKey DRM HAL read, write and map the memfd files"),
             ("clearkey-memfd-no-write-cause", {"clearkey_memfd_variant": "no-write"},
@@ -4324,10 +4475,36 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "SYSTEM/lib64/libinputflinger.so is missing"),
             ("network-stack-without-the-wifi-topic-cause", {"network_stack_variant": "no-marker"},
              "lacks the NetworkMonitor topic of route p0029"),
+            ("network-stack-without-the-wifi-check-report-cause", {"network_stack_variant": "no-check-marker"},
+             "'Wi-Fi internet check failed, the network stays validated' is not in its dex files"),
+            ("settings-without-the-wifi-tracker-topic-cause", {"wifi_tracker_variant": "settings-no-marker"},
+             "SYSTEM_EXT/priv-app/Settings/Settings.apk lacks the WifiTrackerLib topic of route p0033"),
+            ("system-ui-without-the-wifi-tracker-topic-cause", {"wifi_tracker_variant": "systemui-no-marker"},
+             "SYSTEM_EXT/priv-app/SystemUI/SystemUI.apk lacks the WifiTrackerLib topic of route p0033"),
             ("missing-network-stack-cause", {"network_stack_variant": "missing"},
              "SYSTEM/priv-app/NetworkStack/NetworkStack.apk is missing"),
             ("adbd-cannot-read-launch-properties-cause", {"adbd_launch_unreadable": True},
-             "adbd may not read ro.boot.kernarium.adb_key, labelled bootloader_prop"),
+             "adbd may not read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-with-the-bootloader-type-cause", {"adb_key_variant": "bootloader-label"},
+             "ro.boot.kernarium.adb_key is labelled bootloader_prop, not kernarium_adb_key_prop"),
+            ("adb-key-adbd-cannot-read-cause", {"adb_key_variant": "adbd-unreadable"},
+             "adbd may not read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-untrusted-app-reads-cause", {"adb_key_variant": "untrusted-app-reads"},
+             "untrusted_app may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-appdomain-reads-cause", {"adb_key_variant": "appdomain-reads"},
+             "appdomain may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-untrusted-app-34-reads-cause", {"adb_key_variant": "untrusted-app-34-reads"},
+             "untrusted_app_34 may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-untrusted-app-29-reads-cause", {"adb_key_variant": "untrusted-app-29-reads"},
+             "untrusted_app_29 may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-runas-app-reads-cause", {"adb_key_variant": "runas-app-reads"},
+             "runas_app may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-sdk-sandbox-reads-cause", {"adb_key_variant": "sdk-sandbox-reads"},
+             "sdk_sandbox_audit may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-shell-reads-cause", {"adb_key_variant": "shell-reads"},
+             "shell may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-generated-attribute-reads-cause", {"adb_key_variant": "generated-attribute-reads"},
+             "gmscore_app may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
             ("missing-cas-apex-cause", {"cas_hal_variant": "missing-apex"},
              "com.android.hardware.cas.apex is missing: the product needs the default CAS HAL"),
             ("cas-apex-without-binary-cause", {"cas_hal_variant": "no-binary"},
@@ -5484,12 +5661,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "lacks the device-orientation sensor"),
             # The marker counts only inside a library the image can load.
             ("motion-backend-marker-only", {"entries": {
-                "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so":
-                    b"Andarium motion: ro.boot.kernarium.orientation=%d\0"}},
+                "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so": good_motion_sub_hal_text}},
              "is not an ELF file"),
             ("motion-backend-32-bit", {"entries": {
                 "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so":
-                    synthetic_arm_elf() + b"Andarium motion: ro.boot.kernarium.orientation=%d\0"}},
+                    synthetic_arm_elf() + good_motion_sub_hal_text}},
              "32-bit ELF outside the 32-bit library and runtime paths"),
             ("motion-backend-corrupt", {
                 "corrupt_member": "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so"},
@@ -5498,6 +5674,98 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("image-sets-the-orientation-property", {"entries": {
                 "SYSTEM_EXT/etc/build.prop": b"ro.boot.kernarium.orientation=1\n"}},
              "the launch alone states whether the host feeds the device-orientation sensor"),
+            # The magnetometer and the compass feature are the host's to state: the launch passes
+            # androidboot.kernarium.compass=1, and an image of the older kind lists neither.
+            ("motion-backend-without-compass", {"entries": {
+                "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so":
+                    synthetic_aarch64_elf() + good_motion_orientation_text + b"\0"}},
+             "lacks the property that decides whether it lists the magnetometer"),
+            ("motion-backend-without-magnetometer", {"entries": {
+                "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so":
+                    synthetic_aarch64_elf() + good_motion_orientation_text + b", ro.boot.kernarium.compass=%d\0"}},
+             "lacks the magnetometer"),
+            ("image-sets-the-compass-property", {"entries": {
+                "SYSTEM_EXT/etc/build.prop": b"ro.boot.kernarium.compass=1\n"}},
+             "the launch alone states whether the host has a magnetometer"),
+            ("image-sets-the-compass-property-false", {"entries": {
+                "ODM/etc/build.prop": b"ro.boot.kernarium.compass=0\n"}},
+             "the launch alone states whether the host has a magnetometer"),
+            ("missing-compass-feature", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml": None}},
+             "android.hardware.sensor.compass.xml is missing: a host with a magnetometer would have no compass"),
+            ("compass-feature-declares-another", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass"/>'
+                    b'<feature name="android.hardware.sensor.barometer"/></permissions>'}},
+             "declares .* not android.hardware.sensor.compass alone"),
+            ("compass-feature-file-declares-nothing", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml":
+                    b"<permissions/>"}},
+             "declares \\[\\], not android.hardware.sensor.compass alone"),
+            ("compass-directory-holds-another-file", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/other.xml": b"<permissions/>"}},
+             "holds the compass feature alone"),
+            # Declared anywhere else, every launch would claim a compass, including a host with none.
+            ("compass-feature-in-the-vendor-permissions", {"entries": {
+                "VENDOR/etc/permissions/android.hardware.sensor.compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass"/></permissions>'}},
+             "the compass feature is declared outside VENDOR/etc/permissions/kernarium_compass"),
+            ("compass-feature-in-the-product-permissions", {"entries": {
+                "PRODUCT/etc/permissions/android.hardware.sensor.compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass"/></permissions>'}},
+             "the compass feature is declared outside VENDOR/etc/permissions/kernarium_compass"),
+            ("compass-feature-in-a-vendor-sku-directory", {"entries": {
+                "VENDOR/etc/permissions/sku_haptics/android.hardware.sensor.compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass"/></permissions>'}},
+             "the compass feature is declared outside VENDOR/etc/permissions/kernarium_compass"),
+            # SystemConfig reads etc/sysconfig of every partition with the flags that allow features as well.
+            ("compass-feature-in-the-system-sysconfig", {"entries": {
+                "SYSTEM/etc/sysconfig/extra-compass.xml":
+                    b'<config><feature name="android.hardware.sensor.compass"/></config>'}},
+             "the compass feature is declared in the sysconfig file SYSTEM/etc/sysconfig/extra-compass.xml"),
+            ("compass-feature-in-the-vendor-sysconfig", {"entries": {
+                "VENDOR/etc/sysconfig/extra-compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass"/></permissions>'}},
+             "the compass feature is declared in the sysconfig file VENDOR/etc/sysconfig/extra-compass.xml"),
+            # The one file is the permissions root with the one feature, and nothing that takes a feature away.
+            ("compass-feature-file-with-another-root", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml":
+                    b'<config><feature name="android.hardware.sensor.compass"/></config>'}},
+             "has the root element <config>, not <permissions>"),
+            ("compass-feature-file-with-an-unavailable-feature", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass"/>'
+                    b'<unavailable-feature name="android.hardware.sensor.light"/></permissions>'}},
+             "holds an unavailable-feature element"),
+            ("compass-feature-with-another-attribute", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass" notLowRam="true"/></permissions>'}},
+             "is not one <feature name=...> in <permissions>"),
+            ("init-sets-the-compass-property", {"entries": {
+                "SYSTEM/etc/init/early-compass.rc":
+                    b"on early-init\n    setprop ro.boot.kernarium.compass 1  # a host with a magnetometer\n"}},
+             "early-compass.rc sets ro.boot.kernarium.compass"),
+            ("init-sets-the-orientation-property", {"entries": {
+                "SYSTEM/etc/init/early-orientation.rc":
+                    b"on early-init\n    setprop ro.boot.kernarium.orientation 1\n"}},
+             "early-orientation.rc sets ro.boot.kernarium.orientation"),
+            # Init reads a command by its tokens: a quoted word and a continued line are the command they are.
+            ("init-sets-the-quoted-compass-property", {"entries": {
+                "SYSTEM/etc/init/quoted-property.rc":
+                    b'on early-init\n    setprop "ro.boot.kernarium.compass" 1\n'}},
+             "quoted-property.rc sets ro.boot.kernarium.compass"),
+            ("init-quotes-setprop-itself", {"entries": {
+                "SYSTEM/etc/init/quoted-command.rc":
+                    b'on early-init\n    "setprop" ro.boot.kernarium.orientation 1\n'}},
+             "quoted-command.rc sets ro.boot.kernarium.orientation"),
+            ("init-continues-the-setprop-line", {"entries": {
+                "SYSTEM/etc/init/continued.rc":
+                    b"on early-init\n    setprop \\\n        ro.boot.kernarium.compass \\\n        1\n"}},
+             "continued.rc sets ro.boot.kernarium.compass"),
+            ("services-jar-without-the-compass-property", {"services_jar_variant": "no-compass-marker"},
+             "lacks the SystemConfig topic that reads the compass feature for a host with a magnetometer"),
+            ("services-jar-without-the-compass-directory", {"services_jar_variant": "no-compass-directory-marker"},
+             "lacks the directory that SystemConfig topic reads"),
             ("camera-aux-cameras-off", {"camera_variant": "aux-off"}, "must set config_enableAuxCameras to true"),
             ("camera-aux-cameras-missing", {"camera_variant": "aux-missing"},
              "must set config_enableAuxCameras to true"),
@@ -5571,6 +5839,20 @@ def verify_net_setup_tool(android_root: Path) -> None:
     source = (android_root / "overlay/tools/kernarium_net_setup.cpp").read_text()
     if re.search(r"\bifi_change\s*=", source):
         fail("kernarium_net_setup.cpp assigns ifi_change: a link-creation flag mask clears IFF_MULTICAST")
+    verify_net_setup_ipv6(source)
+
+
+def verify_net_setup_ipv6(source: str) -> None:
+    """eth0 and the macvlan carry no IPv6, so no link-local address is built from their MACs. The
+    tool turns it off on eth0 once it exists and on the macvlan before that comes up, and a failure
+    to do so is fatal."""
+    for name in ("kLowerName", "kMacvlanName"):
+        if not re.search(rf"if \(!DisableIpv6\({name}\)\) \{{[^}}]*return 1;", source):
+            fail(f"kernarium_net_setup.cpp does not turn IPv6 off on {name} and fail when it cannot")
+    macvlan = source.find("DisableIpv6(kMacvlanName)")
+    bring_up = source.find("BringUp(*netlink, macvlan_index)")
+    if not 0 < macvlan < bring_up:
+        fail("kernarium_net_setup.cpp turns IPv6 off on the macvlan after it brings the macvlan up")
 
 
 def verify_erofs_board(android_root: Path) -> None:
@@ -5926,92 +6208,16 @@ def verify_wifi_network(android_root: Path) -> None:
     ):
         if accepts(tokens, value) is not expected:
             fail(f"the verifier reads {' '.join(tokens)} as {'not ' * expected}accepting {value}")
-    # The script settles and rejoins for bounded times and ends; nothing in it waits for ever.
+    # The script's waits and loops are bounded: nothing in it waits for ever. This is a presence pin of the
+    # structure. What the script decides, and when it sets the marker, is not judged from its text: the
+    # android17-wifi-network-script test runs this tracked file on a fake Wi-Fi framework, and Soong copies
+    # it into the image unchanged (overlay/tools/Android.bp).
     script = (tools / "kernarium_wifi_network.sh").read_text(encoding="utf-8")
     code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
-    for needle in ("settle=", "rejoin=", 'wait_joined "$settle"', 'wait_joined "$rejoin"', '"$waited" -ge "$1"'):
+    for needle in ("settle=", "looks=", 'wait_joined "$settle"', '"$waited" -ge "$1"', '"$tries" -lt 30',
+                   '"$seen" -lt "$looks"', 'timeout "$limit" cmd wifi list-networks'):
         if needle not in code:
             fail(f"the Wi-Fi network script no longer bounds its wait: {needle!r} is gone")
-
-    # Run on stubs, the script sets 2 only once it has seen the station joined: a listing that
-    # fails prints what a forgotten network does, so neither marks the disk done.
-    marker = verifier.WIFI_NETWORK_MARKER
-
-    def run(stored: str, flags: tuple[str, ...], runs: int) -> tuple[list[int], list[str], str]:
-        """Runs the script `runs` times on one guest whose Wi-Fi the flags describe; returns each
-        run's exit status, every recorded call and the marker."""
-        with tempfile.TemporaryDirectory(prefix="wifi-network-script-") as temporary:
-            stubs = Path(temporary)
-            calls = stubs / "calls"
-            state = stubs / "state"
-            properties = state / "properties"
-            properties.mkdir(parents=True)
-            (properties / marker).write_text(stored + "\n")
-            for flag in flags:
-                (state / flag).touch()
-            for name, body in {
-                "getprop": f'cat {properties}/"$1" 2>/dev/null || echo\n',
-                "setprop": f'echo "setprop $*" >> {calls}\necho "$2" > {properties}/"$1"\n',
-                "cmd": (
-                    f'echo "cmd $*" >> {calls}\n'
-                    'case "$1 $2" in\n'
-                    '"wifi list-networks")\n'
-                    f'    if [ -f {state}/saved ] && [ ! -f {state}/listing-fails ]; then\n'
-                    '        echo "Network Id      SSID                         Security type"\n'
-                    '        echo "0            VirtWifi                         open"\n'
-                    '    else\n'
-                    '        echo "No networks"\n'
-                    '    fi\n'
-                    # One listing fails, as a Wi-Fi thread that does not answer in time does.
-                    f'    rm -f {state}/listing-fails ;;\n'
-                    '"wifi status")\n'
-                    f'    if [ -f {state}/off ]; then echo "Wifi is disabled"; exit 0; fi\n'
-                    '    echo "Wifi is enabled"\n'
-                    f'    if [ -f {state}/joined ]; then echo \'Wifi is connected to "VirtWifi"\'\n'
-                    '    else echo "Wifi is not connected"; fi ;;\n'
-                    '"wifi add-network")\n'
-                    f'    touch {state}/saved\n'
-                    f'    if [ -f {state}/joins-when-saved ]; then touch {state}/joined; fi ;;\n'
-                    "*) exit 2 ;;\n"
-                    "esac\n"
-                ),
-                "log": f'echo "log $*" >> {calls}\n',
-                "sleep": f'echo "sleep $*" >> {calls}\n',
-            }.items():
-                (stubs / name).write_text("#!/bin/sh\n" + body)
-                (stubs / name).chmod(0o755)
-            env = {"PATH": f"{stubs}:/usr/bin:/bin"}
-            statuses = [
-                subprocess.run(["/bin/sh", str(tools / "kernarium_wifi_network.sh")], env=env,
-                               capture_output=True, text=True, timeout=120).returncode
-                for _ in range(runs)
-            ]
-            recorded = calls.read_text().splitlines() if calls.exists() else []
-            return statuses, recorded, (properties / marker).read_text().strip()
-
-    for what, stored, flags, runs, expected in (
-        ("a first boot", "", ("joins-when-saved",), 1, ("2", 1, 0)),
-        ("a station that joins within the settle time", "1", ("saved", "joined"), 1, ("2", 0, 0)),
-        ("a disabled network", "1", ("saved", "joins-when-saved"), 1, ("2", 1, 1)),
-        ("a disabled network that does not join once saved again", "1", ("saved",), 1, ("1", 1, 1)),
-        ("a forgotten network", "1", (), 1, ("1", 0, 0)),
-        ("Wi-Fi that is off", "1", ("saved", "off"), 1, ("1", 0, 0)),
-        ("a listing that fails", "1", ("saved", "listing-fails", "joins-when-saved"), 1, ("1", 0, 0)),
-        ("a listing that fails, then a boot that lists the network", "1",
-         ("saved", "listing-fails", "joins-when-saved"), 2, ("2", 1, 1)),
-        ("a joined network", "2", ("saved",), 1, ("2", 0, 0)),
-    ):
-        statuses, recorded, marked = run(stored, flags, runs)
-        saves = len([line for line in recorded if line.startswith("cmd wifi add-network")])
-        notes = len([line for line in recorded if line.startswith("log ")])
-        if statuses != [0] * runs or (marked, saves, notes) != expected:
-            fail(
-                f"the Wi-Fi network script on {what}: exits {statuses}, marker {marked!r}, saves {saves}, "
-                f"repair lines {notes}; expected marker {expected[0]!r}, saves {expected[1]}, "
-                f"repair lines {expected[2]}"
-            )
-        if stored == "2" and any(line.startswith("cmd ") for line in recorded):
-            fail(f"the Wi-Fi network script asks the Wi-Fi service at marker 2: {recorded}")
 
 
 def verify_pinner_overlay(android_root: Path) -> None:
@@ -7174,10 +7380,12 @@ NETWORK_STACK_PROJECT = "platform/packages/modules/NetworkStack"
 NETWORK_MONITOR_FILE = "src/com/android/server/connectivity/NetworkMonitor.java"
 
 
-def network_stack_topic_problems(patch: str, marker: str) -> list[str]:
-    """What the p0029 patch lacks of the Wi-Fi exemption: it changes NetworkMonitor alone, it holds the
-    name the verifier looks for, it applies to the Wi-Fi transport and to nothing else, and it takes no
-    transition out of the evaluation."""
+def network_stack_topic_problems(patch: str, markers: list[str]) -> list[str]:
+    """What the p0029 patch lacks of the Wi-Fi check: it changes NetworkMonitor alone, it holds the
+    names the verifier looks for, it applies to the Wi-Fi transport and to nothing else (not to a
+    network under the test URLs that CTS sets), it posts the check after validation, it takes the
+    check's result apart from the portal states, it notes the HTTPS probe of a failed check, and it
+    takes no transition out of the evaluation."""
     problems = []
     touched = re.findall(r"^diff --git a/(\S+) b/", patch, re.MULTILINE)
     if touched != [NETWORK_MONITOR_FILE]:
@@ -7188,15 +7396,42 @@ def network_stack_topic_problems(patch: str, marker: str) -> list[str]:
     removed = "\n".join(
         line[1:] for line in patch.splitlines() if line.startswith("-") and not line.startswith("---")
     )
-    if f'"{marker}"' not in added:
-        problems.append(f"it does not add the string {marker!r} that the verifier requires")
+    for marker in markers:
+        if f'"{marker}"' not in added:
+            problems.append(f"it does not add the string {marker!r} that the verifier requires")
     for needle, what in (
         ("hasTransport(NetworkCapabilities.TRANSPORT_WIFI)", "apply to the Wi-Fi transport"),
         ("!mNetworkCapabilities.hasTransport(TRANSPORT_TEST)", "leave a test network alone"),
         ("hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)", "leave a VPN alone"),
+        ("mTestCaptivePortalHttpsUrl == null", "leave a network under the HTTPS test URL alone"),
+        ("mTestCaptivePortalHttpUrl == null", "leave a network under the HTTP test URL alone"),
+        ("mTestCaptivePortalFallbackUrl == null", "leave a network under the fallback test URL alone"),
+        ("sendMessage(CMD_WIFI_CHECK)", "post the check once the network is validated"),
+        ("transitionTo(mProbingState)", "probe the network when a check is due"),
+        ("handleWifiCheckResult(probeResult)", "take a check's result apart from the portal states"),
+        ("noteProbeResult(NETWORK_VALIDATION_PROBE_HTTPS", "note the HTTPS probe of a failed check"),
+        ("&& !isWifiExemptFromValidation()", "keep a Terms and Conditions page from entering the portal state"),
+        ("&& isValidationRequiredByStockRules();", "leave a network that the stock rules do not validate alone"),
+        ("isWifiExemptFromValidation() && getCurrentState() == mValidatedState",
+         "force a check only on a network that is in the validated state"),
+        ("// An evaluation that reaches private DNS is not a check of a validated network.\n"
+         "            mWifiCheckDue = false;",
+         "drop the check that is due when an evaluation reaches private DNS"),
+        ("if (isWifiExemptFromValidation() && mWifiCheckDue) {\n"
+         "                        deferMessage(message);",
+         "defer a request to evaluate private DNS that reaches a check"),
+        ("sendMessageDelayed(CMD_WIFI_CHECK, delayMs)", "retry a failed check after a back-off"),
+        ("if (hasMessages(CMD_WIFI_CHECK)) return;", "keep the time of a check that is waiting"),
+        ('validationLog("Wi-Fi internet check failed, the network stays validated");\n'
+         "        }\n        transitionToPrivateDnsEvaluationSuccessState();",
+         "return from a completed check to the validated state without evaluating private DNS"),
+        ("privateDnsResults != 0);", "keep the last private DNS probe's result in the report of a check"),
     ):
         if needle not in added:
             problems.append(f"it does not {what}")
+    check_result = added.split("private void handleWifiCheckResult", 1)[-1].split("return !isWifiExemptFromValidation()", 1)[0]
+    if "mEvaluatingPrivateDnsState" in check_result:
+        problems.append("a completed check evaluates private DNS again")
     if "transitionTo" in removed:
         problems.append("it removes a transition of the evaluation")
     return problems
@@ -7239,10 +7474,10 @@ def verify_camerax_denylist_assertion(android_root: Path) -> None:
 
 
 def verify_network_stack_topic(android_root: Path) -> None:
-    """The routed NetworkMonitor topic and the verifier agree on the Wi-Fi exemption.
+    """The routed NetworkMonitor topic and the verifier agree on the Wi-Fi check.
 
     The target-files fixtures prove what the verifier rejects; this proves that the topic puts in the
-    APK the name the verifier looks for, and that its exemption reaches a Wi-Fi network and no other."""
+    APK the names the verifier looks for, and that its check reaches a Wi-Fi network and no other."""
     verifier = load_tool(android_root / "tools/verify-target-files.py")
     rows = [
         line.split("\t")
@@ -7256,27 +7491,178 @@ def verify_network_stack_topic(android_root: Path) -> None:
     if len(patches) != 1:
         fail(f"p0029 has {len(patches)} patches, not one")
     patch = patches[0].read_text()
-    if len(verifier.NETWORK_STACK_MARKERS) != 1:
-        fail("the verifier no longer names exactly one NetworkMonitor marker")
-    marker = verifier.NETWORK_STACK_MARKERS[0].decode()
-    problems = network_stack_topic_problems(patch, marker)
+    markers = [marker.decode() for marker in verifier.NETWORK_STACK_MARKERS]
+    if len(markers) != 2:
+        fail("the verifier no longer names exactly two NetworkMonitor markers")
+    problems = network_stack_topic_problems(patch, markers)
     if problems:
         fail("the NetworkMonitor topic: " + "; ".join(problems))
-    for label, edited in (
-        ("a topic without the verifier's string", patch.replace(marker, "Wi-Fi is checked")),
+    mutations = [
+        (f"a topic without the verifier's string {marker!r}", patch.replace(marker, "Wi-Fi is checked"))
+        for marker in markers
+    ]
+    mutations += [
         ("a topic that skips every transport",
          patch.replace("hasTransport(NetworkCapabilities.TRANSPORT_WIFI)", "hasTransport(0)")),
         ("a topic that exempts test networks",
          patch.replace("!mNetworkCapabilities.hasTransport(TRANSPORT_TEST)", "true")),
         ("a topic that exempts a VPN",
          patch.replace("hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)", "isEmpty()")),
+        ("a topic that exempts a network under the HTTPS test URL",
+         patch.replace("mTestCaptivePortalHttpsUrl == null", "true")),
+        ("a topic that exempts a network under the HTTP test URL",
+         patch.replace("mTestCaptivePortalHttpUrl == null", "true")),
+        ("a topic that exempts a network under the fallback test URL",
+         patch.replace("mTestCaptivePortalFallbackUrl == null", "true")),
+        ("a topic that never posts the check", patch.replace("sendMessage(CMD_WIFI_CHECK)", "sendMessage(0)")),
+        ("a topic that never probes for a check", patch.replace("transitionTo(mProbingState)", "")),
+        ("a topic that gives the check's result the portal states",
+         patch.replace("handleWifiCheckResult(probeResult)", "probeResult.isPortal()")),
+        ("a topic that leaves a failed check's HTTPS probe unnoted",
+         patch.replace("noteProbeResult(NETWORK_VALIDATION_PROBE_HTTPS",
+                       "noteProbeResult(NETWORK_VALIDATION_PROBE_HTTP")),
+        ("a topic that lets a Terms and Conditions page enter the portal state",
+         patch.replace("&& !isWifiExemptFromValidation()", "")),
+        ("a topic that exempts a network that the stock rules do not validate",
+         patch.replace("&& isValidationRequiredByStockRules();", ";")),
+        ("a topic that checks when an evaluation is forced, in any state",
+         patch.replace("isWifiExemptFromValidation() && getCurrentState() == mValidatedState",
+                       "isWifiExemptFromValidation()")),
+        ("a topic that checks when an evaluation is forced after the first validation, in any state",
+         patch.replace("getCurrentState() == mValidatedState", "mValidations > 0")),
+        ("a topic that checks when an evaluation is forced, with the state condition dropped",
+         patch.replace("isWifiExemptFromValidation() && getCurrentState() == mValidatedState",
+                       "isWifiExemptFromValidation() && true")),
+        ("a topic that keeps a check due when an evaluation reaches private DNS",
+         patch.replace("+            // An evaluation that reaches private DNS is not a check of a validated network.\n"
+                       "+            mWifiCheckDue = false;\n", "")),
+        ("a topic that drops the request to evaluate private DNS that reaches a check",
+         patch.replace("+                        deferMessage(message);\n+                        return HANDLED;\n",
+                       "+                        return HANDLED;\n")),
+        ("a topic that never retries a failed check",
+         patch.replace("sendMessageDelayed(CMD_WIFI_CHECK, delayMs)", "sendMessage(0, delayMs)")),
+        ("a topic that puts a waiting check off",
+         patch.replace("if (hasMessages(CMD_WIFI_CHECK)) return;", "removeMessages(CMD_WIFI_CHECK);")),
+        ("a topic that evaluates private DNS after every check",
+         patch.replace("+        transitionToPrivateDnsEvaluationSuccessState();",
+                       "+        transitionTo(mEvaluatingPrivateDnsState);")),
+        ("a topic that drops the private DNS probe's result from the report of a check",
+         patch.replace("privateDnsResults != 0", "false")),
         ("a topic that also changes another file",
          patch + "diff --git a/src/com/android/networkstack/util/NetworkStackUtils.java b/x\n"),
         ("a topic that removes a transition",
          patch + "-                            transitionTo(mEvaluatingPrivateDnsState);\n"),
-    ):
-        if not network_stack_topic_problems(edited, marker):
+    ]
+    for label, edited in mutations:
+        if not network_stack_topic_problems(edited, markers):
             fail(f"the NetworkMonitor topic check accepted {label}")
+
+
+WIFI_TRACKER_PROJECT = "platform/frameworks/opt/net/wifi"
+WIFI_TRACKER_FILES = [
+    "libs/WifiTrackerLib/src/com/android/wifitrackerlib/Utils.java",
+    "libs/WifiTrackerLib/src/com/android/wifitrackerlib/WifiEntry.java",
+    "libs/WifiTrackerLib/src/com/android/wifitrackerlib/WifiPickerTracker.java",
+]
+# What the verifier looks for in Settings and SystemUI, and the constant of the connectivity report that
+# the topic reads, whose value it is (ConnectivityDiagnosticsManager.ConnectivityReport).
+WIFI_TRACKER_MARKER_CONSTANTS = {"networkProbesAttempted": "KEY_NETWORK_PROBES_ATTEMPTED_BITMASK"}
+
+
+def wifi_tracker_topic_problems(patch: str, markers: list[str]) -> list[str]:
+    """What the p0033 patch lacks of the warning: it changes the library's Utils, WifiEntry and
+    WifiPickerTracker alone, it reads the key that the verifier looks for, it reads a report that says
+    valid with the HTTPS probe attempted and not succeeded, leaves a network that is not validated,
+    partial or behind a sign-in page to the stock rules, the icon and the summary both take it, and the
+    picker tracker tells its listeners when a report moves the mark."""
+    problems = []
+    touched = re.findall(r"^diff --git a/(\S+) b/", patch, re.MULTILINE)
+    if touched != WIFI_TRACKER_FILES:
+        problems.append(f"it changes {touched}, not {WIFI_TRACKER_FILES}")
+    added = "\n".join(
+        line[1:] for line in patch.splitlines() if line.startswith("+") and not line.startswith("+++")
+    )
+    for marker in markers:
+        constant = WIFI_TRACKER_MARKER_CONSTANTS.get(marker)
+        if constant is None or constant not in added:
+            problems.append(f"it does not read the key {marker!r} (by {constant}) that the verifier requires")
+    for needle, what in (
+        ("NET_CAPABILITY_VALIDATED", "require a validated network"),
+        ("NET_CAPABILITY_CAPTIVE_PORTAL", "leave a network behind a sign-in page to the stock rules"),
+        ("NET_CAPABILITY_PARTIAL_CONNECTIVITY", "leave a partial network to the stock rules"),
+        ("NETWORK_VALIDATION_RESULT_VALID", "require a report that says valid, not skipped"),
+        ("KEY_NETWORK_PROBES_ATTEMPTED_BITMASK", "read the probes the report says were attempted"),
+        ("KEY_NETWORK_PROBES_SUCCEEDED_BITMASK", "read the probes the report says succeeded"),
+        ("(attempted & NETWORK_PROBE_HTTPS) != 0 && (succeeded & NETWORK_PROBE_HTTPS) == 0",
+         "ask for the HTTPS probe attempted and not succeeded"),
+        ("|| isInternetCheckFailed() ||", "show the exclamation mark for a failed check"),
+        ("isPartialConnectivity || isInternetCheckFailed", "write the limited connection summary for a failed check"),
+        ("markChanged |= markShown != entry.shouldShowXLevelIcon();", "see whether a report moves the mark"),
+        ("if (markChanged) {\n            notifyOnWifiEntriesChanged(WIFI_ENTRIES_CHANGED_REASON_GENERAL);",
+         "tell the listeners of the tracker when a report moves the mark"),
+    ):
+        if needle not in added:
+            problems.append(f"it does not {what}")
+    return problems
+
+
+def verify_wifi_tracker_topic(android_root: Path) -> None:
+    """The routed WifiTrackerLib topic and the verifier agree on the warning for a failed check.
+
+    The target-files fixtures prove what the verifier rejects; this proves that the topic puts in
+    Settings and SystemUI the name the verifier looks for, and that the predicate holds for the
+    report a failed check leaves and for no other."""
+    verifier = load_tool(android_root / "tools/verify-target-files.py")
+    rows = [
+        line.split("\t")
+        for line in (android_root / "patches/projects.tsv").read_text().splitlines()
+        if line and not line.startswith("#")
+    ][1:]
+    routes = [row for row in rows if row[3] == WIFI_TRACKER_PROJECT]
+    if [(row[1], row[4]) for row in routes] != [("p0033", "frameworks/opt/net/wifi")]:
+        fail("the route table does not route frameworks/opt/net/wifi once, as p0033")
+    patches = sorted((android_root / "patches/projects/p0033/series").glob("*.patch"))
+    if len(patches) != 1:
+        fail(f"p0033 has {len(patches)} patches, not one")
+    patch = patches[0].read_text()
+    markers = [marker.decode() for marker in verifier.WIFI_TRACKER_MARKERS]
+    if markers != ["networkProbesAttempted"]:
+        fail("the verifier no longer looks for the key the WifiTrackerLib predicate reads")
+    if tuple(verifier.WIFI_TRACKER_APKS) != (
+        "SYSTEM_EXT/priv-app/Settings/Settings.apk",
+        "SYSTEM_EXT/priv-app/SystemUI/SystemUI.apk",
+    ):
+        fail("the verifier no longer checks Settings and SystemUI for the WifiTrackerLib topic")
+    problems = wifi_tracker_topic_problems(patch, markers)
+    if problems:
+        fail("the WifiTrackerLib topic: " + "; ".join(problems))
+    for label, edited in (
+        ("a topic that reads no key the verifier looks for",
+         patch.replace("KEY_NETWORK_PROBES_ATTEMPTED_BITMASK", "KEY_NETWORK_PROBES_SUCCEEDED_BITMASK")),
+        ("a topic that shows an unvalidated network",
+         patch.replace("NET_CAPABILITY_VALIDATED", "NET_CAPABILITY_INTERNET")),
+        ("a topic that shows a sign-in network",
+         patch.replace("NET_CAPABILITY_CAPTIVE_PORTAL", "NET_CAPABILITY_INTERNET")),
+        ("a topic that shows a partial network",
+         patch.replace("NET_CAPABILITY_PARTIAL_CONNECTIVITY", "NET_CAPABILITY_INTERNET")),
+        ("a topic that shows a skipped report",
+         patch.replace("NETWORK_VALIDATION_RESULT_VALID", "NETWORK_VALIDATION_RESULT_SKIPPED")),
+        ("a topic that ignores the attempted probes",
+         patch.replace("(attempted & NETWORK_PROBE_HTTPS) != 0 &&", "")),
+        ("a topic that shows a network whose HTTPS probe succeeded",
+         patch.replace("(succeeded & NETWORK_PROBE_HTTPS) == 0", "(succeeded & NETWORK_PROBE_HTTPS) != 0")),
+        ("a topic whose icon ignores the check", patch.replace("|| isInternetCheckFailed() ||", "||")),
+        ("a topic whose summary ignores the check",
+         patch.replace("isPartialConnectivity || isInternetCheckFailed", "isPartialConnectivity")),
+        ("a topic whose tracker never tells its listeners",
+         patch.replace("if (markChanged) {", "if (false) {")),
+        ("a topic whose tracker does not see the mark move",
+         patch.replace("markShown != entry.shouldShowXLevelIcon()", "false")),
+        ("a topic that also changes another file",
+         patch + "diff --git a/libs/WifiTrackerLib/src/com/android/wifitrackerlib/SavedNetworkTracker.java b/x\n"),
+    ):
+        if not wifi_tracker_topic_problems(edited, markers):
+            fail(f"the WifiTrackerLib topic check accepted {label}")
 
 
 def verify_media_codecs_overlay(android_root: Path) -> None:
@@ -8680,6 +9066,7 @@ def main() -> None:
     verify_overlay_sepolicy(android_root)
     verify_lmkd_gpu_reclaim(android_root)
     verify_network_stack_topic(android_root)
+    verify_wifi_tracker_topic(android_root)
     verify_camerax_denylist_assertion(android_root)
     verify_media_codecs_overlay(android_root)
     verify_package_assertions(android_root)
