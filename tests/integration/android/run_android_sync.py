@@ -21,6 +21,13 @@ shows it on the release's own kernel and file system:
 - the host's quiesce requests follow in its order (``sync``, ``trim once``,
   ``suspend``, ``wake``), the guest answers adb again and ``sync`` replies
   once more;
+- a suspend asked with no sync before it states in its reply whether it synced
+  (``suspended, synced``, the PM core's sync having returned, or ``suspended,
+  not synced``, as the guest's sync_on_suspend says), and the image holds a
+  fresh file right after a reply that says synced (the byte count shows that
+  the file had reached the image by the reply, not that the suspend's own sync
+  wrote it); ``--suspend-statement none`` expects a kernel without the
+  statement, whose reply is ``suspended``;
 - the emulator is killed outright, the way iOS ends a process that never runs
   again, and the image still holds it.
 
@@ -64,7 +71,11 @@ PAYLOAD_BYTES = 8 << 20
 # One byte per attempt: a retry must not find the earlier file's blocks, which
 # the guest may reuse, already holding what it counts.
 PAYLOAD_BYTES_BY_ATTEMPT = (0xA5, 0xB6, 0xC7)
+# The same for the file the suspend alone must write back.
+SUSPEND_PAYLOAD_BYTES_BY_ATTEMPT = (0xD8, 0xE9, 0xFA)
 PAYLOAD = "/data/local/tmp/sync-payload"
+# The suspend's own file: the first one must stay for the check after the kill.
+SUSPEND_PAYLOAD = "/data/local/tmp/suspend-payload"
 # The release is a user build, where the shell is no root: the write-back
 # cannot be held off, so the control looks at the image at once.
 ATTEMPTS = len(PAYLOAD_BYTES_BY_ATTEMPT)
@@ -75,8 +86,8 @@ SYNC_REPLY = re.compile(r"synced in \d+ ms")
 CHUNK = 64 << 20
 
 
-def write_command(byte: int) -> str:
-    return f"head -c {PAYLOAD_BYTES} /dev/zero | tr '\\000' '\\{byte:03o}' > {PAYLOAD}"
+def write_command(byte: int, path: str = PAYLOAD) -> str:
+    return f"head -c {PAYLOAD_BYTES} /dev/zero | tr '\\000' '\\{byte:03o}' > {path}"
 
 
 def image_payload(image: pathlib.Path, byte: int) -> int:
@@ -104,7 +115,53 @@ def background_edge(guest: "base.Guest") -> None:
         raise Failure(f"sync after the wake replied {text!r}, not 'synced in N ms'")
 
 
-def run_checks(guest: "base.Guest", image: pathlib.Path, request: str) -> None:
+def suspend_states_its_sync(guest: "base.Guest", image: pathlib.Path, statement: str) -> None:
+    """A suspend with no sync before it: its reply says whether the suspend
+    synced (as the guest's sync_on_suspend says, when it can be read), and a
+    reply that says it did has the fresh file in the image right after it.
+
+    What the byte count proves is only that the file had reached the image by
+    the reply, which a reply that says synced requires. It does not show that
+    the suspend's own sync wrote it (the guest's flusher would show the same),
+    and a reply that says not synced is not checked against the image at all:
+    the file may already be there. The Linux runner
+    (run_guest_mconsole_console_clients.py) holds write-back off and checks
+    both directions, and a suspend the guest started itself."""
+    for byte in SUSPEND_PAYLOAD_BYTES_BY_ATTEMPT:
+        before_write = image_payload(image, byte)
+        guest.shell(f"rm -f {SUSPEND_PAYLOAD}; {write_command(byte, SUSPEND_PAYLOAD)}")
+        control = image_payload(image, byte) - before_write
+        if control < PAYLOAD_BYTES // 4:
+            break
+    else:
+        raise Failure("the image held the suspend's payload before any request in each attempt")
+    text = guest.console.suspend()
+    held = image_payload(image, byte) - before_write
+    guest.console.request("wake", 60)
+    base.wait_for("the guest after the wake", 90,
+                  lambda: None if guest.shell("echo alive", timeout=30).strip() == "alive" else "no answer", guest)
+    if statement == "none":
+        if text != "suspended":
+            raise Failure(f"the suspend replied {text!r}; a kernel without the statement replies 'suspended'")
+        print(f"suspend replied {text!r}: no statement, as expected of a kernel without it "
+              f"(the image held {held} payload bytes right after it, of {PAYLOAD_BYTES})")
+        return
+    # The shell is no root and may not read it: then either statement stands.
+    flag = guest.shell("cat /sys/power/sync_on_suspend 2>/dev/null; true").strip()
+    expected = {"1": "suspended, synced", "0": "suspended, not synced"}.get(flag)
+    if text not in ("suspended, synced", "suspended, not synced"):
+        raise Failure(f"the suspend replied {text!r}, which states nothing of its sync")
+    if expected is not None and text != expected:
+        raise Failure(f"the suspend replied {text!r} with sync_on_suspend {flag}: expected {expected!r}")
+    if text == "suspended, synced" and held < PAYLOAD_BYTES - SLACK:
+        raise Failure(f"the suspend replied {text!r} and the image held {held} of the payload's "
+                      f"{PAYLOAD_BYTES} bytes right after it (the control held {control}): "
+                      "the statement was not true")
+    print(f"suspend replied {text!r} (sync_on_suspend {flag or 'unreadable'}); the image held {held} payload "
+          f"bytes right after it, of {PAYLOAD_BYTES}, the control {control}")
+
+
+def run_checks(guest: "base.Guest", image: pathlib.Path, request: str, statement: str) -> None:
     error, text = guest.console.exchange("sysrq s", 60)
     if not error or text != "sysrq s disabled":
         raise Failure(f"'sysrq s' ended with {'an error' if error else 'a success'} {text!r}: the guest's "
@@ -135,6 +192,7 @@ def run_checks(guest: "base.Guest", image: pathlib.Path, request: str) -> None:
         raise Failure(f"{request!r} replied {text!r} and the image holds {after - before_write} of the "
                       f"payload's {PAYLOAD_BYTES} bytes (the control held {control - before_write})")
     background_edge(guest)
+    suspend_states_its_sync(guest, image, statement)
     guest.process.kill()
     guest.process.wait(timeout=30)
     killed = image_payload(image, byte)
@@ -151,6 +209,9 @@ def main() -> int:
     parser.description = __doc__
     parser.add_argument("--request", default="sync",
                         help="the command that must reach the image (default sync)")
+    parser.add_argument("--suspend-statement", choices=("stated", "none"), default="stated",
+                        help="whether the kernel states in its suspend reply whether the suspend synced "
+                        "(default), or is one without the statement, which replies 'suspended'")
     options = parser.parse_args()
     if options.cpus <= 0 or options.boot_timeout <= 0:
         print("counts and timeouts must be positive", file=sys.stderr)
@@ -162,7 +223,8 @@ def main() -> int:
     guest: "base.Guest | None" = None
     try:
         guest = base.start_guest(options, str(adb), private)
-        run_checks(guest, instance / boot_android.android_instance.DATA_DISK, options.request)
+        run_checks(guest, instance / boot_android.android_instance.DATA_DISK, options.request,
+                   options.suspend_statement)
         print("PASS")
         return 0
     except (Failure, boot_android.LauncherError, subprocess.TimeoutExpired, OSError) as problem:

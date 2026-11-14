@@ -80,7 +80,14 @@ constexpr std::string_view writebackDisabled = "sysrq s disabled";
 constexpr std::string_view syncAcknowledgementHead = "synced in ";
 constexpr std::string_view syncAcknowledgementTail = " ms";
 constexpr std::string_view unknownCommand = "Unknown command";
+/* The suspend's reply (arch/um/drivers/mconsole_kern.c
+ * um_suspend_notify_entered()) says whether the suspend's own sync returned.
+ * A kernel without the statement replies "suspended". Each text still holds
+ * the word an older host looks for, and only these two whole texts state
+ * anything: another that merely holds the word is no statement. */
 constexpr std::string_view suspendAcknowledgement = "suspended";
+constexpr std::string_view suspendSynced = "suspended, synced";
+constexpr std::string_view suspendNotSynced = "suspended, not synced";
 /* A guest reports a suspend it gave up with "Suspend failed: <errno>". EBUSY
  * (16) is the one a moment later can cure: a wake source fired while the guest
  * synced its filesystems, or another power transition held the lock. */
@@ -356,16 +363,20 @@ public:
 	 * passed only takes what has arrived. A reply that is not complete by then
 	 * leaves the request pending, and the client may receive again.
 	 *
+	 * The parts that arrived before a deadline stay with the client, text and
+	 * error flag both: the next receive continues the reply and delivers it
+	 * whole, so the end of a reply that was refused at its start is still a
+	 * refusal. `response` takes nothing until the reply is complete.
+	 *
 	 * The error flag of any part makes the reply rejected, though the guest
 	 * sets it on the first part only. A datagram that is shorter than the
 	 * reply header, longer than a reply can be, or advertises more text than
-	 * it carries, is malformed. */
+	 * it carries, is malformed, and ends the reply it was part of. */
 	[[nodiscard]] ExchangeResult receive(std::string &response,
 		Deadline deadline) const
 	{
 		constexpr auto header = static_cast<ssize_t>(sizeof(Reply) -
 			maximumConsoleData);
-		bool rejected = false;
 		for (;;) {
 			const auto remaining =
 				std::chrono::duration_cast<std::chrono::microseconds>(
@@ -393,24 +404,35 @@ public:
 				return ExchangeResult::pending;
 			}
 			if (received < header ||
-			    received > static_cast<ssize_t>(sizeof(Reply)))
+			    received > static_cast<ssize_t>(sizeof(Reply))) {
+				partial_.clear();
+				partialRejected_ = false;
 				return ExchangeResult::malformed;
+			}
 			Reply reply {};
 			std::memcpy(&reply, datagram.data(),
 				static_cast<std::size_t>(received));
 			if (reply.length > maximumConsoleData ||
-			    reply.length > static_cast<std::size_t>(received - header))
+			    reply.length > static_cast<std::size_t>(received - header)) {
+				partial_.clear();
+				partialRejected_ = false;
 				return ExchangeResult::malformed;
+			}
 			auto length = static_cast<std::size_t>(reply.length);
 			/* The guest's driver counts the NUL that ends each reply in
 			 * the reply's length. It ends the text and is no part of it. */
 			if (length != 0U && reply.data[length - 1U] == '\0')
 				--length;
-			response.append(reply.data.data(), length);
-			rejected = rejected || reply.error != 0U;
-			if (reply.more == 0U)
+			partial_.append(reply.data.data(), length);
+			partialRejected_ = partialRejected_ || reply.error != 0U;
+			if (reply.more == 0U) {
+				const bool rejected = partialRejected_;
+				response.append(partial_);
+				partial_.clear();
+				partialRejected_ = false;
 				return rejected ? ExchangeResult::rejected :
 					ExchangeResult::accepted;
+			}
 		}
 	}
 
@@ -426,6 +448,10 @@ private:
 	std::string path_;
 	sockaddr_un console_ {};
 	std::unique_ptr<SocketPath> guard_;
+	/* The parts of the reply that a receive took before its deadline, and
+	 * whether any of them carried the error flag. One thread reads a client. */
+	mutable std::string partial_;
+	mutable bool partialRejected_ {false};
 };
 
 /*
@@ -692,10 +718,16 @@ GuestWriteback request_guest_writeback(std::chrono::milliseconds wait,
 
 namespace {
 
-/* A guest that accepted a suspend: it said it reached the sleep boundary. */
-[[nodiscard]] GuestSuspension suspendAccepted(const std::string &response)
+/* A guest that accepted a suspend: it said it reached the sleep boundary,
+ * and a kernel with the statement said whether its sync returned. */
+[[nodiscard]] GuestSuspension suspendAccepted(const std::string &response,
+	GuestSuspendSync &sync)
 {
-	if (response.find(suspendAcknowledgement) == std::string::npos) {
+	if (response == suspendSynced) {
+		sync = GuestSuspendSync::synced;
+	} else if (response == suspendNotSynced) {
+		sync = GuestSuspendSync::skipped;
+	} else if (response.find(suspendAcknowledgement) == std::string::npos) {
 		std::fputs("Guest console returned an unexpected suspend reply\n",
 			stderr);
 	}
@@ -730,12 +762,13 @@ namespace {
  * anything else is unconfirmed, and its resume wakes it.
  */
 [[nodiscard]] GuestSuspension abortSuspend(
-	const GuestConsoleLocation &location, const Client &request)
+	const GuestConsoleLocation &location, const Client &request,
+	GuestSuspendSync &sync)
 {
 	std::string response;
 	switch (request.receive(response, std::chrono::milliseconds {0})) {
 	case ExchangeResult::accepted:
-		return suspendAccepted(response);
+		return suspendAccepted(response, sync);
 	case ExchangeResult::rejected:
 		return suspendRefused(response);
 	case ExchangeResult::notSent:
@@ -762,8 +795,11 @@ namespace {
 
 } // namespace
 
-GuestSuspension suspend_guest() noexcept
+GuestSuspension suspend_guest(GuestSuspendSync *sync) noexcept
 {
+	GuestSuspendSync stated = GuestSuspendSync::unstated;
+	if (sync != nullptr)
+		*sync = stated;
 	try {
 		std::lock_guard lock(consoleMutex);
 		const auto &location = guest_console_location();
@@ -810,21 +846,27 @@ GuestSuspension suspend_guest() noexcept
 				break;
 			ask();
 		}
+		GuestSuspension suspension = GuestSuspension::none;
 		switch (result) {
 		case ExchangeResult::accepted:
-			return suspendAccepted(response);
+			suspension = suspendAccepted(response, stated);
+			break;
 		case ExchangeResult::notSent:
-			return GuestSuspension::none;
+			break;
 		case ExchangeResult::rejected:
 			/* The guest refused, or kept refusing. */
-			return suspendRefused(response);
+			suspension = suspendRefused(response);
+			break;
 		case ExchangeResult::pending:
 		case ExchangeResult::malformed:
 			/* A reply that is no reply proves nothing: it is aborted like
 			 * silence. */
-			return abortSuspend(*location, *request);
+			suspension = abortSuspend(*location, *request, stated);
+			break;
 		}
-		return GuestSuspension::none;
+		if (sync != nullptr)
+			*sync = stated;
+		return suspension;
 	} catch (...) {
 		return GuestSuspension::none;
 	}

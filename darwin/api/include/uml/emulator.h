@@ -137,9 +137,10 @@ enum uml_emulator_guest_storage {
 	 * returned an error, so a report the caller zeroed still holds this. */
 	UML_EMULATOR_GUEST_STORAGE_NOT_REPORTED = 0,
 	/* The guest ran sync(2) to its return and said so: the management
-	 * console's sync was answered in this call. A suspend never confirms the
-	 * storage. The guest syncs on the way to suspend only while
-	 * /sys/power/sync_on_suspend is set, and says nothing of it. */
+	 * console's sync was answered in this call, or the suspend's reply stated
+	 * that the suspend's own sync had returned. A suspend reply that says
+	 * nothing of it, as an older kernel's, confirms nothing: the guest syncs
+	 * on the way to suspend only while /sys/power/sync_on_suspend is set. */
 	UML_EMULATOR_GUEST_STORAGE_CONFIRMED = 1,
 	/* No guest was running on the handle, so there was nothing to settle. */
 	UML_EMULATOR_GUEST_STORAGE_NO_GUEST = 2,
@@ -313,11 +314,13 @@ int uml_emulator_sync(struct uml_emulator *emulator,
  * Reports the number of host files that could not be flushed, 0 when all of
  * them were, and the negated error constant for API failures. `settle`
  * (nullable, with struct_size set) reports what the guest confirmed. The
- * storage is CONFIRMED only by the guest's reply to a writeback request made
- * in this call: the first, or the final one when the suspend was refused or
- * not confirmed. A suspend confirms nothing of the storage, so a guest that
- * slept without answering its writeback reports UNCONFIRMED beside the
- * suspension, which says whether it sleeps. A writeback that gets no reply in
+ * storage is CONFIRMED only by an explicit statement of the guest in this
+ * call: its reply to a writeback request (the first, or the final one when the
+ * suspend was refused or not confirmed), or a suspend reply that states the
+ * suspend's own sync returned. A suspend reply that states nothing of it
+ * confirms nothing, so a guest that slept without answering its writeback and
+ * without that statement reports UNCONFIRMED beside the suspension, which
+ * says whether it sleeps. A writeback that gets no reply in
  * time is not repeated before the suspend, and the trim is then skipped: a
  * guest that is slow to write back would spend the trim's whole wait on
  * reclaim. A guest the host holds quiesced is reported again by a later call;
