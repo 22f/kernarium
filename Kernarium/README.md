@@ -87,8 +87,8 @@ response began) or is already responding, through `set_memory_pressure_callback`
 and with no figures. The system merges the levels raised during a response into
 the next notification, so a level raised during a response is reported after it.
 The loader queues each report to the main queue as its own block and setting or
-clearing its handler does not cancel the ones queued. Andarium shows a notice
-from it; Kernarium sets no callback.
+clearing its handler does not cancel the ones queued. Neither application sets
+a callback; the runtime API keeps it for an application that wants the reports.
 
 ## Guest storage
 

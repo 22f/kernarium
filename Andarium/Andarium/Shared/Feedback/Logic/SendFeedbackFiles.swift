@@ -3,6 +3,7 @@
 #if FEEDBACK_MAIL
 
 import Foundation
+import UniformTypeIdentifiers
 
 // What Send feedback does with a file the person picks from Files: it stays
 // where it is, the sheet holds the access the picker gave it, and the mail's
@@ -22,6 +23,9 @@ nonisolated enum SendFeedbackFileRefusal: Error, Equatable, Sendable {
     case unavailable
     /// The person stopped the copy.
     case cancelled
+    /// An Android package, which no mail service delivers
+    /// (`SendFeedbackAndroidPackage`).
+    case androidPackage
 }
 
 /// What a file is, found without reading any of it.
@@ -43,6 +47,9 @@ nonisolated struct SendFeedbackFileInspection: Equatable, Sendable {
     var isLocal = true
     /// The file can be mapped where it is. Some volumes and providers refuse.
     var mappable = true
+    /// The content type the file system or the provider gives it, from its
+    /// metadata alone.
+    var contentType: UTType?
 
     /// The composer can map it from where it is, at once.
     var usableInPlace: Bool { kind == .file && bytes > 0 && isLocal && mappable }
@@ -61,6 +68,7 @@ nonisolated struct SendFeedbackFileInspection: Equatable, Sendable {
         default: return SendFeedbackFileInspection(kind: .other)
         }
         var result = SendFeedbackFileInspection(kind: .file, bytes: UInt64(max(info.st_size, 0)))
+        result.contentType = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType
         result.isLocal = info.st_flags & datalessFlag == 0 && isDownloaded(url)
         // A placeholder is not opened: that would fetch it.
         if result.isLocal && result.bytes > 0 { result.mappable = canMapFirstPage(url, bytes: result.bytes) }

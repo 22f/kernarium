@@ -415,6 +415,29 @@
         }
       }
     },
+    "APK files can’t be sent by mail" : {
+      "comment" : "The title of the alert when a pick held only Android packages (.apk, and the bundles .apks, .xapk and .apkm): mail services reject a message that carries one, so none was attached. A line of the alert that lists several refusals says the same.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "APKファイルはメールで送信できません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "APK文件无法通过邮件发送"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "APK檔案無法透過郵件傳送"
+          }
+        }
+      }
+    },
     "Attached" : {
       "comment" : "What VoiceOver says for the Bug report button once a bug report is attached.",
       "localizations" : {
@@ -830,7 +853,7 @@
       }
     },
     "Files" : {
-      "comment" : "The item of the bar's Add menu that opens the Files app to add files of any kind to the mail, an Android app (APK) among them. The iOS app is named Files: 文件, 檔案, ファイル.",
+      "comment" : "The item of the bar's Add menu that opens the Files app to add files to the mail; an Android package is refused there. The iOS app is named Files: 文件, 檔案, ファイル.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -1032,6 +1055,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "無法打開郵件"
+          }
+        }
+      }
+    },
+    "Mail services reject messages that carry an APK, so these files were not attached. Paste a download link for the app in the details instead." : {
+      "comment" : "The text of that alert for two or more files, and the line of the longer alert for several packages. The details are the large field of the mail, where the link goes.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "メールサービスはAPKを含むメッセージを拒否するため、これらのファイルは添付されませんでした。代わりに、アプリのダウンロードリンクを詳細に貼り付けてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "邮件服务会拒收带有APK的邮件，因此未附加这些文件。请改为在详细信息中粘贴该App的下载链接。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "郵件服務會拒收含有APK的郵件，因此未附加這些檔案。請改為在詳細資訊中貼上該App的下載連結。"
+          }
+        }
+      }
+    },
+    "Mail services reject messages that carry an APK, so this file was not attached. Paste a download link for the app in the details instead." : {
+      "comment" : "The text of that alert for one file, and the line of the longer alert for one package. The details are the large field of the mail, where the link goes.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "メールサービスはAPKを含むメッセージを拒否するため、このファイルは添付されませんでした。代わりに、アプリのダウンロードリンクを詳細に貼り付けてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "邮件服务会拒收带有APK的邮件，因此未附加此文件。请改为在详细信息中粘贴该App的下载链接。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "郵件服務會拒收含有APK的郵件，因此未附加此檔案。請改為在詳細資訊中貼上該App的下載連結。"
           }
         }
       }

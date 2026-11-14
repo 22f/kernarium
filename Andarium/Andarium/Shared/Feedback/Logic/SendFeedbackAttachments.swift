@@ -75,8 +75,6 @@ nonisolated struct SendFeedbackAttachment: Identifiable, Equatable, Sendable {
     /// The type the composer is told the file has.
     var mimeType: String {
         let ext = (fileName as NSString).pathExtension.lowercased()
-        // An Android package is the common file to send, and no system type has it.
-        if ext == "apk" { return "application/vnd.android.package-archive" }
         return UTType(filenameExtension: ext)?.preferredMIMEType ?? "application/octet-stream"
     }
 
