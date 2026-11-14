@@ -1546,7 +1546,8 @@ void aRefusalIsLoggedOncePerCameraAndReasonUntilTheCameraChanges()
     require(!log.first(1, Refusal::stillNotMade), "and another camera is not reset with it");
     for (const auto reason : {Refusal::noAnchor, Refusal::formatChanged, Refusal::notJoinable, Refusal::inputRefused, Refusal::outputRefused,
                               Refusal::overBudget, Refusal::stillNotMade, Refusal::rawUnavailable, Refusal::raised, Refusal::notRestored,
-                              Refusal::ratioMoved, Refusal::turnNotHeld, Refusal::stillsNotTurned, Refusal::ratioFailed})
+                              Refusal::ratioMoved, Refusal::turnNotHeld, Refusal::stillsNotTurned, Refusal::ratioFailed,
+                              Refusal::ratioTimedOut})
         require(!refusalName(reason).empty() && refusalName(reason) != "unknown", "every reason has a name");
 }
 
@@ -2344,6 +2345,106 @@ void aStillWaitsForAPendingRatioPinInsideTheStillBudget()
     require(waited <= stillWaitBudgetNanoseconds && waited + ratioPinPollNanoseconds > stillWaitBudgetNanoseconds, "and what they waited is within the budget");
 }
 
+// A ratio change is one operation at a time: asked before the device is told, so that a completion that comes at once, or
+// never, or an earlier operation's, is never taken for the one under way; frames are held until the completion arrives
+// without an error; a completion that does not come within the budget of a running session ends the camera's frames.
+void aRatioChangeIsOneOperationAtATime()
+{
+    constexpr std::uint64_t budget = ratioCompletionBudgetNanoseconds;
+    constexpr std::uint64_t start = 5'000'000'000;
+    using Step = RatioFrameStep;
+    require(budget == stillWaitBudgetNanoseconds, "a ratio change waits no longer than a still");
+    require(ratioFrameStep(RatioPin {}) == Step::deliver, "a camera that pinned nothing delivers");
+    // A deferred success: held while it is under way, delivered once it came.
+    {
+        RatioPin pin;
+        ratioPinAsked(pin, 1);
+        require(pin.pending && ratioFrameStep(pin) == Step::hold, "frames are held while the change is under way");
+        require(ratioPinArmed(pin, start) && !ratioPinArmed(pin, start + 1), "the budget begins once");
+        require(!ratioPinTimedOut(pin, start + budget - 1), "inside the budget it waits");
+        require(ratioPinCompleted(pin, 1, 0) && !pin.pending && pin.error == 0, "the completion arrives");
+        require(ratioFrameStep(pin) == Step::deliver && ratioPinErrorForStill(pin) == 0, "frames are delivered once it did, without error");
+        require(!ratioPinTimedOut(pin, start + 10 * budget), "a completed change never times out");
+    }
+    // A completion error: held, and the camera fails, with the error for the still.
+    {
+        RatioPin pin;
+        ratioPinAsked(pin, 1);
+        (void)ratioPinArmed(pin, start);
+        require(ratioPinCompleted(pin, 1, 42) && ratioFrameStep(pin) == Step::failed && ratioPinErrorForStill(pin) == 42,
+                "an error ends it, and the still is told the code");
+        require(ratioPinCompleted(pin, 1, -11800) && ratioPinErrorForStill(pin) == -11800, "the newest completion of the operation stands");
+    }
+    // A completion at once (the setter calls it before it returns, or the device already holds the ratio): never pending.
+    {
+        RatioPin pin;
+        ratioPinAsked(pin, 1);
+        require(ratioPinCompleted(pin, 1, 0), "the completion comes before the session runs");
+        require(!pin.pending && ratioFrameStep(pin) == Step::deliver && !ratioPinArmed(pin, start), "it is not pending, and never armed");
+    }
+    // A later change while the earlier one's result is kept: pending again, and the earlier operation's completion is ignored.
+    {
+        RatioPin pin;
+        ratioPinAsked(pin, 1);
+        require(ratioPinCompleted(pin, 1, 0) && ratioFrameStep(pin) == Step::deliver, "the first change completed");
+        ratioPinAsked(pin, 2);
+        require(pin.pending && pin.error == 0 && ratioFrameStep(pin) == Step::hold,
+                "a later change is under way, whatever the earlier one's result was");
+        require(!ratioPinCompleted(pin, 1, 7) && pin.pending && pin.error == 0, "the earlier operation's late completion is ignored");
+        ratioPinAsked(pin, 3);
+        require(!ratioPinCompleted(pin, 2, 0) && pin.pending, "and so is a later one's of an operation that was replaced");
+        require(ratioPinCompleted(pin, 3, 0) && ratioFrameStep(pin) == Step::deliver, "the current operation's completes it");
+    }
+    // A completion that never comes: held while the budget runs, then timed out once, and the guest's camera ends.
+    {
+        RatioPin pin;
+        ratioPinAsked(pin, 1);
+        require(!ratioPinTimedOut(pin, start + 100 * budget), "a change of a session that does not run yet cannot time out");
+        (void)ratioPinArmed(pin, start);
+        require(!ratioPinTimedOut(pin, start - 1), "a clock that went back does not time it out");
+        require(ratioFrameStep(pin) == Step::hold && !ratioPinTimedOut(pin, start + budget - 1), "it holds until the budget is spent");
+        require(ratioPinTimedOut(pin, start + budget) && !ratioPinTimedOut(pin, start + budget + 1), "it times out once");
+        require(ratioFrameStep(pin) == Step::timedOut && ratioPinErrorForStill(pin) == ratioNoCompletion, "frames stay held, the still is told");
+        require(ratioPinCompleted(pin, 1, 0) && ratioFrameStep(pin) == Step::timedOut,
+                "a completion after the time ran out is kept but does not undo it");
+        // A zero clock still arms.
+        RatioPin other;
+        ratioPinAsked(other, 9);
+        require(ratioPinArmed(other, 0) && other.armedAt != 0, "a clock at zero arms too");
+    }
+    // Without a change asked for, a completion belongs to nothing.
+    RatioPin none;
+    require(!ratioPinCompleted(none, 0, 5) && !ratioPinArmed(none, start) && ratioFrameStep(none) == Step::deliver, "no change, nothing to complete");
+}
+
+// The notes the platform keeps across its sessions are bounded: the current cameras' and the most recently used others'.
+void theHeldNotesAreBoundedToTheCurrentCamerasAndRecentOnes()
+{
+    std::vector<HeldNoteUse> held;
+    for (std::uint64_t index = 0; index < 20; ++index) held.push_back({"device-" + std::to_string(index), index + 1});
+    const std::vector<std::string> current {"device-0", "device-1"};
+    const auto dropped = heldNotesToDrop(held, current, 8);
+    require(dropped.size() == 20 - 2 - 8, "everything but the current cameras and eight others is let go");
+    for (const auto& name : dropped) require(name != "device-0" && name != "device-1", "a current camera is never let go");
+    std::set<std::string> gone(dropped.begin(), dropped.end());
+    for (std::uint64_t index = 12; index < 20; ++index) require(gone.count("device-" + std::to_string(index)) == 0, "the newest are kept");
+    require(gone.count("device-2") == 1 && gone.count("device-11") == 1, "the oldest are dropped");
+    require(heldNotesToDrop(held, {}, 20).empty() && heldNotesToDrop(held, current, 18).empty(), "nothing is dropped within the bound");
+    require(heldNotesToDrop({}, current, 8).empty(), "an empty cache drops nothing");
+    // Equal uses fall in a fixed order.
+    const std::vector<HeldNoteUse> equal {{"b", 1}, {"a", 1}, {"c", 1}};
+    require(heldNotesToDrop(equal, {}, 2) == std::vector<std::string> {"c"}, "ties are broken by the identifier");
+    // A growing cache that is trimmed at each insertion never holds more than the current cameras and eight others.
+    std::vector<HeldNoteUse> growing;
+    std::uint64_t used = 0;
+    for (std::uint64_t round = 0; round < 200; ++round) {
+        growing.push_back({"external-" + std::to_string(round), ++used});
+        for (const auto& name : heldNotesToDrop(growing, current, heldNotesRecent))
+            std::erase_if(growing, [&](const HeldNoteUse& note) { return note.identifier == name; });
+        require(growing.size() <= heldNotesRecent + 1, "the cache stays small");
+    }
+}
+
 int main()
 {
     theDurationThatMovesOutOfTheOthersWayIsWrittenFirst();
@@ -2414,6 +2515,8 @@ int main()
     aCameraThatImitatesAnEarlierOneKeepsItsPhotoConnectionAngle();
     aStillReadsTheCompensationAfterTheCommit();
     aStillWaitsForAPendingRatioPinInsideTheStillBudget();
+    aRatioChangeIsOneOperationAtATime();
+    theHeldNotesAreBoundedToTheCurrentCamerasAndRecentOnes();
     thePinnedCropsFieldOfViewIsTheLargerOfTheTwo();
     theRatioBitsAreDistinctAndNoneHasNone();
     return 0;

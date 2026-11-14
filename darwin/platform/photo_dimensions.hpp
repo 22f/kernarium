@@ -21,10 +21,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -87,6 +89,57 @@ enum class CompensationStep : std::uint8_t { proceed, enable, refuse };
 enum class RatioStillStep : std::uint8_t { proceed, wait, refuseFailed, refuseMoved };
 [[nodiscard]] RatioStillStep ratioStillStep(CameraAspectRatio pinned, CameraAspectRatio now, bool completionPending,
                                             std::int32_t completionError) noexcept;
+
+// A camera's dynamic aspect ratio change, one operation at a time, as the session keeps it from the moment the device is
+// asked until the camera leaves the session. The change is under way (`pending`) from before the device is told, so a
+// completion that comes at once, or never, is not mistaken for another operation's; a completion that belongs to an
+// earlier operation of the camera is ignored. `armedAt` is when the session was running with the camera in it, which is
+// when the time the completion may take begins (zero: not begun).
+struct RatioPin {
+    bool asked {};
+    bool pending {};
+    // The completion's error code (zero for none).
+    std::int32_t error {};
+    // No completion arrived within `ratioCompletionBudgetNanoseconds` of being armed.
+    bool timedOut {};
+    std::uint64_t operation {};
+    std::uint64_t armedAt {};
+};
+// How long the completion of a ratio change may take once the session runs with the camera in it: the budget a still
+// waits in (stillWaitBudgetNanoseconds), so that no wait of the capture is longer than that.
+inline constexpr std::uint64_t ratioCompletionBudgetNanoseconds = 2'000'000'000;
+// What a still is told for a change whose completion never came (ratioStillStep's `completionError`).
+inline constexpr std::int32_t ratioNoCompletion = std::numeric_limits<std::int32_t>::max();
+
+// The change `operation` is asked for.
+void ratioPinAsked(RatioPin& pin, std::uint64_t operation) noexcept;
+// The change `operation` completed with `error`. False, and nothing changed, for a completion of another operation than
+// the camera's current one (or of none asked); a completion after the time ran out is kept (the record names it) but
+// leaves the pin timed out.
+bool ratioPinCompleted(RatioPin& pin, std::uint64_t operation, std::int32_t error) noexcept;
+// The session runs with the camera in it: the budget begins, once for an operation that is still pending. True when it
+// began now.
+bool ratioPinArmed(RatioPin& pin, std::uint64_t now) noexcept;
+// A pending operation whose budget ran out: it is timed out, once. True when it is now.
+bool ratioPinTimedOut(RatioPin& pin, std::uint64_t now) noexcept;
+// What the camera's frames do: are delivered, are held (the change is under way: the device still delivers frames of the
+// ratio it had), or the camera's presentation is not the one the guest was told because the change failed or never
+// completed (frames stay held and the camera is interrupted for the guest).
+enum class RatioFrameStep : std::uint8_t { deliver, hold, failed, timedOut };
+[[nodiscard]] RatioFrameStep ratioFrameStep(const RatioPin& pin) noexcept;
+// The completion's error code a still is told for the pin (ratioStillStep).
+[[nodiscard]] std::int32_t ratioPinErrorForStill(const RatioPin& pin) noexcept;
+
+// The notes the platform keeps across its sessions by device identifier (the last admission of each camera): which to
+// let go. The current session's cameras are kept, and of the rest the `recent` most recently used; `used` is a counter
+// that grows with each use.
+struct HeldNoteUse {
+    std::string identifier;
+    std::uint64_t used {};
+};
+[[nodiscard]] std::vector<std::string> heldNotesToDrop(const std::vector<HeldNoteUse>& held,
+                                                       const std::vector<std::string>& current, std::size_t recent);
+inline constexpr std::size_t heldNotesRecent = 8;
 
 // A device format as the guest is offered it. A format that lists no dynamic aspect ratio is as listed. A square
 // format that lists them is described by the crop the device is held at (pinned, never changed while a stream or a
@@ -219,6 +272,7 @@ inline constexpr std::uint64_t photoOutputSettleNanoseconds = 300'000'000;
 // (admission, a stream start, a resize, a repair) costs a few settle times; two seconds is a fifth of the device's
 // capture timeout, which starts when the still is handed over, and leaves it room for two 48 MP captures after the wait.
 inline constexpr std::uint64_t stillWaitBudgetNanoseconds = 2'000'000'000;
+static_assert(ratioCompletionBudgetNanoseconds == stillWaitBudgetNanoseconds, "one budget for a still and for a ratio change");
 
 // What a capture does when its turn comes (when it is accepted, and again when each wait ends): it starts; waits the
 // rest of the settle time of a later commit; fails, because that wait would take it past the budget (the guest is told
@@ -718,6 +772,7 @@ enum class Refusal : std::uint8_t {
     turnNotHeld,
     stillsNotTurned,
     ratioFailed,
+    ratioTimedOut,
 };
 [[nodiscard]] std::string_view refusalName(Refusal reason) noexcept;
 
