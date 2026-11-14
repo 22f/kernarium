@@ -279,6 +279,19 @@ void every_state_is_written_whole()
 	uml::runtime::reset_session_record();
 }
 
+/* A write that crosses a page boundary can be read torn: the part before the
+ * boundary is the new state and the rest is still the old one. The state area
+ * begins `first_page` bytes before a page boundary, and the output this test
+ * writes keeps every state (about 15 bytes a line, and some 400 for the rest)
+ * inside that part, so that a torn read shows only the old state's padding,
+ * as one that is not torn does. The test is about a state that is cut or
+ * mixed by the writer, not about the page cache. */
+constexpr std::size_t first_page =
+	4096 - uml::runtime::session_state_offset % 4096;
+static_assert(first_page > 1024, "a state fits the first page's part");
+constexpr int reader_output_lines =
+	static_cast<int>((first_page - 400) / 15);
+
 /* A reader that reads the file as fast as it can, while a session begins, grows
  * its output, completes its boot and ends, again and again, sees one state
  * every time. The old writer shrank the file after each shorter state, and a
@@ -314,7 +327,7 @@ void a_reader_never_sees_two_states()
 		require(uml::runtime::begin_session_record(path,
 			console.arguments()));
 		std::string output;
-		for (int line = 0; line < 200; ++line)
+		for (int line = 0; line < reader_output_lines; ++line)
 			output += "init: line " + std::to_string(line) + "\n";
 		console.write(output);
 		uml::runtime::checkpoint_session_memory();

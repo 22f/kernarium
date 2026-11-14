@@ -2,6 +2,7 @@
 #pragma once
 
 #include "guest_statistics.hpp"
+#include "platform/camera_still_failure.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -87,7 +88,7 @@ namespace uml::runtime {
  *
  * The file is text of a fixed layout and of a size it never exceeds
  * (session_record_max_bytes), whatever the session does: the memory slot, the
- * stall slot, the network slot, the storage slot, then the state with the
+ * stall slot, the network slot, the storage slot, the camera slot, then the state with the
  * kernel output it quotes. Each part is rewritten in place by its own writer,
  * so none grows with the session's length. The stall slot is the stall
  * watch's (runtime/stall_record.hpp). The network slot holds the counts of the
@@ -96,8 +97,14 @@ namespace uml::runtime {
  * numbers and words only, never an address, a port or a name. The storage slot
  * holds how many times the guest's storage was settled (note_guest_settle) and
  * how many of those the guest did not confirm, and the last settle's kind,
- * outcome and time; it stays blank until the first one. The first line names
- * the layout: "uml-session 7" has the storage slot between the network slot
+ * outcome and time; it stays blank until the first one. The camera slot holds
+ * how many stills of the guest's cameras did not end in a picture and why for
+ * the last few (note_camera_still_failure): the camera, the stage, the sizes
+ * asked for, resolved and encoded, the photo output's orientation compensation
+ * and the framework's error as a domain word and a code, never a name or a
+ * message; it stays blank until the first one. The first line names
+ * the layout: "uml-session 8" has the camera slot between the storage slot and
+ * the state; "uml-session 7" has the storage slot between the network slot
  * and the state; "uml-session 6" has the history rows described above in a
  * memory slot of 8 KiB; "uml-session 5" has the network slot between the
  * stall slot and the state and shorter rows in a 4 KiB memory slot;
@@ -106,18 +113,21 @@ namespace uml::runtime {
  */
 inline constexpr unsigned memory_checkpoint_interval_ms = 2000;
 /* The bytes of the memory slot at the start of the file, of the stall slot
- * after it, of the network slot after that, of the storage slot, and where the
- * session's state begins. */
+ * after it, of the network slot after that, of the storage slot, of the camera
+ * slot, and where the session's state begins. */
 inline constexpr std::size_t session_memory_slot_bytes = 8192;
 inline constexpr std::size_t session_stall_slot_bytes = 4096;
 inline constexpr std::size_t session_network_slot_bytes = 512;
 inline constexpr std::size_t session_storage_slot_bytes = 256;
+inline constexpr std::size_t session_camera_slot_bytes = 1024;
 inline constexpr std::size_t session_network_offset =
 	session_memory_slot_bytes + session_stall_slot_bytes;
 inline constexpr std::size_t session_storage_offset =
 	session_network_offset + session_network_slot_bytes;
-inline constexpr std::size_t session_state_offset =
+inline constexpr std::size_t session_camera_offset =
 	session_storage_offset + session_storage_slot_bytes;
+inline constexpr std::size_t session_state_offset =
+	session_camera_offset + session_camera_slot_bytes;
 /* The kernel output the state quotes, and the most the state ever takes: its
  * lines, a message and that output, which is the boot's own. Once the ring has
  * dropped output of that boot the state quotes it from its first complete
@@ -261,6 +271,19 @@ enum class SettleSuspension : std::uint8_t {
  * but a signal handler: it may wait for another writer of the slot. */
 void note_guest_settle(SettleKind kind, GuestStorage storage,
 	SettleSuspension suspension) noexcept;
+
+/* How many of the last stills that did not end in a picture the camera slot
+ * names, the newest of them. */
+inline constexpr unsigned session_camera_failures_kept = 8;
+
+/* Records a still of the guest's cameras that did not end in a picture in the
+ * camera slot of the session that is open: a count of all of them, and the
+ * last session_camera_failures_kept with their time (the ones that do not fit
+ * the slot, oldest first, are left out). The camera device reports one through
+ * its owner for each. Nothing without an open session. Any thread but a signal
+ * handler: it may wait for another writer of the slot. */
+void note_camera_still_failure(
+	const uml::platform::CameraStillFailure &failure) noexcept;
 
 enum class SessionEnd : std::uint8_t {
 	running,
