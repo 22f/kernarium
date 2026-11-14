@@ -165,8 +165,9 @@ struct FormatSet {
     std::vector<AVCaptureDeviceFormat*> formats;
 };
 
-// A 4:2:0 device format as data; nothing for any other.
-std::optional<VideoFormatFacts> factsOf(AVCaptureDeviceFormat* format)
+// A 4:2:0 device format as data; nothing for any other. `zoomScale` turns the device's zoom factors into
+// Android's ratios (zoomRatioScale).
+std::optional<VideoFormatFacts> factsOf(AVCaptureDeviceFormat* format, float zoomScale)
 {
     const FourCharCode subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription);
     if (subtype != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange && subtype != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
@@ -181,14 +182,18 @@ std::optional<VideoFormatFacts> factsOf(AVCaptureDeviceFormat* format)
     facts.photoSizes = listedPhotoSizes(format);
     facts.fullRange = subtype == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
     facts.multiCamera = formatTakenByMultiCameraSession(format);
+    // The zoom the system recommends for the format, where it gives one: the camera's stated maximum
+    // (arrangeCameras).
+    if (AVZoomRange* recommended = format.systemRecommendedVideoZoomRange)
+        facts.recommendedZoomMaximum = float(recommended.maxZoomFactor) * zoomScale;
     return facts;
 }
 
-FormatSet formatSetOf(AVCaptureDevice* device)
+FormatSet formatSetOf(AVCaptureDevice* device, float zoomScale)
 {
     FormatSet set;
     for (AVCaptureDeviceFormat* format in device.formats) {
-        auto facts = factsOf(format);
+        auto facts = factsOf(format, zoomScale);
         if (!facts) continue;
         set.facts.push_back(std::move(*facts));
         set.formats.push_back(format);
@@ -231,8 +236,9 @@ NSDictionary* videoSettingsOf(const VideoFormatFacts& facts, std::uint32_t width
 
 // One line per camera, once for the life of the process: the device facts the
 // anchor is chosen from (a format's size, its rate spans, `m` when a
-// multi-camera session takes it, `f` when it is full range and the photo sizes
-// it lists in braces). No identifier and no frame data.
+// multi-camera session takes it, `f` when it is full range, `z` and the zoom
+// the system recommends for it, and the photo sizes it lists in braces). No
+// identifier and no frame data.
 void logFormatTables(const std::vector<Entry>& entries)
 {
     static std::mutex mutex;
@@ -250,6 +256,10 @@ void logFormatTables(const std::vector<Entry>& entries)
             }
             if (format.multiCamera) line += " m";
             if (format.fullRange) line += " f";
+            if (format.recommendedZoomMaximum > 0) {
+                std::snprintf(text, sizeof(text), " z%g", format.recommendedZoomMaximum);
+                line += text;
+            }
             line += " {";
             for (std::size_t index = 0; index < format.photoSizes.size(); ++index)
                 line += (index != 0 ? " " : "") + std::to_string(format.photoSizes[index].width) + "x" +
@@ -313,6 +323,10 @@ std::vector<Entry> discover()
         info.flash = device.hasFlash && info.position != CameraPosition::front;
         info.torch = device.hasTorch;
         const bool zoomCamera = info.lens == CameraLensKind::zoom;
+#if TARGET_OS_IOS
+        // Only a zoom camera's factor is scaled (see zoomRatioScale): every range holds 1.0.
+        entry.zoomMultiplier = zoomRatioScale(info.lens, device.displayVideoZoomFactorMultiplier);
+#endif
 
         // Formats: distinct size and frame-rate range pairs of the 4:2:0 formats.
         std::uint32_t pixelWidth = 0, pixelHeight = 0;
@@ -369,7 +383,7 @@ std::vector<Entry> discover()
         // The formats go to the device as data: it picks each camera's anchor and
         // offers what the anchor does (photo_dimensions.hpp).
         {
-            const FormatSet set = formatSetOf(device);
+            const FormatSet set = formatSetOf(device, entry.zoomMultiplier);
             info.captureFormats = set.facts;
             // Every size some format makes: what the host can do at all.
             const auto made = stillsMadeByAnyFormat(set.facts, 0);
@@ -397,8 +411,6 @@ std::vector<Entry> discover()
             info.manualFocus = info.autofocus && device.lockingFocusWithCustomLensPositionSupported;
             info.manualWhiteBalance = device.lockingWhiteBalanceWithCustomDeviceGainsSupported;
         }
-        // Only a zoom camera's factor is scaled (see zoomRatioScale): every range holds 1.0.
-        entry.zoomMultiplier = zoomRatioScale(info.lens, device.displayVideoZoomFactorMultiplier);
         info.zoomMinimum = float(device.minAvailableVideoZoomFactor) * entry.zoomMultiplier;
         info.zoomMaximum = float(device.maxAvailableVideoZoomFactor) * entry.zoomMultiplier;
         for (NSNumber* factor in device.virtualDeviceSwitchOverVideoZoomFactors)
@@ -754,9 +766,16 @@ public:
             for (std::size_t camera = 0; camera < entries_.size() && camera < formatOfCamera.size(); ++camera) {
                 if (!formatOfCamera[camera]) continue;
                 const std::size_t index = *formatOfCamera[camera];
-                const FormatSet set = formatSetOf(entries_[camera].device);
+                const FormatSet set = formatSetOf(entries_[camera].device, entries_[camera].zoomMultiplier);
                 const auto& listed = entries_[camera].info.captureFormats;
-                if (index >= set.facts.size() || index >= listed.size() || !(set.facts[index] == listed[index])) {
+                // The system's zoom advice is no part of the format: a change of it leaves the anchor.
+                const auto sameFormat = [&] {
+                    if (index >= set.facts.size() || index >= listed.size()) return false;
+                    auto now = set.facts[index];
+                    now.recommendedZoomMaximum = listed[index].recommendedZoomMaximum;
+                    return now == listed[index];
+                };
+                if (!sameFormat()) {
                     refuse(camera, Refusal::formatChanged, "the anchor is not the format discovery listed");
                     continue;
                 }

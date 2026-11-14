@@ -26,13 +26,21 @@ application's statements (the sensor orientation, the rotation that
   metadata stream alone is not use) and `idle` once the guest has closed every
   camera, so each open is reported once and a live session never reports it. A
   host that has not granted access behaves as an interrupted live session.
-- **Cameras.** Wire order is the back zoom camera (else the primary back lens),
-  the front camera, the other back lenses, then external cameras, at most eight.
-  A zoom camera and its lenses conflict; cameras run together where the host
-  says they can. The zoom camera takes automatic controls only. A lens publishes
-  manual exposure, focus and white balance where the host allows them. Of the
-  front lenses (an iPad lists a wide and an ultra wide one over a single
-  sensor) the guest sees the wide one.
+- **Cameras.** Wire order is the primary back lens (the wide, else the ultra
+  wide, else the telephoto), the front camera, the other back lenses (wide,
+  ultra wide, telephoto), then external cameras, at most eight. The device
+  publishes no zoom camera (a virtual device that switches lenses): every back
+  lens is a camera of its own, so a guest switches lenses by switching
+  cameras, and each keeps its own formats, controls and Bayer stills. The
+  Android image numbers a phone's cameras 0 wide, 1 front, 3 ultra wide and 4
+  telephoto. Cameras run together where the host says they can (the wide lens
+  and the front camera on a phone of three lenses); every other pair conflicts.
+  A lens publishes manual exposure, focus and white balance where the host
+  allows them. Of the front lenses (an iPad lists a wide and an ultra wide one
+  over a single sensor) the guest sees the wide one.
+- **Zoom.** Every camera's ratio range starts at 1.0, its own full field of view.
+  A camera that runs in an anchor ends at the zoom the system recommends for the
+  anchor's format, and at the platform's own limit where the system gives none.
 - **Tiers.** The small tier limits a session to 1080p video, 12 MP stills and
   four buffers; the large tier is 4K, 48 MP and six, for a fixed GPU budget of
   1 GiB or more. Every host is given the small tier for now

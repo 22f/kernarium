@@ -217,11 +217,6 @@ std::vector<VideoMode> modesOf(const uml::platform::CaptureOffer& offer)
     return modes;
 }
 
-[[nodiscard]] bool listsIdentifier(const std::vector<std::string>& names, const std::string& identifier)
-{
-    return std::find(names.begin(), names.end(), identifier) != names.end();
-}
-
 } // namespace
 
 std::vector<uml::platform::FrameSize> candidateVideoSizes(std::span<const uml::platform::CameraCaptureFormat> formats)
@@ -240,12 +235,14 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
                                               std::string_view hostModel, const CalibrationStore& calibration,
                                               const ArrangementOptions& options)
 {
-    // Wire order.
+    // Wire order. A zoom camera, which switches between lenses, is never published: each lens is a camera of its own,
+    // so that a guest switches lenses by switching cameras and every lens keeps its own controls, formats and Bayer
+    // stills.
     std::vector<std::size_t> order;
     const auto contains = [&](std::size_t index) { return std::find(order.begin(), order.end(), index) != order.end(); };
     const auto take = [&](auto&& wanted) {
         for (std::size_t index = 0; index < infos.size(); ++index)
-            if (!contains(index) && wanted(infos[index])) {
+            if (!contains(index) && infos[index].lens != CameraLensKind::zoom && wanted(infos[index])) {
                 order.push_back(index);
                 return true;
             }
@@ -254,10 +251,9 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
     const auto lens = [](CameraPosition position, CameraLensKind kind) {
         return [position, kind](const CameraInfo& info) { return info.position == position && info.lens == kind; };
     };
-    // The primary back camera.
-    if (!take(lens(CameraPosition::back, CameraLensKind::zoom)))
-        for (const auto kind : {CameraLensKind::wide, CameraLensKind::ultraWide, CameraLensKind::telephoto})
-            if (take(lens(CameraPosition::back, kind))) break;
+    // The primary back camera is the wide lens, or else the ultra wide, or else the telephoto.
+    for (const auto kind : {CameraLensKind::wide, CameraLensKind::ultraWide, CameraLensKind::telephoto})
+        if (take(lens(CameraPosition::back, kind))) break;
     // The front camera.
     if (!take(lens(CameraPosition::front, CameraLensKind::wide)))
         take([](const CameraInfo& info) { return info.position == CameraPosition::front; });
@@ -269,17 +265,13 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
     }
     order.resize(std::min<std::size_t>(order.size(), maximumCameras));
 
-    // Which cameras run together: those a platform set names, except a zoom
-    // camera and its lenses, which share the sensors.
+    // Which cameras run together: those a platform set names.
     const auto together = [&](std::size_t a, std::size_t b) {
         return std::any_of(concurrentSets.begin(), concurrentSets.end(), [&](const auto& set) {
             return std::find(set.begin(), set.end(), a) != set.end() && std::find(set.begin(), set.end(), b) != set.end();
         });
     };
-    const auto sharesSensors = [&](std::size_t a, std::size_t b) {
-        return listsIdentifier(infos[a].constituents, infos[b].identifier) || listsIdentifier(infos[b].constituents, infos[a].identifier);
-    };
-    const auto runsWith = [&](std::size_t a, std::size_t b) { return a != b && together(a, b) && !sharesSensors(a, b); };
+    const auto runsWith = [&](std::size_t a, std::size_t b) { return a != b && together(a, b); };
 
     // Each camera that lists its formats is arranged once, here: its anchor is
     // the format it runs in whatever it is asked, and everything the guest is
@@ -336,6 +328,10 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
             camera.video = modesOf(entry.offer);
             camera.jpegSizes = entry.offer.stills;
             camera.info.stillSizes = entry.offer.stills;
+            // The camera zooms up to the system's recommendation for the format it runs in, where the system gives
+            // one, and up to the platform's own limit where it does not; its range always holds 1.0.
+            const float recommended = info.captureFormats[*entry.anchor].recommendedZoomMaximum;
+            if (recommended > 0) camera.info.zoomMaximum = std::max({recommended, 1.0f, info.zoomMinimum});
         } else {
             camera.video = videoModes(info, limits);
             // Every size works with every format, within the tier's cap and the limit of the camera's position.
@@ -372,9 +368,6 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
             else
                 camera.wire.conflict_mask |= 1u << other.index;
         }
-        for (const auto& name : camera.info.constituents)
-            for (const auto& other : cameras)
-                if (other.info.identifier == name) camera.wire.constituent_mask |= 1u << other.index;
     }
     return cameras;
 }

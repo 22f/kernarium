@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "calibration_store.hpp"
 #include "camera.hpp"
 #include "camera_authorization.hpp"
+#include "camera_description.hpp"
 #include "frame_bytes.hpp"
 #include "require.hpp"
 
@@ -75,6 +77,10 @@ int main()
         // Android requires every camera's zoom range to hold 1.0: a single lens's 1.0 is its own full field of view.
         require(info.zoomMinimum <= 1.0f && info.zoomMaximum >= 1.0f, "a discovered camera's zoom range holds 1.0");
         if (info.lens != CameraLensKind::zoom) require(info.zoomMinimum == 1.0f, "a single lens's widest view is its ratio 1.0");
+        // The system's zoom advice for a format is a ratio that holds 1.0, or nothing.
+        for (const auto& format : info.captureFormats)
+            require(format.recommendedZoomMaximum == 0.0f || format.recommendedZoomMaximum >= 1.0f,
+                    "a format's recommended zoom is none, or at least 1.0");
         require(info.pixelArrayWidth > 0 && info.pixelArrayHeight > 0);
         require(info.sensorOrientation % 90 == 0 && info.sensorOrientation < 360);
         // A zoom camera takes no manual control, and names lenses the host lists.
@@ -94,6 +100,25 @@ int main()
         require(set.size() > 1);
         for (const auto member : set) require(member < cameras.size());
     }
+    // What the guest is offered of the host's cameras: no zoom camera, whatever the host lists, and every camera a single
+    // lens whose range starts at its own full field of view and ends at the zoom the system recommends for the format
+    // it runs in, where it gives one. The primary back camera is the wide lens when the host has one.
+    const auto published = uml::camera::arrangeCameras(cameras, camera->concurrentSets(), camera->hostModel(),
+                                                       uml::camera::CalibrationStore(), {});
+    bool hostHasBackWide = false;
+    for (const auto& info : cameras) hostHasBackWide |= info.position == CameraPosition::back && info.lens == CameraLensKind::wide;
+    for (const auto& described : published) {
+        require(described.info.lens != CameraLensKind::zoom && described.wire.lens != VIRTIO_VIDEO_CAMERA_LENS_ZOOM,
+                "the host publishes no zoom camera");
+        require(described.wire.zoom_min_q16 == 65536 && described.wire.zoom_max_q16 >= 65536,
+                "a published camera's zoom range is [1, maximum]");
+        if (described.anchor) {
+            const float advised = described.info.captureFormats[*described.anchor].recommendedZoomMaximum;
+            if (advised > 0) require(described.info.zoomMaximum == advised, "a camera zooms up to the system's recommendation");
+        }
+    }
+    if (hostHasBackWide && !published.empty() && published.front().info.position == CameraPosition::back)
+        require(published.front().info.lens == CameraLensKind::wide, "the primary back camera is the wide lens");
     // Discovery changed nothing about the permission.
     require(makeAppleCameraAuthorization()->permission() == permissionBefore);
     return 0;

@@ -22,7 +22,7 @@ uml_add_unit_test(NAME camera-dng-color COMMAND uml_camera_dng_tests
 # Discovery of the host's own cameras: no session, no permission request, no
 # capture.
 add_executable(uml_camera_apple_discovery_tests camera_apple_discovery_tests.cpp)
-target_link_libraries(uml_camera_apple_discovery_tests PRIVATE UML::AppleCamera)
+target_link_libraries(uml_camera_apple_discovery_tests PRIVATE UML::AppleCamera UML::CameraDevice)
 uml_add_unit_test(NAME camera-apple-discovery COMMAND uml_camera_apple_discovery_tests
     LABELS "device;camera")
 

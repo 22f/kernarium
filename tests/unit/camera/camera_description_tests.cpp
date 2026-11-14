@@ -68,60 +68,107 @@ void testPhoneOrder()
 {
     const Host host(SyntheticCameraProfile::phone);
     const auto cameras = host.arrange(CameraTier::small);
-    require(cameras.size() == 5, "five cameras");
-    // The zoom camera, the front camera, then the lenses.
-    require(cameras[0].info.lens == CameraLensKind::zoom && cameras[0].wire.lens == VIRTIO_VIDEO_CAMERA_LENS_ZOOM &&
+    require(cameras.size() == 4, "four cameras");
+    // The wide lens, the front camera, then the other lenses: the host publishes no zoom camera.
+    require(cameras[0].info.lens == CameraLensKind::wide && cameras[0].wire.lens == VIRTIO_VIDEO_CAMERA_LENS_WIDE &&
                 cameras[0].wire.facing == VIRTIO_VIDEO_CAMERA_FACING_BACK,
-            "camera 0 is the back zoom camera");
+            "camera 0 is the back wide lens");
     require(cameras[1].info.position == CameraPosition::front && cameras[1].wire.facing == VIRTIO_VIDEO_CAMERA_FACING_FRONT,
             "camera 1 is the front camera");
-    require(cameras[2].info.lens == CameraLensKind::wide && cameras[3].info.lens == CameraLensKind::ultraWide &&
-                cameras[4].info.lens == CameraLensKind::telephoto,
-            "then the wide, ultra wide and telephoto lenses");
+    require(cameras[2].info.lens == CameraLensKind::ultraWide && cameras[3].info.lens == CameraLensKind::telephoto,
+            "then the ultra wide and telephoto lenses");
     for (std::uint32_t index = 0; index < cameras.size(); ++index)
         require(cameras[index].index == index && cameras[index].wire.index == index, "the index is the position");
-    require(cameras[0].platformIndex == 0 && cameras[1].platformIndex == 4 && cameras[2].platformIndex == 1,
+    require(cameras[0].platformIndex == 0 && cameras[1].platformIndex == 3 && cameras[2].platformIndex == 1 &&
+                cameras[3].platformIndex == 2,
             "the platform's index is kept");
+    for (const auto& camera : cameras)
+        require(camera.wire.lens != VIRTIO_VIDEO_CAMERA_LENS_ZOOM && camera.wire.constituent_mask == 0,
+                "no camera is a zoom camera or made of others");
 
-    // The zoom camera conflicts with the lenses it is made of, and they with it.
-    require(cameras[0].wire.constituent_mask == (1u << 2 | 1u << 3 | 1u << 4), "the zoom camera's lenses");
-    for (const auto lens : {2u, 3u, 4u}) {
-        require(bit(cameras[0].wire.conflict_mask, lens) && bit(cameras[lens].wire.conflict_mask, 0), "a conflict is mutual");
-        require(!bit(cameras[0].wire.concurrent_mask, lens), "and not also concurrent");
-        require(cameras[lens].wire.constituent_mask == 0, "a lens has no constituents");
-    }
-    // The front camera runs with each back camera; the lenses do not run together.
-    for (const auto other : {0u, 2u, 3u, 4u})
-        require(bit(cameras[1].wire.concurrent_mask, other) && bit(cameras[other].wire.concurrent_mask, 1),
-                "the front camera runs with a back camera");
-    require(bit(cameras[2].wire.conflict_mask, 3) && bit(cameras[3].wire.conflict_mask, 2), "two back lenses conflict");
+    // Only the wide lens runs with the front camera, as on the phone whose sets the profile has; the other lenses
+    // conflict with the front camera and with each other.
+    require(bit(cameras[1].wire.concurrent_mask, 0) && bit(cameras[0].wire.concurrent_mask, 1),
+            "the front camera runs with the wide lens");
+    for (const auto lens : {2u, 3u})
+        require(bit(cameras[1].wire.conflict_mask, lens) && bit(cameras[lens].wire.conflict_mask, 1) &&
+                    !bit(cameras[1].wire.concurrent_mask, lens),
+                "and not with another lens");
+    for (const auto [a, b] : {std::make_pair(0u, 2u), std::make_pair(0u, 3u), std::make_pair(2u, 3u)})
+        require(bit(cameras[a].wire.conflict_mask, b) && bit(cameras[b].wire.conflict_mask, a), "two back lenses conflict");
     for (const auto& camera : cameras)
         require((camera.wire.conflict_mask & camera.wire.concurrent_mask) == 0 && !bit(camera.wire.conflict_mask, camera.index) &&
                     !bit(camera.wire.concurrent_mask, camera.index),
                 "a camera is not its own neighbour, and a pair is one or the other");
 
     // The flags follow the camera.
-    require((cameras[0].wire.flags & VIRTIO_VIDEO_CAMERA_F_ZOOM) && !(cameras[0].wire.flags & VIRTIO_VIDEO_CAMERA_F_MANUAL_EXPOSURE),
-            "the zoom camera zooms and has no manual exposure");
-    require(cameras[2].wire.flags & VIRTIO_VIDEO_CAMERA_F_MANUAL_EXPOSURE, "a lens has it");
-    require(!(cameras[1].wire.flags & VIRTIO_VIDEO_CAMERA_F_AUTOFOCUS) && (cameras[2].wire.flags & VIRTIO_VIDEO_CAMERA_F_AUTOFOCUS),
-            "the front camera does not focus");
-    require(cameras[0].wire.num_switch_overs == 2 && cameras[0].wire.switch_over_q16[0] == 65536 &&
-                cameras[0].wire.switch_over_q16[1] == 3 * 65536,
-            "the switch-over ratios");
-    require(cameras[0].wire.zoom_min_q16 == 65536 / 2 && cameras[0].wire.zoom_max_q16 == 15 * 65536, "the zoom range");
+    for (const auto lens : {0u, 2u, 3u})
+        require((cameras[lens].wire.flags & VIRTIO_VIDEO_CAMERA_F_ZOOM) && (cameras[lens].wire.flags & VIRTIO_VIDEO_CAMERA_F_MANUAL_EXPOSURE) &&
+                    (cameras[lens].wire.flags & VIRTIO_VIDEO_CAMERA_F_AUTOFOCUS),
+                "a lens zooms, has manual exposure and focuses");
+    require(!(cameras[1].wire.flags & VIRTIO_VIDEO_CAMERA_F_AUTOFOCUS), "the front camera does not focus");
+    // Each lens zooms from 1.0, its own full field of view, up to the zoom the host states for it.
+    require(cameras[0].wire.zoom_min_q16 == 65536 && cameras[0].wire.zoom_max_q16 == 6 * 65536, "the wide lens: 1 to 6");
+    require(cameras[2].wire.zoom_min_q16 == 65536 && cameras[2].wire.zoom_max_q16 == 3 * 65536, "the ultra wide lens: 1 to 3");
+    require(cameras[3].wire.zoom_min_q16 == 65536 && cameras[3].wire.zoom_max_q16 == 3 * 65536, "the telephoto lens: 1 to 3");
+    require(cameras[0].wire.num_switch_overs == 0 && cameras[2].wire.num_switch_overs == 0 && cameras[3].wire.num_switch_overs == 0,
+            "no lens switches to another");
     require(cameras[0].wire.sensor_orientation == 90 && cameras[1].wire.sensor_orientation == 270, "the sensor orientation");
-    require(cameras[2].wire.focal_length_um > 0 && cameras[2].wire.sensor_width_um > 0, "the optics are stated");
+    require(cameras[0].wire.focal_length_um > 0 && cameras[0].wire.sensor_width_um > 0, "the optics are stated");
     // A wider field of view gives a shorter focal length on the same sensor size.
-    require(cameras[3].wire.focal_length_um < cameras[2].wire.focal_length_um &&
-                cameras[4].wire.focal_length_um > cameras[2].wire.focal_length_um,
+    require(cameras[2].wire.focal_length_um < cameras[0].wire.focal_length_um &&
+                cameras[3].wire.focal_length_um > cameras[0].wire.focal_length_um,
             "ultra wide is shorter, telephoto longer");
+}
+
+// A host lists its zoom cameras (virtual devices that switch between lenses), and the device publishes none: the wire
+// is the same as without it, whatever sets name it.
+void testAZoomCameraIsNotPublished()
+{
+    const Host phone(SyntheticCameraProfile::phone);
+    CameraInfo triple = phone.infos[0];
+    triple.identifier = "synthetic-back-triple";
+    triple.lens = CameraLensKind::zoom;
+    triple.zoomMinimum = 0.5f;
+    triple.zoomMaximum = 123.75f;
+    triple.switchOvers = {1.0f, 3.0f};
+    triple.constituents = {phone.infos[1].identifier, phone.infos[0].identifier, phone.infos[2].identifier};
+    triple.manualExposure = triple.manualFocus = triple.manualWhiteBalance = false;
+    triple.rawStills = false;
+    // The platform's order puts the zoom camera first of the back cameras; its set names the front camera too.
+    std::vector<CameraInfo> listed {triple};
+    listed.insert(listed.end(), phone.infos.begin(), phone.infos.end());
+    const std::vector<std::vector<std::size_t>> sets {{0, 4}, {1, 4}};
+
+    const auto cameras = arrangeCameras(listed, sets, phone.model, CalibrationStore(), {});
+    const auto without = phone.arrange(CameraTier::small);
+    require(cameras.size() == without.size() && cameras.size() == 4, "the same four cameras");
+    for (std::size_t index = 0; index < cameras.size(); ++index) {
+        require(cameras[index].info.identifier == without[index].info.identifier && cameras[index].info.lens != CameraLensKind::zoom &&
+                    cameras[index].wire.lens != VIRTIO_VIDEO_CAMERA_LENS_ZOOM && cameras[index].wire.constituent_mask == 0,
+                "in the same order, none of them the zoom camera");
+        require(cameras[index].platformIndex == without[index].platformIndex + 1, "the platform's index counts the zoom camera");
+        require(cameras[index].wire.zoom_min_q16 == without[index].wire.zoom_min_q16 &&
+                    cameras[index].wire.zoom_max_q16 == without[index].wire.zoom_max_q16,
+                "with the lens's own range");
+    }
+    require(bit(cameras[0].wire.concurrent_mask, 1) && bit(cameras[1].wire.concurrent_mask, 0),
+            "the wide lens runs with the front camera, as the platform's set says");
+    require(cameras[1].wire.conflict_mask == (1u << 2 | 1u << 3), "and the front camera conflicts with no zoom camera, only the other lenses");
+
+    // The zoom camera alone is no camera, and a host with one lens and a virtual device publishes the lens.
+    const auto only = arrangeCameras(std::vector<CameraInfo> {triple}, {}, phone.model, CalibrationStore(), {});
+    require(only.empty(), "a virtual device is not published for want of a lens");
+    const auto lensAndZoom = arrangeCameras(std::vector<CameraInfo> {triple, phone.infos[1]}, {}, phone.model, CalibrationStore(), {});
+    require(lensAndZoom.size() == 1 && lensAndZoom[0].info.lens == CameraLensKind::ultraWide && lensAndZoom[0].index == 0 &&
+                lensAndZoom[0].platformIndex == 1,
+            "the one lens is the primary back camera, whichever it is");
 }
 
 // Android requires every camera's zoom ratio range to hold 1.0, and a single lens's 1.0 is its own full field of view:
 // a client that rebinds a camera re-applies the ratio 1.0, so a lens whose range starts above it fails the client, and one
-// whose range starts below it (an ultra wide stated as 0.5) opens at a crop of its own view. Only the zoom camera, which
-// switches between lenses, has a range that starts below 1.0.
+// whose range starts below it (an ultra wide stated as 0.5) opens at a crop of its own view. Every published camera is a
+// single lens, so every range starts at 1.0.
 void testEveryZoomRangeHoldsOne()
 {
     for (const auto profile : {SyntheticCameraProfile::phone, SyntheticCameraProfile::tablet,
@@ -131,8 +178,7 @@ void testEveryZoomRangeHoldsOne()
             for (const auto& camera : host.arrange(tier)) {
                 require(camera.wire.zoom_min_q16 <= 65536 && camera.wire.zoom_max_q16 >= 65536,
                         "every described camera's zoom range holds 1.0");
-                if (camera.info.lens != CameraLensKind::zoom)
-                    require(camera.wire.zoom_min_q16 == 65536, "a single lens's widest view is its ratio 1.0");
+                require(camera.wire.zoom_min_q16 == 65536, "a single lens's widest view is its ratio 1.0");
             }
     }
 }
@@ -185,8 +231,8 @@ void testTiers()
     const auto small = phone.arrange(CameraTier::small);
     const auto large = phone.arrange(CameraTier::large);
     // The wide lens takes 48 MP stills only in the large tier.
-    require(small[2].jpegSizes.front() == CameraStillSize {4032, 3024}, "12 MP at most in the small tier");
-    require(large[2].jpegSizes.front() == CameraStillSize {8064, 6048}, "48 MP in the large tier");
+    require(small[0].jpegSizes.front() == CameraStillSize {4032, 3024}, "12 MP at most in the small tier");
+    require(large[0].jpegSizes.front() == CameraStillSize {8064, 6048}, "48 MP in the large tier");
     const auto largest = [](const CameraDescription& camera) {
         std::uint32_t width = 0, height = 0;
         for (const auto& mode : camera.video) {
@@ -195,8 +241,8 @@ void testTiers()
         }
         return std::make_pair(width, height);
     };
-    require(largest(small[2]) == std::make_pair(1920u, 1080u), "1080p video at most in the small tier");
-    require(largest(large[2]) == std::make_pair(3840u, 2160u), "4K video in the large tier");
+    require(largest(small[0]) == std::make_pair(1920u, 1080u), "1080p video at most in the small tier");
+    require(largest(large[0]) == std::make_pair(3840u, 2160u), "4K video in the large tier");
     // Every host is given the small tier for now, whatever its GPU budget: the cap is one constant, and the
     // tier the budget would earn is still the large one at 1 GiB.
     require(largestOfferedTier == CameraTier::small, "the cap");
@@ -205,7 +251,7 @@ void testTiers()
     require(limitsOf(CameraTier::small).buffers == 4 && limitsOf(CameraTier::large).buffers == 6, "buffers");
 
     // The sizes include the usual ones the device scales to, never above the camera's own.
-    const auto& modes = small[2].video;
+    const auto& modes = small[0].video;
     for (const auto size : {std::make_pair(1280u, 720u), std::make_pair(640u, 480u), std::make_pair(320u, 240u),
                             std::make_pair(176u, 144u)})
         require(std::any_of(modes.begin(), modes.end(), [&](const auto& mode) { return mode.width == size.first && mode.height == size.second; }),
@@ -274,6 +320,33 @@ void testOfferedStillsFollowTheAnchor()
     require(arrangeCameras(infos, {}, "tablet", CalibrationStore(), optionsOf(CameraTier::large))[0].jpegSizes.front() ==
                 CameraStillSize({4032, 3024}),
             "a camera that lists no 48 MP offers none");
+}
+
+// A camera that runs in an anchor is stated up to the zoom the system recommends for that format, and up to the
+// platform's own limit where the format has none; every range holds 1.0.
+void testZoomFollowsTheAnchorsRecommendation()
+{
+    // The tablet camera's anchor is its format 1 (testOfferedStillsFollowTheAnchor); the other formats advise otherwise.
+    const auto advised = [](float anchorsAdvice, float othersAdvice) {
+        auto info = tabletCamera();
+        info.zoomMinimum = 1.0f;
+        info.zoomMaximum = 123.75f;
+        for (auto& format : info.captureFormats) format.recommendedZoomMaximum = othersAdvice;
+        info.captureFormats[1].recommendedZoomMaximum = anchorsAdvice;
+        const auto cameras = arrangeCameras(std::vector<CameraInfo> {info}, {}, "tablet", CalibrationStore(), {});
+        require(cameras.size() == 1 && cameras[0].anchor == std::optional<std::size_t>(1), "the camera runs in its format 1");
+        require(cameras[0].info.zoomMinimum == 1.0f, "from 1.0");
+        return std::make_pair(cameras[0].wire.zoom_min_q16, cameras[0].wire.zoom_max_q16);
+    };
+    constexpr std::uint32_t one = 65536;
+    require(advised(6.0f, 2.0f) == std::make_pair(one, 6 * one), "the anchor's recommended maximum, whatever the other formats say");
+    require(advised(3.0f, 0.0f) == std::make_pair(one, 3 * one), "a recommendation under the platform's own limit");
+    require(advised(200.0f, 0.0f).second == 200 * one, "one over it is the system's word for the format");
+    require(advised(0.0f, 5.0f) == std::make_pair(one, std::uint32_t(123.75f * 65536.0f)),
+            "no recommendation for the anchor: the platform's own maximum, whatever the other formats say");
+    const auto below = advised(0.5f, 0.0f);
+    require(below.first <= one && below.second >= one, "a recommendation under 1.0 still leaves a range that holds 1.0");
+    require(below.second == one, "which is no zoom at all");
 }
 
 // The reserve holds for what the platform delivers: for every stream a tier offers, at every rate, the format a
@@ -425,29 +498,29 @@ void testRawNeedsCalibration()
         require(!camera.raw() && !(camera.wire.flags & VIRTIO_VIDEO_CAMERA_F_RAW) && camera.wire.bayer_order == VIRTIO_VIDEO_CAMERA_BAYER_NONE,
                 "no RAW without calibration");
 
-    const auto key = CalibrationStore::lensKey(phone.infos[1]);
+    const auto key = CalibrationStore::lensKey(phone.infos[0]);
     require(store.save(phone.model, key, colorOf(2016, 1512)), "calibrate the wide lens");
     cameras = phone.arrange(CameraTier::small, store);
-    require(cameras[2].raw() && (cameras[2].wire.flags & VIRTIO_VIDEO_CAMERA_F_RAW) &&
-                cameras[2].wire.bayer_order == VIRTIO_VIDEO_CAMERA_BAYER_GRBG && cameras[2].wire.raw_width == 2016 &&
-                cameras[2].wire.raw_height == 1512 && cameras[2].wire.black_level == 64 && cameras[2].wire.white_level == 1023,
+    require(cameras[0].raw() && (cameras[0].wire.flags & VIRTIO_VIDEO_CAMERA_F_RAW) &&
+                cameras[0].wire.bayer_order == VIRTIO_VIDEO_CAMERA_BAYER_GRBG && cameras[0].wire.raw_width == 2016 &&
+                cameras[0].wire.raw_height == 1512 && cameras[0].wire.black_level == 64 && cameras[0].wire.white_level == 1023,
             "a calibrated lens has RAW");
-    require(cameras[2].wire.color_matrix1_q16[0] == 65536 && cameras[2].wire.reference_illuminant1 == 17, "with its colour data");
-    require(cameras[2].wire.focal_length_um == 6900, "and the focal length the still revealed");
-    require(!cameras[3].raw() && !cameras[4].raw(), "another lens has none");
+    require(cameras[0].wire.color_matrix1_q16[0] == 65536 && cameras[0].wire.reference_illuminant1 == 17, "with its colour data");
+    require(cameras[0].wire.focal_length_um == 6900, "and the focal length the still revealed");
+    require(!cameras[2].raw() && !cameras[3].raw(), "another lens has none");
 
     // Data that cannot describe a sensor is not enough.
     auto bad = colorOf(2016, 1512);
     bad.whiteLevel = bad.blackLevel;
     require(store.save(phone.model, key, bad), "save bad data");
-    require(!phone.arrange(CameraTier::small, store)[2].raw(), "a white level at the black level is not calibration");
+    require(!phone.arrange(CameraTier::small, store)[0].raw(), "a white level at the black level is not calibration");
     bad = colorOf(2016, 1512);
     bad.bayer = BayerOrder::none;
     require(store.save(phone.model, key, bad), "save data with no pattern");
-    require(!phone.arrange(CameraTier::small, store)[2].raw(), "nor is a missing pattern");
+    require(!phone.arrange(CameraTier::small, store)[0].raw(), "nor is a missing pattern");
     // A calibration beyond the tier's still size is not advertised either.
     require(store.save(phone.model, key, colorOf(8064, 6048)), "save a 48 MP calibration");
-    require(!phone.arrange(CameraTier::small, store)[2].raw() && phone.arrange(CameraTier::large, store)[2].raw(),
+    require(!phone.arrange(CameraTier::small, store)[0].raw() && phone.arrange(CameraTier::large, store)[0].raw(),
             "48 MP RAW needs the large tier");
 }
 
@@ -568,27 +641,27 @@ void testQueryPages()
     const auto cameras = phone.arrange(CameraTier::small);
     const auto whole = cameraQueryResponse(cameras, 0, 4096, 0);
     const auto header = load<virtio_video_camera_query_resp>(whole);
-    require(header.hdr.type == VIRTIO_VIDEO_RESP_OK_CAMERA_QUERY && header.num_cameras == 5 && header.num_descs == 5 &&
+    require(header.hdr.type == VIRTIO_VIDEO_RESP_OK_CAMERA_QUERY && header.num_cameras == 4 && header.num_descs == 4 &&
                 header.next_index == 0 && header.session_flags == 0 && header.desc_size == sizeof(virtio_video_camera_desc),
             "the whole answer fits");
-    require(whole.size() == sizeof(header) + 5 * sizeof(virtio_video_camera_desc), "five records");
+    require(whole.size() == sizeof(header) + 4 * sizeof(virtio_video_camera_desc), "four records");
     const auto third = load<virtio_video_camera_desc>(whole, sizeof(header) + 2 * sizeof(virtio_video_camera_desc));
-    require(third.index == 2 && third.lens == VIRTIO_VIDEO_CAMERA_LENS_WIDE, "records are in order");
+    require(third.index == 2 && third.lens == VIRTIO_VIDEO_CAMERA_LENS_ULTRA_WIDE, "records are in order");
 
     // The answer pages when the guest's buffer is short, and says it is blocked.
     const std::size_t room = sizeof(header) + 2 * sizeof(virtio_video_camera_desc);
     auto page = cameraQueryResponse(cameras, 0, room, VIRTIO_VIDEO_CAMERA_SESSION_F_BLOCKED);
     auto first = load<virtio_video_camera_query_resp>(page);
-    require(first.num_descs == 2 && first.next_index == 2 && first.num_cameras == 5 &&
+    require(first.num_descs == 2 && first.next_index == 2 && first.num_cameras == 4 &&
                 (first.session_flags & VIRTIO_VIDEO_CAMERA_SESSION_F_BLOCKED) && page.size() == room,
             "the first page");
     page = cameraQueryResponse(cameras, 2, room, 0);
     first = load<virtio_video_camera_query_resp>(page);
-    require(first.num_descs == 2 && first.next_index == 4, "the second page");
-    page = cameraQueryResponse(cameras, 4, room, 0);
+    require(first.num_descs == 2 && first.next_index == 0, "the last page ends the walk");
+    page = cameraQueryResponse(cameras, 3, room, 0);
     first = load<virtio_video_camera_query_resp>(page);
-    require(first.num_descs == 1 && first.next_index == 0, "the last page ends the walk");
-    page = cameraQueryResponse(cameras, 5, room, 0);
+    require(first.num_descs == 1 && first.next_index == 0, "a walk may start on the last camera");
+    page = cameraQueryResponse(cameras, 4, room, 0);
     require(load<virtio_video_camera_query_resp>(page).num_descs == 0, "past the end is empty");
     // A buffer with no room for a record is refused: "complete" would end the walk.
     bool refused = false;
@@ -604,10 +677,10 @@ void testFormatAnswers()
 {
     const Host phone(SyntheticCameraProfile::phone);
     CalibrationStore store;
-    store.save(phone.model, CalibrationStore::lensKey(phone.infos[1]), colorOf(2016, 1512));
+    store.save(phone.model, CalibrationStore::lensKey(phone.infos[0]), colorOf(2016, 1512));
     const auto cameras = phone.arrange(CameraTier::small, store);
 
-    const auto video = cameraFormatsResponse(cameras[2], VIRTIO_VIDEO_CAMERA_STREAM_VIDEO);
+    const auto video = cameraFormatsResponse(cameras[0], VIRTIO_VIDEO_CAMERA_STREAM_VIDEO);
     auto header = load<virtio_video_query_capability_resp>(video);
     require(header.hdr.type == VIRTIO_VIDEO_RESP_OK_QUERY_CAPABILITY && header.num_descs == 1, "video is one format");
     std::size_t at = sizeof(header);
@@ -653,16 +726,16 @@ void testFormatAnswers()
     };
     std::vector<std::uint32_t> formats;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> stills;
-    require(walk(cameraFormatsResponse(cameras[2], VIRTIO_VIDEO_CAMERA_STREAM_STILL), formats, stills), "the stills answer is whole");
+    require(walk(cameraFormatsResponse(cameras[0], VIRTIO_VIDEO_CAMERA_STREAM_STILL), formats, stills), "the stills answer is whole");
     require(formats == std::vector<std::uint32_t> {VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, VIRTIO_VIDEO_FORMAT_CAMERA_RAW16_GRBG},
             "JPEG, and RAW for the calibrated lens");
     require(stills.front() == std::make_pair(4032u, 3024u) && stills.back() == std::make_pair(2016u, 1512u), "their sizes");
     formats.clear();
     stills.clear();
-    require(walk(cameraFormatsResponse(cameras[3], VIRTIO_VIDEO_CAMERA_STREAM_STILL), formats, stills), "another lens' answer");
+    require(walk(cameraFormatsResponse(cameras[2], VIRTIO_VIDEO_CAMERA_STREAM_STILL), formats, stills), "another lens' answer");
     require(formats == std::vector<std::uint32_t> {VIRTIO_VIDEO_FORMAT_CAMERA_JPEG}, "JPEG only");
     // The kinds that carry no format list answer with an empty list.
-    require(load<virtio_video_query_capability_resp>(cameraFormatsResponse(cameras[2], VIRTIO_VIDEO_CAMERA_STREAM_META)).num_descs == 0,
+    require(load<virtio_video_query_capability_resp>(cameraFormatsResponse(cameras[0], VIRTIO_VIDEO_CAMERA_STREAM_META)).num_descs == 0,
             "a metadata stream has no formats");
 }
 
@@ -670,7 +743,7 @@ void testRates()
 {
     const Host phone(SyntheticCameraProfile::phone);
     const auto cameras = phone.arrange(CameraTier::small);
-    const auto& wide = cameras[2];
+    const auto& wide = cameras[0];
     require(supportedFrameRate(wide, 1280, 720, 30) == 30, "30 fps is run at 720p");
     require(supportedFrameRate(wide, 1280, 720, 240) == 120, "a rate above the camera's is the camera's highest");
     require(supportedFrameRate(wide, 1920, 1080, 120) == 60, "1080p runs at 60");
@@ -1004,10 +1077,12 @@ void testAFrontCameraWithoutFormatsIsLimitedToo()
 int main()
 {
     testPhoneOrder();
+    testAZoomCameraIsNotPublished();
     testEveryZoomRangeHoldsOne();
     testOtherHosts();
     testTiers();
     testOfferedStillsFollowTheAnchor();
+    testZoomFollowsTheAnchorsRecommendation();
     testTheFramesAnAnchorDeliversNeverExceedTheReservesBuffer();
     testAConcurrentCameraKeepsItsOfferOrRunsAlone();
     testAnchorsAreNamedByThePlatformsCameraIndex();

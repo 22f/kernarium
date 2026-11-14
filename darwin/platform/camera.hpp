@@ -29,7 +29,8 @@ enum class CameraPosition : std::uint8_t { back, front, external };
 // zoom is a virtual device that switches between lenses by zoom ratio and
 // accepts automatic exposure, focus and white balance only; every other kind is
 // one sensor behind one lens, and lets a guest set them by hand where the
-// device can.
+// device can. A host lists its zoom cameras, but the Virtio camera device
+// publishes none of them: a guest switches lenses by switching cameras.
 enum class CameraLensKind : std::uint8_t { zoom, wide, ultraWide, telephoto, external };
 
 enum class BayerOrder : std::uint8_t { none, rggb, grbg, gbrg, bggr };
@@ -68,6 +69,9 @@ struct CameraCaptureFormat {
     std::vector<CameraStillSize> photoSizes;
     bool fullRange {};
     bool multiCamera {};  // a session that runs several cameras takes it
+    // The zoom ratio up to which the system recommends zooming a camera that runs in this format, in the terms of
+    // CameraInfo::zoomMaximum; zero where the system states none. It is advice, not part of the format's identity.
+    float recommendedZoomMaximum {};
     friend bool operator==(const CameraCaptureFormat&, const CameraCaptureFormat&) = default;
 };
 
@@ -133,11 +137,14 @@ struct CameraInfo {
     // The zoom ratio as Android states it: 0.5 is the ultra wide lens of a zoom
     // camera, 1.0 its main lens. switchOvers are the ratios where it changes lens.
     // Every camera's range holds 1.0, and a single lens's 1.0 is its own full
-    // field of view (zoomRatioScale).
+    // field of view (zoomRatioScale). zoomMaximum is the platform's own limit;
+    // a camera that runs in an anchor is stated up to the system's recommended
+    // maximum for that format where it gives one (CameraCaptureFormat).
     float zoomMinimum {1.0f};
     float zoomMaximum {1.0f};
     std::vector<float> switchOvers;
-    // A zoom camera: the identifiers of the lenses it switches between.
+    // A zoom camera: the identifiers of the lenses it switches between. The
+    // device publishes no zoom camera, only its lenses.
     std::vector<std::string> constituents;
 
     // The full field of view, in pixels, and its horizontal angle in degrees.

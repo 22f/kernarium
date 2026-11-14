@@ -213,7 +213,7 @@ class PlanTests(unittest.TestCase):
 
     def test_the_default_layout_of_a_profile_is_the_synthetic_camera_it_presents(self) -> None:
         # darwin/platform/synthetic_camera: the phone's back lenses have flash and manual control and its
-        # zoom and front cameras stream together; the tablet's front camera cannot make the guaranteed
+        # wide and front cameras stream together; the tablet's front camera cannot make the guaranteed
         # concurrent sizes; the laptop has one front camera. A fresh host offers no RAW: it comes with the
         # colour data a first still keeps (darwin/device/camera/README.md, Calibration).
         phone = layouts.by_name()[runner.DEFAULT_LAYOUTS["phone"]]
@@ -235,7 +235,9 @@ class PlanTests(unittest.TestCase):
         found = {name: int(value) for name, value in re.findall(
             r"constexpr std::uint32_t (\w+_camera_id) = (\d+);", header)}
         self.assertEqual(found, {"wide_camera_id": 2, "ultra_wide_camera_id": 3, "telephoto_camera_id": 4})
-        self.assertEqual(runner.PROFILE_CAMERAS["phone"][1], ("0", "1", *(str(value) for value in found.values())))
+        # The host publishes no zoom camera: the wide lens is "0", so a phone has no "2".
+        self.assertEqual(runner.PROFILE_CAMERAS["phone"][1],
+                         ("0", "1", str(found["ultra_wide_camera_id"]), str(found["telephoto_camera_id"])))
         self.assertEqual(runner.PROFILE_CAMERAS["tablet"][1], ("0", "1"))
         self.assertEqual(runner.PROFILE_CAMERAS["laptop"][1], ("0",))
 

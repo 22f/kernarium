@@ -85,11 +85,13 @@ struct ArrangementOptions {
     std::function<std::uint32_t(const uml::platform::CameraInfo&)> sensorOrientation;
 };
 
-/* The wire's cameras for a host, in wire order: the back zoom camera (or the
- * back wide lens where there is none), the front camera, the other back lenses
- * and then any external camera. At most VIRTIO_VIDEO_CAMERA_MAX_CAMERAS. A
- * zoom camera and its lenses are separate cameras that conflict with each
- * other; any two cameras conflict unless the host runs them together. */
+/* The wire's cameras for a host, in wire order: the primary back camera (the
+ * wide lens, or else the ultra wide, or else the telephoto), the front camera,
+ * the other back lenses (wide, ultra wide, telephoto) and then any external
+ * camera. At most VIRTIO_VIDEO_CAMERA_MAX_CAMERAS. A host's zoom camera is not
+ * published: each lens is a camera of its own. Any two cameras conflict unless
+ * the host runs them together. A camera that runs in an anchor is stated up to
+ * the zoom the system recommends for the anchor, where it gives one. */
 [[nodiscard]] std::vector<CameraDescription> arrangeCameras(
     std::span<const uml::platform::CameraInfo> infos, std::span<const std::vector<std::size_t>> concurrentSets,
     std::string_view hostModel, const CalibrationStore& calibration, const ArrangementOptions& options);

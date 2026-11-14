@@ -344,7 +344,9 @@ lens of the host as a camera of its own (a product overlay in
 `overlay/overlay/packages/apps/Aperture`, which the build installs as a static
 runtime overlay of the application; the application declares no overlayable
 section, so Android applies the preinstalled overlay, and the target-files
-verifier reads the overlay, not the application).
+verifier reads the overlay, not the application). The host publishes each back
+lens as a camera of its own and no zoom camera, and a phone's cameras are the
+wide lens "0", the front camera "1", the ultra wide "3" and the telephoto "4".
 
 The image states no camera feature of its own. The host composes a camera
 layout from the cameras it has and passes its name as

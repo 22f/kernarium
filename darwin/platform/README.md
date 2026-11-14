@@ -131,6 +131,9 @@ interface to the wire.
   1.0 (Android's rule): a single lens states its own factors, so its 1.0 is its
   own full field of view, and only a zoom camera is scaled by the host's display
   multiplier (`zoomRatioScale`), as the triple camera's ultra wide lens at 0.5.
+  A format carries the zoom the system recommends for it
+  (`recommendedZoomMaximum`, zero where it states none), which the device
+  states as the maximum of a camera that runs in that format.
 - **Sessions.** `openSession()` is the one call that can light the system's
   capture indicator, and it returns null unless the system has granted access.
   One session is a single `AVCaptureMultiCamSession` on iOS (an
@@ -238,8 +241,8 @@ interface to the wire.
   copy and a quarter turn are exact and a scale agrees with the portable one
   within the filters' difference (`camera-apple-transform`).
 - The synthetic camera is `synthetic_camera/` (`UML::SyntheticCamera`), a
-  platform camera with no hardware: profiles of a phone (a back zoom camera over
-  three lenses, and a front camera), a tablet (and one with both of an iPad's
+  platform camera with no hardware: profiles of a phone (three back lenses and a
+  front camera, no zoom camera), a tablet (and one with both of an iPad's
   front cameras) and a laptop; the multi-camera rule, which counts cameras that
   only take stills and refuses a join over a hardware budget (200 million
   pixels a second); a deterministic chart
