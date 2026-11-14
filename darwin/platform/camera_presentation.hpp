@@ -89,6 +89,12 @@ struct CameraPresentation {
     bool squareFormats {};
     bool dynamicRatios {};
 
+    // How many refusals of the camera's admissions the session logged and the
+    // reason of the last (the platform's own numbering: photo_dimensions.hpp,
+    // Refusal); -1 for none.
+    std::uint16_t refusals {};
+    std::int8_t lastRefusal {-1};
+
     // The device's dynamic aspect ratio, where its anchor lists ratios: the one
     // pinned, the one the device reports afterwards, the output dimensions it
     // reports, and the error code of the completion of the change (0 for none,
