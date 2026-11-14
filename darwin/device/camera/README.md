@@ -144,7 +144,11 @@ application's statements (the sensor orientation, the rotation that
   the last few in the session record's camera slot. A whole request that waited
   for the host's budget until its time ran out is one of them. One that an
   interruption or a blocked session ends, and one that delivered its JPEG
-  (whatever its RAW did), report nothing.
+  (whatever its RAW did), report nothing. How the platform presented each
+  camera (its mounting, what its connections and photo output were set to, its
+  aspect ratio: `darwin/platform/camera_presentation.hpp`) is reported under the
+  guest's number of the camera (`CameraDeviceOptions::onCameraPresentation`) and
+  kept in the same slot.
 - **Metadata.** A meta stream completes one `virtio_video_camera_meta` per
   exposure, with the sequence the frames and stills carry; black frames get a
   record too. The exposure time, ISO, aperture, focal length, neutral point and
