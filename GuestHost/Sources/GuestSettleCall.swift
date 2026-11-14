@@ -5,8 +5,8 @@ import GuestHostCore
 /// The runtime's calls that write the guest's storage back, with what each
 /// reports about the guest (`kernarium_runtime_settle`). A call that does not
 /// fill the report leaves it "not reported", which no application calls
-/// settled.
-extension GuestSettle {
+/// settled. They run on the callers' queues, never on the main actor.
+nonisolated extension GuestSettle {
     static func sync() -> GuestSettle {
         report { kernarium_runtime_loader_sync($0) }
     }

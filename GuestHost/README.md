@@ -46,6 +46,10 @@ Sources/GuestResizeHold.swift          when the guest keeps its display mode whi
 Sources/SceneCoverage.swift            whether a window scene fills its screen
 Sources/GuestRestartEvent.swift        a restart the guest asked for, as the runtime
                                        reports it
+Sources/GuestStopDelivery.swift        how an application delivers a run's host stop
+                                       (RunStop): off the main actor, on the queue of
+                                       its runtime calls, again until the run ends, the
+                                       guest's write-back first
 Sources/LinuxKeyboard.swift            characters to Linux key codes
 Sources/ZstdUtil.swift                 streamed, sparse zstd decode
 Sources/MicrophonePermission.swift     the system microphone permission, read and requested
