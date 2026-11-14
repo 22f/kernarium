@@ -3,6 +3,7 @@
 #if ICP_FILING
 
 import AndariumCore
+import AndariumCoreTestSupport
 import SwiftUI
 import Testing
 import UIKit

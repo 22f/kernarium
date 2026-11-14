@@ -3,6 +3,7 @@
 #if TIP_JAR
 
 import AndariumCore
+import AndariumCoreTestSupport
 import Foundation
 import SwiftUI
 import Testing

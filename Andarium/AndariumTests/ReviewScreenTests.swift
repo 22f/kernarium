@@ -3,6 +3,7 @@
 #if APP_REVIEW
 
 import AndariumCore
+import AndariumCoreTestSupport
 import Foundation
 import Testing
 @testable import Andarium
