@@ -136,20 +136,31 @@ void fillWire(CameraDescription& camera)
     wire.sensor_orientation = camera.sensorOrientation;
     wire.pixel_array_width = info.pixelArrayWidth;
     wire.pixel_array_height = info.pixelArrayHeight;
-    const double sensorWidth = info.pixelArrayWidth * nominalPitchMicrometres;
-    const double sensorHeight = info.pixelArrayHeight * nominalPitchMicrometres;
-    wire.sensor_width_um = std::uint32_t(std::lround(sensorWidth));
-    wire.sensor_height_um = std::uint32_t(std::lround(sensorHeight));
-    // The focal length is the one that gives the field of view the host states
-    // for this sensor size; a Bayer still's own figure replaces it.
+    double sensorWidth = info.pixelArrayWidth * nominalPitchMicrometres;
+    double sensorHeight = info.pixelArrayHeight * nominalPitchMicrometres;
+    // The sensor size and the focal length are a pair that describes the field of view the host states: the guest takes
+    // its lens labels (focal length over the sensor's diagonal) and 35 mm equivalents from it. The focal length is the
+    // one that gives the field of view for the nominal size; a Bayer still's own figure (the lens's physical focal
+    // length) replaces it, and the size then follows the field of view, in the pixel array's shape, so that the pair is
+    // the same ratio before and after the lens has learned its colour data and the physical figure sits beside a
+    // size that agrees with it (the Exif of a still and the DNG state the same focal length). A host that states no
+    // field of view leaves the nominal size.
+    const bool fieldOfViewStated = info.horizontalFieldOfView > 1.0f && info.horizontalFieldOfView < 179.0f;
+    const double halfTangent = fieldOfViewStated ? std::tan(double(info.horizontalFieldOfView) * std::numbers::pi / 360.0) : 0.0;
     double focal = 0;
     if (camera.calibration && camera.calibration->focalLengthMillimetres > 0) {
         focal = camera.calibration->focalLengthMillimetres * 1000.0;
-    } else if (info.horizontalFieldOfView > 1.0f && info.horizontalFieldOfView < 179.0f) {
-        focal = (sensorWidth / 2.0) / std::tan(double(info.horizontalFieldOfView) * std::numbers::pi / 360.0);
+        if (fieldOfViewStated && info.pixelArrayWidth > 0 && info.pixelArrayHeight > 0) {
+            sensorWidth = 2.0 * focal * halfTangent;
+            sensorHeight = sensorWidth * info.pixelArrayHeight / info.pixelArrayWidth;
+        }
+    } else if (fieldOfViewStated) {
+        focal = (sensorWidth / 2.0) / halfTangent;
     } else {
         focal = sensorWidth;
     }
+    wire.sensor_width_um = std::uint32_t(std::lround(sensorWidth));
+    wire.sensor_height_um = std::uint32_t(std::lround(sensorHeight));
     wire.focal_length_um = std::uint32_t(std::lround(focal));
     wire.aperture_x100 = std::uint32_t(std::lround(info.aperture * 100.0f));
     wire.min_focus_distance_mm = std::uint32_t(std::lround(info.minimumFocusDistanceMillimetres));

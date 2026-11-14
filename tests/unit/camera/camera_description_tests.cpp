@@ -12,6 +12,7 @@
 #include "wire_bytes.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <stdexcept>
 #include <vector>
@@ -653,6 +654,55 @@ void testRawNeedsCalibration()
             "48 MP RAW needs the large tier");
 }
 
+// The sensor size and the focal length a camera publishes are a pair that describes its field of view: the guest takes
+// the lens labels (focal length over the sensor's diagonal) and the 35 mm equivalents from it. A lens that has learned its
+// colour data publishes the physical focal length of its still, and the size then follows the field of view, so the pair
+// is the same ratio before and after the first still.
+void testTheCalibratedPairKeepsTheFieldOfView()
+{
+    const Host phone(SyntheticCameraProfile::phone);
+    struct Lens {
+        std::size_t platform;
+        std::size_t wire;
+        double focalMillimetres;
+    };
+    // A wide, an ultra wide and a telephoto lens, with the physical focal lengths of a phone's.
+    const Lens lenses[] = {{0, 0, 6.8}, {1, 2, 2.2}, {2, 3, 15.7}};
+    const auto before = phone.arrange(CameraTier::small);
+    CalibrationStore store;
+    for (const auto& lens : lenses) {
+        auto color = colorOf(2016, 1512);
+        color.focalLengthMillimetres = lens.focalMillimetres;
+        require(store.save(phone.model, CalibrationStore::lensKey(phone.infos[lens.platform]), color), "calibrate the lens");
+    }
+    const auto after = phone.arrange(CameraTier::small, store);
+    for (const auto& lens : lenses) {
+        const auto& uncalibrated = before[lens.wire].wire;
+        const auto& calibrated = after[lens.wire].wire;
+        require(calibrated.focal_length_um == std::uint32_t(std::lround(lens.focalMillimetres * 1000.0)),
+                "the calibrated lens publishes its physical focal length");
+        const double ratioBefore = double(uncalibrated.focal_length_um) / uncalibrated.sensor_width_um;
+        const double ratioAfter = double(calibrated.focal_length_um) / calibrated.sensor_width_um;
+        require(std::abs(ratioAfter - ratioBefore) <= ratioBefore * 0.002,
+                "the focal length over the sensor's width is the field of view's ratio, before and after the first still");
+        // The size keeps the pixel array's shape, and the pair gives the field of view the host states.
+        const double shape = double(calibrated.sensor_height_um) / calibrated.sensor_width_um;
+        require(std::abs(shape - double(calibrated.pixel_array_height) / calibrated.pixel_array_width) < 0.001,
+                "the sensor keeps the pixel array's shape");
+        const double fieldOfView = 2.0 * std::atan(calibrated.sensor_width_um / 2.0 / calibrated.focal_length_um) * 180.0 / 3.14159265358979;
+        require(std::abs(fieldOfView - after[lens.wire].info.horizontalFieldOfView) < 0.1, "and the pair's field of view is the host's");
+    }
+    // A lens with no field of view stated keeps the nominal size beside the calibration's focal length.
+    auto unstated = phone.infos[0];
+    unstated.horizontalFieldOfView = 0;
+    auto color = colorOf(2016, 1512);
+    color.focalLengthMillimetres = 6.8;
+    require(store.save(phone.model, CalibrationStore::lensKey(unstated), color), "calibrate it");
+    const auto none = arrangeCameras(std::vector<CameraInfo> {unstated}, {}, phone.model, store, {});
+    require(none[0].wire.focal_length_um == 6800 && none[0].wire.sensor_width_um == std::uint32_t(std::lround(unstated.pixelArrayWidth * 1.2)),
+            "where the host states none, the size is the nominal one");
+}
+
 // Colour data is a fact of the format it was learned in: a camera is offered RAW from data learned in its anchor, and
 // learns again when it was learned in another format.
 void testACalibrationIsAdvertisedOnlyForTheAnchorItWasLearnedIn()
@@ -1221,6 +1271,7 @@ int main()
     testHostMemoryReserve();
     testTheBufferCheckLine();
     testRawNeedsCalibration();
+    testTheCalibratedPairKeepsTheFieldOfView();
     testACalibrationIsAdvertisedOnlyForTheAnchorItWasLearnedIn();
     testWireFormats();
     testQueryPages();
