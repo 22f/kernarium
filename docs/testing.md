@@ -904,7 +904,8 @@ that it left marker 1, and the next boot, after a restart, logs marker 2.
 upgrade sections: a data disk on which a release left the network disabled is
 repaired once by the first boot of the release under test and the next boot
 leaves it alone, a disk of a release that never disables the network is left
-alone, and a failed check shows only the warning on both.
+alone, a failed check shows only the warning on both, and Auto-connect turned
+off on either stays off at every later boot.
 `android17-wifi-network-runner` (tooling) runs its parsers, the host's server
 and the sections' checks against scripted and simulated answers, without a guest;
 `android17-wifi-network-script` (tooling) runs the boot script itself against a

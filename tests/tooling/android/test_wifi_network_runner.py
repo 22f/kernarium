@@ -36,6 +36,9 @@ import unittest
 from unittest import mock
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import wifi_dump_fixtures  # noqa: E402
+
 REPOSITORY = Path(__file__).resolve().parents[3]
 SCRIPT = REPOSITORY / "tests/integration/android/run_android_wifi_network.py"
 SPEC = importlib.util.spec_from_file_location("run_android_wifi_network", SCRIPT)
@@ -88,10 +91,16 @@ NETWORK_SELECTION_DISABLED_NO_INTERNET_TEMPORARY counter:2
  lcuid=0 allowAutojoin=true mAllowedAutoJoinInAdvancedProtection=true noInternetAccessExpected=false
 """
 AUTOJOIN_OFF_DUMP = ENABLED_DUMP.replace("allowAutojoin=true", "allowAutojoin=false")
+# The dump as the Wi-Fi service prints a saved network: a header with the configuration's ID, then its values.
+NETWORK_HEADER = '* ID: 0 SSID: "VirtWifi" PROVIDER-NAME: null HIDDEN: false\n'
+OTHER_HEADER = '* ID: 1 SSID: "VirtWifi" PROVIDER-NAME: null HIDDEN: false\n'
+NETWORK_ON = NETWORK_HEADER + ENABLED_DUMP
+NETWORK_OFF = NETWORK_HEADER + AUTOJOIN_OFF_DUMP
 DENIAL = ("11-11 09:15:55.822   333   333 W auditd  : type=1400 audit(0.0:7): avc:  denied  "
           "{ read } for comm=\"cmd\" scontext=u:r:kernarium_wifi_network:s0 "
           "tcontext=u:object_r:system_file:s0 tclass=file permissive=0\n")
 REPAIR_LINE = "11-11 09:20:00.000 I kernarium_wifi_network: VirtWifi saved again: Wi-Fi is on and nothing joined\n"
+LEFT_ALONE = "11-11 09:20:00.000 I kernarium_wifi_network: VirtWifi has Auto-connect off: left alone\n"
 
 def agent(net_id: int, capabilities: str, transport: str = "WIFI", validated_at: int | None = None,
           created: str = "2026-11-10T13:30:32.485Z", private_dns_broken: bool = False,
@@ -1051,6 +1060,118 @@ class UpgradeSectionTests(unittest.TestCase):
                               script_service=["stopped"], listing=[LISTING], script_log=[REPAIR_LINE])
         with self.assertRaisesRegex(runner.Failure, "saved the network again although the station had joined"):
             runner.check_left_alone(guest, WAITS)
+
+    def autojoin_guest(self, dumps: list[str], script_log: list[str], **answers: list[str]) -> StubbedGuest:
+        answers = {"listing": [LISTING], "script_service": ["stopped"], **answers}
+        guest = StubbedGuest(dump=dumps, script_log=script_log, **answers)
+        guest.answers[f"cmd wifi add-network {runner.SSID} open -d"] = [""]
+        return guest
+
+    def test_auto_connect_off_that_a_boot_at_marker_1_leaves_alone_passes_when_the_line_shows(self) -> None:
+        guest = self.autojoin_guest([NETWORK_OFF], ["", "", LEFT_ALONE])
+        self.assertIsNone(runner.check_autojoin_kept(guest, WAITS, left_alone=True))
+        self.assertEqual(guest.restarts, 1)
+
+    def test_a_left_alone_line_that_rotated_out_of_the_log_is_kept_once_seen(self) -> None:
+        guest = self.autojoin_guest([NETWORK_OFF], ["", LEFT_ALONE, ""])
+        self.assertIsNone(runner.check_autojoin_kept(guest, WAITS, left_alone=True))
+
+    def test_a_boot_that_does_not_say_it_left_the_network_alone_fails_when_the_line_is_required(self) -> None:
+        guest = self.autojoin_guest([NETWORK_OFF], [""])
+        with self.assertRaisesRegex(runner.Failure, "did not say that it left the network alone"):
+            runner.check_autojoin_kept(guest, WAITS, left_alone=True)
+
+    def test_a_boot_at_marker_2_logs_nothing_and_a_line_there_fails(self) -> None:
+        self.assertIsNone(runner.check_autojoin_kept(self.autojoin_guest([NETWORK_OFF], [""]), WAITS,
+                                                      left_alone=False))
+        guest = self.autojoin_guest([NETWORK_OFF], [LEFT_ALONE])
+        with self.assertRaisesRegex(runner.Failure, "only a boot without marker 2 does"):
+            runner.check_autojoin_kept(guest, WAITS, left_alone=False)
+
+    def test_either_is_accepted_when_the_marker_is_not_known(self) -> None:
+        for log in ("", LEFT_ALONE):
+            guest = self.autojoin_guest([NETWORK_OFF], [log])
+            self.assertIsNone(runner.check_autojoin_kept(guest, WAITS))
+
+    def test_auto_connect_on_again_after_the_restart_fails_whatever_the_log_says(self) -> None:
+        for log in ("", LEFT_ALONE, REPAIR_LINE):
+            guest = self.autojoin_guest([NETWORK_OFF, NETWORK_ON], [log])
+            with self.assertRaisesRegex(runner.Failure, "Auto-connect is on again after a restart"):
+                runner.check_autojoin_kept(guest, WAITS, left_alone=True)
+
+    def test_a_repair_line_fails_even_when_it_rotates_out_and_auto_connect_reads_off(self) -> None:
+        guest = self.autojoin_guest([NETWORK_OFF], [REPAIR_LINE, LEFT_ALONE, ""])
+        with self.assertRaisesRegex(runner.Failure, "saved the network again although the user turned Auto-connect"):
+            runner.check_autojoin_kept(guest, WAITS, left_alone=True)
+
+    def test_a_dump_that_shows_no_auto_connect_for_the_network_after_the_restart_fails_in_every_mode(self) -> None:
+        # An empty dump, or one with the values of another configuration only, is no evidence of a setting kept.
+        for after in ("", ENABLED_DUMP, OTHER_HEADER + ENABLED_DUMP, "Permission Denial: can't dump WifiService\n"):
+            for left_alone in (True, False, None):
+                with self.subTest(after=after[:30], left_alone=left_alone):
+                    guest = self.autojoin_guest([NETWORK_OFF, after], [LEFT_ALONE])
+                    with self.assertRaisesRegex(runner.Failure, "shows no Auto-connect for VirtWifi's configuration"):
+                        runner.check_autojoin_kept(guest, WAITS, left_alone=left_alone)
+
+    def test_another_configurations_value_is_not_the_networks(self) -> None:
+        # VirtWifi (ID 0) is off; another configuration of the same name (ID 1) is on, before or after it.
+        for after in (NETWORK_OFF + OTHER_HEADER + ENABLED_DUMP, OTHER_HEADER + ENABLED_DUMP + NETWORK_OFF,
+                      NETWORK_OFF + ", 1=" + OTHER_HEADER + ENABLED_DUMP):
+            guest = self.autojoin_guest([NETWORK_OFF, after], [LEFT_ALONE])
+            self.assertIsNone(runner.check_autojoin_kept(guest, WAITS, left_alone=True))
+        self.assertEqual(runner.configuration_autojoin(NETWORK_OFF + OTHER_HEADER + ENABLED_DUMP, 0), [False])
+        self.assertEqual(runner.configuration_autojoin(NETWORK_OFF + OTHER_HEADER + ENABLED_DUMP, 1), [True])
+        self.assertEqual(runner.configuration_autojoin(NETWORK_OFF * 2, 0), [False, False])
+        self.assertEqual(runner.configuration_autojoin(AUTOJOIN_OFF_DUMP, 0), [])
+
+    def test_a_boot_script_that_did_not_end_on_this_boot_fails_in_every_mode(self) -> None:
+        for state in ("running", ""):
+            for left_alone in (True, False, None):
+                with self.subTest(state=state, left_alone=left_alone):
+                    guest = self.autojoin_guest([NETWORK_OFF], [LEFT_ALONE], script_service=[state])
+                    with self.assertRaisesRegex(runner.Failure, rf"service is {state or 'not started'!r}, not 'stopped'"):
+                        runner.check_autojoin_kept(guest, WAITS, left_alone=left_alone)
+
+    def test_a_script_that_ends_late_is_waited_for(self) -> None:
+        guest = self.autojoin_guest([NETWORK_OFF], [LEFT_ALONE], script_service=["running", "running", "stopped"])
+        self.assertIsNone(runner.check_autojoin_kept(guest, WAITS, left_alone=True))
+
+    def test_a_network_that_is_not_saved_after_the_restart_fails(self) -> None:
+        guest = self.autojoin_guest([NETWORK_OFF], [LEFT_ALONE],
+                                    listing=[LISTING, "Network Id      SSID                         Security type\n"])
+        with self.assertRaisesRegex(runner.Failure, "VirtWifi is not saved after the restart"):
+            runner.check_autojoin_kept(guest, WAITS, left_alone=True)
+
+    def test_the_values_of_each_dump_the_service_printed_are_read_under_the_networks_own_id(self) -> None:
+        for name, (number, on) in sorted(wifi_dump_fixtures.STATES.items()):
+            with self.subTest(name):
+                values = runner.configuration_autojoin(wifi_dump_fixtures.DUMPS[name], number)
+                self.assertTrue(values)
+                self.assertEqual(values, [on] * len(values))
+        # Other configurations have their own, and a line that holds a header's text names no configuration.
+        two = wifi_dump_fixtures.DUMPS["unconnected-off-two-more"]
+        self.assertEqual([runner.configuration_autojoin(two, number) for number in (0, 1, 2, 7)],
+                         [[True] * 4, [True] * 4, [False] * 4, []])
+        decoy = wifi_dump_fixtures.DUMPS["synthetic-decoy-in-block"]
+        self.assertEqual([runner.configuration_autojoin(decoy, number) for number in (0, 7)], [[False] * 4, []])
+
+    def test_the_step_reads_the_dumps_the_service_printed_after_the_restart(self) -> None:
+        before = wifi_dump_fixtures.DUMPS["connected-off"]
+        for name, (number, on) in sorted(wifi_dump_fixtures.STATES.items()):
+            row = f"Network Id      SSID                         Security type\n{number}            VirtWifi    open\n"
+            guest = self.autojoin_guest([before, wifi_dump_fixtures.DUMPS[name]], [LEFT_ALONE], listing=[LISTING, row])
+            with self.subTest(name):
+                if on:
+                    with self.assertRaisesRegex(runner.Failure, "Auto-connect is on again after a restart"):
+                        runner.check_autojoin_kept(guest, WAITS, left_alone=True)
+                else:
+                    self.assertIsNone(runner.check_autojoin_kept(guest, WAITS, left_alone=True))
+
+    def test_the_left_alone_line_is_read_as_what_it_says(self) -> None:
+        self.assertTrue(runner.left_alone_logged(LEFT_ALONE))
+        self.assertFalse(runner.left_alone_logged(REPAIR_LINE))
+        self.assertFalse(runner.repair_logged(LEFT_ALONE))
+        self.assertIn(runner.LEFT_ALONE_LINE, runner.BOOT_SCRIPT.read_text(encoding="utf-8"))
 
     def test_the_marker_property_is_not_read_as_the_shell(self) -> None:
         # The shell is denied the marker's label on a user build, so a read of it can only print nothing.
