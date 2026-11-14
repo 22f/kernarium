@@ -200,13 +200,32 @@ struct ThermalPolicyTests {
         #expect(!policy.advance(to: at(220)))
         #expect(policy.severity == .critical)
         #expect(policy.nextExpiry == nil)
-        // It ends again at 200: the fall is 120 s after that, to serious.
-        #expect(!policy.observe(.serious, at: at(200)))
-        #expect(policy.nextExpiry == at(320))
-        #expect(!policy.advance(to: at(319.999)))
+        // It ends again at 230: the fall is 120 s after that, to serious.
+        #expect(!policy.observe(.serious, at: at(230)))
+        #expect(policy.nextExpiry == at(350))
+        #expect(!policy.advance(to: at(349.999)))
         #expect(policy.severity == .critical)
-        #expect(policy.advance(to: at(320)))
+        #expect(policy.advance(to: at(350)))
         #expect(policy.severity == .severe)
+    }
+
+    @Test func seriousThatEndedBehindCriticalLeavesNoSevereTail() {
+        let policy = Watch()
+        #expect(policy.observe(.serious, at: at(0)))
+        // Serious ended at 30, when critical began: its wait ends at 150.
+        #expect(policy.observe(.critical, at: at(30)))
+        #expect(!policy.observe(.nominal, at: at(60)))
+        #expect(policy.severity == .critical)
+        #expect(policy.nextExpiry == at(150))
+        // Serious's wait ends first, behind critical's, with no effect.
+        #expect(!policy.advance(to: at(150)))
+        #expect(policy.severity == .critical)
+        #expect(policy.nextExpiry == at(180))
+        // Critical's wait ends at 180, and nothing hot is left in the last
+        // 120 s: the fall is straight to none.
+        #expect(policy.advance(to: at(180)))
+        #expect(policy.severity == .none)
+        #expect(policy.nextExpiry == nil)
     }
 
     @Test func aFlickerAroundSeriousIsOneSteadyCap() {

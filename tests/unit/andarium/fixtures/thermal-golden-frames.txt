@@ -23,9 +23,9 @@ none: 41 54 48 31 00 00 00 00
 # LIGHT: the guest reports it; the application does not send it.
 light: 41 54 48 31 01 00 00 00
 
-# SEVERE: the host's thermal state is serious now, or serious was the hottest
-# state in the last 120 s (the hold after it ended); the guest caps the frame
-# rate.
+# SEVERE: serious is the hottest of the host's thermal states now and in the
+# last 120 s (the hold after a state ended), so critical is neither the state
+# nor held; the guest caps the frame rate.
 severe: 41 54 48 31 03 00 00 00
 
 # CRITICAL: the host's thermal state is critical now or was in the last 120 s
