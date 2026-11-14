@@ -181,22 +181,21 @@ final class GuestPersistence {
     /// and is made again until the run ends, with the guest's write-back
     /// before the first that reaches one (`GuestStopDelivery`).
     ///
-    /// `settle` and `request` are the runtime's, and `interval` how long after
-    /// a request it is made again; `settle` returns whether it reached a
-    /// guest. A test supplies its own.
+    /// `runtime` is the runtime's write-back and stop, and `interval` how long
+    /// after a request it is made again. A test supplies its own of both.
     func deliverStop(
         _ stop: RunStop,
         every interval: DispatchTimeInterval = GuestStopDelivery.interval,
-        settle: (@Sendable () -> Bool)? = nil,
-        request: @escaping @Sendable () -> Void = {
-            kernarium_runtime_loader_request_stop()
-        }
+        runtime: GuestStopDelivery.Runtime = .loader
     ) {
-        let settle = settle ?? {
-            GuestStopDelivery.settleBeforeStop(for: stop, logPrefix: "Kernarium: ")
-        }
         GuestStopDelivery.deliver(
-            stop, on: queue, every: interval, settle: settle, request: request
+            stop, on: queue, every: interval,
+            settle: {
+                GuestStopDelivery.settleBeforeStop(
+                    for: stop, logPrefix: "Kernarium: ", runtime: runtime
+                )
+            },
+            request: runtime.requestStop
         )
     }
 

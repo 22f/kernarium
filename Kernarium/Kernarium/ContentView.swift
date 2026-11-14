@@ -909,7 +909,8 @@ final class EmulatorLauncher: ObservableObject, SpaceRun {
     private var runStop: RunStop?
     /// Delivers a host stop to the runtime: the guest's write-back, then the
     /// stop, off the main actor (`GuestPersistence.deliverStop`). The unit
-    /// tests' launchers bring their own.
+    /// tests' launchers bring their own delivery, or the runtime's two calls
+    /// it makes.
     private let deliverStop: @MainActor (RunStop) -> Void
     /// The view and geometry of a start the free space refused, for asking
     /// again.
@@ -930,13 +931,16 @@ final class EmulatorLauncher: ObservableObject, SpaceRun {
             SpaceHarness.current.freeSpace()
         },
         space: (() -> GuestSpacePause)? = nil,
-        deliverStop: (@MainActor (RunStop) -> Void)? = nil
+        deliverStop: (@MainActor (RunStop) -> Void)? = nil,
+        stopRuntime: GuestStopDelivery.Runtime = .loader
     ) {
         self.configuration = configuration
         self.job = job ?? .shared
         self.freeSpace = freeSpace
         self.space = space
-        self.deliverStop = deliverStop ?? { GuestPersistence.shared.deliverStop($0) }
+        self.deliverStop = deliverStop ?? {
+            GuestPersistence.shared.deliverStop($0, runtime: stopRuntime)
+        }
     }
 
     // MARK: SpaceRun

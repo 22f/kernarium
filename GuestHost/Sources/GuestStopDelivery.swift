@@ -11,6 +11,21 @@ enum GuestStopDelivery {
     /// How long after a delivery the next is made, while the run lives.
     nonisolated static let interval = DispatchTimeInterval.seconds(1)
 
+    /// The runtime's two calls a host stop makes: the guest's write-back and
+    /// the stop itself. A test substitutes these and nothing else, so that
+    /// what the application composes of them (the bound, the order, which
+    /// outcome counts as having reached a guest) is the production one.
+    nonisolated struct Runtime: Sendable {
+        var sync: @Sendable () -> GuestSettle
+        var requestStop: @Sendable () -> Void
+
+        /// The loaded runtime's.
+        static let loader = Runtime(
+            sync: { GuestSettle.sync() },
+            requestStop: { kernarium_runtime_loader_request_stop() }
+        )
+    }
+
     /// Delivers `stop` on `queue`, and again after `interval` until the run
     /// has ended (`RunStop.deliver`): the runtime drops a stop that arrives
     /// before its run begins, and nothing here can see that moment.
@@ -38,8 +53,10 @@ enum GuestStopDelivery {
     /// it, or says it cannot, or there is none to ask, and the host's stop
     /// follows in each case. Returns whether a guest was reached. `prefix`
     /// starts the one line it logs.
-    nonisolated static func settleBeforeStop(for stop: RunStop, logPrefix prefix: String) -> Bool {
-        let outcome = StopSettle.run(for: stop) { GuestSettle.sync() }
+    nonisolated static func settleBeforeStop(
+        for stop: RunStop, logPrefix prefix: String, runtime: Runtime = .loader
+    ) -> Bool {
+        let outcome = StopSettle.run(for: stop) { runtime.sync() }
         // A stop that finds no guest is made again each second: only the one
         // that reached a guest is worth a line.
         guard outcome.reachedGuest else { return false }

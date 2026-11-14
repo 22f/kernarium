@@ -33,6 +33,12 @@ struct GuestStopTests {
         var askedOnMain: Bool { lock.withLock { onMain } }
     }
 
+    private nonisolated static func settled(
+        _ storage: GuestSettle.Storage = .confirmed
+    ) -> GuestSettle {
+        GuestSettle(unflushed: 0, storage: storage, suspension: .notAsked)
+    }
+
     /// The stops a launcher handed to its delivery.
     private final class Delivered {
         var stops: [RunStop] = []
@@ -140,13 +146,15 @@ struct GuestStopTests {
         let launcher = launcher {
             GuestPersistence.shared.deliverStop(
                 $0, every: .milliseconds(50),
-                settle: {
-                    sequence.add("settle began")
-                    release.wait()
-                    sequence.add("settle ended")
-                    return true
-                },
-                request: { sequence.add("stop") }
+                runtime: .init(
+                    sync: {
+                        sequence.add("settle began")
+                        release.wait()
+                        sequence.add("settle ended")
+                        return Self.settled()
+                    },
+                    requestStop: { sequence.add("stop") }
+                )
             )
         }
         let latch = launcher.runBegan()
@@ -174,23 +182,22 @@ struct GuestStopTests {
     }
 
     /// A guest that does not answer holds the host's stop for the bound at
-    /// most.
+    /// most: the runtime's write-back never returns, and the stop follows at
+    /// the application's own bound.
     @Test
     func aGuestThatDoesNotAnswerHoldsTheStopForTheBoundAtMost() async throws {
         let sequence = Calls()
         let release = DispatchSemaphore(value: 0)
-        let launcher = launcher { stop in
+        let launcher = launcher {
             GuestPersistence.shared.deliverStop(
-                stop, every: .milliseconds(50),
-                settle: {
-                    // The runtime's write-back, with the bound shortened for
-                    // the test: it never returns, and is left behind.
-                    StopSettle.run(for: stop, within: .milliseconds(250)) {
+                $0, every: .milliseconds(50),
+                runtime: .init(
+                    sync: {
                         release.wait()
-                        return GuestSettle(unflushed: 0, storage: .confirmed, suspension: .notAsked)
-                    }.reachedGuest
-                },
-                request: { sequence.add("stop") }
+                        return Self.settled()
+                    },
+                    requestStop: { sequence.add("stop") }
+                )
             )
         }
         let latch = launcher.runBegan()
@@ -199,7 +206,10 @@ struct GuestStopTests {
         launcher.stop()
         try #require(await until { !sequence.all.isEmpty }, "the host's stop never came")
         let waited = ContinuousClock.now - before
-        #expect(waited >= .milliseconds(200) && waited < .seconds(5), "the stop came after \(waited)")
+        #expect(
+            waited >= .seconds(3) && waited < .seconds(9),
+            "the stop came after \(waited), not at the bound"
+        )
         // A guest that was reached is the run's one write-back: the rest of
         // the deliveries are stops alone.
         try #require(await until { sequence.all.count >= 3 })
@@ -213,16 +223,20 @@ struct GuestStopTests {
     @Test
     func aStopWithNoGuestYetAsksAgainUntilOneIsReached() async throws {
         let sequence = Calls()
-        let asks = Calls()
         let launcher = launcher {
             GuestPersistence.shared.deliverStop(
                 $0, every: .milliseconds(50),
-                settle: {
-                    sequence.add("settle")
-                    asks.add("ask")
-                    return asks.all.count >= 3
-                },
-                request: { sequence.add("stop") }
+                runtime: .init(
+                    sync: {
+                        sequence.add("settle")
+                        // The guest is there from the third ask on.
+                        return Self.settled(
+                            sequence.all.filter { $0 == "settle" }.count >= 3
+                                ? .confirmed : .noGuest
+                        )
+                    },
+                    requestStop: { sequence.add("stop") }
+                )
             )
         }
         let latch = launcher.runBegan()
@@ -236,6 +250,38 @@ struct GuestStopTests {
         #expect(calls.filter { $0 == "settle" }.count == 3, "the guest was asked \(calls)")
         #expect(Array(calls.prefix(6)) == ["settle", "stop", "settle", "stop", "settle", "stop"])
         #expect(calls.dropFirst(6).allSatisfy { $0 == "stop" })
+    }
+
+    /// The application's own stop, with nothing replaced but the runtime's two
+    /// calls: the launcher's default delivery, the queue it goes through and
+    /// the write-back the default composes. Removing the write-back from the
+    /// default leaves the host stop alone, which this fails.
+    @Test
+    func theApplicationsOwnStopAsksTheGuestOnceBeforeTheHostStops() async throws {
+        let calls = Calls()
+        let launcher = EmulatorLauncher(
+            configuration: .load(),
+            job: BackgroundJob(scheduler: FakeJobScheduler()),
+            stopRuntime: .init(
+                sync: {
+                    calls.add("write back")
+                    return Self.settled()
+                },
+                requestStop: { calls.add("stop") }
+            )
+        )
+        let latch = launcher.runBegan()
+        #expect(latch.enter())
+        launcher.stop()
+        // The delivery is made again every second until the run ends.
+        try #require(await until { calls.all.count >= 3 }, "the stop was not made again")
+        latch.end()
+        launcher.finished(result: 0)
+        #expect(
+            Array(calls.all.prefix(3)) == ["write back", "stop", "stop"],
+            "the application's stop was \(calls.all)"
+        )
+        #expect(!calls.askedOnMain, "the runtime was asked on the main thread")
     }
 
     /// The write-back of a run that has ended is dropped before it reaches the
