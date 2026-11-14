@@ -386,6 +386,13 @@ void logFormatTables(const std::vector<Entry>& entries)
             line += "};";
         }
         std::fprintf(stderr, "%s\n", line.c_str());
+        // How the camera is presented (presentedMountingOf): the rotation coordinator's angles for portrait, portrait upside
+        // down, landscape right and landscape left, the orientation stated, and the turn set on the video connection.
+        const CameraPresentation& mounted = entries[camera].discovered;
+        std::fprintf(stderr, "Camera: camera %zu mounting: angles %d %d %d %d, stated %u, video turn %u%s\n", camera,
+                     int(mounted.coordinatorAngles[0]), int(mounted.coordinatorAngles[1]), int(mounted.coordinatorAngles[2]),
+                     int(mounted.coordinatorAngles[3]), unsigned(mounted.stated), unsigned(mounted.turn),
+                     mounted.earlier ? " (presented like an earlier front camera)" : "");
     }
 }
 
