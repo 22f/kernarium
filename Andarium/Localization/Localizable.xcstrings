@@ -4627,7 +4627,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "其储存空间尚未就绪。文件稍后将显示在此处。"
+            "value" : "其存储空间尚未就绪。文件稍后将显示在此处。"
           }
         },
         "zh-Hant" : {
@@ -6275,7 +6275,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "调整储存空间大小"
+            "value" : "调整存储空间大小"
           }
         },
         "zh-Hant" : {
@@ -6673,7 +6673,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在为Andarium设置%@储存空间。"
+            "value" : "正在为Andarium设置%@存储空间。"
           }
         },
         "zh-Hant" : {
@@ -7599,7 +7599,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "储存空间"
+            "value" : "存储空间"
           }
         },
         "zh-Hant" : {
@@ -7621,7 +7621,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "储存空间只能增大。更大的容量将在下次启动时生效。"
+            "value" : "存储空间只能增大。更大的容量将在下次启动时生效。"
           }
         },
         "zh-Hant" : {
@@ -8555,7 +8555,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "虚拟机的可用空间不足。请在虚拟机中释放一些空间，或使用“调整大小”为其增加储存空间。"
+            "value" : "虚拟机的可用空间不足。请在虚拟机中释放一些空间，或使用“调整大小”为其增加存储空间。"
           }
         },
         "zh-Hant" : {
@@ -9549,7 +9549,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此设备仅剩%1$@可用空间。%2$@正在将数据保存到储存空间。"
+            "value" : "此设备仅剩%1$@可用空间。%2$@正在将数据保存到存储空间。"
           }
         },
         "zh-Hant" : {

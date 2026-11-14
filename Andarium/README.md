@@ -1194,7 +1194,8 @@ one-time, a purchase and free either way; the tier names are not checked.
 English is the key (a readout or a
 joined list has a named key whose comment says which readout it serves), and
 the person's virtual machine is "virtual machine" in English, 虚拟机, 虛擬機器
-and 仮想マシン. Chinese says 你 and writes no space next to Latin text; a
+and 仮想マシン, and its storage is 存储空间 in Simplified Chinese; the name of
+iOS's own Settings page there keeps Apple's 储存空间. Chinese says 你 and writes no space next to Latin text; a
 number keeps its space before its unit. Bug report and session record text, log
 lines and technical names stay English. Text shown on a card, an alert or an
 overlay passes `String.keepingTogether`, so a number stays with its unit and a
