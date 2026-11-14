@@ -7,7 +7,8 @@ disabled network is never joined again, so a guest whose first check failed has
 no network from then on (android/lineage-24/README.md, "Networking"). The image
 overlays the thresholds that disable it (rro/KernariumWifiOverlay) and a boot
 script saves the network again, until the station has joined it once, when a
-boot finds Wi-Fi on and nothing joined (overlay/tools/kernarium_wifi_network.sh).
+boot finds it missing from the Wi-Fi service's list or finds Wi-Fi on and nothing
+joined (overlay/tools/kernarium_wifi_network.sh).
 The platform validates the network before it checks it (routes p0029 and p0033):
 a failed check, and a sign-in or block page in place of the expected answer, only
 show Android's own Wi-Fi mark. The runner shows all of it:
@@ -79,7 +80,26 @@ show Android's own Wi-Fi mark. The runner shows all of it:
   and a failed check warns. The data disk of a release that never disables the
   network, with the network joined, the user's metered setting and the probes at
   a black hole, boots the release under test: nothing saves the network again,
-  the setting and the join are kept, and a failed check warns.
+  the setting and the join are kept, and a failed check warns;
+- quick stop: a guest stopped within a second or two of the boot script saving the
+  network, or at the first moment the station reports the join, can leave the
+  Wi-Fi service's config store without the network, because the service writes
+  the store some time after both. The same data boots the release under test
+  again, with the continuous crash capture attached. The stopped data's own
+  list is read at the boot's first observation, before the script's guard can
+  repair it: a list without VirtWifi is a stop that came before the store was
+  written, and a list that holds it one that came after, which is tried again
+  (up to six times, and twice for the stop at the join). Data that lost the
+  network must hold an address within 60 s of boot_completed, last observation
+  included; the script must say it left marker 1 (a boot that had to save the
+  network never sets 2), and after a restart, which the store survives, the
+  next boot must say it found the network stored and joined and set marker 2.
+  The script's log lines are the runner's window on its marker: the shell cannot
+  read the property. No stop that comes before the store's write fails the
+  first case; for the second, which needs a join before a write that follows
+  the save by a second or two, it is a note. `--quick-stop-only` runs these
+  cases alone, which is how an image without the fix shows its defect: its
+  script ends at marker 1 with no network and the case fails.
 
 Limits: a log buffer that wrapped before the stream attached cannot be detected;
 a crash during the final cleanup after the summary section is not scanned; and
@@ -94,7 +114,7 @@ deadline. The guest is reached through the shared adb server, always named with
 The runner is opt-in: it needs the macos-android17 executable, an installed
 release, and an adb client.
 usage: run_android_wifi_network.py --emulator uml-darwin-android17 [--release DIR]
-       [--previous-release DIR]...
+       [--previous-release DIR]... [--quick-stop-only]
 """
 
 from __future__ import annotations
@@ -153,6 +173,8 @@ STORE_SECONDS = 30
 MARGIN_SECONDS = 30
 # A saved network the disk holds enabled is joined well within this after boot_completed.
 BOOT_JOIN_SECONDS = 30
+# How long the platform takes to join a network the script saved again, by its own scan.
+REJOIN_SECONDS = 180
 BLACKHOLE = "192.0.2.1"
 UNRESOLVED_NAME = "no-such-host.invalid"
 SSID = "VirtWifi"
@@ -161,6 +183,19 @@ OVERLAY_FILE = "/vendor/overlay/KernariumWifiOverlay.apk"
 SCRIPT_LOG_TAG = "kernarium_wifi_network"
 SCRIPT_DOMAIN = "kernarium_wifi_network"
 SCRIPT_LOG_LINE = "VirtWifi saved again"
+NOT_STORED_LINE = "VirtWifi was not stored: saved again"
+# What the script logs when it ends a boot with its marker at 1 (it saved the network, or found it unlisted) or at 2
+# (it found the network stored and joined, or removed in this boot). The shell cannot read the marker; the script logs
+# a marker 2 only after the property was set.
+UNSTORED_LINE = "VirtWifi joined, and is not known to be stored: marker stays 1"
+SETTLED_LINE = "VirtWifi was stored and joined: marker 2"
+# The quick-stop cases: how many stops each tries before it gives up (the stop at the join, which comes after the
+# store's write unless that is late, tries fewer), how long the first boot has to reach its stop point, and how long
+# after boot_completed the second boot has to hold an address.
+QUICK_ATTEMPTS = 6
+QUICK_JOIN_ATTEMPTS = 2
+QUICK_FIRST_SECONDS = 120
+LEASE_SECONDS = 60
 PROBE_SETTINGS = {
     "captive_portal_https_url": f"https://{BLACKHOLE}/generate_204",
     "captive_portal_http_url": f"http://{BLACKHOLE}/generate_204",
@@ -257,15 +292,11 @@ def boot_settle_seconds(script: str) -> int:
     return script_seconds(script, "settle")
 
 
-def boot_rejoin_seconds(script: str) -> int:
-    """The seconds the boot script waits for the station to join after it saved the network again."""
-    return script_seconds(script, "rejoin")
-
-
 @dataclass(frozen=True)
 class Waits:
-    """How long a section waits after a boot for the script, which gives the station `settle` seconds
-    and, after saving the network again, `rejoin` more."""
+    """How long a section waits after a boot for the script, which gives the station `settle` seconds before
+    it saves the network again, and for the platform to join a network the script saved: `rejoin` more. The
+    script no longer waits for that join, so `rejoin` is the platform's time, not a value of the script."""
     settle: int
     rejoin: int
 
@@ -276,7 +307,7 @@ class Waits:
 
     @property
     def repair(self) -> int:
-        """Long enough after a boot for the script to save the network again and wait for the join."""
+        """Long enough after a boot for the script to save the network again and the station to join it."""
         return self.settle + self.rejoin + MARGIN_SECONDS
 
 
@@ -379,8 +410,25 @@ def avc_denials(log: str, domain: str) -> list[str]:
 
 
 def repair_logged(log: str) -> bool:
-    """Whether the boot script's log shows that it saved the network again."""
-    return SCRIPT_LOG_LINE in log
+    """Whether the boot script's log shows that it saved the network again, for either reason it logs: Wi-Fi on
+    with nothing joined, or the network missing from the Wi-Fi service's list at marker 1."""
+    return SCRIPT_LOG_LINE in log or NOT_STORED_LINE in log
+
+
+def not_stored_logged(log: str) -> bool:
+    """Whether the boot script's log shows that it found the network missing at marker 1 and saved it again."""
+    return NOT_STORED_LINE in log
+
+
+def marker_one_logged(log: str) -> bool:
+    """Whether the boot script's log shows that its boot ended with the marker at 1."""
+    return UNSTORED_LINE in log
+
+
+def marker_two_logged(log: str) -> bool:
+    """Whether the boot script's log shows that it set the marker to 2 after finding the network stored and
+    joined."""
+    return SETTLED_LINE in log
 
 
 PRIVATE_DNS_BROKEN_TOKEN = re.compile(r"\sPrivateDnsBroken(?=[\s\]])")
@@ -996,6 +1044,10 @@ class Guest:
     def joined(self) -> bool:
         return wifi_joined(self.status())
 
+    def has_address(self) -> bool:
+        """Whether the station's interface holds an IPv4 address (the lease)."""
+        return " inet " in self.shell("ip -4 addr show dev wlan0 2>/dev/null; true")
+
     def script_log(self) -> str:
         """What the boot script logged since this boot."""
         return self.shell(f"logcat -d -s {SCRIPT_LOG_TAG}")
@@ -1303,13 +1355,13 @@ def start_guest(options: argparse.Namespace, adb: str, private: pathlib.Path, re
             guest.capture.start_boot(guest)
         if not boot_android.wait_for_boot_completed(adb, serial, process, options.boot_timeout):
             raise Failure("Android did not reach sys.boot_completed")
+        # A pending update counts as applied from here, as for the launcher.
+        boot_android.android_instance.booted(instance, identity)
+        if provision:
+            boot_android.provision_guest(adb, serial)
     except BaseException:
         stop(guest)
         raise
-    # A pending update counts as applied from here, as for the launcher.
-    boot_android.android_instance.booted(instance, identity)
-    if provision:
-        boot_android.provision_guest(adb, serial)
     return guest
 
 
@@ -2520,13 +2572,12 @@ def previous_never_disables(guest: Guest) -> bool:
 
 
 def boot_script_finished(guest: Guest) -> str | None:
-    """None once the boot script has run to its end on this boot and the network it saved is joined; else what
-    is still missing. This is what the shell can read of the script's marker reaching 2 (the station joined):
-    the script saves the network only itself, and the way out of it that leaves a joined network behind is
-    setting the marker to 2. Its other ends leave the network unsaved (it could not save it) or not joined
-    (Wi-Fi off, or no join within the settle and rejoin seconds). A disk whose script did not run has no
-    saved network and no service state, and fails here. A script that saved the network again logs it, which
-    the sections that care read apart from this."""
+    """None once the boot script has run to its end on this boot, VirtWifi is saved and the station has joined it;
+    else what is still missing. It does not read the script's marker, which the shell cannot: a boot that saved
+    the network ends at marker 1, and one that found it stored and joined at 2, and both end like this. A script
+    that does not save the network, or leaves it unjoined (Wi-Fi off, or no join within the settle seconds),
+    fails here, and so does a disk whose script did not run (no saved network, no service state). What the
+    script logged of its marker, and of saving the network again, the sections that care read apart from this."""
     state = guest.script_service()
     if state != "stopped":
         return f"the boot script's service is {state or 'not started'!r}, not 'stopped'"
@@ -2590,6 +2641,132 @@ def check_warning_on_disk(guest: Guest) -> str | None:
     warning_shown(guest, True, WARNING_HOLD_SECONDS, "the failed check shows only the warning on the upgraded disk",
                   pin)
     return None
+
+
+# What the first boot of a quick-stop case waits for before it stops the guest: a guest-side condition, polled by
+# the guest itself, so that the stop follows it by the least the host can manage.
+QUICK_TRIGGERS = {
+    "saved": f"cmd wifi list-networks | grep -q {SSID}",
+    "joined": f"cmd wifi status | grep -q 'connected to \"{SSID}\"'",
+}
+
+
+def stop_when(options: argparse.Namespace, adb: str, private: pathlib.Path, instance: pathlib.Path,
+              trigger: str) -> None:
+    """Boots a fresh data disk and stops the guest the moment the trigger holds: the Wi-Fi service lists VirtWifi
+    (the boot script saved it a moment before) or the station reports the join."""
+    guest = start_guest(options, adb, private, options.release, instance, provision=False)
+    try:
+        try:
+            guest.shell(f"end=$(( $(date +%s) + {QUICK_FIRST_SECONDS} )); while [ $(date +%s) -lt $end ]; do "
+                        f"{QUICK_TRIGGERS[trigger]} && exit 0; sleep 0.2; done; exit 1",
+                        timeout=QUICK_FIRST_SECONDS + 30)
+        except (Failure, subprocess.TimeoutExpired) as problem:
+            raise Failure(f"the first boot did not reach the stop point ({trigger}) within {QUICK_FIRST_SECONDS} s "
+                          f"of boot_completed: {problem}") from problem
+    finally:
+        stop(guest)
+
+
+@dataclass
+class Quick:
+    """What the boot after a stop showed: whether the stopped data lacked the network at the first observation."""
+    landed: bool | None = None
+
+
+def judge_quick_boot(guest: Guest, waits: Waits, quick: Quick) -> str | None:
+    """The boot after a quick stop. The stopped data's own list is read first, before the script's guard (ten
+    seconds) can save anything: a list without VirtWifi is a stop that came before the store was written, which
+    sets quick.landed; the script's log is not evidence of the disk. Data that lacked the network must hold an
+    address within LEASE_SECONDS of boot_completed (judged by the time the observation that saw it returned);
+    the script must log that it left marker 1, since a boot that saved the network never sets 2; and the next
+    boot, after a restart the store survives, must log that it found the network stored and joined and set 2.
+    A list that held the network is a stop that came after the write: only the lease is judged, and the
+    note says so. The script's lines are kept from every poll, as the main log buffer is small."""
+    started = time.monotonic()
+    quick.landed = network_id(guest.listing()) is None
+    seen = {"one": False, "two": False, "not_stored": False}
+
+    def read_log() -> None:
+        text = guest.script_log()
+        seen["one"] = seen["one"] or marker_one_logged(text)
+        seen["two"] = seen["two"] or marker_two_logged(text)
+        seen["not_stored"] = seen["not_stored"] or not_stored_logged(text)
+
+    leased: float | None = None
+    deadline = started + LEASE_SECONDS
+    while True:
+        guest.alive()
+        read_log()
+        if guest.joined() and guest.has_address():
+            leased = time.monotonic() - started
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(2)
+    saved = network_id(guest.listing()) is not None
+    if leased is None or leased > LEASE_SECONDS or not saved:
+        raise Failure(
+            f"the data {'that the stop left without' if quick.landed else 'that held'} {SSID} "
+            + (f"held an address only {leased:.0f} s after boot_completed" if leased is not None
+               else f"held no address within {LEASE_SECONDS} s of boot_completed")
+            + f", and the Wi-Fi service lists {'it' if saved else 'nothing'}; the boot script "
+            + f"{'logged' if seen['not_stored'] else 'did not log'} that it saved the network again")
+    if not quick.landed:
+        return f"the stop came after the store wrote the network; the lease took {leased:.0f} s"
+    wait_for("the boot script ends", waits.quiet, lambda: None if guest.script_service() == "stopped"
+             else "the boot script is still running", guest, interval=POLL_SECONDS)
+    read_log()
+    if seen["two"]:
+        raise Failure("the boot that had to save the network set marker 2: a stop before the store's write "
+                      "would then leave marker 2 and no network, which nothing repairs")
+    if not seen["one"]:
+        raise Failure("the boot script did not log that it left marker 1 after saving the network")
+    check_no_denials(guest)
+    guest.restart()
+    if network_id(guest.listing()) is None:
+        raise Failure(f"{SSID} is not listed after a restart: the store did not hold the network the script saved")
+    wait_for("the boot script ends after the restart", waits.quiet, lambda: None if guest.script_service() == "stopped"
+             else "the boot script is still running", guest, interval=POLL_SECONDS)
+    if not marker_two_logged(guest.script_log()):
+        raise Failure("the boot that found the network stored and joined did not log that it set marker 2")
+    return (f"the data lost the network; the script saved it again, the lease took {leased:.0f} s, the boot left "
+            "marker 1 and the next boot set 2")
+
+
+def run_quick_case(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report, waits: Waits,
+                   trigger: str, title: str, required: bool, attempts: int = QUICK_ATTEMPTS) -> None:
+    """Stops fresh guests at the trigger, boots the same data, and judges that boot. A stop that came after the
+    store wrote the network is tried again; when none came before it, the case fails if `required` and is a note
+    if not."""
+    for attempt in range(1, attempts + 1):
+        instance = private / f"quick-{trigger}-{attempt}"
+        stop_when(options, adb, private, instance, trigger)
+        guest = start_guest(options, adb, private, options.release, instance, provision=False, watched=True)
+        quick = Quick()
+        failed = len(report.failures)
+        try:
+            report.section(f"{title} (attempt {attempt})", guest, lambda: judge_quick_boot(guest, waits, quick))
+        finally:
+            stop(guest)
+            shutil.rmtree(instance, ignore_errors=True)
+        if quick.landed or len(report.failures) > failed:
+            return
+    message = f"{title}: no stop came before the Wi-Fi service stored the network in {attempts} attempts"
+    if required:
+        print(f"FAIL {message}", file=sys.stderr)
+        report.failures.append(message)
+    else:
+        print(f"     not exercised: {message}")
+
+
+def quick_stop(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report, waits: Waits) -> None:
+    print("quick stop: a guest stopped before the Wi-Fi service stored the network")
+    run_quick_case(options, adb, private, report, waits, "saved",
+                   "a guest stopped when the Wi-Fi service lists VirtWifi gets it back", required=True)
+    run_quick_case(options, adb, private, report, waits, "joined",
+                   "a guest stopped at the first reported join keeps no marker 2 beside a missing network",
+                   required=False, attempts=QUICK_JOIN_ATTEMPTS)
 
 
 def upgrade(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report, waits: Waits) -> None:
@@ -2673,6 +2850,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--previous-release", type=pathlib.Path, action="append",
                         help="installed release whose data disk the upgrade section boots first (the section "
                         "runs only when this is given; give the option once for each release)")
+    parser.add_argument("--quick-stop-only", action="store_true",
+                        help="run the quick-stop case alone (a short run that shows an image's defect or fix)")
     parser.add_argument("--adb", default="adb", help="adb client to use")
     parser.add_argument("--adb-port", type=int, default=slot_ports.slot_port(slot_ports.ADB_OFFSET, DEFAULT_ADB_PORT),
                         help="loopback port the launcher forwards adbd to (default: the guest slot's first port "
@@ -2691,13 +2870,15 @@ def main() -> int:
         return 2
     adb = str(boot_android.resolve_executable(options.adb, sdk_fallback=True))
     script = BOOT_SCRIPT.read_text(encoding="utf-8")
-    waits = Waits(boot_settle_seconds(script), boot_rejoin_seconds(script))
+    waits = Waits(boot_settle_seconds(script), REJOIN_SECONDS)
     # Short, so the management console's socket path stays within sun_path.
     private = pathlib.Path(tempfile.mkdtemp(prefix="uml-awn-"))
     report = Report()
     try:
-        fresh(options, adb, private, report, waits)
-        if options.previous_release:
+        if not options.quick_stop_only:
+            fresh(options, adb, private, report, waits)
+        quick_stop(options, adb, private, report, waits)
+        if options.previous_release and not options.quick_stop_only:
             upgrade(options, adb, private, report, waits)
     except (Failure, boot_android.LauncherError, subprocess.TimeoutExpired, OSError) as problem:
         print(f"FAIL: {problem}", file=sys.stderr)
