@@ -41,11 +41,11 @@ struct GraphicsNoticeBanner: View {
 
 /// The banners over the top of the session when the model has a notice to
 /// show: iOS denying Andarium the network, the guest's graphics memory, the
-/// lowered frame rate, the camera (paused for other apps sharing the
-/// screen, or off when the guest opens it) and iOS being critically short of
-/// memory, one below the other in that order, below the statistics capsule when
-/// that is up. The stack is one column at the top, each banner as wide as its
-/// words, clear of the side keys and the capsule.
+/// lowered frame rate and the camera (paused for other apps sharing the
+/// screen, or off when the guest opens it), one below the other in that order,
+/// below the statistics capsule when that is up. The stack is one column at the
+/// top, each banner as wide as its words, clear of the side keys and the
+/// capsule.
 ///
 /// The column is plain while it fits the room it is given, so a tap beside the
 /// banners reaches the guest. When the notices are together taller than the
@@ -61,7 +61,7 @@ struct SessionNoticesOverlay: View {
     var body: some View {
         let denial = model.networkDenialShowing
         let showing = denial != nil || model.graphicsNotice.isShowing || model.thermalNotice.isShowing
-            || model.cameraNoticeShowing || model.memoryNoticeShowing
+            || model.cameraNoticeShowing
         ViewThatFits(in: .vertical) {
             column(denial: denial)
             ScrollView(.vertical) {
@@ -78,7 +78,6 @@ struct SessionNoticesOverlay: View {
         .animation(.easeInOut(duration: 0.2), value: model.graphicsNotice.isShowing)
         .animation(.easeInOut(duration: 0.2), value: model.thermalNotice.isShowing)
         .animation(.easeInOut(duration: 0.2), value: model.cameraNoticeKind)
-        .animation(.easeInOut(duration: 0.2), value: model.memoryNoticeShowing)
     }
 
     private func column(denial: NetworkDenial?) -> some View {
@@ -100,10 +99,6 @@ struct SessionNoticesOverlay: View {
             }
             if let notice = model.cameraNoticeKind {
                 CameraNoticeBanner(notice: notice) { model.dismissCameraNotice() }
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
-            if model.memoryNoticeShowing {
-                MemoryPressureNoticeBanner { model.dismissMemoryNotice() }
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }

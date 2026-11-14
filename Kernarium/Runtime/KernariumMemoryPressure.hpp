@@ -30,8 +30,6 @@ namespace kernarium::memory_pressure {
         return KERNARIUM_RUNTIME_MEMORY_RESPONSE_NONE;
     case uml::runtime::PressureReaction::responding:
         return KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED;
-    case uml::runtime::PressureReaction::withheld:
-        return KERNARIUM_RUNTIME_MEMORY_RESPONSE_WITHHELD;
     case uml::runtime::PressureReaction::underway:
         return KERNARIUM_RUNTIME_MEMORY_RESPONSE_UNDER_WAY;
     }

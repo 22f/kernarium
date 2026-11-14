@@ -453,11 +453,10 @@ DEBUG_SYMBOLS = (
     # for its version, which the application's install never does by itself.
     ("legacy install preview", (b"21previewInstallAttempt",)),
     # The Simulator preview's hooks into the Send feedback sheet
-    # (SendFeedbackServices.previewOpensAtLaunch, previewPrepare and
-    # previewKeepsConfirmation): the preview opens the sheet, fills a draft and
-    # holds the confirmation; the application never does.
+    # (SendFeedbackServices.previewOpensAtLaunch and previewPrepare): the
+    # preview opens the sheet and fills a draft; the application never does.
     ("send feedback preview",
-     (b"20previewOpensAtLaunch", b"14previewPrepare", b"24previewKeepsConfirmation")),
+     (b"20previewOpensAtLaunch", b"14previewPrepare")),
     # The UI tests' probe of the guest's keyboard and mouse
     # (Andarium/Shared/InputProbe.swift): its log, its launch, the recording
     # runtime and the session that runs without a guest.
