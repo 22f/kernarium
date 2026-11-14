@@ -725,7 +725,9 @@ public:
                 }
                 auto anchor = std::make_shared<Anchor>();
                 anchor->format = set.formats[index];
-                anchor->facts = set.facts[index];
+                // The facts the device offered from: a front camera's photo sizes within its limit, so the photo
+                // output's maximum (photoMaximum) and the sizes it makes are the sizes offered.
+                anchor->facts = limitedStillFormats(entries_[camera].info.position, set.facts)[index];
                 anchor->rates = offeredRatesOf(anchor->facts, videoRateCap);
                 anchors_[camera] = std::move(anchor);
             }

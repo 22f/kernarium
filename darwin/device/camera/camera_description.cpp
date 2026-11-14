@@ -303,15 +303,20 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
             auto rules = offerRulesOf(limits);
             rules.candidateSizes = candidateVideoSizes(formats);
             const bool couldRunWithOthers = std::any_of(order.begin(), order.end(), [&](std::size_t other) { return runsWith(platform, other); });
+            // Whether the camera keeps its concurrency is decided on the formats as listed: a limit on the photo
+            // sizes of a front camera (limitedStillFormats) is no reason for it to start running with others.
             entry.concurrent = couldRunWithOthers && uml::platform::keepsConcurrency(formats, rules);
             entry.concurrencyDropped = couldRunWithOthers && !entry.concurrent;
-            entry.anchor = uml::platform::chooseAnchor(formats, rules, entry.concurrent);
+            // The anchor and the offer are made on the formats with the position's still limit, as the platform's
+            // session makes the photo output (the same function, setAnchors).
+            const auto limited = uml::platform::limitedStillFormats(infos[platform].position, formats);
+            entry.anchor = uml::platform::chooseAnchor(limited, rules, entry.concurrent);
             if (!entry.anchor) {
                 std::fprintf(stderr, "Camera: platform camera %zu is not offered: none of its %zu formats carries a stream\n", platform,
                              formats.size());
                 continue;
             }
-            entry.offer = uml::platform::offerOf(formats[*entry.anchor], rules);
+            entry.offer = uml::platform::offerOf(limited[*entry.anchor], rules);
         }
         arranged.push_back(std::move(entry));
     }
@@ -333,9 +338,10 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
             camera.info.stillSizes = entry.offer.stills;
         } else {
             camera.video = videoModes(info, limits);
-            // Every size works with every format.
+            // Every size works with every format, within the tier's cap and the limit of the camera's position.
             for (const auto& size : info.stillSizes)
-                if (std::uint64_t(size.width) * size.height <= limits.maximumStillPixels) camera.jpegSizes.push_back(size);
+                if (std::uint64_t(size.width) * size.height <= limits.maximumStillPixels && uml::platform::stillWithinPositionLimit(info.position, size))
+                    camera.jpegSizes.push_back(size);
         }
         // RAW is advertised only for a lens whose colour data is known, and, for
         // a camera that has an anchor, was learned in it: another format may

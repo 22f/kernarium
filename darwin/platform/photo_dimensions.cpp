@@ -121,6 +121,24 @@ std::vector<CameraStillSize> stillsMadeByAnyFormat(std::span<const VideoFormatFa
     return sizes;
 }
 
+bool stillWithinPositionLimit(CameraPosition position, CameraStillSize size) noexcept
+{
+    return position != CameraPosition::front || areaOf(size) <= frontStillMaximumPixels;
+}
+
+std::vector<VideoFormatFacts> limitedStillFormats(CameraPosition position, std::span<const VideoFormatFacts> formats)
+{
+    std::vector<VideoFormatFacts> limited(formats.begin(), formats.end());
+    if (position != CameraPosition::front) return limited;
+    // A size without a dimension is none (stillsOf and photoMaximum take it so too).
+    const auto dropped = [&](CameraStillSize size) {
+        return size.width == 0 || size.height == 0 || !stillWithinPositionLimit(position, size);
+    };
+    for (auto& format : limited)
+        format.photoSizes.erase(std::remove_if(format.photoSizes.begin(), format.photoSizes.end(), dropped), format.photoSizes.end());
+    return limited;
+}
+
 bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested) noexcept
 {
     return (resolved.width == 0 && resolved.height == 0) || resolved == requested;

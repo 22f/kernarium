@@ -4,6 +4,7 @@
 
 #include "calibration_store.hpp"
 #include "camera_description.hpp"
+#include "front_tables.hpp"
 #include "require.hpp"
 #include "photo_dimensions.hpp"
 #include "synthetic_camera.hpp"
@@ -352,7 +353,8 @@ void testAnchorsAreNamedByThePlatformsCameraIndex()
     CameraInfo front = tabletCamera();
     front.identifier = "tablet-front";
     front.position = CameraPosition::front;
-    front.captureFormats.erase(front.captureFormats.begin(), front.captureFormats.begin() + 2);  // its own anchor
+    // Its own anchor: the 1080p format alone (a front camera's 12 MP photos are above its still limit).
+    front.captureFormats.erase(front.captureFormats.begin(), front.captureFormats.begin() + 3);
     CameraInfo noFormats = tabletCamera();
     noFormats.identifier = "plain";
     noFormats.position = CameraPosition::external;
@@ -693,6 +695,291 @@ void testLayout()
     require(!layout.back && !layout.front && !layout.manualSensor && !layout.raw && !layout.concurrent, "no cameras");
 }
 
+// ---------------------------------------------------------------------------
+// The front camera's still limit, as the guest is told
+// ---------------------------------------------------------------------------
+
+bool sameVideo(const std::vector<VideoMode>& a, const std::vector<VideoMode>& b)
+{
+    return std::equal(a.begin(), a.end(), b.begin(), b.end(), [](const VideoMode& x, const VideoMode& y) {
+        return x.width == y.width && x.height == y.height && x.minimumFrameRate == y.minimumFrameRate && x.maximumFrameRate == y.maximumFrameRate;
+    });
+}
+
+const CameraDescription& ofPlatformCamera(const std::vector<CameraDescription>& cameras, std::size_t platform)
+{
+    for (const auto& camera : cameras)
+        if (camera.platformIndex == platform) return camera;
+    throw std::runtime_error("no such camera");
+}
+
+std::uint64_t areaOfStill(CameraStillSize size) { return std::uint64_t(size.width) * size.height; }
+
+// The iPad mini's front camera (12 MP, ultra wide) with the tablet's back camera, as the platform lists them, the
+// platform's concurrent set naming both.
+CameraInfo frontCameraOf(const std::vector<CameraCaptureFormat>& formats, const char* identifier)
+{
+    CameraInfo front;
+    front.identifier = identifier;
+    front.position = CameraPosition::front;
+    front.lens = CameraLensKind::wide;
+    front.pixelArrayWidth = 4032;
+    front.pixelArrayHeight = 3024;
+    front.captureFormats = formats;
+    for (const auto& format : front.captureFormats)
+        front.videoFormats.push_back({format.width, format.height, 1, std::uint32_t(format.frameRates.front().maximum), format.multiCamera});
+    // Every size some format makes, as the platform lists them.
+    for (const auto& format : front.captureFormats)
+        for (const auto& size : format.photoSizes)
+            if (std::find(front.stillSizes.begin(), front.stillSizes.end(), size) == front.stillSizes.end()) front.stillSizes.push_back(size);
+    return front;
+}
+
+std::vector<CameraInfo> miniCameras()
+{
+    CameraInfo back = tabletCamera();
+    back.pixelArrayWidth = 4032;
+    back.pixelArrayHeight = 3024;
+    return {back, frontCameraOf(uml::testing::miniFrontFormats(), "mini-front")};
+}
+
+// Decision 2, what the guest is told of a front camera with the limit. The JPEG sizes it is offered are the limited
+// ones (the guest can ask for nothing larger and the host makes every size it is offered). The pixel array it is told
+// is the camera's full field of view, as it is for every camera: the guest's HAL takes it for the field of view and
+// the RAW size, not as a promise of a JPEG that large. That is how the 12 MP tier cap already treats a 48 MP back
+// camera, whose pixel array stays the sensor's while its JPEG sizes are capped; the two are shown side by side.
+void testAFrontCameraIsToldItsLimitedStillsAndItsFullFieldOfView()
+{
+    const auto infos = miniCameras();
+    const auto cameras = arrangeCameras(infos, std::vector<std::vector<std::size_t>> {{0, 1}}, "tablet", CalibrationStore(), {});
+    require(cameras.size() == 2);
+    const auto& front = ofPlatformCamera(cameras, 1);
+    require(front.info.position == CameraPosition::front && front.index == 1 && front.anchor, "the front camera is wire camera 1, anchored");
+    const auto& anchor = infos[1].captureFormats[*front.anchor];
+    require(anchor.width == 1920 && anchor.height == 1440 && anchor.multiCamera, "it runs in the 1920x1440 multi-camera format");
+    require(front.jpegSizes == std::vector<CameraStillSize>({{2016, 1512}, {1920, 1440}}), "it offers 2016x1512 and 1920x1440, not 3088x2316");
+    require(front.info.stillSizes == front.jpegSizes, "and its own list is the offer");
+    for (const auto& size : front.jpegSizes) require(areaOfStill(size) <= uml::platform::frontStillMaximumPixels, "within the limit");
+    require(front.wire.pixel_array_width == 4032 && front.wire.pixel_array_height == 3024,
+            "the pixel array is the field of view's, as listed, as the back camera's");
+    // The same table as a back camera: 12 MP, and the same pixel array. The tier's 12 MP cap and the limit treat the
+    // pixel array alike.
+    auto asBack = infos[1];
+    asBack.position = CameraPosition::back;
+    asBack.identifier = "mini-as-back";
+    const auto back = arrangeCameras(std::vector<CameraInfo> {asBack}, {}, "tablet", CalibrationStore(), {});
+    require(back.size() == 1 && back[0].jpegSizes.front() == CameraStillSize({3088, 2316}) && back[0].wire.pixel_array_width == 4032 &&
+                back[0].wire.pixel_array_height == 3024,
+            "listed, the camera offers 3088x2316 and the same pixel array");
+    CameraInfo big;
+    big.identifier = "big-back";
+    big.position = CameraPosition::back;
+    big.lens = CameraLensKind::wide;
+    big.pixelArrayWidth = 8064;
+    big.pixelArrayHeight = 6048;
+    big.captureFormats = {{4032, 3024, {{1, 30}}, {{4032, 3024}, {8064, 6048}}, true, false}};
+    big.videoFormats.push_back({4032, 3024, 1, 30, false});
+    big.stillSizes = {{8064, 6048}, {4032, 3024}};
+    const auto capped = arrangeCameras(std::vector<CameraInfo> {big}, {}, "tablet", CalibrationStore(), optionsOf(CameraTier::small));
+    require(capped.size() == 1 && capped[0].jpegSizes == std::vector<CameraStillSize>({{4032, 3024}}) &&
+                capped[0].wire.pixel_array_width == 8064 && capped[0].wire.pixel_array_height == 6048,
+            "a 48 MP back camera under the 12 MP tier cap: capped JPEG sizes, the sensor's pixel array");
+    // The wire's formats are the offer: the JPEG descriptors list the limited sizes only.
+    const auto frontSummary = anchorSummary(front);
+    require(frontSummary.find("offers stills 2016x1512 1920x1440") != std::string::npos, "and the log line shows them");
+    // A camera that lists no size within the limit is offered no native JPEG at all: the ceiling has no exception. It
+    // still has its anchor and its video (Android derives its standard JPEG sizes from the offered video); the same table
+    // as a back camera keeps its 12 MP photo.
+    CameraInfo only = infos[1];
+    only.identifier = "only-large";
+    for (auto& format : only.captureFormats) format.photoSizes = {{4032, 3024}};
+    only.stillSizes = {{4032, 3024}};
+    const auto large = arrangeCameras(std::vector<CameraInfo> {only}, {}, "tablet", CalibrationStore(), {});
+    require(large.size() == 1 && large[0].anchor && large[0].jpegSizes.empty() && large[0].info.stillSizes.empty() && !large[0].video.empty() &&
+                anchorSummary(large[0]).find("offers stills none") != std::string::npos,
+            "a front camera with only large sizes is offered no native JPEG, and keeps its video");
+    auto largeAsBack = only;
+    largeAsBack.position = CameraPosition::back;
+    const auto control = arrangeCameras(std::vector<CameraInfo> {largeAsBack}, {}, "tablet", CalibrationStore(), {});
+    require(control.size() == 1 && control[0].jpegSizes == std::vector<CameraStillSize>({{4032, 3024}}) && sameVideo(control[0].video, large[0].video),
+            "as a back camera it offers the 12 MP photo, and the same video");
+}
+
+// Decision 3, concurrency is unchanged from before the limit. Whether a camera keeps it is decided on the formats as
+// the platform lists them. The same table as a back camera is the control: the limit applies to the front camera only,
+// so what the control is told is what the front camera was told before, and the front camera is told the same.
+void testTheFrontStillLimitChangesNoConcurrency()
+{
+    const auto infos = miniCameras();
+    const std::vector<std::vector<std::size_t>> together {{0, 1}};
+    const auto limited = arrangeCameras(infos, together, "tablet", CalibrationStore(), {});
+    const auto& front = ofPlatformCamera(limited, 1);
+    // The listed formats do not keep the front camera's concurrency (its best format makes a 12 MP photo and no
+    // multi-camera format does), and the limit does not change that.
+    require(front.concurrencyDropped && !bit(front.wire.concurrent_mask, ofPlatformCamera(limited, 0).index) &&
+                !bit(ofPlatformCamera(limited, 0).wire.concurrent_mask, front.index) && bit(front.wire.conflict_mask, ofPlatformCamera(limited, 0).index),
+            "the front camera still runs alone and conflicts with the back camera, as before");
+    require(anchorSummary(front).find("not concurrent") != std::string::npos, "and its log line says so");
+    // The control: the same camera, listed as a back one, is not limited. Its concurrency is what the front camera's
+    // was before the limit; the two agree, as do the back camera's.
+    auto control = infos;
+    control[1].position = CameraPosition::back;
+    control[1].identifier = "mini-front-as-back";
+    const auto unlimited = arrangeCameras(control, together, "tablet", CalibrationStore(), {});
+    const auto& same = ofPlatformCamera(unlimited, 1);
+    require(same.concurrencyDropped == front.concurrencyDropped && same.jpegSizes.front() == CameraStillSize({3088, 2316}),
+            "the control is not limited, and drops its concurrency");
+    // The whole video offer is the control's, although the anchor moved (2016x1512 to 1920x1440): only the stills differ.
+    require(sameVideo(front.video, same.video) && front.video.front().width == 1920 && front.video.front().height == 1080,
+            "the video offer, sizes and rates, is what it was");
+    // The platform session's own predicate for the pair (the anchor's multi-camera flag) changes with the anchor, but the
+    // device runs at most the cameras of its use: the layout of this pair is not concurrent, so it composes one slot (the
+    // camera-device test testTheDeviceRunsOnlyTheCamerasItsUseAllows shows the second camera of such a use refused, whatever
+    // the platform would run, and camera-layout that a pair which does not run together composes use.streams == 1).
+    const auto layout = summarizeLayout(limited, CameraTier::small);
+    const auto controlLayout = summarizeLayout(unlimited, CameraTier::small);
+    require(!layout.concurrent && layout.concurrent == controlLayout.concurrent && layout.back && layout.front,
+            "the layout of the pair is not concurrent, as it was");
+    const auto& backBefore = ofPlatformCamera(unlimited, 0);
+    const auto& backNow = ofPlatformCamera(limited, 0);
+    require(backBefore.concurrencyDropped == backNow.concurrencyDropped && backBefore.jpegSizes == backNow.jpegSizes && backBefore.anchor == backNow.anchor &&
+                backBefore.video.size() == backNow.video.size(),
+            "the back camera is told what it was told");
+    // The tables where the listed formats keep it: it stays, in a format that makes the same stills as the limit leaves.
+    auto keeps = infos;
+    for (auto& format : keeps[1].captureFormats)
+        if (format.width == 1920 && format.height == 1440 && format.multiCamera) format.photoSizes = {{1920, 1440}, {2016, 1512}, {3088, 2316}};
+    const auto kept = arrangeCameras(keeps, together, "tablet", CalibrationStore(), {});
+    const auto& keptFront = ofPlatformCamera(kept, 1);
+    require(!keptFront.concurrencyDropped && bit(keptFront.wire.concurrent_mask, ofPlatformCamera(kept, 0).index) && !bit(keptFront.wire.conflict_mask, ofPlatformCamera(kept, 0).index),
+            "a front camera whose multi-camera format lists the photo as much as its best keeps its concurrency");
+    require(keptFront.jpegSizes == std::vector<CameraStillSize>({{2016, 1512}, {1920, 1440}}), "and offers the limited stills, in a multi-camera format");
+    require(keeps[1].captureFormats[*keptFront.anchor].multiCamera, "in a multi-camera format");
+    // The rest of what the tests model: a table's concurrency as a front camera and as a back camera agree.
+    for (const auto& table : {tabletCamera(), miniCameras()[1]}) {
+        for (const bool dropOne : {false, true}) {
+            auto asFront = table;
+            asFront.identifier = "front";
+            asFront.position = CameraPosition::front;
+            if (dropOne)
+                for (auto& format : asFront.captureFormats) format.multiCamera = format.multiCamera && format.width < 1500;
+            auto asBack = asFront;
+            asBack.identifier = "back";
+            asBack.position = CameraPosition::back;
+            CameraInfo partner = tabletCamera();
+            partner.identifier = "partner";
+            partner.position = CameraPosition::back;
+            partner.lens = CameraLensKind::ultraWide;
+            const auto f = arrangeCameras(std::vector<CameraInfo> {asFront, partner}, together, "tablet", CalibrationStore(), {});
+            const auto b = arrangeCameras(std::vector<CameraInfo> {asBack, partner}, together, "tablet", CalibrationStore(), {});
+            require(ofPlatformCamera(f, 0).concurrencyDropped == ofPlatformCamera(b, 0).concurrencyDropped,
+                    "the same concurrency as the unlimited control");
+        }
+    }
+}
+
+// The second real front table (an iPhone 15 Pro Max's): the camera keeps its concurrency listed, so it keeps it with the
+// limit, runs with the other camera in a multi-camera format, and is offered the limited stills; as a back camera (the
+// control, unlimited) its concurrency, anchor and video are the same.
+void testTheFrontStillLimitOnTheSecondRealFrontTable()
+{
+    CameraInfo back = tabletCamera();
+    back.pixelArrayWidth = 4032;
+    back.pixelArrayHeight = 3024;
+    const auto front = frontCameraOf(uml::testing::phoneFrontFormats(), "phone-front");
+    const std::vector<std::vector<std::size_t>> together {{0, 1}};
+    const auto limited = arrangeCameras(std::vector<CameraInfo> {back, front}, together, "phone", CalibrationStore(), {});
+    const auto& camera = ofPlatformCamera(limited, 1);
+    require(!camera.concurrencyDropped && bit(camera.wire.concurrent_mask, ofPlatformCamera(limited, 0).index) &&
+                !bit(camera.wire.conflict_mask, ofPlatformCamera(limited, 0).index),
+            "it keeps its concurrency");
+    require(camera.anchor && front.captureFormats[*camera.anchor].multiCamera && front.captureFormats[*camera.anchor].width == 1920 &&
+                front.captureFormats[*camera.anchor].height == 1440,
+            "in a 1920x1440 multi-camera format");
+    require(camera.jpegSizes == std::vector<CameraStillSize>({{2016, 1512}, {1920, 1440}}), "it offers 2016x1512 and 1920x1440");
+    require(camera.wire.pixel_array_width == 4032 && camera.wire.pixel_array_height == 3024, "the pixel array is the field of view's");
+    auto asBack = front;
+    asBack.position = CameraPosition::back;
+    asBack.identifier = "phone-front-as-back";
+    const auto unlimited = arrangeCameras(std::vector<CameraInfo> {back, asBack}, together, "phone", CalibrationStore(), {});
+    const auto& control = ofPlatformCamera(unlimited, 1);
+    require(control.concurrencyDropped == camera.concurrencyDropped && control.concurrencyDropped == false &&
+                control.wire.concurrent_mask == camera.wire.concurrent_mask && control.wire.conflict_mask == camera.wire.conflict_mask,
+            "the same concurrency as the unlimited control");
+    require(control.anchor && front.captureFormats[*control.anchor].multiCamera && sameVideo(control.video, camera.video) &&
+                control.jpegSizes == std::vector<CameraStillSize>({{4032, 3024}, {1920, 1440}}),
+            "whose video offer is the same and whose stills are the 12 MP and 1920x1440 ones");
+    require(front.captureFormats[*control.anchor].width == front.captureFormats[*camera.anchor].width &&
+                front.captureFormats[*control.anchor].height == front.captureFormats[*camera.anchor].height,
+            "and whose anchor is a format of the same size");
+}
+
+// A front camera's format that the limit leaves with no photo size, and the ranking as it is. A (1080p at 1-30 fps, a 12 MP
+// photo) beats B (VGA, a VGA photo at 1-15 fps) before the limit and after it: it keeps its video and loses its native
+// JPEG, which Android derives from the video. When B runs at 1-30 fps too, A's lost photo makes B win: the video offer
+// falls from 1080p to VGA and the camera is offered B's photo. Both are what the ranking does on these tables, stated here;
+// the iPad mini's and the iPhone's front tables are not like this (their anchors keep their video).
+void testAFormatThatTheLimitLeavesWithNoPhotoMayStillBeTheAnchor()
+{
+    const auto camera = [](CameraPosition position, std::uint32_t slowMaximum) {
+        CameraInfo info;
+        info.identifier = "two-formats";
+        info.position = position;
+        info.lens = CameraLensKind::wide;
+        info.captureFormats = {
+            {1920, 1080, {{1, 30}}, {{4032, 3024}}, true, false},
+            {640, 480, {{1, double(slowMaximum)}}, {{640, 480}}, true, false},
+        };
+        for (const auto& format : info.captureFormats)
+            info.videoFormats.push_back({format.width, format.height, 1, std::uint32_t(format.frameRates.front().maximum), format.multiCamera});
+        info.stillSizes = {{4032, 3024}, {640, 480}};
+        return info;
+    };
+    const auto arranged = [&](CameraPosition position, std::uint32_t slowMaximum) {
+        return arrangeCameras(std::vector<CameraInfo> {camera(position, slowMaximum)}, {}, "tablet", CalibrationStore(), {});
+    };
+    // B at 1-15 fps: A wins before (as a back camera) and after (as a front one).
+    const auto controlA = arranged(CameraPosition::back, 15);
+    const auto limitedA = arranged(CameraPosition::front, 15);
+    require(controlA.size() == 1 && limitedA.size() == 1 && controlA[0].anchor == std::optional<std::size_t>(0) &&
+                limitedA[0].anchor == std::optional<std::size_t>(0),
+            "A wins before and after");
+    require(controlA[0].jpegSizes == std::vector<CameraStillSize>({{4032, 3024}}) && limitedA[0].jpegSizes.empty(), "A's photo is offered before, not after");
+    require(sameVideo(controlA[0].video, limitedA[0].video) && limitedA[0].video.front().width == 1920 && limitedA[0].video.front().height == 1080 &&
+                limitedA[0].video.front().maximumFrameRate == 30,
+            "and its video, 1080p at 1-30 fps, is the offer either way");
+    require(anchorSummary(limitedA[0]).find("offers stills none") != std::string::npos, "the log line says no stills");
+    // B at 1-30 fps: B wins after the limit.
+    const auto controlB = arranged(CameraPosition::back, 30);
+    const auto limitedB = arranged(CameraPosition::front, 30);
+    require(controlB[0].anchor == std::optional<std::size_t>(0) && controlB[0].video.front().width == 1920, "A wins before");
+    require(limitedB[0].anchor == std::optional<std::size_t>(1), "B wins after");
+    require(limitedB[0].jpegSizes == std::vector<CameraStillSize>({{640, 480}}), "the camera is offered B's photo");
+    require(!limitedB[0].video.empty() && limitedB[0].video.front().width == 640 && limitedB[0].video.front().height == 480 &&
+                std::all_of(limitedB[0].video.begin(), limitedB[0].video.end(), [](const VideoMode& mode) { return mode.width <= 640 && mode.height <= 480; }),
+            "and its video falls from 1080p to VGA");
+}
+
+// A front camera without capture formats (the synthetic phone's) offers a flat list of sizes, and the limit applies to that
+// list too, with the tier's cap; a back camera's list has the tier's cap alone.
+void testAFrontCameraWithoutFormatsIsLimitedToo()
+{
+    const Host phone(SyntheticCameraProfile::phone);
+    const auto cameras = phone.arrange(CameraTier::small);
+    std::size_t checked = 0;
+    for (const auto& camera : cameras) {
+        if (camera.info.position == CameraPosition::front) {
+            require(camera.info.captureFormats.empty() && camera.jpegSizes == std::vector<CameraStillSize>({{2016, 1512}, {1008, 756}}),
+                    "the front camera's flat list loses its 12 MP size");
+            ++checked;
+        } else if (camera.info.lens == CameraLensKind::wide) {
+            require(camera.jpegSizes.front() == CameraStillSize({4032, 3024}), "the back wide camera's list has the tier's cap alone");
+            ++checked;
+        }
+    }
+    require(checked == 2, "both cameras were seen");
+}
+
 } // namespace
 
 int main()
@@ -716,5 +1003,10 @@ int main()
     testRates();
     testAnAnchoredCamerasRates();
     testLayout();
+    testAFrontCameraIsToldItsLimitedStillsAndItsFullFieldOfView();
+    testTheFrontStillLimitChangesNoConcurrency();
+    testTheFrontStillLimitOnTheSecondRealFrontTable();
+    testAFormatThatTheLimitLeavesWithNoPhotoMayStillBeTheAnchor();
+    testAFrontCameraWithoutFormatsIsLimitedToo();
     return 0;
 }

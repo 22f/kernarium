@@ -229,7 +229,9 @@ struct SideKeysTouchTests {
         defer { run.end() }
         let model = run.model
 
-        try #require(await eventually { run.presented != nil }, "the tip did not show")
+        // The popover passes a touch to the screen under it until its card is
+        // in place, so the card is looked at once it has appeared.
+        try #require(await eventually { run.presented?.isBeingPresented == false }, "the tip did not show")
         let card = try #require(run.tipCard)
         let far = run.beside[0]
         let onCard = CGPoint(x: card.midX, y: card.midY)
@@ -253,6 +255,52 @@ struct SideKeysTouchTests {
         model.phase = .home
         #expect(await eventually { run.presented == nil }, "the tip stayed after the session ended")
     }
+
+    /// The tip's popover is UIKit's, and UIKit's popover takes the first touch
+    /// outside its card to dismiss itself: a person's first touch on the keys
+    /// the tip points at (and a second, on the popover's dimming view) never
+    /// reached them. The screen under the popover is one of its pass-through
+    /// views, so that a touch beside the card goes where it fell.
+    @Test func theTipsPopoverLetsATouchBesideItsCardThroughToTheScreen() async throws {
+        let run = try await RunningSession(self)
+        defer { run.end() }
+
+        try #require(await eventually { run.presented != nil }, "the tip did not show")
+        let popover = try #require(run.presented?.popoverPresentationController)
+        let screen = try #require(popover.presentingViewController.view)
+        #expect(
+            await eventually { popover.passthroughViews?.contains { $0 === screen } ?? false },
+            "the popover takes the touch beside its card: \(String(describing: popover.passthroughViews))")
+    }
+
+    /// SwiftUI sets a popover's pass-through list empty again when it updates
+    /// the popover (here the card's words change, as the session's
+    /// capabilities do), and the screen stays one of its pass-through views.
+    @Test func theTipsPopoverStillLetsATouchThroughOnceSwiftUIHasUpdatedIt() async throws {
+        let run = try await RunningSession(self)
+        defer { run.end() }
+
+        try #require(await eventually { run.presented?.isBeingPresented == false }, "the tip did not show")
+        let popover = try #require(run.presented?.popoverPresentationController)
+        let screen = try #require(popover.presentingViewController.view)
+        try #require(
+            await eventually { popover.passthroughViews?.contains { $0 === screen } ?? false },
+            "the popover takes the touch beside its card: \(String(describing: popover.passthroughViews))")
+
+        let emptied = Emptied()
+        let watch = popover.observe(\.passthroughViews, options: [.new]) { _, change in
+            MainActor.assumeIsolated { if (change.newValue ?? nil)?.isEmpty ?? true { emptied.count += 1 } }
+        }
+        defer { watch.invalidate() }
+        run.model.capabilities = withoutApkInstall
+        try #require(await eventually { emptied.count > 0 }, "SwiftUI did not update the popover")
+        #expect(
+            popover.passthroughViews?.contains { $0 === screen } ?? false,
+            "the popover takes the touch beside its card after the update: \(String(describing: popover.passthroughViews))")
+    }
+
+    /// How many times SwiftUI set a popover's pass-through list empty.
+    @MainActor private final class Emptied { var count = 0 }
 
     // MARK: The tip's line for Install APK
 
