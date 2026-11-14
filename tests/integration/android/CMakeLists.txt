@@ -240,6 +240,18 @@ if(UML_ANDROID_RESTART_LOOP_RELEASE AND TARGET uml-darwin-android17)
         RESOURCE_GROUPS cpus:4)
 endif()
 
+# Test support only: a library the camera runner inserts into the launcher
+# (DYLD_INSERT_LIBRARIES), which suspends the thread that serves the Virtio sound
+# device for a while, as a busy host does to the worker its capture timeline
+# runs on while the guest keeps running.
+add_library(uml_audio_hold SHARED audio_hold.cpp)
+set_target_properties(uml_audio_hold PROPERTIES
+    PREFIX ""
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+target_compile_options(uml_audio_hold PRIVATE -Wall -Wextra -Werror)
+target_compile_features(uml_audio_hold PRIVATE cxx_std_20)
+add_dependencies(integration-test-binaries uml_audio_hold)
+
 # The host's cameras (routes p0030 and p0031 and the camera layouts): the runner
 # boots the release with the launcher's synthetic camera and a camera layout on the
 # vendor SKU, and checks the layout's features and media profiles, the cameras
