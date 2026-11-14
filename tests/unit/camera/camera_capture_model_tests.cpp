@@ -2190,6 +2190,67 @@ void theFrontStillLimitOnTheSecondRealFrontTable()
     require(photoMaximum(limited[*after], 12'700'000) == std::optional<CameraStillSize>(CameraStillSize {2016, 1512}), "the output's maximum");
 }
 
+void aCamerasLastUseSurvivesTheNextSessionsDiscovery()
+{
+    // A platform session that closes when the cameras are idle states the mounting again when it opens: the record keeps
+    // what the last admissions of the camera set (the video connection, the photo output, the ratio, the refusals and
+    // the Exif orientation of the last photo) beside the new discovery.
+    CameraPresentation kept;
+    kept.position = CameraPosition::front;
+    kept.stated = 90;
+    kept.turn = 0;
+    kept.anchorWidth = 1920;
+    kept.anchorHeight = 1440;
+    kept.ratioKnown = true;
+    kept.ratioPinned = CameraAspectRatio::r3x4;
+    kept.ratioNow = CameraAspectRatio::r3x4;
+    kept.ratioWidth = 1512;
+    kept.ratioHeight = 2016;
+    kept.ratioError = 0;
+    kept.videoKnown = true;
+    kept.videoDefaultAngle = 0;
+    kept.videoAngle = 270;
+    kept.videoAngleSupported = CameraFact::yes;
+    kept.videoAskedWidth = 1920;
+    kept.videoAskedHeight = 1440;
+    kept.videoFirstWidth = 1920;
+    kept.videoFirstHeight = 1440;
+    kept.photoKnown = true;
+    kept.compensationSupported = CameraFact::yes;
+    kept.compensationEnabled = CameraFact::yes;
+    kept.photoAngle = 0;
+    kept.photoMaximumWidth = 2016;
+    kept.photoMaximumHeight = 1512;
+    kept.exifOrientation = 6;
+    kept.refusals = 2;
+    kept.lastRefusal = 4;
+    CameraPresentation discovered;
+    discovered.position = CameraPosition::front;
+    discovered.deviceType = CameraDeviceType::wide;
+    discovered.coordinatorAngles = {0, 180, 90, 270};
+    discovered.stated = 90;
+    discovered.turn = 270;
+    discovered.earlier = true;
+    discovered.anchorWidth = 1920;
+    discovered.anchorHeight = 1440;
+    discovered.anchorRatios = std::uint8_t(aspectRatioBit(CameraAspectRatio::r4x3) | aspectRatioBit(CameraAspectRatio::r3x4));
+    discovered.anchorFieldOfView = 85;
+    discovered.frontDevices = 2;
+    discovered.squareFormats = true;
+    discovered.dynamicRatios = true;
+    const CameraPresentation merged = withDiscovery(kept, discovered);
+    require(merged.deviceType == CameraDeviceType::wide && merged.coordinatorAngles == discovered.coordinatorAngles && merged.turn == 270 &&
+                merged.earlier && merged.anchorRatios == discovered.anchorRatios && merged.anchorFieldOfView == 85 &&
+                merged.frontDevices == 2 && merged.squareFormats && merged.dynamicRatios,
+            "the discovery is the new session's");
+    require(merged.ratioKnown && merged.ratioPinned == CameraAspectRatio::r3x4 && merged.ratioWidth == 1512 && merged.videoKnown &&
+                merged.videoAngle == 270 && merged.videoAskedWidth == 1920 && merged.videoFirstWidth == 1920 && merged.photoKnown &&
+                merged.compensationSupported == CameraFact::yes && merged.compensationEnabled == CameraFact::yes &&
+                merged.photoMaximumWidth == 2016 && merged.exifOrientation == 6 && merged.refusals == 2 && merged.lastRefusal == 4,
+            "the last use of the camera stays");
+    require(withDiscovery(CameraPresentation {}, discovered) == discovered, "a camera that was not used is its discovery");
+}
+
 int main()
 {
     theDurationThatMovesOutOfTheOthersWayIsWrittenFirst();
@@ -2256,6 +2317,7 @@ int main()
     aCameraStatesThePlatformsOwnMounting();
     aFrontCameraMountedAtTheTopIsPresentedLikeAnEarlierOne();
     aSquareFormatThatListsRatiosIsDescribedByItsPinnedCrop();
+    aCamerasLastUseSurvivesTheNextSessionsDiscovery();
     thePinnedCropsFieldOfViewIsTheLargerOfTheTwo();
     theRatioBitsAreDistinctAndNoneHasNone();
     return 0;

@@ -147,4 +147,26 @@ struct CameraPresentation {
 // record writes `pending`).
 inline constexpr std::int32_t ratioPending = std::numeric_limits<std::int32_t>::min();
 
+// A camera's note when its platform session opens again (a session that closed
+// when the cameras were idle): the facts of its discovery are the new session's,
+// and what an earlier session's admissions set, the refusals counted and the
+// last photo's Exif orientation stay, as the record of the camera's last use.
+[[nodiscard]] inline CameraPresentation withDiscovery(CameraPresentation kept, const CameraPresentation& discovered)
+{
+    kept.position = discovered.position;
+    kept.deviceType = discovered.deviceType;
+    kept.coordinatorAngles = discovered.coordinatorAngles;
+    kept.stated = discovered.stated;
+    kept.turn = discovered.turn;
+    kept.earlier = discovered.earlier;
+    kept.anchorWidth = discovered.anchorWidth;
+    kept.anchorHeight = discovered.anchorHeight;
+    kept.anchorRatios = discovered.anchorRatios;
+    kept.anchorFieldOfView = discovered.anchorFieldOfView;
+    kept.frontDevices = discovered.frontDevices;
+    kept.squareFormats = discovered.squareFormats;
+    kept.dynamicRatios = discovered.dynamicRatios;
+    return kept;
+}
+
 } // namespace uml::platform

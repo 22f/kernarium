@@ -632,6 +632,20 @@ std::vector<Entry> discover()
 
 class AppleSession;
 
+// The last note of each camera across the platform sessions of the process, by the device's identifier: a session that
+// closes when the cameras are idle and opens again states the mounting again, and the record keeps what the cameras'
+// last admissions set (withDiscovery). Its lock is the innermost of the notes' (AppleSession::note).
+struct HeldNotes {
+    std::mutex mutex;
+    std::map<std::string, CameraPresentation> notes;
+};
+
+HeldNotes& heldNotes()
+{
+    static HeldNotes held;
+    return held;
+}
+
 // One camera's output delegate. It forwards to the session through a state
 // that outlives it, so a callback that races the session's end finds it gone.
 struct SessionState {
@@ -1026,7 +1040,8 @@ public:
                 facts.anchorHeight = anchor.facts.height;
                 facts.anchorRatios = anchor.facts.aspectRatios;
                 facts.anchorFieldOfView = fieldOfViewOf(anchor);
-                note(camera, [&](CameraPresentation& held) { held = facts; });
+                // What an earlier session of the process left of the camera's last use stays beside the new discovery.
+                note(camera, [&](CameraPresentation& held) { held = withDiscovery(heldNoteOf(camera), facts); });
             }
         });
     }
@@ -1613,7 +1628,25 @@ public:
         edit(next);
         if (next.anchorWidth == 0) return;
         notes_[camera] = next;
+        keepNote(camera);
         delegate_.cameraPresentation(camera, next);
+    }
+
+    // The camera's note as an earlier session of the process left it (the notes' lock is held).
+    CameraPresentation heldNoteOf(std::size_t camera)
+    {
+        HeldNotes& held = heldNotes();
+        std::lock_guard lock(held.mutex);
+        const auto found = held.notes.find(entries_[camera].info.identifier);
+        return found != held.notes.end() ? found->second : CameraPresentation {};
+    }
+
+    // Keeps the camera's note for the sessions that follow this one (the notes' lock is held).
+    void keepNote(std::size_t camera)
+    {
+        HeldNotes& held = heldNotes();
+        std::lock_guard lock(held.mutex);
+        held.notes[entries_[camera].info.identifier] = notes_[camera];
     }
 
     // The first frame of an admission states the size the output delivers, once.
@@ -1623,6 +1656,7 @@ public:
         if (camera >= notes_.size() || !notes_[camera].videoKnown || notes_[camera].videoFirstWidth != 0) return;
         notes_[camera].videoFirstWidth = width;
         notes_[camera].videoFirstHeight = height;
+        keepNote(camera);
         delegate_.cameraPresentation(camera, notes_[camera]);
     }
 
