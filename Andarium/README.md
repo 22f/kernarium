@@ -455,8 +455,8 @@ control out.
   closes the sheet and Home says what happened, Start being next. The preview
   plays the same screens on mock snapshots (`-screen snapshots-…`).
 - **Release notes.** `Shared/WhatsNew.json` bundles the notes per build,
-  from build 9 (build 5, the first public release, and builds 6 to 8 have
-  none).
+  from build 9 (build 5, the first public release, and builds 6 to 8 and
+  10 have none).
   The first launch of an update that carries notes shows a ribbon above Start,
   on at most three launches, that opens them; a build shows the notes up to its
   own number and no later ones. An entry can name the devices it is for (more
