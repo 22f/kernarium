@@ -54,6 +54,40 @@ std::string stringOf(NSString* value)
     return value ? std::string(value.UTF8String) : std::string();
 }
 
+#if TARGET_OS_IOS
+// Keeps a connection's pictures in the camera's own orientation, unturned and unmirrored, which its stated
+// SENSOR_ORIENTATION describes (sensorOrientationOf): a device may turn or mirror a camera's pictures by default (some
+// iPads turn their front camera's video by 180 degrees). A connection that refuses keeps what it has.
+void keepSensorOrientation(AVCaptureConnection* connection)
+{
+    if (connection == nil) return;
+    @try {
+        if (connection.supportsVideoMirroring) {
+            connection.automaticallyAdjustsVideoMirroring = NO;
+            connection.videoMirrored = NO;
+        }
+        if (connection.videoRotationAngle != 0 && [connection isVideoRotationAngleSupported:0]) connection.videoRotationAngle = 0;
+    } @catch (NSException* exception) {
+        std::fprintf(stderr, "Camera: a connection kept its own orientation: %s\n",
+                     exception.reason != nil ? exception.reason.UTF8String : "");
+    }
+}
+
+// The same for a photo output: its stills stay in the camera's own orientation, without the turn to an earlier
+// model's sensor orientation that the output otherwise applies where it supports one. The host's Exif, which
+// would state a turn, is not passed on (jpeg_gap.hpp).
+void keepStillOrientation(AVCapturePhotoOutput* output)
+{
+    @try {
+        if (output.cameraSensorOrientationCompensationSupported) output.cameraSensorOrientationCompensationEnabled = NO;
+    } @catch (NSException* exception) {
+        std::fprintf(stderr, "Camera: a photo output kept its orientation compensation: %s\n",
+                     exception.reason != nil ? exception.reason.UTF8String : "");
+    }
+    keepSensorOrientation([output connectionWithMediaType:AVMediaTypeVideo]);
+}
+#endif
+
 [[maybe_unused]] CameraControlState controlState(bool adjusting, bool locked)
 {
     if (adjusting) return CameraControlState::searching;
@@ -353,7 +387,10 @@ std::vector<Entry> discover()
         info.aperture = device.lensAperture;
         info.minimumFocusDistanceMillimetres = device.minimumFocusDistance > 0 ? float(device.minimumFocusDistance) : 0.0f;
         info.maximumWhiteBalanceGain = device.maxWhiteBalanceGain;
-        info.sensorOrientation = info.position == CameraPosition::front ? 270 : 90;
+        // The platform states each camera's mounting; the connections keep the pictures in it (keepSensorOrientation).
+        AVCaptureDeviceRotationCoordinator* rotation = [[AVCaptureDeviceRotationCoordinator alloc] initWithDevice:device previewLayer:nil];
+        info.sensorOrientation = sensorOrientationOf(
+            info.position, [rotation videoRotationAngleRelativeToDeviceOrientation:AVCaptureVideoOrientationPortrait]);
         // A virtual device refuses manual exposure, focus and white balance.
         if (!zoomCamera) {
             info.manualExposure = [device isExposureModeSupported:AVCaptureExposureModeCustom];
@@ -1419,6 +1456,9 @@ private:
                 // The stream's size, scaled by the platform from the anchor's at
                 // the anchor's aspect ratio: set once the output has its source.
                 setVideoOutputSettings(output, videoSettingsOf(anchor->facts, width, height));
+#if TARGET_OS_IOS
+                keepSensorOrientation(newConnection);
+#endif
                 return true;
             });
         };
@@ -1440,6 +1480,7 @@ private:
                         AVCaptureConnection* connection = [[AVCaptureConnection alloc] initWithInputPorts:@[port] output:output];
                         if (![session_ canAddConnection:connection]) return false;
                         [session_ addConnection:connection];
+                        keepStillOrientation(output);
                         return true;
 #else
                         return false;
@@ -1448,6 +1489,9 @@ private:
                     if (![session_ canAddOutput:output]) return false;
                     [session_ addOutput:output];
                     newPhoto = output;
+#if TARGET_OS_IOS
+                    keepStillOrientation(output);
+#endif
                     return true;
                 };
                 // The output makes photos up to the anchor's photoMaximum, which

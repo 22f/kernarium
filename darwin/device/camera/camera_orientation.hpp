@@ -25,9 +25,10 @@ namespace uml::camera {
  *  - a front camera looks the other way, so the scene turns the same way in
  *    the buffer and the buffer needs `turn` less: base - turn;
  *  - an external camera is not on the body and does not turn.
- * Check against the sensor's native buffer, which is upright with the home
- * button on the right (interface landscapeRight, turn 270): a back camera
- * (90 + 270) and a front camera (270 - 270) both come to 0. */
+ * Check against the native buffers of an iPhone 15 Pro Max's cameras, both
+ * stated 90 by the platform: a back camera's is upright with the port on the
+ * right (turn 270: 90 + 270 = 0), a front camera's with the port on the left
+ * (turn 90: 90 - 90 = 0). */
 
 [[nodiscard]] constexpr std::uint32_t turnedSensorOrientation(
     uml::platform::CameraPosition position, std::uint32_t base, std::uint32_t turn) noexcept

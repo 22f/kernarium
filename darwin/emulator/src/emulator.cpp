@@ -859,6 +859,13 @@ public:
 		/* Last, with the guest asleep and its files on disk. */
 		if (guest_suspension_ == ::uml::device::GuestSuspension::system)
 			settle_suspended_guest(resident);
+		else if (guest_suspension_ == ::uml::device::GuestSuspension::none) {
+			/* The guest was left running (it could not suspend): what the
+			 * memory pressure response asked of the trimmer while this call
+			 * held the mutex was answered busy, and no resume follows to
+			 * settle it. */
+			(void)apply_trimming(false);
+		}
 		/* The files the host could not flush, as the API reports them. A
 		 * lock it could not release is no file left unflushed, and is
 		 * logged where it happens. */
