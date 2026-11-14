@@ -1378,9 +1378,9 @@ public:
         // The first member that fails says why the capture did (`reportStillFailure`): what the platform said of it, and
         // the stage the device found.
         std::optional<uml::platform::CameraStillFailure> failure;
-        // A capture that delivered a picture did not fail, whatever one of its parts did: that part's buffer has failed
-        // and the capture is not reported.
-        bool delivered = false;
+        // A capture that delivered its JPEG did not fail, whatever its RAW did: that buffer has failed and the capture is
+        // not reported. One whose JPEG did not arrive is, whether its RAW did or not.
+        bool jpegAsked = false, jpegFailed = false;
         const auto fails = [&](uml::platform::CameraStillStage stage, std::uint32_t encodedWidth = 0, std::uint32_t encodedHeight = 0) {
             if (failure) return;
             failure = result.failure;
@@ -1432,7 +1432,11 @@ public:
                 } else if (plan) {
                     jpegStage = uml::platform::CameraStillStage::guestBuffer;
                 }
-                if (!ok) fails(jpegStage, encodedWidth, encodedHeight);
+                jpegAsked = true;
+                if (!ok) {
+                    jpegFailed = true;
+                    fails(jpegStage, encodedWidth, encodedHeight);
+                }
             } else if (!result.raw.empty() && result.color.rawWidth != 0) {
                 ok = writeRaw(stream, resource, result, size);
                 if (!ok) fails(uml::platform::CameraStillStage::guestBuffer);
@@ -1440,10 +1444,9 @@ public:
                 fails(result.failure.stage != uml::platform::CameraStillStage::none ? result.failure.stage
                                                                                     : uml::platform::CameraStillStage::missingData);
             }
-            delivered = delivered || ok;
             complete(stream.id, member.held, member.held.cookie, ok ? 0 : VIRTIO_VIDEO_DEQUEUE_FLAG_ERR, ok ? size : 0, sequence);
         }
-        if (failure && !delivered) reportStillFailure(*group, runtime, *failure);
+        if (failure && (jpegFailed || !jpegAsked)) reportStillFailure(*group, runtime, *failure);
         pushMeta(runtime, meta, 0);
         freePayload(result);
         eraseGroup(result.token);

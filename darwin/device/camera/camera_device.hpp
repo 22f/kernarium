@@ -101,9 +101,10 @@ struct CameraDeviceOptions {
      * the capture (`uml::platform::CameraStillFailure`; numbers and fixed
      * words, never a name or a message). The runtime keeps the last few in its
      * session record. A capture that the camera's interruption or a blocked
-     * session ends is not one of them, and neither is one that delivers. It
-     * changes nothing. The worker waits for it, so it is brief: the runtime's
-     * writes the session record, a synchronous write, once for each. */
+     * session ends is not one of them, and neither is one that delivered its
+     * JPEG, whatever happened to its RAW. It changes nothing. The worker waits
+     * for it, so it is brief: the runtime's writes the session record, a
+     * synchronous write, once for each. */
     std::function<void(const uml::platform::CameraStillFailure&)> onStillFailure;
     /* Called on the transport thread when the state changes. */
     std::function<void(CameraState)> onState;

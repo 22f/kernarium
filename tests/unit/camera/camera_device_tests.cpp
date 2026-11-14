@@ -3198,7 +3198,8 @@ RawAndJpeg askForRawAndJpeg(Rig& rig)
 /* Which captures `onStillFailure` is told of: each one the guest asked for that did not end in a picture, once. A whole
  * capture that waited for the host's budget until its time ran out is one, as the capture the platform held is; one that an
  * interruption of its camera ended is not, whether its time ran out or the platform ended it; a group the guest did not
- * complete is not a capture; and one that delivered a picture is not, whatever one of its parts did. */
+ * complete is not a capture; and one that delivered its JPEG is not, whatever its RAW did. One whose JPEG did not arrive is,
+ * whether its RAW did or not. */
 void testOnlyACaptureThatEndedInNoPictureIsReported()
 {
     constexpr std::uint32_t front = 1;
@@ -3273,7 +3274,7 @@ void testOnlyACaptureThatEndedInNoPictureIsReported()
         require(rig.done(first) && rig.done(second) && (rig.result(second).base.flags & errorFlag), "both fail at their deadline");
         require(rig.stillFailures.empty(), "and an interruption that is on says they are not reported");
     }
-    // A RAW and a JPEG: the part that fails alone does not make a failure of a capture that delivered the other.
+    // A RAW and a JPEG: a RAW that fails alone is not a failure of a capture that delivered its JPEG.
     {
         auto store = learnedColour();
         RigOptions options;
@@ -3289,7 +3290,7 @@ void testOnlyACaptureThatEndedInNoPictureIsReported()
         require(rig.stillFailures.empty(), "a capture that delivered the JPEG reports nothing");
     }
     {
-        // The other way round: the JPEG fails and the RAW is delivered, which is a picture too.
+        // The other way round: the photo did not appear, whatever the RAW did.
         auto store = learnedColour();
         RigOptions options;
         options.store = store;
@@ -3300,7 +3301,10 @@ void testOnlyACaptureThatEndedInNoPictureIsReported()
         rig.step();
         require((rig.result(group.jpeg).base.flags & errorFlag) != 0 && rig.result(group.raw).base.flags == 0,
                 "the JPEG buffer fails and the RAW is delivered");
-        require(rig.stillFailures.empty(), "a capture that delivered the RAW reports nothing");
+        require(rig.stillFailures.size() == 1 && rig.stillFailures[0].stage == CameraStillStage::missingData &&
+                    rig.stillFailures[0].camera == 0 && rig.stillFailures[0].askedWidth == 1008 &&
+                    rig.stillFailures[0].askedHeight == 756,
+                "a capture whose JPEG did not arrive is reported with the JPEG's size, though the RAW did");
     }
     // Both parts failing is a capture that ended in no picture, reported once.
     {
