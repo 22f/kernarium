@@ -327,7 +327,8 @@ automation host.
 `guest-host-core` (unit, macOS) runs the Swift package `GuestHost/Core`, the
 free-space thresholds, suspension check and pause both applications share and
 the logic of the hardware keyboard and pointer (held keys, Caps Lock,
-positions, buttons, scroll), and
+positions, buttons, scroll), and the latch of a run's host stop with the
+guest's write-back before it (`RunStop`, `StopSettle`), and
 `andarium-core` (unit, macOS) runs the Swift package `Andarium/AndariumCore`
 with `swift test` (it includes the hardware input's plug policy and pointer
 capture, the snapshot store on APFS clones of sparse

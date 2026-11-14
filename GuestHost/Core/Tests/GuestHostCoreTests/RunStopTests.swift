@@ -3,7 +3,7 @@
 import Foundation
 import Testing
 
-@testable import AndariumCore
+@testable import GuestHostCore
 
 /// The person's stop of a run across the hand-over to the runtime's thread:
 /// kept until the run ends, delivered after the thread entered the runtime.
@@ -214,8 +214,8 @@ struct RunStopTests {
         #expect(!stop.isLive)
     }
 
-    @Test func theWriteBackIsBoundedByTheEdgeBudget() {
-        #expect(StopSettle.bound == PauseController.edgeBudget)
+    @Test func theWriteBackIsBoundedByFourSeconds() {
+        #expect(StopSettle.bound == .seconds(4))
     }
 
     private static let settledGuest = GuestSettle(unflushed: 0, storage: .confirmed, suspension: .notAsked)
