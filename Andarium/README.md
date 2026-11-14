@@ -1120,7 +1120,10 @@ is on. `AndariumCore/Adb` speaks the protocol.
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB
   debugging setting is, since adbd serves the application's key either way
-  (`Live/LiveGuestFiles.swift`, `AdbSync`, `GuestFiles`). One transfer runs
+  (`Live/LiveGuestFiles.swift`, `AdbSync`, `GuestFiles`). On a page 520 pt or
+  wider the list has Name, Modified and Size columns; Modified is as wide as the
+  widest date the language writes, English's width at least, so a date stays on
+  one line and Name gives up the room (`FileDateProbe`). One transfer runs
   at a time; Install APK and Create bug report wait for it. An import is
   written to a hidden `.andarium-*.part` name beside its destination and moved
   into place, so a stopped or failed one leaves nothing and a Replace keeps the
