@@ -907,6 +907,15 @@ class FakeGuest:
         self.movie = movies if movies is not None else movie(3.5, audio=sound(3.5))
         # The seconds for which the runner stopped the emulator process, each time it did.
         self.frozen: list[float] = []
+        # What the held still step reads: the launcher's log, the preview layer and the times SurfaceFlinger
+        # presented its frames. A stop of the emulator leaves the preview away for as long as it lasted and
+        # `away_more` seconds more, and the launcher prints a closed and an opened capture session if the stop
+        # makes the camera HAL close the stream (`closes_on_freeze`).
+        self.launcher = ""
+        self.layer = "SurfaceView[org.lineageos.aperture/org.lineageos.aperture.CameraActivity](BLAST)#138"
+        self.present = [1_000_000_000 + 33_000_000 * i for i in range(30)]
+        self.closes_on_freeze = False
+        self.away_more = 0.0
         # The audio hold library: the seconds each hold of the sound device's thread was asked for, whether the
         # input then makes silence up (its log line), what the audio flinger's record thread shows, and the
         # input's own log.
@@ -1009,6 +1018,20 @@ class FakeGuest:
 
     def freeze(self, seconds: float) -> None:
         self.frozen.append(seconds)
+        resume = self.present[-1] + round((seconds + self.away_more) * 1e9)
+        self.present += [resume + 33_000_000 * i for i in range(10)]
+        if self.closes_on_freeze:
+            self.launcher += ("Camera: memory: capture session closed, footprint 3466 MiB\n"
+                              "Camera: memory: capture session opened, footprint 3468 MiB\n")
+
+    def launcher_log(self) -> str:
+        return self.launcher
+
+    def preview_layer(self) -> str | None:
+        return self.layer
+
+    def present_times(self, layer: str) -> list[int]:
+        return list(self.present)
 
     def hold_audio(self, seconds: float) -> float:
         self.audio_held.append(seconds)
@@ -1272,6 +1295,104 @@ class FailureLogTests(unittest.TestCase):
         self.assertIn("E CameraService: a line", err.getvalue())
         self.assertIn("no foreground state: adb: device offline", err.getvalue())
         self.assertIn("events of the camera application and its windows:", err.getvalue())
+
+
+class HeldStillTests(unittest.TestCase):
+    PLAN = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+
+    def test_the_session_lines_of_the_launcher_are_read_in_order(self) -> None:
+        text = ("Camera: camera 0: torch off, still flash automatic\n"
+                "Camera: memory: capture session opened, footprint 3350 MiB\n"
+                "Camera: memory: still delivered, footprint 3442 MiB\n"
+                "Camera: memory: capture session closed, footprint 3367 MiB\n"
+                "Camera: idle\n"
+                "Camera: memory: capture session opened, footprint 3373 MiB\n"
+                "Kernarium: memory tick footprint 2682.2 MiB capture session closed\n")
+        self.assertEqual(runner.session_events(text), ["opened", "closed", "opened"])
+        self.assertEqual(runner.session_events("Camera: streaming\n"), [])
+
+    def test_the_preview_layer_is_the_newest_of_the_application(self) -> None:
+        text = ("Display 0\n"
+                "SurfaceView[org.lineageos.aperture/org.lineageos.aperture.CameraActivity](BLAST)#99\n"
+                "SurfaceView[org.lineageos.aperture/org.lineageos.aperture.CameraActivity](BLAST)#138\n"
+                "SurfaceView[org.lineageos.aperture/org.lineageos.aperture.CameraActivity](BLAST)#7\n")
+        self.assertEqual(runner.parse_preview_layer(text),
+                         "SurfaceView[org.lineageos.aperture/org.lineageos.aperture.CameraActivity](BLAST)#138")
+        self.assertIsNone(runner.parse_preview_layer("Display 0\n"))
+
+    def test_the_present_times_of_a_layer(self) -> None:
+        text = ("16666666\n"
+                "100  1000000000  1010000000\n"
+                "100  1033000000  1040000000\n"
+                "100  9223372036854775807  1050000000\n"
+                "0  0  0\n"
+                "100  1033000000  1040000000\n"
+                "100  1066000000  1070000000\n")
+        self.assertEqual(runner.parse_present_times(text), [1_000_000_000, 1_033_000_000, 1_066_000_000])
+        self.assertEqual(runner.parse_present_times("16666666\n"), [])
+
+    def test_the_longest_gap(self) -> None:
+        self.assertAlmostEqual(runner.longest_gap_seconds([0, 33_000_000, 1_133_000_000, 1_166_000_000]), 1.1)
+        self.assertEqual(runner.longest_gap_seconds([5]), 0.0)
+        self.assertEqual(runner.longest_gap_seconds([]), 0.0)
+
+    def run_step(self, guest) -> str:
+        out = io.StringIO()
+        with mock.patch.object(runner.time, "sleep", lambda seconds: None), mock.patch.object(runner, "STILL_SECONDS", 0.05), \
+                contextlib.redirect_stdout(out):
+            runner.check_still_keeps_preview(guest, self.PLAN)
+        return out.getvalue()
+
+    def test_three_stills_that_hold_the_pipeline_leave_the_stream_open(self) -> None:
+        guest = FakeGuest(self.PLAN)
+        printed = self.run_step(guest)
+        self.assertEqual(guest.frozen, [runner.HELD_STILL_SECONDS] * len(runner.HELD_STILL_DELAYS))
+        self.assertEqual(guest.commands.count(f"input keyevent {runner.CAMERA_KEYCODE}"), len(runner.HELD_STILL_DELAYS))
+        self.assertIn("the preview's stream stayed open (no capture session closed)", printed)
+
+    def test_a_session_the_host_closed_behind_the_stills_is_a_failure(self) -> None:
+        guest = FakeGuest(self.PLAN)
+        guest.closes_on_freeze = True
+        with self.assertRaisesRegex(runner.Failure, r"the host closed its capture session 3 times in 3 stills .*closed the "
+                                    "preview's stream behind the still"):
+            self.run_step(guest)
+
+    def test_a_session_closed_before_the_step_is_not_counted(self) -> None:
+        guest = FakeGuest(self.PLAN)
+        guest.launcher = "Camera: memory: capture session closed, footprint 3466 MiB\n"
+        self.run_step(guest)
+
+    def test_a_preview_that_stays_away_longer_than_the_stop_is_a_failure(self) -> None:
+        guest = FakeGuest(self.PLAN)
+        guest.away_more = runner.HELD_STILL_RESUME_SECONDS + 0.4
+        with self.assertRaisesRegex(runner.Failure, r"held still 1: the preview was away 1\.9\d s, more than the stop and 0\.5 s"):
+            self.run_step(guest)
+
+    def test_a_preview_that_comes_back_within_the_bound_passes(self) -> None:
+        guest = FakeGuest(self.PLAN)
+        guest.away_more = runner.HELD_STILL_RESUME_SECONDS - 0.2
+        self.run_step(guest)
+
+    def test_a_round_that_gives_no_still_is_a_failure(self) -> None:
+        guest = FakeGuest(self.PLAN)
+        guest.stills = lambda: {"IMG_old.jpg"}
+        with self.assertRaisesRegex(runner.Failure, "held still 1: a still in the camera folder: no new still"):
+            self.run_step(guest)
+
+    def test_no_preview_layer_and_no_frames_are_failures(self) -> None:
+        guest = FakeGuest(self.PLAN)
+        guest.layer = None
+        with self.assertRaisesRegex(runner.Failure, "no preview layer"):
+            self.run_step(guest)
+        guest = FakeGuest(self.PLAN)
+        guest.present = []
+        with self.assertRaisesRegex(runner.Failure, "held still 1: the preview layer has presented no frame"):
+            self.run_step(guest)
+
+    def test_the_step_runs_in_live_mode_after_the_first_still(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        live = source[source.index("check_still(guest, plan, before)\n    if plan.mode == \"live\":"):]
+        self.assertLess(live.index("check_still_keeps_preview(guest, plan)"), live.index("check_video(guest, plan)"))
 
 
 class VideoAndFrontFlowTests(unittest.TestCase):
@@ -1542,8 +1663,8 @@ class VideoAndFrontFlowTests(unittest.TestCase):
         source = SCRIPT.read_text()
         run_checks = source[source.index("def run_checks"):source.index("def cameraserver_restart_skip")]
         # The switches follow the other live steps, which see the state they always saw.
-        self.assertRegex(run_checks, r'if plan.mode == "live":\n\s+check_video\(guest, plan\)\n'
-                         r'\s+check_audio_stall\(guest, plan\)\n\s+check_video_freeze\(guest, plan\)\n'
+        self.assertRegex(run_checks, r'if plan.mode == "live":\n\s+check_still_keeps_preview\(guest, plan\)\n'
+                         r'\s+check_video\(guest, plan\)\n\s+check_audio_stall\(guest, plan\)\n\s+check_video_freeze\(guest, plan\)\n'
                          r'\s+check_front\(guest, plan\)\n\s+check_mode_switch\(guest, plan\)\n'
                          r'\s+check_hal_log\(guest\)')
 
