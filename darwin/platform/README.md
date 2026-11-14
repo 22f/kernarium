@@ -180,7 +180,9 @@ interface to the wire.
   30 (`videoRateCap`); an anchor with none that low offers its slowest.
 - **Controls** arrive as one `CameraSettings` per camera, and the session
   applies what differs. A zoom camera (a virtual device) takes automatic
-  exposure, focus and white balance only.
+  exposure, focus and white balance only. A stabilization request takes the
+  low-latency mode where the active format supports it, else the standard one,
+  else none (`video_stabilization.hpp`), and never the system's automatic choice.
 - **Stills** are a JPEG, a Bayer still, or both from one capture. A Bayer still
   carries its DNG's colour data (`dng_color.hpp`), the only place the host
   reveals it. A part that fails leaves the others: a capture fails only when

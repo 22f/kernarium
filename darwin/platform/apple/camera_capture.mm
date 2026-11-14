@@ -14,6 +14,7 @@
 #include "photo_metadata.hpp"
 #include "photo_dimensions.hpp"
 #include "still_exposure.hpp"
+#include "video_stabilization.hpp"
 
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
@@ -87,6 +88,17 @@ void keepStillOrientation(AVCapturePhotoOutput* output)
                      exception.reason != nil ? exception.reason.UTF8String : "");
     }
     keepSensorOrientation([output connectionWithMediaType:AVMediaTypeVideo]);
+}
+
+// The capture connection's mode for a stabilization choice (video_stabilization.hpp).
+AVCaptureVideoStabilizationMode stabilizationModeOf(VideoStabilization choice)
+{
+    switch (choice) {
+    case VideoStabilization::lowLatency: return AVCaptureVideoStabilizationModeLowLatency;
+    case VideoStabilization::standard: return AVCaptureVideoStabilizationModeStandard;
+    case VideoStabilization::off: break;
+    }
+    return AVCaptureVideoStabilizationModeOff;
 }
 #endif
 
@@ -902,10 +914,14 @@ public:
             // A value the device refuses in its current state leaves it as it was.
         }
         if (running.connection) {
-            const AVCaptureVideoStabilizationMode mode =
-                settings.stabilization ? AVCaptureVideoStabilizationModeAuto : AVCaptureVideoStabilizationModeOff;
-            if ([device.activeFormat isVideoStabilizationModeSupported:mode])
-                running.connection.preferredVideoStabilizationMode = mode;
+            // Never the automatic mode: the preview and the recording share this one output, and the system's choice
+            // for it is a cinematic mode that holds the viewfinder a second or more behind (video_stabilization.hpp).
+            AVCaptureDeviceFormat* format = device.activeFormat;
+            const AVCaptureVideoStabilizationMode mode = stabilizationModeOf(chooseVideoStabilization(
+                settings.stabilization,
+                {[format isVideoStabilizationModeSupported:AVCaptureVideoStabilizationModeStandard],
+                 [format isVideoStabilizationModeSupported:AVCaptureVideoStabilizationModeLowLatency]}));
+            if ([format isVideoStabilizationModeSupported:mode]) running.connection.preferredVideoStabilizationMode = mode;
         }
 #else
         (void)entry;
