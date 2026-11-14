@@ -117,12 +117,13 @@ share:
   those no executor entered for the last 175 ms first, then the less active by
   band and the smaller first, so the address space the guest runs most goes
   last. A running one between the target and the line is spared while others
-  are left, and they stop at the line, so they keep a sixteenth of the budget
-  between reliefs; past the line it is asked whole, and its program stalls
-  while its threads translate it again. The
-  emulator sets the budget before the first executor, from guest memory and the
-  process memory limit or `--gadget-cache-budget=`; it is also the gadget-cache
-  term of the host GPU's budget
+  are left, and they stop at the line, which leaves the open accounts a
+  sixteenth of the budget of headroom for the growth of any of them until the
+  next relief; past the line it is asked whole, and its program stalls while
+  its threads translate it again. The emulator sets the budget before the
+  first executor, from guest memory and the process memory limit or
+  `--gadget-cache-budget=`; it is also the gadget-cache term of the host GPU's
+  budget
   ([architecture](../docs/architecture.md#memory-and-executable-code)).
 - **Code writes.** In both arm64 engines, code another vCPU changed and
   synchronized takes effect at this vCPU's next context synchronization point.

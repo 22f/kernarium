@@ -28,29 +28,31 @@ namespace uml::cpu::gadget_cache {
  *
  * The budget caps the accounts that are open. A store that finds them above it
  * calls relieve(), which asks open accounts to shed until they hold at most
- * seven eighths of the budget (the target). An executor that enters translated
- * code in an address space, or switches to it, tells its account
- * (Account::ran()), which keeps one bit for each of the last 64 epochs (about
- * 2.7 ms each, 175 ms in all) in which that happened: its activity. Relief asks
- * first any account that holds more than the line by itself, fifteen sixteenths
- * of the budget, which leaves the others less than a sixteenth to run in and
- * which no other account's shedding could spare, and any idle one that holds
- * more than the target. Then it asks the accounts the
- * guest is least likely to run again at once, only while the open ones are above
- * the target: those no executor entered in the window, the one idle longest
- * first, then the others by activity band, a quarter of the window each, the
- * least active band first and the smallest account first within a band, so the
- * address space the guest is running most is asked last. Activity, not the epoch
- * of the last entry, orders the running accounts: a stamp trails a run by more
- * than the gap between running accounts. A running account between the target
- * and the line, a program that alone holds most of the cache, is spared while
- * there are others to ask, and relief then stops at the line instead of the
- * target, so that the others keep at least a sixteenth of the budget between
- * one relief and the next; it is asked only when the open accounts are above
- * the budget with nothing else left. A program that grows past the line is
- * asked whole and stalls while its threads translate its working set again;
- * shedding only the cold part of a running address space, which the cache
- * cannot do, would spare that.
+ * seven eighths of the budget (the target), or fifteen sixteenths of it (the
+ * line) while a running account between the two is spared. An executor that
+ * enters translated code in an address space, or switches to it, tells its
+ * account (Account::ran()), which keeps one bit for each of the last 64 epochs
+ * (about 2.7 ms each, 175 ms in all) in which that happened: its activity.
+ * Relief asks first any account that holds more than the line by itself, which
+ * leaves the others less than a sixteenth of the budget to run in and which no
+ * other account's shedding could spare, and any idle one that holds more than
+ * the target. Then it asks the accounts the guest is least likely to run again
+ * at once, only while the open ones are above the target: those no executor
+ * entered in the window, the one idle longest first, then the others by
+ * activity band, a quarter of the window each, the least active band first and
+ * the smallest account first within a band, so the address space the guest is
+ * running most is asked last. Activity, not the epoch of the last entry, orders
+ * the running accounts: a stamp trails a run by more than the gap between
+ * running accounts. A running account between the target and the line, a
+ * program that alone holds most of the cache, is spared while there are others
+ * to ask, and relief then stops at the line instead of the target. With no
+ * change made meanwhile it leaves the open accounts at least a sixteenth of the
+ * budget of headroom, which the growth of any open account, the spared one
+ * included, uses up before the next relief. A spared account is asked only when
+ * the open accounts are above the budget with nothing else left. A program that
+ * grows past the line is asked whole and stalls while its threads translate its
+ * working set again; shedding only the cold part of a running address space,
+ * which the cache cannot do, would spare that.
  *
  * An account asked to shed tells its engine (Notify), and every executor
  * holding that address space lets go of it at its next entry into translated
@@ -402,8 +404,9 @@ struct Candidate final {
 } // namespace detail
 
 /* Ask open accounts to shed until the open ones hold at most seven eighths of
- * the budget (the target), when they hold more than all of it, as epoch `now`
- * sees them.
+ * the budget (the target), or fifteen sixteenths of it (the line) while a
+ * running account between the two is spared, when they hold more than all of
+ * it, as epoch `now` sees them.
  *
  * What cannot be avoided comes first: an account holding more than the line
  * (fifteen sixteenths of the budget, reserve_divisor) by itself leaves the
@@ -412,15 +415,17 @@ struct Candidate final {
  * the others are asked in the order of detail::shed_before(), which puts the
  * accounts the guest is running last, only while the open ones are above the
  * target. An account the guest runs between the target and the line is spared
- * while any other is left to ask: the others go until the open ones hold at most
- * the line, which is as far as they can bring the open ones, and a spared
+ * while any other is left to ask: the others go until the open ones hold at
+ * most the line, which is as far as they can bring the open ones, and a spared
  * account is asked only when they are still above the budget with nothing else
  * left. One that is idle is asked as soon as it holds more than the target. A
- * relief so leaves the open accounts at most a reserve under the budget, and
- * the next comes after the stores have taken that, never at every store. An
- * account holding nothing is never asked, and a budget smaller than one address
- * space still holds. Of accounts equal in every respect, the one opened last is
- * asked first.
+ * relief that meets no concurrent charge so leaves the open accounts at most at
+ * the line, at least a reserve under the budget, and the next comes only when
+ * the growth of the open accounts, every one of them (the spared one too), has
+ * used the reserve up; one store may use it all, and a charge made meanwhile
+ * moves the figures. An account holding nothing is never asked, and a budget
+ * smaller than one address space still holds. Of accounts equal in every
+ * respect, the one opened last is asked first.
  *
  * Every caller takes its turn, however the lock is held: one that went on
  * storing while another held it, for an account opening or going, a census or
