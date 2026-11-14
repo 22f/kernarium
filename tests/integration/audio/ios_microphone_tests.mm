@@ -29,6 +29,7 @@
 #include <atomic>
 #include <cstdio>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace {
@@ -65,6 +66,20 @@ std::atomic<NSUInteger> sessionOptions {};
 // What another part of the application does to the session right after a
 // category call took effect, before the caller reads the session back.
 void (*afterCategorySet)() = nullptr;
+// The same, but while the caller reads the session back: right after it read
+// the category (1), the mode (2) or the options (3), so that the readings come
+// from two states. It applies to the readings that follow one category call.
+int tornAfterRead = 0;
+bool tornArmed = false;
+void (*tornWrite)() = nullptr;
+
+void tornPoint(int point)
+{
+    if (tornArmed && tornAfterRead == point) {
+        tornArmed = false;
+        tornWrite();
+    }
+}
 // The engine the microphone started last, to post its configuration change.
 AVAudioEngine* __weak startedEngine {};
 
@@ -142,21 +157,32 @@ void installHooks()
           changeSession(name, mode, options);
           if (afterCategorySet != nullptr)
               afterCategorySet();
+          tornArmed = tornWrite != nullptr;
           return YES;
         }));
     Method reportedCategory =
         class_getInstanceMethod([AVAudioSession class], @selector(category));
     method_setImplementation(reportedCategory,
-        imp_implementationWithBlock(^NSString*(id) { return sessionCategory; }));
+        imp_implementationWithBlock(^NSString*(id) {
+          NSString* const reported = sessionCategory;
+          tornPoint(1);
+          return reported;
+        }));
     Method reportedMode =
         class_getInstanceMethod([AVAudioSession class], @selector(mode));
     method_setImplementation(reportedMode,
-        imp_implementationWithBlock(^NSString*(id) { return sessionMode; }));
+        imp_implementationWithBlock(^NSString*(id) {
+          NSString* const reported = sessionMode;
+          tornPoint(2);
+          return reported;
+        }));
     Method reportedOptions = class_getInstanceMethod(
         [AVAudioSession class], @selector(categoryOptions));
     method_setImplementation(reportedOptions,
         imp_implementationWithBlock(^NSUInteger(id) {
-          return sessionOptions.load();
+          const NSUInteger reported = sessionOptions.load();
+          tornPoint(3);
+          return reported;
         }));
 
     Method activate = class_getInstanceMethod(
@@ -685,6 +711,111 @@ void aChangeBetweenTheSetAndTheReadingIsNotRemembered()
     uml::audio::session::release(Client::playback);
 }
 
+// The two ways the picture-in-picture window sets the session.
+void windowSetsTheRecordingCategory()
+{
+    changeSession(AVAudioSessionCategoryPlayAndRecord,
+        AVAudioSessionModeDefault,
+        AVAudioSessionCategoryOptionMixWithOthers |
+            AVAudioSessionCategoryOptionDefaultToSpeaker |
+            AVAudioSessionCategoryOptionAllowBluetoothA2DP);
+}
+
+void windowSetsThePlaybackMovieMode()
+{
+    changeSession(AVAudioSessionCategoryPlayback,
+        AVAudioSessionModeMoviePlayback,
+        AVAudioSessionCategoryOptionMixWithOthers);
+}
+
+// The other caller can also land between two of the reads, which then come from
+// two states: the category and the mode it did not change, with the options it
+// did, and the like. A reading like that can agree with what was asked for,
+// the playback plan asks for no options, so it may be remembered, and the next
+// use finds the session in a state it did not leave and sets the category
+// again: once, and then nothing more.
+void aChangeBetweenTwoReadingsIsCaught()
+{
+    using uml::audio::session::Client;
+    otherAudioPlaying = false;
+    const NSUInteger headset = AVAudioSessionCategoryOptionMixWithOthers |
+        AVAudioSessionCategoryOptionDefaultToSpeaker |
+        AVAudioSessionCategoryOptionAllowBluetoothA2DP |
+        AVAudioSessionCategoryOptionAllowBluetoothHFP |
+        AVAudioSessionCategoryOptionBluetoothHighQualityRecording;
+    const NSUInteger builtIn = AVAudioSessionCategoryOptionMixWithOthers |
+        AVAudioSessionCategoryOptionDefaultToSpeaker |
+        AVAudioSessionCategoryOptionAllowBluetoothA2DP;
+    struct Plan final {
+        const char* name;
+        NSString* category;
+        NSUInteger options;
+    };
+    const Plan plans[] = {
+        {"playback", AVAudioSessionCategoryPlayback, 0},
+        {"recording", AVAudioSessionCategoryPlayAndRecord, headset},
+        {"recording without the headset options",
+            AVAudioSessionCategoryPlayAndRecord, builtIn},
+    };
+    struct Writer final {
+        const char* name;
+        void (*write)();
+    };
+    const Writer writers[] = {
+        {"recording category", windowSetsTheRecordingCategory},
+        {"movie mode", windowSetsThePlaybackMovieMode},
+    };
+    const char* const points[] = {"the category", "the mode", "the options"};
+
+    for (int plan = 0; plan < 3; ++plan) {
+        for (const Writer& writer : writers) {
+            for (int point = 1; point <= 3; ++point) {
+                refuseBluetoothOptions = plan == 2;
+                resetSession();
+                tornWrite = writer.write;
+                tornAfterRead = point;
+                tornArmed = false;
+                std::optional<Recording> recording;
+                if (plan == 0) {
+                    (void)uml::audio::session::acquire(Client::playback);
+                } else {
+                    recording.emplace();
+                    check(recording->start(), "the microphone starts under "
+                                              "the other caller");
+                }
+                tornWrite = nullptr;
+                tornArmed = false;
+
+                const std::string label = std::string(plans[plan].name) +
+                    ", the " + writer.name + " after " + points[point - 1];
+                const auto intended = [&] {
+                    return [sessionCategory isEqualToString:
+                                plans[plan].category] &&
+                        [sessionMode isEqualToString:AVAudioSessionModeDefault] &&
+                        sessionOptions.load() == plans[plan].options;
+                };
+                // A writer whose state is the plan's own leaves nothing to set.
+                const int expected = intended() ? 0 : 1;
+                int before = categoryCalls.load();
+                (void)uml::audio::session::acquire(Client::playback);
+                check(intended() && categoryCalls.load() - before == expected,
+                    (label + ": the next acquire restores the plan").c_str(),
+                    "calls " + std::to_string(categoryCalls.load() - before) +
+                        ", expected " + std::to_string(expected));
+                before = categoryCalls.load();
+                (void)uml::audio::session::acquire(Client::playback);
+                check(intended() && categoryCalls.load() == before,
+                    (label + ": a further acquire sets nothing").c_str(),
+                    "calls " + std::to_string(categoryCalls.load() - before));
+                if (recording)
+                    recording->stop();
+                uml::audio::session::release(Client::playback);
+            }
+        }
+    }
+    refuseBluetoothOptions = false;
+}
+
 // A headset that connects or leaves changes the route under the running
 // engine, which the microphone builds again. The session stays taken, because
 // releasing it would return the category to playback, which switches a
@@ -784,6 +915,7 @@ int main()
         aSessionChangedBehindItsBackIsSetAgain();
         refusedBluetoothOptionsAreAskedAgainWhenTheMicrophoneIsBuiltAgain();
         aChangeBetweenTheSetAndTheReadingIsNotRemembered();
+        aChangeBetweenTwoReadingsIsCaught();
         deprecatedNotificationIsIgnored();
     }
     std::printf("%s: %d failure(s)\n", failures == 0 ? "PASS" : "FAIL",
