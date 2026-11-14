@@ -12,18 +12,20 @@
 #
 # The host's encoder writes every frame that is not a `reject-` frame, and the
 # guest reads each of them as the severity described; the application's policy
-# sends only NONE and CRITICAL. The guest closes the connection on every
-# `reject-` frame and keeps the severity it had; the host never encodes one.
+# sends NONE, SEVERE and CRITICAL, never LIGHT or MODERATE. The guest closes
+# the connection on every `reject-` frame and keeps the severity it had; the
+# host never encodes one.
 
-# NONE: the host's thermal state is nominal, fair or serious, with no critical
-# hold (critical ended 120 s ago or more, or never was).
+# NONE: the host's thermal state is nominal or fair, and neither serious nor
+# critical was the state in the last 120 s.
 none: 41 54 48 31 00 00 00 00
 
 # LIGHT: the guest reports it; the application does not send it.
 light: 41 54 48 31 01 00 00 00
 
-# SEVERE: the guest reports it and caps the frame rate; the application does
-# not send it.
+# SEVERE: the host's thermal state is serious now, or serious was the hottest
+# state in the last 120 s (the hold after it ended); the guest caps the frame
+# rate.
 severe: 41 54 48 31 03 00 00 00
 
 # CRITICAL: the host's thermal state is critical now or was in the last 120 s

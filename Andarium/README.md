@@ -563,13 +563,14 @@ requires reopening Andarium.
 - **Heat.** The application tells the guest's thermal HAL how hot the device is
   over vsock 5559 (`ThermalSession`; the wire is `ThermalProtocol`, whose
   golden frames the HAL's test shares in `tests/unit/andarium/fixtures`).
-  Android hears of heat only at iOS's critical thermal state: nominal, fair and
-  serious are none (iOS reaches serious on a device that is only warm, and
-  slows the processor itself there), critical is its critical, and the host
-  never sends a level that shuts the guest down. The severity falls 120 s after
-  critical ended, so a state that flickers around critical is one steady cap.
-  At critical Android lowers the guest's frame rate to 30, and the first time
-  in a run that this starts the session screen says so once. The session and
+  Android hears of heat from iOS's serious state: nominal and fair are none
+  (fair is not reported because it would not change the frame rate), serious
+  is Android's severe, critical is its critical, and the host never sends a
+  level that shuts the guest down. The severity is the hottest reported state
+  of the last 120 s: it rises at once and falls 120 s after the hotter state
+  ended, so a state that flickers around serious is one steady cap. From severe
+  up Android lowers the guest's frame rate to 30, and the first time in a run
+  that this starts the session screen says so once. The session and
   stall records, the statistics and the feedback information keep iOS's real
   state. There is no switch. A system without the HAL hears nothing and shows
   no notice; the
@@ -1066,8 +1067,8 @@ additionally reads `KERNARIUM_ANDROID_ADB_AUTH`
 states the resolution; the earlier `KERNARIUM_RETINA_MODE` (`1` native, `0`
 one pixel to a point) is read where it is not stated.
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
-for iOS's thermal state in the Simulator and in automation; only `critical`
-reaches the guest as heat.
+for iOS's thermal state in the Simulator and in automation; `serious` and
+`critical` reach the guest as heat.
 `ANDARIUM_FOLLOW_ORIENTATION` (`1` or `0`) states whether the guest follows the
 device's orientation, where the device's idiom (an iPhone follows) would
 otherwise decide.
