@@ -493,10 +493,12 @@ requires reopening Andarium.
   application states the intent at once and the runtime's stop is requested
   off the main actor, on the queue of the runtime's other waiting calls, again
   every second until the run has ended (`RunStop`: the runtime drops a stop
-  that arrives before its run begins). The first delivery asks the guest to
-  write its storage back before the host stops it (the runtime's `sync`,
-  `StopSettle`: four seconds at most, as a lifecycle edge's budget, and none
-  where there is no guest to ask); Stopping covers that wait. A stopped Android guest cannot be
+  that arrives before its run begins). The first delivery that reaches a guest
+  asks it to write its storage back before the host stops it (the runtime's
+  `sync`, `StopSettle`: four seconds at most, as a lifecycle edge's budget); a
+  delivery that finds none goes on to the host's stop and the next asks again,
+  and the ask of a run that has ended is dropped before it calls the runtime.
+  Stopping covers that wait. A stopped Android guest cannot be
   released, so the end is the end screen with its own wording
   (`RunEnd.stoppedByUser`), not Home, and a stop before the runtime runs ends
   at Home. A start the person stopped leaves its preparation to end: the

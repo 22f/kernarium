@@ -88,7 +88,7 @@ struct RunStopTests {
         #expect(stop.enter())
         stop.request()
         for _ in 0..<3 {
-            #expect(stop.deliver(settle: { calls.add("settle") }) { calls.add("stop") })
+            #expect(stop.deliver(settle: { calls.add("settle"); return true }) { calls.add("stop") })
         }
         // The runtime drops a stop that arrives early, so the stop is made
         // again and again; the guest is asked once.
@@ -100,17 +100,17 @@ struct RunStopTests {
         let early = RunStop()
         early.request()
         #expect(!early.enter())
-        #expect(early.deliver(settle: { calls.add("settle") }) { calls.add("stop") })
+        #expect(early.deliver(settle: { calls.add("settle"); return true }) { calls.add("stop") })
         early.end()
-        #expect(!early.deliver(settle: { calls.add("settle") }) { calls.add("stop") })
+        #expect(!early.deliver(settle: { calls.add("settle"); return true }) { calls.add("stop") })
 
         // Entered but not stopped: nothing yet; stopped and then ended: nothing after.
         let late = RunStop()
         #expect(late.enter())
-        #expect(late.deliver(settle: { calls.add("settle") }) { calls.add("stop") })
+        #expect(late.deliver(settle: { calls.add("settle"); return true }) { calls.add("stop") })
         late.end()
         late.request()
-        #expect(!late.deliver(settle: { calls.add("settle") }) { calls.add("stop") })
+        #expect(!late.deliver(settle: { calls.add("settle"); return true }) { calls.add("stop") })
         #expect(calls.all.isEmpty)
     }
 
@@ -120,7 +120,7 @@ struct RunStopTests {
         #expect(stop.enter())
         stop.request()
         #expect(stop.deliver { calls.add("stop") })
-        #expect(stop.deliver(settle: { calls.add("settle") }) { calls.add("stop") })
+        #expect(stop.deliver(settle: { calls.add("settle"); return true }) { calls.add("stop") })
         #expect(calls.all == ["stop", "settle", "stop"])
     }
 
@@ -137,6 +137,7 @@ struct RunStopTests {
                 inside.signal()
                 release.wait()
                 calls.add("settle")
+                return true
             }) { calls.add("stop") }
         }.start()
         inside.wait()
@@ -151,26 +152,132 @@ struct RunStopTests {
         #expect(calls.all == ["settle", "stop"], "the run ended inside the stop's own write-back")
     }
 
+    /// A write-back that found no guest asked nobody: the next delivery asks
+    /// again, and the one that reaches a guest is the one of the run.
+    @Test func aWriteBackThatFoundNoGuestIsMadeAgainUntilOneReachesAGuest() {
+        let stop = RunStop()
+        let calls = Calls()
+        let reached = Script([false, false, true, false])
+        #expect(stop.enter())
+        stop.request()
+        for _ in 0..<5 {
+            #expect(stop.deliver(settle: { calls.add("settle"); return reached.next() }) { calls.add("stop") })
+        }
+        // Three asks, the third reached a guest; the stop follows each of them.
+        #expect(calls.all == ["settle", "stop", "settle", "stop", "settle", "stop", "stop", "stop"])
+    }
+
+    @Test func aGuestThatDidNotAnswerStillCountsAsReached() {
+        // The write-back reports true for a guest that refused or timed out:
+        // the stop does not go on asking it every second.
+        let stop = RunStop()
+        let calls = Calls()
+        #expect(stop.enter())
+        stop.request()
+        for _ in 0..<3 {
+            #expect(stop.deliver(settle: { calls.add("settle"); return true }) { calls.add("stop") })
+        }
+        #expect(calls.all == ["settle", "stop", "stop", "stop"])
+    }
+
+    @Test func aWriteBackIsNeverUnderWayTwiceAtOnce() {
+        let stop = RunStop()
+        #expect(stop.enter())
+        stop.request()
+        let inside = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let calls = Calls()
+        Thread {
+            _ = stop.deliver(settle: {
+                calls.add("settle")
+                inside.signal()
+                release.wait()
+                return false
+            }) { calls.add("stop") }
+        }.start()
+        inside.wait()
+        // A second delivery while the first write-back is still under way
+        // asks nothing of the guest.
+        #expect(stop.deliver(settle: { calls.add("second settle"); return true }) { calls.add("second stop") })
+        release.signal()
+        stop.end()
+        #expect(!calls.all.contains("second settle"))
+    }
+
+    @Test func aRunIsLiveUntilItEnds() {
+        let stop = RunStop()
+        #expect(stop.isLive)
+        #expect(stop.enter())
+        stop.request()
+        #expect(stop.isLive)
+        stop.end()
+        #expect(!stop.isLive)
+    }
+
     @Test func theWriteBackIsBoundedByTheEdgeBudget() {
         #expect(StopSettle.bound == PauseController.edgeBudget)
     }
 
+    private static let settledGuest = GuestSettle(unflushed: 0, storage: .confirmed, suspension: .notAsked)
+
     @Test func aWriteBackThatFinishesReturnsAtOnce() {
-        let ran = ResultBox()
+        let stop = RunStop()
         let before = ContinuousClock.now
-        #expect(StopSettle.run(within: .seconds(30)) { ran.set() })
-        #expect(ran.value)
+        let outcome = StopSettle.run(for: stop, within: .seconds(30)) { Self.settledGuest }
+        #expect(outcome == .answered(Self.settledGuest))
         #expect(ContinuousClock.now - before < .seconds(5))
     }
 
     @Test func aWriteBackThatNeverReturnsIsLeftAtTheBound() {
+        let stop = RunStop()
         let release = DispatchSemaphore(value: 0)
         let before = ContinuousClock.now
-        let finished = StopSettle.run(within: .milliseconds(200)) { release.wait() }
+        let outcome = StopSettle.run(for: stop, within: .milliseconds(200)) {
+            release.wait()
+            return Self.settledGuest
+        }
         let took = ContinuousClock.now - before
-        #expect(!finished)
+        #expect(outcome == .timedOut)
         #expect(took >= .milliseconds(150) && took < .seconds(5), "the wait was \(took)")
         release.signal()
+    }
+
+    /// The worker that is left behind at the bound, or that starts after the
+    /// run ended, must not reach a later run: it asks the run's latch before it
+    /// calls the runtime.
+    @Test func aWriteBackForARunThatHasEndedIsDroppedBeforeItCallsTheRuntime() {
+        let stop = RunStop()
+        stop.end()
+        let calls = Calls()
+        let outcome = StopSettle.run(for: stop, within: .seconds(30)) {
+            calls.add("runtime")
+            return Self.settledGuest
+        }
+        #expect(outcome == .runEnded)
+        #expect(calls.all.isEmpty, "the runtime was asked for a run that had ended")
+        #expect(!outcome.reachedGuest)
+    }
+
+    @Test func onlyAWriteBackThatAskedAGuestIsMadeOnce() {
+        func outcome(_ storage: GuestSettle.Storage) -> StopSettle.Outcome {
+            .answered(GuestSettle(unflushed: 0, storage: storage, suspension: .notAsked))
+        }
+        #expect(outcome(.confirmed).reachedGuest)
+        #expect(outcome(.unconfirmed).reachedGuest)
+        #expect(outcome(.refused).reachedGuest)
+        #expect(outcome(.unreachable).reachedGuest)
+        #expect(!outcome(.noGuest).reachedGuest)
+        #expect(!outcome(.notReported).reachedGuest)
+        #expect(StopSettle.Outcome.timedOut.reachedGuest)
+        #expect(!StopSettle.Outcome.runEnded.reachedGuest)
+    }
+
+    /// Answers in turn, then the last.
+    private final class Script: @unchecked Sendable {
+        private let lock = NSLock()
+        private var answers: [Bool]
+        init(_ answers: [Bool]) { self.answers = answers }
+        func next() -> Bool { lock.withLock { answers.count > 1 ? answers.removeFirst() : answers[0] } }
     }
 
     private final class ResultBox: @unchecked Sendable {
