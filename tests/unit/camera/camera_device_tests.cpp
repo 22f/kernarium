@@ -251,8 +251,12 @@ public:
         }
         sink->cameraFrame(index, std::move(frame));
     }
+    /* Changes a result before the device gets it, as a platform that fails a still in a way the synthetic camera has no
+     * hook for would. */
+    std::function<void(CameraStillResult&)> alterStill;
     void cameraStill(std::size_t index, CameraStillResult result) override
     {
+        if (alterStill) alterStill(result);
         payload_watch::track(result.jpeg.data(), result.jpeg.capacity());
         payload_watch::track(result.raw.data(), result.raw.capacity() * sizeof(std::uint16_t));
         holding.erase(result.token);
@@ -281,6 +285,7 @@ struct Rig final {
         };
         options.automaticRotation = [this](const uml::platform::CameraInfo&) { return automaticDegrees ? *automaticDegrees : 0u; };
         options.onCheckpoint = [this](CameraCheckpoint where) { checkpoints.push_back(where); };
+        options.onStillFailure = [this](const CameraStillFailure& failure) { stillFailures.push_back(failure); };
         options.onRotateAndCrop = [this](std::uint32_t camera, std::uint32_t setting, std::uint32_t degrees) {
             rotations.push_back({camera, setting, degrees});
         };
@@ -312,6 +317,8 @@ struct Rig final {
     std::function<void()> onStateChange;
     /* The diagnostic checkpoints the device reported, in order. */
     std::vector<CameraCheckpoint> checkpoints;
+    /* What the device told onStillFailure, in order. */
+    std::vector<CameraStillFailure> stillFailures;
     /* What the device reported to onRotateAndCrop: camera, setting, degrees. */
     std::vector<std::array<std::uint32_t, 3>> rotations;
     /* What the device reported to onFlash. */
@@ -2984,6 +2991,340 @@ void testAStillThatSpansAnInterruptionFails()
             "a capture asked for after the recovery is delivered");
 }
 
+// The picture of a flat grey scene, as a platform's JPEG file of that size.
+std::vector<std::uint8_t> flatJpeg(std::uint32_t width, std::uint32_t height)
+{
+    const std::vector<std::uint8_t> luma(std::size_t(width) * height, 128);
+    const std::vector<std::uint8_t> chroma(std::size_t(width) * (height / 2), 128);
+    return encodeSyntheticJpeg(luma.data(), width, chroma.data(), width, width, height, 90);
+}
+
+// The front camera of the owner's newest phone states orientation 0, asks for 2016x1512 stills, and its photo output
+// delivers something the device refuses; the cases are the ones the investigation's probe tried. Each ends in an error
+// buffer without bytes, as it always did, and in one report of why that carries only numbers and fixed words. A still
+// that is right reports nothing.
+void testAStillThatFailsSaysWhy()
+{
+    constexpr std::uint32_t front = 1;
+    struct Case {
+        const char* what;
+        std::function<void(CameraStillResult&)> alter;
+        CameraStillStage stage;
+        std::uint32_t encodedWidth, encodedHeight;
+        CameraStillFailure platform;
+    };
+    CameraStillFailure resolvedTransposed;
+    resolvedTransposed.stage = CameraStillStage::resolvedSize;
+    resolvedTransposed.resolvedWidth = 1512;
+    resolvedTransposed.resolvedHeight = 2016;
+    resolvedTransposed.compensationSupported = CameraFact::yes;
+    resolvedTransposed.compensationEnabled = CameraFact::no;
+    CameraStillFailure frameworkError;
+    frameworkError.stage = CameraStillStage::frameworkError;
+    frameworkError.resolvedWidth = 2016;
+    frameworkError.resolvedHeight = 1512;
+    frameworkError.compensationSupported = CameraFact::yes;
+    frameworkError.compensationEnabled = CameraFact::no;
+    frameworkError.errorDomain = CameraErrorDomain::avFoundation;
+    frameworkError.errorCode = -11800;
+    CameraStillFailure missing;
+    missing.stage = CameraStillStage::missingData;
+    missing.compensationSupported = CameraFact::yes;
+    missing.compensationEnabled = CameraFact::no;
+    const std::vector<Case> cases {
+        {"the photo is transposed (1512x2016)",
+         [](CameraStillResult& result) {
+             result.jpeg = flatJpeg(1512, 2016);
+             result.failure.compensationSupported = CameraFact::yes;
+             result.failure.compensationEnabled = CameraFact::no;
+         },
+         CameraStillStage::encodedSize, 1512, 2016, missing},
+        {"the photo is square (1512x1512)", [](CameraStillResult& result) { result.jpeg = flatJpeg(1512, 1512); },
+         CameraStillStage::encodedSize, 1512, 1512, {}},
+        {"the file has no frame header", [](CameraStillResult& result) { result.jpeg = {0xff, 0xd8, 0xff, 0xd9}; },
+         CameraStillStage::encodedSize, 0, 0, {}},
+        {"the photo resolved transposed",
+         [&](CameraStillResult& result) {
+             result.ok = false;
+             result.jpeg.clear();
+             result.failure = resolvedTransposed;
+         },
+         CameraStillStage::resolvedSize, 0, 0, resolvedTransposed},
+        {"the framework reports an error",
+         [&](CameraStillResult& result) {
+             result.ok = false;
+             result.jpeg.clear();
+             result.failure = frameworkError;
+         },
+         CameraStillStage::frameworkError, 0, 0, frameworkError},
+        {"the photo has no data",
+         [&](CameraStillResult& result) {
+             result.ok = false;
+             result.jpeg.clear();
+             result.failure = missing;
+         },
+         CameraStillStage::missingData, 0, 0, missing},
+        {"the platform gives no reason",
+         [](CameraStillResult& result) {
+             result.ok = false;
+             result.jpeg.clear();
+         },
+         CameraStillStage::unknown, 0, 0, {}},
+    };
+    for (const auto& test : cases) {
+        Rig rig;
+        rig.watched->alterStill = test.alter;
+        stillStream(rig, 1, front, 2016, 1512, 1);
+        const auto size = rig.params(1).plane_formats[0].plane_size;
+        const auto before = rig.bytes(1, 1, size);
+        const auto still = rig.queue(1, 1, 61);
+        rig.camera->pump(front, 0);
+        rig.step();
+        require(rig.done(still) && rig.result(still).base.flags == errorFlag && rig.result(still).base.data_sizes[0] == 0 &&
+                    rig.bytes(1, 1, size) == before,
+                test.what);
+        require(rig.stillFailures.size() == 1, test.what);
+        const auto& failure = rig.stillFailures.front();
+        require(failure.stage == test.stage && failure.camera == front && failure.position == CameraPosition::front &&
+                    failure.askedWidth == 2016 && failure.askedHeight == 1512 && failure.encodedWidth == test.encodedWidth &&
+                    failure.encodedHeight == test.encodedHeight && failure.resolvedWidth == test.platform.resolvedWidth &&
+                    failure.resolvedHeight == test.platform.resolvedHeight &&
+                    failure.compensationSupported == test.platform.compensationSupported &&
+                    failure.compensationEnabled == test.platform.compensationEnabled &&
+                    failure.errorDomain == test.platform.errorDomain && failure.errorCode == test.platform.errorCode,
+                test.what);
+    }
+
+    // A file larger than the host takes is a failure with its own stage.
+    {
+        Rig rig;
+        rig.camera->oversizedStills(true);
+        stillStream(rig, 1, front, 2016, 1512, 1);
+        const auto still = rig.queue(1, 1, 62);
+        rig.camera->pump(front, 0);
+        rig.step();
+        require(rig.done(still) && rig.result(still).base.flags == errorFlag, "an oversized file fails");
+        require(rig.stillFailures.size() == 1 && rig.stillFailures[0].stage == CameraStillStage::fileSize &&
+                    rig.stillFailures[0].askedWidth == 2016,
+                "an oversized file is reported as one");
+    }
+    // A still that is right is delivered untouched and reports nothing, whatever the platform said of a part of it.
+    {
+        Rig rig;
+        rig.watched->alterStill = [](CameraStillResult& result) {
+            result.failure.stage = CameraStillStage::frameworkError;  // a part that failed alone
+            result.failure.errorDomain = CameraErrorDomain::avFoundation;
+        };
+        stillStream(rig, 1, front, 2016, 1512, 2);
+        const auto still = rig.queue(1, 1, 63);
+        rig.camera->pump(front, 0);
+        rig.step();
+        require(rig.done(still) && rig.result(still).base.flags == 0 && rig.result(still).base.data_sizes[0] > 4000,
+                "a still of the size asked for is delivered");
+        require(rig.stillFailures.empty(), "and says nothing");
+    }
+    // A capture that is refused before it reaches the platform says so.
+    {
+        RigOptions options;
+        options.use = {2, false, 0};
+        options.workingBytes = 0;
+        Rig rig(options);
+        stillStream(rig, 1, 0, 4032, 3024, 1);
+        const auto still = rig.queue(1, 1, 64);
+        require(rig.done(still) && (rig.result(still).base.flags & errorFlag), "the capture is refused");
+        require(rig.stillFailures.size() == 1 && rig.stillFailures[0].stage == CameraStillStage::refused &&
+                    rig.stillFailures[0].camera == 0 && rig.stillFailures[0].position == CameraPosition::back &&
+                    rig.stillFailures[0].askedWidth == 4032 && rig.stillFailures[0].askedHeight == 3024,
+                "a refusal is reported with the size asked for");
+    }
+    // A capture the platform does not end in time says so; an interruption that ends one is not a fault of the capture.
+    {
+        Rig rig;
+        stillStream(rig, 1, front, 1008, 756, 1);
+        const auto still = rig.queue(1, 1, 65);
+        rig.camera->advanceClock(10'600'000'000);
+        rig.step();
+        require(rig.done(still) && rig.result(still).base.flags == errorFlag, "a capture that takes too long fails");
+        require(rig.stillFailures.size() == 1 && rig.stillFailures[0].stage == CameraStillStage::timeout &&
+                    rig.stillFailures[0].askedWidth == 1008,
+                "a timeout is reported");
+    }
+    {
+        Rig rig;
+        stillStream(rig, 1, 0, 1008, 756, 1);
+        const auto still = rig.queue(1, 1, 66);
+        rig.camera->pump(0, 0);
+        rig.camera->interrupt();
+        rig.step();
+        require(rig.done(still) && (rig.result(still).base.flags & errorFlag), "an interrupted capture fails");
+        require(rig.stillFailures.empty(), "an interruption is not reported as a failure of the capture");
+    }
+}
+
+/* The colour data of the first camera's lens, learned by one still of its own, so that a rig that is given the store has a
+ * camera with RAW stills. */
+std::shared_ptr<CalibrationStore> learnedColour()
+{
+    auto store = std::make_shared<CalibrationStore>();
+    RigOptions options;
+    options.store = store;
+    Rig learner(options);
+    learner.create(1, 0, stillKind);
+    require(Rig::type(learner.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+    learner.attach(1, 1, learner.params(1).plane_formats[0].plane_size);
+    learner.queue(1, 1);
+    learner.camera->pump(0, 0);
+    learner.step();
+    return store;
+}
+
+/* A RAW and a JPEG of the first camera asked for as one capture (streams 2 and 1, cookie 9). */
+struct RawAndJpeg {
+    std::uint64_t raw, jpeg;
+};
+RawAndJpeg askForRawAndJpeg(Rig& rig)
+{
+    rig.create(1, 0, stillKind);
+    rig.create(2, 0, stillKind);
+    require(Rig::type(rig.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "JPEG");
+    require(Rig::type(rig.setParams(2, VIRTIO_VIDEO_FORMAT_CAMERA_RAW16_RGGB, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "RAW");
+    rig.attach(1, 1, rig.params(1).plane_formats[0].plane_size);
+    rig.attach(2, 1, rig.params(2).plane_formats[0].plane_size);
+    const auto raw = rig.queue(2, 1, 9, VIRTIO_VIDEO_CAMERA_QUEUE_F_GROUP_MORE);
+    const auto jpeg = rig.queue(1, 1, 9);
+    return {raw, jpeg};
+}
+
+/* Which captures `onStillFailure` is told of: each one the guest asked for that did not end in a picture, once. A whole
+ * capture that waited for the host's budget until its time ran out is one, as the capture the platform held is; one that an
+ * interruption of its camera ended is not, whether its time ran out or the platform ended it; a group the guest did not
+ * complete is not a capture; and one that delivered its JPEG is not, whatever its RAW did. One whose JPEG did not arrive is,
+ * whether its RAW did or not. */
+void testOnlyACaptureThatEndedInNoPictureIsReported()
+{
+    constexpr std::uint32_t front = 1;
+    // Three whole 12 MP captures: the platform holds one and the host's budget keeps two waiting. Each is reported when its
+    // time runs out, and its buffer fails as it does.
+    {
+        Rig rig;
+        stillStream(rig, 1, 0, 4032, 3024, 3);
+        const auto first = rig.queue(1, 1, 101);
+        const auto second = rig.queue(1, 2, 102);
+        const auto third = rig.queue(1, 3, 103);
+        require(rig.camera->stillsTaken() == 1, "one capture is with the platform, two wait");
+        rig.camera->advanceClock(10'100'000'000);
+        rig.step();
+        require(rig.done(first) && rig.done(second) && rig.done(third), "the three complete at their deadline");
+        require((rig.result(first).base.flags & errorFlag) && (rig.result(second).base.flags & errorFlag) &&
+                    (rig.result(third).base.flags & errorFlag),
+                "and their buffers fail");
+        require(rig.camera->stillsTaken() == 1, "the waiting ones never reached the platform");
+        require(rig.stillFailures.size() == 3, "each of the three is reported");
+        for (const auto& failure : rig.stillFailures)
+            require(failure.stage == CameraStillStage::timeout && failure.camera == 0 && failure.position == CameraPosition::back &&
+                        failure.askedWidth == 4032 && failure.askedHeight == 3024,
+                    "as a timeout of the camera, with the size asked for");
+        rig.camera->pump(0, 0);
+        rig.step();
+        require(rig.stillFailures.size() == 3, "and the platform's late end of the first reports nothing more");
+    }
+    // A group the guest did not complete is not a capture.
+    {
+        Rig rig;
+        stillStream(rig, 1, 0, 1008, 756, 1);
+        const auto unfinished = rig.queue(1, 1, 68, VIRTIO_VIDEO_CAMERA_QUEUE_F_GROUP_MORE);
+        rig.camera->advanceClock(2'100'000'000);
+        rig.step();
+        require(rig.done(unfinished) && (rig.result(unfinished).base.flags & errorFlag), "an unfinished group fails");
+        require(rig.stillFailures.empty(), "and is not reported");
+    }
+    // A capture whose camera was interrupted is not reported when its time runs out, while the camera is interrupted or
+    // after it recovered, and neither when the platform ends it late.
+    for (const bool resume : {false, true}) {
+        Rig rig;
+        stillStream(rig, 1, front, 1008, 756, 1);
+        const auto still = rig.queue(1, 1, 67);
+        rig.camera->interrupt();
+        rig.step();
+        if (resume) {
+            rig.camera->resume();
+            rig.step();
+        }
+        require(!rig.done(still), "the capture is held until its time runs out");
+        rig.camera->advanceClock(10'600'000'000);
+        rig.step();
+        require(rig.done(still) && (rig.result(still).base.flags & errorFlag), "its buffer fails at its deadline");
+        require(rig.stillFailures.empty(), resume ? "a recovery that spans it is not a failure of the capture"
+                                                  : "an interruption is not a failure of the capture");
+        rig.camera->pump(front, 0);
+        rig.step();
+        require(rig.stillFailures.empty(), "and the platform's late end of it reports nothing");
+    }
+    // The same for a whole capture that waits for room when its camera is interrupted.
+    {
+        Rig rig;
+        stillStream(rig, 1, 0, 4032, 3024, 2);
+        const auto first = rig.queue(1, 1, 101);
+        const auto second = rig.queue(1, 2, 102);
+        require(rig.camera->stillsTaken() == 1, "one capture is with the platform, one waits");
+        rig.camera->interrupt();
+        rig.step();
+        rig.camera->advanceClock(10'100'000'000);
+        rig.step();
+        require(rig.done(first) && rig.done(second) && (rig.result(second).base.flags & errorFlag), "both fail at their deadline");
+        require(rig.stillFailures.empty(), "and an interruption that is on says they are not reported");
+    }
+    // A RAW and a JPEG: a RAW that fails alone is not a failure of a capture that delivered its JPEG.
+    {
+        auto store = learnedColour();
+        RigOptions options;
+        options.store = store;
+        Rig rig(options);
+        rig.camera->failRaw(true);
+        const auto group = askForRawAndJpeg(rig);
+        rig.camera->pump(0, 0);
+        rig.step();
+        require(rig.done(group.raw) && rig.done(group.jpeg), "the group completes");
+        require(rig.result(group.jpeg).base.flags == 0 && rig.result(group.jpeg).base.data_sizes[0] > 4000, "the JPEG is delivered");
+        require((rig.result(group.raw).base.flags & errorFlag) != 0, "and the RAW buffer fails alone");
+        require(rig.stillFailures.empty(), "a capture that delivered the JPEG reports nothing");
+    }
+    {
+        // The other way round: the photo did not appear, whatever the RAW did.
+        auto store = learnedColour();
+        RigOptions options;
+        options.store = store;
+        Rig rig(options);
+        rig.watched->alterStill = [](CameraStillResult& result) { result.jpeg.clear(); };
+        const auto group = askForRawAndJpeg(rig);
+        rig.camera->pump(0, 0);
+        rig.step();
+        require((rig.result(group.jpeg).base.flags & errorFlag) != 0 && rig.result(group.raw).base.flags == 0,
+                "the JPEG buffer fails and the RAW is delivered");
+        require(rig.stillFailures.size() == 1 && rig.stillFailures[0].stage == CameraStillStage::missingData &&
+                    rig.stillFailures[0].camera == 0 && rig.stillFailures[0].askedWidth == 1008 &&
+                    rig.stillFailures[0].askedHeight == 756,
+                "a capture whose JPEG did not arrive is reported with the JPEG's size, though the RAW did");
+    }
+    // Both parts failing is a capture that ended in no picture, reported once.
+    {
+        auto store = learnedColour();
+        RigOptions options;
+        options.store = store;
+        Rig rig(options);
+        rig.camera->failRaw(true);
+        rig.watched->alterStill = [](CameraStillResult& result) { result.jpeg.clear(); };
+        const auto group = askForRawAndJpeg(rig);
+        rig.camera->pump(0, 0);
+        rig.step();
+        require((rig.result(group.jpeg).base.flags & errorFlag) != 0 && (rig.result(group.raw).base.flags & errorFlag) != 0,
+                "both buffers fail");
+        require(rig.stillFailures.size() == 1 && rig.stillFailures[0].stage == CameraStillStage::missingData &&
+                    rig.stillFailures[0].askedWidth == 1008 && rig.stillFailures[0].askedHeight == 756,
+                "and the capture is reported once");
+    }
+}
+
 void testService()
 {
     SyntheticCameraOptions options;
@@ -3055,6 +3396,8 @@ int main()
     testStillsAreAdmittedInTheOrderTheyAsked();
     testACaptureBeyondTheWholeBudgetIsRefusedBeforeItStarts();
     testBlackPicturesHoldNothingOfTheirOwn();
+    testAStillThatFailsSaysWhy();
+    testOnlyACaptureThatEndedInNoPictureIsReported();
     testService();
     return 0;
 }

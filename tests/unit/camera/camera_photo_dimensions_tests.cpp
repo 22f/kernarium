@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Which photo size a camera is asked for, and whether the photo is that size,
 // on tables of the shape the platform lists per format.
+#include "camera_still_failure.hpp"
 #include "photo_dimensions.hpp"
 #include "require.hpp"
 
@@ -465,6 +466,52 @@ void aJpegFileBeyondTheGuestsBufferIsNotCopied()
     require(!takeJpegFile(file, 10, true, kept) && kept == std::vector<std::uint8_t>(3, 7), "a refusal leaves the result as it was");
 }
 
+// What a still that failed says of itself is a stage, a few fixed words and numbers: the framework's error becomes a
+// domain word, so no name of the system's is kept, and every stage and word is its own.
+void aFailureIsNamedInFixedWords()
+{
+    require(errorDomainOf("AVFoundationErrorDomain") == CameraErrorDomain::avFoundation &&
+                errorDomainOf("NSOSStatusErrorDomain") == CameraErrorDomain::osStatus &&
+                errorDomainOf("NSCocoaErrorDomain") == CameraErrorDomain::cocoa &&
+                errorDomainOf("NSPOSIXErrorDomain") == CameraErrorDomain::posix &&
+                errorDomainOf("NSMachErrorDomain") == CameraErrorDomain::mach,
+            "the framework's domains have their words");
+    require(errorDomainOf("") == CameraErrorDomain::other && errorDomainOf("com.example.SomeOtherDomain") == CameraErrorDomain::other &&
+                errorDomainOf("avfoundationerrordomain") == CameraErrorDomain::other,
+            "any other domain is `other`, whatever it is called");
+    const std::vector<CameraStillStage> stages {CameraStillStage::none,       CameraStillStage::unknown,
+                                                CameraStillStage::refused,    CameraStillStage::notStarted,
+                                                CameraStillStage::frameworkError, CameraStillStage::missingData,
+                                                CameraStillStage::resolvedSize,   CameraStillStage::encodedSize,
+                                                CameraStillStage::fileSize,   CameraStillStage::guestBuffer,
+                                                CameraStillStage::timeout};
+    std::vector<std::string> words, domains;
+    for (const auto stage : stages) words.emplace_back(stillStageName(stage));
+    for (const auto domain : {CameraErrorDomain::none, CameraErrorDomain::avFoundation, CameraErrorDomain::osStatus,
+                              CameraErrorDomain::cocoa, CameraErrorDomain::posix, CameraErrorDomain::mach, CameraErrorDomain::other})
+        domains.emplace_back(errorDomainName(domain));
+    for (auto* list : {&words, &domains}) {
+        auto sorted = *list;
+        std::sort(sorted.begin(), sorted.end());
+        require(std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end(), "every stage and every domain has its own word");
+    }
+    words.insert(words.end(), domains.begin(), domains.end());
+    for (const auto& word : words)
+        for (const char c : word)
+            require((c >= 'a' && c <= 'z') || c == '-', "a word is lower case letters and hyphens");
+    require(stillStageName(CameraStillStage::resolvedSize) == "resolved-size" && stillStageName(CameraStillStage::encodedSize) == "encoded-size" &&
+                stillStageName(CameraStillStage::frameworkError) == "framework-error" && stillStageName(CameraStillStage::none) == "none",
+            "the stages the readers know are spelt as they read them");
+    require(factName(CameraFact::unknown) == "unknown" && factName(CameraFact::no) == "no" && factName(CameraFact::yes) == "yes" &&
+                cameraPositionName(CameraPosition::front) == "front" && cameraPositionName(CameraPosition::back) == "back" &&
+                cameraPositionName(CameraPosition::external) == "external",
+            "the facts and positions have their words");
+    // A result that is a picture says nothing: its failure is the stage none.
+    require(CameraStillFailure {}.stage == CameraStillStage::none && CameraStillFailure {}.compensationSupported == CameraFact::unknown &&
+                CameraStillFailure {}.errorDomain == CameraErrorDomain::none,
+            "a failure that says nothing is stage none, unknown and no error");
+}
+
 } // namespace
 
 int main()
@@ -493,5 +540,6 @@ int main()
     everyStandardSizeIsDeliveredAtEveryFormatsAspect();
     aRatioWithAnOddSideTakesAnEvenMultiple();
     aStreamTheFormatJustCoversIsDeliveredAsItIs();
+    aFailureIsNamedInFixedWords();
     return 0;
 }

@@ -187,7 +187,11 @@ interface to the wire.
   nothing it asked for arrived. A JPEG is made at exactly the size asked for
   (`photo_dimensions.hpp`): the capture is refused when the active format does
   not list that size, and the photo is dropped when the platform resolved
-  another. A photo output gets its maximum size only after it is attached to the
+  another. A capture that ends without a picture says why in its result
+  (`CameraStillResult::failure`, `camera_still_failure.hpp`): the stage, the
+  resolved size, whether the photo output's orientation compensation is
+  supported and on, and the framework's error as a domain word and a code. A
+  photo output gets its maximum size only after it is attached to the
   session, as AVFoundation requires: the largest size the anchor lists within
   the guest's still cap, so no larger pipeline is prepared. The guest is offered
   the sizes the anchor makes (`stillsOf`), and a camera that only takes stills

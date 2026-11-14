@@ -1929,11 +1929,18 @@ private:
                 ? "live" : "blocked",
             cameraRotation().degrees());
         if (cameras_.hasCameras()) {
+            auto cameraOptions = kernarium::camera::deviceOptions(
+                cameras_, request_.camera.mode,
+                cameraStateReceiver(), cameraRotation());
+            /* A still that does not end in a picture says why in the session
+             * record's camera slot, which a bug report carries (numbers and
+             * fixed words only). */
+            cameraOptions.onStillFailure =
+                [](const uml::platform::CameraStillFailure& failure) {
+                    uml::runtime::note_camera_still_failure(failure);
+                };
             boot->camera = uml::camera::makeInProcessCameraService(
-                cameras_.source,
-                kernarium::camera::deviceOptions(
-                    cameras_, request_.camera.mode,
-                    cameraStateReceiver(), cameraRotation()),
+                cameras_.source, std::move(cameraOptions),
                 sharedMemoryRegions_);
             arguments.emplace_back(uml::gpu::virtioDeviceArgument(
                 boot->camera->takeConnectionName(),
