@@ -26,7 +26,8 @@ Core/                                  GuestHostCore, a Swift package both
                                        pointer's position, buttons and scroll), and
                                        the display's scale: guest pixels to a point,
                                        or native, with the pixels and density it
-                                       gives a view
+                                       gives a view, and a monotonic clock that is
+                                       not a required-reason API (MonotonicClock)
 Sources/KernariumRuntimeLoader.h/.mm   loads the embedded runtime framework and
                                        wraps its C API (Runtime/KernariumRuntime.h)
 Sources/GuestDisplay.swift             the Metal view that shows the guest's display,
