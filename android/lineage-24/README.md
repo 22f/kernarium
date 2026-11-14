@@ -144,7 +144,9 @@ The home screen is one empty page with a dock of Files and Settings: no
 widget, no second page and no other item. Calendar, Gallery, Music and
 Calculator stay installed and are in the app drawer. The Launcher3 resource
 overlay owns the layouts and the verifier requires them. The launcher reads its
-layout once, so a guest created earlier keeps its home screen.
+layout once, so a guest created earlier keeps its home screen. An item the
+launcher adds by itself, such as a newly installed application, goes on the
+first page while it has room, then on the later pages in order (route `p0010`).
 
 ### Motion sensors
 
