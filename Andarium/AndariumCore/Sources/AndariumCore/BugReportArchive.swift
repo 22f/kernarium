@@ -298,16 +298,22 @@ public enum BugReportAttachments {
         return lines.joined(separator: "\n") + "\n"
     }
 
-    /// The stills of the guest's cameras that did not end in a picture in the
-    /// two sessions the records describe, and why, in words; nil when neither
-    /// record has a camera slot with a failure in it (a runtime before layout 8,
-    /// or sessions whose stills all ended in pictures). Numbers and the
-    /// runtime's fixed words only.
+    /// How the platform presented each of the guest's cameras, and the stills of
+    /// the guest's cameras that did not end in a picture, and why, in the two
+    /// sessions the records describe, in words; nil when neither record has a
+    /// camera slot (a runtime before layout 8, or sessions that presented no
+    /// camera and had no failed still). Numbers and the runtime's fixed words only.
     public static func cameraStills(previous: SessionRecord?, current: SessionRecord?) -> String? {
         guard previous?.camera != nil || current?.camera != nil else { return nil }
         var lines = [
-            "Stills of the guest's cameras that did not end in a picture, and where each one stopped.",
+            "How the platform presented each of the guest's cameras, and the stills of the guest's cameras that did not end",
+            "in a picture, with where each one stopped.",
             "Numbers and fixed words only: no name, path or message of the system's is recorded.",
+            "",
+            "mounting: the platform's fixed angle is the clockwise turn that makes the camera's unturned pictures upright for an",
+            "interface orientation. A front camera mounted with its sensor's top at the device's top (portrait 0 or 180)",
+            "imitates an earlier front camera: the guest is told 90, the platform turns the video connection, and the photo",
+            "output turns its stills (orientation compensation, which stays on).",
             "",
             "refused: the device did not start the capture (a limit, no capture session, or the platform's refusal).",
             "not-started: the platform accepted the capture and could not start it.",
@@ -327,7 +333,7 @@ public enum BugReportAttachments {
             if let camera = record?.camera {
                 lines.append(camera.report())
             } else {
-                lines.append(record == nil ? "There is no record." : "The record names no failed still.")
+                lines.append(record == nil ? "There is no record." : "The record names no camera and no failed still.")
             }
         }
         return lines.joined(separator: "\n") + "\n"
