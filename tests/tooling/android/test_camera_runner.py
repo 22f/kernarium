@@ -916,6 +916,14 @@ class FakeGuest:
         self.present = [1_000_000_000 + 33_000_000 * i for i in range(30)]
         self.closes_on_freeze = False
         self.away_more = 0.0
+        # The stop lasts this much longer than it was asked to (a sleep that overshoots); the step compares with the
+        # stop as it lasted.
+        self.stop_extra = 0.0
+        # Which stream the camera HAL's result dispatcher names as the oldest pending buffer in the report of the
+        # nth stop (1 is the still's, 0 the preview's, None: it prints no report); a round beyond the list uses the last.
+        self.head_streams: list[int | None] = [1]
+        self.markers: list[str] = []
+        self.has_still_stream = True
         # The audio hold library: the seconds each hold of the sound device's thread was asked for, whether the
         # input then makes silence up (its log line), what the audio flinger's record thread shows, and the
         # input's own log.
@@ -968,6 +976,8 @@ class FakeGuest:
             self.held = {front} if self.front_holds else {"0"}
         elif command.startswith("am start"):
             self.held = set() if ("video" if "VIDEO_CAMERA" in command else "photo") in self.no_camera_in else {"0"}
+        if command.startswith(f"log -t {runner.HELD_STILL_MARKER_TAG} '"):
+            self.markers.append(command.split("'")[1])
         if command.startswith(f"log -t {runner.SWITCH_MARKER_TAG} '") and not self.no_markers:
             marker = command.split("'")[1]
             number = int(re.search(r"switch (\d+) of", marker).group(1))
@@ -1010,19 +1020,43 @@ class FakeGuest:
             "Client Package Name: org.lineageos.aperture, Conflicting Client Devices: {})\n" for camera in sorted(self.held))
         if ("video" if self.in_video else "photo") not in self.stalled:
             self.frames += 25
+        still = ("    Stream[1]: Output\n      Dims: 4032 x 3024, format 0x21, dataspace 0x8c20000\n"
+                 "      Frames produced: 9, last timestamp: 1 ns\n") if self.has_still_stream else ""
         return ("Active Camera Clients:\n" + clients + "Active Client listener PIDs: 1\n"
-                f"    Stream[3]: Output\n      Frames produced: {self.frames}, last timestamp: 1 ns\n")
+                f"    Stream[3]: Output\n      Dims: 1008 x 756, format 0x23, dataspace 0x0\n"
+                f"      Frames produced: {self.frames}, last timestamp: 1 ns\n" + still)
 
     def screenshot(self):
         return self.chart
 
-    def freeze(self, seconds: float) -> None:
+    def freeze(self, seconds: float) -> float:
         self.frozen.append(seconds)
+        seconds += self.stop_extra
         resume = self.present[-1] + round((seconds + self.away_more) * 1e9)
         self.present += [resume + 33_000_000 * i for i in range(10)]
         if self.closes_on_freeze:
             self.launcher += ("Camera: memory: capture session closed, footprint 3466 MiB\n"
                               "Camera: memory: capture session opened, footprint 3468 MiB\n")
+        return seconds
+
+    def dispatcher_log(self) -> str:
+        """The result dispatcher's report after each stop's marker: the oldest pending buffer first by frame number."""
+        text = ""
+        for number, marker in enumerate(self.markers):
+            head = self.head_streams[min(number, len(self.head_streams) - 1)]
+            second = 100.0 + 10 * number
+            text += f"   {second:.3f}  2423  2423 I {runner.HELD_STILL_MARKER_TAG}: {marker}\n"
+            if head is not None:
+                other = 1 - head
+                text += (f"   {second + 1:.3f}  2292  2379 W GCH_ResultDispatcher: [Cam0_ResultDispatcher] PrintTimeoutMessages: "
+                         f"normal_request_map: pending buffer of stream {other} for frames [{905 + number} - {908 + number}] "
+                         "(4 frames) ready 0\n"
+                         f"   {second + 1:.3f}  2292  2379 W GCH_ResultDispatcher: [Cam0_ResultDispatcher] PrintTimeoutMessages: "
+                         f"normal_request_map: pending buffer of stream {head} for frame {904 + number} ready 0\n"
+                         f"   {second + 1.5:.3f}  2292  2379 W GCH_ResultDispatcher: [Cam0_ResultDispatcher] PrintTimeoutMessages: "
+                         f"normal_request_map: pending buffer of stream {other} for frames [{905 + number} - {910 + number}] "
+                         "(6 frames) ready 0\n")
+        return text
 
     def launcher_log(self) -> str:
         return self.launcher
@@ -1343,6 +1377,38 @@ class HeldStillTests(unittest.TestCase):
         self.assertEqual(runner.longest_gap_seconds([5]), 0.0)
         self.assertEqual(runner.longest_gap_seconds([]), 0.0)
 
+    DUMP = ("    Stream[0]: Output\n      Dims: 1008 x 756, format 0x23, dataspace 0x0\n      Frames produced: 12, last timestamp: 1 ns\n"
+            "    Stream[1]: Output\n      Dims: 4032 x 3024, format 0x21, dataspace 0x8c20000\n      Frames produced: 3, last timestamp: 1 ns\n"
+            "    Stream[2]: Output\n      Dims: 4032 x 3024, format 0x20, dataspace 0x0\n")
+
+    def test_the_still_streams_of_the_camera_service(self) -> None:
+        self.assertEqual(runner.parse_still_streams(self.DUMP), {1, 2})
+        # A stream without a Dims line of its own does not borrow the next stream's.
+        self.assertEqual(runner.parse_still_streams("    Stream[3]: Output\n      Frames produced: 5\n"
+                                                   "    Stream[4]: Output\n      Dims: 1 x 1, format 0x21\n"), {4})
+        self.assertEqual(runner.parse_still_streams("no streams\n"), set())
+
+    def test_the_oldest_pending_buffer_says_whether_a_still_held_the_pipeline(self) -> None:
+        def report(second: float, stream: int, frames: str) -> str:
+            return (f"   {second:.3f}  2292  2379 W GCH_ResultDispatcher: [Cam0_ResultDispatcher] PrintTimeoutMessages: "
+                    f"normal_request_map: pending buffer of stream {stream} for {frames} ready 0\n")
+        marker = "   120.000  2423  2423 I CamHeldStill: held-still-1-77\n"
+        # The preview's frames wait behind the still's (the frame before them): the still holds the pipeline.
+        held = marker + report(121.0, 0, "frames [1166 - 1169] (4 frames)") + report(121.0, 1, "frame 1165") + \
+            report(121.5, 0, "frames [1166 - 1171] (6 frames)")
+        self.assertEqual(runner.pipeline_head(held, "held-still-1-77", {1}),
+                         (True, "the oldest pending buffer is stream 1's frame 1165"))
+        # The still's frame comes after preview frames that the stop caught: the stop missed the still's request.
+        missed = marker + report(121.0, 0, "frames [647 - 648] (2 frames)") + report(121.0, 1, "frame 649") + \
+            report(121.0, 0, "frames [650 - 651] (2 frames)")
+        self.assertEqual(runner.pipeline_head(missed, "held-still-1-77", {1}),
+                         (False, "the oldest pending buffer is stream 0's frame 647"))
+        # A later report (half a second on) does not change the verdict; a report before the marker is another round's.
+        later = report(100.0, 1, "frame 1") + marker + report(121.0, 0, "frame 5") + report(121.6, 1, "frame 2")
+        self.assertEqual(runner.pipeline_head(later, "held-still-1-77", {1})[0], False)
+        self.assertEqual(runner.pipeline_head(marker, "held-still-1-77", {1})[0], None)
+        self.assertEqual(runner.pipeline_head("", "held-still-1-77", {1})[0], None)
+
     def run_step(self, guest) -> str:
         out = io.StringIO()
         with mock.patch.object(runner.time, "sleep", lambda seconds: None), mock.patch.object(runner, "STILL_SECONDS", 0.05), \
@@ -1350,56 +1416,174 @@ class HeldStillTests(unittest.TestCase):
             runner.check_still_keeps_preview(guest, self.PLAN)
         return out.getvalue()
 
-    def test_three_stills_that_hold_the_pipeline_leave_the_stream_open(self) -> None:
+    def guest(self) -> "FakeGuest":
         guest = FakeGuest(self.PLAN)
+        guest.launcher = "Camera: memory: capture session opened, footprint 3350 MiB\n"
+        return guest
+
+    def test_three_stills_that_hold_the_pipeline_leave_the_stream_open(self) -> None:
+        guest = self.guest()
         printed = self.run_step(guest)
-        self.assertEqual(guest.frozen, [runner.HELD_STILL_SECONDS] * len(runner.HELD_STILL_DELAYS))
-        self.assertEqual(guest.commands.count(f"input keyevent {runner.CAMERA_KEYCODE}"), len(runner.HELD_STILL_DELAYS))
-        self.assertIn("the preview's stream stayed open (no capture session closed)", printed)
+        self.assertEqual(guest.frozen, [runner.HELD_STILL_SECONDS] * runner.HELD_STILL_ROUNDS)
+        self.assertEqual(guest.commands.count(f"input keyevent {runner.CAMERA_KEYCODE}"), runner.HELD_STILL_ROUNDS)
+        self.assertIn("3 stops of 1 s inside a still's request: the preview's stream stayed open (no capture session closed)",
+                      printed)
+        self.assertEqual(printed.count("its stop overlapped a still's request: counted"), 3)
 
     def test_a_session_the_host_closed_behind_the_stills_is_a_failure(self) -> None:
-        guest = FakeGuest(self.PLAN)
+        guest = self.guest()
         guest.closes_on_freeze = True
         with self.assertRaisesRegex(runner.Failure, r"held still 1: the host closed its capture session \(1 so far\) behind a "
                                     "still that held the request pipeline: the camera HAL closed the preview's stream"):
             self.run_step(guest)
 
     def test_a_session_closed_before_the_step_is_not_counted(self) -> None:
-        guest = FakeGuest(self.PLAN)
-        guest.launcher = "Camera: memory: capture session closed, footprint 3466 MiB\n"
+        guest = self.guest()
+        guest.launcher += "Camera: memory: capture session closed, footprint 3466 MiB\n"
         self.run_step(guest)
 
+    def test_a_launcher_that_prints_no_session_lines_proves_nothing(self) -> None:
+        guest = self.guest()
+        guest.launcher = "Camera: streaming\n"
+        with self.assertRaisesRegex(runner.Failure, "the launcher has printed no capture session line, so a check that none "
+                                    "closed proves nothing"):
+            self.run_step(guest)
+        self.assertEqual(guest.frozen, [])
+
     def test_a_preview_that_stays_away_longer_than_the_stop_is_a_failure(self) -> None:
-        guest = FakeGuest(self.PLAN)
+        guest = self.guest()
         guest.away_more = runner.HELD_STILL_RESUME_SECONDS + 0.4
-        with self.assertRaisesRegex(runner.Failure, r"held still 1: the preview was away 1\.9\d s, more than the stop and 0\.5 s"):
+        with self.assertRaisesRegex(runner.Failure, r"held still 1: the preview was away 1\.9\d s, more than the stop "
+                                    r"\(1\.00 s\) and 0\.5 s"):
             self.run_step(guest)
 
     def test_a_preview_that_comes_back_within_the_bound_passes(self) -> None:
-        guest = FakeGuest(self.PLAN)
+        guest = self.guest()
         guest.away_more = runner.HELD_STILL_RESUME_SECONDS - 0.2
         self.run_step(guest)
 
+    def test_the_bound_follows_the_stop_as_it_lasted(self) -> None:
+        # A sleep that overshoots makes a stop of 1.6 s: the preview away 1.6 s is the stop, not a defect.
+        guest = self.guest()
+        guest.stop_extra = 0.6
+        printed = self.run_step(guest)
+        self.assertIn("stop 1.60 s", printed)
+        # And 0.6 s more than that stop is a defect whatever the stop was.
+        guest = self.guest()
+        guest.stop_extra = 0.6
+        guest.away_more = runner.HELD_STILL_RESUME_SECONDS + 0.2
+        with self.assertRaisesRegex(runner.Failure, r"more than the stop \(1\.60 s\)"):
+            self.run_step(guest)
+
     def test_a_round_that_gives_no_still_is_a_failure(self) -> None:
-        guest = FakeGuest(self.PLAN)
+        guest = self.guest()
         guest.stills = lambda: {"IMG_old.jpg"}
         with self.assertRaisesRegex(runner.Failure, "held still 1: a still in the camera folder: no new still"):
             self.run_step(guest)
 
     def test_no_preview_layer_and_no_frames_are_failures(self) -> None:
-        guest = FakeGuest(self.PLAN)
+        guest = self.guest()
         guest.layer = None
         with self.assertRaisesRegex(runner.Failure, "no preview layer"):
             self.run_step(guest)
-        guest = FakeGuest(self.PLAN)
+        guest = self.guest()
         guest.present = []
         with self.assertRaisesRegex(runner.Failure, "held still 1: the preview layer has presented no frame"):
             self.run_step(guest)
+
+    def test_no_still_output_stream_is_a_failure(self) -> None:
+        guest = self.guest()
+        guest.has_still_stream = False
+        with self.assertRaisesRegex(runner.Failure, "lists no still output stream"):
+            self.run_step(guest)
+
+    def test_only_a_stop_that_overlapped_a_still_counts(self) -> None:
+        guest = self.guest()
+        guest.head_streams = [0, 0, 1, None, 1, 1]
+        printed = self.run_step(guest)
+        self.assertEqual(len(guest.frozen), 6)
+        self.assertEqual(printed.count("did not overlap a still's request: not counted"), 2)
+        self.assertEqual(printed.count("no evidence that its stop overlapped a still's request: not counted"), 1)
+        self.assertEqual(printed.count("its stop overlapped a still's request: counted"), 3)
+        # The delays are tried in turn.
+        self.assertEqual(re.findall(r"s, ([0-9.]+) s after the key", printed),
+                         ["0.15", "0.18", "0.21", "0.24", "0.12", "0.15"])
+
+    def test_a_step_that_never_overlapped_a_still_is_a_failure_not_a_pass(self) -> None:
+        for heads in ([0], [None]):
+            guest = self.guest()
+            guest.head_streams = heads
+            with self.assertRaisesRegex(runner.Failure, r"only 0 of 8 stops overlapped a still's request \(3 are needed\)"):
+                self.run_step(guest)
+            self.assertEqual(len(guest.frozen), runner.HELD_STILL_ATTEMPTS)
+
+    def test_a_late_still_does_not_lose_the_frames_of_the_stop(self) -> None:
+        """SurfaceFlinger keeps the last 128 frames of a layer: with the still file there eight seconds after the key
+        and a 30 fps preview, a read after the still is found has lost the frames around the stop. The step reads
+        them every half second from the resume on."""
+        guest = RingGuest(self.PLAN)
+        guest.launcher = "Camera: memory: capture session opened, footprint 3350 MiB\n"
+        guest.still_after = 8.0
+        printed = self.run_step_with_clock(guest)
+        self.assertIn("3 stops of 1 s inside a still's request", printed)
+        self.assertRegex(printed, r"the preview was away 1\.0\d s")
+
+    def run_step_with_clock(self, guest) -> str:
+        out = io.StringIO()
+        with mock.patch.object(runner.time, "sleep", guest.advance), mock.patch.object(runner, "STILL_SECONDS", 60), \
+                contextlib.redirect_stdout(out):
+            runner.check_still_keeps_preview(guest, self.PLAN)
+        return out.getvalue()
 
     def test_the_step_runs_in_live_mode_after_the_first_still(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         live = source[source.index("check_still(guest, plan, before)\n    if plan.mode == \"live\":"):]
         self.assertLess(live.index("check_still_keeps_preview(guest, plan)"), live.index("check_video(guest, plan)"))
+
+
+class RingGuest(FakeGuest):
+    """A guest whose clock runs: a preview of 30 frames a second that SurfaceFlinger remembers the last 128 of, a stop
+    that takes the frames away for as long as it lasts, and a still file that appears `still_after` seconds after the key."""
+
+    def __init__(self, plan) -> None:
+        super().__init__(plan)
+        self.clock = 0.0
+        self.keys: list[float] = []
+        self.stops: list[tuple[float, float]] = []
+        self.still_after = 0.3
+        self.present = []
+
+    def advance(self, seconds: float) -> None:
+        self.clock += seconds
+
+    def shell(self, command: str, timeout: float = 0) -> str:
+        if command == f"input keyevent {runner.CAMERA_KEYCODE}":
+            self.commands.append(command)
+            self.keys.append(self.clock)
+            return ""
+        return super().shell(command, timeout)
+
+    def freeze(self, seconds: float) -> float:
+        self.frozen.append(seconds)
+        self.stops.append((self.clock, self.clock + seconds))
+        self.clock += seconds
+        return seconds
+
+    def present_times(self, layer: str) -> list[int]:
+        frames = []
+        for index in range(int(self.clock * 30) + 1):
+            when = 5.0 + index / 30
+            if when > self.clock + 5.0:
+                break
+            if any(start + 5.0 <= when < end + 5.0 for start, end in self.stops):
+                continue
+            frames.append(round(when * 1e9))
+        return frames[-127:]
+
+    def stills(self) -> set[str]:
+        files = {"IMG_old.jpg"}
+        files.update(f"IMG_new{number}.jpg" for number, key in enumerate(self.keys) if self.clock >= key + self.still_after)
+        return files
 
 
 class VideoAndFrontFlowTests(unittest.TestCase):
