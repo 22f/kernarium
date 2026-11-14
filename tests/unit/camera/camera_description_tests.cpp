@@ -4,6 +4,7 @@
 
 #include "calibration_store.hpp"
 #include "camera_description.hpp"
+#include "camera_ids.hpp"
 #include "front_tables.hpp"
 #include "require.hpp"
 #include "photo_dimensions.hpp"
@@ -436,6 +437,106 @@ void testAConcurrentCameraKeepsItsOfferOrRunsAlone()
     const auto kept = arrangeCameras(std::vector<CameraInfo> {equal, other}, together, "tablet", CalibrationStore(), {});
     require(!kept[0].concurrencyDropped && kept[0].anchor == std::optional<std::size_t>(2) && bit(kept[0].wire.concurrent_mask, 1),
             "a multi-camera format offering as much on the first three keys keeps concurrency, and anchors there");
+}
+
+// The iPhone 15 Pro Max as discovery lists it: three virtual cameras (triple, dual wide, dual), the three single
+// lenses and the front camera, and the multi-camera sets AVFoundation names for them: the dual camera and the wide
+// lens each with the front camera, and the dual wide camera with the front camera. No set holds the ultra wide or
+// the telephoto lens, nor two single lenses.
+std::vector<CameraInfo> proMaxCameras()
+{
+    const auto make = [](const char* identifier, CameraPosition position, CameraLensKind lens) {
+        CameraInfo info = tabletCamera();
+        info.identifier = identifier;
+        info.position = position;
+        info.lens = lens;
+        return info;
+    };
+    return {make("triple", CameraPosition::back, CameraLensKind::zoom),     make("dual-wide", CameraPosition::back, CameraLensKind::zoom),
+            make("dual", CameraPosition::back, CameraLensKind::zoom),       make("wide", CameraPosition::back, CameraLensKind::wide),
+            make("ultra-wide", CameraPosition::back, CameraLensKind::ultraWide), make("telephoto", CameraPosition::back, CameraLensKind::telephoto),
+            make("front", CameraPosition::front, CameraLensKind::wide)};
+}
+
+// What the image's HAL announces from the wire's masks (camera_ids.hpp): the largest sets of cameras in which each two
+// run together, by wire index.
+std::vector<std::vector<std::uint32_t>> halSetsOf(const std::vector<CameraDescription>& cameras)
+{
+    std::vector<andarium::camera::Concurrency> concurrency;
+    for (const auto& camera : cameras)
+        concurrency.push_back({camera.index, camera.index, camera.wire.concurrent_mask, camera.wire.conflict_mask});
+    return andarium::camera::concurrent_sets(concurrency);
+}
+
+using Sets = std::vector<std::vector<std::uint32_t>>;
+
+// The guest takes every group of cameras in which each two are told to run together as one it may run at once, and the
+// device runs `concurrentCameras` at once: it refuses a third. So no group the guest is told is larger, whatever the
+// platform lists; of the pairs a set names, the primary back camera with the front camera is kept first, then the
+// other pairs with the front camera.
+void testTheGuestIsToldNoMoreThanTheDeviceRuns()
+{
+    const auto infos = proMaxCameras();
+    const auto arrange = [&](std::vector<std::vector<std::size_t>> sets, std::vector<CameraInfo> from = {}) {
+        if (from.empty()) from = infos;
+        return arrangeCameras(from, sets, "phone", CalibrationStore(), {});
+    };
+    const auto check = [&](const std::vector<CameraDescription>& cameras) {
+        for (const auto& set : halSetsOf(cameras))
+            require(set.size() <= concurrentCameras, "no more cameras are told to run together than the device runs");
+        for (const auto& camera : cameras)
+            for (const auto& other : cameras) {
+                if (camera.index == other.index) continue;
+                const bool together = bit(camera.wire.concurrent_mask, other.index);
+                require(together == bit(other.wire.concurrent_mask, camera.index) && together != bit(camera.wire.conflict_mask, other.index) &&
+                            bit(camera.wire.conflict_mask, other.index) == bit(other.wire.conflict_mask, camera.index),
+                        "a pair is told as one or the other, the same from both cameras");
+            }
+    };
+
+    // The phone's platform lists the wide, ultra wide and telephoto lenses and the front camera as one set (every pair
+    // of them runs together). The guest is told two at once: the wide lens and the front camera, and the front camera
+    // with each other lens; the lenses conflict with each other.
+    const auto all = arrange({{3, 4, 5, 6}});
+    require(all.size() == 4 && all[0].info.identifier == "wide" && all[1].info.identifier == "front" &&
+                all[2].info.identifier == "ultra-wide" && all[3].info.identifier == "telephoto",
+            "wide, front, ultra wide, telephoto");
+    check(all);
+    require(halSetsOf(all) == Sets({{0, 1}, {1, 2}, {1, 3}}), "the wide lens and the front camera, the front camera and each other lens");
+    for (const auto [a, b] : {std::make_pair(0u, 2u), std::make_pair(0u, 3u), std::make_pair(2u, 3u)})
+        require(bit(all[a].wire.conflict_mask, b) && bit(all[b].wire.conflict_mask, a), "the lenses conflict with each other");
+
+    // The log says which pairs the guest is told and the sets they come from.
+    const std::vector<std::vector<std::size_t>> allSets {{3, 4, 5, 6}};
+    require(concurrencySummary(all, allSets) ==
+                "Camera: runs together: 0+1, 1+2, 1+3 (the device runs 2 cameras at once); the platform's multi-camera sets: {3 4 5 6}",
+            "the log names the pairs and the platform's sets");
+    require(concurrencySummary(arrange({}), {}) ==
+                "Camera: runs together: none (the device runs 2 cameras at once); the platform's multi-camera sets: none",
+            "and says when there are none");
+
+    // Pairs listed one by one, in any order, are the same host.
+    const auto paired = arrange({{4, 5}, {3, 5}, {5, 6}, {4, 6}, {3, 4}, {3, 6}});
+    check(paired);
+    require(halSetsOf(paired) == halSetsOf(all), "pairs of a set are the set");
+
+    // A platform that lists the wide lens with the front camera and nothing else: the one pair.
+    const auto probed = arrange({{2, 6}, {3, 6}, {1, 6}});
+    check(probed);
+    require(halSetsOf(probed) == Sets({{0, 1}}), "the wide lens and the front camera alone");
+    for (const std::uint32_t lens : {2u, 3u})
+        for (std::uint32_t other = 0; other < 4; ++other)
+            if (other != lens) require(bit(probed[lens].wire.conflict_mask, other), "a lens no set names conflicts with every camera");
+
+    // No set names the primary back camera: the front camera keeps the pairs it has.
+    const auto frontOnly = arrange({{4, 6}, {5, 6}});
+    check(frontOnly);
+    require(halSetsOf(frontOnly) == Sets({{1, 2}, {1, 3}}), "the front camera with the lenses a set names");
+
+    // A host with no front camera: its back cameras pair in wire order, and no group is larger than the device runs.
+    const auto back = arrange({{0, 1, 2}}, {infos[3], infos[4], infos[5]});
+    check(back);
+    require(halSetsOf(back) == Sets({{0, 1}, {0, 2}}), "back cameras alone pair with the first");
 }
 
 // The session is told the anchors by the platform's camera index, not the wire's: the front camera is wire camera 1
@@ -1085,6 +1186,7 @@ int main()
     testZoomFollowsTheAnchorsRecommendation();
     testTheFramesAnAnchorDeliversNeverExceedTheReservesBuffer();
     testAConcurrentCameraKeepsItsOfferOrRunsAlone();
+    testTheGuestIsToldNoMoreThanTheDeviceRuns();
     testAnchorsAreNamedByThePlatformsCameraIndex();
     testACameraWithoutAnAnchorIsNotOffered();
     testHostsWithoutCaptureFormatsOfferTheirSizesUpToTheCap();

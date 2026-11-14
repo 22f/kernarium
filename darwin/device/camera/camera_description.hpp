@@ -90,7 +90,11 @@ struct ArrangementOptions {
  * the other back lenses (wide, ultra wide, telephoto) and then any external
  * camera. At most VIRTIO_VIDEO_CAMERA_MAX_CAMERAS. A host's zoom camera is not
  * published: each lens is a camera of its own. Any two cameras conflict unless
- * the host runs them together. A camera that runs in an anchor is stated up to
+ * the host runs them together, and never more than the device runs at once
+ * (`concurrentCameras`) are told to run together: of the pairs a platform set
+ * names, the primary back camera with the front camera comes first, then the
+ * other pairs with the front camera, and a pair that would make a third camera
+ * run with them conflicts. A camera that runs in an anchor is stated up to
  * the zoom the system recommends for the anchor, where it gives one. */
 [[nodiscard]] std::vector<CameraDescription> arrangeCameras(
     std::span<const uml::platform::CameraInfo> infos, std::span<const std::vector<std::size_t>> concurrentSets,
@@ -105,6 +109,12 @@ struct ArrangementOptions {
 /* What the log says of a camera at start: its anchor, what it is offered and
  * whether it runs with others. Device facts only. */
 [[nodiscard]] std::string anchorSummary(const CameraDescription& camera);
+
+/* What the log says of the cameras that run together, at start: the pairs of
+ * cameras (wire numbers) the guest is told run together, and the multi-camera
+ * sets the platform lists (platform camera numbers) they come from. */
+[[nodiscard]] std::string concurrencySummary(std::span<const CameraDescription> cameras,
+                                             std::span<const std::vector<std::size_t>> platformSets);
 
 /* What the log says of the first buffer of a camera's capture: its size and the
  * pitch of its rows, against the frame the reserve counts for a buffer of the

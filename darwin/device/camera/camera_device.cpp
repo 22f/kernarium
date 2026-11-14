@@ -310,6 +310,7 @@ public:
         anchors = anchorsByPlatformCamera(cameras, infos.size());
         const bool blocked = options.mode == CameraMode::blocked;
         runtimes.reserve(cameras.size());
+        if (!cameras.empty()) std::fprintf(stderr, "%s\n", concurrencySummary(cameras, sets).c_str());
         for (auto& camera : cameras) {
             if (const auto line = anchorSummary(camera); !line.empty()) std::fprintf(stderr, "%s\n", line.c_str());
             wireOfPlatform[camera.platformIndex] = camera.index;

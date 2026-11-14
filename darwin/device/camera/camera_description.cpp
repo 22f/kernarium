@@ -5,6 +5,7 @@
 #include "vhost_user_device.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <numbers>
@@ -209,6 +210,20 @@ BayerOrder bayerOrderOf(std::uint32_t wireFormat) noexcept
 
 namespace {
 
+// The most cameras of a group in which every two are told to run together, `size` cameras already chosen, `pool` the
+// cameras that run with all of them and are above the last one chosen (bit i: camera i). `adjacent[i]` has bit j when
+// cameras i and j are told to run together.
+std::size_t largestGroup(std::span<const std::uint32_t> adjacent, std::uint32_t pool, std::size_t size)
+{
+    std::size_t best = size;
+    for (std::uint32_t rest = pool; rest != 0; rest &= rest - 1) {
+        const auto camera = std::uint32_t(std::countr_zero(rest));
+        const std::uint32_t above = camera + 1 >= 32 ? 0u : ~0u << (camera + 1);
+        best = std::max(best, largestGroup(adjacent, pool & adjacent[camera] & above, size + 1));
+    }
+    return best;
+}
+
 std::vector<VideoMode> modesOf(const uml::platform::CaptureOffer& offer)
 {
     std::vector<VideoMode> modes;
@@ -358,12 +373,39 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
     }
 
     for (auto& camera : cameras) fillWire(camera);
+
+    // Which cameras the guest is told run together. The wire names pairs, and the guest takes every group of cameras
+    // in which each two are paired as one it may run at once, so the pairs are chosen such that no such group holds
+    // more cameras than the device runs at once (concurrentCameras: a third camera is refused, whatever the platform
+    // lists). A pair is a platform set's two cameras that kept their concurrency. The primary back camera with the
+    // front camera comes first (it is the concurrent feature), then the other pairs with a front camera, then the rest,
+    // each in wire order; a pair that would make a larger group conflicts instead.
+    const std::size_t count = cameras.size();
+    const auto isFront = [&](std::size_t camera) { return cameras[camera].info.position == CameraPosition::front; };
+    std::vector<std::pair<std::size_t, std::size_t>> pairs;
+    for (std::size_t a = 0; a < count; ++a)
+        for (std::size_t b = a + 1; b < count; ++b)
+            if (runsWith(cameras[a].platformIndex, cameras[b].platformIndex) && arranged[a].concurrent && arranged[b].concurrent)
+                pairs.emplace_back(a, b);
+    const auto rankOf = [&](const std::pair<std::size_t, std::size_t>& pair) {
+        const bool primaryWithFront = pair.first == 0 && cameras[0].info.position == CameraPosition::back && isFront(pair.second);
+        if (primaryWithFront) return 0;
+        return isFront(pair.first) || isFront(pair.second) ? 1 : 2;
+    };
+    std::stable_sort(pairs.begin(), pairs.end(), [&](const auto& x, const auto& y) { return rankOf(x) < rankOf(y); });
+    std::vector<std::uint32_t> adjacent(count, 0);
+    for (const auto& [a, b] : pairs) {
+        adjacent[a] |= 1u << b;
+        adjacent[b] |= 1u << a;
+        if (largestGroup(adjacent, (1u << count) - 1, 0) > concurrentCameras) {
+            adjacent[a] &= ~(1u << b);
+            adjacent[b] &= ~(1u << a);
+        }
+    }
     for (auto& camera : cameras) {
         for (const auto& other : cameras) {
             if (other.index == camera.index) continue;
-            // A camera that dropped its concurrency runs with none.
-            if (runsWith(camera.platformIndex, other.platformIndex) && arranged[camera.index].concurrent &&
-                arranged[other.index].concurrent)
+            if (adjacent[camera.index] >> other.index & 1u)
                 camera.wire.concurrent_mask |= 1u << other.index;
             else
                 camera.wire.conflict_mask |= 1u << other.index;
@@ -460,6 +502,27 @@ std::vector<std::optional<std::size_t>> anchorsByPlatformCamera(std::span<const 
     for (const auto& camera : cameras)
         if (camera.anchor && camera.platformIndex < anchors.size()) anchors[camera.platformIndex] = camera.anchor;
     return anchors;
+}
+
+std::string concurrencySummary(std::span<const CameraDescription> cameras, std::span<const std::vector<std::size_t>> platformSets)
+{
+    std::string line = "Camera: runs together:";
+    bool any = false;
+    for (const auto& camera : cameras)
+        for (const auto& other : cameras)
+            if (camera.index < other.index && (camera.wire.concurrent_mask >> other.index & 1u) != 0) {
+                line += (any ? "," : "") + std::string(" ") + std::to_string(camera.index) + "+" + std::to_string(other.index);
+                any = true;
+            }
+    if (!any) line += " none";
+    line += " (the device runs " + std::to_string(concurrentCameras) + " cameras at once); the platform's multi-camera sets:";
+    if (platformSets.empty()) line += " none";
+    for (const auto& set : platformSets) {
+        line += " {";
+        for (std::size_t member = 0; member < set.size(); ++member) line += (member != 0 ? " " : "") + std::to_string(set[member]);
+        line += "}";
+    }
+    return line;
 }
 
 std::string anchorSummary(const CameraDescription& camera)

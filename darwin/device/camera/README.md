@@ -33,8 +33,13 @@ application's statements (the sensor orientation, the rotation that
   lens is a camera of its own, so a guest switches lenses by switching
   cameras, and each keeps its own formats, controls and Bayer stills. The
   Android image numbers a phone's cameras 0 wide, 1 front, 3 ultra wide and 4
-  telephoto. Cameras run together where the host says they can (the wide lens
-  and the front camera on a phone of three lenses); every other pair conflicts.
+  telephoto. Cameras run together where the platform's multi-camera sets say
+  they can, two at once (the device runs no more, which is the layout's
+  `CameraUse::streams`): the guest is told the primary back camera with the
+  front camera first, then the front camera with each other camera a set
+  names, then other pairs, and every other pair conflicts, so the guest never
+  takes a group of more than two as one it may run at once. The log names the
+  pairs and the platform's sets at start.
   A lens publishes manual exposure, focus and white balance where the host
   allows them. Of the front lenses (an iPad lists a wide and an ultra wide one
   over a single sensor) the guest sees the wide one.
