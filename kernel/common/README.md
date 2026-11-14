@@ -440,9 +440,9 @@ it. The bridge fields used below are defined by the comments in
   replies `suspended`, which confirms nothing, and so does a request that
   finds a suspend the guest started itself already holding the transition,
   past its sync or not: the statement is made only for the transition the
-  request's own task runs. The host reads either text as the old reply. The sync runs before tasks are
-  frozen, so a write between the two is not covered
-  (`guest-mconsole-console-clients`).
+  request's own task runs. The host reads either text as the old reply. The
+  sync runs before tasks are frozen, so a write between the two is not
+  covered (`guest-mconsole-console-clients`).
 - A command that answers with what the kernel prints (`sysrq`, `stack`)
   sends its client what the consoles write while it runs, whichever vCPU
   writes it, and nothing after its final reply. The final reply names the
