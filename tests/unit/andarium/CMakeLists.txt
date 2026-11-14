@@ -10,11 +10,23 @@ uml_add_unit_test(NAME andarium-core
     LABELS andarium
     TIMEOUT 1200)
 
+# The guest's motion sub-HAL (android/lineage-24/overlay/sensors): the wire
+# format, its device-orientation part against the golden frames that
+# AndariumCore checks too (the fixture's path is the test's argument, so the
+# file has one copy), and what the orientation sensor reports and when.
 add_executable(uml_andarium_motion_protocol_tests motion_protocol_tests.cpp)
 target_include_directories(uml_andarium_motion_protocol_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/sensors)
 uml_add_unit_test(NAME andarium-motion-protocol
-    COMMAND uml_andarium_motion_protocol_tests LABELS andarium)
+    COMMAND uml_andarium_motion_protocol_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/motion-orientation-golden-frames.txt
+    LABELS andarium)
+
+add_executable(uml_andarium_device_orientation_tests device_orientation_tests.cpp)
+target_include_directories(uml_andarium_device_orientation_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/sensors)
+uml_add_unit_test(NAME andarium-device-orientation
+    COMMAND uml_andarium_device_orientation_tests LABELS andarium)
 
 # The guest's vibrator HAL (android/lineage-24/overlay/vibrator): the wire format
 # against the golden frames that AndariumCore checks too (the fixture's path is
@@ -88,3 +100,24 @@ target_include_directories(uml_andarium_camera_controls_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal)
 uml_add_unit_test(NAME andarium-camera-controls
     COMMAND uml_andarium_camera_controls_tests LABELS andarium)
+
+# How a request ends: the one deadline of its buffers, and a failed request
+# (ERROR_REQUEST, so that the application hears of it) against a request that
+# lost some of its outputs (ERROR_BUFFER).
+add_executable(uml_andarium_camera_request_tests camera_request_tests.cpp)
+target_include_directories(uml_andarium_camera_request_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal)
+uml_add_unit_test(NAME andarium-camera-request
+    COMMAND uml_andarium_camera_request_tests LABELS andarium)
+
+# The guest's Wi-Fi address as a function of eth0's
+# (android/lineage-24/overlay/tools/kernarium_wifi_mac.h): the golden vectors
+# (the guest runner reads the same file), the properties of every result and the
+# rounds that refuse a candidate.
+add_executable(uml_andarium_wifi_mac_tests wifi_mac_tests.cpp)
+target_include_directories(uml_andarium_wifi_mac_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/tools)
+uml_add_unit_test(NAME andarium-wifi-mac
+    COMMAND uml_andarium_wifi_mac_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/wifi-mac-golden-vectors.txt
+    LABELS andarium)

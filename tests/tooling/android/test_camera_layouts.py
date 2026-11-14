@@ -220,6 +220,30 @@ class MediaProfiles(unittest.TestCase):
         profiles, _ = self._profiles("_camlarge2160")
         self.assertIn("2160p", profiles[1])
 
+    def test_the_recording_size_is_the_largest_video_mode_of_the_tier(self):
+        # The HAL adds a JPEG at the camera's recording size (the largest profile CTS reads), cut from the video mode
+        # of that size: that is only the host's largest mode when the media profiles stop where the tier's video does.
+        text = (REPOSITORY / "darwin/device/camera/camera_tiers.hpp").read_text()
+        limits = re.search(r"tier == CameraTier::small \? CameraTierLimits \{(\d+), (\d+),[^}]*\}\s*:\s*"
+                           r"CameraTierLimits \{(\d+), (\d+),", text)
+        self.assertIsNotNone(limits)
+        small, large = (int(limits[1]), int(limits[2])), (int(limits[3]), int(limits[4]))
+        self.assertEqual((small, large), ((1920, 1080), (3840, 2160)))
+
+        def recording_size(variant: str, camera: int):
+            profiles, _ = self._profiles(variant)
+            return max(profiles[camera].values(), key=lambda size: size[0] * size[1])
+
+        self.assertEqual(recording_size("_camsmall", 0), small)
+        self.assertEqual(recording_size("_camsmall", 1), small)
+        self.assertEqual(recording_size("_camlarge", 0), large)
+        self.assertEqual(recording_size("_camlarge2160", 0), large)
+        self.assertEqual(recording_size("_camlarge2160", 1), large)
+        self.assertEqual(recording_size("_camfront", 0), small)
+        # The large layout with a 1080p front camera keeps that camera at the small tier's size, which the HAL's
+        # cameras of that kind offer.
+        self.assertEqual(recording_size("_camlarge", 1), small)
+
     def test_a_front_camera_alone_is_camera_zero(self):
         profiles, caps = self._profiles("_camfront")
         self.assertEqual(sorted(profiles), [0])
@@ -269,10 +293,19 @@ class Files(unittest.TestCase):
         for variant in generator.media_variants():
             self.assertIn(f"$(TARGET_COPY_OUT_VENDOR)/etc/media_profiles{variant}.xml", destinations)
         self.assertIn(f"$(TARGET_COPY_OUT_VENDOR)/etc/init/{generator.INIT_FILE}", destinations)
-        # No camera file lands outside the vendor partition, and no vintf manifest is named after a layout.
+        self.assertIn(f"$(TARGET_COPY_OUT_SYSTEM_EXT)/etc/init/{generator.PROVIDER_INIT_FILE}", destinations)
+        # No camera file lands outside the vendor partition but the provider's init file, which init reads
+        # without the vendor_init context, and no vintf manifest is named after a layout.
         for destination in destinations:
-            self.assertTrue(destination.startswith("$(TARGET_COPY_OUT_VENDOR)/etc/"), destination)
+            if destination != f"$(TARGET_COPY_OUT_SYSTEM_EXT)/etc/init/{generator.PROVIDER_INIT_FILE}":
+                self.assertTrue(destination.startswith("$(TARGET_COPY_OUT_VENDOR)/etc/"), destination)
             self.assertNotIn("vintf", destination)
+
+    def test_the_installed_paths_name_the_partitions_of_the_archive(self):
+        installed = generator.installed()
+        self.assertIn(f"VENDOR/etc/init/{generator.INIT_FILE}", installed)
+        self.assertIn(f"SYSTEM_EXT/etc/init/{generator.PROVIDER_INIT_FILE}", installed)
+        self.assertFalse([path for path in installed if "$(" in path])
 
     def test_the_init_file_selects_the_variant_of_each_layout_that_has_one(self):
         text = generator.init_file().decode()
@@ -283,6 +316,45 @@ class Files(unittest.TestCase):
             self.assertEqual(prop, generator.SKU_PROPERTY)
             self.assertEqual(target, generator.MEDIA_PROPERTY)
         self.assertEqual(len(triggers), len(expected))
+
+    def test_the_provider_init_file_starts_the_provider_with_cameraserver_in_the_layouts_that_have_cameras_and_no_other(self):
+        # cameraserver lists only a provider that has registered, and nothing but init starts the lazy AIDL
+        # provider: the first time, and when cameraserver starts again after the provider has exited. So the
+        # action is on cameraserver's state (and the layout's SKU), never on the SKU alone.
+        text = generator.provider_init_file().decode()
+        actions = {}
+        for action in re.split(r"^(?=on )", text, flags=re.MULTILINE):
+            match = re.match(r"on (.+)\n((?:    .+\n)*)", action)
+            if match is not None:
+                actions[match[1]] = [line.strip() for line in match[2].splitlines()]
+        wanted = {generator.provider_trigger(layout.name): [f"restart {generator.PROVIDER_SERVICE}"]
+                  for layout in generator.all_layouts() if layout.has_front}
+        self.assertEqual(actions, wanted)
+        self.assertNotIn(generator.provider_trigger("none"), actions)
+        self.assertEqual(text.count(f"restart {generator.PROVIDER_SERVICE}"), len(wanted))
+        self.assertEqual(generator.PROVIDER_COMMAND, "restart")
+        # the vendor file's profile actions select the media profiles and start nothing: init reads that file in the
+        # vendor_init context, which may not read init.svc.cameraserver
+        profile = generator.init_file().decode()
+        self.assertNotIn("start ", profile)
+        self.assertNotIn(generator.SERVER_PROPERTY, profile)
+
+    def test_the_vendor_file_triggers_on_the_sku_alone_and_the_provider_file_on_cameraserver_s_status(self):
+        # init reads a vendor script in the vendor_init context, which may read ro.boot.* but not
+        # init.svc.cameraserver (the verifier checks both against the image's policy).
+        triggers = re.findall(r"^on property:(\S+?)=", generator.init_file().decode(), re.MULTILINE)
+        self.assertTrue(triggers)
+        self.assertEqual({trigger for trigger in triggers}, {generator.SKU_PROPERTY})
+        self.assertTrue(generator.SKU_PROPERTY.startswith("ro.boot."))
+        provider = re.findall(r"^on property:(\S+?)=running", generator.provider_init_file().decode(), re.MULTILINE)
+        self.assertEqual(set(provider), {generator.SERVER_PROPERTY})
+
+    def test_the_provider_trigger_is_cameraserver_running_and_the_layout(self):
+        self.assertEqual(generator.provider_trigger("phone"),
+                         "property:init.svc.cameraserver=running && property:ro.boot.product.vendor.sku=phone")
+
+    def test_the_provider_service_is_the_one_of_the_stock_lazy_rc(self):
+        self.assertEqual(generator.PROVIDER_SERVICE, "vendor.camera-provider-2-7-google")
 
     def test_the_table_lists_every_layout_with_its_fallback(self):
         rows = [line.split("\t") for line in generator.table().decode().splitlines() if not line.startswith("#")]

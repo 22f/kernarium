@@ -924,7 +924,7 @@ private:
 
     // Completes the periods that are due, finishes a resumption that has
     // ended and asks whether to take the session back; runs on the device
-    // thread, on every pass and timer tick.
+    // thread, on every device event.
     void serviceMute()
     {
         if (!muted_ || !running_)

@@ -198,9 +198,9 @@ the product sets `sys.use_memfd`, and the recovery image must set it itself.
 Boot keeps RCU grace periods expedited until it completes, as the
 [LineageOS README](../../android/lineage-24/README.md#android-product) states.
 
-Ten topics in this line's overlay change behavior only when the Android overlay
-switches them on, or only under Android's SELinux policy. Each stays out of the
-shared series because it depends on the guest OS:
+Eleven topics in this line's overlay change behavior only when the Android
+overlay switches them on, or only under Android's SELinux policy. Each stays out
+of the shared series because it depends on the guest OS:
 
 - `CONFIG_UML_VNC_INPUT_TOUCHSCREEN`: Android and its recovery treat an absolute
   pointer that reports mouse buttons as a mouse; a desktop guest needs the
@@ -217,6 +217,10 @@ shared series because it depends on the guest OS:
   groups without being root; Linux keeps upstream's check.
 - `CONFIG_FUSE_CANONICAL_PATH`: an app's `FileObserver` on shared storage needs
   FUSE to name the underlying file; desktop FUSE servers do not implement it.
+- `CONFIG_FUSE_PASSTHROUGH_ANDROID`: MediaProvider serves shared storage with
+  FUSE passthrough, the writeback cache and no `CAP_SYS_ADMIN`, and opens one
+  file both ways at once, each of which upstream refuses; a desktop FUSE server
+  keeps upstream's rules, and the option compiles the change out.
 - `CONFIG_NETFILTER_XT_MATCH_QUOTA2` and its alert option: netd's bandwidth
   controller; Linux has the per-CPU `quota` match.
 - `CONFIG_NETFILTER_XT_TARGET_IDLETIMER_NL_MSG`: netd passes `--send_nl_msg`,
@@ -237,7 +241,8 @@ The cgroup, FUSE, `quota2`, `IDLETIMER`, and Incremental file system topics come
 from the Android common kernel. The shared series also carries topics only the
 Android product exercises, each inert in a Linux guest: the `XFRM_SPI_PER_DESTINATION`
 option, the per-device autoconf route table (`accept_ra_rt_table`), and
-virt_wifi's off-channel operation and address-list propagation.
+virt_wifi's off-channel operation, address-list propagation and lockdep
+classes.
 
 The iOS runtime framework for this product is `KRuntime_Android_6_18_4K`;
 [Kernarium](../../Kernarium/README.md#runtimes-and-runs) owns its packaging.

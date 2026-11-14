@@ -90,7 +90,7 @@ public final class PauseController {
 
     /// What an edge's own work may take: the watchdog answers to the edge
     /// handler as a whole.
-    public static let edgeBudget = DispatchTimeInterval.seconds(4)
+    public nonisolated static let edgeBudget = DispatchTimeInterval.seconds(4)
 
     public private(set) var phase = Phase.foreground
     public var isPausedForSpace: Bool { space.isPaused }

@@ -79,6 +79,17 @@ target_include_directories(uml_runtime_kernel_resources PUBLIC
     ${PROJECT_SOURCE_DIR}/darwin
     ${PROJECT_SOURCE_DIR}/darwin/runtime)
 
+# Which vCPU carriers are outside an idle wait, and the kqueue timer by which a
+# carrier that leaves one wakes the stall watch. The carriers' idle wrappers
+# below report to it; the watch sleeps by it.
+add_library(uml_runtime_carrier_activity OBJECT
+    ${PROJECT_SOURCE_DIR}/darwin/runtime/carrier_activity.cpp)
+add_library(UML::RuntimeCarrierActivity ALIAS uml_runtime_carrier_activity)
+uml_declare_architecture_target(uml_runtime_carrier_activity runtime)
+target_include_directories(uml_runtime_carrier_activity PUBLIC
+    ${PROJECT_SOURCE_DIR}/darwin
+    ${PROJECT_SOURCE_DIR}/darwin/runtime)
+
 # The kernel's blocking imports, each marked with what it waits for while it
 # blocks, for the stall watch. The loader resolves them to these wrappers.
 add_library(uml_runtime_kernel_waits OBJECT
@@ -130,6 +141,22 @@ add_library(uml_runtime_stall_watch OBJECT
 add_library(UML::RuntimeStallWatch ALIAS uml_runtime_stall_watch)
 uml_declare_architecture_target(uml_runtime_stall_watch runtime)
 target_include_directories(uml_runtime_stall_watch PUBLIC
+    ${PROJECT_SOURCE_DIR}/darwin
+    ${PROJECT_SOURCE_DIR}/darwin/runtime)
+
+# What the host gives back when the system says it is short of memory: the
+# policy (a response of the host GPU's cached allocations and one guest
+# page-cache trim, rate limited) and the system's side of it, the memory
+# pressure source and the figures. The guest's trim is the emulator's.
+add_library(uml_runtime_memory_pressure OBJECT
+    ${PROJECT_SOURCE_DIR}/darwin/runtime/memory_pressure_response.cpp
+    ${PROJECT_SOURCE_DIR}/darwin/runtime/memory_pressure_system.cpp)
+add_library(UML::RuntimeMemoryPressure ALIAS uml_runtime_memory_pressure)
+uml_declare_architecture_target(uml_runtime_memory_pressure runtime)
+target_link_libraries(uml_runtime_memory_pressure PUBLIC
+    UML::PlatformContract
+    UML::RuntimeGuestStatistics)
+target_include_directories(uml_runtime_memory_pressure PUBLIC
     ${PROJECT_SOURCE_DIR}/darwin
     ${PROJECT_SOURCE_DIR}/darwin/runtime)
 
@@ -227,6 +254,7 @@ target_sources(uml_runtime_objects INTERFACE
 	$<TARGET_OBJECTS:uml_runtime_context>
     $<TARGET_OBJECTS:uml_runtime_kernel_signals>
     $<TARGET_OBJECTS:uml_runtime_kernel_resources>
+    $<TARGET_OBJECTS:uml_runtime_carrier_activity>
     $<TARGET_OBJECTS:uml_runtime_kernel_waits>
     $<TARGET_OBJECTS:uml_runtime_session_record>
     $<TARGET_OBJECTS:uml_runtime_stall_record>
@@ -234,6 +262,7 @@ target_sources(uml_runtime_objects INTERFACE
     $<TARGET_OBJECTS:uml_runtime_thread_fence>
     $<TARGET_OBJECTS:uml_runtime_hibernation>
     $<TARGET_OBJECTS:uml_runtime_virtual_jetsam>
+    $<TARGET_OBJECTS:uml_runtime_memory_pressure>
     $<TARGET_OBJECTS:uml_runtime_guest_statistics>
     $<TARGET_OBJECTS:uml_runtime_guest_selector>
     $<TARGET_OBJECTS:uml_runtime_guest_sync>

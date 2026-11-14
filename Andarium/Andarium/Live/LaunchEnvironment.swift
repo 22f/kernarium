@@ -15,12 +15,14 @@ extension LaunchOverrides {
         case .vCPUCount: "KERNARIUM_VCPU_COUNT"
         case .memoryMiB: "KERNARIUM_GUEST_MEMORY_MIB"
         case .diskGiB: "KERNARIUM_ANDROID_DISK_SIZE_GIB"
-        case .retina: "KERNARIUM_RETINA_MODE"
+        case .displayScale: "KERNARIUM_DISPLAY_SCALE"
+        case .retinaMode: "KERNARIUM_RETINA_MODE"
         case .start: "ANDARIUM_START"
         case .bootMode: "KERNARIUM_ANDROID_BOOT_MODE"
         case .erase: "ANDARIUM_ERASE"
         case .stats: "ANDARIUM_STATS"
         case .instance: "ANDARIUM_GUEST_INSTANCE"
+        case .followsOrientation: "ANDARIUM_FOLLOW_ORIENTATION"
         }
     }
 
@@ -78,6 +80,25 @@ nonisolated enum InputProbeLaunch {
     static func guestRegisters(in environment: [String: String]) -> Bool {
         environment[environmentName] != unregisteredValue
     }
+
+    /// `ANDARIUM_INPUT_PROBE_TIP=1` leaves the side keys' tip on, newly shown
+    /// at the launch, where the probe hides the tips.
+    static let tipEnvironmentName = "ANDARIUM_INPUT_PROBE_TIP"
+
+    static func showsTip(in environment: [String: String]) -> Bool {
+        requested(in: environment) && environment[tipEnvironmentName] == "1"
+    }
+}
+
+/// The development build's compass check (`ANDARIUM_COMPASS_READOUT=1`): the
+/// application prints the device motion sample the guest's field comes from,
+/// with iOS's own attitude and heading from it (`CompassReadout`).
+nonisolated enum CompassReadoutLaunch {
+    static let environmentName = "ANDARIUM_COMPASS_READOUT"
+
+    static func requested(in environment: [String: String]) -> Bool {
+        environment[environmentName] == "1"
+    }
 }
 
 extension AppEntry {
@@ -88,6 +109,7 @@ extension AppEntry {
         overrides.isEmpty && JitPreference.stated(in: environment) == nil
             && ThermalOverride.stated(in: environment) == nil
             && !InputProbeLaunch.requested(in: environment)
+            && !CompassReadoutLaunch.requested(in: environment)
             && environment["XCTestConfigurationFilePath"] == nil
     }
 

@@ -3,6 +3,7 @@
 #include "virtio_gpu_device.hpp"
 
 #include "display_activity_log.hpp"
+#include "platform/frame_figures.hpp"
 #include "virtio_gpu_uml.h"
 
 #if UML_GPU_DEVICE_TESTING
@@ -2416,6 +2417,11 @@ std::vector<std::uint8_t> VirtioGpuDevice::processInternal(
             readStructure<protocol::GpuResourceFlush>(request);
         if (flush == nullptr)
             return response(*header, protocol::GpuResponse::errorInvalidParameter);
+        /* The session record's frame count and longest gap
+         * (platform/frame_figures.hpp): the flush of the guest's scanout,
+         * whichever way it is shown. */
+        if (flush->resourceId == scanoutResource_)
+            uml::platform::noteScanoutFlush();
         if (const auto iterator = resources_.find(flush->resourceId);
             iterator != resources_.end()) {
             const auto& resource = iterator->second;

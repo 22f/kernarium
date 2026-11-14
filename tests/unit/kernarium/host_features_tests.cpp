@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "KernariumHostFeatures.hpp"
+#include "motion_protocol.hpp"
 #include "android_boot.hpp"
 #include "named_tests.hpp"
 #include "require.hpp"
@@ -45,6 +46,11 @@ void everyBitIsOneBitOfItsOwn()
     /* The enum of the public header is what the applications state. */
     require(KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS == 1U);
     require((knownBits() & KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS) != 0U);
+    require(KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION == 2U);
+    require((knownBits() & KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION) != 0U);
+    require(KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS == 4U);
+    require((knownBits() & KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS) != 0U);
+    require(knownBits() == 7U);
 }
 
 void aCollisionBetweenTwoRowsIsDetected()
@@ -90,6 +96,60 @@ void theHapticsBitBecomesTheSkuArgument()
                 "androidboot.product.hardware.sku=haptics"});
     /* A device without haptics passes nothing. */
     require(kernelArguments(0).empty());
+}
+
+void theOrientationBitBecomesTheArgumentTheSubHalReads()
+{
+    /* The guest's motion sub-HAL reads ro.boot.kernarium.orientation
+     * (motion_protocol.hpp), which Android's init imports from this kernel
+     * argument. */
+    require(kernelArguments(KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION) ==
+            std::vector<std::string> {"androidboot.kernarium.orientation=1"});
+    /* init makes "ro.boot.<name>" of "androidboot.<name>". */
+    const std::string property {andarium::motion::orientation_property};
+    require(property.starts_with("ro.boot."));
+    require("androidboot." + property.substr(std::string_view {"ro.boot."}.size()) +
+                "=" ==
+            kernelArguments(KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION).front().substr(
+                0, std::string {"androidboot.kernarium.orientation="}.size()));
+    require(kernelArguments(KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION |
+                            KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS) ==
+            std::vector<std::string> {
+                "androidboot.product.hardware.sku=haptics",
+                "androidboot.kernarium.orientation=1"});
+}
+
+void theCompassBitBecomesTheArgumentTheSubHalWillRead()
+{
+    require(kernelArguments(KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS) ==
+            std::vector<std::string> {"androidboot.kernarium.compass=1"});
+    /* init makes "ro.boot.kernarium.compass" of this argument, the property
+     * the guest's sub-HAL and the compass feature are keyed by. */
+    const std::string argument =
+        kernelArguments(KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS).front();
+    require(argument.starts_with("androidboot."));
+    const std::string name = argument.substr(
+        std::string_view {"androidboot."}.size(),
+        argument.find('=') - std::string_view {"androidboot."}.size());
+    require("ro.boot." + name == "ro.boot.kernarium.compass");
+    /* The three features are independent and come in table order. */
+    require(kernelArguments(KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS |
+                            KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION |
+                            KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS) ==
+            std::vector<std::string> {
+                "androidboot.product.hardware.sku=haptics",
+                "androidboot.kernarium.orientation=1",
+                "androidboot.kernarium.compass=1"});
+    require(kernelArguments(KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS |
+                            KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION) ==
+            std::vector<std::string> {"androidboot.kernarium.orientation=1",
+                                      "androidboot.kernarium.compass=1"});
+    /* Neither of the other bits makes the compass argument. */
+    for (const std::uint32_t bit : {KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS,
+                                    KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION}) {
+        for (const std::string& other : kernelArguments(bit))
+            require(!other.starts_with("androidboot.kernarium.compass="));
+    }
 }
 
 void everyKnownBitMakesOneArgumentInTableOrder()
@@ -166,6 +226,10 @@ int main()
          aCollisionBetweenTwoRowsIsDetected},
         {"the-haptics-bit-becomes-the-sku-argument",
          theHapticsBitBecomesTheSkuArgument},
+        {"the-orientation-bit-becomes-the-argument-the-sub-hal-reads",
+         theOrientationBitBecomesTheArgumentTheSubHalReads},
+        {"the-compass-bit-becomes-the-argument-the-sub-hal-will-read",
+         theCompassBitBecomesTheArgumentTheSubHalWillRead},
         {"every-known-bit-makes-one-argument-in-table-order",
          everyKnownBitMakesOneArgumentInTableOrder},
         {"bits-the-runtime-has-no-row-for-are-reported-and-make-nothing",

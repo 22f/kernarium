@@ -157,6 +157,18 @@ final class HardwareInputUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 30), "Settings did not open")
     }
 
+    /// The probe's text field in the open Settings. An iPhone opens Settings
+    /// at its medium detent, whose rows end above the field, and the list
+    /// makes no row it does not show, so the sheet is drawn up until the
+    /// field is there.
+    private func probeField() -> XCUIElement {
+        let field = app.textFields["inputProbeField"]
+        for _ in 0..<3 where !field.waitForExistence(timeout: 5) {
+            app.collectionViews.firstMatch.swipeUp()
+        }
+        return field
+    }
+
     private func closeSettings() {
         // A tap can be lost while the host is loaded: tap Done again if the
         // sheet is still there.
@@ -236,7 +248,7 @@ final class HardwareInputUITests: XCTestCase {
         let before = lines.filter { $0.hasPrefix("key ") }.count
 
         openSettings()
-        let field = app.textFields["inputProbeField"]
+        let field = probeField()
         XCTAssertTrue(field.waitForExistence(timeout: 10), "Settings has no probe field")
         field.tap()
         let text = { (field.value as? String) ?? "" }
@@ -391,7 +403,7 @@ final class HardwareInputUITests: XCTestCase {
         try XCTSkipIf(isPad, "an iPad has the pointer setting")
         XCTAssertTrue(perform({ app.typeKey("a", modifierFlags: []) }, until: { $0 == "key 0x4 up" }), "log: \(lines)")
         openSettings()
-        XCTAssertTrue(app.textFields["inputProbeField"].waitForExistence(timeout: 10))
+        XCTAssertTrue(probeField().waitForExistence(timeout: 10))
         XCTAssertFalse(app.switches["pointerAsTouch"].exists, "an iPhone has no pointer to give the guest")
         closeSettings()
         XCTAssertFalse(lines.contains { $0.hasPrefix("connect mouse") })

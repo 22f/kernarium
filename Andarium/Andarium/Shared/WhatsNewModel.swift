@@ -60,6 +60,19 @@ final class WhatsNewModel {
     }
 }
 
+extension AppModel {
+    /// What this build has that an entry of the notes can be about: Send
+    /// feedback when the build has a receiver for it (the entrances show only
+    /// then). Nothing else is optional so far.
+    var buildFeatures: Set<WhatsNewFeature> {
+        #if FEEDBACK_MAIL
+        feedbackAddress == nil ? [] : [.sendFeedback]
+        #else
+        []
+        #endif
+    }
+}
+
 extension WhatsNewCatalog {
     /// The notes the application bundles, `WhatsNew.json`; none if the
     /// resource is missing or unreadable.

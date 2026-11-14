@@ -97,11 +97,11 @@ public enum StorageError: Error, Equatable, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .notEnoughSpace:
-            return "There is not enough free storage to set up the guest."
+            return String(localized: "There is not enough free storage to set up the virtual machine.", bundle: .module)
         case .missingRelease:
-            return "This copy of Andarium does not carry a system."
+            return String(localized: "This copy of Andarium does not carry a system.", bundle: .module)
         case .unusableDiskPath(let path):
-            return "The guest cannot start from \(path): its name has a space, comma, colon or quotation mark."
+            return String(localized: "The virtual machine cannot start from \(path): its name has a space, comma, colon or quotation mark.", bundle: .module)
         }
     }
 }
@@ -219,6 +219,13 @@ public struct TwoDiskStorage: GuestStorage {
         // says that no update is pending.
         if snapshotStore.restoreUnderWay { try recoverSnapshots() }
         try files.apply(files.decide(for: release, flags: InstanceFlags(restoreSnapshot: true)), release: release)
+    }
+
+    /// Whether the guest's first Android boot has not been seen to complete
+    /// (`InstanceFiles.firstBootMarker`): a start of it is long by its nature
+    /// even when an earlier one ended, and the data disk exists.
+    public func firstBootPending() -> Bool {
+        files.firstBootPending
     }
 
     /// Records that the guest reached `sys.boot_completed`, at the moment the

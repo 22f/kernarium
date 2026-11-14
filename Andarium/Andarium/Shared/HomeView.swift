@@ -18,7 +18,11 @@ struct HomeView: View {
             GeometryReader { geo in
                 let wide = geo.size.width >= 700
                 Group {
-                    if model.guest != nil {
+                    if model.guest != nil, let fold = model.fold,
+                        let pages = HomePages(fold, frame: geo.frame(in: .global))
+                    {
+                        pagesLayout(pages)
+                    } else if model.guest != nil {
                         ScrollViewReader { proxy in
                             ScrollView {
                                 if wide && geo.size.width > geo.size.height {
@@ -47,11 +51,11 @@ struct HomeView: View {
             .navigationTitle("Andarium")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        model.sheet = .info
-                    } label: {
-                        Label("Info", systemImage: "info")
-                    }
+                    #if FEEDBACK_MAIL || TIP_JAR || APP_REVIEW
+                    HomeToolbarMenu()
+                    #else
+                    HomeInfoButton()
+                    #endif
                 }
             }
         }
@@ -64,6 +68,7 @@ struct HomeView: View {
                 case .create: NewGuestSheet()
                 case .resize: ResizeSheet()
                 case .system: SystemSheet()
+                case .resolution: ResolutionSheet()
                 case .info: InfoSheet(page: hints.infoPage)
                 case .snapshots: SnapshotsSheet()
                 case .whatsNew:
@@ -72,24 +77,90 @@ struct HomeView: View {
                 }
             }
             .environment(model)
+            .foldSheet(model)
         }
+        #if FEEDBACK_MAIL
+        .sendFeedbackSheet(model)
+        #endif
+        #if TIP_JAR
+        .tipJarSheet(model)
+        #endif
         .microphoneAccessAlert()
         .locationAccessAlert()
-        .alert("Erase guest?", isPresented: $model.confirmingErase) {
-            Button("Erase guest", role: .destructive) { model.erase() }
+        .cameraAccessAlert()
+        .alert("Erase virtual machine?", isPresented: $model.confirmingErase) {
+            Button("Erase virtual machine", role: .destructive) { model.erase() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(SnapshotWords.eraseMessage(snapshots: model.snapshots.count))
+            Text(SnapshotWords.eraseMessage(snapshots: model.snapshots.count).keepingTogether)
         }
-        .alert(StartSpace.title, isPresented: $model.startBlocked) {
+        .alert(StartSpaceWords.title, isPresented: $model.startBlocked) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(StartSpace(neededBytes: Limits.startReserveBytes, freeBytes: model.host.freeStorageBytes)
-                .message(device: model.host.name))
+            Text(StartSpaceWords.message(
+                neededBytes: Limits.startReserveBytes, freeBytes: model.host.freeStorageBytes, device: model.host.name).keepingTogether)
         }
     }
 
     // MARK: Layouts
+
+    /// The inner display of a folding iPhone while it is bent at the fold: one
+    /// page of Home on each side of it, each scrolling on its own, and Start at
+    /// the foot of the first. Upright, the virtual machine and Start on the
+    /// leading page and what it may use on the trailing one; turned, the
+    /// virtual machine and Start above the fold and the rest below it. Flat,
+    /// Home is laid out as on an iPad: `HomePages` is nil.
+    @ViewBuilder
+    private func pagesLayout(_ pages: HomePages) -> some View {
+        let first = ScrollView {
+            VStack(spacing: 22) {
+                notices
+                SystemSection()
+                if pages.upright { developmentSections }
+            }
+            .padding(.horizontal, pages.upright ? 20 : 28)
+            .padding(.top, 8)
+            .padding(.bottom, 20)
+        }
+        .safeAreaBar(edge: .bottom) { startBar(wide: false) }
+        let second = ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 22) {
+                    if pages.upright {
+                        guestSections
+                    } else {
+                        developmentSections
+                        guestSections
+                    }
+                    EraseCard()
+                        .id("erase")
+                }
+                .padding(.horizontal, pages.upright ? 20 : 28)
+                .padding(.top, pages.upright ? 8 : 20)
+                .padding(.bottom, 20)
+            }
+            .onAppear {
+                if let target = hints.scrollTarget {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        proxy.scrollTo(target, anchor: .bottom)
+                    }
+                }
+            }
+        }
+        if pages.upright {
+            HStack(spacing: 0) {
+                first.frame(width: pages.first)
+                Color.clear.frame(width: pages.gap)
+                second.frame(width: pages.second)
+            }
+        } else {
+            VStack(spacing: 0) {
+                first.frame(height: pages.first)
+                Color.clear.frame(height: pages.gap)
+                second.frame(height: pages.second)
+            }
+        }
+    }
 
     private var narrowLayout: some View {
         VStack(spacing: 22) {
@@ -97,7 +168,7 @@ struct HomeView: View {
             SystemSection()
             developmentSections
             guestSections
-            RecoveryErasePanel()
+            EraseCard()
                 .id("erase")
         }
         .padding(.horizontal, 16)
@@ -106,14 +177,14 @@ struct HomeView: View {
     }
 
     /// iPad in portrait or a tall window: the controls across the top, the
-    /// options and Recovery and erase beneath.
+    /// options and the Erase card beneath.
     private var tallLayout: some View {
         VStack(spacing: 28) {
             notices
             SystemSection()
             developmentSections
             guestSections
-            RecoveryErasePanel()
+            EraseCard()
                 .id("erase")
         }
         .frame(maxWidth: 680)
@@ -133,7 +204,7 @@ struct HomeView: View {
             .frame(maxWidth: 520)
             VStack(spacing: 22) {
                 guestSections
-                RecoveryErasePanel()
+                EraseCard()
                     .id("erase")
             }
             .frame(maxWidth: 400)
@@ -144,7 +215,7 @@ struct HomeView: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// JIT, right below Guest system, in the builds that have it. An App Store
+    /// JIT, right below Virtual machine, in the builds that have it. An App Store
     /// build has none and nothing takes its place.
     @ViewBuilder
     private var developmentSections: some View {
@@ -153,10 +224,9 @@ struct HomeView: View {
         #endif
     }
 
-    /// Display, Capabilities and Backup: what the guest shows and may use.
+    /// Capabilities and Backup: what the guest may use.
     @ViewBuilder
     private var guestSections: some View {
-        DisplaySection()
         CapabilitiesSection()
         BackupSection()
     }
@@ -187,7 +257,7 @@ struct HomeView: View {
         if model.lowSpace {
             NoticeCard(
                 symbol: "externaldrive.badge.exclamationmark", color: .orange,
-                title: "\(Formats.size(bytes: model.host.freeStorageBytes)) free on this \(model.host.name)",
+                title: String(localized: "\(Formats.size(bytes: model.host.freeStorageBytes)) free on this \(model.host.name)"),
                 text: SnapshotWords.lowSpaceText(
                     hasSnapshots: model.snapshots.count > 0, startReserve: Formats.size(bytes: Limits.startReserveBytes),
                     device: model.host.name)
@@ -204,13 +274,26 @@ struct HomeView: View {
                 )
             )
         }
+        if let denial = model.networkDenialShowing {
+            NoticeCard(
+                symbol: NetworkWords.symbol(for: denial), color: .orange,
+                title: NetworkWords.title(for: denial), text: NetworkWords.text(for: denial),
+                action: NoticeAction(
+                    label: NetworkWords.settingsLabel, hint: NetworkWords.settingsHint,
+                    identifier: "network-notice-settings", perform: { model.openSettings() }),
+                closeLabel: NetworkWords.dismissLabel,
+                onClose: { withAnimation { model.dismissNetworkNotice() } }
+            )
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("home-network-notice")
+        }
         switch model.plan {
         case .update(_, let release) where model.updateNoticeIsShown:
             // A restored older snapshot says itself that the next start updates it.
             NoticeCard(
                 symbol: "arrow.down.circle.fill", color: .accentColor,
-                title: "System image updated",
-                text: "Andarium system image is updated to \(ReleaseLabel.revision(of: release)). The next start finishes the update and takes a little longer."
+                title: String(localized: "System image updated"),
+                text: String(localized: "Andarium system image is updated to \(ReleaseLabel.revision(of: release)). The next start finishes the update and takes a little longer.")
             )
         case .unfinishedUpdate(let release, let canRetry, let canRestore):
             UnfinishedUpdateCard(release: release, canRetry: canRetry, canRestore: canRestore)
@@ -228,8 +311,8 @@ struct HomeView: View {
             case .closedInBackground:
                 NoticeCard(
                     symbol: "moon.zzz.fill", color: .secondary,
-                    title: "iOS closed Andarium",
-                    text: "The guest was shut down in the background.",
+                    title: String(localized: "iOS closed Andarium"),
+                    text: String(localized: "The virtual machine was shut down in the background."),
                     onClose: { withAnimation { model.notice = nil } }
                 )
             case .sessionEnded(let ended):
@@ -288,8 +371,7 @@ struct HomeView: View {
     }
 }
 
-/// The main action starts Android normally. Recovery lives in the Recovery
-/// and Erase section.
+/// The main action starts Android normally.
 struct StartButton: View {
     @Environment(AppModel.self) private var model
 
@@ -314,18 +396,31 @@ struct StartButton: View {
     private var blocked: Bool { !model.plan.allowsStart || !model.host.runsGuestGraphics }
 
     private var title: String {
-        guard model.guest != nil, model.plan.allowsStart else { return "Start" }
+        guard model.guest != nil, model.plan.allowsStart else { return String(localized: "Start") }
         switch model.bootKind(.normal) {
-        case .firstStart: return "Start and set up"
-        case .upgrade: return "Update and start"
-        default: return "Start"
+        case .firstStart: return String(localized: "Start and set up")
+        case .upgrade: return String(localized: "Update and start")
+        default: return String(localized: "Start")
+        }
+    }
+}
+
+/// Home's Info button, the toolbar's trailing item.
+struct HomeInfoButton: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Button {
+            model.sheet = .info
+        } label: {
+            Label("Info", systemImage: "info")
         }
     }
 }
 
 /// The rounded square that marks every row: a white glyph on the accent. The
 /// glyph is an SF Symbol, or an image of the asset catalog that is already
-/// white (it is shown as it is, never tinted).
+/// white (it is shown as it is) or a template image (drawn white).
 struct IconTile: View {
     private enum Glyph {
         case symbol(String)
@@ -362,6 +457,7 @@ struct IconTile: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 16, height: 16)
+                .foregroundStyle(.white)
         }
     }
 }
@@ -371,11 +467,20 @@ struct WelcomeView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        // While the device is bent a half can be shorter than the column: it
+        // scrolls only then.
+        column
+            .scrollsWhenTall()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onCardHalf(.welcome)
+    }
+
+    private var column: some View {
         VStack(spacing: 0) {
             Spacer(minLength: 20)
             StackMark(lit: false, width: 150)
                 .padding(.bottom, 34)
-            Text("No guest yet")
+            Text("No virtual machine yet")
                 .font(.title2.weight(.bold))
             if !model.host.runsGuestGraphics {
                 NoticeCard(
@@ -389,7 +494,7 @@ struct WelcomeView: View {
             Button {
                 model.sheet = .create
             } label: {
-                Text("Set up guest")
+                Text("Set up virtual machine")
                     .font(.body.weight(.semibold))
                     .frame(width: 220, height: 50)
             }
@@ -403,8 +508,15 @@ struct WelcomeView: View {
                 .padding(.bottom, 12)
         }
         .padding(.horizontal, 24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+}
+
+/// A button under a card's message: the way to what the message asks.
+struct NoticeAction {
+    let label: String
+    var hint: String?
+    var identifier: String?
+    let perform: () -> Void
 }
 
 /// A dismissible message above the controls.
@@ -413,6 +525,9 @@ struct NoticeCard: View {
     let color: Color
     let title: String
     let text: String
+    var action: NoticeAction?
+    /// What VoiceOver says for the close button.
+    var closeLabel = String(localized: "Dismiss")
     var onClose: (() -> Void)?
 
     var body: some View {
@@ -422,11 +537,19 @@ struct NoticeCard: View {
                 .foregroundStyle(color)
                 .frame(width: 28)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.subheadline.weight(.semibold))
-                Text(text)
+                Text(title.keepingTogether).font(.subheadline.weight(.semibold))
+                Text(text.keepingTogether)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if let action {
+                    Button(action.label, action: action.perform)
+                        .buttonStyle(.glass)
+                        .controlSize(.small)
+                        .padding(.top, 8)
+                        .accessibilityHint(action.hint ?? "")
+                        .accessibilityIdentifier(action.identifier ?? "")
+                }
             }
             Spacer(minLength: 0)
             if let onClose {
@@ -437,7 +560,7 @@ struct NoticeCard: View {
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Dismiss")
+                .accessibilityLabel(closeLabel)
             }
         }
         .padding(14)
@@ -461,7 +584,7 @@ struct UnfinishedUpdateCard: View {
                     .foregroundStyle(Color.orange)
                     .frame(width: 28)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Andarium's update didn't finish").font(.subheadline.weight(.semibold))
+                    Text("Andarium’s update didn’t finish").font(.subheadline.weight(.semibold))
                     Text(text)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -484,68 +607,42 @@ struct UnfinishedUpdateCard: View {
         let revision = ReleaseLabel.revision(of: release)
         return switch (canRetry, canRestore) {
         case (true, true):
-            "The start that updates to \(revision) did not reach its end. Start tries it again, or Restore puts back your data from before the update."
+            String(localized: "The update to \(revision) did not finish. Update and start tries it again, or Restore puts back your data from before the update.")
         case (true, false):
-            "The start that updates to \(revision) did not reach its end. Start tries it again, or erase the guest to start over."
+            String(localized: "The update to \(revision) did not finish. Update and start tries it again, or erase the virtual machine to start over.")
         case (false, true):
-            "This app version carries a different release than the update that did not finish. Restore puts back your data from before it, or erase the guest to start over."
+            String(localized: "This app version carries a different release than the update that did not finish. Restore puts back your data from before it, or erase the virtual machine to start over.")
         case (false, false):
-            "The start that updates to \(revision) did not reach its end, and nothing from before it is left to put back. Erase the guest to start over."
+            String(localized: "The update to \(revision) did not finish, and nothing from before it is left to put back. Erase the virtual machine to start over.")
         }
     }
 }
 
-/// Recovery and erasing the guest share one section. Its title is not
-/// "Restore", the name of the unfinished-update card's button.
-struct RecoveryErasePanel: View {
+/// Erasing the guest: the one row, in a card of its own after the sections,
+/// with no heading and the spacing the other cards have.
+struct EraseCard: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Recovery and erase")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.leading, 18)
-            VStack(spacing: 0) {
-                Button {
-                    model.start(.recovery)
-                } label: {
-                    HStack(spacing: 12) {
-                        IconTile(symbol: "wrench.adjustable.fill", color: .gray)
-                        Text("Start in recovery")
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.tertiary)
-                    }
-                    .padding(.horizontal, 16)
-                    .frame(minHeight: 54)
-                    .contentShape(Rectangle())
+        Button {
+            model.confirmingErase = true
+        } label: {
+            HStack(spacing: 12) {
+                IconTile(symbol: "trash.fill", color: .red)
+                Text("Erase virtual machine…")
+                    .foregroundStyle(.red)
+                Spacer()
+                if let guest = model.guest {
+                    Text(Formats.size(bytes: guest.usedBytes))
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
-                .disabled(!model.plan.offersRecovery || !model.host.runsGuestGraphics)
-                Divider().padding(.leading, 58)
-                Button {
-                    model.confirmingErase = true
-                } label: {
-                    HStack(spacing: 12) {
-                        IconTile(symbol: "trash.fill", color: .red)
-                        Text("Erase guest…")
-                            .foregroundStyle(.red)
-                        Spacer()
-                        if let guest = model.guest {
-                            Text(Formats.size(bytes: guest.usedBytes))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .frame(minHeight: 54)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
             }
-            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 26))
+            .padding(.horizontal, 16)
+            .frame(minHeight: 54)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 26))
     }
 }
 

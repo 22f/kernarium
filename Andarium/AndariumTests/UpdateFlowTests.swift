@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import AndariumCore
+import AndariumCoreTestSupport
 import Foundation
 import Testing
 @testable import Andarium
@@ -26,9 +27,18 @@ final class StubDriver: RuntimeDriver {
     }
     func save(_ guest: Guest) throws { savedGuest = guest }
     func startPlan() -> StartPlan? { plan }
+    /// Whether the guest's first Android boot has not been seen to complete.
+    var firstBootIsPending = false
+    func firstBootPending() -> Bool { firstBootIsPending }
     /// What the data disk holds now; a test sets it as a run would.
     var diskUsedBytes: UInt64 = 0
     func measuredUsedBytes() -> UInt64 { diskUsedBytes }
+    /// The values that tell this installation apart, as a run's driver knows them.
+    var identifiers = GuestIdentifiers.none
+    func guestIdentifiers() -> GuestIdentifiers { identifiers }
+    /// How many times the model asked to stop the start under way.
+    private(set) var guestStops = 0
+    func stopGuest() { guestStops += 1 }
     func begin(guest: Guest, mode: StartMode, kind: BootKind) {
         begun.append((mode, kind))
         begunGuests.append(guest)
@@ -40,9 +50,13 @@ final class StubDriver: RuntimeDriver {
         // The files now say the update waits for the next start.
         plan = .update(from: "r1", to: "r2")
     }
-    var motionSensors = false
     var savedGuest: Guest?
-    func setMotionSensors(_ on: Bool) { motionSensors = on }
+    /// The denials of the network the model told the driver, in order; nil is none.
+    private(set) var networkNotices: [NetworkDenial?] = []
+    func setNetworkNotice(_ denial: NetworkDenial?) { networkNotices.append(denial) }
+    /// What the Haptics switch told the driver.
+    var haptics = true
+    func setHaptics(_ on: Bool) { haptics = on }
     /// What "Use the pointer as touch" and the pointer lock told the driver.
     var pointerAsTouch = false
     var pointerLocked = false
@@ -128,9 +142,27 @@ final class StubDriver: RuntimeDriver {
     }
     var install: (@Sendable (@Sendable (BusyUpdate) -> Void) async throws -> Void) = { _ in }
     private(set) var installed = 0
-    func installApk(at url: URL, sizeBytes: Int, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
+    /// Whether each attempt carried the flag, in order.
+    private(set) var installAttempts: [Bool] = []
+    /// The file each attempt was asked to install, in order.
+    private(set) var installURLs: [URL] = []
+    /// What an install does for the attempt with or without the flag; set by a test
+    /// that tells the two apart, otherwise `install` answers both.
+    var installAttempt: (@Sendable (Bool, @Sendable (BusyUpdate) -> Void) async throws -> Void)?
+    /// How an install that does not throw ends.
+    var installOutcome = ApkInstallOutcome.installed
+    func installApk(
+        at url: URL, bypassLowTargetSdkBlock: Bool, update: @escaping @Sendable (BusyUpdate) -> Void
+    ) async throws -> ApkInstallOutcome {
         installed += 1
-        try await install(update)
+        installAttempts.append(bypassLowTargetSdkBlock)
+        installURLs.append(url)
+        if let installAttempt {
+            try await installAttempt(bypassLowTargetSdkBlock, update)
+        } else {
+            try await install(update)
+        }
+        return installOutcome
     }
 
     /// What the resume of a guest paused for space answers, and what Shut
@@ -250,7 +282,7 @@ struct UpdateFlowTests {
         let (model, driver) = model(plan: .unfinishedUpdate(to: "r2", canRetry: true, canRestore: true))
         driver.restoreFails = true
         await model.restoreUpdate()
-        #expect(model.alert?.title == "The guest could not be restored")
+        #expect(model.alert?.title == "The virtual machine could not be restored")
         #expect(model.phase == .home)
         #expect(model.plan == .unfinishedUpdate(to: "r2", canRetry: true, canRestore: true))
     }
@@ -310,7 +342,7 @@ struct UpdateFlowTests {
         model.notice = .closedInBackground
         model.resizePreset = 24
         model.erase()
-        #expect(model.busy?.title == "Erasing guest")
+        #expect(model.busy?.title == "Erasing virtual machine")
         #expect(await eventually { model.busy == nil })
         #expect(driver.erased == 1)
         // No guest: Home shows the first-launch screen, with no notice that
@@ -328,7 +360,7 @@ struct UpdateFlowTests {
         driver.eraseFails = true
         model.erase()
         #expect(await eventually { model.alert != nil })
-        #expect(model.alert?.title == "The guest could not be erased")
+        #expect(model.alert?.title == "The virtual machine could not be erased")
         #expect(model.guest != nil)
         #expect(await eventually { model.busy == nil })
     }
@@ -377,15 +409,15 @@ struct UpdateFlowTests {
         #expect(failed.guest?.usedBytes == 3 * Limits.bytesPerGiB)
     }
 
-    @Test func homeOffersRecoveryOnceTheFirstStartHasHappened() {
+    @Test func theFirstStartLastsUntilTheRunHasCreatedTheDataDisk() {
         let (model, driver) = model(plan: .firstStart)
-        #expect(!model.plan.offersRecovery)
+        #expect(model.plan == .firstStart)
         model.start(.normal)
         model.finishBoot(.firstStart)
         // The runtime created the data disk during the start.
         driver.plan = .normal
         model.runEnded(RunEnd(result: 0), uptimeSeconds: 60)
-        #expect(model.plan.offersRecovery)
+        #expect(model.plan == .normal)
     }
 
     @Test func cleanShutdownReturnsHomeAndStartsANewSession() {

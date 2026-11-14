@@ -332,6 +332,9 @@ struct SnapshotStore: Sendable {
             try io.flush(root)
             Self.excludeFromBackup(restoreURL)
             try stageData(of: id)
+            // The snapshot's data may hold partial files of earlier runs: the
+            // record of the walk the guest owes says so before it is in place.
+            try PartialSweepLedger.markOwed(in: locations.directory)
             try io.rename(dataTemporary, files.data)
         } catch {
             try? io.remove(dataTemporary)
@@ -358,6 +361,7 @@ struct SnapshotStore: Sendable {
     private func replaceData(of id: SnapshotID) throws {
         do {
             try stageData(of: id)
+            try PartialSweepLedger.markOwed(in: locations.directory)
             try io.rename(dataTemporary, files.data)
         } catch {
             try? io.remove(dataTemporary)

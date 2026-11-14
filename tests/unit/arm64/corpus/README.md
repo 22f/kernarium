@@ -68,6 +68,30 @@ engine marked them written, FPCR and FPSR as the deferred image reports them).
 A case that expects a vector write therefore fails for an engine that did not
 load the vectors first.
 
+A store-exclusive may fail without cause, as the architecture allows. A
+gadget stream and a fused JIT pair run the host's own exclusives, and the
+host's monitor ends at any interrupt, preemption or first-touch fault between
+the load and the store; a JIT semantic or compare-and-swap path has no host
+pair to lose. A guest loops on the status; a case that discards it
+(`STXR WZR, ...`) cannot, and runs once. The runner runs such a case again, up
+to 16 attempts in all, but only for the one program shape it can prove
+executes the store: `LDXR/LDXP; STXR/STXP; CLREX; SVC` in four consecutive
+words, the load not changing the base register, the store's status discarded,
+no validator, and exactly four instructions retired (a branch over the store
+retires as many, so retirement alone proves nothing). The only difference from
+the pack must be that the store's own bytes hold what the case started with.
+A store that never writes, writes other bytes or writes elsewhere, and any
+other register, flag, vector or byte that differs, fails in the attempt it
+appears in. A store that wrote back the bytes the case started with cannot be
+told from a loss, so only a persistent omission fails, at the bound. Every
+other program runs once. The runner also refuses a pack with a case that
+completes with one store-exclusive at a stable base, reports its status as
+zero and does not retire a pattern; that guard is structural and does not
+examine other control flow. `--interrupt` interrupts the thread that runs the
+guest until a store has lost its reservation, and `--inject` makes each lane
+commit on purpose the faults the retry must take or refuse and checks the
+eligibility rule on programs the pack cannot hold.
+
 ### Validator relations
 
 | Relation | Accepted result |

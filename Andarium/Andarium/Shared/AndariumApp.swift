@@ -42,7 +42,25 @@ final class AndariumProcess {
         // sweep the folder a running test stages its files in.
         BugReportStaging.sweep()
         GuestFileStaging.sweep()
+        PickedFolder.sweep()
+        #if FEEDBACK_MAIL
+        SendFeedbackStaging().sweep()
+        #endif
         model = entry.makeModel()
+        #if TIP_JAR
+        // From launch: a purchase the store delivers outside the sheet (an
+        // approval, an interrupted purchase) is finished, whether or not the
+        // sheet is ever opened.
+        #if !APP_STORE
+        // A hosted test owns StoreKit's queue, and the launch's own listener
+        // would finish its transactions before the test looks.
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+            TipJarUpdates.listen(model.tipJarServices.store)
+        }
+        #else
+        TipJarUpdates.listen(model.tipJarServices.store)
+        #endif
+        #endif
     }
 }
 
@@ -66,6 +84,7 @@ final class AndariumSceneDelegate: UIResponder, UIWindowSceneDelegate {
         let entry = process.entry
         let model = process.model
         self.model = model
+        model.screenDidChange(nativeScale: Double(scene.screen.nativeScale))
         let window = UIWindow(windowScene: scene)
         window.rootViewController = AndariumHostingController(
             rootView: RootView(entry: entry).environment(model), model: model)
@@ -99,7 +118,7 @@ struct RootView: View {
                 }
             }
             .transition(.opacity)
-            if let busy = model.busy {
+            if let busy = model.busy, !model.busyOverSheet {
                 BusyOverlay(state: busy)
             }
             // Over everything the session shows, a Settings sheet aside: the
@@ -123,8 +142,14 @@ struct RootView: View {
         ) { _ in
             Button("OK", role: .cancel) {}
         } message: { alert in
-            Text(alert.message)
+            Text(alert.message.keepingTogether)
         }
+        .legacyInstallAlert()
+        #if FEEDBACK_MAIL
+        // The sheet the boot screen's notice opens: over every phase, so a
+        // draft survives the boot that ends.
+        .sendFeedbackFromBootSheet(model)
+        #endif
         #if !APP_STORE
         .task {
             // The launch's automation work happens once per model: a scene
@@ -136,4 +161,70 @@ struct RootView: View {
         }
         #endif
     }
+}
+
+/// Settings' Install APK, when Android refused an app for the version it was
+/// built for: the question over the install's overlay. The buttons answer;
+/// nothing else closes it. It sits on a view of its own, since a view that
+/// carries two alerts presents only one of them reliably.
+private struct LegacyInstallAlert: ViewModifier {
+    @Environment(AppModel.self) private var model
+    /// The alert is taken away for a moment so that it is presented again.
+    @State private var withdrawn = false
+
+    func body(content: Content) -> some View {
+        content.background {
+            Color.clear
+                .accessibilityHidden(true)
+                .task(id: model.legacyInstallQuestion?.id) { await presentUntilShown() }
+                .alert(
+                    LegacyInstallWords.title,
+                    isPresented: Binding(get: { model.legacyInstallQuestion != nil && !withdrawn }, set: { _ in }),
+                    presenting: model.legacyInstallQuestion
+                ) { _ in
+                    // Cancel is the alert's default: the bold button, and what Return does.
+                    Button("Cancel", role: .cancel) { model.answerLegacyInstall(installAnyway: false) }
+                        .keyboardShortcut(.defaultAction)
+                    Button(LegacyInstallWords.install) { model.answerLegacyInstall(installAnyway: true) }
+                } message: { question in
+                    Text(LegacyInstallWords.message(for: question.target).keepingTogether)
+                }
+        }
+    }
+}
+
+extension LegacyInstallAlert {
+    /// UIKit refuses an alert while a popover (the side keys' tip) or a sheet is
+    /// coming or going, and SwiftUI does not ask again: while the question
+    /// stands and no alert is up, the alert is withdrawn and offered again. An
+    /// alert that is up, whoever's it is, is left alone: UIKit shows ours after it.
+    fileprivate func presentUntilShown() async {
+        // The question's own life bounds the loop: its id is the task's, so an
+        // answer, the overlay's Cancel or the guest ending cancels the task.
+        defer { withdrawn = false }
+        while model.legacyInstallQuestion != nil {
+            do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+            guard model.legacyInstallQuestion != nil else { return }
+            guard !Self.alertIsUp else { continue }
+            withdrawn = true
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+            withdrawn = false
+        }
+    }
+
+    /// Whether a UIKit alert is the topmost presentation of any window now.
+    private static var alertIsUp: Bool {
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            for window in scene.windows {
+                var top = window.rootViewController
+                while let next = top?.presentedViewController { top = next }
+                if top is UIAlertController { return true }
+            }
+        }
+        return false
+    }
+}
+
+extension View {
+    fileprivate func legacyInstallAlert() -> some View { modifier(LegacyInstallAlert()) }
 }

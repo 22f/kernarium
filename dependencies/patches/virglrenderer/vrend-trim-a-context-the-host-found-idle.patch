@@ -125,10 +125,10 @@ index 75b4a818376aadee69e98a799e1d1d1ba63b0c30..1f7f600bc93226e680184e1217639c7a
 +   ctx->trim = vrend_decode_ctx_trim;
  }
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index 3423fe7f586d39713e3b91fde8df1d5672bc2247..20af151e94d97a840bf70cb3e0be0f4148af1031 100644
+index 5d2f0d655a112555897d6ef9f2ad82e7010a232d..1033f5f2ed3b5f526bfce5cd1a32e6c4003456d3 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
-@@ -13217,6 +13217,38 @@ bool vrend_hw_switch_context(struct vrend_context *ctx, bool now)
+@@ -13417,6 +13417,38 @@ bool vrend_hw_switch_context(struct vrend_context *ctx, bool now)
     return true;
  }
  

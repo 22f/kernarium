@@ -24,14 +24,14 @@ public enum HostThermalState: Int, CaseIterable, Comparable, Sendable {
         lhs.rawValue < rhs.rawValue
     }
 
-    /// What Android is told while the host is in this state: fair only
-    /// defers its low-priority background work, serious lowers the frame rate
-    /// to 30, and critical keeps that rate and says so truthfully. The host
-    /// never reports Android's moderate, emergency or shutdown.
+    /// What Android is told while the host is in this state: nothing until
+    /// serious, where Android lowers the frame rate to 30 (its severe), and
+    /// critical, which keeps that rate and says so truthfully. Fair is not
+    /// reported because it would not change the frame rate. The host never
+    /// reports Android's light, moderate, emergency or shutdown.
     public var severity: AndroidThermalSeverity {
         switch self {
-        case .nominal: .none
-        case .fair: .light
+        case .nominal, .fair: .none
         case .serious: .severe
         case .critical: .critical
         }
@@ -58,13 +58,15 @@ public enum AndroidThermalSeverity: UInt8, CaseIterable, Comparable, Sendable {
 /// The severity is the hottest host state in effect at any moment of the last
 /// `hold`. It rises at once and falls `hold` after the hotter state ended, so
 /// a state that flickers around serious is one steady cap and not a stutter,
-/// and a state that comes back restarts the wait. The policy is pure: the
+/// and a state that comes back restarts the wait. A state that Android is told
+/// nothing of (nominal and fair) has no hold. The policy is pure: the
 /// caller gives every reading and the clock's reading with it, and asks
 /// `nextExpiry` when to look again. The clock is uptime in nanoseconds; the
 /// application uses `DispatchTime`'s.
 ///
 /// A policy is one session's: it starts at nominal with no history, so a
-/// session that begins hot is capped from its first reading.
+/// session that begins at serious or critical is capped from its first
+/// reading.
 public struct ThermalPolicy: Sendable {
     /// How long after a hotter state ended the severity still counts it.
     public static let hold: UInt64 = 120_000_000_000
@@ -75,7 +77,8 @@ public struct ThermalPolicy: Sendable {
     public private(set) var severity = AndroidThermalSeverity.none
 
     private var current = HostThermalState.nominal
-    /// When each state last ended, for the states that may still count.
+    /// When each state that Android is told of last ended, for the states that
+    /// may still count.
     private var ended: [HostThermalState: UInt64] = [:]
     private var announced = false
 
@@ -85,7 +88,7 @@ public struct ThermalPolicy: Sendable {
     @discardableResult
     public mutating func observe(_ state: HostThermalState, at now: UInt64) -> Bool {
         if state != current {
-            if current > .nominal { ended[current] = now }
+            if current.severity > .none { ended[current] = now }
             ended[state] = nil
             current = state
         }

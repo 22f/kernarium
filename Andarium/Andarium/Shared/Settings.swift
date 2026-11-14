@@ -6,10 +6,11 @@ import UIKit
 import UniformTypeIdentifiers
 
 /// Settings while the guest runs, opened from the side keys. It slides up over
-/// the guest, which keeps running behind it: watch the stats, install an app
-/// from Files, connect a computer with adb and make a bug report. An
-/// operation on the guest dismisses Settings and shows the full-screen
-/// progress, and then how it ended.
+/// the guest, which keeps running behind it: install an app from Files and
+/// browse the guest's files (the first sections, where the side keys' tip
+/// points), watch the stats, connect a computer with adb and make a bug
+/// report. An operation on the guest dismisses Settings and shows the
+/// full-screen progress, and then how it ended.
 struct SessionSettingsSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -29,13 +30,13 @@ struct SessionSettingsSheet: View {
         NavigationStack(path: fileRoute) {
             ScrollViewReader { proxy in
                 List {
+                    if offersInstall { apps }
+                    if normalSession, model.capabilities.guestFiles, model.fileBrowser != nil { files }
                     if model.capabilities.statistics { stats(session) }
                     if model.host.supportsPointer { pointer }
                     #if !APP_STORE
                     if let probe = model.inputProbe { inputProbe(probe) }
                     #endif
-                    if normalSession, model.capabilities.apkInstall { apps }
-                    if normalSession, model.capabilities.guestFiles, model.fileBrowser != nil { files }
                     if normalSession, model.capabilities.adbOverNetwork { developer(session) }
                     if normalSession, model.capabilities.bugReport { diagnostics }
                 }
@@ -59,6 +60,26 @@ struct SessionSettingsSheet: View {
                     FolderPage(browser: browser, route: route, close: close)
                 }
             }
+        }
+        #if FEEDBACK_MAIL
+        .sendFeedbackSheet(model)
+        #endif
+        // A picker that failed (Install APK and the file browser's Import are
+        // here): the alert is the sheet's own, which keeps the sheet open.
+        .background {
+            Color.clear
+                .accessibilityHidden(true)
+                .alert(
+                    model.documentPickerProblem?.title ?? "",
+                    isPresented: Binding(
+                        get: { model.documentPickerProblem != nil },
+                        set: { if !$0 { model.documentPickerProblem = nil } }),
+                    presenting: model.documentPickerProblem
+                ) { _ in
+                    Button("OK", role: .cancel) {}
+                } message: { problem in
+                    Text(problem.message.keepingTogether)
+                }
         }
         .environment(\.filesBarHeight, filesBarHeight)
         // The bar is outside the pages, so folders slide under it.
@@ -85,17 +106,38 @@ struct SessionSettingsSheet: View {
             if browsing == true { detent = .large }
         }
         .task { await model.watchSettings() }
-        .onDisappear { model.fileBrowser?.sheetClosed() }
+        .onDisappear {
+            model.fileBrowser?.sheetClosed()
+            model.documentPickerProblem = nil
+        }
         .presentationDetents([.medium, .large], selection: $detent)
         .presentationBackground(Color(.systemGroupedBackground))
         .presentationBackgroundInteraction(.enabled(upThrough: .medium))
-        .fileImporter(isPresented: $importing, allowedContentTypes: [InstallRefusal.pickerType]) { result in
-            guard case .success(let url) = result else { return }
-            // Settings goes; the install, or the refusal of a file that is not
-            // one .apk, is on the full-screen overlay.
-            model.installPicked(url)
-            dismiss()
+        #if APP_STORE
+        .fileImporter(isPresented: $importing, allowedContentTypes: InstallRefusal.pickerTypes) { result in
+            switch result {
+            case .success(let url):
+                // Settings goes; the install, or the refusal of a file that is not
+                // an .apk, .apks, .xapk or .apkm, is on the full-screen overlay.
+                model.installPicked(url)
+                dismiss()
+            case .failure(let error):
+                model.documentPickerFailed(error, title: AppModel.installFailure)
+            }
         }
+        #else
+        // Every other build takes a copy of the file (`CopyDocumentPicker`).
+        .documentCopyPicker(isPresented: $importing, types: InstallRefusal.pickerTypes) { result in
+            switch result {
+            case .success(let picked):
+                guard let url = picked.urls.first else { return }
+                model.installPicked(url, staged: picked.folder)
+                dismiss()
+            case .failure(let error):
+                model.documentPickerFailed(error, title: AppModel.installFailure)
+            }
+        }
+        #endif
     }
 
     private var fileRoute: Binding<[FolderRoute]> {
@@ -118,6 +160,13 @@ struct SessionSettingsSheet: View {
         return false
     }
 
+    /// Whether this session has Install APK: the rule the side keys' tip
+    /// reads to point here, one function for both.
+    private var offersInstall: Bool {
+        guard case .running(let mode) = model.phase else { return false }
+        return model.capabilities.offersApkInstall(in: mode)
+    }
+
     // MARK: File browser
 
     private var files: some View {
@@ -136,6 +185,9 @@ struct SessionSettingsSheet: View {
     /// Tapping the row starts at once.
     private var diagnostics: some View {
         Section("Diagnostics") {
+            #if FEEDBACK_MAIL
+            if model.feedbackAddress != nil { SendFeedbackEntrance() }
+            #endif
             Button {
                 dismiss()
                 model.createBugReport()
@@ -150,6 +202,7 @@ struct SessionSettingsSheet: View {
             // The guest's one adb channel is busy with the transfer.
             .disabled(model.fileBrowser?.busy == true)
         }
+        .id("diagnostics")
     }
 
     // MARK: Apps
@@ -161,12 +214,18 @@ struct SessionSettingsSheet: View {
             } label: {
                 HStack(spacing: 12) {
                     IconTile(symbol: "square.and.arrow.down.fill")
+                    // The name gets its width first: it wraps only when the
+                    // line is too narrow for it alone, and the hint beside
+                    // it gives way.
                     Text("Install APK\u{2026}")
                         .foregroundStyle(Color.accentColor)
-                    Spacer()
+                        .layoutPriority(1)
+                    Spacer(minLength: 0)
                     Text("From Files")
                         .font(.subheadline)
                         .foregroundStyle(Color(.secondaryLabel))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
             }
             .disabled(model.fileBrowser?.busy == true)
@@ -200,11 +259,11 @@ struct SessionSettingsSheet: View {
             if let problem = session.adbProblem {
                 Text(problem).foregroundStyle(.red)
             } else if session.adb {
-                Text("The guest asks to allow the computer the first time it connects. ADB turns off when the guest stops or USB debugging is turned off.")
+                Text("The virtual machine asks to allow the computer the first time it connects. ADB turns off when the virtual machine stops or USB debugging is turned off.")
             } else if !model.adbOverNetworkAvailable {
-                Text("Turn on USB debugging in the guest\u{2019}s Developer options to use ADB over network.")
+                Text("Turn on USB debugging in the virtual machine\u{2019}s Developer options to use ADB over network.")
             } else {
-                Text("Lets a computer on the same network connect to the guest with adb.")
+                Text("Lets a computer on the same network connect to the virtual machine with adb.")
             }
         }
     }
@@ -264,7 +323,7 @@ struct SessionSettingsSheet: View {
     private func inputProbe(_ probe: InputProbe) -> some View {
         @Bindable var probe = probe
         return Section {
-            TextField("Input probe", text: $probe.fieldText)
+            TextField(text: $probe.fieldText) { Text(verbatim: "Input probe") }
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
                 .accessibilityIdentifier("inputProbeField")
@@ -325,12 +384,11 @@ struct SessionSettingsSheet: View {
         }
     }
 
-    private func rowLabel(_ title: String, symbol: String) -> some View {
+    private func rowLabel(_ title: LocalizedStringKey, symbol: String) -> some View {
         HStack(spacing: 12) {
             IconTile(symbol: symbol)
             Text(title)
-                .lineLimit(1)
-                .minimumScaleFactor(0.85)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -355,6 +413,9 @@ extension View {
             SessionSettingsSheet(large: large)
                 .environment(model)
                 .statusBarHidden(true)
+                // On a turned inner display the sheet rises to the fold and
+                // lets touches through to the guest above it.
+                .foldSheet(model, reachesBehind: true)
         }
     }
 }

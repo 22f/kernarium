@@ -161,6 +161,7 @@ void check_controls()
     require(abi::cid::af_region == VIRTIO_VIDEO_CAMERA_CID_AF_REGION, "AF_REGION");
     require(abi::cid::still_flash == VIRTIO_VIDEO_CAMERA_CID_STILL_FLASH, "STILL_FLASH");
     require(abi::cid::rotate_and_crop == VIRTIO_VIDEO_CAMERA_CID_ROTATE_AND_CROP, "ROTATE_AND_CROP");
+    require(abi::cid::description == VIRTIO_VIDEO_CAMERA_CID_DESCRIPTION, "DESCRIPTION");
     require(abi::v4l2_value::rotate_automatic == VIRTIO_VIDEO_CAMERA_ROTATE_AUTOMATIC, "automatic rotation");
 }
 

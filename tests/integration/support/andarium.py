@@ -54,7 +54,7 @@ SLOT_PORT_VARIABLE = slot_ports.SLOT_PORT_VARIABLE
 # A launch clears every inherited setting of either family, because one would
 # select a different guest.
 APPLICATION = ios_device.Application(
-    BUNDLE_ID, ("KERNARIUM_", "ANDARIUM_"), RUNTIME_RESULT
+    BUNDLE_ID, ("KERNARIUM_", "ANDARIUM_"), RUNTIME_RESULT, "Andarium"
 )
 
 
