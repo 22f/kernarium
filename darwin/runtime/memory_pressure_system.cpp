@@ -50,9 +50,9 @@ public:
 	{
 	}
 
-	/* The clock of the 30 s between warnings and of the lines' windows:
-	 * monotonic, and stopped while the system sleeps, so a long sleep does
-	 * not end the interval. */
+	/* The clock of the trimmer's hold, the quiet period and the lines'
+	 * windows: monotonic, and stopped while the system sleeps, so a long
+	 * sleep does not end a hold. */
 	std::uint64_t now_ns() noexcept override
 	{
 		return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);

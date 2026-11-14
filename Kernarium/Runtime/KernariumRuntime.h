@@ -1018,9 +1018,9 @@ typedef int (*kernarium_runtime_plan_camera_reserve_function)(
     kernarium_runtime_camera_reserve* reserve);
 
 /* The level the system's memory pressure source reported to the host (runtime
- * API 41). At a warning or a critical level the host turns on the guest's
- * page-cache trimmer, and at a critical level it also frees the host's graphics
- * caches (docs/architecture.md, "Memory pressure"). */
+ * API 41). At a critical level the host turns on the guest's page-cache
+ * trimmer and frees the host's graphics caches; a warning and the normal level
+ * touch neither (docs/architecture.md, "Memory pressure"). */
 enum {
     KERNARIUM_RUNTIME_MEMORY_PRESSURE_NORMAL = 0,
     KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING = 1,
@@ -1029,21 +1029,18 @@ enum {
 
 /* What the host does about that level. */
 enum {
-    /* The normal level: no response starts (the guest's trimmer is turned
-     * off). */
+    /* A warning or the normal level: no response starts (the guest's trimmer
+     * that a critical level turned on is turned off). */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_NONE = 0,
-    /* The host starts a response now. A warning turns on the guest's gradual
-     * page-cache trimmer, which asks the guest for one short message; a
-     * critical level does the same and also frees the host's graphics caches. */
+    /* A critical level: the host starts a response now, which turns on the
+     * guest's gradual page-cache trimmer (one short message) and frees the
+     * host's graphics caches. */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED = 1,
-    /* A warning less than 30 s after the last response began: no response
-     * starts for it (the guest's trimmer is still turned on if it is off). */
+    /* Reserved: never reported, as a warning starts no response. */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_WITHHELD = 2,
-    /* A response is already running, and this level starts none: a higher
-     * level that meets it is neither queued nor added to it, and a running
-     * warning's response is not upgraded. The host handles the notifications
-     * one at a time, each after the response of the one before, so this is
-     * rare. */
+    /* A response is already running, and this level starts none. The host
+     * handles the notifications one at a time, each after the response of the
+     * one before, so this is rare. */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_UNDER_WAY = 3,
 };
 
@@ -1053,8 +1050,8 @@ enum {
  * return to NORMAL included (also the host's own return to NORMAL after a long
  * quiet, for a system that never delivers it), as soon as the host has decided
  * what it does and
- * before it starts the work for that notification (a response can take
- * seconds), in the order delivered. The host handles the notifications one at a
+ * before it starts the work for that notification, in the order delivered.
+ * The host handles the notifications one at a
  * time: a level raised during a response is reported after the response, and
  * one that the system itself merged with others is reported as the most
  * serious of them. It carries no figures. It runs on a runtime thread and must
