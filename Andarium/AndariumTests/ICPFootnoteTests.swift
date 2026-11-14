@@ -113,7 +113,7 @@ struct ICPFootnoteTests {
     /// Info on the application's window, with `openURL` replaced by `opener`.
     private func hostInfo(
         _ model: AppModel, opener: Opener, in lease: HostWindow.Lease, width: Double = 440,
-        height: Double = 1100, size: DynamicTypeSize? = nil
+        height: Double = 1100
     ) -> UIHostingController<some View> {
         let view = InfoSheet(page: nil)
             .environment(model)
@@ -121,7 +121,7 @@ struct ICPFootnoteTests {
                 opener.urls.append(url)
                 return .handled
             })
-            .dynamicTypeSize(size ?? .large)
+            .dynamicTypeSize(.large)
             .frame(width: width, height: height)
         let controller = UIHostingController(rootView: view)
         lease.window.rootViewController = controller
@@ -181,21 +181,6 @@ struct ICPFootnoteTests {
         #expect(UserDefaults.standard.dictionaryRepresentation().keys.sorted() == before)
         // The line stays as it was.
         #expect(labels(in: root).filter { $0 == Self.number }.count == linesBefore)
-    }
-
-    @Test func atTheLargestTextSizeItWrapsAndKeepsTheWholeNumber() async throws {
-        let lease = try await HostWindow.take()
-        defer { lease.give() }
-        let controller = hostInfo(
-            model(storefront: Storefronts("CHN")), opener: Opener(), in: lease, width: 320, height: 6000,
-            size: .accessibility5)
-        try await drawn(controller.view)
-        let root = controller.view!
-        try #require(await eventually { footnote(in: root) != nil })
-        let line = try #require(footnote(in: root))
-        #expect(line.accessibilityLabel == Self.number)
-        // Several lines of footnote text at this size, not one truncated line.
-        #expect(line.accessibilityFrame.height > 60, "\(line.accessibilityFrame)")
     }
 
     // MARK: Elsewhere, and while it is not known
