@@ -139,7 +139,8 @@ interface to the wire.
   frame of N x 3N/4), never changed while a stream or a still runs
   (`presentedFormatOf`). The session reports each camera's mounting, the
   settings of its connections and photo output and its aspect ratio as numbers
-  to its delegate (`camera_presentation.hpp`). Every camera's zoom range holds
+  to its delegate (`camera_presentation.hpp`), and keeps the last of each camera
+  for the sessions that follow in the process. Every camera's zoom range holds
   1.0 (Android's rule): a single lens states its own factors, so its 1.0 is its
   own full field of view, and only a zoom camera is scaled by the host's display
   multiplier (`zoomRatioScale`), as the triple camera's ultra wide lens at 0.5.
