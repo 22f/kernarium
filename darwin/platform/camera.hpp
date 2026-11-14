@@ -131,6 +131,8 @@ struct CameraInfo {
 
     // The zoom ratio as Android states it: 0.5 is the ultra wide lens of a zoom
     // camera, 1.0 its main lens. switchOvers are the ratios where it changes lens.
+    // Every camera's range holds 1.0, and a single lens's 1.0 is its own full
+    // field of view (zoomRatioScale).
     float zoomMinimum {1.0f};
     float zoomMaximum {1.0f};
     std::vector<float> switchOvers;
@@ -294,6 +296,17 @@ struct CameraStillRequest {
 };
 
 inline constexpr std::size_t allCameras = std::numeric_limits<std::size_t>::max();
+
+// What multiplies a host's own zoom factor (1.0 at its widest lens) into the
+// ratio Android sees. Only a zoom camera is scaled by the host's display
+// multiplier, which makes 1.0 its main lens; a single lens keeps 1.0 as its own
+// full field of view, because Android requires every camera's range to hold 1.0
+// (a range that starts above it crashes a client that rebinds at 1.0, and one
+// that starts below it opens cropped).
+[[nodiscard]] inline constexpr float zoomRatioScale(CameraLensKind lens, double displayMultiplier) noexcept
+{
+    return lens == CameraLensKind::zoom && displayMultiplier > 0 ? float(displayMultiplier) : 1.0f;
+}
 
 enum class CameraEventKind : std::uint8_t {
     // The capture cannot run for a reason that ends by itself: another

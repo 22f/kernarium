@@ -399,8 +399,8 @@ std::vector<Entry> discover()
             info.manualFocus = info.autofocus && device.lockingFocusWithCustomLensPositionSupported;
             info.manualWhiteBalance = device.lockingWhiteBalanceWithCustomDeviceGainsSupported;
         }
-        entry.zoomMultiplier = device.displayVideoZoomFactorMultiplier > 0 ? float(device.displayVideoZoomFactorMultiplier)
-                                                                          : 1.0f;
+        // Only a zoom camera's factor is scaled (see zoomRatioScale): every range holds 1.0.
+        entry.zoomMultiplier = zoomRatioScale(info.lens, device.displayVideoZoomFactorMultiplier);
         info.zoomMinimum = float(device.minAvailableVideoZoomFactor) * entry.zoomMultiplier;
         info.zoomMaximum = float(device.maxAvailableVideoZoomFactor) * entry.zoomMultiplier;
         for (NSNumber* factor in device.virtualDeviceSwitchOverVideoZoomFactors)
