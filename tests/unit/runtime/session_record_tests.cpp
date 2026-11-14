@@ -2571,17 +2571,14 @@ void test_camera_presentation()
 		return found;
 	};
 	uml::runtime::reset_session_record();
-	/* The cameras are discovered before the guest's run begins: a note made
-	 * with no session open writes nothing and is held for the session. */
+	/* Without a session nothing is recorded, and nothing fails. */
 	uml::runtime::note_camera_presentation(camera_front_note());
 	const std::string path = temporary_record();
 	require(uml::runtime::begin_session_record(path, {}));
 	std::string record = read_file(path);
 	std::string slot = slot_of(record);
-	require(slot.starts_with("camera 1\nstills failed 0\n"
-			"mount camera 1 front ") &&
-		slot.size() == session_camera_slot_bytes,
-		"the session did not begin with the note made before it: " + slot);
+	require(slot == std::string(session_camera_slot_bytes - 1, ' ') + "\n",
+		"a session does not begin with a blank camera slot: " + slot);
 
 	/* A note writes the format line, the count (none failed) and the camera's
 	 * lines, in the slot alone. */
@@ -2748,23 +2745,13 @@ void test_camera_presentation()
 		at = end + 1;
 	}
 
-	/* The end keeps the file's notes and forgets them: a note after the end
-	 * writes nothing and is held for the next session, which starts with no
-	 * failure of the last one's; and a session after the end of one that had
-	 * no note of its own starts blank. */
+	/* The end keeps the notes, and the next session starts blank. */
 	uml::runtime::end_session_record(SessionEnd::powered_off, 0);
 	const std::string ended = read_file(path);
 	require(slot_of(ended).starts_with("camera 1\nstills failed 12\n"),
 		"the end lost the camera slot");
 	uml::runtime::note_camera_presentation(camera_front_note());
 	require(read_file(path) == ended, "a note was written after the end");
-	require(uml::runtime::begin_session_record(path, {}));
-	slot = slot_of(read_file(path));
-	require(slot.starts_with("camera 1\nstills failed 0\n"
-			"mount camera 1 front ") &&
-		slot.find("still at ") == std::string::npos,
-		"a session did not begin with the note made between two: " + slot);
-	uml::runtime::end_session_record(SessionEnd::powered_off, 0);
 	require(uml::runtime::begin_session_record(path, {}));
 	slot = slot_of(read_file(path));
 	require(slot == std::string(session_camera_slot_bytes - 1, ' ') + "\n",

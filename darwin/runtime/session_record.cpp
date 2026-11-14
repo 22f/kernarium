@@ -1798,12 +1798,11 @@ bool begin_session_record(std::string_view path,
 	storage_has_last = false;
 	write_storage_slot(descriptor);
 	storage_slot_busy.clear(std::memory_order_release);
-	/* The camera slot likewise: no failure of the session before is named. The
-	 * notes of how the cameras are presented are kept: the platform makes them
-	 * when its cameras are discovered, before the guest's run begins. */
+	/* The camera slot likewise: no failure of the session before is named. */
 	while (camera_slot_busy.test_and_set(std::memory_order_acquire))
 		sched_yield();
 	camera_failures = 0;
+	std::memset(camera_presented_has, 0, sizeof(camera_presented_has));
 	write_camera_slot(descriptor);
 	camera_slot_busy.clear(std::memory_order_release);
 	/* The same for a checkpoint of the state, which also reads the values the
@@ -1917,19 +1916,16 @@ void note_camera_presentation(
 {
 	if (presentation.camera >= session_cameras_kept)
 		return;
+	if (!session_open.load(std::memory_order_acquire))
+		return;
+	const int descriptor = record_descriptor.load(std::memory_order_acquire);
+	if (descriptor < 0)
+		return;
 	while (camera_slot_busy.test_and_set(std::memory_order_acquire))
 		sched_yield();
-	/* A note before the session begins (the cameras are discovered before the
-	 * guest's run) is held, and written when it does; after its end, held for
-	 * the next one. */
 	camera_presented[presentation.camera] = presentation;
 	camera_presented_has[presentation.camera] = true;
-	if (session_open.load(std::memory_order_acquire)) {
-		if (const int descriptor =
-			    record_descriptor.load(std::memory_order_acquire);
-		    descriptor >= 0)
-			write_camera_slot(descriptor);
-	}
+	write_camera_slot(descriptor);
 	camera_slot_busy.clear(std::memory_order_release);
 }
 
@@ -1959,12 +1955,6 @@ void end_session_record(SessionEnd end, int status,
 	end_session(end, status, message, unfinished_boot ||
 		(end != SessionEnd::powered_off && end != SessionEnd::restarted &&
 			end != SessionEnd::stopped));
-	/* The file keeps the cameras' notes; the next run's devices note theirs
-	 * again, and a camera that run does not have is not named. */
-	while (camera_slot_busy.test_and_set(std::memory_order_acquire))
-		sched_yield();
-	std::memset(camera_presented_has, 0, sizeof(camera_presented_has));
-	camera_slot_busy.clear(std::memory_order_release);
 }
 
 void record_kernel_crash() noexcept
@@ -2075,7 +2065,6 @@ void reset_session_record() noexcept
 	boot_reported.store(false, std::memory_order_relaxed);
 	boot_restarts.store(0, std::memory_order_relaxed);
 	crash_recorded.store(false, std::memory_order_release);
-	std::memset(camera_presented_has, 0, sizeof(camera_presented_has));
 	while (state_checkpointing.test_and_set(std::memory_order_seq_cst))
 		sched_yield();
 	learn_known_values({});

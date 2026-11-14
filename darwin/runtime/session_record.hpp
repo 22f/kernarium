@@ -291,13 +291,11 @@ void note_camera_still_failure(
 inline constexpr unsigned session_cameras_kept = 8;
 
 /* Records how the platform presented one of the guest's cameras in the camera
- * slot: the camera's whole note replaces its earlier one, and the slot keeps
- * the newest note of each camera (note_camera_still_failure's rules for the
- * rest). The camera device reports each change through its owner. A note made
- * before the session begins (the cameras are discovered before the guest's
- * run) is held and written when it does, and a session's end forgets the
- * notes so that the next run's devices make their own. Nothing for a camera
- * number the slot has no room for. */
+ * slot of the session that is open: the camera's whole note replaces its
+ * earlier one, and the slot keeps the newest note of each camera
+ * (note_camera_still_failure's rules for the rest). The camera device reports
+ * each change through its owner. Nothing without an open session, and nothing
+ * for a camera number the slot has no room for. */
 void note_camera_presentation(
 	const uml::platform::CameraPresentation &presentation) noexcept;
 
