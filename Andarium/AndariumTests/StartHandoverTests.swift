@@ -389,7 +389,7 @@ struct StartHandoverTests {
         #expect(stop.enter())
         stop.request()
         let before = ContinuousClock.now
-        effects.deliverStop(stop, every: .milliseconds(100)) { asked.request(blocking: true) }
+        effects.deliverStop(stop, every: .milliseconds(100), settle: { true }) { asked.request(blocking: true) }
         // The call returns while the runtime's request is still waiting.
         #expect(ContinuousClock.now - before < .milliseconds(500))
         try #require(await until { asked.times == 1 })
@@ -402,5 +402,124 @@ struct StartHandoverTests {
         let after = asked.times
         try? await Task.sleep(for: .milliseconds(300))
         #expect(asked.times == after, "a run that ended was asked to stop")
+    }
+
+    /// What a stop asked of the runtime, in order, and on which thread.
+    private final class Sequence: @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls: [String] = []
+        private var onMain = false
+        func add(_ call: String) {
+            lock.withLock {
+                calls.append(call)
+                if Thread.isMainThread { onMain = true }
+            }
+        }
+        var all: [String] { lock.withLock { calls } }
+        var askedOnMain: Bool { lock.withLock { onMain } }
+    }
+
+    @Test func aStopAsksTheGuestToWriteBackOnceBeforeTheHostStops() async throws {
+        let effects = LivePauseEffects()
+        let stop = RunStop()
+        let sequence = Sequence()
+        #expect(stop.enter())
+        stop.request()
+        effects.deliverStop(
+            stop, every: .milliseconds(50), settle: { sequence.add("settle"); return true },
+            request: { sequence.add("stop") })
+        try #require(await until { sequence.all.count >= 3 }, "the stop was not made again")
+        stop.end()
+        try? await Task.sleep(for: .milliseconds(200))
+        let calls = sequence.all
+        #expect(calls.first == "settle", "the host stopped the guest before it was asked to write back")
+        #expect(calls.filter { $0 == "settle" }.count == 1, "the guest was asked more than once")
+        #expect(calls.dropFirst().allSatisfy { $0 == "stop" })
+        #expect(!sequence.askedOnMain, "the write-back was asked on the main thread")
+    }
+
+    /// A guest that takes its time delays the host's stop, and does not drop it.
+    @Test func theHostStopWaitsForTheWriteBackAndFollowsIt() async throws {
+        let effects = LivePauseEffects()
+        let stop = RunStop()
+        let sequence = Sequence()
+        let release = DispatchSemaphore(value: 0)
+        #expect(stop.enter())
+        stop.request()
+        effects.deliverStop(
+            stop, every: .milliseconds(50),
+            settle: {
+                sequence.add("settle began")
+                release.wait()
+                sequence.add("settle ended")
+                return true
+            }, request: { sequence.add("stop") })
+        try #require(await until { sequence.all == ["settle began"] })
+        try? await Task.sleep(for: .milliseconds(300))
+        #expect(sequence.all == ["settle began"], "the host stopped the guest while it wrote back")
+        release.signal()
+        try #require(await until { sequence.all.count >= 3 }, "the host's stop never followed the write-back")
+        #expect(Array(sequence.all.prefix(3)) == ["settle began", "settle ended", "stop"])
+        stop.end()
+    }
+
+    /// The runtime's own write-back, with no guest running: the loader says
+    /// there is none to ask, at once, and the stop is not held up. Asking nobody
+    /// is not the run's one write-back, so the next delivery asks again.
+    @Test func theWriteBackBeforeAStopCostsNothingWithNoGuest() {
+        let stop = RunStop()
+        let before = ContinuousClock.now
+        let reached = LivePauseEffects.settleBeforeStop(for: stop)
+        // A guest that never answered would hold it for `StopSettle.bound`.
+        #expect(ContinuousClock.now - before < .seconds(3), "a stop with no guest waited for the write-back")
+        #expect(!reached, "a write-back that found no guest counted as made")
+    }
+
+    /// The write-back of a run that has ended is dropped before it reaches the
+    /// runtime, where it would ask whatever runs next.
+    @Test func theWriteBackOfARunThatEndedAsksNoRuntime() {
+        let stop = RunStop()
+        stop.end()
+        #expect(!LivePauseEffects.settleBeforeStop(for: stop))
+    }
+
+    /// A stop that finds no guest yet is made again: the write-back that
+    /// reached one is the run's one, and the host's stop follows every ask.
+    @Test func aStopWithNoGuestYetAsksAgainUntilOneIsReached() async throws {
+        let effects = LivePauseEffects()
+        let stop = RunStop()
+        let sequence = Sequence()
+        let answers = Sequence()
+        #expect(stop.enter())
+        stop.request()
+        effects.deliverStop(
+            stop, every: .milliseconds(50),
+            settle: {
+                sequence.add("settle")
+                answers.add("ask")
+                return answers.all.count >= 3
+            }, request: { sequence.add("stop") })
+        try #require(await until { sequence.all.count >= 8 }, "the stop was not made again")
+        stop.end()
+        try? await Task.sleep(for: .milliseconds(200))
+        let calls = sequence.all
+        #expect(calls.filter { $0 == "settle" }.count == 3, "the guest was asked \(calls)")
+        #expect(Array(calls.prefix(6)) == ["settle", "stop", "settle", "stop", "settle", "stop"])
+        #expect(calls.dropFirst(6).allSatisfy { $0 == "stop" })
+    }
+
+    /// A stop before the runtime runs has no guest to ask.
+    @Test func aStopBeforeTheRuntimeRunsAsksNoGuest() async throws {
+        let effects = LivePauseEffects()
+        let stop = RunStop()
+        let sequence = Sequence()
+        stop.request()
+        #expect(!stop.enter())
+        effects.deliverStop(
+            stop, every: .milliseconds(50), settle: { sequence.add("settle"); return true },
+            request: { sequence.add("stop") })
+        try? await Task.sleep(for: .milliseconds(300))
+        #expect(sequence.all.isEmpty, "a run that never began was asked something")
+        stop.end()
     }
 }

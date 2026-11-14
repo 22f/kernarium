@@ -181,8 +181,11 @@ A test of a suspend contract, such as `guest-video-suspend` for the Virtio video
 devices, suspends the guest both as the host's quiesce does and as the guest does
 by itself, with a stream in progress as well as idle. `vhost-user-held-requests`
 checks the transport's rules for a device that holds requests across a ring
-disable, and `gpu-device-suspend-held-fence` the Virtio-GPU device's fenced
-command across one, on a renderer the test controls. A driver path that only a
+disable, `vhost-user-backend-wait` the budget of the wait for a backend
+request's acknowledgement and the end of the main socket during it, in time the
+test moves, and
+`gpu-device-suspend-held-fence` the Virtio-GPU device's fenced command across
+one, on a renderer the test controls. A driver path that only a
 misbehaving device reaches, such as a device that was reset during a suspend
 (`guest-video-camera-reset`) or is late to stop a stream
 (`guest-video-camera-slow-clear`, `guest-video-camera-slow-stop`), is reached by
@@ -335,9 +338,10 @@ fake guests and players, the haptics wire against the golden frames in
 relay test against too; the game controllers' wire against that directory's
 gamepad frames, each family's reports read back through a test-only HID
 descriptor parser, and the stream and session on a fake relay; the session
-record's stall and network slots against the golden slots there, which
+record's stall, network and storage slots against the golden slots there, which
 `runtime-stall-record` and `runtime-session-record` check the runtime's writers
-against; and the notice that iOS denies the network, from the path's mapping to
+against, and that the record quotes no identity value (`runtime-session-record`);
+and the notice that iOS denies the network, from the path's mapping to
 the watcher's start and stop on a fake path source);
 `andarium-motion-protocol`, `andarium-device-orientation`,
 `andarium-haptics-protocol`, `andarium-haptics-player`,
@@ -382,7 +386,7 @@ metadata, fed literal metadata and an in-memory image, never a camera, and
 fake format tables
 ([Cameras](../darwin/device/camera/README.md)). The Camera setting's hosted
 tests (`CameraFlowTests`, and `CameraOffNoticeBannerTests` for the notice that
-Camera is off, drawn in a window at the largest text size) play iOS's
+Camera is off, drawn in a window) play iOS's
 permission with a fake and open no camera;
 the Simulator has no camera and `simctl privacy` cannot grant or revoke one, so
 the denied, restricted and absent states are shown by the preview
@@ -413,8 +417,11 @@ checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
-screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`
-and `HomeMenuTests` (Home's toolbar menu) exist only in a build with
+screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`,
+`SendFeedbackStartLogTests` (the sheet's tip and start log during a start),
+`SendFeedbackFilesScreenTests` (files from Files: in place, the copy of a file
+that cannot be used there, the access held and stopped once) and
+`HomeMenuTests` (Home's toolbar menu) exist only in a build with
 `FEEDBACK_ADDRESS=feedback@example.com` on the command line, as the command
 above has it ([Send feedback](../Andarium/README.md#send-feedback)), and
 `HomePlainInfoTests` (the plain Info button) only in a build without it;
@@ -451,7 +458,8 @@ the test moves, so no test waits three minutes: when the notice comes (also for
 a start whose boot line never comes, the case it is for), what Stop asks of the
 runtime (after the dialog's answer) and the stopped end screen's words, the
 later notice and plain title of a first start, the controls with and without
-the feedback receiver, that the sheet the notice opens outlives the boot, that
+the feedback receiver and their size (the application's ordinary 44 points at the
+default text size, no less at any size), that the sheet the notice opens outlives the boot, that
 the alert and the sheet take the appearance of the screen under them, the
 Boot line of the information block, and that the notice goes with the boot.
 `StartHandoverTests` run the real runtime object with the files' preparation
@@ -461,11 +469,11 @@ for after it (a Restore on the real storage), that an old boot's console cannot
 mark the next boot, not even through a restart that printed no banner, that a
 guest whose first boot did not complete starts with the longer time, that the
 notice's clock stands still while the application is away, and that the stop is
-made off the main actor until the run ends.
+made off the main actor until the run ends, after the first guest it finds was
+asked once to write back (and none for a run that has ended).
 `SlowStartCaptureTests` save the notice in windows the Simulator's own capture
 cannot take (an iPad turned, a narrow Split View window, the Duo's poses) and
-at the largest text size scrolled to its buttons, and do nothing unless
-`TEST_RUNNER_ANDARIUM_CAPTURE_DIR` names a folder.
+do nothing unless `TEST_RUNNER_ANDARIUM_CAPTURE_DIR` names a folder.
 `GuestRecoveryTests` check that a recovery the guest asked for is a recovery
 session and its reboot a normal one.
 
@@ -553,8 +561,11 @@ host's test run records no screen video and keeps no attachments (the scheme
 sets it, and `start` refuses a built run file that does not), and its result
 bundle lives under the state directory, not in DerivedData.
 
-A host ends on its own now and then, and a new one started within minutes needs
-no approval at the device while one started hours later does. `watch` keeps one
+A host ends on its own now and then. A new one needs the owner at the device
+only when the system lost the last approval, however soon it starts: when
+xcodebuild's relaunch of the runner initialized (its log says so) nothing is
+asked and the watch replaces the host at once; when it failed to initialize, or
+the log does not say, the owner may be needed and the watch ends. `watch` keeps one
 device's host serving, and acts only on evidence: it adopts a serving host,
 starts the next only once the old one is shown to be dead (three reads in a row
 that all worked and all showed the same beat), and otherwise replaces nothing
@@ -566,7 +577,9 @@ directory until a host serves, and a device with no host to read is the first
 and its sender gets status 3. Run it in a terminal, detached with
 `watch --detach`, or as a job manager's job (`watch --print-launchd-job
 <label>` prints a launchd job that launchd never restarts, and creates nothing:
-make its log directory first); `stop --force` ends the watch before the host.
+make its log directory first; launchd must be able to open the job file and the
+log, so both belong on a volume with ownership enabled, and `--launchd-log`
+names the log); `stop --force` ends the watch before the host.
 The `kernarium-ipad-automation-watch` and
 `kernarium-ipad-automation-watch-process` tooling tests run the real script
 against fake `xcrun` and `xcodebuild` executables.
@@ -817,7 +830,16 @@ instances and check the setup wizard's flow and end state, the product's adb
 defaults, that the command Andarium's bug report sends for the guest's
 `/proc` counters (`GuestProcFiles`, its one source) reads each file or says why
 not, and that each instance's guest reports its own serial number and eth0
-address, kept across a reboot and a new launch;
+address, kept across a reboot and a new launch
+(`android-installation-identity-image` registers when
+`UML_ANDROID_INSTALLATION_IDENTITY_IMAGE_RELEASE` names a release built with the
+overlay and also checks wlan0's derived address, the Wi-Fi lease, that eth0 and
+the macvlan carry no IPv6 link-local address, and that a probe application in an
+ordinary application process cannot read `ro.boot.kernarium.adb_key`; that
+the guest's adbd reads the key is proven on a Kernarium runtime guest by
+`AndariumTests/AdbOverVsockTests` (the application's own adb client; the macOS
+launcher fixes ADB authorization off, and `run_android_adb_debugging.py` cannot
+be authorized by a runtime guest, which accepts only the key its application made);
 `tests/integration/android/run_guest_android_adb_vsock.py` is the
 opt-in ADB-over-vsock counterpart of `guest-vsock-stream`.
 `android-microg-spoofing` (integration) additionally needs
@@ -837,6 +859,21 @@ previous release's data disk to check the one-time on-screen keyboard change.
 `screenrecord`'s encoder run across a suspend by the host's route (asked again
 while the guest is busy, as the host does) and by the guest's own on one stream
 each, and the host closes no stream by a reset.
+`android-sync` (integration) registers when `UML_ANDROID_SYNC_RELEASE` names the
+release: with SysRq off, a file the guest holds dirty reaches the host's data
+image once the management console's `sync` replies, and survives a hard kill of
+the emulator; a request that is refused leaves it in the guest only; a `suspend`
+asked with no sync before it states in its reply that it synced and the image
+holds the file (`--suspend-statement none` for a kernel before the statement).
+The host's side of the settle calls is covered on any host by
+`guest-console-writeback` (with `-timeout`, `-strict` for the reply grammar and
+`-budget` for the one deadline), `guest-console-suspend-statement` (the reply's
+statement, and that no other wording confirms),
+`guest-console-suspend-partial-refusal` (a reply refused in its first part stays
+refused when its end arrives late), `emulator-lifecycle` (what each call
+reports, and when a saved answer is repeated), `kernarium-settle-plumbing` (the
+runtime's report envelope, the handle a sync pins and the loader's forwarding)
+and `runtime-session-record`.
 `android-wifi-network` (integration) registers when
 `UML_ANDROID_WIFI_NETWORK_RELEASE` names the release: the guest's one Wi-Fi
 network stays enabled, joined and validated while the internet checks fail, and
@@ -858,14 +895,21 @@ none.
 The network joins again after a suspend and after a restart, and the boot script
 runs without SELinux denials; a joined network keeps its metered and
 Auto-connect settings, a forgotten one stays forgotten and Wi-Fi that is off
-stays off.
+stays off. A guest stopped when the Wi-Fi service lists the network, or when
+the join is first reported, still has the network when the same data starts
+again: it leases within a minute (last observation included), the script logs
+that it left marker 1, and the next boot, after a restart, logs marker 2.
 `UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE` (a `;`-separated list) adds the
 upgrade sections: a data disk on which a release left the network disabled is
 repaired once by the first boot of the release under test and the next boot
 leaves it alone, a disk of a release that never disables the network is left
 alone, and a failed check shows only the warning on both.
 `android17-wifi-network-runner` (tooling) runs its parsers, the host's server
-and the sections' checks against scripted and simulated answers, without a guest.
+and the sections' checks against scripted and simulated answers, without a guest;
+`android17-wifi-network-script` (tooling) runs the boot script itself against a
+fake Wi-Fi framework (a stop before the config store wrote the network, a join
+before the write, a stop right after marker 2, an unanswered listing, a network
+removed during the boot, marker 2 in every state).
 `android-restart-loop` (integration) registers when
 `UML_ANDROID_RESTART_LOOP_RELEASE` names the release: a guest restarted 16 s
 after each kernel start, while `sys.boot_completed` is still unset, ends the

@@ -16,7 +16,11 @@ enum SendFeedbackComposer {
     static func present(
         _ request: SendFeedbackMailRequest, finished: @escaping @MainActor (SendFeedbackMailResult) -> Void
     ) -> Bool {
-        guard MFMailComposeViewController.canSendMail(), let top = topViewController() else { return false }
+        // Every file arrives mapped (`SendFeedbackModel.send`); the composer never maps,
+        // so it can never leave a file out of the mail.
+        guard request.mapped.count == request.attachments.count,
+            MFMailComposeViewController.canSendMail(), let top = topViewController()
+        else { return false }
         let composer = MFMailComposeViewController()
         let delegate = Delegate(finished: finished)
         composer.mailComposeDelegate = delegate
@@ -25,17 +29,16 @@ enum SendFeedbackComposer {
         composer.setToRecipients([request.address])
         composer.setSubject(request.subject)
         composer.setMessageBody(request.body, isHTML: false)
-        for attachment in request.attachments {
-            // Mapped: the file's pages are read as the composer copies them,
-            // not all held in the application's memory at once.
-            guard let data = try? Data(contentsOf: attachment.url, options: .alwaysMapped) else { continue }
+        // Mapped data: the file's pages are read as the composer copies them,
+        // not all held in the application's memory at once.
+        for (attachment, data) in zip(request.attachments, request.mapped) {
             composer.addAttachmentData(data, mimeType: attachment.mimeType, fileName: attachment.fileName)
         }
         top.present(composer, animated: true)
         return true
     }
 
-    private static func topViewController() -> UIViewController? {
+    static func topViewController() -> UIViewController? {
         let windows = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap(\.windows)

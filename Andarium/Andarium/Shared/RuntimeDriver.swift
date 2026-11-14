@@ -128,6 +128,11 @@ protocol RuntimeDriver: AnyObject {
     /// which outlasts a start that ended before it: the next start is long by
     /// its nature (`SlowStart`) though its disk exists.
     func firstBootPending() -> Bool
+    /// The values that tell this installation from another (its serial number,
+    /// its hardware address, the adb key and the time zone it was given), which
+    /// a text the guest printed has taken out wherever they stand
+    /// (`SendFeedbackStartLog.masked`); none for a driver with no guest.
+    func guestIdentifiers() -> GuestIdentifiers
     /// What the guest's data disk occupies now, measured from its file; the
     /// guest changes it while it runs.
     func measuredUsedBytes() -> UInt64
@@ -135,10 +140,11 @@ protocol RuntimeDriver: AnyObject {
     /// size, after the disk is ready.
     func begin(guest: Guest, mode: StartMode, kind: BootKind)
     /// The person stops the start under way, from the boot screen's notice
-    /// for a slow start. A run that is under way is asked to stop and ends
-    /// through the runtime's result, which the model reports as the person's
-    /// (`RunEnd.stoppedByUser`); a start that has not reached the runtime yet
-    /// is ended here, and the model hears it as a run that ended.
+    /// for a slow start. A run that is under way has its guest asked to write
+    /// its storage back (for `StopSettle.bound` at most), then is asked to
+    /// stop, and ends through the runtime's result, which the model reports as
+    /// the person's (`RunEnd.stoppedByUser`); a start that has not reached the
+    /// runtime yet is ended here, and the model hears it as a run that ended.
     func stopGuest()
     /// Puts the data back to what the update that did not finish started
     /// from; the guest does not start. It waits for a snapshot operation under
@@ -255,6 +261,8 @@ extension RuntimeDriver {
     func guestStallFiles() async -> [BugReportArchive.Entry] { [] }
     /// A driver with no session record has nothing to tell.
     func setNetworkNotice(_ denial: NetworkDenial?) {}
+    /// A driver with no guest has no values that tell an installation apart.
+    func guestIdentifiers() -> GuestIdentifiers { .none }
     #if FEEDBACK_MAIL
     /// A driver with no display has no picture, and no run to time.
     func captureGuestDisplay() -> UIImage? { nil }

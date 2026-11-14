@@ -458,6 +458,10 @@ final class AppModel {
     /// The preview's frozen boot screen shows the start's own clock, which runs.
     @ObservationIgnored var previewClockRuns = false
     #endif
+    /// What tells the runtime's session record of the boot under way from any
+    /// other (`BootRecordBinding`): made as a start begins, and counted on at
+    /// each restart of the guest in place. nil before the first start.
+    @ObservationIgnored var bootRecord: BootRecordBinding?
     /// The time the boot screen counts a start by, in seconds: a monotonic
     /// reading that does not run while the guest is held (a background span, a
     /// pause for space). A runtime supplies its pause-aware clock; a test
@@ -1551,6 +1555,12 @@ final class AppModel {
             frozenBootStage = nil
             bootTracker = BootTracker()
             slowStart.begin(at: clock(), kind: kind, firstBootPending: driver?.firstBootPending() ?? false)
+            // The record the file holds now is not the run's: the runtime rewrites it for the run, after this.
+            bootRecord = BootRecordBinding(
+                processID: Int(ProcessInfo.processInfo.processIdentifier),
+                recordAtStart: diagnosticsDirectory.flatMap {
+                    SessionRecord.read(at: $0.appendingPathComponent(BugReportAttachments.sessionRecord))
+                })
             preparingDisk = false
             diskProgress = nil
             #if !APP_STORE
@@ -1638,6 +1648,13 @@ final class AppModel {
         refreshPlan()
     }
 
+    /// The runtime began to boot the guest again in place for the `count`th time
+    /// in this run: the session record of the boot that follows says that
+    /// number, and the record of the boot before is not this boot's.
+    func guestRestartsCounted(_ count: Int) {
+        bootRecord?.restarts = count
+    }
+
     /// Android's own Restart boots the guest again in place. ADB and the
     /// install list belong to the run that ended.
     func restart() {
@@ -1691,8 +1708,9 @@ final class AppModel {
         confirmingStop = true
     }
 
-    /// Ends the start under way: the answer to the dialog. The runtime ends
-    /// the run and `runEnded` follows; the notice says Stopping meanwhile. The
+    /// Ends the start under way: the answer to the dialog. The guest is asked
+    /// to write back first and the runtime then ends the run, and `runEnded`
+    /// follows; the notice says Stopping the whole time. The
     /// preview, with no runtime, ends it at once as a host stop does.
     func stopStart() {
         confirmingStop = false

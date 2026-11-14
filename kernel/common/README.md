@@ -146,9 +146,9 @@ it. The bridge fields used below are defined by the comments in
 - The virtual CPU has no SVE outside streaming mode: there is no `NT_ARM_SVE`,
   `PR_SVE_*` fails with `EINVAL`, and the bridge tail holds no SVE state.
 - Because XNU delivers a signal to a thread in streaming mode without leaving
-  it, a carrier of an SME run blocks SIGUSR1 outside its idle `pselect()` and
-  the process-directed SIGINT, SIGTERM, SIGHUP, SIGQUIT, and SIGCHLD
-  throughout. Without SME no carrier blocks them.
+  it, a carrier of an SME run blocks SIGUSR1 and the process-directed SIGINT,
+  SIGTERM, SIGHUP, SIGQUIT, and SIGCHLD throughout, its idle wait included,
+  which its wake pipe ends. Without SME no carrier blocks them.
 
 ## Memory and address space
 
@@ -243,10 +243,14 @@ it. The bridge fields used below are defined by the comments in
   vectors at safe kernel spin, retry, TLB-walk, and `cond_resched()` boundaries
   and in `schedule()` when the caller stays runnable, so a kernel retry loop
   must service them: the IPI signal is only a wake edge. An idle virtual CPU
-  never blocks while one of its IPI vectors is pending. The byte in its wake
-  pipe only ends a wait and the vectors are the pending mask, so an idle exit
-  whose wait found the pipe empty drains it only if a vector is pending, and a
-  byte that lands later costs at most one spurious wait
+  waits in one `kevent()` on its own queue, which holds its wake pipe, the
+  host's stop descriptor and, on CPU0, the event the notification thread
+  triggers. Its deadline is a one-shot critical timer that the call adds,
+  because Darwin coalesces a wait's own timeout. An idle virtual CPU never
+  blocks while one of its IPI vectors is pending. The byte in its wake pipe
+  only ends a wait and the vectors are the pending mask, so an idle exit
+  whose wait found the pipe empty drains it only if a vector is pending, and
+  a byte that lands later costs at most one spurious wait
   (`kernel-darwin-ipi-drain`).
 - Darwin has no per-thread SIGIO, so a CPU collects the host's descriptor
   events at its clock tick and when it leaves idle, one CPU at a time: a
@@ -256,7 +260,7 @@ it. The bridge fields used below are defined by the comments in
   CPU tries only when no CPU has begun a dispatch for two ticks (20 ms), which
   is how an event waits no longer when the host holds CPU0's carrier, since a
   busy CPU0 collects at its tick only. The `uml-irq-notify` thread takes no
-  lock a CPU holds, so a stopped CPU0 cannot hold it up. It signals a CPU0
+  lock a CPU holds, so a stopped CPU0 cannot hold it up. It wakes a CPU0
   that idles, and for an event no dispatch has followed within 20 ms it also
   wakes an idle secondary through the pipe its idle wait reads. While CPU0 is
   not idle it parks after one event until CPU0's next idle entry or its 20 ms
@@ -421,6 +425,24 @@ it. The bridge fields used below are defined by the comments in
   fit Darwin's 104-byte `sun_path` is refused, never truncated.
 - The console's `mem` replies `total=<n> available=<n> free=<n>` in decimal
   bytes, so it answers where a policy keeps the console from `/proc/meminfo`.
+- The console's `sync` writes every file system and block device back, as
+  `sync(2)` does, and replies `synced in <n> ms` only once that has returned,
+  whatever the SysRq mask is; `sysrq s` only starts a writeback and is refused
+  with the mask off. It runs on a work item of its own, so a sync that has to
+  wait (the host holds a block device while its disk is full) sends no reply
+  and holds up no other request in the console's dispatcher, though a request
+  that needs the same I/O still waits for it; the host bounds its wait. The
+  reply says the pass returned, not that no I/O error occurred. A suspend syncs
+  only while the guest's `sync_on_suspend` is set, and says so in its reply:
+  `suspended, synced` once the PM core's sync of this suspend has returned,
+  `suspended, not synced` when there was none (a failed or given-up suspend
+  replies with an error and no statement). A kernel without the statement
+  replies `suspended`, which confirms nothing, and so does a request that
+  finds a suspend the guest started itself already holding the transition,
+  past its sync or not: the statement is made only for the transition the
+  request's own task runs. The host reads either text as the old reply. The
+  sync runs before tasks are frozen, so a write between the two is not
+  covered (`guest-mconsole-console-clients`).
 - A command that answers with what the kernel prints (`sysrq`, `stack`)
   sends its client what the consoles write while it runs, whichever vCPU
   writes it, and nothing after its final reply. The final reply names the
@@ -443,7 +465,14 @@ it. The bridge fields used below are defined by the comments in
   request: that suspend replies `Suspend failed: -16` when its turn comes and
   does not put the guest to sleep, in whichever order queued requests run. A
   host-asked suspend that ends with `-EBUSY` is entered again up to three more
-  times, and a request that gives up replies `Suspend failed`.
+  times unless a suspend of the guest's own has answered the request meanwhile,
+  and a request that gives up replies `Suspend failed`. The retries rely on the
+  kernels not being preemptible (`CONFIG_PREEMPT_NONE=y` in every
+  configuration): the worker has no scheduling point between its last look at
+  the request and the PM core's trylock but the sleep that the look follows, so
+  a suspend of the guest's own cannot answer the request in that time. A
+  configuration that enables preemption must make the look inside the PM
+  transition, with its mutex held.
   `guest-suspend-holds` checks the host's suspend under traffic, early wakes,
   and every guest-started wake path; `kernel-darwin-mconsole-suspend` checks
   the bookkeeping.

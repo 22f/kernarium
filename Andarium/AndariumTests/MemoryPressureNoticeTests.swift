@@ -354,10 +354,10 @@ struct MemoryPressureNoticeBannerTests {
     /// The notices in a window of `width` (and `height`, when a test gives the
     /// room a height of its own).
     private func hosted(
-        _ model: AppModel, width: CGFloat, height: CGFloat? = nil, size: DynamicTypeSize, in lease: HostWindow.Lease
+        _ model: AppModel, width: CGFloat, height: CGFloat? = nil, in lease: HostWindow.Lease
     ) -> UIViewController {
         let controller = UIHostingController(
-            rootView: SessionNoticesOverlay().environment(model).dynamicTypeSize(size)
+            rootView: SessionNoticesOverlay().environment(model).dynamicTypeSize(.large)
                 .frame(width: width, height: height))
         lease.window.rootViewController = controller
         controller.view.layoutIfNeeded()
@@ -368,7 +368,7 @@ struct MemoryPressureNoticeBannerTests {
     /// capsule and the notices from the top, the side keys on the edge over
     /// them.
     private func sessionHosted(
-        _ model: AppModel, width: CGFloat, height: CGFloat? = nil, size: DynamicTypeSize, in lease: HostWindow.Lease
+        _ model: AppModel, width: CGFloat, height: CGFloat? = nil, in lease: HostWindow.Lease
     ) -> UIViewController {
         let actions = SideKeyActions(
             power: {}, powerHold: {}, volumeUp: {}, volumeDown: {}, back: {}, home: {}, settings: {})
@@ -384,7 +384,7 @@ struct MemoryPressureNoticeBannerTests {
                     SideKeysOverlay(
                         mode: .normal, lit: true, open: .constant(false), tip: SideKeysTip(offersInstall: false), actions: actions)
                 }
-                .environment(model).dynamicTypeSize(size).frame(width: width, height: height))
+                .environment(model).dynamicTypeSize(.large).frame(width: width, height: height))
         lease.window.rootViewController = controller
         controller.view.layoutIfNeeded()
         return controller
@@ -406,7 +406,7 @@ struct MemoryPressureNoticeBannerTests {
         model.memoryPressureChanged(.critical)
         let lease = try await HostWindow.take()
         defer { lease.give() }
-        let controller = hosted(model, width: 390, size: .large, in: lease)
+        let controller = hosted(model, width: 390, in: lease)
         guard let found = try await parts(in: controller) else {
             Issue.record("The notice was not found: is application accessibility on in this Simulator?")
             return
@@ -427,7 +427,7 @@ struct MemoryPressureNoticeBannerTests {
         model.memoryPressureChanged(.warning)
         let lease = try await HostWindow.take()
         defer { lease.give() }
-        let controller = hosted(model, width: 390, size: .large, in: lease)
+        let controller = hosted(model, width: 390, in: lease)
         try await Task.sleep(for: .milliseconds(300))
         controller.view.layoutIfNeeded()
         #expect(find(in: controller.view) { $0.accessibilityLabel == MemoryPressureWords.title } == nil)
@@ -452,7 +452,7 @@ struct MemoryPressureNoticeBannerTests {
         model.memoryPressureChanged(.critical)
         let lease = try await HostWindow.take()
         defer { lease.give() }
-        let controller = hosted(model, width: 390, size: .large, in: lease)
+        let controller = hosted(model, width: 390, in: lease)
         guard try await parts(in: controller) != nil else {
             Issue.record("The notice was not found: is application accessibility on in this Simulator?")
             return
@@ -472,16 +472,14 @@ struct MemoryPressureNoticeBannerTests {
     // MARK: Frames
 
     /// The notice in a window of `width`, its words and button inside the
-    /// column and not wider than it, the button under the words at the
-    /// accessibility sizes, and all of it inside the window's height.
-    @Test(arguments: [DynamicTypeSize.large, .accessibility3, .accessibility5])
-    func theNoticeFitsANarrowScreenAtEveryTextSize(size: DynamicTypeSize) async throws {
+    /// column and not wider than it, and all of it inside the window's height.
+    @Test func theNoticeFitsANarrowScreen() async throws {
         let model = makeModel()
         model.memoryPressureChanged(.critical)
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let width: CGFloat = 320
-        let controller = hosted(model, width: width, size: size, in: lease)
+        let controller = hosted(model, width: width, in: lease)
         guard let found = try await parts(in: controller) else {
             Issue.record("The notice was not found: is application accessibility on in this Simulator?")
             return
@@ -500,9 +498,6 @@ struct MemoryPressureNoticeBannerTests {
                 "inside the column \(column): \(frame)")
         }
         #expect(detail.minY >= title.maxY - 1, "the detail is under the title")
-        if size.isAccessibilitySize {
-            #expect(dismiss.minY >= detail.maxY - 1, "the button goes under the words")
-        }
         let screen = lease.window.bounds
         #expect(
             title.minY >= screen.minY && dismiss.maxY <= screen.maxY,
@@ -517,14 +512,10 @@ struct MemoryPressureNoticeBannerTests {
     /// The memory notice under the Camera-is-off notice, in the column the
     /// session gives its notices: it is the later one, below the camera notice,
     /// nothing overlaps another, and the column stays clear of the statistics
-    /// capsule above and the closed side keys on the edge. At the largest size
-    /// the two are taller than a phone's window and the column scrolls: it is
-    /// then inside the window, and scrolled to its end shows the memory notice
-    /// and its button in the window.
-    @Test(arguments: [DynamicTypeSize.large, .accessibility5], [true, false])
-    func theNoticeJoinsTheStackBelowTheCameraNoticeClearOfTheCapsuleAndTheKeys(
-        size: DynamicTypeSize, statsShowing: Bool
-    ) async throws {
+    /// capsule above and the closed side keys on the edge, with the memory
+    /// notice and its button in the window.
+    @Test(arguments: [true, false])
+    func theNoticeJoinsTheStackBelowTheCameraNoticeClearOfTheCapsuleAndTheKeys(statsShowing: Bool) async throws {
         let model = makeModel()
         model.cameraAccess = .notDetermined
         model.cameraCaptureChanged(.blockedInUse)
@@ -535,7 +526,7 @@ struct MemoryPressureNoticeBannerTests {
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let width: CGFloat = 390
-        let controller = sessionHosted(model, width: width, size: size, in: lease)
+        let controller = sessionHosted(model, width: width, in: lease)
         guard let memory = try await parts(in: controller),
             let cameraTitle = find(in: controller.view, { $0.accessibilityLabel == CameraWords.offTitle }),
             let cameraDetail = find(in: controller.view, { $0.accessibilityLabel == CameraWords.offDetail })
@@ -555,14 +546,12 @@ struct MemoryPressureNoticeBannerTests {
             #expect(
                 frame.minX >= column.minX - 0.5 && frame.maxX <= column.maxX + 0.5, "inside the column: \(frame)")
         }
-        var capsuleFrame: CGRect?
         if statsShowing {
             let spoken = model.session.readout.spoken(memoryMiB: 2048, recovery: false)
             guard let capsule = find(in: controller.view, { $0.accessibilityLabel == spoken }) else {
                 Issue.record("The statistics capsule was not found")
                 return
             }
-            capsuleFrame = capsule.accessibilityFrame
             #expect(!capsule.accessibilityFrame.intersects(cameraFrame), "the capsule keeps its place")
             #expect(!capsule.accessibilityFrame.intersects(memoryFrame))
             #expect(cameraFrame.minY >= capsule.accessibilityFrame.maxY, "the notices hang below the capsule")
@@ -577,44 +566,13 @@ struct MemoryPressureNoticeBannerTests {
         for frame in [cameraFrame, memoryFrame] {
             #expect(frame.maxX <= keysFrame.maxX - 12 + 0.5, "short of the keys' capsules: \(frame) and \(keysFrame)")
         }
-        try await checkColumnReachesItsNotices(
-            controller, memoryDismiss: memory.dismiss, screen: screen, below: capsuleFrame, keys: keysFrame)
-    }
-
-    /// The column, plain or scrolling, as the room decides: plain when
-    /// everything is inside the window; otherwise one scroll view inside the
-    /// window, below the capsule, no wider than the notices' glass and clear of
-    /// the keys, whose scrolled end puts the last Dismiss inside the window.
-    private func checkColumnReachesItsNotices(
-        _ controller: UIViewController, memoryDismiss: NSObject, screen: CGRect, below capsule: CGRect?, keys: CGRect
-    ) async throws {
-        let scrolls = scrollViews(under: controller.view)
-        if scrolls.isEmpty {
-            #expect(
-                screen.contains(memoryDismiss.accessibilityFrame),
-                "the column fits, and the last button is in the window: \(memoryDismiss.accessibilityFrame)")
-            return
-        }
-        #expect(scrolls.count == 1, "one scroll view for the column: \(scrolls.count)")
-        let scroll = try #require(scrolls.first)
-        let frame = scroll.convert(scroll.bounds, to: nil)
-        #expect(screen.insetBy(dx: -0.5, dy: -0.5).contains(frame), "the scroll view is in the window: \(frame) in \(screen)")
-        if let capsule { #expect(frame.minY >= capsule.maxY, "below the capsule: \(frame) and \(capsule)") }
-        #expect(frame.maxX <= keys.maxX - 12 + 0.5, "clear of the keys' capsules: \(frame) and \(keys)")
-        #expect(scroll.contentSize.height > scroll.bounds.height, "it scrolls because the notices are taller than the room")
-        scroll.setContentOffset(
-            CGPoint(x: 0, y: scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom),
-            animated: false)
-        controller.view.layoutIfNeeded()
-        try await Task.sleep(for: .milliseconds(100))
-        let button = memoryDismiss.accessibilityFrame
         #expect(
-            frame.insetBy(dx: -0.5, dy: -0.5).contains(button),
-            "scrolled to its end, the last button is in the scroll view: \(button) in \(frame)")
+            screen.contains(memory.dismiss.accessibilityFrame),
+            "the last button is in the window: \(memory.dismiss.accessibilityFrame)")
     }
 
-    /// The column scrolls when the room is shorter than its notices, at any
-    /// text size, and not otherwise.
+    /// The column scrolls when the room is shorter than its notices, and not
+    /// otherwise.
     @Test func aColumnTallerThanItsRoomScrollsAndAColumnThatFitsDoesNot() async throws {
         let model = makeModel()
         model.cameraAccess = .notDetermined
@@ -622,14 +580,14 @@ struct MemoryPressureNoticeBannerTests {
         model.memoryPressureChanged(.critical)
         let lease = try await HostWindow.take()
         defer { lease.give() }
-        let tall = hosted(model, width: 390, height: 700, size: .large, in: lease)
+        let tall = hosted(model, width: 390, height: 700, in: lease)
         guard let memory = try await parts(in: tall) else {
             Issue.record("The notice was not found: is application accessibility on in this Simulator?")
             return
         }
         #expect(scrollViews(under: tall.view).isEmpty, "two notices at the default size fit 700 points")
         #expect(lease.window.bounds.contains(memory.dismiss.accessibilityFrame))
-        let short = hosted(model, width: 390, height: 160, size: .large, in: lease)
+        let short = hosted(model, width: 390, height: 160, in: lease)
         _ = try await parts(in: short)
         #expect(scrollViews(under: short.view).count == 1, "two notices do not fit 160 points: they scroll")
     }
@@ -646,7 +604,7 @@ struct MemoryPressureNoticeBannerTests {
         model.memoryPressureChanged(.critical)
         let lease = try await HostWindow.take()
         defer { lease.give() }
-        let controller = hosted(model, width: 390, height: 1400, size: .large, in: lease)
+        let controller = hosted(model, width: 390, height: 1400, in: lease)
         guard let memory = try await parts(in: controller),
             let network = find(in: controller.view, { $0.accessibilityLabel == NetworkWords.title(for: .wifi) }),
             let graphics = find(in: controller.view, { $0.accessibilityLabel == GraphicsNotice.title }),

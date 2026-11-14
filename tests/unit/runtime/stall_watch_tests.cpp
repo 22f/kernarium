@@ -38,6 +38,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <string>
+#include <sys/event.h>
 #include <sys/resource.h>
 #include <sys/select.h>
 #include <time.h>
@@ -192,6 +193,34 @@ void blink_until_stopped(const Carrier &carrier, long period_ms)
 		const timespec period{period_ms / 1000, (period_ms % 1000) * 1000L * 1000L};
 		(void)wait(0, nullptr, nullptr, nullptr, &period, nullptr);
 	}
+}
+
+/* An idle wait as the kernel makes it: a kevent() on the vCPU's own queue,
+ * whose one-shot timer is in the change list and which has no timeout. With
+ * `kernel_shape` false the timer is in microseconds, a shape no caller makes,
+ * which the wrapper does not count as idle. */
+void kevent_idle_until_stopped(const Carrier &carrier, long period_ms,
+	bool kernel_shape)
+{
+	using Kevent = int (*)(int, const struct kevent *, int, struct kevent *, int,
+		const timespec *);
+	const auto wait = reinterpret_cast<Kevent>(
+		uml::runtime::kernel_wait_import("kevent"));
+	require(wait != nullptr);
+	const int queue = kqueue();
+	require(queue >= 0);
+	while (!carrier.stop.load(std::memory_order_acquire)) {
+		struct kevent timer;
+		if (kernel_shape)
+			EV_SET(&timer, 0, EVFILT_TIMER, EV_ADD | EV_ONESHOT,
+				NOTE_NSECONDS | NOTE_CRITICAL, period_ms * 1'000'000, nullptr);
+		else
+			EV_SET(&timer, 0, EVFILT_TIMER, EV_ADD | EV_ONESHOT, NOTE_USECONDS,
+				period_ms * 1000, nullptr);
+		struct kevent result[2];
+		(void)wait(queue, &timer, 1, result, 2, nullptr);
+	}
+	close(queue);
 }
 
 /* An idle wait that ends when the descriptor is readable. */
@@ -618,6 +647,53 @@ void the_watch_sleeps_while_every_carrier_is_idle()
 	close(quiet[1]);
 }
 
+/* The kernel's own idle wait, a kevent whose deadline is in its change list,
+ * is an idle wait to the watch as pselect is: it sleeps through carriers
+ * that wake now and then. */
+void the_watch_sleeps_while_carriers_wait_in_the_kernels_kevent()
+{
+	Session session{"uml-stall-kevent.XXXXXX"};
+	Carrier idle0;
+	Carrier idle1;
+	start(idle0, 0, [&] { kevent_idle_until_stopped(idle0, 30, true); }, true);
+	start(idle1, 1, [&] { kevent_idle_until_stopped(idle1, 45, true); }, true);
+	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
+	require(watch != nullptr, "a watch without a record");
+	sleep_ms(800);
+	const unsigned long first = looks_after(session.path, 1);
+	require(first >= 2, "the watch made no look at the idle carriers");
+	sleep_ms(1000);
+	const unsigned long second = looks_after(session.path, 2);
+	require(second == first, "the watch looked at carriers in the kernel's "
+		"kevent wait: " + std::to_string(first) + " then " + std::to_string(second));
+	require(vcpu_events(stall_slot(session.path)) == 0, "idle carriers stalled");
+	watch.reset();
+	for (Carrier *carrier : {&idle0, &idle1})
+		carrier->stop.store(true, std::memory_order_release);
+	for (Carrier *carrier : {&idle0, &idle1})
+		require(pthread_join(carrier->thread, nullptr) == 0);
+}
+
+/* A timer of any other shape is not read: the carrier stays counted outside
+ * its wait and the watch keeps sampling it. */
+void a_timer_of_another_shape_keeps_the_watch_looking()
+{
+	Session session{"uml-stall-shape.XXXXXX"};
+	Carrier idle0;
+	start(idle0, 0, [&] { kevent_idle_until_stopped(idle0, 30, false); }, true);
+	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
+	require(watch != nullptr);
+	sleep_ms(500);
+	const unsigned long first = looks_after(session.path, 1);
+	sleep_ms(1000);
+	const unsigned long second = looks_after(session.path, 2);
+	require(second >= first + 12, "the watch slept for a timer it cannot read: " +
+		std::to_string(first) + " then " + std::to_string(second));
+	watch.reset();
+	idle0.stop.store(true, std::memory_order_release);
+	require(pthread_join(idle0.thread, nullptr) == 0);
+}
+
 void a_carrier_that_reports_nothing_keeps_the_watch_looking()
 {
 	Session session{"uml-stall-awake.XXXXXX"};
@@ -977,6 +1053,8 @@ int main()
 	a_hold_of_the_threads_is_no_stall(false);
 	a_hold_of_the_threads_is_no_stall(true);
 	the_watch_sleeps_while_every_carrier_is_idle();
+	the_watch_sleeps_while_carriers_wait_in_the_kernels_kevent();
+	a_timer_of_another_shape_keeps_the_watch_looking();
 	a_carrier_that_reports_nothing_keeps_the_watch_looking();
 	a_wedge_after_a_wake_is_found_within_a_quarter_of_a_second();
 	a_two_second_idle_is_no_starvation();

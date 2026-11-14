@@ -59,20 +59,38 @@ public struct SessionRecord: Equatable, Sendable {
     /// iOS denies it the network was shown, from layout 5 on; nil in an earlier
     /// layout or when the slot is of a version this reader does not know.
     public var network: NetworkRecord?
+    /// How often the guest's storage was settled and how often the guest did
+    /// not confirm it, from layout 7 on; nil in an earlier layout, when the
+    /// slot is blank (no settle yet) or when it is of a version this reader
+    /// does not know.
+    public var storage: StorageRecord?
 
     /// The layouts this reader knows: 1 to 3 keep the session's state right
     /// after the memory slot, 4 puts the stall slot between them, 5 the
-    /// network slot after the stall slot and 6 the figures of the run in each
-    /// history row of an 8 KiB memory slot. The rows are for the person
-    /// reading the bug report; this reader takes none of them.
+    /// network slot after the stall slot, 6 the figures of the run in each
+    /// history row of an 8 KiB memory slot and 7 the storage slot after the
+    /// network slot. The rows are for the person reading the bug report; this
+    /// reader takes none of them.
     static let layouts = [
         "uml-session 1", "uml-session 2", "uml-session 3", "uml-session 4", "uml-session 5", "uml-session 6",
+        "uml-session 7",
     ]
 
-    /// The most a record file ever holds is 17920 bytes
-    /// (`session_record_max_bytes`); a file longer than this is not one the
-    /// runtime wrote, and is neither read nor copied beyond it.
+    /// The read cap, 20 KiB: the runtime writes at most 18176 bytes
+    /// (`session_record_max_bytes`), so a file longer than the cap is not one
+    /// it wrote, and is neither read nor copied beyond it. The gap is slack for
+    /// a later layout, not a limit the runtime reaches.
     public static let maximumBytes = 20 << 10
+
+    /// The output's own text: the runtime pads the state's area with newlines to
+    /// its full size, so the output ends with one newline, as the guest's
+    /// last line did, and not with the padding.
+    private static func withoutPadding(_ output: String) -> String {
+        guard output.hasSuffix("\n") else { return output }
+        var text = Substring(output)
+        while text.hasSuffix("\n") { text.removeLast() }
+        return text + "\n"
+    }
 
     /// Reads a record's text; nil when it is not one.
     public init?(text: String) {
@@ -94,16 +112,18 @@ public struct SessionRecord: Equatable, Sendable {
         started = fields["started"].flatMap { TimeInterval($0) }.map { Date(timeIntervalSince1970: $0) }
         ended = fields["ended"].flatMap { TimeInterval($0) }.map { Date(timeIntervalSince1970: $0) }
         message = fields["message"]
-        kernelOutput = parts.count > 1 ? parts[1] : nil
+        kernelOutput = parts.count > 1 ? Self.withoutPadding(parts[1]) : nil
         memory = fields["memory"].flatMap(Self.memory(from:))
         bootFinished = fields["boot"].flatMap { ["completed": true, "unfinished": false][$0] }
         restarts = fields["restarts"].flatMap { Int($0) }
         terms = fields["terms"]
         peakTerms = fields["peak-terms"]
-        let hasStalls = ["uml-session 4", "uml-session 5", "uml-session 6"].contains(String(format))
+        let hasStalls = ["uml-session 4", "uml-session 5", "uml-session 6", "uml-session 7"]
+            .contains(String(format))
         stalls = hasStalls ? StallRecord(text: parts[0]) : nil
-        let hasNetwork = ["uml-session 5", "uml-session 6"].contains(String(format))
+        let hasNetwork = ["uml-session 5", "uml-session 6", "uml-session 7"].contains(String(format))
         network = hasNetwork ? NetworkRecord(text: parts[0]) : nil
+        storage = format == "uml-session 7" ? StorageRecord(text: parts[0]) : nil
     }
 
     /// "at T footprint F peak P [available A]".

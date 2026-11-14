@@ -49,9 +49,9 @@ struct GraphicsNoticeBanner: View {
 ///
 /// The column is plain while it fits the room it is given, so a tap beside the
 /// banners reaches the guest. When the notices are together taller than the
-/// room (the accessibility text sizes, a short window), it scrolls instead, no
-/// wider than the banners and no taller than the room, so every Dismiss can be
-/// reached and the side keys stay tappable.
+/// room (a short window), it scrolls instead, no wider than the banners and no
+/// taller than the room, so every Dismiss can be reached and the side keys stay
+/// tappable.
 struct SessionNoticesOverlay: View {
     @Environment(AppModel.self) private var model
 

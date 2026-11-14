@@ -673,13 +673,31 @@ ADB_HOST_PROPERTY_TYPE = "kernarium_adb_host_prop"
 # The host application is the adb host of its guest and reaches adbd over virtio-vsock. adbd's p0011
 # topics read two launch properties themselves: ro.boot.kernarium.adb_key, the public key the
 # application authorizes for the boot, and ro.boot.kernarium.adb_tcp, 0 when the launch has no
-# host forward, which keeps adbd off guest TCP. The launch properties are bootloader_prop, which
-# every domain may read; service.adb.listen_addrs would not do, as it is a system_prop that
-# vendor_init may not set. The adbd binary sits in its APEX, whose payload hints keep it
-# uncompressed so that the verifier reads these names in the payload's bytes.
+# host forward, which keeps adbd off guest TCP (service.adb.listen_addrs would not do, as it is a
+# system_prop that vendor_init may not set). The TCP property is a bootloader_prop, which every
+# domain may read. The key is the installation's own, and a bootloader_prop is readable by every
+# application, so the key has a type of its own (overlay/sepolicy/system_ext/private/
+# adb_key_prop.te) that no application may read: adbd reads it, init sets it and dumpstate can
+# read it, so a bug report that the user shares can carry the key. The adbd binary sits in its
+# APEX, whose payload hints keep it uncompressed so that the verifier reads these names in the
+# payload's bytes.
 ADBD_APEX = "SYSTEM/apex/com.android.adbd.apex"
 ADBD_BINARY = "bin/adbd"
-ADBD_LAUNCH_PROPERTIES = ("ro.boot.kernarium.adb_key", "ro.boot.kernarium.adb_tcp")
+ADB_KEY_PROPERTY = "ro.boot.kernarium.adb_key"
+ADB_KEY_PROPERTY_TYPE = "kernarium_adb_key_prop"
+ADBD_LAUNCH_PROPERTIES = (ADB_KEY_PROPERTY, "ro.boot.kernarium.adb_tcp")
+# No application may read the key. The platform lists the concrete types that run applications in
+# the attributes below (untrusted_app_29, untrusted_app_34, runas_app, sdk_sandbox_34, ...), and
+# a rule is written against a concrete type or a generated attribute, so a rule for
+# untrusted_app_34 does not reach the name untrusted_app. The check reads every concrete member,
+# after the names that a rule is most likely to use.
+ADB_KEY_APP_DOMAINS = (
+    "appdomain", "untrusted_app", "isolated_app", "ephemeral_app", "platform_app", "priv_app", "system_app",
+)
+ADB_KEY_APP_ATTRIBUTES = ("appdomain", "untrusted_app_all", "isolated_app_all", "sdk_sandbox_all")
+# The policies that may add application domains: the platform's, the vendor's and system_ext's, and
+# the product's and the odm's when the image has them.
+APP_POLICY_CIL = ("PRODUCT/etc/selinux/product_sepolicy.cil", "ODM/etc/selinux/odm_sepolicy.cil")
 # The key rule of p0011 reads the guest's debugging setting: AdbService records USB debugging in
 # persist.sys.usb.config (route p0007) and wireless debugging is persist.adb.tls_server.enable. adbd
 # offers any key but the host's only while one is on, and logs the refusal line otherwise; the line
@@ -731,6 +749,10 @@ SUSPEND_BLOCKER_SERVICE = ("suspend_blocker", "/vendor/bin/suspend_blocker")
 # (overlay/config/init.vendor.rc, tools/kernarium_net_setup.cpp).
 NET_SETUP_SERVICE = ("kernarium_net_setup", "/vendor/bin/kernarium_net_setup")
 NET_SETUP_TRIGGER = "post-fs-data"
+# The tool turns IPv6 off on eth0 and the macvlan through the kernel's sysctl files, so that
+# neither carries a link-local address built from its MAC.
+NET_SETUP_DOMAIN = "kernarium_net_setup"
+NET_SETUP_SYSCTL_LABEL = "proc_net"
 NET_SETUP_SYSCTLS = (
     "write /proc/sys/net/ipv4/conf/all/arp_ignore 1",
     "write /proc/sys/net/ipv4/conf/all/arp_announce 2",
@@ -749,16 +771,19 @@ NET_SETUP_TRANSITION = re.compile(
 # After boot completes a script saves the virtual Wi-Fi network (VirtWifi, open) once, in a
 # core domain of its own on system_ext (overlay/tools/kernarium_wifi_network.sh,
 # overlay/sepolicy/system_ext/private).
-# Until the station has joined it once (the marker then reads 2), a boot that finds Wi-Fi on,
-# the network still saved and nothing joined after a settle time saves it again, which enables
-# a network an earlier release left disabled for lack of internet. It never turns Wi-Fi on or
-# connects: the user's switch decides whether the saved network is joined, and a network the
-# user forgets stays forgotten.
+# Until a boot has found the network stored and joined (the marker then reads 2) the saved list
+# decides on every boot: a boot saves the network when the list lacks it, and saves it again when
+# it finds Wi-Fi on and nothing joined after a settle time, which enables a network an earlier
+# release left disabled for lack of internet. The Wi-Fi service writes its store some time after
+# a save or a join, so a boot that saved leaves the marker at 1. The script never turns Wi-Fi on
+# or connects: the user's switch decides whether the saved network is joined. What it decides is
+# tested on the tracked file (tests/tooling/android/test_wifi_network_script.py); the checks here
+# are presence checks of the image's copy.
 WIFI_NETWORK_SERVICE = ("kernarium_wifi_network", "/system_ext/bin/kernarium_wifi_network.sh")
 WIFI_NETWORK_TRIGGER = "property:sys.boot_completed=1"
 WIFI_NETWORK_MARKER = "persist.sys.kernarium.virtwifi_saved"
 WIFI_NETWORK_MARKER_TYPE = "kernarium_wifi_network_prop"
-# The marker holds 1 (saved) and 2 (joined), so its property type must accept both.
+# The marker holds 1 (saved, no join seen) and 2 (joined), so its property type must accept both.
 WIFI_NETWORK_MARKER_VALUES = ("1", "2")
 WIFI_NETWORK_SCRIPT_REQUIRED = (
     "cmd wifi add-network VirtWifi open",
@@ -3997,7 +4022,11 @@ def check_kernel_policy(
                 (platform_policy, vendor_policy, system_ext_policy),
                 f"{entry}: ",
             )
-    check_adbd_launch_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
+    check_adbd_launch_policy(
+        contexts,
+        (platform_policy, vendor_policy, system_ext_policy)
+        + tuple(read_small(archive, infos[name]) for name in APP_POLICY_CIL if name in infos),
+    )
     check_lmkd_gpu_policy(contexts, (platform_policy, vendor_policy, system_ext_policy), vendor_policy)
     check_venus_option_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
     check_audio_ring_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
@@ -4156,6 +4185,14 @@ def check_network_setup_policy(vendor_policy: bytes, vendor_file_contexts: bytes
         fail("vendor file contexts do not label /vendor/bin/kernarium_net_setup")
     if not NET_SETUP_TRANSITION.search(vendor_policy):
         fail("vendor policy does not move init into the network setup domain")
+    if not cil_allows(
+        (vendor_policy,), NET_SETUP_DOMAIN, NET_SETUP_SYSCTL_LABEL, "file", {"open", "write"}
+    ):
+        fail(
+            f"vendor policy does not let {NET_SETUP_DOMAIN} open and write {NET_SETUP_SYSCTL_LABEL} "
+            "files: it could not turn IPv6 off on eth0 and the macvlan, and would exit before "
+            "it made wlan0"
+        )
 
 
 def check_wifi_network(rc_payload: str, script: bytes) -> None:
@@ -4795,7 +4832,29 @@ def cil_allows_file_read(policies: tuple[bytes, ...], domain: str, label: str) -
 
 
 def check_adbd_launch_policy(contexts: list[str], policies: tuple[bytes, ...]) -> None:
-    """adbd may read the launch properties and the debugging setting it acts on."""
+    """adbd may read the launch properties and the debugging setting it acts on, and no
+    application may read the installation's adb key."""
+    key_label = property_label(ADB_KEY_PROPERTY, contexts) or "default_prop"
+    if key_label != ADB_KEY_PROPERTY_TYPE:
+        fail(
+            f"{ADB_KEY_PROPERTY} is labelled {key_label}, not {ADB_KEY_PROPERTY_TYPE} "
+            "(overlay/sepolicy/system_ext/private/property_contexts): every application could read "
+            "the key that the host makes for the installation"
+        )
+    members = {
+        member
+        for policy in policies
+        for attribute in ADB_KEY_APP_ATTRIBUTES
+        for member in cil_attribute_members(policy, attribute)
+    }
+    if not any(cil_attribute_members(policy, "appdomain") for policy in policies):
+        fail("the policy lists no type for appdomain: the check could not tell who runs applications")
+    for domain in (*ADB_KEY_APP_DOMAINS, *sorted(members - set(ADB_KEY_APP_DOMAINS))):
+        if cil_allows_file_read(policies, domain, key_label):
+            fail(
+                f"{domain} may read {ADB_KEY_PROPERTY}, labelled {key_label}: an application could "
+                "read the key that the host makes for the installation"
+            )
     for name in ADBD_LAUNCH_PROPERTIES + ADBD_DEBUGGING_PROPERTIES:
         label = property_label(name, contexts) or "default_prop"
         if not cil_allows_file_read(policies, "adbd", label):

@@ -552,18 +552,33 @@ shared-memory map or unmap, a configuration change, a call), that
 `GET_FEATURES` is answered after the wait and behind every message already
 queued, rather than inside it, since a reset sends unmaps of its own; so a
 device with a shared-memory region may keep its requests too. The wait ends with
-the acknowledgement, the end of the backend-request channel, or a service stop;
-it has no deadline of its own, and a front-end that never answers leaves the
-reset waiting. A reset whose unmap is refused or whose channel has ended also
-drops every range the backend published from the host index. That
-`GET_FEATURES` also retires every ring still disabled, which the guest then
-frees: the transport reads it no more until its next `SET_VRING_KICK` or
-in-band `VRING_KICK`, whereas an enabled ring, and a disabled one no teardown
+the acknowledgement, the end of the backend-request channel, the end of the main
+socket, which aborts the operation before it writes anything the acknowledgement
+would have released, even while the acknowledgement is being received, or a
+service stop. Once a reply the front-end waits for depends on the wait, because
+a query or a request that asks for an acknowledgement is queued behind it or
+because the connection has ended and a reset's unmaps are all that is left, the
+wait has a budget of ten seconds (`backendAcknowledgementBound`). Its own polls
+spend it, each at most the interval it asked for plus 25 ms, not the clock: an
+interval in which the whole process could not run, as for an application the
+system suspended, costs one poll. An awake front-end that stays silent gets ten
+seconds of charged poll time; real time is longer by the work between polls and
+by an overrun beyond a poll's cap. A frame received during such a wait, from
+either socket, has the same time from its first byte, within the wait's budget
+when it has one; ordinary request reception is not timed. Past that the wait
+fails, says so on stderr, and closes the backend-request channel: nothing a late
+acknowledgement would release is written, the reset or the connection ends
+without the unmaps it can no longer wait for, and the guest's driver drops the
+device. A wait that nothing waits behind, such as a notification a suspended
+guest has not yet read, has no budget. A reset whose unmap is refused or whose
+channel has ended also drops every range the backend published from the host
+index. That `GET_FEATURES` also retires every ring still disabled, which the
+guest then frees: the transport reads it no more until its next `SET_VRING_KICK`
+or in-band `VRING_KICK`, whereas an enabled ring, and a disabled one no teardown
 followed, stay read and are refused when their available flags are reserved. A
-write to the control or backend-request socket that fails because the
-front-end closed its end (`EPIPE`, `ECONNRESET`, `ENOTCONN`) ends the
-connection without a failure report; a write to a queue's call descriptor that
-fails still reports. A
+write to the control or backend-request socket that fails because the front-end
+closed its end (`EPIPE`, `ECONNRESET`, `ENOTCONN`) ends the connection without a
+failure report; a write to a queue's call descriptor that fails still reports. A
 `VRING_KICK` is accepted whatever the state of the rings: a kick on a disabled
 ring is handled as that ring's buffers are, and a kick that asks for no
 acknowledgement gets none.
@@ -694,11 +709,14 @@ first, which is safe.
 ## Guest lifecycle
 
 The platform layer tracks every writable host descriptor opened for the guest.
-`uml_emulator_sync()` asks the guest to write back through its management
-console, then flushes those descriptors. `uml_emulator_quiesce()` has the guest
-trim its cold page cache and hand its free memory to the host, enters full Linux
-system suspend and waits for the platform sleep boundary before flushing the
-host. `uml_emulator_quiesce_resident()` does the same and keeps the guest's RAM
+`uml_emulator_sync()` has the guest write back through the management console's
+`sync` command, then flushes those descriptors. The command runs `sync(2)` in
+the guest's process context and replies only after it returns, whatever the
+magic SysRq mask is. `uml_emulator_quiesce()` has the guest write back first,
+so that what it dirtied becomes reclaimable, then trim its cold page cache and
+hand its free memory to the host, enters full Linux system suspend and waits
+for the platform sleep boundary before flushing the host.
+`uml_emulator_quiesce_resident()` does the same and keeps the guest's RAM
 in the process where a quiesce would [hibernate](#hibernation) it, for a host
 short of the space an image takes. `uml_emulator_resume()` sends the console
 wake edge, and
@@ -712,9 +730,42 @@ busy, is not frozen and the host treats it as not suspended. A request with no
 reply at the deadline is aborted: only a "suspended" reply that arrived before
 the wake edge counts, otherwise the suspension is unconfirmed, never
 hibernated, and woken at the resume. The management console's own stop is no
-fallback, because it halts only one vCPU. Guests that need write-back boot with
-magic SysRq enabled; if the physical iOS sandbox cannot bind the console,
-host-file flushing still runs but guest write-back and freeze are unavailable.
+fallback, because it halts only one vCPU. If the physical iOS sandbox cannot
+bind the console, host-file flushing still runs but guest write-back and freeze
+are unavailable.
+
+Each of the three calls reports what the guest confirmed through a nullable
+`uml_emulator_settle`, and whether it sleeps. The guest's storage is confirmed
+only by an explicit statement of its own in that call: its reply to a `sync`
+request, or a suspend reply that states the suspend's own sync returned
+(`suspended, synced`). A suspend reply without the statement, as every older
+kernel's, confirms nothing: the kernel syncs on the way to suspend only while
+the guest's `sync_on_suspend` is set. Otherwise there
+was no guest, or the storage is unconfirmed (no reply in time, a busy lifecycle
+call or console, or a kernel that only started a writeback), refused, or
+unreachable (its console could not be bound). Only confirmed and no-guest are
+settled: an application never logs "settled" for another outcome (`GuestSettle`
+in `GuestHostCore`, filled from the runtime's `kernarium_runtime_settle`), and
+the session record counts them. The zero value of the storage report claims
+nothing, so a report the call never wrote is no confirmation.
+
+A reply confirms only as "synced in <n> ms" whole, in one well-formed datagram
+per part; text that starts alike, a truncated datagram and an error flagged in
+any part of the reply are refusals. A kernel without the `sync` command answers
+exactly "Unknown command", and the host then asks for `sysrq s`, which only
+starts a writeback and needs SysRq enabled (the Kernarium runtime boots its
+guests with it for that case): the result is unconfirmed. One deadline, from the
+call, covers a writeback request in full: the console's lock, every part of the
+reply, the fallback and its settling period. The header
+([`darwin/api/include/uml/emulator.h`](../darwin/api/include/uml/emulator.h))
+states each call's bounds. A quiesced guest the host holds is reported again by a later call; a
+guest whose threads could not be held, or whose suspension is unconfirmed, may
+have run and written since, so a later call asks it again. The guest runs each
+`sync` on a work item of its own, so the console's dispatcher is never blocked
+behind one, and a reply that comes after the host stopped waiting finds the
+request's own socket closed. The runtime's `sync` pins the handle instead of
+holding the lifecycle mutex, which a quiesce keeps for as long as it takes, so
+the library's own bounded wait is the only one.
 
 The kernel says how the guest ends before it shuts its drivers down, with the
 bridge import `darwin_uml_guest_shutdown()`: power-off, halt, or restart with the
@@ -740,16 +791,26 @@ checkpoint thread rewrites the state with the console's last output whenever
 that grew, so a process ended mid-boot leaves where the boot had got, and a
 stop, restart or power-off before the boot completed quotes that output too.
 The output a record quotes is its own boot's, never an earlier boot's of the
-same process. An end is the last state on disk unless the process dies between
+same process. It is quoted without what identifies the installation: the
+values of the launch's `androidboot.serialno`, `androidboot.kernarium.adb_key`
+and `androidboot.kernarium.timezone` arguments wherever they stand (also a
+write that ends inside one), the assignments of those names and any hardware
+address in its colon spelling are replaced by `<masked>`, `<time zone>` and
+`<address>`, the words the application's start log uses, so no reader of the
+file has them. An end is the last state on disk unless the process dies between
 a delayed checkpoint's write and its repair: the end formats its record before
 it writes it, and a checkpoint whose write lands after it writes that record
-again at once. The file is text of a fixed layout
-(`uml-session 6`) that never passes 17920 bytes
-(`session_record_max_bytes`): an 8 KiB memory slot, a 4 KiB stall slot, a 512-byte
-network slot and the state with the kernel output it quotes, at most 5 KiB. Each
-part is rewritten in place by its own writer, so nothing grows with the session;
-layouts 1 to 5, which lack the figures of the run or the network slot or the
-stall slot, still parse. The
+again at once. The file is text of a fixed layout (`uml-session 7`) of 18176
+bytes (`session_record_max_bytes`) from a session's begin: an 8 KiB memory slot,
+a 4 KiB stall slot, a 512-byte network slot, a 256-byte storage slot and the
+state with the kernel output it quotes, 5 KiB. Each part is rewritten in place
+by its own writer, so nothing grows with the session, and each state is one
+write of its whole area, padded with newlines that the readers ignore, so a
+reader never sees two states mixed; layouts 1 to 6, which lack the storage slot
+or the figures of the run or the network slot or the stall slot, still parse.
+The storage slot counts the session's settles and those that were not
+confirmed, and names the last one's call, outcome and time: words and numbers
+only, blank until the first. The
 first 8 KiB are a memory checkpoint that a thread of its own rewrites every 2 s
 (`memory_checkpoint_interval_ms`): the footprint, its peak and what the
 process's memory limit still allows, the large terms of the footprint (guest
