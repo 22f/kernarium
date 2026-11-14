@@ -121,12 +121,13 @@ interface to the wire.
   read only behind an availability check, and a device on 27.0 lists none. The
   order is stable, and every index in the interface is an index into it. A
   front camera publishes no flash: its flash is the screen's, which the guest's
-  camera unit does not model. A camera's `sensorOrientation` is the platform's
-  statement of its mounting, the rotation coordinator's angle for portrait
-  (`sensorOrientationOf`), never a value per position (an external camera
-  states 90); every frame and still
-  is delivered in that orientation, unturned and unmirrored, whatever turn,
-  mirroring or still compensation the system would apply by default.
+  camera unit does not model. On iOS a camera's `sensorOrientation` is the
+  platform's statement of its mounting, the rotation coordinator's angle for
+  portrait (`sensorOrientationOf`; an external camera states 90), never a value
+  per position, and every frame and still is delivered in that orientation,
+  unturned and unmirrored where its connection accepts the setting, whatever
+  turn, mirroring or still compensation the system would apply by default; a
+  Mac's cameras state 0 and take none of this.
 - **Sessions.** `openSession()` is the one call that can light the system's
   capture indicator, and it returns null unless the system has granted access.
   One session is a single `AVCaptureMultiCamSession` on iOS (an
