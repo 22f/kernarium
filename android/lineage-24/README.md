@@ -393,9 +393,10 @@ declared. A camera lists the keys it honours: the frame duration and the black
 level lock only with `MANUAL_SENSOR`, the AF regions only with autofocus, and no
 camera lists the tone map mode or curves or states the available tone map modes
 (the templates carry no tone map key). Every result carries the scene mode
-(`DISABLED`) and, with `MANUAL_SENSOR`, the black level lock. The candidate's
-smoke test is `tests/integration/android/run_android_camera.py`
-(`android-camera`).
+(`DISABLED`) and, with `MANUAL_SENSOR`, the black level lock. The Exif focal
+length in 35 mm film is written only for a camera that states its sensor's
+physical size (`camera_exif.hpp`). The candidate's smoke test is
+`tests/integration/android/run_android_camera.py` (`android-camera`).
 
 ### Networking
 

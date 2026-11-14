@@ -7,6 +7,8 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <optional>
 #include <vector>
 
 #include "camera_controls.hpp"
@@ -433,6 +435,35 @@ void check_exif()
     require(!write_blob_header(tiny, 0), "a buffer smaller than the header");
 }
 
+// The focal length in 35 mm film follows from the lens and the sensor's size
+// in millimetres; a camera that states no size has no such value, and the tag is
+// left out, not computed from a divisor clamped to a hundredth of a millimetre
+// (a 6.765 mm lens made 29272 that way).
+void check_focal_length_35mm()
+{
+    // A back camera: 6.765 mm on a 9.8 x 7.3 mm sensor; a front one: 2.69 mm on 4.8 x 3.6 mm.
+    require(focal_length_in_35mm_film(6.765f, 9.8f, 7.3f) == std::optional<std::uint16_t>(24), "the back lens is a 24 mm one");
+    require(focal_length_in_35mm_film(2.69f, 4.8f, 3.6f) == std::optional<std::uint16_t>(19), "the front lens is a 19 mm one");
+    require(focal_length_in_35mm_film(50.0f, 36.0f, 24.0f) == std::optional<std::uint16_t>(50), "a 35 mm frame is the film itself");
+    require(focal_length_in_35mm_film(25.0f, 18.0f, 12.0f) == std::optional<std::uint16_t>(50), "half the frame doubles the focal length");
+
+    // The sensor's size is the camera's to state; where it did not, there is no tag.
+    require(!focal_length_in_35mm_film(6.765f, 0.0f, 0.0f), "no sensor size: no tag (not 29272)");
+    require(!focal_length_in_35mm_film(6.765f, 9.8f, 0.0f), "one side missing: no tag");
+    require(!focal_length_in_35mm_film(6.765f, 0.0f, 7.3f), "the other side missing: no tag");
+    require(!focal_length_in_35mm_film(6.765f, -9.8f, 7.3f), "a negative size: no tag");
+    require(!focal_length_in_35mm_film(0.0f, 9.8f, 7.3f), "no focal length: no tag");
+    require(!focal_length_in_35mm_film(-1.0f, 9.8f, 7.3f), "a negative focal length: no tag");
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    require(!focal_length_in_35mm_film(nan, 9.8f, 7.3f) && !focal_length_in_35mm_film(6.765f, nan, 7.3f), "not a number: no tag");
+    require(!focal_length_in_35mm_film(inf, 9.8f, 7.3f) && !focal_length_in_35mm_film(6.765f, 9.8f, inf), "infinite: no tag");
+    // The tag is 16 bits: a result beyond it, or one that rounds to nothing, is no focal length either.
+    require(!focal_length_in_35mm_film(100.0f, 0.001f, 0.001f), "a result beyond 65535: no tag");
+    require(!focal_length_in_35mm_film(0.001f, 36.0f, 24.0f), "a result that rounds to zero: no tag");
+    require(focal_length_in_35mm_film(1000.0f, 36.0f, 24.0f) == std::optional<std::uint16_t>(1000), "a long lens on film");
+}
+
 } // namespace
 
 int main()
@@ -444,5 +475,6 @@ int main()
     check_regions();
     check_results();
     check_exif();
+    check_focal_length_35mm();
     return 0;
 }

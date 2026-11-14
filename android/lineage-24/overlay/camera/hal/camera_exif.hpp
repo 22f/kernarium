@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The two edits the HAL makes to a JPEG that the host encoded. The host leaves
-// an Exif segment (an APP1 whose length field already says its payload is
-// abi::exif_gap_length bytes) in the picture, and the HAL writes the Exif data
-// and the thumbnail into it in place, so the picture's entropy-coded data is not
-// moved again. Android's JPEG buffer then ends with a camera3_jpeg_blob_t that
-// states the size of the picture.
+// The two edits the HAL makes to a JPEG that the host encoded, and the one Exif
+// value that is the HAL's own rule. The host leaves an Exif segment (an APP1
+// whose length field already says its payload is abi::exif_gap_length bytes) in
+// the picture, and the HAL writes the Exif data and the thumbnail into it in
+// place, so the picture's entropy-coded data is not moved again. Android's JPEG
+// buffer then ends with a camera3_jpeg_blob_t that states the size of the
+// picture.
 #pragma once
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <span>
 
 #include "camera_abi.hpp"
@@ -24,6 +27,27 @@ struct JpegBlobHeader {
 };
 static_assert(sizeof(JpegBlobHeader) == 8);
 constexpr std::uint16_t jpeg_blob_id = 0x00FF;
+
+// The Exif tag FocalLengthIn35mmFormat: the focal length that a camera with a
+// 35 mm frame (43.27 mm across the diagonal) needs for the same field of view,
+// in whole millimetres. It follows from the lens's focal length and the sensor's
+// physical size, all in millimetres. Without a size (the camera states none) or
+// with a result that no sensible lens has (the tag is 16 bits), there is no
+// such value and the tag is left out: a sensor of no size is not a sensor of a
+// hundredth of a millimetre, as a divisor clamped to that would make it.
+[[nodiscard]] inline std::optional<std::uint16_t> focal_length_in_35mm_film(float focal_length_mm,
+                                                                              float sensor_width_mm,
+                                                                              float sensor_height_mm)
+{
+    constexpr float film_diagonal_mm = 43.27f;
+    if (!(focal_length_mm > 0.0f) || !(sensor_width_mm > 0.0f) || !(sensor_height_mm > 0.0f)) return std::nullopt;
+    if (!std::isfinite(focal_length_mm) || !std::isfinite(sensor_width_mm) || !std::isfinite(sensor_height_mm))
+        return std::nullopt;
+    const float diagonal = std::hypot(sensor_width_mm, sensor_height_mm);
+    const float value = std::round(focal_length_mm * film_diagonal_mm / diagonal);
+    if (!(value >= 1.0f) || value > 65535.0f) return std::nullopt;
+    return static_cast<std::uint16_t>(value);
+}
 
 // Writes the Exif data (what libexif saves: "Exif\0\0" and the TIFF structure)
 // at the start of the gap and zeroes the rest of it. Returns false and changes
