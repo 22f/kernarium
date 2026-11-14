@@ -10,11 +10,52 @@
 using namespace uml::platform;
 using uml::testing::require;
 
+namespace {
+
+/* The zoom factors AVFoundation states on a multi-lens phone, run through the rule that discovery applies: a lens
+ * whose display multiplier is not 1 (a telephoto's 5, an ultra wide's 0.5) is not scaled by it, and a zoom camera is. */
+void zoomRangesHoldOne()
+{
+    struct Device {
+        CameraLensKind lens;
+        double displayMultiplier;
+        double minimumFactor, maximumFactor;
+    };
+    const Device devices[] = {
+        {CameraLensKind::zoom, 0.5, 1.0, 123.75},       // the triple camera: factor 1 is its ultra wide lens
+        {CameraLensKind::zoom, 1.0, 1.0, 123.75},       // a dual camera
+        {CameraLensKind::wide, 1.0, 1.0, 123.75},
+        {CameraLensKind::ultraWide, 0.5, 1.0, 123.75},
+        {CameraLensKind::telephoto, 5.0, 1.0, 123.75},
+        {CameraLensKind::telephoto, 4.0, 1.0, 123.75},
+        {CameraLensKind::external, 1.0, 1.0, 4.0},
+    };
+    for (const auto& device : devices) {
+        const float scale = zoomRatioScale(device.lens, device.displayMultiplier);
+        const float minimum = float(device.minimumFactor) * scale;
+        const float maximum = float(device.maximumFactor) * scale;
+        require(minimum <= 1.0f && maximum >= 1.0f, "every camera's zoom range holds 1.0");
+        // A single lens states its own factors: 1.0 is its own full field of view.
+        if (device.lens != CameraLensKind::zoom)
+            require(scale == 1.0f && minimum == float(device.minimumFactor), "a single lens is not scaled by the display multiplier");
+    }
+    // A zoom camera is scaled, which puts its ultra wide lens at 0.5; a multiplier the host does not state is 1.
+    require(zoomRatioScale(CameraLensKind::zoom, 0.5) == 0.5f, "the zoom camera's display multiplier");
+    require(zoomRatioScale(CameraLensKind::zoom, 0.0) == 1.0f && zoomRatioScale(CameraLensKind::zoom, -1.0) == 1.0f,
+            "an unstated multiplier is 1");
+    for (const auto lens : {CameraLensKind::wide, CameraLensKind::ultraWide, CameraLensKind::telephoto, CameraLensKind::external})
+        require(zoomRatioScale(lens, 0.5) == 1.0f && zoomRatioScale(lens, 5.0) == 1.0f && zoomRatioScale(lens, 0.0) == 1.0f,
+                "no lens that is not a zoom camera has a multiplier");
+}
+
+} // namespace
+
 /* Discovery only. The test reads what AVFoundation lists and never opens a
  * session, never asks for access and never captures, so it runs on a host
  * with any cameras, or with none, and cannot light a capture indicator. */
 int main()
 {
+    zoomRangesHoldOne();
     const auto permissionBefore = makeAppleCameraAuthorization()->permission();
     const auto camera = makeAppleCamera();
     require(camera != nullptr);
@@ -31,6 +72,9 @@ int main()
             require(format.minimumFrameRate >= 1 && format.maximumFrameRate >= format.minimumFrameRate);
         }
         require(info.zoomMinimum > 0 && info.zoomMaximum >= info.zoomMinimum);
+        // Android requires every camera's zoom range to hold 1.0: a single lens's 1.0 is its own full field of view.
+        require(info.zoomMinimum <= 1.0f && info.zoomMaximum >= 1.0f, "a discovered camera's zoom range holds 1.0");
+        if (info.lens != CameraLensKind::zoom) require(info.zoomMinimum == 1.0f, "a single lens's widest view is its ratio 1.0");
         require(info.pixelArrayWidth > 0 && info.pixelArrayHeight > 0);
         require(info.sensorOrientation % 90 == 0 && info.sensorOrientation < 360);
         // A zoom camera takes no manual control, and names lenses the host lists.

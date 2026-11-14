@@ -123,7 +123,6 @@ Profile profileOf(SyntheticCameraProfile which)
         wide.pixelArrayWidth = 8064;
         wide.pixelArrayHeight = 6048;
         CameraInfo ultra = lens("synthetic-back-ultrawide", CameraPosition::back, CameraLensKind::ultraWide);
-        ultra.zoomMinimum = 0.5f;
         ultra.zoomMaximum = 4.0f;
         ultra.rawStills = true;
         ultra.rawStillSize = {2016, 1512};
@@ -186,7 +185,6 @@ Profile profileOf(SyntheticCameraProfile which)
         ultra.stillSizes = {{2016, 1512}, {1008, 756}};
         ultra.pixelArrayWidth = 2016;
         ultra.pixelArrayHeight = 1512;
-        ultra.zoomMinimum = 0.5f;
         ultra.zoomMaximum = 2.0f;
         profile.cameras = {back, front, ultra};
         profile.sets = {{0, 1}, {0, 2}};
