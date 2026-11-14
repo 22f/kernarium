@@ -3,13 +3,14 @@
 """The guest's Wi-Fi network script against a fake Wi-Fi framework.
 
 The real script (android/lineage-24/overlay/tools/kernarium_wifi_network.sh) runs
-under `sh` with stub `cmd`, `getprop`, `setprop`, `sleep`, `date` and `log` over
-a fake framework that has what the Wi-Fi service has: a config store that the
-platform reads once (a save before the read is rejected) and writes some time
-after a save, a join or a forget (a pending write keeps its deadline), a list in
-memory, a station that joins an enabled network, a user who forgets it, a
-listing that stalls for four seconds and prints what an empty one does, and the
-persistent marker. Each case boots that framework once or more and states what
+under `sh` with stub `cmd`, `dumpsys`, `getprop`, `setprop`, `sleep`, `date` and
+`log` over a fake framework that has what the Wi-Fi service has: a config store
+that the platform reads once (a save before the read is rejected) and writes some
+time after a save, a join, a forget or a change of Auto-connect (a pending write
+keeps its deadline), a list in memory, a station that joins an enabled network
+that has Auto-connect on, a user who forgets it or turns Auto-connect off, a
+dump that shows each saved network's Auto-connect, a listing that stalls for four
+seconds and prints what an empty one does, and the persistent marker. Each case boots that framework once or more and states what
 the script did: the saves it asked for, the lines it logged, the marker, what
 the store holds afterwards and how long it slept. A guest stops when the script
 is killed right after it wrote the marker, or a set time after it ended. The
@@ -18,8 +19,9 @@ nothing waits.
 
 The test checks itself: mutants of the script (marker 1 final, marker 2 set by a
 boot that saved, a stalled listing read as absent, a network removed during the
-boot saved again, a guard of fewer looks, no early end at marker 2) must each
-fail a case.
+boot saved again, a guard of fewer looks, no early end at marker 2, a repair that
+ignores Auto-connect, an unreadable dump read as off, another network's
+Auto-connect counted) must each fail a case.
 
 `test_wifi_network_script.py --script FILE` prints what a script gets wrong.
 """
@@ -32,6 +34,8 @@ import os
 import sys
 
 CLOCK_LIMIT = 600
+DUMP_OK, DUMP_FAILS, DUMP_SLOW, DUMP_DENIED = 0, 1, 2, 3     # what `dumpsys wifi` does
+OTHER_NONE, OTHER_ON, OTHER_OFF = 0, 1, 2                    # another saved network, and its Auto-connect
 HEADER = "Network Id      SSID                         Security type"
 
 
@@ -110,6 +114,8 @@ def framework(state: str, arguments: list[str]) -> int:
                 # An answer that takes two seconds is still an answer.
                 memory["slow"] -= 1
                 duration(state, 2)
+    elif command == ["dumpsys", "wifi"]:
+        status = dump(state, memory)
     elif command == ["wifi", "status"]:
         note(state, "status")
         print("Wifi is enabled" if memory["wifi_on"] else "Wifi is disabled")
@@ -127,15 +133,48 @@ def framework(state: str, arguments: list[str]) -> int:
         elif memory["add_ignored"] > 0:
             memory["add_ignored"] -= 1
         else:
-            if not memory["listed"] or memory["disabled_now"]:
+            if not memory["listed"] or memory["disabled_now"] or not memory["autojoin"]:
                 memory["since"] = now
             memory["listed"] = True
             memory["disabled_now"] = False
+            # Saving the network again replaces its configuration: Auto-connect is on again.
+            memory["autojoin"] = True
             schedule(memory, now)
     else:
         status = 2
     save(path, memory)
     return status
+
+
+def dump(state: str, memory: dict) -> int:
+    """`dumpsys wifi`: the saved networks' configurations, each printed more than once, as the Wi-Fi service prints
+    them, with Auto-connect on a line of its own after a header line that names the network."""
+    note(state, "dump")
+    mode = memory["dump_state"]
+    if mode == DUMP_FAILS:
+        print("Can't find service: wifi", file=sys.stderr)
+        return 20
+    if mode == DUMP_DENIED:
+        print("Permission Denial: can't dump WifiService from pid 1 uid 0")
+        return 0
+    if mode == DUMP_SLOW:
+        duration(state, 12)
+    networks = []
+    if memory["listed"]:
+        networks.append(("VirtWifi", memory["autojoin"]))
+    if memory["other"]:
+        networks.append(("Elsewhere", memory["other"] == OTHER_ON))
+    print('mWifiInfo SSID: "VirtWifi", BSSID: 02:00:00:00:00:00, Supplicant state: COMPLETED')
+    for section, order in enumerate((networks, networks[::-1])):
+        print("Dump of WifiConfigManager")
+        for number, (name, on) in enumerate(order):
+            lead = "mPerId={0=" if section and not number else ""
+            print(f'{lead}* ID: {number} SSID: "{name}" PROVIDER-NAME: null BSSID: null HIDDEN: false')
+            print(" Protocols: RSN")
+            print(f" lcuid=0 allowAutojoin={str(on).lower()} mAllowedAutoJoinInAdvancedProtection=true")
+            print("lastConnected: 2026-11-14T03:34:22.375")
+    print('mScanResultMatchInfoMapForCurrentUser={ScanResultMatchInfo: SSID: "VirtWifi", from scan result: false')
+    return 0
 
 
 def schedule(memory: dict, when: int) -> None:
@@ -156,11 +195,15 @@ def advance(memory: dict, end: int) -> None:
             due.append((memory["read_at"], 0, "read"))
         if memory["read_done"] and memory["listed"] and memory["forget_at"] is not None and memory["forget_at"] <= end:
             due.append((max(memory["forget_at"], memory["read_at"]), 1, "forget"))
+        if (memory["read_done"] and memory["listed"] and memory["autojoin_off_at"] is not None
+                and memory["autojoin_off_at"] <= end):
+            due.append((max(memory["autojoin_off_at"], memory["read_at"]), 2, "autojoin"))
         if (memory["listed"] and memory["wifi_on"] and not memory["disabled_now"] and not memory["joined"]
-                and memory["join_after"] is not None and memory["since"] + memory["join_after"] <= end):
-            due.append((memory["since"] + memory["join_after"], 2, "join"))
+                and memory["autojoin"] and memory["join_after"] is not None
+                and memory["since"] + memory["join_after"] <= end):
+            due.append((memory["since"] + memory["join_after"], 3, "join"))
         if memory["store_due"] is not None and memory["store_due"] <= end:
-            due.append((memory["store_due"], 3, "store"))
+            due.append((memory["store_due"], 4, "store"))
         if not due:
             return
         when, _, what = min(due)
@@ -168,14 +211,21 @@ def advance(memory: dict, end: int) -> None:
             memory["read_done"] = True
             memory["listed"] = memory["stored"]
             memory["disabled_now"] = memory["disabled"] and memory["stored"]
+            memory["autojoin"] = memory["autojoin_stored"] or not memory["stored"]
             memory["since"] = memory["read_at"] if memory["stored"] else None
             memory["joined"] = memory["joined"] and memory["stored"]
         elif what == "forget":
             memory["listed"], memory["joined"], memory["disabled_now"] = False, False, False
+            memory["autojoin"] = True
             memory["forget_at"] = None
+            schedule(memory, when)
+        elif what == "autojoin":
+            memory["autojoin"] = False
+            memory["autojoin_off_at"] = None
             schedule(memory, when)
         elif what == "store":
             memory["stored"], memory["disabled"] = memory["listed"], memory["disabled_now"]
+            memory["autojoin_stored"] = memory["autojoin"] or not memory["listed"]
             memory["store_due"] = None
         else:
             memory["joined"] = True
@@ -216,6 +266,10 @@ class Boot:
     add_ignored: int = 0             # the first saves that do nothing (the service is busy)
     wifi_on: bool = True
     forget_at: int | None = None     # when the user forgets the network
+    autojoin_off_at: int | None = None   # when the user turns Auto-connect off for the network
+    autojoin_start: bool | None = None   # the store holds Auto-connect on (True) or off (False) from the boot on
+    other: int = OTHER_NONE          # another saved network, with Auto-connect on or off
+    dump_state: int = DUMP_OK        # `dumpsys wifi` fails, takes twelve seconds or says the caller may not
     kill_after_marker: bool = False  # the guest stops right after the script wrote the marker
     stop_after: int = 30             # seconds the guest runs on after the script ends before it stops
 
@@ -227,6 +281,7 @@ class Expect:
     notes: int = 0
     marker: str = ""
     stored: bool = False
+    autojoin_off: bool = False       # the store holds Auto-connect off for the network afterwards
     asks: int | None = None          # the calls the script made of the Wi-Fi service, when it must be none
     slept: int | None = None         # the seconds the script slept, when the case pins them
 
@@ -238,12 +293,13 @@ class Case:
     stored: bool
     boots: tuple[tuple[Boot, Expect], ...]
     disabled: bool = False
+    autojoin_off: bool = False       # the store holds Auto-connect off for the network
 
 
 class Guest:
     """The persistent half of the framework and the property store, kept between boots."""
 
-    def __init__(self, directory: Path, marker: str, stored: bool, disabled: bool) -> None:
+    def __init__(self, directory: Path, marker: str, stored: bool, disabled: bool, autojoin_off: bool) -> None:
         self.directory = directory
         self.state = directory / "state"
         (self.state / "properties").mkdir(parents=True)
@@ -251,18 +307,21 @@ class Guest:
             (self.state / "properties" / MARKER).write_text(marker + "\n")
         self.stored = stored
         self.disabled = disabled
+        self.autojoin_stored = not autojoin_off
         self.stubs = directory / "stubs"
         self.stubs.mkdir()
         python = sys.executable
         me = Path(__file__).resolve()
         state = self.state
+        service_call = (
+            f'if [ -n "$UNDER_TIMEOUT" ]; then exec "{python}" -S -E "{me}" --stub "{state}" "$@"; fi\n'
+            f'"{python}" -S -E "{me}" --stub "{state}" "$@"\nrc=$?\n'
+            f'd=$(cat "{state}/duration")\n[ "$d" -gt 0 ] && echo "$d" >> "{state}/extras"\nexit $rc\n'
+        )
         bodies = {
             # A call that `timeout` wraps is cut by it; any other call lets its whole duration pass.
-            "cmd": (
-                f'if [ -n "$UNDER_TIMEOUT" ]; then exec "{python}" -S -E "{me}" --stub "{state}" "$@"; fi\n'
-                f'"{python}" -S -E "{me}" --stub "{state}" "$@"\nrc=$?\n'
-                f'd=$(cat "{state}/duration")\n[ "$d" -gt 0 ] && echo "$d" >> "{state}/extras"\nexit $rc\n'
-            ),
+            "cmd": service_call,
+            "dumpsys": service_call.replace('"$@"', 'dumpsys "$@"'),
             "timeout": (
                 f'limit=$1\nshift\nout=$(UNDER_TIMEOUT=1 "$@")\nrc=$?\nd=$(cat "{state}/duration")\n'
                 f'if [ "$d" -gt "$limit" ]; then echo "$limit" >> "{state}/extras"; exit 124; fi\n'
@@ -289,7 +348,12 @@ class Guest:
         """Boots the framework and runs the script once, then lets the guest run on for `stop_after` seconds;
         returns the script's status, the calls it made, the marker, whether the config store holds the network
         when the guest stops, and the seconds the script slept."""
+        if boot.autojoin_start is not None:
+            self.autojoin_stored = boot.autojoin_start
+        listed = self.stored and boot.read_at is None
         memory = {
+            "autojoin_stored": self.autojoin_stored, "autojoin": self.autojoin_stored or not listed,
+            "autojoin_off_at": boot.autojoin_off_at, "other": boot.other, "dump_state": boot.dump_state,
             "read_at": boot.read_at if boot.read_at is not None else 0,
             "read_done": boot.read_at is None, "store_delay": boot.store_delay, "store_due": None,
             "join_after": boot.join_after, "stalled": boot.stalled_looks, "failing": boot.failing_looks,
@@ -313,6 +377,7 @@ class Guest:
         after = load(str(self.state / "framework"))
         advance(after, ended + boot.stop_after)
         self.stored, self.disabled = after["stored"], after["disabled"]
+        self.autojoin_stored = after["autojoin_stored"]
         marker_file = self.state / "properties" / MARKER
         marker = marker_file.read_text().strip() if marker_file.exists() else ""
         slept = sum(int(seconds) for seconds in (self.state / "sleeps").read_text().split())
@@ -325,7 +390,9 @@ ONE = Boot()
 SETTLED = Expect(notes=1, marker="2", stored=True)     # a boot that finds the network stored and joined
 CASES = (
     # Marker 2 never asks the service anything, in any state.
-    *(Case(f"marker 2, {what}", "2", stored, ((boot, Expect(marker="2", stored=stored, asks=0)),), disabled=disabled)
+    *(Case(f"marker 2, {what}", "2", stored, (
+        (boot, Expect(marker="2", stored=stored, asks=0, autojoin_off=what == "Auto-connect off")),),
+        disabled=disabled, autojoin_off=what == "Auto-connect off")
       for what, stored, disabled, boot in (
           ("an empty list (forgotten)", False, False, ONE),
           ("a joined network", True, False, ONE),
@@ -336,6 +403,7 @@ CASES = (
           ("a listing that fails", True, False, Boot(failing_looks=5)),
           ("a listing that stalls", True, False, Boot(stalled_looks=5)),
           ("the store read late", False, False, Boot(read_at=3)),
+          ("Auto-connect off", True, False, Boot(autojoin_start=False)),
       )),
     # A first boot saves the network and leaves 1: a join does not prove the store holds it. The next boot finds
     # it stored and joined and sets 2.
@@ -423,6 +491,43 @@ CASES = (
     Case("Wi-Fi on and the user disconnected the network", "1", True, (
         (Boot(join_after=None), Expect(adds=1, notes=1, marker="1", stored=True)),
     )),
+    # Auto-connect off is the user's choice, not a disabled network: it keeps it at every boot until a boot joins.
+    # The data of an earlier release that left the network disabled is repaired once, with no marker; the user then
+    # turns Auto-connect off, and no later boot turns it on again. Turned on, the next boot joins and sets 2.
+    Case("an earlier release's disabled network, repaired, then Auto-connect off for every boot", "", True, (
+        (ONE, Expect(adds=1, notes=1, marker="1", stored=True)),
+        (Boot(autojoin_start=False), Expect(notes=1, marker="1", stored=True, autojoin_off=True)),
+        (ONE, Expect(notes=1, marker="1", stored=True, autojoin_off=True)),
+        (Boot(autojoin_start=True), SETTLED),
+        (ONE, Expect(marker="2", stored=True, asks=0)),
+    ), disabled=True),
+    Case("Auto-connect turned off during the settle of the repair boot", "", True, (
+        (Boot(autojoin_off_at=10), Expect(notes=1, marker="", stored=True, autojoin_off=True)),
+    ), disabled=True),
+    Case("Auto-connect turned off during the settle of the first boot", "", False, (
+        (Boot(join_after=30, autojoin_off_at=8), Expect(adds=1, notes=1, marker="1", stored=True, autojoin_off=True)),
+    )),
+    Case("marker 1, a disabled network with Auto-connect off too, then Auto-connect on", "1", True, (
+        (Boot(), Expect(notes=1, marker="1", stored=True, autojoin_off=True)),
+        (Boot(autojoin_start=True), Expect(adds=1, notes=1, marker="1", stored=True)),
+        (ONE, SETTLED),
+    ), disabled=True, autojoin_off=True),
+    Case("marker 1, Auto-connect off, a stored network that does not join", "1", True, (
+        (Boot(join_after=None), Expect(notes=1, marker="1", stored=True, autojoin_off=True)),
+    ), autojoin_off=True),
+    # Only VirtWifi's Auto-connect counts, wherever the dump prints another network.
+    Case("another network with Auto-connect off, VirtWifi disabled with it on", "1", True, (
+        (Boot(other=OTHER_OFF), Expect(adds=1, notes=1, marker="1", stored=True)),
+    ), disabled=True),
+    Case("another network with Auto-connect on, VirtWifi with it off", "1", True, (
+        (Boot(other=OTHER_ON), Expect(notes=1, marker="1", stored=True, autojoin_off=True)),
+    ), autojoin_off=True),
+    # A dump that does not show it is no sign of the user's choice: the repair stays what it was.
+    *(Case(f"marker 1, Auto-connect off and {what}", "1", True, (
+        (Boot(dump_state=state), Expect(adds=1, notes=1, marker="1", stored=True)),
+    ), autojoin_off=True) for what, state in (
+        ("a dump that fails", DUMP_FAILS), ("a dump that takes twelve seconds", DUMP_SLOW),
+        ("a dump that is denied", DUMP_DENIED))),
     Case("a Wi-Fi service that is not up, no marker", "", False, (
         (Boot(add_fails=True), Expect(status=1, adds=30, marker="", stored=False)),
     )),
@@ -440,18 +545,20 @@ def judge(script: Path, case: Case) -> list[str]:
     """What the script gets wrong in one case, as messages."""
     problems = []
     with tempfile.TemporaryDirectory(prefix="wifi-network-script-") as directory:
-        guest = Guest(Path(directory), case.marker, case.stored, case.disabled)
+        guest = Guest(Path(directory), case.marker, case.stored, case.disabled, case.autojoin_off)
         for number, (boot, expect) in enumerate(case.boots, 1):
             status, calls, marker, stored, slept = guest.run(script, boot)
             adds = calls.count("add")
             notes = len([call for call in calls if call.startswith("log ")])
-            asks = len([call for call in calls if call in ("add", "list", "status")])
-            if (status, adds, notes, marker, stored) != (expect.status, expect.adds, expect.notes, expect.marker,
-                                                          expect.stored):
+            asks = len([call for call in calls if call in ("add", "list", "status", "dump")])
+            off = stored and not guest.autojoin_stored
+            if (status, adds, notes, marker, stored, off) != (expect.status, expect.adds, expect.notes, expect.marker,
+                                                               expect.stored, expect.autojoin_off):
                 problems.append(f"{case.name}, boot {number}: exit {status}, saves {adds}, log lines {notes}, "
-                                f"marker {marker!r}, store holds the network {stored}; expected exit "
-                                f"{expect.status}, saves {expect.adds}, log lines {expect.notes}, marker "
-                                f"{expect.marker!r}, store {expect.stored}")
+                                f"marker {marker!r}, store holds the network {stored}, with Auto-connect off {off}; "
+                                f"expected exit {expect.status}, saves {expect.adds}, log lines {expect.notes}, "
+                                f"marker {expect.marker!r}, store {expect.stored}, Auto-connect off "
+                                f"{expect.autojoin_off}")
             if expect.asks is not None and asks != expect.asks:
                 problems.append(f"{case.name}, boot {number}: the script made {asks} calls of the Wi-Fi service; "
                                 f"expected {expect.asks}")
@@ -522,6 +629,12 @@ class WifiNetworkScript(unittest.TestCase):
                 text, 'cmd wifi add-network VirtWifi open >/dev/null 2>&1\nsaved_it\nnote "VirtWifi saved again',
                 'exit 0\nsaved_it\nnote "VirtWifi saved again')),
             ("a join is not waited for", mutated(text, 'if wait_joined "$settle"; then', "if :; then")),
+            ("Auto-connect is not looked at", mutated(text, 'if [ "$autojoin" = off ]; then', "if false; then")),
+            ("an unreadable dump reads as off", mutated(
+                text, '[ "$off" = 1 ] && [ "$on" = 0 ] && autojoin=off', '[ "$on" = 0 ] && autojoin=off')),
+            ("another network's Auto-connect counts", mutated(
+                text, "*' SSID: '*) mine=0 ;;", "*' SSID: '*) mine=1 ;;")),
+            ("the dump has no time limit", mutated(text, 'timeout "$dumplimit" dumpsys wifi', "dumpsys wifi")),
         )
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             results = list(pool.map(lambda mutant: problems_of(mutant[1], stop_at_first=True), mutants))

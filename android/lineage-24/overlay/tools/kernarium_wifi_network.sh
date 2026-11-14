@@ -54,13 +54,26 @@
 # and the platform's own scan joins it. A network that was listed at the first
 # look and is gone at the settle was removed by the user during this boot: it
 # stays removed, and the marker becomes 2. Wi-Fi that is off leaves the marker
-# alone, so the next boot with Wi-Fi on still repairs. The script sleeps at most
-# 113 s in all, plus the time its commands take (a listing at most $limit s).
+# alone, so the next boot with Wi-Fi on still repairs.
+#
+# A network the user turned Auto-connect off for is no disabled network: it is
+# never joined by itself either, so the settle ends the same way, and saving it
+# again would turn Auto-connect back on. Before that save the script reads the
+# network's Auto-connect from the Wi-Fi service's dump (`dumpsys wifi`; no
+# `cmd wifi` command shows it). Off leaves the network alone and the marker at
+# 1, and the script logs it: a boot with Auto-connect on joins and sets 2. Only
+# a dump that shows VirtWifi with Auto-connect off, and never on, counts; a dump
+# that fails, is cut short at $dumplimit seconds or does not show the network
+# repairs as before. A network that is disabled and has Auto-connect off too is
+# left disabled until the user turns Auto-connect on, and the next boot repairs
+# it. The script sleeps at most 113 s in all, plus the time its commands take (a
+# listing at most $limit s, a dump at most $dumplimit s).
 
 marker=persist.sys.kernarium.virtwifi_saved
 settle=45
 looks=3
 limit=3
+dumplimit=10
 tag=kernarium_wifi_network
 
 note() {
@@ -81,6 +94,33 @@ look() {
     else
         state=unknown
     fi
+}
+
+# Sets $autojoin to off when the Wi-Fi service's dump shows Auto-connect off for
+# VirtWifi and never on (the dump prints each saved network more than once, under
+# a header line that names its SSID), and to on otherwise.
+autojoin_state() {
+    autojoin=on
+    mine=0
+    off=0
+    on=0
+    lines=$(timeout "$dumplimit" dumpsys wifi 2>/dev/null |
+        grep -E 'ID: [0-9]+ SSID: |allowAutojoin=')
+    saved_ifs=$IFS
+    IFS='
+'
+    set -f
+    for line in $lines; do
+        case "$line" in
+            *'SSID: "VirtWifi"'*) mine=1 ;;
+            *' SSID: '*) mine=0 ;;
+            *allowAutojoin=true*) [ "$mine" = 1 ] && on=1 ;;
+            *allowAutojoin=false*) [ "$mine" = 1 ] && off=1 ;;
+        esac
+    done
+    set +f
+    IFS=$saved_ifs
+    [ "$off" = 1 ] && [ "$on" = 0 ] && autojoin=off
 }
 
 # Succeeds when, after the absent look in $state, $looks looks in all, five
@@ -161,6 +201,13 @@ esac
 look
 case "$state" in
     unknown) exit 0 ;;
+    saved)
+        autojoin_state
+        if [ "$autojoin" = off ]; then
+            note "VirtWifi has Auto-connect off: left alone"
+            exit 0
+        fi
+        ;;
     absent)
         if [ "$listed" = 1 ]; then
             setprop "$marker" 2 && note "VirtWifi was removed during this boot: marker 2"

@@ -92,6 +92,7 @@ DENIAL = ("11-11 09:15:55.822   333   333 W auditd  : type=1400 audit(0.0:7): av
           "{ read } for comm=\"cmd\" scontext=u:r:kernarium_wifi_network:s0 "
           "tcontext=u:object_r:system_file:s0 tclass=file permissive=0\n")
 REPAIR_LINE = "11-11 09:20:00.000 I kernarium_wifi_network: VirtWifi saved again: Wi-Fi is on and nothing joined\n"
+LEFT_ALONE = "11-11 09:20:00.000 I kernarium_wifi_network: VirtWifi has Auto-connect off: left alone\n"
 
 def agent(net_id: int, capabilities: str, transport: str = "WIFI", validated_at: int | None = None,
           created: str = "2026-11-10T13:30:32.485Z", private_dns_broken: bool = False,
@@ -1051,6 +1052,54 @@ class UpgradeSectionTests(unittest.TestCase):
                               script_service=["stopped"], listing=[LISTING], script_log=[REPAIR_LINE])
         with self.assertRaisesRegex(runner.Failure, "saved the network again although the station had joined"):
             runner.check_left_alone(guest, WAITS)
+
+    def autojoin_guest(self, dumps: list[str], script_log: list[str]) -> StubbedGuest:
+        guest = StubbedGuest(dump=dumps, script_log=script_log)
+        guest.answers[f"cmd wifi add-network {runner.SSID} open -d"] = [""]
+        return guest
+
+    def test_auto_connect_off_that_a_boot_at_marker_1_leaves_alone_passes_when_the_line_shows(self) -> None:
+        guest = self.autojoin_guest([AUTOJOIN_OFF_DUMP], ["", "", LEFT_ALONE])
+        self.assertIsNone(runner.check_autojoin_kept(guest, WAITS, left_alone=True))
+        self.assertEqual(guest.restarts, 1)
+
+    def test_a_left_alone_line_that_rotated_out_of_the_log_is_kept_once_seen(self) -> None:
+        guest = self.autojoin_guest([AUTOJOIN_OFF_DUMP], ["", LEFT_ALONE, ""])
+        self.assertIsNone(runner.check_autojoin_kept(guest, WAITS, left_alone=True))
+
+    def test_a_boot_that_does_not_say_it_left_the_network_alone_fails_when_the_line_is_required(self) -> None:
+        guest = self.autojoin_guest([AUTOJOIN_OFF_DUMP], [""])
+        with self.assertRaisesRegex(runner.Failure, "did not say that it left the network alone"):
+            runner.check_autojoin_kept(guest, WAITS, left_alone=True)
+
+    def test_a_boot_at_marker_2_logs_nothing_and_a_line_there_fails(self) -> None:
+        self.assertIsNone(runner.check_autojoin_kept(self.autojoin_guest([AUTOJOIN_OFF_DUMP], [""]), WAITS,
+                                                      left_alone=False))
+        guest = self.autojoin_guest([AUTOJOIN_OFF_DUMP], [LEFT_ALONE])
+        with self.assertRaisesRegex(runner.Failure, "only a boot without marker 2 does"):
+            runner.check_autojoin_kept(guest, WAITS, left_alone=False)
+
+    def test_either_is_accepted_when_the_marker_is_not_known(self) -> None:
+        for log in ("", LEFT_ALONE):
+            guest = self.autojoin_guest([AUTOJOIN_OFF_DUMP], [log])
+            self.assertIsNone(runner.check_autojoin_kept(guest, WAITS))
+
+    def test_auto_connect_on_again_after_the_restart_fails_whatever_the_log_says(self) -> None:
+        for log in ("", LEFT_ALONE, REPAIR_LINE):
+            guest = self.autojoin_guest([AUTOJOIN_OFF_DUMP, ENABLED_DUMP], [log])
+            with self.assertRaisesRegex(runner.Failure, "Auto-connect is on again after a restart"):
+                runner.check_autojoin_kept(guest, WAITS, left_alone=True)
+
+    def test_a_repair_line_fails_even_when_it_rotates_out_and_auto_connect_reads_off(self) -> None:
+        guest = self.autojoin_guest([AUTOJOIN_OFF_DUMP], [REPAIR_LINE, LEFT_ALONE, ""])
+        with self.assertRaisesRegex(runner.Failure, "saved the network again although the user turned Auto-connect"):
+            runner.check_autojoin_kept(guest, WAITS, left_alone=True)
+
+    def test_the_left_alone_line_is_read_as_what_it_says(self) -> None:
+        self.assertTrue(runner.left_alone_logged(LEFT_ALONE))
+        self.assertFalse(runner.left_alone_logged(REPAIR_LINE))
+        self.assertFalse(runner.repair_logged(LEFT_ALONE))
+        self.assertIn(runner.LEFT_ALONE_LINE, runner.BOOT_SCRIPT.read_text(encoding="utf-8"))
 
     def test_the_marker_property_is_not_read_as_the_shell(self) -> None:
         # The shell is denied the marker's label on a user build, so a read of it can only print nothing.
