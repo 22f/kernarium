@@ -457,21 +457,23 @@ the Virtio sound driver's minimum period to 5 ms for it. The output reports its
 position from its ALSA device, less the frames in the ring and the latency the
 host reports for its output (route `p0005`). The input's ALSA read alone
 paces its I/O thread, and the frames its client takes keep to real time: a read
-waits for its frames until 100 ms after the last of them is due and makes the
-missing ones up then, so that a stall of the device leaves the audio of a
+waits for its frames until a short slack after the last of them is due and makes
+the missing ones up then, so that a stall of the device leaves the audio of a
 recording as long as its timestamps span. The count may lead the clock by that
-100 ms at most and the frames beyond are dropped; with the host's capture credit
-capped at four periods a stall causes none, they are stale backlog or come from
-a device faster than the clock. A count more than 200 ms behind the clock as a
-read starts or ends restarts the clock and makes nothing up, so a process that
-stood still leaves a gap in the audio as in the video. The input's position
-keeps its client's count and reports the time its last frame was due (route
-`p0005`). A low-latency AAudio stream with a data callback that leaves its
-capacity unspecified starts with a two-burst buffer and grows it by one burst
-per underrun until the app sets a size (route `p0028`). A Virtio battery device
-reports the Apple host's percentage and charging state; on iOS the percentage is
-`UIDevice.batteryLevel`, which moves in 5% steps, so the guest's does too, and
-the Mac's is exact.
+slack at most and the frames beyond are dropped; with the host's capture credit
+capped a stall causes none, they are stale backlog or come from a device faster
+than the clock. A long interruption of the whole process is not caught up: the
+clock starts again and the interruption stays a gap in the timeline of the
+audio, as it does in the video (the read that it stopped holds at most one
+buffer of silence), and a reader that is late during a stall of the device
+leaves a gap of its own. The input's position keeps its client's count and
+reports the time its last frame was due, or the time of the reply when that is
+too old (route `p0005`). A low-latency AAudio stream with a data callback that
+leaves its capacity unspecified starts with a two-burst buffer and grows it by
+one burst per underrun until the app sets a size (route `p0028`). A Virtio
+battery device reports the Apple host's percentage and charging state; on iOS
+the percentage is `UIDevice.batteryLevel`, which moves in 5% steps, so the
+guest's does too, and the Mac's is exact.
 The swipe lock screen can be turned on: `ro.lockscreen.disable.default` turns it
 off for user 0 of a fresh `/data` only.
 

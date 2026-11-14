@@ -19,31 +19,36 @@ is never later than the reply's and later than the previous position's,
 whatever the clock does (a restart, the slow re-anchoring). Before the
 first frame after a start, and while the clock does not run, it is the
 reply's time, as before. A read leaves the clock behind by no more than
-the limit of the previous change, or stops it, so the reported time is
-at most that long before the reply.
+the limit of the previous change, or stops it. A reply that finds the
+time older than the limit does the same (the process stood still
+between the end of the read and the reply, or the client has read
+nothing for a while): the next read starts the clock again and the time
+is the reply's. So the reported time is at most that long before the
+reply, also for a status reply with no read before it.
 
 The output's position and the latency of the input are untouched.
 ---
- .../aidl/default/alsa/StreamAlsaMonoPipe.cpp  | 26 ++++++++++++++++++-
- .../include/core-impl/StreamAlsaMonoPipe.h    |  6 ++++-
+ .../aidl/default/alsa/StreamAlsaMonoPipe.cpp  | 36 +++++++++++++++++--
+ .../include/core-impl/StreamAlsaMonoPipe.h    |  6 +++-
  audio/aidl/default/primary/StreamPrimary.cpp  |  4 +++
- 3 files changed, 34 insertions(+), 2 deletions(-)
+ 3 files changed, 43 insertions(+), 3 deletions(-)
 
 diff --git a/audio/aidl/default/alsa/StreamAlsaMonoPipe.cpp b/audio/aidl/default/alsa/StreamAlsaMonoPipe.cpp
-index e5fb22ceba501117326ec873a5d698cd9999f845..2d287da1e54bf85516caef11336f2a91ecafd791 100644
+index 81b8609440d17824aad7fc9b9851a8a09e3488c5..bbbe0b5cef4b44115ae3b977eccbb346465855a1 100644
 --- a/audio/aidl/default/alsa/StreamAlsaMonoPipe.cpp
 +++ b/audio/aidl/default/alsa/StreamAlsaMonoPipe.cpp
-@@ -219,7 +219,8 @@ void StreamAlsaMonoPipe::restartInputClock() {
- // the slack and the delay of the reader, which the limit has room for: a stall of any length is
- // made up without a restart. The I/O thread wakes the wait each time it has written to the pipe,
- // and when it is stopped, which ends the wait as well. The
--// position of the input stays its client's count and the time of the reply.
-+// position of the input is its client's count, with the time that the last of them was due (see
-+// 'refineInputPositionTime').
+@@ -227,8 +227,8 @@ void StreamAlsaMonoPipe::restartInputClock() {
+ // for: a stall of any length is made up without a restart, as long as the reader comes back within
+ // the slack. A reader that is later than that during a stall restarts the clock once, and the stall
+ // leaves a gap of its own. The I/O thread wakes the wait each time it has written to the pipe, and
+-// when it is stopped, which ends the wait as well. The position of the input stays its client's
+-// count and the time of the reply.
++// when it is stopped, which ends the wait as well. The position of the input is its client's
++// count, with the time that the last of them was due (see 'refineInputPositionTime').
  void StreamAlsaMonoPipe::readInput(void* buffer, size_t frameCount) {
      constexpr int64_t kSlackNs = 100'000'000;
-     constexpr int64_t kLongestMakeUpNs = 200'000'000;
-@@ -331,6 +332,29 @@ void StreamAlsaMonoPipe::readInput(void* buffer, size_t frameCount) {
+     constexpr int64_t kDropLogIntervalNs = 10'000'000'000;
+@@ -339,6 +339,38 @@ void StreamAlsaMonoPipe::readInput(void* buffer, size_t frameCount) {
      }
  }
  
@@ -57,14 +62,23 @@ index e5fb22ceba501117326ec873a5d698cd9999f845..2d287da1e54bf85516caef11336f2a91
 +// does (a restart, the slow re-anchoring). Before the first frame after a start, and whenever the
 +// clock is not running, it is the reply's time. The steady clock of the input's clock, the
 +// 'uptimeNanos' of the reply and the clock of the recorder (CLOCK_MONOTONIC) are one clock, so the
-+// due time needs no conversion. A read leaves the clock behind by no more than the limit of
-+// 'readInput', or stops it, which bounds how long before the reply the reported time can be.
++// due time needs no conversion. A read leaves the clock behind by no more than 'kLongestMakeUpNs',
++// or stops it, and so does a reply that finds the due time older than that (the process stood
++// still between the end of the read and the reply, or the client has read nothing for a while): the
++// standstill is not caught up, the next read starts the clock again and the time is the reply's.
++// That bounds how long before the reply the reported time can be, for a reply to a read and for a
++// status reply with no read before it alike: a status reply carries the due time of the last read's
++// frames for as long as that is not older than the limit, and its own time after that.
 +void StreamAlsaMonoPipe::refineInputPositionTime(int64_t* replyTimeNs) {
 +    const int64_t replyNs = *replyTimeNs;
 +    int64_t timeNs = replyNs;
 +    if (mInputClockRunning && mInputFramesTaken > 0) {
 +        const int64_t sampleRate = getContext().getSampleRate();
 +        timeNs = mInputClockStartNs + framesToNanos(mInputFramesTaken, sampleRate);
++        if (replyNs - timeNs > kLongestMakeUpNs) {
++            restartInputClock();
++            timeNs = replyNs;
++        }
 +    }
 +    *replyTimeNs = mInputPositionTimeNs =
 +            std::min(replyNs, std::max(timeNs, mInputPositionTimeNs + 1));

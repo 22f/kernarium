@@ -32,14 +32,17 @@ device delivers late in the normal course, and makes the missing ones
 up then: the count follows the time through a stall of the device, and
 nothing is made up while the device delivers. A stall leaves the count
 behind the clock by that slack and the delay of the reader, so a stall
-of any length is made up.
+of any length is made up while the reader comes back within the slack.
+A reader that is later than that during a stall restarts the clock
+once, and the stall leaves a gap of its own.
 
 Elapsed time between two reads restarts nothing by itself. A count that
-is more than 200 ms behind the clock as a read starts or ends does,
-and makes nothing up: the whole process stood still, and the video of
-the recording has the same gap. The limit is the slack plus the delay
-of the reader that a stall leaves room for, and bounds how long before
-the reply a frame was due.
+is more than 200 ms behind the clock as a read starts or ends does:
+the whole process stood still, and the video of the recording has the
+same gap, so the standstill is not caught up and stays a gap in the
+timeline. A read that it stopped holds one buffer of silence for it at
+most. The limit is the slack plus the delay of the reader that a stall
+leaves room for, and bounds how long before a reply a frame was due.
 
 The count may lead the clock by the slack at most: frames that would
 put it further ahead are dropped, oldest first. They are the buffers
@@ -50,17 +53,19 @@ the frames dropped since.
 
 The device's clock and the guest's differ a little. A read that got all
 its frames from the device moves the start of the clock by a small step
-(at most 20 us) towards a lateness of 10 ms, so that a long recording
-neither reaches the edge of the slack nor falls out of it.
+(at most 1 ms) towards a lateness of 10 ms, so that a long recording
+neither reaches the edge of the slack nor falls out of it, and a count
+that a reader's absence left behind the clock (the ring of the device
+overran and lost frames) is back at that lateness within seconds.
 ---
- .../aidl/default/alsa/StreamAlsaMonoPipe.cpp  | 197 +++++++++++++++++-
+ .../aidl/default/alsa/StreamAlsaMonoPipe.cpp  | 205 +++++++++++++++++-
  .../include/core-impl/StreamAlsaMonoPipe.h    |  19 ++
  .../default/include/core-impl/StreamPrimary.h |   4 -
  audio/aidl/default/primary/StreamPrimary.cpp  |  39 +---
- 4 files changed, 211 insertions(+), 48 deletions(-)
+ 4 files changed, 219 insertions(+), 48 deletions(-)
 
 diff --git a/audio/aidl/default/alsa/StreamAlsaMonoPipe.cpp b/audio/aidl/default/alsa/StreamAlsaMonoPipe.cpp
-index aab177402c05c9ed0769e24ec84d8ba32078cd2e..e5fb22ceba501117326ec873a5d698cd9999f845 100644
+index aab177402c05c9ed0769e24ec84d8ba32078cd2e..81b8609440d17824aad7fc9b9851a8a09e3488c5 100644
 --- a/audio/aidl/default/alsa/StreamAlsaMonoPipe.cpp
 +++ b/audio/aidl/default/alsa/StreamAlsaMonoPipe.cpp
 @@ -17,6 +17,12 @@
@@ -76,13 +81,19 @@ index aab177402c05c9ed0769e24ec84d8ba32078cd2e..e5fb22ceba501117326ec873a5d698cd
  #include <media/AidlConversionCppNdk.h>
  
  #include "core-impl/StreamAlsaMonoPipe.h"
-@@ -25,6 +31,30 @@ using aidl::android::hardware::audio::common::getChannelCount;
+@@ -25,6 +31,36 @@ using aidl::android::hardware::audio::common::getChannelCount;
  
  namespace aidl::android::hardware::audio::core {
  
 +namespace {
 +
 +constexpr int64_t kNanosPerSecond = 1'000'000'000;
++
++// How far behind its clock the input's count may be when a read starts or ends, or when a reply
++// reports the position: a stall of the device leaves room for the slack of a read and the delay of
++// the reader. A count further behind is a standstill of the whole process, which is not caught up
++// (the clock starts again), and the limit bounds how long before a reply a frame was due.
++constexpr int64_t kLongestMakeUpNs = 200'000'000;
 +
 +int64_t steadyNanos() {
 +    return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -107,7 +118,7 @@ index aab177402c05c9ed0769e24ec84d8ba32078cd2e..e5fb22ceba501117326ec873a5d698cd
  StreamAlsaMonoPipe::StreamAlsaMonoPipe(StreamContext* context, const Metadata& metadata,
                                         int readWriteRetries)
      : StreamAlsaBase(context, metadata, readWriteRetries) {}
-@@ -66,7 +96,14 @@ StreamAlsaMonoPipe::~StreamAlsaMonoPipe() {
+@@ -66,7 +102,14 @@ StreamAlsaMonoPipe::~StreamAlsaMonoPipe() {
      return ::android::OK;
  }
  
@@ -122,7 +133,7 @@ index aab177402c05c9ed0769e24ec84d8ba32078cd2e..e5fb22ceba501117326ec873a5d698cd
      if (!mAlsaDeviceProxies.empty()) {
          // This is a resume after a pause.
          return ::android::OK;
-@@ -122,15 +159,7 @@ StreamAlsaMonoPipe::~StreamAlsaMonoPipe() {
+@@ -122,15 +165,7 @@ StreamAlsaMonoPipe::~StreamAlsaMonoPipe() {
      if (mIsInput) {
          const size_t i = 0;  // For the input case, only support a single device.
          LOG(VERBOSE) << __func__ << ": reading from sink " << i;
@@ -139,7 +150,7 @@ index aab177402c05c9ed0769e24ec84d8ba32078cd2e..e5fb22ceba501117326ec873a5d698cd
          maxLatency = proxy_get_latency(mAlsaDeviceProxies[i].get());
      } else {
          alsa::applyGain(buffer, mGain, bytesToTransfer, mConfig.value().format, mConfig->channels);
-@@ -161,6 +190,147 @@ StreamAlsaMonoPipe::~StreamAlsaMonoPipe() {
+@@ -161,6 +196,149 @@ StreamAlsaMonoPipe::~StreamAlsaMonoPipe() {
      return ::android::OK;
  }
  
@@ -166,20 +177,22 @@ index aab177402c05c9ed0769e24ec84d8ba32078cd2e..e5fb22ceba501117326ec873a5d698cd
 +//    dropped, oldest first. They are the buffers that the device delivered before the clock started
 +//    (the I/O thread runs from the start of the stream), for time that was made up already after a
 +//    stall, or because the device is faster than the clock.
-+// A count that is more than 200 ms behind the clock when a read starts, or when it ends, starts the
-+// clock again and makes nothing up: the whole process stood still, inside a read or between two,
-+// and a recording has the same gap in its video. A stall of the device leaves the count behind by
-+// the slack and the delay of the reader, which the limit has room for: a stall of any length is
-+// made up without a restart. The I/O thread wakes the wait each time it has written to the pipe,
-+// and when it is stopped, which ends the wait as well. The
-+// position of the input stays its client's count and the time of the reply.
++// A count that is more than 'kLongestMakeUpNs' behind the clock when a read starts, or when it
++// ends, starts the clock again: the whole process stood still, inside a read or between two, and a
++// recording has the same gap in its video, so the standstill is not caught up and stays a gap in
++// the timeline (a read that it stopped holds one buffer of silence for it at most). A stall of the
++// device leaves the count behind by the slack and the delay of the reader, which the limit has room
++// for: a stall of any length is made up without a restart, as long as the reader comes back within
++// the slack. A reader that is later than that during a stall restarts the clock once, and the stall
++// leaves a gap of its own. The I/O thread wakes the wait each time it has written to the pipe, and
++// when it is stopped, which ends the wait as well. The position of the input stays its client's
++// count and the time of the reply.
 +void StreamAlsaMonoPipe::readInput(void* buffer, size_t frameCount) {
 +    constexpr int64_t kSlackNs = 100'000'000;
-+    constexpr int64_t kLongestMakeUpNs = 200'000'000;
 +    constexpr int64_t kDropLogIntervalNs = 10'000'000'000;
 +    // The clock follows the device's own rate slowly (see below).
 +    constexpr int64_t kTargetLatenessNs = 10'000'000;
-+    constexpr int64_t kMaxStepNs = 20'000;
++    constexpr int64_t kMaxStepNs = 1'000'000;
 +    constexpr int64_t kStepDivisor = 64;
 +    const size_t i = 0;  // For the input case, only support a single device.
 +    const int64_t sampleRate = getContext().getSampleRate();
@@ -278,8 +291,8 @@ index aab177402c05c9ed0769e24ec84d8ba32078cd2e..e5fb22ceba501117326ec873a5d698cd
 +    mInputFramesTaken += frameCount;
 +    if (nowNs - (mInputClockStartNs + framesToNanos(mInputFramesTaken, sampleRate)) >
 +        kLongestMakeUpNs) {
-+        // The read itself was stopped (the process stood still inside it): there is nothing to make
-+        // up for and the next read starts the clock again.
++        // The read itself was stopped (the process stood still inside it): the standstill is not
++        // caught up, and the next read starts the clock again.
 +        mInputClockRunning = false;
 +    }
 +}
@@ -287,7 +300,7 @@ index aab177402c05c9ed0769e24ec84d8ba32078cd2e..e5fb22ceba501117326ec873a5d698cd
  void StreamAlsaMonoPipe::shutdown() {
      teardownIo();
  }
-@@ -185,6 +355,9 @@ void StreamAlsaMonoPipe::inputIoThread(size_t idx) {
+@@ -185,6 +363,9 @@ void StreamAlsaMonoPipe::inputIoThread(size_t idx) {
                                             mBufferSizeFrames - bufferFramesWritten);
                  if (framesWrittenOrError > 0) {
                      bufferFramesWritten += framesWrittenOrError;
@@ -297,7 +310,7 @@ index aab177402c05c9ed0769e24ec84d8ba32078cd2e..e5fb22ceba501117326ec873a5d698cd
                  } else if (framesWrittenOrError == 0) {
                      // The pipe is full, as the client is behind: try again soon.
                      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-@@ -232,7 +405,13 @@ void StreamAlsaMonoPipe::outputIoThread(size_t idx) {
+@@ -232,7 +413,13 @@ void StreamAlsaMonoPipe::outputIoThread(size_t idx) {
  }
  
  void StreamAlsaMonoPipe::teardownIo() {
