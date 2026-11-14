@@ -43,7 +43,6 @@ import pathlib
 import re
 import shutil
 import socket
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -69,7 +68,10 @@ COMMAND_SECONDS = 120
 SETTLE_SECONDS = 90
 STATE_SECONDS = 45
 CLOSE_SECONDS = 15
+# A measurement must last two statistics windows (FRAME_STATS_SECONDS) for one of them to lie wholly inside
+# it: 300 frames are 10 s at the capped 30 a second, and twice as many are 10 s at the uncapped 58.
 PRESENT_FRAMES = 300
+UNCAPPED_PRESENT_FRAMES = 600
 PRESENT_SECONDS = 300
 FRAME_STATS_SECONDS = 5
 MAGIC = b"ATH1"
@@ -260,16 +262,16 @@ class Guest:
     def headroom(self) -> float | None:
         return parse_headroom(self.shell("cmd thermalservice headroom 0"))
 
-    def present_rate(self) -> tuple[float, float | None]:
+    def present_rate(self, frames: int = PRESENT_FRAMES) -> tuple[float, float | None]:
         """Frames a second of ``kernarium_vk_present`` by the clock, and of the host's presented frames."""
         before = self.log.stat().st_size
         started = time.monotonic()
-        self.shell(f"kernarium_vk_present {PRESENT_FRAMES}", timeout=PRESENT_SECONDS)
+        self.shell(f"kernarium_vk_present {frames}", timeout=PRESENT_SECONDS)
         seconds = time.monotonic() - started
         with self.log.open("rb") as stream:
             stream.seek(before)
             added = stream.read().decode(errors="replace")
-        return PRESENT_FRAMES / seconds, presented_rate(added)
+        return frames / seconds, presented_rate(added)
 
 
 def wait_for(description: str, seconds: float, check: Callable[[], str | None],
@@ -410,7 +412,7 @@ def check_cap(guest: Guest, capped: bool, label: str) -> None:
 
     wait_for(f"{label}: the display manager's vote", STATE_SECONDS, vote, guest)
     wait_for(f"{label}: SurfaceFlinger's render rate", STATE_SECONDS, render, guest)
-    clock, host = guest.present_rate()
+    clock, host = guest.present_rate(PRESENT_FRAMES if capped else UNCAPPED_PRESENT_FRAMES)
     print(f"  {label}: kernarium_vk_present {clock:.1f} fps, host presented "
           f"{'none' if host is None else f'{host:.1f}'} a second")
     low, high = CAPPED_FPS if capped else (UNCAPPED_FPS_MINIMUM, math.inf)
