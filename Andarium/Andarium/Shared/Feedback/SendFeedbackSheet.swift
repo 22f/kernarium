@@ -99,6 +99,9 @@ struct SendFeedbackSheet: View {
                 }
             }
         }
+        // Once the mail is sent the sheet stays as it was under the notice, and nothing in it acts: the notice's
+        // own button closes the notice and the sheet together. The notice is outside this scope.
+        .disabled(model.sent)
         .overlay {
             if let busy = model.app.feedbackBusy {
                 BusyOverlay(state: busy)
@@ -114,8 +117,10 @@ struct SendFeedbackSheet: View {
         .animation(.easeInOut(duration: 0.2), value: model.app.feedbackBusy != nil)
         .animation(.easeInOut(duration: 0.2), value: model.fileBusy != nil)
         .animation(.easeInOut(duration: 0.2), value: model.sent)
-        // Once something is typed or attached, a stray swipe loses nothing.
-        .interactiveDismissDisabled(state.hasContent || state.makingBugReport || model.fileBusy != nil)
+        // Once something is typed or attached, a stray swipe loses nothing. Over the sent notice a swipe does
+        // nothing: the notice's button is the way out.
+        .interactiveDismissDisabled(
+            state.hasContent || state.makingBugReport || model.fileBusy != nil || model.sent)
         // An alert, not a dialog: on an iPad a dialog is a popover that leaves out
         // its cancel button, and both choices must show.
         .alert(Text("Discard this feedback?", tableName: "Feedback"), isPresented: $model.confirmingDiscard) {
@@ -154,14 +159,11 @@ struct SendFeedbackSheet: View {
         // An account added in iOS Settings brings the sheet to life.
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { model.refresh() }
+            if phase == .background { model.applicationEnteredBackground() }
         }
-        .task(id: model.sent) {
-            guard model.sent else { return }
-            #if !APP_STORE
-            if model.app.feedbackServices.previewKeepsConfirmation { return }
-            #endif
-            try? await Task.sleep(for: .seconds(1.8))
-            dismiss()
+        // The keyboard goes with the notice: a field that kept the focus would take a hardware keyboard's text.
+        .onChange(of: model.sent) { _, sent in
+            if sent { focus = nil }
         }
         .task {
             // Opened during a start, the sheet attaches its start log once; the
@@ -176,6 +178,8 @@ struct SendFeedbackSheet: View {
     }
 
     private func cancel() {
+        // The notice's button closes the sheet; the discard question is for a draft that was not sent.
+        guard !model.sent else { return }
         if state.hasContent {
             model.confirmingDiscard = true
         } else {

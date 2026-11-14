@@ -60,10 +60,15 @@ final class SendFeedbackModel {
     var showsInformation = false
     /// The card that asks for a bug report was put away.
     var hintDismissed = false
-    /// The mail was sent: the sheet shows its confirmation and closes.
-    private(set) var sent = false
+    /// The mail was sent: the sheet shows its confirmation over what was sent and closes when the person
+    /// closes the confirmation, not before (`mailFinished`, `close`).
+    var sent: Bool { form.sent }
     private(set) var closed = false
     private var presentingMail = false
+    /// The information block the mail went with, shown unchanged under the confirmation.
+    @ObservationIgnored private var mailedInformation: SendFeedbackInformation?
+    /// The staged files and the access held to the picked ones were let go.
+    @ObservationIgnored private var filesReleased = false
     /// The start log was offered once, whether or not it was attached, and
     /// whether or not it was removed since: it is made when the sheet opens
     /// and never again.
@@ -95,13 +100,17 @@ final class SendFeedbackModel {
         return state
     }
 
-    /// The basic information the mail ends with.
-    var information: SendFeedbackInformation { app.feedbackInformation() }
+    /// The basic information the mail ends with; once the mail is sent, the block it went with.
+    var information: SendFeedbackInformation {
+        if form.sent, let mailedInformation { return mailedInformation }
+        return app.feedbackInformation()
+    }
 
     /// Mail can come back when the person adds an account in iOS Settings, and
     /// go when the system restricts it: asked again when the app returns to
-    /// the foreground.
+    /// the foreground. A sheet whose mail was sent stays as it was.
     func refresh() {
+        guard !form.sent else { return }
         form.mailAvailable = app.feedbackServices.canSendMail()
     }
 
@@ -484,16 +493,19 @@ final class SendFeedbackModel {
             takeOut(form.attachments.items.filter { failure.attachments.contains($0.id) })
             return
         }
+        let sentInformation = information
         let request = SendFeedbackMailRequest(
             address: address, subject: SendFeedbackMail.subject(problem: form.problem),
-            body: SendFeedbackMail.body(details: form.details, information: information),
+            body: SendFeedbackMail.body(details: form.details, information: sentInformation),
             attachments: form.attachments.items, mapped: mapped)
+        mailedInformation = sentInformation
         presentingMail = true
         let shown = app.feedbackServices.presentMail(request) { [weak self] result in
             self?.mailFinished(result)
         }
         if !shown {
             presentingMail = false
+            mailedInformation = nil
             fail(
                 String(localized: "Mail not opened", table: "Feedback"),
                 String(localized: "Andarium couldn\u{2019}t open the mail composer.", table: "Feedback"))
@@ -544,29 +556,39 @@ final class SendFeedbackModel {
         }
     }
 
-    /// The person left the composer. Sent ends the draft; saved and cancelled
-    /// leave it as it was, for another try; a failure is the system's own words.
+    /// The person left the composer. Sent leaves the sheet exactly as it was
+    /// under its confirmation, with the files still staged, and the draft ends
+    /// when the person closes it (`close`); saved and cancelled leave it as it
+    /// was, for another try; a failure is the system's own words.
     func mailFinished(_ result: SendFeedbackMailResult) {
         presentingMail = false
         switch result {
         case .sent:
-            sent = true
-            form.problem = ""
-            form.details = ""
-            cleanUp()
+            form.sent = true
+            confirmingDiscard = false
         case .saved, .cancelled:
-            break
+            mailedInformation = nil
         case .failed(let message):
+            mailedInformation = nil
             fail(String(localized: "Feedback not sent", table: "Feedback"), message)
         }
     }
 
+    /// The application left the foreground. A sent mail needs none of its files
+    /// any more, and the rows under the confirmation are drawn without them, so
+    /// a process that ends in the background leaves none behind.
+    func applicationEnteredBackground() {
+        guard form.sent else { return }
+        releaseFiles()
+    }
+
     // MARK: Closing
 
-    /// The sheet is closed or the mail is sent: nothing stays behind. A
-    /// parent torn down under the sheet (the low-space pause, the end of a
-    /// run) closes it too, so the sheet's claim on the overlay of a task under
-    /// way goes with it: the screens draw that overlay, and its Cancel, again.
+    /// The sheet is closed: nothing stays behind, and a draft whose mail was
+    /// sent ends here, not when the mail left. A parent torn down under the
+    /// sheet (the low-space pause, the end of a run) closes it too, so the
+    /// sheet's claim on the overlay of a task under way goes with it: the
+    /// screens draw that overlay, and its Cancel, again.
     func close() {
         guard !closed else { return }
         closed = true
@@ -574,18 +596,26 @@ final class SendFeedbackModel {
         app.busyOverSheet = false
         app.feedbackSheetOpen = false
         app.feedbackFromBoot = false
-        cleanUp()
+        releaseFiles()
+        thumbnails = [:]
+        _ = form.attachments.removeAll()
+        if form.sent {
+            form.problem = ""
+            form.details = ""
+            mailedInformation = nil
+        }
     }
 
-    private func cleanUp() {
-        // Only the access the rows own. A file still being looked at or copied
-        // keeps its own until that work ends (`addFile`), so nothing is read
-        // after its access is let go.
+    /// Lets go of the files, once: the staged ones are deleted and the access
+    /// the rows hold to the picked ones stops. Only the access the rows own: a
+    /// file still being looked at or copied keeps its own until that work
+    /// ends (`addFile`), so nothing is read after its access is let go.
+    private func releaseFiles() {
+        guard !filesReleased else { return }
+        filesReleased = true
         for item in form.attachments.items where item.inPlace { scopes.release(item.id) }
         folder.removeAll()
         try? FileManager.default.removeItem(at: staging.incoming)
-        thumbnails = [:]
-        _ = form.attachments.removeAll()
     }
 
     private func fail(_ title: String, _ message: String) {

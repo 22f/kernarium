@@ -371,7 +371,7 @@ SHOTS: list[Shot] = [
     feedback("feedback-file-picker", "feedback-file-picker", "The system's document picker over the sheet, as a tap on Files in the Add menu opens it.", wait=20.0),
     feedback("feedback-file-menu", "feedback-file-menu", "The bar's Add menu open: Photos and Files, anchored on the button."),
     feedback("feedback-generating", "feedback-generating", "Send feedback while the bug report is made: the app's progress overlay with Cancel over the whole sheet, Settings still open beneath."),
-    feedback("feedback-sent", "feedback-sent", "Send feedback once the mail was sent: the Feedback sent card with Done over the whole sheet."),
+    feedback("feedback-sent", "feedback-sent", "Send feedback once the mail was sent: the Feedback sent card with Done over the sheet, which still shows the problem, the details, the attachments and the information block that were sent."),
     feedback("feedback-missing-both", "feedback-missing-both", "Send tapped with the problem and the details both empty: Can't send yet, and what to write in each.", dark=True),
     feedback("feedback-missing-problem", "feedback-missing-problem", "Send tapped with the details written and the problem empty: the alert asks for the Problem line."),
     feedback("feedback-missing-details", "feedback-missing-details", "Send tapped with the problem written and the details empty: the alert asks for what was done and what happened."),

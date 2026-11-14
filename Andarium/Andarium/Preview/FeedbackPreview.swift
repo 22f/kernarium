@@ -43,7 +43,6 @@ enum FeedbackPreview {
             // The capture run keeps a picture of the sheet only once it is open and its draft is made.
             CaptureState.markFeedbackReady()
         }
-        services.previewKeepsConfirmation = screen == "feedback-sent"
         model.feedbackServices = services
         if overBoot(screen) { seedStartRecord(in: model) }
         guard opensSheet(screen) else { return }

@@ -51,9 +51,6 @@ struct SendFeedbackServices {
     var previewOpensOverBoot = false
     /// Runs when the sheet appears: the Simulator preview fills a draft with it.
     var previewPrepare: @MainActor (SendFeedbackModel) async -> Void = { _ in }
-    /// Keeps the confirmation of a sent mail on screen, which closes the sheet
-    /// within seconds, so a capture of it can be taken.
-    var previewKeepsConfirmation = false
     #endif
 }
 

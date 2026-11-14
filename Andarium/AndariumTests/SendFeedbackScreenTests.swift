@@ -5,6 +5,7 @@
 import AndariumCore
 import AndariumCoreTestSupport
 import Foundation
+import SwiftUI
 import Testing
 import UIKit
 @testable import Andarium
@@ -26,10 +27,13 @@ struct SendFeedbackScreenTests {
     /// A mail request the stand-in composer was handed, and the way out of it.
     @MainActor private final class Composer {
         var request: SendFeedbackMailRequest?
+        /// How many times the composer was opened.
+        private(set) var opened = 0
         private var finish: (@MainActor (SendFeedbackMailResult) -> Void)?
 
         func open(_ request: SendFeedbackMailRequest, _ finish: @escaping @MainActor (SendFeedbackMailResult) -> Void) {
             self.request = request
+            opened += 1
             self.finish = finish
         }
 
@@ -564,21 +568,225 @@ struct SendFeedbackScreenTests {
         sheet.close()
     }
 
-    @Test func sentEndsTheDraftAndLeavesNoFile() async throws {
+    // MARK: The sent notice
+
+    /// A sheet with a problem, details, a photo and a screenshot, ready to send.
+    private func filledSheet(in fixture: Fixture) async throws -> SendFeedbackModel {
+        let sheet = fixture.sheet()
+        sheet.form.problem = "Game freezes"
+        sheet.form.details = "The picture stops after the intro."
+        await sheet.importMedia([try pickedPhoto(in: fixture)])
+        sheet.takeScreenshot()
+        try #require(await eventually { sheet.form.attachments.count == 2 })
+        return sheet
+    }
+
+    @Test func sentLeavesTheSheetAsItWasAndTheFilesStagedUntilItCloses() async throws {
+        let fixture = fixture()
+        let sheet = try await filledSheet(in: fixture)
+        let staged = sheet.form.attachments.items.map(\.url)
+        let before = sheet.form
+        let pictures = Set(sheet.thumbnails.keys)
+        #expect(!pictures.isEmpty)
+        sheet.send()
+        fixture.composer.leave(.sent)
+        #expect(sheet.sent && !sheet.closed)
+        // What was sent is still the sheet's: the text, the list, the pictures and the files behind them.
+        var expected = before
+        expected.sent = true
+        #expect(sheet.form == expected, "the form under the notice is as it was sent")
+        #expect(Set(sheet.thumbnails.keys) == pictures)
+        #expect(staged.allSatisfy { FileManager.default.fileExists(atPath: $0.path) } && sheet.folder.exists)
+        // Nothing under the notice acts.
+        let state = sheet.state
+        #expect(!state.fieldsEnabled && !state.canSend && !state.readyToSend && !state.canMakeBugReport
+                && !state.canTakeScreenshot && !state.canAddMedia && !state.canAddFiles)
+        sheet.send()
+        sheet.takeScreenshot()
+        sheet.createBugReport()
+        sheet.pickFiles()
+        #expect(fixture.composer.opened == 1 && sheet.form.attachments.count == 2 && fixture.app.busy == nil)
+        #expect(sheet.confirmingDiscard == false)
+        // Closing ends the draft: no file, no pictures, no text.
+        sheet.close()
+        #expect(sheet.closed && !sheet.folder.exists)
+        #expect(staged.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+        #expect(!FileManager.default.fileExists(atPath: fixture.staging.incoming.path))
+        #expect(sheet.form.problem.isEmpty && sheet.form.details.isEmpty && sheet.form.attachments.isEmpty)
+        #expect(sheet.thumbnails.isEmpty)
+        try? FileManager.default.removeItem(at: fixture.root)
+    }
+
+    @Test func theNextSheetAfterASendIsEmpty() async throws {
+        let fixture = fixture()
+        let sheet = try await filledSheet(in: fixture)
+        sheet.send()
+        fixture.composer.leave(.sent)
+        sheet.close()
+        let next = fixture.sheet()
+        #expect(next.form.problem.isEmpty && next.form.details.isEmpty && next.form.attachments.isEmpty)
+        #expect(!next.sent && next.thumbnails.isEmpty && !next.state.hasContent && next.state.canSend)
+        next.close()
+        try? FileManager.default.removeItem(at: fixture.root)
+    }
+
+    @Test func theFilesAreLetGoOnceAndNoLaterLookAtTheFolderRemovesAnything() async throws {
+        let fixture = fixture()
+        let sheet = try await filledSheet(in: fixture)
+        sheet.send()
+        fixture.composer.leave(.sent)
+        sheet.close()
+        // What a second removal would take is not there to take: a file that appears after the close stays.
+        let late = sheet.folder.url.appendingPathComponent("late.txt")
+        try FileManager.default.createDirectory(at: sheet.folder.url, withIntermediateDirectories: true)
+        try Data([1]).write(to: late)
+        sheet.close()
+        sheet.applicationEnteredBackground()
+        #expect(FileManager.default.fileExists(atPath: late.path), "the files were let go once")
+        try? FileManager.default.removeItem(at: fixture.root)
+    }
+
+    @Test func theInformationBlockUnderTheNoticeIsTheOneTheMailWentWith() async throws {
         let fixture = fixture()
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
         sheet.form.details = "Details"
-        let picked = try pickedPhoto(in: fixture)
-        await sheet.importMedia([picked])
-        let staged = try #require(sheet.form.attachments.items.first?.url)
-        #expect(FileManager.default.fileExists(atPath: staged.path))
+        #expect(sheet.information.runningSeconds == 125)
+        sheet.send()
+        let body = try #require(fixture.composer.request).body
+        fixture.app.feedbackServices.runningSeconds = { _ in 999 }
+        #expect(sheet.information.runningSeconds == 999, "until the mail is sent the block is the app's, live")
+        fixture.composer.leave(.sent)
+        #expect(sheet.information.runningSeconds == 125, "the block under the notice is the one that was sent")
+        #expect(body.contains(sheet.information.text), "the mail carried this block")
+        sheet.close()
+    }
+
+    @Test func savedCancelledAndFailedKeepTheDraftTheFilesAndALiveSheet() async throws {
+        for result: SendFeedbackMailResult in [.saved, .cancelled, .failed("The operation couldn\u{2019}t be completed.")] {
+            let fixture = fixture()
+            let sheet = try await filledSheet(in: fixture)
+            let staged = sheet.form.attachments.items.map(\.url)
+            let before = sheet.form
+            sheet.send()
+            fixture.composer.leave(result)
+            #expect(!sheet.sent && sheet.form == before && !sheet.closed, "\(result)")
+            #expect(staged.allSatisfy { FileManager.default.fileExists(atPath: $0.path) }, "\(result)")
+            #expect(sheet.state.canSend && sheet.state.fieldsEnabled && sheet.state.readyToSend, "\(result)")
+            // The block is the app's again, and a second try opens the composer again.
+            fixture.app.feedbackServices.runningSeconds = { _ in 999 }
+            #expect(sheet.information.runningSeconds == 999, "\(result)")
+            sheet.send()
+            #expect(fixture.composer.opened == 2, "\(result)")
+            // In the background a draft that was not sent keeps its files.
+            sheet.applicationEnteredBackground()
+            #expect(staged.allSatisfy { FileManager.default.fileExists(atPath: $0.path) }, "\(result)")
+            sheet.close()
+            #expect(staged.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) }, "\(result)")
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+    }
+
+    @Test func aSendThatLeavesTheForegroundDropsItsFilesAndKeepsWhatTheRowsShow() async throws {
+        let fixture = fixture()
+        let sheet = try await filledSheet(in: fixture)
+        let staged = sheet.form.attachments.items.map(\.url)
+        let before = sheet.form
         sheet.send()
         fixture.composer.leave(.sent)
-        #expect(sheet.sent)
-        #expect(!FileManager.default.fileExists(atPath: staged.path) && !sheet.folder.exists)
-        #expect(sheet.form.problem.isEmpty && sheet.form.attachments.isEmpty && !sheet.state.hasContent)
+        // The application goes to the background and may be ended there: no staged file is left.
+        sheet.applicationEnteredBackground()
+        #expect(staged.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) } && !sheet.folder.exists)
+        var expected = before
+        expected.sent = true
+        #expect(sheet.form == expected && !sheet.thumbnails.isEmpty, "the notice is still over the whole sheet")
         sheet.close()
+        try? FileManager.default.removeItem(at: fixture.root)
+    }
+
+    @Test func aSheetLetGoAfterASendLeavesNoFolder() async throws {
+        let fixture = fixture()
+        var url: URL?
+        do {
+            let sheet = try await filledSheet(in: fixture)
+            url = sheet.folder.url
+            sheet.send()
+            fixture.composer.leave(.sent)
+            #expect(FileManager.default.fileExists(atPath: try #require(url).path))
+        }
+        #expect(await eventually { !FileManager.default.fileExists(atPath: url?.path ?? "/") })
+        try? FileManager.default.removeItem(at: fixture.root)
+    }
+
+    private func nodes(in node: NSObject, depth: Int = 0) -> [NSObject] {
+        guard depth < 64 else { return [] }
+        var children = (node.accessibilityElements ?? []).compactMap { $0 as? NSObject }
+        if let view = node as? UIView { children += view.subviews }
+        return [node] + children.flatMap { nodes(in: $0, depth: depth + 1) }
+    }
+
+    /// The sheet as a person meets it: presented over the screen by its own presenter, sent, and left alone
+    /// for longer than the old timer (1.8 s). The notice stays over the sheet, which keeps what was sent; a
+    /// swipe down and the toolbar's close button do nothing; the notice's own button closes both, and the
+    /// next sheet is empty.
+    @Test func theNoticeStaysOverTheSheetUntilItsButtonClosesThemBothAndTheNextSheetIsEmpty() async throws {
+        let fixture = fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let photo = try pickedPhoto(in: fixture)
+        var first: SendFeedbackModel?
+        fixture.app.feedbackServices.previewPrepare = { model in
+            first = model
+            model.form.problem = "Game freezes"
+            model.form.details = "The picture stops after the intro."
+            await model.importMedia([photo])
+            model.send()
+            fixture.composer.leave(.sent)
+        }
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let root = AndariumHostingController(
+            rootView: Color.clear.sendFeedbackSheet(fixture.app).environment(fixture.app), model: fixture.app)
+        lease.window.rootViewController = root
+        root.view.layoutIfNeeded()
+        fixture.app.feedbackSheetOpen = true
+        let shown = await eventually { first?.sent == true && root.presentedViewController?.view.window != nil }
+        try #require(shown, "the sheet was not sent; is ApplicationAccessibilityEnabled on?")
+        let sheet = try #require(root.presentedViewController)
+        let model = try #require(first)
+        let staged = model.form.attachments.items.map(\.url)
+        #expect(sheet.isModalInPresentation, "a swipe down is not taken as a dismissal")
+        // Longer than the old timer.
+        try await Task.sleep(for: .seconds(3.5))
+        #expect(root.presentedViewController === sheet && !sheet.isBeingDismissed, "the sheet closed by itself")
+        #expect(fixture.app.feedbackSheetOpen && !model.closed)
+        #expect(model.form.problem == "Game freezes" && model.form.details == "The picture stops after the intro.")
+        #expect(model.form.attachments.count == 1)
+        #expect(staged.allSatisfy { FileManager.default.fileExists(atPath: $0.path) }, "the files wait for the close")
+        // The toolbar's close button does nothing, and no question about discarding comes up.
+        for item in ToolbarProbe.barItems(under: root) where item.title == "Cancel" || item.accessibilityLabel == "Cancel" {
+            #expect(!item.isEnabled, "the close button is off under the notice")
+        }
+        model.confirmingDiscard = false
+        #expect(sheet.presentedViewController == nil)
+        // The notice's button closes the notice and the sheet together.
+        let done = nodes(in: sheet.view).first { $0.accessibilityLabel == "Done" && $0.accessibilityTraits.contains(.button) }
+        try #require(done != nil, "the notice has no Done button")
+        #expect(done?.accessibilityActivate() == true)
+        #expect(await eventually { root.presentedViewController == nil }, "Done did not close the sheet")
+        #expect(await eventually { model.closed })
+        #expect(!fixture.app.feedbackSheetOpen)
+        #expect(staged.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) } && !model.folder.exists)
+        #expect(model.form.problem.isEmpty && model.form.attachments.isEmpty)
+        // The next sheet is empty.
+        var second: SendFeedbackModel?
+        fixture.app.feedbackServices.previewPrepare = { second = $0 }
+        fixture.app.feedbackSheetOpen = true
+        try #require(await eventually { second != nil && root.presentedViewController?.view.window != nil })
+        #expect(second?.form.problem.isEmpty == true && second?.form.details.isEmpty == true)
+        #expect(second?.form.attachments.isEmpty == true && second?.sent == false)
+        fixture.app.feedbackSheetOpen = false
+        #expect(await eventually { root.presentedViewController == nil })
+        root.dismiss(animated: false)
     }
 
     // MARK: Mail not available
