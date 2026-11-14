@@ -8,8 +8,9 @@ pinned shortcut or a pinned widget) skipped the first screen and went
 to the second screen or a new one. This product's first screen holds
 nothing, so exclude no screen from the search: it begins at the first
 screen, which the space finder counts even while it is empty, and goes
-on through the later screens in order. A new screen is added only when
-every screen is full. Items already on the second screen stay put.
+on through the later screens in order. A new screen is added when no
+candidate screen can accommodate the item's span. Items already on the
+second screen stay put.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
