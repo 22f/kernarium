@@ -11,6 +11,8 @@ android/lineage-24/README.md ("Thermal"), and the wire is overlay/thermal/therma
   sensor reads 31.0 degrees with status NONE, its seven hot thresholds are NaN, 34, 37, 40, 43, 46 and 49,
   the headroom thresholds are NaN, 0.8, 0.9, 1.0, 1.1, 1.2 and 1.3, there is no battery sensor, and the
   display's skin observer holds the SEVERE point of 30 Hz;
+- CRITICAL sent from NONE, as the application does (it reports nothing below critical), sets the status
+  to 4 and brings the same cap as SEVERE, and NONE sent straight after it lifts the cap;
 - LIGHT sets the status to 1 and casts no vote on the frame rate;
 - SEVERE sets the status to 3, the display manager holds a render-rate vote of 0 to 30 Hz at the skin
   temperature priority, SurfaceFlinger renders at 30.00 Hz on the unchanged mode, and
@@ -41,7 +43,6 @@ import pathlib
 import re
 import shutil
 import socket
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -67,7 +68,10 @@ COMMAND_SECONDS = 120
 SETTLE_SECONDS = 90
 STATE_SECONDS = 45
 CLOSE_SECONDS = 15
+# A measurement must last two statistics windows (FRAME_STATS_SECONDS) for one of them to lie wholly inside
+# it: 300 frames are 10 s at the capped 30 a second, and twice as many are 10 s at the uncapped 58.
 PRESENT_FRAMES = 300
+UNCAPPED_PRESENT_FRAMES = 600
 PRESENT_SECONDS = 300
 FRAME_STATS_SECONDS = 5
 MAGIC = b"ATH1"
@@ -210,10 +214,16 @@ FRAME_LINE = re.compile(r"Native display frames: guest (\d+(?:\.\d+)?)/s present
 
 
 def presented_rate(log_text: str) -> float | None:
-    """The median presented rate of the host's frame statistics lines that show activity."""
-    rates = [float(match[2]) for match in FRAME_LINE.finditer(log_text)]
+    """The highest presented rate of a measurement's full statistics windows, or None when it has none.
+
+    The launcher prints a line every FRAME_STATS_SECONDS for the window that just ended. The first line
+    printed after a measurement starts is not the measurement's: its window began earlier and holds the
+    previous step's last frames (a 43.0 line of an uncapped step ahead of a capped one), so it is ignored.
+    Every later line ends inside the measurement, and the busy ones are its windows. A measurement of two
+    windows or more has one; with none there is no figure and the caller fails."""
+    rates = [float(match[2]) for match in FRAME_LINE.finditer(log_text)][1:]
     busy = [rate for rate in rates if rate >= 5.0]
-    return statistics.median(busy) if busy else None
+    return max(busy) if busy else None
 
 
 # ---- The guest.
@@ -255,16 +265,16 @@ class Guest:
     def headroom(self) -> float | None:
         return parse_headroom(self.shell("cmd thermalservice headroom 0"))
 
-    def present_rate(self) -> tuple[float, float | None]:
+    def present_rate(self, frames: int = PRESENT_FRAMES) -> tuple[float, float | None]:
         """Frames a second of ``kernarium_vk_present`` by the clock, and of the host's presented frames."""
         before = self.log.stat().st_size
         started = time.monotonic()
-        self.shell(f"kernarium_vk_present {PRESENT_FRAMES}", timeout=PRESENT_SECONDS)
+        self.shell(f"kernarium_vk_present {frames}", timeout=PRESENT_SECONDS)
         seconds = time.monotonic() - started
         with self.log.open("rb") as stream:
             stream.seek(before)
             added = stream.read().decode(errors="replace")
-        return PRESENT_FRAMES / seconds, presented_rate(added)
+        return frames / seconds, presented_rate(added)
 
 
 def wait_for(description: str, seconds: float, check: Callable[[], str | None],
@@ -405,14 +415,15 @@ def check_cap(guest: Guest, capped: bool, label: str) -> None:
 
     wait_for(f"{label}: the display manager's vote", STATE_SECONDS, vote, guest)
     wait_for(f"{label}: SurfaceFlinger's render rate", STATE_SECONDS, render, guest)
-    clock, host = guest.present_rate()
+    clock, host = guest.present_rate(PRESENT_FRAMES if capped else UNCAPPED_PRESENT_FRAMES)
     print(f"  {label}: kernarium_vk_present {clock:.1f} fps, host presented "
           f"{'none' if host is None else f'{host:.1f}'} a second")
     low, high = CAPPED_FPS if capped else (UNCAPPED_FPS_MINIMUM, math.inf)
     if not low <= clock <= high:
         raise Failure(f"{label}: kernarium_vk_present ran at {clock:.1f} fps, not in {low} to {high}")
     if host is None:
-        raise Failure(f"{label}: the launcher printed no frame statistics (UML_GPU_FRAME_STATS)")
+        raise Failure(f"{label}: the launcher printed no full busy statistics window inside the measurement "
+                      "(UML_GPU_FRAME_STATS; the first line after the start is not the measurement's)")
     if not low <= host <= high:
         raise Failure(f"{label}: the host presented {host:.1f} frames a second, not in {low} to {high}")
 
@@ -440,6 +451,19 @@ def run_checks(guest: Guest) -> None:
         time.sleep(2)
         settle_severity(guest, 0)
         check_headroom(guest, 0)
+
+        # What the application sends: the host goes from NONE straight to CRITICAL and straight back.
+        print("CRITICAL from NONE")
+        host.send(record(4))
+        settle_severity(guest, 4)
+        check_headroom(guest, 4)
+        check_cap(guest, True, "critical from none")
+
+        print("NONE after CRITICAL")
+        host.send(record(0))
+        settle_severity(guest, 0)
+        check_headroom(guest, 0)
+        check_cap(guest, False, "none after critical")
 
         print("LIGHT")
         host.send(record(1))

@@ -9,7 +9,8 @@ import Testing
 /// The session's one notice that the frame rate is lowered while the device
 /// is hot, in the model and through the thermal session: it shows once the
 /// session screen is up, once in a run, and goes when dismissed or after its
-/// time. When it is due is `ThermalPolicy`'s (tested in `andarium-core`).
+/// time. When it is due is `ThermalPolicy`'s (tested in `andarium-core`): at
+/// iOS's critical state and not before.
 @MainActor
 struct ThermalNoticeFlowTests {
     private let host = HostDevice(
@@ -166,6 +167,14 @@ struct ThermalNoticeFlowTests {
             }
             return result
         }
+
+        /// Whether another record arrives within a moment.
+        func hasRecord() -> Bool {
+            let peer = lock.withLock { self.peer }
+            guard peer >= 0 else { return false }
+            var descriptor = pollfd(fd: peer, events: Int16(POLLIN), revents: 0)
+            return poll(&descriptor, 1, 150) > 0
+        }
     }
 
     private nonisolated final class Clock: @unchecked Sendable {
@@ -184,7 +193,7 @@ struct ThermalNoticeFlowTests {
 
     private func frame(_ severity: AndroidThermalSeverity) -> [UInt8] { Array(ThermalProtocol.record(severity)) }
 
-    @Test func theNoticeAppearsOnceAtTheFirstSevereAndNotAtLightOrAgainAfterCoolingAndHeatingAgain() async {
+    @Test func theNoticeAppearsOnceAtTheFirstCriticalAndNotAtFairOrSeriousOrAgainAfterCoolingAndHeatingAgain() async {
         let model = model()
         let hal = Hal()
         let clock = Clock()
@@ -196,40 +205,51 @@ struct ThermalNoticeFlowTests {
         #expect(hal.record() == frame(.none))
 
         session.observe(.fair)
-        #expect(hal.record() == frame(.light))
-        session.settle()
-        try? await Task.sleep(for: .milliseconds(60))
-        #expect(!model.thermalNotice.isShowing, "announced at light")
-
         session.observe(.serious)
-        #expect(hal.record() == frame(.severe))
+        session.settle()
+        #expect(!hal.hasRecord(), "fair or serious told the guest")
+        try? await Task.sleep(for: .milliseconds(60))
+        #expect(!model.thermalNotice.isShowing, "announced at fair or serious")
+
+        session.observe(.critical)
+        #expect(hal.record() == frame(.critical))
         #expect(await until { model.thermalNotice.isShowing })
         model.dismissThermalNotice()
+
+        // Serious within the hold keeps the cap and tells the guest nothing.
+        session.observe(.serious)
+        session.settle()
+        #expect(!hal.hasRecord(), "the fall to serious told the guest")
+        clock.advance(seconds: 60)
+        session.observe(.critical)
+        session.settle()
+        #expect(!hal.hasRecord(), "the return to critical told the guest again")
 
         session.observe(.nominal)
         session.settle()
         clock.advance(seconds: 130)
         timers.fire()
         #expect(hal.record() == frame(.none))
-        session.observe(.serious)
-        #expect(hal.record() == frame(.severe))
+        session.observe(.critical)
+        #expect(hal.record() == frame(.critical))
         session.settle()
         try? await Task.sleep(for: .milliseconds(60))
         #expect(!model.thermalNotice.isShowing, "announced twice in a run")
         session.update(running: false, booted: false)
     }
 
-    @Test func aRunThatNeverReachesSevereShowsNoNotice() async {
+    @Test func aRunThatNeverReachesCriticalShowsNoNoticeAndTellsTheGuestNothing() async {
         let model = model()
         let hal = Hal()
         let session = ThermalSession(
             opener: hal, capStarted: { Task { @MainActor in model.thermalCapStarted() } })
         session.update(running: true, booted: true)
         #expect(hal.record() == frame(.none))
-        // Light holds for 120 s after it ended, so the guest hears of it once.
-        for state in [HostThermalState.fair, .nominal, .fair, .nominal] { session.observe(state) }
-        #expect(hal.record() == frame(.light))
+        for state in [HostThermalState.fair, .serious, .nominal, .serious, .fair, .nominal] {
+            session.observe(state)
+        }
         session.settle()
+        #expect(!hal.hasRecord(), "a state below critical told the guest")
         try? await Task.sleep(for: .milliseconds(60))
         #expect(!model.thermalNotice.isShowing)
         session.update(running: false, booted: false)
@@ -242,18 +262,38 @@ struct ThermalNoticeFlowTests {
         let hal = Hal()
         let session = ThermalSession(
             opener: hal, capStarted: { Task { @MainActor in model.thermalCapStarted() } })
-        let environment = ["ANDARIUM_THERMAL_STATE": "serious"]
+        let environment = ["ANDARIUM_THERMAL_STATE": "critical"]
         let monitor = ThermalMonitor(
             center: NotificationCenter(), read: { ThermalOverride.stated(in: environment) ?? .nominal },
             deliver: { session.observe($0) })
         session.update(running: true, booted: true)
         // A connection starts with the severity of the moment it is made, so the
-        // monitor's reading (severe) is delivered after the first record is
-        // read: none, then severe, however soon the connection is made.
+        // monitor's reading (critical) is delivered after the first record is
+        // read: none, then critical, however soon the connection is made.
         #expect(hal.record() == frame(.none))
         monitor.start()
-        #expect(hal.record() == frame(.severe))
+        #expect(hal.record() == frame(.critical))
         #expect(await until { model.thermalNotice.isShowing })
+        monitor.stop()
+        session.update(running: false, booted: false)
+    }
+
+    @Test func aLaunchOverrideOfSeriousTellsTheGuestNothingAndShowsNoNotice() async {
+        let model = model()
+        let hal = Hal()
+        let session = ThermalSession(
+            opener: hal, capStarted: { Task { @MainActor in model.thermalCapStarted() } })
+        let environment = ["ANDARIUM_THERMAL_STATE": "serious"]
+        let monitor = ThermalMonitor(
+            center: NotificationCenter(), read: { ThermalOverride.stated(in: environment) ?? .nominal },
+            deliver: { session.observe($0) })
+        session.update(running: true, booted: true)
+        #expect(hal.record() == frame(.none))
+        monitor.start()
+        session.settle()
+        #expect(!hal.hasRecord(), "serious told the guest")
+        try? await Task.sleep(for: .milliseconds(60))
+        #expect(!model.thermalNotice.isShowing)
         monitor.stop()
         session.update(running: false, booted: false)
     }
