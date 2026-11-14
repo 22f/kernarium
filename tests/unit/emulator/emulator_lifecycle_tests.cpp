@@ -2207,6 +2207,68 @@ void aPressureEndMetByALongLifecycleCallIsReplayedAtTheResume()
 	(void)hibernationLog.take();
 }
 
+/* The same end of the trimmer, met by a quiesce that leaves the guest running
+ * (its suspend is refused, as a guest that cannot suspend does): no resume
+ * follows, so the quiesce settles what the response last wanted when it ends,
+ * and nothing is owed afterwards. */
+void aPressureEndMetByAQuiesceThatLeavesTheGuestRunningIsSentWhenItEnds()
+{
+	using ::uml::runtime::TrimKind;
+	using ::uml::runtime::TrimOutcome;
+	using uml::emulator::testing::trim_for_memory_pressure;
+	const auto emulator = makeEmulator();
+	FakeGuestConsole console;
+	console.refuseSuspend = true;
+	require(console.requests(1U, [&] {
+		require(trim_for_memory_pressure(emulator.get(),
+			TrimKind::gradual_on) == TrimOutcome::sent);
+	}) == Requests {"trim on"});
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool suspending {false};
+	bool released {false};
+	/* The guest holds its refusal of the suspend, as a freezer that is slow to
+	 * give up does, and the quiesce its lifecycle mutex. */
+	console.onRequest = [&](const std::string &command) {
+		if (command != "suspend")
+			return;
+		std::unique_lock lock {mutex};
+		suspending = true;
+		changed.notify_all();
+		(void)changed.wait_for(lock, std::chrono::seconds {5},
+			[&] { return released; });
+	};
+	Requests heard;
+	std::thread quiescing {[&] {
+		heard = console.requests(5U, [&] {
+			require(uml_emulator_quiesce(emulator.get(), nullptr) == 0);
+		});
+	}};
+	{
+		std::unique_lock lock {mutex};
+		require(changed.wait_for(lock, std::chrono::seconds {10},
+			[&] { return suspending; }), "the quiesce never sent its suspend");
+	}
+	/* The end of the trimmer, asked more often than the response retries. */
+	for (int attempt = 0; attempt < 6; ++attempt)
+		require(trim_for_memory_pressure(emulator.get(),
+			TrimKind::gradual_off) == TrimOutcome::busy);
+	{
+		const std::lock_guard lock {mutex};
+		released = true;
+	}
+	changed.notify_all();
+	quiescing.join();
+	require(heard == Requests {"sync", "trim once", "suspend", "sync",
+		"trim off"}, "the end of the trimmer was lost behind the quiesce");
+	console.onRequest = nullptr;
+	/* Settled: nothing is owed, and asking again sends nothing. */
+	require(console.requests(0U, [&] {
+		require(trim_for_memory_pressure(emulator.get(),
+			TrimKind::gradual_off) == TrimOutcome::done);
+	}).empty());
+}
+
 /* A foreground transition's "trim off" holds the lifecycle mutex while it
  * waits for the guest. A pressure trim that meets it sends nothing and says it
  * is busy, which is what the response tries again; once the call has ended the
@@ -2695,6 +2757,7 @@ int main(int argc, char **argv)
 	aLifecycleCallInProgressIsNotWaitedFor("trim once");
 	aLifecycleCallInProgressIsNotWaitedFor("suspend");
 	aPressureEndMetByALongLifecycleCallIsReplayedAtTheResume();
+	aPressureEndMetByAQuiesceThatLeavesTheGuestRunningIsSentWhenItEnds();
 	aPressureTrimBesideATrimChangeIsBusyThenSent();
 	aQuiesceDoesNotWaitForAMemoryRequest();
 	aQuiesceBesideAPressureTrimThatSpentTheWaitSendsNoSecondTrim();
