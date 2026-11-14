@@ -9,6 +9,7 @@
 #include "camera_controls.hpp"
 #include "camera_device.hpp"
 #include "camera_layout.hpp"
+#include "camera_orientation.hpp"
 #include "in_process_service.hpp"
 #include "jpeg_gap.hpp"
 #include "nv12_transform.hpp"
@@ -132,6 +133,8 @@ struct RigOptions {
     std::optional<std::uint32_t> workingBytes;
     /* The RAW size the host declares for its first camera, where a test is to state it. */
     std::optional<uml::platform::CameraStillSize> rawStillSize;
+    /* The application's statement of each camera's SENSOR_ORIENTATION, where a test is to state it. */
+    std::function<std::uint32_t(const uml::platform::CameraInfo&)> sensorOrientation;
 };
 
 class Recorder final : public CameraSessionDelegate {
@@ -282,6 +285,7 @@ struct Rig final {
         options.tier = rigOptions.tier;
         options.use = rigOptions.use;
         options.calibration = store;
+        options.sensorOrientation = rigOptions.sensorOrientation;
         options.onState = [this](CameraState state) {
             states.push_back(state);
             if (onStateChange) onStateChange();
@@ -3393,7 +3397,7 @@ void testThePlatformsPresentationReachesTheOwnerUnderTheGuestsNumber()
     for (std::size_t told = 0; told < rig.presentations.size(); ++told) {
         const auto& note = rig.presentations[told];
         require(note.camera < infos.size() && numbers.insert(note.camera).second, "each under its own number of the guest's");
-        require(note.stated == 100 + told && note.position == infos[told].position && note.refusals == 7,
+        require(note.platformStated == 100 + told && note.position == infos[told].position && note.refusals == 7,
                 "and as the platform said it");
     }
     rig.presentations.clear();
@@ -3403,6 +3407,53 @@ void testThePlatformsPresentationReachesTheOwnerUnderTheGuestsNumber()
     rig.presentationThrows = true;
     rig.watched->sink->cameraPresentation(0, lost);
     require(rig.presentations.size() == 1, "an owner that fails is told, and the platform goes on");
+}
+
+/* The orientation the record states is the one of the guest's description, which the application turns for the layout a
+ * tablet boots in; the platform's own is the second number. The tablet's values as measured: the platform states 90 for
+ * both cameras and the guest is told 180 for the front camera and 0 for the back. */
+void testThePresentationStatesWhatTheGuestIsTold()
+{
+    constexpr std::uint32_t bootTurn = 270;
+    RigOptions options;
+    options.sensorOrientation = [](const CameraInfo& info) { return turnedSensorOrientation(info.position, 90, bootTurn); };
+    Rig rig(options);
+    stillStream(rig, 1, 0, 1008, 756, 1);
+    (void)rig.queue(1, 1, 61);
+    require(rig.watched->sink != nullptr, "the session is open");
+    const auto infos = rig.camera->cameras();
+    bool back = false, front = false;
+    for (std::size_t platform = 0; platform < infos.size(); ++platform) {
+        CameraPresentation note;
+        note.position = infos[platform].position;
+        note.stated = 90;
+        rig.watched->sink->cameraPresentation(platform, note);
+    }
+    require(rig.presentations.size() == infos.size(), "every camera is told");
+    for (std::size_t told = 0; told < rig.presentations.size(); ++told) {
+        const auto& note = rig.presentations[told];
+        require(note.platformStated == 90, "the platform's own orientation is the second number");
+        if (note.position == CameraPosition::back) {
+            require(note.stated == 0, "the guest is told 0 for the back camera");
+            back = true;
+        } else if (note.position == CameraPosition::front) {
+            require(note.stated == 180, "and 180 for the front camera");
+            front = true;
+        }
+    }
+    require(back && front, "the profile has both");
+    // Without a statement of the application's the guest is told the platform's own, and the two numbers agree.
+    Rig plain;
+    stillStream(plain, 1, 0, 1008, 756, 1);
+    (void)plain.queue(1, 1, 61);
+    require(plain.watched->sink != nullptr, "the session is open");
+    CameraPresentation note;
+    note.position = plain.camera->cameras()[0].position;
+    note.stated = std::uint16_t(plain.camera->cameras()[0].sensorOrientation);
+    plain.watched->sink->cameraPresentation(0, note);
+    require(plain.presentations.size() == 1 && plain.presentations[0].stated == note.stated &&
+                plain.presentations[0].platformStated == note.stated,
+            "the platform's value is what the guest is told where nothing turns it");
 }
 
 void testService()
@@ -3424,6 +3475,7 @@ void testService()
 int main()
 {
     testThePlatformsPresentationReachesTheOwnerUnderTheGuestsNumber();
+    testThePresentationStatesWhatTheGuestIsTold();
     testHandshake();
     testStreamsAndParameters();
     testVideoAndMetadata();

@@ -924,8 +924,12 @@ void camera_line(FixedText &text, CameraLineKind kind,
 			text.text(" ");
 			camera_figure(text, angle);
 		}
-		text.text(" stated ").number(c.stated).text(" turn ")
-			.number(c.turn).text(" earlier ");
+		text.text(" stated ").number(c.stated);
+		/* The platform's own orientation, where the guest is told another
+		 * (a tablet that boots turned). */
+		if (c.platformStated != c.stated)
+			text.text(" platform ").number(c.platformStated);
+		text.text(" turn ").number(c.turn).text(" earlier ");
 		camera_yes_no(text, c.earlier);
 		text.text(" anchor ");
 		camera_size(text, c.anchorWidth, c.anchorHeight);
