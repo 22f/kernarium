@@ -893,14 +893,21 @@ none.
 The network joins again after a suspend and after a restart, and the boot script
 runs without SELinux denials; a joined network keeps its metered and
 Auto-connect settings, a forgotten one stays forgotten and Wi-Fi that is off
-stays off.
+stays off. A guest stopped when the Wi-Fi service lists the network, or when
+the join is first reported, still has the network when the same data starts
+again: it leases within a minute (last observation included), the script logs
+that it left marker 1, and the next boot, after a restart, logs marker 2.
 `UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE` (a `;`-separated list) adds the
 upgrade sections: a data disk on which a release left the network disabled is
 repaired once by the first boot of the release under test and the next boot
 leaves it alone, a disk of a release that never disables the network is left
 alone, and a failed check shows only the warning on both.
 `android17-wifi-network-runner` (tooling) runs its parsers, the host's server
-and the sections' checks against scripted and simulated answers, without a guest.
+and the sections' checks against scripted and simulated answers, without a guest;
+`android17-wifi-network-script` (tooling) runs the boot script itself against a
+fake Wi-Fi framework (a stop before the config store wrote the network, a join
+before the write, a stop right after marker 2, an unanswered listing, a network
+removed during the boot, marker 2 in every state).
 `android-restart-loop` (integration) registers when
 `UML_ANDROID_RESTART_LOOP_RELEASE` names the release: a guest restarted 16 s
 after each kernel start, while `sys.boot_completed` is still unset, ends the

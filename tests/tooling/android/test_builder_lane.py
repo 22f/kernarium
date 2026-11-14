@@ -6208,92 +6208,16 @@ def verify_wifi_network(android_root: Path) -> None:
     ):
         if accepts(tokens, value) is not expected:
             fail(f"the verifier reads {' '.join(tokens)} as {'not ' * expected}accepting {value}")
-    # The script settles and rejoins for bounded times and ends; nothing in it waits for ever.
+    # The script's waits and loops are bounded: nothing in it waits for ever. This is a presence pin of the
+    # structure. What the script decides, and when it sets the marker, is not judged from its text: the
+    # android17-wifi-network-script test runs this tracked file on a fake Wi-Fi framework, and Soong copies
+    # it into the image unchanged (overlay/tools/Android.bp).
     script = (tools / "kernarium_wifi_network.sh").read_text(encoding="utf-8")
     code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
-    for needle in ("settle=", "rejoin=", 'wait_joined "$settle"', 'wait_joined "$rejoin"', '"$waited" -ge "$1"'):
+    for needle in ("settle=", "looks=", 'wait_joined "$settle"', '"$waited" -ge "$1"', '"$tries" -lt 30',
+                   '"$seen" -lt "$looks"', 'timeout "$limit" cmd wifi list-networks'):
         if needle not in code:
             fail(f"the Wi-Fi network script no longer bounds its wait: {needle!r} is gone")
-
-    # Run on stubs, the script sets 2 only once it has seen the station joined: a listing that
-    # fails prints what a forgotten network does, so neither marks the disk done.
-    marker = verifier.WIFI_NETWORK_MARKER
-
-    def run(stored: str, flags: tuple[str, ...], runs: int) -> tuple[list[int], list[str], str]:
-        """Runs the script `runs` times on one guest whose Wi-Fi the flags describe; returns each
-        run's exit status, every recorded call and the marker."""
-        with tempfile.TemporaryDirectory(prefix="wifi-network-script-") as temporary:
-            stubs = Path(temporary)
-            calls = stubs / "calls"
-            state = stubs / "state"
-            properties = state / "properties"
-            properties.mkdir(parents=True)
-            (properties / marker).write_text(stored + "\n")
-            for flag in flags:
-                (state / flag).touch()
-            for name, body in {
-                "getprop": f'cat {properties}/"$1" 2>/dev/null || echo\n',
-                "setprop": f'echo "setprop $*" >> {calls}\necho "$2" > {properties}/"$1"\n',
-                "cmd": (
-                    f'echo "cmd $*" >> {calls}\n'
-                    'case "$1 $2" in\n'
-                    '"wifi list-networks")\n'
-                    f'    if [ -f {state}/saved ] && [ ! -f {state}/listing-fails ]; then\n'
-                    '        echo "Network Id      SSID                         Security type"\n'
-                    '        echo "0            VirtWifi                         open"\n'
-                    '    else\n'
-                    '        echo "No networks"\n'
-                    '    fi\n'
-                    # One listing fails, as a Wi-Fi thread that does not answer in time does.
-                    f'    rm -f {state}/listing-fails ;;\n'
-                    '"wifi status")\n'
-                    f'    if [ -f {state}/off ]; then echo "Wifi is disabled"; exit 0; fi\n'
-                    '    echo "Wifi is enabled"\n'
-                    f'    if [ -f {state}/joined ]; then echo \'Wifi is connected to "VirtWifi"\'\n'
-                    '    else echo "Wifi is not connected"; fi ;;\n'
-                    '"wifi add-network")\n'
-                    f'    touch {state}/saved\n'
-                    f'    if [ -f {state}/joins-when-saved ]; then touch {state}/joined; fi ;;\n'
-                    "*) exit 2 ;;\n"
-                    "esac\n"
-                ),
-                "log": f'echo "log $*" >> {calls}\n',
-                "sleep": f'echo "sleep $*" >> {calls}\n',
-            }.items():
-                (stubs / name).write_text("#!/bin/sh\n" + body)
-                (stubs / name).chmod(0o755)
-            env = {"PATH": f"{stubs}:/usr/bin:/bin"}
-            statuses = [
-                subprocess.run(["/bin/sh", str(tools / "kernarium_wifi_network.sh")], env=env,
-                               capture_output=True, text=True, timeout=120).returncode
-                for _ in range(runs)
-            ]
-            recorded = calls.read_text().splitlines() if calls.exists() else []
-            return statuses, recorded, (properties / marker).read_text().strip()
-
-    for what, stored, flags, runs, expected in (
-        ("a first boot", "", ("joins-when-saved",), 1, ("2", 1, 0)),
-        ("a station that joins within the settle time", "1", ("saved", "joined"), 1, ("2", 0, 0)),
-        ("a disabled network", "1", ("saved", "joins-when-saved"), 1, ("2", 1, 1)),
-        ("a disabled network that does not join once saved again", "1", ("saved",), 1, ("1", 1, 1)),
-        ("a forgotten network", "1", (), 1, ("1", 0, 0)),
-        ("Wi-Fi that is off", "1", ("saved", "off"), 1, ("1", 0, 0)),
-        ("a listing that fails", "1", ("saved", "listing-fails", "joins-when-saved"), 1, ("1", 0, 0)),
-        ("a listing that fails, then a boot that lists the network", "1",
-         ("saved", "listing-fails", "joins-when-saved"), 2, ("2", 1, 1)),
-        ("a joined network", "2", ("saved",), 1, ("2", 0, 0)),
-    ):
-        statuses, recorded, marked = run(stored, flags, runs)
-        saves = len([line for line in recorded if line.startswith("cmd wifi add-network")])
-        notes = len([line for line in recorded if line.startswith("log ")])
-        if statuses != [0] * runs or (marked, saves, notes) != expected:
-            fail(
-                f"the Wi-Fi network script on {what}: exits {statuses}, marker {marked!r}, saves {saves}, "
-                f"repair lines {notes}; expected marker {expected[0]!r}, saves {expected[1]}, "
-                f"repair lines {expected[2]}"
-            )
-        if stored == "2" and any(line.startswith("cmd ") for line in recorded):
-            fail(f"the Wi-Fi network script asks the Wi-Fi service at marker 2: {recorded}")
 
 
 def verify_pinner_overlay(android_root: Path) -> None:
