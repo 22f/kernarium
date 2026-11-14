@@ -1895,20 +1895,26 @@ void theFrontStillLimitChangesOnlyThePhotoSizesOfTheTablesTheTestsModel()
     require(laptop[0].photoSizes == Sizes({{1920, 1080}}), "a laptop's 1080p camera is as it was");
 }
 
-// The rule never leaves a front camera with no still size it lists: when no format lists a size within the limit
-// every format keeps its smallest, and a camera that lists none lists none.
-void aFrontCameraAlwaysKeepsAStillSizeItLists()
+// The limit is a ceiling with no exception: when no format of a front camera lists a size within it, every format lists
+// none, and so the camera is offered no native still (Android derives its JPEG sizes from the offered video) and its
+// photo output has no maximum to prepare. A format that lists no usable size lists none either.
+void aFrontCameraNeverKeepsASizeAboveTheLimit()
 {
     const auto big = limitedStillFormats(CameraPosition::front, std::vector<VideoFormatFacts> {fmt(3840, 2160, {{8064, 6048}, {4032, 3024}, {3840, 2160}}),
                                                                                             fmt(1920, 1080, {{4032, 3024}, {0, 0}})});
-    require(big[0].photoSizes == Sizes({{3840, 2160}}) && big[1].photoSizes == Sizes({{4032, 3024}}),
-            "nothing inside the limit anywhere: each format keeps its smallest listed size");
-    require(photoMaximum(big[0], 12'700'000) == std::optional<CameraStillSize>(CameraStillSize {3840, 2160}), "which the output then prepares");
-    require(limitedStillFormats(CameraPosition::front, std::vector<VideoFormatFacts> {fmt(1920, 1080, {}), fmt(640, 480, {{0, 0}})})[0].photoSizes.empty(),
+    require(big.size() == 2 && big[0].photoSizes.empty() && big[1].photoSizes.empty(), "nothing inside the limit anywhere: every format lists none");
+    for (const auto& format : big) {
+        require(!photoMaximum(format, 12'700'000) && stillsOf(format, 12'700'000).empty(), "so there is no output maximum and no offered still");
+        require(!photoMaximum(format, 0) && stillsOf(format, 0).empty(), "whatever the tier's cap");
+    }
+    require(limitedStillFormats(CameraPosition::front, std::vector<VideoFormatFacts> {fmt(1920, 1080, {}), fmt(640, 480, {{0, 0}})})[1].photoSizes.empty(),
             "a format that lists nothing usable lists nothing");
     const auto mixed = limitedStillFormats(CameraPosition::front, std::vector<VideoFormatFacts> {fmt(3840, 2160, {{4032, 3024}}), fmt(1920, 1080, {{1920, 1080}})});
-    require(mixed[0].photoSizes.empty() && mixed[1].photoSizes == Sizes({{1920, 1080}}),
-            "a size inside the limit on another format: this one lists none, and the camera still has its stills");
+    require(mixed[0].photoSizes.empty() && mixed[1].photoSizes == Sizes({{1920, 1080}}), "a size inside the limit on another format: this one lists none");
+    // The one place the position's limit is read from, for a list that belongs to no format.
+    require(stillWithinPositionLimit(CameraPosition::front, {2016, 1512}) && !stillWithinPositionLimit(CameraPosition::front, {2560, 1440}) &&
+                stillWithinPositionLimit(CameraPosition::back, {8064, 6048}) && stillWithinPositionLimit(CameraPosition::external, {8064, 6048}),
+            "a front camera's stills are within 3.2 MP, no other camera's are limited here");
 }
 
 // A size is offered, prepared and made together: the offer (stillsOf), the photo output's maximum (photoMaximum) and
@@ -1960,46 +1966,42 @@ void theFrontStillLimitLeavesTheVideoOfferAndDecidesNoConcurrency()
     require(keepsConcurrency(limited, rules), "it would on the limited formats: the limit must not be what decides it");
 }
 
-// The same rule over generated tables: a front camera that lists a usable size keeps one, every kept size was listed,
-// within the limit when any size on the table is, the formats are otherwise as listed, and limiting twice is limiting
-// once.
-void everyGeneratedFrontTableKeepsAStillAndTheLimit()
+// The same rule over generated tables: nothing above the limit survives on a front camera, ever; every kept size was
+// listed, and every listed size within the limit is kept, in its order; the formats are otherwise as listed; limiting
+// twice is limiting once; and a back camera is not limited.
+void everyGeneratedFrontTableKeepsNothingAboveTheLimit()
 {
     constexpr std::uint64_t seed = 20261114;
     constexpr int tables = 20000;
     Rng rng {seed};
-    std::uint64_t outside = 0, fallbacks = 0;
+    std::uint64_t outside = 0, emptied = 0;
     for (int table = 0; table < tables; ++table) {
         const std::string where = " (seed " + std::to_string(seed) + ", table " + std::to_string(table) + ")";
         const auto formats = generateTable(rng);
         const auto limited = limitedStillFormats(CameraPosition::front, formats);
         require(limited.size() == formats.size(), "one format per format" + where);
-        bool listedUsable = false, listedInside = false, keptUsable = false;
-        for (const auto& format : formats)
-            for (const auto& size : format.photoSizes) {
-                const bool usable = size.width != 0 && size.height != 0;
-                listedUsable = listedUsable || usable;
-                listedInside = listedInside || (usable && areaOfSize(size) <= frontStillMaximumPixels);
-            }
         for (std::size_t index = 0; index < formats.size(); ++index) {
             require(sameButForThePhotoSizes(formats[index], limited[index]), "only the photo sizes change" + where);
-            for (const auto& size : limited[index].photoSizes) {
-                keptUsable = keptUsable || (size.width != 0 && size.height != 0);
-                require(std::find(formats[index].photoSizes.begin(), formats[index].photoSizes.end(), size) != formats[index].photoSizes.end(),
-                        "a kept size was listed" + where);
-                require(!listedInside || areaOfSize(size) <= frontStillMaximumPixels, "within the limit when any size is" + where);
+            Sizes within;
+            for (const auto& size : formats[index].photoSizes) {
                 outside += areaOfSize(size) > frontStillMaximumPixels;
+                if (size.width != 0 && size.height != 0 && areaOfSize(size) <= frontStillMaximumPixels) within.push_back(size);
             }
-            if (!listedInside && !limited[index].photoSizes.empty()) {
-                ++fallbacks;
-                require(limited[index].photoSizes.size() == 1, "the fallback keeps one size" + where);
+            require(limited[index].photoSizes == within, "exactly the listed sizes within the limit survive, in order" + where);
+            for (const auto& size : limited[index].photoSizes)
+                require(areaOfSize(size) <= frontStillMaximumPixels, "nothing above the limit survives" + where);
+            // What a camera is offered and prepared can never be above it either, whatever the tier's cap.
+            for (const std::uint64_t cap : {std::uint64_t(0), std::uint64_t(12'700'000)}) {
+                for (const auto& size : stillsOf(limited[index], cap)) require(areaOfSize(size) <= frontStillMaximumPixels, "no offered size above it" + where);
+                const auto maximum = photoMaximum(limited[index], cap);
+                require(!maximum || areaOfSize(*maximum) <= frontStillMaximumPixels, "no output maximum above it" + where);
             }
+            emptied += limited[index].photoSizes.empty() && !formats[index].photoSizes.empty();
         }
-        require(keptUsable == listedUsable, "a front camera that lists a usable size keeps one" + where);
         require(limitedStillFormats(CameraPosition::front, limited) == limited, "limiting twice is limiting once" + where);
         require(limitedStillFormats(CameraPosition::back, formats) == formats, "a back camera is not limited" + where);
     }
-    require(outside > 0 && fallbacks > 0, "the generated tables reach the fallback");
+    require(outside > 0 && emptied > 0, "the generated tables reach sizes above the limit and formats left with none");
 }
 
 // The second real front table, an iPhone 15 Pro Max's (44 formats): its multi-camera formats make 4032x3024 and
@@ -2102,10 +2104,10 @@ int main()
     everyGeneratedTableHoldsTheInvariants();
     theFrontStillLimitIsAboutThreeMegapixelsOnAnyTable();
     theFrontStillLimitChangesOnlyThePhotoSizesOfTheTablesTheTestsModel();
-    aFrontCameraAlwaysKeepsAStillSizeItLists();
+    aFrontCameraNeverKeepsASizeAboveTheLimit();
     theOfferTheOutputAndTheCaptureAgreeOnTheLimitedList();
     theFrontStillLimitLeavesTheVideoOfferAndDecidesNoConcurrency();
     theFrontStillLimitOnTheSecondRealFrontTable();
-    everyGeneratedFrontTableKeepsAStillAndTheLimit();
+    everyGeneratedFrontTableKeepsNothingAboveTheLimit();
     return 0;
 }

@@ -40,7 +40,9 @@ application's statements (the sensor orientation, the rotation that
   camera is composed; the image keeps them, and the launcher's `--camera-tier=`
   exercises them. A front camera's stills are limited to about 3 MP at either
   tier (`frontStillMaximumPixels`: its still session's memory grows with the
-  photo's pixels); the back cameras' limit is the tier's.
+  photo's pixels), with no exception: a front camera with no size within it is
+  offered no native JPEG, and Android derives its JPEG sizes from the video. The
+  back cameras' limit is the tier's.
 - **Memory.** A live session holds host memory outside the guest's RAM. The
   device holds the host to what it counts (`camera_tiers.hpp`, `CameraUse`,
   given in `CameraDeviceOptions::use`), and the application takes the matching
@@ -118,11 +120,12 @@ application's statements (the sensor orientation, the rotation that
   its **anchor**, and offers only what the anchor makes: its stills up to the
   tier's cap (a front camera's up to `frontStillMaximumPixels`, from the
   formats `limitedStillFormats` returns, which the platform's photo output
-  reads too; whether a camera keeps its concurrency is decided on the formats as
-  listed), the video sizes inside it whose capture buffers fit the reserve (one
-  byte count, `alignedFrameBytes` in `platform/frame_bytes.hpp`, for the offer's
-  bound and the reserve), and its whole frame rates up to 30 (`videoRateCap`:
-  photos win over fast streams).
+  reads too, and in the flat list of a host without formats; whether a camera
+  keeps its concurrency is decided on the formats as listed), the video sizes
+  inside it whose capture buffers fit the reserve (one byte count,
+  `alignedFrameBytes` in `platform/frame_bytes.hpp`, for the offer's bound and
+  the reserve), and its whole frame rates up to 30 (`videoRateCap`: photos win
+  over fast streams).
   The anchor is chosen once when the cameras are arranged, by the key in
   `photo_dimensions.hpp`: a whole rate within 30, then the largest still, then
   the largest video box, then the smaller format, the lower minimum rate, a

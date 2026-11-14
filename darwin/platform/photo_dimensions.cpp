@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <iterator>
 #include <limits>
 #include <numeric>
 
@@ -122,25 +121,21 @@ std::vector<CameraStillSize> stillsMadeByAnyFormat(std::span<const VideoFormatFa
     return sizes;
 }
 
+bool stillWithinPositionLimit(CameraPosition position, CameraStillSize size) noexcept
+{
+    return position != CameraPosition::front || areaOf(size) <= frontStillMaximumPixels;
+}
+
 std::vector<VideoFormatFacts> limitedStillFormats(CameraPosition position, std::span<const VideoFormatFacts> formats)
 {
     std::vector<VideoFormatFacts> limited(formats.begin(), formats.end());
     if (position != CameraPosition::front) return limited;
-    const auto usable = [](CameraStillSize size) { return size.width != 0 && size.height != 0; };
-    const auto inside = [&](CameraStillSize size) { return usable(size) && areaOf(size) <= frontStillMaximumPixels; };
-    const bool somewhere = std::any_of(limited.begin(), limited.end(), [&](const VideoFormatFacts& format) {
-        return std::any_of(format.photoSizes.begin(), format.photoSizes.end(), inside);
-    });
-    for (auto& format : limited) {
-        std::vector<CameraStillSize> kept;
-        if (somewhere) {
-            std::copy_if(format.photoSizes.begin(), format.photoSizes.end(), std::back_inserter(kept), inside);
-        } else {
-            for (const auto& size : format.photoSizes)
-                if (usable(size) && (kept.empty() || largerPhoto(kept.front(), size))) kept = {size};
-        }
-        format.photoSizes = std::move(kept);
-    }
+    // A size without a dimension is none (stillsOf and photoMaximum take it so too).
+    const auto dropped = [&](CameraStillSize size) {
+        return size.width == 0 || size.height == 0 || !stillWithinPositionLimit(position, size);
+    };
+    for (auto& format : limited)
+        format.photoSizes.erase(std::remove_if(format.photoSizes.begin(), format.photoSizes.end(), dropped), format.photoSizes.end());
     return limited;
 }
 

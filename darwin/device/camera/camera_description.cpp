@@ -338,9 +338,10 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
             camera.info.stillSizes = entry.offer.stills;
         } else {
             camera.video = videoModes(info, limits);
-            // Every size works with every format.
+            // Every size works with every format, within the tier's cap and the limit of the camera's position.
             for (const auto& size : info.stillSizes)
-                if (std::uint64_t(size.width) * size.height <= limits.maximumStillPixels) camera.jpegSizes.push_back(size);
+                if (std::uint64_t(size.width) * size.height <= limits.maximumStillPixels && uml::platform::stillWithinPositionLimit(info.position, size))
+                    camera.jpegSizes.push_back(size);
         }
         // RAW is advertised only for a lens whose colour data is known, and, for
         // a camera that has an anchor, was learned in it: another format may
