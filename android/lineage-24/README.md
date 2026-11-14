@@ -457,9 +457,15 @@ the Virtio sound driver's minimum period to 5 ms for it. The output reports its
 position from its ALSA device, less the frames in the ring and the latency the
 host reports for its output (route `p0005`). The input's ALSA read alone
 paces its I/O thread, and the frames its client takes keep to real time: a read
-waits for its frames until 100 ms after the last of them is due, makes the
-missing ones up then, and drops the frames that come after their time was made
-up, so that the audio of a recording holds what its timestamps span (route
+waits for its frames until 100 ms after the last of them is due and makes the
+missing ones up then, so that a stall of the device leaves the audio of a
+recording as long as its timestamps span. The count may lead the clock by that
+100 ms at most and the frames beyond are dropped; with the host's capture credit
+capped at four periods a stall causes none, they are stale backlog or come from
+a device faster than the clock. A count more than 200 ms behind the clock as a
+read starts or ends restarts the clock and makes nothing up, so a process that
+stood still leaves a gap in the audio as in the video. The input's position
+keeps its client's count and reports the time its last frame was due (route
 `p0005`). A low-latency AAudio stream with a data callback that leaves its
 capacity unspecified starts with a two-burst buffer and grows it by one burst
 per underrun until the app sets a size (route `p0028`). A Virtio battery device
