@@ -41,7 +41,8 @@ enum class CameraStillStage : std::uint8_t {
     fileSize,
     // The device could not put the file into the guest's buffer.
     guestBuffer,
-    // The platform did not end the capture in time.
+    // The capture was not ended in time: the platform did not end it, or the
+    // host's budget kept a whole request waiting until its time ran out.
     timeout,
 };
 

@@ -1052,6 +1052,14 @@ public:
         return failure;
     }
 
+    /* Whether an interruption or a recovery of its camera ended a capture: not a fault of the capture, so it is not
+     * reported (`reportStillFailure`), whether the platform ended it (`deliverStill`) or its time did (`expireGroups`).
+     * A capture that has not started has no serial to span a boundary with: only an interruption that is on counts. */
+    [[nodiscard]] static bool endedByInterruption(const Group& group, const Runtime& runtime) noexcept
+    {
+        return runtime.interruption != Interruption::none || (group.fired && group.fireSerial < runtime.boundary);
+    }
+
     /* A capture that ends makes room for the captures that wait for it. */
     void eraseGroup(std::uint64_t token)
     {
@@ -1338,7 +1346,7 @@ public:
         const bool spansBoundary = group->fireSerial < runtime.boundary;
         if (!result.ok || spansBoundary || runtime.interruption != Interruption::none) {
             // An interruption or a recovery that ended the capture is not a fault of the capture.
-            if (!result.ok && !spansBoundary && runtime.interruption == Interruption::none) {
+            if (!result.ok && !endedByInterruption(*group, runtime)) {
                 auto failure = result.failure;
                 if (failure.stage == uml::platform::CameraStillStage::none) failure.stage = uml::platform::CameraStillStage::unknown;
                 reportStillFailure(*group, runtime, failure);
@@ -1370,6 +1378,9 @@ public:
         // The first member that fails says why the capture did (`reportStillFailure`): what the platform said of it, and
         // the stage the device found.
         std::optional<uml::platform::CameraStillFailure> failure;
+        // A capture that delivered a picture did not fail, whatever one of its parts did: that part's buffer has failed
+        // and the capture is not reported.
+        bool delivered = false;
         const auto fails = [&](uml::platform::CameraStillStage stage, std::uint32_t encodedWidth = 0, std::uint32_t encodedHeight = 0) {
             if (failure) return;
             failure = result.failure;
@@ -1429,9 +1440,10 @@ public:
                 fails(result.failure.stage != uml::platform::CameraStillStage::none ? result.failure.stage
                                                                                     : uml::platform::CameraStillStage::missingData);
             }
+            delivered = delivered || ok;
             complete(stream.id, member.held, member.held.cookie, ok ? 0 : VIRTIO_VIDEO_DEQUEUE_FLAG_ERR, ok ? size : 0, sequence);
         }
-        if (failure) reportStillFailure(*group, runtime, *failure);
+        if (failure && !delivered) reportStillFailure(*group, runtime, *failure);
         pushMeta(runtime, meta, 0);
         freePayload(result);
         eraseGroup(result.token);
@@ -1480,10 +1492,11 @@ public:
                 ++index;
                 continue;
             }
-            // A capture that started and was not ended in time; one that never reached the platform is the guest's
-            // own (a group it did not complete, or one that waited for room).
-            if (group.fired) {
-                if (const auto* runtime = runtimeOf(group.camera))
+            // A capture that was not ended in time, one the platform did not end or a whole one that waited for room, is
+            // reported, unless an interruption of its camera ended it; a group the guest did not complete is the guest's
+            // own.
+            if (group.fired || group.waiting) {
+                if (const auto* runtime = runtimeOf(group.camera); runtime != nullptr && !endedByInterruption(group, *runtime))
                     reportStillFailure(group, *runtime, failureAt(uml::platform::CameraStillStage::timeout));
             }
             failGroup(group, 0);
