@@ -15,7 +15,9 @@ from __future__ import annotations
 
 __import__("sys").dont_write_bytecode = True
 
+import contextlib
 import importlib.util
+import io
 import math
 from pathlib import Path
 import sys
@@ -146,22 +148,84 @@ class DisplayDumpTests(unittest.TestCase):
         self.assertEqual(runner.parse_render_rates("no rate"), [])
 
 
+def frame_lines(*rates: float) -> str:
+    """The launcher's frame statistics lines of a measurement, in the order they were printed."""
+    return "\n".join(
+        f"Native display frames: guest {rate}/s presented {rate}/s dropped 0.0/s (0.0%) cpu-fallback 0.0/s"
+        for rate in rates)
+
+
 class FrameStatisticsTests(unittest.TestCase):
-    def test_the_highest_of_the_busy_windows(self) -> None:
-        log = "\n".join(
-            f"Native display frames: guest {guest}/s presented {presented}/s dropped 0.0/s (0.0%) cpu-fallback 0.0/s"
-            for guest, presented in ((1.1, 1.1), (30.2, 30.0), (29.9, 29.9), (30.0, 31.0), (0.0, 0.0)))
-        self.assertEqual(runner.presented_rate(log), 31.0)
+    def test_the_first_line_after_the_start_is_not_the_measurements(self) -> None:
+        # A capped step after an uncapped one, as the quiet host's log had it: the uncapped step's full
+        # windows (60.0) were printed before the capped measurement began and are not in its slice; the
+        # window that ended after the start (216 frames in 5 s, 43.0) is the previous step's trailing
+        # one, then comes the capped step's own full window (150 frames, 30.0). The 43.0 must not be
+        # the figure.
+        self.assertEqual(runner.presented_rate(frame_lines(43.0, 30.0)), 30.0)
+        self.assertEqual(runner.presented_rate(frame_lines(43.0, 30.0, 30.2)), 30.2)
 
-    def test_the_windows_at_the_edges_of_a_run_do_not_lower_its_rate(self) -> None:
-        log = "\n".join(
-            f"Native display frames: guest {rate}/s presented {rate}/s dropped 0.0/s (0.0%) cpu-fallback 0.0/s"
-            for rate in (0.0, 18.8, 30.6))
-        self.assertEqual(runner.presented_rate(log), 30.6)
+    def test_an_uncapped_step_after_a_capped_one_reads_its_own_full_window(self) -> None:
+        # The capped step's trailing window (28.5) leads; the uncapped step's full windows follow.
+        self.assertEqual(runner.presented_rate(frame_lines(28.5, 60.0)), 60.0)
+        self.assertEqual(runner.presented_rate(frame_lines(28.5, 45.2, 60.0)), 60.0)
+        self.assertEqual(runner.presented_rate(frame_lines(0.0, 18.8, 30.6)), 30.6)
 
-    def test_an_idle_log_has_no_rate(self) -> None:
-        self.assertIsNone(runner.presented_rate("Native display frames: guest 0.0/s presented 0.0/s dropped 0.0/s"))
+    def test_the_windows_at_the_end_of_a_run_do_not_lower_its_rate(self) -> None:
+        self.assertEqual(runner.presented_rate(frame_lines(43.0, 30.2, 12.0)), 30.2)
+
+    def test_a_measurement_without_a_full_busy_window_has_no_figure(self) -> None:
+        self.assertIsNone(runner.presented_rate(frame_lines(43.0)))
+        self.assertIsNone(runner.presented_rate(frame_lines(43.0, 0.0)))
+        self.assertIsNone(runner.presented_rate(frame_lines(43.0, 4.9, 0.3)))
         self.assertIsNone(runner.presented_rate(""))
+        self.assertIsNone(runner.presented_rate("Native display frames: guest 0.0/s presented 0.0/s dropped 0.0/s"))
+
+
+class CapCheckTests(unittest.TestCase):
+    """check_cap against a guest that answers from a script: the cap's checks and the measurement's length."""
+
+    @staticmethod
+    def check(guest, capped: bool, label: str) -> None:
+        with contextlib.redirect_stdout(io.StringIO()):
+            runner.check_cap(guest, capped, label)
+
+    class Guest:
+        def __init__(self, capped: bool, clock: float, host: float | None) -> None:
+            self.capped, self.clock, self.host = capped, clock, host
+            self.frames: list[int] = []
+
+        def alive(self) -> None:
+            pass
+
+        def display(self):
+            return runner.DisplayDump(3 if self.capped else 0, True, 30.0 if self.capped else None, self.capped)
+
+        def render_rates(self) -> list[float]:
+            return [30.0] if self.capped else [59.99]
+
+        def present_rate(self, frames: int = runner.PRESENT_FRAMES) -> tuple[float, float | None]:
+            self.frames.append(frames)
+            return self.clock, self.host
+
+    def test_a_capped_and_an_uncapped_step_measure_ten_seconds_each(self) -> None:
+        capped = self.Guest(True, 29.7, 30.0)
+        self.check(capped, True, "severe")
+        self.assertEqual(capped.frames, [runner.PRESENT_FRAMES])
+        uncapped = self.Guest(False, 59.4, 60.0)
+        self.check(uncapped, False, "none")
+        self.assertEqual(uncapped.frames, [runner.UNCAPPED_PRESENT_FRAMES])
+        self.assertEqual(runner.UNCAPPED_PRESENT_FRAMES, 2 * runner.PRESENT_FRAMES)
+
+    def test_a_step_without_a_figure_fails_and_says_why(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "severe: .*no full busy statistics window"):
+            self.check(self.Guest(True, 29.7, None), True, "severe")
+
+    def test_a_host_rate_outside_the_band_fails(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "the host presented 43.0 frames a second"):
+            self.check(self.Guest(True, 29.7, 43.0), True, "severe")
+        with self.assertRaisesRegex(runner.Failure, "the host presented 42.5 frames a second"):
+            self.check(self.Guest(False, 58.4, 42.5), False, "none")
 
 
 class RecordTests(unittest.TestCase):

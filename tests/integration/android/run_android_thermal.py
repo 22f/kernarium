@@ -214,11 +214,14 @@ FRAME_LINE = re.compile(r"Native display frames: guest (\d+(?:\.\d+)?)/s present
 
 
 def presented_rate(log_text: str) -> float | None:
-    """The highest presented rate of the host's frame statistics lines that show activity.
+    """The highest presented rate of a measurement's full statistics windows, or None when it has none.
 
-    A measurement starts and ends inside windows of FRAME_STATS_SECONDS, so the windows at its edges are
-    partly idle and only the one it filled is its rate."""
-    rates = [float(match[2]) for match in FRAME_LINE.finditer(log_text)]
+    The launcher prints a line every FRAME_STATS_SECONDS for the window that just ended. The first line
+    printed after a measurement starts is not the measurement's: its window began earlier and holds the
+    previous step's last frames (a 43.0 line of an uncapped step ahead of a capped one), so it is ignored.
+    Every later line ends inside the measurement, and the busy ones are its windows. A measurement of two
+    windows or more has one; with none there is no figure and the caller fails."""
+    rates = [float(match[2]) for match in FRAME_LINE.finditer(log_text)][1:]
     busy = [rate for rate in rates if rate >= 5.0]
     return max(busy) if busy else None
 
@@ -419,7 +422,8 @@ def check_cap(guest: Guest, capped: bool, label: str) -> None:
     if not low <= clock <= high:
         raise Failure(f"{label}: kernarium_vk_present ran at {clock:.1f} fps, not in {low} to {high}")
     if host is None:
-        raise Failure(f"{label}: the launcher printed no frame statistics (UML_GPU_FRAME_STATS)")
+        raise Failure(f"{label}: the launcher printed no full busy statistics window inside the measurement "
+                      "(UML_GPU_FRAME_STATS; the first line after the start is not the measurement's)")
     if not low <= host <= high:
         raise Failure(f"{label}: the host presented {host:.1f} frames a second, not in {low} to {high}")
 
