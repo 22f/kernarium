@@ -139,6 +139,14 @@ std::vector<VideoFormatFacts> limitedStillFormats(CameraPosition position, std::
     return limited;
 }
 
+std::uint32_t sensorOrientationOf(CameraPosition position, double portraitAngle) noexcept
+{
+    if (position == CameraPosition::external) return 90;
+    if (!std::isfinite(portraitAngle)) return 0;
+    const double quarters = std::fmod(std::round(portraitAngle / 90.0), 4.0);
+    return std::uint32_t(quarters < 0 ? quarters + 4 : quarters) * 90;
+}
+
 bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested) noexcept
 {
     return (resolved.width == 0 && resolved.height == 0) || resolved == requested;

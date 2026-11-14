@@ -45,7 +45,6 @@ void theValuesAreTheApplicationsWords()
         "the levels");
     require(responseValue(PressureReaction::none) == KERNARIUM_RUNTIME_MEMORY_RESPONSE_NONE);
     require(responseValue(PressureReaction::responding) == KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED);
-    require(responseValue(PressureReaction::withheld) == KERNARIUM_RUNTIME_MEMORY_RESPONSE_WITHHELD);
     require(responseValue(PressureReaction::underway) == KERNARIUM_RUNTIME_MEMORY_RESPONSE_UNDER_WAY);
     require(KERNARIUM_RUNTIME_MEMORY_RESPONSE_NONE == 0 && KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED == 1
             && KERNARIUM_RUNTIME_MEMORY_RESPONSE_WITHHELD == 2 && KERNARIUM_RUNTIME_MEMORY_RESPONSE_UNDER_WAY == 3,
@@ -60,14 +59,14 @@ void theReceiverPassesEachReportInOrder()
     require(reports.callbacks == 0, "no callback is set yet");
 
     receiver.set(record, &reports);
-    receiver.publish({PressureLevel::warn, PressureReaction::responding});
-    receiver.publish({PressureLevel::warn, PressureReaction::withheld});
+    receiver.publish({PressureLevel::critical, PressureReaction::responding});
+    receiver.publish({PressureLevel::warn, PressureReaction::none});
     receiver.publish({PressureLevel::critical, PressureReaction::underway});
     receiver.publish({PressureLevel::normal, PressureReaction::none});
     require((reports.heard
                 == std::vector<std::pair<int, int>> {
-                    {KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING, KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED},
-                    {KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING, KERNARIUM_RUNTIME_MEMORY_RESPONSE_WITHHELD},
+                    {KERNARIUM_RUNTIME_MEMORY_PRESSURE_CRITICAL, KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED},
+                    {KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING, KERNARIUM_RUNTIME_MEMORY_RESPONSE_NONE},
                     {KERNARIUM_RUNTIME_MEMORY_PRESSURE_CRITICAL, KERNARIUM_RUNTIME_MEMORY_RESPONSE_UNDER_WAY},
                     {KERNARIUM_RUNTIME_MEMORY_PRESSURE_NORMAL, KERNARIUM_RUNTIME_MEMORY_RESPONSE_NONE},
                 }),
