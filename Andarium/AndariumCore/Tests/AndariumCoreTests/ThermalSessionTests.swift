@@ -77,18 +77,20 @@ struct ThermalSessionTests {
 
     @Test func eachChangeOfTheSeverityIsOneRecord() throws {
         let rig = try connected()
+        rig.session.observe(.serious)
+        #expect(rig.guest.record() == (try frame("severe")))
+        rig.session.observe(.serious)
         rig.session.observe(.critical)
         #expect(rig.guest.record() == (try frame("critical")))
         rig.session.observe(.critical)
-        rig.session.observe(.serious)
         rig.session.settle()
         #expect(!rig.guest.hasPending(), "a repeated reading was sent")
         #expect(rig.session.severity == .critical)
     }
 
-    @Test func fairAndSeriousSendNothingAndLeaveTheGuestAtNone() throws {
+    @Test func fairSendsNothingAndHoldsNothing() throws {
         let rig = try connected()
-        for state in [HostThermalState.fair, .serious, .fair, .nominal, .serious] {
+        for state in [HostThermalState.fair, .nominal, .fair, .fair, .nominal] {
             rig.session.observe(state)
             rig.session.settle()
             #expect(!rig.guest.hasPending(), "\(state) sent a record")
@@ -96,6 +98,42 @@ struct ThermalSessionTests {
         }
         #expect(rig.timer.delays.isEmpty, "a state that is not reported asked for a timer")
         #expect(rig.caps.count == 0)
+    }
+
+    @Test func seriousSendsSevereAndFairAfterItIsHeldForTheWait() throws {
+        let rig = try connected()
+        rig.session.observe(.serious)
+        #expect(rig.guest.record() == (try frame("severe")))
+        rig.clock.advance(seconds: 40)
+        rig.session.observe(.fair)
+        rig.session.settle()
+        #expect(rig.timer.delays.last == 120_000_000_000)
+        #expect(!rig.guest.hasPending(), "the fall to fair was sent at once")
+        rig.clock.advance(seconds: 120)
+        rig.timer.fireLatest()
+        #expect(rig.guest.record() == (try frame("none")))
+        #expect(rig.session.severity == .none)
+    }
+
+    @Test func seriousCriticalSeriousSendsEachRiseHoldsCriticalAndThenFallsToSevere() throws {
+        let rig = try connected()
+        rig.session.observe(.serious)
+        #expect(rig.guest.record() == (try frame("severe")))
+        rig.clock.advance(seconds: 30)
+        rig.session.observe(.critical)
+        #expect(rig.guest.record() == (try frame("critical")))
+        rig.clock.advance(seconds: 30)
+        rig.session.observe(.serious)
+        rig.session.settle()
+        #expect(!rig.guest.hasPending(), "the fall to serious was sent at once")
+        #expect(rig.session.severity == .critical)
+        #expect(rig.timer.delays.last == 120_000_000_000)
+        rig.clock.advance(seconds: 120)
+        rig.timer.fireLatest()
+        #expect(rig.guest.record() == (try frame("severe")))
+        #expect(rig.session.severity == .severe)
+        rig.session.settle()
+        #expect(rig.caps.count == 1)
     }
 
     @Test func criticalSeriousCriticalWithinTheHoldSendsCriticalOnceAndNeverLowersIt() throws {
@@ -117,36 +155,41 @@ struct ThermalSessionTests {
         rig.session.settle()
         #expect(rig.session.severity == .critical, "the voided wait lowered the severity")
         #expect(!rig.guest.hasPending())
-        // The next fall starts a wait of its own and ends the cap after it.
+        // The next fall starts a wait of its own and ends critical after it, at serious.
         rig.session.observe(.serious)
         rig.session.settle()
         rig.clock.advance(seconds: 120)
         rig.timer.fireLatest()
-        #expect(rig.guest.record() == (try frame("none")))
+        #expect(rig.guest.record() == (try frame("severe")))
         #expect(rig.caps.count == 1)
     }
 
     @Test func aReadingFromBeforeTheRunIsTheStateItBeginsIn() throws {
-        let rig = rig()
-        rig.session.observe(.critical)
-        rig.session.update(running: true, booted: false)
-        #expect(rig.guest.record() == (try frame("critical")))
-        #expect(thermalEventually { rig.caps.count == 1 })
+        for (state, name) in [(HostThermalState.critical, "critical"), (.serious, "severe")] {
+            let rig = rig()
+            rig.session.observe(state)
+            rig.session.update(running: true, booted: false)
+            #expect(rig.guest.record() == (try frame(name)), "\(state)")
+            #expect(thermalEventually { rig.caps.count == 1 }, "\(state) was not capped from its first reading")
+        }
     }
 
-    @Test func aReadingFromBeforeTheRunThatIsSeriousIsNotCapped() throws {
+    @Test func aReadingFromBeforeTheRunThatIsFairIsNotCapped() throws {
         let rig = rig()
-        rig.session.observe(.serious)
+        rig.session.observe(.fair)
         rig.session.update(running: true, booted: false)
         #expect(rig.guest.record() == (try frame("none")))
         rig.session.settle()
         #expect(rig.caps.count == 0)
+        rig.session.observe(.serious)
+        #expect(rig.guest.record() == (try frame("severe")))
+        #expect(thermalEventually { rig.caps.count == 1 })
     }
 
     @Test func theFallComesOnTheTimerAfterOneHundredTwentySeconds() throws {
         let rig = try connected()
-        rig.session.observe(.critical)
-        #expect(rig.guest.record() == (try frame("critical")))
+        rig.session.observe(.serious)
+        #expect(rig.guest.record() == (try frame("severe")))
         rig.clock.advance(seconds: 100)
         rig.session.observe(.nominal)
         rig.session.settle()
@@ -156,7 +199,7 @@ struct ThermalSessionTests {
         rig.clock.advance(seconds: 119)
         rig.timer.fireLatest()
         rig.session.settle()
-        #expect(rig.session.severity == .critical)
+        #expect(rig.session.severity == .severe)
         #expect(rig.timer.delays.last == 1_000_000_000)
         rig.clock.advance(seconds: 1)
         rig.timer.fireLatest()
@@ -166,22 +209,22 @@ struct ThermalSessionTests {
 
     @Test func aTimerRequestThatANewerOneReplacedChangesNothing() throws {
         let rig = try connected()
-        rig.session.observe(.critical)
+        rig.session.observe(.serious)
         rig.session.observe(.nominal)
         rig.session.settle()
-        rig.session.observe(.critical)
+        rig.session.observe(.serious)
         rig.session.observe(.nominal)
         rig.session.settle()
         #expect(rig.timer.delays.count == 2, "each fall asks for a timer")
         rig.clock.advance(seconds: 60)
         rig.timer.fireFirst()
         rig.session.settle()
-        #expect(rig.session.severity == .critical, "an old timer lowered the severity")
+        #expect(rig.session.severity == .severe, "an old timer lowered the severity")
     }
 
     @Test func aReadingOnReturningToTheForegroundFindsTheFallDue() throws {
         let rig = try connected()
-        rig.session.observe(.critical)
+        rig.session.observe(.serious)
         _ = rig.guest.record()
         rig.session.observe(.nominal)
         rig.session.settle()
@@ -194,22 +237,22 @@ struct ThermalSessionTests {
 
     @Test func aLostConnectionIsMadeAgainWithTheCurrentSeverity() throws {
         let rig = try connected()
-        rig.session.observe(.critical)
+        rig.session.observe(.serious)
         _ = rig.guest.record()
         rig.guest.dropLatest()
         #expect(thermalEventually { rig.guest.connections == 2 && rig.session.isConnected })
-        #expect(rig.guest.record() == (try frame("critical")))
+        #expect(rig.guest.record() == (try frame("severe")))
     }
 
     @Test func aGuestThatRestartsItselfIsToldAgainAndTheCapIsNotAnnouncedAgain() throws {
         let rig = try connected()
-        rig.session.observe(.critical)
+        rig.session.observe(.serious)
         _ = rig.guest.record()
         #expect(thermalEventually { rig.caps.count == 1 })
         rig.session.restart()
         rig.session.update(running: true, booted: false)
         #expect(thermalEventually { rig.guest.connections == 2 && rig.session.isConnected })
-        #expect(rig.guest.record() == (try frame("critical")))
+        #expect(rig.guest.record() == (try frame("severe")))
         rig.session.settle()
         #expect(rig.caps.count == 1)
     }
@@ -219,8 +262,11 @@ struct ThermalSessionTests {
     @Test func theCapIsAnnouncedOnceWhenItStarts() throws {
         let rig = try connected()
         rig.session.observe(.fair)
-        rig.session.observe(.critical)
+        rig.session.settle()
+        #expect(rig.caps.count == 0, "announced at fair")
+        rig.session.observe(.serious)
         #expect(thermalEventually { rig.caps.count == 1 })
+        rig.session.observe(.critical)
         rig.session.observe(.serious)
         rig.session.observe(.critical)
         rig.session.settle()
@@ -229,7 +275,7 @@ struct ThermalSessionTests {
 
     @Test func theCapIsNotAnnouncedAgainAfterCoolingAndHeatingAgain() throws {
         let rig = try connected()
-        rig.session.observe(.critical)
+        rig.session.observe(.serious)
         #expect(thermalEventually { rig.caps.count == 1 })
         rig.session.observe(.nominal)
         rig.session.settle()
@@ -237,18 +283,18 @@ struct ThermalSessionTests {
         rig.timer.fireLatest()
         rig.session.settle()
         #expect(rig.session.severity == .none)
-        rig.session.observe(.critical)
+        rig.session.observe(.serious)
         rig.session.settle()
-        #expect(rig.session.severity == .critical)
+        #expect(rig.session.severity == .severe)
         #expect(rig.caps.count == 1, "announced twice in a run")
     }
 
-    @Test func aRunThatNeverReachesCriticalAnnouncesNothing() throws {
+    @Test func aRunThatNeverReachesSeriousAnnouncesNothing() throws {
         let rig = try connected()
-        for state in [HostThermalState.fair, .serious, .nominal, .serious, .fair] { rig.session.observe(state) }
+        for state in [HostThermalState.fair, .nominal, .fair, .nominal, .fair] { rig.session.observe(state) }
         rig.session.settle()
         rig.clock.advance(seconds: 300)
-        rig.session.observe(.serious)
+        rig.session.observe(.fair)
         rig.session.settle()
         #expect(rig.caps.count == 0)
         #expect(!rig.guest.hasPending(), "a record was sent")
@@ -256,14 +302,14 @@ struct ThermalSessionTests {
 
     @Test func aNewRunAnnouncesAgain() throws {
         let rig = try connected()
-        rig.session.observe(.critical)
+        rig.session.observe(.serious)
         #expect(thermalEventually { rig.caps.count == 1 })
         rig.session.update(running: false, booted: false)
         rig.session.settle()
         #expect(rig.session.severity == .none, "a run's severity outlived it")
         rig.session.update(running: true, booted: false)
         #expect(thermalEventually { rig.guest.connections == 2 && rig.session.isConnected })
-        #expect(rig.guest.record() == (try frame("critical")), "the state read before the run is the state it begins in")
+        #expect(rig.guest.record() == (try frame("severe")), "the state read before the run is the state it begins in")
         #expect(thermalEventually { rig.caps.count == 2 })
     }
 
@@ -271,14 +317,14 @@ struct ThermalSessionTests {
         let rig = rig()
         rig.guest.accepting = false
         rig.session.update(running: true, booted: false)
-        rig.session.observe(.critical)
+        rig.session.observe(.serious)
         usleep(100_000)
         rig.session.settle()
         #expect(rig.caps.count == 0, "the cap was announced with no HAL to apply it")
         // The HAL starts late in boot: the cap is announced when it connects.
         rig.guest.accepting = true
         #expect(thermalEventually { rig.caps.count == 1 })
-        #expect(rig.guest.record() == (try frame("critical")))
+        #expect(rig.guest.record() == (try frame("severe")))
     }
 
     // MARK: Giving up
@@ -291,13 +337,13 @@ struct ThermalSessionTests {
         #expect(!rig.session.hasGivenUp, "gave up before Android booted")
         rig.session.update(running: true, booted: true)
         #expect(thermalEventually { rig.session.hasGivenUp })
-        rig.session.observe(.critical)
+        rig.session.observe(.serious)
         rig.session.settle()
         let attempts = rig.guest.attempts
         usleep(100_000)
         #expect(rig.guest.attempts == attempts, "tried again after giving up")
         #expect(rig.caps.count == 0)
-        #expect(rig.session.severity == .critical, "the policy stopped with the connection")
+        #expect(rig.session.severity == .severe, "the policy stopped with the connection")
     }
 
     @Test func aRestartBeginsTheAttemptsAgain() throws {
@@ -315,7 +361,7 @@ struct ThermalSessionTests {
     @Test func recoveryNeverConnects() {
         let rig = rig()
         rig.session.update(running: false, booted: true)
-        rig.session.observe(.critical)
+        rig.session.observe(.serious)
         usleep(100_000)
         rig.session.settle()
         #expect(rig.guest.attempts == 0)

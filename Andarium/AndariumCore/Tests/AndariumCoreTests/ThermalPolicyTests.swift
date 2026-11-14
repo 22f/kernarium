@@ -5,10 +5,11 @@ import Testing
 
 @testable import AndariumCore
 
-/// What the guest is told from iOS's thermal state: nothing is hot until
-/// critical, which rises at once, falls 120 s after it ended, and restarts the
-/// wait when it comes back. The policy is pure, so every test gives it a clock
-/// of its own.
+/// What the guest is told from iOS's thermal state: nothing for nominal and
+/// fair, Android's severe at serious (its frame rate cap) and critical at
+/// critical. A reported state rises at once, falls 120 s after it ended, and
+/// restarts the wait when it comes back. The policy is pure, so every test
+/// gives it a clock of its own.
 struct ThermalPolicyTests {
     private func at(_ seconds: Double) -> UInt64 { UInt64(seconds * 1_000_000_000) }
 
@@ -26,25 +27,26 @@ struct ThermalPolicyTests {
 
     // MARK: The mapping
 
-    @Test func onlyCriticalIsHotForAndroid() {
+    @Test func eachHostStateHasItsAndroidSeverity() {
         #expect(HostThermalState.nominal.severity == .none)
         #expect(HostThermalState.fair.severity == .none)
-        #expect(HostThermalState.serious.severity == .none)
+        #expect(HostThermalState.serious.severity == .severe)
         #expect(HostThermalState.critical.severity == .critical)
         #expect(ProcessInfoMapping.all == [.nominal, .fair, .serious, .critical])
     }
 
-    @Test func criticalIsAtOrAboveTheSeverityWhereAndroidCapsTheFrameRate() {
+    @Test func seriousAndCriticalCapTheFrameRateAndNothingBelowThemDoes() {
         #expect(ThermalPolicy.capSeverity == .severe)
+        #expect(HostThermalState.serious.severity >= ThermalPolicy.capSeverity)
         #expect(HostThermalState.critical.severity >= ThermalPolicy.capSeverity)
-        for state in HostThermalState.allCases where state != .critical {
+        for state in [HostThermalState.nominal, .fair] {
             #expect(state.severity < ThermalPolicy.capSeverity, "\(state) caps the frame rate")
         }
     }
 
-    @Test func theHostSaysEitherNoneOrCritical() {
+    @Test func theHostSaysNoneSevereOrCriticalAndNothingElse() {
         let told = Set(HostThermalState.allCases.map(\.severity))
-        #expect(told == [.none, .critical])
+        #expect(told == [.none, .severe, .critical], "light and moderate are never sent")
     }
 
     private enum ProcessInfoMapping {
@@ -63,38 +65,69 @@ struct ThermalPolicyTests {
 
     // MARK: Rising and falling
 
-    @Test func fairAndSeriousChangeNothingAndHoldNothing() {
+    @Test func fairChangesNothingAndHoldsNothing() {
         let policy = Watch()
         #expect(!policy.observe(.fair, at: at(10)))
-        #expect(!policy.observe(.serious, at: at(11)))
+        #expect(!policy.observe(.nominal, at: at(11)))
         #expect(!policy.observe(.fair, at: at(12)))
-        #expect(!policy.observe(.nominal, at: at(13)))
         #expect(policy.severity == .none)
         #expect(policy.nextExpiry == nil, "a state that is not reported left a wait behind")
         #expect(!policy.advance(to: at(1000)))
     }
 
-    @Test func criticalIsReportedAtOnceFromAnyState() {
-        for from in [HostThermalState.nominal, .fair, .serious] {
-            let policy = Watch()
-            policy.observe(from, at: at(10))
-            #expect(policy.observe(.critical, at: at(12)), "\(from)")
-            #expect(policy.severity == .critical)
-            #expect(!policy.observe(.critical, at: at(13)))
-        }
-    }
-
-    @Test func aStateThatBeginsCriticalIsCappedFromItsFirstReading() {
+    @Test func aRiseIsReportedAtOnceAtEveryReportedStep() {
         let policy = Watch()
-        #expect(policy.observe(.critical, at: at(0)))
+        #expect(!policy.observe(.fair, at: at(10)))
+        #expect(policy.observe(.serious, at: at(11)))
+        #expect(policy.severity == .severe)
+        #expect(policy.observe(.critical, at: at(12)))
         #expect(policy.severity == .critical)
+        #expect(!policy.observe(.critical, at: at(13)))
     }
 
-    @Test func aStateThatBeginsSeriousIsNotCapped() {
+    @Test func aStateThatBeginsSeriousOrCriticalIsCappedFromItsFirstReading() {
+        let serious = Watch()
+        #expect(serious.observe(.serious, at: at(0)))
+        #expect(serious.severity == .severe)
+        #expect(serious.claimAnnouncement())
+        let critical = Watch()
+        #expect(critical.observe(.critical, at: at(0)))
+        #expect(critical.severity == .critical)
+    }
+
+    @Test func aStateThatBeginsFairIsNotCappedUntilSerious() {
         let policy = Watch()
-        #expect(!policy.observe(.serious, at: at(0)))
+        #expect(!policy.observe(.fair, at: at(0)))
         #expect(policy.severity == .none)
         #expect(!policy.claimAnnouncement())
+        #expect(policy.observe(.serious, at: at(30)))
+        #expect(policy.severity == .severe)
+        #expect(policy.claimAnnouncement())
+    }
+
+    @Test func theSeverityFallsOneHundredTwentySecondsAfterSeriousEnded() {
+        let policy = Watch()
+        policy.observe(.serious, at: at(10))
+        policy.observe(.nominal, at: at(100))
+        #expect(policy.severity == .severe, "the fall was not held")
+        #expect(policy.nextExpiry == at(220))
+        #expect(!policy.advance(to: at(219.999)))
+        #expect(policy.severity == .severe)
+        #expect(policy.advance(to: at(220)))
+        #expect(policy.severity == .none)
+        #expect(policy.nextExpiry == nil)
+    }
+
+    @Test func aFallFromSeriousToFairWaitsAsWellAndEndsAtNone() {
+        let policy = Watch()
+        policy.observe(.serious, at: at(10))
+        policy.observe(.fair, at: at(100))
+        #expect(policy.severity == .severe)
+        policy.advance(to: at(219))
+        #expect(policy.severity == .severe)
+        #expect(policy.advance(to: at(220)))
+        #expect(policy.severity == .none, "fair is not reported")
+        #expect(policy.nextExpiry == nil)
     }
 
     @Test func theSeverityFallsOneHundredTwentySecondsAfterCriticalEnded() {
@@ -104,24 +137,51 @@ struct ThermalPolicyTests {
         #expect(policy.severity == .critical, "the fall was not held")
         #expect(policy.nextExpiry == at(220))
         #expect(!policy.advance(to: at(219.999)))
+        #expect(policy.advance(to: at(220)))
+        #expect(policy.severity == .none)
+    }
+
+    @Test func aFallFromCriticalToSeriousHoldsCriticalAndThenStaysAtSevere() {
+        let policy = Watch()
+        policy.observe(.serious, at: at(0))
+        policy.observe(.critical, at: at(30))
+        #expect(policy.observe(.serious, at: at(60)) == false, "the fall to serious was reported at once")
+        #expect(policy.severity == .critical)
+        #expect(policy.nextExpiry == at(180))
+        #expect(!policy.advance(to: at(179.999)))
+        #expect(policy.severity == .critical)
+        #expect(policy.advance(to: at(180)))
+        #expect(policy.severity == .severe, "serious is still current")
+        #expect(policy.nextExpiry == nil)
+        #expect(!policy.advance(to: at(10_000)))
+    }
+
+    @Test func aStepwiseFallHoldsEachReportedStateForItsOwnWait() {
+        let policy = Watch()
+        policy.observe(.critical, at: at(0))
+        policy.observe(.serious, at: at(100))
+        policy.observe(.fair, at: at(150))
+        // Critical ended at 100, serious at 150.
         #expect(policy.severity == .critical)
         #expect(policy.advance(to: at(220)))
+        #expect(policy.severity == .severe, "the serious that ended at 150 still counts")
+        policy.advance(to: at(269.9))
+        #expect(policy.severity == .severe)
+        #expect(policy.advance(to: at(270)))
         #expect(policy.severity == .none)
         #expect(policy.nextExpiry == nil)
     }
 
-    @Test func aFallToSeriousOrFairWaitsAsWellAndEndsAtNone() {
-        for cooler in [HostThermalState.serious, .fair] {
-            let policy = Watch()
-            policy.observe(.critical, at: at(10))
-            policy.observe(cooler, at: at(100))
-            #expect(policy.severity == .critical, "\(cooler)")
-            policy.advance(to: at(219))
-            #expect(policy.severity == .critical, "\(cooler)")
-            #expect(policy.advance(to: at(220)), "\(cooler)")
-            #expect(policy.severity == .none, "\(cooler) fell to something Android is told of")
-            #expect(policy.nextExpiry == nil)
-        }
+    @Test func seriousCriticalSeriousWithinTheHoldIsCriticalUntilItsWaitEndsAndThenSevere() {
+        let policy = Watch()
+        #expect(policy.observe(.serious, at: at(0)))
+        #expect(policy.observe(.critical, at: at(30)))
+        #expect(!policy.observe(.serious, at: at(60)))
+        // Critical ended at 60: the wait ends at 180.
+        policy.advance(to: at(179))
+        #expect(policy.severity == .critical)
+        #expect(policy.advance(to: at(180)))
+        #expect(policy.severity == .severe)
     }
 
     @Test func criticalSeriousCriticalWithinTheHoldIsOneSteadyCap() {
@@ -131,21 +191,56 @@ struct ThermalPolicyTests {
         #expect(!policy.observe(.serious, at: at(30)))
         #expect(policy.severity == .critical)
         #expect(policy.nextExpiry == at(150))
-        // It comes back at 100, before the wait ends: the wait is void.
+        // It comes back at 100, before the wait ends: the wait is void. The
+        // serious that ended at 100 is behind critical and expires with no effect.
         #expect(!policy.observe(.critical, at: at(100)))
-        #expect(policy.nextExpiry == nil)
+        #expect(policy.nextExpiry == at(220))
         #expect(!policy.advance(to: at(150)), "the first wait still ran")
         #expect(policy.severity == .critical)
-        // It ends again at 200: the fall is 120 s after that.
-        #expect(!policy.observe(.serious, at: at(200)))
-        #expect(policy.nextExpiry == at(320))
-        #expect(!policy.advance(to: at(319.999)))
+        #expect(!policy.advance(to: at(220)))
         #expect(policy.severity == .critical)
-        #expect(policy.advance(to: at(320)))
-        #expect(policy.severity == .none)
+        #expect(policy.nextExpiry == nil)
+        // It ends again at 230: the fall is 120 s after that, to serious.
+        #expect(!policy.observe(.serious, at: at(230)))
+        #expect(policy.nextExpiry == at(350))
+        #expect(!policy.advance(to: at(349.999)))
+        #expect(policy.severity == .critical)
+        #expect(policy.advance(to: at(350)))
+        #expect(policy.severity == .severe)
     }
 
-    @Test func aFlickerAroundCriticalNeverLowersTheSeverityUntilItEnds() {
+    @Test func seriousThatEndedBehindCriticalLeavesNoSevereTail() {
+        let policy = Watch()
+        #expect(policy.observe(.serious, at: at(0)))
+        // Serious ended at 30, when critical began: its wait ends at 150.
+        #expect(policy.observe(.critical, at: at(30)))
+        #expect(!policy.observe(.nominal, at: at(60)))
+        #expect(policy.severity == .critical)
+        #expect(policy.nextExpiry == at(150))
+        // Serious's wait ends first, behind critical's, with no effect.
+        #expect(!policy.advance(to: at(150)))
+        #expect(policy.severity == .critical)
+        #expect(policy.nextExpiry == at(180))
+        // Critical's wait ends at 180, and nothing hot is left in the last
+        // 120 s: the fall is straight to none.
+        #expect(policy.advance(to: at(180)))
+        #expect(policy.severity == .none)
+        #expect(policy.nextExpiry == nil)
+    }
+
+    @Test func aFlickerAroundSeriousIsOneSteadyCap() {
+        let policy = Watch()
+        #expect(policy.observe(.serious, at: at(0)))
+        var changes = 0
+        for step in 1...20 {
+            let state: HostThermalState = step % 2 == 1 ? .fair : .serious
+            if policy.observe(state, at: at(Double(step) * 40)) { changes += 1 }
+        }
+        #expect(changes == 0, "the severity moved while the state flickered")
+        #expect(policy.severity == .severe)
+    }
+
+    @Test func aFlickerAroundCriticalNeverLowersTheSeverityBelowCriticalUntilItEnds() {
         let policy = Watch()
         policy.observe(.critical, at: at(0))
         var changes = 0
@@ -159,23 +254,23 @@ struct ThermalPolicyTests {
 
     @Test func aStateThatComesBackRestartsTheWait() {
         let policy = Watch()
-        policy.observe(.critical, at: at(0))
+        policy.observe(.serious, at: at(0))
         policy.observe(.nominal, at: at(50))
         // The first wait would end at 170.
-        policy.observe(.critical, at: at(100))
-        #expect(policy.severity == .critical)
+        policy.observe(.serious, at: at(100))
+        #expect(policy.severity == .severe)
         policy.observe(.nominal, at: at(130))
         policy.advance(to: at(170))
-        #expect(policy.severity == .critical, "the first wait still ran")
+        #expect(policy.severity == .severe, "the first wait still ran")
         policy.advance(to: at(249.9))
-        #expect(policy.severity == .critical)
+        #expect(policy.severity == .severe)
         #expect(policy.advance(to: at(250)))
         #expect(policy.severity == .none)
     }
 
     @Test func aReadingAfterALongGapFindsTheExpiryAlreadyPassed() {
         let policy = Watch()
-        policy.observe(.critical, at: at(0))
+        policy.observe(.serious, at: at(0))
         policy.observe(.nominal, at: at(10))
         // The application was away longer than the wait.
         #expect(policy.observe(.nominal, at: at(1000)))
@@ -184,9 +279,9 @@ struct ThermalPolicyTests {
 
     @Test func aRepeatedReadingChangesNothing() {
         let policy = Watch()
-        policy.observe(.critical, at: at(0))
+        policy.observe(.serious, at: at(0))
         for second in stride(from: 1.0, to: 60.0, by: 7) {
-            #expect(!policy.observe(.critical, at: at(second)))
+            #expect(!policy.observe(.serious, at: at(second)))
         }
         #expect(policy.nextExpiry == nil)
     }
@@ -216,7 +311,7 @@ struct ThermalPolicyTests {
         }
     }
 
-    @Test func randomWalksAgreeWithTheDefinitionAndSayOnlyNoneOrCritical() {
+    @Test func randomWalksAgreeWithTheDefinitionAndSayOnlyNoneSevereOrCritical() {
         var expiriesChecked = 0
         for seed in UInt64(1)...40 {
             var random = Generator(state: seed)
@@ -236,8 +331,8 @@ struct ThermalPolicyTests {
                 if history.last?.state != state { history.append((clock, state)) }
                 policy.observe(state, at: at(clock))
                 #expect(policy.severity == reference(history: history, now: clock), "seed \(seed) at \(clock)")
-                #expect(policy.severity == .none || policy.severity == .critical, "seed \(seed) at \(clock)")
-                if policy.nextExpiry != nil { #expect(policy.severity == .critical, "a wait outlived the cap") }
+                #expect([.none, .severe, .critical].contains(policy.severity), "seed \(seed) at \(clock)")
+                if policy.nextExpiry != nil { #expect(policy.severity >= .severe, "a wait outlived the cap") }
             }
         }
         #expect(expiriesChecked > 100, "the walks never reached an expiry")
@@ -245,38 +340,36 @@ struct ThermalPolicyTests {
 
     // MARK: The announcement
 
-    @Test func theCapIsAnnouncedOnceAtTheFirstCritical() {
+    @Test func theCapIsAnnouncedOnceAtTheFirstSerious() {
         let policy = Watch()
         policy.observe(.fair, at: at(0))
         #expect(!policy.claimAnnouncement(), "announced at fair")
-        policy.observe(.serious, at: at(5))
-        #expect(!policy.claimAnnouncement(), "announced at serious")
         #expect(!policy.claimAnnouncement(), "a refusal consumed the announcement")
-        policy.observe(.critical, at: at(10))
+        policy.observe(.serious, at: at(10))
         #expect(policy.claimAnnouncement())
         #expect(!policy.claimAnnouncement())
+        policy.observe(.critical, at: at(20))
+        #expect(!policy.claimAnnouncement(), "critical announced a second cap")
     }
 
     @Test func theCapIsNotAnnouncedAgainAfterCoolingAndHeatingAgain() {
         let policy = Watch()
-        policy.observe(.critical, at: at(0))
+        policy.observe(.serious, at: at(0))
         #expect(policy.claimAnnouncement())
         policy.observe(.nominal, at: at(30))
         policy.advance(to: at(150))
         #expect(policy.severity == .none)
-        policy.observe(.critical, at: at(200))
+        policy.observe(.serious, at: at(200))
         #expect(!policy.claimAnnouncement())
-        policy.observe(.serious, at: at(210))
-        policy.observe(.critical, at: at(400))
+        policy.observe(.critical, at: at(210))
+        policy.observe(.fair, at: at(400))
+        policy.observe(.critical, at: at(600))
         #expect(!policy.claimAnnouncement())
     }
 
-    @Test func aSessionThatNeverReachesCriticalAnnouncesNothing() {
+    @Test func aSessionThatNeverReachesSeriousAnnouncesNothing() {
         let policy = Watch()
-        let readings: [(Double, HostThermalState)] = [
-            (0, .fair), (30, .serious), (90, .nominal), (500, .serious), (600, .fair), (700, .nominal),
-        ]
-        for (second, state) in readings {
+        for (second, state) in [(0.0, HostThermalState.fair), (30, .nominal), (500, .fair), (600, .nominal)] {
             policy.observe(state, at: at(second))
             #expect(!policy.claimAnnouncement())
         }
@@ -290,15 +383,9 @@ struct ThermalPolicyTests {
         #expect(policy.claimAnnouncement())
     }
 
-    @Test func aSessionThatStartsCriticalAnnouncesAtOnce() {
-        let policy = Watch()
-        policy.observe(.critical, at: at(0))
-        #expect(policy.claimAnnouncement())
-    }
-
     @Test func aLaterAnnouncementWaitsForTheCallThatCanMakeItWhileTheCapHolds() {
         let policy = Watch()
-        policy.observe(.critical, at: at(0))
+        policy.observe(.serious, at: at(0))
         // The caller could not announce yet and the state cooled: the cap
         // still counts for 120 s, so it is still to be announced.
         policy.observe(.nominal, at: at(20))
@@ -307,7 +394,7 @@ struct ThermalPolicyTests {
 
     @Test func aCapThatHasFallenIsNotAnnouncedLate() {
         let policy = Watch()
-        policy.observe(.critical, at: at(0))
+        policy.observe(.serious, at: at(0))
         policy.observe(.nominal, at: at(20))
         policy.advance(to: at(140))
         #expect(policy.severity == .none)
