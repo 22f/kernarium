@@ -11,6 +11,8 @@ android/lineage-24/README.md ("Thermal"), and the wire is overlay/thermal/therma
   sensor reads 31.0 degrees with status NONE, its seven hot thresholds are NaN, 34, 37, 40, 43, 46 and 49,
   the headroom thresholds are NaN, 0.8, 0.9, 1.0, 1.1, 1.2 and 1.3, there is no battery sensor, and the
   display's skin observer holds the SEVERE point of 30 Hz;
+- CRITICAL sent from NONE, as the application does (it reports nothing below critical), sets the status
+  to 4 and brings the same cap as SEVERE, and NONE sent straight after it lifts the cap;
 - LIGHT sets the status to 1 and casts no vote on the frame rate;
 - SEVERE sets the status to 3, the display manager holds a render-rate vote of 0 to 30 Hz at the skin
   temperature priority, SurfaceFlinger renders at 30.00 Hz on the unchanged mode, and
@@ -440,6 +442,19 @@ def run_checks(guest: Guest) -> None:
         time.sleep(2)
         settle_severity(guest, 0)
         check_headroom(guest, 0)
+
+        # What the application sends: the host goes from NONE straight to CRITICAL and straight back.
+        print("CRITICAL from NONE")
+        host.send(record(4))
+        settle_severity(guest, 4)
+        check_headroom(guest, 4)
+        check_cap(guest, True, "critical from none")
+
+        print("NONE after CRITICAL")
+        host.send(record(0))
+        settle_severity(guest, 0)
+        check_headroom(guest, 0)
+        check_cap(guest, False, "none after critical")
 
         print("LIGHT")
         host.send(record(1))
