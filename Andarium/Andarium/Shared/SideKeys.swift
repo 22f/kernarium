@@ -582,6 +582,53 @@ struct SideKeysTipCard: View {
         .frame(idealWidth: width, maxWidth: Self.widest)
         .fixedSize(horizontal: false, vertical: true)
         .presentationCompactAdaptation(.popover)
-        .presentationBackgroundInteraction(.enabled)
+        .background(PopoverPassthrough())
+    }
+}
+
+/// Lets a touch beside the tip's card reach the screen under its popover.
+/// UIKit's popover takes the first touch outside it to dismiss itself, so
+/// the keys the tip points at never see it; with the screen's view among the
+/// popover's pass-through views, the popover stays up and the touch goes
+/// where it fell. SwiftUI sets that list itself, and sets it empty again at
+/// its next update (`presentationBackgroundInteraction` does not reach a
+/// popover), so the list is kept as it should be for as long as the popover
+/// shows.
+private struct PopoverPassthrough: UIViewRepresentable {
+    func makeUIView(context: Context) -> PassthroughView { PassthroughView() }
+    func updateUIView(_ view: PassthroughView, context: Context) {}
+
+    final class PassthroughView: UIView {
+        private var watch: NSKeyValueObservation?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            watch = nil
+            attach()
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            if watch == nil { attach() }
+        }
+
+        /// The popover is the presentation controller of the nearest view
+        /// controller up the responder chain: the card's hosting controller.
+        private func attach() {
+            guard window != nil else { return }
+            var responder: UIResponder? = self
+            while let current = responder {
+                if let controller = current as? UIViewController,
+                   let popover = controller.popoverPresentationController {
+                    watch = popover.observe(\.passthroughViews, options: [.initial, .new]) { popover, _ in
+                        guard let screen = popover.presentingViewController.view,
+                              popover.passthroughViews ?? [] != [screen] else { return }
+                        popover.passthroughViews = [screen]
+                    }
+                    return
+                }
+                responder = current.next
+            }
+        }
     }
 }

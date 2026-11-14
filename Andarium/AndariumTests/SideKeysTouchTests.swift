@@ -254,6 +254,28 @@ struct SideKeysTouchTests {
         #expect(await eventually { run.presented == nil }, "the tip stayed after the session ended")
     }
 
+    /// The tip's popover is UIKit's, and UIKit's popover takes the first touch
+    /// outside its card to dismiss itself: a person's first touch on the keys
+    /// the tip points at (and a second, on the popover's dimming view) never
+    /// reached them. The screen under the popover is one of its pass-through
+    /// views, so that a touch beside the card goes where it fell, and it stays
+    /// one when SwiftUI sets the list empty again at one of its updates.
+    @Test func theTipsPopoverLetsATouchBesideItsCardThroughToTheScreen() async throws {
+        let run = try await RunningSession(self)
+        defer { run.end() }
+
+        try #require(await eventually { run.presented != nil }, "the tip did not show")
+        let popover = try #require(run.presented?.popoverPresentationController)
+        let screen = try #require(popover.presentingViewController.view)
+        #expect(
+            await eventually { popover.passthroughViews?.contains { $0 === screen } ?? false },
+            "the popover takes the touch beside its card: \(String(describing: popover.passthroughViews))")
+        popover.passthroughViews = []
+        #expect(
+            popover.passthroughViews?.contains { $0 === screen } ?? false,
+            "the popover takes the touch beside its card after an update: \(String(describing: popover.passthroughViews))")
+    }
+
     // MARK: The tip's line for Install APK
 
     private static let installLine = "To install an app, open Settings here and choose Install APK."

@@ -422,6 +422,29 @@ struct FoldSessionHostingTests {
         }
     }
 
+    /// A session that began on the cover is unfolded: the keys come up on the
+    /// inner display, closed, with their tip over them, as at the start of a
+    /// session there. The tip's popover must not take a touch meant for the
+    /// keys it points at (UIKit's popover dismisses itself on the first touch
+    /// outside its card), whichever inner pose the device is unfolded to.
+    @Test(arguments: [Pose.uprightBook, .uprightFlat, .turnedFlat])
+    func theTipAtAnUnfoldLetsATouchOnTheKeysThrough(_ pose: Pose) async throws {
+        let rig = try await Rig(.cover, test: self)
+        defer { rig.end() }
+        await rig.move(to: pose, test: self)
+        let found = await eventually { rig.lease.window.rootViewController?.presentedViewController != nil }
+        try #require(found, "\(pose): the tip did not show at the unfold")
+        let popover = try #require(rig.lease.window.rootViewController?.presentedViewController?.popoverPresentationController)
+        let screen = try #require(popover.presentingViewController.view)
+        #expect(
+            await eventually { popover.passthroughViews?.contains { $0 === screen } ?? false },
+            "\(pose): the popover takes the touch on the keys: \(String(describing: popover.passthroughViews))")
+        popover.passthroughViews = []
+        #expect(
+            popover.passthroughViews?.contains { $0 === screen } ?? false,
+            "\(pose): the popover takes the touch on the keys after an update: \(String(describing: popover.passthroughViews))")
+    }
+
     // MARK: Folding, turning and bending
 
     /// Every change the walk makes, with the size the guest's display takes
