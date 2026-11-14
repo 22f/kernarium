@@ -344,9 +344,13 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
             camera.jpegSizes = entry.offer.stills;
             camera.info.stillSizes = entry.offer.stills;
             // The camera zooms up to the system's recommendation for the format it runs in, where the system gives
-            // one, and up to the platform's own limit where it does not; its range always holds 1.0.
-            const float recommended = info.captureFormats[*entry.anchor].recommendedZoomMaximum;
-            if (recommended > 0) camera.info.zoomMaximum = std::max({recommended, 1.0f, info.zoomMinimum});
+            // one; where it does not, up to what the format itself delivers, and never beyond the device's largest
+            // (a front camera's other formats zoom further than the one it runs in); its range always holds 1.0.
+            const auto& anchorFormat = info.captureFormats[*entry.anchor];
+            if (anchorFormat.recommendedZoomMaximum > 0)
+                camera.info.zoomMaximum = std::max({anchorFormat.recommendedZoomMaximum, 1.0f, info.zoomMinimum});
+            else if (anchorFormat.maximumZoom > 0)
+                camera.info.zoomMaximum = std::min(info.zoomMaximum, std::max({anchorFormat.maximumZoom, 1.0f, info.zoomMinimum}));
         } else {
             camera.video = videoModes(info, limits);
             // Every size works with every format, within the tier's cap and the limit of the camera's position.

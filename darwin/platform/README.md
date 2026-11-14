@@ -133,7 +133,9 @@ interface to the wire.
   multiplier (`zoomRatioScale`), as the triple camera's ultra wide lens at 0.5.
   A format carries the zoom the system recommends for it
   (`recommendedZoomMaximum`, zero where it states none), which the device
-  states as the maximum of a camera that runs in that format.
+  states as the maximum of a camera that runs in that format, and the zoom the
+  format itself delivers (`maximumZoom`), which it states instead where there is
+  no recommendation.
 - **Sessions.** `openSession()` is the one call that can light the system's
   capture indicator, and it returns null unless the system has granted access.
   One session is a single `AVCaptureMultiCamSession` on iOS (an

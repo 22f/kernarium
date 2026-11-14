@@ -200,6 +200,11 @@ std::optional<VideoFormatFacts> factsOf(AVCaptureDeviceFormat* format, float zoo
     // (arrangeCameras).
     if (AVZoomRange* recommended = format.systemRecommendedVideoZoomRange)
         facts.recommendedZoomMaximum = float(recommended.maxZoomFactor) * zoomScale;
+    // The zoom the format itself delivers: a camera with no recommendation is stated up to it, not to the device's
+    // largest over all its formats.
+#if TARGET_OS_IOS
+    facts.maximumZoom = float(format.videoMaxZoomFactor) * zoomScale;
+#endif
     return facts;
 }
 
@@ -782,11 +787,12 @@ public:
                 const std::size_t index = *formatOfCamera[camera];
                 const FormatSet set = formatSetOf(entries_[camera].device, entries_[camera].zoomMultiplier);
                 const auto& listed = entries_[camera].info.captureFormats;
-                // The system's zoom advice is no part of the format: a change of it leaves the anchor.
+                // The zoom the system advises and the format's own maximum are no part of the format: a change of them leaves the anchor.
                 const auto sameFormat = [&] {
                     if (index >= set.facts.size() || index >= listed.size()) return false;
                     auto now = set.facts[index];
                     now.recommendedZoomMaximum = listed[index].recommendedZoomMaximum;
+                    now.maximumZoom = listed[index].maximumZoom;
                     return now == listed[index];
                 };
                 if (!sameFormat()) {

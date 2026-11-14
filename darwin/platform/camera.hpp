@@ -71,6 +71,10 @@ struct CameraCaptureFormat {
     // The zoom ratio up to which the system recommends zooming a camera that runs in this format, in the terms of
     // CameraInfo::zoomMaximum; zero where the system states none. It is advice, not part of the format's identity.
     float recommendedZoomMaximum {};
+    // The largest zoom ratio the format itself delivers (the platform's own limit for it), in the terms of
+    // CameraInfo::zoomMaximum, which is the device's largest over all its formats; zero where the host states none.
+    // Advice as well: a camera whose format has no recommendation is stated up to it.
+    float maximumZoom {};
     friend bool operator==(const CameraCaptureFormat&, const CameraCaptureFormat&) = default;
 };
 

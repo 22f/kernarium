@@ -45,7 +45,8 @@ application's statements (the sensor orientation, the rotation that
   over a single sensor) the guest sees the wide one.
 - **Zoom.** Every camera's ratio range starts at 1.0, its own full field of view.
   A camera that runs in an anchor ends at the zoom the system recommends for the
-  anchor's format, and at the platform's own limit where the system gives none.
+  anchor's format, and where the system gives none at what the anchor's format
+  itself delivers, never above the device's largest.
 - **Tiers.** The small tier limits a session to 1080p video, 12 MP stills and
   four buffers; the large tier is 4K, 48 MP and six, for a fixed GPU budget of
   1 GiB or more. Every host is given the small tier for now

@@ -348,6 +348,34 @@ void testZoomFollowsTheAnchorsRecommendation()
     const auto below = advised(0.5f, 0.0f);
     require(below.first <= one && below.second >= one, "a recommendation under 1.0 still leaves a range that holds 1.0");
     require(below.second == one, "which is no zoom at all");
+
+    // No recommendation (a front camera): the format the camera runs in states its own maximum, which is below the
+    // device's largest over all its formats (128.875 on the phone, of which the format delivers 94.5). It is never
+    // above the device's, and the range holds 1.0.
+    const auto own = [](float anchorsMaximum, float othersMaximum, float deviceMaximum) {
+        auto info = tabletCamera();
+        info.zoomMinimum = 1.0f;
+        info.zoomMaximum = deviceMaximum;
+        for (auto& format : info.captureFormats) format.maximumZoom = othersMaximum;
+        info.captureFormats[1].maximumZoom = anchorsMaximum;
+        const auto cameras = arrangeCameras(std::vector<CameraInfo> {info}, {}, "phone", CalibrationStore(), {});
+        require(cameras.size() == 1 && cameras[0].anchor == std::optional<std::size_t>(1), "the camera runs in its format 1");
+        return std::make_pair(cameras[0].wire.zoom_min_q16, cameras[0].wire.zoom_max_q16);
+    };
+    require(own(94.5f, 128.875f, 128.875f) == std::make_pair(one, std::uint32_t(94.5f * 65536.0f)),
+            "no recommendation: the anchor's own maximum, below the device's, whatever the other formats deliver");
+    require(own(0.0f, 94.5f, 128.875f) == std::make_pair(one, std::uint32_t(128.875f * 65536.0f)),
+            "a format that states none leaves the device's maximum");
+    require(own(200.0f, 0.0f, 128.875f).second == std::uint32_t(128.875f * 65536.0f), "and the device's maximum is the ceiling");
+    require(own(0.5f, 0.0f, 128.875f) == std::make_pair(one, one), "a maximum under 1.0 still leaves a range that holds 1.0");
+    // A recommendation wins over the format's own maximum, as it does for the back lenses.
+    auto lens = tabletCamera();
+    lens.zoomMinimum = 1.0f;
+    lens.zoomMaximum = 123.75f;
+    for (auto& format : lens.captureFormats) format.maximumZoom = 94.5f;
+    lens.captureFormats[1].recommendedZoomMaximum = 6.0f;
+    const auto recommended = arrangeCameras(std::vector<CameraInfo> {lens}, {}, "phone", CalibrationStore(), {});
+    require(recommended[0].wire.zoom_max_q16 == 6 * one, "a recommendation is the maximum, whatever the format delivers");
 }
 
 // The reserve holds for what the platform delivers: for every stream a tier offers, at every rate, the format a

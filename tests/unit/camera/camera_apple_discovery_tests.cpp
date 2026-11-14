@@ -78,9 +78,11 @@ int main()
         require(info.zoomMinimum <= 1.0f && info.zoomMaximum >= 1.0f, "a discovered camera's zoom range holds 1.0");
         if (info.lens != CameraLensKind::zoom) require(info.zoomMinimum == 1.0f, "a single lens's widest view is its ratio 1.0");
         // The system's zoom advice for a format is a ratio that holds 1.0, or nothing.
-        for (const auto& format : info.captureFormats)
+        for (const auto& format : info.captureFormats) {
             require(format.recommendedZoomMaximum == 0.0f || format.recommendedZoomMaximum >= 1.0f,
                     "a format's recommended zoom is none, or at least 1.0");
+            require(format.maximumZoom == 0.0f || format.maximumZoom >= 1.0f, "a format's own maximum zoom is none, or at least 1.0");
+        }
         require(info.pixelArrayWidth > 0 && info.pixelArrayHeight > 0);
         require(info.sensorOrientation % 90 == 0 && info.sensorOrientation < 360);
         // A zoom camera takes no manual control, and names lenses the host lists.
@@ -115,6 +117,8 @@ int main()
         if (described.anchor) {
             const float advised = described.info.captureFormats[*described.anchor].recommendedZoomMaximum;
             if (advised > 0) require(described.info.zoomMaximum == advised, "a camera zooms up to the system's recommendation");
+            else require(described.info.zoomMaximum <= cameras[described.platformIndex].zoomMaximum,
+                         "a camera with no recommendation zooms no further than the device does");
         }
     }
     if (hostHasBackWide && !published.empty() && published.front().info.position == CameraPosition::back)
