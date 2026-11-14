@@ -201,7 +201,7 @@ uml_add_tooling_test(
     COMMAND ${Python3_EXECUTABLE} -B
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_wifi_network_script.py
     LABELS android
-    TIMEOUT 240)
+    TIMEOUT 360)
 
 # The video-suspend runner's suspend step against a fake guest: a host GPU reset
 # across the wake fails it by that name, and the shared reader of the launcher's

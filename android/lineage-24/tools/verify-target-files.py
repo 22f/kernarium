@@ -774,8 +774,9 @@ NET_SETUP_TRANSITION = re.compile(
 # Until a boot has found the network stored and joined (the marker then reads 2) the saved list
 # decides on every boot: a boot saves the network when the list lacks it, and saves it again when
 # it finds Wi-Fi on and nothing joined after a settle time, which enables a network an earlier
-# release left disabled for lack of internet. The Wi-Fi service writes its store some time after
-# a save or a join, so a boot that saved leaves the marker at 1. The script never turns Wi-Fi on
+# release left disabled for lack of internet, unless the dump of the Wi-Fi service shows that the
+# user turned Auto-connect off for it, which is a choice and is left alone. The Wi-Fi service
+# writes its store some time after a save or a join, so a boot that saved leaves the marker at 1. The script never turns Wi-Fi on
 # or connects: the user's switch decides whether the saved network is joined. What it decides is
 # tested on the tracked file (tests/tooling/android/test_wifi_network_script.py); the checks here
 # are presence checks of the image's copy.

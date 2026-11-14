@@ -432,7 +432,8 @@ product's one network, VirtWifi, is saved once and is never disabled for lack of
 internet (`overlay/rro/KernariumWifiOverlay`), because the platform never joins a
 disabled network again. Until a boot has found VirtWifi stored and joined, a
 boot saves it when the saved list lacks it and saves it again when Wi-Fi is on
-and nothing joined, which enables it
+and nothing joined, which enables it, unless the Wi-Fi service's dump shows
+that the user turned Auto-connect off for it
 (`overlay/tools/kernarium_wifi_network.sh`); a guest that stops before the
 Wi-Fi service has stored the network gets it back at the next boot. Wi-Fi that
 is off stays off and a network forgotten after that boot stays forgotten. There is
