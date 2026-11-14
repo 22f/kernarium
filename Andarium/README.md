@@ -493,7 +493,12 @@ requires reopening Andarium.
   application states the intent at once and the runtime's stop is requested
   off the main actor, on the queue of the runtime's other waiting calls, again
   every second until the run has ended (`RunStop`: the runtime drops a stop
-  that arrives before its run begins). A stopped Android guest cannot be
+  that arrives before its run begins). The first delivery that reaches a guest
+  asks it to write its storage back before the host stops it (the runtime's
+  `sync`, `StopSettle`: four seconds at most, as a lifecycle edge's budget); a
+  delivery that finds none goes on to the host's stop and the next asks again,
+  and the ask of a run that has ended is dropped before it calls the runtime.
+  Stopping covers that wait. A stopped Android guest cannot be
   released, so the end is the end screen with its own wording
   (`RunEnd.stoppedByUser`), not Home, and a stop before the runtime runs ends
   at Home. A start the person stopped leaves its preparation to end: the
@@ -853,7 +858,11 @@ requires reopening Andarium.
   ([`docs/architecture.md`](../docs/architecture.md)). The next launch keeps
   that record as the previous session's (`PreviousSession`) and, after an end
   that was neither Android's own nor a stop, Home shows a notice with its cause
-  (`SessionRecord.notice`). `ExitReports` keeps the exit and diagnostic reports
+  (`SessionRecord.notice`). The runtime writes the record without the serial
+  number, the adb key and the time zone the launch stated and without any
+  hardware address in its colon spelling (masked as the start log masks them),
+  so neither the bug report nor the previous session's copy has them.
+  `ExitReports` keeps the exit and diagnostic reports
   MetricKit delivers beside the records. The record's stall slot (`StallRecord`)
   says when the guest's vCPUs stopped running on the host and what the host was
   doing; the bug report carries it in words, with the guest's `/proc` counters

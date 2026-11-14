@@ -783,7 +783,9 @@ command. A guest that restarts five times in a row within 15 s of booting, or
 eight times in a row each within 15 s or before its boot had finished
 (`sys.boot_completed`, recovery's start or apexd's `markBootCompleted()` on the
 console, once init's output was seen there), ends the launch with exit status 3;
-restarts after a finished boot that lasted 15 s or more are not limited.
+restarts after a finished boot that lasted 15 s or more are not limited. A
+recovery that restarts after that window while `misc` still asks for recovery
+is not ended by the guard, because recovery's start counts as a finished boot.
 
 `build/assemble-image.sh` owns ramdisk composition, system disk assembly and
 verification, and `tools/verify-lineage-recovery.py` checks the recovery image.

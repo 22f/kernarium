@@ -340,7 +340,8 @@ gamepad frames, each family's reports read back through a test-only HID
 descriptor parser, and the stream and session on a fake relay; the session
 record's stall, network and storage slots against the golden slots there, which
 `runtime-stall-record` and `runtime-session-record` check the runtime's writers
-against; and the notice that iOS denies the network, from the path's mapping to
+against, and that the record quotes no identity value (`runtime-session-record`);
+and the notice that iOS denies the network, from the path's mapping to
 the watcher's start and stop on a fake path source);
 `andarium-motion-protocol`, `andarium-device-orientation`,
 `andarium-haptics-protocol`, `andarium-haptics-player`,
@@ -468,7 +469,8 @@ for after it (a Restore on the real storage), that an old boot's console cannot
 mark the next boot, not even through a restart that printed no banner, that a
 guest whose first boot did not complete starts with the longer time, that the
 notice's clock stands still while the application is away, and that the stop is
-made off the main actor until the run ends.
+made off the main actor until the run ends, after the first guest it finds was
+asked once to write back (and none for a run that has ended).
 `SlowStartCaptureTests` save the notice in windows the Simulator's own capture
 cannot take (an iPad turned, a narrow Split View window, the Duo's poses) and
 do nothing unless `TEST_RUNNER_ANDARIUM_CAPTURE_DIR` names a folder.
