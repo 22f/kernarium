@@ -318,7 +318,7 @@ public struct CameraRecord: Equatable, Sendable {
             let type = mount.type >= 0 && mount.type < Self.deviceTypes.count ? Self.deviceTypes[mount.type] : "type \(mount.type)"
             let angles = mount.angles.map { Self.degrees($0) }.joined(separator: ", ")
             lines.append(
-                "  mounting: a \(type) device; the platform's fixed angles for portrait, portrait upside down, "
+                "  mounting: device type \(type); the platform's fixed angles for portrait, portrait upside down, "
                     + "landscape right and landscape left are \(angles); the guest is told \(mount.stated); "
                     + "the video connection is turned \(mount.turn); imitates an earlier front camera: "
                     + "\(mount.earlier ? "yes" : "no").")

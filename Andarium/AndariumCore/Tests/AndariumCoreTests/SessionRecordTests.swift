@@ -401,7 +401,7 @@ struct SessionRecordTests {
         let report = slot.report()
         #expect(report.contains("3 stills of the guest's cameras did not end in a picture."))
         #expect(report.contains("Camera 1 (front):"))
-        #expect(report.contains("a wide-angle device; the platform's fixed angles for portrait, portrait upside down, landscape right and landscape left are 0, 180, 90, 270; the guest is told 90; the video connection is turned 270; imitates an earlier front camera: yes."))
+        #expect(report.contains("mounting: device type wide-angle; the platform's fixed angles for portrait, portrait upside down, landscape right and landscape left are 0, 180, 90, 270; the guest is told 90; the video connection is turned 270; imitates an earlier front camera: yes."))
         #expect(report.contains("anchor: 1920x1440, aspect ratios listed: 4x3 3x4, field of view 85 degrees."))
         #expect(report.contains("aspect ratio: pinned 3x4, the device holds 3x4, output dimensions 1512x2016, the change's completion error 0."))
         #expect(report.contains("video connection: angle 0 by default and 270 now (the angle asked for is supported: yes)"))
