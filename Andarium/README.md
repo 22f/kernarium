@@ -1120,7 +1120,10 @@ is on. `AndariumCore/Adb` speaks the protocol.
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB
   debugging setting is, since adbd serves the application's key either way
-  (`Live/LiveGuestFiles.swift`, `AdbSync`, `GuestFiles`). One transfer runs
+  (`Live/LiveGuestFiles.swift`, `AdbSync`, `GuestFiles`). On a page 520 pt or
+  wider the list has Name, Modified and Size columns; Modified is as wide as the
+  widest date the language writes, English's width at least, so a date stays on
+  one line and Name gives up the room (`FileDateProbe`). One transfer runs
   at a time; Install APK and Create bug report wait for it. An import is
   written to a hidden `.andarium-*.part` name beside its destination and moved
   into place, so a stopped or failed one leaves nothing and a Replace keeps the
@@ -1191,7 +1194,8 @@ one-time, a purchase and free either way; the tier names are not checked.
 English is the key (a readout or a
 joined list has a named key whose comment says which readout it serves), and
 the person's virtual machine is "virtual machine" in English, 虚拟机, 虛擬機器
-and 仮想マシン. Chinese says 你 and writes no space next to Latin text; a
+and 仮想マシン, and its storage is 存储空间 in Simplified Chinese; the name of
+iOS's own Settings page there keeps Apple's 储存空间. Chinese says 你 and writes no space next to Latin text; a
 number keeps its space before its unit. Bug report and session record text, log
 lines and technical names stay English. Text shown on a card, an alert or an
 overlay passes `String.keepingTogether`, so a number stays with its unit and a

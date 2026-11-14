@@ -13,6 +13,8 @@ struct FolderPage: View {
     let route: FolderRoute
     let close: () -> Void
     @State private var wide = false
+    /// The Modified column's width, from the widest date this language writes.
+    @State private var dateWidth = FileRow.minimumDateWidth
 
     private var path: String { route.path }
 
@@ -20,6 +22,7 @@ struct FolderPage: View {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(.systemGroupedBackground))
+            .background { FileDateProbe(width: $dateWidth) }
             .onGeometryChange(for: Bool.self) { $0.size.width >= 520 } action: { wide = $0 }
             .navigationTitle(GuestPath.name(of: path))
             .navigationSubtitle(subtitle)
@@ -111,6 +114,7 @@ struct FolderPage: View {
         let selected = browser.isSelected(file)
         let label = FileRow(
             file: file, selected: selected, fresh: browser.fresh.contains(file.path), wide: wide,
+            dateWidth: dateWidth,
             toggle: { withAnimation(.snappy) { browser.toggle(file) } }
         )
         Button {
@@ -143,7 +147,7 @@ struct FolderPage: View {
             columnButton(.name, title: String(localized: "Name"))
                 .frame(maxWidth: .infinity, alignment: .leading)
             columnButton(.date, title: String(localized: "Modified"))
-                .frame(width: FileRow.dateWidth, alignment: .leading)
+                .frame(width: dateWidth, alignment: .leading)
             columnButton(.size, title: String(localized: "Size"))
                 .frame(width: FileRow.sizeWidth, alignment: .trailing)
             Color.clear.frame(width: FileRow.chevronWidth, height: 1)
@@ -172,7 +176,7 @@ struct FolderPage: View {
         List {
             Section {
                 ForEach(0..<9, id: \.self) { index in
-                    FileRow.placeholder(index: index, wide: wide)
+                    FileRow.placeholder(index: index, wide: wide, dateWidth: dateWidth)
                 }
             } header: {
                 if wide { columnHeader.unredacted() }
@@ -236,7 +240,9 @@ struct FolderPage: View {
 /// it, since a tap anywhere else goes into it.
 struct FileRow: View {
     static let tileSize: CGFloat = 32
-    static let dateWidth: CGFloat = 104
+    /// What the Modified column keeps in English; a language that writes its
+    /// dates wider gets the width its widest date measures (`FileDateProbe`).
+    static let minimumDateWidth: CGFloat = 104
     static let sizeWidth: CGFloat = 76
     static let chevronWidth: CGFloat = 14
 
@@ -244,6 +250,7 @@ struct FileRow: View {
     let selected: Bool
     let fresh: Bool
     let wide: Bool
+    let dateWidth: CGFloat
     let toggle: () -> Void
 
     var body: some View {
@@ -272,8 +279,13 @@ struct FileRow: View {
             }
             Spacer(minLength: 8)
             if wide {
-                Text(date)
-                    .frame(width: Self.dateWidth, alignment: .leading)
+                // One line whatever the language: the column is as wide as the
+                // widest date needs, and the scale factor takes up a digit that
+                // is a hair wider than the measured one.
+                Text(file.modified, format: FileDate.style)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .frame(width: dateWidth, alignment: .leading)
                 Text(file.isFolder ? "\u{2013}" : Formats.size(bytes: file.size))
                     .frame(width: Self.sizeWidth, alignment: .trailing)
                     .monospacedDigit()
@@ -294,7 +306,7 @@ struct FileRow: View {
         .contentShape(.rect)
     }
 
-    private var date: String { file.modified.formatted(date: .abbreviated, time: .omitted) }
+    private var date: String { file.modified.formatted(FileDate.style) }
 
     private var details: String {
         file.isFolder ? date : "\(date) \u{00B7} \(Formats.size(bytes: file.size))"
@@ -315,15 +327,54 @@ struct FileRow: View {
     }
 
     /// A row the size of a real one, for the folder that has not answered.
-    static func placeholder(index: Int, wide: Bool) -> some View {
+    static func placeholder(index: Int, wide: Bool, dateWidth: CGFloat) -> some View {
         let names = ["IMG_20261102_140233", "Holiday recording", "IMG_20261031_0932", "Screen capture 04"]
         return FileRow(
             file: GuestFile(
                 path: GuestPath.child(names[index % names.count], of: GuestPath.root), isFolder: false,
                 size: 4_200_000, modified: .now
             ),
-            selected: false, fresh: false, wide: wide, toggle: {}
+            selected: false, fresh: false, wide: wide, dateWidth: dateWidth, toggle: {}
         )
+    }
+}
+
+/// How a file's date is written, in the Modified column and under the name.
+enum FileDate {
+    static let style = Date.FormatStyle(date: .abbreviated, time: .omitted)
+
+    /// The dates that decide how wide the Modified column must be: the 28th of
+    /// each of twelve consecutive months, which has two digits in every month,
+    /// so the longest month name or number and a two-digit day are among them.
+    static func widest(in calendar: Calendar, from now: Date = .now) -> [Date] {
+        (0..<12).compactMap { offset in
+            guard let month = calendar.date(byAdding: .month, value: -offset, to: now),
+                let start = calendar.dateInterval(of: .month, for: month)?.start
+            else { return nil }
+            return calendar.date(byAdding: .day, value: 27, to: start)
+        }
+    }
+}
+
+/// Measures the widest date the Modified column can show, as the column draws
+/// it: the same font, language and calendar, hidden and out of the layout.
+/// `width` keeps at least the English width.
+private struct FileDateProbe: View {
+    @Binding var width: CGFloat
+    @Environment(\.calendar) private var calendar
+
+    var body: some View {
+        ZStack {
+            ForEach(FileDate.widest(in: calendar), id: \.self) { date in
+                Text(date, format: FileDate.style)
+            }
+        }
+        .font(.subheadline)
+        .fixedSize()
+        .onGeometryChange(for: CGFloat.self) { ceil($0.size.width) } action: {
+            width = max(FileRow.minimumDateWidth, $0)
+        }
+        .hidden()
     }
 }
 
