@@ -28,13 +28,36 @@ struct JpegBlobHeader {
 static_assert(sizeof(JpegBlobHeader) == 8);
 constexpr std::uint16_t jpeg_blob_id = 0x00FF;
 
+// The focal length and the physical sensor size that a camera's description
+// states, in millimetres: a pair, which gives the camera's field of view (the
+// host derives both from the field of view it reports, so the pair holds
+// whatever pitch it assumed for the pixels). A description that states none of
+// the three states no pair, and every member is zero then: the static metadata
+// keeps a template's default size for such a camera because the platform
+// requires a size, and that default is no stated one.
+struct StatedOptics {
+    float focal_length_mm = 0.0f;
+    float sensor_width_mm = 0.0f;
+    float sensor_height_mm = 0.0f;
+};
+
+[[nodiscard]] inline StatedOptics stated_optics(const abi::Desc& desc) noexcept
+{
+    if (desc.focal_length_um == 0 || desc.sensor_width_um == 0 || desc.sensor_height_um == 0) return {};
+    return {float(desc.focal_length_um) / 1000.0f, float(desc.sensor_width_um) / 1000.0f,
+            float(desc.sensor_height_um) / 1000.0f};
+}
+
 // The Exif tag FocalLengthIn35mmFormat: the focal length that a camera with a
 // 35 mm frame (43.27 mm across the diagonal) needs for the same field of view,
-// in whole millimetres. It follows from the lens's focal length and the sensor's
-// physical size, all in millimetres. Without a size (the camera states none) or
-// with a result that no sensible lens has (the tag is 16 bits), there is no
-// such value and the tag is left out: a sensor of no size is not a sensor of a
-// hundredth of a millimetre, as a divisor clamped to that would make it.
+// in whole millimetres. It follows from the camera's stated focal length and
+// physical sensor size, all in millimetres, and not from the focal length of
+// one picture (a calibration replaces that with the lens's own, which does not
+// go with a size derived from the field of view). Without a pair (the camera
+// states none) or with a result that no sensible lens has (the tag is 16 bits),
+// there is no such value and the tag is left out: a sensor of no size is not a
+// sensor of a hundredth of a millimetre, as a divisor clamped to that would
+// make it.
 [[nodiscard]] inline std::optional<std::uint16_t> focal_length_in_35mm_film(float focal_length_mm,
                                                                               float sensor_width_mm,
                                                                               float sensor_height_mm)

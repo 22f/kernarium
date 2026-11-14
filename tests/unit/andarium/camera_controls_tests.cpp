@@ -5,9 +5,11 @@
 // the host encoded (android/lineage-24/overlay/camera/hal).
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <numbers>
 #include <optional>
 #include <vector>
 
@@ -435,33 +437,98 @@ void check_exif()
     require(!write_blob_header(tiny, 0), "a buffer smaller than the header");
 }
 
-// The focal length in 35 mm film follows from the lens and the sensor's size
-// in millimetres; a camera that states no size has no such value, and the tag is
-// left out, not computed from a divisor clamped to a hundredth of a millimetre
-// (a 6.765 mm lens made 29272 that way).
+// The focal length in 35 mm film follows from the camera's stated focal length
+// and physical sensor size: the pair that the field of view gives. The sizes in
+// the tests are the ones the host states (darwin/device/camera/camera_description.cpp):
+// the pixel array at a nominal pitch, and the focal length that gives the
+// horizontal field of view the host reports for a sensor that wide. The value is
+// then the field of view's own equivalent whatever the pitch; a camera that
+// states no pair has no value, and the tag is left out (a 6.765 mm lens made
+// 29272 from a size of zero).
+abi::Desc host_description(std::uint32_t width_px, std::uint32_t height_px, double horizontal_fov_degrees,
+                           double pitch_um = 1.2)
+{
+    abi::Desc desc{};
+    desc.pixel_array_width = width_px;
+    desc.pixel_array_height = height_px;
+    const double width_um = width_px * pitch_um;
+    const double height_um = height_px * pitch_um;
+    desc.sensor_width_um = std::uint32_t(std::lround(width_um));
+    desc.sensor_height_um = std::uint32_t(std::lround(height_um));
+    desc.focal_length_um =
+        std::uint32_t(std::lround((width_um / 2.0) / std::tan(horizontal_fov_degrees * std::numbers::pi / 360.0)));
+    return desc;
+}
+
+// The 35 mm equivalent of a field of view, from the film's diagonal and the aspect ratio alone.
+double equivalent_of_field_of_view(std::uint32_t width_px, std::uint32_t height_px, double horizontal_fov_degrees)
+{
+    const double half_width = std::tan(horizontal_fov_degrees * std::numbers::pi / 360.0);
+    return 43.27 / (2.0 * half_width * std::hypot(1.0, double(height_px) / double(width_px)));
+}
+
+std::optional<std::uint16_t> tag_of(const abi::Desc& desc)
+{
+    const auto optics = stated_optics(desc);
+    return focal_length_in_35mm_film(optics.focal_length_mm, optics.sensor_width_mm, optics.sensor_height_mm);
+}
+
 void check_focal_length_35mm()
 {
-    // A back camera: 6.765 mm on a 9.8 x 7.3 mm sensor; a front one: 2.69 mm on 4.8 x 3.6 mm.
-    require(focal_length_in_35mm_film(6.765f, 9.8f, 7.3f) == std::optional<std::uint16_t>(24), "the back lens is a 24 mm one");
-    require(focal_length_in_35mm_film(2.69f, 4.8f, 3.6f) == std::optional<std::uint16_t>(19), "the front lens is a 19 mm one");
+    struct Camera {
+        const char* name;
+        std::uint32_t width, height;
+        double fov;
+    };
+    // A wide back camera, a front one, an ultra wide and a telephoto, at the sizes of their pixel arrays.
+    const Camera cameras[] = {{"main", 4032, 3024, 63.4}, {"front", 3088, 2316, 70.0}, {"ultra wide", 4032, 3024, 106.0},
+                              {"telephoto", 4032, 3024, 25.0}, {"wide 16:9", 3840, 2160, 63.4}};
+    for (const Camera& camera : cameras) {
+        const double expected = equivalent_of_field_of_view(camera.width, camera.height, camera.fov);
+        for (const double pitch : {0.8, 1.2, 2.3}) {
+            const auto tag = tag_of(host_description(camera.width, camera.height, camera.fov, pitch));
+            require(tag.has_value(), camera.name);
+            require(std::abs(double(*tag) - expected) <= 1.0, "the tag is the field of view's own 35 mm equivalent");
+        }
+    }
+    require(tag_of(host_description(4032, 3024, 63.4)) == std::optional<std::uint16_t>(28), "the main camera is a 28 mm one");
+    require(tag_of(host_description(3088, 2316, 70.0)) == std::optional<std::uint16_t>(25), "the front camera is a 25 mm one");
+    require(tag_of(host_description(4032, 3024, 106.0)) == std::optional<std::uint16_t>(13), "the ultra wide is a 13 mm one");
+
+    // A description that states no pair states none: every member is zero, and there is no tag
+    // (the lens's own focal length, 6.765 mm, on a size of zero used to make 29272).
+    for (int missing = 0; missing < 3; ++missing) {
+        abi::Desc desc = host_description(4032, 3024, 63.4);
+        (missing == 0 ? desc.focal_length_um : missing == 1 ? desc.sensor_width_um : desc.sensor_height_um) = 0;
+        const auto optics = stated_optics(desc);
+        require(optics.focal_length_mm == 0.0f && optics.sensor_width_mm == 0.0f && optics.sensor_height_mm == 0.0f,
+                "a pair with a member missing is no pair");
+        require(!tag_of(desc), "no pair: no tag");
+    }
+    abi::Desc unstated = host_description(4032, 3024, 63.4);
+    unstated.sensor_width_um = unstated.sensor_height_um = 0;
+    unstated.focal_length_um = 6765;
+    require(!tag_of(unstated), "a lens focal length with no sensor size: no tag (not 29272)");
+
+    // The arithmetic itself: the 35 mm frame is the film, half the frame doubles the focal length.
     require(focal_length_in_35mm_film(50.0f, 36.0f, 24.0f) == std::optional<std::uint16_t>(50), "a 35 mm frame is the film itself");
     require(focal_length_in_35mm_film(25.0f, 18.0f, 12.0f) == std::optional<std::uint16_t>(50), "half the frame doubles the focal length");
+    require(focal_length_in_35mm_film(1000.0f, 36.0f, 24.0f) == std::optional<std::uint16_t>(1000), "a long lens on film");
 
-    // The sensor's size is the camera's to state; where it did not, there is no tag.
-    require(!focal_length_in_35mm_film(6.765f, 0.0f, 0.0f), "no sensor size: no tag (not 29272)");
-    require(!focal_length_in_35mm_film(6.765f, 9.8f, 0.0f), "one side missing: no tag");
-    require(!focal_length_in_35mm_film(6.765f, 0.0f, 7.3f), "the other side missing: no tag");
-    require(!focal_length_in_35mm_film(6.765f, -9.8f, 7.3f), "a negative size: no tag");
-    require(!focal_length_in_35mm_film(0.0f, 9.8f, 7.3f), "no focal length: no tag");
-    require(!focal_length_in_35mm_film(-1.0f, 9.8f, 7.3f), "a negative focal length: no tag");
+    // What the pair rules out.
+    require(!focal_length_in_35mm_film(6.765f, 0.0f, 0.0f), "no sensor size: no tag");
+    require(!focal_length_in_35mm_film(6.765f, 4.8f, 0.0f), "one side missing: no tag");
+    require(!focal_length_in_35mm_film(6.765f, 0.0f, 3.6f), "the other side missing: no tag");
+    require(!focal_length_in_35mm_film(6.765f, -4.8f, 3.6f), "a negative size: no tag");
+    require(!focal_length_in_35mm_film(0.0f, 4.8f, 3.6f), "no focal length: no tag");
+    require(!focal_length_in_35mm_film(-1.0f, 4.8f, 3.6f), "a negative focal length: no tag");
     const float nan = std::numeric_limits<float>::quiet_NaN();
     const float inf = std::numeric_limits<float>::infinity();
-    require(!focal_length_in_35mm_film(nan, 9.8f, 7.3f) && !focal_length_in_35mm_film(6.765f, nan, 7.3f), "not a number: no tag");
-    require(!focal_length_in_35mm_film(inf, 9.8f, 7.3f) && !focal_length_in_35mm_film(6.765f, 9.8f, inf), "infinite: no tag");
+    require(!focal_length_in_35mm_film(nan, 4.8f, 3.6f) && !focal_length_in_35mm_film(6.765f, nan, 3.6f), "not a number: no tag");
+    require(!focal_length_in_35mm_film(inf, 4.8f, 3.6f) && !focal_length_in_35mm_film(6.765f, 4.8f, inf), "infinite: no tag");
     // The tag is 16 bits: a result beyond it, or one that rounds to nothing, is no focal length either.
     require(!focal_length_in_35mm_film(100.0f, 0.001f, 0.001f), "a result beyond 65535: no tag");
     require(!focal_length_in_35mm_film(0.001f, 36.0f, 24.0f), "a result that rounds to zero: no tag");
-    require(focal_length_in_35mm_film(1000.0f, 36.0f, 24.0f) == std::optional<std::uint16_t>(1000), "a long lens on film");
 }
 
 } // namespace
