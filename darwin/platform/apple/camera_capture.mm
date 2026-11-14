@@ -80,7 +80,8 @@ std::int8_t mirroringNumber(AVCaptureConnection* connection)
 // SENSOR_ORIENTATION describes (presentedMountingOf): a device may turn or mirror a camera's pictures by default (some
 // iPads turn their front camera's video by 180 degrees). A connection that refuses keeps what it has, which the facts
 // say. A video data output physically turns its buffers by the angle, so the angle is set before the output's size.
-ConnectionFacts keepSensorOrientation(AVCaptureConnection* connection, std::uint32_t turn)
+// Without `setAngle` the angle stays what the connection has, and only the mirroring is turned off.
+ConnectionFacts keepSensorOrientation(AVCaptureConnection* connection, std::uint32_t turn, bool setAngle = true)
 {
     ConnectionFacts facts;
     if (connection == nil) return facts;
@@ -91,8 +92,12 @@ ConnectionFacts keepSensorOrientation(AVCaptureConnection* connection, std::uint
             connection.automaticallyAdjustsVideoMirroring = NO;
             connection.videoMirrored = NO;
         }
-        facts.angleSupported = [connection isVideoRotationAngleSupported:CGFloat(turn)];
-        if (connection.videoRotationAngle != CGFloat(turn) && facts.angleSupported) connection.videoRotationAngle = CGFloat(turn);
+        if (setAngle) {
+            facts.angleSupported = [connection isVideoRotationAngleSupported:CGFloat(turn)];
+            if (connection.videoRotationAngle != CGFloat(turn) && facts.angleSupported) connection.videoRotationAngle = CGFloat(turn);
+        } else {
+            facts.angleSupported = [connection isVideoRotationAngleSupported:connection.videoRotationAngle];
+        }
         facts.angle = angleNumber(connection.videoRotationAngle);
         facts.mirrored = mirroringNumber(connection);
     } @catch (NSException* exception) {
@@ -107,12 +112,15 @@ ConnectionFacts keepSensorOrientation(AVCaptureConnection* connection, std::uint
 struct PhotoOutputFacts {
     CameraFact compensationSupported {};
     CameraFact compensationEnabled {};
+    // Whether the compensation was read before or after the capture session's configuration was committed.
+    CameraReading reading {};
     ConnectionFacts connection;
 };
 
-PhotoOutputFacts readCompensation(AVCapturePhotoOutput* output)
+PhotoOutputFacts readCompensation(AVCapturePhotoOutput* output, CameraReading reading)
 {
     PhotoOutputFacts facts;
+    facts.reading = reading;
     @try {
         const bool supported = output.cameraSensorOrientationCompensationSupported;
         facts.compensationSupported = supported ? CameraFact::yes : CameraFact::no;
@@ -125,21 +133,25 @@ PhotoOutputFacts readCompensation(AVCapturePhotoOutput* output)
 
 // The same for a photo output: where the camera does not imitate an earlier front camera its stills stay in the camera's
 // own orientation, without the turn to an earlier model's sensor orientation that the output otherwise applies where it
-// supports one. A camera that does imitate one (presentedMountingOf) keeps the output's default, the turn on: its stated
-// orientation is the earlier model's, which that turn gives, and the caller refuses the output when the facts say it
-// does not turn. The host's Exif, which would state a turn, is not passed on (jpeg_gap.hpp), so the photo connection
-// stays at angle 0, unmirrored, where an angle changes the Exif alone.
-PhotoOutputFacts keepStillOrientation(AVCapturePhotoOutput* output, bool imitatesEarlierFront)
+// supports one. A camera that does imitate one (presentedMountingOf) needs that turn: its compensation is asked on where
+// the output says it is supported, which is a reading that is only known to hold once the configuration is committed,
+// so a still reads it again then and refuses on that reading alone (startStill). The host's Exif, which would state a
+// turn, is not passed on (jpeg_gap.hpp): the photo connection is set to angle 0, unmirrored, where an angle changes the
+// Exif alone, and a camera that imitates one keeps its connection's own angle (photoConnectionTurnOf).
+PhotoOutputFacts keepStillOrientation(AVCapturePhotoOutput* output, const PresentedMounting& mounting)
 {
     @try {
-        if (!imitatesEarlierFront && output.cameraSensorOrientationCompensationSupported)
-            output.cameraSensorOrientationCompensationEnabled = NO;
+        if (output.cameraSensorOrientationCompensationSupported) {
+            if (mounting.emulatesEarlierFront) output.cameraSensorOrientationCompensationEnabled = YES;
+            else output.cameraSensorOrientationCompensationEnabled = NO;
+        }
     } @catch (NSException* exception) {
         std::fprintf(stderr, "Camera: a photo output kept its orientation compensation: %s\n",
                      exception.reason != nil ? exception.reason.UTF8String : "");
     }
-    PhotoOutputFacts facts = readCompensation(output);
-    facts.connection = keepSensorOrientation([output connectionWithMediaType:AVMediaTypeVideo], 0);
+    PhotoOutputFacts facts = readCompensation(output, CameraReading::beforeCommit);
+    const std::optional<std::uint32_t> turn = photoConnectionTurnOf(mounting);
+    facts.connection = keepSensorOrientation([output connectionWithMediaType:AVMediaTypeVideo], turn.value_or(0), turn.has_value());
     return facts;
 }
 
@@ -447,6 +459,9 @@ std::vector<Entry> discover()
 #endif
         }
     }
+    // The formats of the front devices that are not offered because they list ratios and cannot be described: what is left
+    // of a front device whose formats are all dropped, which is then no camera.
+    std::uint16_t frontFormatsDropped = 0;
     std::vector<Entry> entries;
     for (AVCaptureDevice* device in session.devices) {
         Entry entry;
@@ -526,7 +541,10 @@ std::vector<Entry> discover()
             if (aspectRatiosOf(format) != 0) {
                 const auto listed = factsOf(format);
                 pinned = listed ? presentedFormatOf(*listed, entry.mounting.connectionTurn) : std::nullopt;
-                if (!pinned) continue;
+                if (!pinned) {
+                    if (info.position == CameraPosition::front) frontFormatsDropped = std::uint16_t(std::min(65535, frontFormatsDropped + 1));
+                    continue;
+                }
                 dimensions = {std::int32_t(pinned->width), std::int32_t(pinned->height)};
             }
             multiCamera = format.multiCamSupported;
@@ -618,6 +636,7 @@ std::vector<Entry> discover()
 #endif
         entries.push_back(std::move(entry));
     }
+    for (auto& entry : entries) entry.discovered.frontFormatsDropped = frontFormatsDropped;
     // Back cameras first (the zoom camera, then the lenses), then front, then
     // the rest, each group in a fixed lens order.
     const auto rank = [](const CameraInfo& info) {
@@ -635,9 +654,15 @@ class AppleSession;
 // The last note of each camera across the platform sessions of the process, by the device's identifier: a session that
 // closes when the cameras are idle and opens again states the mounting again, and the record keeps what the cameras'
 // last admissions set (withDiscovery). Its lock is the innermost of the notes' (AppleSession::note).
+// It is bounded: the current session's cameras and the most recently used others (heldNotesToDrop).
 struct HeldNotes {
+    struct Held {
+        CameraPresentation note;
+        std::uint64_t used {};
+    };
     std::mutex mutex;
-    std::map<std::string, CameraPresentation> notes;
+    std::map<std::string, Held> notes;
+    std::uint64_t clock {};
 };
 
 HeldNotes& heldNotes()
@@ -838,7 +863,8 @@ RatioFacts ratioFactsOf(AVCaptureDevice* device, CameraAspectRatio pinned)
 }
 #endif
 
-// What the completion of a dynamic aspect ratio change says: zero, or the error's code. It may run on any queue.
+// What the completion of a dynamic aspect ratio change says: zero, or the error's code, and `ratioPending` when the change
+// is asked for, before the device is told. It may run on any queue.
 using RatioDone = std::function<void(std::int32_t)>;
 
 // Puts a device in its anchor: the format only when it is not the active one
@@ -858,14 +884,17 @@ bool activate(AVCaptureDevice* device, const Anchor& anchor, const std::optional
         if (device.activeFormat != anchor.format) device.activeFormat = anchor.format;
 #if TARGET_OS_IOS
         if (pinRatio && anchor.facts.pinnedRatio != CameraAspectRatio::none) {
+            // The change is asked for before the device is told, so that it is under way for whatever reads it, and a completion
+            // that comes at once is the change's own; a device that already holds the ratio completes it explicitly.
+            RatioDone done = ratioDone;
+            if (done) done(ratioPending);
             if (ratioOfAV(device.dynamicAspectRatio) != anchor.facts.pinnedRatio) {
-                RatioDone done = ratioDone;
                 [device setDynamicAspectRatio:avRatioOf(anchor.facts.pinnedRatio)
                             completionHandler:^(CMTime, NSError* completion) {
                     if (done) done(completion == nil ? 0 : std::int32_t(std::clamp<NSInteger>(completion.code, INT32_MIN + 1, INT32_MAX)));
                 }];
-            } else if (ratioDone) {
-                ratioDone(0);
+            } else if (done) {
+                done(0);
             }
         }
 #else
@@ -1229,19 +1258,15 @@ public:
         const Entry& entry = entries_[camera];
         auto& running = cameras_[camera];
         if (!prepareStill(camera)) return false;
-#if TARGET_OS_IOS
-        // A crop is never changed under a still: the ratio the anchor pins is read, and a device that holds another is
-        // refused, with the facts in the record.
-        if (const Anchor* anchor = anchorOf(camera); anchor != nullptr && anchor->facts.pinnedRatio != CameraAspectRatio::none) {
-            const RatioFacts facts = ratioFactsOf(entry.device, anchor->facts.pinnedRatio);
-            if (facts.now != facts.pinned) {
-                note(camera, [&](CameraPresentation& held) { applyRatio(held, facts); });
-                refuse(camera, Refusal::ratioMoved,
-                       "the device holds " + std::string(aspectRatioName(facts.now)) + ", not " + std::string(aspectRatioName(facts.pinned)));
-                return false;
-            }
-        }
-#endif
+        // A crop is never changed under a still: the ratio the anchor pins is read. A change whose completion has not arrived
+        // is waited for with the settle time, inside the same budget; a completion error or a ratio that differs after the
+        // completion refuses the still, with the facts in the record.
+        const RatioStillStep ratioStep = ratioStepOf(camera);
+        if (ratioStep == RatioStillStep::refuseMoved || ratioStep == RatioStillStep::refuseFailed) return false;
+        const bool ratioIsPending = ratioStep == RatioStillStep::wait;
+        // A camera that imitates an earlier front camera takes a still only when its photo output turns it, on the
+        // reading taken after the configuration was committed.
+        if (!stillsAreTurned(camera, running.photoOutput)) return false;
         AVCapturePhotoOutput* output = running.photoOutput;
         AVCapturePhotoSettings* settings = nil;
         // The quality belongs inside the compression properties: iOS raises
@@ -1318,17 +1343,17 @@ public:
         // has passed (the first after the admission, and one after a stream started, resized or stopped, or after a
         // repair), scheduled on the session's queue, which stays free for the other cameras and the stop meanwhile. The waits of
         // a request are bounded (stillWaitBudgetNanoseconds): commits that keep coming fail it instead of postponing it.
-        const auto step = uml::platform::scheduledStillStep(false, true, running.photoMaximumCommittedAt, hostNow(), waited);
+        const auto step = uml::platform::scheduledStillStep(false, true, running.photoMaximumCommittedAt, hostNow(), waited, ratioIsPending);
         if (step.step == ScheduledStillStep::fail) {
             // Commits kept postponing it past its budget: the guest is told at once (the caller's failure).
-            std::fprintf(stderr, "Camera: camera %zu: the still failed: the photo output's full-resolution maximum did not settle within %llu ms\n",
+            std::fprintf(stderr, "Camera: camera %zu: the still failed: the photo output's full-resolution maximum or the aspect ratio did not settle within %llu ms\n",
                          camera, static_cast<unsigned long long>(stillWaitBudgetNanoseconds / 1000000));
             std::lock_guard lock(photoMutex_);
             photos_.erase(request.token);
             return false;
         }
         if (step.step == ScheduledStillStep::wait) {
-            std::fprintf(stderr, "Camera: camera %zu: the still starts in %llu ms, when the photo output's full-resolution maximum has taken effect\n",
+            std::fprintf(stderr, "Camera: camera %zu: the still starts in %llu ms, when the photo output's full-resolution maximum and the aspect ratio have taken effect\n",
                          camera, static_cast<unsigned long long>(step.waitNanoseconds / 1000000));
             {
                 std::lock_guard lock(photoMutex_);
@@ -1382,7 +1407,17 @@ public:
         }
         const auto running = cameras_.find(camera);
         const std::uint64_t committedAt = running == cameras_.end() ? 0 : running->second.photoMaximumCommittedAt;
-        const auto step = uml::platform::scheduledStillStep(stopped_, known && running != cameras_.end(), committedAt, hostNow(), waited);
+        // The pinned ratio's change that was under way when the still was accepted has completed or not: read again.
+        bool ratioIsPending = false;
+        if (known && !stopped_) {
+            const RatioStillStep ratioStep = ratioStepOf(camera);
+            if (ratioStep == RatioStillStep::refuseMoved || ratioStep == RatioStillStep::refuseFailed) {
+                failStill(camera, token);
+                return;
+            }
+            ratioIsPending = ratioStep == RatioStillStep::wait;
+        }
+        const auto step = uml::platform::scheduledStillStep(stopped_, known && running != cameras_.end(), committedAt, hostNow(), waited, ratioIsPending);
         switch (step.step) {
         case ScheduledStillStep::drop:
             std::fprintf(stderr, "Camera: a scheduled still was dropped: the session ended or the request is gone\n");
@@ -1398,7 +1433,7 @@ public:
         }
         case ScheduledStillStep::fail:
             // Commits kept postponing it past its budget: failed once, here, and nothing is scheduled again.
-            std::fprintf(stderr, "Camera: camera %zu: the still failed: the photo output's full-resolution maximum did not settle within %llu ms\n",
+            std::fprintf(stderr, "Camera: camera %zu: the still failed: the photo output's full-resolution maximum or the aspect ratio did not settle within %llu ms\n",
                          camera, static_cast<unsigned long long>(stillWaitBudgetNanoseconds / 1000000));
             failStill(camera, token);
             return;
@@ -1473,6 +1508,9 @@ public:
     void deliverFrame(std::size_t camera, CMSampleBufferRef sample)
     {
         if (camera >= entries_.size()) return;
+        // The camera's pinned ratio is not the one it delivers until the change has completed: nothing of it is passed on,
+        // and the device's own stand-in frames bridge the gap as they do at a session's start.
+        if (ratioHoldsFrames(camera)) return;
         // What the capture made before the cameras were put back in their anchors does not get here
         // (RepairBoundary, applied by the output delegate before it calls this).
         const CMTime presentation = CMSampleBufferGetPresentationTimeStamp(sample);
@@ -1638,7 +1676,7 @@ public:
         HeldNotes& held = heldNotes();
         std::lock_guard lock(held.mutex);
         const auto found = held.notes.find(entries_[camera].info.identifier);
-        return found != held.notes.end() ? found->second : CameraPresentation {};
+        return found != held.notes.end() ? found->second.note : CameraPresentation {};
     }
 
     // Keeps the camera's note for the sessions that follow this one (the notes' lock is held).
@@ -1646,7 +1684,13 @@ public:
     {
         HeldNotes& held = heldNotes();
         std::lock_guard lock(held.mutex);
-        held.notes[entries_[camera].info.identifier] = notes_[camera];
+        held.notes[entries_[camera].info.identifier] = {notes_[camera], ++held.clock};
+        if (held.notes.size() <= entries_.size() + heldNotesRecent) return;
+        std::vector<HeldNoteUse> uses;
+        for (const auto& [identifier, kept] : held.notes) uses.push_back({identifier, kept.used});
+        std::vector<std::string> current;
+        for (const auto& entry : entries_) current.push_back(entry.info.identifier);
+        for (const auto& identifier : heldNotesToDrop(uses, current, heldNotesRecent)) held.notes.erase(identifier);
     }
 
     // The first frame of an admission states the size the output delivers, once.
@@ -1666,31 +1710,67 @@ public:
         note(camera, [&](CameraPresentation& held) { held.exifOrientation = orientation; });
     }
 
-    // The completion of a dynamic aspect ratio change arrives (the device's own queue), under the state's mutex.
-    void ratioCompleted(std::size_t camera, std::int32_t code)
+    // The completion of a dynamic aspect ratio change arrives (the device's own queue), under the state's mutex: `operation`
+    // is the change it belongs to, or `ratioPending` as the code when the change is asked for, before the device is told.
+    // The camera's frames are held until the change has completed without an error; an error ends the camera for the
+    // guest (failRatio), as a refused admission does.
+    void ratioCompleted(std::size_t camera, std::uint64_t operation, std::int32_t code)
     {
 #if TARGET_OS_IOS
         if (camera >= entries_.size()) return;
-        CameraAspectRatio pinned = CameraAspectRatio::none;
+        bool failedNow = false;
         {
             std::lock_guard lock(notesMutex_);
-            if (camera < notes_.size()) pinned = notes_[camera].ratioPinned;
+            RatioPin& pin = ratioPins_[camera];
+            if (code == ratioPending) {
+                ratioPinAsked(pin, operation);
+            } else {
+                const bool wasTimedOut = pin.timedOut;
+                if (!ratioPinCompleted(pin, operation, code)) return;
+                failedNow = code != 0 && !wasTimedOut;
+            }
         }
+        // The ratio the camera's anchor pins, which the notes do not hold until the admission that asked for it is noted.
+        CameraAspectRatio pinned = CameraAspectRatio::none;
+        if (const Anchor* anchor = anchorOf(camera); anchor != nullptr) pinned = anchor->facts.pinnedRatio;
         std::optional<RatioFacts> facts;
         if (pinned != CameraAspectRatio::none) facts = ratioFactsOf(entries_[camera].device, pinned);
         note(camera, [&](CameraPresentation& held) {
             if (facts) applyRatio(held, *facts);
             held.ratioError = code;
         });
+        if (failedNow)
+            failRatio(camera, Refusal::ratioFailed, "the change to " + std::string(aspectRatioName(pinned)) + " ended with error " + std::to_string(code));
 #else
         (void)camera;
+        (void)operation;
         (void)code;
 #endif
+    }
+
+    // The camera's pinned ratio did not come to be, by an error or by no completion in time: it is refused as an admission
+    // whose connection does not hold its turn is, with the reason in the record, and the session is said to have failed,
+    // which the device answers by telling the guest its cameras are interrupted and opening another session whose
+    // admissions pin the ratio again. Called with the state's mutex held.
+    void failRatio(std::size_t camera, Refusal reason, const std::string& detail)
+    {
+        refuse(camera, reason, detail);
+        deliver({allCameras, CameraEventKind::failed});
     }
 
 private:
 #if TARGET_OS_IOS
     static CameraFact factOf(bool value) { return value ? CameraFact::yes : CameraFact::no; }
+
+    // What the camera's pinned ratio change says in a note: pending while it is under way or never completed, else its
+    // completion's error code; nothing where none was asked for.
+    std::optional<std::int32_t> ratioCodeOf(std::size_t camera)
+    {
+        std::lock_guard lock(notesMutex_);
+        const auto found = ratioPins_.find(camera);
+        if (found == ratioPins_.end() || !found->second.asked) return std::nullopt;
+        return found->second.pending || found->second.timedOut ? ratioPending : found->second.error;
+    }
 
     // The ratio facts into a note; a change whose completion has not come yet is pending.
     static void applyRatio(CameraPresentation& held, const RatioFacts& facts)
@@ -1716,15 +1796,30 @@ private:
 
     // What an admission set on the camera: the video connection (its angle and mirroring by default and now, the size the
     // output was asked for), the photo output's compensation and photo connection, the device's ratio.
-    void noteAdmission(std::size_t camera, const std::optional<ConnectionFacts>& video, const std::optional<PhotoOutputFacts>& photo,
+    void noteAdmission(std::size_t camera, const std::optional<ConnectionFacts>& video, const std::optional<PhotoOutputFacts>& attached,
                        const std::optional<CameraStillSize>& photoMaximum, const std::optional<RatioFacts>& ratio, CameraStillSize asked)
     {
+        // The photo output's compensation as it reads now that the admission committed the configuration; the reading
+        // taken as the output was attached stays where the output is gone again.
+        std::optional<PhotoOutputFacts> photo = attached;
+        if (photo)
+            if (const auto running = cameras_.find(camera); running != cameras_.end() && running->second.photoOutput != nil) {
+                const PhotoOutputFacts committed = readCompensation(running->second.photoOutput, CameraReading::afterCommit);
+                photo->compensationSupported = committed.compensationSupported;
+                photo->compensationEnabled = committed.compensationEnabled;
+                photo->reading = committed.reading;
+            }
         AVCaptureDevice* device = entries_[camera].device;
         const CameraFact center = factOf(device.centerStageActive);
         const CameraFact distortion = factOf(device.geometricDistortionCorrectionEnabled);
         const Anchor* anchor = anchorOf(camera);
+        const std::optional<std::int32_t> ratioCode = ratioCodeOf(camera);
         note(camera, [&](CameraPresentation& held) {
-            if (ratio) applyRatio(held, *ratio);
+            if (ratio) {
+                applyRatio(held, *ratio);
+                // The change's own state, which a completion that came before this note may already have ended.
+                if (ratioCode) held.ratioError = *ratioCode;
+            }
             if (video) {
                 held.videoKnown = true;
                 held.videoDefaultAngle = video->defaultAngle;
@@ -1744,6 +1839,7 @@ private:
                 held.photoKnown = true;
                 held.compensationSupported = photo->compensationSupported;
                 held.compensationEnabled = photo->compensationEnabled;
+                held.compensationReading = photo->reading;
                 held.photoDefaultAngle = photo->connection.defaultAngle;
                 held.photoAngle = photo->connection.angle;
                 held.photoDefaultMirrored = photo->connection.defaultMirrored;
@@ -1772,7 +1868,7 @@ private:
             }
         std::optional<PhotoOutputFacts> photo;
         if (running.photoOutput != nil) {
-            photo = readCompensation(running.photoOutput);
+            photo = readCompensation(running.photoOutput, CameraReading::afterCommit);
             if (AVCaptureConnection* connection = [running.photoOutput connectionWithMediaType:AVMediaTypeVideo]; connection != nil)
                 @try {
                     photo->connection.angle = angleNumber(connection.videoRotationAngle);
@@ -1781,8 +1877,12 @@ private:
                 }
         }
         const CMVideoDimensions maximum = running.photoOutput != nil ? running.photoOutput.maxPhotoDimensions : CMVideoDimensions {};
+        const std::optional<std::int32_t> ratioCode = ratioCodeOf(camera);
         note(camera, [&](CameraPresentation& held) {
-            if (ratio) applyRatio(held, *ratio);
+            if (ratio) {
+                applyRatio(held, *ratio);
+                if (ratioCode) held.ratioError = *ratioCode;
+            }
             if (video && held.videoKnown) {
                 held.videoAngle = video->first;
                 held.videoMirrored = video->second;
@@ -1792,6 +1892,7 @@ private:
             if (photo && held.photoKnown) {
                 held.compensationSupported = photo->compensationSupported;
                 held.compensationEnabled = photo->compensationEnabled;
+                held.compensationReading = photo->reading;
                 held.photoAngle = photo->connection.angle;
                 held.photoMirrored = photo->connection.mirrored;
                 held.photoMaximumWidth = std::uint32_t(std::max(0, int(maximum.width)));
@@ -1803,14 +1904,147 @@ private:
     static std::int16_t fieldOfViewOf(const Anchor&) { return -1; }
 #endif
 
+#if TARGET_OS_IOS
+    // What a still does about the ratio its camera's anchor pins (ratioStillStep), on the device's reading now and the
+    // state of the change the session asked for. A refusal is logged and recorded here.
+    RatioStillStep ratioStepOf(std::size_t camera)
+    {
+        const Anchor* anchor = anchorOf(camera);
+        if (anchor == nullptr || anchor->facts.pinnedRatio == CameraAspectRatio::none) return RatioStillStep::proceed;
+        const RatioFacts facts = ratioFactsOf(entries_[camera].device, anchor->facts.pinnedRatio);
+        RatioPin pin;
+        {
+            std::lock_guard lock(notesMutex_);
+            if (const auto found = ratioPins_.find(camera); found != ratioPins_.end()) pin = found->second;
+        }
+        const RatioStillStep step = ratioStillStep(facts.pinned, facts.now, pin.pending && !pin.timedOut, ratioPinErrorForStill(pin));
+        if (step == RatioStillStep::refuseMoved || step == RatioStillStep::refuseFailed) {
+            note(camera, [&](CameraPresentation& held) {
+                applyRatio(held, facts);
+                if (step == RatioStillStep::refuseFailed && !pin.timedOut) held.ratioError = pin.error;
+            });
+            if (step == RatioStillStep::refuseFailed && pin.timedOut)
+                refuse(camera, Refusal::ratioTimedOut, "the change to " + std::string(aspectRatioName(facts.pinned)) + " did not complete");
+            else if (step == RatioStillStep::refuseFailed)
+                refuse(camera, Refusal::ratioFailed, "the change to " + std::string(aspectRatioName(facts.pinned)) + " ended with error " +
+                                                         std::to_string(pin.error));
+            else
+                refuse(camera, Refusal::ratioMoved,
+                       "the device holds " + std::string(aspectRatioName(facts.now)) + ", not " + std::string(aspectRatioName(facts.pinned)));
+        }
+        return step;
+    }
+
+    // What a still does about the photo output's orientation compensation of a camera that imitates an earlier front
+    // camera (stillCompensationStep), on the reading taken now, after the configuration was committed: supported and off is
+    // turned on once, in a configuration of its own. The reading goes into the camera's photo line, and a refusal says
+    // which reading refused it. Nothing is asked of any other camera.
+    bool stillsAreTurned(std::size_t camera, AVCapturePhotoOutput* output)
+    {
+        const Entry& entry = entries_[camera];
+        if (!entry.mounting.emulatesEarlierFront) return true;
+        PhotoOutputFacts facts = readCompensation(output, CameraReading::afterCommit);
+        CompensationStep step = stillCompensationStep(true, facts.compensationSupported, facts.compensationEnabled, facts.reading);
+        if (step == CompensationStep::enable) {
+            [session_ beginConfiguration];
+            @try {
+                output.cameraSensorOrientationCompensationEnabled = YES;
+            } @catch (NSException* exception) {
+                std::fprintf(stderr, "Camera: camera %zu: the photo output kept its orientation compensation: %s\n", camera,
+                             exception.reason != nil ? exception.reason.UTF8String : "");
+            }
+            [session_ commitConfiguration];
+            photoPipelinesSettle();
+            facts = readCompensation(output, CameraReading::afterCommit);
+            step = stillCompensationStep(true, facts.compensationSupported, facts.compensationEnabled, facts.reading);
+            if (step == CompensationStep::enable) step = CompensationStep::refuse;
+        }
+        note(camera, [&](CameraPresentation& held) {
+            held.photoKnown = true;
+            held.compensationSupported = facts.compensationSupported;
+            held.compensationEnabled = facts.compensationEnabled;
+            held.compensationReading = facts.reading;
+        });
+        if (step != CompensationStep::refuse) return true;
+        refuse(camera, Refusal::stillsNotTurned,
+               "the photo output does not turn its stills (compensation supported " + std::string(factName(facts.compensationSupported)) +
+                   ", on " + std::string(factName(facts.compensationEnabled)) + ", read after the configuration was committed): the camera takes no still");
+        return false;
+    }
+#else
+    RatioStillStep ratioStepOf(std::size_t) { return RatioStillStep::proceed; }
+    bool stillsAreTurned(std::size_t, AVCapturePhotoOutput*) { return true; }
+#endif
+
+#if TARGET_OS_IOS
+    // Whether the camera's frames are held: a pinned ratio's change is under way, or ended in an error or no completion
+    // (ratioFrameStep). What the device delivers until the change completed is of the ratio it had before.
+    bool ratioHoldsFrames(std::size_t camera)
+    {
+        std::lock_guard lock(notesMutex_);
+        const auto found = ratioPins_.find(camera);
+        return found != ratioPins_.end() && ratioFrameStep(found->second) != RatioFrameStep::deliver;
+    }
+
+    // The session runs with the camera in it (after an admission or a repair): the time the pinned ratio's change may
+    // take begins, once for the change that is pending, and is watched on the session's queue.
+    void armRatioWatch(std::size_t camera)
+    {
+        std::uint64_t operation = 0;
+        {
+            std::lock_guard lock(notesMutex_);
+            const auto found = ratioPins_.find(camera);
+            if (found == ratioPins_.end() || !ratioPinArmed(found->second, hostNow())) return;
+            operation = found->second.operation;
+        }
+        std::shared_ptr<SessionState> state = state_;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, std::int64_t(ratioCompletionBudgetNanoseconds)), queue_, ^{
+            AppleSession* session = nullptr;
+            {
+                std::lock_guard lock(state->mutex);
+                session = static_cast<AppleSession*>(state->session);
+            }
+            if (session != nullptr) session->ratioWatchFired(camera, operation);
+        });
+    }
+
+    // The time of a pinned ratio's change ran out (on the session's queue): a change that has not completed ends the
+    // camera for the guest (failRatio). The watch fires after the budget, whatever the clocks read.
+    void ratioWatchFired(std::size_t camera, std::uint64_t operation)
+    {
+        if (stopped_) return;
+        {
+            std::lock_guard lock(notesMutex_);
+            const auto found = ratioPins_.find(camera);
+            if (found == ratioPins_.end() || found->second.operation != operation) return;
+            if (!ratioPinTimedOut(found->second, std::max(hostNow(), found->second.armedAt + ratioCompletionBudgetNanoseconds))) return;
+        }
+        std::lock_guard lock(state_->mutex);
+        if (state_->session) failRatio(camera, Refusal::ratioTimedOut, "the change did not complete within " + std::to_string(ratioCompletionBudgetNanoseconds / 1000000) + " ms");
+    }
+
+    // An admission that did not hold leaves no change under way.
+    void forgetRatio(std::size_t camera)
+    {
+        std::lock_guard lock(notesMutex_);
+        ratioPins_.erase(camera);
+    }
+#else
+    bool ratioHoldsFrames(std::size_t) { return false; }
+    void armRatioWatch(std::size_t) {}
+    void forgetRatio(std::size_t) {}
+#endif
+
     // The completion handler of a ratio change the device is asked for (activate): it reaches the session only while
     // the session lives, under the state's mutex like every callback of the platform's.
+    // Each call is one operation (a change asked for, or found made), numbered so that a completion belongs to it alone.
     RatioDone ratioDone(std::size_t camera)
     {
         std::shared_ptr<SessionState> state = state_;
-        return [state, camera](std::int32_t code) {
+        const std::uint64_t operation = ++ratioOperation_;
+        return [state, camera, operation](std::int32_t code) {
             std::lock_guard lock(state->mutex);
-            if (state->session) static_cast<AppleSession*>(state->session)->ratioCompleted(camera, code);
+            if (state->session) static_cast<AppleSession*>(state->session)->ratioCompleted(camera, operation, code);
         };
     }
 
@@ -1976,7 +2210,7 @@ private:
                 const ConnectionFacts connection = keepSensorOrientation(newConnection, entry.mounting.connectionTurn);
                 videoConnection = connection;
                 if (entry.mounting.emulatesEarlierFront && (!connection.angleSupported || connection.angle != std::int16_t(entry.mounting.connectionTurn))) {
-                    refuse(camera, Refusal::outputRefused,
+                    refuse(camera, Refusal::turnNotHeld,
                            "the video connection does not hold a turn of " + std::to_string(entry.mounting.connectionTurn) + " (it has " +
                                std::to_string(connection.angle) + ", by default " + std::to_string(connection.defaultAngle) + ")");
                     return false;
@@ -1996,18 +2230,11 @@ private:
 #endif
 #if TARGET_OS_IOS
                 // The orientation of the output's stills; a camera that imitates an earlier front camera needs the output
-                // to turn them (its compensation, supported and on), or it takes no still: a still of the platform's own
-                // orientation would be turned the wrong way for the orientation stated, and never reaches the guest.
-                const auto stillsAreTurned = [&](AVCapturePhotoOutput* attached) -> bool {
-                    const PhotoOutputFacts facts = keepStillOrientation(attached, entry.mounting.emulatesEarlierFront);
-                    photoFacts = facts;
-                    if (!entry.mounting.emulatesEarlierFront ||
-                        (facts.compensationSupported == CameraFact::yes && facts.compensationEnabled == CameraFact::yes))
-                        return true;
-                    refuse(camera, Refusal::outputRefused,
-                           "the photo output does not turn its stills (compensation supported " + std::string(factName(facts.compensationSupported)) +
-                               ", on " + std::string(factName(facts.compensationEnabled)) + "): the camera takes no still");
-                    return false;
+                // to turn them (its compensation, supported and on). What the output says of it is only known to hold
+                // once the configuration is committed, so nothing is refused here: a still reads it then (startStill).
+                const auto keepOrientation = [&](AVCapturePhotoOutput* attached) -> bool {
+                    photoFacts = keepStillOrientation(attached, entry.mounting);
+                    return true;
                 };
 #endif
                 const auto attach = [&]() -> bool {
@@ -2022,7 +2249,7 @@ private:
                         AVCaptureConnection* connection = [[AVCaptureConnection alloc] initWithInputPorts:@[port] output:output];
                         if (![session_ canAddConnection:connection]) return false;
                         [session_ addConnection:connection];
-                        return stillsAreTurned(output);
+                        return keepOrientation(output);
 #else
                         return false;
 #endif
@@ -2031,7 +2258,7 @@ private:
                     [session_ addOutput:output];
                     newPhoto = output;
 #if TARGET_OS_IOS
-                    return stillsAreTurned(output);
+                    return keepOrientation(output);
 #else
                     return true;
 #endif
@@ -2099,6 +2326,7 @@ private:
         noteAdmission(camera, videoConnection, photoFacts, photoMaximumSet, ratioFacts, video ? CameraStillSize {width, height} : CameraStillSize {});
 #endif
         if (result != Admission::admitted) {
+            if (plan.activate) forgetRatio(camera);
             switch (result) {
             case Admission::inputRefused: refuse(camera, Refusal::inputRefused); break;
             case Admission::formatRefused: refuse(camera, Refusal::raised, "the device refused its anchor"); break;
@@ -2133,6 +2361,7 @@ private:
         if ((activeBefore != anchor->format || settingsStale) && running.applied) applyOnQueue(camera, running.settings, true);
         logJoin(camera);
         startSession();
+        armRatioWatch(camera);
         return true;
     }
 
@@ -2272,7 +2501,7 @@ private:
             if (entry.mounting.emulatesEarlierFront && running.connection != nil) {
                 const ConnectionFacts connection = keepSensorOrientation(running.connection, entry.mounting.connectionTurn);
                 if (!connection.angleSupported || connection.angle != std::int16_t(entry.mounting.connectionTurn)) {
-                    refuse(camera, Refusal::outputRefused,
+                    refuse(camera, Refusal::turnNotHeld,
                            "the video connection does not hold a turn of " + std::to_string(entry.mounting.connectionTurn) + " (it has " +
                                std::to_string(connection.angle) + ")");
                     return false;
@@ -2294,6 +2523,8 @@ private:
         // A stream's durations are written with its anchor; a still-only camera's are written when it streams.
         if (ok && running.video) running.timingWritten();
         if (ok && running.applied) applyOnQueue(camera, running.settings, true);
+        // The ratio pinned again is under way until its completion: the time it may take begins now.
+        armRatioWatch(camera);
         return ok;
     }
 
@@ -2498,6 +2729,11 @@ private:
     // How each camera is presented, by index of cameras() (note()); the notes' own lock is taken after the state's.
     std::mutex notesMutex_;
     std::vector<CameraPresentation> notes_;
+    // The state of each camera's pinned aspect ratio change, by index of cameras() (guarded by notesMutex_): the
+    // operation, whether it is under way, its completion's error code, and whether its time ran out (RatioPin).
+    std::map<std::size_t, RatioPin> ratioPins_;
+    // The number of the last ratio change asked for (on the session's queue).
+    std::uint64_t ratioOperation_ {};
     std::set<std::size_t> joinsLogged_;
     std::atomic_bool stopped_ {};
     // The recoveries of this session: a failure stays until the session is torn
@@ -2642,6 +2878,7 @@ void noteCompensation(uml::platform::CameraStillFailure& failure, AVCapturePhoto
         failure.compensationSupported = supported ? uml::platform::CameraFact::yes : uml::platform::CameraFact::no;
         failure.compensationEnabled = supported && output.cameraSensorOrientationCompensationEnabled
             ? uml::platform::CameraFact::yes : uml::platform::CameraFact::no;
+        failure.compensationReading = uml::platform::CameraReading::afterCommit;
     } @catch (NSException*) {
         // The facts stay unknown.
     }
