@@ -584,14 +584,12 @@ DEBUG_SYMBOLS = (
     ("send feedback preview",
      (b"20previewOpensAtLaunch", b"14previewPrepare", b"24previewKeepsConfirmation")),
     # The Simulator preview's hooks into the Buy me tokens sheet
-    # (TipJarServices.previewOpensSheet, previewPlays, previewScrollsToTop,
-    # previewFullHeight and openLink, and the environment values that scroll the
-    # sheet to its top and open it at full height): the preview opens the sheet,
-    # plays a purchase, scrolls, sizes it and sees which profile a tap opens; the
-    # application never does.
-    ("tip jar preview", (b"16previewOpensSheet", b"12previewPlays", b"19previewScrollsToTop",
-                         b"17previewFullHeight", b"14TipJarServicesV8openLink",
-                         b"21TipJarScrollsToTopKey", b"19TipJarFullHeightKey")),
+    # (TipJarServices.previewOpensSheet, previewPlays, previewFullHeight and
+    # openLink, and the environment value that opens the sheet at full height):
+    # the preview opens the sheet, plays a purchase, sizes it and sees which
+    # profile a tap opens; the application never does.
+    ("tip jar preview", (b"16previewOpensSheet", b"12previewPlays", b"17previewFullHeight",
+                         b"14TipJarServicesV8openLink", b"19TipJarFullHeightKey")),
     # A Debug build's own check of the rating prompt (ReviewAskTracker.debugSet,
     # ReviewAsk.applyDebugLaunch): it sets the counter and clears the record.
     ("rating prompt debug", (b"8debugSet", b"16applyDebugLaunch")),

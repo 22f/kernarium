@@ -23,8 +23,6 @@ struct TipJarServices {
     /// Opens the sheet once Home has settled, as a launch of the Simulator
     /// preview asks; never in the application.
     var previewOpensSheet = false
-    /// Scrolls the conversation to its top instead of resting at its bottom.
-    var previewScrollsToTop = false
     /// Opens the sheet at the full height of a page, taller than its conversation.
     var previewFullHeight = false
     /// Runs when the sheet appears: the Simulator preview plays a purchase with it.

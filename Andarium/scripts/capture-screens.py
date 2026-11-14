@@ -417,7 +417,6 @@ SHOTS: list[Shot] = [
     # Buy me tokens: needs a Preview built with the four TIP_ settings (see --help)
     tipjar("tipjar-entrance-home", "tipjar-home", "Home's toolbar after a virtual machine is set up: the one menu button where Info was, which holds Info, Send feedback, Review on the App Store and Buy me tokens (the menu itself is not captured).", dark=True, wait=3.0),
     tipjar("tipjar", "tipjar", "Buy me tokens over Home: the chat with Andarium's developer (the header shows the developer's avatar, name and two profile logos where the Preview is given them), the plain statement and the four tiers with the store's prices.", dark=True),
-    tipjar("tipjar-top", "tipjar", "Buy me tokens scrolled to its top, so that the sender line is in view at the largest text sizes.", "-tipScroll", "top", dark=True),
     tipjar("tipjar-tall", "tipjar", "Buy me tokens at the full height of a page, taller than its conversation: the conversation stands at the top, under the title, and the tiers stay at the foot.", "-tipHeight", "full"),
     tipjar("tipjar-loading", "tipjar-loading", "The store has not answered yet: the four tiers with a spinner for each price."),
     tipjar("tipjar-missing", "tipjar-missing", "The store knows three of the four: the others are offered, Max is left out."),

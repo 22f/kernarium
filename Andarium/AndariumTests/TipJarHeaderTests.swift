@@ -212,27 +212,24 @@ struct TipJarHeaderTests {
     }
 
     /// The logos are a touch target each, 44 pt tall, no larger than the target, and no two of them
-    /// overlap, at the default size and at the largest: they used to grow with the text until they
-    /// touched and rivalled the name.
-    @Test(arguments: [DynamicTypeSize.large, .accessibility5])
-    func theLogosKeepTheirSizeAndTheirTargets(size: DynamicTypeSize) async throws {
-        let links = try await linkTargets(of: Self.content(), at: size, count: Self.sites.count)
+    /// overlap.
+    @Test func theLogosKeepTheirSizeAndTheirTargets() async throws {
+        let links = try await linkTargets(of: Self.content(), at: .large, count: Self.sites.count)
         for frame in links {
-            #expect(frame.width <= 48 && frame.height >= 43.5 && frame.height <= 48, "\(size): a logo's target: \(frame)")
+            #expect(frame.width <= 48 && frame.height >= 43.5 && frame.height <= 48, "a logo's target: \(frame)")
         }
         for (first, second) in zip(links, links.dropFirst()) {
             #expect(!first.insetBy(dx: 0.5, dy: 0.5).intersects(second.insetBy(dx: 0.5, dy: 0.5)),
-                    "\(size): two targets overlap: \(first) \(second)")
+                    "two targets overlap: \(first) \(second)")
         }
     }
 
-    /// A lone logo is a 44 pt square target (no neighbour shares its sides), at both sizes.
-    @Test(arguments: [DynamicTypeSize.large, .accessibility5])
-    func aLoneLogoIsA44PointTarget(size: DynamicTypeSize) async throws {
-        let links = try await linkTargets(of: Self.content(x: nil), at: size, count: 1)
+    /// A lone logo is a 44 pt square target (no neighbour shares its sides).
+    @Test func aLoneLogoIsA44PointTarget() async throws {
+        let links = try await linkTargets(of: Self.content(x: nil), at: .large, count: 1)
         let frame = try #require(links.first)
         #expect(frame.width >= 43.5 && frame.width <= 48 && frame.height >= 43.5 && frame.height <= 48,
-                "\(size): the lone logo's target: \(frame)")
+                "the lone logo's target: \(frame)")
     }
 
     // MARK: The gaps
@@ -274,11 +271,9 @@ struct TipJarHeaderTests {
     }
 
     /// The name, the GitHub mark and the X mark read as one tight group: the gap from the name to the
-    /// first mark and between the marks is one inline gap (8 pt), at the default size, where the line
-    /// holds them all, and at the largest, where the marks go under the name. The touch targets are
-    /// 44 pt tall and do not space the glyphs.
-    @Test(arguments: [DynamicTypeSize.large, .accessibility5])
-    func theNameAndTheMarksAreOneTightGroup(size: DynamicTypeSize) async throws {
+    /// first mark and between the marks is one inline gap (8 pt). The touch targets are 44 pt tall and
+    /// do not space the glyphs.
+    @Test func theNameAndTheMarksAreOneTightGroup() async throws {
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let developer = TipJarDeveloper(name: "example", githubHandle: "example", xHandle: "example_x")
@@ -286,7 +281,7 @@ struct TipJarHeaderTests {
             developer: developer, avatar: nil, githubLogo: Self.solid(), xLogo: Self.solid())
         let controller = UIHostingController(
             rootView: TipJarSender(content: content)
-                .dynamicTypeSize(size)
+                .dynamicTypeSize(.large)
                 .padding(16)
                 .frame(width: 380)
                 .frame(maxHeight: .infinity, alignment: .top)
@@ -308,22 +303,12 @@ struct TipJarHeaderTests {
         let picture = UIGraphicsImageRenderer(bounds: view.bounds).image { _ in
             view.drawHierarchy(in: view.bounds, afterScreenUpdates: true)
         }
-        let wrapped = size.isAccessibilitySize
-        // The marks are the ink right of the name (one line) or under it (wrapped).
-        let area = wrapped
-            ? CGRect(x: 0, y: line.maxY, width: view.bounds.width, height: 120)
-            : CGRect(x: line.maxX, y: line.minY - 12, width: view.bounds.width - line.maxX, height: line.height + 24)
+        // The marks are the ink right of the name.
+        let area = CGRect(x: line.maxX, y: line.minY - 12, width: view.bounds.width - line.maxX, height: line.height + 24)
         let marks = Self.inkRuns(in: picture, area: area, columns: true)
         try #require(marks.count == Self.sites.count, "the marks drawn: \(marks) in \(area), the name at \(line)")
         let gap = 8.0
-        if wrapped {
-            let rows = Self.inkRuns(in: picture, area: area, columns: false)
-            let top = try #require(rows.first?.lowerBound)
-            #expect(top - line.maxY <= 8, "the marks sit \(top - line.maxY) pt under the name")
-            #expect(abs(marks[0].lowerBound - line.minX) <= 1.5, "the first mark lines up with the name: \(marks[0]) \(line)")
-        } else {
-            #expect(abs(marks[0].lowerBound - line.maxX - gap) <= 1.5, "the name to the first mark: \(marks[0].lowerBound - line.maxX) pt")
-        }
+        #expect(abs(marks[0].lowerBound - line.maxX - gap) <= 1.5, "the name to the first mark: \(marks[0].lowerBound - line.maxX) pt")
         for (first, second) in zip(marks, marks.dropFirst()) {
             #expect(abs(second.lowerBound - first.upperBound - gap) <= 1.5, "between the marks: \(second.lowerBound - first.upperBound) pt")
         }

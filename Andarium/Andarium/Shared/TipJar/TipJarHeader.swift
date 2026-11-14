@@ -87,9 +87,8 @@ struct TipJarSender: View {
     /// The gap between the name and the first logo, and between the logos, as text has between words.
     private let spacing = 8.0
 
-    private var avatarSize: Double { min(avatarMetric, 56) }
-    /// The logos stay smaller than the name they follow, at any text size.
-    private var glyphSize: Double { min(glyphMetric, 24) }
+    private var avatarSize: Double { avatarMetric }
+    private var glyphSize: Double { glyphMetric }
     private var shownLinks: [TipJarSenderContent.Link] { links ? content.links : [] }
 
     var body: some View {

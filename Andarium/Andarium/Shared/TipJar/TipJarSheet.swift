@@ -13,12 +13,6 @@ import SwiftUI
 // kept when the sheet closes.
 
 #if !APP_STORE
-/// The Simulator preview scrolls the conversation to its top, where the sender line is at the largest
-/// text sizes (the conversation otherwise rests at its bottom, by the tiers).
-private struct TipJarScrollsToTopKey: EnvironmentKey {
-    static let defaultValue = false
-}
-
 /// The Simulator preview opens the sheet at the full height of a page, taller than its conversation, to
 /// show where a short conversation stands.
 private struct TipJarFullHeightKey: EnvironmentKey {
@@ -26,11 +20,6 @@ private struct TipJarFullHeightKey: EnvironmentKey {
 }
 
 extension EnvironmentValues {
-    var tipJarScrollsToTop: Bool {
-        get { self[TipJarScrollsToTopKey.self] }
-        set { self[TipJarScrollsToTopKey.self] = newValue }
-    }
-
     var tipJarFullHeight: Bool {
         get { self[TipJarFullHeightKey.self] }
         set { self[TipJarFullHeightKey.self] = newValue }
@@ -45,17 +34,11 @@ struct TipJarSheet: View {
     /// "iPhone" or "iPad", for the note when purchases are not allowed.
     let device: String
     let close: () -> Void
-    @Environment(\.dynamicTypeSize) private var typeSize
     #if !APP_STORE
-    @Environment(\.tipJarScrollsToTop) private var scrollsToTop
     @Environment(\.tipJarFullHeight) private var fullHeight
-    private var anchor: UnitPoint { scrollsToTop ? .top : .bottom }
     #else
     private let fullHeight = false
-    private var anchor: UnitPoint { .bottom }
     #endif
-    /// The sheet takes the whole height: at accessibility sizes, where the conversation needs it.
-    private var tall: Bool { typeSize.isAccessibilitySize || fullHeight }
     /// The conversation's and the bar's heights: the sheet is as tall as they
     /// are, and grows as the conversation does.
     @State private var conversationHeight: CGFloat = 400
@@ -78,9 +61,6 @@ struct TipJarSheet: View {
                     TipJarNote(text: Text(TipJarWords.statement))
                         .padding(.vertical, 12)
                     replies
-                    if typeSize.isAccessibilitySize {
-                        TipJarBar(jar: jar, close: close, pinned: false)
-                    }
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
@@ -96,8 +76,8 @@ struct TipJarSheet: View {
             // A conversation longer than the sheet opens at its end and follows it as it grows; one
             // shorter than the sheet stands at the top, under the title, and is not centred or pushed
             // down to the bar.
-            .defaultScrollAnchor(anchor, for: .initialOffset)
-            .defaultScrollAnchor(anchor, for: .sizeChanges)
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
+            .defaultScrollAnchor(.bottom, for: .sizeChanges)
             .defaultScrollAnchor(.top, for: .alignment)
             // A conversation that fitted and now overflows (the person's reply, then the thank-you)
             // follows its newest bubble: the anchors above only keep a bottom that was already in
@@ -119,29 +99,19 @@ struct TipJarSheet: View {
                 }
             }
             .safeAreaBar(edge: .bottom) {
-                // At accessibility sizes four full-width chips would take half the screen from the
-                // conversation, so the bar is the last thing in the conversation instead.
-                if !typeSize.isAccessibilitySize {
-                    TipJarBar(jar: jar, close: close)
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
-                            barHeight = height
-                        }
-                }
+                TipJarBar(jar: jar, close: close)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                        barHeight = height
+                    }
             }
         }
-        // Larger text needs the whole height.
-        .presentationDetents(tall ? [.large] : [.height(fittedHeight)])
-        // An iPad sheet at an accessibility size takes the whole height.
-        .presentationSizing(FixedSheetSizing(width: 600, height: tall ? 2000 : fittedHeight))
+        .presentationDetents(fullHeight ? [.large] : [.height(fittedHeight)])
+        .presentationSizing(FixedSheetSizing(width: 600, height: fullHeight ? 2000 : fittedHeight))
         .accessibilityIdentifier("tipjar-sheet")
         .task { jar.start() }
     }
 
     private func followTheEnd() {
-        #if !APP_STORE
-        // The preview that shows the top of the conversation keeps it there.
-        if scrollsToTop { return }
-        #endif
         position.scrollTo(edge: .bottom)
     }
 
@@ -270,15 +240,12 @@ private struct TipJarNote: View {
 }
 
 /// What stands under the conversation: the four tiers as reply chips, two by
-/// two (one column at the end of the conversation at accessibility sizes); Try again when the store gave
+/// two; Try again when the store gave
 /// nothing; Done alone after the thank-you; nothing when purchases are not
 /// allowed and no prices came.
 private struct TipJarBar: View {
-    @Environment(\.dynamicTypeSize) private var typeSize
     let jar: TipJarModel
     let close: () -> Void
-    /// Pinned under the conversation on a fade, or (accessibility sizes) the last thing in it.
-    var pinned = true
 
     var body: some View {
         Group {
@@ -297,7 +264,7 @@ private struct TipJarBar: View {
                 .controlSize(.large)
                 .accessibilityIdentifier("tipjar-retry")
             } else {
-                let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: typeSize.isAccessibilitySize ? 1 : 2)
+                let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 2)
                 LazyVGrid(columns: columns, spacing: 10) {
                     ForEach(jar.shownTiers) { tier in
                         chip(tier)
@@ -306,12 +273,12 @@ private struct TipJarBar: View {
             }
         }
         .frame(maxWidth: 600)
-        .padding(.horizontal, pinned ? 16 : 0)
-        .padding(.top, pinned ? 14 : 12)
-        .padding(.bottom, pinned ? 6 : 0)
+        .padding(.horizontal, 16)
+        .padding(.top, 14)
+        .padding(.bottom, 6)
         .frame(maxWidth: .infinity)
         .background {
-            if pinned { TipJarBarFade(color: Color(.systemBackground)) }
+            TipJarBarFade(color: Color(.systemBackground))
         }
     }
 

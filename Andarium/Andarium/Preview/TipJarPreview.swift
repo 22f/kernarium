@@ -23,8 +23,6 @@ import UIKit
 ///     -screen tipjar-home       Home with the toolbar menu, no sheet
 ///     -tipPrices us|jp|dk|mixed the store's prices (us); mixed puts four very
 ///                               different widths side by side
-///     -tipScroll top            the conversation scrolled to its top, which shows
-///                               the sender line at the largest text sizes
 ///     -tipHeight full           the sheet at the full height of a page, taller than
 ///                               its conversation, which stands at the top
 ///     -tipDeveloperParts a,b    which of name, avatar, github and x the header
@@ -46,7 +44,6 @@ enum TipJarPreview {
         services.store = store(for: screen, prices: prices)
         services.previewOpensSheet = opensSheet(screen)
         services.sender = { sender() }
-        services.previewScrollsToTop = UserDefaults.standard.string(forKey: "tipScroll") == "top"
         services.previewFullHeight = UserDefaults.standard.string(forKey: "tipHeight") == "full"
         services.previewPlays = { jar in await prepare(screen: screen, jar: jar) }
         if screen == "tipjar-loading" { services.timeout = .seconds(3600) }

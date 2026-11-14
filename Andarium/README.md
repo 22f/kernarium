@@ -500,9 +500,7 @@ Buy me tokens, each present only when its own feature is
 (`Shared/HomeMenu.swift`). Welcome has the menu too, so Send feedback is
 reachable before a virtual machine is set up; the other two need one. Without
 a feature, or with only Info to offer, Info stays the plain button and the
-build holds no menu code that names a feature. A system menu drops its item
-icons at accessibility text sizes, so the tip's icon is then only in its
-sheet's title.
+build holds no menu code that names a feature.
 
 ## Model and storage
 

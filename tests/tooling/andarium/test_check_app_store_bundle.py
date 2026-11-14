@@ -85,10 +85,8 @@ DEBUG_SUPPORT = (
     # The Simulator preview's hooks into the Buy me tokens sheet.
     ("tip jar preview", "int _s8Andarium14TipJarServicesV16previewOpensSheetSbvg(void) { return 1; }\n"),
     ("tip jar preview", "int _s8Andarium14TipJarServicesV12previewPlaysyyAA0aB5ModelCYaYbcvg(void) { return 1; }\n"),
-    ("tip jar preview", "int _s8Andarium14TipJarServicesV19previewScrollsToTopSbvg(void) { return 1; }\n"),
     ("tip jar preview", "int _s8Andarium14TipJarServicesV17previewFullHeightSbvg(void) { return 1; }\n"),
     ("tip jar preview", "int _s8Andarium14TipJarServicesV8openLinkySo17OpenURLActionResult(void) { return 1; }\n"),
-    ("tip jar preview", "int _s8Andarium21TipJarScrollsToTopKeyV12defaultValueSbvgZ(void) { return 1; }\n"),
     ("tip jar preview", "int _s8Andarium19TipJarFullHeightKeyV12defaultValueSbvgZ(void) { return 1; }\n"),
     # A Debug build's own check of the rating prompt.
     ("rating prompt debug", "int _s8Andarium16ReviewAskTrackerV8debugSet13activeSeconds12clearHistoryySdSg_SbtF(void) { return 1; }\n"),
