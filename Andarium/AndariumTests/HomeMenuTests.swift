@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#if FEEDBACK_MAIL
+#if FEEDBACK_MAIL || TIP_JAR || APP_REVIEW
 
 import AndariumCore
 import AndariumCoreTestSupport
@@ -9,13 +9,18 @@ import Testing
 import UIKit
 @testable import Andarium
 
-/// Home's one toolbar menu: Info, and Send feedback where it is compiled in and its
-/// receiver is configured. A build without Send feedback has no menu and is not here
-/// (`HomePlainInfoTests`).
+/// Home's one toolbar menu: Info, and each feature that is compiled in and
+/// available. A build that has all three features answers every combination of
+/// them; a build with fewer answers its own; a build with none has no menu and
+/// is not here (`HomePlainInfoTests`).
 @MainActor
 @Suite(.serialized)
 struct HomeMenuTests {
-    private func model(guest: Bool = true, feedback: Bool = true) -> AppModel {
+    #if TIP_JAR
+    private static let arranged = TipJarProductsFixture.arranged
+    #endif
+
+    private func model(guest: Bool = true, feedback: Bool = true, review: Bool = true, tips: Bool = true) -> AppModel {
         let host = HostDevice(
             name: "iPhone", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [4096]), freeStorageBytes: 40_000_000_000
         )
@@ -27,7 +32,15 @@ struct HomeMenuTests {
         model.launchApplied = true
         model.driver = StubDriver(plan: .normal)
         model.phase = .home
+        #if FEEDBACK_MAIL
         model.feedbackServices.address = { feedback ? "feedback@example.com" : nil }
+        #endif
+        #if APP_REVIEW
+        model.reviewServices.link = { review ? ReviewLink(identifier: "id1234567890") : nil }
+        #endif
+        #if TIP_JAR
+        model.tipJarServices.products = { tips ? Self.arranged : nil }
+        #endif
         return model
     }
 
@@ -39,15 +52,72 @@ struct HomeMenuTests {
         return condition()
     }
 
+    /// What this build's menu holds when every feature it compiled in is configured: on Home with
+    /// a virtual machine all of them, on Welcome (none set up yet) Info and Send feedback only.
+    private func expectedItems(onHome: Bool) -> [HomeMenuItem] {
+        var items: [HomeMenuItem] = [.info]
+        #if FEEDBACK_MAIL
+        items.append(.sendFeedback)
+        #endif
+        if onHome {
+            #if APP_REVIEW
+            items.append(.reviewOnAppStore)
+            #endif
+            #if TIP_JAR
+            items.append(.buyMeTokens)
+            #endif
+        }
+        return items
+    }
+
+    /// Where this build has a menu at all: Welcome has one only with Send feedback.
+    nonisolated static var places: [Bool] {
+        #if FEEDBACK_MAIL
+        [true, false]
+        #else
+        [true]
+        #endif
+    }
+
     // MARK: What the menu holds
 
-    /// Send feedback is there exactly where its receiver is configured, on Home and on Welcome,
-    /// where no virtual machine is set up yet.
-    @Test func sendFeedbackIsThereWhereItsReceiverIsConfigured() {
-        for guest in [true, false] {
-            #expect(model(guest: guest, feedback: true).homeMenuItems == [.info, .sendFeedback], "guest \(guest)")
-            #expect(model(guest: guest, feedback: false).homeMenuItems == [.info], "guest \(guest)")
+    #if FEEDBACK_MAIL && TIP_JAR && APP_REVIEW
+    /// All three features: the eight combinations, in the order the menu shows them.
+    @Test func theMenuFollowsTheFeaturesInEachOfTheEightCombinations() {
+        for feedback in [false, true] {
+            for review in [false, true] {
+                for tips in [false, true] {
+                    var expected: [HomeMenuItem] = [.info]
+                    if feedback { expected.append(.sendFeedback) }
+                    if review { expected.append(.reviewOnAppStore) }
+                    if tips { expected.append(.buyMeTokens) }
+                    #expect(
+                        model(feedback: feedback, review: review, tips: tips).homeMenuItems == expected,
+                        "feedback \(feedback), review \(review), tips \(tips)")
+                }
+            }
         }
+        #expect(model().homeMenuItems == [.info, .sendFeedback, .reviewOnAppStore, .buyMeTokens])
+    }
+
+    /// Welcome, before a virtual machine is set up: Send feedback is there, the other two never are.
+    @Test func onWelcomeTheMenuHoldsInfoAndSendFeedbackAndNothingElse() {
+        for review in [true, false] {
+            for tips in [true, false] {
+                #expect(
+                    model(guest: false, feedback: true, review: review, tips: tips).homeMenuItems == [.info, .sendFeedback])
+                #expect(model(guest: false, feedback: false, review: review, tips: tips).homeMenuItems == [.info])
+            }
+        }
+    }
+    #endif
+
+    /// Whatever the build compiled in: each item is there exactly where its feature is configured
+    /// and, for the two that need a virtual machine, where one is set up.
+    @Test func eachItemIsThereWhereItsFeatureIsAvailable() {
+        #expect(model().homeMenuItems == expectedItems(onHome: true))
+        #expect(model(guest: false).homeMenuItems == expectedItems(onHome: false))
+        #expect(model(feedback: false, review: false, tips: false).homeMenuItems == [.info])
     }
 
     @Test func eachItemDoesWhatItsEntranceDid() {
@@ -55,11 +125,28 @@ struct HomeMenuTests {
         model.choose(.info)
         #expect(model.sheet == .info)
         model.sheet = nil
+        #if FEEDBACK_MAIL
         model.choose(.sendFeedback)
         #expect(model.feedbackSheetOpen)
         #expect(model.sheet == nil, "Send feedback is its own sheet, not a page of Info")
+        model.feedbackSheetOpen = false
+        #endif
+        #if APP_REVIEW
+        var opened: [URL] = []
+        model.reviewServices.open = { opened.append($0) }
+        model.choose(.reviewOnAppStore)
+        #expect(opened.map(\.absoluteString) == ["https://apps.apple.com/app/id1234567890?action=write-review"])
+        #expect(model.sheet == nil, "the item opens the App Store, not a sheet")
+        #endif
+        #if TIP_JAR
+        model.choose(.buyMeTokens)
+        #expect(model.tipJarSheetOpen)
+        model.tipJarSheetOpen = false
+        #endif
+        #expect(model.sheet == nil)
     }
 
+    #if FEEDBACK_MAIL
     /// The words of the menu are in every language the application ships: Info and Send feedback.
     @Test(arguments: ["ja", "zh-Hans", "zh-Hant"])
     func theMenuSaysItsItemsInEachLanguage(language: String) {
@@ -71,6 +158,7 @@ struct HomeMenuTests {
         #expect(sendFeedback != "Send feedback" && !sendFeedback.isEmpty, "\(language) says Send feedback in English")
         #expect(!sendFeedback.contains("\u{2026}"), "the menu item carries no ellipsis")
     }
+    #endif
 
     // MARK: The real toolbar
 
@@ -86,10 +174,11 @@ struct HomeMenuTests {
         return (controller, lease)
     }
 
-    /// The bar holds one menu button in place of the Info button, which keeps Info's own
-    /// accessibility label, on Home and on Welcome. (SwiftUI builds a toolbar menu's items when it
-    /// opens, so what it holds is `homeMenuItems`, which `HomeToolbarMenu` lays out.)
-    @Test(arguments: [true, false])
+    /// The bar holds one menu button, which keeps Info's own accessibility label, in place of
+    /// the Info button, on Home and (with Send feedback) on Welcome. (SwiftUI builds a toolbar
+    /// menu's items when it opens, so what it holds is `homeMenuItems`, which `HomeToolbarMenu`
+    /// lays out.)
+    @Test(arguments: HomeMenuTests.places)
     func theToolbarHoldsOneMenuInPlaceOfTheInfoButton(onHome: Bool) async throws {
         let model = model(guest: onHome)
         let (controller, lease) = try await host(model)
@@ -100,10 +189,10 @@ struct HomeMenuTests {
         try #require(shown, "the toolbar shows a menu; it holds: \(ToolbarProbe.describe(under: controller))")
         try await Task.sleep(for: .milliseconds(500))
         let items = ToolbarProbe.barItems(under: controller)
-        #expect(items.filter { $0.menu != nil }.count == 1, "one menu")
+        #expect(items.filter { $0.menu != nil }.count == 1, "one menu, not one per feature")
         #expect(items.count == 1, "Info is in the menu, not beside it")
         #expect(items.first?.title == "Info" || items.first?.accessibilityLabel == "Info", "it reads Info: \(ToolbarProbe.describe(under: controller))")
-        #expect(model.homeMenuItems == [.info, .sendFeedback], "the menu holds Info, then Send feedback")
+        #expect(model.homeMenuItems == expectedItems(onHome: onHome), "the menu holds Info, then the features in their order")
     }
 
     /// What VoiceOver finds in the navigation bar: buttons labelled Info (the bar's button and
@@ -123,9 +212,26 @@ struct HomeMenuTests {
         #expect(!buttons.isEmpty && buttons.allSatisfy { $0.label == "Info" }, "the bar: \(top.map(\.description))")
     }
 
-    /// Opened as a tap opens it, the menu offers exactly Info and then Send feedback as buttons,
-    /// which is what VoiceOver finds in it. The bar's own buttons are labelled Info too and the host
-    /// window holds buttons of its own, so only what the opening adds to the scene is read.
+    /// What VoiceOver reads for an item of the menu, in English.
+    private func spoken(_ item: HomeMenuItem) -> String {
+        switch item {
+        case .info: "Info"
+        #if FEEDBACK_MAIL
+        case .sendFeedback: "Send feedback"
+        #endif
+        #if APP_REVIEW
+        case .reviewOnAppStore: "Review on the App Store"
+        #endif
+        #if TIP_JAR
+        case .buyMeTokens: String(localized: TipJarWords.name)
+        #endif
+        }
+    }
+
+    /// Opened as a tap opens it, the menu offers exactly its items as buttons, in the order it
+    /// holds them, which is what VoiceOver finds in it. The bar's own buttons are labelled Info
+    /// too and the host window holds buttons of its own, so only what the opening adds to the
+    /// scene is read.
     @Test func theOpenMenuOffersEachItemToVoiceOver() async throws {
         let model = model()
         let (controller, lease) = try await host(model)
@@ -133,6 +239,7 @@ struct HomeMenuTests {
         let shown = await eventually { ToolbarProbe.barItems(under: controller).contains { $0.menu != nil } }
         try #require(shown, "the toolbar shows a menu")
         try await Task.sleep(for: .milliseconds(600))
+        let expected = model.homeMenuItems.map(spoken)
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         func buttons() -> [ToolbarProbe.Element] {
             scenes.flatMap(\.windows).flatMap { ToolbarProbe.elements(in: $0, above: 4000) }
@@ -163,19 +270,14 @@ struct HomeMenuTests {
             return added().sorted { $0.top < $1.top }
                 .filter { places.insert("\($0.label) \($0.object.accessibilityFrame)").inserted }.map(\.label)
         }
-        let found = await eventually { items().contains("Send feedback") }
-        try #require(found, "the open menu offers Send feedback: \(added().map(\.description))")
+        let found = await eventually { items().contains(expected.last ?? "") }
+        try #require(found, "the open menu offers \(expected.last ?? ""): \(added().map(\.description))")
         try await Task.sleep(for: .milliseconds(400))
-        #expect(items() == ["Info", "Send feedback"], "the open menu: \(added().map { "\($0.description) \($0.object.accessibilityFrame)" })")
+        #expect(items() == expected, "the open menu: \(added().map { "\($0.description) \($0.object.accessibilityFrame)" })")
     }
 
-    /// With no receiver there is nothing for a menu to hold beside Info: the plain button again.
-    @Test func withoutAReceiverInfoIsThePlainButtonAgain() async throws {
-        let model = model(feedback: false)
-        let (controller, lease) = try await host(model)
-        defer { lease.give() }
-        try await Task.sleep(for: .seconds(1))
-        #expect(model.homeMenuItems == [.info])
+    /// The bar holds Info and nothing else: one item, labelled Info, and no menu.
+    private func expectPlainInfo(_ controller: UIViewController) {
         let items = ToolbarProbe.barItems(under: controller)
         #expect(items.allSatisfy { $0.menu == nil }, "no menu holds Info alone")
         #expect(items.count == 1, "the bar holds Info and nothing else: \(ToolbarProbe.describe(under: controller))")
@@ -184,6 +286,29 @@ struct HomeMenuTests {
             "the one item reads Info: \(ToolbarProbe.describe(under: controller))")
     }
 
+    /// With nothing configured there is nothing for a menu to hold beside Info: the plain button again.
+    @Test func withNothingConfiguredInfoIsThePlainButtonAgain() async throws {
+        let model = model(feedback: false, review: false, tips: false)
+        let (controller, lease) = try await host(model)
+        defer { lease.give() }
+        try await Task.sleep(for: .seconds(1))
+        #expect(model.homeMenuItems == [.info])
+        expectPlainInfo(controller)
+    }
+
+    #if TIP_JAR || APP_REVIEW
+    /// On Welcome the review and tip items never show, so without Send feedback Info is plain there.
+    @Test func withNothingAvailableOnWelcomeInfoIsThePlainButtonAgain() async throws {
+        let model = model(guest: false, feedback: false, review: true, tips: true)
+        let (controller, lease) = try await host(model)
+        defer { lease.give() }
+        try await Task.sleep(for: .seconds(1))
+        #expect(model.homeMenuItems == [.info])
+        expectPlainInfo(controller)
+    }
+    #endif
+
+    #if FEEDBACK_MAIL
     @Test func sendFeedbackOpensOverHomeFromTheMenu() async throws {
         let model = model()
         let (controller, lease) = try await host(model)
@@ -193,9 +318,26 @@ struct HomeMenuTests {
         model.feedbackSheetOpen = false
         #expect(await eventually { controller.presentedViewController == nil })
     }
+    #endif
+
+    #if TIP_JAR
+    @Test func buyMeTokensOpensOverHomeFromTheMenuAndNeverByItself() async throws {
+        let model = model()
+        let (controller, lease) = try await host(model)
+        defer { lease.give() }
+        // Nothing prompts: Home stays as it is while the app waits.
+        try await Task.sleep(for: .seconds(2))
+        #expect(controller.presentedViewController == nil && !model.tipJarSheetOpen)
+        model.choose(.buyMeTokens)
+        #expect(await eventually { controller.presentedViewController != nil }, "the sheet is over Home")
+        model.tipJarSheetOpen = false
+        #expect(await eventually { controller.presentedViewController == nil })
+    }
+    #endif
 
     // MARK: Info
 
+    #if FEEDBACK_MAIL
     private func nodes(in node: NSObject, depth: Int = 0) -> [NSObject] {
         guard depth < 64 else { return [] }
         var children = (node.accessibilityElements ?? []).compactMap { $0 as? NSObject }
@@ -223,6 +365,7 @@ struct HomeMenuTests {
         #expect(!identifiers.contains("info-send-feedback"), "\(identifiers)")
         #expect(labels.contains("Acknowledgements"), "Info still lists Acknowledgements: \(labels)")
     }
+    #endif
 }
 
 #endif

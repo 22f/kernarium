@@ -1,21 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#if FOLLOW_X
+#if FOLLOW_X || SHEET_X
 
 import Foundation
 
 // Follow developer on X's logic: plain values and rules, no UIKit. The
-// application compiles this file with the rest of the row, and only where it
-// is compiled in; the AndariumCore package compiles the same file for its
-// tests (Andarium/README.md#follow-developer-on-x).
+// application compiles this file where the row is compiled in and where the
+// Buy me tokens header has an X button, which builds its address the same way
+// from a handle of its own; the AndariumCore package compiles the same file
+// for its tests (Andarium/README.md#follow-developer-on-x).
 
-/// The developer's profile on X: the handle the build names and the address
-/// built from it. The address is made here and nowhere else, so no file holds
-/// a profile address; the handle comes from the ignored local configuration.
+/// The developer's profile on X: a handle and the address built from it. The
+/// address is made here and nowhere else, so no file holds a profile address;
+/// the handle comes from the ignored local configuration.
 nonisolated enum FollowXProfile {
-    /// The Info.plist key the build writes the handle to, only where the row
-    /// is compiled in (`Config/Andarium.xcconfig`).
-    static let key = "AndariumFollowXHandle"
     /// The host the address names, the one X's own links use.
     static let host = "x.com"
 
@@ -41,6 +39,11 @@ nonisolated enum FollowXProfile {
         return parts.url
     }
 
+    #if FOLLOW_X
+    /// The Info.plist key the build writes the row's handle to, only where the
+    /// row is compiled in (`Config/Andarium.xcconfig`).
+    static let key = "AndariumFollowXHandle"
+
     /// The handle in a property list (the application's Info.plist); nil when
     /// the key is absent or its value is not a well formed handle, which hides
     /// the row.
@@ -51,6 +54,7 @@ nonisolated enum FollowXProfile {
 
     /// The handle this build names.
     static var handle: String? { handle(in: Bundle.main.infoDictionary) }
+    #endif
 }
 
 #endif

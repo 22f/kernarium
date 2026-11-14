@@ -425,10 +425,33 @@ final class AppModel {
     /// boot ends or the run does.
     var feedbackFromBoot = false
     #endif
+    #if TIP_JAR
+    /// What Buy me tokens asks of the App Store and of the build
+    /// (`TipJarServices`); a test or the Simulator preview replaces it.
+    @ObservationIgnored var tipJarServices = TipJarServices()
+    /// The Buy me tokens sheet is open, over Home. Nothing else about it is
+    /// kept: the sheet's state belongs to one opening.
+    var tipJarSheetOpen = false
+    #endif
+    #if APP_REVIEW
+    /// What Review on the App Store asks of the build and of the system
+    /// (`ReviewServices`); a test replaces it.
+    @ObservationIgnored var reviewServices = ReviewServices()
+    /// The rating prompt (`ReviewAsk`): made by the application's own launch,
+    /// so a model built any other way (a test, the preview) never asks.
+    @ObservationIgnored var reviewAsk: ReviewAsk?
+    #endif
     #if FOLLOW_X
     /// The handle Follow developer on X opens, from Info.plist, which only a
     /// build that names one has; a test replaces it.
     @ObservationIgnored var followXHandle: () -> String? = { FollowXProfile.handle }
+    #endif
+    #if ICP_FILING
+    /// The filing number Info's footnote shows, from Info.plist, which only a
+    /// build that names one has, and the storefront that decides whether it
+    /// shows; a test replaces each.
+    @ObservationIgnored var icpNumber: () -> String? = { ICPFiling.number }
+    @ObservationIgnored var icpStorefront = ICPStorefrontServices.live
     #endif
     /// The update's Restore is under way (waiting for a snapshot operation, or running).
     private var restoringUpdate = false
@@ -727,6 +750,11 @@ final class AppModel {
         else { return }
         print("Andarium: \(previous.record.summary)")
         if guest != nil, let notice = previous.notice { self.notice = notice }
+        #if APP_REVIEW
+        // The record is the run's end as the runtime wrote it, also when the
+        // application was not running to say so.
+        reviewAsk?.previousRunEnded(normally: previous.record.orderly)
+        #endif
     }
 
     var canCreate: Bool { host.hasRoom(for: createRequirementBytes) }
@@ -1551,6 +1579,9 @@ final class AppModel {
         guard !snapshotActivity.holdsGuestFiles else { return }
         switch lifecycle.start(mode, host: host, plan: plan) {
         case let .allowed(kind):
+            #if APP_REVIEW
+            reviewAsk?.runBegan()
+            #endif
             restoredSnapshot = nil
             snapshots.cancelReads()
             frozenBootStage = nil
@@ -1614,6 +1645,9 @@ final class AppModel {
         runEnd = end
         runUptimeSeconds = uptimeSeconds
         lifecycle.fail()
+        #if APP_REVIEW
+        reviewAsk?.runEnded(normally: false)
+        #endif
     }
 
     /// The runtime's run returned: the guest powered off, or stopped for a
@@ -1647,6 +1681,9 @@ final class AppModel {
         if let driver { lifecycle.guest?.usedBytes = driver.measuredUsedBytes() }
         persistNow()
         refreshPlan()
+        #if APP_REVIEW
+        reviewAsk?.runEnded(normally: end.poweredOff)
+        #endif
     }
 
     /// The runtime began to boot the guest again in place for the `count`th time
