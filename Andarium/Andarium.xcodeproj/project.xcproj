@@ -1,14 +1,17 @@
 {
   "default-configuration": "Release",
   "configurations": [
-    { "name": "AppStore", "file": "Config/Signing.xcconfig" },
-    { "name": "Debug", "file": "Config/Signing.xcconfig" },
-    { "name": "Release", "file": "Config/Signing.xcconfig" },
+    { "name": "AppStore", "file": "Config/Andarium.xcconfig" },
+    { "name": "Debug", "file": "Config/Andarium.xcconfig" },
+    { "name": "Release", "file": "Config/Andarium.xcconfig" },
   ],
   "localizations": {
     "development": "en",
     "supported": [
       "Base",
+      "ja",
+      "zh-Hans",
+      "zh-Hant",
     ],
   },
   "packages": [
@@ -35,7 +38,65 @@
         { "path": "Andarium-Bridging-Header.h" },
         { "path": "Info.plist" },
         { "path": "PrivacyInfo.xcprivacy", "target-membership": [ "Andarium/resources" ] },
-        { "path": "../../GuestHost/Config/Signing.xcconfig" },
+        { "path": "Andarium.xcconfig" },
+        { "path": "Feedback.local.xcconfig.example" },
+        { "path": "TipJar.local.xcconfig.example" },
+        { "path": "Review.local.xcconfig.example" },
+        { "path": "Developer.local.xcconfig.example" },
+      ],
+    }, {
+      "kind": "group",
+      "path": "Localization",
+      "children": [
+        {
+          "path": "Localizable.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        }, {
+          "path": "InfoPlist.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        }, {
+          "path": "WhatsNew.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        }, {
+          "path": "JIT.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        }, {
+          "path": "Feedback.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        }, {
+          "path": "TipJar.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        }, {
+          "path": "Review.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        }, {
+          "path": "FollowX.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        },
       ],
     }, {
       "kind": "group",
@@ -75,6 +136,27 @@
           "run-on-every-build": true,
           "shell": "/bin/sh",
           "script": "/usr/bin/env python3 -B \"$SRCROOT/../scripts/check-run-location.py\"\n",
+        }, {
+          "kind": "script",
+          "name": "Check developer artwork inputs",
+          "run-on-every-build": true,
+          "shell": "/bin/sh",
+          "script": [
+            "need() {",
+            "  [ -f \"$SRCROOT/Config/Local/$1\" ] || {",
+            "    echo \"error: $2 needs $1 at Andarium/Config/Local/ (Config/Developer.local.xcconfig.example)\" >&2",
+            "    exit 1",
+            "  }",
+            "}",
+            "if [ \"$FOLLOW_X_LOGO_SOURCE\" = local ] && { [ -n \"$FOLLOW_X_HANDLE\" ] || [ -n \"$SHEET_DEVELOPER_X\" ]; }; then",
+            "  need x-logo.svg \"the X logo\"",
+            "fi",
+            "if [ \"$SHEET_ARTWORK_SOURCE\" = local ]; then",
+            "  [ -z \"$SHEET_DEVELOPER_GITHUB\" ] || need github-logo.svg \"the GitHub mark\"",
+            "  [ -z \"$SHEET_DEVELOPER_NAME\" ] || need developer-avatar.jpeg \"the developer's avatar\"",
+            "fi",
+            "",
+          ],
         },
         "compile-sources",
         "frameworks",
@@ -102,11 +184,100 @@
         }, {
           "kind": "script",
           "name": "Check App Store bundle",
+          "input-paths": [
+            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+          ],
           "run-on-every-build": true,
           "shell": "/bin/sh",
           "script": [
             "[ \"$CONFIGURATION\" = AppStore ] || exit 0",
-            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
+            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --feedback-address \"$FEEDBACK_ADDRESS\" --feedback-receiver \"$FEEDBACK_RECEIVER\" --tip-products \"$TIP_LITE,$TIP_PRO,$TIP_MAX,$TIP_ULTRA\" --tip-local-products \"$TIP_PRODUCT_LITE,$TIP_PRODUCT_PRO,$TIP_PRODUCT_MAX,$TIP_PRODUCT_ULTRA\" --review-id \"$REVIEW_ID\" --review-local-id \"$REVIEW_APP_ID\" --follow-x-handle \"$FOLLOW_X_HANDLE\" --developer-x-handle \"$DEVELOPER_X_HANDLE\" --developer-name \"$SHEET_DEVELOPER_NAME\" --developer-github \"$SHEET_DEVELOPER_GITHUB\" --developer-x \"$SHEET_DEVELOPER_X\" --developer-local-github \"$DEVELOPER_GITHUB_HANDLE\" --icp-number \"$ICP_NUMBER\" --icp-local-number \"$DEVELOPER_ICP_NUMBER\" --info-source \"$SRCROOT/Config/Info.plist\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
+            "",
+          ],
+        }, {
+          "kind": "script",
+          "name": "Check Send feedback",
+          "input-paths": [
+            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+          ],
+          "run-on-every-build": true,
+          "shell": "/bin/sh",
+          "script": [
+            "[ \"$CONFIGURATION\" != AppStore ] || exit 0",
+            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --feedback --configuration \"$CONFIGURATION\" --feedback-address \"$FEEDBACK_ADDRESS\" --feedback-receiver \"$FEEDBACK_RECEIVER\" --info-source \"$SRCROOT/Config/Info.plist\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
+            "",
+          ],
+        }, {
+          "kind": "script",
+          "name": "Check Buy me tokens",
+          "input-paths": [
+            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+            "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Assets.car",
+          ],
+          "run-on-every-build": true,
+          "shell": "/bin/sh",
+          "script": [
+            "[ \"$CONFIGURATION\" != AppStore ] || exit 0",
+            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --tip-jar --configuration \"$CONFIGURATION\" --tip-products \"$TIP_LITE,$TIP_PRO,$TIP_MAX,$TIP_ULTRA\" --tip-local-products \"$TIP_PRODUCT_LITE,$TIP_PRODUCT_PRO,$TIP_PRODUCT_MAX,$TIP_PRODUCT_ULTRA\" --developer-name \"$SHEET_DEVELOPER_NAME\" --developer-github \"$SHEET_DEVELOPER_GITHUB\" --developer-x \"$SHEET_DEVELOPER_X\" --developer-local-github \"$DEVELOPER_GITHUB_HANDLE\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
+            "",
+          ],
+        }, {
+          "kind": "script",
+          "name": "Check Review on the App Store",
+          "input-paths": [
+            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+          ],
+          "run-on-every-build": true,
+          "shell": "/bin/sh",
+          "script": [
+            "[ \"$CONFIGURATION\" != AppStore ] || exit 0",
+            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --review --configuration \"$CONFIGURATION\" --review-id \"$REVIEW_ID\" --review-local-id \"$REVIEW_APP_ID\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
+            "",
+          ],
+        }, {
+          "kind": "script",
+          "name": "Check Follow developer on X",
+          "input-paths": [
+            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+            "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Assets.car",
+          ],
+          "run-on-every-build": true,
+          "shell": "/bin/sh",
+          "script": [
+            "[ \"$CONFIGURATION\" != AppStore ] || exit 0",
+            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --follow-x --configuration \"$CONFIGURATION\" --follow-x-handle \"$FOLLOW_X_HANDLE\" --developer-x \"$SHEET_DEVELOPER_X\" --developer-x-handle \"$DEVELOPER_X_HANDLE\" --info-source \"$SRCROOT/Config/Info.plist\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
+            "",
+          ],
+        }, {
+          "kind": "script",
+          "name": "Check ICP filing number",
+          "input-paths": [
+            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+          ],
+          "run-on-every-build": true,
+          "shell": "/bin/sh",
+          "script": [
+            "[ \"$CONFIGURATION\" != AppStore ] || exit 0",
+            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --icp --configuration \"$CONFIGURATION\" --icp-number \"$ICP_NUMBER\" --icp-local-number \"$DEVELOPER_ICP_NUMBER\" --info-source \"$SRCROOT/Config/Info.plist\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
+            "",
+          ],
+        }, {
+          "kind": "script",
+          "name": "Check document pickers",
+          "input-paths": [
+            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+          ],
+          "run-on-every-build": true,
+          "shell": "/bin/sh",
+          "script": [
+            "[ \"$CONFIGURATION\" != AppStore ] || exit 0",
+            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --pickers --configuration \"$CONFIGURATION\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
             "",
           ],
         },
@@ -125,7 +296,7 @@
         "ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME": "AccentColor",
         "CODE_SIGN_ENTITLEMENTS": "Config/Andarium.entitlements",
         "CODE_SIGN_STYLE": "Automatic",
-        "CURRENT_PROJECT_VERSION": "9",
+        "CURRENT_PROJECT_VERSION": "11",
         "ENABLE_PREVIEWS": "YES",
         "ENABLE_USER_SCRIPT_SANDBOXING": "NO",
         "FRAMEWORK_SEARCH_PATHS": [
@@ -135,14 +306,18 @@
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_FILE": "Config/Info.plist",
         "INFOPLIST_KEY_CFBundleDisplayName": "Andarium",
+        "INFOPLIST_KEY_NSCameraUsageDescription": "Andarium uses the camera only when you turn on Camera, so that apps in the virtual machine can use it.",
         "INFOPLIST_KEY_NSLocalNetworkUsageDescription": "Apps running in Andarium use this to connect to devices on your local network, such as printers, media servers and computers, and ADB over network uses it to let a computer on your network connect to Andarium. Internet access doesn't need it.",
-        "INFOPLIST_KEY_NSLocationWhenInUseUsageDescription": "Andarium shares this device's location only when you turn on Location, so that apps in the guest can use it.",
-        "INFOPLIST_KEY_NSMicrophoneUsageDescription": "Andarium records from the microphone only when you turn on Microphone, so that apps in the guest can use it.",
+        "INFOPLIST_KEY_NSLocationWhenInUseUsageDescription": "Andarium shares this device's location only when you turn on Location, so that apps in the virtual machine can use it.",
+        "INFOPLIST_KEY_NSMicrophoneUsageDescription": "Andarium records from the microphone only when you turn on Microphone, so that apps in the virtual machine can use it.",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation": "NO",
         "INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents": "YES",
         "INFOPLIST_KEY_UILaunchScreen_Generation": "YES",
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad": "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight",
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone": "UIInterfaceOrientationPortrait",
+        "INFOPLIST_OTHER_PREPROCESSOR_FLAGS": "-traditional -undef",
+        "INFOPLIST_PREPROCESS": "YES",
+        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION) $(TIP_JAR_PLIST_DEFINITION) $(REVIEW_PLIST_DEFINITION) $(DEVELOPER_PLIST_DEFINITIONS) $(FOLLOW_X_PLIST_DEFINITION) $(ICP_PLIST_DEFINITION)",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
           "@executable_path/Frameworks",
@@ -272,16 +447,23 @@
         "CODE_SIGN_STYLE": "Automatic",
         "CURRENT_PROJECT_VERSION": "1",
         "ENABLE_PREVIEWS": "YES",
+        "FEEDBACK_ADDRESS": "",
+        "FOLLOW_X_HANDLE": "",
         "GENERATE_INFOPLIST_FILE": "YES",
+        "ICP_NUMBER": "",
         "INFOPLIST_FILE": "Config/Info.plist",
         "INFOPLIST_KEY_CFBundleDisplayName": "Andarium",
-        "INFOPLIST_KEY_NSLocationWhenInUseUsageDescription": "The Simulator preview asks for the location only when launched with -systemLocation YES, to show the permission flow.",
-        "INFOPLIST_KEY_NSMicrophoneUsageDescription": "The Simulator preview asks for the microphone only when launched with -systemMicrophone YES, to show the permission flow.",
+        "INFOPLIST_KEY_NSCameraUsageDescription": "Andarium uses the camera only when you turn on Camera, so that apps in the virtual machine can use it.",
+        "INFOPLIST_KEY_NSLocationWhenInUseUsageDescription": "Andarium shares this device's location only when you turn on Location, so that apps in the virtual machine can use it.",
+        "INFOPLIST_KEY_NSMicrophoneUsageDescription": "Andarium records from the microphone only when you turn on Microphone, so that apps in the virtual machine can use it.",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation": "NO",
         "INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents": "YES",
         "INFOPLIST_KEY_UILaunchScreen_Generation": "YES",
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad": "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight",
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone": "UIInterfaceOrientationPortrait",
+        "INFOPLIST_OTHER_PREPROCESSOR_FLAGS": "-traditional -undef",
+        "INFOPLIST_PREPROCESS": "YES",
+        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION) $(TIP_JAR_PLIST_DEFINITION) $(REVIEW_PLIST_DEFINITION) $(DEVELOPER_PLIST_DEFINITIONS) $(FOLLOW_X_PLIST_DEFINITION) $(ICP_PLIST_DEFINITION)",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
           "@executable_path/Frameworks",
@@ -289,6 +471,10 @@
         "MARKETING_VERSION": "1.0",
         "PRODUCT_BUNDLE_IDENTIFIER": "com.imxieyi.AndariumPreview",
         "PRODUCT_NAME": "$(TARGET_NAME)",
+        "REVIEW_ID": "",
+        "SHEET_DEVELOPER_GITHUB": "",
+        "SHEET_DEVELOPER_NAME": "",
+        "SHEET_DEVELOPER_X": "",
         "SUPPORTED_PLATFORMS": "iphonesimulator",
         "SUPPORTS_MACCATALYST": "NO",
         "SWIFT_APPROACHABLE_CONCURRENCY": "YES",
@@ -296,6 +482,10 @@
         "SWIFT_EMIT_LOC_STRINGS": "YES",
         "SWIFT_VERSION": "6.0",
         "TARGETED_DEVICE_FAMILY": "1,2",
+        "TIP_LITE": "",
+        "TIP_MAX": "",
+        "TIP_PRO": "",
+        "TIP_ULTRA": "",
       },
     },
   ],
@@ -316,6 +506,10 @@
     "ENABLE_TESTABILITY[config=Debug]": "YES",
     "ENABLE_USER_SCRIPT_SANDBOXING": "YES",
     "EXCLUDED_ARCHS[sdk=iphonesimulator*]": "x86_64",
+    "EXCLUDED_SOURCE_FILE_NAMES[config=AppStore]": [
+      "JIT.xcstrings",
+      "$(inherited)",
+    ],
     "GCC_OPTIMIZATION_LEVEL[config=Debug]": "0",
     "GCC_PREPROCESSOR_DEFINITIONS[config=AppStore]": [
       "UML_APP_STORE_APPLICATION=1",

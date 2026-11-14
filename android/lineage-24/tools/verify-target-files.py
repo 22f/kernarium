@@ -15,6 +15,7 @@ import stat
 import struct
 import sys
 import zipfile
+import zlib
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 
@@ -656,6 +657,13 @@ WIFI_HAL_DEBUG_PROPERTY_READ = re.compile(
     rb"\(file \([^)]*\bread\b[^)]*\)\)\)$",
     re.MULTILINE,
 )
+# The camera HAL uses the display composer's file descriptors: the present fence that a preview buffer
+# comes back with once an activity covers its surface (overlay/sepolicy/vendor/hal_camera_default.te).
+CAMERA_HAL_COMPOSER_FENCE = re.compile(
+    rb"^\(allow hal_camera_default(?:_[0-9]{6})? hal_graphics_composer(?:_[0-9]{6})? "
+    rb"\(fd \([^)]*\buse\b[^)]*\)\)\)$",
+    re.MULTILINE,
+)
 # adbd reports its host in this property and init holds a userspace wakelock while
 # it is 1 (adbd's p0011 topic, overlay/config/init.vendor.rc,
 # overlay/sepolicy/system_ext/private). The property is system-owned: adbd is a core
@@ -665,13 +673,31 @@ ADB_HOST_PROPERTY_TYPE = "kernarium_adb_host_prop"
 # The host application is the adb host of its guest and reaches adbd over virtio-vsock. adbd's p0011
 # topics read two launch properties themselves: ro.boot.kernarium.adb_key, the public key the
 # application authorizes for the boot, and ro.boot.kernarium.adb_tcp, 0 when the launch has no
-# host forward, which keeps adbd off guest TCP. The launch properties are bootloader_prop, which
-# every domain may read; service.adb.listen_addrs would not do, as it is a system_prop that
-# vendor_init may not set. The adbd binary sits in its APEX, whose payload hints keep it
-# uncompressed so that the verifier reads these names in the payload's bytes.
+# host forward, which keeps adbd off guest TCP (service.adb.listen_addrs would not do, as it is a
+# system_prop that vendor_init may not set). The TCP property is a bootloader_prop, which every
+# domain may read. The key is the installation's own, and a bootloader_prop is readable by every
+# application, so the key has a type of its own (overlay/sepolicy/system_ext/private/
+# adb_key_prop.te) that no application may read: adbd reads it, init sets it and dumpstate can
+# read it, so a bug report that the user shares can carry the key. The adbd binary sits in its
+# APEX, whose payload hints keep it uncompressed so that the verifier reads these names in the
+# payload's bytes.
 ADBD_APEX = "SYSTEM/apex/com.android.adbd.apex"
 ADBD_BINARY = "bin/adbd"
-ADBD_LAUNCH_PROPERTIES = ("ro.boot.kernarium.adb_key", "ro.boot.kernarium.adb_tcp")
+ADB_KEY_PROPERTY = "ro.boot.kernarium.adb_key"
+ADB_KEY_PROPERTY_TYPE = "kernarium_adb_key_prop"
+ADBD_LAUNCH_PROPERTIES = (ADB_KEY_PROPERTY, "ro.boot.kernarium.adb_tcp")
+# No application may read the key. The platform lists the concrete types that run applications in
+# the attributes below (untrusted_app_29, untrusted_app_34, runas_app, sdk_sandbox_34, ...), and
+# a rule is written against a concrete type or a generated attribute, so a rule for
+# untrusted_app_34 does not reach the name untrusted_app. The check reads every concrete member,
+# after the names that a rule is most likely to use.
+ADB_KEY_APP_DOMAINS = (
+    "appdomain", "untrusted_app", "isolated_app", "ephemeral_app", "platform_app", "priv_app", "system_app",
+)
+ADB_KEY_APP_ATTRIBUTES = ("appdomain", "untrusted_app_all", "isolated_app_all", "sdk_sandbox_all")
+# The policies that may add application domains: the platform's, the vendor's and system_ext's, and
+# the product's and the odm's when the image has them.
+APP_POLICY_CIL = ("PRODUCT/etc/selinux/product_sepolicy.cil", "ODM/etc/selinux/odm_sepolicy.cil")
 # The key rule of p0011 reads the guest's debugging setting: AdbService records USB debugging in
 # persist.sys.usb.config (route p0007) and wireless debugging is persist.adb.tls_server.enable. adbd
 # offers any key but the host's only while one is on, and logs the refusal line otherwise; the line
@@ -723,6 +749,10 @@ SUSPEND_BLOCKER_SERVICE = ("suspend_blocker", "/vendor/bin/suspend_blocker")
 # (overlay/config/init.vendor.rc, tools/kernarium_net_setup.cpp).
 NET_SETUP_SERVICE = ("kernarium_net_setup", "/vendor/bin/kernarium_net_setup")
 NET_SETUP_TRIGGER = "post-fs-data"
+# The tool turns IPv6 off on eth0 and the macvlan through the kernel's sysctl files, so that
+# neither carries a link-local address built from its MAC.
+NET_SETUP_DOMAIN = "kernarium_net_setup"
+NET_SETUP_SYSCTL_LABEL = "proc_net"
 NET_SETUP_SYSCTLS = (
     "write /proc/sys/net/ipv4/conf/all/arp_ignore 1",
     "write /proc/sys/net/ipv4/conf/all/arp_announce 2",
@@ -741,16 +771,20 @@ NET_SETUP_TRANSITION = re.compile(
 # After boot completes a script saves the virtual Wi-Fi network (VirtWifi, open) once, in a
 # core domain of its own on system_ext (overlay/tools/kernarium_wifi_network.sh,
 # overlay/sepolicy/system_ext/private).
-# Until the station has joined it once (the marker then reads 2), a boot that finds Wi-Fi on,
-# the network still saved and nothing joined after a settle time saves it again, which enables
-# a network an earlier release left disabled for lack of internet. It never turns Wi-Fi on or
-# connects: the user's switch decides whether the saved network is joined, and a network the
-# user forgets stays forgotten.
+# Until a boot has found the network stored and joined (the marker then reads 2) the saved list
+# decides on every boot: a boot saves the network when the list lacks it, and saves it again when
+# it finds Wi-Fi on and nothing joined after a settle time, which enables a network an earlier
+# release left disabled for lack of internet, unless the dump of the Wi-Fi service shows that the
+# user turned Auto-connect off for it, which is a choice and is left alone. The Wi-Fi service
+# writes its store some time after a save or a join, so a boot that saved leaves the marker at 1. The script never turns Wi-Fi on
+# or connects: the user's switch decides whether the saved network is joined. What it decides is
+# tested on the tracked file (tests/tooling/android/test_wifi_network_script.py); the checks here
+# are presence checks of the image's copy.
 WIFI_NETWORK_SERVICE = ("kernarium_wifi_network", "/system_ext/bin/kernarium_wifi_network.sh")
 WIFI_NETWORK_TRIGGER = "property:sys.boot_completed=1"
 WIFI_NETWORK_MARKER = "persist.sys.kernarium.virtwifi_saved"
 WIFI_NETWORK_MARKER_TYPE = "kernarium_wifi_network_prop"
-# The marker holds 1 (saved) and 2 (joined), so its property type must accept both.
+# The marker holds 1 (saved, no join seen) and 2 (joined), so its property type must accept both.
 WIFI_NETWORK_MARKER_VALUES = ("1", "2")
 WIFI_NETWORK_SCRIPT_REQUIRED = (
     "cmd wifi add-network VirtWifi open",
@@ -1032,7 +1066,10 @@ def read_small(
 ) -> bytes:
     if info.is_dir() or info.file_size > limit:
         fail(f"policy file is missing or unexpectedly large: {info.filename}")
-    return archive.read(info)
+    try:
+        return archive.read(info)
+    except (zipfile.BadZipFile, zlib.error, OSError) as problem:
+        fail(f"cannot read {info.filename} from the archive: {problem}")
 
 
 def check_apex_payload_filesystem(
@@ -2058,10 +2095,11 @@ def resource_string_pool(table: bytes, offset: int) -> list[str]:
     return strings
 
 
-def resource_entries(table: bytes, type_name: str):
+def resource_entries(table: bytes, type_name: str, *, configurations: bool = False):
     """The (name, position, flags) of every entry of one resource type in a compiled resource
     table, in each of its configurations. The position is that of the ResTable_entry, or of the
-    compact entry whose key sits where a full entry keeps its size."""
+    compact entry whose key sits where a full entry keeps its size. With `configurations`, a
+    fourth item says whether the entry is in the default configuration (no qualifier set)."""
     position = struct.unpack_from("<H", table, 2)[0]
     chunk, _, size = struct.unpack_from("<HHI", table, position)
     if chunk != 0x0001:
@@ -2083,6 +2121,9 @@ def resource_entries(table: bytes, type_name: str):
                 if inner_chunk == 0x0201 and types[table[inner + 8] - 1] == type_name:
                     count, entries_start = struct.unpack_from("<II", table, inner + 12)
                     kind = table[inner + 9]
+                    # The ResTable_config at +20 starts with its own size; the default one sets nothing after it.
+                    config_size = struct.unpack_from("<I", table, inner + 20)[0]
+                    default = not any(table[inner + 24:inner + 20 + config_size])
                     if kind & 0x01:  # sparse: (index, offset / 4) pairs of 16 bits
                         offsets = [4 * pair[1] for pair in struct.iter_unpack("<HH", table[inner + inner_header:inner + inner_header + 4 * count])]
                     elif kind & 0x02:  # 16-bit offsets in units of 4 bytes
@@ -2097,9 +2138,18 @@ def resource_entries(table: bytes, type_name: str):
                         key, flags = struct.unpack_from("<HH", table, entry)
                         if not flags & 0x08:  # a full entry: size, flags, then a 32-bit key
                             key = struct.unpack_from("<I", table, entry + 4)[0]
-                        yield keys[key], entry, flags
+                        if configurations:
+                            yield keys[key], entry, flags, default
+                        else:
+                            yield keys[key], entry, flags
                 inner += inner_size
         position += size
+
+
+def resource_default_names(table: bytes, type_name: str) -> set[str]:
+    """The names of the resources of one type that a compiled resource table defines in its default
+    configuration: the definitions that apply whatever the device's qualifiers are."""
+    return {name for name, _, _, default in resource_entries(table, type_name, configurations=True) if default}
 
 
 def resource_arrays(table: bytes) -> dict[str, list[list[str]]]:
@@ -2150,6 +2200,86 @@ def resource_integers(table: bytes) -> dict[str, list[int]]:
         if data_type in (0x10, 0x11):  # TYPE_INT_DEC, TYPE_INT_HEX
             integers.setdefault(name, []).append(data - (1 << 32) if data >> 31 else data)
     return integers
+
+
+# The chunks of a compiled resource table that declare an <overlayable> section and its policies.
+RES_TABLE_PACKAGE_TYPE = 0x0200
+RES_TABLE_OVERLAYABLE_TYPES = (0x0204, 0x0205)
+
+
+RES_TABLE_TYPE = 0x0002
+
+
+def resource_chunks(table: bytes, start: int, end: int):
+    """The (type, header size, size, position) of each chunk that fills table[start:end] exactly.
+    A chunk that is smaller than its header, or does not fit, raises ValueError."""
+    position = start
+    while position < end:
+        if position + 8 > end:
+            raise ValueError(f"a chunk header at {position} runs past the end of its parent ({end})")
+        chunk, header_size, size = struct.unpack_from("<HHI", table, position)
+        if header_size < 8 or size < header_size or position + size > end:
+            raise ValueError(f"the chunk 0x{chunk:04x} at {position} declares header {header_size} and size {size} "
+                             f"in a parent that ends at {end}")
+        yield chunk, header_size, size, position
+        position += size
+
+
+def resource_table_defines_overlayable(table: bytes) -> bool:
+    """Whether a package of a compiled resource table declares an <overlayable> section. A table whose
+    header, declared size or chunks do not hold together raises ValueError instead of reading as one
+    without the section."""
+    if len(table) < 12:
+        raise ValueError(f"{len(table)} bytes are shorter than a resource table header")
+    chunk, header_size, size = struct.unpack_from("<HHI", table, 0)
+    if chunk != RES_TABLE_TYPE or header_size < 12 or size < header_size or size > len(table):
+        raise ValueError(f"not a resource table: type 0x{chunk:04x}, header {header_size}, size {size} of {len(table)} bytes")
+    for chunk, chunk_header, chunk_size, position in resource_chunks(table, header_size, size):
+        if chunk == RES_TABLE_PACKAGE_TYPE:
+            for inner_chunk, _, _, _ in resource_chunks(table, position + chunk_header, position + chunk_size):
+                if inner_chunk in RES_TABLE_OVERLAYABLE_TYPES:
+                    return True
+    return False
+
+
+def manifest_element_attributes(manifest: bytes, element_name: str) -> dict[str, str | int | bool | None] | None:
+    """The attributes, by name, of the first element of this name in a compiled manifest, or None when
+    it has no such element. A value is a string, an integer or a boolean as the manifest typed it, and
+    None for any other type."""
+    if len(manifest) < 8 or struct.unpack_from("<HH", manifest, 0)[0] != 0x0003:
+        raise ValueError("not a compiled XML file")
+    strings: list[str] = []
+    offset = struct.unpack_from("<H", manifest, 2)[0]
+    while offset + 8 <= len(manifest):
+        kind, header, size = struct.unpack_from("<HHI", manifest, offset)
+        if size < 8 or offset + size > len(manifest):
+            raise ValueError("truncated compiled XML chunk")
+        if kind == AXML_STRING_POOL:
+            strings = axml_strings(manifest, offset)
+        elif kind == AXML_START_ELEMENT:
+            body = offset + header
+            element = struct.unpack_from("<I", manifest, body + 4)[0]
+            if element < len(strings) and strings[element] == element_name:
+                attribute_start, attribute_size, count = struct.unpack_from("<HHH", manifest, body + 8)
+                attributes: dict[str, str | int | bool | None] = {}
+                for index in range(count):
+                    position = body + attribute_start + index * attribute_size
+                    name, _, _, data_type, data = struct.unpack_from("<IIHxBI", manifest, position + 4)
+                    if name >= len(strings):
+                        raise ValueError("an attribute name outside the string pool")
+                    if data_type == AXML_STRING_TYPE:
+                        if data >= len(strings):
+                            raise ValueError("an attribute value outside the string pool")
+                        attributes[strings[name]] = strings[data]
+                    elif data_type in AXML_INTEGER_TYPES:
+                        attributes[strings[name]] = data
+                    elif data_type == AXML_BOOLEAN_TYPE:
+                        attributes[strings[name]] = data != 0
+                    else:
+                        attributes[strings[name]] = None
+                return attributes
+        offset += size
+    return None
 
 
 def check_network_time(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
@@ -2547,6 +2677,8 @@ def check_payload_regular_file(payload: bytes, path: str, apex_name: str, what: 
 # without it would forget the user's choice at every boot and stop the host's channel.
 # The display topic of the same route lets a display without a refresh rate throttling map use the
 # default configuration's; without it the thermal HAL's SEVERE status holds no frame rate back.
+# The SystemConfig topic reads the compass feature's directory when the launch says the host has a
+# magnetometer; without it a host that has one would run an image with a sensor and no feature.
 SERVICES_JAR = "SYSTEM/framework/services.jar"
 SERVICES_JAR_MARKERS = (
     (b"kernarium: USB debugging is now ", "the AdbService topics"),
@@ -2554,6 +2686,11 @@ SERVICES_JAR_MARKERS = (
         b"RefreshRateThrottling: using the map of the default configuration",
         "the display topic that reads the default configuration's refresh rate throttling map",
     ),
+    (
+        b"ro.boot.kernarium.compass",
+        "the SystemConfig topic that reads the compass feature for a host with a magnetometer",
+    ),
+    (b"kernarium_compass", "the directory that SystemConfig topic reads"),
 )
 SERVICES_JAR_LIMIT = 48 << 20
 
@@ -2579,12 +2716,18 @@ def check_services_jar(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInf
         fail(f"cannot inspect {SERVICES_JAR}: {problem}")
 
 
-# The p0029 topic makes NetworkMonitor validate the virtual Wi-Fi without probes, so a blocked
-# validation server cannot leave the guest's one network unvalidated. NetworkStack is a priv-app of
-# the system partition, and its APK stores the dex file uncompressed, so the topic's validation log
-# line is in the bytes. A build without it would probe through the virtual Wi-Fi.
+# The p0029 topic makes NetworkMonitor validate the virtual Wi-Fi before it checks it, so a blocked
+# validation server cannot leave the guest's one network unvalidated, and report a check that failed,
+# or that a sign-in or block page answered, only as the HTTPS probe attempted and not succeeded.
+# NetworkStack is a priv-app of the system partition, and its APK stores the dex file uncompressed,
+# so the topic's validation log lines are in the bytes. A build without them would probe the virtual
+# Wi-Fi as a network that has to pass its probes (the first line) or leave a failed check unreported
+# (the second).
 NETWORK_STACK_APK = "SYSTEM/priv-app/NetworkStack/NetworkStack.apk"
-NETWORK_STACK_MARKERS = (b"Wi-Fi is validated without probes",)
+NETWORK_STACK_MARKERS = (
+    b"Wi-Fi is validated before its internet check",
+    b"Wi-Fi internet check failed, the network stays validated",
+)
 NETWORK_STACK_LIMIT = 16 << 20
 
 
@@ -2603,11 +2746,49 @@ def check_network_stack(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipIn
                 if not any(marker in apk.read(name) for name in dex):
                     fail(
                         f"{NETWORK_STACK_APK} lacks the NetworkMonitor topic of route p0029 "
-                        f"({marker.decode()!r} is not in its dex files): the guest's Wi-Fi would be "
-                        "probed and could stay unvalidated"
+                        f"({marker.decode()!r} is not in its dex files): the guest's Wi-Fi would not "
+                        "be validated before its check, or a failed check would not be reported"
                     )
     except (OSError, zipfile.BadZipFile) as problem:
         fail(f"cannot inspect {NETWORK_STACK_APK}: {problem}")
+
+
+# The p0033 topic makes WifiTrackerLib show a failed check of a validated network: the Wi-Fi mark in
+# the status bar and in the Wi-Fi list. Settings and SystemUI link the library statically and store
+# their dex files uncompressed. The optimizer inlines a small method away, so the check looks for the
+# key of the connectivity report that the topic's predicate reads (the bitmask of the probes
+# attempted): a string constant of the live code, which no other code of either application holds.
+# A build without the topic would show nothing for a network whose check failed.
+WIFI_TRACKER_APKS = (
+    "SYSTEM_EXT/priv-app/Settings/Settings.apk",
+    "SYSTEM_EXT/priv-app/SystemUI/SystemUI.apk",
+)
+WIFI_TRACKER_MARKERS = (b"networkProbesAttempted",)
+WIFI_TRACKER_LIMIT = 192 << 20
+
+
+def check_wifi_tracker_users(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    for apk_path in WIFI_TRACKER_APKS:
+        info = infos.get(apk_path)
+        if info is None:
+            fail(f"{apk_path} is missing")
+        try:
+            with zipfile.ZipFile(io.BytesIO(read_small(archive, info, WIFI_TRACKER_LIMIT))) as apk:
+                dex = [
+                    name for name in apk.namelist() if re.fullmatch(r"classes[0-9]*\.dex", name)
+                ]
+                if not dex:
+                    fail(f"{apk_path} holds no dex file")
+                contents = [apk.read(name) for name in dex]
+                for marker in WIFI_TRACKER_MARKERS:
+                    if not any(marker in content for content in contents):
+                        fail(
+                            f"{apk_path} lacks the WifiTrackerLib topic of route p0033 "
+                            f"({marker.decode()!r} is not in its dex files): a Wi-Fi network whose "
+                            "internet check failed would show no warning"
+                        )
+        except (OSError, zipfile.BadZipFile) as problem:
+            fail(f"cannot inspect {apk_path}: {problem}")
 
 
 def check_ota_certificates(
@@ -2734,6 +2915,34 @@ def check_cas_hal(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -
             fail(f"the ClearKey CAS plugin is missing: {plugin}")
 
 
+# The motion sub-HAL lists a device-orientation sensor, which the window manager then follows instead of
+# judging the accelerometer, when the launch passes androidboot.kernarium.orientation=1. The sub-HAL logs
+# the property when it lists its sensors, and the format string of that line is in the library's bytes.
+# A build whose sub-HAL lacks it never offers the sensor, and no other check would notice: Andarium's
+# host would wait for a guest that does not say it takes orientations.
+MOTION_SUB_HAL = "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so"
+MOTION_SUB_HAL_MARKER = b"Andarium motion: ro.boot.kernarium.orientation="
+MOTION_SUB_HAL_LIMIT = 16 << 20
+# Only the launch states it (the host's "androidboot.kernarium.orientation=1" argument); a build.prop that
+# set it would list the sensor for a host that does not feed it, and the window manager would follow a
+# sensor that nothing drives.
+MOTION_ORIENTATION_PROPERTY = "ro.boot.kernarium.orientation"
+# The same sub-HAL lists a magnetometer when the launch passes androidboot.kernarium.compass=1, which the
+# guest reads as ro.boot.kernarium.compass; its log line names the property and the sensor's name is in
+# the bytes. The compass feature is declared for that launch alone: the file below is read by SystemConfig
+# (the p0007 topic) only when the property is true, and nothing else may declare the feature, since a host
+# without a magnetometer would then claim a compass no application can use. The directory holds that file
+# alone for the same reason, and no build.prop sets the property, as for the orientation sensor.
+MOTION_SUB_HAL_COMPASS_MARKERS = (
+    (b"ro.boot.kernarium.compass=", "the property that decides whether it lists the magnetometer"),
+    (b"Host Magnetometer", "the magnetometer"),
+)
+MOTION_COMPASS_PROPERTY = "ro.boot.kernarium.compass"
+COMPASS_FEATURE = "android.hardware.sensor.compass"
+COMPASS_PERMISSION_DIRECTORY = "VENDOR/etc/permissions/kernarium_compass"
+COMPASS_FEATURE_FILE = f"{COMPASS_PERMISSION_DIRECTORY}/{COMPASS_FEATURE}.xml"
+
+
 def check_motion_sensors(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
     configuration = read_small(archive, infos["VENDOR/etc/sensors/hals.conf"]).decode().strip()
     if configuration != "/vendor/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so":
@@ -2750,6 +2959,161 @@ def check_motion_sensors(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipI
     ]).decode()
     if not re.search(r"^service \S+ /vendor/bin/hw/android\.hardware\.sensors-service\.multihal$", script, re.M):
         fail("motion sensor HAL service does not start the multi-HAL binary")
+    # The marker counts only in a shared library the image can load: bytes that merely contain the text
+    # would pass for a sub-HAL.
+    info = infos[MOTION_SUB_HAL]
+    prefix = read_elf_prefix(archive, info)
+    if prefix is None:
+        fail(f"{MOTION_SUB_HAL} is not an ELF file")
+    elf_type, machine = struct.unpack_from("<HH", prefix, 16)
+    if elf_type != ET_DYN or machine != android_image.EM_AARCH64:
+        fail(f"{MOTION_SUB_HAL} is not an AArch64 shared library")
+    check_target_elf(info, prefix)
+    library = read_small(archive, info, MOTION_SUB_HAL_LIMIT)
+    if MOTION_SUB_HAL_MARKER not in library:
+        fail(
+            f"{MOTION_SUB_HAL} lacks the device-orientation sensor ({MOTION_SUB_HAL_MARKER.decode()!r} "
+            "is not in it): a launch that asks for the sensor would find none"
+        )
+    for marker, what in MOTION_SUB_HAL_COMPASS_MARKERS:
+        if marker not in library:
+            fail(
+                f"{MOTION_SUB_HAL} lacks {what} ({marker.decode()!r} is not in it): "
+                "a launch that says the host has a magnetometer would find none"
+            )
+    check_compass_feature(archive, infos)
+
+
+def check_compass_feature(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    """The compass feature is one file in a directory of its own, which only a launch that says the
+    host has a magnetometer makes SystemConfig read."""
+    info = infos.get(COMPASS_FEATURE_FILE)
+    if info is None or info.is_dir():
+        fail(f"{COMPASS_FEATURE_FILE} is missing: a host with a magnetometer would have no compass feature")
+    try:
+        root = ET.fromstring(read_small(archive, info))
+    except ET.ParseError as error:
+        fail(f"cannot parse {COMPASS_FEATURE_FILE}: {error}")
+    features = [
+        element.attrib.get("name") for element in root.iter() if element.tag.rsplit("}", 1)[-1] == "feature"
+    ]
+    if features != [COMPASS_FEATURE]:
+        fail(f"{COMPASS_FEATURE_FILE} declares {features}, not {COMPASS_FEATURE} alone")
+    # SystemConfig reads <permissions> files; the file is that root with the one feature and nothing that
+    # takes a feature away again.
+    if root.tag != "permissions":
+        fail(f"{COMPASS_FEATURE_FILE} has the root element <{root.tag}>, not <permissions>")
+    if any(element.tag.rsplit("}", 1)[-1] == "unavailable-feature" for element in root.iter()):
+        fail(f"{COMPASS_FEATURE_FILE} holds an unavailable-feature element: it declares the compass feature alone")
+    children = list(root)
+    if len(children) != 1 or children[0].tag != "feature" or set(children[0].attrib) != {"name"}:
+        fail(f"{COMPASS_FEATURE_FILE} is not one <feature name=...> in <permissions>: {[c.tag for c in children]}")
+    for name in sorted(infos):
+        if name.startswith(f"{COMPASS_PERMISSION_DIRECTORY}/") and name != COMPASS_FEATURE_FILE:
+            fail(f"{name} is in {COMPASS_PERMISSION_DIRECTORY}, which holds the compass feature alone")
+        # SystemConfig reads etc/sysconfig of every partition with the flags that allow features, as it
+        # reads etc/permissions: a declaration there would be read for every launch.
+        path = PurePosixPath(name)
+        if infos[name].is_dir() or path.suffix != ".xml" or "sysconfig" not in path.parts:
+            continue
+        try:
+            other = ET.fromstring(read_small(archive, infos[name]))
+        except ET.ParseError:
+            continue
+        if any(
+            element.tag.rsplit("}", 1)[-1] == "feature" and element.attrib.get("name") == COMPASS_FEATURE
+            for element in other.iter()
+        ):
+            fail(
+                f"the compass feature is declared in the sysconfig file {name}: only a host with a "
+                f"magnetometer has a compass, and SystemConfig reads {COMPASS_PERMISSION_DIRECTORY} for "
+                "such a host alone"
+            )
+    check_motion_properties_in_init(archive, infos)
+
+
+def init_commands(text: str) -> list[list[str]]:
+    """The logical commands of an init script as init's tokenizer reads them: words split at blanks, double
+    quotes group (and are dropped), a backslash continues the line at a newline and escapes inside a word, and a
+    # that starts a word comments out the rest of the line. A newline outside a quote ends the command."""
+    commands: list[list[str]] = []
+    words: list[str] = []
+    word: list[str] = []
+    in_word = in_quote = False
+    index, length = 0, len(text)
+
+    def end_word() -> None:
+        nonlocal in_word
+        if in_word:
+            words.append("".join(word))
+            word.clear()
+        in_word = False
+
+    def end_command() -> None:
+        nonlocal in_quote
+        end_word()
+        in_quote = False
+        if words:
+            commands.append(list(words))
+        words.clear()
+
+    while index < length:
+        character = text[index]
+        if character == "\\":
+            following = text[index + 1] if index + 1 < length else ""
+            if following in ("\n", "\r"):
+                # A continued line: the newline and the blanks after it are not part of the command.
+                index += 2 if following == "\n" or text[index + 1:index + 3] != "\r\n" else 3
+                while index < length and text[index] in " \t":
+                    index += 1
+                if not in_quote:
+                    end_word()
+                continue
+            word.append({"n": "\n", "r": "\r", "t": "\t"}.get(following, following))
+            in_word = True
+            index += 2
+            continue
+        if in_quote:
+            if character == '"':
+                in_quote = False
+            elif character == "\n":
+                end_command()
+            else:
+                word.append(character)
+            index += 1
+            continue
+        if character == '"':
+            in_quote = in_word = True
+        elif character == "\n":
+            end_command()
+        elif character in " \t\r":
+            end_word()
+        elif character == "#" and not in_word:
+            while index < length and text[index] != "\n":
+                index += 1
+            continue
+        else:
+            word.append(character)
+            in_word = True
+        index += 1
+    end_command()
+    return commands
+
+
+def check_motion_properties_in_init(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    """The launch alone states what the host feeds: no init script of the image sets the properties the
+    sensors' list and the compass feature follow (build.prop is checked with every property file). A command
+    is read as init reads it, so a quoted word or a continued line is the command it is."""
+    for name in sorted(infos):
+        if infos[name].is_dir() or not name.endswith(".rc"):
+            continue
+        for command in init_commands(read_small(archive, infos[name]).decode("utf-8", errors="replace")):
+            if len(command) >= 2 and command[0] == "setprop" and command[1] in (
+                    MOTION_ORIENTATION_PROPERTY, MOTION_COMPASS_PROPERTY):
+                fail(
+                    f"{name} sets {command[1]}: the launch alone states whether the host feeds the "
+                    "device-orientation sensor and has a magnetometer"
+                )
 
 
 # The vibrator HAL exists only on a device with haptics. The host passes the "haptics" ODM SKU for
@@ -3021,10 +3385,14 @@ def check_thermal_hal(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo
 
 # The host's cameras (overlay/camera; routes p0030 and p0031). The camera device gives the guest V4L2
 # nodes, and the emulated camera HAL of hardware/google/camera takes the cameras from them: the lazy
-# provider runs only while an application holds a camera or the torch, and its HWL library holds the
-# V4L2 source of route p0030. The host composes one camera layout from its cameras and passes it as
-# the vendor SKU: the permission directory of that name declares the camera features and an init
-# trigger selects the media profiles that match its size caps, all of them generated (camera_layouts.py).
+# provider is started by the init file of a layout that has cameras whenever cameraserver starts (a
+# restart finds no provider otherwise: cameraserver lists only a provider that has registered), runs
+# while cameraserver lists the cameras and while an application holds a camera or the torch, and exits
+# otherwise (init starts it again through its interface); its HWL library holds the V4L2 source of
+# route p0030. The host composes one camera layout from its cameras and passes it as the vendor SKU:
+# the permission directory of that name declares the camera features, an init trigger selects the
+# media profiles that match its size caps and a second one starts the provider, all of them generated
+# (camera_layouts.py).
 # Nothing here fails loudly when it is missing: a stock library lists no camera, a missing declaration
 # lists no feature, and a missing file leaves the default profiles.
 CAMERA_HAL_NAME = "android.hardware.camera.provider"
@@ -3055,6 +3423,13 @@ CAMERA_TEMPLATE = "VENDOR/etc/config/emu_camera_v4l2.json"
 CAMERA_CONFIG_DIRECTORY = "VENDOR/etc/config/"
 CAMERA_APP = "PRODUCT/app/Aperture/Aperture.apk"
 CAMERA_APP_LIMIT = 256 << 20
+# The product's overlay directory is enforced as runtime overlays: the build leaves the application's own
+# resources at their defaults and installs the product's values in a static overlay beside the others
+# (SimpleDeviceConfig, Launcher3QuickStep, framework-res). Android applies a preinstalled overlay to
+# an application that declares no overlayable section, so the check reads the overlay, and requires
+# the target to stay without such a section: one that defined it would bind the overlay to a policy.
+CAMERA_APP_PACKAGE = "org.lineageos.aperture"
+CAMERA_APP_OVERLAY = "PRODUCT/overlay/Aperture__lineage_andarium__auto_generated_rro_product.apk"
 CAMERA_AUX_CAMERAS = "config_enableAuxCameras"
 CAMERA_IGNORED_AUX_CAMERAS = "config_ignoredAuxCameraIds"
 CAMERA_IGNORED_AUX_IDS = ["2"]
@@ -3108,8 +3483,25 @@ def check_camera_layout_files(archive: zipfile.ZipFile, infos: dict[str, zipfile
             fail(f"{entry} is a VINTF manifest of a camera layout: the layouts differ in features, not in HALs")
 
 
+def camera_init_commands(script: str, service: str) -> dict[str, list[str]]:
+    """The init script's actions that start or restart the service: each trigger (the text after `on `) with
+    those commands of its action. An action with no such command is not listed."""
+    commands: dict[str, list[str]] = {}
+    trigger = None
+    for raw in script.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("on "):
+            trigger = line[len("on "):].strip()
+        elif line in (f"start {service}", f"restart {service}") and trigger is not None:
+            commands.setdefault(trigger, []).append(line)
+    return commands
+
+
 def check_camera_provider(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
-    """The lazy provider is installed alone, declared once, started on demand, and loads the V4L2 HWL."""
+    """The lazy provider is installed alone, declared once, restarted by an action of each layout that has
+    cameras when cameraserver is running and started by its interface afterwards, and loads the V4L2 HWL."""
     binary = f"VENDOR/bin/hw/{CAMERA_PROVIDER}"
     for entry in (binary, CAMERA_HWL):
         info = infos.get(entry)
@@ -3119,8 +3511,8 @@ def check_camera_provider(archive: zipfile.ZipFile, infos: dict[str, zipfile.Zip
             fail(f"{entry} is not an ELF file")
     for entry in (f"VENDOR/bin/hw/{CAMERA_EAGER_PROVIDER}", f"VENDOR/etc/init/{CAMERA_EAGER_PROVIDER}.rc"):
         if entry in infos:
-            fail(f"{entry} is installed: only the lazy camera provider runs, so that no process exists "
-                 "while no application holds a camera")
+            fail(f"{entry} is installed: only the lazy camera provider runs, which exits when cameraserver "
+                 "holds no camera")
     library = read_small(archive, infos[CAMERA_HWL], CAMERA_HWL_LIMIT)
     for marker in CAMERA_HWL_MARKERS:
         if marker not in library:
@@ -3137,7 +3529,40 @@ def check_camera_provider(archive: zipfile.ZipFile, infos: dict[str, zipfile.Zip
         if required not in lines:
             fail(f"the camera provider service must carry '{required}'")
     if any(line.startswith("on ") for line in lines):
-        fail("the camera provider init script may have no trigger: init starts the service when a client asks")
+        fail("the camera provider init script may have no trigger: the layouts' provider init file starts the "
+             "service and its interface line restarts it")
+    # cameraserver lists a lazy AIDL provider only if it registered when it looked or registers later, and
+    # nothing but an init action starts it: not the first time, and not when cameraserver starts again
+    # (a crash, a restart of the framework) after the provider has exited. So each layout that has cameras
+    # has the action that restarts this service when cameraserver is running and the layout is the SKU
+    # (restart, because start leaves a provider that has unregistered and is about to exit, and starts
+    # nothing again), and no other action starts or restarts it (one in the early profile action, in a
+    # layout without cameras, or on a property other than cameraserver's state would list no camera after
+    # a restart).
+    service_name = service[0].split()[1]
+    if service_name != camera_layouts.PROVIDER_SERVICE:
+        fail(f"the camera provider service is {service_name}, not {camera_layouts.PROVIDER_SERVICE}, "
+             "which the init file of the camera layouts starts")
+    profile_info = infos.get(f"VENDOR/etc/init/{camera_layouts.INIT_FILE}")
+    if profile_info is not None and camera_init_commands(
+            read_small(archive, profile_info).decode("utf-8", errors="strict"), service_name):
+        fail(f"VENDOR/etc/init/{camera_layouts.INIT_FILE} starts the camera provider: init reads a vendor script "
+             "in the vendor_init context and would drop the action on cameraserver's status, so the layouts' "
+             f"SYSTEM_EXT/etc/init/{camera_layouts.PROVIDER_INIT_FILE} starts it")
+    init_info = infos.get(f"SYSTEM_EXT/etc/init/{camera_layouts.PROVIDER_INIT_FILE}")
+    if init_info is None or init_info.is_dir():
+        fail(f"SYSTEM_EXT/etc/init/{camera_layouts.PROVIDER_INIT_FILE} is missing: nothing starts the camera provider")
+    starts = camera_init_commands(read_small(archive, init_info).decode("utf-8", errors="strict"), service_name)
+    wanted = {camera_layouts.provider_trigger(layout.name): [f"{camera_layouts.PROVIDER_COMMAND} {service_name}"]
+              for layout in camera_layouts.all_layouts() if layout.has_front}
+    if starts != wanted:
+        missing = sorted(set(wanted) - set(starts))
+        extra = sorted(set(starts) - set(wanted))
+        repeated = sorted(trigger for trigger, commands in starts.items() if len(commands) != 1)
+        fail("the init file of the camera provider must restart the camera provider in one action for each "
+             "layout that has cameras, with the conditions cameraserver running and the layout's SKU, and nowhere else: "
+             f"missing {missing[:3]}{' ...' if len(missing) > 3 else ''} ({len(missing)}), "
+             f"extra {extra[:3]}{' ...' if len(extra) > 3 else ''} ({len(extra)}), repeated {repeated[:3]}")
     declarations = []
     for entry, info in sorted(infos.items()):
         path = PurePosixPath(entry)
@@ -3196,25 +3621,69 @@ def check_camera_configuration(archive: zipfile.ZipFile, infos: dict[str, zipfil
 def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
     """The camera application lists each lens the host has, and the sensor privacy service reads
     the camera switch."""
-    table = camera_resources(archive, infos, CAMERA_APP, CAMERA_APP_LIMIT)
+    app_table = camera_resources(archive, infos, CAMERA_APP, CAMERA_APP_LIMIT)
     try:
-        booleans = resource_booleans(table)
-        arrays = resource_arrays(table)
+        defines_overlayable = resource_table_defines_overlayable(app_table)
+        app_defaults = {"bool": resource_default_names(app_table, "bool"),
+                        "array": resource_default_names(app_table, "array")}
     except (ValueError, struct.error, IndexError) as error:
         fail(f"{CAMERA_APP} has no readable resource table: {error}")
+    if defines_overlayable:
+        fail(
+            f"{CAMERA_APP} declares an overlayable section: Android would apply a product overlay to the "
+            "resources it names under its policies alone, and this check cannot tell which"
+        )
+    # An overlay replaces resources its target defines; one for a name the application lost (an uprev
+    # renamed it) applies to nothing, and the overlay's own values then look right.
+    for name, kind in ((CAMERA_AUX_CAMERAS, "bool"), (CAMERA_IGNORED_AUX_CAMERAS, "array")):
+        if name not in app_defaults[kind]:
+            fail(
+                f"{CAMERA_APP} does not define the {kind} resource {name} in its default configuration: "
+                "the overlay would apply to nothing"
+            )
+    info = infos.get(CAMERA_APP_OVERLAY)
+    if info is None or info.is_dir():
+        fail(
+            f"{CAMERA_APP_OVERLAY} is missing: the application's own resources keep the defaults that "
+            "hide each lens of the host as a camera of its own"
+        )
+    try:
+        with zipfile.ZipFile(io.BytesIO(read_small(archive, info, CAMERA_APP_LIMIT))) as overlay_apk:
+            manifest = overlay_apk.read("AndroidManifest.xml")
+            table = overlay_apk.read("resources.arsc")
+        overlay = manifest_element_attributes(manifest, "overlay")
+        booleans = resource_booleans(table)
+        arrays = resource_arrays(table)
+        overlay_defaults = {"bool": resource_default_names(table, "bool"),
+                            "array": resource_default_names(table, "array")}
+    except (KeyError, OSError, ValueError, struct.error, IndexError, zipfile.BadZipFile) as error:
+        fail(f"{CAMERA_APP_OVERLAY} has no readable manifest and resource table: {error}")
+    if overlay is None or overlay.get("targetPackage") != CAMERA_APP_PACKAGE or overlay.get("isStatic") is not True:
+        fail(
+            f"{CAMERA_APP_OVERLAY} must be a static overlay of {CAMERA_APP_PACKAGE}: Android would not "
+            f"apply it otherwise: {overlay}"
+        )
     if booleans.get(CAMERA_AUX_CAMERAS) != [True]:
         fail(
-            f"{CAMERA_APP} must set {CAMERA_AUX_CAMERAS} to true: {booleans.get(CAMERA_AUX_CAMERAS)}; "
+            f"{CAMERA_APP_OVERLAY} must set {CAMERA_AUX_CAMERAS} to true: {booleans.get(CAMERA_AUX_CAMERAS)}; "
             "each lens of the host is its own camera device"
         )
     if arrays.get(CAMERA_IGNORED_AUX_CAMERAS) != [CAMERA_IGNORED_AUX_IDS]:
         fail(
-            f"{CAMERA_APP} must list the camera IDs {CAMERA_IGNORED_AUX_IDS} in "
+            f"{CAMERA_APP_OVERLAY} must list the camera IDs {CAMERA_IGNORED_AUX_IDS} in "
             f"{CAMERA_IGNORED_AUX_CAMERAS}: {arrays.get(CAMERA_IGNORED_AUX_CAMERAS)}; "
             "the wide lens is the zoom camera's 1x"
         )
+    # The one definition of each name is the sole one, and it carries no qualifier: a value under a
+    # resource configuration applies only on a device that matches it.
+    for name, kind in ((CAMERA_AUX_CAMERAS, "bool"), (CAMERA_IGNORED_AUX_CAMERAS, "array")):
+        if name not in overlay_defaults[kind]:
+            fail(f"{CAMERA_APP_OVERLAY} defines {name} only under a resource configuration: "
+                 "it must be in the default configuration")
     try:
-        toggle = resource_booleans(camera_resources(archive, infos, FRAMEWORK_OVERLAY, FRAMEWORK_OVERLAY_LIMIT))
+        toggle_table = camera_resources(archive, infos, FRAMEWORK_OVERLAY, FRAMEWORK_OVERLAY_LIMIT)
+        toggle = resource_booleans(toggle_table)
+        toggle_defaults = resource_default_names(toggle_table, "bool")
     except (ValueError, struct.error, IndexError) as error:
         fail(f"{FRAMEWORK_OVERLAY} has no readable resource table: {error}")
     if toggle.get(CAMERA_HARDWARE_TOGGLE) != [True]:
@@ -3222,11 +3691,16 @@ def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
             f"{FRAMEWORK_OVERLAY} must set {CAMERA_HARDWARE_TOGGLE} to true: {toggle.get(CAMERA_HARDWARE_TOGGLE)}; "
             "a session started with Camera off could not show the camera blocked"
         )
+    if CAMERA_HARDWARE_TOGGLE not in toggle_defaults:
+        fail(f"{FRAMEWORK_OVERLAY} defines {CAMERA_HARDWARE_TOGGLE} only under a resource configuration: "
+             "it must be in the default configuration")
 
 
 def check_camera(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
-    check_camera_layout_files(archive, infos)
+    # The provider's contract first: its message names what a changed init file broke, where the layout files'
+    # byte comparison only says that they differ.
     check_camera_provider(archive, infos)
+    check_camera_layout_files(archive, infos)
     check_camera_configuration(archive, infos)
     check_camera_app(archive, infos)
 
@@ -3358,6 +3832,12 @@ def check_hardware_features(
                     f"a camera feature is declared outside the camera layouts in {name}: {feature}; "
                     "the host's cameras decide it, through the permission directory of the layout"
                 )
+            if feature == COMPASS_FEATURE and name != COMPASS_FEATURE_FILE:
+                fail(
+                    f"the compass feature is declared outside {COMPASS_PERMISSION_DIRECTORY} in {name}: "
+                    "only a host with a magnetometer has a compass, and SystemConfig reads that directory "
+                    "for such a host alone"
+                )
             if feature == "android.software.vulkan.deqp.level":
                 fail(f"a Vulkan dEQP level is declared in {name}: the Vulkan lists are not qualified")
             if feature == OPENGLES_DEQP_LEVEL_FEATURE:
@@ -3476,6 +3956,8 @@ def check_kernel_policy(
         fail("vendor policy does not let the audio HAL processes call each other's binder")
     if not WIFI_HAL_DEBUG_PROPERTY_READ.search(vendor_policy):
         fail("vendor policy does not let the Wi-Fi HAL read persist_vendor_debug_wifi_prop")
+    if not CAMERA_HAL_COMPOSER_FENCE.search(vendor_policy):
+        fail("vendor policy does not let the camera HAL use the display composer's file descriptors")
     check_clearkey_memfd_policy(vendor_policy)
     check_userdata_grow_policy(vendor_policy)
     check_network_setup_policy(
@@ -3529,16 +4011,23 @@ def check_kernel_policy(
         .decode("utf-8", errors="strict")
         .splitlines()
     ]
-    check_vendor_init_triggers(
-        init_actions(
-            read_small(archive, infos["VENDOR/etc/init/init.kernarium.rc"]).decode(
-                "utf-8", errors="strict"
+    for entry in sorted(infos):
+        if (
+            PurePosixPath(entry).parts[0] in ("VENDOR", "ODM")
+            and entry.endswith(".rc")
+            and not infos[entry].is_dir()
+        ):
+            check_vendor_init_triggers(
+                init_actions(read_small(archive, infos[entry]).decode("utf-8", errors="strict")),
+                contexts,
+                (platform_policy, vendor_policy, system_ext_policy),
+                f"{entry}: ",
             )
-        ),
+    check_adbd_launch_policy(
         contexts,
-        (platform_policy, vendor_policy, system_ext_policy),
+        (platform_policy, vendor_policy, system_ext_policy)
+        + tuple(read_small(archive, infos[name]) for name in APP_POLICY_CIL if name in infos),
     )
-    check_adbd_launch_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
     check_lmkd_gpu_policy(contexts, (platform_policy, vendor_policy, system_ext_policy), vendor_policy)
     check_venus_option_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
     check_audio_ring_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
@@ -3697,6 +4186,14 @@ def check_network_setup_policy(vendor_policy: bytes, vendor_file_contexts: bytes
         fail("vendor file contexts do not label /vendor/bin/kernarium_net_setup")
     if not NET_SETUP_TRANSITION.search(vendor_policy):
         fail("vendor policy does not move init into the network setup domain")
+    if not cil_allows(
+        (vendor_policy,), NET_SETUP_DOMAIN, NET_SETUP_SYSCTL_LABEL, "file", {"open", "write"}
+    ):
+        fail(
+            f"vendor policy does not let {NET_SETUP_DOMAIN} open and write {NET_SETUP_SYSCTL_LABEL} "
+            "files: it could not turn IPv6 off on eth0 and the macvlan, and would exit before "
+            "it made wlan0"
+        )
 
 
 def check_wifi_network(rc_payload: str, script: bytes) -> None:
@@ -4336,29 +4833,62 @@ def cil_allows_file_read(policies: tuple[bytes, ...], domain: str, label: str) -
 
 
 def check_adbd_launch_policy(contexts: list[str], policies: tuple[bytes, ...]) -> None:
-    """adbd may read the launch properties and the debugging setting it acts on."""
+    """adbd may read the launch properties and the debugging setting it acts on, and no
+    application may read the installation's adb key."""
+    key_label = property_label(ADB_KEY_PROPERTY, contexts) or "default_prop"
+    if key_label != ADB_KEY_PROPERTY_TYPE:
+        fail(
+            f"{ADB_KEY_PROPERTY} is labelled {key_label}, not {ADB_KEY_PROPERTY_TYPE} "
+            "(overlay/sepolicy/system_ext/private/property_contexts): every application could read "
+            "the key that the host makes for the installation"
+        )
+    members = {
+        member
+        for policy in policies
+        for attribute in ADB_KEY_APP_ATTRIBUTES
+        for member in cil_attribute_members(policy, attribute)
+    }
+    if not any(cil_attribute_members(policy, "appdomain") for policy in policies):
+        fail("the policy lists no type for appdomain: the check could not tell who runs applications")
+    for domain in (*ADB_KEY_APP_DOMAINS, *sorted(members - set(ADB_KEY_APP_DOMAINS))):
+        if cil_allows_file_read(policies, domain, key_label):
+            fail(
+                f"{domain} may read {ADB_KEY_PROPERTY}, labelled {key_label}: an application could "
+                "read the key that the host makes for the installation"
+            )
     for name in ADBD_LAUNCH_PROPERTIES + ADBD_DEBUGGING_PROPERTIES:
         label = property_label(name, contexts) or "default_prop"
         if not cil_allows_file_read(policies, "adbd", label):
             fail(f"adbd may not read {name}, labelled {label}: it would ignore it")
 
 
-def check_vendor_init_triggers(
-    actions: dict[str, list[str]], contexts: list[str], policies: tuple[bytes, ...]
-) -> None:
-    """Every property that a product init trigger names is readable by vendor_init.
+# The prefixes that init accepts in a vendor script without asking the policy
+# (system/core/init/action_parser.cpp, IsActionableProperty).
+INIT_PARTNER_PREFIXES = (
+    "init.svc.vendor.", "ro.vendor.", "persist.vendor.", "vendor.", "init.svc.odm.", "ro.odm.",
+    "persist.odm.", "odm.", "ro.boot.",
+)
 
-    Init parses a vendor script in the vendor_init subcontext and drops a trigger
+
+def check_vendor_init_triggers(
+    actions: dict[str, list[str]], contexts: list[str], policies: tuple[bytes, ...], where: str = ""
+) -> None:
+    """Every property that an init trigger of a vendor or odm script names is readable by vendor_init.
+
+    Init parses such a script in the vendor_init subcontext and drops a trigger
     whose property that domain may not read ("unexported property trigger"), so a
     service that only such a trigger starts never runs. The platform's
-    neverallow keeps vendor_init off system_internal_prop types.
+    neverallow keeps vendor_init off system_internal_prop types, and init.svc.<name>
+    is one of them for every service but a few.
     """
     for trigger in actions:
         for name in INIT_PROPERTY_TRIGGER.findall(trigger):
+            if name.startswith(INIT_PARTNER_PREFIXES):
+                continue
             label = property_label(name, contexts) or "default_prop"
             if not cil_allows_file_read(policies, "vendor_init", label):
                 fail(
-                    f"the trigger 'on {trigger}' names {name}, labelled {label}, which "
+                    f"{where}the trigger 'on {trigger}' names {name}, labelled {label}, which "
                     "vendor_init may not read; init drops the trigger"
                 )
 
@@ -4537,6 +5067,16 @@ def check_property_file(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> None
             fail(
                 f"{info.filename} sets {key}={value}: a vendor overlay theme enables overlays at "
                 "boot, and the navigation mode overlays are the platform's to choose"
+            )
+        if key == MOTION_ORIENTATION_PROPERTY:
+            fail(
+                f"{info.filename} sets {key}={value}: the launch alone states whether the host feeds the "
+                "device-orientation sensor"
+            )
+        if key == MOTION_COMPASS_PROPERTY:
+            fail(
+                f"{info.filename} sets {key}={value}: the launch alone states whether the host has a "
+                "magnetometer, which lists the sensor and declares the compass feature"
             )
         if key == "persist.sys.usb.config":
             fail(
@@ -4993,6 +5533,13 @@ def check_audio_policy(
 def read_elf_prefix(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes | None:
     """Return an ELF file's header and program-header table, or None for any
     other file."""
+    try:
+        return read_elf_prefix_unchecked(archive, info)
+    except (zipfile.BadZipFile, zlib.error, OSError) as problem:
+        fail(f"cannot read {info.filename} from the archive: {problem}")
+
+
+def read_elf_prefix_unchecked(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes | None:
     if info.file_size < android_image.ELF32_HEADER_SIZE:
         return None
     with archive.open(info) as source:
@@ -5234,6 +5781,7 @@ def main() -> None:
         check_services_jar(archive, infos)
         check_input_flinger(archive, infos)
         check_network_stack(archive, infos)
+        check_wifi_tracker_users(archive, infos)
         check_audio_policy(archive, infos)
         check_multilib_properties(archive, infos)
         check_video_encoders(archive, infos)

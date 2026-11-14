@@ -98,7 +98,7 @@ struct StallRecordTests {
         let record = try #require(SessionRecord(text: Self.record(stalls: blank)))
         #expect(record.stalls == nil && record.processID == 77)
         // A layout of the future is no record.
-        #expect(SessionRecord(text: "uml-session 5\nstate ended\nend powered-off\n") == nil)
+        #expect(SessionRecord(text: "uml-session 8\nstate ended\nend powered-off\n") == nil)
     }
 
     @Test func aLaterRuntimeMayAddFieldsAndLines() throws {

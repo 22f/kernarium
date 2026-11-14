@@ -12,24 +12,7 @@ struct SessionView: View {
 
     var body: some View {
         @Bindable var model = model
-        Color.clear
-            // Controller events go to the Game Controller framework only, so
-            // iOS makes no focus or press event of them in these screens.
-            .background { GameControllerEventInteraction().allowsHitTesting(false) }
-            .overlay(alignment: .top) {
-                if model.session.showStats {
-                    StatsOverlay(memoryMiB: model.guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound, recovery: mode == .recovery)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                        .padding(.top, StatsPlacement.top)
-                        .allowsHitTesting(false)
-                }
-            }
-            .overlay(alignment: .top) {
-                SessionNoticesOverlay()
-            }
-            .overlay {
-                SideKeysOverlay(mode: mode, lit: true, open: $model.session.sideKeysOpen, actions: actions)
-            }
+        content
             .statusBarHidden(true)
             // The system honours the bottom edge's deferral only while the
             // home indicator is visible: with it hidden, one swipe goes Home.
@@ -47,6 +30,41 @@ struct SessionView: View {
                 if let probe = model.inputProbe { InputProbeReadout(probe: probe) }
             }
             #endif
+    }
+
+    /// Andarium's pieces over the guest: on a display that folds where the plan
+    /// puts them (`AndariumCore/FoldLayout.swift`), elsewhere the keys on the
+    /// guest's edge and the statistics hanging from its top.
+    @ViewBuilder
+    private var content: some View {
+        @Bindable var model = model
+        if let plan = model.sessionPlan {
+            Color.clear
+                .background { GameControllerEventInteraction().allowsHitTesting(false) }
+                .overlay { FoldSessionOverlay(plan: plan, mode: mode, lit: true, actions: actions) }
+        } else {
+            Color.clear
+                // Controller events go to the Game Controller framework only, so
+                // iOS makes no focus or press event of them in these screens.
+                .background { GameControllerEventInteraction().allowsHitTesting(false) }
+                .overlay(alignment: .top) {
+                    if model.session.showStats {
+                        StatsOverlay(memoryMiB: model.guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound, recovery: mode == .recovery)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                            .padding(.top, StatsPlacement.top)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .overlay(alignment: .top) {
+                    SessionNoticesOverlay()
+                }
+                .overlay {
+                    SideKeysOverlay(
+                        mode: mode, lit: true, open: $model.session.sideKeysOpen,
+                        tip: SideKeysTip(offersInstall: model.capabilities.offersApkInstall(in: mode)), actions: actions
+                    )
+                }
+        }
     }
 
     private var runtime: LiveRuntime? { model.driver as? LiveRuntime }

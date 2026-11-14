@@ -43,16 +43,36 @@ struct SideKeysOverlay: View {
     /// Counts key presses for the click felt on each one.
     @State private var keyPresses = 0
     @Namespace private var keysSpace
-    private let tip = SideKeysTip()
+    private let tip: SideKeysTip
     /// The tip's popover is up: while the closed keys are on screen and the
     /// tip wants to show.
     @State private var tipShown = false
+    @Environment(AppModel.self) private var model: AppModel?
 
-    init(mode: StartMode, lit: Bool, open: Binding<Bool>, leading: Bool = false, actions: SideKeyActions) {
+    /// A sheet the application keeps over the screens is up (Send feedback,
+    /// opened from the boot screen's notice): the tip waits, because a popover
+    /// SwiftUI presents beside it takes the sheet, and what was typed in it,
+    /// away.
+    private var sheetOverScreens: Bool {
+        #if FEEDBACK_MAIL
+        model?.feedbackFromBoot ?? false
+        #else
+        false
+        #endif
+    }
+
+    /// `tip` is the tip beside the closed keys. It says where Install APK is
+    /// where Settings has the row in this session
+    /// (`Capabilities.offersApkInstall`).
+    init(
+        mode: StartMode, lit: Bool, open: Binding<Bool>, leading: Bool = false, tip: SideKeysTip,
+        actions: SideKeyActions
+    ) {
         self.mode = mode
         self.lit = lit
         _open = open
         self.actions = actions
+        self.tip = tip
         _leading = State(initialValue: leading)
     }
 
@@ -107,8 +127,13 @@ struct SideKeysOverlay: View {
                     // away (opening, or the session ending), over the open
                     // keys or Home, where its card takes their touches.
                     // SwiftUI dismisses its popover with the closed keys.
-                    .popover(isPresented: $tipShown, arrowEdge: leading ? .leading : .trailing) {
-                        SideKeysTipCard(tip: tip)
+                    .popover(
+                        isPresented: Binding(get: { tipShown && !sheetOverScreens }, set: { tipShown = $0 }),
+                        arrowEdge: leading ? .leading : .trailing
+                    ) {
+                        SideKeysTipCard(
+                            tip: tip, maxHeight: SideKeysTipCard.maxHeight(in: size.height),
+                            width: SideKeysTipCard.width(in: size.width))
                     }
                     .task {
                         for await shows in tip.shouldDisplayUpdates { tipShown = shows }
@@ -199,6 +224,11 @@ enum KeyMetrics {
     static let rowGap: CGFloat = 10
     static let columnGap: CGFloat = 8
     static let edgeGap: CGFloat = 8
+    /// A key on the deck, which lies flat under the thumbs: wider than tall.
+    static let deckKey = CGSize(width: 66, height: 54)
+    /// A key in the cover's rail, which shares the strip with the stats.
+    static let railKeyHeight: CGFloat = 56
+    static let railGap: CGFloat = 8
 }
 
 /// The closed keys: Power and a longer volume rocker, each a plain glass key
@@ -245,36 +275,50 @@ struct OpenKeys: View {
 
     var body: some View {
         VStack(spacing: KeyMetrics.rowGap) {
-            ZStack {
-                Capsule().fill(.clear)
-                VStack(spacing: 3) {
-                    Image(systemName: "power")
-                        .font(.system(size: 20, weight: .semibold))
-                    Circle()
-                        .fill(lit ? Color.accentColor : Color.gray.opacity(0.5))
-                        .frame(width: 5, height: 5)
-                        .shadow(color: lit ? Color.accentColor : .clear, radius: 3)
-                }
-            }
-            .frame(width: KeyMetrics.width, height: KeyMetrics.keyHeight)
-            .glassEffect(.regular.interactive(), in: .capsule)
-            .matchedGeometryEffect(id: "power", in: space)
-            .contentShape(.capsule)
-            .onTapGesture(perform: power)
-            .onLongPressGesture(minimumDuration: 0.6, perform: powerHold)
-            .accessibilityElement()
-            .accessibilityLabel("Power")
-            .accessibilityHint(recovery ? "Chooses the highlighted item" : "Hold for the power menu")
-            .accessibilityAddTraits(.isButton)
-            .accessibilityAction(named: "Power menu", powerHold)
+            PowerKey(recovery: recovery, lit: lit, power: power, powerHold: powerHold)
+                .matchedGeometryEffect(id: "power", in: space)
 
             KeyPair(
-                top: (recovery ? "chevron.up" : "plus", recovery ? "Up" : "Volume up", volumeUp),
-                bottom: (recovery ? "chevron.down" : "minus", recovery ? "Down" : "Volume down", volumeDown)
+                top: (recovery ? "chevron.up" : "plus", recovery ? String(localized: "Up") : String(localized: "Volume up"), volumeUp),
+                bottom: (recovery ? "chevron.down" : "minus", recovery ? String(localized: "Down") : String(localized: "Volume down"), volumeDown)
             )
             .matchedGeometryEffect(id: "rocker", in: space)
         }
         .foregroundStyle(.primary)
+    }
+}
+
+/// Power: tap to press, hold for Android's power menu. Its light says
+/// whether the guest's screen is on.
+struct PowerKey: View {
+    let recovery: Bool
+    let lit: Bool
+    var size = CGSize(width: KeyMetrics.width, height: KeyMetrics.keyHeight)
+    let power: () -> Void
+    let powerHold: () -> Void
+
+    var body: some View {
+        ZStack {
+            Capsule().fill(.clear)
+            VStack(spacing: 3) {
+                Image(systemName: "power")
+                    .font(.system(size: 20, weight: .semibold))
+                Circle()
+                    .fill(lit ? Color.accentColor : Color.gray.opacity(0.5))
+                    .frame(width: 5, height: 5)
+                    .shadow(color: lit ? Color.accentColor : .clear, radius: 3)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .contentShape(.capsule)
+        .onTapGesture(perform: power)
+        .onLongPressGesture(minimumDuration: 0.6, perform: powerHold)
+        .accessibilityElement()
+        .accessibilityLabel("Power")
+        .accessibilityHint(recovery ? "Chooses the highlighted item" : "Hold for the power menu")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction(named: "Power menu", powerHold)
     }
 }
 
@@ -287,20 +331,11 @@ struct GuestKeys: View {
 
     var body: some View {
         VStack(spacing: KeyMetrics.rowGap) {
-            Button(action: settings) {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 20, weight: .semibold))
-                    .frame(width: KeyMetrics.width, height: KeyMetrics.keyHeight)
-                    .contentShape(.capsule)
-            }
-            .buttonStyle(.plain)
-            .glassEffect(.regular.interactive(), in: .capsule)
-            .accessibilityLabel("Settings")
-            .accessibilityHint("Install apps, ADB, stats and options")
+            SettingsKey(action: settings)
 
             KeyPair(
-                top: ("arrowtriangle.backward.fill", "Back", back),
-                bottom: ("circle.fill", "Home", home),
+                top: ("arrowtriangle.backward.fill", String(localized: "Back"), back),
+                bottom: ("circle.fill", String(localized: "Home"), home),
                 glyphSize: 16
             )
         }
@@ -308,19 +343,54 @@ struct GuestKeys: View {
     }
 }
 
-/// Two keys in one glass capsule, like a volume rocker.
+/// Settings: Andarium's own, opened from the keys.
+struct SettingsKey: View {
+    var size = CGSize(width: KeyMetrics.width, height: KeyMetrics.keyHeight)
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "gearshape")
+                .font(.system(size: 20, weight: .semibold))
+                .frame(width: size.width, height: size.height)
+                .contentShape(.capsule)
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .accessibilityLabel("Settings")
+        .accessibilityHint("Install apps, ADB, stats and options")
+    }
+}
+
+/// Two keys in one glass capsule, like a volume rocker: stacked on an edge,
+/// side by side on the deck.
 struct KeyPair: View {
     let top: (symbol: String, label: String, action: () -> Void)
     let bottom: (symbol: String, label: String, action: () -> Void)
     var glyphSize: CGFloat = 19
+    var axis: Axis = .vertical
+    /// A key's height on an edge.
+    var keyHeight = KeyMetrics.keyHeight
 
     var body: some View {
-        VStack(spacing: 0) {
-            key(top)
-            Capsule()
-                .fill(.primary.opacity(0.18))
-                .frame(width: 22, height: 1.5)
-            key(bottom)
+        Group {
+            if axis == .vertical {
+                VStack(spacing: 0) {
+                    key(top)
+                    Capsule()
+                        .fill(.primary.opacity(0.18))
+                        .frame(width: 22, height: 1.5)
+                    key(bottom)
+                }
+            } else {
+                HStack(spacing: 0) {
+                    key(top)
+                    Capsule()
+                        .fill(.primary.opacity(0.18))
+                        .frame(width: 1.5, height: 22)
+                    key(bottom)
+                }
+            }
         }
         .buttonStyle(.plain)
         .glassEffect(.regular.interactive(), in: .capsule)
@@ -330,10 +400,112 @@ struct KeyPair: View {
         Button(action: key.action) {
             Image(systemName: key.symbol)
                 .font(.system(size: glyphSize, weight: .semibold))
-                .frame(width: KeyMetrics.width, height: KeyMetrics.keyHeight - 0.75)
+                .frame(
+                    width: axis == .vertical ? KeyMetrics.width : KeyMetrics.deckKey.width - 0.75,
+                    height: axis == .vertical ? keyHeight - 0.75 : KeyMetrics.deckKey.height)
                 .contentShape(Rectangle())
         }
         .accessibilityLabel(key.label)
+    }
+}
+
+// MARK: - Rail and deck
+
+/// The side keys in the cover's trailing strip, beside the camera's: always
+/// open, one column, so every key is one tap and none covers the guest. Power
+/// and the volume rocker on top, as on a phone's side; Settings, then Back
+/// and Home nearest the thumb.
+struct KeyRail: View {
+    let mode: StartMode
+    let lit: Bool
+    let actions: SideKeyActions
+    @State private var keyPresses = 0
+
+    var body: some View {
+        let recovery = mode == .recovery
+        let key = CGSize(width: KeyMetrics.width, height: KeyMetrics.railKeyHeight)
+        VStack(spacing: KeyMetrics.railGap) {
+            PowerKey(recovery: recovery, lit: lit, size: key, power: { pressed(actions.power) }, powerHold: holdPower)
+            KeyPair(
+                top: (recovery ? "chevron.up" : "plus", recovery ? String(localized: "Up") : String(localized: "Volume up"), { pressed(actions.volumeUp) }),
+                bottom: (recovery ? "chevron.down" : "minus", recovery ? String(localized: "Down") : String(localized: "Volume down"), { pressed(actions.volumeDown) }),
+                keyHeight: key.height
+            )
+            if !recovery {
+                SettingsKey(size: key, action: actions.settings)
+                KeyPair(
+                    top: ("arrowtriangle.backward.fill", String(localized: "Back"), { pressed(actions.back) }),
+                    bottom: ("circle.fill", String(localized: "Home"), { pressed(actions.home) }),
+                    glyphSize: 16, keyHeight: key.height
+                )
+            }
+        }
+        .foregroundStyle(.primary)
+        .environment(\.colorScheme, .dark)
+        .sensoryFeedback(.impact(weight: .light), trigger: keyPresses)
+    }
+
+    private func pressed(_ action: () -> Void) {
+        keyPresses += 1
+        action()
+    }
+
+    private func holdPower() {
+        guard mode == .normal else { return }
+        actions.powerHold()
+    }
+}
+
+/// The side keys on the lower half while the device stands turned, its
+/// lower half on the table: one row along the near edge, under the thumbs.
+/// Back and Home on the left; Settings in the middle; volume and Power on
+/// the right, as a phone's side keys lie when the phone is on its side.
+struct KeyDeck: View {
+    let mode: StartMode
+    let lit: Bool
+    let actions: SideKeyActions
+    @State private var keyPresses = 0
+
+    var body: some View {
+        let recovery = mode == .recovery
+        HStack(spacing: 0) {
+            if !recovery {
+                KeyPair(
+                    top: ("arrowtriangle.backward.fill", String(localized: "Back"), { pressed(actions.back) }),
+                    bottom: ("circle.fill", String(localized: "Home"), { pressed(actions.home) }),
+                    glyphSize: 16, axis: .horizontal
+                )
+                Spacer(minLength: 16)
+                SettingsKey(size: KeyMetrics.deckKey, action: actions.settings)
+                Spacer(minLength: 16)
+            } else {
+                Spacer(minLength: 0)
+            }
+            KeyPair(
+                top: (recovery ? "chevron.up" : "minus", recovery ? String(localized: "Up") : String(localized: "Volume down"),
+                      { pressed(recovery ? actions.volumeUp : actions.volumeDown) }),
+                bottom: (recovery ? "chevron.down" : "plus", recovery ? String(localized: "Down") : String(localized: "Volume up"),
+                         { pressed(recovery ? actions.volumeDown : actions.volumeUp) }),
+                axis: .horizontal
+            )
+            .padding(.trailing, 14)
+            PowerKey(
+                recovery: recovery, lit: lit, size: KeyMetrics.deckKey,
+                power: { pressed(actions.power) }, powerHold: holdPower)
+        }
+        .foregroundStyle(.primary)
+        .environment(\.colorScheme, .dark)
+        .sensoryFeedback(.impact(weight: .light), trigger: keyPresses)
+    }
+
+    private func pressed(_ action: () -> Void) {
+        keyPresses += 1
+        action()
+    }
+
+    private func holdPower() {
+        guard mode == .normal else { return }
+        actions.powerHold()
     }
 }
 
@@ -342,24 +514,125 @@ struct KeyPair: View {
 /// Shown once Android has booted, pointing at the side keys. It stops once the
 /// keys have been opened or the tip closed, and appears at most three times.
 nonisolated struct SideKeysTip: Tip {
+    /// The tip's words, which say where Install APK is when Settings has the
+    /// row in this session. The tip is the same one either way (its identity
+    /// and its count of displays do not change), so a person who closed it is
+    /// not shown it again for the added line.
+    let words: String
+
+    /// `locale` is the language of the words: the person's own, and a
+    /// language's table for a test that reads one.
+    init(offersInstall: Bool, locale: Locale = .current) {
+        words = Self.words(offersInstall: offersInstall, locale: locale)
+    }
+
     var title: Text { Text("Side keys") }
-    var message: Text? { Text("Tap for Back, Home and Settings. Hold Power for the power menu. Drag to move.") }
+    var message: Text? { Text(words.keepingTogether) }
+
+    /// The tip's words: the keys, and a second line for Install APK.
+    static func words(offersInstall: Bool, locale: Locale = .current) -> String {
+        let keys = String(localized: LocalizedStringResource(
+            "Tap for Back, Home and Settings. Hold Power for the power menu. Drag to move.", locale: locale))
+        guard offersInstall else { return keys }
+        return keys + "\n" + String(localized: LocalizedStringResource(
+            "To install an app, open Settings here and choose Install APK.", locale: locale))
+    }
+
     var image: Image? { Image(systemName: "hand.tap") }
     var options: [any TipOption] { [MaxDisplayCount(3)] }
 }
 
 /// The tip in its popover, drawn as TipKit draws a popover tip: the popover's
 /// own background, at most 400 points wide. A touch beside it reaches the
-/// guest, as a touch beside TipKit's does.
-private struct SideKeysTipCard: View {
+/// guest, as a touch beside TipKit's does. The card takes at most
+/// `maxHeight`: what does not fit scrolls inside it, so the card, the
+/// icon and the close button stay on the screen on the smallest iPhone and
+/// in the half of a folding iPhone.
+///
+/// The popover is as high as the card measures at its ideal width, so that
+/// width has to be the one UIKit gives it: UIKit narrows a popover to the room
+/// beside the keys, the text then wraps to more lines than were measured, and
+/// the card cuts off the first or the last of them. `width` is the card's
+/// ideal width, from `width(in:)`.
+struct SideKeysTipCard: View {
     let tip: SideKeysTip
+    let maxHeight: CGFloat
+    let width: CGFloat
+
+    /// The widest the card is.
+    static let widest: CGFloat = 400
+
+    /// The most height the card takes where the keys have `height` points: the
+    /// popover keeps its own margins from the screen's edges.
+    static func maxHeight(in height: CGFloat) -> CGFloat { max(160, height - 120) }
+
+    /// The width of the card where the keys have `available` points across:
+    /// the room beside them less what the popover keeps for its margin, its
+    /// arrow and the keys (UIKit gives it 41 points less than the screen is
+    /// wide), with some to spare so that UIKit never narrows it.
+    static func width(in available: CGFloat) -> CGFloat { min(widest, max(240, available - 60)) }
 
     var body: some View {
-        TipView(tip)
-            .tipBackground(.clear)
-            .frame(idealWidth: 400, maxWidth: 400)
-            .fixedSize(horizontal: false, vertical: true)
-            .presentationCompactAdaptation(.popover)
-            .presentationBackgroundInteraction(.enabled)
+        ScrollView {
+            TipView(tip)
+                .tipBackground(.clear)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(maxHeight: maxHeight)
+        .frame(idealWidth: width, maxWidth: Self.widest)
+        .fixedSize(horizontal: false, vertical: true)
+        .presentationCompactAdaptation(.popover)
+        .background(PopoverPassthrough())
+    }
+}
+
+/// Lets a touch beside the tip's card reach the screen under its popover.
+/// UIKit's popover takes the first touch outside it to dismiss itself, so
+/// the keys the tip points at never see it; with the screen's view among the
+/// popover's pass-through views, the popover stays up and the touch goes
+/// where it fell. SwiftUI sets that list itself, and sets it empty again at
+/// its next update (`presentationBackgroundInteraction` does not reach a
+/// popover), so the list is kept as it should be for as long as the popover
+/// shows. While the popover is still appearing its card takes no touch, and a
+/// touch on the card reaches the screen too.
+private struct PopoverPassthrough: UIViewRepresentable {
+    func makeUIView(context: Context) -> PassthroughView { PassthroughView() }
+    func updateUIView(_ view: PassthroughView, context: Context) {}
+
+    final class PassthroughView: UIView {
+        private var watch: NSKeyValueObservation?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            watch = nil
+            attach()
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            if watch == nil { attach() }
+        }
+
+        /// The popover is the presentation controller of the nearest view
+        /// controller up the responder chain: the card's hosting controller.
+        private func attach() {
+            guard window != nil else { return }
+            var responder: UIResponder? = self
+            while let current = responder {
+                if let controller = current as? UIViewController,
+                   let popover = controller.popoverPresentationController {
+                    watch = popover.observe(\.passthroughViews, options: [.initial, .new]) { popover, _ in
+                        // UIKit and SwiftUI set the list on the main thread.
+                        MainActor.assumeIsolated {
+                            guard let screen = popover.presentingViewController.view,
+                                  popover.passthroughViews ?? [] != [screen] else { return }
+                            popover.passthroughViews = [screen]
+                        }
+                    }
+                    return
+                }
+                responder = current.next
+            }
+        }
     }
 }

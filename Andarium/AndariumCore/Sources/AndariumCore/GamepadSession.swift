@@ -67,8 +67,9 @@ public protocol GamepadIndicators: AnyObject, Sendable {
 /// only. Leaving the front lets go of every controller's state (a device still
 /// being made is given the neutral state too), sends each device one neutral
 /// report, so that nothing stays pressed, stops every rumble and keeps the
-/// devices; returning to it sends each device its state, which the application
-/// refreshes from the controllers.
+/// devices; returning to it sends each device the state it holds, which is the
+/// let go one: iOS says nothing of a controller that has not reported since, so
+/// what it holds reaches the guest with its next report.
 ///
 /// **Whose reply.** The relay answers each `CREATE` once, in order, and its
 /// other frames name only a slot's number. A controller that leaves while its
@@ -396,9 +397,10 @@ public final class GamepadSession: @unchecked Sendable {
     // MARK: Front
 
     private func leaveFront() {
-        guard stream != nil else { return }
         // Every controller's state is let go of, a device that is still being
-        // made included: it is given the neutral state when it is ready.
+        // made included: it is given the neutral state when it is ready. A
+        // session with no relay does it too, since the devices it makes next
+        // start from that state.
         for index in slots.indices {
             guard var slot = slots[index] else { continue }
             slot.state = slot.state.released

@@ -5,465 +5,32 @@
 // else but kicks: none of it may reset such a device, what the device
 // completes or raises meanwhile reaches the guest at the ring's enable, and
 // the messages that change what the requests refer to still retire them.
+// A device that also has a shared-memory region is held to the same rules: the
+// GET_FEATURES that would reset it is answered after a map or unmap it waits
+// for, never inside the wait, and the messages that end the guest's driver
+// still reset it and unmap what it mapped.
 // The front end is the GPU tests', so their support header and protocol
 // header are on the path.
-#include "gpu_test_support.hpp"
-#include "vhost_user_device.hpp"
+#include "held_request_harness.hpp"
 
-#include <algorithm>
-#include <array>
-#include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <deque>
 #include <functional>
 #include <memory>
-#include <mutex>
-#include <optional>
-#include <stdexcept>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace {
 
-using namespace uml::gpu::testing;
-using uml::gpu::VhostUserServer;
-using uml::testing::require;
-using uml::virtio::VhostUserDevice;
-using uml::virtio::VhostUserQueueAction;
-using uml::virtio::VhostUserQueueCompletion;
-using uml::virtio::VhostUserQueueResult;
-namespace protocol = uml::gpu::protocol;
-
-constexpr std::uint32_t requestQueue = 0;
-constexpr std::uint32_t eventQueue = 1;
-constexpr std::uint16_t queueDepth = 8;
-constexpr std::uint64_t negotiated = protocol::protocolFeatureReplyAck |
-    protocol::protocolFeatureConfig;
-constexpr std::uint64_t negotiatedInband = negotiated |
-    protocol::protocolFeatureInbandNotifications |
-    protocol::protocolFeatureSlaveRequest;
-
-/* The device's tag for a request is the one byte the guest sends; its
- * response to the request is that byte and the next. */
-[[nodiscard]] std::vector<std::uint8_t> responseTo(std::uint8_t tag)
-{
-    return {tag, static_cast<std::uint8_t>(tag + 1U)};
-}
-
-/* A device with a request queue and an event queue, like a codec. The request
- * queue defers every request until the test finishes it; the event queue
- * answers a buffer with the oldest event the test raised, and keeps the buffer
- * while there is none. */
-class HoldingDevice final : public VhostUserDevice {
-public:
-    struct Options {
-        bool keepsRequests {};
-        bool answersKicksFirst {};
-        bool sharedMemory {};
-    };
-
-    explicit HoldingDevice(Options options) : options_(options)
-    {
-        wake_ = makePipe();
-        require(::fcntl(wake_.readEnd.get(), F_SETFL, O_NONBLOCK) == 0);
-    }
-
-    [[nodiscard]] const char* name() const noexcept override { return "holding"; }
-    [[nodiscard]] std::uint64_t features() const noexcept override { return 0; }
-    [[nodiscard]] std::size_t queueCount() const noexcept override { return 2; }
-    [[nodiscard]] std::vector<std::uint8_t> configuration() const override
-    {
-        return {0, 0, 0, 0};
-    }
-    void writeConfiguration(
-        std::uint32_t, std::uint32_t, std::span<const std::uint8_t>) override {}
-    [[nodiscard]] bool keepsDeferredRequestsWhileDisabled() const noexcept override
-    {
-        return options_.keepsRequests;
-    }
-    [[nodiscard]] bool keepsRequestsOnDisabledRing() const noexcept override
-    {
-        return options_.keepsRequests;
-    }
-    [[nodiscard]] bool answersKicksBeforeRunning() const noexcept override
-    {
-        return options_.answersKicksFirst;
-    }
-    [[nodiscard]] std::optional<uml::virtio::VhostUserSharedMemoryRegion>
-        sharedMemoryRegion() const noexcept override
-    {
-        if (!options_.sharedMemory)
-            return std::nullopt;
-        return uml::virtio::VhostUserSharedMemoryRegion {.id = 0, .size = 1U << 16};
-    }
-
-    [[nodiscard]] VhostUserQueueResult processQueue(
-        std::uint32_t index,
-        std::uint64_t requestId,
-        std::span<const std::uint8_t> request,
-        std::size_t) override
-    {
-        const std::lock_guard lock {mutex_};
-        ++runs_[index];
-        if (index == requestQueue) {
-            held_.push_back({requestId, request.empty() ? std::uint8_t {} : request[0]});
-            return {VhostUserQueueAction::defer, {}};
-        }
-        if (events_.empty())
-            return {VhostUserQueueAction::retry, {}};
-        const auto event = events_.front();
-        events_.pop_front();
-        return {VhostUserQueueAction::complete, uml::virtio::toBytes(event)};
-    }
-    [[nodiscard]] bool takeQueueCompletion(VhostUserQueueCompletion& completion) override
-    {
-        const std::lock_guard lock {mutex_};
-        if (finished_.empty())
-            return false;
-        completion = std::move(finished_.front());
-        finished_.pop_front();
-        ++taken_;
-        return true;
-    }
-    void reset() noexcept override
-    {
-        const std::lock_guard lock {mutex_};
-        ++resets_;
-        held_.clear();
-        finished_.clear();
-        events_.clear();
-    }
-    [[nodiscard]] int eventDescriptor() const noexcept override
-    {
-        return wake_.readEnd.get();
-    }
-    void drainEventSource() override
-    {
-        std::array<char, 16> bytes {};
-        while (::read(wake_.readEnd.get(), bytes.data(), bytes.size()) > 0) {}
-        const std::lock_guard lock {mutex_};
-        ++drained_;
-    }
-
-    /* The device finishes the request the guest tagged `tag`. */
-    void finish(std::uint8_t tag)
-    {
-        {
-            const std::lock_guard lock {mutex_};
-            const auto held = std::find_if(
-                held_.begin(), held_.end(), [tag](const Held& request) {
-                    return request.tag == tag;
-                });
-            require(held != held_.end(), "the device holds no such request");
-            finished_.push_back({held->requestId, responseTo(tag)});
-            held_.erase(held);
-        }
-        wake();
-    }
-    /* The device raises an event for the event queue's next buffer. */
-    void raise(std::uint64_t event)
-    {
-        {
-            const std::lock_guard lock {mutex_};
-            events_.push_back(event);
-        }
-        wake();
-    }
-
-    [[nodiscard]] unsigned runs(std::uint32_t queue) const
-    {
-        const std::lock_guard lock {mutex_};
-        return runs_[queue];
-    }
-    [[nodiscard]] unsigned resets() const
-    {
-        const std::lock_guard lock {mutex_};
-        return resets_;
-    }
-    [[nodiscard]] std::size_t held() const
-    {
-        const std::lock_guard lock {mutex_};
-        return held_.size();
-    }
-    [[nodiscard]] unsigned taken() const
-    {
-        const std::lock_guard lock {mutex_};
-        return taken_;
-    }
-    [[nodiscard]] unsigned drained() const
-    {
-        const std::lock_guard lock {mutex_};
-        return drained_;
-    }
-
-private:
-    struct Held {
-        std::uint64_t requestId {};
-        std::uint8_t tag {};
-    };
-
-    void wake() const
-    {
-        require(::write(wake_.writeEnd.get(), "x", 1) == 1);
-    }
-
-    Options options_;
-    Pipe wake_;
-    mutable std::mutex mutex_;
-    std::array<unsigned, 2> runs_ {};
-    unsigned resets_ {};
-    unsigned taken_ {};
-    unsigned drained_ {};
-    std::deque<Held> held_;
-    std::deque<VhostUserQueueCompletion> finished_;
-    std::deque<std::uint64_t> events_;
-};
-
-/* Where a queue's rings lie in the ring's one page: SplitRing places a single
- * queue, so the second takes the upper half. The buffers follow. */
-struct Layout {
-    std::size_t descriptors;
-    std::size_t available;
-    std::size_t used;
-};
-constexpr Layout eventLayout {0x000, 0x100, 0x200};
-constexpr Layout requestLayout {0x400, 0x500, 0x600};
-constexpr std::size_t eventBufferOffset = 0x300;
-constexpr std::size_t requestBufferOffset = 0x700;
-constexpr std::size_t responseBufferOffset = 0x780;
-constexpr std::size_t bufferStride = 0x10;
-constexpr std::uint32_t responseCapacity = 8;
-
-/* One queue of the device in `ring`'s page, driven the way a front end does:
- * placed and enabled, given a call pipe and, when asked, a kick pipe, and fed
- * buffers by the test. */
-class TestQueue {
-public:
-    TestQueue(const SplitRing& ring, std::uint32_t index, Layout layout)
-        : ring_(ring), index_(index), layout_(layout) {}
-
-    void start(int socket, bool enable, bool withKickPipe)
-    {
-        const protocol::VringState size {.index = index_, .value = queueDepth};
-        sendRequestAndReadAcknowledgement(
-            socket, protocol::VhostRequest::setVringNum, bytesOf(size));
-        const protocol::VringAddress address {
-            .index = index_,
-            .flags = 0,
-            .descriptor = SplitRing::userBase + layout_.descriptors,
-            .used = SplitRing::userBase + layout_.used,
-            .available = SplitRing::userBase + layout_.available,
-            .log = 0,
-        };
-        sendRequestAndReadAcknowledgement(
-            socket, protocol::VhostRequest::setVringAddr, bytesOf(address));
-        if (enable)
-            this->enable(socket, true);
-        attachChannels(socket, withKickPipe);
-    }
-    /* A new call pipe, and a kick pipe when asked. The pipes the server had
-     * stay open here: closing the write end of its kick pipe would end the
-     * connection before the new one reached it. */
-    void attachChannels(int socket, bool withKickPipe)
-    {
-        retired_.push_back(std::move(call_));
-        retired_.push_back(std::move(kick_));
-        call_ = makePipe();
-        const std::uint64_t queue = index_;
-        const std::array callDescriptors {call_.writeEnd.get()};
-        sendRequestAndReadAcknowledgement(
-            socket,
-            protocol::VhostRequest::setVringCall,
-            bytesOf(queue),
-            callDescriptors);
-        if (!withKickPipe)
-            return;
-        kick_ = makePipe();
-        const std::array kickDescriptors {kick_.readEnd.get()};
-        sendRequestAndReadAcknowledgement(
-            socket,
-            protocol::VhostRequest::setVringKick,
-            bytesOf(queue),
-            kickDescriptors);
-    }
-    void enable(int socket, bool on) const
-    {
-        const protocol::VringState state {.index = index_, .value = on ? 1U : 0U};
-        sendRequestAndReadAcknowledgement(
-            socket, protocol::VhostRequest::setVringEnable, bytesOf(state));
-    }
-    void writeKickPipe() const { writeKick(kick_); }
-    /* An in-band kick. Whatever the kick asks for, it returns once the server
-     * has handled it, which a configuration read, answered after it, shows;
-     * a reply the kick should not have got would come before that one. */
-    void kick(int socket, bool needReply) const
-    {
-        const protocol::VringState state {.index = index_, .value = 0};
-        sendRequest(
-            socket, protocol::VhostRequest::vringKick, bytesOf(state), {}, needReply);
-        if (needReply)
-            readAcknowledgement(socket, protocol::VhostRequest::vringKick);
-        (void)readConfig(socket, 0, 1);
-    }
-
-    /* The guest queues the request it tags `tag`: one byte for the device and
-     * room for its answer. */
-    void postRequest(std::uint8_t tag)
-    {
-        const auto slot = posted_;
-        require(slot < 4, "the buffer area holds four requests");
-        const auto requestOffset = requestBufferOffset + slot * bufferStride;
-        const auto responseOffset = responseBufferOffset + slot * bufferStride;
-        ring_.memory()[requestOffset] = tag;
-        const auto head = static_cast<std::uint16_t>(2U * slot);
-        const auto chain = requestChain(
-            requestOffset, 1, responseOffset, responseCapacity, head);
-        publish(chain, head);
-    }
-    /* The guest queues a buffer for the device's next event. */
-    void postEventBuffer()
-    {
-        const std::array<protocol::VirtqueueDescriptor, 1> buffer {{
-            {.address = SplitRing::guestBase + eventBufferOffset + posted_ * bufferStride,
-             .length = responseCapacity,
-             .flags = protocol::descriptorWrite,
-             .next = 0}}};
-        publish(buffer, static_cast<std::uint16_t>(posted_));
-    }
-
-    [[nodiscard]] std::uint16_t usedIndex() const
-    {
-        return std::atomic_ref<std::uint16_t>(
-                   *reinterpret_cast<std::uint16_t*>(
-                       ring_.memory().data() + layout_.used + sizeof(std::uint16_t)))
-            .load(std::memory_order_acquire);
-    }
-    [[nodiscard]] protocol::VirtqueueUsedElement used(std::size_t index) const
-    {
-        protocol::VirtqueueUsedElement element {};
-        std::memcpy(
-            &element,
-            ring_.memory().data() + layout_.used + protocol::splitRingHeaderSize +
-                index * sizeof(element),
-            sizeof(element));
-        return element;
-    }
-    /* The response the device wrote for request number `slot` of this queue
-     * (counting from zero). */
-    [[nodiscard]] std::vector<std::uint8_t> responseAt(std::size_t slot, std::size_t size) const
-    {
-        const auto* bytes = ring_.memory().data() + responseBufferOffset + slot * bufferStride;
-        return {bytes, bytes + size};
-    }
-    [[nodiscard]] std::uint64_t eventAt(std::size_t slot) const
-    {
-        std::uint64_t event {};
-        std::memcpy(
-            &event, ring_.memory().data() + eventBufferOffset + slot * bufferStride, sizeof(event));
-        return event;
-    }
-
-    /* Whether the guest has been called since it last was. */
-    [[nodiscard]] bool called(int timeoutMilliseconds = 100) const
-    {
-        pollfd call {.fd = call_.readEnd.get(), .events = POLLIN};
-        if (::poll(&call, 1, timeoutMilliseconds) != 1)
-            return false;
-        std::uint64_t count {};
-        readExact(call_.readEnd.get(), &count, sizeof(count));
-        return true;
-    }
-    void awaitCall() const
-    {
-        uml::gpu::testing::awaitCall(call_.readEnd.get());
-    }
-
-private:
-    void publish(
-        std::span<const protocol::VirtqueueDescriptor> chain, std::uint16_t head)
-    {
-        auto* memory = ring_.memory().data();
-        std::memcpy(
-            memory + layout_.descriptors + head * sizeof(protocol::VirtqueueDescriptor),
-            chain.data(),
-            chain.size_bytes());
-        std::memcpy(
-            memory + layout_.available + protocol::splitRingHeaderSize +
-                (posted_ % queueDepth) * sizeof(std::uint16_t),
-            &head,
-            sizeof(head));
-        ++posted_;
-        std::atomic_ref<std::uint16_t>(
-            *reinterpret_cast<std::uint16_t*>(
-                memory + layout_.available + sizeof(std::uint16_t)))
-            .store(static_cast<std::uint16_t>(posted_), std::memory_order_release);
-    }
-
-    const SplitRing& ring_;
-    std::uint32_t index_;
-    Layout layout_;
-    std::size_t posted_ {};
-    Pipe call_;
-    Pipe kick_;
-    std::vector<Pipe> retired_;
-};
-
-/* The state of the guest's two queues once the device holds requests: both
- * started and enabled, the request queue holding `requests` requests the
- * device deferred and the event queue holding one buffer. */
-struct HeldSession {
-    HoldingDevice& device;
-    SplitRing& ring;
-    TestQueue& requests;
-    TestQueue& events;
-    int socket;
-};
-
-/* Runs `body` on a connection whose guest has posted `postedRequests`
- * requests (tags 1, 2, ...) and one event buffer, all of which the device
- * holds, and then suspended: both rings disabled. */
-void withSuspendedGuest(
-    HoldingDevice::Options options,
-    unsigned postedRequests,
-    const std::function<void(const HeldSession&)>& body)
-{
-    auto device = std::make_unique<HoldingDevice>(options);
-    auto* recorder = device.get();
-    VhostUserServer server {std::move(device)};
-    SplitRing ring;
-    TestQueue requests {ring, requestQueue, requestLayout};
-    TestQueue events {ring, eventQueue, eventLayout};
-
-    withServerConnection(server, [&](int socket) {
-        negotiateProtocolFeatures(socket, negotiated);
-        configureMemory(socket, ring.descriptor());
-        requests.start(socket, true, true);
-        events.start(socket, true, true);
-        for (unsigned tag = 1; tag <= postedRequests; ++tag)
-            requests.postRequest(static_cast<std::uint8_t>(tag));
-        events.postEventBuffer();
-        requests.writeKickPipe();
-        events.writeKickPipe();
-        awaitCondition([&] {
-            return recorder->runs(requestQueue) >= postedRequests &&
-                recorder->runs(eventQueue) >= 1;
-        });
-        require(recorder->held() == postedRequests);
-        requests.enable(socket, false);
-        events.enable(socket, false);
-        body({*recorder, ring, requests, events, socket});
-    });
-}
+using namespace uml::virtio::held_request_harness;
 
 /* A request the device completes while the guest is suspended, and an event
  * it raises, are written to the rings at each ring's enable, in whichever
  * order the rings are enabled, and the suspend resets nothing. The request
  * completions keep the order the device finished them in. */
-void completionsAndEventsWaitForTheEnable(bool enableEventsFirst)
+void completionsAndEventsWaitForTheEnable(bool enableEventsFirst, bool sharedMemory)
 {
-    withSuspendedGuest({true, false}, 2, [&](const HeldSession& session) {
+    withSuspendedGuest({true, false, sharedMemory}, 2, [&](const HeldSession& session) {
         auto& device = session.device;
         auto& requests = session.requests;
         auto& events = session.events;
@@ -514,6 +81,11 @@ void completionsAndEventsWaitForTheEnable(bool enableEventsFirst)
         }
         require(device.resets() == resets, "the suspend and resume reset the device");
         require(device.held() == 0);
+        if (sharedMemory) {
+            require(device.mapped() == 2 && device.unmapsCompleted() == 0,
+                    "the suspend and resume unmapped what the device mapped");
+            require(session.backend->count(protocol::VhostSlaveRequest::sharedMemoryUnmap) == 0);
+        }
     });
 }
 
@@ -615,7 +187,7 @@ void kicksAcrossASuspend(bool needReply, bool answersKicksFirst)
 /* The messages that change what a held request refers to, or end the
  * driver, reset the device and drop its held requests and completions;
  * the connection goes on. */
-void stateMessagesRetireHeldRequests()
+void stateMessagesRetireHeldRequests(bool sharedMemory)
 {
     struct Message {
         const char* name;
@@ -678,7 +250,7 @@ void stateMessagesRetireHeldRequests()
          }},
     };
     for (const auto& message : messages) {
-        withSuspendedGuest({true, false}, 2, [&](const HeldSession& session) {
+        withSuspendedGuest({true, false, sharedMemory}, 2, [&](const HeldSession& session) {
             const auto& device = session.device;
             // A completion held for the enable goes with the requests.
             const auto taken = device.taken();
@@ -690,6 +262,10 @@ void stateMessagesRetireHeldRequests()
             const std::string name = message.name;
             require(device.resets() == resets + 1, name + " did not reset the device");
             require(device.held() == 0, name + " left a request held");
+            if (sharedMemory) {
+                require(device.mapped() == 0 && device.unmapsCompleted() == 2,
+                        name + " did not unmap what the device had mapped");
+            }
             (void)getFeatures(session.socket);
         });
     }
@@ -698,9 +274,9 @@ void stateMessagesRetireHeldRequests()
 /* The messages a suspend can race with, or that touch neither the requests
  * nor the rings' layout, leave the device alone, and the held request is
  * still answered at the enable. */
-void otherMessagesLeaveHeldRequestsAlone()
+void otherMessagesLeaveHeldRequestsAlone(bool sharedMemory)
 {
-    withSuspendedGuest({true, false}, 1, [&](const HeldSession& session) {
+    withSuspendedGuest({true, false, sharedMemory}, 1, [&](const HeldSession& session) {
         auto& device = session.device;
         auto& requests = session.requests;
         auto& events = session.events;
@@ -709,6 +285,8 @@ void otherMessagesLeaveHeldRequestsAlone()
         const auto unchanged = [&](const char* name) {
             require(device.resets() == resets, std::string {name} + " reset the device");
             require(device.held() == 1, std::string {name} + " dropped a request");
+            require(device.mapped() == (sharedMemory ? 1U : 0U),
+                    std::string {name} + " unmapped what the device had mapped");
         };
 
         (void)readConfig(socket, 0, 4);
@@ -742,9 +320,9 @@ void otherMessagesLeaveHeldRequestsAlone()
  * features, and gives its rings up. The request is still held through the
  * disables; the features request ends it, and the calls and kicks the driver
  * then withdraws are accepted. */
-void teardownRetiresHeldRequestsAtTheFeaturesRequest()
+void teardownRetiresHeldRequestsAtTheFeaturesRequest(bool sharedMemory)
 {
-    withSuspendedGuest({true, false}, 1, [&](const HeldSession& session) {
+    withSuspendedGuest({true, false, sharedMemory}, 1, [&](const HeldSession& session) {
         auto& device = session.device;
         auto& requests = session.requests;
         auto& events = session.events;
@@ -758,6 +336,12 @@ void teardownRetiresHeldRequestsAtTheFeaturesRequest()
         (void)getFeatures(socket);
         require(device.resets() == resets + 1 && device.held() == 0,
                 "the features request after the disables did not retire the request");
+        require(device.mapped() == 0 && device.unmapsCompleted() == (sharedMemory ? 1U : 0U),
+                "the features request after the disables did not unmap what the device had mapped");
+        if (sharedMemory) {
+            require(!session.regions->contains(0, 0, 1),
+                    "the features request after the disables left the host index a range");
+        }
         for (const std::uint64_t queue : {std::uint64_t {eventQueue}, std::uint64_t {requestQueue}}) {
             const std::uint64_t withdrawn = queue | protocol::vhostVringNoDescriptor;
             sendRequestAndReadAcknowledgement(
@@ -772,9 +356,9 @@ void teardownRetiresHeldRequestsAtTheFeaturesRequest()
 
 /* A reset drops the completion a ring was holding for its enable: nothing is
  * written when the ring is enabled afterwards. */
-void resetDropsAHeldCompletion()
+void resetDropsAHeldCompletion(bool sharedMemory)
 {
-    withSuspendedGuest({true, false}, 1, [&](const HeldSession& session) {
+    withSuspendedGuest({true, false, sharedMemory}, 1, [&](const HeldSession& session) {
         auto& device = session.device;
         auto& requests = session.requests;
         auto& events = session.events;
@@ -816,9 +400,11 @@ void deviceThatDoesNotOptInIsResetAtTheDisable()
         require(recorder->held() == 1);
         const auto resets = recorder->resets();
 
-        requests.enable(socket, false);
+        const auto said = captureStderr([&] { requests.enable(socket, false); });
         require(recorder->resets() == resets + 1, "the disable did not reset a device that holds a request");
         require(recorder->held() == 0);
+        require(said == "Vhost-user: device reset at ring disable: device=holding ring=0 deferred=1\n",
+                "the reset at the disable was not reported as expected: " + said);
 
         requests.postRequest(2);
         requests.writeKickPipe();
@@ -827,28 +413,200 @@ void deviceThatDoesNotOptInIsResetAtTheDisable()
                 "a request on a disabled ring was kept");
         require(recorder->runs(requestQueue) == 1);
 
-        // With nothing held, a disable resets nothing further.
-        events.enable(socket, false);
+        // With nothing held, a disable resets nothing further, and says nothing.
+        const auto quiet = captureStderr([&] { events.enable(socket, false); });
         require(recorder->resets() == resets + 1);
+        require(quiet.empty(), "a disable that reset nothing was reported: " + quiet);
     });
 }
 
-/* A device that keeps deferred requests cannot also have a shared-memory
- * region: the map or unmap a request raises waits for the front end's
- * acknowledgement, and the GET_FEATURES answered meanwhile would reset the
- * device under the request it is running. The server refuses the pair when it
- * is built. Either alone is accepted. */
-void keepingDeviceWithSharedMemoryIsRefused()
+/* A guest that suspends over and over with a request held, to a device that
+ * does not keep it, is told of every one of the first 256 resets, one line
+ * each, and then only of each one whose count doubles: the 512th, and not the
+ * 257th to the 511th or the 513th. */
+void theResetAtADisableIsReportedLessOften()
 {
-    bool refused = false;
-    try {
-        VhostUserServer server {std::make_unique<HoldingDevice>(HoldingDevice::Options {true, false, true})};
-    } catch (const std::invalid_argument&) {
-        refused = true;
+    auto device = std::make_unique<HoldingDevice>(HoldingDevice::Options {false, false});
+    auto* recorder = device.get();
+    VhostUserServer server {std::move(device)};
+    constexpr unsigned suspends = 513;
+    constexpr auto line = "Vhost-user: device reset at ring disable: device=holding ring=0 deferred=1\n";
+    unsigned lines = 0;
+    for (unsigned suspend = 1; suspend <= suspends; ++suspend) {
+        SplitRing ring;
+        TestQueue requests {ring, requestQueue, requestLayout};
+        TestQueue events {ring, eventQueue, eventLayout};
+        withServerConnection(server, [&](int socket) {
+            negotiateProtocolFeatures(socket, negotiated);
+            configureMemory(socket, ring.descriptor());
+            requests.start(socket, true, true);
+            events.start(socket, true, true);
+            requests.postRequest(1);
+            requests.writeKickPipe();
+            awaitCondition([&] { return recorder->held() == 1; });
+            const auto said = captureStderr([&] { requests.enable(socket, false); });
+            const bool reported = suspend <= 256 || (suspend & (suspend - 1U)) == 0;
+            const auto count = countLines(said, line);
+            require(count == (reported ? 1U : 0U) && said.size() == count * std::strlen(line),
+                    "reset " + std::to_string(suspend) + " was reported " +
+                        std::to_string(count) + " times: " + said);
+            lines += count;
+        });
     }
-    require(refused, "a device that keeps deferred requests was given a shared-memory region");
-    VhostUserServer region {std::make_unique<HoldingDevice>(HoldingDevice::Options {false, false, true})};
-    VhostUserServer keeping {std::make_unique<HoldingDevice>(HoldingDevice::Options {true, false, false})};
+    require(lines == 257, "the resets were reported " + std::to_string(lines) + " times, not 257");
+}
+
+/* A teardown's GET_FEATURES that arrives while the server waits for the
+ * acknowledgement of a map the device asked for is not answered inside the
+ * wait: the reset it brings would send the unmaps of the device's ranges while
+ * the map is still owed an answer, and clear the requests under the request
+ * being run. It is answered once the map has been acknowledged and the
+ * request that raised it has been taken, and then resets the device, whose
+ * every range is unmapped. */
+void getFeaturesInsideAMapWaitIsAnsweredAfterIt()
+{
+    withSuspendedGuest({true, false, true}, 1, [&](const HeldSession& session) {
+        auto& device = session.device;
+        auto& requests = session.requests;
+        auto& backend = *session.backend;
+        const int socket = session.socket;
+        constexpr auto map = protocol::VhostSlaveRequest::sharedMemoryMap;
+        constexpr auto unmap = protocol::VhostSlaveRequest::sharedMemoryUnmap;
+        const auto resets = device.resets();
+        require(backend.count(map) == 1);
+
+        /* The guest resumes its request ring, which holds a request that maps
+         * a range, while its event ring is still disabled. */
+        requests.postRequest(2);
+        backend.hold(true);
+        requests.sendEnable(socket, true);
+        awaitCondition([&] { return backend.count(map) == 2; });
+
+        sendRequest(socket, protocol::VhostRequest::getFeatures, {}, {}, false);
+        pollfd answered {.fd = socket, .events = POLLIN};
+        require(::poll(&answered, 1, 100) == 0, "a request was answered inside the backend wait");
+        require(!backend.unreadFrame(), "the device was reset inside the backend wait");
+        require(device.resets() == resets && backend.count(unmap) == 0);
+
+        backend.hold(false);
+        readAcknowledgement(socket, protocol::VhostRequest::setVringEnable);
+        (void)readValueReply<std::uint64_t>(socket, protocol::VhostRequest::getFeatures);
+        require(device.resets() == resets + 1 && device.held() == 0,
+                "the features request did not reset the device once the wait was over");
+        require(device.mapped() == 0 && device.unmapsCompleted() == 2 && backend.count(unmap) == 2,
+                "the reset did not unmap what the device had mapped");
+        (void)readConfig(socket, 0, 1);
+    });
+}
+
+/* A driver's teardown sends its ring disables without asking for a reply and
+ * ends with the GET_FEATURES it waits for, so that reply tells it the disables
+ * have taken effect. When they arrive while the server waits for the
+ * acknowledgement of a map, they are queued behind it, and the GET_FEATURES
+ * stays queued behind them: it is not answered in the wait, and the answer of
+ * the request that raised the map, which the device completes at once, is
+ * written to its ring before that reply, never after the driver may free the
+ * ring. */
+void getFeaturesFollowsDisablesQueuedInAMapWait()
+{
+    auto device = std::make_unique<HoldingDevice>(HoldingDevice::Options {true, false, true, true});
+    auto* recorder = device.get();
+    VhostUserServer server {std::move(device)};
+    SplitRing ring;
+    TestQueue requests {ring, requestQueue, requestLayout};
+    TestQueue events {ring, eventQueue, eventLayout};
+    std::optional<SocketPair> backendChannel;
+    std::optional<BackendAnswerer> answerer;
+
+    withServerConnection(server, [&](int socket) {
+        constexpr auto map = protocol::VhostSlaveRequest::sharedMemoryMap;
+        backendChannel = openBackendChannel(socket, negotiatedSharedMemory);
+        answerer.emplace(backendChannel->descriptors[0].get());
+        configureMemory(socket, ring.descriptor());
+        requests.start(socket, true, true);
+        events.start(socket, true, true);
+        answerer->hold(true);
+        requests.postRequest(1);
+        requests.writeKickPipe();
+        awaitCondition([&] { return answerer->count(map) == 1; });
+        const auto resets = recorder->resets();
+
+        events.sendEnable(socket, false, false);
+        requests.sendEnable(socket, false, false);
+        sendRequest(socket, protocol::VhostRequest::getFeatures, {}, {}, false);
+        pollfd answered {.fd = socket, .events = POLLIN};
+        require(::poll(&answered, 1, 100) == 0,
+                "a GET_FEATURES overtook the ring disables queued before it");
+        require(requests.usedIndex() == 0);
+
+        answerer->hold(false);
+        (void)readValueReply<std::uint64_t>(socket, protocol::VhostRequest::getFeatures);
+        require(requests.usedIndex() == 1 && requests.responseAt(0, 2) == responseTo(1),
+                "the request's answer was not written before the GET_FEATURES reply");
+        require(recorder->resets() == resets, "the queued disables reset a device with nothing held");
+        (void)readConfig(socket, 0, 1);
+        require(requests.usedIndex() == 1, "an answer was written after the GET_FEATURES reply");
+    });
+}
+
+/* A reset whose first unmap the front end refuses fails closed: the server
+ * ends the backend channel, which makes the front end revoke every map, and
+ * the host index drops the range it had not yet asked to unmap along with the
+ * one it had, so no host mapping outlives the guest's. */
+void failedUnmapDropsEveryRangeOfTheBackend()
+{
+    withSuspendedGuest({true, false, true}, 2, [&](const HeldSession& session) {
+        auto& device = session.device;
+        auto& backend = *session.backend;
+        const auto& regions = *session.regions;
+        const int socket = session.socket;
+        constexpr auto unmap = protocol::VhostSlaveRequest::sharedMemoryUnmap;
+        require(regions.contains(0, 0, 1) && regions.contains(0, HoldingDevice::rangeLength, 1),
+                "the device's ranges were not published to the host");
+        const auto resets = device.resets();
+
+        backend.refuseUnmaps(1);
+        (void)getFeatures(socket);
+        require(device.resets() == resets + 1 && device.held() == 0 && device.mapped() == 0,
+                "the features request did not reset the device whose unmap failed");
+        require(backend.count(unmap) == 1, "the reset went on asking after a refused unmap");
+        require(!regions.contains(0, 0, 1) && !regions.contains(0, HoldingDevice::rangeLength, 1),
+                "a range stayed in the host index after the reset");
+        (void)readConfig(socket, 0, 1);
+    });
+}
+
+/* A guest that suspends and never comes back, whose connection ends instead,
+ * leaves a device that keeps its requests reset, with its ranges unmapped, and
+ * nothing written to a ring it did not enable again. */
+void endOfTheConnectionResetsAKeepingDevice(bool sharedMemory)
+{
+    unsigned resetsAtSuspend = 0;
+    withSuspendedGuest(
+        {true, false, sharedMemory},
+        2,
+        [&](const HeldSession& session) {
+            auto& device = session.device;
+            resetsAtSuspend = device.resets();
+            const auto taken = device.taken();
+            device.finish(1);
+            awaitCondition([&] { return device.taken() == taken + 1; });
+            (void)readConfig(session.socket, 0, 1);
+            require(device.resets() == resetsAtSuspend && device.held() == 1,
+                    "the suspend reset the device");
+        },
+        [&](const HeldSession& session) {
+            const auto& device = session.device;
+            require(device.resets() == resetsAtSuspend + 1 && device.held() == 0,
+                    "the end of the connection did not reset the device");
+            require(session.requests.usedIndex() == 0,
+                    "an answer was written to a ring the guest never enabled again");
+            if (sharedMemory) {
+                require(device.mapped() == 0 && device.unmapsCompleted() == 2 &&
+                            session.backend->count(protocol::VhostSlaveRequest::sharedMemoryUnmap) == 2,
+                        "the end of the connection did not unmap what the device had mapped");
+            }
+        });
 }
 
 } // namespace
@@ -857,13 +615,23 @@ void keepingDeviceWithSharedMemoryIsRefused()
 int main(int argc, char** argv)
 {
     struct Case {
-        const char* name;
+        std::string name;
         std::function<void()> run;
     };
     std::vector<Case> cases;
-    for (const bool eventsFirst : {false, true}) {
-        cases.push_back({eventsFirst ? "completions-events-first" : "completions-requests-first",
-                         [=] { completionsAndEventsWaitForTheEnable(eventsFirst); }});
+    /* Each rule holds for a device with a shared-memory region too, whose
+     * resets also unmap what it mapped. */
+    for (const bool sharedMemory : {false, true}) {
+        const std::string suffix = sharedMemory ? "-shared-memory" : "";
+        for (const bool eventsFirst : {false, true}) {
+            cases.push_back({std::string {eventsFirst ? "completions-events-first" : "completions-requests-first"} + suffix,
+                             [=] { completionsAndEventsWaitForTheEnable(eventsFirst, sharedMemory); }});
+        }
+        cases.push_back({"state-messages" + suffix, [=] { stateMessagesRetireHeldRequests(sharedMemory); }});
+        cases.push_back({"other-messages" + suffix, [=] { otherMessagesLeaveHeldRequestsAlone(sharedMemory); }});
+        cases.push_back({"teardown" + suffix, [=] { teardownRetiresHeldRequestsAtTheFeaturesRequest(sharedMemory); }});
+        cases.push_back({"reset-drops-completion" + suffix, [=] { resetDropsAHeldCompletion(sharedMemory); }});
+        cases.push_back({"connection-end" + suffix, [=] { endOfTheConnectionResetsAKeepingDevice(sharedMemory); }});
     }
     cases.push_back({"completion-on-enabled-ring", completionOnAnEnabledRingIsWrittenAtOnce});
     for (const bool needReply : {false, true}) {
@@ -873,12 +641,11 @@ int main(int argc, char** argv)
                              [=] { kicksAcrossASuspend(needReply, answersFirst); }});
         }
     }
-    cases.push_back({"state-messages", stateMessagesRetireHeldRequests});
-    cases.push_back({"other-messages", otherMessagesLeaveHeldRequestsAlone});
-    cases.push_back({"teardown", teardownRetiresHeldRequestsAtTheFeaturesRequest});
-    cases.push_back({"reset-drops-completion", resetDropsAHeldCompletion});
     cases.push_back({"no-opt-in", deviceThatDoesNotOptInIsResetAtTheDisable});
-    cases.push_back({"shared-memory-refused", keepingDeviceWithSharedMemoryIsRefused});
+    cases.push_back({"reset-report-rate", theResetAtADisableIsReportedLessOften});
+    cases.push_back({"features-in-a-map-wait", getFeaturesInsideAMapWaitIsAnsweredAfterIt});
+    cases.push_back({"features-behind-queued-disables", getFeaturesFollowsDisablesQueuedInAMapWait});
+    cases.push_back({"failed-unmap-drops-ranges", failedUnmapDropsEveryRangeOfTheBackend});
     try {
         for (const auto& test : cases) {
             if (argc > 1 && std::string {argv[1]} != test.name)

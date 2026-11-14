@@ -10,8 +10,15 @@ this runner shows it with the apps that use the devices:
 - the gallery (Glimpse, Media3 over c2.v4l2.avc.decoder) plays a clip and
   ``screenrecord`` (the hardware encoder) records the screen while the guest
   suspends, by the route the host's quiesce takes (``suspend`` and ``wake`` on
-  the management console) and by the route Android takes itself with its
-  screen off and adb disconnected, ended by a ``wake``;
+  the management console, the suspend asked again while the guest answers
+  busy, as the host's client does) and by the route Android takes itself with
+  its screen off and adb disconnected, ended by a ``wake``;
+- the launcher's log from before each suspend to the end of the check that
+  follows it (output can arrive after the wake) must show no GPU error: the
+  host's own reset line fails the step as a host GPU reset across the
+  suspend, the known host defect that leaves the guest's graphics gone; the
+  guest kernel's refused commands or the host's refusal of an unknown context
+  without it fail as GPU errors, whose cause is not established;
 - after the wake the picture is moving again, no thread of the guest stays in
   uninterruptible sleep, ``screenrecord`` ends with status 0 and a file, and
   Back closes the player, which returns only if the device handed every
@@ -35,6 +42,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import functools
 import hashlib
 import importlib.util
 import os
@@ -52,6 +60,7 @@ from collections.abc import Callable
 HERE = pathlib.Path(__file__).resolve().parent
 REPOSITORY = HERE.parents[2]
 sys.path.insert(0, str(REPOSITORY / "tests" / "integration" / "support"))
+import gpu_suspend_log  # noqa: E402
 import slot_ports  # noqa: E402
 
 SPEC = importlib.util.spec_from_file_location("boot_android", REPOSITORY / "tools" / "boot_android.py")
@@ -66,6 +75,16 @@ CLIP_SECONDS = 120
 RECORD_SECONDS = 30
 HOLD_SECONDS = 4.0
 RESUME_SECONDS = 90
+# The host's own suspend (darwin/device/mconsole/guest_console.cpp,
+# suspend_guest()): a guest that answers "Suspend failed: -16" because a wake
+# source of its own, an Android alarm due within two seconds, ended the attempt
+# is asked again at this interval, for this long after the first refusal, and
+# the whole suspend has one deadline from the first send.
+SUSPEND_BUSY = "Suspend failed: -16"
+SUSPEND_RETRY_INTERVAL = 0.25
+SUSPEND_RETRY_WINDOW = 2.0
+SUSPEND_RETRY_GUARD = 1.0
+SUSPEND_DEADLINE = 10.0
 MOVING_SECONDS = 60
 CLOSE_SECONDS = 30
 SLEEP_SECONDS = 20
@@ -106,7 +125,8 @@ class Console:
         self.directory = directory
         self.reply = reply_directory / "mc"
 
-    def request(self, command: str, seconds: float = 90) -> str:
+    def exchange(self, command: str, seconds: float) -> tuple[int, str]:
+        """One request on a fresh socket: the reply's error flag and text."""
         endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         try:
             self.reply.unlink(missing_ok=True)
@@ -120,13 +140,37 @@ class Console:
             except socket.timeout:
                 raise Failure(f"mconsole {command}: no reply in {seconds:.0f} s") from None
             error, _, length = struct.unpack_from("<III", answer)
-            text = answer[12:12 + length].decode(errors="replace").rstrip("\0")
-            if error:
-                raise Failure(f"mconsole {command} failed: {text!r}")
-            return text
+            return error, answer[12:12 + length].decode(errors="replace").rstrip("\0")
         finally:
             endpoint.close()
             self.reply.unlink(missing_ok=True)
+
+    def request(self, command: str, seconds: float = 90) -> str:
+        error, text = self.exchange(command, seconds)
+        if error:
+            raise Failure(f"mconsole {command} failed: {text!r}")
+        return text
+
+    def suspend(self) -> str:
+        """The host's suspend as the product sends it: a busy refusal is asked again."""
+        deadline = time.monotonic() + SUSPEND_DEADLINE
+        retry_deadline: float | None = None
+        asks = 0
+        while True:
+            asks += 1
+            error, text = self.exchange("suspend", deadline - time.monotonic())
+            if not error or not text.startswith(SUSPEND_BUSY):
+                break
+            if retry_deadline is None:
+                retry_deadline = time.monotonic() + SUSPEND_RETRY_WINDOW
+            time.sleep(SUSPEND_RETRY_INTERVAL)
+            now = time.monotonic()
+            if now >= retry_deadline or deadline - now <= SUSPEND_RETRY_GUARD:
+                break
+        if error:
+            raise Failure(f"mconsole suspend failed after {asks} ask(s): {text!r}")
+        print(f"host suspend answered by ask {asks}")
+        return text
 
 
 class Guest:
@@ -201,7 +245,7 @@ class Guest:
 
 def suspend_by_host(guest: Guest) -> None:
     """The route the host's quiesce takes."""
-    answer = guest.console.request("suspend")
+    answer = guest.console.suspend()
     if "suspended" not in answer:
         raise Failure(f"host suspend: the guest replied {answer!r}")
     time.sleep(HOLD_SECONDS)
@@ -230,6 +274,58 @@ def suspend_by_guest(guest: Guest) -> None:
 
 
 ROUTES = {"host": suspend_by_host, "guest": suspend_by_guest}
+
+
+def pending_of(guest: Guest) -> "gpu_suspend_log.Pending":
+    """The mark of the guest's last suspend, pending until the check that suspended it settles it."""
+    pending = guest.__dict__.get("pending_suspend")
+    if pending is None:
+        pending = guest.__dict__["pending_suspend"] = gpu_suspend_log.Pending(
+            lambda: gpu_suspend_log.log_size(guest.log), lambda offset: gpu_suspend_log.log_since(guest.log, offset))
+    return pending
+
+
+def suspend(guest: Guest, route: str) -> None:
+    """One suspend by `route`, and the proof that the guest answers after it. The launcher's log is marked before
+    it and the mark stays pending through the checks that follow the wake (`settles` ends it): output can arrive
+    after this returns, when the first graphics work reaches a missing context. A failure of the whole operation,
+    the route and its adb waits included, is replaced by the GPU diagnosis when the log shows one (the guest that
+    does not answer is its symptom) and kept otherwise; so is a mark an earlier suspend left pending."""
+    pending = pending_of(guest)
+    earlier = pending.begin()
+    if earlier is not None:
+        raise Failure(f"before the {route} suspend: {earlier}")
+    try:
+        ROUTES[route](guest)
+        guest.shell("echo guest-answers")
+    except Exception as problem:
+        found = pending.settle()
+        if found is not None:
+            raise Failure(f"after the {route} suspend: {found} (the step had failed with: {problem})") from problem
+        raise
+    found = pending.peek()
+    if found is not None:
+        pending.settle()
+        raise Failure(f"after the {route} suspend: {found}")
+
+
+def settles(check: Callable[..., None]) -> Callable[..., None]:
+    """A check that suspends the guest: when it ends, passed or failed, the pending mark is scanned and ended, and a
+    GPU diagnosis is the failure."""
+    @functools.wraps(check)
+    def settled(guest: Guest, *arguments: object) -> None:
+        try:
+            check(guest, *arguments)
+        except Exception as problem:
+            found = pending_of(guest).settle()
+            if found is not None:
+                raise Failure(f"{found} (the check had failed with: {problem})") from problem
+            raise
+        found = pending_of(guest).settle()
+        if found is not None:
+            raise Failure(found)
+
+    return settled
 
 
 # ---- What the apps do.
@@ -290,11 +386,12 @@ def check_no_thread_in_d(guest: Guest, route: str) -> None:
     wait_for(f"no thread in uninterruptible sleep after the {route} suspend", SLEEP_SECONDS, clear, guest)
 
 
+@settles
 def check_player(guest: Guest, media_id: int, route: str) -> None:
     print(f"player across a {route} suspend")
     opened = len(guest.closes())
     play(guest, media_id)
-    ROUTES[route](guest)
+    suspend(guest, route)
     wait_for("the picture moves after the wake", MOVING_SECONDS,
              lambda: None if guest.moving() else "the picture is still", guest)
     check_no_thread_in_d(guest, route)
@@ -317,6 +414,7 @@ def check_player(guest: Guest, media_id: int, route: str) -> None:
     wait_for(f"the player returns its buffers after the {route} suspend", CLOSE_SECONDS, decoder_closed, guest)
 
 
+@settles
 def check_recording(guest: Guest, route: str) -> None:
     print(f"screenrecord across a {route} suspend")
     opened = len(guest.closes())
@@ -326,7 +424,7 @@ def check_recording(guest: Guest, route: str) -> None:
         guest.shell(f"setsid sh -c 'screenrecord --time-limit {RECORD_SECONDS} {RECORDING} >{RECORDING_STATUS} 2>&1; "
                     f"echo screenrecord-rc=$? >>{RECORDING_STATUS}' >/dev/null 2>&1 &")
         time.sleep(10)
-        ROUTES[route](guest)
+        suspend(guest, route)
 
         def finished() -> str | None:
             status = guest.shell(f"cat {RECORDING_STATUS}")

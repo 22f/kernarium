@@ -61,11 +61,11 @@ final class LocationController {
 /// The words of the Location setting: the row's detail line and the alerts.
 /// They are one place so the text can change without touching the logic.
 enum LocationWords {
-    static let title = "Location"
-    static let denied = "Not allowed in Settings"
-    static let restricted = "Restricted on this device"
-    static let servicesOff = "Location Services are off"
-    static let approximate = "Approximate"
+    static let title = String(localized: "Location")
+    static let denied = String(localized: "Not allowed in Settings")
+    static let restricted = String(localized: "Restricted on this device")
+    static let servicesOff = String(localized: "Location Services are off")
+    static let approximate = String(localized: "Approximate location")
 
     /// The line under Location: why it cannot be used, or that it is
     /// approximate while it is on; none otherwise.
@@ -83,13 +83,13 @@ enum LocationWords {
     static func hint(for access: LocationAuthorization, shownOn: Bool) -> String {
         switch access {
         case .denied:
-            "Andarium is not allowed to use the location. Turning this on offers to open Settings."
+            String(localized: "Andarium is not allowed to use the location. Turning this on offers to open Settings.")
         case .servicesOff:
-            "Location Services are off on this device. Turning this on explains how to turn them on."
+            String(localized: "Location Services are off on this device. Turning this on explains how to turn them on.")
         case .restricted:
-            "The location is restricted on this device. Turning this on explains why."
+            String(localized: "The location is restricted on this device. Turning this on explains why.")
         case .approximate where shownOn:
-            "iOS gives only an approximate location. Activate the line under the title to see why."
+            String(localized: "iOS gives only an approximate location. Activate the line under the title to see why.")
         case .approximate, .precise, .notDetermined:
             ""
         }
@@ -109,23 +109,23 @@ enum LocationWords {
         switch access {
         case .denied:
             Alert(
-                title: "Allow location access",
-                message: "iOS is not allowing Andarium to use this device\u{2019}s location. Turn on Location for Andarium in Settings, then come back to use it.",
+                title: String(localized: "Allow location access"),
+                message: String(localized: "iOS is not allowing Andarium to use this device\u{2019}s location. Turn on Location for Andarium in Settings, then come back to use it."),
                 offersSettings: true)
         case .servicesOff:
             Alert(
-                title: "Location Services are off",
-                message: "Location Services are turned off on this device. Turn them on in Settings, under Privacy & Security, then come back to use Location.",
+                title: String(localized: "Location Services are off"),
+                message: String(localized: "Location Services are turned off on this device. Turn them on in Settings, under Privacy & Security, then come back to use Location."),
                 offersSettings: true)
         case .restricted:
             Alert(
-                title: "Location is restricted",
-                message: "This device\u{2019}s settings, such as Screen Time or a profile, do not let apps use the location, so Andarium cannot share it.",
+                title: String(localized: "Location is restricted"),
+                message: String(localized: "This device\u{2019}s settings, such as Screen Time or a profile, do not let apps use the location, so Andarium cannot share it."),
                 offersSettings: false)
         case .approximate:
             Alert(
-                title: "Approximate location",
-                message: "iOS is giving Andarium only the area you are in, because Precise Location is off for it. Apps in the guest see a wide area. To share the exact position, turn on Precise Location for Andarium in Settings.",
+                title: String(localized: "Approximate location"),
+                message: String(localized: "iOS is giving Andarium only the area you are in, because Precise Location is off for it. Apps in the virtual machine see a wide area. To share the exact position, turn on Precise Location for Andarium in Settings."),
                 offersSettings: true)
         case .precise, .notDetermined:
             nil

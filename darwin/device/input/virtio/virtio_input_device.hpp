@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 
 namespace uml::input::virtio {
@@ -108,6 +109,19 @@ public:
     /* Whether the guest has told the host its input device exists. A fixed
      * device is always registered. */
     [[nodiscard]] bool registered() const noexcept;
+    /* A switch (EV_SW) the device has, and its state: advertised in the
+     * device's configuration, and queued as a report of its own before
+     * anything else and again after every reset, so the guest's input core
+     * holds the state from the moment it creates the device and a reader that
+     * asks later (EVIOCGSW) finds it. The state is for the guest's whole run:
+     * a fixed device holds one switch, set before the guest probes, and a
+     * second call replaces the first. */
+    struct Switch final {
+        std::uint16_t code {};
+        bool on {};
+    };
+    void setSwitch(Switch state) noexcept;
+    [[nodiscard]] std::optional<Switch> switchState() const noexcept;
     /* Plugs or unplugs a pluggable device and raises a configuration change;
      * nothing happens, and false is returned, when it is in that state
      * already or is fixed. Unplugging drops what waits for a registration. */
@@ -138,7 +152,7 @@ public:
     [[nodiscard]] bool claimConfigChange() noexcept;
     void clearConfigChange() noexcept;
     /* The guest reset the device: it has no events queued, has registered
-     * nothing and has not probed. */
+     * nothing and has not probed. A switch the host stated is queued again. */
     void reset() noexcept;
     void clear() noexcept;
 
@@ -149,6 +163,7 @@ private:
      * starts again from the events still queued for the new one. */
     void forgetGuestLocked() noexcept;
     void queueLocked(std::span<const protocol::InputEvent> events) noexcept;
+    void queueSwitchLocked() noexcept;
     [[nodiscard]] bool holdLocked(
         std::span<const protocol::InputEvent> events) noexcept;
     bool setConnectedLocked(bool connected) noexcept;
@@ -170,6 +185,7 @@ private:
     bool probed_;
     bool registered_;
     bool heldLost_ {};
+    std::optional<Switch> switch_;
     std::uint64_t configGeneration_ {};
     std::uint64_t configClaimed_ {};
     std::uint64_t configDelivered_ {};

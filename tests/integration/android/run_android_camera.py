@@ -15,17 +15,40 @@ The runner checks, in this order:
 - the cameras Android lists (``dumpsys media.camera``) are the profile's: "0" the back zoom camera (the
   primary back lens of a host without one, the front camera of a host without a back camera), "1" the
   front camera, and "2", "3" and "4" the wide, ultra wide and telephoto lenses a phone has;
+- the provider's life (live and blocked): it is a lazy service that init starts with cameraserver, so it
+  exits once cameraserver has listed the cameras and holds none, an open of the camera starts it again
+  through its interface, and it exits again when the application is stopped, with the cameras still listed
+  (``ps -A`` is all a user build offers; a restart of cameraserver itself needs root, so that path is
+  the init action the target-files verifier requires, not something this runner exercises);
 - live: the camera application previews the synthetic chart (a screenshot is not black), and the camera
-  key takes one still, a complete JPEG with Exif data inside the layout's size cap;
-- blocked: the same cameras are listed, the preview is not the chart on two samples, and the camera key
-  takes nothing;
+  key takes one still, a complete JPEG with Exif data inside the layout's size cap; then, on the same
+  boot, it records about four seconds of video with the back camera (a movie file of at least a second
+  with a video track), previews and takes a still with the front camera when the profile has one, switches
+  the application from photo to video mode (``--switch-rounds`` times, each from a freshly started
+  application whose capture is running; a round passes only when the photo activity's pause, the video
+  activity's resume and capture after them were seen, and the camera service logged no "Unable to submit
+  capture request" and the camera HAL's domain no denial of the composer's file descriptors in the whole
+  interval), and the camera HAL has logged no failed buffer ("every buffer of the stream is in flight", a
+  request "not queued completely", a buffer "never collected");
+- recordings keep their sound to real time: the audio track of a recording holds as much audio as its time
+  line spans (its stretch, the time line over the coded audio, stays within a bound either way), because a
+  player that follows the audio clock skips ahead at every gap in a track that holds less. The check runs on the
+  recording above and on a recording during which the thread that serves the Virtio sound device is held for
+  1.5 s three times while the guest runs (``--audio-hold-library``: the video goes on and the audio input has
+  nothing to read), with the audio capture seen to run first; the audio table has no jump of a stall's length,
+  the audio ends with the video, and the HAL says it made silence up. A third recording stops the whole
+  emulator process three times for 1.5 s (the guest stands still, and the video has the same gap): the two
+  tracks have gaps of about the same length and the audio does not end after the video (no burst);
+- blocked: the same cameras are listed, the preview is not the chart on two samples, each taken only while
+  the camera application is the resumed activity and the device is awake (the application is brought back
+  once; a second absence fails the step), and the camera key takes nothing;
 - none: no camera feature and no camera at all.
 
 Every wait has a deadline. The guest's launcher is stopped through its own process on any exit, and the
 guest is reached through the shared adb server, always named with ``-s``.
 
 The runner is opt-in: it needs the macos-android17 executable, an installed release and an adb client.
-usage: run_android_camera.py --emulator uml-darwin-android17 [--release DIR] [--layout NAME]
+usage: run_android_camera.py --emulator uml-darwin-android17 [--release DIR] [--layout NAME|auto]
        [--camera-profile phone|tablet|laptop] [--mode live|blocked|none]
 """
 
@@ -40,6 +63,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -72,6 +96,12 @@ CAMERA_PACKAGE = "org.lineageos.aperture"
 CAMERA_PERMISSIONS = ("android.permission.CAMERA", "android.permission.RECORD_AUDIO")
 CAMERA_KEYCODE = 27  # KEYCODE_CAMERA: the camera application's default shutter key
 STILL_DIRECTORY = "/sdcard/DCIM/Camera"
+# The lazy provider's process, as `ps -A` names it (its binary: android.hardware.camera.provider@2.7-service-google-lazy),
+# and how long it may run after the last camera is closed: the service manager tells a lazy service that it
+# has no clients on a timer of seconds.
+PROVIDER_PROCESS = "android.hardware.camera.provider"
+PROVIDER_START_SECONDS = 60
+PROVIDER_EXIT_SECONDS = 240
 COMMAND_SECONDS = 120
 PREVIEW_SECONDS = 90
 STILL_SECONDS = 60
@@ -95,7 +125,101 @@ STILL_MINIMUM_SIDE = 480
 # (a camera that opened after all) is seen.
 BLOCKED_SAMPLES = 2
 BLOCKED_SAMPLE_GAP_SECONDS = 10
+# A blocked sample counts only while the camera application is in front; this long after it was brought back.
+BRING_BACK_SETTLE_SECONDS = 8
+# What is on the screen: the resumed activity, the focused window and the display's power state.
+FOREGROUND_COMMAND = ("dumpsys activity activities | grep -a -E 'ResumedActivity'; "
+                      "dumpsys window | grep -a -E 'mCurrentFocus|mFocusedApp'; "
+                      "dumpsys power | grep -a -E 'mWakefulness='")
+# The camera application's own events at a failure: its crashes, ANRs, process deaths and the windows
+# (dialogs) that came in front of it.
+APP_EVENTS_PATTERN = (f"{CAMERA_PACKAGE}|FATAL EXCEPTION|ANR in|am_crash|am_anr|am_proc_died|am_kill|"
+                      "ActivityTaskManager|WindowManager: (Resumed|Destroying|Changing focus)")
+APP_EVENTS_LINES = 80
+# The application's own log lines (its errors, what it logged before it left) come by process id: they do not name the package.
+APP_OWN_LOG_LINES = 80
 CONCURRENT_FEATURE = "android.hardware.camera.concurrent"
+# The camera application's intents: its video mode, and the extra that picks the front camera.
+VIDEO_ACTION = "android.media.action.VIDEO_CAMERA"
+FRONT_EXTRA = "android.intent.extra.USE_FRONT_CAMERA"
+# Video: how long the shutter key's recording runs, how long the file may take to appear, the movie
+# duration it must have (the recording is shorter than the hold by the application's start-up), and the
+# average frame rate of its video track (the preview and the recording share one camera exposure: a rate
+# near half of the camera's means they took an exposure each).
+VIDEO_HOLD_SECONDS = 5
+VIDEO_SECONDS = 90
+VIDEO_MINIMUM_SECONDS = 1.0
+VIDEO_MAXIMUM_SECONDS = 15.0
+VIDEO_MINIMUM_FPS = 20.0
+VIDEO_URI = "content://media/external/video/media"
+# The audio of a recording: the AAC-LC encoder takes this many samples a frame, so the audio a track holds is its
+# sample count times this, and its time line the total duration of its samples. The time line over the coded audio
+# is the track's stretch: 1.0 for a track that holds what its time stamps span. A recorder stamps each buffer it reads
+# with the time of the read, so a gap of stamps with no audio behind it (an input that makes up too few frames for a
+# stall) stretches the time line, and a player that follows the audio clock skips ahead at every such gap and plays
+# the clip too fast. A good recording stays within a percent of 1.0; the bounds leave room for the encoder's rounding
+# and are the same either way (a time line shorter than the audio it holds is as wrong as a longer one).
+AAC_FRAME_SAMPLES = 1024
+AUDIO_STRETCH_MINIMUM = 0.95
+AUDIO_STRETCH_MAXIMUM = 1.05
+# A jump in the audio's sample table (the longest time between two audio samples) of about a stall's length is what an
+# input that does not make a stalled time up leaves; the encoder's own steps are a few hundredths of a second, and
+# half a second is a third of a stall.
+AUDIO_JUMP_MAXIMUM_SECONDS = 0.5
+# Where the tracks end: a recording's audio ends with its video (a control's differ by a few hundredths of a second).
+# Frames that were made up for a stall and arrive in a burst are stamped at its end and laid after it, so the audio
+# then ends as many seconds after the video as the stall lasted.
+AUDIO_END_SKEW_MAXIMUM_SECONDS = 0.25
+# The recordings with a disturbance. Each runs DISTURB_HOLD_SECONDS from the start key to the stop key. The audio
+# capture is seen to run first (the audio flinger's record thread is out of standby, has an active client and reads
+# more frames between two looks); one second later, and then at DISTURB_GAP_SECONDS after each end, DISTURB_COUNT
+# disturbances follow. A stall holds the thread that serves the Virtio sound device for STALL_SECONDS while the guest
+# runs, as a busy host does to the worker the device's capture timeline runs on: the video goes on and the audio
+# input has nothing to read. A freeze stops the whole emulator process for FREEZE_SECONDS: the guest stands still and
+# the video has the same gap. The runner cannot tell where in the input's read cycle a disturbance lands (in a read
+# or between two); the model of the input covers the phases, and the step reports when each disturbance began.
+STALL_SECONDS = 1.5
+FREEZE_SECONDS = 1.5
+DISTURB_COUNT = 3
+DISTURB_LEAD_SECONDS = 1.0
+DISTURB_GAP_SECONDS = 1.5
+DISTURB_HOLD_SECONDS = 14
+DISTURB_MAXIMUM_SECONDS = 25.0
+AUDIO_CAPTURE_SECONDS = 30
+AUDIO_HOLD_WAIT_SECONDS = 15
+# The library must have held the thread for most of the time asked, and the HAL must say it made silence up for at
+# least half of the time that the stalls took (the host's capture credit leaves a little real audio at each thaw).
+AUDIO_HOLD_MINIMUM_FRACTION = 0.9
+MADE_UP_MINIMUM_FRACTION = 0.5
+# A stall must leave the video alone (a stalled guest would excuse the audio's gap), a freeze must show in the video
+# as a gap, and the audio's gaps must be about as long as the video's.
+VIDEO_GAP_MAXIMUM_SECONDS = 0.5
+FREEZE_GAP_MINIMUM_SECONDS = 1.0
+GAP_AGREEMENT_MAXIMUM_SECONDS = 0.35
+# The input's own log lines (the Stream's tag in the audio HAL).
+HAL_STREAM_TAG = "AHAL_StreamAlsaMonoPipe"
+# The camera HAL's own tags: a failed buffer is an error or a warning of one of these.
+HAL_TAGS = ("V4l2Stream", "V4l2FrameSource", "EmulatedSensorHost")
+# The photo to video switch: the application's video activity covers its photo activity while that activity's
+# preview still repeats, and the last preview buffers come back with the display composer's fence. The camera
+# service hands such a fence to the HAL with the next request, which the policy must let the HAL use (overlay/
+# sepolicy/vendor/hal_camera_default.te). A refusal shows as an SELinux denial of the camera HAL's domain using
+# the composer's file descriptor and as the camera service's "Unable to submit capture request" for the request
+# it could not submit; the application then gets ERROR_CAMERA_DEVICE and reopens the camera, which costs the
+# switch about a second more. It happens in some switches only (in six rounds each, from a freshly started
+# application, 2 were refused with the window animations on and 4 with them off, which does not tell the two
+# apart), so the step repeats the switch, each time from a freshly started application and with the animations
+# off (restored afterwards). A round counts only when the switch was seen: the photo activity's pause and the
+# video activity's resume, with capture running before and after.
+CAMERA_HAL_DOMAIN = "hal_camera_default"
+COMPOSER_HAL_DOMAIN = "hal_graphics_composer_default"
+SWITCH_ROUNDS = 4
+SWITCH_HOLD_SECONDS = 10
+SWITCH_SETTLE_SECONDS = 8
+SWITCH_OBSERVE_SECONDS = 30
+SWITCH_DRAIN_SECONDS = 5
+SWITCH_MARKER_TAG = "CamSwitch"
+ANIMATION_SCALES = ("window_animation_scale", "transition_animation_scale", "animator_duration_scale")
 
 # The cameras each synthetic profile presents, and the camera IDs Android gives them
 # (android/lineage-24/overlay/camera/hal/camera_ids.hpp).
@@ -104,13 +228,16 @@ PROFILE_CAMERAS = {
     "tablet": ("back+front", ("0", "1")),
     "laptop": ("front", ("0",)),
 }
-# The layout each synthetic profile earns (darwin/platform/synthetic_camera): the phone's back lenses
-# have flash, manual control and RAW, its zoom and front cameras stream together, and its front
-# camera records 2160p; the tablet's back camera has flash, manual control and RAW, and its front
-# camera cannot make the guaranteed concurrent stream sizes; the laptop has one front camera.
+# The layout each synthetic profile earns on a host that has not learnt its lenses' colour data: the phone's
+# back lenses have flash and manual control, its zoom and front cameras stream together, and its front camera
+# records 2160p; the tablet's back camera has flash and manual control, and its front camera cannot make the
+# guaranteed concurrent stream sizes; the laptop has one front camera (darwin/platform/synthetic_camera). The
+# host offers RAW only for a lens whose colour data an earlier still has kept (darwin/device/camera/README.md,
+# Calibration), so a fresh host composes these layouts and the same host after a still the -raw ones, which
+# --layout states for a host that has a calibration directory.
 DEFAULT_LAYOUTS = {
-    "phone": "bf-large-flash-manual-raw-concurrent-front2160",
-    "tablet": "bf-small-flash-manual-raw",
+    "phone": "bf-large-flash-manual-concurrent-front2160",
+    "tablet": "bf-small-flash-manual",
     "laptop": "front",
 }
 MODES = ("live", "blocked", "none")
@@ -130,13 +257,14 @@ class Plan:
     camera_ids: tuple[str, ...]
     features: frozenset[str]
     media_variant: str
+    switch_rounds: int = SWITCH_ROUNDS
 
     @property
     def still_maximum_pixels(self) -> int:
         return STILL_MAXIMUM_PIXELS[self.layout.tier or "small"]
 
 
-def make_plan(layout_name: str, profile: str, mode: str) -> Plan:
+def make_plan(layout_name: str, profile: str, mode: str, switch_rounds: int = SWITCH_ROUNDS) -> Plan:
     """The expectations of one run; a layout that does not describe the profile's cameras is refused,
     because the features would then promise cameras the guest lacks."""
     layouts = camera_layouts.by_name()
@@ -146,17 +274,19 @@ def make_plan(layout_name: str, profile: str, mode: str) -> Plan:
         raise ValueError(f"{profile!r} is not a synthetic camera profile")
     if mode not in MODES:
         raise ValueError(f"{mode!r} is not a mode")
+    if switch_rounds < 1:
+        raise ValueError("a run makes at least one photo to video switch")
     layout = layouts[layout_name]
     if mode == "none":
         if layout.cameras != "none":
             raise ValueError("the layout of a guest without a camera device is none")
-        return Plan(layout, profile, mode, (), frozenset(), layout.media_variant)
+        return Plan(layout, profile, mode, (), frozenset(), layout.media_variant, switch_rounds)
     cameras, ids = PROFILE_CAMERAS[profile]
     if layout.cameras != cameras:
         raise ValueError(
             f"the {profile} profile presents {cameras} cameras and the layout {layout_name} describes "
             f"{layout.cameras}")
-    return Plan(layout, profile, mode, ids, frozenset(layout.features), layout.media_variant)
+    return Plan(layout, profile, mode, ids, frozenset(layout.features), layout.media_variant, switch_rounds)
 
 
 # ---- Readers of what the guest prints. The tooling test feeds them text in the same layout.
@@ -188,6 +318,289 @@ def active_client_packages(text: str) -> set[str]:
                 packages.add(match[1])
         break
     return packages
+
+
+def active_client_camera_ids(text: str, package: str) -> set[str]:
+    """`dumpsys media.camera`: the IDs of the cameras the package holds, from its lines of the Active
+    Camera Clients block (`(Camera ID: 1, Cost: 100, PID: .., Client Package Name: .., ..)`)."""
+    return set(re.findall(rf"Camera ID: (\w+),[^\n]*?Client Package Name: {re.escape(package)}\b", text))
+
+
+def parse_content_rows(text: str) -> list[dict[str, str]]:
+    """`content query`: one dict per `Row: N key=value, key=value` line. A value runs to the next `, key=`."""
+    rows = []
+    for line in text.splitlines():
+        if not (head := re.match(r"Row: \d+ (.*)", line.strip())):
+            continue
+        rows.append({match[1]: match[2] for match in re.finditer(r"(\w+)=(.*?)(?=, \w+=|$)", head[1])})
+    return rows
+
+
+@dataclass
+class Movie:
+    seconds: float
+    video: bool
+    audio: bool
+    frames: int = 0
+    video_seconds: float = 0.0
+    audio_samples: int = 0       # the audio track's samples (AAC frames)
+    audio_seconds: float = 0.0   # its time line: the total duration of those samples
+    audio_rate: int = 0          # its sample rate, from its sample entry (the time scale when there is none)
+    video_end: float = 0.0       # where each track ends on the movie's time line (edit list applied)
+    audio_end: float = 0.0
+    video_gap: float = 0.0       # the longest time between two samples of each track
+    audio_gap: float = 0.0
+
+    @property
+    def fps(self) -> float:
+        """The average frame rate of the video track: its frames over its duration, 0 without a sample table."""
+        return self.frames / self.video_seconds if self.video_seconds > 0 else 0.0
+
+    @property
+    def audio_coded_seconds(self) -> float:
+        """The audio the track holds: its AAC frames at AAC_FRAME_SAMPLES samples each, 0 without a sample table."""
+        return self.audio_samples * AAC_FRAME_SAMPLES / self.audio_rate if self.audio_rate > 0 else 0.0
+
+    @property
+    def audio_stretch(self) -> float:
+        """The audio track's time line over the audio it holds: 1.0 for a track whose time stamps span what it
+        holds, more when stamped time has no audio behind it; 0 without a sample table."""
+        coded = self.audio_coded_seconds
+        return self.audio_seconds / coded if coded > 0 else 0.0
+
+    @property
+    def audio_skew(self) -> float:
+        """Where the audio ends minus where the video ends, in seconds: 0 for a recording whose tracks end together,
+        positive when the audio runs on past the video (made-up frames laid after a gap of stamps)."""
+        return self.audio_end - self.video_end
+
+
+def mp4_boxes(data: bytes, start: int, end: int):
+    """The boxes of an MP4 between two offsets: (type, payload start, box end)."""
+    position = start
+    while position + 8 <= end:
+        size, kind = struct.unpack_from(">I4s", data, position)
+        header = 8
+        if size == 1:
+            size, header = struct.unpack_from(">Q", data, position + 8)[0], 16
+        elif size == 0:
+            size = end - position
+        if size < header or position + size > end:
+            raise ValueError(f"a box of {size} bytes at {position} does not fit")
+        yield kind, position + header, position + size
+        position += size
+
+
+def audio_sample_rate(data: bytes, start: int, end: int) -> int:
+    """The sample rate that the first sample entry of an `stsd` box (`start` to `end`) states for its audio: the
+    16.16 field at the end of an audio sample entry's fixed part; 0 when the box has no such entry."""
+    entry = start + 8  # the box's version and flags, and its entry count
+    if entry + 8 > end:
+        return 0
+    size = struct.unpack_from(">I", data, entry)[0]
+    if size < 36 or entry + size > end:
+        return 0
+    return struct.unpack_from(">I", data, entry + 32)[0] >> 16
+
+
+@dataclass(frozen=True)
+class Track:
+    samples: int = 0
+    seconds: float = 0.0   # the total duration of its samples
+    rate: int = 0          # an audio track's sample rate: its sample entry's, else its time scale
+    gap: float = 0.0       # the longest duration of one sample: the longest step of the sample times
+    end: float = 0.0       # where its last sample ends on the movie's time line
+
+
+def edit_offsets(data: bytes, trak: dict, movie_scale: int, media_scale: int) -> tuple[float, float]:
+    """(start, skip) of a track from its edit list: the movie time at which its first sample plays (the empty edits
+    before it) and the media time its first edit skips; (0, 0) without an edit list."""
+    start = skip = 0.0
+    edts = trak.get(b"edts")
+    if edts is None:
+        return start, skip
+    boxes = {k: (p, s) for k, p, s in mp4_boxes(data, *edts)}
+    if b"elst" not in boxes:
+        return start, skip
+    position = boxes[b"elst"][0]
+    version = data[position]
+    entries = struct.unpack_from(">I", data, position + 4)[0]
+    position += 8
+    seen = False
+    for _ in range(entries):
+        if version == 1:
+            segment, media_time = struct.unpack_from(">Qq", data, position)
+            position += 20
+        else:
+            segment, media_time = struct.unpack_from(">Ii", data, position)
+            position += 12
+        if media_time == -1:
+            start += segment / movie_scale if movie_scale else 0.0
+        elif not seen:
+            skip, seen = media_time / media_scale, True
+    return start, skip
+
+
+def track_samples(data: bytes, start: int, end: int, handler_type: bytes, movie_scale: int = 0) -> Track:
+    """The first track of a `moov` box whose handler is `handler_type` (`vide` or `soun`): the sample count and the
+    total sample duration of its `stts`, in the time scale of its `mdhd`, the longest single sample duration, where
+    the last sample ends on the movie's time line (its edit list applied) and the sample rate of an audio track's
+    sample entry (its time scale when there is no entry); an empty Track when it has no sample table."""
+    for kind, payload, stop in mp4_boxes(data, start, end):
+        if kind != b"trak":
+            continue
+        trak = {k: (p, s) for k, p, s in mp4_boxes(data, payload, stop)}
+        mdia = trak.get(b"mdia")
+        if mdia is None:
+            continue
+        parts = {k: (p, s) for k, p, s in mp4_boxes(data, *mdia)}
+        handler, header = parts.get(b"hdlr"), parts.get(b"mdhd")
+        if handler is None or header is None or data[handler[0] + 8:handler[0] + 12] != handler_type:
+            continue
+        scale = struct.unpack_from(">I", data, header[0] + (20 if data[header[0]] == 1 else 12))[0]
+        minf = {k: (p, s) for k, p, s in mp4_boxes(data, *parts[b"minf"])} if b"minf" in parts else {}
+        stbl = {k: (p, s) for k, p, s in mp4_boxes(data, *minf[b"stbl"])} if b"stbl" in minf else {}
+        if scale == 0 or b"stts" not in stbl:
+            return Track()
+        table, table_end = stbl[b"stts"]
+        entries = struct.unpack_from(">I", data, table + 4)[0]
+        if table + 8 + 8 * entries > table_end:
+            raise ValueError("an stts table that does not fit its box")
+        samples = [struct.unpack_from(">II", data, table + 8 + 8 * index) for index in range(entries)]
+        rate = audio_sample_rate(data, *stbl[b"stsd"]) if handler_type == b"soun" and b"stsd" in stbl else 0
+        total = sum(count * delta for count, delta in samples) / scale
+        offset, skip = edit_offsets(data, trak, movie_scale, scale)
+        return Track(sum(count for count, _ in samples), total, rate or scale,
+                     max((delta for _, delta in samples), default=0) / scale, offset + total - skip)
+    return Track()
+
+
+def parse_mp4(data: bytes) -> Movie:
+    """The duration and the track kinds of an MP4 file: its `ftyp`, and in `moov` the `mvhd`, the handlers and the
+    sample tables of the video and the audio track."""
+    boxes = {kind: (payload, end) for kind, payload, end in mp4_boxes(data, 0, len(data))}
+    if b"ftyp" not in boxes or b"moov" not in boxes:
+        raise ValueError("no ftyp and moov: not a finished movie")
+    start, end = boxes[b"moov"]
+    inner = {kind: (payload, stop) for kind, payload, stop in mp4_boxes(data, start, end)}
+    if b"mvhd" not in inner:
+        raise ValueError("no mvhd")
+    payload, _ = inner[b"mvhd"]
+    if data[payload] == 1:
+        scale, duration = struct.unpack_from(">IQ", data, payload + 20)
+    else:
+        scale, duration = struct.unpack_from(">II", data, payload + 12)
+    if scale == 0:
+        raise ValueError("a time scale of zero")
+    moov = data[start:end]
+    video = track_samples(data, start, end, b"vide", scale)
+    audio = track_samples(data, start, end, b"soun", scale)
+    return Movie(duration / scale, b"vide" in moov, b"soun" in moov, video.samples, video.seconds,
+                 audio.samples, audio.seconds, audio.rate, video.end, audio.end, video.gap, audio.gap)
+
+
+def active_capture_frames(text: str) -> int | None:
+    """The `Frames read` of the audio flinger's record thread that is capturing in a `dumpsys media.audio_flinger`:
+    an input thread of type RECORD that is out of standby with an active client. None when no record thread is.
+    The history of removed threads (lines that start with a dash) is not a thread."""
+    capturing: int | None = None
+    section: list[str] | None = None
+    sections: list[list[str]] = []
+    for line in text.splitlines():
+        if re.match(r"Input thread .*\(RECORD\):\s*$", line):
+            section = []
+            sections.append(section)
+        elif section is not None and line[:1] not in (" ", "\t", ""):
+            section = None
+        elif section is not None:
+            section.append(line)
+    for lines in sections:
+        body = "\n".join(lines)
+        active = re.search(r"(\d+) Tracks? of which (\d+) are active", body)
+        frames = re.search(r"Frames read: (\d+)", body)
+        if re.search(r"^\s*Standby: no\s*$", body, re.M) and active and int(active.group(2)) > 0 and frames:
+            capturing = max(capturing or 0, int(frames.group(1)))
+    return capturing
+
+
+def made_up_frames(text: str) -> list[int]:
+    """The frames of silence that the input made up in each stall its log says ended: `readInput: the device
+    delivers again, after N frames of silence made up`."""
+    return [int(count) for count in re.findall(r"the device delivers again, after (\d+) frames of silence made up", text)]
+
+
+def hal_failures(text: str) -> list[str]:
+    """`logcat -d` lines of the camera HAL's tags that say a buffer failed: an error of any of them, a request
+    that was not queued completely, a buffer that never arrived or was never collected."""
+    failures = []
+    for line in text.splitlines():
+        if not (match := re.search(r"\s([EW])\s+(\w+)\s*: (.*)$", line)):
+            continue
+        level, tag, message = match.groups()
+        if tag not in HAL_TAGS:
+            continue
+        if level == "E" or any(part in message for part in (
+                "was not queued completely", "did not deliver", "never collected")):
+            failures.append(line.strip())
+    return failures
+
+
+SWITCH_DENIAL_KIND = f"an SELinux denial naming {CAMERA_HAL_DOMAIN}"
+SWITCH_REFUSAL_KIND = 'the camera service\'s "Unable to submit capture request"'
+# The events of the switch: the photo activity pauses and the video activity resumes (ActivityTaskManager's
+# wm_on_paused_called and wm_on_resume_called, in the events buffer `logcat -b all` merges).
+PHOTO_PAUSED = re.compile(rf"wm_on_paused_called: \[\d+,{re.escape(CAMERA_PACKAGE)}\.CameraActivity,")
+VIDEO_RESUMED = re.compile(rf"wm_on_resume_called: \[\d+,{re.escape(CAMERA_PACKAGE)}\.VideoCamera,")
+
+
+def composer_fence_denial(line: str) -> bool:
+    """Whether a log line is the SELinux denial of the camera HAL using a file descriptor of the display composer
+    HAL: source hal_camera_default, target hal_graphics_composer_default, class fd, permission use."""
+    denied = re.search(r"avc:\s+denied\s+\{([^}]*)\}", line)
+    if not denied or "use" not in denied[1].split():
+        return False
+    fields = dict(re.findall(r"\b(scontext|tcontext|tclass)=(\S+)", line))
+    return (fields.get("tclass") == "fd"
+            and fields.get("scontext", "").split(":")[:3] == ["u", "r", CAMERA_HAL_DOMAIN]
+            and fields.get("tcontext", "").split(":")[:3] == ["u", "r", COMPOSER_HAL_DOMAIN])
+
+
+def switch_failures(text: str) -> list[tuple[str, str]]:
+    """The lines of a `logcat -d` taken across photo to video switches that show a capture request refused, as
+    (what, line): the denial of composer_fence_denial, and the camera service's (cameraserver logs under the tag
+    Camera3-Device) "Unable to submit capture request", which is what the refused binder transaction becomes.
+    Nothing else counts: the service logs "Broken pipe (-32)" for the buffers of every stream whose application
+    is stopped, and other denials are not this one."""
+    found: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if composer_fence_denial(line):
+            found.append((SWITCH_DENIAL_KIND, line))
+        elif re.search(r"\s[EWF]\s+Camera3-Device\s*: .*Unable to submit capture request", line):
+            found.append((SWITCH_REFUSAL_KIND, line))
+    return found
+
+
+def switch_observed(text: str) -> list[str]:
+    """What a `logcat -d` taken after a switch's marker lacks of the switch: the photo activity's pause and the
+    video activity's resume."""
+    missing = []
+    if not PHOTO_PAUSED.search(text):
+        missing.append(f"pause of {CAMERA_PACKAGE}.CameraActivity")
+    if not VIDEO_RESUMED.search(text):
+        missing.append(f"resume of {CAMERA_PACKAGE}.VideoCamera")
+    return missing
+
+
+def log_after(text: str, marker: str) -> str | None:
+    """The part of a `logcat -d` from the last line that holds `marker`, or None when no line holds it."""
+    index = text.rfind(marker)
+    return None if index < 0 else text[index:]
+
+
+def frames_produced(dump: str) -> int:
+    """`dumpsys media.camera`: the frames the camera service counts for all the streams it lists."""
+    return sum(int(count) for count in re.findall(r"Frames produced: (\d+)", dump))
 
 
 def camera_connected(text: str, package: str) -> bool:
@@ -222,6 +635,9 @@ class StaticInfo:
 # as `name (tag): type[count]` and the values on the lines under it in brackets (enum values by name).
 # The entries follow the order the HAL's metadata was built in, not the tag order, so only the header
 # starts the next camera; the next `== ` header of another kind ends the camera.
+# Android 17 prints the autofocus modes of the dump as numbers, the capabilities and the facing as names.
+AF_MODE_NAMES = {"0": "OFF", "1": "AUTO", "2": "MACRO", "3": "CONTINUOUS_VIDEO", "4": "CONTINUOUS_PICTURE",
+                 "5": "EDOF"}
 STATIC_INFO_HEADER = re.compile(r"^\s*== Camera HAL device .* static information: ==\s*$")
 STATIC_INFO_ENTRY = re.compile(r"^\s*(android\.[A-Za-z0-9_.]+) \(([0-9a-f]+)\): ")
 STATIC_INFO_VALUES = re.compile(r"^\s*\[([^\]]*)\]\s*$")
@@ -252,7 +668,7 @@ def parse_static_info(text: str) -> list[StaticInfo]:
         facing=camera["android.lens.facing"][0],
         capabilities=frozenset(camera.get("android.request.availableCapabilities", ())),
         flash=camera.get("android.flash.info.available", ["FALSE"])[:1] == ["TRUE"],
-        af_modes=frozenset(camera.get("android.control.afAvailableModes", ())))
+        af_modes=frozenset(AF_MODE_NAMES.get(mode, mode) for mode in camera.get("android.control.afAvailableModes", ())))
         for camera in cameras if camera.get("android.lens.facing")]
 
 
@@ -277,6 +693,16 @@ def features_of(infos: list[StaticInfo]) -> set[str]:
     if any("RAW" in info.capabilities for info in infos):
         features.add("android.hardware.camera.capability.raw")
     return features
+
+
+def parse_provider_pids(text: str) -> list[int]:
+    """`ps -A -o PID,NAME`: the pids of the camera provider (its binary's name holds PROVIDER_PROCESS)."""
+    pids = []
+    for line in text.splitlines():
+        words = line.split(None, 1)
+        if len(words) == 2 and words[0].isdecimal() and PROVIDER_PROCESS in words[1]:
+            pids.append(int(words[0]))
+    return pids
 
 
 def parse_listing(text: str) -> set[str]:
@@ -417,12 +843,14 @@ def parse_jpeg(data: bytes) -> Jpeg:
 
 class Guest:
     def __init__(self, adb: str, serial: str, process: subprocess.Popen, log: pathlib.Path,
-                 private: pathlib.Path) -> None:
+                 private: pathlib.Path, hold_directory: pathlib.Path | None = None) -> None:
         self.adb = adb
         self.serial = serial
         self.process = process
         self.log = log
         self.private = private
+        # Where the launcher's audio hold library (--audio-hold-library) takes its requests; None without one.
+        self.hold_directory = hold_directory
 
     def adb_run(self, *arguments: str, timeout: float = COMMAND_SECONDS,
                 binary: bool = False) -> subprocess.CompletedProcess:
@@ -451,9 +879,21 @@ class Guest:
     def media_camera(self) -> str:
         return self.shell("dumpsys media.camera")
 
+    def provider_pids(self) -> list[int]:
+        return parse_provider_pids(self.shell("ps -A -o PID,NAME"))
+
     def stills(self) -> set[str]:
         return {name for name in parse_listing(self.shell(f"ls {STILL_DIRECTORY} 2>&1 || true"))
                 if name.lower().endswith((".jpg", ".jpeg"))}
+
+    def videos(self) -> tuple[dict[str, dict[str, str]], str]:
+        """The movies MediaStore lists, by their `_id`, and the raw text of the query."""
+        text = self.shell(f"content query --uri {VIDEO_URI} --projection _id:_display_name:_data:duration:_size "
+                          "2>&1 || true")
+        return {row["_id"]: row for row in parse_content_rows(text) if "_id" in row}, text
+
+    def hal_log(self) -> str:
+        return self.shell("logcat -d -b all " + " ".join(f"{tag}:W" for tag in HAL_TAGS) + " '*:S' 2>&1 || true")
 
     def screenshot(self) -> Image:
         result = self.adb_run("exec-out", "screencap", "-p", timeout=SCREENSHOT_SECONDS, binary=True)
@@ -463,6 +903,51 @@ class Guest:
             return decode_png(result.stdout)
         except (ValueError, zlib.error) as problem:
             raise Failure(f"the screenshot is unreadable: {problem}") from problem
+
+    def freeze(self, seconds: float) -> None:
+        """Stops the emulator process for `seconds` and continues it: the whole guest, its sound device and its
+        camera with it, stands still, as when the host holds the application up. The process goes on whatever
+        happens in between."""
+        os.kill(self.process.pid, signal.SIGSTOP)
+        try:
+            time.sleep(seconds)
+        finally:
+            os.kill(self.process.pid, signal.SIGCONT)
+
+    def audio_flinger(self) -> str:
+        return self.shell("dumpsys media.audio_flinger")
+
+    def stream_log(self) -> str:
+        """The audio HAL's own lines about its streams, from the log's start."""
+        return self.shell(f"logcat -d -v time -s {HAL_STREAM_TAG}:V 2>&1 || true")
+
+    def hold_audio(self, seconds: float) -> float:
+        """Has the library in the launcher hold the thread that serves the Virtio sound device for `seconds` while
+        the guest runs, and returns how long it was held. The request is written to another name and renamed, so the
+        library never reads half of it; the library says what it held in the file `holds`: a count of threads that
+        is not one, or a hold much shorter than asked, is a hold that did not happen."""
+        if self.hold_directory is None:
+            raise Failure("no audio hold library: the run was not given --audio-hold-library")
+        log = self.hold_directory / "holds"
+        before = len(log.read_text().splitlines()) if log.is_file() else 0
+        request = self.hold_directory / "hold.request"
+        request.write_text(f"{round(seconds * 1000)}\n")
+        os.replace(request, self.hold_directory / "hold")
+        deadline = time.monotonic() + seconds + AUDIO_HOLD_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            self.alive()
+            lines = log.read_text().splitlines() if log.is_file() else []
+            if len(lines) > before:
+                fields = lines[before].split()
+                held, threads = int(fields[1]) / 1e9, int(fields[3])
+                if threads != 1 or held < seconds * AUDIO_HOLD_MINIMUM_FRACTION:
+                    raise Failure(f"the audio hold library held {threads} thread(s) named for the sound device "
+                                  f"for {held:.2f} s of the {seconds:g} s asked: a stall that did not happen "
+                                  f"cannot judge the input ({lines[before]!r})")
+                return held
+            time.sleep(0.05)
+        raise Failure(f"the audio hold library reported no hold within {seconds + AUDIO_HOLD_WAIT_SECONDS:g} s "
+                      f"(requested {seconds:g} s)")
 
     def pull(self, remote: str) -> bytes:
         local = self.private / pathlib.PurePosixPath(remote).name
@@ -515,6 +1000,15 @@ def check_camera_list(guest: Guest, plan: Plan) -> None:
     wait_for("the cameras Android lists", SETTLE_SECONDS if plan.camera_ids else 5, listed, guest)
 
 
+def wait_provider_exit(guest: Guest, when: str) -> float:
+    """Waits for the lazy provider to be gone; returns how long it took. `dumpsys media.camera` can wake the provider,
+    so nothing that asks cameraserver runs between the close and this wait."""
+    began = time.monotonic()
+    wait_for(f"the camera provider to exit {when}", PROVIDER_EXIT_SECONDS,
+             lambda: None if not guest.provider_pids() else f"it still runs as {guest.provider_pids()}", guest)
+    return time.monotonic() - began
+
+
 def check_characteristics(guest: Guest, plan: Plan) -> None:
     """The features that the layout states are the ones the cameras' own characteristics earn."""
     infos = parse_static_info(guest.media_camera())
@@ -541,11 +1035,70 @@ def blocked_preview(sample: Callable[[], tuple[float, float]], sleep: Callable[[
     return None
 
 
-def start_camera_application(guest: Guest) -> None:
+@dataclass(frozen=True)
+class Foreground:
+    """What the guest shows: the resumed activity ("package/.Class"), the focused window, the wakefulness."""
+    resumed: str
+    focus: str
+    wakefulness: str
+
+    def camera_in_front(self) -> bool:
+        return self.resumed.startswith(CAMERA_PACKAGE + "/") and self.wakefulness == "Awake"
+
+    def describe(self) -> str:
+        return (f"resumed activity {self.resumed or 'none'}, focused window {self.focus or 'none'}, "
+                f"wakefulness {self.wakefulness or 'unknown'}")
+
+
+def parse_foreground(text: str) -> Foreground:
+    """The `FOREGROUND_COMMAND` output. The top resumed activity is preferred, any resumed activity next."""
+    resumed = ""
+    for pattern in (r"topResumedActivity=ActivityRecord\{\S+ u\d+ (\S+)", r"ResumedActivity[=:] *ActivityRecord\{\S+ u\d+ (\S+)"):
+        match = re.search(pattern, text)
+        if match:
+            resumed = match.group(1)
+            break
+    focus = re.search(r"mCurrentFocus=Window\{\S+ u\d+ ([^}]*)\}", text)
+    wakefulness = re.search(r"mWakefulness=(\w+)", text)
+    return Foreground(resumed, focus.group(1) if focus else "", wakefulness.group(1) if wakefulness else "")
+
+
+class BlockedSampler:
+    """One blocked-preview sample: taken only while the camera application is the resumed activity and the
+    device is awake, checked before and after the screenshot. When it is not, the application is brought
+    back once for the whole step and the sample is taken again; a second absence is a Failure of its own
+    (never a pass and never a skip), naming what was in front."""
+
+    def __init__(self, read: Callable[[], Foreground], take: Callable[[], tuple[float, float]],
+                 bring_back: Callable[[], None], sleep: Callable[[float], None]) -> None:
+        self.read, self.take, self.bring_back, self.sleep = read, take, bring_back, sleep
+        self.brought_back = False
+
+    def __call__(self) -> tuple[float, float]:
+        while True:
+            state = self.read()
+            if state.camera_in_front():
+                value = self.take()
+                state = self.read()
+                if state.camera_in_front():
+                    return value
+            if self.brought_back:
+                raise Failure(f"a blocked session cannot be judged: the camera application is not in front "
+                              f"({state.describe()}) after it was brought back once")
+            print(f"  blocked: the camera application is not in front ({state.describe()}); bringing it back")
+            self.brought_back = True
+            self.bring_back()
+            self.sleep(BRING_BACK_SETTLE_SECONDS)
+
+
+def start_camera_application(guest: Guest, action: str = "android.media.action.STILL_IMAGE_CAMERA",
+                             front: bool | None = None) -> None:
+    """Starts the application: with its `front` extra (the application keeps its last choice otherwise)."""
     for permission in CAMERA_PERMISSIONS:
         guest.shell(f"pm grant {CAMERA_PACKAGE} {permission} 2>&1 || true")
     guest.shell("input keyevent KEYCODE_WAKEUP; wm dismiss-keyguard 2>&1 || true")
-    guest.shell("am start -a android.media.action.STILL_IMAGE_CAMERA")
+    extra = "" if front is None else f" --ez {FRONT_EXTRA} {'true' if front else 'false'}"
+    guest.shell(f"am start -a {action}{extra}")
 
 
 def check_preview(guest: Guest, plan: Plan) -> None:
@@ -574,11 +1127,19 @@ def check_preview(guest: Guest, plan: Plan) -> None:
         wait_for("the preview showing the chart", PREVIEW_SECONDS, previewing, guest)
         print(f"  preview: mean {statistics[-1][0]:.1f}, deviation {statistics[-1][1]:.1f}")
     else:
-        def sample() -> tuple[float, float]:
+        def take() -> tuple[float, float]:
             guest.alive()
             statistics.append(luma_statistics(guest.screenshot()))
             return statistics[-1]
 
+        def bring_back() -> None:
+            # The application left the camera on its own: what the platform logged about it goes out before it is
+            # started again, since a restart is also a teardown of that evidence.
+            print_application_events(guest, sys.stdout)
+            start_camera_application(guest)
+
+        sample = BlockedSampler(lambda: parse_foreground(guest.shell(FOREGROUND_COMMAND, timeout=60)), take,
+                                bring_back, time.sleep)
         message = blocked_preview(sample, time.sleep)
         if message:
             raise Failure(f"a blocked session {message}")
@@ -624,6 +1185,332 @@ def check_still(guest: Guest, plan: Plan, before: set[str]) -> None:
     print(f"  still: {found[-1]} {jpeg.width}x{jpeg.height}")
 
 
+def wait_for_chart(guest: Guest, camera_id: str, what: str) -> None:
+    """The application holds camera `camera_id` and its preview is the chart."""
+    wait_for(f"the camera application holding camera {camera_id} ({what})", PREVIEW_SECONDS,
+             lambda: None if camera_id in active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE)
+             else f"it holds {sorted(active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE))}", guest)
+    seen: list[tuple[float, float]] = []
+
+    def previewing() -> str | None:
+        seen.append(luma_statistics(guest.screenshot()))
+        mean, deviation = seen[-1]
+        return None if deviation >= CHART_MINIMUM_DEVIATION else \
+            f"the preview is flat (mean {mean:.1f}, deviation {deviation:.1f})"
+
+    wait_for(f"the {what} preview showing the chart", PREVIEW_SECONDS, previewing, guest)
+    print(f"  {what} preview: mean {seen[-1][0]:.1f}, deviation {seen[-1][1]:.1f}")
+
+
+def record_video(guest: Guest, plan: Plan, hold_seconds: float, disturb: Callable[[Guest], None] | None = None,
+                 maximum: float = VIDEO_MAXIMUM_SECONDS) -> tuple[dict[str, str], Movie]:
+    """The camera key starts and stops a recording of the application's video mode on the profile's first camera,
+    `hold_seconds` apart; `disturb`, when given, runs right after the start key (and takes part of the hold). Returns
+    MediaStore's row of the new movie and the movie as parsed: a finished file of at least VIDEO_MINIMUM_SECONDS and
+    at most `maximum` with a video track."""
+    before, _ = guest.videos()
+    guest.shell(f"am force-stop {CAMERA_PACKAGE}")
+    start_camera_application(guest, VIDEO_ACTION, front=PROFILE_CAMERAS[plan.profile][0] == "front")
+    wait_for_chart(guest, plan.camera_ids[0], "video")
+    guest.shell(f"input keyevent {CAMERA_KEYCODE}")
+    if disturb is None:
+        time.sleep(hold_seconds)
+    else:
+        started = time.monotonic()
+        disturb(guest)
+        time.sleep(max(0.0, hold_seconds - (time.monotonic() - started)))
+    guest.shell(f"input keyevent {CAMERA_KEYCODE}")
+    raw = ["not queried"]
+    found: list[dict[str, str]] = []
+
+    def recorded() -> str | None:
+        rows, raw[0] = guest.videos()
+        added = [row for _, row in sorted(rows.items()) if row["_id"] not in before]
+        if not added:
+            return f"MediaStore lists no new movie (query: {raw[0].strip()[-200:]!r})"
+        found[:] = added
+        return None
+
+    wait_for("a movie in MediaStore", VIDEO_SECONDS, recorded, guest)
+    time.sleep(3)  # the file is finished when the application has closed it; give the last write time to land
+    path = found[-1].get("_data", "")
+    try:
+        movie = parse_mp4(guest.pull(path))
+    except ValueError as problem:
+        raise Failure(f"{path} is not a finished movie: {problem}") from problem
+    if not movie.video:
+        raise Failure(f"{path} has no video track")
+    if not VIDEO_MINIMUM_SECONDS <= movie.seconds <= maximum:
+        raise Failure(f"{path} lasts {movie.seconds:.2f} s; the recording ran {hold_seconds:g} s "
+                      f"and must last between {VIDEO_MINIMUM_SECONDS} and {maximum:g} s")
+    return found[-1], movie
+
+
+def wait_for_audio_capture(guest: Guest) -> tuple[int, int]:
+    """The audio flinger's record thread captures now, not only once did: it is out of standby with an active client
+    and its `Frames read` rises between two looks. Returns the two counts."""
+    seen: list[int] = []
+
+    def capturing() -> str | None:
+        frames = active_capture_frames(guest.audio_flinger())
+        if frames is None:
+            return "no record thread of the audio flinger is out of standby with an active client"
+        previous = seen[-1] if seen else None
+        seen.append(frames)
+        return None if previous is not None and frames > previous else f"the record thread has read {frames} frames"
+
+    wait_for("audio capture", AUDIO_CAPTURE_SECONDS, capturing, guest)
+    return seen[-2], seen[-1]
+
+
+def disturb_recording(guest: Guest, kind: str, events: list[float]) -> None:
+    """Right after the start key of a recording: the audio capture is seen to run, then DISTURB_COUNT disturbances
+    (`stall` or `freeze`), the first DISTURB_LEAD_SECONDS later, the others DISTURB_GAP_SECONDS after each end.
+    `events` gets the seconds after the start key at which each began."""
+    started = time.monotonic()
+    first, last = wait_for_audio_capture(guest)
+    print(f"  audio capture runs: the record thread has read {first}, then {last} frames")
+    for index in range(DISTURB_COUNT):
+        time.sleep(DISTURB_LEAD_SECONDS if index == 0 else DISTURB_GAP_SECONDS)
+        events.append(time.monotonic() - started)
+        if kind == "stall":
+            held = guest.hold_audio(STALL_SECONDS)
+            print(f"  stall {index + 1}: the sound device's thread held {held:.2f} s from {events[-1]:.1f} s after the start key")
+        else:
+            guest.freeze(FREEZE_SECONDS)
+            print(f"  freeze {index + 1}: the emulator stopped {FREEZE_SECONDS:g} s from {events[-1]:.1f} s after the start key")
+
+
+def check_audio(path: str, movie: Movie) -> None:
+    """The audio track of a recording holds what its time stamps span and ends with its video: its stretch (the time
+    line over the coded audio) is within AUDIO_STRETCH_MINIMUM and AUDIO_STRETCH_MAXIMUM, its sample table has no jump
+    of AUDIO_JUMP_MAXIMUM_SECONDS, and it ends within AUDIO_END_SKEW_MAXIMUM_SECONDS of the video. The track's sample
+    accounting is printed before the checks."""
+    if not movie.audio:
+        raise Failure(f"{path} has no audio track: the application records with the microphone permission granted")
+    if movie.audio_samples == 0 or movie.audio_rate == 0:
+        raise Failure(f"{path} has no sample table for its audio track: its stretch cannot be told")
+    print(f"  audio: {movie.audio_samples} AAC frames = {movie.audio_coded_seconds:.2f} s of audio over a "
+          f"{movie.audio_seconds:.2f} s time line at {movie.audio_rate} Hz, stretch {movie.audio_stretch:.3f}; "
+          f"longest step of its sample times {movie.audio_gap:.3f} s, ends {movie.audio_skew:+.3f} s after the video")
+    if movie.audio_stretch > AUDIO_STRETCH_MAXIMUM:
+        raise Failure(f"{path}: the audio track holds {movie.audio_coded_seconds:.2f} s of audio under a "
+                      f"{movie.audio_seconds:.2f} s time line (stretch {movie.audio_stretch:.3f}, above "
+                      f"{AUDIO_STRETCH_MAXIMUM}): stamped time has no audio behind it, and a player that follows the "
+                      "audio clock skips ahead at every such gap and plays the clip too fast")
+    if movie.audio_stretch < AUDIO_STRETCH_MINIMUM:
+        raise Failure(f"{path}: the audio track holds {movie.audio_coded_seconds:.2f} s of audio under a "
+                      f"{movie.audio_seconds:.2f} s time line (stretch {movie.audio_stretch:.3f}, below "
+                      f"{AUDIO_STRETCH_MINIMUM}): more audio than its time stamps span")
+    if movie.audio_gap > AUDIO_JUMP_MAXIMUM_SECONDS:
+        raise Failure(f"{path}: the audio's sample table jumps {movie.audio_gap:.2f} s between two samples (above "
+                      f"{AUDIO_JUMP_MAXIMUM_SECONDS} s): time that the audio does not hold")
+    check_audio_end(path, movie)
+
+
+def check_audio_end(path: str, movie: Movie) -> None:
+    if abs(movie.audio_skew) > AUDIO_END_SKEW_MAXIMUM_SECONDS:
+        raise Failure(f"{path}: the audio ends {movie.audio_skew:+.2f} s after the video (more than "
+                      f"{AUDIO_END_SKEW_MAXIMUM_SECONDS} s either way): the audio and the video are out of step by "
+                      "as much as a stall, which frames made up late and stamped in a burst leave")
+
+
+def check_video(guest: Guest, plan: Plan) -> None:
+    """The camera key starts and stops a recording of the application's video mode on the profile's first
+    camera: MediaStore lists a new movie of at least VIDEO_MINIMUM_SECONDS with a video track, at the frame rate
+    floor, and with an audio track that holds what its time stamps span and ends with the video."""
+    row, movie = record_video(guest, plan, VIDEO_HOLD_SECONDS)
+    path = row.get("_data", "")
+    print(f"  video: {row.get('_display_name', path)} {movie.seconds:.2f} s, {movie.frames} frames over "
+          f"{movie.video_seconds:.2f} s = {movie.fps:.1f} fps average, audio {'yes' if movie.audio else 'no'}")
+    if movie.frames == 0:
+        raise Failure(f"{path} has no sample table for its video track: the frame rate cannot be told")
+    if movie.fps < VIDEO_MINIMUM_FPS:
+        raise Failure(f"{path} averages {movie.fps:.1f} fps ({movie.frames} frames over {movie.video_seconds:.2f} s), "
+                      f"below {VIDEO_MINIMUM_FPS:.0f}: the preview and the recording do not share one exposure")
+    check_audio(path, movie)
+
+
+def check_audio_stall(guest: Guest, plan: Plan) -> None:
+    """A recording during which the thread that serves the Virtio sound device is held STALL_SECONDS, DISTURB_COUNT
+    times, with the audio capture seen to run first: the video goes on (no gap of VIDEO_GAP_MAXIMUM_SECONDS) while the
+    audio input has nothing to read, and the audio track must still hold what its time stamps span, have no jump and
+    end with the video, as the input makes the stalled time up. The HAL must have said it made silence up, for at least
+    MADE_UP_MINIMUM_FRACTION of the stalls' time. Without --audio-hold-library the step says it did not run."""
+    if guest.hold_directory is None:
+        print("  audio stall: not run (no --audio-hold-library)")
+        return
+    events: list[float] = []
+    before = made_up_frames(guest.stream_log())
+    row, movie = record_video(guest, plan, DISTURB_HOLD_SECONDS, lambda g: disturb_recording(g, "stall", events),
+                              DISTURB_MAXIMUM_SECONDS)
+    path = row.get("_data", "")
+    print(f"  video with the sound device held {DISTURB_COUNT} x {STALL_SECONDS:g} s: {row.get('_display_name', path)} "
+          f"{movie.seconds:.2f} s, {movie.frames} frames over {movie.video_seconds:.2f} s, longest gap in the video "
+          f"{movie.video_gap:.3f} s")
+    if movie.video_gap > VIDEO_GAP_MAXIMUM_SECONDS:
+        raise Failure(f"{path}: the video has a gap of {movie.video_gap:.2f} s (above {VIDEO_GAP_MAXIMUM_SECONDS} s): "
+                      "the guest stood still as well, and its audio gap could not be told from the video's")
+    check_audio(path, movie)
+    made_up = made_up_frames(guest.stream_log())[len(before):]
+    needed = MADE_UP_MINIMUM_FRACTION * DISTURB_COUNT * STALL_SECONDS * (movie.audio_rate or 48000)
+    print(f"  the HAL made {sum(made_up)} frames of silence up in {len(made_up)} stall(s) ({needed:.0f} needed)")
+    if sum(made_up) < needed:
+        raise Failure(f"the input's log says it made {sum(made_up)} frames of silence up in {len(made_up)} stall(s) "
+                      f"during {DISTURB_COUNT} stalls of {STALL_SECONDS:g} s (at least {needed:.0f} frames wanted): "
+                      "it did not make the stalled time up")
+
+
+def check_video_freeze(guest: Guest, plan: Plan) -> None:
+    """A recording during which the emulator process is stopped FREEZE_SECONDS, DISTURB_COUNT times, with the audio
+    capture seen to run first. The whole guest stands still, so the video has gaps, and a clip with the same gaps in
+    its audio is a faithful one: the video's longest gap shows (FREEZE_GAP_MINIMUM_SECONDS), the audio's is within
+    GAP_AGREEMENT_MAXIMUM_SECONDS of it, and the audio ends with the video: frames made up for the stood-still time
+    and stamped in a burst at the thaw would run it on past the video. Only the audio is held to this, not the frame
+    rate."""
+    events: list[float] = []
+    row, movie = record_video(guest, plan, DISTURB_HOLD_SECONDS, lambda g: disturb_recording(g, "freeze", events),
+                              DISTURB_MAXIMUM_SECONDS)
+    path = row.get("_data", "")
+    print(f"  video with the emulator stopped {DISTURB_COUNT} x {FREEZE_SECONDS:g} s: {row.get('_display_name', path)} "
+          f"{movie.seconds:.2f} s, {movie.frames} frames over {movie.video_seconds:.2f} s, longest gap in the video "
+          f"{movie.video_gap:.3f} s")
+    if not movie.audio or movie.audio_samples == 0:
+        raise Failure(f"{path} has no audio track with a sample table")
+    print(f"  audio: {movie.audio_samples} AAC frames, longest step of its sample times {movie.audio_gap:.3f} s, "
+          f"ends {movie.audio_skew:+.3f} s after the video")
+    if movie.video_gap < FREEZE_GAP_MINIMUM_SECONDS:
+        raise Failure(f"{path}: the freeze left a gap of only {movie.video_gap:.2f} s in the video (below "
+                      f"{FREEZE_GAP_MINIMUM_SECONDS} s): the emulator did not stand still, and nothing can be judged")
+    if abs(movie.audio_gap - movie.video_gap) > GAP_AGREEMENT_MAXIMUM_SECONDS:
+        raise Failure(f"{path}: the audio's longest step is {movie.audio_gap:.2f} s and the video's "
+                      f"{movie.video_gap:.2f} s (they differ by more than {GAP_AGREEMENT_MAXIMUM_SECONDS} s): "
+                      "a stood-still guest leaves the same gap in both tracks")
+    check_audio_end(path, movie)
+
+
+def wait_for_capture(guest: Guest, what: str) -> None:
+    """The camera service's frame counters rise between two reads: capture is running now, not only once was."""
+    seen: list[int] = []
+
+    def producing() -> str | None:
+        count = frames_produced(guest.media_camera())
+        previous = seen[-1] if seen else None
+        seen.append(count)
+        return None if previous is not None and count > previous else f"the frame counters stand at {count}"
+
+    wait_for(f"live capture ({what})", SWITCH_OBSERVE_SECONDS, producing, guest)
+
+
+def read_switch_log(guest: Guest, marker: str) -> str:
+    """The log from the line of `marker`. A log that no longer holds the line has lost what followed it, which may
+    be an error nobody read: the switches cannot be judged then."""
+    after = log_after(guest.shell("logcat -d -b all", timeout=180), marker)
+    if after is None:
+        raise Failure(f"the log has no line for the {marker}: it was lost or never written, so the photo to video "
+                      "switches cannot be judged")
+    return after
+
+
+def refusal_failure(failures: list[tuple[str, str]], where: str) -> Failure:
+    """The denial is the cause and the refusal its effect; either may come first in the log."""
+    first = {kind: line for kind, line in reversed(failures)}
+    kinds = [kind for kind in (SWITCH_DENIAL_KIND, SWITCH_REFUSAL_KIND) if kind in first]
+    return Failure(f"{' and '.join(kinds)} {where}: " + " | ".join(first[kind] for kind in kinds))
+
+
+def restore_animation_scales(guest: Guest, saved: dict[str, str]) -> list[str]:
+    """Puts back every scale that was read, each on its own: what could not be put back, as messages."""
+    problems = []
+    for key, value in saved.items():
+        try:
+            guest.shell(f"settings delete global {key}" if value in ("", "null")
+                        else f"settings put global {key} {value}")
+        except (Failure, subprocess.TimeoutExpired) as problem:
+            problems.append(f"the animation scale {key} was not restored: {problem}")
+    return problems
+
+
+def check_mode_switch(guest: Guest, plan: Plan) -> None:
+    """Photo to video with the preview running, `plan.switch_rounds` times, each from a freshly started
+    application and with the window animations off (restored on every exit; a restore that fails fails the
+    step unless the step failed already). The video activity covers the photo activity's preview while it
+    repeats, which is the case the policy rule for the display composer's fence is for. A round passes only when
+    capture was running before the switch, the photo activity's pause and the video activity's resume were seen,
+    and capture runs after them, each within a deadline. The log is read from the previous round's marker (the
+    first from its own) on every read and once more after the last round, so what is logged between two reads,
+    or after the last, is read by the next; a log that lost that marker fails the step."""
+    saved: dict[str, str] = {}
+    try:
+        for key in ANIMATION_SCALES:
+            saved[key] = guest.shell(f"settings get global {key}").strip()
+        for key in ANIMATION_SCALES:
+            guest.shell(f"settings put global {key} 0")
+        observe_mode_switches(guest, plan)
+    except BaseException:
+        for problem in restore_animation_scales(guest, saved):
+            print(f"  mode switch: {problem}")
+        raise
+    problems = restore_animation_scales(guest, saved)
+    if problems:
+        raise Failure("; ".join(problems))
+
+
+def observe_mode_switches(guest: Guest, plan: Plan) -> None:
+    front = PROFILE_CAMERAS[plan.profile][0] == "front"
+    markers: list[str] = []
+    for number in range(1, plan.switch_rounds + 1):
+        guest.shell(f"am force-stop {CAMERA_PACKAGE}")
+        start_camera_application(guest, front=front)
+        wait_for_chart(guest, plan.camera_ids[0], "photo")
+        time.sleep(SWITCH_HOLD_SECONDS)
+        wait_for_capture(guest, f"photo, before switch {number}")
+        marker = f"photo to video switch {number} of {plan.switch_rounds}"
+        guest.shell(f"log -t {SWITCH_MARKER_TAG} '{marker}'")
+        lower = markers[-1] if markers else marker
+        markers.append(marker)
+        start_camera_application(guest, VIDEO_ACTION, front=front)
+        time.sleep(SWITCH_SETTLE_SECONDS)
+
+        def switched() -> str | None:
+            after = read_switch_log(guest, lower)
+            failures = switch_failures(after)
+            if failures:
+                raise refusal_failure(failures, f"since the {lower} (read after the {marker})")
+            missing = switch_observed(log_after(after, marker) or "")
+            return f"the log after its marker shows no {' and no '.join(missing)}" if missing else None
+
+        wait_for(f"no mode switch observed in the {marker}", SWITCH_OBSERVE_SECONDS, switched, guest)
+        wait_for_chart(guest, plan.camera_ids[0], "video")
+        wait_for_capture(guest, f"video, after the {marker}")
+        print(f"  mode switch {number} of {plan.switch_rounds}: photo activity paused, video activity resumed, "
+              f"capture before and after; no refused capture request, no {CAMERA_HAL_DOMAIN} denial")
+    time.sleep(SWITCH_DRAIN_SECONDS)
+    failures = switch_failures(read_switch_log(guest, markers[-1]))
+    if failures:
+        raise refusal_failure(failures, f"in the final read after the last switch ({markers[-1]})")
+
+
+def check_front(guest: Guest, plan: Plan) -> None:
+    """With a front camera (the profile's camera "1"): the application opens it, the preview is the chart and
+    the camera key takes a still."""
+    if PROFILE_CAMERAS[plan.profile][0] != "back+front":
+        print("  front: the profile's only camera is the front one, checked above")
+        return
+    before = guest.stills()
+    guest.shell(f"am force-stop {CAMERA_PACKAGE}")
+    start_camera_application(guest, front=True)
+    wait_for_chart(guest, "1", "front")
+    check_still(guest, plan, before)
+
+
+def check_hal_log(guest: Guest) -> None:
+    failures = hal_failures(guest.hal_log())
+    if failures:
+        raise Failure(f"the camera HAL logged {len(failures)} failed buffer lines; the first: {failures[0]}")
+    print("  the camera HAL logged no failed buffer")
+
+
 def run_checks(guest: Guest, plan: Plan) -> None:
     print(f"layout {plan.layout.name}, profile {plan.profile}, {plan.mode}")
     check_layout(guest, plan)
@@ -632,10 +1519,61 @@ def run_checks(guest: Guest, plan: Plan) -> None:
         check_characteristics(guest, plan)
     print(f"  cameras {list(plan.camera_ids)} and features {sorted(plan.features)}")
     if plan.mode == "none":
+        if guest.provider_pids():
+            raise Failure(f"a layout without cameras runs the camera provider: {guest.provider_pids()}")
         return
+    # The provider was started with cameraserver, which listed the cameras, and holds none: it exits. The wait
+    # asks cameraserver nothing (a dump can wake it), so the open below is what starts it again.
+    exited = wait_provider_exit(guest, "once cameraserver has listed the cameras and none is open")
+    print(f"  provider: gone {exited:.0f} s after the listing and the characteristics (host load {os.getloadavg()[0]:.1f})")
     before = guest.stills()
     check_preview(guest, plan)
+    running = guest.provider_pids()
+    if not running:
+        raise Failure("the camera application holds a camera and no camera provider runs: the open did not start it")
+    print(f"  provider: started again by the open, pid {running}")
     check_still(guest, plan, before)
+    if plan.mode == "live":
+        check_video(guest, plan)
+        check_audio_stall(guest, plan)
+        check_video_freeze(guest, plan)
+        check_front(guest, plan)
+        check_mode_switch(guest, plan)
+        check_hal_log(guest)
+    guest.shell(f"am force-stop {CAMERA_PACKAGE}")
+    exited = wait_provider_exit(guest, "after the camera application is stopped")
+    print(f"  provider: gone {exited:.0f} s after the application stopped")
+    check_camera_list(guest, plan)
+    print("  the cameras are still listed with the provider gone")
+    check_cameraserver_restart(guest, plan)
+
+
+def cameraserver_restart_skip(debuggable: str) -> str | None:
+    """Why a restart of cameraserver cannot be run on this build, or None when it can: stopping a system
+    service needs root, which only a debuggable build gives the shell."""
+    if debuggable == "1":
+        return None
+    return "not run on a user build (stopping cameraserver needs root); the action that restarts the " \
+        "provider is in the image, which the target-files verifier checks"
+
+
+def check_cameraserver_restart(guest: Guest, plan: Plan) -> None:
+    """cameraserver starts again with the provider gone: the action restarts the provider and the cameras are
+    listed again."""
+    skipped = cameraserver_restart_skip(guest.prop("ro.debuggable"))
+    if skipped:
+        print(f"  skip: cameraserver restarted with the provider gone: {skipped}")
+        return
+    guest.shell("su 0 stop cameraserver")
+    wait_for("cameraserver to be stopped", COMMAND_SECONDS, lambda: None if guest.prop(
+        "init.svc.cameraserver") == "stopped" else "it is not stopped", guest)
+    exited = wait_provider_exit(guest, "after cameraserver stopped")
+    guest.shell("su 0 start cameraserver")
+    wait_for("the camera provider to be started by cameraserver's start", PROVIDER_START_SECONDS,
+             lambda: None if guest.provider_pids() else "no provider process", guest)
+    check_camera_list(guest, plan)
+    print(f"  cameraserver restarted {exited:.0f} s after the provider was gone: the provider started again "
+          "and the cameras are listed again")
 
 
 # ---- Starting and stopping the guest.
@@ -643,14 +1581,44 @@ def run_checks(guest: Guest, plan: Plan) -> None:
 CAMERA_SOURCES = {"live": "synthetic", "blocked": "blocked", "none": "none"}
 
 
-def launcher_arguments(plan: Plan) -> list[str]:
+AUTO_LAYOUT = "auto"
+
+
+# The layout the launcher composes for each profile's cameras: every host is given the small tier for now
+# (darwin/device/camera/camera_tiers.hpp, largestOfferedTier), so the phone has no 2160p front camera and no
+# concurrent stream pair, whatever the launcher's graphics budget.
+AUTO_LAYOUTS = {
+    "phone": "bf-small-flash-manual-raw",
+    "tablet": "bf-small-flash-manual-raw",
+    "laptop": "front",
+}
+
+
+def auto_layout(profile: str, taught: bool) -> str:
+    """The layout the launcher composes for the profile's cameras at the tier every host is given, without
+    RAW until a Bayer still has taught the colour data (the first session of a calibration directory)."""
+    name = AUTO_LAYOUTS[profile]
+    if taught:
+        return name
+    plain = "-".join(part for part in name.split("-") if part != "raw")
+    if plain not in camera_layouts.by_name():
+        raise ValueError(f"{plain!r} is not a camera layout")
+    return plain
+
+
+def launcher_arguments(plan: Plan, auto: bool = False, calibration: pathlib.Path | None = None) -> list[str]:
     """What the plan adds to the launcher's command: the camera source and profile, and the layout,
     which the launcher forwards to the kernel as given, as the host's application states the layout it
-    composed."""
+    composed. With ``auto`` the launcher composes it from the cameras the source presents, through the
+    function the iOS runtime uses, and the run checks that Android booted with the plan's."""
+    # A guest with no camera device has no profile to give, and the launcher refuses one.
     return [
         f"--camera={CAMERA_SOURCES[plan.mode]}",
-        f"--camera-profile={plan.profile}",
-        f"{camera_layouts.SKU_BOOT_ARGUMENT}{plan.layout.name}",
+        *([] if plan.mode == "none" else [f"--camera-profile={plan.profile}"]),
+        "--camera-layout=auto" if auto else f"{camera_layouts.SKU_BOOT_ARGUMENT}{plan.layout.name}",
+        # Every host is given the small tier for now; a layout of the large tier is exercised with it.
+        *(["--camera-tier=large"] if plan.mode != "none" and plan.layout.tier == "large" else []),
+        *([f"--camera-calibration-dir={calibration}"] if calibration else []),
     ]
 
 
@@ -678,15 +1646,23 @@ def start_guest(options: argparse.Namespace, plan: Plan, adb: str, private: path
         *boot_android.emulator_command(
             boot_options, release, instance / boot_android.android_instance.DATA_DISK, emulator,
             boot_android.data_capacity(boot_options, identity)),
-        *launcher_arguments(plan),
+        *launcher_arguments(plan, options.layout == AUTO_LAYOUT, options.calibration_dir),
     ]
     log = private / "emulator.log"
     stream = log.open("wb")
+    environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    hold_directory = None
+    if options.audio_hold_library is not None:
+        # The library holds the thread of the sound device for as long as a request in this directory says.
+        hold_directory = private / "audio-hold"
+        hold_directory.mkdir()
+        environment["DYLD_INSERT_LIBRARIES"] = str(options.audio_hold_library.resolve())
+        environment["UML_AUDIO_HOLD_DIRECTORY"] = str(hold_directory)
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
-                               start_new_session=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+                               start_new_session=True, env=environment)
     stream.close()
     serial = f"127.0.0.1:{options.adb_port}"
-    guest = Guest(adb, serial, process, log, private)
+    guest = Guest(adb, serial, process, log, private, hold_directory)
     boot_android.wait_for_adb(adb, serial, process, options.boot_timeout)
     if not boot_android.wait_for_boot_completed(adb, serial, process, options.boot_timeout):
         raise Failure("Android did not reach sys.boot_completed")
@@ -696,6 +1672,16 @@ def start_guest(options: argparse.Namespace, plan: Plan, adb: str, private: path
     print(f"booted; settling for {SETTLE_SECONDS} s")
     time.sleep(SETTLE_SECONDS)
     return guest
+
+
+def positive_integer(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"{text!r} is not positive")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -709,7 +1695,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-profile", choices=sorted(PROFILE_CAMERAS), default="phone",
                         help="the cameras the synthetic source presents")
     parser.add_argument("--layout", help="the camera layout to state on the vendor SKU "
-                        "(default: the profile's, or none for --mode none)")
+                        "(default: the profile's, or none for --mode none); `auto` has the launcher compose it "
+                        "from the cameras, as the iOS runtime does, and expects the profile's")
+    parser.add_argument("--calibration-dir", type=pathlib.Path,
+                        help="where the colour data a Bayer still teaches is kept across runs; with --layout auto a "
+                        "directory that holds none yet expects the layout without RAW, one that holds some the "
+                        "profile's own")
     parser.add_argument("--mode", choices=MODES, default="live",
                         help="live: the synthetic chart; blocked: a session started with Camera off; "
                         "none: no camera device")
@@ -717,11 +1708,59 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--adb-port", type=int, default=slot_ports.slot_port(slot_ports.ADB_OFFSET, DEFAULT_ADB_PORT),
                         help="loopback port the launcher forwards adbd to (default: the guest slot's first port "
                         f"when GUEST_SLOT_PORT_BASE is set, else {DEFAULT_ADB_PORT})")
+    parser.add_argument("--switch-rounds", type=positive_integer, default=SWITCH_ROUNDS,
+                        help="how many photo to video switches the live mode makes (each can miss a race that "
+                        f"an image without the policy rule loses only some of the time; default {SWITCH_ROUNDS})")
+    parser.add_argument("--audio-hold-library", type=pathlib.Path,
+                        help="the test library (uml_audio_hold) that holds the thread of the Virtio sound device; "
+                        "without it the audio stall step does not run")
     parser.add_argument("--cpus", type=int, default=4)
     parser.add_argument("--memory", default="4G")
     parser.add_argument("--boot-timeout", type=int, default=900,
                         help="seconds to wait for adbd and for boot_completed")
     return parser
+
+
+# The tags of the camera path and of the buffers it allocates; the application's own noise (the surface
+# composer's per-frame lines, adb's own polling of the camera folder) is left out.
+FAILURE_LOG_PATTERN = ("V4l2Stream|V4l2FrameSource|EmulatedSensor|EmulatedRequest|CameraService|Camera2Client|Camera3|"
+                       "cameraserver|camera.provider|CameraProvider|CameraX|Aperture|vrend|gralloc|minigbm|virtio|BufferQueue")
+FAILURE_LOG_NOISE = ("SurfaceFlinger|adbd|out of bounds transparent region|minigbm:virtgpu_init|minigbm:virgl_get_caps|"
+                     "minigbm:virgl_add_combination|vendor.minigbm.debug")
+FAILURE_LOG_LINES = 120
+
+def print_camera_log(guest: Guest) -> None:
+    """At a failure, the guest's own log lines about the camera path and its buffers, then what was in front and
+    the camera application's own events (nothing is asserted on them): they tell a failure of the image from
+    one of the runner."""
+    try:
+        text = guest.shell(f"logcat -d -b all | grep -a -E '{FAILURE_LOG_PATTERN}' | grep -a -v -E '{FAILURE_LOG_NOISE}' "
+                           f"| tail -n {FAILURE_LOG_LINES}", timeout=120)
+    except Exception as problem:  # the guest may be gone; the failure being reported is the one that matters
+        print(f"(no camera log lines: {problem})", file=sys.stderr)
+        return
+    print("camera log lines of the guest:\n" + text.rstrip(), file=sys.stderr)
+    try:
+        foreground = guest.shell(FOREGROUND_COMMAND, timeout=60)
+        print("in front at the failure:\n" + foreground.rstrip(), file=sys.stderr)
+    except Exception as problem:
+        print(f"(no foreground state: {problem})", file=sys.stderr)
+    print_application_events(guest, sys.stderr)
+
+
+def print_application_events(guest: Guest, stream) -> None:
+    """The camera application's own log lines: its crashes, ANRs, process deaths and the windows (dialogs) that
+    came in front of it. A guest that is gone is said, not raised."""
+    try:
+        events = guest.shell(f"logcat -d -b all | grep -a -E '{APP_EVENTS_PATTERN}' | grep -a -v -E '{FAILURE_LOG_NOISE}' "
+                             f"| tail -n {APP_EVENTS_LINES}", timeout=120)
+        print("events of the camera application and its windows:\n" + events.rstrip(), file=stream)
+        own = guest.shell(f"for pid in $(pidof {CAMERA_PACKAGE}); do logcat -d -b all --pid=$pid; done "
+                          f"| grep -a -v -E '{FAILURE_LOG_NOISE}' | tail -n {APP_OWN_LOG_LINES}", timeout=120)
+        print("the camera application's own log lines (by process id):\n" + (own.rstrip() or "(none: no process)"),
+              file=stream)
+    except Exception as problem:
+        print(f"(no application events: {problem})", file=stream)
 
 
 def main() -> int:
@@ -730,8 +1769,19 @@ def main() -> int:
         print("counts and timeouts must be positive", file=sys.stderr)
         return 2
     layout = options.layout or ("none" if options.mode == "none" else DEFAULT_LAYOUTS[options.camera_profile])
+    if layout == AUTO_LAYOUT:
+        if options.mode == "none":
+            print("--layout auto needs a camera to compose it from", file=sys.stderr)
+            return 2
+        taught = bool(options.calibration_dir and options.calibration_dir.is_dir()
+                      and any(options.calibration_dir.iterdir()))
+        try:
+            layout = auto_layout(options.camera_profile, taught)
+        except ValueError as problem:
+            print(f"{problem}", file=sys.stderr)
+            return 2
     try:
-        plan = make_plan(layout, options.camera_profile, options.mode)
+        plan = make_plan(layout, options.camera_profile, options.mode, options.switch_rounds)
     except ValueError as problem:
         print(f"{problem}", file=sys.stderr)
         return 2
@@ -746,6 +1796,8 @@ def main() -> int:
         return 0
     except (Failure, boot_android.LauncherError, subprocess.TimeoutExpired, OSError) as problem:
         print(f"FAIL: {problem}", file=sys.stderr)
+        if guest is not None and not isinstance(problem, boot_android.LauncherError):
+            print_camera_log(guest)
         log = private / "emulator.log"
         if log.is_file():
             print("launcher log tail:\n" + "\n".join(log.read_text(errors="replace").splitlines()[-30:]),

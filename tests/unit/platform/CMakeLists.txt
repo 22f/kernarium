@@ -70,6 +70,17 @@ uml_add_unit_test(NAME platform-video-encoder-recovery
     COMMAND uml_video_encoder_recovery_tests ${PROJECT_SOURCE_DIR}/tests/support/video
     LABELS video TIMEOUT 300)
 
+# Discovery against a scripted host, which needs no hardware: a refusal and a
+# ceiling are answers and are stored; a probe the host did not answer is not an
+# answer, leaves the discovery incomplete and out of the cache, and is asked
+# again later, a bounded number of times.
+add_executable(uml_video_encoder_discovery_tests video_encoder_discovery_tests.cpp)
+target_link_libraries(uml_video_encoder_discovery_tests PRIVATE
+    uml_video_encoder_test_variant)
+uml_add_unit_test(NAME platform-video-encoder-discovery
+    COMMAND uml_video_encoder_discovery_tests
+    LABELS video)
+
 # The capability cache, through child processes that find a valid file, no
 # file, or a file they cannot vouch for.
 add_executable(uml_video_encoder_cache_tests video_encoder_cache_tests.cpp)
@@ -82,6 +93,10 @@ uml_add_unit_test(NAME platform-video-encoder-cache
 # that hold them (one holds all it can get) run one at a time.
 set_tests_properties(platform-video-encoder platform-video-encoder-recovery
     platform-video-encoder-cache PROPERTIES RESOURCE_LOCK video-encoder-hardware)
+# A host that left a probe of the discovery unanswered in every discovery the
+# test asked for cannot validate those codecs; the test says so and is skipped,
+# not passed.
+set_tests_properties(platform-video-encoder PROPERTIES SKIP_RETURN_CODE 77)
 
 # The platform's run routing; the transaction tests use its test variant.
 add_executable(uml_run_routing_tests
@@ -120,6 +135,20 @@ target_include_directories(uml_host_environment_tests PRIVATE
 uml_add_unit_test(
     NAME platform-host-environment
     COMMAND uml_host_environment_tests)
+
+# The Apple thermal source's notices of a change of the thermal state or of Low
+# Power Mode, until the caller withdraws and after the provider ends.
+add_executable(uml_host_thermal_tests
+    host_thermal_tests.mm
+    $<TARGET_OBJECTS:uml_host_thermal>)
+target_link_libraries(uml_host_thermal_tests PRIVATE
+    UML::PlatformContract
+    "-framework Foundation")
+target_include_directories(uml_host_thermal_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/darwin/platform)
+uml_add_unit_test(
+    NAME platform-host-thermal
+    COMMAND uml_host_thermal_tests)
 
 # The host GPU's fixed budget: what the limit leaves above the floor, the
 # guest's RAM where there is no limit, and when the process is short of the

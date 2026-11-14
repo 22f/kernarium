@@ -3,6 +3,7 @@
 // length field, what happens to the segments around it, and that the scan is
 // left exactly as the platform made it.
 
+#include "camera_tiers.hpp"
 #include "jpeg_gap.hpp"
 #include "require.hpp"
 
@@ -144,6 +145,73 @@ void testFillBytesAndOtherLengths()
     require(small && small->gapLength == 1024 && small->head[4] == 0x04 && small->head[5] == 0x02, "another gap length");
 }
 
+/* The picture's size is the first frame header's, big-endian, the height first;
+ * a header that is missing or cut short states none. */
+void testFrameSize()
+{
+    const auto plain = reserveExifGap(sample());
+    require(plain && plain->frameWidth == 16 && plain->frameHeight == 16, "the sample's SOF0 states 16 by 16");
+
+    // A rectangular picture of the size of a 12 MP still, in each frame type.
+    for (const std::uint8_t code : {0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc9, 0xcf}) {
+        std::vector<std::uint8_t> jpeg = {0xff, 0xd8};
+        marker(jpeg, 0xe0, {'J', 'F', 'I', 'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0});
+        marker(jpeg, code, {8, 0x0b, 0xd8, 0x0f, 0xc0, 1, 1, 0x11, 0});  // 3032 high, 4032 wide
+        marker(jpeg, 0xda, {1, 1, 0, 0, 63, 0});
+        for (const std::uint8_t byte : {0x12, 0x34, 0xff, 0xd9}) jpeg.push_back(byte);
+        const auto plan = reserveExifGap(jpeg);
+        require(plan && plan->frameWidth == 4032 && plan->frameHeight == 3032, "a frame header of any type states the size");
+    }
+
+    // The tables and the arithmetic conditioning are not frame headers.
+    std::vector<std::uint8_t> tables = {0xff, 0xd8};
+    marker(tables, 0xc4, {0, 0, 0x0b, 0xd8, 0x0f, 0xc0, 1, 1, 0x11, 0});
+    marker(tables, 0xcc, {0, 0, 0x0b, 0xd8, 0x0f, 0xc0, 1, 1, 0x11, 0});
+    marker(tables, 0xda, {1, 1, 0, 0, 63, 0});
+    for (const std::uint8_t byte : {0x12, 0xff, 0xd9}) tables.push_back(byte);
+    const auto none = reserveExifGap(tables);
+    require(none && none->frameWidth == 0 && none->frameHeight == 0, "no frame header, no size");
+
+    // The first frame header counts; a short one states nothing.
+    std::vector<std::uint8_t> twice = {0xff, 0xd8};
+    marker(twice, 0xc0, {8, 0, 4, 0, 6, 1, 1, 0x11, 0});
+    marker(twice, 0xc2, {8, 0, 9, 0, 9, 1, 1, 0x11, 0});
+    marker(twice, 0xda, {1, 1, 0, 0, 63, 0});
+    for (const std::uint8_t byte : {0x12, 0xff, 0xd9}) twice.push_back(byte);
+    const auto first = reserveExifGap(twice);
+    require(first && first->frameWidth == 6 && first->frameHeight == 4, "the first frame header");
+    std::vector<std::uint8_t> shortHeader = {0xff, 0xd8};
+    marker(shortHeader, 0xc0, {8, 0, 4});
+    marker(shortHeader, 0xda, {1, 1, 0, 0, 63, 0});
+    for (const std::uint8_t byte : {0x12, 0xff, 0xd9}) shortHeader.push_back(byte);
+    const auto cut = reserveExifGap(shortHeader);
+    require(cut && cut->frameWidth == 0 && cut->frameHeight == 0, "a frame header too short to hold a size");
+}
+
+// The largest file the device takes (`maximumJpegBytes`) is the largest that, with the reserved gap in and a segment of the
+// platform's own gone, still fits the buffer the guest is told (`jpegBufferBytes`): a file with no Exif of its own grows by
+// the new segment's marker, length field and payload, and no more.
+void testTheLargestFileFillsTheGuestsBuffer()
+{
+    for (const std::uint64_t pixels : {std::uint64_t(256), std::uint64_t(1920) * 1080, std::uint64_t(4032) * 3024}) {
+        const auto bound = maximumJpegBytes(pixels);
+        std::vector<std::uint8_t> jpeg = {0xff, 0xd8};
+        marker(jpeg, 0xe0, {'J', 'F', 'I', 'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0});
+        marker(jpeg, 0xdb, std::vector<std::uint8_t>(65, 3));
+        marker(jpeg, 0xc0, {8, 0, 16, 0, 16, 1, 1, 0x11, 0});
+        marker(jpeg, 0xda, {1, 1, 0, 0, 63, 0});
+        while (jpeg.size() + 2 < bound) jpeg.push_back(0x12);
+        jpeg.push_back(0xff);
+        jpeg.push_back(0xd9);
+        require(jpeg.size() == bound, "the file is of the bound's size");
+        const auto plan = reserveExifGap(jpeg);
+        require(plan.has_value() && plan->size() == jpegBufferBytes(pixels), "the largest file fills the buffer exactly");
+        jpeg.insert(jpeg.end() - 2, std::uint8_t(0x12));
+        const auto over = reserveExifGap(jpeg);
+        require(over.has_value() && over->size() == jpegBufferBytes(pixels) + 1, "and a byte more does not fit it");
+    }
+}
+
 void testRefusals()
 {
     require(!reserveExifGap({}).has_value(), "empty data");
@@ -169,6 +237,8 @@ int main()
     testSegmentsAroundTheGap();
     testOtherPicturesAreNotPassedOn();
     testFillBytesAndOtherLengths();
+    testFrameSize();
+    testTheLargestFileFillsTheGuestsBuffer();
     testRefusals();
     return 0;
 }

@@ -110,6 +110,15 @@ struct SnapshotRulesTests {
         #expect(SnapshotRules.restorePlan(of: state(release: older), diskGiB: 8, release: other) == .refused(.differentSystem))
     }
 
+    @Test func aSnapshotOfTheOldCounterUpdatesToAReleaseNumberAndNotBack() {
+        let counted = snapshotRelease("20261110-los24-r22", build: 2_026_110_817)
+        let numbered = snapshotRelease("20261114-los24-r26", build: 26, sha: String(repeating: "b", count: 64))
+        #expect(
+            SnapshotRules.restorePlan(of: state(release: counted), diskGiB: 8, release: numbered)
+                == .updatesAtNextStart(from: counted.releaseID, to: numbered.releaseID))
+        #expect(SnapshotRules.restorePlan(of: state(release: numbered), diskGiB: 8, release: counted) == .refused(.newerAndroid))
+    }
+
     @Test func aDiskSizeTheReleaseDoesNotAcceptIsRefused() {
         let release = snapshotRelease(minimumGiB: 4, maximumGiB: 16)
         #expect(SnapshotRules.restorePlan(of: state(release: release), diskGiB: 16, release: release) == .asIs)

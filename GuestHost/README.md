@@ -16,17 +16,27 @@ package with no UIKit, SwiftUI or runtime dependency, tested with `swift test`
 ```text
 Core/                                  GuestHostCore, a Swift package both
                                        applications import: sizes and their text,
-                                       the device's free space (HostStorage), the
-                                       free-space thresholds (RunSpace), the start
-                                       check's text (StartSpace), and the pause
-                                       for space (SpacePauser, SuspensionCheck,
+                                       the space a write can use on the device
+                                       (HostStorage), the free-space thresholds
+                                       (RunSpace), the start check's text
+                                       (StartSpace), and the pause for space
+                                       (SpacePauser, SuspensionCheck,
                                        SpacePause), and the hardware keyboard and
                                        pointer (the keys held down, Caps Lock, the
-                                       pointer's position, buttons and scroll)
+                                       pointer's position, buttons and scroll), and
+                                       the display's scale: guest pixels to a point,
+                                       or native, with the pixels and density it
+                                       gives a view, the host's stop of a run
+                                       (RunStop: kept until the run ends;
+                                       StopSettle: the guest's write-back before
+                                       it, bounded), and a monotonic clock that is
+                                       not a required-reason API (MonotonicClock)
 Sources/KernariumRuntimeLoader.h/.mm   loads the embedded runtime framework and
                                        wraps its C API (Runtime/KernariumRuntime.h)
 Sources/GuestDisplay.swift             the Metal view that shows the guest's display,
-                                       its view controller, and the SwiftUI wrapper
+                                       its view controller, and the SwiftUI wrapper;
+                                       the application gives it a scale
+                                       (GuestDisplayScale)
 Sources/GuestInput.swift               touch and pointer mapping onto the guest's
                                        touchscreen range, display viewport geometry
 Sources/GuestHardwareInput.swift       what the display does with hardware keys and
@@ -37,6 +47,10 @@ Sources/GuestResizeHold.swift          when the guest keeps its display mode whi
 Sources/SceneCoverage.swift            whether a window scene fills its screen
 Sources/GuestRestartEvent.swift        a restart the guest asked for, as the runtime
                                        reports it
+Sources/GuestStopDelivery.swift        how an application delivers a run's host stop
+                                       (RunStop): off the main actor, on the queue of
+                                       its runtime calls, again until the run ends, the
+                                       guest's write-back first
 Sources/LinuxKeyboard.swift            characters to Linux key codes
 Sources/ZstdUtil.swift                 streamed, sparse zstd decode
 Sources/MicrophonePermission.swift     the system microphone permission, read and requested
@@ -44,15 +58,18 @@ Sources/MetalShaderCache.swift         the bound on Metal's per-application shad
 Sources/MesaShaderCache.swift          the place and size limit of Mesa's disk shader cache
 Sources/GuestProcessorLimit.swift      the vCPU count the applications default to and offer
                                        at most, as the loader answers it
-Config/Signing.xcconfig                the signing settings both Xcode projects use as
-                                       their base configuration
+Config/Signing.xcconfig                the signing settings Kernarium's Xcode project
+                                       uses as its base configuration and Andarium's
+                                       `Config/Andarium.xcconfig` includes
 ```
 
 ## Signing
 
-Both projects take their signing from `Config/Signing.xcconfig`, which names no
-team. The signer's own Apple Developer team goes in `Config/Signing.local.xcconfig`,
-which the base file includes when it exists and Git ignores:
+Both projects take their signing from `Config/Signing.xcconfig` (Kernarium as its
+base configuration, Andarium through its own `Config/Andarium.xcconfig`, which
+includes it), and it names no team. The signer's own Apple Developer team goes in
+`Config/Signing.local.xcconfig`, which that file includes when it exists and Git
+ignores:
 
 ```sh
 cp GuestHost/Config/Signing.local.xcconfig.example GuestHost/Config/Signing.local.xcconfig

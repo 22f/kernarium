@@ -41,6 +41,10 @@ struct RunEnd final {
     Kind kind {Kind::none};
     /* The guest's raw restart command. */
     std::string command;
+    /* Whether the boot that ended had finished, where this guest's console
+     * says so (the loop guard counts a restart before that as early). */
+    uml::emulator::BootCompletion completion {
+        uml::emulator::BootCompletion::unobserved};
 };
 
 /* The delays the loop waits for. The runtime uses the defaults. */
@@ -346,14 +350,10 @@ private:
          * link. */
         machine.stopBoot();
         machine.resetLink();
-        if (!guard.may_restart(machine.now())) {
+        if (!guard.may_restart(machine.now(), end.completion)) {
             machine.say(
-                "the guest restarted " +
-                std::to_string(guard.early_restarts()) +
-                " times in a row within " +
-                std::to_string(
-                    uml::emulator::early_restart_window.count()) +
-                " s of booting; not booting it again");
+                "the guest " + guard.end_message() +
+                "; not booting it again");
             return KERNARIUM_RUNTIME_RESULT_RESTART_LOOP;
         }
         ++restarts;
