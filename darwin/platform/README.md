@@ -127,7 +127,10 @@ interface to the wire.
   per position, and every frame and still is delivered in that orientation,
   unturned and unmirrored where its connection accepts the setting, whatever
   turn, mirroring or still compensation the system would apply by default; a
-  Mac's cameras state 0 and take none of this.
+  Mac's cameras state 0 and take none of this. Every camera's zoom range holds
+  1.0 (Android's rule): a single lens states its own factors, so its 1.0 is its
+  own full field of view, and only a zoom camera is scaled by the host's display
+  multiplier (`zoomRatioScale`), as the triple camera's ultra wide lens at 0.5.
 - **Sessions.** `openSession()` is the one call that can light the system's
   capture indicator, and it returns null unless the system has granted access.
   One session is a single `AVCaptureMultiCamSession` on iOS (an

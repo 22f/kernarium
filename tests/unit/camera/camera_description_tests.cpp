@@ -118,6 +118,25 @@ void testPhoneOrder()
             "ultra wide is shorter, telephoto longer");
 }
 
+// Android requires every camera's zoom ratio range to hold 1.0, and a single lens's 1.0 is its own full field of view:
+// a client that rebinds a camera re-applies the ratio 1.0, so a lens whose range starts above it fails the client, and one
+// whose range starts below it (an ultra wide stated as 0.5) opens at a crop of its own view. Only the zoom camera, which
+// switches between lenses, has a range that starts below 1.0.
+void testEveryZoomRangeHoldsOne()
+{
+    for (const auto profile : {SyntheticCameraProfile::phone, SyntheticCameraProfile::tablet,
+                               SyntheticCameraProfile::tabletDualFront, SyntheticCameraProfile::laptop}) {
+        const Host host(profile);
+        for (const auto tier : {CameraTier::small, CameraTier::large})
+            for (const auto& camera : host.arrange(tier)) {
+                require(camera.wire.zoom_min_q16 <= 65536 && camera.wire.zoom_max_q16 >= 65536,
+                        "every described camera's zoom range holds 1.0");
+                if (camera.info.lens != CameraLensKind::zoom)
+                    require(camera.wire.zoom_min_q16 == 65536, "a single lens's widest view is its ratio 1.0");
+            }
+    }
+}
+
 void testOtherHosts()
 {
     const Host tablet(SyntheticCameraProfile::tablet);
@@ -985,6 +1004,7 @@ void testAFrontCameraWithoutFormatsIsLimitedToo()
 int main()
 {
     testPhoneOrder();
+    testEveryZoomRangeHoldsOne();
     testOtherHosts();
     testTiers();
     testOfferedStillsFollowTheAnchor();
