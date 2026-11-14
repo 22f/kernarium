@@ -26,6 +26,7 @@ VERIFIER = Path("tools/verify-target-files.py")
 ZOOM = "config_enableZoom"
 AUX_CAMERAS = "config_enableAuxCameras"
 IGNORED_AUX_CAMERAS = "config_ignoredAuxCameraIds"
+MAIN_CAMERAS = "LensZoomRatioUtils.getMainCameras("
 
 
 def fail(message: str) -> None:
@@ -102,6 +103,10 @@ def check(android_root: Path) -> None:
     if labels is None or [item.strip() for item in labels.group(1).split(",")] != [
             "0.5f", "1f", "2f", "2.5f", "3f", "4f", "5f"]:
         fail("the camera application's patches do not snap the lens labels to 0.5, 1, 2, 2.5, 3, 4 and 5")
+    # The labels of a side are relative to its main camera, found for the internal and the external
+    # cameras alike by the same grouping.
+    if not any(MAIN_CAMERAS in line for line in added):
+        fail(f"the camera application's patches never group the cameras of a side: no line adds {MAIN_CAMERAS}")
 
 
 def fixtures(android_root: Path) -> None:
@@ -140,6 +145,10 @@ def fixtures(android_root: Path) -> None:
                                           f'<bool name="{ZOOM}">false</bool>'), encoding="utf-8")
             expect_failure(lambda: check(copy), "a patch that turns free zoom off by default")
             patch.write_text(text, encoding="utf-8")
+            if MAIN_CAMERAS in text:
+                patch.write_text(text.replace(MAIN_CAMERAS, "mainCamerasOf("), encoding="utf-8")
+                expect_failure(lambda: check(copy), "a patch that does not group the cameras of a side")
+                patch.write_text(text, encoding="utf-8")
         check(copy)
 
 

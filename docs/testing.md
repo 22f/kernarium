@@ -770,18 +770,22 @@ on an M4 or newer Mac.
 
 Build-side contracts need no Android build: `lineage24-target-files-fixtures`,
 `lineage24-builder-lane`, `lineage24-release-contract`,
-`lineage24-camera-app-contract`, `lineage24-first-boot-precompile` and the
-`lineage24-mesa-venus-*` tests run the producer's verifiers over fixtures, and
+`lineage24-first-boot-precompile` and the `lineage24-mesa-venus-*` tests run
+the producer's verifiers over fixtures, and
 `android-partition-boot-selection`, `android17-instance-rules` and
 `android17-macos-launcher-options` cover the host library and launcher over the
 storage layout (`android17-launcher-arguments`,
 where the Android CLI is built, runs the executable's own argument checks)
 ([storage](../android/lineage-24/README.md#static-disk-and-boot-contract),
-[block device](../darwin/device/block/README.md)). `guest-android-disks`
-(integration) boots the Linux test guest on a release and a data disk the
-library created. `gnss-hal-nmea`, `gnss-hal-policy`, `gnss-hal-engine`,
-`gnss-hal-entry` and `gnss-hal-callbacks` (unit) compile the guest GNSS HAL's
-headers ([Location](../android/lineage-24/README.md#location)) against the host
+[block device](../darwin/device/block/README.md)).
+`lineage24-camera-app-contract` checks that the camera application's overlay,
+its patch series and the target-files verifier's constants name the same
+settings and values; what the application then does is the image's to show.
+`guest-android-disks` (integration) boots the Linux test guest on a release
+and a data disk the library created. `gnss-hal-nmea`, `gnss-hal-policy`,
+`gnss-hal-engine`, `gnss-hal-entry` and `gnss-hal-callbacks` (unit) compile the
+guest GNSS HAL's headers
+([Location](../android/lineage-24/README.md#location)) against the host
 writer's own epochs: the reading of the stream, the reporting rules, the
 session and the AIDL entry points, with a pipe for the receiver and a counting
 wakelock, and with a framework callback that does not answer, so that no entry

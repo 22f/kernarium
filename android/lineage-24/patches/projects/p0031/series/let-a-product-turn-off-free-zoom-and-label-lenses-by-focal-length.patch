@@ -14,23 +14,25 @@ field of view.
 Label and order the lens buttons by the ratio of each camera's 35
 mm-equivalent focal length (the focal length over the sensor diagonal)
 to that of the main camera of its side, instead of the ratio of view
-angles that CameraX truncates to whole degrees. A ratio within 20 % of
-0.5, 1, 2, 2.5, 3, 4 or 5 takes that label, and any other shows one
-decimal. CameraX's ratio stays the fallback for a camera whose
-characteristics lack the focal length or the sensor size.
+angles that CameraX truncates to whole degrees. The main camera of a
+side is the one with the lowest ID, and all the external cameras are
+one side. A ratio within 20 % of 0.5, 1, 2, 2.5, 3, 4 or 5 takes that
+label, and any other shows one decimal. CameraX's ratio stays the
+fallback for a camera whose characteristics lack the focal length or
+the sensor size.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- .../org/lineageos/aperture/CameraActivity.kt  | 12 ++--
- .../lineageos/aperture/SettingsActivity.kt    | 25 ++++++++
- .../org/lineageos/aperture/models/Camera.kt   | 40 ++++++++++++
- .../aperture/repositories/CameraRepository.kt | 17 ++++-
+ .../org/lineageos/aperture/CameraActivity.kt  | 12 ++-
+ .../lineageos/aperture/SettingsActivity.kt    | 25 ++++++
+ .../org/lineageos/aperture/models/Camera.kt   | 40 ++++++++++
+ .../aperture/repositories/CameraRepository.kt | 19 ++++-
  .../repositories/OverlaysRepository.kt        |  5 ++
  .../aperture/ui/views/LensSelectorLayout.kt   |  6 +-
- .../aperture/utils/LensZoomRatioUtils.kt      | 62 +++++++++++++++++++
- .../aperture/viewmodels/CameraViewModel.kt    | 35 +++++++++--
+ .../aperture/utils/LensZoomRatioUtils.kt      | 79 +++++++++++++++++++
+ .../aperture/viewmodels/CameraViewModel.kt    | 35 ++++++--
  app/src/main/res/values/config.xml            |  5 ++
- 9 files changed, 192 insertions(+), 15 deletions(-)
+ 9 files changed, 212 insertions(+), 14 deletions(-)
  create mode 100644 app/src/main/java/org/lineageos/aperture/utils/LensZoomRatioUtils.kt
 
 diff --git a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
@@ -207,40 +209,39 @@ index 0847e6fd0c324d502037861064150c946fb6f8f2..776087556aaf29fa6c46bdd105e94157
          }
      }
 diff --git a/app/src/main/java/org/lineageos/aperture/repositories/CameraRepository.kt b/app/src/main/java/org/lineageos/aperture/repositories/CameraRepository.kt
-index e47ac484c2c8d9ef4e3ddf8c1751872a77d53743..66754a7d98cbff0a35658afd3631ac916fd46358 100644
+index e47ac484c2c8d9ef4e3ddf8c1751872a77d53743..325b36f0b135ac7f2052927de70ac5065e1171c2 100644
 --- a/app/src/main/java/org/lineageos/aperture/repositories/CameraRepository.kt
 +++ b/app/src/main/java/org/lineageos/aperture/repositories/CameraRepository.kt
-@@ -54,12 +54,22 @@ class CameraRepository(
-      * List of internal cameras. These should never change.
-      */
-     private val internalCameras by lazy {
--        cameraProvider.availableCameraInfos
-+        val cameraXCameraInfos = cameraProvider.availableCameraInfos
-             .filter { cameraXCameraInfo ->
-                 cameraXCameraInfo.lensFacing != CameraSelector.LENS_FACING_EXTERNAL
-                         && cameraXCameraInfo.isInternalCameraAllowed()
-             }
--            .mapToCamera()
-+
-+        // The main camera of a side is the one with the lowest ID
-+        val mainCameraXCameraInfos = cameraXCameraInfos
-+            .groupBy { it.lensFacing }
-+            .mapValues { (_, sameSideCameraXCameraInfos) ->
-+                sameSideCameraXCameraInfos.minBy { Camera2CameraInfo.from(it).cameraId }
-+            }
-+
-+        cameraXCameraInfos.map {
-+            it.toCamera(mainCameraXCameraInfos.getValue(it.lensFacing))
-+        }.sortedBy { it.cameraId }
+@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.shareIn
+ import org.lineageos.aperture.ext.permissionGranted
+ import org.lineageos.aperture.models.Camera
+ import org.lineageos.aperture.models.CameraFacing
++import org.lineageos.aperture.utils.LensZoomRatioUtils
+ 
+ /**
+  * Repository that provides camera devices.
+@@ -132,12 +133,26 @@ class CameraRepository(
+         }
      }
  
-     val mainBackCamera by lazy {
-@@ -134,10 +144,11 @@ class CameraRepository(
- 
-     private fun List<CameraInfo>.mapToCamera() = map { it.toCamera() }.sortedBy { it.cameraId }
+-    private fun List<CameraInfo>.mapToCamera() = map { it.toCamera() }.sortedBy { it.cameraId }
++    /**
++     * Map camera infos to cameras. The lens buttons of a side are relative to its main camera, the
++     * one with the lowest ID. All the external cameras are on one side.
++     */
++    private fun List<CameraInfo>.mapToCamera(): List<Camera> {
++        val mainCameraInfos = LensZoomRatioUtils.getMainCameras(
++            this,
++            { it.lensFacing },
++            { Camera2CameraInfo.from(it).cameraId },
++        )
++
++        return map { it.toCamera(mainCameraInfos.getValue(it.lensFacing)) }
++            .sortedBy { it.cameraId }
++    }
  
 -    private fun CameraInfo.toCamera() = Camera.fromCameraX(
-+    private fun CameraInfo.toCamera(mainCameraInfo: CameraInfo = this) = Camera.fromCameraX(
++    private fun CameraInfo.toCamera(mainCameraInfo: CameraInfo) = Camera.fromCameraX(
          this,
          extensionsManager,
          overlaysRepository,
@@ -294,10 +295,10 @@ index c15c0b3c19c82c85a2d1f87be6b78e0227e05ad3..bdb393649728e7c8ce415048d6a090b8
  
 diff --git a/app/src/main/java/org/lineageos/aperture/utils/LensZoomRatioUtils.kt b/app/src/main/java/org/lineageos/aperture/utils/LensZoomRatioUtils.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..0e73640b4c4c3ea7509eff19a462508d6e250694
+index 0000000000000000000000000000000000000000..364736a6508c7b9ef84b18b030d2aee8072c9803
 --- /dev/null
 +++ b/app/src/main/java/org/lineageos/aperture/utils/LensZoomRatioUtils.kt
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,79 @@
 +/*
 + * SPDX-FileCopyrightText: The LineageOS Project
 + * SPDX-License-Identifier: Apache-2.0
@@ -346,6 +347,23 @@ index 0000000000000000000000000000000000000000..0e73640b4c4c3ea7509eff19a462508d
 +        }
 +
 +        return snapToLabelRatio(focalLengthPerDiagonal / mainFocalLengthPerDiagonal)
++    }
++
++    /**
++     * Get the main camera of each side: of the cameras that face the same way, the one with the
++     * lowest ID. The external cameras all face the same side, so they share one main camera.
++     *
++     * @param cameras The cameras
++     * @param side The side a camera faces
++     * @param cameraId The ID of a camera
++     * @return The main camera of each side
++     */
++    fun <T, S> getMainCameras(
++        cameras: Collection<T>,
++        side: (T) -> S,
++        cameraId: (T) -> String,
++    ): Map<S, T> = cameras.groupBy(side).mapValues { (_, sameSideCameras) ->
++        sameSideCameras.minBy(cameraId)
 +    }
 +
 +    /**

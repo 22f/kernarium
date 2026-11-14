@@ -343,8 +343,9 @@ Lens launcher and button, with lens buttons labelled by focal length and with
 a switch for free zoom (route `p0031`). Its lens selector lists each lens of
 the host as a camera of its own and the camera has no free zoom: a button for
 each lens, ordered ultra wide, main, telephoto, and labelled by the ratio of
-its 35 mm-equivalent focal length to the main back camera's, snapped to 0.5,
-1, 2, 2.5, 3, 4 or 5 when within 20 %. Pinch to zoom (the front camera's too),
+its 35 mm-equivalent focal length to that of the main camera of its side (the
+lowest camera ID; the external cameras are one side), snapped to 0.5, 1, 2,
+2.5, 3, 4 or 5 when within 20 %. Pinch to zoom (the front camera's too),
 the zoom slider and the Zoom action of the hardware keys are off, the volume
 keys keep their other actions (the shutter by default), and a tap on the
 active button does nothing. A product overlay in
