@@ -17,9 +17,9 @@ enum class Client : std::uint8_t {
  * the microphone is being captured, and returns to playback when capture
  * leaves. Only while the microphone is captured may a Bluetooth headset be the
  * input (audio_session_category.hpp has the options and what they cost the
- * headset's output). The category is set only when it changes: a session that
- * holds it is not set again, as that takes about 300 ms and posts a route
- * change. The session is deactivated when no client is left.
+ * headset's output). The category is set only when the plan or the session's
+ * reported settings changed. The session is deactivated when no client is
+ * left.
  *
  * acquire() returns false if the system refuses the session; the client then
  * is not counted. macOS has no audio session, and both calls do nothing. */

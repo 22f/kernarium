@@ -62,30 +62,60 @@ static_assert(option::allowBluetoothA2DP ==
 static_assert(option::bluetoothHighQualityRecording ==
     AVAudioSessionCategoryOptionBluetoothHighQualityRecording);
 
+/* The option bits whose loss changes where the audio goes. */
+constexpr std::uint32_t routingOptions = option::allowBluetoothHandsFree |
+    option::allowBluetoothA2DP | option::bluetoothHighQualityRecording;
+
 bool setCategory(AVAudioSession* session, const CategoryPlan& plan,
     NSError** error) noexcept
 {
+    NSString* const category = plan.category == Category::playAndRecord
+        ? AVAudioSessionCategoryPlayAndRecord
+        : AVAudioSessionCategoryPlayback;
     if (![session
-            setCategory:plan.category == Category::playAndRecord
-                ? AVAudioSessionCategoryPlayAndRecord
-                : AVAudioSessionCategoryPlayback
+            setCategory:category
                    mode:AVAudioSessionModeDefault
                 options:static_cast<AVAudioSessionCategoryOptions>(plan.options)
                   error:error])
         return false;
+    heldPlan.reset();
+    // The session lock does not cover the rest of the application, and the
+    // picture-in-picture window sets the category too. A call of that kind
+    // between the set above and the reads below leaves the session in its
+    // state, and what is read then must not stand for the plan: it is
+    // remembered only if it agrees with what was asked for, so that otherwise
+    // the next apply() sets the category again.
+    NSString* const reportedCategory = session.category;
+    NSString* const reportedMode = session.mode;
+    const NSUInteger reportedOptions = session.categoryOptions;
+    if (![reportedCategory isEqualToString:category] ||
+        ![reportedMode isEqualToString:AVAudioSessionModeDefault] ||
+        (reportedOptions & plan.options & routingOptions) !=
+            (plan.options & routingOptions)) {
+        static bool reported = false;
+        if (!std::exchange(reported, true)) {
+            std::fprintf(stderr,
+                "Audio session settings differ from the category just set "
+                "(options %u asked for, %lu reported); setting it again with "
+                "the next use\n",
+                plan.options, static_cast<unsigned long>(reportedOptions));
+        }
+        return true;
+    }
     heldPlan = plan;
-    heldCategory = session.category;
-    heldMode = session.mode;
-    heldOptions = session.categoryOptions;
+    heldCategory = reportedCategory;
+    heldMode = reportedMode;
+    heldOptions = reportedOptions;
     return true;
 }
 
 /* Whether the session holds `plan` as setCategory() left it. Setting a
  * category the session already has is not free: on an iPhone a
- * play-and-record one takes about 300 ms and posts a category-change route
- * notification, on which the output restarts and takes the session again
- * (apply() below), and each such turn blocks the thread that serves the guest's
- * audio. */
+ * play-and-record one takes hundreds of milliseconds and posts a
+ * category-change route notification, on which the output restarts and takes
+ * the session again (apply() below). Each such turn blocks the thread that
+ * serves the guest's audio, and the guest's capture loses the periods it is
+ * owed. */
 bool holds(AVAudioSession* session, const CategoryPlan& plan) noexcept
 {
     return heldPlan == plan &&

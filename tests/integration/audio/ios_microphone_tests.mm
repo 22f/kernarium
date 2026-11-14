@@ -62,6 +62,9 @@ std::atomic<bool> refuseBluetoothOptions {};
 NSString* __strong sessionCategory = AVAudioSessionCategorySoloAmbient;
 NSString* __strong sessionMode = AVAudioSessionModeDefault;
 std::atomic<NSUInteger> sessionOptions {};
+// What another part of the application does to the session right after a
+// category call took effect, before the caller reads the session back.
+void (*afterCategorySet)() = nullptr;
 // The engine the microphone started last, to post its configuration change.
 AVAudioEngine* __weak startedEngine {};
 
@@ -137,6 +140,8 @@ void installHooks()
               return NO;
           }
           changeSession(name, mode, options);
+          if (afterCategorySet != nullptr)
+              afterCategorySet();
           return YES;
         }));
     Method reportedCategory =
@@ -619,6 +624,67 @@ void refusedBluetoothOptionsAreAskedAgainWhenTheMicrophoneIsBuiltAgain()
     uml::audio::session::release(Client::playback);
 }
 
+// Another part of the application sets the session's category too (the
+// picture-in-picture window does, as the app leaves the foreground), and the
+// session lock does not cover it. When its call lands between ours and our
+// reading of the session, what we read is its state, not the plan we set, and
+// that must not be remembered as ours: the next acquire sets the category again.
+void aChangeBetweenTheSetAndTheReadingIsNotRemembered()
+{
+    using uml::audio::session::Client;
+    otherAudioPlaying = false;
+    refuseBluetoothOptions = false;
+    resetSession();
+
+    // The recording category without the headset options, as the window sets it.
+    afterCategorySet = [] {
+        changeSession(AVAudioSessionCategoryPlayAndRecord,
+            AVAudioSessionModeDefault,
+            AVAudioSessionCategoryOptionMixWithOthers |
+                AVAudioSessionCategoryOptionDefaultToSpeaker |
+                AVAudioSessionCategoryOptionAllowBluetoothA2DP);
+    };
+    Recording recording;
+    check(recording.start(), "the microphone starts under the other caller");
+    afterCategorySet = nullptr;
+    int before = categoryCalls.load();
+    (void)uml::audio::session::acquire(Client::playback);
+    const NSUInteger headset = AVAudioSessionCategoryOptionAllowBluetoothHFP |
+        AVAudioSessionCategoryOptionBluetoothHighQualityRecording;
+    check(categoryCalls.load() == before + 1 &&
+            (categoryOptions.load() & headset) == headset &&
+            (sessionOptions.load() & headset) == headset,
+        "the next acquire asks for the headset options again",
+        "calls " + std::to_string(categoryCalls.load() - before));
+    before = categoryCalls.load();
+    (void)uml::audio::session::acquire(Client::playback);
+    check(categoryCalls.load() == before, "and once they are held sets nothing",
+        "calls " + std::to_string(categoryCalls.load() - before));
+    recording.stop();
+    uml::audio::session::release(Client::playback);
+
+    // The playback category in the movie mode, as the window sets it.
+    resetSession();
+    afterCategorySet = [] {
+        changeSession(AVAudioSessionCategoryPlayback,
+            AVAudioSessionModeMoviePlayback,
+            AVAudioSessionCategoryOptionMixWithOthers);
+    };
+    (void)uml::audio::session::acquire(Client::playback);
+    afterCategorySet = nullptr;
+    before = categoryCalls.load();
+    (void)uml::audio::session::acquire(Client::playback);
+    check(categoryCalls.load() == before + 1 &&
+            [sessionMode isEqualToString:AVAudioSessionModeDefault],
+        "a mode set in between is set again by the next acquire",
+        "calls " + std::to_string(categoryCalls.load() - before));
+    before = categoryCalls.load();
+    (void)uml::audio::session::acquire(Client::playback);
+    check(categoryCalls.load() == before, "and once it is held sets nothing",
+        "calls " + std::to_string(categoryCalls.load() - before));
+    uml::audio::session::release(Client::playback);
+}
+
 // A headset that connects or leaves changes the route under the running
 // engine, which the microphone builds again. The session stays taken, because
 // releasing it would return the category to playback, which switches a
@@ -717,6 +783,7 @@ int main()
         sessionCategoryIsSetOnlyWhenItChanges();
         aSessionChangedBehindItsBackIsSetAgain();
         refusedBluetoothOptionsAreAskedAgainWhenTheMicrophoneIsBuiltAgain();
+        aChangeBetweenTheSetAndTheReadingIsNotRemembered();
         deprecatedNotificationIsIgnored();
     }
     std::printf("%s: %d failure(s)\n", failures == 0 ? "PASS" : "FAIL",
