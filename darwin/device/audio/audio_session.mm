@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
+#include <optional>
 #include <utility>
 
 namespace uml::audio::session {
@@ -22,6 +23,17 @@ namespace {
 std::mutex lock;
 bool playbackNeeds {};
 bool captureNeeds {};
+// What the session holds from the last category apply() set: the plan, and the
+// category, mode and options the session itself reported right after. A later
+// apply() sets a category only when the plan or those reports differ, so that
+// whatever else changes the session (a media-services reset, another part of
+// the app) is set again.
+std::optional<CategoryPlan> heldPlan;
+NSString* __strong heldCategory;
+NSString* __strong heldMode;
+NSUInteger heldOptions {};
+// The session refused the Bluetooth options since the microphone last took it.
+bool bluetoothRefused {};
 double playbackCycle {};
 double captureCycle {};
 
@@ -53,29 +65,54 @@ static_assert(option::bluetoothHighQualityRecording ==
 bool setCategory(AVAudioSession* session, const CategoryPlan& plan,
     NSError** error) noexcept
 {
-    return [session
-        setCategory:plan.category == Category::playAndRecord
-            ? AVAudioSessionCategoryPlayAndRecord
-            : AVAudioSessionCategoryPlayback
-               mode:AVAudioSessionModeDefault
-            options:static_cast<AVAudioSessionCategoryOptions>(plan.options)
-              error:error];
+    if (![session
+            setCategory:plan.category == Category::playAndRecord
+                ? AVAudioSessionCategoryPlayAndRecord
+                : AVAudioSessionCategoryPlayback
+                   mode:AVAudioSessionModeDefault
+                options:static_cast<AVAudioSessionCategoryOptions>(plan.options)
+                  error:error])
+        return false;
+    heldPlan = plan;
+    heldCategory = session.category;
+    heldMode = session.mode;
+    heldOptions = session.categoryOptions;
+    return true;
 }
 
-/* Sets the category the current clients need and activates the session. */
+/* Whether the session holds `plan` as setCategory() left it. Setting a
+ * category the session already has is not free: on an iPhone a
+ * play-and-record one takes about 300 ms and posts a category-change route
+ * notification, on which the output restarts and takes the session again
+ * (apply() below), and each such turn blocks the thread that serves the guest's
+ * audio. */
+bool holds(AVAudioSession* session, const CategoryPlan& plan) noexcept
+{
+    return heldPlan == plan &&
+        [session.category isEqualToString:heldCategory] &&
+        [session.mode isEqualToString:heldMode] &&
+        session.categoryOptions == heldOptions;
+}
+
+/* Sets the category the current clients need, when the session does not hold
+ * it, and activates the session. */
 bool apply() noexcept
 {
     @try {
         AVAudioSession* session = [AVAudioSession sharedInstance];
         NSError* error = nil;
         const bool recording = captureNeeds;
-        if (!setCategory(session, categoryPlan(recording), &error)) {
+        const CategoryPlan wanted = categoryPlan(recording, !bluetoothRefused);
+        if (!holds(session, wanted) && !setCategory(session, wanted, &error)) {
             // The microphone worked before the Bluetooth options, and a
             // session that refuses them must not cost the guest it.
             static bool reported = false;
-            if (!recording ||
-                !setCategory(session, categoryPlan(recording, false), &error))
+            const CategoryPlan fallback = categoryPlan(recording, false);
+            if (!recording || bluetoothRefused ||
+                (!holds(session, fallback) &&
+                    !setCategory(session, fallback, &error)))
                 return false;
+            bluetoothRefused = true;
             if (!std::exchange(reported, true)) {
                 std::fprintf(stderr,
                     "Audio session refused the Bluetooth microphone options; "
@@ -108,6 +145,11 @@ bool acquire(Client client) noexcept
     bool& needs = client == Client::capture ? captureNeeds : playbackNeeds;
     const bool before = needs;
     needs = true;
+    // The microphone starting, or built again after a route change that may
+    // allow them, asks for the Bluetooth options once more; the output taking
+    // the session does not.
+    if (client == Client::capture)
+        bluetoothRefused = false;
     if (apply())
         return true;
     needs = before;

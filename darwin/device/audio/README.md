@@ -89,6 +89,9 @@ reads or opens the microphone, and no permission prompt can appear.
 - On iOS the microphone never takes the audio session from an app that plays or
   records, such as a call. The session is shared with the output
   (`audio_session.hpp`); macOS has no audio session.
+- The shared session's category is set only when it changes, or when something
+  else changed it: setting the one the session holds takes about 300 ms on an
+  iPhone and posts a route change, which restarts the output and sets it again.
 - While the guest records, a connected Bluetooth headset is the input, over the
   hands-free profile (full bandwidth where the headset supports high-quality
   recording), and the headset's output moves to that profile too, at telephone
