@@ -10,21 +10,22 @@
 # 3 SEVERE, 4 CRITICAL) and three reserved bytes that are zero. Android's
 # EMERGENCY (5) and SHUTDOWN (6) are not severities of the wire.
 #
-# The host encodes every frame that is not a `reject-` frame, and the guest
-# reads each of them as the severity described. The guest closes the connection
-# on every `reject-` frame and keeps the severity it had; the host never
-# encodes one.
+# The host's encoder writes every frame that is not a `reject-` frame, and the
+# guest reads each of them as the severity described; the application's policy
+# sends only NONE and CRITICAL. The guest closes the connection on every
+# `reject-` frame and keeps the severity it had; the host never encodes one.
 
-# NONE: the host is nominal.
+# NONE: the host's thermal state is nominal, fair or serious.
 none: 41 54 48 31 00 00 00 00
 
-# LIGHT: the host's thermal state is fair.
+# LIGHT: the guest reports it; the application does not send it.
 light: 41 54 48 31 01 00 00 00
 
-# SEVERE: the host's thermal state is serious.
+# SEVERE: the guest reports it and caps the frame rate; the application does
+# not send it.
 severe: 41 54 48 31 03 00 00 00
 
-# CRITICAL: the host's thermal state is critical.
+# CRITICAL: the host's thermal state is critical; the guest caps the frame rate.
 critical: 41 54 48 31 04 00 00 00
 
 # Severity 5 is Android's EMERGENCY, which the guest never reports.
