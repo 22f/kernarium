@@ -2003,9 +2003,13 @@ void aWatchFollowsLevelsThatAlternate()
 	uml::platform::publishGpuCacheReclaimer(nullptr);
 	KindCounts counts;
 	StderrCapture capture;
+	/* A retry interval far shorter than the wait below, so that a retry the
+	 * watch wrongly kept pending would come due inside it. */
+	PressureTiming timing;
+	timing.retry_interval_ns = 20 * millisecond;
 	{
 		const auto watch = uml::runtime::start_memory_pressure_response(
-			&countKinds, &counts);
+			&countKinds, &counts, timing);
 		require(watch != nullptr);
 		for (int cycle = 0; cycle < 3; ++cycle) {
 			raiseAndWait(DISPATCH_MEMORYPRESSURE_CRITICAL);
