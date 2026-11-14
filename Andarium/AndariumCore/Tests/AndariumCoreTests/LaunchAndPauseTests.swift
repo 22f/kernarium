@@ -286,6 +286,12 @@ struct PauseControllerTests {
         #expect(controller.phase == .foreground)
     }
 
+    /// The stop's write-back (`StopSettle`, GuestHostCore's) waits as long as an
+    /// edge's own work may take.
+    @Test func theStopsWriteBackWaitsAsLongAsAnEdge() {
+        #expect(StopSettle.bound == PauseController.edgeBudget)
+    }
+
     @Test func aSecondBackgroundEdgeIsIgnored() throws {
         let (controller, effects, _) = try makeController()
         controller.guestDidStart()

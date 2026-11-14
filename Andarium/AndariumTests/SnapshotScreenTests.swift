@@ -155,7 +155,7 @@ struct SnapshotWordsTests {
             == "Everything the virtual machine has stored is deleted, and its 5 snapshots with it. This can\u{2019}t be undone.")
         #expect(SnapshotWords.lowSpaceText(hasSnapshots: false, startReserve: "2 GiB", device: "iPhone").hasSuffix("iPhone Storage."))
         #expect(SnapshotWords.lowSpaceText(hasSnapshots: true, startReserve: "2 GiB", device: "iPhone").hasSuffix("iPhone Storage, or delete snapshots."))
-        #expect(SnapshotWords.backupNote(device: "iPhone", hasSnapshots: false) == "Puts the virtual machine's apps and files in iCloud and computer backups of this iPhone.")
+        #expect(SnapshotWords.backupNote(device: "iPhone", hasSnapshots: false) == "Puts the virtual machine’s apps and files in iCloud and computer backups of this iPhone.")
         #expect(SnapshotWords.backupNote(device: "iPhone", hasSnapshots: true).hasSuffix(" Snapshots are not included."))
         #expect(SnapshotWords.blockedText(.olderAndroid, hasOlderSnapshot: false) == StartBlock.olderAndroid.explanation)
         #expect(SnapshotWords.blockedText(.olderAndroid, hasOlderSnapshot: true).contains("restore an older snapshot"))

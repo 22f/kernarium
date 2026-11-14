@@ -247,7 +247,7 @@ enum SnapshotWords {
     /// Backup's note says snapshots are not in a backup, when there are some.
     static func backupNote(device: String, hasSnapshots: Bool) -> String {
         Sentences.join(
-            [String(localized: "Puts the virtual machine's apps and files in iCloud and computer backups of this \(device).")]
+            [String(localized: "Puts the virtual machine’s apps and files in iCloud and computer backups of this \(device).")]
                 + (hasSnapshots ? [String(localized: "Snapshots are not included.")] : []))
     }
 

@@ -26,7 +26,10 @@ Core/                                  GuestHostCore, a Swift package both
                                        pointer's position, buttons and scroll), and
                                        the display's scale: guest pixels to a point,
                                        or native, with the pixels and density it
-                                       gives a view, and a monotonic clock that is
+                                       gives a view, the host's stop of a run
+                                       (RunStop: kept until the run ends;
+                                       StopSettle: the guest's write-back before
+                                       it, bounded), and a monotonic clock that is
                                        not a required-reason API (MonotonicClock)
 Sources/KernariumRuntimeLoader.h/.mm   loads the embedded runtime framework and
                                        wraps its C API (Runtime/KernariumRuntime.h)
@@ -44,6 +47,10 @@ Sources/GuestResizeHold.swift          when the guest keeps its display mode whi
 Sources/SceneCoverage.swift            whether a window scene fills its screen
 Sources/GuestRestartEvent.swift        a restart the guest asked for, as the runtime
                                        reports it
+Sources/GuestStopDelivery.swift        how an application delivers a run's host stop
+                                       (RunStop): off the main actor, on the queue of
+                                       its runtime calls, again until the run ends, the
+                                       guest's write-back first
 Sources/LinuxKeyboard.swift            characters to Linux key codes
 Sources/ZstdUtil.swift                 streamed, sparse zstd decode
 Sources/MicrophonePermission.swift     the system microphone permission, read and requested

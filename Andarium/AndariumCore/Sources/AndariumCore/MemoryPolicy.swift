@@ -16,7 +16,7 @@ import Foundation
 ///   steps and at least 1.5 GiB, and never above the bound;
 /// - the default is what a new guest gets: the safe size held to 4 GiB, and on
 ///   a device whose bound reaches 4 GiB also the most that leaves the host
-///   GPU a gibibyte, so it is never above the safe size;
+///   GPU 992 MiB, so it is never above the safe size;
 /// - the graphics memory is the host GPU's budget, B, a guest of a size and
 ///   vCPU count would launch with, less the host-side memory a live camera
 ///   session holds out of it while Camera is on (`cameraReserveMiB`, the
@@ -124,7 +124,7 @@ public struct MemoryPolicy: Equatable, Sendable {
         return policy
     }
 
-    /// Where the runtime lowered the default to keep B at a gibibyte, the
+    /// Where the runtime lowered the default to keep B at 992 MiB, the
     /// default itself is the line, as it was before the range passed 4 GiB.
     /// Elsewhere the largest size a person may choose that still keeps that
     /// much: no lower than the default (a new guest is never warned about) and

@@ -273,9 +273,11 @@ struct SideKeysTouchTests {
             "the popover takes the touch beside its card: \(String(describing: popover.passthroughViews))")
     }
 
-    /// SwiftUI sets a popover's pass-through list empty again when it updates
-    /// the popover (here the card's words change, as the session's
-    /// capabilities do), and the screen stays one of its pass-through views.
+    /// The screen stays one of the popover's pass-through views once SwiftUI
+    /// has updated the popover (here the card's words change, as the session's
+    /// capabilities do) and once the list is set empty. SwiftUI empties it at
+    /// an update only in some processes (not after a fold session's walk), so
+    /// the test empties it itself.
     @Test func theTipsPopoverStillLetsATouchThroughOnceSwiftUIHasUpdatedIt() async throws {
         let run = try await RunningSession(self)
         defer { run.end() }
@@ -283,24 +285,24 @@ struct SideKeysTouchTests {
         try #require(await eventually { run.presented?.isBeingPresented == false }, "the tip did not show")
         let popover = try #require(run.presented?.popoverPresentationController)
         let screen = try #require(popover.presentingViewController.view)
+        let passesBeside = { popover.passthroughViews?.contains { $0 === screen } ?? false }
         try #require(
-            await eventually { popover.passthroughViews?.contains { $0 === screen } ?? false },
+            await eventually(passesBeside),
             "the popover takes the touch beside its card: \(String(describing: popover.passthroughViews))")
 
-        let emptied = Emptied()
-        let watch = popover.observe(\.passthroughViews, options: [.new]) { _, change in
-            MainActor.assumeIsolated { if (change.newValue ?? nil)?.isEmpty ?? true { emptied.count += 1 } }
-        }
-        defer { watch.invalidate() }
         run.model.capabilities = withoutApkInstall
-        try #require(await eventually { emptied.count > 0 }, "SwiftUI did not update the popover")
+        let card = try #require(run.presented?.viewIfLoaded)
+        try #require(
+            await eventually { !Self.elements(in: card).contains { $0.label.contains("Install APK") } },
+            "SwiftUI did not update the popover")
         #expect(
-            popover.passthroughViews?.contains { $0 === screen } ?? false,
+            await eventually(passesBeside),
             "the popover takes the touch beside its card after the update: \(String(describing: popover.passthroughViews))")
+        popover.passthroughViews = []
+        #expect(
+            await eventually(passesBeside),
+            "the popover takes the touch beside its card once the list was emptied: \(String(describing: popover.passthroughViews))")
     }
-
-    /// How many times SwiftUI set a popover's pass-through list empty.
-    @MainActor private final class Emptied { var count = 0 }
 
     // MARK: The tip's line for Install APK
 

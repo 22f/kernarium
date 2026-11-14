@@ -169,7 +169,7 @@ typedef struct kernarium_guest_memory_range {
 kernarium_guest_memory_range kernarium_runtime_loader_guest_memory_range(void);
 /* The most guest RAM, in MiB, the settings offer at `guest_processor_count`
  * vCPUs with `parameters` (zero vCPUs count as one): the largest multiple of 64
- * from 512 through the ceiling above that leaves the host GPU its 384 MiB floor
+ * from 512 through the ceiling above that leaves the host GPU its 352 MiB floor
  * under the memory limit the system sets this process. The ceiling where the
  * system sets none, the Mac included; 512 where even that leaves less than the
  * floor. The settings pass the maximum set. */
@@ -184,7 +184,7 @@ uint32_t kernarium_runtime_loader_maximum_guest_memory_mib_for_limit(
 /* The guest RAM, in MiB, a new guest gets at `guest_processor_count` vCPUs
  * (zero counts as one): the conservative size below, and where the system's
  * limit lets a guest have 4096 MiB at one vCPU also no more than the largest
- * multiple of 512 that leaves the host GPU a budget of 1024 MiB with
+ * multiple of 512 that leaves the host GPU a budget of 992 MiB with
  * `parameters`, the launch set. Never more than 4096, whatever is offered;
  * 4096 where the system sets no limit. A guest with more is likely to run
  * short of graphics memory. */
@@ -196,7 +196,7 @@ uint32_t kernarium_runtime_loader_default_guest_memory_mib_for_limit(
     uint64_t limit_bytes,
     uint32_t guest_processor_count,
     kernarium_launch_memory_set parameters);
-/* Nonzero where the default above is the size the host GPU's 1024 MiB budget
+/* Nonzero where the default above is the size the host GPU's 992 MiB budget
  * rule lowered, below the conservative size: a guest with more has less than
  * that for the GPU from the next multiple of 512, which the applications warn
  * about. Zero where the default is the conservative size, and then it says

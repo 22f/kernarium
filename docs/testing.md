@@ -320,14 +320,18 @@ the software renderer's contract. `KernariumAutomation` is the iPad's
 automation host.
 
 `kernarium-device-framework-symbols` and `kernarium-device-framework-embed`
-(tooling) cover the device-only embed script.
+(tooling) cover the device-only embed script, and `kernarium-host-stop-paths`
+(tooling) pins the call sites through which the application ends a running
+guest, each of which has the guest write back first. The hosted
+`GuestStopTests` cover that stop's order and bound.
 
 ### Andarium
 
 `guest-host-core` (unit, macOS) runs the Swift package `GuestHost/Core`, the
 free-space thresholds, suspension check and pause both applications share and
 the logic of the hardware keyboard and pointer (held keys, Caps Lock,
-positions, buttons, scroll), and
+positions, buttons, scroll), and the latch of a run's host stop with the
+guest's write-back before it (`RunStop`, `StopSettle`), and
 `andarium-core` (unit, macOS) runs the Swift package `Andarium/AndariumCore`
 with `swift test` (it includes the hardware input's plug policy and pointer
 capture, the snapshot store on APFS clones of sparse
@@ -408,8 +412,12 @@ mock data, `Andarium` the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
-FEEDBACK_ADDRESS=feedback@example.com FOLLOW_X_HANDLE=example_handle`; the scheme
-without the filter also runs `AndariumUITests`). The scheme's Test
+FEEDBACK_ADDRESS=feedback@example.com REVIEW_ID=id0000000000 FOLLOW_X_HANDLE=example_handle
+TIP_LITE=com.example.andarium.tip.lite TIP_PRO=com.example.andarium.tip.pro
+TIP_MAX=com.example.andarium.tip.max TIP_ULTRA=com.example.andarium.tip.ultra
+SHEET_DEVELOPER_NAME=example SHEET_DEVELOPER_GITHUB=example SHEET_DEVELOPER_X=example_handle
+ICP_NUMBER=示例ICP备00000000号-0A`;
+the scheme without the filter also runs `AndariumUITests`). The scheme's Test
 action pins English, so the tests that read the application's words do not
 depend on the language of the device; `LocalizationTests` names a lost pin and
 looks each language up by name, and the language a `-testLanguage` run asks
@@ -419,17 +427,30 @@ map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
 screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`,
-`SendFeedbackStartLogTests` (the sheet's tip and start log during a start),
+`SendFeedbackStartLogTests` (the sheet's tip and start log during a start) and
 `SendFeedbackFilesScreenTests` (files from Files: in place, the copy of a file
-that cannot be used there, the access held and stopped once) and
-`HomeMenuTests` (Home's toolbar menu) exist only in a build with
-`FEEDBACK_ADDRESS=feedback@example.com` on the command line, as the command
-above has it ([Send feedback](../Andarium/README.md#send-feedback)), and
-`HomePlainInfoTests` (the plain Info button) only in a build without it;
-`FollowXRowTests` exist only with `FOLLOW_X_HANDLE=example_handle`
-([Follow developer on X](../Andarium/README.md#follow-developer-on-x)); a run
-without them does not build them. The Mail composer, the picker and the
-guest's display are stand-ins. The hosted tests
+that cannot be used there, the access held and stopped once) exist only in a
+build with `FEEDBACK_ADDRESS=feedback@example.com` on the command line, as the
+command above has it ([Send feedback](../Andarium/README.md#send-feedback)); a
+run without it does not build them. Each other feature's tests need the example
+values of its own: `FollowXRowTests` `FOLLOW_X_HANDLE=example_handle`
+([Follow developer on X](../Andarium/README.md#follow-developer-on-x)),
+`ICPFootnoteTests` `ICP_NUMBER=示例ICP备00000000号-0A`
+([ICP filing number](../Andarium/README.md#icp-filing-number)),
+`TipJarScreenTests`, `TipJarHeaderTests` and `TipJarStoreKitTests` the four
+`TIP_` settings and the `SHEET_DEVELOPER_*` placeholders
+([Buy me tokens](../Andarium/README.md#buy-me-tokens); the last plays
+StoreKit's test session over `AndariumTests/TipJar.storekit`, example
+identifiers only, never the App Store), and `ReviewScreenTests`,
+`ReviewAskFlowTests` and `ReviewAskStoreTests` `REVIEW_ID`
+([Review on the App Store](../Andarium/README.md#review-on-the-app-store); the
+system's rating prompt is never asked for). `HomeMenuTests` (Home's toolbar
+menu) exist with any of Send feedback, Review and Buy me tokens, and
+`HomePlainInfoTests` (the plain Info button) only with none
+([Home toolbar menu](../Andarium/README.md#home-toolbar-menu)).
+`AndariumCoreTests` holds the tip sheet's states and the rating rule, counter
+and record as pure logic.
+The Mail composer, the picker and the guest's display are stand-ins. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
 opens the system's Settings or another app. The bundle's principal class
@@ -542,6 +563,11 @@ Tooling tests cover `scripts/check-privacy-manifests.py`
 device slice it packages), `Andarium/scripts/check-app-store-bundle.py`
 (`andarium-app-store-bundle`, the last build phase of the AppStore
 configuration, [configurations](../Andarium/README.md#configurations)), the
+tip sheet's words (`andarium-tip-words`: `Andarium/scripts/check-tip-words.py`
+rejects the forbidden terms of each language and a token amount in the
+`TipJar` table, and requires the statement that a tip is voluntary, one-time
+and the features free; the bundle check also covers the developer header's
+keys and artwork),
 document pickers' build conditions (`andarium-document-pickers`: the App Store
 configuration opens files in place, every other presents the copy-mode picker,
 and an in-place importer anywhere else is in an App Store branch or a named

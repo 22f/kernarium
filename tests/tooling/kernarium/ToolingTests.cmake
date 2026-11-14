@@ -95,3 +95,12 @@ if(TARGET uml-initramfs)
         LABELS kernarium;boot
         TIMEOUT 60)
 endif()
+
+# Every host-side end of a running guest goes through the launcher's stop, which
+# has the guest write back first.
+uml_add_tooling_test(
+    NAME kernarium-host-stop-paths
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_host_stop_paths.py
+    LABELS kernarium
+    TIMEOUT 30)

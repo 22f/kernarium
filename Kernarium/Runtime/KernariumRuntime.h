@@ -101,7 +101,7 @@ enum {
  * android_data_gib GiB when that is larger; it never shrinks one. The guest
  * has exactly these two disks. The kernel is carried by the runtime.
  *
- * The host GPU's budget is B = max(L - A - G - E - S, 384 MiB), evaluated
+ * The host GPU's budget is B = max(L - A - G - E - S, 352 MiB), evaluated
  * once at launch (see the architecture document): L is the application's
  * memory limit, G the guest's memory, and E the gadget cache plus the other
  * memory the guest side of the process uses. Without a limit B is G. The
@@ -216,7 +216,7 @@ typedef struct kernarium_runtime_boot {
  * the boot request it receives. */
 typedef struct kernarium_runtime_gpu_budget {
     uint32_t struct_size;
-    /* Nonzero when L - A - G - E - S is below the budget's 384 MiB floor: the
+    /* Nonzero when L - A - G - E - S is below the budget's 352 MiB floor: the
      * process is likely to be ended, the guest boots anyway with the budget
      * clamped to the floor, and the application is to say so. */
     uint32_t short_of_floor;

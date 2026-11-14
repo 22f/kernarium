@@ -178,6 +178,8 @@ def load_checker(path: Path):
     spec = importlib.util.spec_from_file_location("check_app_store_bundle", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    # The checker's dataclasses look their module up by name.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 

@@ -51,7 +51,7 @@ struct HomeView: View {
             .navigationTitle("Andarium")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    #if FEEDBACK_MAIL
+                    #if FEEDBACK_MAIL || TIP_JAR || APP_REVIEW
                     HomeToolbarMenu()
                     #else
                     HomeInfoButton()
@@ -81,6 +81,9 @@ struct HomeView: View {
         }
         #if FEEDBACK_MAIL
         .sendFeedbackSheet(model)
+        #endif
+        #if TIP_JAR
+        .tipJarSheet(model)
         #endif
         .microphoneAccessAlert()
         .locationAccessAlert()
@@ -581,7 +584,7 @@ struct UnfinishedUpdateCard: View {
                     .foregroundStyle(Color.orange)
                     .frame(width: 28)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Andarium's update didn't finish").font(.subheadline.weight(.semibold))
+                    Text("Andarium’s update didn’t finish").font(.subheadline.weight(.semibold))
                     Text(text)
                         .font(.footnote)
                         .foregroundStyle(.secondary)

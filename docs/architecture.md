@@ -142,7 +142,7 @@ host GPU's budget, B, is computed once at launch and fixed for the run
 (`platform/gpu_budget.hpp`, planned by `emulator/src/gpu_budget_plan.*`):
 
 ```text
-B = max(L - A - G - E - S, 384 MiB)
+B = max(L - A - G - E - S, 352 MiB)
 ```
 
 G is the guest's RAM, E the guest side's host memory, A the application's

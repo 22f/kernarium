@@ -44,8 +44,12 @@ uml_add_tooling_test(
 # The App Store configuration builds an application that passes this check as
 # its last build phase; the fixtures show it finds each problem the script's
 # header lists, and leaves the guest kernel image alone. They also show Send
-# feedback and Follow developer on X present only where the build names a
-# receiver or a handle, in either direction.
+# feedback present only where the build names a receiver, Buy me tokens only
+# where it names its four product identifiers, Review on the App Store only where
+# it names the application's identifier, Follow developer on X only where it names
+# a handle, the ICP filing number only where it names the number, and the tip
+# header's developer only where the product has Buy me tokens and the build names
+# the value, in either direction.
 uml_add_tooling_test(
     NAME andarium-app-store-bundle
     COMMAND ${Python3_EXECUTABLE} -B
@@ -53,6 +57,20 @@ uml_add_tooling_test(
         --checker ${PROJECT_SOURCE_DIR}/Andarium/scripts/check-app-store-bundle.py
     LABELS andarium;package
     TIMEOUT 600)
+
+# Buy me tokens' words are held to App Store Review Guideline 3.1.1: no donation,
+# plan, subscription, unlock, upgrade, premium, credit, balance or token amount
+# in any language of the table, and the English source says a tip is a voluntary
+# one-time purchase and every feature is free either way. The fixtures show the
+# check finds each, and the application's own table passes.
+uml_add_tooling_test(
+    NAME andarium-tip-words
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_check_tip_words.py
+        --checker ${PROJECT_SOURCE_DIR}/Andarium/scripts/check-tip-words.py
+        --table ${PROJECT_SOURCE_DIR}/Andarium/Localization/TipJar.xcstrings
+    LABELS andarium
+    TIMEOUT 120)
 
 # The document pickers open files in place in the App Store configuration and
 # present the copy-mode picker in every other: the sources are read as the

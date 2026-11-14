@@ -32,10 +32,13 @@ The project file is the JSON format Xcode 27 reads, kept in the canonical form
 after every hand edit. Every configuration takes its base settings from
 `Config/Andarium.xcconfig`, which includes
 `../GuestHost/Config/Signing.xcconfig` and sets what decides
-[Send feedback](#send-feedback); the signer's team is only in the ignored
-`Signing.local.xcconfig` beside the signing file
-([`GuestHost/README.md`](../GuestHost/README.md#signing)), so the project names
-no team.
+[Send feedback](#send-feedback), [Buy me tokens](#buy-me-tokens),
+[Review on the App Store](#review-on-the-app-store),
+[Follow developer on X](#follow-developer-on-x) and the
+[ICP filing number](#icp-filing-number); the
+signer's team is only in the ignored `Signing.local.xcconfig` beside the
+signing file ([`GuestHost/README.md`](../GuestHost/README.md#signing)), so the
+project names no team.
 
 ## Targets
 
@@ -232,10 +235,18 @@ everything that exists for automation or only pretends:
   ([`scripts/check-privacy-manifests.py`](../scripts/check-privacy-manifests.py));
   the script's header is the complete list.
 - It alone can carry [Send feedback](#send-feedback), and only when the
-  receiver's address is in the ignored `Config/Feedback.local.xcconfig`, and
+  receiver's address is in the ignored `Config/Feedback.local.xcconfig`,
+  [Buy me tokens](#buy-me-tokens), and only when the four product identifiers
+  are in the ignored `Config/TipJar.local.xcconfig`,
+  [Review on the App Store](#review-on-the-app-store), and only when the
+  application's App Store identifier is in the ignored
+  `Config/Review.local.xcconfig`, and
   [Follow developer on X](#follow-developer-on-x), and only when the handle is
   in the ignored `Config/Developer.local.xcconfig` and the logo in the ignored
-  `Config/Local/`.
+  `Config/Local/`, and the [ICP filing number](#icp-filing-number), and only
+  when the number is in the same file. The five switches are independent,
+  except that the pieces of the Buy me tokens sheet's header (the developer's
+  name, avatar and GitHub and X buttons) are carried only with Buy me tokens.
 
 ```sh
 cmake --preset kernarium-ios-device-android-app-store
@@ -256,28 +267,24 @@ not declare because only an App Store build is uploaded.
 
 Home's toolbar menu and a running session's Settings open a sheet that writes
 an email to the developer (`Shared/Feedback/`, the system's Mail composer sends
-it). Home's toolbar holds one menu in place of the Info button, with Info and
-Send feedback; it keeps Info's glyph and accessibility label and is on Welcome
-too, where Send feedback is reachable before a virtual machine is set up. A
-build without Send feedback keeps the plain Info button and holds no menu code
-(`Shared/HomeMenu.swift`). Info itself has no Send feedback section. The
-feature is compiled in, under the `FEEDBACK_MAIL` condition, only in an
-AppStore build whose ignored `Config/Feedback.local.xcconfig` (from
+it). It is compiled in, under the `FEEDBACK_MAIL` condition, only in an AppStore
+build whose ignored `Config/Feedback.local.xcconfig` (from
 `Feedback.local.xcconfig.example`) names the receiver, so a fork, a sideload or
 a Debug or Release build holds none of it, and every configuration's bundle
 check says whether it does: it also fails on the local receiver's bytes in any
 file of a bundle that does not name it (never printing it), and on an
 `Info.plist` whose values differ from `Config/Info.plist` (the preprocessing
-changes the feedback key alone). Tests and captures turn it on in a Debug build
-with `FEEDBACK_ADDRESS=feedback@example.com` on the `xcodebuild` line, which
-the bundle check accepts in Debug alone; `AndariumPreview` takes that
-arrangement only, never the local receiver, and its hooks into the sheet are
-not in the AppStore product. Its logic (`Shared/Feedback/Logic`) is also built,
-and tested, by AndariumCore's tests through a symlinked target no product
-links. The feature's words are looked up in the `Feedback` string table
-(zh-Hans, zh-Hant and ja are in [Languages](#languages)); the mail's subject
-prefix and its information block are English whatever the interface language,
-and the bug report's overlay text is the app's own.
+changes the keys of these features alone).
+Tests and captures turn it on in a Debug build with
+`FEEDBACK_ADDRESS=feedback@example.com` on the `xcodebuild` line, which the
+bundle check accepts in Debug alone; `AndariumPreview` takes that arrangement
+only, never the local receiver, and its hooks into the sheet are not in the
+AppStore product. Its logic (`Shared/Feedback/Logic`) is also built, and
+tested, by AndariumCore's tests through a symlinked target no product links.
+The feature's words are looked up in the `Feedback` string table (zh-Hans,
+zh-Hant and ja are in [Languages](#languages)); the mail's subject prefix and
+its information block are English whatever the interface language, and the bug
+report's overlay text is the app's own.
 
 Send needs both a problem (the mail's subject) and details (its body); white
 space counts as empty, and a file or the start log is neither. Send stays
@@ -349,7 +356,157 @@ adding `FOLLOW_X_LOGO_SOURCE=local` takes the logo from `Config/Local/`.
 `AndariumPreview` takes the arrangement only, never the local handle. The
 handle's shape and the address are in `Shared/FollowX/Logic`, which
 AndariumCore's tests build through a symlinked target no product links, and
-the words are in the `FollowX` string table.
+the words are in the `FollowX` string table. The [Buy me tokens](#buy-me-tokens)
+header's X button shares the logo and `FollowXProfile` and is keyed on a handle
+of its own, so a build with the button and without the row holds the logo and
+the address's builder and nothing else of the row.
+
+### ICP filing number
+
+For users whose App Store storefront is mainland China's, the last line of
+Info is the developer's ICP filing number, as the law asks: a centred
+footnote, shown as stored (not translated), linking to MIIT's filing site
+(`Shared/ICP/`). It shows only when StoreKit 2's `Storefront.current` is
+`CHN`, kept current through `Storefront.updates` while Info is open; an
+unknown storefront hides it, and nothing else decides (no locale, region,
+time zone or address).
+
+The number is the developer's and is tracked nowhere: the line is compiled in,
+under the `ICP_FILING` condition, only in an AppStore build whose ignored
+`Config/Developer.local.xcconfig` (from `Developer.local.xcconfig.example`)
+names `DEVELOPER_ICP_NUMBER`; it needs no tip, review or X value. The bundle
+check asserts both directions as for Follow developer on X: the number and its
+Info.plist key (`AndariumICPNumber`) are in no other product, the number is in
+no other file of one that names it, the local number is in no file of one that
+does not (as UTF-8 or UTF-16, never printed), and the
+arranged placeholder is in no product but Debug's. Tests and captures turn it
+on in a Debug build with `ICP_NUMBER=示例ICP备00000000号-0A`; the hosted tests
+inject the storefront. Whether `Storefront.updates` fires when the storefront
+first becomes known while Info is open only a device shows; otherwise the line
+appears at the next opening.
+
+### Buy me tokens
+
+A sheet in the shape of a chat offers four one-time tips, Lite, Pro, Max and
+Ultra (`Shared/TipJar/`), as consumable In-App Purchases through StoreKit 2.
+A tip is voluntary and unlocks nothing: every feature is free either way, and
+nothing about a tip is remembered, counted or shown outside the sheet. Its
+one entrance is the item in [Home's toolbar menu](#home-toolbar-menu), offered
+once a virtual machine is set up. The words never use "donate", "plan" or
+"subscribe" and name no token amount: `scripts/check-tip-words.py`
+(`andarium-tip-words`) checks every language of the `TipJar` string table, and
+each price is the store's own. The last words of a longer text are tied (a
+no-break space in English, U+2060 between the last characters in Chinese and
+Japanese) so that no short word or lone mark wraps alone; the word check reads
+a tie as a space or as nothing. The tier names are the products' own in App
+Store Connect; no tracked text assumes they appear on the system's purchase
+sheet.
+
+The feature is compiled in, under the `TIP_JAR` condition, only in an AppStore
+build whose ignored `Config/TipJar.local.xcconfig` (from
+`TipJar.local.xcconfig.example`) names all four products, so a fork, a
+sideload or a Debug or Release build holds none of it: no entrance, StoreKit
+use, string table or identifier. The bundle check says for every configuration
+whether it does, fails on identifiers without the code or the code without
+identifiers, and fails on the local identifiers in any file of a bundle that
+does not name them (as UTF-8 or UTF-16, never printed).
+Tests and captures turn it on in a Debug build with
+`TIP_LITE=com.example.andarium.tip.lite` and the same for `TIP_PRO`,
+`TIP_MAX` and `TIP_ULTRA`, which the check accepts in Debug alone.
+
+The sheet's states live in `Shared/TipJar/Logic` behind a store seam, which
+AndariumCore's tests build through a symlinked target no product links; the
+hosted StoreKit tests play purchases, Ask to Buy and unfinished transactions
+against `AndariumTests/TipJar.storekit` (example identifiers only), never the
+App Store. A listener from launch finishes every transaction the store holds
+unfinished, verified or not, because nothing is unlocked and an unfinished
+consumable blocks buying it again; a purchase that comes back unverified is
+thanked like any other. Nothing is collected, so the privacy manifest
+declares nothing for it.
+
+The sheet opens on a sender line (`Shared/TipJar/TipJarHeader.swift`): the
+developer's name, role and avatar, with a GitHub and an X button that open the
+profiles through `openURL`. Each piece follows what the build holds: no avatar
+keeps the application's mark, no name reads the role alone, and a button
+exists only where its handle does. The name, handles and artwork are the
+maker's own, in the ignored `Config/Developer.local.xcconfig` and
+`Config/Local/` (`developer-avatar.jpeg`, `github-logo.svg`, `x-logo.svg`),
+the same file and directory as [Follow developer on X](#follow-developer-on-x);
+they reach only an AppStore build that has Buy me tokens, as Info.plist keys
+and linked asset catalogs. A value without its artwork file fails the first
+build phase, so a name needs the avatar file and a handle its logo; nothing
+falls back. The avatar is compiled as it is, so its metadata goes into the
+product: strip it (an EXIF location, for one) before an archive. The bundle
+check compares keys and asset names, refuses the placeholders of every value
+in an AppStore build, and fails on an artwork file or a profile address in any
+bundle that does not name it. The tests' arrangement states
+`SHEET_DEVELOPER_NAME` and `SHEET_DEVELOPER_GITHUB` as `example` and
+`SHEET_DEVELOPER_X` as `example_handle`, with plain glyph catalogs in place of
+artwork; `SHEET_ARTWORK_SOURCE=local` and `FOLLOW_X_LOGO_SOURCE=local` take it
+from `Config/Local/`, for a capture.
+
+### Review on the App Store
+
+An item of [Home's toolbar menu](#home-toolbar-menu), offered once a virtual
+machine is set up, opens this application's App Store page at its write-review
+address through the system (`Shared/Review/`); it shows no prompt and no web
+view. It is compiled in, under the `APP_REVIEW` condition, only in an AppStore
+build whose ignored `Config/Review.local.xcconfig` (from
+`Review.local.xcconfig.example`) names the application's App Store identifier
+(`id` and its digits), so a fork, a sideload or a Debug or Release build holds
+no item, address or text. The bundle check says for every configuration
+whether it is compiled in, fails on the code without the identifier or the
+identifier without the code, refuses the all-zero placeholder in an App Store
+build, and fails on the identifier's digits in any file of a bundle that does
+not name it (as UTF-8 or UTF-16, never printed). Tests turn it on in a Debug
+build with `REVIEW_ID=id0000000000`, which the check accepts in Debug alone.
+Its word is the `Review` string table. Opening it answers the
+[Rating prompt](#rating-prompt).
+
+### Rating prompt
+
+The system's own rating prompt (`AppStore.requestReview(in:)`), requested once
+per device. It shows nothing of the application's own, is never tied to Buy me
+tokens, and shares the build switch of Review on the App Store: a product
+without that feature holds no request, counter or stored record.
+
+- **When.** The virtual machine has run five hours in the foreground (past
+  boot, scene active, not paused for space; the counter is written at each
+  state change and once a minute and never decreases); Home shows with a
+  virtual machine set up and none running or starting; the most recent run
+  ended normally (the run's end when the application saw it, else the previous
+  session record's `orderly`); no notice, sheet, alert, dialog or release-notes
+  ribbon is up; the scene is active; and Home has stayed so for a second.
+  Otherwise the next arrival at Home tries again.
+- **Once.** The request is recorded before it is made, and the application
+  does not look at what the system did: iOS decides whether anything shows, so
+  the person is asked once whether or not it did. Opening Review on the App
+  Store sets the same record. A record that cannot be read asks nothing.
+- **Storage.** The counter and the run's end are in `UserDefaults`; the record
+  is in `UserDefaults` and in a Keychain generic-password item of the
+  application's default access group (named after the bundle identifier),
+  device-only and not synchronized, read back as the furthest of the two. The
+  item survives deleting the application, so a reinstall is not asked again,
+  needs no entitlement, and is not touched by Erase guest, which deletes the
+  adb key only. Nothing about it leaves the device or enters a bug report, and
+  no privacy manifest or App Store metadata entry changes.
+- **Debug.** A Debug build sets the counter from `ANDARIUM_REVIEW_ASK_SECONDS`
+  and clears the record with `ANDARIUM_REVIEW_ASK_RESET=1` (`Live/`), for the
+  maker's own check; an App Store build compiles both out, which the bundle
+  check's knob scan covers. The application's own launch is the only one that
+  asks: the Simulator preview and a hosted test build their own.
+
+### Home toolbar menu
+
+When Send feedback, Review on the App Store or Buy me tokens is compiled in,
+Home's toolbar holds one menu in place of the Info button: it keeps Info's
+glyph and accessibility label, so the toolbar looks as it does without a menu,
+and holds Info, a separator, then Send feedback, Review on the App Store and
+Buy me tokens, each present only when its own feature is
+(`Shared/HomeMenu.swift`). Welcome has the menu too, so Send feedback is
+reachable before a virtual machine is set up; the other two need one. Without
+a feature, or with only Info to offer, Info stays the plain button and the
+build holds no menu code that names a feature.
 
 ## Model and storage
 
@@ -382,9 +539,9 @@ control out.
   of graphics memory (VRAM, the host GPU's budget): the System sheet turns the
   ticks past it orange and warns that games may (`GraphicsMemoryWarning`), and
   Home says nothing. The line is the default where the runtime lowered the
-  default to keep the GPU 1 GiB
+  default to keep the GPU 992 MiB
   (`kernarium_runtime_loader_default_guest_memory_holds_gpu_budget`), and
-  elsewhere the largest size whose estimate of VRAM is still 1 GiB or more
+  elsewhere the largest size whose estimate of VRAM is still 992 MiB or more
   (`Limits.minimumDefaultGraphicsMemoryMiB`), so a range above 4 GiB warns
   only where the estimate falls. The sheet also shows the loader's estimate of
   VRAM for the chosen memory and vCPUs and says it is separate from the
@@ -969,7 +1126,10 @@ is on. `AndariumCore/Adb` speaks the protocol.
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB
   debugging setting is, since adbd serves the application's key either way
-  (`Live/LiveGuestFiles.swift`, `AdbSync`, `GuestFiles`). One transfer runs
+  (`Live/LiveGuestFiles.swift`, `AdbSync`, `GuestFiles`). On a page 520 pt or
+  wider the list has Name, Modified and Size columns; Modified is as wide as the
+  widest date the language writes, English's width at least, so a date stays on
+  one line and Name gives up the room (`FileDateProbe`). One transfer runs
   at a time; Install APK and Create bug report wait for it. An import is
   written to a hidden `.andarium-*.part` name beside its destination and moved
   into place, so a stopped or failed one leaves nothing and a Replace keeps the
@@ -1027,15 +1187,21 @@ and Japanese, and follows the language of iOS and the per-app language setting.
 The strings are String Catalogs in `Localization/` (screens, permission texts,
 What's New notes) and in `AndariumCore`'s resources. The JIT texts are their own
 catalog, table `JIT`, which the App Store configuration leaves out of the
-bundle and its check asserts is absent. The Send feedback texts are another,
-table `Feedback`, built only where Send feedback is compiled in
-(`EXCLUDED_SOURCE_FILE_NAMES` in `Config/Andarium.xcconfig`); the bundle check
-refuses the table, by its file name, in a product without the feature and
-asks for it in every language of one with it. The text of Follow developer on X
-is the same, table `FollowX`. English is the key (a readout or a
+bundle and its check asserts is absent. The texts of Send feedback, Buy me
+tokens, Review on the App Store and Follow developer on X are catalogs of their
+own, tables `Feedback`, `TipJar`, `Review` and `FollowX`, built only where their
+feature is compiled in (`EXCLUDED_SOURCE_FILE_NAMES` in `Config/Andarium.xcconfig`);
+the bundle check refuses a table, by its file name, in a product without its
+feature and asks for it in every language of one with it. The tip's words keep
+to its rules in each language (`scripts/check-tip-words.py`): no donation, plan
+or subscription word (nor unlock, upgrade, premium, credits or balance) and no
+token amount, and the statement says in each language that a tip is voluntary,
+one-time, a purchase and free either way; the tier names are not checked.
+English is the key (a readout or a
 joined list has a named key whose comment says which readout it serves), and
 the person's virtual machine is "virtual machine" in English, 虚拟机, 虛擬機器
-and 仮想マシン. Chinese says 你 and writes no space next to Latin text; a
+and 仮想マシン, and its storage is 存储空间 in Simplified Chinese; the name of
+iOS's own Settings page there keeps Apple's 储存空间. Chinese says 你 and writes no space next to Latin text; a
 number keeps its space before its unit. Bug report and session record text, log
 lines and technical names stay English. Text shown on a card, an alert or an
 overlay passes `String.keepingTogether`, so a number stays with its unit and a
@@ -1045,9 +1211,11 @@ short quoted Chinese or Japanese name is not cut across two lines.
 `SWIFT_EMIT_LOC_STRINGS=YES`, `scripts/localization.py sync --check
 --stringsdata <DerivedData>` fails on a key the code uses and a catalog lacks,
 or the reverse. It runs on a development build made with
-`FEEDBACK_ADDRESS=feedback@example.com FOLLOW_X_HANDLE=example_handle` (the
-output of `Andarium` and `AndariumPreview` together; one without Send feedback
-or the row has no `Feedback` or `FollowX` strings and fails) and on an App Store build with `--app-store`. A
+`FEEDBACK_ADDRESS=feedback@example.com`, the four `TIP_*` identifiers,
+`REVIEW_ID=id0000000000`, `FOLLOW_X_HANDLE=example_handle` and
+`ICP_NUMBER=示例ICP备00000000号-0A` (the output of
+`Andarium` and `AndariumPreview` together; one without a feature has none of its
+strings and fails) and on an App Store build with `--app-store`. A
 string no catalog reaches (a `String` built in code) shows as English under
 Xcode's Accented Pseudolanguage, so a run with it on is part of adding a
 screen.
@@ -1069,6 +1237,9 @@ one pixel to a point) is read where it is not stated.
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
 for iOS's thermal state in the Simulator and in automation; `serious` and
 `critical` reach the guest as heat.
+`ANDARIUM_REVIEW_ASK_SECONDS` and `ANDARIUM_REVIEW_ASK_RESET=1` set the rating
+prompt's counter and clear its record, in a build that has the prompt
+([Rating prompt](#rating-prompt)).
 `ANDARIUM_FOLLOW_ORIENTATION` (`1` or `0`) states whether the guest follows the
 device's orientation, where the device's idiom (an iPhone follows) would
 otherwise decide.
