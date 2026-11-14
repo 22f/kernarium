@@ -80,6 +80,14 @@ nonisolated enum InputProbeLaunch {
     static func guestRegisters(in environment: [String: String]) -> Bool {
         environment[environmentName] != unregisteredValue
     }
+
+    /// `ANDARIUM_INPUT_PROBE_TIP=1` leaves the side keys' tip on, newly shown
+    /// at the launch, where the probe hides the tips.
+    static let tipEnvironmentName = "ANDARIUM_INPUT_PROBE_TIP"
+
+    static func showsTip(in environment: [String: String]) -> Bool {
+        requested(in: environment) && environment[tipEnvironmentName] == "1"
+    }
 }
 
 /// The development build's compass check (`ANDARIUM_COMPASS_READOUT=1`): the
