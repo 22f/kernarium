@@ -494,7 +494,8 @@ guest that never registers its mouse, whose pointer stays the touchscreen's.
 a session: an iPad's interface follows, an iPhone's stays portrait. The
 results carry how many attempts each repeated step took. The Simulator produces
 no Escape, Delete, Caps Lock, F13, lone Shift or Globe key, and no raw mouse
-motion under the pointer lock.
+motion under the pointer lock. `SideKeysTipUITests` leaves the side keys' tip
+on and taps the keys once: they open.
 
 The folding iPhone's layout ([devices](../Andarium/README.md#devices)) is
 `andarium-core`'s `FoldLayoutTests`, one test per pose of the iPhone Duo.
