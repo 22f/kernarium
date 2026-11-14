@@ -2,12 +2,12 @@
 /*
  * What the guest side of the process holds beside the guest's RAM as the vCPU
  * count grows, the most RAM a process limit leaves a guest and the RAM a new
- * guest gets: the cache cap per vCPU count, the slot tags, E(v, G), G_max(v),
- * the conservative line and the default at the iPad mini 6's 2,867 MiB and
- * other limits, under the launch set and the maximum set, and the host GPU's
- * budget B the default keeps where a guest may have 4 GiB. The expected rows
- * were derived on their own, in integer bytes, from the measured ceilings (see
- * the table comment) and by the searches in
+ * guest gets: the cache cap and burst per vCPU count, the slot tags, E(v, G),
+ * G_max(v), the conservative line and the default at the iPad mini 6's 2,867
+ * MiB and other limits, under the launch set and the maximum set, and the host
+ * GPU's budget B the default keeps where a guest may have 4 GiB. The expected
+ * rows were derived on their own, in integer bytes, from the measured ceilings
+ * (see the table comment) and by the searches in
  * theConservativeDefaultIsTheLargestStepThatLeavesTheFloor and
  * onADeviceThatOffers4GiBTheDefaultKeepsAGibibyteForTheGpu. The range has no
  * top of 4 GiB, and B has no cap of half the guest's RAM:
@@ -57,6 +57,12 @@ constexpr std::array<double, 8> measured_ceiling_mib{
 constexpr std::array<std::uint32_t, 8> expected_cap_mib{
 	128, 160, 192, 224, 240, 240, 272, 272};
 
+/* The most the cache's charge exceeded its budget in an Android guest's boot,
+ * first launches and a simultaneous start of several applications at 1..8
+ * vCPUs (charge-time high-water marks), rounded up to 1 MiB. */
+constexpr std::array<std::uint32_t, 8> expected_burst_mib{
+	1, 1, 1, 1, 1, 1, 1, 2};
+
 using Row = std::array<std::uint32_t, 8>;
 
 Row maximumRow(std::uint64_t limit, const budget::LaunchMemorySet &set)
@@ -98,6 +104,25 @@ void aCountOfZeroIsOneAndFurtherVCPUsAddSixteenEach()
 			budget::gadget_cache_cap(executors + 1), "never falls");
 }
 
+/* x(v) is small against the cap it exceeds, a count of zero is one and a count
+ * above the last measured one has the last one's. */
+void theBurstIsTheMeasuredExcessOfTheChargeOverTheBudget()
+{
+	for (unsigned executors = 1; executors <= 8; ++executors) {
+		require(budget::gadget_cache_burst(executors) ==
+			expected_burst_mib[executors - 1] * mib);
+		require(budget::gadget_cache_burst(executors) * 16 <
+			budget::gadget_cache_cap(executors),
+			"a burst is a few MiB, far under the cap");
+	}
+	require(budget::gadget_cache_burst(0) == budget::gadget_cache_burst(1));
+	require(budget::gadget_cache_burst(9) == budget::gadget_cache_burst(8));
+	require(budget::gadget_cache_burst(64) == budget::gadget_cache_burst(8));
+	/* It is no part of the budget the cache sheds to. */
+	require(budget::gadget_cache_budget(4096 * mib, std::size_t{64} << 30, 8) ==
+		272 * mib);
+}
+
 void theSlotTagsAreFourMebibytesEach()
 {
 	require(budget::slot_tag_bytes_per_executor == 4 * mib);
@@ -131,15 +156,24 @@ void theCacheBudgetIsCappedOnlyUnderALimit()
 		(272 + 16 * 4) * mib);
 }
 
-void theEngineIsTheCacheTheSlotTagsAndTheRest()
+void theEngineIsTheCacheItsBurstTheSlotTagsAndTheRest()
 {
-	require(budget::engine_memory(300 * mib, 4, 0) == 316 * mib);
-	require(budget::engine_memory(300 * mib, 4, 604 * mib) == 920 * mib);
-	require(budget::engine_memory(0, 0, 0) == 4 * mib, "a count of zero is one");
+	const auto burst = [](unsigned executors) {
+		return std::uint64_t{expected_burst_mib[executors - 1]} * mib;
+	};
+	require(budget::engine_memory(300 * mib, 4, 0) ==
+		316 * mib + burst(4));
+	require(budget::engine_memory(300 * mib, 4, 604 * mib) ==
+		920 * mib + burst(4));
+	require(budget::engine_memory(0, 8, 0) == 32 * mib + burst(8));
+	require(budget::engine_memory(0, 0, 0) == 4 * mib + burst(1),
+		"a count of zero is one");
 	constexpr auto unlimited = std::numeric_limits<std::uint64_t>::max();
 	require(budget::engine_memory(unlimited, 2, 1) == unlimited);
 	require(budget::engine_memory(1, 2, unlimited) == unlimited);
 	require(budget::engine_memory(unlimited - 4 * mib, 1, 0) == unlimited);
+	require(budget::engine_memory(unlimited - 4 * mib - burst(1) + 1, 1, 0) ==
+		unlimited, "the burst saturates with the rest");
 }
 
 /* The launch set is the conservative one the default and the GPU's budget are
@@ -162,7 +196,7 @@ void theMaximumOnAnIPadFollowsTheVCPUCountForEverySet()
 		Row{1792, 1728, 1728, 1664, 1664, 1664, 1600, 1600},
 		"launch set");
 	require(maximumRow(ipad_limit, light_set) ==
-		Row{1664, 1600, 1536, 1536, 1536, 1536, 1472, 1472}, "light");
+		Row{1664, 1600, 1536, 1536, 1536, 1472, 1472, 1472}, "light");
 	require(maximumRow(ipad_limit, middle_set) ==
 		Row{1536, 1472, 1472, 1408, 1408, 1408, 1344, 1344}, "middle");
 	require(maximumRow(ipad_limit, heavy_set) ==
@@ -441,13 +475,13 @@ void theDefaultKeepsAGibibyteForTheGpuAtTheTopOfTheRange()
 	require(conservativeRow(4096 * mib) ==
 		DefaultRow{2560, 2560, 2560, 2560, 2560, 2560, 2560, 2560});
 	/* 5120 MiB offers 4096 at every count: 3584 MiB leaves the GPU 699 to
-	 * 871 MiB, so the default is 3072 MiB and the GPU 1211 to 1383. */
+	 * 871 MiB, so the default is 3072 MiB and the GPU 1209 to 1382. */
 	require(conservativeRow(5120 * mib) ==
 		DefaultRow{3584, 3584, 3584, 3584, 3584, 3584, 3584, 3584});
 	require(defaultRow(5120 * mib) ==
 		DefaultRow{3072, 3072, 3072, 3072, 3072, 3072, 3072, 3072});
 	require(budgetAtDefaultRow(5120 * mib) ==
-		DefaultRow{1383, 1347, 1311, 1275, 1255, 1251, 1215, 1211});
+		DefaultRow{1382, 1346, 1310, 1274, 1254, 1250, 1214, 1209});
 	for (unsigned executors = 1; executors <= 8; ++executors)
 		require(budget::gpu_budget(5120 * mib, 3584, executors).bytes <
 			1024 * mib, "the conservative line leaves the GPU less");
@@ -458,7 +492,7 @@ void theDefaultKeepsAGibibyteForTheGpuAtTheTopOfTheRange()
 		DefaultRow{3584, 3584, 3072, 3072, 3072, 3072, 3072, 3072});
 	require(defaultRow(4700 * mib) ==
 		DefaultRow{2560, 2560, 2560, 2560, 2560, 2560, 2560, 2560});
-	/* 6144 MiB leaves a 4096 MiB guest 1211 to 1383 MiB already. The
+	/* 6144 MiB leaves a 4096 MiB guest 1209 to 1382 MiB already. The
 	 * default stops at 4096; the line the process is likely to be ended
 	 * above does not. */
 	require(defaultRow(6144 * mib) ==
@@ -466,7 +500,7 @@ void theDefaultKeepsAGibibyteForTheGpuAtTheTopOfTheRange()
 	require(conservativeRow(6144 * mib) ==
 		DefaultRow{4608, 4608, 4608, 4608, 4608, 4608, 4608, 4608});
 	require(budgetAtDefaultRow(6144 * mib) ==
-		DefaultRow{1383, 1347, 1311, 1275, 1255, 1251, 1215, 1211});
+		DefaultRow{1382, 1346, 1310, 1274, 1254, 1250, 1214, 1209});
 	/* No limit: the whole range, as before, and B is the guest's RAM. */
 	for (unsigned executors : {0U, 1U, 4U, 8U})
 		require(budget::default_guest_memory_mib(0, executors) == 4096);
@@ -479,8 +513,8 @@ void theDefaultKeepsAGibibyteForTheGpuAtTheTopOfTheRange()
  * of the conservative line and the largest multiple of 512 MiB that leaves B
  * at 1024 MiB, searched here from compute_gpu_budget, and is never under 2048
  * MiB (such a limit leaves a guest of 2048 more than a gibibyte). With the
- * launch set's terms the closed form L - A - E_rest - cap(v) - 4 MiB * v - S -
- * 1024 stands for the search, since the cache is then at its cap. */
+ * launch set's terms the closed form L - A - E_rest - cap(v) - x(v) - 4 MiB * v
+ * - S - 1024 stands for the search, since the cache is then at its cap. */
 void onADeviceThatOffers4GiBTheDefaultKeepsAGibibyteForTheGpu()
 {
 	unsigned limited = 0;
@@ -526,6 +560,7 @@ void onADeviceThatOffers4GiBTheDefaultKeepsAGibibyteForTheGpu()
 					executors) == budget::gadget_cache_cap(executors));
 			const std::uint64_t spare = limit_mib - 64U - 320U -
 				(budget::gadget_cache_cap(executors) +
+				 budget::gadget_cache_burst(executors) +
 				 budget::slot_tag_bytes(executors)) / mib -
 				(45U + 40U + 64U) - 1024U;
 			require(largest == std::min<std::uint64_t>(
@@ -608,19 +643,21 @@ void theBudgetIsTheEvaluationTheRunMakes()
 	const auto plain = budget::gpu_budget(ipad_limit, 1536, 6);
 	const std::uint64_t cache = budget::gadget_cache_budget(
 		1536 * mib, ipad_limit, 6);
-	const std::uint64_t engine = cache + 6 * 4 * mib + 320 * mib;
+	const std::uint64_t engine = cache + 6 * 4 * mib +
+		expected_burst_mib[5] * mib + 320 * mib;
 	require(plain.available == ipad_limit - 64 * mib - 1536 * mib - engine -
 		149 * mib);
-	require(plain.bytes == 534 * mib);
+	require(plain.bytes == 533 * mib);
 	require(!plain.short_of_floor);
 	/* The most the settings offer leaves the floor and the process short. */
 	const auto top = budget::gpu_budget(ipad_limit, 2176, 6);
 	require(top.bytes == 384 * mib && top.short_of_floor);
 	/* A small guest is no bound: what the limit leaves is all of it. */
 	const auto small = budget::gpu_budget(ipad_limit, 512, 1);
-	require(small.available == (2867 - 64 - 512 - (128 + 4 + 320) - 149) * mib);
+	require(small.available ==
+		(2867 - 64 - 512 - (128 + 4 + 1 + 320) - 149) * mib);
 	require(small.bytes == small.available);
-	require(small.bytes == 1690 * mib && !small.short_of_floor);
+	require(small.bytes == 1689 * mib && !small.short_of_floor);
 	/* Without a limit it is the guest's RAM, whatever the terms. */
 	require(budget::gpu_budget(0, 1536, 6).bytes == 1536 * mib);
 	require(budget::gpu_budget(0, 1536, 6, heavy_set).bytes == 1536 * mib);
@@ -1008,8 +1045,10 @@ int main()
 			theSlotTagsAreFourMebibytesEach},
 		{"the-cache-budget-is-capped-only-under-a-limit",
 			theCacheBudgetIsCappedOnlyUnderALimit},
-		{"the-engine-is-the-cache-the-slot-tags-and-the-rest",
-			theEngineIsTheCacheTheSlotTagsAndTheRest},
+		{"the-burst-is-the-measured-excess-of-the-charge-over-the-budget",
+			theBurstIsTheMeasuredExcessOfTheChargeOverTheBudget},
+		{"the-engine-is-the-cache-its-burst-the-slot-tags-and-the-rest",
+			theEngineIsTheCacheItsBurstTheSlotTagsAndTheRest},
 		{"the-launch-set-is-conservative-and-the-maximum-set-counts-none",
 			theLaunchSetIsConservativeAndTheMaximumSetCountsNone},
 		{"the-maximum-on-an-ipad-follows-the-vcpu-count-for-every-set",

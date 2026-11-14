@@ -664,12 +664,19 @@ public:
 			 * this one is at. */
 			state.space->observe(changes, code_change_reader_,
 				code_change_context_);
+			/* A place goes to make room: the least recently
+			 * current, unless another executor is running it,
+			 * which retiring here would free the code of
+			 * (GenerationWindow::victim()). */
 			window_.trim([this](std::uint64_t retiring) {
 #if UML_GADGET_CACHE_CENSUS
 				if (!window_.generations.contains(retiring))
 					++lru_tomb_;
 #endif
 				retire(retiring);
+			},
+			[now = gadget_cache::epoch()](const Generation &held) {
+				return held.space->use(now);
 			});
 			return;
 		}
@@ -695,8 +702,9 @@ public:
 	 * reports destroyed, and say whether the one last prepared was among
 	 * them. The generation's number keeps its place in the order the
 	 * window retires in, a tombstone that holds nothing and that the
-	 * least-recently-used rule drops when it reaches it, so the window
-	 * keeps the live address spaces it would have kept. An answer `live`
+	 * window drops in its turn, or sooner in place of an address space
+	 * another executor is running (GenerationWindow::victim()), so the
+	 * window keeps the live address spaces it would have kept. An answer `live`
 	 * cannot give (negative) keeps the address space. Out of memory part
 	 * way, what was not let go of is still held, and the caller asks
 	 * again. */

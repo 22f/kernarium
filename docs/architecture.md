@@ -169,11 +169,15 @@ The guest side's memory follows the vCPU count, v, and that header is the one
 place that says how; every caller evaluates it:
 
 ```text
-E(v, G) = c(v, G) + 4 MiB * v + E_rest
+E(v, G) = c(v, G) + x(v) + 4 MiB * v + E_rest
 c(v, G) = min(derive_budget(G, L), cap(v))      where L is set; derive_budget(G, L) alone otherwise
 ```
 
-`cap(v)` is a table of the gadget cache's ceiling per vCPU count. The largest
+`cap(v)` is a table of the gadget cache's ceiling per vCPU count, and `x(v)` a
+table of the most the cache's charge (open accounts plus those asked to shed)
+exceeds its budget in an Android guest's burst: the cache sheds to `c(v, G)`,
+and `x(v)` is what the guest side holds beyond that while shed accounts wait
+for their last holders. The largest
 guest RAM a limit leaves, `G_max(v)`, is the largest G (in 64 MiB steps, from
 512 MiB) that keeps B at its floor or above, up to the host's ceiling, C
 (`guest_memory_ceiling_mib`): the RAM the product's native kernel window holds

@@ -598,6 +598,7 @@ std::atomic<std::size_t> stress_renewal_floor{renewal_floor_bytes};
 std::atomic<unsigned> stress_renewal_period{64};
 std::atomic<std::size_t> stress_live_spaces{};
 std::atomic<std::uint64_t> stress_closes{};
+std::atomic<std::uint64_t> stress_limbo_pushes{};
 #endif
 
 [[nodiscard]] inline std::size_t renewal_floor() noexcept
@@ -722,6 +723,18 @@ public:
 		return account_.shedding();
 	}
 
+	/* Whether no executor will run this space again once those holding it
+	 * have let go of it, which is certain for one that is private to its
+	 * cache, closed, or being shed, and stays so: none of these ever clears,
+	 * and a closed or shed space is not handed out again (SpaceRegistry).
+	 * Its storage goes with its last holder, so what an executor that lets go
+	 * of it does to tell the space about each body is lost on it: it has no
+	 * later use for a record, a held-bytes figure or a limbo. */
+	[[nodiscard]] bool doomed() const noexcept
+	{
+		return key_.owner != nullptr || closed() || shedding();
+	}
+
 	/* What the space charges the budget. */
 	[[nodiscard]] std::size_t charged() const noexcept
 	{
@@ -733,6 +746,14 @@ public:
 	void ran(std::uint64_t epoch) noexcept
 	{
 		account_.ran(epoch);
+	}
+
+	/* How the asking executor's window sees this address space at epoch
+	 * `now` (gadget_cache::place_use()). */
+	[[nodiscard]] gadget_cache::PlaceUse use(std::uint64_t now) const
+	{
+		return gadget_cache::place_use(attached_, account_, closed(),
+			now);
 	}
 
 #if UML_GADGET_SWEEP_STRESS
@@ -923,6 +944,9 @@ public:
 		 * them in limbo. */
 		if (record != nullptr && record->names(*body))
 			record->reset();
+#if UML_GADGET_SWEEP_STRESS
+		stress_limbo_pushes.fetch_add(1, std::memory_order_relaxed);
+#endif
 		limbo_.push(body);
 	}
 
@@ -1506,7 +1530,9 @@ public:
 			for (auto &slot : slab->slots) {
 				if (slot.body() == nullptr)
 					continue;
-				space_of(slot).release(slot.body(), false);
+				auto &space = space_of(slot);
+				if (!space.doomed())
+					space.release(slot.body(), false);
 				slot.vacate();
 			}
 		}
@@ -2059,14 +2085,16 @@ public:
 	}
 
 	/* Let go of every address space held here that has been closed, as the
-	 * window lets go of the least recently used one, and, with `dead`, of
-	 * every one whose generation the MMU has destroyed since the caller last
-	 * looked. A destroyed generation never runs again, so nothing it holds
-	 * can be looked up again. A closed space's generation leaves the window's
+	 * window lets go of the one it retires, and, with `dead`, of every one
+	 * whose generation the MMU has destroyed since the caller last looked.
+	 * A destroyed generation never runs again, so nothing it holds can be
+	 * looked up again. A closed space's generation leaves the window's
 	 * order; a destroyed one's number keeps its place in it as a tombstone,
-	 * which holds nothing and which the least-recently-used rule retires when
-	 * it reaches it, so the window keeps the live address spaces it would
-	 * have kept. Say whether the one last prepared was among those let go of.
+	 * which holds nothing and which the window retires in its turn, or
+	 * sooner in place of an address space another executor is running
+	 * (GenerationWindow::victim()), so the window keeps the live address
+	 * spaces it would have kept. Say whether
+	 * the one last prepared was among those let go of.
 	 * The caller runs no translated code of this cache from before this call
 	 * until after the next prepare(), which it must therefore make: a retired
 	 * space's successor is attached there, at the address space's current
@@ -2108,6 +2136,16 @@ public:
 			retire(generation, tombstone);
 		}
 		return left_current;
+	}
+
+	/* Whether an address space held here is closed or being shed, which
+	 * leave_gone() would let go of. */
+	[[nodiscard]] bool holds_gone() const noexcept
+	{
+		for (const auto &[generation, state] : window_.generations)
+			if (state.space->closed() || state.space->shedding())
+				return true;
+		return false;
 	}
 
 private:
@@ -2283,6 +2321,19 @@ private:
 	 * storing, so this is proportional to what it owned rather than to the
 	 * size of the cache.
 	 *
+	 * A space that is doomed (Space::doomed()) is let go of by emptying the
+	 * slots alone: nothing will run it again once its holders have let go,
+	 * and its storage goes with the last of them, so the cost of telling it
+	 * about each body (a lock, a hash probe, an atomic, a push to limbo, for
+	 * every body, behind the locks of every other executor doing the same)
+	 * buys nothing. The bodies stay as they are for the executors still
+	 * running the space, which may adopt one this cache held or release the
+	 * slot of one it shares; a count of holders above the slots that hold it
+	 * only keeps the body until the space goes. A space still open is let
+	 * go of body by body: it may stay in use and have its arena renewed,
+	 * which counts the bodies released. A generation the MMU destroyed is
+	 * never entered again, so its space is let go of like a doomed one.
+	 *
 	 * The generation's number leaves the window's order unless `tombstone`
 	 * keeps its place there (leave_gone). A number in the order that names
 	 * no address space is such a tombstone: retiring it only drops the
@@ -2295,26 +2346,27 @@ private:
 			return;
 		}
 		const auto id = owner->second.id;
+		auto *space = owner->second.space;
+		/* Everything that can fail comes before anything changes,
+		 * so that a failure leaves the address space held and
+		 * retirable again. */
+		window_.reserve_id();
+		const bool doomed = tombstone || space->doomed();
 		if (owner->second.slots_complete) {
 			for (const auto index : owner->second.slots)
-				release(slot_at(index), id);
+				release(slot_at(index), id, doomed);
 		} else {
 			for (auto &slab : slabs_) {
 				if (!slab)
 					continue;
 				for (auto &slot : slab->slots)
-					release(slot, id);
+					release(slot, id, doomed);
 			}
 		}
 		if (link_memo_)
 			for (auto &entry : *link_memo_)
 				if (entry.generation == generation)
 					entry = {};
-		auto *space = owner->second.space;
-		/* Everything that can fail comes before anything changes,
-		 * so that a failure leaves the address space held and
-		 * retirable again. */
-		window_.reserve_id();
 		/* Letting go of its slots may have left a shared space
 		 * mostly freed arena. This cache still holds the space,
 		 * which is what makes it safe to close. */
@@ -2337,7 +2389,10 @@ private:
 			SpaceRegistry::instance().close(&space);
 	}
 
-	void release(Slot &slot, std::uint16_t owner)
+	/* Let go of the translation in `slot` if it is one of the address space
+	 * `owner`'s: the slot is emptied and, unless the space is `doomed`
+	 * (retire()), the space is told. */
+	void release(Slot &slot, std::uint16_t owner, bool doomed)
 	{
 		if (slot.body() == nullptr || slot.owner() != owner)
 			return;
@@ -2346,7 +2401,8 @@ private:
 			body_digest(*slot.body()), body_bytes(*slot.body()),
 			census::Departure::retired);
 #endif
-		space_of(slot).release(slot.body(), false);
+		if (!doomed)
+			space_of(slot).release(slot.body(), false);
 		slot.vacate();
 	}
 
@@ -2428,8 +2484,9 @@ private:
 
 	/* The address space translation is currently running in, bound to its
 	 * space -- made, or shared with the other executors running it -- on
-	 * first sight, when the least recently current one beyond the resident
-	 * bound is retired.
+	 * first sight, when one beyond the resident bound is retired: the least
+	 * recently current, unless another executor is running it (the
+	 * window's victim()).
 	 *
 	 * prepare() sets this on every switch, but its caller may skip the call
 	 * when nothing changed, and on the very first entry there is nothing to
@@ -2454,12 +2511,19 @@ private:
 				},
 				state.changes, announcement_);
 			touch(window_.current_generation);
+			/* A place goes to make room: the least recently
+			 * current, unless another executor is running it,
+			 * which retiring here would free the code of
+			 * (GenerationWindow::victim()). */
 			window_.trim([this](unsigned long generation) {
 #if UML_GADGET_CACHE_CENSUS
 				if (!window_.generations.contains(generation))
 					++lru_tomb_;
 #endif
 				retire(generation);
+			},
+			[now = gadget_cache::epoch()](const Generation &held) {
+				return held.space->use(now);
 			});
 		}
 		window_.bind(*window_.current);
@@ -2868,6 +2932,8 @@ GadgetExecutor::GadgetExecutor(arm64::gadgets::BuildOptions build_options)
 	 * a reclaimer can see whether this executor is running translated
 	 * code. */
 	announcement_ = acquire_announcement();
+	if (announcement_ != nullptr)
+		renew_ = &announcement_->renew;
 	share_translations_ = announcement_ != nullptr &&
 		build_options_.host_capabilities.has(ArmFeature::lse2) &&
 		shared_bodies_enabled();
@@ -2917,7 +2983,8 @@ constexpr std::uint64_t unprepared_changes = ~std::uint64_t{};
 } // namespace
 
 /* Let go of the address spaces another executor closed because they held
- * mostly freed arena (Space::renewal_due), and, when the MMU has destroyed a
+ * mostly freed arena (Space::renewal_due) or the budget asked to shed
+ * (Account::start_shedding), and, when the MMU has destroyed a
  * generation since this executor last looked, of those whose generation it
  * destroyed, which no vCPU can enter again. This executor runs no translated
  * code here, and its return ring empties at the first select_cpu() of the
@@ -2932,6 +2999,7 @@ void GadgetExecutor::leave_gone_spaces(std::uint64_t retirements) noexcept
 		announcement_->renew.exchange(false, std::memory_order_acquire);
 	if (!dead && !closed)
 		return;
+	renewal_stuck_ = false;
 	retirements_seen_ = retirements;
 	try {
 		if (programs_->leave_gone(dead)) {
@@ -2943,12 +3011,34 @@ void GadgetExecutor::leave_gone_spaces(std::uint64_t retirements) noexcept
 				mode.generation = no_generation;
 				mode.changes = unprepared_changes;
 			}
+		/* The closes above asked every executor attached to a space, this
+		 * one among them, to let go of it, though it has. The ask is
+		 * cleared and made again only if a space held here is still closed
+		 * or being shed, as another executor's close may have made it since:
+		 * it closes the space before it asks, so the check after the clear
+		 * finds it. Otherwise the next run would end at its first block for
+		 * an ask this run answered (renewal_pending()). */
+		if (announcement_ != nullptr) {
+			(void)announcement_->renew.exchange(false,
+				std::memory_order_acq_rel);
+			bool again = programs_->holds_gone();
+			for (const auto &mode : sme_caches_)
+				again = again || (mode.programs &&
+					mode.programs->holds_gone());
+			if (again)
+				announcement_->renew.store(true,
+					std::memory_order_relaxed);
+		}
 	} catch (...) {
 		/* Out of memory part way, so some may still be held: ask again at
 		 * the next entry, and prepare afresh meanwhile, since the one last
-		 * prepared may be among those let go of. */
-		if (announcement_ != nullptr)
+		 * prepared may be among those let go of. The ask stands, so the
+		 * runs do not end early for it (renewal_pending()) until a let-go
+		 * succeeds. */
+		if (announcement_ != nullptr) {
 			announcement_->renew.store(true, std::memory_order_relaxed);
+			renewal_stuck_ = true;
+		}
 		retirements_seen_ = retirements - 1U;
 		cache_generation_ = no_generation;
 		cache_changes_ = unprepared_changes;
@@ -3784,6 +3874,11 @@ std::size_t live_spaces() noexcept
 std::uint64_t closes() noexcept
 {
 	return stress_closes.load(std::memory_order_relaxed);
+}
+
+std::uint64_t limbo_pushes() noexcept
+{
+	return stress_limbo_pushes.load(std::memory_order_relaxed);
 }
 
 void set_renewal_period(unsigned stores) noexcept
