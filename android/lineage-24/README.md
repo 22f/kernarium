@@ -144,7 +144,9 @@ The home screen is one empty page with a dock of Files and Settings: no
 widget, no second page and no other item. Calendar, Gallery, Music and
 Calculator stay installed and are in the app drawer. The Launcher3 resource
 overlay owns the layouts and the verifier requires them. The launcher reads its
-layout once, so a guest created earlier keeps its home screen.
+layout once, so a guest created earlier keeps its home screen. An item the
+launcher adds by itself, such as a newly installed application, goes on the
+first page while it has room, then on the later pages in order (route `p0010`).
 
 ### Motion sensors
 
@@ -430,7 +432,8 @@ product's one network, VirtWifi, is saved once and is never disabled for lack of
 internet (`overlay/rro/KernariumWifiOverlay`), because the platform never joins a
 disabled network again. Until a boot has found VirtWifi stored and joined, a
 boot saves it when the saved list lacks it and saves it again when Wi-Fi is on
-and nothing joined, which enables it
+and nothing joined, which enables it, unless the Wi-Fi service's dump shows
+that the user turned Auto-connect off for it
 (`overlay/tools/kernarium_wifi_network.sh`); a guest that stops before the
 Wi-Fi service has stored the network gets it back at the next boot. Wi-Fi that
 is off stays off and a network forgotten after that boot stays forgotten. There is
