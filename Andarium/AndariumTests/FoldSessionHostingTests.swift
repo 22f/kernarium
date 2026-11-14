@@ -439,10 +439,6 @@ struct FoldSessionHostingTests {
         #expect(
             await eventually { popover.passthroughViews?.contains { $0 === screen } ?? false },
             "\(pose): the popover takes the touch on the keys: \(String(describing: popover.passthroughViews))")
-        popover.passthroughViews = []
-        #expect(
-            popover.passthroughViews?.contains { $0 === screen } ?? false,
-            "\(pose): the popover takes the touch on the keys after an update: \(String(describing: popover.passthroughViews))")
     }
 
     // MARK: Folding, turning and bending

@@ -593,7 +593,8 @@ struct SideKeysTipCard: View {
 /// where it fell. SwiftUI sets that list itself, and sets it empty again at
 /// its next update (`presentationBackgroundInteraction` does not reach a
 /// popover), so the list is kept as it should be for as long as the popover
-/// shows.
+/// shows. While the popover is still appearing its card takes no touch, and a
+/// touch on the card reaches the screen too.
 private struct PopoverPassthrough: UIViewRepresentable {
     func makeUIView(context: Context) -> PassthroughView { PassthroughView() }
     func updateUIView(_ view: PassthroughView, context: Context) {}
@@ -621,9 +622,12 @@ private struct PopoverPassthrough: UIViewRepresentable {
                 if let controller = current as? UIViewController,
                    let popover = controller.popoverPresentationController {
                     watch = popover.observe(\.passthroughViews, options: [.initial, .new]) { popover, _ in
-                        guard let screen = popover.presentingViewController.view,
-                              popover.passthroughViews ?? [] != [screen] else { return }
-                        popover.passthroughViews = [screen]
+                        // UIKit and SwiftUI set the list on the main thread.
+                        MainActor.assumeIsolated {
+                            guard let screen = popover.presentingViewController.view,
+                                  popover.passthroughViews ?? [] != [screen] else { return }
+                            popover.passthroughViews = [screen]
+                        }
                     }
                     return
                 }
