@@ -304,7 +304,7 @@ struct SessionRecordTests {
         let back = slot.cameras[0]
         let backMount = try #require(back.mount)
         #expect(backMount.position == "back" && backMount.type == 1 && backMount.angles == [90, 270, 0, 180])
-        #expect(backMount.stated == 90 && backMount.turn == 0 && !backMount.earlier)
+        #expect(backMount.stated == 90 && backMount.platformStated == 90 && backMount.turn == 0 && !backMount.earlier)
         #expect(backMount.anchor == .init(width: 4032, height: 3024) && backMount.ratios == 0 && backMount.fieldOfView == 63)
         #expect(back.video == nil && back.ratio == nil && back.photo == nil && back.refusals == nil)
         #expect(slot.fronts == .init(devices: 2, square: true, dynamicRatios: true, formatsDropped: 3))
@@ -421,11 +421,33 @@ struct SessionRecordTests {
         #expect(CameraRecord(text: "camera 1\nstills failed 0\nfronts 1 square no\n")?.fronts == nil)
     }
 
+    /// A tablet boots turned: the guest is told another orientation than the platform states, and the report says which is
+    /// which. The measured values of a tablet: 180 for the front camera and 0 for the back, the platform's own 90 for both.
+    @Test func theTwoOrientationsOfATabletReadApart() throws {
+        let slot = try #require(
+            CameraRecord(
+                text: "camera 1\nstills failed 0\n"
+                    + "mount camera 0 back type 1 angles 90 270 0 180 stated 0 platform 90 turn 0 earlier no anchor 4032x3024 ratios 0 fov 63\n"
+                    + "mount camera 1 front type 1 angles 90 270 180 0 stated 180 platform 90 turn 0 earlier no anchor 1920x1440 ratios 0 fov 85\n"))
+        let back = try #require(slot.cameras[0].mount)
+        #expect(back.stated == 0 && back.platformStated == 90)
+        let front = try #require(slot.cameras[1].mount)
+        #expect(front.stated == 180 && front.platformStated == 90)
+        let report = slot.report()
+        #expect(report.contains("the guest is told 0 (the platform states 90 for it); the video connection is turned 0"))
+        #expect(report.contains("the guest is told 180 (the platform states 90 for it); the video connection is turned 0"))
+        // A phone, whose line has no second number, states one: the guest is told what the platform states.
+        let phone = try #require(CameraRecord(text: try Self.cameraGolden()))
+        #expect(phone.cameras.allSatisfy { $0.mount?.platformStated == $0.mount?.stated })
+        #expect(!phone.report().contains("the platform states"))
+    }
+
     /// The reasons the platform refuses an admission, by the runtime's code.
     @Test func theRefusalReasonsOfTheStillChecksReadInWords() throws {
         for (code, reason) in [
             (11, "the video connection does not hold the turn"), (12, "the photo output does not turn its stills"),
             (13, "the device's aspect ratio change failed"),
+            (14, "the device's aspect ratio change did not complete in time"),
         ] {
             let slot = try #require(CameraRecord(text: "camera 1\nstills failed 0\nrefused camera 0 count 1 last \(code)\n"
                 + "mount camera 0 front type 1 angles 0 180 90 270 stated 90 turn 270 earlier yes anchor - ratios 0 fov -\n"))

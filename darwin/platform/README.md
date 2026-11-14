@@ -130,17 +130,30 @@ interface to the wire.
   front camera mounted with its sensor's top at the device's top (portrait 0 or
   180) is presented like an earlier front camera instead
   (`presentedMountingOf`): the guest is told 90, the video connection is turned
-  by the difference before the output's size is set, and the photo output keeps
-  its orientation compensation on, which turns the stills; a connection or an
-  output that does not hold this refuses the camera, and a still that does not
-  come out in the orientation stated is never delivered. A square format that
+  by the difference before the output's size is set, and the photo output's
+  orientation compensation, which turns the stills, is on, read only after the
+  configuration is committed (before that its answer is not valid) and switched
+  on where it is supported and off; the photo connection keeps its default
+  angle, unmirrored. A connection that does not hold the turn refuses the
+  camera, a still whose photo output does not turn its stills is refused before
+  its capture, and a still of another shape than the one asked for (the
+  resolved size and the file's own are checked; a half turn has the same shape
+  and is not caught) is never delivered. A square format that
   lists dynamic aspect ratios is described by the crop the device is pinned at
   at each admission and repair (3x4 for a quarter turn, else 4x3, a landscape
   frame of N x 3N/4), never changed while a stream or a still runs
-  (`presentedFormatOf`). The session reports each camera's mounting, the
+  (`presentedFormatOf`). The change is one numbered operation, asked before the
+  device is told: the camera's frames are held (the device's stand-in frames
+  bridge it) until its completion arrives without an error, a still waits for
+  it inside its wait budget, and an error, or no completion within that budget
+  of a session running with the camera in it, refuses the camera as a
+  connection that does not hold its turn does and fails the session, which the
+  device answers by interrupting the guest's cameras and opening another
+  (`RatioPin`). The session reports each camera's mounting, the
   settings of its connections and photo output and its aspect ratio as numbers
   to its delegate (`camera_presentation.hpp`), and keeps the last of each camera
-  for the sessions that follow in the process. Every camera's zoom range holds
+  for the sessions that follow in the process (the current cameras and the
+  eight most recently used others). Every camera's zoom range holds
   1.0 (Android's rule): a single lens states its own factors, so its 1.0 is its
   own full field of view, and only a zoom camera is scaled by the host's display
   multiplier (`zoomRatioScale`), as the triple camera's ultra wide lens at 0.5.

@@ -173,6 +173,64 @@ RatioStillStep ratioStillStep(CameraAspectRatio pinned, CameraAspectRatio now, b
     return now == pinned ? RatioStillStep::proceed : RatioStillStep::refuseMoved;
 }
 
+void ratioPinAsked(RatioPin& pin, std::uint64_t operation) noexcept
+{
+    pin = {};
+    pin.asked = true;
+    pin.pending = true;
+    pin.operation = operation;
+}
+
+bool ratioPinCompleted(RatioPin& pin, std::uint64_t operation, std::int32_t error) noexcept
+{
+    if (!pin.asked || pin.operation != operation) return false;
+    pin.pending = false;
+    pin.error = error;
+    return true;
+}
+
+bool ratioPinArmed(RatioPin& pin, std::uint64_t now) noexcept
+{
+    if (!pin.asked || !pin.pending || pin.armedAt != 0) return false;
+    pin.armedAt = now == 0 ? 1 : now;
+    return true;
+}
+
+bool ratioPinTimedOut(RatioPin& pin, std::uint64_t now) noexcept
+{
+    if (!pin.asked || !pin.pending || pin.timedOut || pin.armedAt == 0) return false;
+    if (now < pin.armedAt || now - pin.armedAt < ratioCompletionBudgetNanoseconds) return false;
+    pin.timedOut = true;
+    return true;
+}
+
+RatioFrameStep ratioFrameStep(const RatioPin& pin) noexcept
+{
+    if (!pin.asked) return RatioFrameStep::deliver;
+    if (pin.timedOut) return RatioFrameStep::timedOut;
+    if (pin.pending) return RatioFrameStep::hold;
+    return pin.error != 0 ? RatioFrameStep::failed : RatioFrameStep::deliver;
+}
+
+std::int32_t ratioPinErrorForStill(const RatioPin& pin) noexcept
+{
+    return pin.timedOut ? ratioNoCompletion : pin.error;
+}
+
+std::vector<std::string> heldNotesToDrop(const std::vector<HeldNoteUse>& held, const std::vector<std::string>& current,
+                                         std::size_t recent)
+{
+    std::vector<const HeldNoteUse*> others;
+    for (const auto& note : held)
+        if (std::find(current.begin(), current.end(), note.identifier) == current.end()) others.push_back(&note);
+    std::sort(others.begin(), others.end(), [](const HeldNoteUse* a, const HeldNoteUse* b) {
+        return a->used != b->used ? a->used > b->used : a->identifier < b->identifier;
+    });
+    std::vector<std::string> dropped;
+    for (std::size_t index = recent; index < others.size(); ++index) dropped.push_back(others[index]->identifier);
+    return dropped;
+}
+
 std::optional<VideoFormatFacts> presentedFormatOf(const VideoFormatFacts& listed, std::uint32_t connectionTurn)
 {
     if (listed.aspectRatios == 0) return listed;
@@ -689,6 +747,7 @@ std::string_view refusalName(Refusal reason) noexcept
     case Refusal::turnNotHeld: return "the video connection does not hold the turn";
     case Refusal::stillsNotTurned: return "the photo output does not turn its stills";
     case Refusal::ratioFailed: return "the device's aspect ratio change failed";
+    case Refusal::ratioTimedOut: return "the device's aspect ratio change did not complete in time";
     }
     return "unknown";
 }

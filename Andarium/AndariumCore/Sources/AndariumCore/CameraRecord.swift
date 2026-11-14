@@ -85,10 +85,13 @@ public struct CameraRecord: Equatable, Sendable {
             /// portrait upside down, landscape right and landscape left; nil
             /// where the platform stated none.
             public var angles: [Int?]
-            /// The orientation stated to the guest and the turn set on the video
-            /// connection, in degrees, and whether the camera imitates an earlier
-            /// front camera.
+            /// The orientation stated to the guest (its description's, which
+            /// the application turns for the layout a tablet boots in), the
+            /// platform's own for the camera (the same where the guest is told
+            /// no other) and the turn set on the video connection, in degrees,
+            /// and whether the camera imitates an earlier front camera.
             public var stated: Int
+            public var platformStated: Int
             public var turn: Int
             public var earlier: Bool
             /// The camera's anchor size, the dynamic aspect ratios it lists (a
@@ -258,7 +261,8 @@ public struct CameraRecord: Equatable, Sendable {
             else { return }
             camera.mount = Camera.Mount(
                 position: String(words[cameraAt + 2]), type: type, angles: angles.map { number($0) },
-                stated: stated, turn: turn, earlier: value(after: "earlier") == "yes",
+                stated: stated, platformStated: number(value(after: "platform")) ?? stated, turn: turn,
+                earlier: value(after: "earlier") == "yes",
                 anchor: value(after: "anchor").flatMap { Size($0) }, ratios: number(value(after: "ratios")) ?? 0,
                 fieldOfView: number(value(after: "fov")))
         case "ratio":
@@ -332,7 +336,7 @@ public struct CameraRecord: Equatable, Sendable {
         "the anchor makes no such photo", "no Bayer RAW format", "the platform raised",
         "the device could not be put back as it was", "the device's aspect ratio was not the one pinned",
         "the video connection does not hold the turn", "the photo output does not turn its stills",
-        "the device's aspect ratio change failed",
+        "the device's aspect ratio change failed", "the device's aspect ratio change did not complete in time",
     ]
 
     /// The names of the dynamic aspect ratios a mask lists, lowest bit first.
@@ -368,8 +372,9 @@ public struct CameraRecord: Equatable, Sendable {
             let angles = mount.angles.map { Self.degrees($0) }.joined(separator: ", ")
             lines.append(
                 "  mounting: device type \(type); the platform's fixed angles for portrait, portrait upside down, "
-                    + "landscape right and landscape left are \(angles); the guest is told \(mount.stated); "
-                    + "the video connection is turned \(mount.turn); imitates an earlier front camera: "
+                    + "landscape right and landscape left are \(angles); the guest is told \(mount.stated)"
+                    + (mount.platformStated != mount.stated ? " (the platform states \(mount.platformStated) for it)" : "")
+                    + "; the video connection is turned \(mount.turn); imitates an earlier front camera: "
                     + "\(mount.earlier ? "yes" : "no").")
             var anchor = "  anchor: \(mount.anchor?.text ?? "none"), aspect ratios listed: \(Self.ratioNames(mount.ratios)), "
             anchor += "field of view \(Self.degrees(mount.fieldOfView)) degrees."

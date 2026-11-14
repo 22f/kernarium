@@ -2304,6 +2304,7 @@ uml::platform::CameraPresentation camera_back_note()
 	note.deviceType = CameraDeviceType::wide;
 	note.coordinatorAngles = {90, 270, 0, 180};
 	note.stated = 90;
+	note.platformStated = 90;
 	note.turn = 0;
 	note.anchorWidth = 4032;
 	note.anchorHeight = 3024;
@@ -2330,6 +2331,7 @@ uml::platform::CameraPresentation camera_front_note()
 	note.deviceType = CameraDeviceType::wide;
 	note.coordinatorAngles = {0, 180, 90, 270};
 	note.stated = 90;
+	note.platformStated = 90;
 	note.turn = 270;
 	note.earlier = true;
 	note.anchorWidth = 1920;
@@ -2656,6 +2658,29 @@ void test_camera_presentation()
 		count(slot, " camera 0 ") == 1,
 		"a bare camera was recorded wrong: " + slot);
 
+	/* A tablet that boots turned tells the guest another orientation than the platform's: the line names both (the
+	 * measured values of a tablet: the guest is told 180 for the front camera and 0 for the back, the platform's own
+	 * being 90 for both), and a phone, which states what the platform does, names one. */
+	auto tablet_back = camera_back_note();
+	tablet_back.camera = 2;
+	tablet_back.stated = 0;
+	tablet_back.platformStated = 90;
+	uml::runtime::note_camera_presentation(tablet_back);
+	auto tablet_front = camera_front_note();
+	tablet_front.camera = 3;
+	tablet_front.stated = 180;
+	tablet_front.platformStated = 90;
+	tablet_front.earlier = false;
+	tablet_front.ratioKnown = tablet_front.videoKnown = tablet_front.photoKnown = false;
+	tablet_front.refusals = 0;
+	uml::runtime::note_camera_presentation(tablet_front);
+	slot = slot_of(read_file(path));
+	require(has(slot, "mount camera 2 back type 1 angles 90 270 0 180 stated 0 platform 90 turn 0 earlier no ") &&
+		has(slot, "mount camera 3 front type 1 angles 0 180 90 270 stated 180 platform 90 turn 270 earlier no ") &&
+		has(slot, "mount camera 1 front type 1 angles 0 180 90 270 stated 90 turn 270 earlier yes ") &&
+		!has(slot, "stated 90 platform"),
+		"a tablet's two orientations were recorded wrong: " + slot);
+
 	/* A camera number the slot has no room for is not recorded. */
 	CameraPresentation beyond = camera_front_note();
 	beyond.camera = uml::runtime::session_cameras_kept;
@@ -2710,7 +2735,7 @@ void test_camera_presentation()
 		note.refusals = 65535;
 		note.coordinatorAngles = {359, 359, 359, 359};
 		note.anchorFieldOfView = 359;
-		note.stated = note.turn = 359;
+		note.stated = note.platformStated = note.turn = 359;
 		note.ratioError = INT32_MIN + 1;
 		uml::runtime::note_camera_presentation(note);
 		record = read_file(path);

@@ -811,8 +811,11 @@ The storage slot counts the session's settles and those that were not
 confirmed, and names the last one's call, outcome and time: words and numbers
 only, blank until the first. The camera slot says how the platform presented
 each of the guest's cameras (its mounting, the angles of its connections, the
-photo output's orientation compensation, its aspect ratio: the camera device
-reports each change through `onCameraPresentation`), counts the stills of the
+photo output's orientation compensation and when it was read, its aspect ratio:
+the camera device reports each change through `onCameraPresentation`), what the
+platform found of the front devices (how many, whether any has a square format
+or lists ratios, how many formats it did not offer) in a line of its own that
+stays whichever camera was used, counts the stills of the
 guest's cameras that did not end in a picture and names why for the newest two
 that fit beside the front camera's lines (the camera, the stage it stopped at,
 the sizes asked for, resolved and encoded, the photo's Exif orientation, and the
