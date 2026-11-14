@@ -57,6 +57,10 @@ public struct CameraRecord: Equatable, Sendable {
         /// `unknown`.
         public var compensationSupported: String
         public var compensationEnabled: String
+        /// When the compensation was read: `before-commit` (before the capture
+        /// session's configuration was committed, when the answer is not yet
+        /// valid), `after-commit`, or `unknown`.
+        public var compensationReading: String
         /// The Exif orientation (1 to 8) of the photo the host's output gave for
         /// the capture; nil where it gave none.
         public var exifOrientation: Int?
@@ -92,11 +96,6 @@ public struct CameraRecord: Equatable, Sendable {
             public var anchor: Size?
             public var ratios: Int
             public var fieldOfView: Int?
-            /// For a front camera: how many front devices the platform listed and
-            /// whether any has a square format or lists dynamic ratios.
-            public var frontDevices: Int?
-            public var squareFormats: Bool?
-            public var dynamicRatios: Bool?
         }
 
         /// The device's dynamic aspect ratio: the one pinned, the one the device
@@ -128,6 +127,8 @@ public struct CameraRecord: Equatable, Sendable {
         public struct Photo: Equatable, Sendable {
             public var compensationSupported: String
             public var compensationEnabled: String
+            /// When the compensation was read, as a failure's.
+            public var compensationReading: String
             public var defaultAngle: Int?
             public var angle: Int?
             public var defaultMirrored: Int?
@@ -153,8 +154,24 @@ public struct CameraRecord: Equatable, Sendable {
         public var refusals: Refusals?
     }
 
+    /// What the platform found of the front devices, in a line of its own that
+    /// the slot keeps whenever it holds any camera's note: how many front
+    /// devices it listed, whether any has a square format or lists dynamic
+    /// ratios, and how many of their formats it did not offer the guest. A front
+    /// device whose formats were all dropped is no camera, and this is what is
+    /// left of it.
+    public struct Fronts: Equatable, Sendable {
+        public var devices: Int
+        public var square: Bool
+        public var dynamicRatios: Bool
+        public var formatsDropped: Int
+    }
+
     /// The guest's cameras the slot says something of, by number.
     public var cameras: [Camera]
+
+    /// The front devices' facts; nil where the slot has no such line.
+    public var fronts: Fronts?
 
     /// The stills that failed during the session, and the newest of them that
     /// fit the slot, oldest first.
@@ -168,6 +185,7 @@ public struct CameraRecord: Equatable, Sendable {
     public init?(text: String) {
         var header = false
         var failed: Int?
+        var fronts: Fronts?
         var recent: [Failure] = []
         var cameras: [Int: Camera] = [:]
         // The kernel's quoted output is not the record's own lines.
@@ -181,6 +199,9 @@ public struct CameraRecord: Equatable, Sendable {
             case "stills":
                 // stills failed N
                 if words.count >= 3, words[1] == "failed" { failed = Int(words[2]) }
+            case "fronts":
+                // fronts N square yes|no dynamic yes|no dropped M
+                if let found = Self.fronts(words) { fronts = found }
             case "still":
                 if let failure = Self.failure(words) { recent.append(failure) }
             case "mount", "ratio", "video", "photo", "refused":
@@ -191,8 +212,22 @@ public struct CameraRecord: Equatable, Sendable {
         }
         guard header, let failed else { return nil }
         self.failed = failed
+        self.fronts = fronts
         self.recent = recent
         self.cameras = cameras.values.sorted { $0.index < $1.index }
+    }
+
+    /// `fronts N square X dynamic Y dropped M`, read by the field names.
+    private static func fronts(_ words: [Substring]) -> Fronts? {
+        func value(after name: Substring) -> Substring? {
+            guard let at = words.firstIndex(of: name), at + 1 < words.count else { return nil }
+            return words[at + 1]
+        }
+        guard words.count >= 2, let devices = Int(words[1]), let square = value(after: "square"),
+            let dynamicRatios = value(after: "dynamic"), let dropped = number(value(after: "dropped"))
+        else { return nil }
+        return Fronts(
+            devices: devices, square: square == "yes", dynamicRatios: dynamicRatios == "yes", formatsDropped: dropped)
     }
 
     /// A word's value as the record writes a number: `-` (or a word that is no
@@ -225,9 +260,7 @@ public struct CameraRecord: Equatable, Sendable {
                 position: String(words[cameraAt + 2]), type: type, angles: angles.map { number($0) },
                 stated: stated, turn: turn, earlier: value(after: "earlier") == "yes",
                 anchor: value(after: "anchor").flatMap { Size($0) }, ratios: number(value(after: "ratios")) ?? 0,
-                fieldOfView: number(value(after: "fov")), frontDevices: number(value(after: "fronts")),
-                squareFormats: value(after: "square").map { $0 == "yes" },
-                dynamicRatios: value(after: "dynamic").map { $0 == "yes" })
+                fieldOfView: number(value(after: "fov")))
         case "ratio":
             guard let pinned = value(after: "pinned"), let now = value(after: "now") else { return }
             let error = value(after: "error")
@@ -244,6 +277,7 @@ public struct CameraRecord: Equatable, Sendable {
             let mirror = values(after: "mirror", count: 2)
             camera.photo = Camera.Photo(
                 compensationSupported: fact("supported"), compensationEnabled: fact("enabled"),
+                compensationReading: Self.readingWord(fact("read")),
                 defaultAngle: number(value(after: "default")), angle: number(value(after: "set")),
                 defaultMirrored: number(mirror?[0]), mirrored: number(mirror?[1]),
                 maximum: value(after: "max").flatMap { Size($0) }, exifOrientation: number(value(after: "exif")),
@@ -256,7 +290,7 @@ public struct CameraRecord: Equatable, Sendable {
     }
 
     /// `still at T camera N POSITION stage STAGE asked S resolved S encoded S
-    /// compensation supported X enabled Y exif E error DOMAIN [CODE]`, read by the
+    /// compensation supported X enabled Y read R exif E error DOMAIN [CODE]`, read by the
     /// field names.
     private static func failure(_ words: [Substring]) -> Failure? {
         func value(after name: Substring) -> Substring? {
@@ -280,6 +314,7 @@ public struct CameraRecord: Equatable, Sendable {
             encoded: value(after: "encoded").flatMap { Size($0) },
             compensationSupported: value(after: "supported").map(String.init) ?? "unknown",
             compensationEnabled: value(after: "enabled").map(String.init) ?? "unknown",
+            compensationReading: Self.readingWord(value(after: "read").map(String.init) ?? "-"),
             exifOrientation: number(value(after: "exif")),
             errorDomain: domain, errorCode: code)
     }
@@ -296,6 +331,8 @@ public struct CameraRecord: Equatable, Sendable {
         "the session took no input", "the session took no output", "over the multi-camera hardware budget",
         "the anchor makes no such photo", "no Bayer RAW format", "the platform raised",
         "the device could not be put back as it was", "the device's aspect ratio was not the one pinned",
+        "the video connection does not hold the turn", "the photo output does not turn its stills",
+        "the device's aspect ratio change failed",
     ]
 
     /// The names of the dynamic aspect ratios a mask lists, lowest bit first.
@@ -307,7 +344,19 @@ public struct CameraRecord: Equatable, Sendable {
 
     private static func degrees(_ value: Int?) -> String { value.map { "\($0)" } ?? "unknown" }
 
-    private static func yesNo(_ value: Bool?) -> String { value.map { $0 ? "yes" : "no" } ?? "unknown" }
+    private static func yesNo(_ value: Bool) -> String { value ? "yes" : "no" }
+
+    /// The record's word for when the compensation was read: `-` is unknown.
+    private static func readingWord(_ word: String) -> String { word == "-" ? "unknown" : word }
+
+    /// When the compensation was read, in words.
+    private static func reading(_ word: String) -> String {
+        switch word {
+        case "before-commit": return "read before the session's configuration was committed"
+        case "after-commit": return "read after the session's configuration was committed"
+        default: return "read at an unknown time"
+        }
+    }
 
     /// How a camera was presented, in words, a line to each part the record has.
     func report(of camera: Camera) -> [String] {
@@ -324,10 +373,6 @@ public struct CameraRecord: Equatable, Sendable {
                     + "\(mount.earlier ? "yes" : "no").")
             var anchor = "  anchor: \(mount.anchor?.text ?? "none"), aspect ratios listed: \(Self.ratioNames(mount.ratios)), "
             anchor += "field of view \(Self.degrees(mount.fieldOfView)) degrees."
-            if let fronts = mount.frontDevices {
-                anchor += " Front devices listed: \(fronts); any with a square format: \(Self.yesNo(mount.squareFormats))"
-                anchor += "; any that lists aspect ratios: \(Self.yesNo(mount.dynamicRatios))."
-            }
             lines.append(anchor)
         }
         if let ratio = camera.ratio {
@@ -346,7 +391,7 @@ public struct CameraRecord: Equatable, Sendable {
         if let photo = camera.photo {
             lines.append(
                 "  photo output: orientation compensation supported \(photo.compensationSupported) and enabled "
-                    + "\(photo.compensationEnabled); photo connection angle \(Self.degrees(photo.defaultAngle)) by default and "
+                    + "\(photo.compensationEnabled) (\(Self.reading(photo.compensationReading))); photo connection angle \(Self.degrees(photo.defaultAngle)) by default and "
                     + "\(Self.degrees(photo.angle)) now, mirrored \(Self.degrees(photo.defaultMirrored)) and "
                     + "\(Self.degrees(photo.mirrored)); largest photo \(photo.maximum?.text ?? "unknown"); Exif orientation of the "
                     + "last photo \(photo.exifOrientation.map { "\($0)" } ?? "none yet"); Center Stage active "
@@ -364,7 +409,13 @@ public struct CameraRecord: Equatable, Sendable {
     public func report() -> String {
         var lines: [String] = []
         for camera in cameras { lines.append(contentsOf: report(of: camera)) }
-        if !cameras.isEmpty { lines.append("") }
+        if let fronts {
+            lines.append(
+                "Front devices listed: \(fronts.devices); any with a square format: \(Self.yesNo(fronts.square)); "
+                    + "any that lists aspect ratios: \(Self.yesNo(fronts.dynamicRatios)); formats not offered to the guest: "
+                    + "\(fronts.formatsDropped).")
+        }
+        if !cameras.isEmpty || fronts != nil { lines.append("") }
         if failed == 0 {
             lines.append("No still of the guest's cameras failed to end in a picture.")
         } else {
@@ -384,7 +435,7 @@ public struct CameraRecord: Equatable, Sendable {
             line += ", resolved \(failure.resolved?.text ?? "unknown")"
             line += ", file states \(failure.encoded?.text ?? "unknown")"
             line += ", orientation compensation supported \(failure.compensationSupported)"
-            line += " and enabled \(failure.compensationEnabled)"
+            line += " and enabled \(failure.compensationEnabled) (\(Self.reading(failure.compensationReading)))"
             line += ", the host photo's Exif orientation \(failure.exifOrientation.map { "\($0)" } ?? "unknown")"
             if failure.errorDomain != "none" {
                 line += ", the framework's error \(failure.errorDomain)"

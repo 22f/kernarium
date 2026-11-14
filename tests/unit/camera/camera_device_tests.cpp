@@ -153,6 +153,8 @@ public:
     CameraSessionDelegate* sink {};
     /* The next startVideo is refused, and the capture it was to replace keeps running. */
     bool refuseNextStart {};
+    /* While it is set the platform takes no still (a still without the colour data is asked for again, so one refusal is two). */
+    bool refuseStills {};
     /* The stills the platform holds, by token. */
     std::set<std::uint64_t> holding;
     /* The most the delivered results' payloads held when a capture was started. */
@@ -212,6 +214,7 @@ public:
         bool takeStill(std::size_t index, const CameraStillRequest& request) override
         {
             camera.payloadWhenStarting = std::max(camera.payloadWhenStarting, payload_watch::bytes());
+            if (camera.refuseStills) return false;
             const bool taken = inner->takeStill(index, request);
             if (taken) camera.holding.insert(request.token);
             return taken;
@@ -3143,6 +3146,40 @@ void testAStillThatFailsSaysWhy()
                     rig.stillFailures[0].camera == 0 && rig.stillFailures[0].position == CameraPosition::back &&
                     rig.stillFailures[0].askedWidth == 4032 && rig.stillFailures[0].askedHeight == 3024,
                 "a refusal is reported with the size asked for");
+    }
+    // A refusal says what the photo output last read of its compensation and when it was read, as the platform's notes
+    // told it, so a bug report names the reading that refused the still; before any note it says nothing of it.
+    {
+        Rig rig;
+        stillStream(rig, 1, 0, 1008, 756, 3);
+        rig.watched->refuseStills = true;
+        const auto before = rig.queue(1, 1, 66);
+        require(rig.waitFor([&] { return rig.done(before); }), "the refused still ends");
+        require(rig.done(before) && rig.stillFailures.size() == 1 &&
+                    rig.stillFailures[0].stage == CameraStillStage::refused &&
+                    rig.stillFailures[0].compensationSupported == CameraFact::unknown &&
+                    rig.stillFailures[0].compensationReading == CameraReading::unknown,
+                "a refusal before any reading says nothing of the compensation");
+        rig.watched->refuseStills = false;
+        (void)rig.queue(1, 2, 67);
+        require(rig.watched->sink != nullptr, "the session is open");
+        for (std::size_t platform = 0; platform < rig.camera->cameras().size(); ++platform) {
+            CameraPresentation note;
+            note.photoKnown = true;
+            note.compensationSupported = CameraFact::yes;
+            note.compensationEnabled = CameraFact::no;
+            note.compensationReading = CameraReading::afterCommit;
+            rig.watched->sink->cameraPresentation(platform, note);
+        }
+        rig.watched->refuseStills = true;
+        const auto later = rig.queue(1, 3, 68);
+        require(rig.waitFor([&] { return rig.done(later); }), "the later refused still ends");
+        require(rig.done(later) && rig.stillFailures.size() == 2 &&
+                    rig.stillFailures[1].stage == CameraStillStage::refused &&
+                    rig.stillFailures[1].compensationSupported == CameraFact::yes &&
+                    rig.stillFailures[1].compensationEnabled == CameraFact::no &&
+                    rig.stillFailures[1].compensationReading == CameraReading::afterCommit,
+                "a refusal after a reading carries it and says when it was taken");
     }
     // A capture the platform does not end in time says so; an interruption that ends one is not a fault of the capture.
     {
