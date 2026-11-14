@@ -12,6 +12,8 @@ struct SendFeedbackFailure: Identifiable, Equatable {
     let id = UUID()
     var title: String
     var message: String
+    /// The alert asks for a download link, which goes in the details: they are ready to type in once it closes.
+    var focusesDetails = false
 }
 
 extension SendFeedbackMissing {
@@ -139,6 +141,20 @@ final class SendFeedbackModel {
         } catch {
             // The log helps; a sheet without it is as usable.
         }
+    }
+
+    /// A draft that already lists an Android package (one an earlier build attached) loses it as the sheet opens,
+    /// with the alert a pick of one gets. A draft ends with its sheet, so none comes from an earlier build today;
+    /// the rule holds the list to the same invariant whichever way it was filled.
+    func refuseAndroidPackagesInDraft() {
+        let packages = form.attachments.items.filter { item in
+            [item.fileName, item.displayName ?? "", item.url.lastPathComponent].contains {
+                SendFeedbackAndroidPackage.matches(name: $0)
+            }
+        }
+        guard !packages.isEmpty else { return }
+        packages.forEach(remove)
+        failure = Self.packageFailure(count: packages.count)
     }
 
     // MARK: Bug report
@@ -353,7 +369,7 @@ final class SendFeedbackModel {
         // A copy that was still under way as the sheet closed may have made its folder again.
         if closed { folder.removeAll() }
         guard !refusals.isEmpty, !closed else { return }
-        fail(Self.fileFailureTitle(count: refusals.count), Self.fileFailureMessage(refusals, device: app.host.name))
+        failure = Self.fileFailure(refusals, device: app.host.name)
     }
 
     private func addFile(_ url: URL, cancellation: SendFeedbackCancellation) async throws {
@@ -368,6 +384,13 @@ final class SendFeedbackModel {
         case .file: break
         case .folder, .other: throw SendFeedbackFileRefusal.notAFile
         case .missing: throw SendFeedbackFileRefusal.unavailable
+        }
+        // No mail service delivers an Android package: it is told by its name (and the type its provider gives),
+        // and is never opened.
+        let name = url.lastPathComponent
+        if SendFeedbackAndroidPackage.matches(name: name, contentType: info.contentType)
+            || SendFeedbackAndroidPackage.matches(name: SendFeedbackFolder.safeName(name)) {
+            throw SendFeedbackFileRefusal.androidPackage
         }
         guard info.bytes > 0 else { throw SendFeedbackFileRefusal.empty }
         let displayName = SendFeedbackNames.display(url.lastPathComponent)
@@ -427,6 +450,34 @@ final class SendFeedbackModel {
             : String(localized: "\(count) items weren\u{2019}t added", table: "Feedback")
     }
 
+    /// The one alert a pick of files gets, whatever it refused. Android packages alone are said by themselves:
+    /// the mail service rejects them, and a download link in the details is what to send instead. With other
+    /// refusals they are one line among the others. Either way the details are ready to type in afterwards.
+    static func fileFailure(_ refusals: [SendFeedbackFileRefusal], device: String) -> SendFeedbackFailure {
+        let packages = refusals.filter { $0 == .androidPackage }.count
+        if packages > 0, packages == refusals.count { return packageFailure(count: packages) }
+        return SendFeedbackFailure(
+            title: fileFailureTitle(count: refusals.count), message: fileFailureMessage(refusals, device: device),
+            focusesDetails: packages > 0)
+    }
+
+    /// The alert for `count` Android packages that were not attached.
+    static func packageFailure(count: Int) -> SendFeedbackFailure {
+        SendFeedbackFailure(
+            title: String(localized: "APK files can\u{2019}t be sent by mail", table: "Feedback"),
+            message: packageLine(count: count), focusesDetails: true)
+    }
+
+    private static func packageLine(count: Int) -> String {
+        count == 1
+            ? String(
+                localized: "Mail services reject messages that carry an APK, so this file was not attached. Paste a download link for the app in the details instead.",
+                table: "Feedback")
+            : String(
+                localized: "Mail services reject messages that carry an APK, so these files were not attached. Paste a download link for the app in the details instead.",
+                table: "Feedback")
+    }
+
     /// One line for each reason a file was refused, in a fixed order.
     static func fileFailureMessage(_ refusals: [SendFeedbackFileRefusal], device: String) -> String {
         var lines: [String] = []
@@ -448,6 +499,8 @@ final class SendFeedbackModel {
                 localized: "A file couldn\u{2019}t be read. Check that it is still in Files and downloaded, then try again.",
                 table: "Feedback"))
         }
+        let packages = refusals.filter { $0 == .androidPackage }.count
+        if packages > 0 { lines.append(packageLine(count: packages)) }
         return lines.joined(separator: "\n")
     }
 

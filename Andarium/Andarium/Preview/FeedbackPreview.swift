@@ -160,20 +160,33 @@ enum FeedbackPreview {
         switch screen {
         case "feedback-file":
             await attachAll(feedback, report: nil, screenshot: false, photo: nil)
-            await attachFile(feedback, named: "example-app.apk", megabytes: 12.4)
+            await attachFile(feedback, named: "example-log.zip", megabytes: 12.4)
         case "feedback-file-long":
             await attachFile(
-                feedback, named: "example-application-release-candidate-build-2026-11-13-arm64-v8a-signed-debuggable.apk",
+                feedback, named: "example-application-release-candidate-build-2026-11-13-arm64-v8a-crash-log-with-symbols.zip",
                 megabytes: 12.4)
         case "feedback-file-names":
-            await attachFile(feedback, named: "\u{6D4B}\u{8BD5}\u{5E94}\u{7528}.apk", megabytes: 12.4)
-            await attachFile(feedback, named: "\u{30C6}\u{30B9}\u{30C8}\u{30A2}\u{30D7}\u{30EA}.apk", megabytes: 5.1)
+            await attachFile(feedback, named: "\u{6D4B}\u{8BD5}\u{65E5}\u{5FD7}.zip", megabytes: 12.4)
+            await attachFile(feedback, named: "\u{30C6}\u{30B9}\u{30C8}\u{30ED}\u{30B0}.zip", megabytes: 5.1)
         case "feedback-file-mixed":
             await attachAll(feedback, report: 3.2, photo: 2.4)
-            await attachFile(feedback, named: "example-app.apk", megabytes: 6.8)
+            await attachFile(feedback, named: "example-log.zip", megabytes: 6.8)
         case "feedback-file-large":
             await attachAll(feedback, report: nil, screenshot: false, photo: nil)
-            await attachFile(feedback, named: "example-app.apk", megabytes: 1_920)
+            await attachFile(feedback, named: "example-log.zip", megabytes: 1_920)
+        case "feedback-file-apk", "feedback-file-apk-several":
+            // One pick: an ordinary file, which is attached, and the packages, which are not. The one alert says why.
+            await attachAll(feedback, report: nil, screenshot: false, photo: nil)
+            var pick: [URL] = []
+            let names = screen == "feedback-file-apk"
+                ? ["example-log.zip", "example-app.apk"]
+                : ["example-log.zip", "example-app.apk", "example-app.apks", "example-app.xapk"]
+            for name in names {
+                if let file = try? makeFile(named: name, head: emptyZip, megabytes: name.hasSuffix(".zip") ? 0.8 : 12.4) {
+                    pick.append(file)
+                }
+            }
+            await feedback.addFiles(pick)
         case "feedback-file-copying":
             // What a person has while a copy runs: the screenshot attached before; the file's row comes when the
             // copy ends, and meanwhile Send is dimmed.
@@ -188,7 +201,7 @@ enum FeedbackPreview {
         case "feedback-file-gone":
             // The real path: a file is attached, goes from where it was kept, and Send finds it out.
             await attachAll(feedback, report: nil, screenshot: false, photo: nil)
-            if let file = try? makeFile(named: "example-app.apk", head: emptyZip, megabytes: 12.4) {
+            if let file = try? makeFile(named: "example-log.zip", head: emptyZip, megabytes: 12.4) {
                 await feedback.addFiles([file])
                 try? FileManager.default.removeItem(at: file)
                 feedback.send()
@@ -250,7 +263,7 @@ enum FeedbackPreview {
         let details = "The game plays its intro, then the picture stops while the sound goes on. It happens every time since this morning\u{2019}s update."
         let suggestion = "Let me keep the keyboard on screen"
         let fileProblem = "The app closes right after it opens"
-        let fileDetails = "I installed the attached app with Install APK. It opens, then closes after about a second. The same file works on my other phone."
+        let fileDetails = "I open it from the Home screen, and it closes after about a second. The attached log was saved right after it happened."
         let suggestionDetails = "In games I type a lot, and the keyboard closes after every message. The picture shows where."
     }
 

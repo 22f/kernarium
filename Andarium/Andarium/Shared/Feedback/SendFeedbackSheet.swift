@@ -131,8 +131,9 @@ struct SendFeedbackSheet: View {
             (model.failure?.title ?? "").keepingTogether,
             isPresented: Binding(get: { model.failure != nil }, set: { if !$0 { model.failure = nil } }),
             presenting: model.failure
-        ) { _ in
-            Button(Words.ok, role: .cancel) {}
+        ) { failure in
+            // An alert that asks for a link leaves the details ready for it.
+            Button(Words.ok, role: .cancel) { if failure.focusesDetails { focus = .details } }
         } message: { failure in
             Text(failure.message.keepingTogether)
         }
@@ -165,10 +166,16 @@ struct SendFeedbackSheet: View {
         .onChange(of: model.sent) { _, sent in
             if sent { focus = nil }
         }
+        // The system gives the focus back to the field that had it when an alert closes, after the one the alert
+        // asked for: let go of it first, as the alert that says what is missing does (`sendButton`).
+        .onChange(of: model.failure?.focusesDetails == true) { _, asks in
+            if asks { focus = nil }
+        }
         .task {
             // Opened during a start, the sheet attaches its start log once; the
             // task runs again if the view is rebuilt, and the model remembers.
             model.offerStartLog()
+            model.refuseAndroidPackagesInDraft()
             #if !APP_STORE
             await model.app.feedbackServices.previewPrepare(model)
             #endif
