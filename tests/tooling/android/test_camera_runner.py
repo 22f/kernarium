@@ -1320,6 +1320,13 @@ class HeldStillTests(unittest.TestCase):
                          "SurfaceView[org.lineageos.aperture/org.lineageos.aperture.CameraActivity](BLAST)#138")
         self.assertIsNone(runner.parse_preview_layer("Display 0\n"))
 
+    def test_the_preview_layer_keeps_the_hash_the_list_gives_it(self) -> None:
+        name = "SurfaceView[org.lineageos.aperture/org.lineageos.aperture.CameraActivity]"
+        text = ("RequestedLayerState{Background for 7c01cb3 " + name + "#137 parentId=135 relativeParentId=128}\n"
+                "RequestedLayerState{7c01cb3 " + name + "(BLAST)#136 parentId=135}\n"
+                "RequestedLayerState{7c01cb3 " + name + "#135 parentId=134 relativeParentId=128 z=-2}\n")
+        self.assertEqual(runner.parse_preview_layer(text), "7c01cb3 " + name + "(BLAST)#136")
+
     def test_the_present_times_of_a_layer(self) -> None:
         text = ("16666666\n"
                 "100  1000000000  1010000000\n"
@@ -1353,8 +1360,8 @@ class HeldStillTests(unittest.TestCase):
     def test_a_session_the_host_closed_behind_the_stills_is_a_failure(self) -> None:
         guest = FakeGuest(self.PLAN)
         guest.closes_on_freeze = True
-        with self.assertRaisesRegex(runner.Failure, r"the host closed its capture session 3 times in 3 stills .*closed the "
-                                    "preview's stream behind the still"):
+        with self.assertRaisesRegex(runner.Failure, r"held still 1: the host closed its capture session \(1 so far\) behind a "
+                                    "still that held the request pipeline: the camera HAL closed the preview's stream"):
             self.run_step(guest)
 
     def test_a_session_closed_before_the_step_is_not_counted(self) -> None:

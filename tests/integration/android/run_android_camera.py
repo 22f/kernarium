@@ -197,6 +197,9 @@ HELD_STILL_DELAYS = (0.15, 0.18, 0.21)
 HELD_STILL_SECONDS = 1.0
 HELD_STILL_RESUME_SECONDS = 0.5
 HELD_STILL_OBSERVE_SECONDS = 4.0
+# SurfaceFlinger keeps the last 128 presented frames of a layer (about 4 seconds of a 30 fps preview), so the times are
+# read every HELD_STILL_POLL_SECONDS through the observation and put together.
+HELD_STILL_POLL_SECONDS = 0.5
 DISTURB_COUNT = 3
 DISTURB_LEAD_SECONDS = 1.0
 DISTURB_GAP_SECONDS = 1.5
@@ -621,7 +624,7 @@ def frames_produced(dump: str) -> int:
 
 
 SESSION_LINE = re.compile(r"^Camera: memory: capture session (closed|opened)\b", re.MULTILINE)
-PREVIEW_LAYER = re.compile(r"(SurfaceView\[[^\n{}]*\(BLAST\)#(\d+))")
+PREVIEW_LAYER = re.compile(r"((?:[0-9a-f]+ )?SurfaceView\[[^\n{}]*\(BLAST\)#(\d+))")
 PENDING_PRESENT = 9 * 10 ** 18
 
 
@@ -633,7 +636,9 @@ def session_events(text: str) -> list[str]:
 
 def parse_preview_layer(text: str) -> str | None:
     """The newest SurfaceView layer of the camera application in `dumpsys SurfaceFlinger --list` (the highest
-    layer number), which is the preview's."""
+    layer number), which is the preview's. The name is the layer's own, with the window's hash in front of it where
+    the list gives one (`RequestedLayerState{7c01cb3 SurfaceView[...](BLAST)#136 ...}`): `--latency` finds a layer by
+    that name and answers a name without the hash with the refresh period alone."""
     found = PREVIEW_LAYER.findall(text)
     return max(found, key=lambda item: int(item[1]))[0].strip() if found else None
 
@@ -1269,8 +1274,15 @@ def check_still_keeps_preview(guest: Guest, plan: Plan) -> None:
         guest.freeze(HELD_STILL_SECONDS)
         wait_for(f"held still {number}: a still in the camera folder", STILL_SECONDS,
                  lambda: None if len(guest.stills() - before) >= number else "no new still", guest)
-        time.sleep(HELD_STILL_OBSERVE_SECONDS)
-        newer = [t for t in guest.present_times(layer) if t > known[-1]]
+        seen: set[int] = set()
+        for _ in range(round(HELD_STILL_OBSERVE_SECONDS / HELD_STILL_POLL_SECONDS)):
+            time.sleep(HELD_STILL_POLL_SECONDS)
+            seen.update(guest.present_times(layer))
+        closed = session_events(guest.launcher_log()[log_start:]).count("closed")
+        if closed:
+            raise Failure(f"held still {number}: the host closed its capture session ({closed} so far) behind a still "
+                          "that held the request pipeline: the camera HAL closed the preview's stream")
+        newer = sorted(t for t in seen if t > known[-1])
         if not newer:
             raise Failure(f"held still {number}: the preview presented no frame after the still")
         gap = longest_gap_seconds([known[-1], *newer])
@@ -1280,10 +1292,6 @@ def check_still_keeps_preview(guest: Guest, plan: Plan) -> None:
         if gap > limit:
             raise Failure(f"held still {number}: the preview was away {gap:.2f} s, more than the stop and "
                           f"{HELD_STILL_RESUME_SECONDS:g} s ({limit:g} s)")
-    closed = session_events(guest.launcher_log()[log_start:]).count("closed")
-    if closed:
-        raise Failure(f"the host closed its capture session {closed} times in {len(HELD_STILL_DELAYS)} stills that held "
-                      "the request pipeline: the camera HAL closed the preview's stream behind the still")
     print(f"  {len(HELD_STILL_DELAYS)} stills held the request pipeline {HELD_STILL_SECONDS:g} s each: the preview's "
           "stream stayed open (no capture session closed)")
 
