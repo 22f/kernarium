@@ -79,6 +79,9 @@ struct CameraStillFailure {
     // orientation (compensation), and whether that was on for the capture.
     CameraFact compensationSupported {};
     CameraFact compensationEnabled {};
+    // The Exif orientation (1 to 8) of the photo the host's output gave for the
+    // capture; zero where it gave none or none was read.
+    std::uint8_t hostExifOrientation {};
     // The framework's error, when it reported one.
     CameraErrorDomain errorDomain {CameraErrorDomain::none};
     std::int32_t errorCode {};

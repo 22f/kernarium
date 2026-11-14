@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -1544,8 +1545,9 @@ void aRefusalIsLoggedOncePerCameraAndReasonUntilTheCameraChanges()
     require(log.first(0, Refusal::stillNotMade) && log.first(0, Refusal::overBudget), "a reset camera logs again");
     require(!log.first(1, Refusal::stillNotMade), "and another camera is not reset with it");
     for (const auto reason : {Refusal::noAnchor, Refusal::formatChanged, Refusal::notJoinable, Refusal::inputRefused, Refusal::outputRefused,
-                              Refusal::overBudget, Refusal::stillNotMade, Refusal::rawUnavailable, Refusal::raised})
-        require(!refusalName(reason).empty(), "every reason has a name");
+                              Refusal::overBudget, Refusal::stillNotMade, Refusal::rawUnavailable, Refusal::raised, Refusal::notRestored,
+                              Refusal::ratioMoved})
+        require(!refusalName(reason).empty() && refusalName(reason) != "unknown", "every reason has a name");
 }
 
 // ---------------------------------------------------------------------------
@@ -1986,6 +1988,128 @@ void aCameraStatesThePlatformsOwnMounting()
     require(sensorOrientationOf(CameraPosition::front, std::numeric_limits<double>::quiet_NaN()) == 0, "no angle states none");
 }
 
+// A front camera whose coordinator states portrait 0 or 180 is mounted with its sensor's top at the device's top, where an
+// earlier front camera's is at the side (90). It is presented as one of those: the guest is told 90 and the platform
+// turns the video connection by the difference, so that the buffers are upright where the earlier cameras' are. Nothing
+// else changes: not a front camera at 90 or 270, not a back camera at any angle, not an external camera, not an angle
+// that is not a number.
+void aFrontCameraMountedAtTheTopIsPresentedLikeAnEarlierOne()
+{
+    const auto of = [](CameraPosition position, double angle) { return presentedMountingOf(position, angle); };
+    require(of(CameraPosition::front, 90) == PresentedMounting({90, 0, false}), "a front camera at 90 is as it states");
+    require(of(CameraPosition::front, 0) == PresentedMounting({90, 270, true}), "a front camera at 0 states 90 and is turned 270");
+    require(of(CameraPosition::front, 180) == PresentedMounting({90, 90, true}), "a front camera at 180 states 90 and is turned 90");
+    require(of(CameraPosition::front, 270) == PresentedMounting({270, 0, false}), "a front camera at 270 is as it states");
+    require(of(CameraPosition::back, 90) == PresentedMounting({90, 0, false}), "a back camera at 90 is as it states");
+    require(of(CameraPosition::back, 0) == PresentedMounting({0, 0, false}), "a back camera at 0 is not imitated");
+    require(of(CameraPosition::back, 180) == PresentedMounting({180, 0, false}) && of(CameraPosition::back, 270) == PresentedMounting({270, 0, false}),
+            "nor at 180 or 270");
+    require(of(CameraPosition::external, 0) == PresentedMounting({90, 0, false}) && of(CameraPosition::external, 180) == PresentedMounting({90, 0, false}),
+            "an external camera states 90 and is not turned");
+    require(of(CameraPosition::front, std::numeric_limits<double>::quiet_NaN()) == PresentedMounting({0, 0, false}), "no angle is not imitated");
+    require(of(CameraPosition::front, std::numeric_limits<double>::infinity()) == PresentedMounting({0, 0, false}), "nor an infinite one");
+    require(of(CameraPosition::front, 0.4) == of(CameraPosition::front, 0) && of(CameraPosition::front, 359.7) == of(CameraPosition::front, 0),
+            "an angle is rounded to a quarter turn first");
+    require(of(CameraPosition::front, 89.6) == PresentedMounting({90, 0, false}), "so a front camera at 89.6 is at 90");
+    require(of(CameraPosition::front, -180) == of(CameraPosition::front, 180), "and taken within one turn");
+    // Whatever the angle: an imitated camera states 90 and its turn brings its own angle to that, a camera that is not
+    // imitated states what sensorOrientationOf does and is not turned.
+    for (const auto position : {CameraPosition::back, CameraPosition::front, CameraPosition::external})
+        for (double angle = -720; angle <= 720; angle += 22.5) {
+            const auto mounting = presentedMountingOf(position, angle);
+            if (mounting.emulatesEarlierFront) {
+                require(position == CameraPosition::front && mounting.stated == 90 && mounting.connectionTurn % 90 == 0,
+                        "an imitated camera is a front camera and states 90");
+                require((mounting.connectionTurn + 90) % 360 == sensorOrientationOf(position, angle),
+                        "its turn takes its own angle to 90");
+            } else {
+                require(mounting.stated == sensorOrientationOf(position, angle) && mounting.connectionTurn == 0,
+                        "a camera that is not imitated states the platform's angle and is not turned");
+            }
+        }
+}
+
+// A square format that lists dynamic aspect ratios is described by the crop the device is pinned at: 3x4 where the video
+// connection is turned a quarter turn, else 4x3, a landscape frame of N x 3N/4 either way, with the landscape 4:3 photo
+// sizes it lists. A format that lists none is as listed. One that cannot be described is dropped, never offered in
+// another shape.
+void aSquareFormatThatListsRatiosIsDescribedByItsPinnedCrop()
+{
+    constexpr std::uint8_t all = 0x1f;
+    const std::uint8_t tallAndWide = aspectRatioBit(CameraAspectRatio::r3x4) | aspectRatioBit(CameraAspectRatio::r4x3);
+    const auto square = [](std::uint32_t side, std::uint8_t ratios, Sizes photos) {
+        auto facts = fmt(side, side, std::move(photos), {{1, 30}, {1, 60}}, false, true);
+        facts.aspectRatios = ratios;
+        return facts;
+    };
+    const Sizes photos {{4032, 4032}, {3024, 4032}, {4032, 3024}, {2016, 1512}, {1512, 2016}, {4032, 2268}};
+    for (const std::uint8_t ratios : {all, tallAndWide}) {
+        const auto presented = presentedFormatOf(square(4032, ratios, photos), 270);
+        require(presented && presented->width == 4032 && presented->height == 3024, "a 4032 square is 4032x3024");
+        require(presented->pinnedRatio == CameraAspectRatio::r3x4, "pinned at 3x4");
+        require(presented->photoSizes == Sizes({{4032, 3024}, {2016, 1512}}), "only the landscape 4:3 photos stay, in order");
+        require(presented->aspectRatios == ratios && presented->fullRange == false && presented->multiCamera &&
+                    presented->frameRates == Spans({{1, 30}, {1, 60}}),
+                "the rest is as listed");
+        const auto quarter = presentedFormatOf(square(4032, ratios, photos), 90);
+        require(quarter && *quarter == *presented, "a quarter turn the other way pins the same");
+    }
+    for (const std::uint32_t turn : {0u, 180u}) {
+        const auto presented = presentedFormatOf(square(1280, all, photos), turn);
+        require(presented && presented->width == 1280 && presented->height == 960 && presented->pinnedRatio == CameraAspectRatio::r4x3,
+                "a turn that is no quarter pins 4x3, still N x 3N/4");
+    }
+    // A format that lists none is as listed, whatever its turn.
+    const auto plain = fmt(1920, 1440, photos, {{1, 30}}, true, true);
+    for (const std::uint32_t turn : {0u, 90u, 180u, 270u}) {
+        const auto presented = presentedFormatOf(plain, turn);
+        require(presented && *presented == plain && presented->pinnedRatio == CameraAspectRatio::none, "a format without ratios is unchanged");
+    }
+    // The ratio the turn needs is not listed: dropped, but the other turn's format is not.
+    const std::uint8_t noTall = aspectRatioBit(CameraAspectRatio::r1x1) | aspectRatioBit(CameraAspectRatio::r16x9) | aspectRatioBit(CameraAspectRatio::r4x3);
+    require(!presentedFormatOf(square(2016, noTall, photos), 270).has_value(), "a format without 3x4 is dropped for a quarter turn");
+    require(presentedFormatOf(square(2016, noTall, photos), 0).has_value(), "and kept for none");
+    require(!presentedFormatOf(square(2016, aspectRatioBit(CameraAspectRatio::r1x1), photos), 0).has_value() &&
+                !presentedFormatOf(square(2016, aspectRatioBit(CameraAspectRatio::r1x1), photos), 270).has_value(),
+            "a format that lists only 1x1 is dropped for any turn");
+    // One that is not square, or whose side is not divisible by four, cannot be described.
+    auto wide = fmt(1920, 1440, photos, {{1, 30}});
+    wide.aspectRatios = all;
+    require(!presentedFormatOf(wide, 270).has_value() && !presentedFormatOf(wide, 0).has_value(), "a format that lists ratios and is not square is dropped");
+    require(!presentedFormatOf(square(1282, all, photos), 270).has_value() && !presentedFormatOf(square(0, all, photos), 270).has_value(),
+            "so is one whose side does not divide by four, or has none");
+    // No landscape 4:3 photo listed: a format with no photo.
+    const auto none = presentedFormatOf(square(1280, all, {{1280, 1280}, {960, 1280}}), 270);
+    require(none && none->photoSizes.empty() && none->width == 1280 && none->height == 960, "a format with no such photo lists none");
+    // A pinned crop's width is the side and its frame is exactly 4:3 for every side divisible by four.
+    for (std::uint32_t side = 4; side <= 4032; side += 4) {
+        const auto presented = presentedFormatOf(square(side, all, {}), 270);
+        require(presented && presented->width == side && std::uint64_t(presented->height) * 4 == std::uint64_t(side) * 3, "exactly 4:3");
+    }
+}
+
+// The field of view of a pinned crop is the larger of the two crops', so a view cropped from the square is never stated
+// narrower than it is; the order of the arguments does not matter.
+void thePinnedCropsFieldOfViewIsTheLargerOfTheTwo()
+{
+    require(pinnedFieldOfView(80.0f, 90.0f) == 90.0f && pinnedFieldOfView(90.0f, 80.0f) == 90.0f, "the larger");
+    require(pinnedFieldOfView(85.5f, 85.5f) == 85.5f, "equal");
+    require(pinnedFieldOfView(0.0f, 72.0f) == 72.0f, "a crop that states none does not narrow it");
+}
+
+// The ratios a format lists are a mask of one bit each, and none has no bit.
+void theRatioBitsAreDistinctAndNoneHasNone()
+{
+    std::uint32_t seen = 0;
+    for (const auto ratio : {CameraAspectRatio::r1x1, CameraAspectRatio::r16x9, CameraAspectRatio::r9x16, CameraAspectRatio::r4x3,
+                             CameraAspectRatio::r3x4}) {
+        require(std::popcount(unsigned(aspectRatioBit(ratio))) == 1 && (seen & aspectRatioBit(ratio)) == 0, "one bit each");
+        seen |= aspectRatioBit(ratio);
+        require(aspectRatioName(ratio) != "-", "and a name");
+    }
+    require(seen == 0x1f && aspectRatioBit(CameraAspectRatio::none) == 0 && aspectRatioName(CameraAspectRatio::none) == "-", "five bits, none has none");
+}
+
 // The same rule over generated tables: nothing above the limit survives on a front camera, ever; every kept size was
 // listed, and every listed size within the limit is kept, in its order; the formats are otherwise as listed; limiting
 // twice is limiting once; and a back camera is not limited.
@@ -2130,5 +2254,9 @@ int main()
     theFrontStillLimitOnTheSecondRealFrontTable();
     everyGeneratedFrontTableKeepsNothingAboveTheLimit();
     aCameraStatesThePlatformsOwnMounting();
+    aFrontCameraMountedAtTheTopIsPresentedLikeAnEarlierOne();
+    aSquareFormatThatListsRatiosIsDescribedByItsPinnedCrop();
+    thePinnedCropsFieldOfViewIsTheLargerOfTheTwo();
+    theRatioBitsAreDistinctAndNoneHasNone();
     return 0;
 }
