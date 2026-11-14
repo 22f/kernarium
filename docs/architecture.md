@@ -798,17 +798,23 @@ address in its colon spelling are replaced by `<masked>`, `<time zone>` and
 file has them. An end is the last state on disk unless the process dies between
 a delayed checkpoint's write and its repair: the end formats its record before
 it writes it, and a checkpoint whose write lands after it writes that record
-again at once. The file is text of a fixed layout (`uml-session 7`) of 18176
+again at once. The file is text of a fixed layout (`uml-session 8`) of 19200
 bytes (`session_record_max_bytes`) from a session's begin: an 8 KiB memory slot,
-a 4 KiB stall slot, a 512-byte network slot, a 256-byte storage slot and the
-state with the kernel output it quotes, 5 KiB. Each part is rewritten in place
-by its own writer, so nothing grows with the session, and each state is one
-write of its whole area, padded with newlines that the readers ignore, so a
-reader never sees two states mixed; layouts 1 to 6, which lack the storage slot
-or the figures of the run or the network slot or the stall slot, still parse.
+a 4 KiB stall slot, a 512-byte network slot, a 256-byte storage slot, a 1 KiB
+camera slot and the state with the kernel output it quotes, 5 KiB. Each part is
+rewritten in place by its own writer, so nothing grows with the session, and
+each state is one write of its whole area, padded with newlines that the
+readers ignore, so a reader never sees two states mixed; layouts 1 to 7, which
+lack the camera slot or the storage slot or the figures of the run or the
+network slot or the stall slot, still parse.
 The storage slot counts the session's settles and those that were not
 confirmed, and names the last one's call, outcome and time: words and numbers
-only, blank until the first. The
+only, blank until the first. The camera slot counts the stills of the guest's
+cameras that did not end in a picture and names why for the newest few (the
+camera, the stage it stopped at, the sizes asked for, resolved and encoded, the
+photo output's orientation compensation, and the framework's error as a domain
+word and a code); the camera device reports each one (`onStillFailure`) and
+Andarium's bug report spells them out in words, in an entry of its own. The
 first 8 KiB are a memory checkpoint that a thread of its own rewrites every 2 s
 (`memory_checkpoint_interval_ms`): the footprint, its peak and what the
 process's memory limit still allows, the large terms of the footprint (guest

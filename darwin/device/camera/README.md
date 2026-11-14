@@ -99,6 +99,11 @@ application's statements (the sensor orientation, the rotation that
   scaler, see [`darwin/platform`](../../platform/README.md)), writes a picture
   that needs none of it straight into the guest's rows, and drops frames to a
   stream's rate. A frame with no queued buffer is dropped and its number spent.
+- **Stabilization.** The guest's request for it is met with the host's
+  low-latency mode where the active format supports it, else the standard one,
+  else none, and never with the system's automatic choice, which on an iPhone
+  holds the viewfinder a second or more behind (the preview and the recording
+  share one output).
 - **Stills.** A JPEG buffer carries the platform's file behind a reserved Exif
   APP1 segment for the guest to fill in place (`jpeg_gap.hpp`); a RAW buffer
   carries 16-bit rows at the 16-byte pitch. Buffers of one non-zero cookie
@@ -137,6 +142,14 @@ application's statements (the sensor orientation, the rotation that
   once. A host that lists no formats has no anchors and offers what it states.
   A camera opened while another's still is in flight, which the two conflict
   over, is refused until that still is delivered or has run out its ten seconds.
+  A still that does not end in a picture is reported to the device's owner
+  (`CameraDeviceOptions::onStillFailure`) with the stage it stopped at, the
+  camera, the sizes asked for, resolved and encoded, and what the platform
+  said of the capture (`darwin/platform/camera_still_failure.hpp`); the runtime keeps
+  the last few in the session record's camera slot. A whole request that waited
+  for the host's budget until its time ran out is one of them. One that an
+  interruption or a blocked session ends, and one that delivered its JPEG
+  (whatever its RAW did), report nothing.
 - **Metadata.** A meta stream completes one `virtio_video_camera_meta` per
   exposure, with the sequence the frames and stills carry; black frames get a
   record too. The exposure time, ISO, aperture, focal length, neutral point and
