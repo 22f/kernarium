@@ -668,7 +668,7 @@ def longest_gap_seconds(times: list[int]) -> float:
     return max(((b - a) / 1e9 for a, b in zip(times, times[1:])), default=0.0)
 
 
-STILL_STREAM = re.compile(r"Stream\[(\d+)\]: Output\n(?:(?!\s*Stream\[).*\n)*?\s+Dims: \d+ x \d+, format (0x[0-9a-f]+)")
+STILL_STREAM = re.compile(r"Stream\[(\d+)\]: Output\n(?:(?!\s*Stream\[\d+\]: Output).*\n)*?\s+Dims: \d+ x \d+, format (0x[0-9a-f]+)")
 STILL_FORMATS = ("0x20", "0x21")  # RAW16 and BLOB (the JPEG)
 PENDING_BUFFER = re.compile(r"pending buffer of stream (\d+) for frames? \[?(\d+)")
 LOGCAT_LINE = re.compile(r"^\s*(\d+\.\d+)\s+\d+\s+\d+\s+[A-Z]\s+(\S+)\s*:\s?(.*)$")

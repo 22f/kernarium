@@ -1377,9 +1377,13 @@ class HeldStillTests(unittest.TestCase):
         self.assertEqual(runner.longest_gap_seconds([5]), 0.0)
         self.assertEqual(runner.longest_gap_seconds([]), 0.0)
 
-    DUMP = ("    Stream[0]: Output\n      Dims: 1008 x 756, format 0x23, dataspace 0x0\n      Frames produced: 12, last timestamp: 1 ns\n"
-            "    Stream[1]: Output\n      Dims: 4032 x 3024, format 0x21, dataspace 0x8c20000\n      Frames produced: 3, last timestamp: 1 ns\n"
-            "    Stream[2]: Output\n      Dims: 4032 x 3024, format 0x20, dataspace 0x0\n")
+    # As the camera service prints it: the stream's header, its consumer, a second line with its surface, then its size.
+    DUMP = ("    Stream[0]: Output\n      Consumer name: f279c8e SurfaceView[org.lineageos.aperture/org.lineageos.aperture.CameraActivity]#1\n"
+            "    Stream[0]: Surface Id: 0\n      State: 4\n      Dims: 1008 x 756, format 0x23, dataspace 0x0\n      Frames produced: 12\n"
+            "    Stream[1]: Output\n      Consumer name: ImageReader-4032x3024f21m4-2209-0\n"
+            "    Stream[1]: Surface Id: 0\n      State: 4\n      Dims: 4032 x 3024, format 0x21, dataspace 0x8c20000\n      Frames produced: 3\n"
+            "    Stream[2]: Output\n      Consumer name: ImageReader-4032x3024f20m4-2209-1\n"
+            "    Stream[2]: Surface Id: 0\n      Dims: 4032 x 3024, format 0x20, dataspace 0x0\n")
 
     def test_the_still_streams_of_the_camera_service(self) -> None:
         self.assertEqual(runner.parse_still_streams(self.DUMP), {1, 2})
