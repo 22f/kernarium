@@ -1022,6 +1022,36 @@ public:
         for (const auto& member : group.members) complete(member.stream, member.held, member.held.cookie, VIRTIO_VIDEO_DEQUEUE_FLAG_ERR | extra);
     }
 
+    /* Tells the owner why a capture did not end in a picture
+     * (`CameraDeviceOptions::onStillFailure`): `failure` has the stage and what
+     * the platform or the device saw of the file, and gets the camera and the
+     * JPEG size the guest asked for here. Call it before the group's members
+     * are completed or dropped. */
+    void reportStillFailure(const Group& group, const Runtime& runtime, uml::platform::CameraStillFailure failure)
+    {
+        if (!options.onStillFailure) return;
+        failure.camera = runtime.description.index;
+        failure.position = runtime.description.info.position;
+        for (const auto& member : group.members) {
+            const auto found = streams.find(member.stream);
+            if (found == streams.end() || found->second.format != VIRTIO_VIDEO_FORMAT_CAMERA_JPEG) continue;
+            failure.askedWidth = found->second.width;
+            failure.askedHeight = found->second.height;
+        }
+        try {
+            options.onStillFailure(failure);
+        } catch (...) {
+            // The owner's record must not fail a capture.
+        }
+    }
+
+    [[nodiscard]] static uml::platform::CameraStillFailure failureAt(uml::platform::CameraStillStage stage) noexcept
+    {
+        uml::platform::CameraStillFailure failure;
+        failure.stage = stage;
+        return failure;
+    }
+
     /* A capture that ends makes room for the captures that wait for it. */
     void eraseGroup(std::uint64_t token)
     {
@@ -1143,6 +1173,7 @@ public:
         group.whole = ++wholeCount;
         group.deadline = now() + captureTimeoutNanoseconds;
         if (group.cost > stillBudget) {
+            reportStillFailure(group, runtime, failureAt(uml::platform::CameraStillStage::refused));
             failGroup(group, 0);
             const auto order = group.whole;
             std::erase_if(groups, [order](const auto& other) { return other.whole == order; });
@@ -1186,6 +1217,7 @@ public:
             // A control changed while it waited (a zoom back to 1 adds the colour data of an uncalibrated lens): the capture
             // may now cost more than the device admits at all, which is refused as it is at the request.
             if (next->cost > stillBudget) {
+                reportStillFailure(*next, *runtime, failureAt(uml::platform::CameraStillStage::refused));
                 failGroup(*next, 0);
                 groups.erase(next);
                 refused = true;
@@ -1263,6 +1295,7 @@ public:
             if (!taken) refusal = 1;
         }
         if (refusal != 0) {
+            reportStillFailure(group, runtime, failureAt(uml::platform::CameraStillStage::refused));
             failGroup(group, sessionFailed ? std::uint32_t(VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED) : 0u);
             eraseGroup(group.token);
             releaseSessionIfIdle();
@@ -1304,6 +1337,12 @@ public:
         // went wrong does, for the guest to ask again.
         const bool spansBoundary = group->fireSerial < runtime.boundary;
         if (!result.ok || spansBoundary || runtime.interruption != Interruption::none) {
+            // An interruption or a recovery that ended the capture is not a fault of the capture.
+            if (!result.ok && !spansBoundary && runtime.interruption == Interruption::none) {
+                auto failure = result.failure;
+                if (failure.stage == uml::platform::CameraStillStage::none) failure.stage = uml::platform::CameraStillStage::unknown;
+                reportStillFailure(*group, runtime, failure);
+            }
             failGroup(*group, runtime.interruption != Interruption::none ? std::uint32_t(VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED) : 0u);
             freePayload(result);
             eraseGroup(result.token);
@@ -1328,25 +1367,46 @@ public:
         const auto sequence = ++runtime.sequence;
         auto meta = metaOf(runtime, sequence, result.exposure, VIRTIO_VIDEO_CAMERA_FRAME_F_STILL);
         runtime.latest = result.exposure;
+        // The first member that fails says why the capture did (`reportStillFailure`): what the platform said of it, and
+        // the stage the device found.
+        std::optional<uml::platform::CameraStillFailure> failure;
+        const auto fails = [&](uml::platform::CameraStillStage stage, std::uint32_t encodedWidth = 0, std::uint32_t encodedHeight = 0) {
+            if (failure) return;
+            failure = result.failure;
+            failure->stage = stage;
+            failure->encodedWidth = encodedWidth;
+            failure->encodedHeight = encodedHeight;
+        };
         for (const auto& member : group->members) {
             auto& stream = streams.at(member.stream);
             auto& resource = stream.resources.at(member.held.resource);
             std::uint32_t size = 0;
             bool ok = false;
             if (stream.format == VIRTIO_VIDEO_FORMAT_CAMERA_JPEG) {
+                // The platform's own account of a JPEG that is not here stands when it gave one.
+                const auto platformStage = result.failure.stage != uml::platform::CameraStillStage::none
+                    ? result.failure.stage : uml::platform::CameraStillStage::missingData;
+                auto jpegStage = result.jpeg.empty() ? platformStage : uml::platform::CameraStillStage::none;
                 // A file larger than the host takes fails the capture, before anything of it is copied to the guest.
                 const auto largest = maximumJpegBytes(std::uint64_t(stream.width) * stream.height);
                 if (result.jpeg.size() > largest) {
                     std::fprintf(stderr, "Virtio camera stream %u: the still's file is %zu bytes, more than the %llu a %ux%u still may take\n",
                                  stream.id, result.jpeg.size(), static_cast<unsigned long long>(largest), stream.width, stream.height);
                     result.jpeg.clear();
+                    jpegStage = uml::platform::CameraStillStage::fileSize;
                 }
                 auto plan = reserveExifGap(result.jpeg);
+                // A file that has no frame header or scan states no size.
+                if (!plan && jpegStage == uml::platform::CameraStillStage::none) jpegStage = uml::platform::CameraStillStage::encodedSize;
+                std::uint32_t encodedWidth = 0, encodedHeight = 0;
                 // The guest asked for this size and gets this size or an error: a
                 // platform picture of another size is not the one it configured.
                 if (plan && (plan->frameWidth != stream.width || plan->frameHeight != stream.height)) {
                     std::fprintf(stderr, "Virtio camera stream %u: the still is %ux%u, not the %ux%u that was asked for\n", stream.id,
                                  unsigned(plan->frameWidth), unsigned(plan->frameHeight), stream.width, stream.height);
+                    jpegStage = uml::platform::CameraStillStage::encodedSize;
+                    encodedWidth = plan->frameWidth;
+                    encodedHeight = plan->frameHeight;
                     plan.reset();
                 }
                 if (plan && plan->size() <= resource.capacity && !resource.planes.empty()) {
@@ -1357,12 +1417,21 @@ public:
                     size = std::uint32_t(plan->size());
                     meta.jpeg_gap_offset = plan->gapOffset;
                     meta.jpeg_gap_length = plan->gapLength;
+                    if (!ok) jpegStage = uml::platform::CameraStillStage::guestBuffer;
+                } else if (plan) {
+                    jpegStage = uml::platform::CameraStillStage::guestBuffer;
                 }
+                if (!ok) fails(jpegStage, encodedWidth, encodedHeight);
             } else if (!result.raw.empty() && result.color.rawWidth != 0) {
                 ok = writeRaw(stream, resource, result, size);
+                if (!ok) fails(uml::platform::CameraStillStage::guestBuffer);
+            } else {
+                fails(result.failure.stage != uml::platform::CameraStillStage::none ? result.failure.stage
+                                                                                    : uml::platform::CameraStillStage::missingData);
             }
             complete(stream.id, member.held, member.held.cookie, ok ? 0 : VIRTIO_VIDEO_DEQUEUE_FLAG_ERR, ok ? size : 0, sequence);
         }
+        if (failure) reportStillFailure(*group, runtime, *failure);
         pushMeta(runtime, meta, 0);
         freePayload(result);
         eraseGroup(result.token);
@@ -1410,6 +1479,12 @@ public:
                 lost = true;
                 ++index;
                 continue;
+            }
+            // A capture that started and was not ended in time; one that never reached the platform is the guest's
+            // own (a group it did not complete, or one that waited for room).
+            if (group.fired) {
+                if (const auto* runtime = runtimeOf(group.camera))
+                    reportStillFailure(group, *runtime, failureAt(uml::platform::CameraStillStage::timeout));
             }
             failGroup(group, 0);
             if (group.fired) {

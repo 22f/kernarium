@@ -10,6 +10,7 @@
 // openSession() fails when the system has not granted access, and nothing in
 // this interface asks for it (camera_authorization.hpp does, at a user's act).
 
+#include "camera_still_failure.hpp"
 #include "nv12_transform.hpp"
 
 #include <array>
@@ -23,8 +24,6 @@
 #include <vector>
 
 namespace uml::platform {
-
-enum class CameraPosition : std::uint8_t { back, front, external };
 
 // zoom is a virtual device that switches between lenses by zoom ratio and
 // accepts automatic exposure, focus and white balance only; every other kind is
@@ -226,6 +225,11 @@ struct CameraStillResult {
     std::vector<std::uint16_t> raw;
     CameraColorData color;  // bayer is none when the capture taught nothing
     CameraExposure exposure;
+    // Why the capture, or the JPEG of it, did not end in a picture, as far as
+    // the platform can tell (camera_still_failure.hpp): stage none for a
+    // capture that did. The camera, its position and the sizes the platform did
+    // not see are the device's to fill.
+    CameraStillFailure failure;
 };
 
 enum class CameraExposureMode : std::uint8_t { continuousAuto, locked, manual };

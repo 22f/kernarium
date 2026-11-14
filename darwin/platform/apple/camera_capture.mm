@@ -78,6 +78,8 @@ void keepSensorOrientation(AVCaptureConnection* connection)
 // would state a turn, is not passed on (jpeg_gap.hpp).
 void keepStillOrientation(AVCapturePhotoOutput* output)
 {
+    // A front camera that states orientation 0 and supports the compensation has its stills rejected here (the session
+    // record's camera slot says how); the fix for it waits for a bug report that shows what the photo output delivers.
     @try {
         if (output.cameraSensorOrientationCompensationSupported) output.cameraSensorOrientationCompensationEnabled = NO;
     } @catch (NSException* exception) {
@@ -1128,6 +1130,7 @@ public:
     {
         CameraStillResult failed;
         failed.token = token;
+        failed.failure.stage = CameraStillStage::notStarted;
         std::lock_guard lock(state_->mutex);
         if (state_->session) deliverStill(camera, std::move(failed));
     }
@@ -2039,6 +2042,46 @@ std::unique_ptr<Camera> makeAppleCamera()
 
 @end
 
+namespace {
+
+// What a still that did not end in a picture says about itself (camera_still_failure.hpp). The first failure of a
+// capture stands: a later callback of the same capture names the same fault.
+void noteStillFailure(uml::platform::CameraStillFailure& failure, uml::platform::CameraStillStage stage)
+{
+    if (failure.stage == uml::platform::CameraStillStage::none) failure.stage = stage;
+}
+
+// The framework's error as a domain word and a code: nothing else of it (no message, no description) is kept.
+void noteFrameworkError(uml::platform::CameraStillFailure& failure, NSError* error)
+{
+    if (error == nil || failure.stage != uml::platform::CameraStillStage::none) return;
+    failure.stage = uml::platform::CameraStillStage::frameworkError;
+    failure.errorDomain = uml::platform::errorDomainOf(error.domain != nil ? error.domain.UTF8String : "");
+    failure.errorCode = std::int32_t(std::clamp<NSInteger>(error.code, INT32_MIN, INT32_MAX));
+}
+
+// Whether the photo output supports turning its stills to an earlier model's sensor orientation, and whether it did for
+// this capture; unknown where the host has no such output (macOS).
+void noteCompensation(uml::platform::CameraStillFailure& failure, AVCapturePhotoOutput* output)
+{
+#if TARGET_OS_IOS
+    if (output == nil) return;
+    @try {
+        const bool supported = output.cameraSensorOrientationCompensationSupported;
+        failure.compensationSupported = supported ? uml::platform::CameraFact::yes : uml::platform::CameraFact::no;
+        failure.compensationEnabled = supported && output.cameraSensorOrientationCompensationEnabled
+            ? uml::platform::CameraFact::yes : uml::platform::CameraFact::no;
+    } @catch (NSException*) {
+        // The facts stay unknown.
+    }
+#else
+    (void)failure;
+    (void)output;
+#endif
+}
+
+} // namespace
+
 @implementation UMLPhotoDelegate {
     size_t _camera;
     uint64_t _token;
@@ -2087,10 +2130,16 @@ std::unique_ptr<Camera> makeAppleCamera()
     didFinishProcessingPhoto:(AVCapturePhoto*)photo
                        error:(NSError*)error
 {
-    (void)output;
+    noteCompensation(_result.failure, output);
     // A part that fails leaves its field empty and the other part alone: a Bayer
     // still that cannot be made does not take the person's JPEG with it.
-    if (error != nil || photo == nil) return;
+    if (error != nil || photo == nil) {
+        // The framework's error is kept as a domain word and a code for the session record; the capture goes on
+        // without this part. A photo that is not there at all is missing data.
+        noteFrameworkError(_result.failure, error);
+        noteStillFailure(_result.failure, uml::platform::CameraStillStage::missingData);
+        return;
+    }
     NSData* data = photo.fileDataRepresentation;
     // The photo's own Exif, read from its file: AVCapturePhoto.metadata is not
     // on the Mac.
@@ -2136,10 +2185,12 @@ std::unique_ptr<Camera> makeAppleCamera()
         // capture counts this file).
         const std::span<const std::uint8_t> file(static_cast<const std::uint8_t*>(data.bytes), data.length);
         if (!uml::platform::takeJpegFile(file, _maximumBytes, _wantJpeg, _result.jpeg)) {
-            if (_wantJpeg)
+            if (_wantJpeg) {
                 std::fprintf(stderr, "Camera: the photo's file is %lu bytes, more than the %llu a %ux%u photo may take\n",
                              static_cast<unsigned long>(data.length), static_cast<unsigned long long>(_maximumBytes), _jpegSize.width,
                              _jpegSize.height);
+                _result.failure.stage = uml::platform::CameraStillStage::fileSize;
+            }
             return;
         }
         _jpegReadings = readings;
@@ -2150,12 +2201,18 @@ std::unique_ptr<Camera> makeAppleCamera()
     didFinishCaptureForResolvedSettings:(AVCaptureResolvedPhotoSettings*)resolvedSettings
                                   error:(NSError*)error
 {
-    (void)output;
-    (void)error;
+    noteCompensation(_result.failure, output);
+    // The capture's own error: the photo callback's, when it had one, is the one kept.
+    noteFrameworkError(_result.failure, error);
     // The session drops its hold on this object when it delivers, which can be
     // the last one.
     __strong UMLPhotoDelegate* keepAlive = self;
     (void)keepAlive;
+    if (_wantJpeg && resolvedSettings != nil) {
+        const CMVideoDimensions resolved = resolvedSettings.photoDimensions;
+        _result.failure.resolvedWidth = std::uint32_t(std::max(0, int(resolved.width)));
+        _result.failure.resolvedHeight = std::uint32_t(std::max(0, int(resolved.height)));
+    }
     // The photo is the size the guest configured or it is not passed on: the
     // output makes at most the size it was asked for, and the platform says
     // what it resolved. (The device compares the encoded picture as well.)
@@ -2169,6 +2226,7 @@ std::unique_ptr<Camera> makeAppleCamera()
                          resolvedSize.width, resolvedSize.height, _jpegSize.width, _jpegSize.height, _attempt,
                          uml::platform::stillAttemptLimit);
             _result.jpeg.clear();
+            _result.failure.stage = uml::platform::CameraStillStage::resolvedSize;
             if (outcome == uml::platform::StillSizeOutcome::retry) {
                 // The photo of the first capture is dropped and the request is made again; the result is the
                 // next capture's.
@@ -2177,6 +2235,8 @@ std::unique_ptr<Camera> makeAppleCamera()
             }
         }
     }
+    // A JPEG that was asked for and did not arrive, for a reason no callback gave, is missing data.
+    if (_wantJpeg && _result.jpeg.empty()) noteStillFailure(_result.failure, uml::platform::CameraStillStage::missingData);
     // Whatever arrived stands; the capture failed only when nothing asked for did.
     _result.ok = (_wantJpeg && !_result.jpeg.empty()) || (_wantRaw && !_result.raw.empty());
     // Whether the flash fired is the metadata's word, and the platform's decision
