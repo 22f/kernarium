@@ -64,6 +64,30 @@ struct PresentedMounting {
 };
 [[nodiscard]] PresentedMounting presentedMountingOf(CameraPosition position, double portraitAngle) noexcept;
 
+// The angle set on the photo output's connection: 0 for every camera, as before; none for a camera that imitates an
+// earlier front camera, whose connection keeps its default (only its mirroring is turned off). The angle changes the
+// Exif tag alone and the host drops the platform's Exif.
+[[nodiscard]] constexpr std::optional<std::uint32_t> photoConnectionTurnOf(const PresentedMounting& mounting) noexcept
+{
+    if (mounting.emulatesEarlierFront) return std::nullopt;
+    return std::uint32_t {0};
+}
+
+// What a still of a camera does about the photo output's orientation compensation, read when it starts. A camera that
+// imitates an earlier front camera needs the output to turn its stills: compensation supported and on, which is read
+// after the configuration is committed (a reading before it decides nothing). Supported and off is turned on, once;
+// anything else refuses the still. Every other camera is not asked.
+enum class CompensationStep : std::uint8_t { proceed, enable, refuse };
+[[nodiscard]] CompensationStep stillCompensationStep(bool imitatesEarlierFront, CameraFact supported, CameraFact enabled,
+                                                     CameraReading reading) noexcept;
+
+// What a still does about the dynamic aspect ratio its camera's anchor pins: nothing where it pins none or the device
+// holds it; waits where the change's completion has not arrived; refuses where the completion reported an error, or
+// arrived and the device holds another ratio.
+enum class RatioStillStep : std::uint8_t { proceed, wait, refuseFailed, refuseMoved };
+[[nodiscard]] RatioStillStep ratioStillStep(CameraAspectRatio pinned, CameraAspectRatio now, bool completionPending,
+                                            std::int32_t completionError) noexcept;
+
 // A device format as the guest is offered it. A format that lists no dynamic aspect ratio is as listed. A square
 // format that lists them is described by the crop the device is held at (pinned, never changed while a stream or a
 // still runs): 3x4 where the video connection is turned a quarter turn, 4x3 where it is not, which both give a
@@ -216,6 +240,13 @@ struct ScheduledStill {
 };
 [[nodiscard]] ScheduledStill scheduledStillStep(bool sessionEnded, bool requestKnown, std::uint64_t committedAt, std::uint64_t now,
                                                 std::uint64_t waitedNanoseconds) noexcept;
+
+// The same for a camera whose pinned aspect ratio's change has not completed (ratioStillStep): it waits at least
+// `ratioPinPollNanoseconds` more, inside the same budget, so that it never waits longer than a still that waits for the
+// settle time.
+inline constexpr std::uint64_t ratioPinPollNanoseconds = 50'000'000;
+[[nodiscard]] ScheduledStill scheduledStillStep(bool sessionEnded, bool requestKnown, std::uint64_t committedAt, std::uint64_t now,
+                                                std::uint64_t waitedNanoseconds, bool ratioPending) noexcept;
 
 // What a finished capture whose photo is not the size asked for leads to. A
 // capture that starts before the settle time has passed can still be served at
@@ -684,6 +715,9 @@ enum class Refusal : std::uint8_t {
     raised,
     notRestored,
     ratioMoved,
+    turnNotHeld,
+    stillsNotTurned,
+    ratioFailed,
 };
 [[nodiscard]] std::string_view refusalName(Refusal reason) noexcept;
 

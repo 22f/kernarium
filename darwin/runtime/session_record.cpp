@@ -827,6 +827,15 @@ std::uint64_t camera_failures{};
 /* The newest note of each camera, by the guest's number of it. */
 uml::platform::CameraPresentation camera_presented[session_cameras_kept];
 bool camera_presented_has[session_cameras_kept];
+/* What the newest note says of the front devices, which every camera's note of
+ * a session says alike. */
+struct CameraFronts final {
+	std::uint8_t devices{};
+	bool square{};
+	bool dynamic{};
+	std::uint16_t dropped{};
+};
+CameraFronts camera_fronts;
 
 /* "WxH" for a size, or "-" for one that is not known. */
 void camera_size(FixedText &text, std::uint32_t width,
@@ -871,6 +880,8 @@ void camera_failure_line(FixedText &text, const CameraNote &note) noexcept
 		.text(uml::platform::factName(failure.compensationSupported))
 		.text(" enabled ")
 		.text(uml::platform::factName(failure.compensationEnabled))
+		.text(" read ")
+		.text(uml::platform::readingName(failure.compensationReading))
 		.text(" exif ");
 	if (failure.hostExifOrientation == 0)
 		text.text("-");
@@ -920,12 +931,6 @@ void camera_line(FixedText &text, CameraLineKind kind,
 		camera_size(text, c.anchorWidth, c.anchorHeight);
 		text.text(" ratios ").number(c.anchorRatios).text(" fov ");
 		camera_figure(text, c.anchorFieldOfView);
-		if (c.position == uml::platform::CameraPosition::front) {
-			text.text(" fronts ").number(c.frontDevices).text(" square ");
-			camera_yes_no(text, c.squareFormats);
-			text.text(" dynamic ");
-			camera_yes_no(text, c.dynamicRatios);
-		}
 		break;
 	case CameraLineKind::ratio:
 		text.text(" pinned ")
@@ -958,7 +963,9 @@ void camera_line(FixedText &text, CameraLineKind kind,
 	case CameraLineKind::photo:
 		text.text(" compensation supported ")
 			.text(factName(c.compensationSupported)).text(" enabled ")
-			.text(factName(c.compensationEnabled)).text(" default ");
+			.text(factName(c.compensationEnabled)).text(" read ")
+			.text(uml::platform::readingName(c.compensationReading))
+			.text(" default ");
 		camera_figure(text, c.photoDefaultAngle);
 		text.text(" set ");
 		camera_figure(text, c.photoAngle);
@@ -1022,6 +1029,18 @@ void write_camera_slot(int descriptor) noexcept
 		};
 		text.text("camera 1\nstills failed ").number(n(camera_failures))
 			.text("\n");
+		/* What the platform found of the front devices, in a line of its
+		 * own that stays whichever camera the guest used: a front device
+		 * whose formats were all dropped is no camera, and this is what is
+		 * left of it. */
+		if (any_note) {
+			text.text("fronts ").number(camera_fronts.devices)
+				.text(" square ");
+			camera_yes_no(text, camera_fronts.square);
+			text.text(" dynamic ");
+			camera_yes_no(text, camera_fronts.dynamic);
+			text.text(" dropped ").number(camera_fronts.dropped).text("\n");
+		}
 		std::size_t room = sizeof(slot) - 1 - text.size();
 		/* The lines of each camera, as written for the camera's last note. */
 		for (std::size_t camera = 0; camera < session_cameras_kept; ++camera) {
@@ -1803,6 +1822,7 @@ bool begin_session_record(std::string_view path,
 		sched_yield();
 	camera_failures = 0;
 	std::memset(camera_presented_has, 0, sizeof(camera_presented_has));
+	camera_fronts = {};
 	write_camera_slot(descriptor);
 	camera_slot_busy.clear(std::memory_order_release);
 	/* The same for a checkpoint of the state, which also reads the values the
@@ -1925,6 +1945,8 @@ void note_camera_presentation(
 		sched_yield();
 	camera_presented[presentation.camera] = presentation;
 	camera_presented_has[presentation.camera] = true;
+	camera_fronts = {presentation.frontDevices, presentation.squareFormats,
+		presentation.dynamicRatios, presentation.frontFormatsDropped};
 	write_camera_slot(descriptor);
 	camera_slot_busy.clear(std::memory_order_release);
 }

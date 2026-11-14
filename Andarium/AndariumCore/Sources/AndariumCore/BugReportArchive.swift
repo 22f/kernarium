@@ -324,7 +324,9 @@ public enum BugReportAttachments {
             "file-size: the file is larger than the host takes.",
             "guest-buffer: the file could not be put into the guest's buffer.",
             "timeout: the platform did not end the capture in time.",
-            "Orientation compensation is the photo output turning its stills to an earlier model's sensor orientation.",
+            "Orientation compensation is the photo output turning its stills to an earlier model's sensor orientation. The system",
+            "answers it only once the capture session's configuration is committed: an answer read before that is not final.",
+            "Front devices: the front devices the platform listed, and how many of their formats it did not offer the guest.",
             "andarium/session-previous.txt and andarium/session-current.txt hold the raw records.",
         ]
         for (title, record) in [("The previous session", previous), ("The current session", current)] {

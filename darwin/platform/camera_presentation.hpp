@@ -88,6 +88,10 @@ struct CameraPresentation {
     std::uint8_t frontDevices {};
     bool squareFormats {};
     bool dynamicRatios {};
+    // How many formats of the front devices were not offered, because they list dynamic aspect ratios and cannot be
+    // described (presentedFormatOf). The same for every camera: a front device whose formats are all dropped is no
+    // camera, and these facts are what is left of it.
+    std::uint16_t frontFormatsDropped {};
 
     // How many refusals of the camera's admissions the session logged and the
     // reason of the last (the platform's own numbering: photo_dimensions.hpp,
@@ -130,6 +134,7 @@ struct CameraPresentation {
     bool photoKnown {};
     CameraFact compensationSupported {};
     CameraFact compensationEnabled {};
+    CameraReading compensationReading {};
     std::int16_t photoDefaultAngle {-1};
     std::int16_t photoAngle {-1};
     std::int8_t photoDefaultMirrored {-1};
@@ -166,6 +171,7 @@ inline constexpr std::int32_t ratioPending = std::numeric_limits<std::int32_t>::
     kept.frontDevices = discovered.frontDevices;
     kept.squareFormats = discovered.squareFormats;
     kept.dynamicRatios = discovered.dynamicRatios;
+    kept.frontFormatsDropped = discovered.frontFormatsDropped;
     return kept;
 }
 

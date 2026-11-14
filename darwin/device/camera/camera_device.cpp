@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -252,6 +253,14 @@ public:
     CameraTierLimits limits;
     std::vector<Runtime> runtimes;
     std::unordered_map<std::size_t, std::uint32_t> wireOfPlatform;
+    // The newest reading of each platform camera's photo output compensation (cameraPresentation, on the platform's thread).
+    struct CompensationReading {
+        uml::platform::CameraFact supported {};
+        uml::platform::CameraFact enabled {};
+        uml::platform::CameraReading reading {};
+    };
+    std::mutex compensationMutex;
+    std::map<std::size_t, CompensationReading> compensationOf;
     GuestMapper mapper;
     std::shared_ptr<const uml::virtio::SharedMemoryRegions> regions;
     std::unordered_map<std::uint32_t, Stream> streams;
@@ -745,6 +754,11 @@ public:
         if (wire == wireOfPlatform.end()) return;
         uml::platform::CameraPresentation told = presentation;
         told.camera = wire->second;
+        if (presentation.photoKnown) {
+            // The newest reading of the photo output's compensation, for a still the platform refuses before it has one.
+            std::lock_guard lock(compensationMutex);
+            compensationOf[camera] = {presentation.compensationSupported, presentation.compensationEnabled, presentation.compensationReading};
+        }
         try {
             options.onCameraPresentation(told);
         } catch (...) {
@@ -1049,6 +1063,15 @@ public:
         if (!options.onStillFailure) return;
         failure.camera = runtime.description.index;
         failure.position = runtime.description.info.position;
+        if (failure.compensationSupported == uml::platform::CameraFact::unknown) {
+            // A still refused before the platform had a photo to read it from says what the output last read.
+            std::lock_guard lock(compensationMutex);
+            if (const auto found = compensationOf.find(runtime.description.platformIndex); found != compensationOf.end()) {
+                failure.compensationSupported = found->second.supported;
+                failure.compensationEnabled = found->second.enabled;
+                failure.compensationReading = found->second.reading;
+            }
+        }
         for (const auto& member : group.members) {
             const auto found = streams.find(member.stream);
             if (found == streams.end() || found->second.format != VIRTIO_VIDEO_FORMAT_CAMERA_JPEG) continue;
