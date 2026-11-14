@@ -52,6 +52,13 @@ target_link_libraries(uml_camera_photo_dimensions_tests PRIVATE UML::PhotoDimens
 uml_add_unit_test(NAME camera-photo-dimensions COMMAND uml_camera_photo_dimensions_tests
     LABELS "device;camera")
 
+# Which video stabilization a camera is asked for, over what its format supports
+# (no camera is opened).
+add_executable(uml_camera_video_stabilization_tests camera_video_stabilization_tests.cpp)
+target_link_libraries(uml_camera_video_stabilization_tests PRIVATE UML::VideoStabilization)
+uml_add_unit_test(NAME camera-video-stabilization COMMAND uml_camera_video_stabilization_tests
+    LABELS "device;camera")
+
 # The anchor model: the one format a camera runs in, what it offers from it, the
 # session's admit and resize transactions on a fake session, and the invariants
 # over seeded generated format tables.

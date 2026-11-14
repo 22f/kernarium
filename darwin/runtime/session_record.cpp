@@ -103,7 +103,9 @@ constexpr unsigned state_checkpoint_wait_ms = 50;
  * the next are the stall slot that only the stall watch writes, the network
  * slot after it is written by the checkpoints and the session's begin and
  * end, the storage slot after that is written by the settle calls
- * (note_guest_settle) and the session's begin, and the rest is the session's
+ * (note_guest_settle) and the session's begin, the camera slot after that by
+ * the camera's failure reports (note_camera_still_failure) and the session's
+ * begin, and the rest is the session's
  * state that only its begin and its end write, so none ever overwrites
  * another's bytes, whichever finishes last. */
 constexpr std::size_t memory_slot_size = session_memory_slot_bytes;
@@ -495,7 +497,7 @@ void write_memory_slot(int descriptor, bool beginning) noexcept
 	os_unfair_lock_lock(&history_lock);
 	Text text{slot, sizeof(slot) - 1};
 	const std::int64_t at = now();
-	text.text("uml-session 7\nmemory at ").number(at);
+	text.text("uml-session 8\nmemory at ").number(at);
 	task_vm_info_data_t info{};
 	mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
 	std::uint64_t footprint = 0;
@@ -808,6 +810,101 @@ void write_storage_slot(int descriptor) noexcept
 	do {
 		written = pwrite(descriptor, slot, sizeof(slot),
 			session_storage_offset);
+	} while (written < 0 && errno == EINTR);
+}
+
+/* The camera slot: how many stills of the guest's cameras did not end in a
+ * picture, and why for the last few. One writer at a time, and the session's
+ * begin, which blanks it, waits for the flag. */
+std::atomic_flag camera_slot_busy = ATOMIC_FLAG_INIT;
+struct CameraNote final {
+	std::int64_t at{};
+	uml::platform::CameraStillFailure failure{};
+};
+CameraNote camera_recent[session_camera_failures_kept];
+std::uint64_t camera_failures{};
+
+/* "WxH" for a size, or "-" for one that is not known. */
+void camera_size(FixedText &text, std::uint32_t width,
+	std::uint32_t height) noexcept
+{
+	if (width == 0 && height == 0) {
+		text.text("-");
+		return;
+	}
+	text.number(width).text("x").number(height);
+}
+
+/* One failure's line. A reader takes the words as they are written. */
+void camera_failure_line(FixedText &text, const CameraNote &note) noexcept
+{
+	const auto &failure = note.failure;
+	text.text("still at ").number(note.at).text(" camera ")
+		.number(failure.camera).text(" ")
+		.text(uml::platform::cameraPositionName(failure.position))
+		.text(" stage ").text(uml::platform::stillStageName(failure.stage))
+		.text(" asked ");
+	camera_size(text, failure.askedWidth, failure.askedHeight);
+	text.text(" resolved ");
+	camera_size(text, failure.resolvedWidth, failure.resolvedHeight);
+	text.text(" encoded ");
+	camera_size(text, failure.encodedWidth, failure.encodedHeight);
+	text.text(" compensation supported ")
+		.text(uml::platform::factName(failure.compensationSupported))
+		.text(" enabled ")
+		.text(uml::platform::factName(failure.compensationEnabled))
+		.text(" error ")
+		.text(uml::platform::errorDomainName(failure.errorDomain));
+	if (failure.errorDomain != uml::platform::CameraErrorDomain::none)
+		text.text(" ").number(failure.errorCode);
+	text.text("\n");
+}
+
+/* The camera slot, padded to its size: blank before the first failure, else a
+ * format line, the count and the newest failures that fit, oldest first. Held
+ * under `camera_slot_busy`. */
+void write_camera_slot(int descriptor) noexcept
+{
+	static char slot[session_camera_slot_bytes];
+	Text text{slot, sizeof(slot) - 1};
+	if (camera_failures != 0U) {
+		const auto n = [](std::uint64_t value) {
+			return static_cast<std::int64_t>(std::min<std::uint64_t>(
+				value, INT64_MAX));
+		};
+		text.text("camera 1\nstills failed ").number(n(camera_failures))
+			.text("\n");
+		const std::size_t kept = static_cast<std::size_t>(std::min<
+			std::uint64_t>(camera_failures, session_camera_failures_kept));
+		const std::size_t room = sizeof(slot) - 1 - text.size();
+		/* The failure that is `age` places from the newest, 1 being the
+		 * newest. */
+		const auto recent = [](std::size_t age) -> const CameraNote & {
+			return camera_recent[(camera_failures - age) %
+				session_camera_failures_kept];
+		};
+		/* The newest that fit, so that a longer line costs the oldest. */
+		std::size_t fitting = 0;
+		std::size_t taken = 0;
+		while (fitting < kept) {
+			char line[320];
+			Text probe{line, sizeof(line)};
+			camera_failure_line(probe, recent(fitting + 1));
+			if (probe.size() > room - taken)
+				break;
+			taken += probe.size();
+			++fitting;
+		}
+		for (std::size_t age = fitting; age > 0; --age)
+			camera_failure_line(text, recent(age));
+	}
+	const std::size_t used = text.size();
+	std::memset(slot + used, ' ', sizeof(slot) - 1 - used);
+	slot[sizeof(slot) - 1] = '\n';
+	ssize_t written;
+	do {
+		written = pwrite(descriptor, slot, sizeof(slot),
+			session_camera_offset);
 	} while (written < 0 && errno == EINTR);
 }
 
@@ -1499,6 +1596,12 @@ bool begin_session_record(std::string_view path,
 	storage_has_last = false;
 	write_storage_slot(descriptor);
 	storage_slot_busy.clear(std::memory_order_release);
+	/* The camera slot likewise: no failure of the session before is named. */
+	while (camera_slot_busy.test_and_set(std::memory_order_acquire))
+		sched_yield();
+	camera_failures = 0;
+	write_camera_slot(descriptor);
+	camera_slot_busy.clear(std::memory_order_release);
 	/* The same for a checkpoint of the state, which also reads the values the
 	 * record takes out of what it quotes. */
 	while (state_checkpointing.test_and_set(std::memory_order_seq_cst))
@@ -1586,6 +1689,23 @@ void note_guest_settle(SettleKind kind, GuestStorage storage,
 	storage_last_at = now();
 	write_storage_slot(descriptor);
 	storage_slot_busy.clear(std::memory_order_release);
+}
+
+void note_camera_still_failure(
+	const uml::platform::CameraStillFailure &failure) noexcept
+{
+	if (!session_open.load(std::memory_order_acquire))
+		return;
+	const int descriptor = record_descriptor.load(std::memory_order_acquire);
+	if (descriptor < 0)
+		return;
+	while (camera_slot_busy.test_and_set(std::memory_order_acquire))
+		sched_yield();
+	camera_recent[camera_failures % session_camera_failures_kept] = {
+		.at = now(), .failure = failure};
+	++camera_failures;
+	write_camera_slot(descriptor);
+	camera_slot_busy.clear(std::memory_order_release);
 }
 
 void set_session_boot_facts(bool console_reports_completion,

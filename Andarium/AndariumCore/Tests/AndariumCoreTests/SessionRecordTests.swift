@@ -195,7 +195,7 @@ struct SessionRecordTests {
         let figures = " 2000 120 45 2 1 12 5000 1 2 3 158 5900 5000 74 3000 11800"
         let names = " span frames gap thermal pressure compressed internal reliefs shed renewals largest"
             + " cpu vcpu perf mhz energy"
-        for layout in [5, 6, 7] {
+        for layout in [5, 6, 7, 8] {
             var memory = """
                 uml-session \(layout)
                 memory at 1794210239 footprint 6441524416 peak 6442458280 available 926528
@@ -207,10 +207,12 @@ struct SessionRecordTests {
                 """
             memory = NetworkRecordTests.padded(String(memory.dropLast()), to: layout >= 6 ? 8192 : 4096)
             // Layout 7 has the storage slot, blank until the first settle,
-            // between the network slot and the state.
+            // between the network slot and the state, and layout 8 the camera
+            // slot, blank until the first failed still, after it.
             let text = memory + NetworkRecordTests.padded(try StallRecordTests.golden(), to: 4096)
                 + NetworkRecordTests.padded(try NetworkRecordTests.golden(), to: 512)
-                + (layout == 7 ? NetworkRecordTests.padded("", to: 256) : "")
+                + (layout >= 7 ? NetworkRecordTests.padded("", to: 256) : "")
+                + (layout == 8 ? NetworkRecordTests.padded("", to: 1024) : "")
                 + "state running\nend running\nstatus 0\npid 20373\nstarted 1794209753\n"
             let record = try #require(SessionRecord(text: text), "layout \(layout)")
             #expect(record.running && record.nearMemoryLimit && record.processID == 20373, "layout \(layout)")
@@ -218,18 +220,20 @@ struct SessionRecordTests {
             #expect(record.terms?.hasPrefix("guest 4090 gpu 1262/1251") == true)
             #expect(record.peakTerms?.hasPrefix("at 1794210239 footprint 6143 guest 4090") == true)
             #expect(record.stalls?.total == 37 && record.network?.tcp?.attempts == 12, "layout \(layout)")
-            // An earlier layout has no storage slot; a blank one makes no claim.
-            #expect(record.storage == nil, "layout \(layout)")
+            // An earlier layout has no storage slot, nor a camera slot; a blank
+            // one makes no claim.
+            #expect(record.storage == nil && record.camera == nil, "layout \(layout)")
         }
-        #expect(SessionRecord.maximumBytes >= 18176)
-        var largest = "uml-session 7\nmemory at 1 footprint 2 peak 3\n"
+        #expect(SessionRecord.maximumBytes >= 19200)
+        var largest = "uml-session 8\nmemory at 1 footprint 2 peak 3\n"
         largest = NetworkRecordTests.padded(String(largest.dropLast()), to: 8192)
         largest += NetworkRecordTests.padded("stalls 1 base 1 at 1 total 0 shown 0", to: 4096)
         largest += NetworkRecordTests.padded("network 1\nnet-notice denials 0 now none", to: 512)
         largest += NetworkRecordTests.padded("", to: 256)
+        largest += NetworkRecordTests.padded("", to: 1024)
         largest += "state running\nend running\nstatus 0\npid 3\n"
-        largest += String(repeating: "k", count: 18176 - largest.utf8.count)
-        #expect(largest.utf8.count == 18176 && SessionRecord(text: largest)?.running == true)
+        largest += String(repeating: "k", count: 19200 - largest.utf8.count)
+        #expect(largest.utf8.count == 19200 && SessionRecord(text: largest)?.running == true)
     }
 
     /// The runtime's storage slot as Andarium reads it: the golden fixture the
@@ -250,6 +254,114 @@ struct SessionRecordTests {
             + NetworkRecordTests.padded(try NetworkRecordTests.golden(), to: 512)
             + NetworkRecordTests.padded(storage, to: 256)
             + "state running\nend running\nstatus 0\npid 77\n"
+    }
+
+    /// The runtime's camera slot as Andarium reads it: the golden fixture the
+    /// runtime's own test checks its writer against
+    /// (`tests/unit/andarium/fixtures/camera-slot-golden.txt`).
+    static func cameraGolden() throws -> String {
+        var url = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { url.deleteLastPathComponent() }
+        url.append(path: "tests/unit/andarium/fixtures/camera-slot-golden.txt")
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    /// A whole layout 8 record with `camera` in the camera slot.
+    static func layout8(camera: String) throws -> String {
+        var memory = "uml-session 8\nmemory at 1794114290 footprint 2147483648 peak 2415919104 available 900000000\n"
+        memory = NetworkRecordTests.padded(String(memory.dropLast()), to: 8192)
+        return memory + NetworkRecordTests.padded(try StallRecordTests.golden(), to: 4096)
+            + NetworkRecordTests.padded(try NetworkRecordTests.golden(), to: 512)
+            + NetworkRecordTests.padded(try Self.storageGolden().trimmingCharacters(in: .newlines), to: 256)
+            + NetworkRecordTests.padded(camera, to: 1024)
+            + "state running\nend running\nstatus 0\npid 78\n"
+    }
+
+    @Test func theGoldenCameraSlotParses() throws {
+        let slot = try #require(CameraRecord(text: try Self.cameraGolden()))
+        #expect(slot.failed == 3 && slot.recent.count == 3)
+        let refused = slot.recent[0]
+        #expect(refused.stage == "refused" && refused.camera == 0 && refused.position == "back")
+        #expect(refused.asked == .init(width: 4032, height: 3024) && refused.resolved == nil && refused.encoded == nil)
+        #expect(refused.compensationSupported == "unknown" && refused.errorDomain == "none" && refused.errorCode == nil)
+        let error = slot.recent[1]
+        #expect(error.stage == "framework-error" && error.camera == 1 && error.position == "front")
+        #expect(error.errorDomain == "avfoundation" && error.errorCode == -11800)
+        #expect(error.compensationSupported == "yes" && error.compensationEnabled == "no")
+        #expect(error.at == Date(timeIntervalSince1970: 1_794_114_290))
+        let encoded = slot.recent[2]
+        #expect(encoded.stage == "encoded-size" && encoded.encoded == .init(width: 1512, height: 2016))
+        #expect(encoded.asked == .init(width: 2016, height: 1512) && encoded.resolved == .init(width: 2016, height: 1512))
+    }
+
+    @Test func aLayout8RecordCarriesTheCameraSlot() throws {
+        let session = try #require(
+            SessionRecord(text: try Self.layout8(camera: try Self.cameraGolden().trimmingCharacters(in: .newlines))))
+        #expect(session.processID == 78 && session.running)
+        #expect(session.camera?.failed == 3 && session.camera?.recent.last?.stage == "encoded-size")
+        // The other slots are read as they are in layout 7.
+        #expect(session.storage?.settles == 4 && session.stalls?.total == 37 && session.network?.tcp?.attempts == 12)
+    }
+
+    @Test func aBlankCameraSlotMakesNoClaim() throws {
+        // A session in which no still failed says nothing of its stills.
+        let session = try #require(SessionRecord(text: try Self.layout8(camera: "")))
+        #expect(session.camera == nil && session.running && session.processID == 78)
+    }
+
+    @Test func aLayout7RecordHasNoCameraSlotEvenWithACameraLookingLine() throws {
+        let seven = "uml-session 7\nmemory at 1 footprint 2 peak 3\nstate ended\nend powered-off\n"
+            + (try Self.cameraGolden())
+        let session = try #require(SessionRecord(text: seven))
+        #expect(session.camera == nil && session.end == "powered-off")
+    }
+
+    @Test func aCameraSlotOfAnotherVersionOrWithoutACountIsNotRead() throws {
+        #expect(CameraRecord(text: "") == nil)
+        #expect(CameraRecord(text: "camera 2\nstills failed 1\n") == nil)
+        #expect(CameraRecord(text: "stills failed 1\n") == nil)
+        #expect(CameraRecord(text: "camera 1\n") == nil)
+        // A line this reader cannot read is skipped, and the count stands.
+        let slot = CameraRecord(text: "camera 1\nstills failed 2\nstill at x\nstill\n")
+        #expect(slot?.failed == 2 && slot?.recent.isEmpty == true)
+        // A later runtime may add lines and fields; a field is read by its name.
+        let later = CameraRecord(
+            text: "camera 1\nstills failed 1\nstill at 7 camera 1 front stage timeout asked 2016x1512 resolved - "
+                + "encoded - compensation supported no enabled no error none extra 1\nnew line\n")
+        #expect(later?.recent.first?.stage == "timeout" && later?.recent.first?.compensationSupported == "no")
+    }
+
+    @Test func theCameraFailuresReadInWords() throws {
+        let slot = try #require(CameraRecord(text: try Self.cameraGolden()))
+        let report = slot.report()
+        #expect(report.contains("3 stills of the guest's cameras did not end in a picture."))
+        #expect(report.contains("camera 1 (front), stopped at framework-error, asked 2016x1512, resolved 2016x1512"))
+        #expect(report.contains("the framework's error avfoundation -11800"))
+        #expect(report.contains("file states 1512x2016, orientation compensation supported yes and enabled no"))
+        // Only the failures the slot holds are listed, and the report says so.
+        let more = try #require(CameraRecord(text: "camera 1\nstills failed 50\n" + (try Self.cameraGolden()).split(separator: "\n").dropFirst(2).joined(separator: "\n")))
+        #expect(more.report().contains("The last 3 that the record holds, oldest first:"))
+    }
+
+    @Test func theCameraSlotIsAnEntryOfTheBugReportOnlyWhenARecordHasOne() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("andarium-camera-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let none = BugReportAttachments.entries(from: directory, containers: [])
+        #expect(!none.contains { $0.name == BugReportAttachments.cameraReport })
+        try Self.layout8(camera: "").write(
+            to: directory.appendingPathComponent(BugReportAttachments.sessionRecord), atomically: true, encoding: .utf8)
+        let blank = BugReportAttachments.entries(from: directory, containers: [])
+        #expect(!blank.contains { $0.name == BugReportAttachments.cameraReport })
+        try Self.layout8(camera: try Self.cameraGolden().trimmingCharacters(in: .newlines)).write(
+            to: directory.appendingPathComponent(BugReportAttachments.sessionRecord), atomically: true, encoding: .utf8)
+        let entries = BugReportAttachments.entries(from: directory, containers: [])
+        let report = try #require(entries.first { $0.name == BugReportAttachments.cameraReport })
+        let text = String(decoding: report.data, as: UTF8.self)
+        #expect(text.contains("== The current session (process 78) =="))
+        #expect(text.contains("stopped at encoded-size"))
+        #expect(text.contains("== The previous session ==") && text.contains("There is no record."))
     }
 
     @Test func theGoldenStorageSlotParses() throws {
@@ -310,7 +422,7 @@ struct SessionRecordTests {
 
     @Test func otherTextIsNoRecord() {
         #expect(SessionRecord(text: "") == nil)
-        #expect(SessionRecord(text: "uml-session 8\nstate ended\nend powered-off\n") == nil)
+        #expect(SessionRecord(text: "uml-session 9\nstate ended\nend powered-off\n") == nil)
         #expect(SessionRecord(text: "uml-session 2\nstatus 0\n") == nil)
         #expect(SessionRecord.read(at: URL(fileURLWithPath: "/nonexistent/session.txt")) == nil)
     }

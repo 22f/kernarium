@@ -70,6 +70,20 @@ std::string read_file(const std::string &path)
 	return text;
 }
 
+/* The file as the application reads it for a bug report: one bounded read of
+ * the whole file (`BoundedFile.read`), not a loop of reads. */
+std::string read_file_once(const std::string &path)
+{
+	const int descriptor = open(path.c_str(), O_RDONLY);
+	if (descriptor < 0)
+		return {};
+	std::string text(uml::runtime::session_record_max_bytes + 1, '\0');
+	const ssize_t count = read(descriptor, text.data(), text.size());
+	close(descriptor);
+	text.resize(count > 0 ? static_cast<std::size_t>(count) : 0);
+	return text;
+}
+
 bool has(const std::string &text, const char *part)
 {
 	return text.find(part) != std::string::npos;
@@ -283,7 +297,12 @@ void every_state_is_written_whole()
  * its output, completes its boot and ends, again and again, sees one state
  * every time. The old writer shrank the file after each shorter state, and a
  * read between the write and the cut saw the new state's start followed by the
- * old state's end. */
+ * old state's end. The reader reads as the application does, with one bounded
+ * read of the whole file: a reader that reads it in several parts (an `fread`
+ * loop) can take the start of one state and the end of the next when a write
+ * lands between its reads, however whole each write is, so it cannot tell a
+ * mixed state of the writer from its own. The state is a long one (200 lines
+ * of output). */
 void a_reader_never_sees_two_states()
 {
 	const Console console;
@@ -299,7 +318,8 @@ void a_reader_never_sees_two_states()
 	std::string problem;
 	std::thread reader{[&] {
 		while (!stop.load(std::memory_order_acquire)) {
-			const std::string problem_now = state_problem(read_file(path));
+			const std::string problem_now =
+				state_problem(read_file_once(path));
 			reads.fetch_add(1);
 			if (!problem_now.empty()) {
 				const std::lock_guard<std::mutex> lock{mutex};

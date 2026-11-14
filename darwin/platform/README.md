@@ -183,14 +183,20 @@ interface to the wire.
   30 (`videoRateCap`); an anchor with none that low offers its slowest.
 - **Controls** arrive as one `CameraSettings` per camera, and the session
   applies what differs. A zoom camera (a virtual device) takes automatic
-  exposure, focus and white balance only.
+  exposure, focus and white balance only. A stabilization request takes the
+  low-latency mode where the active format supports it, else the standard one,
+  else none (`video_stabilization.hpp`), and never the system's automatic choice.
 - **Stills** are a JPEG, a Bayer still, or both from one capture. A Bayer still
   carries its DNG's colour data (`dng_color.hpp`), the only place the host
   reveals it. A part that fails leaves the others: a capture fails only when
   nothing it asked for arrived. A JPEG is made at exactly the size asked for
   (`photo_dimensions.hpp`): the capture is refused when the active format does
   not list that size, and the photo is dropped when the platform resolved
-  another. A photo output gets its maximum size only after it is attached to the
+  another. A capture that ends without a picture says why in its result
+  (`CameraStillResult::failure`, `camera_still_failure.hpp`): the stage, the
+  resolved size, whether the photo output's orientation compensation is
+  supported and on, and the framework's error as a domain word and a code. A
+  photo output gets its maximum size only after it is attached to the
   session, as AVFoundation requires: the largest size the anchor lists within
   the guest's still cap, so no larger pipeline is prepared. The guest is offered
   the sizes the anchor makes (`stillsOf`), and a camera that only takes stills

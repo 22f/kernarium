@@ -1,0 +1,5 @@
+camera 1
+stills failed 3
+still at 1794114290 camera 0 back stage refused asked 4032x3024 resolved - encoded - compensation supported unknown enabled unknown error none
+still at 1794114290 camera 1 front stage framework-error asked 2016x1512 resolved 2016x1512 encoded - compensation supported yes enabled no error avfoundation -11800
+still at 1794114290 camera 1 front stage encoded-size asked 2016x1512 resolved 2016x1512 encoded 1512x2016 compensation supported yes enabled no error none
