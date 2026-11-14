@@ -147,11 +147,17 @@ class DisplayDumpTests(unittest.TestCase):
 
 
 class FrameStatisticsTests(unittest.TestCase):
-    def test_the_median_of_the_busy_seconds(self) -> None:
+    def test_the_highest_of_the_busy_windows(self) -> None:
         log = "\n".join(
             f"Native display frames: guest {guest}/s presented {presented}/s dropped 0.0/s (0.0%) cpu-fallback 0.0/s"
             for guest, presented in ((1.1, 1.1), (30.2, 30.0), (29.9, 29.9), (30.0, 31.0), (0.0, 0.0)))
-        self.assertEqual(runner.presented_rate(log), 30.0)
+        self.assertEqual(runner.presented_rate(log), 31.0)
+
+    def test_the_windows_at_the_edges_of_a_run_do_not_lower_its_rate(self) -> None:
+        log = "\n".join(
+            f"Native display frames: guest {rate}/s presented {rate}/s dropped 0.0/s (0.0%) cpu-fallback 0.0/s"
+            for rate in (0.0, 18.8, 30.6))
+        self.assertEqual(runner.presented_rate(log), 30.6)
 
     def test_an_idle_log_has_no_rate(self) -> None:
         self.assertIsNone(runner.presented_rate("Native display frames: guest 0.0/s presented 0.0/s dropped 0.0/s"))

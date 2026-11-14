@@ -212,10 +212,13 @@ FRAME_LINE = re.compile(r"Native display frames: guest (\d+(?:\.\d+)?)/s present
 
 
 def presented_rate(log_text: str) -> float | None:
-    """The median presented rate of the host's frame statistics lines that show activity."""
+    """The highest presented rate of the host's frame statistics lines that show activity.
+
+    A measurement starts and ends inside windows of FRAME_STATS_SECONDS, so the windows at its edges are
+    partly idle and only the one it filled is its rate."""
     rates = [float(match[2]) for match in FRAME_LINE.finditer(log_text)]
     busy = [rate for rate in rates if rate >= 5.0]
-    return statistics.median(busy) if busy else None
+    return max(busy) if busy else None
 
 
 # ---- The guest.
