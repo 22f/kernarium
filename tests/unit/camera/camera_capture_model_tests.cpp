@@ -2002,6 +2002,48 @@ void everyGeneratedFrontTableKeepsAStillAndTheLimit()
     require(outside > 0 && fallbacks > 0, "the generated tables reach the fallback");
 }
 
+// The second real front table, an iPhone 15 Pro Max's (44 formats): its multi-camera formats make 4032x3024 and
+// 2016x1512, and the camera keeps its concurrency. The limit leaves each format the sizes it lists within it (the formats
+// that list only larger sizes list none), the largest size kept anywhere is 2016x1512, the video offer and the
+// concurrency are what they were, and the anchor's stills become 2016x1512 and 1920x1440 where they were 4032x3024 and
+// 1920x1440.
+void theFrontStillLimitOnTheSecondRealFrontTable()
+{
+    const auto listed = factsOfRows(uml::testing::phoneFrontFormats());
+    require(listed.size() == 44, "the iPhone's front table");
+    const auto limited = limitedStillFormats(CameraPosition::front, listed);
+    require(limited.size() == listed.size());
+    std::uint64_t largest = 0;
+    for (std::size_t index = 0; index < listed.size(); ++index) {
+        require(sameButForThePhotoSizes(listed[index], limited[index]), "only the photo sizes are limited");
+        Sizes within;
+        for (const auto& size : listed[index].photoSizes)
+            if (areaOfSize(size) <= frontStillMaximumPixels) within.push_back(size);
+        require(limited[index].photoSizes == within, "each format keeps the sizes it lists within the limit, in order");
+        for (const auto& size : within) largest = std::max(largest, areaOfSize(size));
+    }
+    require(largest == areaOfSize({2016, 1512}), "the largest photo kept anywhere is 2016x1512");
+    const auto rules = smallRules(listed);
+    const bool concurrent = keepsConcurrency(listed, rules);
+    require(concurrent && keepsConcurrency(limited, rules), "it keeps its concurrency listed and limited");
+    const auto before = chooseAnchor(listed, rules, concurrent);
+    const auto after = chooseAnchor(limited, rules, concurrent);
+    require(before && after && listed[*before].multiCamera && listed[*after].multiCamera, "both anchors are multi-camera formats");
+    require(listed[*after].width == 1920 && listed[*after].height == 1440, "the anchor is a 1920x1440 format");
+    const auto offerBefore = offerOf(listed[*before], rules);
+    const auto offerAfter = offerOf(limited[*after], rules);
+    require(offerBefore.stills == Sizes({{4032, 3024}, {1920, 1440}}) && offerAfter.stills == Sizes({{2016, 1512}, {1920, 1440}}),
+            "the stills were 4032x3024 and 1920x1440 and are 2016x1512 and 1920x1440");
+    require(offerBefore.videoSizes == offerAfter.videoSizes && offerBefore.rates == offerAfter.rates && offerBefore.box == offerAfter.box,
+            "the video sizes, rates and box are the same");
+    for (const auto& size : offerAfter.stills) {
+        require(formatMakesPhoto(limited[*after], size, 12'700'000), "an offered size is made");
+        require(exactPhotoSize(listed[*after].photoSizes, size, *photoMaximum(limited[*after], 12'700'000)) == std::optional<CameraStillSize>(size),
+                "and passes the capture check on the live list");
+    }
+    require(photoMaximum(limited[*after], 12'700'000) == std::optional<CameraStillSize>(CameraStillSize {2016, 1512}), "the output's maximum");
+}
+
 int main()
 {
     theDurationThatMovesOutOfTheOthersWayIsWrittenFirst();
@@ -2063,6 +2105,7 @@ int main()
     aFrontCameraAlwaysKeepsAStillSizeItLists();
     theOfferTheOutputAndTheCaptureAgreeOnTheLimitedList();
     theFrontStillLimitLeavesTheVideoOfferAndDecidesNoConcurrency();
+    theFrontStillLimitOnTheSecondRealFrontTable();
     everyGeneratedFrontTableKeepsAStillAndTheLimit();
     return 0;
 }

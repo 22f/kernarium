@@ -710,25 +710,30 @@ std::uint64_t areaOfStill(CameraStillSize size) { return std::uint64_t(size.widt
 
 // The iPad mini's front camera (12 MP, ultra wide) with the tablet's back camera, as the platform lists them, the
 // platform's concurrent set naming both.
-std::vector<CameraInfo> miniCameras()
+CameraInfo frontCameraOf(const std::vector<CameraCaptureFormat>& formats, const char* identifier)
 {
-    CameraInfo back = tabletCamera();
-    back.pixelArrayWidth = 4032;
-    back.pixelArrayHeight = 3024;
     CameraInfo front;
-    front.identifier = "mini-front";
+    front.identifier = identifier;
     front.position = CameraPosition::front;
     front.lens = CameraLensKind::wide;
     front.pixelArrayWidth = 4032;
     front.pixelArrayHeight = 3024;
-    front.captureFormats = uml::testing::miniFrontFormats();
+    front.captureFormats = formats;
     for (const auto& format : front.captureFormats)
         front.videoFormats.push_back({format.width, format.height, 1, std::uint32_t(format.frameRates.front().maximum), format.multiCamera});
     // Every size some format makes, as the platform lists them.
     for (const auto& format : front.captureFormats)
         for (const auto& size : format.photoSizes)
             if (std::find(front.stillSizes.begin(), front.stillSizes.end(), size) == front.stillSizes.end()) front.stillSizes.push_back(size);
-    return {back, front};
+    return front;
+}
+
+std::vector<CameraInfo> miniCameras()
+{
+    CameraInfo back = tabletCamera();
+    back.pixelArrayWidth = 4032;
+    back.pixelArrayHeight = 3024;
+    return {back, frontCameraOf(uml::testing::miniFrontFormats(), "mini-front")};
 }
 
 // Decision 2, what the guest is told of a front camera with the limit. The JPEG sizes it is offered are the limited
@@ -846,6 +851,39 @@ void testTheFrontStillLimitChangesNoConcurrency()
     }
 }
 
+// The second real front table (an iPhone 15 Pro Max's): the camera keeps its concurrency listed, so it keeps it with the
+// limit, runs with the other camera in a multi-camera format, and is offered the limited stills; as a back camera (the
+// control, unlimited) its concurrency, anchor and video are the same.
+void testTheFrontStillLimitOnTheSecondRealFrontTable()
+{
+    CameraInfo back = tabletCamera();
+    back.pixelArrayWidth = 4032;
+    back.pixelArrayHeight = 3024;
+    const auto front = frontCameraOf(uml::testing::phoneFrontFormats(), "phone-front");
+    const std::vector<std::vector<std::size_t>> together {{0, 1}};
+    const auto limited = arrangeCameras(std::vector<CameraInfo> {back, front}, together, "phone", CalibrationStore(), {});
+    const auto& camera = ofPlatformCamera(limited, 1);
+    require(!camera.concurrencyDropped && bit(camera.wire.concurrent_mask, ofPlatformCamera(limited, 0).index) &&
+                !bit(camera.wire.conflict_mask, ofPlatformCamera(limited, 0).index),
+            "it keeps its concurrency");
+    require(camera.anchor && front.captureFormats[*camera.anchor].multiCamera && front.captureFormats[*camera.anchor].width == 1920 &&
+                front.captureFormats[*camera.anchor].height == 1440,
+            "in a 1920x1440 multi-camera format");
+    require(camera.jpegSizes == std::vector<CameraStillSize>({{2016, 1512}, {1920, 1440}}), "it offers 2016x1512 and 1920x1440");
+    require(camera.wire.pixel_array_width == 4032 && camera.wire.pixel_array_height == 3024, "the pixel array is the field of view's");
+    auto asBack = front;
+    asBack.position = CameraPosition::back;
+    asBack.identifier = "phone-front-as-back";
+    const auto unlimited = arrangeCameras(std::vector<CameraInfo> {back, asBack}, together, "phone", CalibrationStore(), {});
+    const auto& control = ofPlatformCamera(unlimited, 1);
+    require(control.concurrencyDropped == camera.concurrencyDropped && control.concurrencyDropped == false &&
+                control.wire.concurrent_mask == camera.wire.concurrent_mask && control.wire.conflict_mask == camera.wire.conflict_mask,
+            "the same concurrency as the unlimited control");
+    require(control.anchor && front.captureFormats[*control.anchor].multiCamera && control.video.size() == camera.video.size() &&
+                control.jpegSizes == std::vector<CameraStillSize>({{4032, 3024}, {1920, 1440}}),
+            "whose stills are the 12 MP and 1920x1440 ones");
+}
+
 } // namespace
 
 int main()
@@ -871,5 +909,6 @@ int main()
     testLayout();
     testAFrontCameraIsToldItsLimitedStillsAndItsFullFieldOfView();
     testTheFrontStillLimitChangesNoConcurrency();
+    testTheFrontStillLimitOnTheSecondRealFrontTable();
     return 0;
 }
