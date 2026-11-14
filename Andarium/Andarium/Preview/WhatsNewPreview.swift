@@ -4,14 +4,14 @@ import AndariumCore
 import UIKit
 
 /// The release notes and the stored record of the preview's What's New
-/// screens. The notes of builds 10 and 9 are the bundled ones; those of builds
+/// screens. The notes of builds 11 and 9 are the bundled ones; those of builds
 /// 5 and 4 are made up, to stand in for releases a person skipped (the
 /// application bundles notes from build 9 on). A device keeps the record in its
 /// defaults.
 enum WhatsNewPreview {
     /// The build the preview's What's New screens run.
-    static let currentBuild = 10
-    static let appVersion = "1.0 (10)"
+    static let currentBuild = 11
+    static let appVersion = "1.0 (11)"
 
     static let releases: [WhatsNewRelease] = WhatsNewCatalog.load() + [
         WhatsNewRelease(build: 5, version: "1.0 (5)", date: "2026-11-09", entries: [
@@ -42,9 +42,9 @@ enum WhatsNewPreview {
 
     /// The screens of the design, and what each one stands for.
     static let screens: Set<String> = [
-        "whatsnew",                // first launch after the update to build 10
+        "whatsnew",                // first launch after the update to build 11
         "whatsnew-open",           // its notes, opened from the ribbon
-        "whatsnew-skipped",        // first launch after skipping builds 4 to 9
+        "whatsnew-skipped",        // first launch after skipping builds 4 to 10
         "whatsnew-skipped-open",   // the notes of all four
         "whatsnew-update",         // the update also carries a new Android release
         "whatsnew-limited",        // a device that offers no more than 4 GiB
@@ -57,7 +57,7 @@ enum WhatsNewPreview {
     ]
 
     /// The record a screen's launch finds, and whether the install has a
-    /// guest: a record of build 9 is the update to 10, of build 5 the update
+    /// guest: a record of build 9 is the update to 11, of build 5 the update
     /// from the first public release, of build 3 an update that skipped
     /// three releases.
     private static func stored(for screen: String) -> WhatsNewRecord? {

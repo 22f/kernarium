@@ -397,7 +397,7 @@ def write_notes(app: Path, entries: list[dict] | None, strings: dict[str, str],
     is None) and the compiled table of their translations in each language."""
     if entries is not None:
         (app / "WhatsNew.json").write_text(
-            json.dumps([{"build": 10, "version": "1.0 (10)", "entries": entries}]), encoding="utf-8")
+            json.dumps([{"build": 11, "version": "1.0 (11)", "entries": entries}]), encoding="utf-8")
     for language in languages:
         lproj = app / f"{language}.lproj"
         lproj.mkdir(exist_ok=True)
