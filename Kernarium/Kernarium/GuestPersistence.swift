@@ -174,6 +174,32 @@ final class GuestPersistence {
         }
     }
 
+    /// Asks the runtime to stop the run `stop` belongs to, off the main actor:
+    /// the request may wait for a guest being restored or for the runtime's
+    /// own lock. It goes through the queue of the other guest requests, so it
+    /// comes after a write-back or a suspension that was asked for before it,
+    /// and is made again until the run ends, with the guest's write-back
+    /// before the first that reaches one (`GuestStopDelivery`).
+    ///
+    /// `settle` and `request` are the runtime's, and `interval` how long after
+    /// a request it is made again; `settle` returns whether it reached a
+    /// guest. A test supplies its own.
+    func deliverStop(
+        _ stop: RunStop,
+        every interval: DispatchTimeInterval = GuestStopDelivery.interval,
+        settle: (@Sendable () -> Bool)? = nil,
+        request: @escaping @Sendable () -> Void = {
+            kernarium_runtime_loader_request_stop()
+        }
+    ) {
+        let settle = settle ?? {
+            GuestStopDelivery.settleBeforeStop(for: stop, logPrefix: "Kernarium: ")
+        }
+        GuestStopDelivery.deliver(
+            stop, on: queue, every: interval, settle: settle, request: request
+        )
+    }
+
     func stopObserving() {
         for observer in observers {
             NotificationCenter.default.removeObserver(observer)

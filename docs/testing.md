@@ -320,7 +320,10 @@ the software renderer's contract. `KernariumAutomation` is the iPad's
 automation host.
 
 `kernarium-device-framework-symbols` and `kernarium-device-framework-embed`
-(tooling) cover the device-only embed script.
+(tooling) cover the device-only embed script, and `kernarium-host-stop-paths`
+(tooling) pins the call sites through which the application ends a running
+guest, each of which has the guest write back first. The hosted
+`GuestStopTests` cover that stop's order and bound.
 
 ### Andarium
 

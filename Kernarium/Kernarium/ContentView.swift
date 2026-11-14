@@ -139,6 +139,8 @@ struct ContentView: View {
             serialConsole.stopObserving()
             GuestPersistence.shared.stopObserving()
             GuestPictureInPicture.shared.guestRunningChanged(false)
+            // The screen is going: the guest is asked to write its storage
+            // back and is then stopped, off the main actor.
             EmulatorLauncher.shared.stop()
         }
         .onReceive(
@@ -902,6 +904,13 @@ final class EmulatorLauncher: ObservableObject, SpaceRun {
     /// ended ends.
     private(set) var stopRequested = false
     private var thermalObserver: NSObjectProtocol?
+    /// The host's stop of the run in hand, from when it begins until its
+    /// thread has returned (`RunStop`).
+    private var runStop: RunStop?
+    /// Delivers a host stop to the runtime: the guest's write-back, then the
+    /// stop, off the main actor (`GuestPersistence.deliverStop`). The unit
+    /// tests' launchers bring their own.
+    private let deliverStop: @MainActor (RunStop) -> Void
     /// The view and geometry of a start the free space refused, for asking
     /// again.
     private var refusedStart: (GuestMetalView, GuestDisplayGeometry)?
@@ -920,12 +929,14 @@ final class EmulatorLauncher: ObservableObject, SpaceRun {
         freeSpace: @escaping @Sendable () -> UInt64 = {
             SpaceHarness.current.freeSpace()
         },
-        space: (() -> GuestSpacePause)? = nil
+        space: (() -> GuestSpacePause)? = nil,
+        deliverStop: (@MainActor (RunStop) -> Void)? = nil
     ) {
         self.configuration = configuration
         self.job = job ?? .shared
         self.freeSpace = freeSpace
         self.space = space
+        self.deliverStop = deliverStop ?? { GuestPersistence.shared.deliverStop($0) }
     }
 
     // MARK: SpaceRun
@@ -1034,9 +1045,7 @@ final class EmulatorLauncher: ObservableObject, SpaceRun {
         ) == 0 {
             gpuBudgetWarning = GPUBudgetWarning(plan: plan)
         }
-        phase = .running
-        space?().runStarted()
-        startThermalObservation()
+        let stop = runBegan()
         let size = GuestInputCoordinateSpace.boundedDisplaySize(
             geometry.pixelSize
         )
@@ -1055,23 +1064,51 @@ final class EmulatorLauncher: ObservableObject, SpaceRun {
         // would otherwise block for hours. It inherits the main thread's
         // SIGALRM block, which the runtime then reasserts for itself.
         let worker = Thread {
-            let result = runGuest(
-                view: view,
-                boot: boot,
-                width: width,
-                height: height,
-                dotsPerInch: dotsPerInch,
-                guestMemoryMiB: guestMemoryMiB,
-                vCPUCount: vCPUCount,
-                autoResizeGuest: autoResizeGuest,
-                gpuBudget: gpuBudget
-            )
+            let result = Self.runThread(stop) {
+                runGuest(
+                    view: view,
+                    boot: boot,
+                    width: width,
+                    height: height,
+                    dotsPerInch: dotsPerInch,
+                    guestMemoryMiB: guestMemoryMiB,
+                    vCPUCount: vCPUCount,
+                    autoResizeGuest: autoResizeGuest,
+                    gpuBudget: gpuBudget
+                )
+            }
             Task { @MainActor in
                 EmulatorLauncher.shared.finished(result: result)
             }
         }
         worker.name = "uml-launcher"
         worker.start()
+    }
+
+    /// The run begins: the guest is running as far as the application can
+    /// say, and its thread is about to start. Returns the latch of the host's
+    /// stop that the thread keeps (`runThread`).
+    func runBegan() -> RunStop {
+        phase = .running
+        let stop = RunStop()
+        runStop = stop
+        space?().runStarted()
+        startThermalObservation()
+        return stop
+    }
+
+    /// What the run's thread does around the runtime. A stop asked for since
+    /// the run began keeps it out of the runtime, which drops a stop from
+    /// before its own run begins: the run ends with the stop's status. The
+    /// latch ends when the runtime returns, however it ended, after any
+    /// delivery under way.
+    nonisolated static func runThread(_ stop: RunStop, _ run: () -> Int32) -> Int32 {
+        guard stop.enter() else {
+            stop.end()
+            return 0
+        }
+        defer { stop.end() }
+        return run()
     }
 
     /// A plain image boots read-only under a disposable overlay disk, which is
@@ -1129,6 +1166,7 @@ final class EmulatorLauncher: ObservableObject, SpaceRun {
     }
 
     func finished(result: Int32) {
+        runStop = nil
         space?().runEnded()
         stopThermalObservation()
         restartIndicator.runEnded()
@@ -1142,9 +1180,16 @@ final class EmulatorLauncher: ObservableObject, SpaceRun {
         job.guestRunEnded(result: result)
     }
 
+    /// The application ends the run, as the screen closing does and Shut down
+    /// over a paused guest. It states the intent at once and asks nothing of
+    /// the runtime on the main actor: the guest is asked to write its storage
+    /// back and is then stopped, on the queue of the runtime's other waiting
+    /// calls, and the stop is made again until the run ends (`RunStop`). With
+    /// no run in hand there is nothing to end.
     func stop() {
         stopRequested = true
-        kernarium_runtime_loader_request_stop()
+        guard let stop = runStop else { return }
+        if stop.request() { deliverStop(stop) }
     }
 
     /// What a start lacks in free space, nil when there is enough. A guest's
