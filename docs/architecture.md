@@ -86,53 +86,52 @@ and releases what it frees (`darwin_uml_physmem_commit`/`_release`,
 `memory/guest_ram_commitment.cpp`), and released pages leave the process
 footprint. Physical iOS also wires a page while it is committed; the one window
 with a held page unwired is a [hibernation](#hibernation). The kernel trims its
-page cache only at the host's request (`uml_emulator_trim_page_cache()`, every
-quiesce, and the system's critical memory pressure below) and, in small passes,
-while its periodic trimmer runs (a memory warning below, or the application's
-request). The host GPU's memory is not carved out of the guest's RAM, and the
-host provides no Virtio balloon device.
+page cache only at the host's request (`uml_emulator_trim_page_cache()` and
+every quiesce) and, in small passes, while its periodic trimmer runs (the
+system's memory pressure below, or the application's request). The host GPU's
+memory is not carved out of the guest's RAM, and the host provides no Virtio
+balloon device.
 
 **Memory pressure.** The guest's own page-cache trimmer is on exactly while the
 system's last memory pressure level is not normal, unless the application asked
-for it (`runtime/memory_pressure_response.hpp`). A warning turns it on: it trims
-the cold file cache in small passes, and the request is one short message that
-waits for nothing. A critical level also frees the host GPU's cached driver
-allocations and asks the guest for one page-cache trim of all its cold cache,
-which unwires those pages. The normal level turns the trimmer off. A warning
-starts at most one response per 30 s of awake time (`CLOCK_UPTIME_RAW`) counted
-from the start of the last response, a critical level always starts one, and
-none starts while one runs; the 30 s limits the responses and their report, not
-the trimmer, which a withheld warning still turns on. The emulator keeps what
-the application and the response want of the trimmer and what the guest last
-took, and a request the guest did not take (a failed send, or a quiesced guest)
-is sent by the next call or by the resume, which replays it after the wake. A
-request skipped for a guest the host has quiesced or with no console is not
-retried, except a trimmer request that could not be written; one that meets
-another lifecycle call of the guest, or a console request in flight, is retried
-up to four times, a second apart, until a response of its own or the normal
-level takes its place. A lifecycle call (quiesce, resume, stop) goes before a
-pressure request, which gives way and is retried. A quiesce counts its trim's
-reply wait from its call, and omits its own trim only when a pressure trim
-reached the guest while it waited and used the wait up. A request wakes a guest
-that suspended itself. macOS and iOS, and both applications, get it through the
-runtime. Each notification the system delivers is also reported to the
-application (the level, and whether a response starts, is withheld by the 30 s
-or is already running), once and before that notification's work, the normal
-level included (`set_pressure_observer`, and the runtime API's
-`set_memory_pressure_callback`). The source's handler only records the delivery
-and a second serial queue handles the deliveries one at a time, in the order
-they arrived: a level raised during a response is reported and answered after
-it, and a notification the system itself merged reads as its most serious flag.
-At most 64 deliveries wait, and the oldest is dropped beyond that. An iPad's
-source never delivers the normal level, so the level held returns to normal
-itself, the same way and with a report, after 240 s of device awake time (the
-clock stops while the device sleeps) in which the source delivered no level but
-normal (the policy's timer, no thread of its own); a process suspended for
+for it (`runtime/memory_pressure_response.hpp`). A warning or a critical level
+turns it on: it trims the cold file cache in small passes, and the request is
+one short message that waits for nothing. No level asks for one trim of all the
+cold cache, which stalls frames: the system's level describes the device, not
+this process's headroom. A critical level also frees the host GPU's cached
+driver allocations. The normal level turns the trimmer off. A warning starts at
+most one response per 30 s of awake time (`CLOCK_UPTIME_RAW`) counted from the
+start of the last response, a critical level always starts one (its GPU
+release), and none starts while one runs; the 30 s limits the responses and
+their report, not the trimmer, which a withheld warning still turns on. The
+emulator keeps what the application and the response want of the trimmer and
+what the guest last took, and a request the guest did not take (a failed send,
+or a quiesced guest) is sent by the next call or by the resume, which replays it
+after the wake. A request skipped for a guest the host has quiesced is not
+retried; one that could not be written, or meets another lifecycle call of the
+guest or a console request in flight, is retried up to four times, a second
+apart, until a response of its own or the normal level takes its place. A
+lifecycle call (quiesce, resume, stop) goes before a pressure request, which
+gives way and is retried. A quiesce counts its trim's reply wait from its call.
+A request wakes a guest that suspended itself. macOS and iOS, and both
+applications, get it through the runtime. Each notification the system delivers
+is also reported to the application (the level, and whether a response starts,
+is withheld by the 30 s or is already running), once and before that
+notification's work, the normal level included (`set_pressure_observer`, and the
+runtime API's `set_memory_pressure_callback`). The source's handler only records
+the delivery and a second serial queue handles the deliveries one at a time, in
+the order they arrived: a level raised during a response is reported and
+answered after it, and a notification the system itself merged reads as its most
+serious flag. At most 64 deliveries wait, and the oldest is dropped beyond that.
+An iPad's source never delivers the normal level, so the level held returns to
+normal itself, the same way and with a report, after 240 s of device awake time
+(the clock stops while the device sleeps) in which the source delivered no level
+but normal (the policy's timer, no thread of its own); a process suspended for
 longer meets the return at its resume, which only asks the trimmer off. The
 observer lives for the process. Each level change and each response is one
-rate-limited line: the footprint, the failed guest-RAM wiring operations and,
-on a response line, the bytes each part released and the trim's duration (a
-warning's, the state of the trimmer).
+rate-limited line: the footprint, the failed guest-RAM wiring operations and, on
+a response line, the state of the trimmer and, for a critical level, the bytes
+of graphics the GPU release freed.
 
 **Budgets.** The process's memory limit, L, is the figure the memory budgets
 derive from. iOS enforces one per application

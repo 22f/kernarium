@@ -13,8 +13,8 @@ target_compile_features(uml_memory_pressure_injector PRIVATE cxx_std_20)
 add_dependencies(integration-test-binaries uml_memory_pressure_injector)
 
 # A warning turns the guest's page-cache trimmer on and a second one does
-# nothing, a critical level trims the cache once, the normal level turns the
-# trimmer off, and the lines say so.
+# nothing, a critical level asks for the same trimmer and never trims all the
+# cache, the normal level turns the trimmer off, and the lines say so.
 uml_add_guest_integration_test(
     NAME guest-memory-pressure
     SCRIPT run_guest_memory_pressure.py

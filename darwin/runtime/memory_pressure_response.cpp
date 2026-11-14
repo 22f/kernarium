@@ -76,13 +76,10 @@ void dropped_text(FixedText &out, std::uint64_t dropped) noexcept
 }
 
 /* A request that did not go through and may the next time: another call held
- * the guest or its console, or (for the gradual trimmer's short messages) the
- * message could not be written. The trim of all the cache is tried again only
- * when the guest was busy. */
-[[nodiscard]] bool transient(TrimKind kind, TrimOutcome outcome) noexcept
+ * the guest or its console, or the message could not be written. */
+[[nodiscard]] bool transient(TrimOutcome outcome) noexcept
 {
-	return outcome == TrimOutcome::busy ||
-	       (kind != TrimKind::once && outcome == TrimOutcome::unreachable);
+	return outcome == TrimOutcome::busy || outcome == TrimOutcome::unreachable;
 }
 
 } // namespace
@@ -339,8 +336,7 @@ void MemoryPressureResponse::end_gradual_trim() noexcept
 	const TrimOutcome outcome = ask_gradual(TrimKind::gradual_off);
 	const std::lock_guard lock{mutex_};
 	/* The pressure came back meanwhile: that response asks for itself. */
-	if (transient(TrimKind::gradual_off, outcome) &&
-	    level_ == PressureLevel::normal && !running_)
+	if (transient(outcome) && level_ == PressureLevel::normal && !running_)
 		keep_pending(PressureLevel::normal, TrimKind::gradual_off);
 }
 
@@ -352,8 +348,7 @@ void MemoryPressureResponse::arm_gradual_trim() noexcept
 		const std::lock_guard lock{mutex_};
 		if (level_ == PressureLevel::normal)
 			end = !running_;
-		else if (transient(TrimKind::gradual_on, outcome) && !running_ &&
-			 !retry_pending_)
+		else if (transient(outcome) && !running_ && !retry_pending_)
 			keep_pending(level_, TrimKind::gradual_on);
 	}
 	/* The normal level came meanwhile and found nothing to end. */
@@ -368,23 +363,13 @@ void MemoryPressureResponse::respond(PressureLevel level,
 	const PressureFigures before = actions_.figures();
 	/* A warning takes nothing a person could notice. The GPU's caches are the
 	 * critical level's because a warning gets no footprint from them (a
-	 * rendering client takes the storage back within a second), and so is the
-	 * one trim of all the cache, which stalls frames. */
+	 * rendering client takes the storage back within a second). */
 	const std::uint64_t gpu_freed = critical ? actions_.reclaim_gpu() : 0U;
 	const PressureFigures after_gpu = actions_.figures();
-	const std::uint64_t trim_start = actions_.now_ns();
-	TrimOutcome once = TrimOutcome::done;
-	if (critical)
-		once = actions_.trim_page_cache(TrimKind::once);
-	const std::uint64_t trim_end = actions_.now_ns();
-	/* The gradual trimmer is on while the pressure lasts: the pressure that is
-	 * critical now is a warning when it eases, and the trimmer then keeps the
-	 * cache from filling again. A trim that found the guest busy is tried
-	 * again first. */
-	TrimOutcome gradual = TrimOutcome::done;
-	const bool gradual_asked = !critical || once != TrimOutcome::busy;
-	if (gradual_asked)
-		gradual = ask_gradual(TrimKind::gradual_on);
+	/* The gradual trimmer is on while the pressure lasts, at either level: one
+	 * trim of all the cache stalls frames, and the system's level is the
+	 * device's, not this process's headroom. */
+	const TrimOutcome gradual = ask_gradual(TrimKind::gradual_on);
 	const PressureFigures after = actions_.figures();
 	bool end_after = false;
 	{
@@ -393,9 +378,7 @@ void MemoryPressureResponse::respond(PressureLevel level,
 		++counts_.responses;
 		/* Not for a pressure that the normal level ended during the request. */
 		if (level_ != PressureLevel::normal) {
-			if (critical && once == TrimOutcome::busy)
-				keep_pending(level, TrimKind::once);
-			else if (transient(TrimKind::gradual_on, gradual))
+			if (transient(gradual))
 				keep_pending(level, TrimKind::gradual_on);
 		} else {
 			end_after = gradual_on_;
@@ -418,17 +401,10 @@ void MemoryPressureResponse::respond(PressureLevel level,
 		line.text("; released ");
 		size_text(line, fell_by(before.graphics, after_gpu.graphics));
 		line.text(" graphics (").number(static_cast<std::int64_t>(gpu_freed))
-			.text(" cached allocations), ");
-		size_text(line, fell_by(after_gpu.guest_held, after.guest_held));
-		line.text(" guest RAM (page cache trim ")
-			.text(trim_outcome_name(once)).text(", ")
-			.number(static_cast<std::int64_t>(
-				elapsed(trim_start, trim_end) / 1'000'000ULL))
-			.text(" ms)");
-	} else {
-		line.text("; guest page cache trimmer on (")
-			.text(trim_outcome_name(gradual)).text(")");
+			.text(" cached allocations)");
 	}
+	line.text("; guest page cache trimmer on (")
+		.text(trim_outcome_name(gradual)).text(")");
 	line.text("; ").number(static_cast<std::int64_t>(after.wire_failures))
 		.text(" guest RAM wire failures");
 	if (events_skipped != 0U)
@@ -441,7 +417,7 @@ void MemoryPressureResponse::respond(PressureLevel level,
 MemoryPressureResponse::Outcome MemoryPressureResponse::on_retry() noexcept
 {
 	PressureLevel level = PressureLevel::normal;
-	TrimKind kind = TrimKind::once;
+	TrimKind kind = TrimKind::gradual_on;
 	unsigned attempt = 0;
 	bool quiet = false;
 	{
@@ -466,17 +442,7 @@ MemoryPressureResponse::Outcome MemoryPressureResponse::on_retry() noexcept
 	}
 	if (quiet)
 		return handle_level(PressureLevel::normal, true);
-	const PressureFigures before = actions_.figures();
-	const std::uint64_t trim_start = actions_.now_ns();
-	const TrimOutcome trim = kind == TrimKind::once ?
-		actions_.trim_page_cache(TrimKind::once) : ask_gradual(kind);
-	const std::uint64_t trim_end = actions_.now_ns();
-	/* A trim of all the cache that went through also leaves the gradual
-	 * trimmer on, as a critical response does, and is not asked again. */
-	const bool follow = kind == TrimKind::once && trim != TrimOutcome::busy;
-	TrimOutcome gradual = TrimOutcome::done;
-	if (follow)
-		gradual = ask_gradual(TrimKind::gradual_on);
+	const TrimOutcome trim = ask_gradual(kind);
 	const PressureFigures after = actions_.figures();
 	bool again = false;
 	bool end_after = false;
@@ -489,16 +455,9 @@ MemoryPressureResponse::Outcome MemoryPressureResponse::on_retry() noexcept
 		 * pending request meanwhile. */
 		const bool pending = retry_pending_;
 		retry_pending_ = false;
-		if (pending) {
-			if (kind == TrimKind::once && follow) {
-				if (transient(TrimKind::gradual_on, gradual)) {
-					keep_pending(level, TrimKind::gradual_on);
-					again = retry_pending_;
-				}
-			} else if (transient(kind, trim) && retry_attempts_left_ != 0U) {
-				retry_pending_ = true;
-				again = true;
-			}
+		if (pending && transient(trim) && retry_attempts_left_ != 0U) {
+			retry_pending_ = true;
+			again = true;
 		}
 		if (level_ == PressureLevel::normal)
 			/* The pressure ended while the request was in the guest's
@@ -514,9 +473,8 @@ MemoryPressureResponse::Outcome MemoryPressureResponse::on_retry() noexcept
 		end_gradual_trim();
 	if (arm_after)
 		arm_gradual_trim();
-	/* A trim that went through says what it did even when its follow-up
-	 * comes next; a retry that failed says nothing until its last. */
-	if (again && !follow)
+	/* A retry that failed says nothing until its last. */
+	if (again)
 		return Outcome::retried;
 
 	std::uint64_t dropped = 0;
@@ -528,24 +486,9 @@ MemoryPressureResponse::Outcome MemoryPressureResponse::on_retry() noexcept
 		.text(" (retry ").number(static_cast<std::int64_t>(attempt))
 		.text(" of ")
 		.number(static_cast<std::int64_t>(timing_.retry_attempts))
-		.text("): ");
-	if (kind == TrimKind::once) {
-		line.text("footprint ")
-			.number(static_cast<std::int64_t>(before.footprint / mebibyte))
-			.text(" -> ");
-		footprint_text(line, after.footprint);
-		line.text("; released ");
-		size_text(line, fell_by(before.guest_held, after.guest_held));
-		line.text(" guest RAM (page cache trim ")
-			.text(trim_outcome_name(trim)).text(", ")
-			.number(static_cast<std::int64_t>(
-				elapsed(trim_start, trim_end) / 1'000'000ULL))
-			.text(" ms)");
-	} else {
-		line.text("guest page cache trimmer ")
-			.text(kind == TrimKind::gradual_on ? "on" : "off")
-			.text(" (").text(trim_outcome_name(trim)).text(")");
-	}
+		.text("): guest page cache trimmer ")
+		.text(kind == TrimKind::gradual_on ? "on" : "off")
+		.text(" (").text(trim_outcome_name(trim)).text(")");
 	line.text("; ").number(static_cast<std::int64_t>(after.wire_failures))
 		.text(" guest RAM wire failures");
 	dropped_text(line, dropped);
