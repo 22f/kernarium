@@ -161,8 +161,8 @@ def framework(state: str, arguments: list[str]) -> int:
 
 
 def target_id(memory: dict) -> int:
-    """VirtWifi's network ID: 0, or 1 when the boot gives the other network the first ID."""
-    return 1 if memory["swap_ids"] else 0
+    """VirtWifi's network ID: the boot's own, else 0, or 1 when the boot gives the other network the first ID."""
+    return memory["virtwifi_id"] or (1 if memory["swap_ids"] else 0)
 
 
 def other_id(memory: dict) -> int:
@@ -183,6 +183,11 @@ def dump(state: str, memory: dict) -> int:
     if mode == DUMP_SLOW:
         duration(state, 12)
         return 0
+    if memory["dump_fixture"]:
+        # A dump the Wi-Fi service printed, kept in wifi_dump_fixtures.
+        import wifi_dump_fixtures
+        print(wifi_dump_fixtures.DUMPS[sorted(wifi_dump_fixtures.DUMPS)[memory["dump_fixture"] - 1]])
+        return 0
     networks = []
     if memory["listed"]:
         networks.append((target_id(memory), "VirtWifi", memory["autojoin"]))
@@ -192,9 +197,11 @@ def dump(state: str, memory: dict) -> int:
     for section, order in enumerate((networks, networks[::-1])):
         lines.append("Dump of WifiConfigManager")
         for position, (number, name, on) in enumerate(order):
-            # A map prints its first entry after its name and the others after a comma.
+            # A map prints its first entry after its name and the others after a comma. The header of the
+            # connected configuration, and only that one, has a star before its ID.
             lead = ("mPerId={" if not position else ", ") + f"{number}=" if section else ""
-            lines.append(f'{lead}* ID: {number} SSID: "{name}" PROVIDER-NAME: null BSSID: null HIDDEN: false')
+            star = "* " if memory["joined"] and number == target_id(memory) and name == "VirtWifi" else ""
+            lines.append(f'{lead}{star}ID: {number} SSID: "{name}" PROVIDER-NAME: null BSSID: null HIDDEN: false')
             lines.append(" Protocols: RSN")
             lines.append(f" lcuid=0 allowAutojoin={str(on).lower()} mAllowedAutoJoinInAdvancedProtection=true")
             lines.append("lastConnected: 2026-11-14T03:34:22.375")
@@ -270,12 +277,16 @@ def advance(memory: dict, end: int) -> None:
 if __name__ == "__main__" and sys.argv[1:2] == ["--stub"]:
     raise SystemExit(framework(sys.argv[2], sys.argv[3:]))
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import concurrent.futures
 import dataclasses
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+import wifi_dump_fixtures
 
 SCRIPT = Path(__file__).resolve().parents[3] / "android/lineage-24/overlay/tools/kernarium_wifi_network.sh"
 MARKER = "persist.sys.kernarium.virtwifi_saved"
@@ -305,6 +316,8 @@ class Boot:
     autojoin_start: bool | None = None   # the store holds Auto-connect on (True) or off (False) from the boot on
     other: int = OTHER_NONE          # another saved network, with Auto-connect on or off
     other_name: int = 0              # the index of its name in OTHER_NAMES
+    dump_fixture: int = 0            # a dump kept in wifi_dump_fixtures (the position in its sorted names, from 1)
+    virtwifi_id: int = 0             # VirtWifi's ID when it is not 0 (or 1, with swap_ids): the fixture's
     swap_ids: bool = False           # the other network has the first ID and VirtWifi the second
     dump_state: int = DUMP_OK        # `dumpsys wifi` fails, takes twelve seconds or says the caller may not
     kill_after_marker: bool = False  # the guest stops right after the script wrote the marker
@@ -395,7 +408,8 @@ class Guest:
         memory = {
             "autojoin_stored": self.autojoin_stored, "autojoin": self.autojoin_stored or not listed,
             "autojoin_off_at": boot.autojoin_off_at, "other": boot.other, "dump_state": boot.dump_state,
-            "other_name": boot.other_name, "swap_ids": boot.swap_ids,
+            "other_name": boot.other_name, "swap_ids": boot.swap_ids, "dump_fixture": boot.dump_fixture,
+            "virtwifi_id": boot.virtwifi_id,
             "read_at": boot.read_at if boot.read_at is not None else 0,
             "read_done": boot.read_at is None, "store_delay": boot.store_delay, "store_due": None,
             "join_after": boot.join_after, "stalled": boot.stalled_looks, "failing": boot.failing_looks,
@@ -588,6 +602,15 @@ CASES = (
     Case("marker 1, a disabled network with Auto-connect on and a dump cut after its value", "1", True, (
         (Boot(dump_state=DUMP_CUT_AFTER), Expect(adds=1, notes=1, marker="1", stored=True)),
     ), disabled=True),
+    # The dumps the Wi-Fi service printed (wifi_dump_fixtures): the network connected or not, with other networks
+    # or not, in each form of a header; and one with a log line in a block, which no real dump has. VirtWifi's ID is
+    # the fixture's, and the script finds its Auto-connect under that ID alone. Off is left alone; on, with the
+    # network disabled, is repaired.
+    *(Case(f"the dump {name}: Auto-connect {'on' if on else 'off'}", "1", True, (
+        (Boot(join_after=None, dump_fixture=sorted(wifi_dump_fixtures.DUMPS).index(name) + 1, virtwifi_id=number),
+         Expect(notes=1, marker="1", stored=True, autojoin_off=True) if not on else
+         Expect(adds=1, notes=1, marker="1", stored=True)),
+    ), disabled=on, autojoin_off=not on) for name, (number, on) in sorted(wifi_dump_fixtures.STATES.items())),
     # A dump that does not show it is no sign of the user's choice: the repair stays what it was.
     *(Case(f"marker 1, Auto-connect off and {what}", "1", True, (
         (Boot(dump_state=state), Expect(adds=1, notes=1, marker="1", stored=True)),
@@ -704,6 +727,9 @@ class WifiNetworkScript(unittest.TestCase):
             ("a header's SSID text names the configuration", mutated(
                 text, 'if [ "${rest%%[!0-9]*}" = "$netid" ]; then mine=1; else mine=0; fi',
                 """case "$line" in *'SSID: "VirtWifi"'*) mine=1 ;; *) mine=0 ;; esac""")),
+            ("a header must have a star", mutated(text, "(^|=)(\\* )?ID: [0-9]+", "(^|=)\\* ID: [0-9]+")),
+            ("a line that holds the text of a header is a header", mutated(
+                text, "(^|=)(\\* )?ID: [0-9]+", "ID: [0-9]+")),
             ("the dump has no time limit", mutated(
                 text, 'timeout "$dumplimit" dumpsys -t', "dumpsys -t")),
         )

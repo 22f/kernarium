@@ -413,12 +413,14 @@ def autojoin_values(dump: str) -> list[bool]:
 
 def configuration_autojoin(dump: str, network: int) -> list[bool]:
     """Auto-connect of the saved network with this ID, one value for each time `dumpsys wifi` prints it. Only the
-    values under a configuration header (`* ID: n SSID: ...`) of that ID count, as the boot script reads them:
+    values under a configuration header (`ID: n SSID: ...`) of that ID count, as the boot script reads them:
     a header for another ID ends the configuration, and the SSID text of a header is never searched."""
     values: list[bool] = []
     current: int | None = None
     for line in dump.splitlines():
-        header = re.search(r"\* ID: (\d+) SSID: ", line)
+        # The configuration of a connected network has a star before its ID; the others have none. A header
+        # starts the line or follows the `=` of a map entry: a log line with the same text is no header.
+        header = re.search(r"(?:^|=)(?:\* )?ID: (\d+) SSID: ", line)
         if header:
             current = int(header[1])
         elif current == network:
