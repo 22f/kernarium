@@ -303,15 +303,20 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
             auto rules = offerRulesOf(limits);
             rules.candidateSizes = candidateVideoSizes(formats);
             const bool couldRunWithOthers = std::any_of(order.begin(), order.end(), [&](std::size_t other) { return runsWith(platform, other); });
+            // Whether the camera keeps its concurrency is decided on the formats as listed: a limit on the photo
+            // sizes of a front camera (limitedStillFormats) is no reason for it to start running with others.
             entry.concurrent = couldRunWithOthers && uml::platform::keepsConcurrency(formats, rules);
             entry.concurrencyDropped = couldRunWithOthers && !entry.concurrent;
-            entry.anchor = uml::platform::chooseAnchor(formats, rules, entry.concurrent);
+            // The anchor and the offer are made on the formats with the position's still limit, as the platform's
+            // session makes the photo output (the same function, setAnchors).
+            const auto limited = uml::platform::limitedStillFormats(infos[platform].position, formats);
+            entry.anchor = uml::platform::chooseAnchor(limited, rules, entry.concurrent);
             if (!entry.anchor) {
                 std::fprintf(stderr, "Camera: platform camera %zu is not offered: none of its %zu formats carries a stream\n", platform,
                              formats.size());
                 continue;
             }
-            entry.offer = uml::platform::offerOf(formats[*entry.anchor], rules);
+            entry.offer = uml::platform::offerOf(limited[*entry.anchor], rules);
         }
         arranged.push_back(std::move(entry));
     }

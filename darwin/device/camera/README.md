@@ -38,7 +38,9 @@ application's statements (the sensor orientation, the rotation that
   1 GiB or more. Every host is given the small tier for now
   (`largestOfferedTier`), so no layout of the large tier or with a 2160p front
   camera is composed; the image keeps them, and the launcher's `--camera-tier=`
-  exercises them.
+  exercises them. A front camera's stills are limited to about 3 MP at either
+  tier (`frontStillMaximumPixels`: its still session's memory grows with the
+  photo's pixels); the back cameras' limit is the tier's.
 - **Memory.** A live session holds host memory outside the guest's RAM. The
   device holds the host to what it counts (`camera_tiers.hpp`, `CameraUse`,
   given in `CameraDeviceOptions::use`), and the application takes the matching
@@ -114,7 +116,10 @@ application's statements (the sensor orientation, the rotation that
   platform is asked for exactly that size. A host whose photo sizes belong to
   its formats (`CameraInfo::captureFormats`) runs each camera in one of them,
   its **anchor**, and offers only what the anchor makes: its stills up to the
-  tier's cap, the video sizes inside it whose capture buffers fit the reserve (one
+  tier's cap (a front camera's up to `frontStillMaximumPixels`, from the
+  formats `limitedStillFormats` returns, which the platform's photo output
+  reads too; whether a camera keeps its concurrency is decided on the formats as
+  listed), the video sizes inside it whose capture buffers fit the reserve (one
   byte count, `alignedFrameBytes` in `platform/frame_bytes.hpp`, for the offer's
   bound and the reserve), and its whole frame rates up to 30 (`videoRateCap`:
   photos win over fast streams).

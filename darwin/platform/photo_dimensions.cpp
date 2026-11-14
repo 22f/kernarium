@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <numeric>
 
@@ -119,6 +120,28 @@ std::vector<CameraStillSize> stillsMadeByAnyFormat(std::span<const VideoFormatFa
             if (std::find(sizes.begin(), sizes.end(), size) == sizes.end()) sizes.push_back(size);
     std::sort(sizes.begin(), sizes.end(), largerPhoto);
     return sizes;
+}
+
+std::vector<VideoFormatFacts> limitedStillFormats(CameraPosition position, std::span<const VideoFormatFacts> formats)
+{
+    std::vector<VideoFormatFacts> limited(formats.begin(), formats.end());
+    if (position != CameraPosition::front) return limited;
+    const auto usable = [](CameraStillSize size) { return size.width != 0 && size.height != 0; };
+    const auto inside = [&](CameraStillSize size) { return usable(size) && areaOf(size) <= frontStillMaximumPixels; };
+    const bool somewhere = std::any_of(limited.begin(), limited.end(), [&](const VideoFormatFacts& format) {
+        return std::any_of(format.photoSizes.begin(), format.photoSizes.end(), inside);
+    });
+    for (auto& format : limited) {
+        std::vector<CameraStillSize> kept;
+        if (somewhere) {
+            std::copy_if(format.photoSizes.begin(), format.photoSizes.end(), std::back_inserter(kept), inside);
+        } else {
+            for (const auto& size : format.photoSizes)
+                if (usable(size) && (kept.empty() || largerPhoto(kept.front(), size))) kept = {size};
+        }
+        format.photoSizes = std::move(kept);
+    }
+    return limited;
 }
 
 bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested) noexcept

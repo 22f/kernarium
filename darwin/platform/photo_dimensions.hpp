@@ -101,6 +101,22 @@ enum class PhotoOutputPreparation : std::uint8_t {
 // time to apply after the session commits the maximum.
 inline constexpr std::uint64_t binnedSensorStillPixels = 4032ull * 3024ull;
 
+// The largest JPEG a front camera is offered, in pixels: about 3 MP. A front camera's still session holds memory in
+// the system's capture services, outside the application's footprint, and the pixel count of the photo drives it; a
+// 4 GiB device has no room for the front lens's full-resolution size. 2016x1512 (3.05 MP), 2304x1296 (2.99 MP) and
+// 2048x1536 (3.15 MP) are within it; 2560x1440 (3.69 MP) is not. The back cameras' limit is the tier's, not this.
+inline constexpr std::uint64_t frontStillMaximumPixels = 3'200'000;
+
+// The formats of a camera as its guest is offered them. A front camera's photo sizes above frontStillMaximumPixels are
+// dropped from every format, so that the offer (stillsOf), the photo output's maximum (photoMaximum) and the capture's
+// size check read one list and a size is offered, prepared and made together. A front camera none of whose formats
+// lists a size within the limit keeps each format's smallest instead, so that it still takes stills. Another camera's
+// formats are returned as they are. Only the photo sizes change: a format's own size, rates and multi-camera flag are
+// those listed. The anchor and its offer are chosen and made on these formats; whether a camera keeps its concurrency
+// (keepsConcurrency) is decided on the listed ones, so that the limit is no reason for a camera to start running with
+// others.
+[[nodiscard]] std::vector<VideoFormatFacts> limitedStillFormats(CameraPosition position, std::span<const VideoFormatFacts> formats);
+
 // Whether a photo output's maximum needs the full-resolution mode: it is above the binned size, whatever the area
 // the still cap of a tier allows. Only this wait depends on it: a photo of another size is made again
 // (stillSizeOutcome) for any maximum.
