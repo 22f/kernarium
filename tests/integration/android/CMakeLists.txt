@@ -256,8 +256,10 @@ add_dependencies(integration-test-binaries uml_audio_hold)
 # boots the release with the launcher's synthetic camera and a camera layout on the
 # vendor SKU, and checks the layout's features and media profiles, the cameras
 # Android lists, one preview frame and one still of the camera application, and,
-# in a blocked session, the same cameras with black frames and no still. It boots
-# Android with the macOS launcher, so it is opt-in: name the release under test.
+# in a blocked session, the same cameras with black frames and no still; a live
+# session also records, and holds the sound of its recordings to real time through
+# a stalled sound device and a stood-still guest. It boots Android with the macOS
+# launcher, so it is opt-in: name the release under test.
 set(UML_ANDROID_CAMERA_RELEASE "" CACHE PATH
     "Installed Android release directory that the android-camera tests boot")
 if(UML_ANDROID_CAMERA_RELEASE AND TARGET uml-darwin-android17)
@@ -273,6 +275,7 @@ if(UML_ANDROID_CAMERA_RELEASE AND TARGET uml-darwin-android17)
                 ${CMAKE_CURRENT_SOURCE_DIR}/run_android_camera.py
                 --release ${UML_ANDROID_CAMERA_RELEASE}
                 --emulator $<TARGET_FILE:uml-darwin-android17>
+                --audio-hold-library $<TARGET_FILE:uml_audio_hold>
                 --mode ${mode}
             LABELS guest;boot;android
             TIMEOUT 3600

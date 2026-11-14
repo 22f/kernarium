@@ -977,12 +977,16 @@ frame and one still of the camera application, photo-to-video switches
 with capture running and the window animations off, and each seen: the photo
 activity's pause, the video activity's resume and capture after them) that
 refuse no capture request and draw no SELinux denial of the camera HAL's use of
-the display composer's file descriptors, two recordings of the video mode whose
-audio track holds what its time stamps span (the time line over the coded audio
-is at most 1.05; the second recording has the emulator process stopped for 1.5 s
-and continued, and a guest whose audio input leaves the stalled time without
-audio fails it), and, in a blocked session, that the same cameras give black
-frames and no still.
+the display composer's file descriptors, three recordings of the video mode
+whose audio track holds what its time stamps span and ends with its video (the
+runner's bounds): a plain one; one during which the thread that serves the
+Virtio sound device is held (`uml_audio_hold`, which the runner inserts into the
+launcher), so that the video goes on while the audio input has nothing to read,
+and the input's log must say it made the time up; and one during which the
+emulator process is stopped, whose two tracks must show gaps of about the same
+length with no burst of made-up audio after them. The audio capture is seen to
+run before either is injected. In a blocked session the runner checks instead
+that the same cameras give black frames and no still.
 `android17-camera-runner` (tooling) runs its parsers and the expectations of
 every layout without a guest, and `android17-camera-layouts` (tooling) the
 layout set, its fallback order and the generated files.

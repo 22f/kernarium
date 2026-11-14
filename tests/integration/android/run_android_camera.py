@@ -31,11 +31,14 @@ The runner checks, in this order:
   interval), and the camera HAL has logged no failed buffer ("every buffer of the stream is in flight", a
   request "not queued completely", a buffer "never collected");
 - recordings keep their sound to real time: the audio track of a recording holds as much audio as its time
-  line spans (its stretch, the time line over the coded audio, stays at 1.05 or below), because a player that
-  follows the audio clock skips ahead at every gap in a track that holds less. The check runs on the
-  recording above and on a second one, during which the emulator process is stopped for 1.5 s (the guest, its
-  sound device and its camera stand still, as when the host holds the application up) and continued; a guest
-  whose audio input makes up only the frames of its own reads for the stalled time fails it;
+  line spans (its stretch, the time line over the coded audio, stays within a bound either way), because a
+  player that follows the audio clock skips ahead at every gap in a track that holds less. The check runs on the
+  recording above and on a recording during which the thread that serves the Virtio sound device is held for
+  1.5 s three times while the guest runs (``--audio-hold-library``: the video goes on and the audio input has
+  nothing to read), with the audio capture seen to run first; the audio table has no jump of a stall's length,
+  the audio ends with the video, and the HAL says it made silence up. A third recording stops the whole
+  emulator process three times for 1.5 s (the guest stands still, and the video has the same gap): the two
+  tracks have gaps of about the same length and the audio does not end after the video (no burst);
 - blocked: the same cameras are listed, the preview is not the chart on two samples, each taken only while
   the camera application is the resumed activity and the device is awake (the application is brought back
   once; a second absence fails the step), and the camera key takes nothing;
@@ -154,15 +157,47 @@ VIDEO_URI = "content://media/external/video/media"
 # is the track's stretch: 1.0 for a track that holds what its time stamps span. A recorder stamps each buffer it reads
 # with the time of the read, so a gap of stamps with no audio behind it (an input that makes up too few frames for a
 # stall) stretches the time line, and a player that follows the audio clock skips ahead at every such gap and plays
-# the clip too fast. A good recording stays within a percent of 1.0; the limit leaves room for the encoder's rounding.
+# the clip too fast. A good recording stays within a percent of 1.0; the bounds leave room for the encoder's rounding
+# and are the same either way (a time line shorter than the audio it holds is as wrong as a longer one).
 AAC_FRAME_SAMPLES = 1024
+AUDIO_STRETCH_MINIMUM = 0.95
 AUDIO_STRETCH_MAXIMUM = 1.05
-# The recording with a stall: it runs FREEZE_HOLD_SECONDS, and the emulator process is stopped for FREEZE_SECONDS
-# from FREEZE_AFTER_SECONDS after the start key. The whole guest stands still, so the video has a gap as well, and the
-# step does not hold the recording to the frame rate floor.
-FREEZE_HOLD_SECONDS = 6
-FREEZE_AFTER_SECONDS = 2.0
+# A jump in the audio's sample table (the longest time between two audio samples) of about a stall's length is what an
+# input that does not make a stalled time up leaves; the encoder's own steps are a few hundredths of a second, and
+# half a second is a third of a stall.
+AUDIO_JUMP_MAXIMUM_SECONDS = 0.5
+# Where the tracks end: a recording's audio ends with its video (a control's differ by a few hundredths of a second).
+# Frames that were made up for a stall and arrive in a burst are stamped at its end and laid after it, so the audio
+# then ends as many seconds after the video as the stall lasted.
+AUDIO_END_SKEW_MAXIMUM_SECONDS = 0.25
+# The recordings with a disturbance. Each runs DISTURB_HOLD_SECONDS from the start key to the stop key. The audio
+# capture is seen to run first (the audio flinger's record thread is out of standby, has an active client and reads
+# more frames between two looks); one second later, and then at DISTURB_GAP_SECONDS after each end, DISTURB_COUNT
+# disturbances follow. A stall holds the thread that serves the Virtio sound device for STALL_SECONDS while the guest
+# runs, as a busy host does to the worker the device's capture timeline runs on: the video goes on and the audio
+# input has nothing to read. A freeze stops the whole emulator process for FREEZE_SECONDS: the guest stands still and
+# the video has the same gap. The runner cannot tell where in the input's read cycle a disturbance lands (in a read
+# or between two); the model of the input covers the phases, and the step reports when each disturbance began.
+STALL_SECONDS = 1.5
 FREEZE_SECONDS = 1.5
+DISTURB_COUNT = 3
+DISTURB_LEAD_SECONDS = 1.0
+DISTURB_GAP_SECONDS = 1.5
+DISTURB_HOLD_SECONDS = 14
+DISTURB_MAXIMUM_SECONDS = 25.0
+AUDIO_CAPTURE_SECONDS = 30
+AUDIO_HOLD_WAIT_SECONDS = 15
+# The library must have held the thread for most of the time asked, and the HAL must say it made silence up for at
+# least half of the time that the stalls took (the host's capture credit leaves a little real audio at each thaw).
+AUDIO_HOLD_MINIMUM_FRACTION = 0.9
+MADE_UP_MINIMUM_FRACTION = 0.5
+# A stall must leave the video alone (a stalled guest would excuse the audio's gap), a freeze must show in the video
+# as a gap, and the audio's gaps must be about as long as the video's.
+VIDEO_GAP_MAXIMUM_SECONDS = 0.5
+FREEZE_GAP_MINIMUM_SECONDS = 1.0
+GAP_AGREEMENT_MAXIMUM_SECONDS = 0.35
+# The input's own log lines (the Stream's tag in the audio HAL).
+HAL_STREAM_TAG = "AHAL_StreamAlsaMonoPipe"
 # The camera HAL's own tags: a failed buffer is an error or a warning of one of these.
 HAL_TAGS = ("V4l2Stream", "V4l2FrameSource", "EmulatedSensorHost")
 # The photo to video switch: the application's video activity covers its photo activity while that activity's
@@ -311,6 +346,10 @@ class Movie:
     audio_samples: int = 0       # the audio track's samples (AAC frames)
     audio_seconds: float = 0.0   # its time line: the total duration of those samples
     audio_rate: int = 0          # its sample rate, from its sample entry (the time scale when there is none)
+    video_end: float = 0.0       # where each track ends on the movie's time line (edit list applied)
+    audio_end: float = 0.0
+    video_gap: float = 0.0       # the longest time between two samples of each track
+    audio_gap: float = 0.0
 
     @property
     def fps(self) -> float:
@@ -328,6 +367,12 @@ class Movie:
         holds, more when stamped time has no audio behind it; 0 without a sample table."""
         coded = self.audio_coded_seconds
         return self.audio_seconds / coded if coded > 0 else 0.0
+
+    @property
+    def audio_skew(self) -> float:
+        """Where the audio ends minus where the video ends, in seconds: 0 for a recording whose tracks end together,
+        positive when the audio runs on past the video (made-up frames laid after a gap of stamps)."""
+        return self.audio_end - self.video_end
 
 
 def mp4_boxes(data: bytes, start: int, end: int):
@@ -358,15 +403,54 @@ def audio_sample_rate(data: bytes, start: int, end: int) -> int:
     return struct.unpack_from(">I", data, entry + 32)[0] >> 16
 
 
-def track_samples(data: bytes, start: int, end: int, handler_type: bytes) -> tuple[int, float, int]:
-    """(samples, seconds, rate) of the first track of a `moov` box whose handler is `handler_type` (`vide` or
-    `soun`): the sample count and the total sample duration of its `stts`, in the time scale of its `mdhd`, and
-    the sample rate of an audio track's sample entry (its time scale when there is no entry); (0, 0.0, 0) when
-    the track has no sample table."""
+@dataclass(frozen=True)
+class Track:
+    samples: int = 0
+    seconds: float = 0.0   # the total duration of its samples
+    rate: int = 0          # an audio track's sample rate: its sample entry's, else its time scale
+    gap: float = 0.0       # the longest duration of one sample: the longest step of the sample times
+    end: float = 0.0       # where its last sample ends on the movie's time line
+
+
+def edit_offsets(data: bytes, trak: dict, movie_scale: int, media_scale: int) -> tuple[float, float]:
+    """(start, skip) of a track from its edit list: the movie time at which its first sample plays (the empty edits
+    before it) and the media time its first edit skips; (0, 0) without an edit list."""
+    start = skip = 0.0
+    edts = trak.get(b"edts")
+    if edts is None:
+        return start, skip
+    boxes = {k: (p, s) for k, p, s in mp4_boxes(data, *edts)}
+    if b"elst" not in boxes:
+        return start, skip
+    position = boxes[b"elst"][0]
+    version = data[position]
+    entries = struct.unpack_from(">I", data, position + 4)[0]
+    position += 8
+    seen = False
+    for _ in range(entries):
+        if version == 1:
+            segment, media_time = struct.unpack_from(">Qq", data, position)
+            position += 20
+        else:
+            segment, media_time = struct.unpack_from(">Ii", data, position)
+            position += 12
+        if media_time == -1:
+            start += segment / movie_scale if movie_scale else 0.0
+        elif not seen:
+            skip, seen = media_time / media_scale, True
+    return start, skip
+
+
+def track_samples(data: bytes, start: int, end: int, handler_type: bytes, movie_scale: int = 0) -> Track:
+    """The first track of a `moov` box whose handler is `handler_type` (`vide` or `soun`): the sample count and the
+    total sample duration of its `stts`, in the time scale of its `mdhd`, the longest single sample duration, where
+    the last sample ends on the movie's time line (its edit list applied) and the sample rate of an audio track's
+    sample entry (its time scale when there is no entry); an empty Track when it has no sample table."""
     for kind, payload, stop in mp4_boxes(data, start, end):
         if kind != b"trak":
             continue
-        mdia = {k: (p, s) for k, p, s in mp4_boxes(data, payload, stop)}.get(b"mdia")
+        trak = {k: (p, s) for k, p, s in mp4_boxes(data, payload, stop)}
+        mdia = trak.get(b"mdia")
         if mdia is None:
             continue
         parts = {k: (p, s) for k, p, s in mp4_boxes(data, *mdia)}
@@ -377,15 +461,18 @@ def track_samples(data: bytes, start: int, end: int, handler_type: bytes) -> tup
         minf = {k: (p, s) for k, p, s in mp4_boxes(data, *parts[b"minf"])} if b"minf" in parts else {}
         stbl = {k: (p, s) for k, p, s in mp4_boxes(data, *minf[b"stbl"])} if b"stbl" in minf else {}
         if scale == 0 or b"stts" not in stbl:
-            return 0, 0.0, 0
+            return Track()
         table, table_end = stbl[b"stts"]
         entries = struct.unpack_from(">I", data, table + 4)[0]
         if table + 8 + 8 * entries > table_end:
             raise ValueError("an stts table that does not fit its box")
         samples = [struct.unpack_from(">II", data, table + 8 + 8 * index) for index in range(entries)]
         rate = audio_sample_rate(data, *stbl[b"stsd"]) if handler_type == b"soun" and b"stsd" in stbl else 0
-        return sum(count for count, _ in samples), sum(count * delta for count, delta in samples) / scale, rate or scale
-    return 0, 0.0, 0
+        total = sum(count * delta for count, delta in samples) / scale
+        offset, skip = edit_offsets(data, trak, movie_scale, scale)
+        return Track(sum(count for count, _ in samples), total, rate or scale,
+                     max((delta for _, delta in samples), default=0) / scale, offset + total - skip)
+    return Track()
 
 
 def parse_mp4(data: bytes) -> Movie:
@@ -406,10 +493,40 @@ def parse_mp4(data: bytes) -> Movie:
     if scale == 0:
         raise ValueError("a time scale of zero")
     moov = data[start:end]
-    frames, video_seconds, _ = track_samples(data, start, end, b"vide")
-    audio_samples, audio_seconds, audio_rate = track_samples(data, start, end, b"soun")
-    return Movie(duration / scale, b"vide" in moov, b"soun" in moov, frames, video_seconds,
-                 audio_samples, audio_seconds, audio_rate)
+    video = track_samples(data, start, end, b"vide", scale)
+    audio = track_samples(data, start, end, b"soun", scale)
+    return Movie(duration / scale, b"vide" in moov, b"soun" in moov, video.samples, video.seconds,
+                 audio.samples, audio.seconds, audio.rate, video.end, audio.end, video.gap, audio.gap)
+
+
+def active_capture_frames(text: str) -> int | None:
+    """The `Frames read` of the audio flinger's record thread that is capturing in a `dumpsys media.audio_flinger`:
+    an input thread of type RECORD that is out of standby with an active client. None when no record thread is.
+    The history of removed threads (lines that start with a dash) is not a thread."""
+    capturing: int | None = None
+    section: list[str] | None = None
+    sections: list[list[str]] = []
+    for line in text.splitlines():
+        if re.match(r"Input thread .*\(RECORD\):\s*$", line):
+            section = []
+            sections.append(section)
+        elif section is not None and line[:1] not in (" ", "\t", ""):
+            section = None
+        elif section is not None:
+            section.append(line)
+    for lines in sections:
+        body = "\n".join(lines)
+        active = re.search(r"(\d+) Tracks? of which (\d+) are active", body)
+        frames = re.search(r"Frames read: (\d+)", body)
+        if re.search(r"^\s*Standby: no\s*$", body, re.M) and active and int(active.group(2)) > 0 and frames:
+            capturing = max(capturing or 0, int(frames.group(1)))
+    return capturing
+
+
+def made_up_frames(text: str) -> list[int]:
+    """The frames of silence that the input made up in each stall its log says ended: `readInput: the device
+    delivers again, after N frames of silence made up`."""
+    return [int(count) for count in re.findall(r"the device delivers again, after (\d+) frames of silence made up", text)]
 
 
 def hal_failures(text: str) -> list[str]:
@@ -726,12 +843,14 @@ def parse_jpeg(data: bytes) -> Jpeg:
 
 class Guest:
     def __init__(self, adb: str, serial: str, process: subprocess.Popen, log: pathlib.Path,
-                 private: pathlib.Path) -> None:
+                 private: pathlib.Path, hold_directory: pathlib.Path | None = None) -> None:
         self.adb = adb
         self.serial = serial
         self.process = process
         self.log = log
         self.private = private
+        # Where the launcher's audio hold library (--audio-hold-library) takes its requests; None without one.
+        self.hold_directory = hold_directory
 
     def adb_run(self, *arguments: str, timeout: float = COMMAND_SECONDS,
                 binary: bool = False) -> subprocess.CompletedProcess:
@@ -794,6 +913,41 @@ class Guest:
             time.sleep(seconds)
         finally:
             os.kill(self.process.pid, signal.SIGCONT)
+
+    def audio_flinger(self) -> str:
+        return self.shell("dumpsys media.audio_flinger")
+
+    def stream_log(self) -> str:
+        """The audio HAL's own lines about its streams, from the log's start."""
+        return self.shell(f"logcat -d -v time -s {HAL_STREAM_TAG}:V 2>&1 || true")
+
+    def hold_audio(self, seconds: float) -> float:
+        """Has the library in the launcher hold the thread that serves the Virtio sound device for `seconds` while
+        the guest runs, and returns how long it was held. The request is written to another name and renamed, so the
+        library never reads half of it; the library says what it held in the file `holds`: a count of threads that
+        is not one, or a hold much shorter than asked, is a hold that did not happen."""
+        if self.hold_directory is None:
+            raise Failure("no audio hold library: the run was not given --audio-hold-library")
+        log = self.hold_directory / "holds"
+        before = len(log.read_text().splitlines()) if log.is_file() else 0
+        request = self.hold_directory / "hold.request"
+        request.write_text(f"{round(seconds * 1000)}\n")
+        os.replace(request, self.hold_directory / "hold")
+        deadline = time.monotonic() + seconds + AUDIO_HOLD_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            self.alive()
+            lines = log.read_text().splitlines() if log.is_file() else []
+            if len(lines) > before:
+                fields = lines[before].split()
+                held, threads = int(fields[1]) / 1e9, int(fields[3])
+                if threads != 1 or held < seconds * AUDIO_HOLD_MINIMUM_FRACTION:
+                    raise Failure(f"the audio hold library held {threads} thread(s) named for the sound device "
+                                  f"for {held:.2f} s of the {seconds:g} s asked: a stall that did not happen "
+                                  f"cannot judge the input ({lines[before]!r})")
+                return held
+            time.sleep(0.05)
+        raise Failure(f"the audio hold library reported no hold within {seconds + AUDIO_HOLD_WAIT_SECONDS:g} s "
+                      f"(requested {seconds:g} s)")
 
     def pull(self, remote: str) -> bytes:
         local = self.private / pathlib.PurePosixPath(remote).name
@@ -1048,22 +1202,23 @@ def wait_for_chart(guest: Guest, camera_id: str, what: str) -> None:
     print(f"  {what} preview: mean {seen[-1][0]:.1f}, deviation {seen[-1][1]:.1f}")
 
 
-def record_video(guest: Guest, plan: Plan, hold_seconds: float, freeze: bool = False) -> tuple[dict[str, str], Movie]:
+def record_video(guest: Guest, plan: Plan, hold_seconds: float, disturb: Callable[[Guest], None] | None = None,
+                 maximum: float = VIDEO_MAXIMUM_SECONDS) -> tuple[dict[str, str], Movie]:
     """The camera key starts and stops a recording of the application's video mode on the profile's first camera,
-    `hold_seconds` apart; with `freeze` the emulator process is stopped for FREEZE_SECONDS, FREEZE_AFTER_SECONDS after
-    the start. Returns MediaStore's row of the new movie and the movie as parsed: a finished file of at least
-    VIDEO_MINIMUM_SECONDS with a video track."""
+    `hold_seconds` apart; `disturb`, when given, runs right after the start key (and takes part of the hold). Returns
+    MediaStore's row of the new movie and the movie as parsed: a finished file of at least VIDEO_MINIMUM_SECONDS and
+    at most `maximum` with a video track."""
     before, _ = guest.videos()
     guest.shell(f"am force-stop {CAMERA_PACKAGE}")
     start_camera_application(guest, VIDEO_ACTION, front=PROFILE_CAMERAS[plan.profile][0] == "front")
     wait_for_chart(guest, plan.camera_ids[0], "video")
     guest.shell(f"input keyevent {CAMERA_KEYCODE}")
-    if freeze:
-        time.sleep(FREEZE_AFTER_SECONDS)
-        guest.freeze(FREEZE_SECONDS)
-        time.sleep(hold_seconds - FREEZE_AFTER_SECONDS - FREEZE_SECONDS)
-    else:
+    if disturb is None:
         time.sleep(hold_seconds)
+    else:
+        started = time.monotonic()
+        disturb(guest)
+        time.sleep(max(0.0, hold_seconds - (time.monotonic() - started)))
     guest.shell(f"input keyevent {CAMERA_KEYCODE}")
     raw = ["not queried"]
     found: list[dict[str, str]] = []
@@ -1085,32 +1240,85 @@ def record_video(guest: Guest, plan: Plan, hold_seconds: float, freeze: bool = F
         raise Failure(f"{path} is not a finished movie: {problem}") from problem
     if not movie.video:
         raise Failure(f"{path} has no video track")
-    if not VIDEO_MINIMUM_SECONDS <= movie.seconds <= VIDEO_MAXIMUM_SECONDS:
+    if not VIDEO_MINIMUM_SECONDS <= movie.seconds <= maximum:
         raise Failure(f"{path} lasts {movie.seconds:.2f} s; the recording ran {hold_seconds:g} s "
-                      f"and must last between {VIDEO_MINIMUM_SECONDS} and {VIDEO_MAXIMUM_SECONDS} s")
+                      f"and must last between {VIDEO_MINIMUM_SECONDS} and {maximum:g} s")
     return found[-1], movie
 
 
+def wait_for_audio_capture(guest: Guest) -> tuple[int, int]:
+    """The audio flinger's record thread captures now, not only once did: it is out of standby with an active client
+    and its `Frames read` rises between two looks. Returns the two counts."""
+    seen: list[int] = []
+
+    def capturing() -> str | None:
+        frames = active_capture_frames(guest.audio_flinger())
+        if frames is None:
+            return "no record thread of the audio flinger is out of standby with an active client"
+        previous = seen[-1] if seen else None
+        seen.append(frames)
+        return None if previous is not None and frames > previous else f"the record thread has read {frames} frames"
+
+    wait_for("audio capture", AUDIO_CAPTURE_SECONDS, capturing, guest)
+    return seen[-2], seen[-1]
+
+
+def disturb_recording(guest: Guest, kind: str, events: list[float]) -> None:
+    """Right after the start key of a recording: the audio capture is seen to run, then DISTURB_COUNT disturbances
+    (`stall` or `freeze`), the first DISTURB_LEAD_SECONDS later, the others DISTURB_GAP_SECONDS after each end.
+    `events` gets the seconds after the start key at which each began."""
+    started = time.monotonic()
+    first, last = wait_for_audio_capture(guest)
+    print(f"  audio capture runs: the record thread has read {first}, then {last} frames")
+    for index in range(DISTURB_COUNT):
+        time.sleep(DISTURB_LEAD_SECONDS if index == 0 else DISTURB_GAP_SECONDS)
+        events.append(time.monotonic() - started)
+        if kind == "stall":
+            held = guest.hold_audio(STALL_SECONDS)
+            print(f"  stall {index + 1}: the sound device's thread held {held:.2f} s from {events[-1]:.1f} s after the start key")
+        else:
+            guest.freeze(FREEZE_SECONDS)
+            print(f"  freeze {index + 1}: the emulator stopped {FREEZE_SECONDS:g} s from {events[-1]:.1f} s after the start key")
+
+
 def check_audio(path: str, movie: Movie) -> None:
-    """The audio track of a recording holds what its time stamps span: its stretch (the time line over the coded
-    audio) is at most AUDIO_STRETCH_MAXIMUM. The track's sample accounting is printed before the check."""
+    """The audio track of a recording holds what its time stamps span and ends with its video: its stretch (the time
+    line over the coded audio) is within AUDIO_STRETCH_MINIMUM and AUDIO_STRETCH_MAXIMUM, its sample table has no jump
+    of AUDIO_JUMP_MAXIMUM_SECONDS, and it ends within AUDIO_END_SKEW_MAXIMUM_SECONDS of the video. The track's sample
+    accounting is printed before the checks."""
     if not movie.audio:
         raise Failure(f"{path} has no audio track: the application records with the microphone permission granted")
     if movie.audio_samples == 0 or movie.audio_rate == 0:
         raise Failure(f"{path} has no sample table for its audio track: its stretch cannot be told")
     print(f"  audio: {movie.audio_samples} AAC frames = {movie.audio_coded_seconds:.2f} s of audio over a "
-          f"{movie.audio_seconds:.2f} s time line at {movie.audio_rate} Hz, stretch {movie.audio_stretch:.3f}")
+          f"{movie.audio_seconds:.2f} s time line at {movie.audio_rate} Hz, stretch {movie.audio_stretch:.3f}; "
+          f"longest step of its sample times {movie.audio_gap:.3f} s, ends {movie.audio_skew:+.3f} s after the video")
     if movie.audio_stretch > AUDIO_STRETCH_MAXIMUM:
         raise Failure(f"{path}: the audio track holds {movie.audio_coded_seconds:.2f} s of audio under a "
                       f"{movie.audio_seconds:.2f} s time line (stretch {movie.audio_stretch:.3f}, above "
                       f"{AUDIO_STRETCH_MAXIMUM}): stamped time has no audio behind it, and a player that follows the "
                       "audio clock skips ahead at every such gap and plays the clip too fast")
+    if movie.audio_stretch < AUDIO_STRETCH_MINIMUM:
+        raise Failure(f"{path}: the audio track holds {movie.audio_coded_seconds:.2f} s of audio under a "
+                      f"{movie.audio_seconds:.2f} s time line (stretch {movie.audio_stretch:.3f}, below "
+                      f"{AUDIO_STRETCH_MINIMUM}): more audio than its time stamps span")
+    if movie.audio_gap > AUDIO_JUMP_MAXIMUM_SECONDS:
+        raise Failure(f"{path}: the audio's sample table jumps {movie.audio_gap:.2f} s between two samples (above "
+                      f"{AUDIO_JUMP_MAXIMUM_SECONDS} s): time that the audio does not hold")
+    check_audio_end(path, movie)
+
+
+def check_audio_end(path: str, movie: Movie) -> None:
+    if abs(movie.audio_skew) > AUDIO_END_SKEW_MAXIMUM_SECONDS:
+        raise Failure(f"{path}: the audio ends {movie.audio_skew:+.2f} s after the video (more than "
+                      f"{AUDIO_END_SKEW_MAXIMUM_SECONDS} s either way): the audio and the video are out of step by "
+                      "as much as a stall, which frames made up late and stamped in a burst leave")
 
 
 def check_video(guest: Guest, plan: Plan) -> None:
     """The camera key starts and stops a recording of the application's video mode on the profile's first
     camera: MediaStore lists a new movie of at least VIDEO_MINIMUM_SECONDS with a video track, at the frame rate
-    floor, and with an audio track that holds what its time stamps span."""
+    floor, and with an audio track that holds what its time stamps span and ends with the video."""
     row, movie = record_video(guest, plan, VIDEO_HOLD_SECONDS)
     path = row.get("_data", "")
     print(f"  video: {row.get('_display_name', path)} {movie.seconds:.2f} s, {movie.frames} frames over "
@@ -1123,15 +1331,62 @@ def check_video(guest: Guest, plan: Plan) -> None:
     check_audio(path, movie)
 
 
-def check_video_stall(guest: Guest, plan: Plan) -> None:
-    """A second recording, during which the emulator process is stopped for FREEZE_SECONDS and continued: the
-    video has a gap (the whole guest stood still), and the audio track must still hold what its time stamps span,
-    as the audio input makes up the frames of the stalled time. Only the audio is held to its stretch."""
-    row, movie = record_video(guest, plan, FREEZE_HOLD_SECONDS, freeze=True)
+def check_audio_stall(guest: Guest, plan: Plan) -> None:
+    """A recording during which the thread that serves the Virtio sound device is held STALL_SECONDS, DISTURB_COUNT
+    times, with the audio capture seen to run first: the video goes on (no gap of VIDEO_GAP_MAXIMUM_SECONDS) while the
+    audio input has nothing to read, and the audio track must still hold what its time stamps span, have no jump and
+    end with the video, as the input makes the stalled time up. The HAL must have said it made silence up, for at least
+    MADE_UP_MINIMUM_FRACTION of the stalls' time. Without --audio-hold-library the step says it did not run."""
+    if guest.hold_directory is None:
+        print("  audio stall: not run (no --audio-hold-library)")
+        return
+    events: list[float] = []
+    before = made_up_frames(guest.stream_log())
+    row, movie = record_video(guest, plan, DISTURB_HOLD_SECONDS, lambda g: disturb_recording(g, "stall", events),
+                              DISTURB_MAXIMUM_SECONDS)
     path = row.get("_data", "")
-    print(f"  video with the emulator stopped for {FREEZE_SECONDS:g} s: {row.get('_display_name', path)} "
-          f"{movie.seconds:.2f} s, {movie.frames} frames over {movie.video_seconds:.2f} s")
+    print(f"  video with the sound device held {DISTURB_COUNT} x {STALL_SECONDS:g} s: {row.get('_display_name', path)} "
+          f"{movie.seconds:.2f} s, {movie.frames} frames over {movie.video_seconds:.2f} s, longest gap in the video "
+          f"{movie.video_gap:.3f} s")
+    if movie.video_gap > VIDEO_GAP_MAXIMUM_SECONDS:
+        raise Failure(f"{path}: the video has a gap of {movie.video_gap:.2f} s (above {VIDEO_GAP_MAXIMUM_SECONDS} s): "
+                      "the guest stood still as well, and its audio gap could not be told from the video's")
     check_audio(path, movie)
+    made_up = made_up_frames(guest.stream_log())[len(before):]
+    needed = MADE_UP_MINIMUM_FRACTION * DISTURB_COUNT * STALL_SECONDS * (movie.audio_rate or 48000)
+    print(f"  the HAL made {sum(made_up)} frames of silence up in {len(made_up)} stall(s) ({needed:.0f} needed)")
+    if sum(made_up) < needed:
+        raise Failure(f"the input's log says it made {sum(made_up)} frames of silence up in {len(made_up)} stall(s) "
+                      f"during {DISTURB_COUNT} stalls of {STALL_SECONDS:g} s (at least {needed:.0f} frames wanted): "
+                      "it did not make the stalled time up")
+
+
+def check_video_freeze(guest: Guest, plan: Plan) -> None:
+    """A recording during which the emulator process is stopped FREEZE_SECONDS, DISTURB_COUNT times, with the audio
+    capture seen to run first. The whole guest stands still, so the video has gaps, and a clip with the same gaps in
+    its audio is a faithful one: the video's longest gap shows (FREEZE_GAP_MINIMUM_SECONDS), the audio's is within
+    GAP_AGREEMENT_MAXIMUM_SECONDS of it, and the audio ends with the video: frames made up for the stood-still time
+    and stamped in a burst at the thaw would run it on past the video. Only the audio is held to this, not the frame
+    rate."""
+    events: list[float] = []
+    row, movie = record_video(guest, plan, DISTURB_HOLD_SECONDS, lambda g: disturb_recording(g, "freeze", events),
+                              DISTURB_MAXIMUM_SECONDS)
+    path = row.get("_data", "")
+    print(f"  video with the emulator stopped {DISTURB_COUNT} x {FREEZE_SECONDS:g} s: {row.get('_display_name', path)} "
+          f"{movie.seconds:.2f} s, {movie.frames} frames over {movie.video_seconds:.2f} s, longest gap in the video "
+          f"{movie.video_gap:.3f} s")
+    if not movie.audio or movie.audio_samples == 0:
+        raise Failure(f"{path} has no audio track with a sample table")
+    print(f"  audio: {movie.audio_samples} AAC frames, longest step of its sample times {movie.audio_gap:.3f} s, "
+          f"ends {movie.audio_skew:+.3f} s after the video")
+    if movie.video_gap < FREEZE_GAP_MINIMUM_SECONDS:
+        raise Failure(f"{path}: the freeze left a gap of only {movie.video_gap:.2f} s in the video (below "
+                      f"{FREEZE_GAP_MINIMUM_SECONDS} s): the emulator did not stand still, and nothing can be judged")
+    if abs(movie.audio_gap - movie.video_gap) > GAP_AGREEMENT_MAXIMUM_SECONDS:
+        raise Failure(f"{path}: the audio's longest step is {movie.audio_gap:.2f} s and the video's "
+                      f"{movie.video_gap:.2f} s (they differ by more than {GAP_AGREEMENT_MAXIMUM_SECONDS} s): "
+                      "a stood-still guest leaves the same gap in both tracks")
+    check_audio_end(path, movie)
 
 
 def wait_for_capture(guest: Guest, what: str) -> None:
@@ -1280,7 +1535,8 @@ def run_checks(guest: Guest, plan: Plan) -> None:
     check_still(guest, plan, before)
     if plan.mode == "live":
         check_video(guest, plan)
-        check_video_stall(guest, plan)
+        check_audio_stall(guest, plan)
+        check_video_freeze(guest, plan)
         check_front(guest, plan)
         check_mode_switch(guest, plan)
         check_hal_log(guest)
@@ -1394,11 +1650,19 @@ def start_guest(options: argparse.Namespace, plan: Plan, adb: str, private: path
     ]
     log = private / "emulator.log"
     stream = log.open("wb")
+    environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    hold_directory = None
+    if options.audio_hold_library is not None:
+        # The library holds the thread of the sound device for as long as a request in this directory says.
+        hold_directory = private / "audio-hold"
+        hold_directory.mkdir()
+        environment["DYLD_INSERT_LIBRARIES"] = str(options.audio_hold_library.resolve())
+        environment["UML_AUDIO_HOLD_DIRECTORY"] = str(hold_directory)
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
-                               start_new_session=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+                               start_new_session=True, env=environment)
     stream.close()
     serial = f"127.0.0.1:{options.adb_port}"
-    guest = Guest(adb, serial, process, log, private)
+    guest = Guest(adb, serial, process, log, private, hold_directory)
     boot_android.wait_for_adb(adb, serial, process, options.boot_timeout)
     if not boot_android.wait_for_boot_completed(adb, serial, process, options.boot_timeout):
         raise Failure("Android did not reach sys.boot_completed")
@@ -1447,6 +1711,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--switch-rounds", type=positive_integer, default=SWITCH_ROUNDS,
                         help="how many photo to video switches the live mode makes (each can miss a race that "
                         f"an image without the policy rule loses only some of the time; default {SWITCH_ROUNDS})")
+    parser.add_argument("--audio-hold-library", type=pathlib.Path,
+                        help="the test library (uml_audio_hold) that holds the thread of the Virtio sound device; "
+                        "without it the audio stall step does not run")
     parser.add_argument("--cpus", type=int, default=4)
     parser.add_argument("--memory", default="4G")
     parser.add_argument("--boot-timeout", type=int, default=900,
