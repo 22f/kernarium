@@ -235,11 +235,12 @@ sensor, turns under it. The application states the body's clockwise turn from
 portrait (`turn`: 0, 90, 180 or 270; the interface orientation's landscapeLeft
 is 90) and a boot states each camera's SENSOR_ORIENTATION from it
 (`camera_orientation.hpp`): a back camera's base orientation plus `turn`, a
-front camera's minus `turn`, an external camera's unchanged. With `turn` 0,
-where the guest rotates itself, the platform's values stand (90 back, 270
-front). A turn after the boot reaches the guest only as a turn of the picture
-by the difference of the two orientations, which ROTATE_AND_CROP's automatic
-setting applies (`CameraDeviceOptions::automaticRotation`, per camera).
+front camera's minus `turn`, an external camera's unchanged. The base is the
+platform camera's own `sensorOrientation`, and with `turn` 0, where the guest
+rotates itself, it stands. A turn after the boot reaches the guest only as a
+turn of the picture by the difference of the two orientations, which
+ROTATE_AND_CROP's automatic setting applies
+(`CameraDeviceOptions::automaticRotation`, per camera).
 
 ## Tests
 

@@ -1966,6 +1966,26 @@ void theFrontStillLimitLeavesTheVideoOfferAndDecidesNoConcurrency()
     require(keepsConcurrency(limited, rules), "it would on the limited formats: the limit must not be what decides it");
 }
 
+// Each camera states the platform's own mounting, the rotation coordinator's angle for portrait. An iPhone 15 Pro Max
+// states 90 for its front camera as for its back ones (the front camera is upright with the port on the left, the back
+// ones with the port on the right): the 270 a front camera was once told by position turned its pictures by 180
+// degrees in the guest.
+void aCameraStatesThePlatformsOwnMounting()
+{
+    require(sensorOrientationOf(CameraPosition::back, 90) == 90, "a back camera upright with the port on the right states 90");
+    require(sensorOrientationOf(CameraPosition::front, 90) == 90, "a front camera upright with the port on the left states 90, not 270");
+    for (const double angle : {0.0, 90.0, 180.0, 270.0})
+        for (const auto position : {CameraPosition::back, CameraPosition::front})
+            require(sensorOrientationOf(position, angle) == std::uint32_t(angle), "a quarter turn is stated as the platform gives it");
+    require(sensorOrientationOf(CameraPosition::front, 360) == 0 && sensorOrientationOf(CameraPosition::front, -90) == 270,
+            "an angle is taken within one turn");
+    require(sensorOrientationOf(CameraPosition::back, 89.6) == 90 && sensorOrientationOf(CameraPosition::back, 314) == 270,
+            "an angle is rounded to a quarter turn");
+    require(sensorOrientationOf(CameraPosition::external, 0) == 90 && sensorOrientationOf(CameraPosition::external, 180) == 90,
+            "an external camera states 90 whatever the angle");
+    require(sensorOrientationOf(CameraPosition::front, std::numeric_limits<double>::quiet_NaN()) == 0, "no angle states none");
+}
+
 // The same rule over generated tables: nothing above the limit survives on a front camera, ever; every kept size was
 // listed, and every listed size within the limit is kept, in its order; the formats are otherwise as listed; limiting
 // twice is limiting once; and a back camera is not limited.
@@ -2109,5 +2129,6 @@ int main()
     theFrontStillLimitLeavesTheVideoOfferAndDecidesNoConcurrency();
     theFrontStillLimitOnTheSecondRealFrontTable();
     everyGeneratedFrontTableKeepsNothingAboveTheLimit();
+    aCameraStatesThePlatformsOwnMounting();
     return 0;
 }

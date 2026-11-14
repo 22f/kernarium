@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // How a camera's SENSOR_ORIENTATION and picture turn follow the turn of the
 // device body where the host owns the guest's rotation (an iPad window): the
-// table of the four interface orientations and the two facings, the phone case
-// that leaves the platform's values, and the turn of the picture after a boot.
+// table of the four interface orientations for a back camera and for a front
+// camera of either mounting (its base is the platform camera's own statement:
+// 270, or 90 as an iPhone 15 Pro Max's), the phone case that leaves the
+// platform's values, and the turn of the picture after a boot.
 
 #include "camera_orientation.hpp"
 #include "require.hpp"
@@ -22,31 +24,38 @@ namespace {
 struct Interface {
     const char* name;
     std::uint32_t turn;
-    std::uint32_t back;
-    std::uint32_t front;
+    std::uint32_t back;     // a back camera stated 90
+    std::uint32_t front270; // a front camera stated 270
+    std::uint32_t front90;  // a front camera stated 90
 };
 
 constexpr std::array<Interface, 4> interfaces {{
-    {"portrait", 0, 90, 270},
-    {"landscapeLeft", 90, 180, 180},
-    {"portraitUpsideDown", 180, 270, 90},
-    {"landscapeRight", 270, 0, 0},
+    {"portrait", 0, 90, 270, 90},
+    {"landscapeLeft", 90, 180, 180, 0},
+    {"portraitUpsideDown", 180, 270, 90, 270},
+    {"landscapeRight", 270, 0, 0, 180},
 }};
 
 void testTheTableOfOrientations()
 {
-    // The platform's own values: 90 for a back camera, 270 for a front camera.
+    // The platform's own values: 90 for a back camera and, for a front camera,
+    // its own statement, which is 270 or 90 (an iPhone 15 Pro Max's).
     for (const auto& one : interfaces) {
         require(turnedSensorOrientation(CameraPosition::back, 90, one.turn) == one.back, one.name);
-        require(turnedSensorOrientation(CameraPosition::front, 270, one.turn) == one.front, one.name);
+        require(turnedSensorOrientation(CameraPosition::front, 270, one.turn) == one.front270, one.name);
+        require(turnedSensorOrientation(CameraPosition::front, 90, one.turn) == one.front90, one.name);
         // An external camera is not on the body.
         require(turnedSensorOrientation(CameraPosition::external, 90, one.turn) == 90, one.name);
     }
-    // The sensor's native buffer is upright with the home button on the right
-    // (landscapeRight): neither facing needs a turn there.
+    // A native buffer is upright where the turn undoes its base: with the home
+    // button on the right (landscapeRight) for a back camera and a front camera
+    // stated 270, and with it on the left (landscapeLeft) for a front camera
+    // stated 90.
     require(turnedSensorOrientation(CameraPosition::back, 90, 270) == 0 &&
                 turnedSensorOrientation(CameraPosition::front, 270, 270) == 0,
             "the native buffer needs no turn in landscapeRight");
+    require(turnedSensorOrientation(CameraPosition::front, 90, 90) == 0,
+            "a front camera stated 90 needs no turn in landscapeLeft");
 }
 
 void testAPhoneKeepsThePlatformsValues()
@@ -72,8 +81,11 @@ void testThePictureTurnsByTheChangeSinceTheBoot()
                      pictureTurn(CameraPosition::back, boot.turn, now.turn)) % 360 == now.back,
                     "back: boot orientation plus the change is the orientation now");
             require((turnedSensorOrientation(CameraPosition::front, 270, boot.turn) +
-                     pictureTurn(CameraPosition::front, boot.turn, now.turn)) % 360 == now.front,
-                    "front: boot orientation plus the change is the orientation now");
+                     pictureTurn(CameraPosition::front, boot.turn, now.turn)) % 360 == now.front270,
+                    "front stated 270: boot orientation plus the change is the orientation now");
+            require((turnedSensorOrientation(CameraPosition::front, 90, boot.turn) +
+                     pictureTurn(CameraPosition::front, boot.turn, now.turn)) % 360 == now.front90,
+                    "front stated 90: boot orientation plus the change is the orientation now");
         }
     }
     require(pictureTurn(CameraPosition::back, 0, 0) == 0 && pictureTurn(CameraPosition::front, 270, 270) == 0,
