@@ -56,12 +56,19 @@ The statement is the request's own: a suspend that the guest started itself
 ``suspended``, because the sync that ran was not the request's. One more guest
 dirties 24 MiB, starts such a suspend, and sends the console's ``suspend`` at
 growing delays after the guest printed its suspend entry (one attempt for each
-of GUEST_STARTED_DELAYS) until one overlaps the guest's own suspend: the
-guest's write succeeds and the request is answered. The reply of the first
-overlap must be ``suspended`` (``--guest-started-reply bare``, the default);
-``--guest-started-reply synced`` is the control on a kernel without the
-request binding, which must show ``suspended, synced``. A run in which no
-attempt overlaps fails as "not reproduced": it proves nothing either way.
+of GUEST_STARTED_DELAYS, or ``--guest-started-delays``) until one overlaps the
+guest's own suspend. The guest's console says which: the lines of a suspend
+carry the guest's clock and the printing task, and the request overlaps when
+the console worker's first suspend entry is printed before the guest's own
+task disables the secondary CPUs, just before it enters and answers. A request
+that comes later finds the guest asleep or the transition over and is answered
+by a suspend of its own, which says nothing of the guest's. The reply of the
+first overlap must be ``suspended`` (``--guest-started-reply bare``, the
+default), and one wake must end the sleep; ``--guest-started-reply synced`` is
+the control on a kernel without the request binding, which must show
+``suspended, synced``. A run in which no attempt overlaps fails as "not
+reproduced": it proves nothing either way. ``--only-guest-started`` runs this
+scenario alone.
 
 The contract is the management-console paragraph of kernel/common/README.md.
 """
@@ -532,6 +539,36 @@ def wake_until_alive(guest: Guest, directory: pathlib.Path,
     raise RuntimeError("the guest does not answer after five wakes")
 
 
+PM_LINE = re.compile(r"\[\s*(\d+\.\d+)\]\[\s*T(\d+)\] (.*)")
+
+
+def request_met_the_transition(log: str) -> bool:
+    """Whether the host's suspend was pending when the guest's own suspend
+    reached the platform: the first suspend entry of a task other than the
+    guest's own (the console's worker, which publishes the request just
+    before it) is printed before the guest's own task prints that it disables
+    the secondary CPUs, which it does just before it enters and answers. The
+    lines carry the guest's clock and the printing task's id. A request that
+    arrives after that finds the guest asleep, or the transition over, and is
+    answered, if at all, by a suspend of its own."""
+    own = None
+    entered = worker = disabled = None
+    for line in log.splitlines():
+        found = PM_LINE.search(line)
+        if found is None:
+            continue
+        when, task, text = float(found[1]), found[2], found[3]
+        if text.startswith("PM: suspend entry"):
+            if own is None:
+                own = task
+            elif task != own and worker is None:
+                worker = when
+        elif task == own and disabled is None and \
+                text.startswith("Disabling non-boot CPUs"):
+            disabled = when
+    return worker is not None and disabled is not None and worker < disabled
+
+
 def awake_command(guest: Guest, directory: pathlib.Path, serial: int,
                   command: str) -> tuple[str, int]:
     """Runs `command`, and while the guest does not answer wakes it and asks
@@ -550,7 +587,9 @@ def awake_command(guest: Guest, directory: pathlib.Path, serial: int,
 
 def run_guest_started_suspend(emulator: pathlib.Path, rootfs: pathlib.Path,
                               engine: str, private: pathlib.Path,
-                              expected: str) -> None:
+                              expected: str,
+                              delays: tuple[float, ...] = GUEST_STARTED_DELAYS
+                              ) -> None:
     """A suspend that the guest started itself, past its sync, takes the
     host's request at its entry, and the statement in the reply is not the
     request's: it must be the bare 'suspended' (`expected`, the control on a
@@ -570,11 +609,12 @@ def run_guest_started_suspend(emulator: pathlib.Path, rootfs: pathlib.Path,
         directory = private / f"uml-kern{guest.process_id}"
         guest.check_command(DIRTY_SETUP, 60)
         guest.check_command("cat /sys/power/sync_on_suspend", 30, expected="1")
-        for attempt, delay in enumerate(GUEST_STARTED_DELAYS):
+        for attempt, delay in enumerate(delays):
             awake_command(guest, directory, 4000 + attempt * 10, REDIRTY)
             awake_command(guest, directory, 5000 + attempt * 10,
                           "rm -f /tmp/self-suspend-rc")
             entries = guest.output().count(SUSPEND_ENTRY)
+            begun = len(guest.output())
             guest._write(SELF_SUSPEND)
             deadline = time.monotonic() + 30
             while guest.output().count(SUSPEND_ENTRY) <= entries:
@@ -599,15 +639,20 @@ def run_guest_started_suspend(emulator: pathlib.Path, rootfs: pathlib.Path,
                 "sleep 1; cat /tmp/self-suspend-rc")
             wakes += more
             status = status.strip().splitlines()[-1] if status.strip() else ""
-            if status != "0":
-                outcomes.append(f"{delay:g} s: the request's own suspend ran "
-                                f"first (the guest's write returned {status}, "
-                                f"the reply {text!r})")
+            if not request_met_the_transition(guest.output()[begun:]):
+                outcomes.append(f"{delay:g} s: the request did not reach the "
+                                "guest's own suspend before it entered (the "
+                                f"reply {text!r}, the guest's write returned "
+                                f"{status})")
                 continue
-            if error:
-                outcomes.append(f"{delay:g} s: after the guest's own suspend "
-                                f"entered, the request was refused {text!r}")
-                continue
+            if error or status != "0":
+                raise RuntimeError(
+                    f"the host's suspend met the guest's own suspend "
+                    f"({delay:g} s after its entry) and was answered "
+                    f"{'with an error ' if error else ''}{text!r}, the "
+                    f"guest's write returned {status!r}: expected the "
+                    "guest's suspend to answer it and end with the wake"
+                )
             if text != expected:
                 raise RuntimeError(
                     f"the host's suspend overlapped the guest's own suspend "
@@ -633,7 +678,7 @@ def run_guest_started_suspend(emulator: pathlib.Path, rootfs: pathlib.Path,
                 print("earlier attempt, " + outcome)
             print(f"the host's suspend overlapped the guest's own suspend "
                   f"{delay:g} s after its entry (attempt {attempt + 1} of "
-                  f"{len(GUEST_STARTED_DELAYS)}) and was answered {text!r} "
+                  f"{len(delays)}) and was answered {text!r} "
                   f"after {answered:.3f} s, as expected; the guest needed "
                   f"{wakes} wake(s) to run again")
             # Not shut down: a control kernel may put the guest to sleep
@@ -703,6 +748,13 @@ def main() -> int:
                         help="run only the kill-after-request scenario")
     parser.add_argument("--only-suspend-statement", action="store_true",
                         help="run only the suspend-statement scenarios")
+    parser.add_argument("--only-guest-started", action="store_true",
+                        help="run only the guest-started suspend scenario")
+    parser.add_argument("--guest-started-delays", default=None,
+                        help="the seconds after the guest's own suspend entry "
+                        "at which the host's suspend is sent, comma "
+                        "separated, one attempt each (default "
+                        + ",".join(f"{d:g}" for d in GUEST_STARTED_DELAYS) + ")")
     parser.add_argument("--guest-started-reply", choices=("bare", "synced"),
                         default="bare",
                         help="what the host's suspend, overlapping a suspend "
@@ -727,20 +779,24 @@ def main() -> int:
     try:
         emulator = arguments.emulator.resolve()
         rootfs = arguments.rootfs.resolve()
-        only = arguments.only_sync or arguments.only_suspend_statement
+        delays = GUEST_STARTED_DELAYS if arguments.guest_started_delays is None \
+            else tuple(float(d) for d in arguments.guest_started_delays.split(","))
+        only = (arguments.only_sync or arguments.only_suspend_statement
+                or arguments.only_guest_started)
         for scenario in () if only else (run, run_sysrq_off):
             scenario(emulator, rootfs, arguments.engine, private)
-        if not arguments.only_suspend_statement:
+        if not (arguments.only_suspend_statement
+                or arguments.only_guest_started):
             run_sync_reaches_the_image(emulator, rootfs, arguments.engine,
                                        private, arguments.request)
-        if not arguments.only_sync:
+        if not (arguments.only_sync or arguments.only_guest_started):
             run_suspend_states_its_sync(emulator, rootfs, arguments.engine,
                                         private, arguments.suspend_statement)
-            if arguments.suspend_statement == "stated":
-                run_guest_started_suspend(
-                    emulator, rootfs, arguments.engine, private,
-                    "suspended" if arguments.guest_started_reply == "bare"
-                    else "suspended, synced")
+        if not arguments.only_sync and arguments.suspend_statement == "stated":
+            run_guest_started_suspend(
+                emulator, rootfs, arguments.engine, private,
+                "suspended" if arguments.guest_started_reply == "bare"
+                else "suspended, synced", delays)
     finally:
         shutil.rmtree(private, ignore_errors=True)
     return 0

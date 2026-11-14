@@ -437,10 +437,10 @@ it. The bridge fields used below are defined by the comments in
   `suspended, synced` once the PM core's sync of this suspend has returned,
   `suspended, not synced` when there was none (a failed or given-up suspend
   replies with an error and no statement). A kernel without the statement
-  replies `suspended`, which confirms nothing, and so does a suspend that the
-  guest started itself and the host's request found already past its sync:
-  the statement is made only for the transition the request's own task runs.
-  The host reads either text as the old reply. The sync runs before tasks are
+  replies `suspended`, which confirms nothing, and so does a request that
+  finds a suspend the guest started itself already holding the transition,
+  past its sync or not: the statement is made only for the transition the
+  request's own task runs. The host reads either text as the old reply. The sync runs before tasks are
   frozen, so a write between the two is not covered
   (`guest-mconsole-console-clients`).
 - A command that answers with what the kernel prints (`sysrq`, `stack`)
@@ -466,7 +466,13 @@ it. The bridge fields used below are defined by the comments in
   does not put the guest to sleep, in whichever order queued requests run. A
   host-asked suspend that ends with `-EBUSY` is entered again up to three more
   times unless a suspend of the guest's own has answered the request meanwhile,
-  and a request that gives up replies `Suspend failed`.
+  and a request that gives up replies `Suspend failed`. The retries rely on the
+  kernels not being preemptible (`CONFIG_PREEMPT_NONE=y` in every
+  configuration): the worker has no scheduling point between its last look at
+  the request and the PM core's trylock but the sleep that the look follows, so
+  a suspend of the guest's own cannot answer the request in that time. A
+  configuration that enables preemption must make the look inside the PM
+  transition, with its mutex held.
   `guest-suspend-holds` checks the host's suspend under traffic, early wakes,
   and every guest-started wake path; `kernel-darwin-mconsole-suspend` checks
   the bookkeeping.
