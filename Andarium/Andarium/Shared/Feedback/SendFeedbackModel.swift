@@ -12,6 +12,8 @@ struct SendFeedbackFailure: Identifiable, Equatable {
     let id = UUID()
     var title: String
     var message: String
+    /// The alert asks for a download link, which goes in the details: they are ready to type in once it closes.
+    var focusesDetails = false
 }
 
 extension SendFeedbackMissing {
@@ -60,10 +62,15 @@ final class SendFeedbackModel {
     var showsInformation = false
     /// The card that asks for a bug report was put away.
     var hintDismissed = false
-    /// The mail was sent: the sheet shows its confirmation and closes.
-    private(set) var sent = false
+    /// The mail was sent: the sheet shows its confirmation over what was sent and closes when the person
+    /// closes the confirmation, not before (`mailFinished`, `close`).
+    var sent: Bool { form.sent }
     private(set) var closed = false
     private var presentingMail = false
+    /// The information block the mail went with, shown unchanged under the confirmation.
+    @ObservationIgnored private var mailedInformation: SendFeedbackInformation?
+    /// The staged files and the access held to the picked ones were let go.
+    @ObservationIgnored private var filesReleased = false
     /// The start log was offered once, whether or not it was attached, and
     /// whether or not it was removed since: it is made when the sheet opens
     /// and never again.
@@ -95,13 +102,17 @@ final class SendFeedbackModel {
         return state
     }
 
-    /// The basic information the mail ends with.
-    var information: SendFeedbackInformation { app.feedbackInformation() }
+    /// The basic information the mail ends with; once the mail is sent, the block it went with.
+    var information: SendFeedbackInformation {
+        if form.sent, let mailedInformation { return mailedInformation }
+        return app.feedbackInformation()
+    }
 
     /// Mail can come back when the person adds an account in iOS Settings, and
     /// go when the system restricts it: asked again when the app returns to
-    /// the foreground.
+    /// the foreground. A sheet whose mail was sent stays as it was.
     func refresh() {
+        guard !form.sent else { return }
         form.mailAvailable = app.feedbackServices.canSendMail()
     }
 
@@ -130,6 +141,20 @@ final class SendFeedbackModel {
         } catch {
             // The log helps; a sheet without it is as usable.
         }
+    }
+
+    /// A draft that already lists an Android package (one an earlier build attached) loses it as the sheet opens,
+    /// with the alert a pick of one gets. A draft ends with its sheet, so none comes from an earlier build today;
+    /// the rule holds the list to the same invariant whichever way it was filled.
+    func refuseAndroidPackagesInDraft() {
+        let packages = form.attachments.items.filter { item in
+            [item.fileName, item.displayName ?? "", item.url.lastPathComponent].contains {
+                SendFeedbackAndroidPackage.matches(name: $0)
+            }
+        }
+        guard !packages.isEmpty else { return }
+        packages.forEach(remove)
+        failure = Self.packageFailure(count: packages.count)
     }
 
     // MARK: Bug report
@@ -344,7 +369,7 @@ final class SendFeedbackModel {
         // A copy that was still under way as the sheet closed may have made its folder again.
         if closed { folder.removeAll() }
         guard !refusals.isEmpty, !closed else { return }
-        fail(Self.fileFailureTitle(count: refusals.count), Self.fileFailureMessage(refusals, device: app.host.name))
+        failure = Self.fileFailure(refusals, device: app.host.name)
     }
 
     private func addFile(_ url: URL, cancellation: SendFeedbackCancellation) async throws {
@@ -359,6 +384,13 @@ final class SendFeedbackModel {
         case .file: break
         case .folder, .other: throw SendFeedbackFileRefusal.notAFile
         case .missing: throw SendFeedbackFileRefusal.unavailable
+        }
+        // No mail service delivers an Android package: it is told by its name (and the type its provider gives),
+        // and is never opened.
+        let name = url.lastPathComponent
+        if SendFeedbackAndroidPackage.matches(name: name, contentType: info.contentType)
+            || SendFeedbackAndroidPackage.matches(name: SendFeedbackFolder.safeName(name)) {
+            throw SendFeedbackFileRefusal.androidPackage
         }
         guard info.bytes > 0 else { throw SendFeedbackFileRefusal.empty }
         let displayName = SendFeedbackNames.display(url.lastPathComponent)
@@ -418,6 +450,34 @@ final class SendFeedbackModel {
             : String(localized: "\(count) items weren\u{2019}t added", table: "Feedback")
     }
 
+    /// The one alert a pick of files gets, whatever it refused. Android packages alone are said by themselves:
+    /// the mail service rejects them, and a download link in the details is what to send instead. With other
+    /// refusals they are one line among the others. Either way the details are ready to type in afterwards.
+    static func fileFailure(_ refusals: [SendFeedbackFileRefusal], device: String) -> SendFeedbackFailure {
+        let packages = refusals.filter { $0 == .androidPackage }.count
+        if packages > 0, packages == refusals.count { return packageFailure(count: packages) }
+        return SendFeedbackFailure(
+            title: fileFailureTitle(count: refusals.count), message: fileFailureMessage(refusals, device: device),
+            focusesDetails: packages > 0)
+    }
+
+    /// The alert for `count` Android packages that were not attached.
+    static func packageFailure(count: Int) -> SendFeedbackFailure {
+        SendFeedbackFailure(
+            title: String(localized: "APK files can\u{2019}t be sent by mail", table: "Feedback"),
+            message: packageLine(count: count), focusesDetails: true)
+    }
+
+    private static func packageLine(count: Int) -> String {
+        count == 1
+            ? String(
+                localized: "Mail services reject messages that carry an APK, so this file was not attached. Paste a download link for the app in the details instead.",
+                table: "Feedback")
+            : String(
+                localized: "Mail services reject messages that carry an APK, so these files were not attached. Paste a download link for the app in the details instead.",
+                table: "Feedback")
+    }
+
     /// One line for each reason a file was refused, in a fixed order.
     static func fileFailureMessage(_ refusals: [SendFeedbackFileRefusal], device: String) -> String {
         var lines: [String] = []
@@ -439,6 +499,8 @@ final class SendFeedbackModel {
                 localized: "A file couldn\u{2019}t be read. Check that it is still in Files and downloaded, then try again.",
                 table: "Feedback"))
         }
+        let packages = refusals.filter { $0 == .androidPackage }.count
+        if packages > 0 { lines.append(packageLine(count: packages)) }
         return lines.joined(separator: "\n")
     }
 
@@ -484,16 +546,19 @@ final class SendFeedbackModel {
             takeOut(form.attachments.items.filter { failure.attachments.contains($0.id) })
             return
         }
+        let sentInformation = information
         let request = SendFeedbackMailRequest(
             address: address, subject: SendFeedbackMail.subject(problem: form.problem),
-            body: SendFeedbackMail.body(details: form.details, information: information),
+            body: SendFeedbackMail.body(details: form.details, information: sentInformation),
             attachments: form.attachments.items, mapped: mapped)
+        mailedInformation = sentInformation
         presentingMail = true
         let shown = app.feedbackServices.presentMail(request) { [weak self] result in
             self?.mailFinished(result)
         }
         if !shown {
             presentingMail = false
+            mailedInformation = nil
             fail(
                 String(localized: "Mail not opened", table: "Feedback"),
                 String(localized: "Andarium couldn\u{2019}t open the mail composer.", table: "Feedback"))
@@ -544,29 +609,39 @@ final class SendFeedbackModel {
         }
     }
 
-    /// The person left the composer. Sent ends the draft; saved and cancelled
-    /// leave it as it was, for another try; a failure is the system's own words.
+    /// The person left the composer. Sent leaves the sheet exactly as it was
+    /// under its confirmation, with the files still staged, and the draft ends
+    /// when the person closes it (`close`); saved and cancelled leave it as it
+    /// was, for another try; a failure is the system's own words.
     func mailFinished(_ result: SendFeedbackMailResult) {
         presentingMail = false
         switch result {
         case .sent:
-            sent = true
-            form.problem = ""
-            form.details = ""
-            cleanUp()
+            form.sent = true
+            confirmingDiscard = false
         case .saved, .cancelled:
-            break
+            mailedInformation = nil
         case .failed(let message):
+            mailedInformation = nil
             fail(String(localized: "Feedback not sent", table: "Feedback"), message)
         }
     }
 
+    /// The application left the foreground. A sent mail needs none of its files
+    /// any more, and the rows under the confirmation are drawn without them, so
+    /// a process that ends in the background leaves none behind.
+    func applicationEnteredBackground() {
+        guard form.sent else { return }
+        releaseFiles()
+    }
+
     // MARK: Closing
 
-    /// The sheet is closed or the mail is sent: nothing stays behind. A
-    /// parent torn down under the sheet (the low-space pause, the end of a
-    /// run) closes it too, so the sheet's claim on the overlay of a task under
-    /// way goes with it: the screens draw that overlay, and its Cancel, again.
+    /// The sheet is closed: nothing stays behind, and a draft whose mail was
+    /// sent ends here, not when the mail left. A parent torn down under the
+    /// sheet (the low-space pause, the end of a run) closes it too, so the
+    /// sheet's claim on the overlay of a task under way goes with it: the
+    /// screens draw that overlay, and its Cancel, again.
     func close() {
         guard !closed else { return }
         closed = true
@@ -574,18 +649,26 @@ final class SendFeedbackModel {
         app.busyOverSheet = false
         app.feedbackSheetOpen = false
         app.feedbackFromBoot = false
-        cleanUp()
+        releaseFiles()
+        thumbnails = [:]
+        _ = form.attachments.removeAll()
+        if form.sent {
+            form.problem = ""
+            form.details = ""
+            mailedInformation = nil
+        }
     }
 
-    private func cleanUp() {
-        // Only the access the rows own. A file still being looked at or copied
-        // keeps its own until that work ends (`addFile`), so nothing is read
-        // after its access is let go.
+    /// Lets go of the files, once: the staged ones are deleted and the access
+    /// the rows hold to the picked ones stops. Only the access the rows own: a
+    /// file still being looked at or copied keeps its own until that work
+    /// ends (`addFile`), so nothing is read after its access is let go.
+    private func releaseFiles() {
+        guard !filesReleased else { return }
+        filesReleased = true
         for item in form.attachments.items where item.inPlace { scopes.release(item.id) }
         folder.removeAll()
         try? FileManager.default.removeItem(at: staging.incoming)
-        thumbnails = [:]
-        _ = form.attachments.removeAll()
     }
 
     private func fail(_ title: String, _ message: String) {

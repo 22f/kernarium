@@ -282,10 +282,16 @@ and the bug report's overlay text is the app's own.
 Send needs both a problem (the mail's subject) and details (its body); white
 space counts as empty, and a file or the start log is neither. Send stays
 enabled while one is empty: its tap opens no composer and shows one alert that
-names what is missing, and the first empty field takes the focus after OK.
+names what is missing, and the first empty field takes the focus after OK. Once
+the mail is sent, the Feedback sent notice stays over the sheet, which keeps what
+was sent and takes no touch; the notice's Done closes both and ends the draft,
+and a swipe down or the toolbar's close does nothing meanwhile.
 
 The sheet attaches the bug report, a screenshot, photos and videos from the
-photo library, and any number of files from Files. The bar has three buttons:
+photo library, and any number of files from Files, except an Android package
+(`.apk`, `.apks`, `.xapk`, `.apkm`, told by the name or the type a provider
+gives, never by opening it), which mail services reject: one alert per pick
+says so and asks for a download link in the details. The bar has three buttons:
 Bug report, Screenshot and Add, a paperclip whose menu offers Photos and Files
 (the system's menu, anchored on the button). A file is opened where it is kept
 (the document picker in place,
