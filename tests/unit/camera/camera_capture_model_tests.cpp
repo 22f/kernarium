@@ -1546,7 +1546,7 @@ void aRefusalIsLoggedOncePerCameraAndReasonUntilTheCameraChanges()
     require(!log.first(1, Refusal::stillNotMade), "and another camera is not reset with it");
     for (const auto reason : {Refusal::noAnchor, Refusal::formatChanged, Refusal::notJoinable, Refusal::inputRefused, Refusal::outputRefused,
                               Refusal::overBudget, Refusal::stillNotMade, Refusal::rawUnavailable, Refusal::raised, Refusal::notRestored,
-                              Refusal::ratioMoved})
+                              Refusal::ratioMoved, Refusal::turnNotHeld, Refusal::stillsNotTurned, Refusal::ratioFailed})
         require(!refusalName(reason).empty() && refusalName(reason) != "unknown", "every reason has a name");
 }
 
@@ -2251,6 +2251,99 @@ void aCamerasLastUseSurvivesTheNextSessionsDiscovery()
     require(withDiscovery(CameraPresentation {}, discovered) == discovered, "a camera that was not used is its discovery");
 }
 
+void aCameraThatImitatesAnEarlierOneKeepsItsPhotoConnectionAngle()
+{
+    // The photo connection's angle changes the Exif alone, and the host drops the platform's Exif: a camera that imitates
+    // an earlier front camera leaves its connection at its default, as the setup proven on that camera did. Every other
+    // camera is set to 0, as before.
+    require(photoConnectionTurnOf(presentedMountingOf(CameraPosition::front, 0)) == std::nullopt, "a front camera at 0 leaves it");
+    require(photoConnectionTurnOf(presentedMountingOf(CameraPosition::front, 180)) == std::nullopt, "a front camera at 180 leaves it");
+    require(photoConnectionTurnOf(presentedMountingOf(CameraPosition::front, 90)) == std::optional<std::uint32_t>(0), "a front camera at 90 is set to 0");
+    require(photoConnectionTurnOf(presentedMountingOf(CameraPosition::front, 270)) == std::optional<std::uint32_t>(0), "a front camera at 270 is set to 0");
+    require(photoConnectionTurnOf(presentedMountingOf(CameraPosition::back, 90)) == std::optional<std::uint32_t>(0), "a back camera at 90 is set to 0");
+    require(photoConnectionTurnOf(presentedMountingOf(CameraPosition::back, 0)) == std::optional<std::uint32_t>(0), "a back camera at 0 is set to 0");
+    require(photoConnectionTurnOf(presentedMountingOf(CameraPosition::external, 0)) == std::optional<std::uint32_t>(0), "an external camera is set to 0");
+    require(photoConnectionTurnOf(presentedMountingOf(CameraPosition::front, std::nan(""))) == std::optional<std::uint32_t>(0),
+            "a front camera with no angle is not imitated and is set to 0");
+}
+
+void aStillReadsTheCompensationAfterTheCommit()
+{
+    const auto step = [](bool imitates, CameraFact supported, CameraFact enabled, CameraReading reading) {
+        return stillCompensationStep(imitates, supported, enabled, reading);
+    };
+    using Step = CompensationStep;
+    const CameraFact yes = CameraFact::yes, no = CameraFact::no, unknown = CameraFact::unknown;
+    const CameraReading before = CameraReading::beforeCommit, after = CameraReading::afterCommit;
+    // A reading taken before the commit decides nothing, whatever it says.
+    for (const auto supported : {yes, no, unknown})
+        for (const auto enabled : {yes, no, unknown})
+            require(step(true, supported, enabled, before) == Step::proceed && step(true, supported, enabled, CameraReading::unknown) == Step::proceed,
+                    "a reading before the commit never refuses a still");
+    // After it: on is accepted, supported and off is turned on, everything else refuses.
+    require(step(true, yes, yes, after) == Step::proceed, "supported and on is accepted");
+    require(step(true, yes, no, after) == Step::enable, "supported and off is turned on");
+    require(step(true, no, no, after) == Step::refuse && step(true, no, yes, after) == Step::refuse, "unsupported refuses");
+    require(step(true, unknown, unknown, after) == Step::refuse && step(true, yes, unknown, after) == Step::refuse && step(true, unknown, yes, after) == Step::refuse,
+            "a reading that failed refuses");
+    // A camera that imitates nothing is never asked.
+    for (const auto supported : {yes, no, unknown})
+        for (const auto enabled : {yes, no, unknown})
+            for (const auto reading : {before, after, CameraReading::unknown})
+                require(step(false, supported, enabled, reading) == Step::proceed, "a camera that imitates nothing is not asked");
+    require(readingName(CameraReading::beforeCommit) == "before-commit" && readingName(CameraReading::afterCommit) == "after-commit" &&
+                readingName(CameraReading::unknown) == "-",
+            "the readings have their words");
+}
+
+void aStillWaitsForAPendingRatioPinInsideTheStillBudget()
+{
+    using R = CameraAspectRatio;
+    using Step = RatioStillStep;
+    require(ratioStillStep(R::none, R::r4x3, false, 0) == Step::proceed && ratioStillStep(R::none, R::none, true, 7) == Step::proceed,
+            "no pin asks nothing");
+    require(ratioStillStep(R::r3x4, R::r3x4, false, 0) == Step::proceed, "a ratio held after the completion proceeds");
+    require(ratioStillStep(R::r3x4, R::r4x3, true, 0) == Step::wait && ratioStillStep(R::r3x4, R::r3x4, true, 0) == Step::wait,
+            "a completion that has not arrived is waited for, whatever the device holds meanwhile");
+    require(ratioStillStep(R::r3x4, R::r4x3, false, 0) == Step::refuseMoved, "a ratio that differs after the completion refuses");
+    require(ratioStillStep(R::r3x4, R::r3x4, false, -11800) == Step::refuseFailed && ratioStillStep(R::r3x4, R::r4x3, false, 5) == Step::refuseFailed,
+            "a completion error refuses");
+    // The wait is the settle wait's, inside the same budget.
+    const std::uint64_t settled = 1'000'000, now = 10'000'000'000;
+    const auto idle = scheduledStillStep(false, true, settled, now, 0, false);
+    require(idle.step == ScheduledStillStep::fire, "a settled camera with no pending pin fires");
+    const auto pending = scheduledStillStep(false, true, settled, now, 0, true);
+    require(pending.step == ScheduledStillStep::wait && pending.waitNanoseconds == ratioPinPollNanoseconds &&
+                pending.waitedNanoseconds == ratioPinPollNanoseconds,
+            "a pending pin waits one poll, which counts against the budget");
+    require(scheduledStillStep(false, true, now - 100'000'000, now, 0, true).waitNanoseconds == photoOutputSettleNanoseconds - 100'000'000,
+            "the settle time left outlasts a poll");
+    require(scheduledStillStep(false, true, settled, now, stillWaitBudgetNanoseconds - ratioPinPollNanoseconds, true).step == ScheduledStillStep::wait,
+            "the last poll the budget allows is waited");
+    require(scheduledStillStep(false, true, settled, now, stillWaitBudgetNanoseconds - ratioPinPollNanoseconds + 1, true).step == ScheduledStillStep::fail,
+            "a poll past the budget fails the still");
+    require(scheduledStillStep(false, true, settled, now, stillWaitBudgetNanoseconds, true).step == ScheduledStillStep::fail,
+            "a spent budget fails it");
+    require(scheduledStillStep(true, true, settled, now, 0, true).step == ScheduledStillStep::drop &&
+                scheduledStillStep(false, false, settled, now, 0, true).step == ScheduledStillStep::drop,
+            "an ended session or a gone request drops it");
+    // The five-argument form is the one without a pin.
+    require(scheduledStillStep(false, true, settled, now, 0).step == ScheduledStillStep::fire, "no pin is the old rule");
+    // A wait of polls cannot outlast the budget.
+    std::uint64_t waited = 0;
+    int polls = 0;
+    for (;; ++polls) {
+        const auto next = scheduledStillStep(false, true, settled, now, waited, true);
+        if (next.step != ScheduledStillStep::wait) {
+            require(next.step == ScheduledStillStep::fail, "the polls end in a failure");
+            break;
+        }
+        waited = next.waitedNanoseconds;
+        require(polls < 1000, "the polls end");
+    }
+    require(waited <= stillWaitBudgetNanoseconds && waited + ratioPinPollNanoseconds > stillWaitBudgetNanoseconds, "and what they waited is within the budget");
+}
+
 int main()
 {
     theDurationThatMovesOutOfTheOthersWayIsWrittenFirst();
@@ -2318,6 +2411,9 @@ int main()
     aFrontCameraMountedAtTheTopIsPresentedLikeAnEarlierOne();
     aSquareFormatThatListsRatiosIsDescribedByItsPinnedCrop();
     aCamerasLastUseSurvivesTheNextSessionsDiscovery();
+    aCameraThatImitatesAnEarlierOneKeepsItsPhotoConnectionAngle();
+    aStillReadsTheCompensationAfterTheCommit();
+    aStillWaitsForAPendingRatioPinInsideTheStillBudget();
     thePinnedCropsFieldOfViewIsTheLargerOfTheTwo();
     theRatioBitsAreDistinctAndNoneHasNone();
     return 0;

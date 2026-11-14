@@ -60,6 +60,21 @@ enum class CameraErrorDomain : std::uint8_t {
 
 enum class CameraFact : std::uint8_t { unknown, no, yes };
 
+// When a value of the platform's was read, relative to the commit of the capture session's configuration that made it
+// valid: a photo output's capabilities are only known to hold once the output is attached and the configuration is
+// committed.
+enum class CameraReading : std::uint8_t { unknown, beforeCommit, afterCommit };
+
+[[nodiscard]] constexpr std::string_view readingName(CameraReading reading) noexcept
+{
+    switch (reading) {
+    case CameraReading::unknown: break;
+    case CameraReading::beforeCommit: return "before-commit";
+    case CameraReading::afterCommit: return "after-commit";
+    }
+    return "-";
+}
+
 struct CameraStillFailure {
     CameraStillStage stage {CameraStillStage::none};
     // The camera's index as the guest sees it, and where it is mounted: filled
@@ -79,6 +94,8 @@ struct CameraStillFailure {
     // orientation (compensation), and whether that was on for the capture.
     CameraFact compensationSupported {};
     CameraFact compensationEnabled {};
+    // When those two were read: after the commit of the configuration for a capture the platform refused or finished.
+    CameraReading compensationReading {};
     // The Exif orientation (1 to 8) of the photo the host's output gave for the
     // capture; zero where it gave none or none was read.
     std::uint8_t hostExifOrientation {};

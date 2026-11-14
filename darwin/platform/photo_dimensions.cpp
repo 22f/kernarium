@@ -155,6 +155,24 @@ PresentedMounting presentedMountingOf(CameraPosition position, double portraitAn
     return {90, (stated + 270) % 360, true};
 }
 
+CompensationStep stillCompensationStep(bool imitatesEarlierFront, CameraFact supported, CameraFact enabled,
+                                       CameraReading reading) noexcept
+{
+    if (!imitatesEarlierFront || reading != CameraReading::afterCommit) return CompensationStep::proceed;
+    if (supported == CameraFact::yes && enabled == CameraFact::yes) return CompensationStep::proceed;
+    if (supported == CameraFact::yes && enabled == CameraFact::no) return CompensationStep::enable;
+    return CompensationStep::refuse;
+}
+
+RatioStillStep ratioStillStep(CameraAspectRatio pinned, CameraAspectRatio now, bool completionPending,
+                              std::int32_t completionError) noexcept
+{
+    if (pinned == CameraAspectRatio::none) return RatioStillStep::proceed;
+    if (completionPending) return RatioStillStep::wait;
+    if (completionError != 0) return RatioStillStep::refuseFailed;
+    return now == pinned ? RatioStillStep::proceed : RatioStillStep::refuseMoved;
+}
+
 std::optional<VideoFormatFacts> presentedFormatOf(const VideoFormatFacts& listed, std::uint32_t connectionTurn)
 {
     if (listed.aspectRatios == 0) return listed;
@@ -202,8 +220,15 @@ std::uint64_t stillSettleNanoseconds(std::uint64_t committedAt, std::uint64_t no
 ScheduledStill scheduledStillStep(bool sessionEnded, bool requestKnown, std::uint64_t committedAt, std::uint64_t now,
                                   std::uint64_t waitedNanoseconds) noexcept
 {
+    return scheduledStillStep(sessionEnded, requestKnown, committedAt, now, waitedNanoseconds, false);
+}
+
+ScheduledStill scheduledStillStep(bool sessionEnded, bool requestKnown, std::uint64_t committedAt, std::uint64_t now,
+                                  std::uint64_t waitedNanoseconds, bool ratioPending) noexcept
+{
     if (sessionEnded || !requestKnown) return {ScheduledStillStep::drop, 0, waitedNanoseconds};
-    const std::uint64_t wait = stillSettleNanoseconds(committedAt, now);
+    std::uint64_t wait = stillSettleNanoseconds(committedAt, now);
+    if (ratioPending) wait = std::max(wait, ratioPinPollNanoseconds);
     if (wait == 0) return {ScheduledStillStep::fire, 0, waitedNanoseconds};
     if (waitedNanoseconds >= stillWaitBudgetNanoseconds || wait > stillWaitBudgetNanoseconds - waitedNanoseconds)
         return {ScheduledStillStep::fail, 0, waitedNanoseconds};
@@ -661,6 +686,9 @@ std::string_view refusalName(Refusal reason) noexcept
     case Refusal::raised: return "the platform raised";
     case Refusal::notRestored: return "the device could not be put back as it was";
     case Refusal::ratioMoved: return "the device's aspect ratio is not the one pinned";
+    case Refusal::turnNotHeld: return "the video connection does not hold the turn";
+    case Refusal::stillsNotTurned: return "the photo output does not turn its stills";
+    case Refusal::ratioFailed: return "the device's aspect ratio change failed";
     }
     return "unknown";
 }
