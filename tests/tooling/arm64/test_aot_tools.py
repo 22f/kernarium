@@ -255,6 +255,52 @@ class FixtureTests(unittest.TestCase):
         self.assertNotIn(0x1008, self.library.budget_extent)
 
 
+class HintAndFloatingPointTests(unittest.TestCase):
+    """What the rewriter inlines must be what the engine runs natively."""
+
+    @staticmethod
+    def steps(word: int) -> int:
+        library = library_of([word, RET], [(0, 8)])
+        unit_words(library)
+        return library.stats.steps
+
+    def test_hints_the_engine_runs_as_no_ops_are_inlined(self) -> None:
+        # paciasp, autiasp, bti c, nop, wfe: no effect for this guest.
+        for word in (0xd503233f, 0xd50323bf, 0xd503245f, 0xd503201f,
+                     0xd503205f):
+            self.assertEqual(self.steps(word), 0, hex(word))
+
+    def test_hints_with_an_effect_step(self) -> None:
+        # yield, dgh: gadgets with an effect in the engine.
+        for word in (0xd503203f, 0xd50320df):
+            self.assertEqual(self.steps(word), 1, hex(word))
+
+    def test_single_and_double_precision_are_inlined(self) -> None:
+        for word in (0x1e622820,   # fadd d0, d1, d2
+                     0x1e612000,   # fcmp d0, d1
+                     0x4e22d420):  # fadd v0.4s, v1.4s, v2.4s
+            self.assertEqual(self.steps(word), 0, hex(word))
+
+    def test_general_register_operands_are_substituted(self) -> None:
+        decoder = a64decode.Decoder()
+        for word, expected in ((0x9e620240, [(5, False)]),   # scvtf d0, x18
+                               (0x9e780038, [(0, False)]),   # fcvtzs x24, d1
+                               (0x9e660079, [(0, False)]),   # fmov x25, d3
+                               (0x9e670343, [(5, False)])):  # fmov d3, x26
+            encoding = decoder.decode(word)
+            self.assertEqual(
+                rewrite.Library._copy_fields(None, word, encoding),
+                expected, hex(word))
+
+    def test_what_the_engine_may_run_in_software_steps(self) -> None:
+        for word in (0x1ee22820,   # fadd h0, h1, h2 (FEAT_FP16)
+                     0x1e284020,   # frint32z s0, s1 (FEAT_FRINTTS)
+                     0x1ef80020,   # fcvtzs w0, h1 (FEAT_FP16)
+                     0x1e634020,   # bfcvt h0, s1 (FEAT_BF16)
+                     0x1e7e0020):  # fjcvtzs w0, d1 (FEAT_JSCVT)
+            self.assertEqual(self.steps(word), 1, hex(word))
+
+
 class BudgetTests(unittest.TestCase):
     def test_every_backward_branch_target_is_charged(self) -> None:
         # Function B (0x1010..0x1020) branches back into the interior of

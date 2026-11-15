@@ -134,7 +134,15 @@ SIMD_CLASSES = {
 }
 SIMD_FEATURES = {"FEAT_AdvSIMD", "FEAT_AES", "FEAT_PMULL", "FEAT_SHA1",
                  "FEAT_SHA256"}
-FP_NAMES = {"SCVTF", "UCVTF"}
+# Scalar floating point. The engine runs these as the host's own instruction
+# under the guest FPCR and FPSR for single and double precision; its software
+# paths exist for half precision (FEAT_FP16), BFloat16, FRINT32/64
+# (FEAT_FRINTTS), FJCVTZS, the new FPRCVT forms and the dot-product and FHM
+# families, which the decoder labels with a feature of their own and which
+# therefore step. FPCR.AH, FIZ and NEP are excluded at entry.
+FLOAT_CLASSES = {"floatdp1", "floatdp2", "floatdp3", "floatcmp", "floatccmp",
+                 "floatsel", "floatimm"}
+FP_FEATURES = {"FEAT_FP", "FEAT_AdvSIMD"}
 MEM_CLASSES = {
     "ldst_pos", "ldst_unscaled", "ldst_immpre", "ldst_immpost", "ldst_regoff",
     "ldstpair_off", "ldstpair_pre", "ldstpair_post", "ldstnapair_offs",
@@ -143,6 +151,15 @@ MEM_CLASSES = {
 PAIR_CLASSES = {"ldstpair_off", "ldstpair_pre", "ldstpair_post",
                 "ldstnapair_offs"}
 MEM_FEATURES = {"baseline", "FEAT_FP"}
+# HINT #imm7. The engine runs YIELD (1), DGH (6), CSDB (20) and CLRBHB (22)
+# as gadgets with an effect and every other hint, allocated or not, as a
+# no-op (pointer authentication, branch targets, GCS and the rest are not
+# advertised to the guest): gadget_scalar_selection.cpp,
+# architectural_hint_gadget().
+HINT_MASK = 0xfffff01f
+HINT_BASE = 0xd503201f
+HINT_EFFECTS = (1, 6, 20, 22)
+SITE_SAMPLES = 8
 TPIDR_EL0 = 0xd53bd040
 TPIDR_MASK = 0xffffffe0
 
@@ -193,6 +210,10 @@ class Library:
                     "<I", data, offset)[0]
         self.entry_labels: list[int] = []
         self.step_list: list[tuple[int, str]] = []
+        # Inlined instructions by "class:mnemonic": where each kind occurs,
+        # so the differential test can start cases at a sample of each.
+        self.sites: dict[str, list[int]] = {}
+        self._site_key = ""
         # Per function, cleared as each is emitted: the cold stubs it needs.
         self.fn_start = 0
         self.fn_mm: list[tuple[int, str, int]] = []
@@ -296,15 +317,22 @@ class Library:
 
     # classification of one instruction; returns whether it falls through
     def _emit_instruction(self, offset: int, word: int) -> bool:
+        steps = self.stats.steps
+        self._site_key = "unallocated"
+        result = self._classify(offset, word)
+        if self.stats.steps == steps:
+            self.sites.setdefault(self._site_key, []).append(offset)
+        return result
+
+    def _classify(self, offset: int, word: int) -> bool:
+        if (word & HINT_MASK) == HINT_BASE:
+            return self._hint(offset, word)
         encoding = self.decoder.decode(word)
         if encoding is None:
             return self._step(offset, "unallocated")
         cls, mnemonic, feature = (encoding.decode_class, encoding.mnemonic,
                                   encoding.feature)
-        if word == 0xd503201f:
-            self.stats.inlined += 1
-            self.stats.kinds["nop"] += 1
-            return True
+        self._site_key = f"{cls}:{mnemonic}"
         if cls == "branch_imm":
             return self._branch_imm(offset, word, mnemonic == "BL")
         if cls == "condbranch" and mnemonic == "B":
@@ -338,6 +366,14 @@ class Library:
             return self._copy(offset, word, encoding, fields)
         return self._step(offset, f"{cls}:{mnemonic}:{feature}")
 
+    def _hint(self, offset: int, word: int) -> bool:
+        self._site_key = "hint"
+        if ((word >> 5) & 0x7f) in HINT_EFFECTS:
+            return self._step(offset, "hint-effect")
+        self.stats.inlined += 1
+        self.stats.kinds["hint"] += 1
+        return True
+
     def _copy_fields(self, word: int, encoding: a64decode.Encoding):
         cls, mnemonic, feature = (encoding.decode_class, encoding.mnemonic,
                                   encoding.feature)
@@ -368,16 +404,17 @@ class Library:
         if cls == "dp_2src" and feature in ("baseline", "FEAT_CRC32") and \
                 mnemonic in DP2_ALLOWED:
             return [(0, False), (5, False), (16, False)]
-        if cls == "float2int" and mnemonic == "FMOV" and \
-                feature in ("FEAT_FP", "baseline"):
-            opcode = (word >> 16) & 7
-            if opcode == 6:
-                return [(0, False)]
-            if opcode == 7:
-                return [(5, False)]
-            return None
-        if cls in SIMD_CLASSES and feature in SIMD_FEATURES and \
-                mnemonic not in FP_NAMES and not mnemonic.startswith("F"):
+        if cls in FLOAT_CLASSES and feature in FP_FEATURES:
+            return []
+        if cls == "float2int" and feature in FP_FEATURES:
+            # SCVTF, UCVTF and FMOV from a general register name it in Rn;
+            # every other form writes Rd.
+            return [(5, False)] if (word >> 16) & 7 in (2, 3, 7) else \
+                [(0, False)]
+        if cls == "float2fix" and feature in FP_FEATURES:
+            return [(5, False)] if (word >> 16) & 7 in (2, 3) else \
+                [(0, False)]
+        if cls in SIMD_CLASSES and feature in SIMD_FEATURES:
             if cls == "asimdins" and not (word >> 29) & 1:
                 # INS (general), DUP (general), SMOV and UMOV (op = 0); INS
                 # (element) (op = 1) names vector registers only.
@@ -1104,6 +1141,7 @@ def build_unit(job: tuple) -> dict:
         "filesz": segment.filesz,
         "functions": [(f.start, f.end) for f in library.functions],
         "step_list": library.step_list,
+        "sites": library.sites,
         "host_path": file_path,
         "stats": {"functions": library.stats.functions,
                   "instructions": library.stats.instructions,
@@ -1257,6 +1295,16 @@ def main(argv: list[str] | None = None) -> int:
         for unit in sorted(units, key=lambda unit: unit["index"]):
             handle.write(f"{unit['index']}\t{unit['path']}\t"
                          f"{unit['host_path']}\n")
+    # A sample of each inlined kind of instruction per library: where the
+    # differential test starts cases to exercise every class.
+    with open(arguments.out / "sites.txt", "w") as handle:
+        for unit in sorted(units, key=lambda unit: unit["index"]):
+            for kind in sorted(unit["sites"]):
+                offsets = unit["sites"][kind]
+                count = min(len(offsets), SITE_SAMPLES)
+                for pick in range(count):
+                    at = offsets[pick * len(offsets) // count]
+                    handle.write(f"{unit['index']} {at:x} {kind}\n")
     with open(arguments.out / "steps.txt", "w") as handle:
         for unit in sorted(units, key=lambda unit: unit["index"]):
             for offset, cause in sorted(unit["step_list"]):

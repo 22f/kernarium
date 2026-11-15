@@ -515,29 +515,46 @@ clean and file-backed and one copy serves every process at any load bias.
 through the executor's TLB and `StaticGuestMemory::fetch`.
 
 - Switch: `DARWIN_UML_AOT=1` at start-up; off, nothing changes.
-- Binding: the framework stands for exact guest bytes. A 64-bit digest of each
-  4 KiB code page identifies a library; before any of its code runs the whole
-  text is verified at the address space's current code-change sequence. A page
-  the guest has not mapped yet defers the instance; any other difference
-  retires it for that address space, and the engine runs the code.
-- Entry: only at an instruction the framework covers, with PSTATE.SM clear, no
-  FPCR trap enable, no single step, no open exclusive monitor and top-byte
-  ignore on (the framework probes the TLB with the address without its tag).
-  Guest state is canonical at every instruction boundary, so entry and exit
-  are possible at any covered instruction.
+- Units: each library is a self-contained unit of the framework (its own
+  exits and thunks, an entry table with one slot per guest instruction, and
+  the digests of its code pages), page aligned in the blob. Branches between
+  libraries verified in the same address space (up to 64 instances) stay in
+  rewritten code; any other target leaves to the engine.
+- Binding: the framework stands for exact guest bytes. A 64-bit digest of
+  each 4 KiB code page identifies a library. An instance is verified in full
+  before its code first runs, then only for the pages the address space's
+  code-change history names. A page the guest has not mapped yet defers the
+  instance and a later lookup tries again; any other difference retires the
+  instance for that address space, and the engine runs the code.
+- Entry: only at an instruction the framework covers, with PSTATE.SM clear,
+  no FPCR trap enable and FPCR.FIZ, AH and NEP clear, no single step, no open
+  exclusive monitor, top-byte ignore on (the framework probes the TLB with
+  the address without its tag) and a 16-byte aligned SP. Guest state is
+  canonical at every instruction boundary, so entry and exit are possible at
+  any covered instruction. Rewritten code keeps SP aligned: an instruction
+  that can leave it misaligned ends the entry after it commits, so the
+  engine's SP-alignment check applies to every SP-based access.
 - Exit: whatever the framework does not inline stops with committed state and
   the engine runs exactly that instruction (`run_trap_enabled_instruction`)
   before the next entry, so faults, system calls, signals and debugger
   exits are the engine's own. One entry retires at most 4096 instructions,
-  the engine's chaining limit, so interrupt and mapping-change polling are
-  those of the engine; retired counts are estimates.
-- Memory: inline TLB probe of the engine's entry (first byte's page, read or
-  write key); a page crossing steps; a miss calls back once to fill the entry
-  with every register saved and the instruction steps only if the host
-  cannot (a fault). The framework calls nothing else.
+  the engine's chaining limit: the budget is charged at function entries,
+  every backward-branch target and indirect branches, so interrupt and
+  mapping-change polling are those of the engine; retired counts are
+  estimates.
+- Memory: inline TLB probe of the engine's entry (the page of the access's
+  last byte, read or write key); a page crossing steps; a miss calls the
+  executor's refill once, with every register the host ABI lets a callee
+  change saved, and restarts the instruction. It steps only if the host
+  cannot fill the entry (a fault). The framework calls nothing else.
 - Floating point and SIMD run under the guest FPCR/FPSR in the host registers
   the way gadget code does; the engine restores the host environment at the
   dispatcher boundary.
+- Diagnostics: the CMake option `UML_AOT_DIAGNOSTICS` (off) builds counters,
+  a step histogram, a report file written by a thread of its own, and the
+  test switches. A product build has none of it, and in no build does a vCPU
+  thread do file I/O or allocate while it is inside rewritten code. The
+  differential test (`arm64-aot-differential`) needs the option.
 
 Build and tests: `tools/aot/README.md`.
 

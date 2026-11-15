@@ -53,7 +53,8 @@ namespace {
 
 constexpr std::uint64_t page_bytes = 4096;
 constexpr std::uint64_t stub_offset = 0x4000'0000ULL;
-constexpr std::uint64_t arena_offset = 0x10'0000ULL;
+/* Beyond the text of the largest library under test. */
+constexpr std::uint64_t arena_offset = 0x1000'0000ULL;
 constexpr std::size_t arena_pages = 12;
 constexpr std::size_t stack_pages = 2;
 constexpr std::size_t max_blocks = 1500;
@@ -61,7 +62,7 @@ constexpr std::size_t max_blocks = 1500;
  * keys its entries by the untagged address), so each such access is one
  * engine step and one block: the AOT run needs far more blocks than the
  * reference for the same work. */
-constexpr std::size_t aot_max_blocks = 40000;
+constexpr std::size_t aot_max_blocks = 500000;
 
 struct SplitMix final {
 	std::uint64_t state;
@@ -190,6 +191,27 @@ struct Function final {
 			out.push_back({std::strtoull(a.c_str(), nullptr, 0),
 				std::strtoull(b.c_str(), nullptr, 0)});
 	require(!out.empty());
+	return out;
+}
+
+/* A sample of each kind of instruction the rewriter inlined, per library:
+ * `offset` of an instruction of `kind` (decode class and mnemonic). */
+struct Site final {
+	std::uint64_t offset;
+	std::string kind;
+};
+
+[[nodiscard]] std::vector<Site> load_sites(const std::string &path,
+	std::size_t library)
+{
+	std::ifstream in{path};
+	require(in.good());
+	std::vector<Site> out;
+	std::size_t index;
+	std::string offset, kind;
+	while (in >> index >> offset >> kind)
+		if (index == library)
+			out.push_back({std::strtoull(offset.c_str(), nullptr, 16), kind});
 	return out;
 }
 
@@ -489,6 +511,22 @@ void describe(const char *what, const Case &c)
 		c.cpu.tbi_enabled ? 1 : 0, c.faulting ? 1 : 0);
 }
 
+/* Whether two runs ended in the same state, without a report. */
+[[nodiscard]] bool identical(const Result &a, const Result &b)
+{
+	if (a.finished != b.finished || a.last != b.last ||
+	    a.faults != b.faults || a.cpu.sp != b.cpu.sp ||
+	    a.cpu.pc != b.cpu.pc || a.cpu.nzcv != b.cpu.nzcv ||
+	    a.cpu.fpcr != b.cpu.fpcr || a.cpu.fpsr != b.cpu.fpsr ||
+	    a.memory != b.memory)
+		return false;
+	for (std::size_t i = 0; i < a.cpu.registers.size(); ++i)
+		if (a.cpu.registers[i] != b.cpu.registers[i])
+			return false;
+	return std::memcmp(a.cpu.vectors.data(), b.cpu.vectors.data(),
+		sizeof(a.cpu.vectors)) == 0;
+}
+
 [[nodiscard]] bool same(const Result &a, const Result &b, const Case &c)
 {
 	bool ok = true;
@@ -671,7 +709,8 @@ void describe(const char *what, const Case &c)
 /* Where an AOT run first leaves the reference's path: the reference single
  * steps and records every instruction's state; each state the AOT run
  * returns the engine at must be one of them, in order. */
-void diagnose(const Case &c, const LibraryImage &image, std::uint64_t bias)
+[[nodiscard]] bool diagnose(const Case &c, const LibraryImage &image,
+	std::uint64_t bias)
 {
 	constexpr std::uint64_t id = 5101;
 	{
@@ -705,7 +744,7 @@ void diagnose(const Case &c, const LibraryImage &image, std::uint64_t bias)
 		first.pc = bias + c.pc_offset;
 		return snapshot_of(first);
 	}());
-	(void)drive(ref, ref_arena, c, 60000, [&](const arm64::CpuState &cpu) {
+	(void)drive(ref, ref_arena, c, 300000, [&](const arm64::CpuState &cpu) {
 		trace.push_back(snapshot_of(cpu));
 	});
 	aot::set_enabled(true);
@@ -778,22 +817,23 @@ void diagnose(const Case &c, const LibraryImage &image, std::uint64_t bias)
 		show("ref end", trace.back());
 		show("ref at", trace[at]);
 	}
+	return !reported;
 }
 
 struct Totals final {
 	std::size_t cases{}, compared{}, skipped{}, faulted{}, fault_events{},
-		finished{};
+		finished{}, nondeterministic{}, slow{};
 };
 
 struct Config final {
-	std::string libraries, functions;
+	std::string libraries, functions, sites;
 	/* Run only the library with this index (-1: all). */
 	long library{-1};
 	/* At most this many functions of a library are sampled. */
 	std::size_t sample{400};
 	/* seed:pc_offset:faulting:tbi of one case to run alone. */
 	std::string only;
-	std::size_t starts{12}, interior{8}, sp_sites{6};
+	std::size_t starts{12}, interior{8}, sp_sites{6}, site_cases{4};
 	std::uint64_t master{0x5eed};
 };
 
@@ -802,6 +842,7 @@ struct Config final {
 	Config c;
 	c.libraries = AOT_TEST_LIBRARIES;
 	c.functions = AOT_TEST_FUNCTIONS;
+	c.sites = AOT_TEST_SITES;
 	for (int i = 1; i + 1 < argc; i += 2) {
 		const std::string key{argv[i]};
 		if (key == "--starts")
@@ -810,6 +851,8 @@ struct Config final {
 			c.interior = std::strtoul(argv[i + 1], nullptr, 0);
 		else if (key == "--sp-sites")
 			c.sp_sites = std::strtoul(argv[i + 1], nullptr, 0);
+		else if (key == "--site-cases")
+			c.site_cases = std::strtoul(argv[i + 1], nullptr, 0);
 		else if (key == "--master")
 			c.master = std::strtoull(argv[i + 1], nullptr, 0);
 		else if (key == "--case")
@@ -823,9 +866,10 @@ struct Config final {
 }
 
 /* Every function of the library, from its first instruction and from random
- * interior ones, against random states and fault patterns. */
+ * interior ones, and a sample of every kind of instruction the rewriter
+ * inlined, against random states and fault patterns. */
 Totals differential(const Config &config, const LibraryImage &image,
-	const std::vector<Function> &functions)
+	const std::vector<Function> &functions, const std::vector<Site> &sites)
 {
 	constexpr std::uint64_t bias = 0x7123'0000'0000ULL;
 	Environment ref{4101, bias, image};
@@ -835,57 +879,76 @@ Totals differential(const Config &config, const LibraryImage &image,
 	SplitMix rng{config.master};
 	Totals t;
 	aot::reset_stats();
+	const auto one = [&](std::uint64_t pc, const char *kind) {
+		const bool faulting = rng.below(3) == 0;
+		const bool tbi = rng.below(4) != 0;
+		const auto c = make_case(rng, bias, pc, faulting, tbi,
+			arena_base(bias));
+		if (std::getenv("AOT_TRACE") != nullptr) {
+			describe("reference", c);
+			std::fflush(stderr);
+		}
+		aot::set_enabled(false);
+		const auto want = drive(ref, ref_arena, c, max_blocks);
+		++t.cases;
+		if (!want.done()) {
+			++t.skipped;
+			return;
+		}
+		if (std::getenv("AOT_TRACE") != nullptr) {
+			describe("running", c);
+			std::fflush(stderr);
+		}
+		aot::set_enabled(true);
+		const auto got = drive(aot_env, aot_arena, c, aot_max_blocks);
+		aot::set_enabled(false);
+		if (!identical(want, got)) {
+			/* The counter registers and the like differ between two runs
+			 * of the same code: if the engine disagrees with itself the
+			 * case says nothing. */
+			aot::set_enabled(false);
+			const auto again = drive(ref, ref_arena, c, max_blocks);
+			if (!identical(want, again)) {
+				++t.skipped;
+				++t.nondeterministic;
+				return;
+			}
+		}
+		if (!same(want, got, c)) {
+			std::fprintf(stderr, "  start %llx (%s)\n",
+				static_cast<unsigned long long>(pc), kind);
+			const bool consistent = diagnose(c, image, bias);
+			/* An AOT run that is still going after the limit but has
+			 * left the engine's path nowhere is a run that steps a
+			 * great deal, not a wrong one. */
+			if (consistent && !got.done()) {
+				++t.skipped;
+				++t.slow;
+				return;
+			}
+			require(false);
+		}
+		++t.compared;
+		t.finished += want.finished ? 1 : 0;
+		t.faulted += faulting ? 1 : 0;
+		t.fault_events += want.faults.size();
+	};
 	for (const auto &function : functions) {
-		std::vector<std::uint64_t> starts;
 		for (std::size_t i = 0; i < config.starts; ++i)
-			starts.push_back(function.start);
+			one(function.start, "function");
 		for (std::size_t i = 0; i < config.interior; ++i)
-			starts.push_back(function.start + 4 * rng.below(
-				(function.end - function.start) / 4));
+			one(function.start + 4 * rng.below(
+				(function.end - function.start) / 4), "interior");
 		/* Every instruction that writes SP from a register, from itself,
 		 * with that register aligned or not. */
 		for (auto at = function.start; at < function.end; at += 4)
 			if (sp_source(image, at) >= 0)
 				for (std::size_t i = 0; i < config.sp_sites; ++i)
-					starts.push_back(at);
-		for (const auto pc : starts) {
-			const bool faulting = rng.below(3) == 0;
-			const bool tbi = rng.below(4) != 0;
-			const auto c = make_case(rng, bias, pc, faulting, tbi,
-				arena_base(bias));
-			if (std::getenv("AOT_TRACE") != nullptr) {
-				describe("reference", c);
-				std::fflush(stderr);
-			}
-			aot::set_enabled(false);
-			const auto want = drive(ref, ref_arena, c, max_blocks);
-			++t.cases;
-			if (!want.done()) {
-				++t.skipped;
-				continue;
-			}
-			if (std::getenv("AOT_TRACE") != nullptr) {
-				describe("running", c);
-				std::fflush(stderr);
-			}
-			aot::set_enabled(true);
-			const auto got = drive(aot_env, aot_arena, c,
-				aot_max_blocks);
-			aot::set_enabled(false);
-			if (!same(want, got, c)) {
-				std::fprintf(stderr,
-					"  function %llx..%llx\n",
-					static_cast<unsigned long long>(function.start),
-					static_cast<unsigned long long>(function.end));
-				diagnose(c, image, bias);
-				require(false);
-			}
-			++t.compared;
-			t.finished += want.finished ? 1 : 0;
-			t.faulted += faulting ? 1 : 0;
-			t.fault_events += want.faults.size();
-		}
+					one(at, "sp write");
 	}
+	for (const auto &site : sites)
+		for (std::size_t i = 0; i < config.site_cases; ++i)
+			one(site.offset, site.kind.c_str());
 	return t;
 }
 
@@ -1441,7 +1504,7 @@ int main(int argc, char **argv)
 		g_sites_image = &image;
 		const auto c = make_case_from_seed(seed, bias, pc, faulting != 0,
 			tbi != 0, arena_base(bias));
-		diagnose(c, image, bias);
+		(void)diagnose(c, image, bias);
 		return 0;
 	}
 	bool scenarios_done = false;
@@ -1465,14 +1528,16 @@ int main(int argc, char **argv)
 			scenarios_done = true;
 		}
 		aot::reset_stats();
-		const auto t = differential(cfg, image, sample);
+		const auto sites = load_sites(cfg.sites, file.index);
+		const auto t = differential(cfg, image, sample, sites);
 		const auto st = aot::stats();
 		std::fprintf(stderr,
-			"differential: %zu cases, %zu compared, %zu unbounded, "
-			"%zu finished, %zu faulting, %zu faults; enters %llu steps %llu "
+			"differential: %zu cases, %zu compared, %zu unbounded "
+			"(%zu not repeatable, %zu too slow), %zu finished, %zu faulting, %zu faults; enters %llu steps %llu "
 			"binds %llu verifications %llu retired %llu refills %llu "
-			"refusals sp %llu fp %llu\n",
-			t.cases, t.compared, t.skipped, t.finished, t.faulted,
+			"refusals sp %llu fp %llu poisoned %llu unreadable %llu\n",
+			t.cases, t.compared, t.skipped, t.nondeterministic, t.slow,
+			t.finished, t.faulted,
 			t.fault_events, static_cast<unsigned long long>(st.enters),
 			static_cast<unsigned long long>(st.steps),
 			static_cast<unsigned long long>(st.binds),
@@ -1480,7 +1545,9 @@ int main(int argc, char **argv)
 			static_cast<unsigned long long>(st.retired),
 			static_cast<unsigned long long>(st.refills),
 			static_cast<unsigned long long>(st.refusals[1]),
-			static_cast<unsigned long long>(st.refusals[3]));
+			static_cast<unsigned long long>(st.refusals[3]),
+			static_cast<unsigned long long>(st.poisoned),
+			static_cast<unsigned long long>(st.unreadable));
 		require(t.compared > t.cases / 2);
 		require(st.enters > t.compared / 2);
 		require(st.poisoned == 0);

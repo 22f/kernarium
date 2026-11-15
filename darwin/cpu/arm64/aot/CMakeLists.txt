@@ -144,7 +144,8 @@ endif()
 add_custom_command(
     OUTPUT ${_uml_aot_blob} ${_uml_aot_manifest}
         ${_uml_aot_dir}/functions.txt ${_uml_aot_dir}/libraries.txt
-        ${_uml_aot_dir}/steps.txt ${_uml_aot_dir}/licences.json
+        ${_uml_aot_dir}/steps.txt ${_uml_aot_dir}/sites.txt
+        ${_uml_aot_dir}/licences.json
     COMMAND ${Python3_EXECUTABLE} -B ${_uml_aot_tools}/rewrite.py
         --root ${_uml_aot_image_dir}/root
         ${_uml_aot_mount_args}
@@ -164,13 +165,15 @@ add_library(uml_arm64_aot_framework SHARED
     ${_uml_aot_blob}
     ${_uml_aot_dir}/functions.txt
     ${_uml_aot_dir}/libraries.txt
-    ${_uml_aot_dir}/steps.txt)
+    ${_uml_aot_dir}/steps.txt
+    ${_uml_aot_dir}/sites.txt)
 uml_declare_architecture_target(uml_arm64_aot_framework cpu gadget)
 set_source_files_properties(aot_blob.S PROPERTIES
     COMPILE_DEFINITIONS "AOT_BLOB=\"${_uml_aot_blob}\""
     OBJECT_DEPENDS ${_uml_aot_blob})
 set_source_files_properties(${_uml_aot_blob} ${_uml_aot_dir}/functions.txt
     ${_uml_aot_dir}/libraries.txt ${_uml_aot_dir}/steps.txt
+    ${_uml_aot_dir}/sites.txt
     PROPERTIES GENERATED TRUE HEADER_FILE_ONLY TRUE)
 set_target_properties(uml_arm64_aot_framework PROPERTIES
     LINKER_LANGUAGE C
@@ -193,6 +196,7 @@ set_property(GLOBAL PROPERTY UML_AOT_MANIFEST "${_uml_aot_manifest}")
 set_property(GLOBAL PROPERTY UML_AOT_IMAGE_ROOT "${_uml_aot_image_dir}/root")
 set_property(GLOBAL PROPERTY UML_AOT_FUNCTIONS "${_uml_aot_dir}/functions.txt")
 set_property(GLOBAL PROPERTY UML_AOT_LIBRARY_FILES "${_uml_aot_dir}/libraries.txt")
+set_property(GLOBAL PROPERTY UML_AOT_SITES "${_uml_aot_dir}/sites.txt")
 
 # The part the gadget executor links: the binder and the entry call.
 add_library(uml_arm64_aot_runtime OBJECT aot_runtime.cpp)

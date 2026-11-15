@@ -484,10 +484,12 @@
             OBJECTS ${UML_ARM64_GADGET_RUNTIME_TEST_OBJECTS})
         get_property(_uml_aot_libraries GLOBAL PROPERTY UML_AOT_LIBRARY_FILES)
         get_property(_uml_aot_functions GLOBAL PROPERTY UML_AOT_FUNCTIONS)
+        get_property(_uml_aot_sites GLOBAL PROPERTY UML_AOT_SITES)
         target_compile_definitions(uml_arm64_aot_differential_tests PRIVATE
             UML_AOT_DIAGNOSTICS=1
             AOT_TEST_LIBRARIES="${_uml_aot_libraries}"
-            AOT_TEST_FUNCTIONS="${_uml_aot_functions}")
+            AOT_TEST_FUNCTIONS="${_uml_aot_functions}"
+            AOT_TEST_SITES="${_uml_aot_sites}")
     endif()
     # The AArch32 gadget tests read the library-exit counters, which only the
     # semantic library's counting variant has.

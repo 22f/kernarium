@@ -21,7 +21,18 @@ set(UML_AOT_IMAGE "" CACHE PATH
     "An accepted Android release directory to generate the AOT framework from; empty builds without AOT")
 set(UML_AOT_FSCK_EROFS "" CACHE FILEPATH
     "An fsck.erofs that decodes Zstandard, used to unpack UML_AOT_IMAGE")
-set(UML_AOT_LIBRARIES "/system/lib64/libz.so" CACHE STRING
+set(UML_AOT_LIBRARIES
+    "/apex/com.android.runtime/lib64/bionic/libc.so"
+    "/apex/com.android.runtime/bin/linker64"
+    "/apex/com.android.art/lib64/libart.so"
+    "/system/lib64/libhwui.so"
+    "/vendor/lib64/venus_gallium_dri.so"
+    "/system/bin/surfaceflinger"
+    "/system/lib64/libcrypto.so"
+    "/system/lib64/libpcre2.so"
+    "/system/lib64/libbinder.so"
+    "/system/lib64/libz.so"
+    CACHE STRING
     "Libraries of the release to rewrite, as absolute guest paths")
 option(UML_AOT_DIAGNOSTICS
     "Build the AOT runtime with its counters, report and test switches (never for a product)" OFF)
