@@ -298,8 +298,8 @@ inline void enter_any(Env* env) {
 // synchronization, survives it and goes to the array at the next one; the stores are byte stores, so not even the
 // bytes next to a changed one are stored to. A chunk neither side touched costs two
 // comparisons and a read, and writes nothing to the array or the block. A run of adjacent chunks that are alike is read
-// in pieces of kPullPiece bytes; a run the application wrote costs two region calls (the array's bytes are read, merged
-// and written).
+// in pieces of kPullPiece bytes; a run the application wrote costs one region read of the run and one region write for each
+// maximal run of the bytes it wrote (no byte between two runs is written).
 // The synchronization points: before a call that is passed the block, as an argument or as the receiver (the
 // application's chunks go to the array), after that call, at the start of Get...Elements, Get...Critical and
 // GetByteArrayRegion (the chunks of the range), before and after SetByteArrayRegion, and at a Release. A
@@ -396,11 +396,12 @@ void take_java(uint8_t* block, uint8_t* baseline, const uint8_t* java, uint32_t 
 }
 
 // The byte-by-byte rule over n bytes: a byte the application wrote (block != baseline) replaces the array's `java`
-// byte, unless that is the same already. Returns whether `java` changed. Words are compared at a time and bytes stored one
-// at a time: where the application wrote all four bytes of a word and Java none, the four are stored; any other word is
-// decided byte by byte, so a byte the rule leaves alone is never stored to.
-bool merge_words(uint8_t* java, const uint8_t* block, const uint8_t* baseline, uint32_t n) {
-    bool differs = false;
+// byte, unless that is the same already. Every byte that changes is reported to `sink` as changed(offset, count), the
+// offset counted from `base`, in ascending order; a word whose four bytes all change is one report. Words are compared at
+// a time and bytes stored one at a time: where the application wrote all four bytes of a word and Java none, the four are
+// stored; any other word is decided byte by byte, so a byte the rule leaves alone is never stored to.
+template <class Sink>
+void merge_words(uint8_t* java, const uint8_t* block, const uint8_t* baseline, uint32_t n, uint32_t base, Sink& sink) {
     uint32_t i = 0;
     for (; i + 4 <= n; i += 4) {
         uint32_t b, k, j;
@@ -416,14 +417,14 @@ bool merge_words(uint8_t* java, const uint8_t* block, const uint8_t* baseline, u
             for (uint32_t m = 0; m < 4; ++m) {
                 store_byte(java + i + m, written[m]);  // the application wrote all four and Java none
             }
-            differs = true;
+            sink.changed(base + i, 4);
             continue;
         }
         for (uint32_t m = i; m < i + 4; ++m) {
             const uint8_t written = block[m];
             if (written != baseline[m] && java[m] != written) {
                 store_byte(java + m, written);
-                differs = true;
+                sink.changed(base + m, 1);
             }
         }
     }
@@ -431,30 +432,68 @@ bool merge_words(uint8_t* java, const uint8_t* block, const uint8_t* baseline, u
         const uint8_t written = block[i];
         if (written != baseline[i] && java[i] != written) {
             store_byte(java + i, written);
-            differs = true;
+            sink.changed(base + i, 1);
         }
     }
-    return differs;
 }
 // (libc's memcmp skips what the application did not write, kScanBlock bytes at a time: most of a run is that)
-bool merge_bytes(uint8_t* java, const uint8_t* block, const uint8_t* baseline, uint32_t n) {
-    bool differs = false;
+template <class Sink>
+void merge_bytes(uint8_t* java, const uint8_t* block, const uint8_t* baseline, uint32_t n, Sink& sink) {
     uint32_t i = 0;
     for (; i + kScanBlock <= n; i += kScanBlock) {
         if (__builtin_memcmp(block + i, baseline + i, kScanBlock) != 0) {
-            differs = merge_words(java + i, block + i, baseline + i, kScanBlock) || differs;
+            merge_words(java + i, block + i, baseline + i, kScanBlock, i, sink);
         }
     }
     if (i < n) {
-        differs = merge_words(java + i, block + i, baseline + i, n - i) || differs;
+        merge_words(java + i, block + i, baseline + i, n - i, i, sink);
     }
-    return differs;
 }
 
+// The sink of the merge in the live array: whether any byte changed.
+struct AnyChange {
+    bool any = false;
+    void changed(uint32_t, uint32_t) { any = true; }
+};
+
+// The sink of the merge in a buffer: the array gets exactly the bytes that changed, one region write for each maximal run
+// of adjacent changed bytes, and never a byte between two runs. (A Java thread's write to a byte the application did not
+// write, landing between the read of the run and these writes, is not undone.) `merged` holds the new bytes.
+struct RunWriter {
+    Env* env;
+    jobject array;
+    uint32_t from;  // the array offset of the first byte of the run
+    const uint8_t* merged;
+    uint32_t start;
+    uint32_t end;
+    bool open;
+    RunWriter(Env* e, jobject a, uint32_t f, const uint8_t* m) : env(e), array(a), from(f), merged(m), start(0), end(0), open(false) {}
+    void changed(uint32_t at, uint32_t count) {
+        if (open && at == end) {
+            end += count;
+            return;
+        }
+        flush();
+        start = at;
+        end = at + count;
+        open = true;
+    }
+    void flush() {
+        if (!open) {
+            return;
+        }
+        original<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(slot::SetByteArrayRegion)(
+            env, array, static_cast<jsize>(from + start), static_cast<jsize>(end - start),
+            reinterpret_cast<const jbyte*>(merged + start));
+        open = false;
+    }
+};
+
 // The chunks first..last (all written by the application): the array's bytes of the run are read, a byte the application
-// wrote (block != baseline) replaces the array's, and the merged run goes back to the array and becomes the baseline and
-// the block. The array is not written where the application's bytes are the array's already. A run longer than one chunk
-// reads into memory the platform gives; where there is none, the run is merged chunk by chunk.
+// wrote (block != baseline) replaces the array's, and the bytes that changed go back to the array, each maximal run of
+// them in one region write; the merged run becomes the baseline and, where Java changed a byte, the block. The array is
+// not written where the application's bytes are the array's already, and never at a byte between two such runs. A run
+// longer than one chunk reads into memory the platform gives; where there is none, the run is merged chunk by chunk.
 void merge_run(Env* env, BlockHeader* header, jobject array, unsigned first, unsigned last) {
     const uint32_t from = chunk_offset(first), to = chunk_end(header, last), n = to - from;
     uint8_t stack[kChunk];
@@ -474,10 +513,9 @@ void merge_run(Env* env, BlockHeader* header, jobject array, unsigned first, uns
         env, array, static_cast<jsize>(from), static_cast<jsize>(n), reinterpret_cast<jbyte*>(java));
     uint8_t* block = data_of(header) + from;
     uint8_t* baseline = header->baseline + from;
-    if (merge_bytes(java, block, baseline, n)) {
-        original<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(slot::SetByteArrayRegion)(
-            env, array, static_cast<jsize>(from), static_cast<jsize>(n), reinterpret_cast<const jbyte*>(java));
-    }
+    RunWriter writer(env, array, from, java);
+    merge_bytes(java, block, baseline, n, writer);
+    writer.flush();
     take_java(block, baseline, java, n);
     if (heap) {
         g.platform.free_baseline(java);
@@ -590,7 +628,9 @@ void sync_critical(Env* env, BlockHeader* header, jobject array, void* pinned, b
             uint8_t* java = static_cast<uint8_t*>(pinned) + offset;  // the array's bytes: the application's replace them
             const uint8_t* block = data_of(header) + offset;
             const uint8_t* baseline = header->baseline + offset;
-            wrote = merge_bytes(java, block, baseline, length) || wrote;
+            AnyChange change;
+            merge_bytes(java, block, baseline, length, change);
+            wrote = change.any || wrote;
             take_java(data_of(header) + offset, header->baseline + offset, java, length);
         } else {
             take_java(data_of(header) + offset, header->baseline + offset, static_cast<const uint8_t*>(pinned) + offset, length);

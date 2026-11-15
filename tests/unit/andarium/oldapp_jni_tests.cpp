@@ -7,6 +7,7 @@
 // of the array a shadow stands for, what the runtime is handed in place of a shadow (for any caller,
 // whatever the method), the limits (nothing in use is recycled), a thread that ends, PopLocalFrame,
 // and the calls of the platform's own libraries, which must see no shadow.
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <chrono>
@@ -1739,8 +1740,8 @@ void check_an_exact_comparison_keeps_every_write() {
     require(std::memcmp(buffer, written.data(), 8) == 0 && made.object->bytes == written, "the write reached the array and the reader");
 }
 
-// A run of chunks the application wrote is two region calls (read, merge, write); a clean run is read in pieces of 16 KiB;
-// and a clean chunk is never written.
+// A run of chunks the application wrote is one read of the run and one write for each maximal run of the bytes it wrote
+// (never a byte between two runs); a clean run is read in pieces of 16 KiB; and a clean chunk is never written.
 void check_a_run_of_chunks_is_one_region_call() {
     Fixture f = make();
     Made made = make_shadow_of(f, sample(6 * 4096));
@@ -1750,10 +1751,15 @@ void check_a_run_of_chunks_is_one_region_call() {
     world.set_calls = 0;
     world.get_calls = 0;
     call_static_int_v(f, f.consume, made.shadow);
-    require(world.set_calls == 1, "chunks 2 to 4 went to the array in one call");
+    require(world.set_calls == 3, "the three bytes the application wrote went to the array, one call for each");
     require(world.get_calls == 3, "one read of that run (it is merged with Java's bytes), and the six chunks came back in two pieces");
     require(world.seen_arrays[0][2 * 4096] == raw_of(made)[2 * 4096] && world.seen_arrays[0][4 * 4096 + 5] == raw_of(made)[4 * 4096 + 5],
             "Java saw the writes");
+    Made dense = make_shadow_of(f, sample(6 * 4096));
+    for (size_t i = 2 * 4096; i < 5 * 4096; ++i) raw_of(dense)[i] ^= 0x55;  // every byte of chunks 2 to 4
+    world.set_calls = 0;
+    call_static_int_v(f, f.consume, dense.shadow);
+    require(world.set_calls == 1, "bytes the application wrote all along three chunks are one write");
     Made big = make_shadow_of(f, sample(256 * 4096));
     world.set_calls = 0;
     world.get_calls = 0;
@@ -3988,6 +3994,83 @@ void check_a_failed_sentinel_allocation_is_survived() {
             "the next creation made the sentinel and swept");
 }
 
+// ---- a merge writes back exactly the bytes the application wrote
+
+// A Java thread's write to a byte the application did not write, landing after the merge read the dirty run and before it
+// wrote it back, is neither undone in the array nor lost to the block.
+void check_a_java_write_during_a_merge_is_kept() {
+    Fixture f = make();
+    Made a = make_held(f, sample(100));
+    raw_of(a)[0] = 0x55;  // the application wrote byte 0: the chunk is dirty
+    g_after_get = [&] { a.object->bytes[20] = 0xB2; };  // Java writes byte 20 meanwhile
+    jbyte* elements = get_elements(f, a.shadow);        // a synchronization point: the dirty chunk is merged
+    require(a.object->bytes[0] == 0x55, "the application's byte reached the array");
+    require(a.object->bytes[20] == 0xB2, "and Java's byte, which the merge's read did not see, is still there");
+    release_elements(f, a.shadow, elements, 0);
+    require(a.object->bytes[20] == 0xB2 && raw_of(a)[20] == 0xB2 && raw_of(a)[0] == 0x55,
+            "the next point gave the block Java's byte, and the application's stayed");
+}
+
+// Scattered bytes of the application, in runs of one byte and across the edges of a scan block (256) and of a chunk, and a
+// Java write into the first byte of every gap while the merge runs (from the hook of the run's read): one region write for
+// each run, every gap byte keeps Java's value, and the block has them at the next point.
+void check_scattered_application_bytes_keep_a_java_write_in_every_gap() {
+    Fixture f = make();
+    const size_t size = 3 * 4096;
+    Made a = make_held(f, sample(size));
+    const std::vector<uint8_t> before = a.object->bytes;
+    std::vector<std::pair<size_t, size_t>> runs;  // start, length
+    for (size_t at = 3; at < size; at += 97) {
+        if (at + 1 >= 250 && at < 262) continue;  // the run across 256 is below
+        if (at + 1 >= 4090 && at < 4102) continue;
+        runs.push_back({at, 1});
+    }
+    runs.push_back({250, 12});
+    runs.push_back({4090, 12});
+    std::sort(runs.begin(), runs.end());
+    for (const auto& run : runs) {
+        for (size_t i = run.first; i < run.first + run.second; ++i) raw_of(a)[i] ^= 0x55;
+    }
+    std::vector<size_t> gaps;  // the first byte of every gap between two runs
+    for (size_t k = 0; k + 1 < runs.size(); ++k) {
+        const size_t end = runs[k].first + runs[k].second;
+        require(end < runs[k + 1].first, "the runs are apart");
+        gaps.push_back(end);
+    }
+    g_after_get = [&] {
+        for (size_t gap : gaps) a.object->bytes[gap] = 0xB2;
+    };
+    world.set_calls = 0;
+    call_static_int_v(f, f.consume, a.shadow);
+    require(world.set_calls == int(runs.size()), "one region write for each run of the application's bytes");
+    for (const auto& run : runs) {
+        for (size_t i = run.first; i < run.first + run.second; ++i) {
+            require(a.object->bytes[i] == uint8_t(before[i] ^ 0x55), "the application's byte is in the array");
+        }
+    }
+    for (size_t gap : gaps) {
+        require(a.object->bytes[gap] == 0xB2, "Java's write into the gap is in the array");
+    }
+    size_t others = 0;
+    for (size_t i = 0; i < size; ++i) {
+        bool in_run = false;
+        for (const auto& run : runs) in_run = in_run || (i >= run.first && i < run.first + run.second);
+        if (!in_run && std::find(gaps.begin(), gaps.end(), i) == gaps.end()) {
+            require(a.object->bytes[i] == before[i], "no other byte of the array changed");
+            ++others;
+        }
+    }
+    require(others > 0, "the rows' bytes include untouched ones");
+    std::vector<jbyte> whole(size);
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, jsize(size), whole.data());  // a point: the block takes Java's bytes
+    for (size_t gap : gaps) {
+        require(raw_of(a)[gap] == 0xB2, "the block has Java's byte of the gap");
+    }
+    for (const auto& run : runs) {
+        require(raw_of(a)[run.first] == uint8_t(before[run.first] ^ 0x55), "and kept the application's");
+    }
+}
+
 // ---- stores that touch only the bytes the rule chose
 
 // A store that lands exactly where a test wants another thread's write to land. The page is made read-only; the first
@@ -4239,6 +4322,8 @@ int main(int argc, char** argv) {
     check_the_table_of_the_runtimes_pointers_does_not_wait_for_the_mutex();
     check_the_sentinels_array_is_made_outside_the_mutex();
     check_a_failed_sentinel_allocation_is_survived();
+    check_a_java_write_during_a_merge_is_kept();
+    check_scattered_application_bytes_keep_a_java_write_in_every_gap();
     check_a_pull_stores_only_the_byte_java_changed();
     check_the_critical_merge_stores_only_the_byte_the_application_wrote();
     check_install_rules();

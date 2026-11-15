@@ -664,8 +664,10 @@ patches ART's one JNI function table in place and gives the application:
   the array byte by byte: a byte the application wrote goes to the array, every
   other byte takes the array's if Java changed it, and a byte both sides wrote
   takes the application's. Any other chunk takes the bytes Java changed. The
-  block never takes a byte Java did not change, so a raw write to such a byte
-  that races a synchronization survives it. A committing
+  block never takes a byte Java did not change, and the array never takes one
+  the application did not write (one region write for each run of the bytes it
+  wrote), so a write by either side to such a byte that races a
+  synchronization survives it. A committing
   release (mode 0 or `JNI_COMMIT`) is such a point and keeps Java's bytes
   wherever the application did not write; `JNI_ABORT` discards the working copy,
   and the block takes the array's bytes. `Get...Elements` and `Get...Critical`
@@ -673,7 +675,9 @@ patches ART's one JNI function table in place and gives the application:
   commits when told so makes its writes visible through any other reference to
   the array; a real array keeps the runtime's own flag. Bytes Java writes
   outside those points (another thread, a callback after the native method
-  returned) show at the next one. A reference to a block ends where a Dalvik local
+  returned) show at the next one, also when they land while a point runs. A
+  byte both sides write in the same interval keeps the application's value:
+  that is the one case in which a racing write is lost. A reference to a block ends where a Dalvik local
   reference did: at `DeleteLocalRef` of a reference the innermost frame holds (a
   reference of an outer frame is left alone, as both runtimes leave it), at
   `PopLocalFrame`, at the return of a native
@@ -714,8 +718,7 @@ patches ART's one JNI function table in place and gives the application:
   synchronizations of all threads run one at a time. Nothing under it waits for
   the runtime's collector (a critical get that opens a region, an allocation in
   the Java heap): those are made before it is taken, so a thread that waits for
-  it inside a critical region never holds up a collection. A raw write that
-  races one to a byte both sides wrote can be lost. A release goes to the block whose data
+  it inside a critical region never holds up a collection. A release goes to the block whose data
   starts at its pointer, whichever reference comes with it, and never reaches
   the runtime for a pointer in the region; a pointer inside the region that is
   not at a block's start is not read as a header, copies nothing, and counts as
