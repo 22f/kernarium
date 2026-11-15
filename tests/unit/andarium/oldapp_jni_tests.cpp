@@ -27,6 +27,7 @@
 #include <thread>
 #include <vector>
 
+#include <pthread.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -4071,6 +4072,49 @@ void check_scattered_application_bytes_keep_a_java_write_in_every_gap() {
     }
 }
 
+// ---- little stack
+
+// Any wrapper can be called on a thread with a small stack (an audio thread, a thread of a library): a pull and a merge read
+// the array into one static buffer, not onto the stack. The thread has exactly 16 KiB (a stack of our own, with a guard
+// page below), the size of the old pull's buffer alone.
+void check_the_synchronizations_need_little_stack() {
+    Fixture f = make();
+    const size_t size = 256 * 4096;
+    Made a = make_held(f, sample(size));
+    raw_of(a)[5 * 4096 + 1] ^= 0x55;  // a dirty chunk: a merge of one chunk
+    for (size_t i = 40 * 4096; i < 48 * 4096; ++i) raw_of(a)[i] ^= 0x55;  // eight dirty chunks: a merge longer than the buffer
+    a.object->bytes[100000] ^= 0x33;  // Java's change, taken by a pull
+    Other o(f);
+    struct Job {
+        Other* thread;
+        Made* made;
+        std::vector<jbyte> copy;
+        size_t size;
+    } job{&o, &a, std::vector<jbyte>(size), size};
+    const size_t page = size_t(getpagesize());
+    require(page == 16384, "the host page is 16 KiB");
+    uint8_t* stack = static_cast<uint8_t*>(mmap(nullptr, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0));
+    require(stack != MAP_FAILED && mprotect(stack, page, PROT_NONE) == 0, "a stack and its guard page");
+    pthread_attr_t attributes;
+    pthread_attr_init(&attributes);
+    require(pthread_attr_setstack(&attributes, stack + page, page) == 0, "a thread with a 16 KiB stack");
+    pthread_t thread;
+    require(pthread_create(&thread, &attributes, [](void* argument) -> void* {
+        Job* work = static_cast<Job*>(argument);
+        fn<GetRegion>(*work->thread->f.table, slot::GetByteArrayRegion)(work->thread->f.env, work->made->shadow, 0,
+                                                                         jsize(work->size), work->copy.data());
+        return nullptr;
+    }, &job) == 0, "the thread starts");
+    pthread_join(thread, nullptr);
+    pthread_attr_destroy(&attributes);
+    munmap(stack, 2 * page);
+    require(a.object->bytes[5 * 4096 + 1] == uint8_t(sample(size)[5 * 4096 + 1] ^ 0x55) &&
+                a.object->bytes[47 * 4096 + 7] == uint8_t(sample(size)[47 * 4096 + 7] ^ 0x55),
+            "the merges reached the array");
+    require(raw_of(a)[100000] == uint8_t(sample(size)[100000] ^ 0x33) && uint8_t(job.copy[100000]) == raw_of(a)[100000],
+            "the pull gave the block and the reader Java's byte");
+}
+
 // ---- stores that touch only the bytes the rule chose
 
 // A store that lands exactly where a test wants another thread's write to land. The page is made read-only; the first
@@ -4322,6 +4366,7 @@ int main(int argc, char** argv) {
     check_the_table_of_the_runtimes_pointers_does_not_wait_for_the_mutex();
     check_the_sentinels_array_is_made_outside_the_mutex();
     check_a_failed_sentinel_allocation_is_survived();
+    check_the_synchronizations_need_little_stack();
     check_a_java_write_during_a_merge_is_kept();
     check_scattered_application_bytes_keep_a_java_write_in_every_gap();
     check_a_pull_stores_only_the_byte_java_changed();

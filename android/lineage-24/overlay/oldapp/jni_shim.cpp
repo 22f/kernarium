@@ -36,7 +36,7 @@ constexpr unsigned kRecordSlots = 2048;         // the runtime's own pointers th
 constexpr size_t kBlockTail = 16;  // zeroes behind the data: raw readers overrun by a few bytes
 constexpr uint32_t kChunk = 4096;  // the unit of the block's synchronization with its array
 constexpr uint32_t kScanBlock = 256;   // the bytes the merges compare with one libc call before they look at words
-constexpr uint32_t kPullPiece = 16384;  // the array's bytes are read into a stack buffer of this size, and compared with the baseline
+constexpr uint32_t kPullPiece = 16384;  // the array's bytes are read into the scratch buffer, this many at a time
 
 template <class T>
 struct IsVoid {
@@ -176,6 +176,7 @@ struct Globals {
     PointerRecord records[kRecordSlots];  // open addressing by pointer; under records_lock
     unsigned records_in_use;
     uint32_t records_lock;     // the table's own lock (a leaf: nothing is called and no other lock is taken under it)
+    uint8_t scratch[kPullPiece];  // the bytes of the array that a pull or a merge reads; under the mutex (see "scratch")
     uint32_t kind_pool_used;
     char kind_pool[kKindPoolBytes];
     MethodInfo methods[kMethodSlots];
@@ -493,13 +494,13 @@ struct RunWriter {
 // wrote (block != baseline) replaces the array's, and the bytes that changed go back to the array, each maximal run of
 // them in one region write; the merged run becomes the baseline and, where Java changed a byte, the block. The array is
 // not written where the application's bytes are the array's already, and never at a byte between two such runs. A run
-// longer than one chunk reads into memory the platform gives; where there is none, the run is merged chunk by chunk.
+// longer than the scratch buffer reads into memory the platform gives; where there is none, the run is merged chunk by
+// chunk.
 void merge_run(Env* env, BlockHeader* header, jobject array, unsigned first, unsigned last) {
     const uint32_t from = chunk_offset(first), to = chunk_end(header, last), n = to - from;
-    uint8_t stack[kChunk];
-    uint8_t* java = stack;
+    uint8_t* java = g.scratch;
     bool heap = false;
-    if (n > kChunk) {
+    if (n > kPullPiece) {
         java = static_cast<uint8_t*>(g.platform.alloc_baseline(n));
         heap = java != nullptr;
         if (!heap) {
@@ -524,8 +525,12 @@ void merge_run(Env* env, BlockHeader* header, jobject array, unsigned first, uns
 
 // The array's bytes over [from, to) reach the baseline and, where Java changed them, the block (take_java), a piece of
 // kPullPiece bytes at a time.
+//
+// The scratch: the bytes read from the array (a pull's pieces, a merge of up to kPullPiece bytes) are read into one static
+// buffer, not onto the stack, so that a thread with a small stack can call any wrapper. Every synchronization runs under
+// the mutex, and none runs inside another, so the buffer is the running one's alone.
 void pull_range(Env* env, BlockHeader* header, jobject array, uint32_t from, uint32_t to) {
-    uint8_t piece[kPullPiece];
+    uint8_t* piece = g.scratch;
     for (uint32_t at = from; at < to; at += kPullPiece) {
         const uint32_t n = to - at < kPullPiece ? to - at : kPullPiece;
         original<void (*)(Env*, jarray, jsize, jsize, jbyte*)>(slot::GetByteArrayRegion)(
