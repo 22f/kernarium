@@ -353,9 +353,9 @@ nonisolated enum OldAppsWords {
 
     /// The page's footer: what the switch is for, then when to use it.
     static var footer: String {
-        String(localized: "Some apps this old close as soon as they open, because they rely on how Android used to work. Old app compatibility makes Android run one app more like older versions did.")
+        String(localized: "Some apps this old crash because they rely on how Android used to work. Old app compatibility makes Android run an app more like older versions did.")
             + "\n\n"
-            + String(localized: "Turn it on only for an app that closes as soon as it opens: it can make an app that works today behave differently. Turning it on or off closes the app if it\u{2019}s open. Only apps it can apply to are listed.")
+            + String(localized: "Turn it on only for an app that crashes: it can make an app that works today behave differently. Turning it on or off closes the app if it\u{2019}s open. Only apps it can apply to are listed.")
     }
 
     /// What VoiceOver reads for an app's switch.
@@ -377,21 +377,21 @@ nonisolated enum OldAppsWords {
         switch prompt {
         case let .turnOn(app, open):
             let message = String(
-                localized: "Android will run this app more like older versions did. This may help an app that closes as soon as it opens, but it can also make the app behave differently or close later on. You can turn it off again here.")
+                localized: "Android will run this app more like older versions did. This may help an app that crashes, but it can also make the app behave differently. You can turn it off again here.")
             return open ? Sentences.join(message, closesNow(app.label)) : message
         case let .turnOff(app):
-            return Sentences.join(closesNow(app.label), String(localized: "It opens without old app compatibility next time."))
+            return Sentences.join(closesNow(app.label), String(localized: "It will open without Old app compatibility next time."))
         case .notChanged:
             return String(localized: "The virtual machine didn\u{2019}t accept the change. Try again.")
         }
     }
 
     private static func closesNow(_ label: String) -> String {
-        String(localized: "\u{201C}\(label)\u{201D} is open and closes now.")
+        String(localized: "\u{201C}\(label)\u{201D} is open and will close now.")
     }
 
     /// The two sentences after Install anyway installed an old app: what it
     /// was built for, and where the switch is.
     static let installHint = String(
-        localized: "It was built for an Android version before 4.0. If it closes as soon as it opens, open Settings here and choose Old app compatibility.")
+        localized: "It was built for an Android version before 4.0. If it crashes, open Settings from the side keys and choose Old app compatibility.")
 }

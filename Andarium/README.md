@@ -623,9 +623,17 @@ control out.
   `SnapshotWords` says every refusal, plan and figure in one place. A restore
   closes the sheet and Home says what happened, Start being next. The preview
   plays the same screens on mock snapshots (`-screen snapshots-…`).
-- **Release notes.** `Shared/WhatsNew.json` bundles the notes per build,
-  from build 9 (build 5, the first public release, and builds 6 to 8 and
-  10 have none).
+- **Release notes.** The notes have two tracks, each a file of `Shared`
+  that lists them per build: the beta track, `WhatsNew.json`, for Debug,
+  Release and TestFlight builds (from build 9: build 5, the first public
+  release, and builds 6 to 8 and 10 have none), and the App Store track,
+  `WhatsNewAppStore.json`, for AppStore builds (empty until the App Store
+  version has notes, and then keyed by its own builds). A build bundles and
+  reads its configuration's track alone (`WHATS_NEW_TRACK` in
+  `Config/Andarium.xcconfig` leaves the other's file out and picks the file
+  `WhatsNewTrack` loads), which the bundle check of an AppStore or TestFlight
+  build requires. One string table, `Localization/WhatsNew.xcstrings`,
+  serves both.
   The first launch of an update that carries notes shows a ribbon above Start,
   on at most three launches, that opens them; a build shows the notes up to its
   own number and no later ones. An entry can name the devices it is for (more
@@ -634,10 +642,13 @@ control out.
   An entry can also name a feature the build may lack (Send feedback): a build
   without it shows the entry nowhere, though the notes and their strings are
   bundled whole, so the bundle check leaves that entry's strings, and no other
-  of the notes' table, out of its search for Send feedback text. Info keeps
+  of the notes' table, out of its search for Send feedback text (the table of
+  an AppStore bundle holds the beta track's strings too, which the check names
+  from `WhatsNew.json` in the source). Info keeps
   every other entry as written (`WhatsNewRules`, `WhatsNewStore`). A launch
   with a launch setting, or one a test runs, shows no ribbon and keeps no
-  record.
+  record, and neither does a track with no notes, whose build also has no
+  What's New row in Info.
 
 ## Runtime
 
@@ -1143,7 +1154,7 @@ is on. `AndariumCore/Adb` speaks the protocol.
   colour, and a title of its own (`ApkInstallOutcome.words`).
 - **Old app compatibility** (Settings > Apps) makes Android run one app built
   for an Android before 4.0 more like the older versions did, for an app that
-  closes as soon as it opens. The image's `kernarium_oldapp` command lists the
+  crashes. The image's `kernarium_oldapp` command lists the
   installed apps it can apply to and writes the switch
   ([`android/lineage-24`](../android/lineage-24/README.md)); `OldAppCompatibility`
   in `AndariumCore` is the only code that knows its words and its output, and

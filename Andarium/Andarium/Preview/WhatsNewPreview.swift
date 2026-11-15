@@ -4,8 +4,8 @@ import AndariumCore
 import UIKit
 
 /// The release notes and the stored record of the preview's What's New
-/// screens. The notes of builds 11 and 9 are the bundled ones; those of builds
-/// 5 and 4 are made up, to stand in for releases a person skipped (the
+/// screens. The notes of builds 11 and 9 are the beta track's bundled ones; those
+/// of builds 5 and 4 are made up, to stand in for releases a person skipped (the
 /// application bundles notes from build 9 on). A device keeps the record in its
 /// defaults.
 enum WhatsNewPreview {
@@ -13,7 +13,7 @@ enum WhatsNewPreview {
     static let currentBuild = 11
     static let appVersion = "1.0 (11)"
 
-    static let releases: [WhatsNewRelease] = WhatsNewCatalog.load() + [
+    static let releases: [WhatsNewRelease] = WhatsNewCatalog.load(.beta) + [
         WhatsNewRelease(build: 5, version: "1.0 (5)", date: "2026-11-09", entries: [
             WhatsNewEntry(
                 id: "stats-vram", title: "Graphics memory in Stats",

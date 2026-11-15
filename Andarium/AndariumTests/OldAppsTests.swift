@@ -151,14 +151,14 @@ struct OldAppsModelTests {
         #expect(prompt == .turnOn(pixel, open: true))
         #expect(OldAppsWords.title(for: prompt) == "Turn on for \u{201C}Pixel Knights\u{201D}?")
         let message = OldAppsWords.message(for: prompt)
-        #expect(message.hasSuffix("\u{201C}Pixel Knights\u{201D} is open and closes now."))
+        #expect(message.hasSuffix("\u{201C}Pixel Knights\u{201D} is open and will close now."))
         #expect(message.contains("You can turn it off again here."))
         // An app that is not open is told nothing of the kind.
         scripted.open = []
         state.prompt = nil
         await model.requestOldApp(pixel.package, on: true)
         let quiet = OldAppsWords.message(for: try #require(state.prompt))
-        #expect(!quiet.contains("closes now") && quiet.hasSuffix("You can turn it off again here."))
+        #expect(!quiet.contains("will close now") && quiet.hasSuffix("You can turn it off again here."))
     }
 
     @Test func turningOffAsksOnlyForAnAppThatIsOpen() async throws {
@@ -172,7 +172,7 @@ struct OldAppsModelTests {
         #expect(OldAppsWords.title(for: prompt) == "Turn off for \u{201C}Rally 2011\u{201D}?")
         #expect(
             OldAppsWords.message(for: prompt)
-                == "\u{201C}Rally 2011\u{201D} is open and closes now. It opens without old app compatibility next time.")
+                == "\u{201C}Rally 2011\u{201D} is open and will close now. It will open without Old app compatibility next time.")
         #expect(scripted.writes.isEmpty)
         await model.answerOldApps(prompt, confirmed: true)
         #expect(scripted.writes.count == 1 && !scripted.writes[0].on && !state.anyOn)
@@ -453,7 +453,7 @@ struct OldAppsModelTests {
         let card = try await installAnyway(model)
         #expect(card?.title == "App installed")
         #expect(card?.detail == "\(installed) \(OldAppsWords.installHint)")
-        #expect(card?.detail.hasSuffix("open Settings here and choose Old app compatibility.") == true)
+        #expect(card?.detail.hasSuffix("open Settings from the side keys and choose Old app compatibility.") == true)
         #expect(card?.result?.failed == false)
         #expect(seen.value == 1 && scripted.listings == 2)
         // The two listings around the install wait only a few seconds: the install's result waits for them.
@@ -560,8 +560,8 @@ struct OldAppsWordsTests {
             "The virtual machine didn\u{2019}t answer. Try again.", "Try again", "Turn on", "Turn off",
             "Old app compatibility wasn\u{2019}t changed",
             "The virtual machine didn\u{2019}t accept the change. Try again.",
-            "It opens without old app compatibility next time.",
-            "It was built for an Android version before 4.0. If it closes as soon as it opens, open Settings here and choose Old app compatibility.",
+            "It will open without Old app compatibility next time.",
+            "It was built for an Android version before 4.0. If it crashes, open Settings from the side keys and choose Old app compatibility.",
         ]
         for key in keys {
             let english = text(key, in: "en")
@@ -574,7 +574,7 @@ struct OldAppsWordsTests {
         let label = "Pixel Knights"
         #expect(text("Turn on for \u{201C}\(label)\u{201D}?", in: language).contains(label))
         #expect(text("Turn off for \u{201C}\(label)\u{201D}?", in: language).contains(label))
-        #expect(text("\u{201C}\(label)\u{201D} is open and closes now.", in: language).contains(label))
+        #expect(text("\u{201C}\(label)\u{201D} is open and will close now.", in: language).contains(label))
         #expect(text("\(label), Old app compatibility", in: language).contains(label))
     }
 
@@ -582,9 +582,9 @@ struct OldAppsWordsTests {
         for language in ["en"] + Self.languages {
             let words = [
                 text("Old app compatibility", in: language),
-                text("Some apps this old close as soon as they open, because they rely on how Android used to work. Old app compatibility makes Android run one app more like older versions did.", in: language),
-                text("Turn it on only for an app that closes as soon as it opens: it can make an app that works today behave differently. Turning it on or off closes the app if it\u{2019}s open. Only apps it can apply to are listed.", in: language),
-                text("Android will run this app more like older versions did. This may help an app that closes as soon as it opens, but it can also make the app behave differently or close later on. You can turn it off again here.", in: language),
+                text("Some apps this old crash because they rely on how Android used to work. Old app compatibility makes Android run an app more like older versions did.", in: language),
+                text("Turn it on only for an app that crashes: it can make an app that works today behave differently. Turning it on or off closes the app if it\u{2019}s open. Only apps it can apply to are listed.", in: language),
+                text("Android will run this app more like older versions did. This may help an app that crashes, but it can also make the app behave differently. You can turn it off again here.", in: language),
             ].joined(separator: " ")
             for forbidden in ["Google", "Apple", "VM ", "guest", "Guest"] {
                 #expect(!words.contains(forbidden), "\(language) says \(forbidden)")

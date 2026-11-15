@@ -1985,6 +1985,8 @@ extern "C" const char uml_arm64_gadget_veneer_section_begin[];
 extern "C" const char uml_arm64_gadget_veneer_section_end[];
 extern "C" const char uml_arm64_gadget_sme_section_begin[];
 extern "C" const char uml_arm64_gadget_sme_section_end[];
+extern "C" const char uml_arm64_gadget_runs_section_begin[];
+extern "C" const char uml_arm64_gadget_runs_section_end[];
 
 namespace jit_test = arm64::jit::testing;
 
@@ -2020,7 +2022,7 @@ public:
       : max_failures_{max_failures} {}
 
   void region() {
-    const std::array<std::pair<const char *, const char *>, 7> parts{{
+    const std::array<std::pair<const char *, const char *>, 8> parts{{
         {uml_arm64_gadget_bank_begin, uml_arm64_gadget_bank_end},
         {uml_arm64_gadget_forward_section_begin,
          uml_arm64_gadget_forward_section_end},
@@ -2032,6 +2034,8 @@ public:
         {uml_arm64_gadget_veneer_section_begin,
          uml_arm64_gadget_veneer_section_end},
         {uml_arm64_gadget_sme_section_begin, uml_arm64_gadget_sme_section_end},
+        {uml_arm64_gadget_runs_section_begin,
+         uml_arm64_gadget_runs_section_end},
     }};
     for (const auto &[begin, end] : parts) {
       if (end <= begin || (end - begin) % 4 != 0)

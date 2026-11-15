@@ -534,6 +534,14 @@ PRODUCT_PACKAGES += KernariumPinnerOverlay
 # its own.
 PRODUCT_PACKAGES += kernarium_wifi_network_script
 
+# Very old 32-bit games (applications that target an API level below 14) read a
+# Java byte[] through its object pointer, leak local references and assume a heap
+# below 2 GiB. ActivityThread loads this library into the process of such an
+# application and nothing else (overlay/oldapp; the hook is a frameworks/base
+# topic); the library gives that application what Dalvik gave it.
+PRODUCT_PACKAGES += libkernarium_oldapp
+PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += system/lib/libkernarium_oldapp.so
+
 # Cached apps the system starts at boot (privacy sandbox, backup, key
 # provisioning, domain verification, Health Connect) keep memory until the low
 # memory killer wants it. Once boot has settled this script kills the cached
@@ -553,6 +561,12 @@ PRODUCT_PACKAGES += kernarium_time_zone_script
 # guest; once boot completes this script turns it off, once, for a guest whose settings
 # an older release created with it on. It runs from system_ext in a core domain of its own.
 PRODUCT_PACKAGES += kernarium_keyboard_default_script
+
+# Old app compatibility is a choice per application (persist.sys.kernarium.oldapp.<package>,
+# typed by sepolicy/system_ext/private/kernarium_oldapp_prop.te). The adb shell user lists the
+# applications it can apply to and sets the choice with this command, which Andarium runs; it is
+# a Java tool, so the package manager can give the labels in the guest's language.
+PRODUCT_PACKAGES += kernarium_oldapp
 
 # A Vulkan hardware-buffer import check: it fills gralloc buffers of several
 # formats and widths through the CPU, imports each into Vulkan and reads it

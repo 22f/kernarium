@@ -119,6 +119,23 @@ target_include_directories(uml_andarium_camera_streams_tests PRIVATE
 uml_add_unit_test(NAME andarium-camera-streams
     COMMAND uml_andarium_camera_streams_tests LABELS andarium)
 
+# The crop region that a result states, against the residual the camera service
+# splits off an application's zoom.
+add_executable(uml_andarium_camera_crop_tests camera_crop_tests.cpp)
+target_include_directories(uml_andarium_camera_crop_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal)
+uml_add_unit_test(NAME andarium-camera-crop
+    COMMAND uml_andarium_camera_crop_tests LABELS andarium)
+
+# What the camera HAL does when the host ends a camera's video: the session kinds,
+# the session-scoped state of a session that is over, and the reopening of a
+# camera's streams.
+add_executable(uml_andarium_camera_session_tests camera_session_tests.cpp)
+target_include_directories(uml_andarium_camera_session_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal)
+uml_add_unit_test(NAME andarium-camera-session
+    COMMAND uml_andarium_camera_session_tests LABELS andarium)
+
 # The guest's Wi-Fi address as a function of eth0's
 # (android/lineage-24/overlay/tools/kernarium_wifi_mac.h): the golden vectors
 # (the guest runner reads the same file), the properties of every result and the
@@ -129,4 +146,35 @@ target_include_directories(uml_andarium_wifi_mac_tests PRIVATE
 uml_add_unit_test(NAME andarium-wifi-mac
     COMMAND uml_andarium_wifi_mac_tests
         ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/wifi-mac-golden-vectors.txt
+    LABELS andarium)
+
+# The old-application layer (android/lineage-24/overlay/oldapp), which lets a
+# 32-bit application written for Android before 4.0 start on ART: the
+# allocator that keeps its heap below 2 GiB, the scan of an application
+# library's relocations for the allocator imports to redirect (synthetic
+# ELF32 images), the page-protection window that writes into read-only memory
+# pass through, and the JNI interposer against a fake function table that
+# accepts live references only. The interposer's table indices are checked
+# against the JDK's jni.h member order (the fixture's path is the test's
+# argument).
+set(UML_OLDAPP_DIR ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/oldapp)
+add_executable(uml_andarium_oldapp_arena_tests oldapp_arena_tests.cpp)
+target_include_directories(uml_andarium_oldapp_arena_tests PRIVATE ${UML_OLDAPP_DIR})
+uml_add_unit_test(NAME andarium-oldapp-arena
+    COMMAND uml_andarium_oldapp_arena_tests LABELS andarium)
+
+add_executable(uml_andarium_oldapp_elf_scan_tests oldapp_elf_scan_tests.cpp)
+target_include_directories(uml_andarium_oldapp_elf_scan_tests PRIVATE ${UML_OLDAPP_DIR})
+uml_add_unit_test(NAME andarium-oldapp-elf-scan
+    COMMAND uml_andarium_oldapp_elf_scan_tests LABELS andarium)
+
+add_executable(uml_andarium_oldapp_protection_tests oldapp_protection_tests.cpp)
+target_include_directories(uml_andarium_oldapp_protection_tests PRIVATE ${UML_OLDAPP_DIR})
+uml_add_unit_test(NAME andarium-oldapp-protection
+    COMMAND uml_andarium_oldapp_protection_tests LABELS andarium)
+
+add_executable(uml_andarium_oldapp_jni_tests oldapp_jni_tests.cpp ${UML_OLDAPP_DIR}/jni_shim.cpp)
+target_include_directories(uml_andarium_oldapp_jni_tests PRIVATE ${UML_OLDAPP_DIR})
+uml_add_unit_test(NAME andarium-oldapp-jni
+    COMMAND uml_andarium_oldapp_jni_tests ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/jni-slots.tsv
     LABELS andarium)

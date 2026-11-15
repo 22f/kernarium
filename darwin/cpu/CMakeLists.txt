@@ -319,7 +319,7 @@ set(_uml_gadget_region_options)
 foreach(_uml_gadget_region_section IN ITEMS
         __a64_bank __a64_forward __a64_vforward __a64_cold __a64_afp
         __a64_veneer __a64_sme __a32_bank __a32_cold __a32_veneer
-        __x86_bank __x86_cold)
+        __a64_runs __x86_bank __x86_cold)
     list(APPEND _uml_gadget_region_options
         "LINKER:-rename_section,__TEXT,${_uml_gadget_region_section},__TEXT,__text")
 endforeach()

@@ -84,6 +84,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import contextlib
 import importlib.util
 import math
 import os
@@ -324,7 +325,30 @@ DEFAULT_LAYOUTS = {
     "tablet": "bf-small-flash-manual",
     "laptop": "front",
 }
-MODES = ("live", "blocked", "none", "restart")
+MODES = ("live", "blocked", "none", "restart", "video-lost")
+# The video-lost mode: the synthetic camera reads its test-only control pipe, and the runner tells it that the application
+# left the foreground (the host ends the video of a camera that has a video stream open; docs/testing.md). The recording
+# ends by itself and the clip, with encoded video samples, is saved, the application stays the resumed activity, and the
+# camera opens again when the application is started again after the person returns: LOST_HOLD_SECONDS of video before
+# the loss, a clip of at least LOST_MINIMUM_SECONDS, and LOST_WAIT_SECONDS for the clip to appear.
+CONTROL_VARIABLE = "UML_SYNTHETIC_CAMERA_CONTROL"
+LOST_HOLD_SECONDS = 4
+LOST_MINIMUM_SECONDS = 2.0
+LOST_WAIT_SECONDS = 60
+# The viewfinder cases. The person is away LOST_AWAY_SECONDS, and when they return the viewfinder is live again within
+# VIEWFINDER_RECOVERY_SECONDS of the return (one deadline for the camera, the picture and the frame counters), in the same
+# process and with no error window. The video mode's viewfinder (no recording) binds an encoder surface, so the HAL ends the
+# camera for it as for a recording; the photo mode's viewfinder has no encoder stream, so the HAL must not: it closes the
+# camera's video streams and opens them again, which its log says.
+# A coded video sample is at least this many bytes on average: a file whose `mdat` boxes hold less than its declared samples need
+# has a sample table and no encoded video.
+MINIMUM_SAMPLE_BYTES = 16
+LOST_AWAY_SECONDS = 8
+VIEWFINDER_RECOVERY_SECONDS = 45
+HAL_END_LINE = "the host ended the camera: its video buffers fail"
+HAL_REOPEN_LINE = "the host ended the camera's video: its video streams are closed and opened again"
+STILL_ACTION = "android.media.action.STILL_IMAGE_CAMERA"
+ERROR_WINDOW = re.compile(r"Application (Error|Not Responding)|isn't responding|has stopped|keeps stopping")
 # The cameras Android lists again after the restart: the lazy provider starts when cameraserver first asks.
 RESTART_LIST_SECONDS = 60
 CALIBRATION_SECONDS = 30  # the host writes the colour data of a still when the still is done
@@ -455,6 +479,7 @@ class Movie:
     audio_end: float = 0.0
     video_gap: float = 0.0       # the longest time between two samples of each track
     audio_gap: float = 0.0
+    media_bytes: int = 0         # the bytes of the file's `mdat` boxes: the encoded samples themselves
 
     @property
     def fps(self) -> float:
@@ -600,8 +625,9 @@ def parse_mp4(data: bytes) -> Movie:
     moov = data[start:end]
     video = track_samples(data, start, end, b"vide", scale)
     audio = track_samples(data, start, end, b"soun", scale)
+    media = sum(stop - payload for kind, payload, stop in mp4_boxes(data, 0, len(data)) if kind == b"mdat")
     return Movie(duration / scale, b"vide" in moov, b"soun" in moov, video.samples, video.seconds,
-                 audio.samples, audio.seconds, audio.rate, video.end, audio.end, video.gap, audio.gap)
+                 audio.samples, audio.seconds, audio.rate, video.end, audio.end, video.gap, audio.gap, media)
 
 
 def active_capture_frames(text: str) -> int | None:
@@ -706,6 +732,29 @@ def log_after(text: str, marker: str) -> str | None:
 def frames_produced(dump: str) -> int:
     """`dumpsys media.camera`: the frames the camera service counts for all the streams it lists."""
     return sum(int(count) for count in re.findall(r"Frames produced: (\d+)", dump))
+
+
+STREAM_HEADER = re.compile(r"^\s*Stream\[(\d+)\]:")
+
+
+def preview_stream_frames(dump: str, package: str = CAMERA_PACKAGE) -> dict[int, int]:
+    """`dumpsys media.camera`: the frames produced by each output stream whose consumer is the application's own preview
+    surface (a `SurfaceView[<package>/...]`), by stream id. Only that stream shows that the viewfinder is live: another
+    stream (a still, an encoder's surface) may run while the preview stands still."""
+    consumers: dict[int, str] = {}
+    counts: dict[int, int] = {}
+    current: int | None = None
+    for line in dump.splitlines():
+        if (header := STREAM_HEADER.match(line)):
+            current = int(header[1])
+        if current is None:
+            continue
+        if (consumer := re.search(r"Consumer name: (.*)$", line)):
+            consumers[current] = consumer[1]
+        if (produced := re.search(r"Frames produced: (\d+)", line)):
+            counts[current] = int(produced[1])
+    return {stream: counts[stream] for stream, consumer in consumers.items()
+            if f"SurfaceView[{package}" in consumer and stream in counts}
 
 
 SESSION_LINE = re.compile(r"^Camera: memory: capture session (closed|opened)\b", re.MULTILINE)
@@ -1145,7 +1194,7 @@ class SessionCapture:
 class Guest:
     def __init__(self, adb: str, serial: str, process: subprocess.Popen, log: pathlib.Path,
                  private: pathlib.Path, hold_directory: pathlib.Path | None = None,
-                 hardware_input: bool = False) -> None:
+                 control: pathlib.Path | None = None, hardware_input: bool = False) -> None:
         self.adb = adb
         self.serial = serial
         self.process = process
@@ -1153,17 +1202,44 @@ class Guest:
         self.private = private
         # Where the launcher's audio hold library (--audio-hold-library) takes its requests; None without one.
         self.hold_directory = hold_directory
+        # The time (a time.monotonic() value) by which every command must have finished, while a step holds one (`bounded`).
+        self.limit: float | None = None
+        # The synthetic camera's control pipe (the video-lost mode); None without one.
+        self.control = control
         # Whether the launcher gave the guest the side keys (--hardware-input): the device that reports the lens cover.
         self.hardware_input = hardware_input
         # The continuous capture of the guest's main and events logs, once the runner has started it.
         self.capture: SessionCapture | None = None
 
+    def camera_control(self, line: str) -> None:
+        """Writes one line to the synthetic camera's control pipe: `interrupt background`, `interrupt`, `resume`."""
+        if self.control is None:
+            raise Failure("no control pipe: the run was not started in the video-lost mode")
+        wait_for("the synthetic camera's control pipe", COMMAND_SECONDS,
+                 lambda: None if self.control.exists() else f"{self.control} does not exist", self)
+        descriptor = os.open(self.control, os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            os.write(descriptor, f"{line}\n".encode())
+        finally:
+            os.close(descriptor)
+
     def adb_run(self, *arguments: str, timeout: float = COMMAND_SECONDS,
                 binary: bool = False) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [self.adb, "-s", self.serial, *arguments], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE if binary else subprocess.STDOUT, text=not binary, timeout=timeout,
-            check=False)
+        if self.limit is not None:
+            # A step with a deadline: no command starts after it, and none runs past it.
+            left = self.limit - time.monotonic()
+            if left <= 0:
+                raise Failure(f"the deadline passed before 'adb {' '.join(arguments)[:80]}' ran")
+            timeout = min(timeout, left)
+        try:
+            return subprocess.run(
+                [self.adb, "-s", self.serial, *arguments], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE if binary else subprocess.STDOUT, text=not binary, timeout=timeout,
+                check=False)
+        except subprocess.TimeoutExpired as problem:
+            if self.limit is None:
+                raise
+            raise Failure(f"'adb {' '.join(arguments)[:80]}' did not finish by the step's deadline") from problem
 
     def shell(self, command: str, timeout: float = COMMAND_SECONDS) -> str:
         result = self.adb_run("shell", command, timeout=timeout)
@@ -1305,8 +1381,9 @@ class Guest:
 
 
 def wait_for(description: str, seconds: float, check: Callable[[], str | None],
-             guest: Guest | None = None) -> None:
-    """Calls `check` until it returns None (done); its last message is the failure."""
+             guest: Guest | None = None, strict: bool = False) -> None:
+    """Calls `check` until it returns None (done); its last message is the failure. With `strict` the limit holds
+    through the end of each check: one that returns after it does not pass."""
     deadline = time.monotonic() + seconds
     message: str | None = "not checked"
     while time.monotonic() < deadline:
@@ -1314,9 +1391,23 @@ def wait_for(description: str, seconds: float, check: Callable[[], str | None],
             guest.alive()
         message = check()
         if message is None:
+            if strict and time.monotonic() > deadline:
+                raise Failure(f"{description}: the check finished {time.monotonic() - deadline:.1f} s after the limit "
+                              f"of {seconds:.0f} s")
             return
         time.sleep(1.0)
     raise Failure(f"{description}: {message} (after {seconds:.0f} s)")
+
+
+@contextlib.contextmanager
+def bounded(guest, deadline: float):
+    """While the block runs, no command of the guest starts after `deadline` (a time.monotonic() value) or runs past it."""
+    previous = getattr(guest, "limit", None)
+    guest.limit = deadline if previous is None else min(previous, deadline)
+    try:
+        yield
+    finally:
+        guest.limit = previous
 
 
 # ---- The checks.
@@ -2035,11 +2126,15 @@ def check_still_keeps_preview(guest: Guest, plan: Plan) -> None:
           "(no capture session closed)")
 
 
-def wait_for_chart(guest: Guest, camera_id: str, what: str) -> None:
-    """The application holds camera `camera_id` and its preview is the chart."""
-    wait_for(f"the camera application holding camera {camera_id} ({what})", PREVIEW_SECONDS,
+def wait_for_camera_held(guest: Guest, camera_id: str, what: str, seconds: float, strict: bool = False) -> None:
+    """The application holds camera `camera_id`, within `seconds`."""
+    wait_for(f"the camera application holding camera {camera_id} ({what})", seconds,
              lambda: None if camera_id in active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE)
-             else f"it holds {sorted(active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE))}", guest)
+             else f"it holds {sorted(active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE))}", guest, strict)
+
+
+def wait_for_picture(guest: Guest, what: str, seconds: float, strict: bool = False) -> None:
+    """The screen shows the chart (a picture taken now), within `seconds`."""
     seen: list[tuple[float, float]] = []
 
     def previewing() -> str | None:
@@ -2048,8 +2143,48 @@ def wait_for_chart(guest: Guest, camera_id: str, what: str) -> None:
         return None if deviation >= CHART_MINIMUM_DEVIATION else \
             f"the preview is flat (mean {mean:.1f}, deviation {deviation:.1f})"
 
-    wait_for(f"the {what} preview showing the chart", PREVIEW_SECONDS, previewing, guest)
+    wait_for(f"the {what} preview showing the chart", seconds, previewing, guest, strict)
     print(f"  {what} preview: mean {seen[-1][0]:.1f}, deviation {seen[-1][1]:.1f}")
+
+
+def wait_for_chart(guest: Guest, camera_id: str, what: str, seconds: float | None = None,
+                   deadline: float | None = None) -> None:
+    """The application holds camera `camera_id` and its preview is the chart, within `seconds` (PREVIEW_SECONDS) for each
+    of the two; with `deadline` (an absolute time.monotonic() value) both share what is left of it."""
+    seconds = PREVIEW_SECONDS if seconds is None else seconds
+
+    def left() -> float:
+        return seconds if deadline is None else max(0.0, deadline - time.monotonic())
+
+    wait_for_camera_held(guest, camera_id, what, left())
+    wait_for_picture(guest, what, left())
+
+
+def wait_for_fresh_preview(guest: Guest, camera_id: str, what: str, deadline: float) -> None:
+    """The viewfinder is live again by `deadline` (an absolute time.monotonic() value), in three stages that share it: the
+    application holds the camera; the stream of ITS preview surface produces a new frame (that stream's own counter rises
+    between two reads taken after the return: another stream running proves nothing, and the old picture stays on the
+    screen when the preview stops); then a picture taken now shows the chart. Every command is bounded by the time left,
+    and a check that ends after the deadline does not pass."""
+    def left() -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    with bounded(guest, deadline):
+        wait_for_camera_held(guest, camera_id, what, left(), strict=True)
+        seen: list[dict[int, int]] = []
+
+        def producing() -> str | None:
+            counts = preview_stream_frames(guest.media_camera())
+            previous = seen[-1] if seen else {}
+            seen.append(counts)
+            if not counts:
+                return "the camera service lists no stream of the application's preview surface"
+            if any(stream in previous and count > previous[stream] for stream, count in counts.items()):
+                return None
+            return f"the preview stream's frame counters stand at {counts}"
+
+        wait_for(f"live capture: a new frame of the {what} preview stream", left(), producing, guest, strict=True)
+        wait_for_picture(guest, what, left(), strict=True)
 
 
 def record_video(guest: Guest, plan: Plan, hold_seconds: float, disturb: Callable[[Guest], None] | None = None,
@@ -2179,6 +2314,147 @@ def check_video(guest: Guest, plan: Plan) -> None:
         raise Failure(f"{path} averages {movie.fps:.1f} fps ({movie.frames} frames over {movie.video_seconds:.2f} s), "
                       f"below {VIDEO_MINIMUM_FPS:.0f}: the preview and the recording do not share one exposure")
     check_audio(path, movie)
+
+
+def start_recording(guest: Guest, plan: Plan, restart_application: bool) -> None:
+    """The video mode of the application on the profile's first camera is in front with the chart in its preview, and
+    the shutter key has started a recording. With `restart_application` the application is stopped first."""
+    if restart_application:
+        guest.shell(f"am force-stop {CAMERA_PACKAGE}")
+    start_camera_application(guest, VIDEO_ACTION, front=PROFILE_CAMERAS[plan.profile][0] == "front")
+    wait_for_chart(guest, plan.camera_ids[0], "video")
+    guest.shell(f"input keyevent {CAMERA_KEYCODE}")
+
+
+def new_movie(guest: Guest, before: dict[str, dict[str, str]], seconds: float) -> dict[str, str]:
+    """MediaStore's row of the movie that appeared since `before` was read, waiting at most `seconds`."""
+    found: list[dict[str, str]] = []
+
+    def recorded() -> str | None:
+        rows, query = guest.videos()
+        added = [row for _, row in sorted(rows.items()) if row["_id"] not in before]
+        if not added:
+            return f"MediaStore lists no new movie (query: {query.strip()[-200:]!r})"
+        found[:] = added
+        return None
+
+    wait_for("a movie in MediaStore", seconds, recorded, guest)
+    time.sleep(3)  # the file is finished when the application has closed it
+    return found[-1]
+
+
+def check_video_lost(guest: Guest, plan: Plan) -> None:
+    """The host ends the video of a camera that records when the application leaves the foreground: the recording ends
+    and its clip, which must hold encoded video samples, is saved without a second key press, the application stays in
+    front, and a recording works again. That last step STARTS THE APPLICATION AGAIN (a new activity start after the
+    return): it shows that the camera can be opened again, not that the viewfinder recovered by itself; the viewfinder
+    cases that follow show that. Needs an image whose HAL reports the loss (route p0030)."""
+    before, _ = guest.videos()
+    start_recording(guest, plan, restart_application=True)
+    time.sleep(LOST_HOLD_SECONDS)
+    guest.camera_control("interrupt background")
+    row = new_movie(guest, before, LOST_WAIT_SECONDS)
+    path = row.get("_data", "")
+    try:
+        movie = parse_mp4(guest.pull(path))
+    except ValueError as problem:
+        raise Failure(f"{path} is not a finished movie: {problem}") from problem
+    if not movie.video:
+        raise Failure(f"{path} has no video track")
+    require_media_payload(path, movie)
+    if not LOST_MINIMUM_SECONDS <= movie.seconds <= LOST_HOLD_SECONDS + VIDEO_MAXIMUM_SECONDS:
+        raise Failure(f"{path} lasts {movie.seconds:.2f} s; the recording ran {LOST_HOLD_SECONDS} s before the loss "
+                      f"and must last between {LOST_MINIMUM_SECONDS:g} s and the time the loss took to be noticed")
+    print(f"  the recording ended by itself: {row.get('_display_name', path)} {movie.seconds:.2f} s, {movie.frames} frames")
+    foreground = parse_foreground(guest.shell(FOREGROUND_COMMAND))
+    if not foreground.resumed.startswith(CAMERA_PACKAGE):
+        raise Failure(f"the camera application is not in front after the recording ended: {foreground.describe()}")
+    print(f"  the application stays in front: {foreground.describe()}")
+    # What the application does with its camera is its own: the open camera is reported, not required.
+    held = sorted(active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE))
+    print(f"  cameras the application holds after the loss: {held or 'none'}")
+    guest.camera_control("resume")
+    after, _ = guest.videos()
+    start_recording(guest, plan, restart_application=False)  # a new activity start: see the docstring
+    time.sleep(VIDEO_HOLD_SECONDS)
+    guest.shell(f"input keyevent {CAMERA_KEYCODE}")
+    again = new_movie(guest, after, VIDEO_SECONDS)
+    reopened = parse_mp4(guest.pull(again.get("_data", "")))
+    if not reopened.video or reopened.frames <= 0 or reopened.seconds < VIDEO_MINIMUM_SECONDS:
+        raise Failure(f"the recording after the person returned is not a movie of at least {VIDEO_MINIMUM_SECONDS:g} s "
+                      f"with encoded video samples: {reopened.seconds:.2f} s, video track {'yes' if reopened.video else 'no'}, "
+                      f"{reopened.frames} frames")
+    require_media_payload(again.get("_data", ""), reopened)
+    print(f"  the camera opened again for a new start of the application: {again.get('_display_name', '')} "
+          f"{reopened.seconds:.2f} s, {reopened.frames} frames")
+    if HAL_END_LINE not in guest.hal_log():
+        raise Failure("the camera HAL logged no end of the camera: the image lacks the HAL topic of route p0030")
+    print("  the HAL reported the end of the camera (ERROR_DEVICE)")
+    check_viewfinder_returns(guest, plan, "video")
+    check_viewfinder_returns(guest, plan, "photo")
+
+
+def require_media_payload(path: str, movie: Movie) -> None:
+    """A clip passes only with encoded video in it: its video track declares samples (the sample table) and its `mdat` boxes
+    hold the bytes they need, MINIMUM_SAMPLE_BYTES for each, not a table of counts over an empty file."""
+    if movie.frames <= 0:
+        raise Failure(f"{path} has a video track but no encoded video samples")
+    needed = movie.frames * MINIMUM_SAMPLE_BYTES
+    if movie.media_bytes < needed:
+        raise Failure(f"{path} declares {movie.frames} video samples but its media data holds {movie.media_bytes} bytes "
+                      f"(at least {needed} needed): the clip has no encoded video")
+
+
+def application_pids(guest: Guest) -> str:
+    return guest.shell(f"pidof {CAMERA_PACKAGE} || true").strip()
+
+
+def check_viewfinder_returns(guest: Guest, plan: Plan, mode: str) -> None:
+    """A viewfinder with NO recording. The application leaves the foreground and comes back; the viewfinder is live
+    again within VIEWFINDER_RECOVERY_SECONDS of the return (one deadline for the camera, the picture and the frame
+    counters) without anything restarting the application (the same process, the same window, no new activity start)
+    and with no error window. `mode` is "video" (the video mode's viewfinder, which binds an encoder surface: the HAL
+    ends the camera for it as for a recording, printed, not required) or "photo" (the photo mode's viewfinder has no
+    encoder stream: the HAL must not tell it the device is gone, it closes the camera's video streams and opens them
+    again, and the log says so)."""
+    camera = plan.camera_ids[0]
+    photo = mode == "photo"
+    label = "photo viewfinder" if photo else "video viewfinder"
+    if photo:
+        start_camera_application(guest, STILL_ACTION, front=PROFILE_CAMERAS[plan.profile][0] == "front")
+    wait_for_chart(guest, camera, label)
+    process = application_pids(guest)
+    crashes = guest.shell("logcat -d -b events | grep -a -E 'am_crash|am_anr|am_proc_died' || true")
+    log = guest.hal_log()
+    ended, reopened = log.count(HAL_END_LINE), log.count(HAL_REOPEN_LINE)
+    guest.camera_control("interrupt background")
+    time.sleep(LOST_AWAY_SECONDS)
+    log = guest.hal_log()
+    lost, reopening = log.count(HAL_END_LINE) > ended, log.count(HAL_REOPEN_LINE) > reopened
+    held = sorted(active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE))
+    print(f"  {label}: the HAL {'ended' if lost else 'did not end'} the camera and "
+          f"{'reopened' if reopening else 'did not reopen'} its video streams; the application holds {held or 'none'} while away")
+    if photo and lost:
+        raise Failure("the HAL told the photo viewfinder that the device is gone (ERROR_DEVICE): only a session with an encoder "
+                      "stream may be ended")
+    guest.camera_control("resume")
+    returned = time.monotonic()
+    deadline = returned + VIEWFINDER_RECOVERY_SECONDS
+    wait_for_fresh_preview(guest, camera, f"{label} after the return", deadline)
+    print(f"  {label}: live again {time.monotonic() - returned:.1f} s after the return (limit {VIEWFINDER_RECOVERY_SECONDS} s)")
+    if application_pids(guest) != process:
+        raise Failure(f"the application was restarted (process {process!r}, then {application_pids(guest)!r}) "
+                      "instead of showing its viewfinder again")
+    foreground = parse_foreground(guest.shell(FOREGROUND_COMMAND))
+    if not foreground.resumed.startswith(CAMERA_PACKAGE) or ERROR_WINDOW.search(foreground.focus):
+        raise Failure(f"the application does not show its viewfinder after the return: {foreground.describe()}")
+    after = guest.shell("logcat -d -b events | grep -a -E 'am_crash|am_anr|am_proc_died' || true")
+    if after != crashes:
+        raise Failure(f"the application crashed or stopped responding around the loss: {after[len(crashes):][-300:]!r}")
+    if photo and guest.hal_log().count(HAL_REOPEN_LINE) <= reopened:
+        raise Failure("the HAL logged no reopening of its video streams: the host did not end the camera's video, or the image "
+                      "lacks the HAL topic of route p0030")
+    print(f"  {label}: live again after the return, same process {process}, no error window")
 
 
 def check_audio_stall(guest: Guest, plan: Plan) -> None:
@@ -2368,6 +2644,9 @@ def run_checks(guest: Guest, plan: Plan) -> None:
     if plan.camera_ids:
         check_characteristics(guest, plan)
     print(f"  cameras {list(plan.camera_ids)} and features {sorted(plan.features)}")
+    if plan.mode == "video-lost":
+        check_video_lost(guest, plan)
+        return
     if plan.mode == "none":
         if guest.provider_pids():
             raise Failure(f"a layout without cameras runs the camera provider: {guest.provider_pids()}")
@@ -2522,11 +2801,16 @@ def start_guest(options: argparse.Namespace, plan: Plan, adb: str, private: path
         hold_directory.mkdir()
         environment["DYLD_INSERT_LIBRARIES"] = str(options.audio_hold_library.resolve())
         environment["UML_AUDIO_HOLD_DIRECTORY"] = str(hold_directory)
+    control = None
+    if plan.mode == "video-lost":
+        # The pipe is made by the camera device of the launcher, under this name.
+        control = private / "camera-control"
+        environment[CONTROL_VARIABLE] = str(control)
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
                                start_new_session=True, env=environment)
     stream.close()
     serial = f"127.0.0.1:{options.adb_port}"
-    guest = Guest(adb, serial, process, log, private, hold_directory, hardware_input=hardware_input)
+    guest = Guest(adb, serial, process, log, private, hold_directory, control, hardware_input=hardware_input)
     boot_android.wait_for_adb(adb, serial, process, options.boot_timeout)
     if not boot_android.wait_for_boot_completed(adb, serial, process, options.boot_timeout):
         raise Failure("Android did not reach sys.boot_completed")

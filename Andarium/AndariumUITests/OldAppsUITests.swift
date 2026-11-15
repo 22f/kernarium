@@ -76,7 +76,7 @@ final class OldAppsUITests: XCTestCase {
         let ask = app.alerts["Turn on for \(quoted("Pixel Knights"))?"]
         XCTAssertTrue(ask.waitForExistence(timeout: 20), "turning on asked nothing")
         XCTAssertTrue(ask.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "You can turn it off again here.")).firstMatch.exists)
-        XCTAssertFalse(ask.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "closes now")).firstMatch.exists)
+        XCTAssertFalse(ask.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "will close now")).firstMatch.exists)
         ask.buttons["Cancel"].tap()
         XCTAssertTrue(ask.waitForNonExistence(timeout: 10))
         XCTAssertEqual(value(pixel, in: app), "0")
@@ -96,7 +96,7 @@ final class OldAppsUITests: XCTestCase {
         let ask = app.alerts["Turn off for \(quoted("Rally 2011"))?"]
         XCTAssertTrue(ask.waitForExistence(timeout: 20), "turning off an open app asked nothing")
         XCTAssertTrue(
-            ask.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "\(quoted("Rally 2011")) is open and closes now.")).firstMatch.exists,
+            ask.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "\(quoted("Rally 2011")) is open and will close now.")).firstMatch.exists,
             "the alert does not say the app closes")
         ask.buttons["Turn off"].tap()
         XCTAssertTrue(waitForValue("0", of: rally, in: app), "the switch did not turn off")
