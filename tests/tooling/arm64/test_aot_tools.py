@@ -417,8 +417,22 @@ class SimdStructureTests(unittest.TestCase):
             else:
                 self.assertIsNone(cause, name)
 
+    def test_the_warm_rows_do_not_step(self) -> None:
+        elf = elf64.Elf(fixture.build())
+        library = rewrite.Library(
+            0, "/aot-test/libaotfixture.so", elf,
+            a64decode.Decoder(a64decode.DEFAULT_TABLE),
+            rewrite.read_layout(rewrite.LAYOUT_HEADER))
+        library.build([1] * ((library.table_end - library.table_base) // 4096))
+        causes = dict(library.step_list)
+        for index, (name, _) in enumerate(fixture.simd_warm_rows()):
+            base = fixture.SIMD_WARM_AT + index * fixture.SIMD_WARM_STEP
+            self.assertIsNone(causes.get(base), name)
+            self.assertIsNone(causes.get(base + 4), name)
+
     def test_the_rows_fit_between_the_mops_rows_and_the_edges(self) -> None:
-        end = fixture.SIMD_AT + fixture.SIMD_STEP * len(fixture.simd_rows())
+        end = fixture.SIMD_WARM_AT + fixture.SIMD_WARM_STEP * len(
+            fixture.simd_warm_rows())
         self.assertLessEqual(end, min(fixture.EDGES.values()))
         self.assertGreaterEqual(fixture.SIMD_AT,
                                 fixture.MOPS_AT + fixture.MOPS_STEP *
@@ -453,6 +467,24 @@ class CensusTests(unittest.TestCase):
         self.assertEqual(census["stub.mm"], 2 * 2 * 4)
         self.assertEqual(census["insn"], 4)
         self.assertEqual(census["table"], 4096)  # one text page of entries
+
+    def test_a_function_that_falls_off_its_end_tags_the_branch(self) -> None:
+        library = library_of([self.ADD, self.ADD], [(0, 8)])
+        unit = unit_words(library)
+        self.assertEqual(sum(library.stats.census.values()), 4 * len(unit))
+        self.assertEqual(library.stats.census["other"], 0)
+
+    def test_nothing_is_untagged_in_a_whole_library(self) -> None:
+        elf = elf64.Elf(fixture.build())
+        library = rewrite.Library(
+            0, "/aot-test/libaotfixture.so", elf,
+            a64decode.Decoder(a64decode.DEFAULT_TABLE),
+            rewrite.read_layout(rewrite.LAYOUT_HEADER))
+        unit = library.build(
+            [1] * ((library.table_end - library.table_base) // 4096))["unit"]
+        census = library.stats.census
+        self.assertEqual(sum(census.values()), len(unit))
+        self.assertEqual(census["other"], 0)
 
     def test_the_stored_source_is_counted_once(self) -> None:
         library = library_of([self.ADD, RET], [(0, 8)])

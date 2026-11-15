@@ -358,7 +358,13 @@ def mops_functions() -> tuple[tuple[int, int], ...]:
 # by immediate and by register, virtual base and index registers, an SP base
 # (which steps) and the reserved words.
 SIMD_AT = TEXT + 0x1c00
-SIMD_STEP = 0x10
+SIMD_STEP = 8
+# After the one-instruction rows: a byte load from x2, the structure access
+# from x1 and a RET. The differential starts them with x2 in a page whose TLB
+# entry the load fills, and x1 in the neighbouring page.
+SIMD_WARM_AT = SIMD_AT + 0x300
+SIMD_WARM_STEP = 0x10
+LDRB_W9_X2 = 0x39400049
 
 
 def simd_multi(load: bool, q: int, opcode: int, size: int, rn: int, rt: int,
@@ -450,9 +456,24 @@ def simd_rows() -> list[tuple[str, int]]:
         ("ld1r_sp", simd_single(True, 1, 0, 6, 0, 2, 31, 0)),
         ("st1r_reserved", simd_single(False, 1, 0, 6, 0, 2, 1, 0)),
     ]
-    if SIMD_AT + SIMD_STEP * len(rows) > TEXT + 2 * PAGE:
-        raise ValueError("the SIMD rows run into the edge functions")
+    # A register list that wraps from v31 to v0.
+    rows += [
+        ("ld4_wrap_16b", simd_multi(True, 1, 0, 0, 1, 30)),
+        ("st4_wrap_16b", simd_multi(False, 1, 0, 0, 1, 30)),
+        ("ld3_wrap_i", simd_multi(True, 1, 4, 1, 1, 31, 31)),
+        ("ld4_wrap_b", simd_single(True, 0, 1, 1, 0, 0, 1, 30)),
+        ("ld4r_wrap", simd_single(True, 1, 1, 7, 0, 3, 1, 30)),
+    ]
+    if SIMD_AT + SIMD_STEP * len(rows) > SIMD_WARM_AT:
+        raise ValueError("the SIMD rows run into the warm rows")
     return rows
+
+
+def simd_warm_rows() -> list[tuple[str, int]]:
+    return [("ld4_16b", simd_multi(True, 1, 0, 0, 1, 0)),
+            ("st4_16b", simd_multi(False, 1, 0, 0, 1, 0)),
+            ("ld1_16b", simd_multi(True, 1, 7, 0, 1, 0)),
+            ("st1_4x16b", simd_multi(False, 1, 2, 0, 1, 0))]
 
 
 def simd_code() -> dict[int, int]:
@@ -461,12 +482,19 @@ def simd_code() -> dict[int, int]:
         base = SIMD_AT + index * SIMD_STEP
         code[base] = word
         code[base + 4] = RET
+    for index, (_, word) in enumerate(simd_warm_rows()):
+        base = SIMD_WARM_AT + index * SIMD_WARM_STEP
+        code[base] = LDRB_W9_X2
+        code[base + 4] = word
+        code[base + 8] = RET
     return code
 
 
 def simd_functions() -> tuple[tuple[int, int], ...]:
     return tuple((SIMD_AT + index * SIMD_STEP, 8)
-                 for index in range(len(simd_rows())))
+                 for index in range(len(simd_rows()))) + tuple(
+        (SIMD_WARM_AT + index * SIMD_WARM_STEP, 12)
+        for index in range(len(simd_warm_rows())))
 
 
 def eh_frame() -> bytes:

@@ -485,7 +485,9 @@ class Library:
             last_falls_through = self._emit_instruction(offset, word)
         if last_falls_through:
             self.cur = function.end - 4
+            before = len(asm._w)
             asm.b(self.goto_label(function.end))
+            self.tag("branch", before)
         before = len(asm._w)
         self._emit_stubs(function)
         self.stats.words["stubs"] += len(asm._w) - before

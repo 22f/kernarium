@@ -408,14 +408,26 @@ struct Fault final {
 	bool alignment;
 	std::uint32_t syndrome;
 	/* The state the fault leaves, which the resumed run then builds on: the
-	 * integer registers, the stack pointer, the flags and the arena (as a
-	 * hash). A partial copy or set must leave exactly the engine's. */
+	 * integer registers, the stack pointer, the flags, all vector registers
+	 * (as a hash) and the arena (as a hash). A partial copy or set, or a
+	 * vector access that changed a register before its fault, must leave
+	 * exactly the engine's: the resumed run would repair it. */
 	std::array<std::uint64_t, 31> registers;
 	std::uint64_t sp;
 	std::uint32_t nzcv;
+	std::uint64_t vectors;
 	std::uint64_t memory;
 	bool operator==(const Fault &) const = default;
 };
+
+[[nodiscard]] std::uint64_t hash_of(const void *data, std::size_t size)
+{
+	std::uint64_t hash = 0xcbf29ce484222325ULL;
+	const auto *bytes = static_cast<const unsigned char *>(data);
+	for (std::size_t i = 0; i < size; ++i)
+		hash = (hash ^ bytes[i]) * 0x100000001b3ULL;
+	return hash;
+}
 
 [[nodiscard]] std::uint64_t hash_bytes(const std::vector<std::byte> &bytes)
 {
@@ -540,6 +552,7 @@ struct BlockLog final {
 			static_cast<std::uint32_t>(executor.fault_access()),
 			executor.fault_alignment(),
 			executor.floating_point_syndrome(), {}, c.cpu.sp, c.cpu.nzcv,
+			hash_of(c.cpu.vectors.data(), sizeof(c.cpu.vectors)),
 			hash_bytes(arena.snapshot())};
 		for (std::size_t i = 0; i < fault.registers.size(); ++i)
 			fault.registers[i] = c.cpu.registers[i];
@@ -622,7 +635,7 @@ void describe(const char *what, const Case &c)
 				continue;
 			std::fprintf(stderr, "  fault %zu: pc %llx/%llx address %llx/%llx "
 				"access %u/%u alignment %d/%d syndrome %x/%x nzcv %x/%x "
-				"sp %llx/%llx memory %s\n", i,
+				"sp %llx/%llx vectors %s memory %s\n", i,
 				static_cast<unsigned long long>(x.pc),
 				static_cast<unsigned long long>(y.pc),
 				static_cast<unsigned long long>(x.address),
@@ -631,6 +644,7 @@ void describe(const char *what, const Case &c)
 				x.syndrome, y.syndrome, x.nzcv, y.nzcv,
 				static_cast<unsigned long long>(x.sp),
 				static_cast<unsigned long long>(y.sp),
+				x.vectors == y.vectors ? "same" : "DIFFERENT",
 				x.memory == y.memory ? "same" : "DIFFERENT");
 			for (std::size_t r = 0; r < x.registers.size(); ++r)
 				if (x.registers[r] != y.registers[r])
@@ -2702,8 +2716,20 @@ enum MopsRow : std::size_t {
 	return row == row_set || row == row_set_high || row == row_set_zero;
 }
 
+/* tools/aot/fixture.py (SIMD_WARM_AT): byte load from x2, then the structure
+ * access from x1. */
+constexpr std::uint64_t simd_warm_at = 0x2f00, simd_warm_step = 0x10;
+constexpr std::size_t simd_warm_rows = 4;
+
 struct MopsRun final {
 	std::size_t compared{}, faulted{};
+};
+
+/* Where in the row a start is made (0 the prologue, 8 the epilogue) and, if
+ * set, the flags it starts with. */
+struct MopsStart final {
+	std::uint64_t at{0};
+	std::optional<std::uint32_t> nzcv{};
 };
 
 /* One start of a row: destination, source and count, and the kind of each
@@ -2713,12 +2739,14 @@ struct MopsRun final {
 void mops_row(Fixture &ref, Fixture &got, SplitMix &rng, MopsRun &run,
 	std::size_t row, std::uint64_t destination, std::uint64_t source,
 	std::uint64_t count, const std::vector<std::uint8_t> &kinds,
-	std::uint64_t fill = 0x1234'5678'90ab'cdefULL)
+	std::uint64_t fill = 0x1234'5678'90ab'cdefULL, MopsStart start = {})
 {
 	const auto bias = Fixture::bias;
-	auto c = make_case_from_seed(rng.next(), bias, mops_at + row * mops_step,
-		true, true, arena_base(bias));
+	auto c = make_case_from_seed(rng.next(), bias,
+		mops_at + row * mops_step + start.at, true, true, arena_base(bias));
 	enterable(c);
+	if (start.nzcv)
+		c.cpu.nzcv = *start.nzcv;
 	c.kinds = kinds;
 	const bool high = row == row_cpyf_high || row == row_cpy_high ||
 		row == row_set_high;
@@ -2733,8 +2761,10 @@ void mops_row(Fixture &ref, Fixture &got, SplitMix &rng, MopsRun &run,
 	const auto have = drive(got.env, got.arena, c, aot_max_blocks);
 	aot::set_enabled(false);
 	if (!want.done() || !same(want, have, c)) {
-		std::fprintf(stderr, "  memory copy/set row %zu: destination %llx "
-			"source %llx count %llx\n", row,
+		std::fprintf(stderr, "  memory copy/set row %zu at +%llu flags %x: "
+			"destination %llx source %llx count %llx\n", row,
+			static_cast<unsigned long long>(start.at),
+			start.nzcv ? *start.nzcv : 0xffU,
 			static_cast<unsigned long long>(destination),
 			static_cast<unsigned long long>(source),
 			static_cast<unsigned long long>(count));
@@ -2742,6 +2772,20 @@ void mops_row(Fixture &ref, Fixture &got, SplitMix &rng, MopsRun &run,
 	}
 	++run.compared;
 	run.faulted += want.faults.empty() ? 0 : 1;
+}
+
+/* The engine alone and then rewritten code, both from this case. */
+void compare_case(Fixture &ref, Fixture &got, const Case &c, const char *what)
+{
+	aot::set_enabled(false);
+	const auto want = drive(ref.env, ref.arena, c, max_blocks);
+	aot::set_enabled(true);
+	const auto have = drive(got.env, got.arena, c, aot_max_blocks);
+	aot::set_enabled(false);
+	if (!want.done() || !same(want, have, c)) {
+		std::fprintf(stderr, "  %s\n", what);
+		require(false);
+	}
 }
 
 void memory_copy_and_set_match_the_engine(const LibraryImage &image)
@@ -2906,6 +2950,105 @@ void memory_copy_and_set_match_the_engine(const LibraryImage &image)
 	}
 }
 
+/* A signal handler can leave a copy in the middle of its epilogue with the
+ * flags or the count edited, so the stage is entered in states the prologue
+ * never formats: the flags clear with bytes left (an exception), N set on a
+ * forward copy (ignored), a count above the limit. The engine decides each;
+ * rewritten code must agree, including the exception syndrome. */
+void memory_copy_and_set_started_at_the_epilogue(const LibraryImage &image)
+{
+	constexpr std::uint32_t flag_n = 0x8000'0000U, flag_z = 0x4000'0000U,
+		flag_c = 0x2000'0000U, flag_v = 0x1000'0000U;
+	constexpr std::uint64_t copy_limit = 0x007f'ffff'ffff'ffffULL,
+		set_limit = 0x7fff'ffff'ffff'ffffULL;
+	const auto bias = Fixture::bias;
+	Fixture ref{4611, image}, got{4612, image};
+	SplitMix rng{37};
+	MopsRun run;
+	aot::reset_stats();
+	const auto base = arena_base(bias);
+	const auto page_at = [&](std::size_t page) {
+		return base + page * page_bytes;
+	};
+	const std::vector<std::uint8_t> plain(arena_pages + stack_pages, 2);
+	auto broken = plain;
+	broken[5] = 0;
+	const std::uint32_t flags[] = {0, flag_c, flag_n | flag_c,
+		flag_z | flag_c, flag_v | flag_c, flag_n, flag_z,
+		flag_n | flag_z | flag_c | flag_v};
+	for (std::size_t row = 0; row < mops_rows; ++row) {
+		const auto limit = mops_is_set(row) ? set_limit : copy_limit;
+		const std::uint64_t counts[] = {0, 1, 64, 65, 4097, limit,
+			limit + 1, ~0ULL};
+		for (const auto nzcv : flags)
+			for (const auto n : counts) {
+				const MopsStart start{8, nzcv};
+				/* Inside one page each. */
+				mops_row(ref, got, rng, run, row, page_at(4) + 0x300,
+					page_at(2) + 0x100, n, plain, 0x1234, start);
+				/* The destination ends in an unmapped page. */
+				mops_row(ref, got, rng, run, row, page_at(5) - 20,
+					page_at(2) + 0x40, n, broken, 0x1234, start);
+				/* The source below an overlapping destination. */
+				mops_row(ref, got, rng, run, row, page_at(3) + 0x410,
+					page_at(3) + 0x400, n, plain, 0x1234, start);
+			}
+	}
+	const auto st = aot::stats();
+	std::fprintf(stderr, "epilogue starts: %zu compared, %zu faulted; "
+		"enters %llu steps %llu\n", run.compared, run.faulted,
+		static_cast<unsigned long long>(st.enters),
+		static_cast<unsigned long long>(st.steps));
+	require(run.compared > 1000);
+	require(run.faulted > 100);
+	require(st.enters > run.compared / 2);
+}
+
+/* Advanced SIMD structure accesses that span two pages, with the TLB entry
+ * of one of them already filled by an earlier byte load: the first page
+ * unmapped and the last cached, and the reverse, for loads and stores, at
+ * every split of the access. */
+void structure_accesses_over_a_boundary_match_the_engine(
+	const LibraryImage &image)
+{
+	const auto bias = Fixture::bias;
+	Fixture ref{4621, image}, got{4622, image};
+	SplitMix rng{43};
+	const auto base = arena_base(bias);
+	const auto page_at = [&](std::size_t page) {
+		return base + page * page_bytes;
+	};
+	std::size_t compared = 0;
+	aot::reset_stats();
+	for (std::size_t row = 0; row < simd_warm_rows; ++row)
+		for (const std::uint64_t lead : {1ULL, 8ULL, 15ULL, 16ULL, 17ULL,
+		     32ULL, 48ULL, 63ULL, 64ULL})
+			for (const std::uint8_t first : {0, 1, 2})
+				for (const std::uint8_t last : {0, 1, 2})
+					for (const bool cache_first : {false, true})
+						for (const std::uint64_t tag : {0ULL, 0x5aULL << 56}) {
+							auto c = make_case_from_seed(rng.next(), bias,
+								simd_warm_at + row * simd_warm_step, true,
+								true, base);
+							enterable(c);
+							c.kinds.assign(arena_pages + stack_pages, 2);
+							c.kinds[5] = first;
+							c.kinds[6] = last;
+							c.cpu.registers[1] = (page_at(6) - lead) | tag;
+							c.cpu.registers[2] = cache_first ?
+								page_at(5) + 0x10 : page_at(6) + 0x20;
+							compare_case(ref, got, c,
+								"structure access over a boundary");
+							++compared;
+						}
+	const auto st = aot::stats();
+	std::fprintf(stderr, "structure accesses over a boundary: %zu compared; "
+		"enters %llu steps %llu\n", compared,
+		static_cast<unsigned long long>(st.enters),
+		static_cast<unsigned long long>(st.steps));
+	require(st.enters > compared / 2);
+}
+
 /* A function that retires a handful of instructions costs more to enter than
  * the engine takes to run it: after two such entries in a row the engine runs
  * it, and rewritten code is entered again one time in 64. */
@@ -2939,63 +3082,234 @@ void short_entries_are_left_to_the_engine(const LibraryImage &image)
 	require(st.refusals[4] > 100);
 }
 
-/* The guest kernel's threads run the executor on a 64 KiB stack: nothing on
- * the way into rewritten code may need much of it (a 64 KiB temporary in the
- * executor killed the first boot of a guest). The stack is the last 64 KiB
- * of a mapping whose first megabyte is inaccessible, so an overflow always
- * faults instead of landing in a neighbouring mapping. */
-void rewritten_code_is_entered_on_the_kernels_stack(const LibraryImage &image)
+/* The history the engine keeps for admission (the address a stepped
+ * instruction faulted at, and the addresses whose entries were short) is a
+ * hint keyed by the address alone. Nothing resets it when the text under the
+ * address changes, a mapping goes or the executor runs in another address
+ * space, so the rows below warm it without ever toggling diagnostics (which
+ * resets it) and then change each of those: the run must be the engine's,
+ * and entering must resume once the text is the framework's again. */
+void admission_history_survives_changes_as_a_hint_only(
+	const LibraryImage &image)
 {
 	const auto bias = Fixture::bias;
-	Fixture got{4801, image};
-	SplitMix rng{41};
-	auto c = make_case_from_seed(rng.next(), bias,
-		mops_at + row_cpyf * mops_step, true, true, arena_base(bias));
+	const auto base = arena_base(bias);
+	const auto row_pc = mops_at + row_cpyf * mops_step;
+	const auto changed_at = row_pc + 8;
+	constexpr std::uint32_t nop = 0xd503201fU;
+	SplitMix rng{53};
+	auto c = make_case_from_seed(rng.next(), bias, row_pc, true, true, base);
 	enterable(c);
 	c.kinds.assign(arena_pages + stack_pages, 2);
-	for (std::size_t i = 0; i < got.arena.total(); ++i)
-		got.arena.set_kind(i, c.kinds[i]);
-	SplitMix fill{c.seed};
-	got.arena.fill(fill);
-	auto cpu = std::make_unique<arm64::CpuState>(c.cpu);
-	cpu->pc = bias + c.pc_offset;
-	struct Job final {
-		Fixture *fixture;
-		arm64::CpuState *cpu;
-		std::size_t ran{};
-	} job{&got, cpu.get()};
-	aot::set_enabled(true);
+	c.cpu.registers[0] = base + 4 * page_bytes + 0x300;
+	c.cpu.registers[1] = base + 2 * page_bytes + 0x100;
+	c.cpu.registers[2] = 16;
+	std::uint32_t original;
+	std::memcpy(&original, &image.bytes[changed_at], 4);
+	LibraryImage changed = image;
+	std::memcpy(&changed.bytes[changed_at], &nop, 4);
+	/* What the engine does with each text, computed before AOT is on. */
+	aot::set_enabled(false);
+	Fixture ref_original{4901, image}, ref_changed{4902, changed};
+	const auto want_original = drive(ref_original.env, ref_original.arena, c,
+		max_blocks);
+	const auto want_changed = drive(ref_changed.env, ref_changed.arena, c,
+		max_blocks);
+	require(want_original.done() && want_changed.done());
+	require(!identical(want_original, want_changed));
+	/* The page that holds the row is not mapped at all. */
+	const std::size_t row_page = row_pc / page_bytes;
+	Environment hole_ref_env{4903, bias, image, row_page};
+	Arena hole_ref_arena{4903, base};
+	const auto want_hole = drive(hole_ref_env, hole_ref_arena, c, max_blocks);
+	require(want_hole.done());
+	require(!identical(want_original, want_hole));
+
+	Fixture got{4904, image};
+	Fixture other{4905, changed};
+	Environment hole_env{4906, bias, image, row_page};
+	Arena hole_arena{4906, base};
 	aot::reset_stats();
+	aot::set_enabled(true);
+	const auto run = [&](Environment &env, Arena &arena,
+	                     const Result &want, std::size_t times,
+	                     const char *what) {
+		for (std::size_t i = 0; i < times; ++i) {
+			/* The executor is got's in every row; the address space is
+			 * the one named. */
+			const auto have = drive_on(got.env.executor, env.memory,
+				env.generation, env.bias, arena, c, aot_max_blocks);
+			if (!same(want, have, c)) {
+				std::fprintf(stderr, "  %s, run %zu\n", what, i);
+				require(false);
+			}
+		}
+	};
+	/* The change is published in got's own address space by name: the
+	 * address space the publication reaches by default is the one the
+	 * thread touched last, which is not got's here. */
+	const auto publish = [&](std::uint32_t word) {
+		got.env.backing.put32(changed_at, word);
+		require(darwin_uml_static_vm_invalidate_code_generation(
+			got.env.generation, got.env.bias + changed_at, 4) == 0);
+	};
+	/* The history is warm: the entries are refused and the verdicts live. */
+	run(got.env, got.arena, want_original, 200, "warming");
+	const auto warm = aot::stats();
+	require(warm.enters >= 2);
+	require(warm.refusals[4] > 100);
+	/* The text under the address changes (and is published). A refused entry
+	 * is the engine's; the one in 64 that is tried finds the page changed. */
+	publish(nop);
+	run(got.env, got.arena, want_changed, 200, "text changed");
+	const auto after_change = aot::stats();
+	require(after_change.refusals[4] > warm.refusals[4]);
+	/* The bytes are back: rewritten code is entered again. */
+	publish(original);
+	run(got.env, got.arena, want_original, 200, "text restored");
+	require(aot::stats().enters > after_change.enters);
+	/* Another address space whose text differs at the address. */
+	const auto before_other = aot::stats();
+	run(other.env, other.arena, want_changed, 200, "other address space");
+	require(aot::stats().refusals[4] > before_other.refusals[4]);
+	/* Another address space in which the page is not mapped. */
+	run(hole_env, hole_arena, want_hole, 200, "unmapped text");
+	/* And back in the first one. */
+	run(got.env, got.arena, want_original, 200, "first address space again");
+	aot::set_enabled(false);
+	const auto st = aot::stats();
+	std::fprintf(stderr, "admission history: enters %llu, left to the "
+		"engine %llu\n", static_cast<unsigned long long>(st.enters),
+		static_cast<unsigned long long>(st.refusals[4]));
+	require(st.poisoned == 0);
+}
+
+/* The guest kernel's threads run the executor on a 64 KiB stack, with its own
+ * frames and a signal frame above ours: nothing on the way into rewritten
+ * code may need much of it (a 64 KiB temporary in the executor killed the
+ * first boot of a guest). The scenarios below run on the last 64 KiB of a
+ * mapping whose first megabyte is inaccessible, painted beforehand, so an
+ * overflow faults and the high-water mark is measured: a first entry (the
+ * verification of a page and a refill), a native copy, the host routine
+ * for a longer one, a fault that is resolved and resumed, a step the
+ * engine takes (an exception), and structure accesses that span a
+ * boundary. */
+void rewritten_code_stays_within_a_stack_budget(const LibraryImage &image)
+{
 	constexpr std::size_t stack_bytes = 64 * 1024;
 	constexpr std::size_t moat_bytes = 1024 * 1024;
-	void *const mapping = mmap(nullptr, moat_bytes + stack_bytes,
-		PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-	require(mapping != MAP_FAILED);
-	require(mprotect(mapping, moat_bytes, PROT_NONE) == 0);
-	pthread_attr_t attributes;
-	require(pthread_attr_init(&attributes) == 0);
-	require(pthread_attr_setstack(&attributes,
-		static_cast<char *>(mapping) + moat_bytes, stack_bytes) == 0);
-	pthread_t thread;
-	require(pthread_create(&thread, &attributes, [](void *argument) -> void * {
-		auto *work = static_cast<Job *>(argument);
-		while (work->ran < 8) {
-			++work->ran;
-			const auto out = run_selected(work->fixture->env.executor,
-				work->fixture->env.memory, work->fixture->env.generation,
-				*work->cpu);
-			if (out.event != EngineEvent::continued &&
-			    out.event != EngineEvent::interrupt)
-				break;
-		}
-		return nullptr;
-	}, &job) == 0);
-	require(pthread_join(thread, nullptr) == 0);
-	pthread_attr_destroy(&attributes);
-	require(munmap(mapping, moat_bytes + stack_bytes) == 0);
+	/* What the executor, the harness and the host routines may use beyond
+	 * the thread's own start-up. */
+	constexpr std::size_t budget = 16 * 1024;
+	const auto bias = Fixture::bias;
+	const auto base = arena_base(bias);
+	const auto page_at = [&](std::size_t page) {
+		return base + page * page_bytes;
+	};
+	struct Scenario final {
+		std::unique_ptr<Fixture> fixture;
+		Case c;
+	};
+	std::vector<Scenario> scenarios;
+	unsigned long generation = 4800;
+	SplitMix rng{47};
+	const auto add = [&](std::uint64_t pc_offset) -> Case & {
+		scenarios.push_back({std::make_unique<Fixture>(++generation, image),
+			make_case_from_seed(rng.next(), bias, pc_offset, true, true,
+				base)});
+		auto &c = scenarios.back().c;
+		enterable(c);
+		c.kinds.assign(arena_pages + stack_pages, 2);
+		return c;
+	};
+	const auto row_at = [&](std::size_t row) {
+		return mops_at + row * mops_step;
+	};
+	{	/* A first entry: verification, refill, the native copy. */
+		auto &c = add(row_at(row_cpyf));
+		c.cpu.registers[0] = page_at(4) + 0x300;
+		c.cpu.registers[1] = page_at(2) + 0x100;
+		c.cpu.registers[2] = 16;
+	}
+	{	/* The host routine: a longer copy across a boundary. */
+		auto &c = add(row_at(row_cpy));
+		c.cpu.registers[0] = page_at(4) + 0xff0;
+		c.cpu.registers[1] = page_at(2) + 0x100;
+		c.cpu.registers[2] = 3 * page_bytes;
+	}
+	{	/* A fault, resolved and resumed. */
+		auto &c = add(row_at(row_cpyf));
+		c.kinds[5] = 0;
+		c.cpu.registers[0] = page_at(5) - 20;
+		c.cpu.registers[1] = page_at(2) + 0x40;
+		c.cpu.registers[2] = 5000;
+	}
+	{	/* The engine takes an exception: bytes left with the flags clear. */
+		auto &c = add(row_at(row_set) + 8);
+		c.cpu.nzcv = 0;
+		c.cpu.registers[0] = page_at(4) + 0x300;
+		c.cpu.registers[2] = 65;
+	}
+	{	/* A structure access over a boundary, first page unmapped. */
+		auto &c = add(simd_warm_at);
+		c.kinds[5] = 0;
+		c.cpu.registers[1] = page_at(6) - 16;
+		c.cpu.registers[2] = page_at(6) + 0x20;
+	}
+	{	/* A structure store over a boundary, last page read-only. */
+		auto &c = add(simd_warm_at + simd_warm_step);
+		c.kinds[6] = 1;
+		c.cpu.registers[1] = page_at(6) - 48;
+		c.cpu.registers[2] = page_at(5) + 0x20;
+	}
+	aot::set_enabled(true);
+	aot::reset_stats();
+	const auto run = [&](std::size_t count) -> std::size_t {
+		void *const mapping = mmap(nullptr, moat_bytes + stack_bytes,
+			PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+		require(mapping != MAP_FAILED);
+		require(mprotect(mapping, moat_bytes, PROT_NONE) == 0);
+		auto *const stack = static_cast<std::uint64_t *>(
+			static_cast<void *>(static_cast<char *>(mapping) + moat_bytes));
+		constexpr std::uint64_t paint = 0xa5a5'5a5a'c3c3'3c3cULL;
+		for (std::size_t i = 0; i < stack_bytes / 8; ++i)
+			stack[i] = paint;
+		struct Job final {
+			std::vector<Scenario> *scenarios;
+			std::size_t count;
+		} job{&scenarios, count};
+		pthread_attr_t attributes;
+		require(pthread_attr_init(&attributes) == 0);
+		require(pthread_attr_setstack(&attributes, stack, stack_bytes) == 0);
+		pthread_t thread;
+		require(pthread_create(&thread, &attributes, [](void *argument) -> void * {
+			auto *work = static_cast<Job *>(argument);
+			for (std::size_t i = 0; i < work->count; ++i) {
+				auto &one = (*work->scenarios)[i];
+				(void)drive(one.fixture->env, one.fixture->arena, one.c,
+					aot_max_blocks);
+			}
+			return nullptr;
+		}, &job) == 0);
+		require(pthread_join(thread, nullptr) == 0);
+		pthread_attr_destroy(&attributes);
+		std::size_t untouched = 0;
+		while (untouched < stack_bytes / 8 && stack[untouched] == paint)
+			++untouched;
+		require(munmap(mapping, moat_bytes + stack_bytes) == 0);
+		return stack_bytes - untouched * 8;
+	};
+	/* An empty run measures what the thread itself uses. The scenarios then
+	 * run one after another on a fresh stack, each on its own fixture, so
+	 * each one verifies its pages on that stack; the mark is the deepest. */
+	const auto start_up = run(0);
+	const auto high_water = run(scenarios.size());
 	aot::set_enabled(false);
-	require(job.ran > 0);
+	std::fprintf(stderr, "stack: thread start-up %zu bytes, high water "
+		"with the executor %zu bytes (budget %zu above start-up)\n",
+		start_up, high_water, budget);
 	require(aot::stats().enters > 0);
+	require(high_water <= start_up + budget);
 }
 
 } // namespace
@@ -3141,8 +3455,11 @@ int main(int argc, char **argv)
 			code_change_history_overflows(image, functions);
 			a_shootdown_reaches_a_native_loop(image);
 			memory_copy_and_set_match_the_engine(image);
+			memory_copy_and_set_started_at_the_epilogue(image);
+			structure_accesses_over_a_boundary_match_the_engine(image);
 			short_entries_are_left_to_the_engine(image);
-			rewritten_code_is_entered_on_the_kernels_stack(image);
+			admission_history_survives_changes_as_a_hint_only(image);
+			rewritten_code_stays_within_a_stack_budget(image);
 		}
 		/* The scenarios use the first library: they are about the
 		 * mechanism, not about the code. */
