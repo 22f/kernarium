@@ -89,6 +89,36 @@ def eor_reg(rd: int, rn: int, rm: int, *, shift: int = 0, amount: int = 0
             (rm << 16) | (_u(amount, 6) << 10) | (rn << 5) | rd)
 
 
+def and_ones(rd: int, rn: int, ones: int) -> int:
+    """AND (immediate), 64-bit, with the mask of `ones` low bits set."""
+    return 0x92400000 | ((_u(ones, 6) - 1) << 10) | (rn << 5) | rd
+
+
+def orr_ones(rd: int, rn: int, ones: int) -> int:
+    """ORR (immediate), 64-bit, with the mask of `ones` low bits set (a
+    register-to-register move of the mask when rn is XZR)."""
+    return 0xb2400000 | ((_u(ones, 6) - 1) << 10) | (rn << 5) | rd
+
+
+def cmp_reg(rn: int, rm: int) -> int:
+    """SUBS XZR, Rn, Rm (64-bit)."""
+    return 0xeb00001f | (rm << 16) | (rn << 5)
+
+
+def csel(rd: int, rn: int, rm: int, cond: int) -> int:
+    return 0x9a800000 | (rm << 16) | (_u(cond, 4) << 12) | (rn << 5) | rd
+
+
+def ccmp_imm(rn: int, imm5: int, nzcv: int, cond: int) -> int:
+    """CCMP (immediate), 64-bit."""
+    return (0xfa400800 | (_u(imm5, 5) << 16) | (_u(cond, 4) << 12) |
+            (rn << 5) | _u(nzcv, 4))
+
+
+def movz_hw(rd: int, imm16: int, hw: int) -> int:
+    return movz(rd, imm16, hw)
+
+
 def mov_reg(rd: int, rm: int) -> int:
     return (1 << 31) | (0b01 << 29) | (0b01010 << 24) | (rm << 16) | \
         (XZR << 5) | rd

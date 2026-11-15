@@ -526,9 +526,9 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   of each 4 KiB page merely finds which library a page belongs to. An
   instance is verified in full before its code first runs, then only for the
   pages the address space's code-change history names. A page the guest has
-  not mapped yet defers the instance and a later lookup tries again; any
-  other difference retires the instance for that address space, and the
-  engine runs the code.
+  not mapped yet defers the instance and a later lookup tries again, with
+  the pages already compared kept; any other difference retires the instance
+  for that address space, and the engine runs the code.
 - Entry: only at an instruction the framework covers, with PSTATE.SM clear,
   no FPCR trap enable and FPCR.FIZ, AH and NEP clear, no single step, no open
   exclusive monitor, top-byte ignore on (the framework probes the TLB with
@@ -538,9 +538,13 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   that can leave it misaligned ends the entry after it commits, so the
   engine's SP-alignment check applies to every SP-based access.
 - Exit: whatever the framework does not inline stops with committed state and
-  the engine runs exactly that instruction (`run_trap_enabled_instruction`)
-  before the next entry, so faults, system calls, signals and debugger
-  exits are the engine's own. The budget of an entry is 4096 instructions,
+  the engine runs exactly that instruction (a cached one-instruction
+  program, as `run_trap_enabled_instruction` builds it) before the next
+  entry, so faults, system calls, signals and debugger exits are the
+  engine's own. The executor goes on into the next entry without returning to
+  its dispatcher while nothing the dispatcher checks has changed (the
+  interrupt, mapping and code sequences, SVCR, the FPCR trap enables) and
+  fewer than 4096 instructions have run. The budget of an entry is 4096 instructions,
   the engine's chaining limit. It is charged in advance at function entries,
   every backward-branch target, call targets and points inserted so that no
   run of code from a point is longer than 32 instructions; a branch, a
@@ -555,6 +559,14 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   executor's refill once, with every register the host ABI lets a callee
   change saved, and restarts the instruction. It steps only if the host
   cannot fill the entry (a fault). The framework calls nothing else.
+- Ordered accesses, atomics and MOPS: LDAR and STLR, the LSE atomic memory
+  operations and compare-and-swap probe the entry of a naturally aligned
+  address (an unaligned one steps, so the engine decides between the LSE2
+  completion and the alignment fault) and run as the host's own instruction.
+  The prologue and main stages of CPY, CPYF and SET are inlined as the
+  engine's option B defines them (`detail/memory_copy_set.hpp`); the
+  epilogue moves the data and is the engine's. An SP base, pairs, exclusives
+  and the other members of these groups step.
 - Floating point and SIMD run under the guest FPCR/FPSR in the host registers
   the way gadget code does; the engine restores the host environment at the
   dispatcher boundary.

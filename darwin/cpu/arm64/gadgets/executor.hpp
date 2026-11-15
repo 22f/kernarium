@@ -165,6 +165,11 @@ private:
 		CpuState &cpu, ::uml::memory::StaticGuestMemory &memory,
 		unsigned long generation, std::uint64_t code_changes,
 		std::size_t &executed);
+	/* run_aot's engine step: the one instruction rewritten code left to the
+	 * engine, as run_trap_enabled_instruction runs it, from a cached
+	 * one-instruction program. Defined only with UML_AOT. */
+	[[nodiscard]] ::uml::cpu::EngineEvent step_aot(CpuState &cpu,
+		::uml::memory::StaticGuestMemory &memory, std::size_t &executed);
 
 	/* run_block for a guest SVCR other than 0, out of line so that the
 	 * mode-0 path stays as it was. */

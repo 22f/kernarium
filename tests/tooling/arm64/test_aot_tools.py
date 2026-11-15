@@ -261,7 +261,7 @@ class FixtureTests(unittest.TestCase):
 
     def test_ranges_and_plt(self) -> None:
         self.assertEqual(
-            [(f.start, f.end) for f in self.elf.functions()],
+            [(f.start, f.end) for f in self.elf.functions()][:3],
             [(0x1000, 0x1010), (0x1020, 0x1030), (0x1040, 0x1050)])
 
     def test_loop_branch_lands_inside_another_range(self) -> None:
@@ -394,6 +394,97 @@ class StackAlignmentTests(unittest.TestCase):
         ldr = 0xf94003e0  # ldr x0, [sp]
         unit = unit_words(library_of([ldr, RET], [(0, 8)]))
         self.assertNotIn(self.GUARD, unit)
+
+
+class WideningTests(unittest.TestCase):
+    """Ordered accesses, atomics and the MOPS stages that rewritten code
+    runs itself, and what is left to the engine."""
+
+    # Words an assembler produced for the encoders added with them.
+    ENCODINGS = {
+        "and x2, x1, #0x00ffffffffffffff": (A.and_ones(2, 1, 56), 0x9240dc22),
+        "orr x26, xzr, #0x7fffffffffffffff":
+            (A.orr_ones(26, 31, 63), 0xb240fbfa),
+        "orr x26, xzr, #0x007fffffffffffff":
+            (A.orr_ones(26, 31, 55), 0xb240dbfa),
+        "cmp x1, x2": (A.cmp_reg(1, 2), 0xeb02003f),
+        "csel x1, x1, x26, ls": (A.csel(1, 1, 26, 9), 0x9a9a9021),
+        "ccmp x28, #0, #4, lo": (A.ccmp_imm(28, 0, 4, 3), 0xfa403b84),
+        "ldar w3, [x28]": (fixture.ordered(True, 2, 28, 3), 0x88dfff83),
+        "stlrh w4, [x28]": (fixture.ordered(False, 1, 28, 4), 0x489fff84),
+        "ldaddal x26, x27, [x28]":
+            (fixture.amo(3, 1, 1, 26, 0, False, 28, 27), 0xf8fa039b),
+        "swplh w26, w27, [x28]":
+            (fixture.amo(1, 0, 1, 26, 0, True, 28, 27), 0x787a839b),
+        "casa x26, x27, [x28]": (fixture.cas(3, 1, 0, 26, 28, 27), 0xc8fa7f9b),
+        "casah w26, w27, [x28]":
+            (fixture.cas(1, 1, 0, 26, 28, 27), 0x48fa7f9b),
+        "cpyfp [x0]!, [x1]!, x2!": (fixture.mops("cpyf", 0, 0, 0, 2, 1),
+                                    0x19010440),
+        "cpym [x0]!, [x1]!, x2!": (fixture.mops("cpy", 1, 0, 0, 2, 1),
+                                   0x1d410440),
+        "cpye [x0]!, [x1]!, x2!": (fixture.mops("cpy", 2, 0, 0, 2, 1),
+                                   0x1d810440),
+        "cpypwn [x0]!, [x1]!, x2!": (fixture.mops("cpy", 0, 4, 0, 2, 1),
+                                     0x1d014440),
+        "setp [x0]!, x1!, x2": (fixture.mops("set", 0, 0, 0, 1, 2),
+                                0x19c20420),
+        "setm [x0]!, x1!, x2": (fixture.mops("set", 1, 0, 0, 1, 2),
+                                0x19c24420),
+        "setptn [x0]!, x1!, x2": (fixture.mops("set", 0, 3, 0, 1, 2),
+                                  0x19c23420),
+    }
+
+    def test_encoders_match_an_assembler(self) -> None:
+        for text, (made, assembled) in self.ENCODINGS.items():
+            self.assertEqual(made, assembled, f"{text}: {made:#x}")
+
+    def test_what_steps_is_what_the_engine_must_run(self) -> None:
+        elf = elf64.Elf(fixture.build())
+        library = rewrite.Library(
+            0, "/aot-test/libaotfixture.so", elf,
+            a64decode.Decoder(a64decode.DEFAULT_TABLE),
+            rewrite.read_layout(rewrite.LAYOUT_HEADER))
+        library.build([1] * ((library.table_end - library.table_base) // 4096))
+        causes = dict(library.step_list)
+        stepped: dict[str, set[str]] = {}
+        for index, (name, words) in enumerate(fixture.forms()):
+            base = fixture.FORMS_AT + index * fixture.FORM_SIZE
+            for position in range(len(words)):
+                cause = causes.get(base + 4 * position)
+                if cause is not None:
+                    stepped.setdefault(name, set()).add(cause)
+        expected = {}
+        for name, _ in fixture.forms():
+            if name.endswith("_sp"):
+                expected[name] = {
+                    "ordered-sp" if name[:4] in ("ldar", "stlr") else
+                    "atomic-sp"}
+            elif name.endswith("_e") and name.split("_")[0] in (
+                    "cpyf", "cpy", "set"):
+                expected[name] = {"mops-epilogue"}
+        for name, cause in (("ldapr", "memop:LDAPR:FEAT_LRCPC"),
+                            ("ldapr_b", "memop:LDAPRB:FEAT_LRCPC"),
+                            ("ldlar", "ldstord:LDLAR:FEAT_LOR"),
+                            ("stllr", "ldstord:STLLR:FEAT_LOR")):
+            expected[name] = {cause}
+        for kind in ("cpyf", "cpy", "set"):
+            for name in ("same", "xzr_d"):
+                expected[f"{kind}_{name}"] = {"mops-invalid"}
+        expected["cpyf_zs"] = {"mops-invalid"}
+        expected["cpy_zs"] = {"mops-invalid"}
+        for name, _ in fixture.forms():
+            parts = name.split("_")
+            if parts[0] in ("cpyf", "cpy", "set") and len(parts) > 1 and \
+                    parts[1] not in ("m", "pp", "e", "same", "xzr_d", "zs"):
+                expected.setdefault(name, set()).add("mops-epilogue")
+        expected["set_zs"] = {"mops-epilogue"}
+        expected["cpy_vdvn"] = {"mops-virtual", "mops-epilogue"}
+        expected["cpy_vnvs"] = {"mops-virtual", "mops-epilogue"}
+        # "xzr_d" is parsed as ("xzr", "d").
+        for kind in ("cpyf", "cpy", "set"):
+            expected[f"{kind}_xzr_d"] = {"mops-invalid"}
+        self.assertEqual(stepped, expected)
 
 
 if __name__ == "__main__":

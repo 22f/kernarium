@@ -38,6 +38,10 @@ struct Stats final {
 	 * instances. */
 	std::uint64_t max_retired{};
 	std::uint64_t verify_nanos{};
+	/* Instructions the engine ran for rewritten code, and the nanoseconds
+	 * that took in all (the engine's side of a step, entry to return). */
+	std::uint64_t step_nanos{};
+	std::uint64_t steps_run{};
 };
 
 /* Override DARWIN_UML_AOT (nullopt: read the environment again). */

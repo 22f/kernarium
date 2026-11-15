@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 /* Ahead-of-time native code for the Android image's own arm64 libraries
  * (docs/architecture.md, "Ahead-of-time code"). The framework holds one
@@ -31,6 +32,10 @@ enum class Refusal : unsigned {
 	count,
 };
 void note_refusal(Refusal reason) noexcept;
+/* Bracket the engine's execution of one instruction rewritten code left to
+ * it (counted and timed in a diagnostics build only). */
+[[nodiscard]] std::uint64_t step_begin() noexcept;
+void step_end(std::uint64_t began) noexcept;
 
 /* Why AOT code returned; the numbers are the generator's. */
 enum class Reason : std::uint64_t {
@@ -123,6 +128,10 @@ private:
 		bool poisoned{};
 		bool used{};
 		bool verified{};
+		/* One bit per text page: known to equal the stored text as of
+		 * `matched_changes`. */
+		std::vector<std::uint64_t> matched{};
+		std::uint64_t matched_changes{};
 	};
 	struct PageSlot final {
 		unsigned long generation{};
@@ -140,14 +149,15 @@ private:
 		::uml::memory::StaticGuestMemory &memory, void *context,
 		unsigned long generation, std::uint64_t code_changes,
 		std::uint64_t page) noexcept;
-	/* Bring the instance up to `code_changes`: hash its pages in full the
-	 * first time, then only the pages the history names. */
+	/* Bring the instance up to `code_changes`: compare its pages with the
+	 * stored text the first time, then only the pages the history names and
+	 * those an earlier attempt could not read. */
 	[[nodiscard]] Verdict verify(::uml::memory::StaticGuestMemory &memory,
 		void *context, Instance &instance,
 		std::uint64_t code_changes) noexcept;
 	[[nodiscard]] Verdict verify_pages(
-		::uml::memory::StaticGuestMemory &memory, const Instance &instance,
-		std::uint64_t first, std::uint64_t last) noexcept;
+		::uml::memory::StaticGuestMemory &memory,
+		Instance &instance) noexcept;
 	/* Whether a code change after `sequence` touches [low, high). */
 	[[nodiscard]] static bool changed_since(void *context,
 		std::uint64_t sequence, std::uint64_t low, std::uint64_t high,

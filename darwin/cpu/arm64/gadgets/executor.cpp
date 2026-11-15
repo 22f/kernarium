@@ -2926,7 +2926,17 @@ private:
 
 #if UML_AOT
 struct GadgetExecutor::AotState final {
+	/* The one-instruction programs of the instructions rewritten code left
+	 * to the engine, by address; a program is a function of the address and
+	 * the instruction word alone. */
+	struct StepSlot final {
+		std::uint64_t pc{1};
+		std::uint32_t word{};
+		std::unique_ptr<arm64::gadgets::BuildResult> built;
+	};
+	static constexpr std::size_t step_slots = 2048;
 	arm64::aot::Binder binder;
+	std::array<StepSlot, step_slots> steps{};
 };
 #else
 struct GadgetExecutor::AotState final {};
@@ -3384,68 +3394,137 @@ GadgetExecutor::finish_block(ProgramCache &programs, const BuildResult &built,
 }
 
 #if UML_AOT
-/* One AOT entry runs at most as many instructions as the engine chains
+/* One AOT call runs at most as many instructions as the engine chains
  * between two returns to its dispatcher, which bounds how long a vCPU goes
  * without polling for an interrupt. */
 constexpr std::uint64_t aot_entry_budget = 4096;
+
+::uml::cpu::EngineEvent GadgetExecutor::step_aot(
+	arm64::CpuState &cpu, StaticGuestMemory &memory, std::size_t &executed)
+{
+	std::uint32_t instruction = 0;
+	if (!memory.fetch(cpu.pc,
+		    std::as_writable_bytes(std::span{&instruction, 1})))
+		return fetch_fault(tlb_, memory);
+	/* A transaction (guest trap enables) and the illegal encodings are
+	 * the cold path's. */
+	if (arm64::detail::needs_floating_exception_transaction(
+		    cpu.effective_fpcr(), instruction))
+		return run_trap_enabled_instruction(cpu, memory, executed);
+	auto &slot = aot_->steps[(cpu.pc >> 2) % AotState::step_slots];
+	if (slot.pc != cpu.pc || slot.word != instruction ||
+	    slot.built == nullptr) {
+		auto options = build_options_;
+		options.svcr = 0;
+		auto built = arm64::gadgets::Builder{}.build(
+			cpu.pc, std::span{&instruction, 1}, {},
+			std::pmr::get_default_resource(), {}, options);
+		if (!built.complete || built.program.instruction_count() != 1)
+			return run_trap_enabled_instruction(cpu, memory, executed);
+		slot.built = std::make_unique<arm64::gadgets::BuildResult>(
+			std::move(built));
+		slot.pc = cpu.pc;
+		slot.word = instruction;
+	}
+	const auto &program = slot.built->program;
+	cpu.gadget_indirect_miss = nullptr;
+	cpu.gadget_target_tier = nullptr;
+	arm64::gadgets::restore_native_fp_environment(cpu);
+	const auto event = arm64::gadgets::execute(program, cpu, tlb_, executed);
+	correct_terminal_instruction_count(program, event, cpu.pc, executed);
+	cpu.gadget_indirect_miss = nullptr;
+	/* A one-instruction fallthrough ends in Builder's synthetic interrupt
+	 * gadget: a cold-mode boundary, not a guest-visible one. */
+	return event == ::uml::cpu::EngineEvent::interrupt ?
+		::uml::cpu::EngineEvent::continued : event;
+}
 
 std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 	arm64::CpuState &cpu, StaticGuestMemory &memory, unsigned long generation,
 	std::uint64_t code_changes, std::size_t &executed)
 {
-	/* An open exclusive monitor (the JIT records it in exclusive_size, the
-	 * gadget engine in exclusive_key) is the engine's to complete. The rewritten
-	 * code ignores the top address byte, as every Android process runs
-	 * with, and keeps SP 16-byte aligned, which the engine checks for every
-	 * SP-based access; a guest that has neither is the engine's alone. */
-	if (cpu.exclusive_size != 0U || cpu.exclusive_key != 0U) {
-		arm64::aot::note_refusal(arm64::aot::Refusal::exclusive_monitor);
-		return std::nullopt;
-	}
-	if (!cpu.tbi_enabled) {
-		arm64::aot::note_refusal(arm64::aot::Refusal::tbi_disabled);
-		return std::nullopt;
-	}
-	if ((cpu.sp & 0xfU) != 0U) {
-		arm64::aot::note_refusal(arm64::aot::Refusal::sp_misaligned);
-		return std::nullopt;
-	}
-	/* FPCR.FIZ, AH and NEP change what an FP instruction computes beyond
-	 * what the host does under the same rounding mode, flush-to-zero and
-	 * default-NaN bits; the engine's twin gadgets cover them, rewritten
-	 * code does not. */
-	if ((cpu.fpcr & arm64::fpcr_afp_controls) != 0U) {
-		arm64::aot::note_refusal(arm64::aot::Refusal::fp_environment);
-		return std::nullopt;
-	}
 	if (!aot_)
 		aot_ = std::make_unique<AotState>();
-	const auto hit = aot_->binder.find(memory, execution_context_,
-		generation, code_changes, cpu.pc);
-	if (hit.native == nullptr)
-		return std::nullopt;
-	const auto start = cpu.pc;
-	/* Rewritten code reads and writes the vector registers in place. */
-	cpu.access_fp_state();
-	cpu.gadget_indirect_miss = nullptr;
-	const auto result = arm64::aot::enter(cpu, tlb_, hit, aot_entry_budget,
-		aot_->binder.cross(generation, code_changes));
-	executed = static_cast<std::size_t>(result.retired);
-	if (result.reason == arm64::aot::Reason::step) {
-		/* The engine runs the one instruction the rewritten code left
-		 * to it: it needs the guest's floating-point environment the
-		 * way a stepped instruction does, and reports faults and
-		 * system calls as any block does. */
-		std::size_t stepped = 0;
-		const auto event =
-			run_trap_enabled_instruction(cpu, memory, stepped);
-		executed += stepped;
-		return event;
+	const auto entry = darwin_uml_static_vm_execution_context_sequences(
+		execution_context_);
+	std::size_t total = 0;
+	const auto first = cpu.pc;
+	for (;;) {
+		/* An open exclusive monitor (the JIT records it in
+		 * exclusive_size, the gadget engine in exclusive_key) is the
+		 * engine's to complete. The rewritten code ignores the top
+		 * address byte, as every Android process runs with, and keeps SP
+		 * 16-byte aligned, which the engine checks for every SP-based
+		 * access; a guest that has neither is the engine's alone. */
+		if (cpu.exclusive_size != 0U || cpu.exclusive_key != 0U) {
+			arm64::aot::note_refusal(
+				arm64::aot::Refusal::exclusive_monitor);
+			break;
+		}
+		if (!cpu.tbi_enabled) {
+			arm64::aot::note_refusal(arm64::aot::Refusal::tbi_disabled);
+			break;
+		}
+		if ((cpu.sp & 0xfU) != 0U) {
+			arm64::aot::note_refusal(arm64::aot::Refusal::sp_misaligned);
+			break;
+		}
+		/* FPCR.FIZ, AH and NEP change what an FP instruction computes
+		 * beyond what the host does under the same rounding mode,
+		 * flush-to-zero and default-NaN bits; the engine's twin gadgets
+		 * cover them, rewritten code does not. */
+		if ((cpu.fpcr & arm64::fpcr_afp_controls) != 0U) {
+			arm64::aot::note_refusal(arm64::aot::Refusal::fp_environment);
+			break;
+		}
+		const auto hit = aot_->binder.find(memory, execution_context_,
+			generation, code_changes, cpu.pc);
+		if (hit.native == nullptr)
+			break;
+		const auto start = cpu.pc;
+		/* Rewritten code reads and writes the vector registers in place. */
+		cpu.access_fp_state();
+		cpu.gadget_indirect_miss = nullptr;
+		const auto result = arm64::aot::enter(cpu, tlb_, hit,
+			aot_entry_budget - total,
+			aot_->binder.cross(generation, code_changes));
+		total += static_cast<std::size_t>(result.retired);
+		if (result.reason == arm64::aot::Reason::step) {
+			/* The engine runs the one instruction the rewritten code
+			 * left to it: it needs the guest's floating-point
+			 * environment the way a stepped instruction does, and
+			 * reports faults and system calls as any block does. */
+			std::size_t stepped = 0;
+			const auto began = arm64::aot::step_begin();
+			const auto event = step_aot(cpu, memory, stepped);
+			arm64::aot::step_end(began);
+			total += stepped;
+			if (event != ::uml::cpu::EngineEvent::continued) {
+				executed = total;
+				return event;
+			}
+		} else if (cpu.pc == start && result.retired == 0) {
+			break;
+		}
+		/* What run_block checks on entry is rechecked here before the
+		 * next entry; any change returns to it. */
+		const auto now = darwin_uml_static_vm_execution_context_sequences(
+			execution_context_);
+		if (total >= aot_entry_budget || single_step_ ||
+		    now.execution_interrupt != 0U ||
+		    now.code_changes != entry.code_changes ||
+		    now.mapping_changes != entry.mapping_changes ||
+		    cpu.svcr != 0U ||
+		    (cpu.effective_fpcr() &
+		     arm64::detail::fpcr_exception_enable_mask) != 0U)
+			break;
 	}
-	if (cpu.pc == start && result.retired == 0)
-		return std::nullopt;
-	if (executed == 0)
-		executed = 1;
+	if (total == 0) {
+		if (cpu.pc == first)
+			return std::nullopt;
+		total = 1;
+	}
+	executed = total;
 	return ::uml::cpu::EngineEvent::continued;
 }
 #endif

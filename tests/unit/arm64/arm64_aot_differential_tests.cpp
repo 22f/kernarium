@@ -611,6 +611,10 @@ void describe(const char *what, const Case &c)
 		std::uint64_t offset = rng.below(page_bytes);
 		if (rng.below(4) == 0)
 			offset = page_bytes - 1 - rng.below(16);
+		/* Half the pointers are 8-aligned: the atomics and ordered
+		 * accesses take the engine's alignment path for the others. */
+		else if (rng.below(2) == 0)
+			offset &= ~std::uint64_t{7};
 		std::uint64_t p = arena_base + page * page_bytes + offset;
 		if (tbi && rng.below(2) != 0)
 			p |= (rng.below(256) | 1) << 56;
@@ -1433,8 +1437,10 @@ void cross_library_branches(const LibraryImage &image,
 void loop_through_another_range(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
-	/* The two ranges of the loop and the PLT stub after them. */
-	require(functions.size() == 3);
+	/* The two ranges of the loop, the PLT stub after them and the
+	 * instruction forms. */
+	require(functions.size() >= 3);
+	require(functions[0].start == 0x1000);
 	const auto bias = Fixture::bias;
 	Fixture ref{4311, image}, got{4312, image};
 	SplitMix rng{43};

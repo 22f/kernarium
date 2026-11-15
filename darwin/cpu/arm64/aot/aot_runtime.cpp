@@ -160,7 +160,7 @@ namespace counters {
 std::atomic<std::uint64_t> binds{0}, verifications{0}, pages_hashed{0},
 	unreadable{0}, poisoned{0}, enters{0}, steps{0}, retired{0}, refills{0},
 	refill_failures{0}, cross_hits{0}, cross_misses{0}, max_retired{0},
-	verify_nanos{0};
+	verify_nanos{0}, step_nanos{0}, steps_run{0};
 std::array<std::atomic<std::uint64_t>, 4> refusals{};
 /* The guest addresses AOT code stepped at most: library << 40 | offset. */
 constexpr std::size_t step_slots = 32768;
@@ -212,6 +212,10 @@ void write_report() noexcept
 		get(counters::retired), get(counters::refills),
 		get(counters::refill_failures), get(counters::cross_hits),
 		get(counters::cross_misses));
+	std::fprintf(file,
+		"max_retired %llu verify_nanos %llu step_nanos %llu steps_run %llu\n",
+		get(counters::max_retired), get(counters::verify_nanos),
+		get(counters::step_nanos), get(counters::steps_run));
 	std::fprintf(file, "refused tbi %llu sp %llu exclusive %llu fp %llu\n",
 		get(counters::refusals[0]), get(counters::refusals[1]),
 		get(counters::refusals[2]), get(counters::refusals[3]));
@@ -346,6 +350,28 @@ void note_refusal(Refusal reason) noexcept
 #endif
 }
 
+std::uint64_t step_begin() noexcept
+{
+#if UML_AOT_DIAGNOSTICS
+	return static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::nanoseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count());
+#else
+	return 0;
+#endif
+}
+
+void step_end(std::uint64_t began) noexcept
+{
+#if UML_AOT_DIAGNOSTICS
+	counters::step_nanos.fetch_add(step_begin() - began,
+		std::memory_order_relaxed);
+	counters::steps_run.fetch_add(1, std::memory_order_relaxed);
+#else
+	(void)began;
+#endif
+}
+
 #if UML_AOT_DIAGNOSTICS
 namespace diagnostics {
 
@@ -375,6 +401,8 @@ Stats stats() noexcept
 		result.refusals[i] = get(counters::refusals[i]);
 	result.max_retired = get(counters::max_retired);
 	result.verify_nanos = get(counters::verify_nanos);
+	result.step_nanos = get(counters::step_nanos);
+	result.steps_run = get(counters::steps_run);
 	return result;
 }
 
@@ -386,7 +414,8 @@ void reset_stats() noexcept
 		     &counters::retired, &counters::refills,
 		     &counters::refill_failures, &counters::cross_hits,
 		     &counters::cross_misses, &counters::max_retired,
-		     &counters::verify_nanos})
+		     &counters::verify_nanos, &counters::step_nanos,
+		     &counters::steps_run})
 		counter->store(0, std::memory_order_relaxed);
 	for (auto &counter : counters::refusals)
 		counter.store(0, std::memory_order_relaxed);
@@ -423,13 +452,16 @@ bool Binder::changed_since(void *context, std::uint64_t sequence,
 }
 
 Binder::Verdict Binder::verify_pages(
-	::uml::memory::StaticGuestMemory &memory, const Instance &instance,
-	std::uint64_t first, std::uint64_t last) noexcept
+	::uml::memory::StaticGuestMemory &memory, Instance &instance) noexcept
 {
 	const auto &dir = directory();
 	const auto library = dir.library(instance.library);
 	alignas(8) std::array<std::byte, page_size> page;
-	for (std::uint64_t index = first; index < last; ++index) {
+	for (std::uint64_t index = 0; index < library.pages; ++index) {
+		auto &word = instance.matched[index / 64];
+		const auto bit = std::uint64_t{1} << (index % 64);
+		if ((word & bit) != 0)
+			continue;
 		const auto address =
 			instance.bias + library.table_base + index * page_size;
 		if (!memory.fetch(address, page))
@@ -438,6 +470,7 @@ Binder::Verdict Binder::verify_pages(
 		if (std::memcmp(page.data(), uml_aot_blob + library.source +
 		    index * page_size, page_size) != 0)
 			return Verdict::mismatch;
+		word |= bit;
 	}
 	return Verdict::match;
 }
@@ -446,25 +479,22 @@ Binder::Verdict Binder::verify(::uml::memory::StaticGuestMemory &memory,
 	void *context, Instance &instance, std::uint64_t code_changes) noexcept
 {
 	const auto library = directory().library(instance.library);
-	Verdict verdict = Verdict::match;
-	bool full = !instance.verified;
-	darwin_uml_static_code_change ranges[32];
-	int count = 0;
-	std::uint64_t current = 0;
-	if (!full) {
-		count = context == nullptr ? -1 :
+	/* instance.matched holds the pages known to equal the stored text as of
+	 * instance.matched_changes. A page progress is kept when a later page
+	 * is unreadable, so that a retry compares only what is still unknown;
+	 * the code-change history then clears the pages it names. */
+	if (instance.matched.empty()) {
+		instance.matched.assign((library.pages + 63) / 64, 0);
+		instance.matched_changes = code_changes;
+	} else if (instance.matched_changes != code_changes) {
+		darwin_uml_static_code_change ranges[32];
+		std::uint64_t current = 0;
+		const int count = context == nullptr ? -1 :
 			darwin_uml_static_vm_execution_context_code_change_ranges(
-				context, instance.verified_changes, ranges, 32, &current);
-		full = count < 0;
-	}
-	const std::uint64_t low = instance.bias + library.table_base;
-	const std::uint64_t high = instance.bias + library.table_end;
-	if (full) {
-		UML_AOT_COUNT(verifications, 1);
-		verdict = verify_pages(memory, instance, 0, library.pages);
-	} else {
-		for (int index = 0; index < count && verdict == Verdict::match;
-		     ++index) {
+				context, instance.matched_changes, ranges, 32, &current);
+		const std::uint64_t low = instance.bias + library.table_base;
+		const std::uint64_t high = instance.bias + library.table_end;
+		for (int index = 0; index < count; ++index) {
 			std::uint64_t from = ranges[index].address;
 			std::uint64_t to = from + ranges[index].length;
 			if (ranges[index].length == 0) {
@@ -475,11 +505,17 @@ Binder::Verdict Binder::verify(::uml::memory::StaticGuestMemory &memory,
 				continue;
 			from = std::max(from, low);
 			to = std::min(to, high);
-			verdict = verify_pages(memory, instance,
-				(from - low) / page_size,
-				(to - low + page_size - 1) / page_size);
+			for (auto page = (from - low) / page_size;
+			     page < (to - low + page_size - 1) / page_size; ++page)
+				instance.matched[page / 64] &=
+					~(std::uint64_t{1} << (page % 64));
 		}
+		if (count < 0)
+			std::fill(instance.matched.begin(), instance.matched.end(), 0);
+		instance.matched_changes = code_changes;
 	}
+	UML_AOT_COUNT(verifications, 1);
+	const auto verdict = verify_pages(memory, instance);
 	if (verdict == Verdict::match) {
 		instance.verified = true;
 		instance.verified_changes = code_changes;

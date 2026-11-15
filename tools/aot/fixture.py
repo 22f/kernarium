@@ -21,7 +21,8 @@ import sys
 
 PAGE = 4096
 TEXT = 0x1000
-EH_FRAME = 0x2000
+TEXT_PAGES = 2
+EH_FRAME = TEXT + TEXT_PAGES * PAGE
 
 
 def b_cond(cond: int, here: int, target: int) -> int:
@@ -65,6 +66,135 @@ PLT_CODE = (
 )
 
 
+# ---- instruction forms ----------------------------------------------------
+# One small function per form: the instructions of the form, then RET. The
+# differential test starts cases at every function, so each form runs from
+# random states against the engine, whatever the library it was written for
+# contains. The words are built from the architecture's field layouts and
+# checked against an assembler by the tooling test.
+
+FORMS_AT = TEXT + 0x100
+FORM_SIZE = 0x14           # a function of 0x10 bytes and a gap that keeps
+                           # neighbouring ranges from merging
+SIZES = ("b", "h", "w", "x")
+ORDERINGS = ("", "a", "l", "al")      # none, acquire, release, both
+
+
+def ordered(load: bool, size: int, rn: int, rt: int) -> int:
+    return (size << 30) | (0x08dffc00 if load else 0x089ffc00) | \
+        (rn << 5) | rt
+
+
+def amo(size: int, acquire: int, release: int, rs: int, op: int, swap: bool,
+        rn: int, rt: int) -> int:
+    return (size << 30) | 0x38200000 | (acquire << 23) | (release << 22) | \
+        (rs << 16) | (int(swap) << 15) | (op << 12) | (rn << 5) | rt
+
+
+def cas(size: int, acquire: int, release: int, rs: int, rn: int, rt: int
+        ) -> int:
+    return (size << 30) | 0x08a07c00 | (acquire << 22) | (release << 15) | \
+        (rs << 16) | (rn << 5) | rt
+
+
+def mops(kind: str, stage: int, hint: int, rd: int, rn: int, rs: int) -> int:
+    """kind: 'cpyf', 'cpy' or 'set'; hint is the option bits 15:12 (or, for
+    SET, bits 13:12)."""
+    if kind == "set":
+        return 0x19c00400 | (rs << 16) | (stage << 14) | ((hint & 3) << 12) \
+            | (rn << 5) | rd
+    base = 0x19000400 if kind == "cpyf" else 0x1d000400
+    return base | (stage << 22) | (rs << 16) | (hint << 12) | (rn << 5) | rd
+
+
+def forms() -> list[tuple[str, list[int]]]:
+    """(name, words) of every form; the words end before the RET."""
+    out: list[tuple[str, list[int]]] = []
+    # LDAR and STLR, by width, with real, virtual and zero registers and a
+    # stack base (which steps).
+    for size in range(4):
+        for load in (True, False):
+            tag = "ldar" if load else "stlr"
+            out.append((f"{tag}{size}", [ordered(load, size, 1, 2)]))
+            out.append((f"{tag}{size}_vt", [ordered(load, size, 1, 24)]))
+            out.append((f"{tag}{size}_vb", [ordered(load, size, 25, 2)]))
+            out.append((f"{tag}{size}_zt", [ordered(load, size, 1, 31)]))
+            out.append((f"{tag}{size}_sp", [ordered(load, size, 31, 2)]))
+            out.append((f"{tag}{size}_vv", [ordered(load, size, 18, 28)]))
+    # The atomic memory operations: every operation, ordering and width.
+    for op in range(8):
+        for size in range(4):
+            for order, (a, r) in enumerate(((0, 0), (1, 0), (0, 1), (1, 1))):
+                out.append((f"amo{op}_{size}_{order}",
+                            [amo(size, a, r, 3, op, False, 1, 2)]))
+    for size in range(4):
+        for order, (a, r) in enumerate(((0, 0), (1, 0), (0, 1), (1, 1))):
+            out.append((f"swp_{size}_{order}",
+                        [amo(size, a, r, 3, 0, True, 1, 2)]))
+            out.append((f"cas_{size}_{order}",
+                        [cas(size, a, r, 3, 1, 2)]))
+    # Register variants of one operation of each kind: virtual operands,
+    # equal operands, the zero register, a stack or virtual base.
+    for rs, rn, rt, name in ((24, 1, 2, "vs"), (3, 1, 28, "vt"),
+                             (24, 1, 28, "vsvt"), (25, 1, 25, "same"),
+                             (31, 1, 2, "zs"), (3, 1, 31, "zt"),
+                             (3, 18, 2, "vb"), (3, 31, 2, "sp"),
+                             (2, 1, 2, "rsrt"), (2, 2, 3, "rnrs"),
+                             (3, 3, 3, "all")):
+        out.append((f"amo_add_{name}", [amo(3, 1, 1, rs, 0, False, rn, rt)]))
+        out.append((f"swp_{name}", [amo(2, 0, 1, rs, 0, True, rn, rt)]))
+        out.append((f"cas_{name}", [cas(3, 1, 1, rs, rn, rt)]))
+        out.append((f"casb_{name}", [cas(0, 1, 0, rs, rn, rt)]))
+    # Other words of the same groups: LDAPR (steps), the unallocated
+    # neighbours of the atomic and ordered groups.
+    out.append(("ldapr", [0xf8bfc022]))
+    out.append(("ldlar", [0xc8df7c22]))
+    out.append(("stllr", [0xc89f7c22]))
+    out.append(("ldapr_b", [0x38bfc022]))
+    # FEAT_MOPS: the three stages in a row, from the same registers, with
+    # every option set, then variants with virtual registers (one is
+    # inlined, two step) and the zero fill register.
+    for kind in ("cpyf", "cpy", "set"):
+        hints = (0, 1, 2, 3) if kind == "set" else (0, 4, 8, 12, 1, 2, 5, 10)
+        for hint in hints:
+            out.append((f"{kind}_{hint}", [mops(kind, 0, hint, 0, 2, 1),
+                                           mops(kind, 1, hint, 0, 2, 1),
+                                           mops(kind, 2, hint, 0, 2, 1)]))
+    for name, d, n, s in (("vn", 0, 24, 1), ("vd", 25, 2, 1),
+                          ("vs", 0, 2, 26), ("vdvn", 24, 25, 1),
+                          ("vnvs", 0, 18, 28), ("same", 0, 0, 1),
+                          ("zs", 0, 2, 31), ("xzr_d", 31, 2, 1),
+                          ("high", 17, 16, 15)):
+        for kind in ("cpyf", "cpy", "set"):
+            out.append((f"{kind}_{name}",
+                        [mops(kind, 0, 0, d, n, s), mops(kind, 1, 0, d, n, s),
+                         mops(kind, 2, 0, d, n, s)]))
+    # A prologue repeated without its epilogue, and a main stage alone.
+    for kind in ("cpyf", "cpy", "set"):
+        out.append((f"{kind}_pp", [mops(kind, 0, 0, 0, 2, 1),
+                                   mops(kind, 0, 0, 0, 2, 1)]))
+        out.append((f"{kind}_m", [mops(kind, 1, 0, 0, 2, 1)]))
+        out.append((f"{kind}_e", [mops(kind, 2, 0, 0, 2, 1)]))
+    return out
+
+
+def form_code() -> dict[int, int]:
+    code = {}
+    for index, (_, words) in enumerate(forms()):
+        base = FORMS_AT + index * FORM_SIZE
+        if len(words) + 1 > (FORM_SIZE - 4) // 4:
+            raise ValueError("a form is too long")
+        for position, word in enumerate(words):
+            code[base + 4 * position] = word
+        code[base + 4 * len(words)] = RET
+    return code
+
+
+def form_functions() -> tuple[tuple[int, int], ...]:
+    return tuple((FORMS_AT + index * FORM_SIZE, FORM_SIZE - 4)
+                 for index in range(len(forms())))
+
+
 def eh_frame() -> bytes:
     # CIE: version 1, "zR", code alignment 4, data alignment -8, return
     # address x30, pointers are pc-relative signed 32-bit.
@@ -72,7 +202,7 @@ def eh_frame() -> bytes:
                 bytes([4, 0x78, 30, 1, 0x1b, 0x0c, 31, 0]))
     cie_body += bytes(-(len(cie_body) + 4) % 8)
     out = bytearray(struct.pack("<I", len(cie_body)) + cie_body)
-    for start, size in FUNCTIONS:
+    for start, size in FUNCTIONS + form_functions():
         position = len(out)
         field = EH_FRAME + position + 8
         body = struct.pack("<Iii", position + 4, start - field, size)
@@ -84,10 +214,12 @@ def eh_frame() -> bytes:
 
 
 def build() -> bytes:
-    text = bytearray(PAGE)
-    for offset in range(0, PAGE, 4):
+    text = bytearray(PAGE * TEXT_PAGES)
+    for offset in range(0, len(text), 4):
         struct.pack_into("<I", text, offset, BRK)
     for address, word in CODE.items():
+        struct.pack_into("<I", text, address - TEXT, word)
+    for address, word in form_code().items():
         struct.pack_into("<I", text, address - TEXT, word)
     for index, word in enumerate(PLT_CODE):
         struct.pack_into("<I", text, PLT - TEXT + 4 * index, word)
@@ -95,7 +227,7 @@ def build() -> bytes:
     names = b"\0.text\0.plt\0.eh_frame\0.shstrtab\0"
     size_load = EH_FRAME + len(frame)
     image = bytearray(size_load)
-    image[TEXT:TEXT + PAGE] = text
+    image[TEXT:TEXT + len(text)] = text
     image[EH_FRAME:EH_FRAME + len(frame)] = frame
     shstr_offset = len(image)
     image += names
@@ -107,7 +239,7 @@ def build() -> bytes:
                            size, 0, 0, align, 0)
 
     image += section(0, 0, 0, 0, 0, 0, 0)
-    image += section(1, 1, 6, TEXT, TEXT, PAGE, 4)
+    image += section(1, 1, 6, TEXT, TEXT, len(text), 4)
     image += section(7, 1, 6, PLT, PLT, 4 * len(PLT_CODE), 16)
     image += section(12, 1, 2, EH_FRAME, EH_FRAME, len(frame), 8)
     image += section(22, 3, 0, 0, shstr_offset, len(names), 1)

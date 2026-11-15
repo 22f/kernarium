@@ -168,6 +168,14 @@ HINT_MASK = 0xfffff01f
 HINT_BASE = 0xd503201f
 HINT_EFFECTS = (1, 6, 20, 22)
 SITE_SAMPLES = 8
+# LDAR/LDARB/LDARH and STLR/STLRB/STLRH (size in bits 31:30), the LSE atomic
+# memory operations (LDADD, LDCLR, LDEOR, LDSET, LDSMAX, LDSMIN, LDUMAX,
+# LDUMIN and SWP in any acquire/release form) and CAS. The other words of the
+# same encoding groups (LDLAR, LDAPR, ST64B, CASP, ...) step.
+ORDERED_MASK = 0x3ffffc00
+LDAR_BASE, STLR_BASE = 0x08dffc00, 0x089ffc00
+AMO_MASK, AMO_BASE = 0x3f200c00, 0x38200000
+CAS_MASK, CAS_BASE = 0x3fa07c00, 0x08a07c00
 TPIDR_EL0 = 0xd53bd040
 TPIDR_MASK = 0xffffffe0
 
@@ -181,6 +189,9 @@ class Stats:
     steps_by_cause: collections.Counter = dataclasses.field(
         default_factory=collections.Counter)
     kinds: collections.Counter = dataclasses.field(
+        default_factory=collections.Counter)
+    # Words emitted, by instruction class, charges, stubs and the rest.
+    words: collections.Counter = dataclasses.field(
         default_factory=collections.Counter)
 
 
@@ -230,6 +241,7 @@ class Library:
         self.fn_xu: set[int] = set()
         self.fn_xb: set[int] = set()
         self.fn_ma: list[int] = []
+        self.fn_st: list[int] = []
         self.charge = self._plan_charges()
 
     def _flow(self, word: int, offset: int) -> tuple[str, int | None]:
@@ -346,6 +358,7 @@ class Library:
         self.fn_xu = set()
         self.fn_xb = set()
         self.fn_ma = []
+        self.fn_st = []
         last_falls_through = True
         for offset in range(function.start, function.end, 4):
             word = self.words[offset]
@@ -355,23 +368,31 @@ class Library:
                 self.fn_xu.add(offset)
                 asm.word(A.add_imm(BUD, BUD, cost, sub=True))
                 asm.tbz(BUD, 63, self.lab("XU", offset), nz=True)
+                self.stats.words["charge"] += 2
             asm.label(self.lab("E", offset))
             if self.count_retired:
                 asm.word(A.ldr_x(T2, 31, SLOT_COUNT))
                 asm.word(A.add_imm(T2, T2, 1))
                 asm.word(A.str_x(T2, 31, SLOT_COUNT))
+                self.stats.words["count"] += 3
             self.entry_labels.append(offset)
             self.stats.instructions += 1
             last_falls_through = self._emit_instruction(offset, word)
         if last_falls_through:
             asm.b(self.goto_label(function.end))
+        before = len(asm._w)
         self._emit_stubs(function)
+        self.stats.words["stubs"] += len(asm._w) - before
 
     # classification of one instruction; returns whether it falls through
     def _emit_instruction(self, offset: int, word: int) -> bool:
         steps = self.stats.steps
         self._site_key = "unallocated"
+        before = len(self.asm._w)
         result = self._classify(offset, word)
+        label = self._site_key.split(":")[0] if self.stats.steps == steps \
+            else "step"
+        self.stats.words[label] += len(self.asm._w) - before
         if self.stats.steps == steps:
             self.sites.setdefault(self._site_key, []).append(offset)
         return result
@@ -413,6 +434,12 @@ class Library:
             self.stats.inlined += 1
             self.stats.kinds["dmb"] += 1
             return True
+        if cls == "ldstord" and feature == "baseline":
+            return self._ordered(offset, word)
+        if cls in ("memop", "comswap") and feature == "FEAT_LSE":
+            return self._atomic(offset, word)
+        if cls == "memcms" and feature == "FEAT_MOPS":
+            return self._mops(offset, word)
         fields = self._copy_fields(word, encoding)
         if fields is not None:
             return self._copy(offset, word, encoding, fields)
@@ -897,6 +924,171 @@ class Library:
         self.stats.kinds["pair" if pair else "mem"] += 1
         return True
 
+    # --- ordered accesses, atomics and FEAT_MOPS -------------------------------
+    def _atomic_probe(self, offset: int, base_g, base_field: int, n: int,
+                      write: bool) -> None:
+        """Probe the page of a naturally aligned access of n bytes at the
+        base register's address (a plain base, no offset). An unaligned
+        address steps (the engine decides between the LSE2 completion and the
+        alignment fault); a missing translation refills and restarts. On
+        return T2 is the host address."""
+        asm = self.asm
+        if base_g in VIRTUAL:
+            self._load_guest(T0, base_g)
+            source = T0
+        else:
+            source = base_field
+        asm.word(A.ubfx(T0, source, 0, 56))
+        if n > 1:
+            asm.word(A.ubfx(T1, T0, 0, n.bit_length() - 1))
+            asm.cbz(T1, self.lab("ST", offset), sf=1, nz=True)
+            self.fn_st.append(offset)
+        asm.word(A.ubfx(T2, T0, 12, 14))
+        asm.word(A.add_reg(T2, TLB, T2, shift=0, amount=5))
+        asm.word(A.ldp_x(T1, T2, T2, 16 if write else 0))
+        asm.word(A.add_reg(T2, T2, T0))
+        if n > 1:
+            asm.word(A.add_imm(T0, T0, n - 1))
+        asm.word(A.eor_reg(T1, T1, T0, shift=1, amount=12))
+        asm.cbz(T1, self.lab("MM", offset), sf=1, nz=True)
+        self.fn_mm.append((offset, "STORE" if write else "LOAD", n))
+
+    def _ordered(self, offset: int, word: int) -> bool:
+        """LDAR and STLR of a byte, halfword, word or doubleword."""
+        load = bool((word >> 22) & 1)
+        if (word & ORDERED_MASK) != (LDAR_BASE if load else STLR_BASE):
+            return self._step(offset, "ordered-other")
+        n = 1 << (word >> 30)
+        rn, rt = (word >> 5) & 31, word & 31
+        base_g = self._resolve(rn, True)
+        if base_g == "sp":
+            return self._step(offset, "ordered-sp")
+        rt_g = self._resolve(rt, False)
+        self._atomic_probe(offset, base_g, rn, n, write=not load)
+        host_rt = rt
+        if rt_g in VIRTUAL:
+            host_rt = T1
+            if not load:
+                self._load_guest(T1, rt_g)
+        elif rt_g == "zr":
+            host_rt = 31
+        self.asm.word((word & ~0x3ff) | (T2 << 5) | host_rt)
+        if load and rt_g in VIRTUAL:
+            self._store_guest(T1, rt_g)
+        self.stats.inlined += 1
+        self.stats.kinds["ordered"] += 1
+        return True
+
+    def _atomic(self, offset: int, word: int) -> bool:
+        """An LSE atomic memory operation or compare-and-swap, on the write
+        translation of its address, run as the host's own instruction."""
+        if (word & AMO_MASK) == AMO_BASE:
+            if (word >> 15) & 1 and (word >> 12) & 7:
+                return self._step(offset, "atomic-other")
+            cas = False
+        elif (word & CAS_MASK) == CAS_BASE:
+            cas = True
+        else:
+            return self._step(offset, "atomic-other")
+        n = 1 << (word >> 30)
+        rs, rn, rt = (word >> 16) & 31, (word >> 5) & 31, word & 31
+        base_g = self._resolve(rn, True)
+        if base_g == "sp":
+            return self._step(offset, "atomic-sp")
+        rs_g, rt_g = self._resolve(rs, False), self._resolve(rt, False)
+        self._atomic_probe(offset, base_g, rn, n, write=True)
+        host_s, host_t = rs, rt
+        if rs_g in VIRTUAL:
+            host_s = T0
+            self._load_guest(T0, rs_g)
+        elif rs_g == "zr":
+            host_s = 31
+        if rt_g in VIRTUAL:
+            if rt_g == rs_g:
+                host_t = host_s
+            else:
+                host_t = T1
+                if cas:
+                    self._load_guest(T1, rt_g)
+        elif rt_g == "zr":
+            host_t = 31
+        self.asm.word((word & ~((31 << 16) | (31 << 5) | 31)) |
+                      (host_s << 16) | (T2 << 5) | host_t)
+        if cas:
+            # Rs receives the old value; Rt is only read.
+            if rs_g in VIRTUAL:
+                self._store_guest(T0, rs_g)
+        elif rt_g in VIRTUAL:
+            self._store_guest(host_t, rt_g)
+        self.stats.inlined += 1
+        self.stats.kinds["cas" if cas else "atomic"] += 1
+        return True
+
+    def _mops(self, offset: int, word: int) -> bool:
+        """The prologue and main stages of CPY, CPYF and SET. The virtual CPU
+        implements option B (darwin/cpu/arm64/detail/memory_copy_set.hpp): the
+        prologue formats the registers and the flags, the main stage does
+        nothing, and the epilogue, which moves the data, is the engine's."""
+        family_set = (word & 0x3fe00c00) == 0x19c00400
+        tag = (word & 0x3fe00c00) == 0x1dc00400
+        forward = not family_set and not tag and \
+            (word & 0x3f200c00) == 0x19000400
+        general = not family_set and not tag and not forward and \
+            (word & 0x3f200c00) == 0x1d000400
+        if not (family_set or forward or general):
+            return self._step(offset, "mops-other")
+        d, n, s = word & 31, (word >> 5) & 31, (word >> 16) & 31
+        stage = (word >> 14) & 3 if family_set else (word >> 22) & 3
+        if (word >> 30) != 0 or stage == 3 or d == 31 or n == 31 or \
+                d == n or s == d or s == n or (not family_set and s == 31):
+            return self._step(offset, "mops-invalid")
+        if stage == 2:
+            return self._step(offset, "mops-epilogue")
+        names = [("n", n), ("d", d), ("s", s)] if general else [("n", n)]
+        virtual = [name for name, reg in names
+                   if self._resolve(reg, False) in VIRTUAL]
+        if len(virtual) > 1 and stage == 0:
+            return self._step(offset, "mops-virtual")
+        self.stats.inlined += 1
+        self.stats.kinds["mops"] += 1
+        if stage == 1:
+            return True
+        asm = self.asm
+        host = {name: reg for name, reg in names}
+        slot_of_virtual = None
+        for name, reg in names:
+            if name in virtual:
+                self._load_guest(T1, self._resolve(reg, False))
+                host[name] = T1
+                slot_of_virtual = self._resolve(reg, False)
+        count = host["n"]
+        # remaining = min(count, the largest the stage allows).
+        asm.word(A.orr_ones(T0, 31, 55 if general else 63))
+        asm.word(A.cmp_reg(count, T0))
+        asm.word(A.csel(count, count, T0, 9))          # LS
+        if not general:
+            asm.word(A.movz(T0, 0x2000, 1))
+            asm.word(A.msr("nzcv", T0))
+        else:
+            source, dest = host["s"], host["d"]
+            # Backward when 0 < (to - from) mod 2^56 < remaining.
+            asm.word(A.and_ones(T0, source, 56))
+            asm.word(A.and_ones(T2, dest, 56))
+            asm.word(A.add_reg(T2, T2, T0, sub=True))
+            asm.word(A.cmp_reg(T2, count))
+            asm.word(A.ccmp_imm(T2, 0, 4, 3))           # LO
+            asm.word(A.add_reg(T0, source, count))
+            asm.word(A.csel(source, T0, source, 1))      # NE
+            asm.word(A.add_reg(T0, dest, count))
+            asm.word(A.csel(dest, T0, dest, 1))
+            asm.word(A.movz(T0, 0x2000, 1))
+            asm.word(A.movz(T2, 0xa000, 1))
+            asm.word(A.csel(T0, T2, T0, 1))
+            asm.word(A.msr("nzcv", T0))
+        if slot_of_virtual is not None:
+            self._store_guest(T1, slot_of_virtual)
+        return True
+
     def _nop_prefetch(self, encoding) -> bool:
         self.stats.inlined += 1
         self.stats.kinds["prefetch"] += 1
@@ -929,6 +1121,9 @@ class Library:
             if slot >> 16:
                 asm.word(A.movk(T1, (slot >> 16) & 0xffff, 1))
             asm.b(f"REFILL_{kind}_{total}")
+        for offset in self.fn_st:
+            asm.label(self.lab("ST", offset))
+            self._exit_to(offset, "EXIT_STEP")
         for offset in sorted(self.fn_xu):
             asm.label(self.lab("XU", offset))
             self._exit_to(offset, "EXIT_BUDGET")
@@ -1209,7 +1404,8 @@ def build_unit(job: tuple) -> dict:
                   "inlined": library.stats.inlined,
                   "steps": library.stats.steps,
                   "steps_by_cause": dict(library.stats.steps_by_cause),
-                  "inlined_by_kind": dict(library.stats.kinds)},
+                  "inlined_by_kind": dict(library.stats.kinds),
+                  "words": dict(library.stats.words)},
     })
     return unit
 
@@ -1294,6 +1490,8 @@ def build_blob(units: list[dict], layout: dict[str, int],
             "steps": unit["stats"]["steps"],
             "steps_by_cause": unit["stats"]["steps_by_cause"],
             "inlined_by_kind": unit["stats"]["inlined_by_kind"],
+            "words": unit["stats"]["words"],
+            "source_bytes": unit["table_end"] - unit["table_base"],
         } for unit in units],
     }
     return bytes(blob), manifest
