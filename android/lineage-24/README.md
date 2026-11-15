@@ -412,7 +412,10 @@ declared. A camera lists the keys it honours: the frame duration and the black
 level lock only with `MANUAL_SENSOR`, the AF regions only with autofocus, and no
 camera lists the tone map mode or curves or states the available tone map modes
 (the templates carry no tone map key). Every result carries the scene mode
-(`DISABLED`) and, with `MANUAL_SENSOR`, the black level lock. A video output
+(`DISABLED`) and, with `MANUAL_SENSOR`, the black level lock. A result states
+the crop region of its request (`camera_crop.hpp`: clamped into the active
+array, the whole array when the request has none), because the camera service
+joins the zoom ratio and that residual region again in the result. A video output
 that stays configured but leaves the requests has its host stream closed after
 half a second and two requests without a still; a request that takes a still
 counts for nothing and starts the count again for every open video output, so
