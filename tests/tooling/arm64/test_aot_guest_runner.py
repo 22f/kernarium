@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""The AOT guest runner against scripted guests.
+
+tests/integration/aot/run_aot_guest.py compares an Android guest with the
+ahead-of-time component off and on. Here a fake launcher and a fake adb stand
+in for the guest, and each row scripts what the guest printed and which exit
+statuses it returned. The runner must pass a complete, successful, identical
+pair of arms and fail every incomplete or failed one.
+"""
+
+__import__("sys").dont_write_bytecode = True
+
+import hashlib
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import tempfile
+import textwrap
+import unittest
+
+RUNNER_DIRECTORY = (pathlib.Path(__file__).resolve().parents[2] /
+                    "integration" / "aot")
+sys.path.insert(0, str(RUNNER_DIRECTORY))
+sys.path.insert(0, str(RUNNER_DIRECTORY.parent / "support"))
+import run_aot_guest as runner  # noqa: E402
+
+FAKE_LAUNCHER = """\
+import os, pathlib, signal, sys, time
+state = pathlib.Path(os.environ["FAKE_GUEST_STATE"])
+arm = "on" if os.environ.get("DARWIN_UML_AOT") == "1" else "off"
+(state / "arm").write_text(arm)
+scenario = json.loads((state / "scenario.json").read_text())
+report = os.environ.get("DARWIN_UML_AOT_REPORT")
+if report and scenario.get("report", {}).get(arm) is not None:
+    pathlib.Path(report).write_text(scenario["report"][arm])
+deadline = time.monotonic() + 120
+while time.monotonic() < deadline:
+    time.sleep(0.05)
+"""
+
+FAKE_ADB = """\
+import json, os, pathlib, sys
+state = pathlib.Path(os.environ["FAKE_GUEST_STATE"])
+scenario = json.loads((state / "scenario.json").read_text())
+arm = (state / "arm").read_text() if (state / "arm").exists() else "off"
+arguments = sys.argv[1:]
+if arguments[:1] == ["-s"]:
+    arguments = arguments[2:]
+verb = arguments[0] if arguments else ""
+if verb == "get-state":
+    print("device")
+elif verb == "shell" and arguments[1].startswith("getprop"):
+    print("1")
+elif verb == "shell" and "LD_PRELOAD" in arguments[1]:
+    counter = state / ("probe-" + arm)
+    number = int(counter.read_text()) if counter.exists() else 0
+    counter.write_text(str(number + 1))
+    texts = scenario["probe"][arm]
+    sys.stdout.write(texts[min(number, len(texts) - 1)])
+    sys.exit(scenario.get("probe_status", 0))
+elif verb == "shell":
+    sys.stdout.write(scenario["workloads"][arm])
+    sys.exit(scenario.get("workloads_status", 0))
+elif verb == "push":
+    sys.exit(scenario.get("push_status", 0))
+sys.exit(0)
+"""
+
+WRAPPER = """\
+import sys
+sys.path.insert(0, {runner_directory!r})
+sys.path.insert(0, {support_directory!r})
+import run_aot_guest as runner
+runner.LAUNCHER = {launcher!r}
+runner.SETTLE_SECONDS = 0
+runner.REPORT_SECONDS = 0
+sys.exit(runner.main())
+"""
+
+
+def digest(name: str) -> str:
+    return hashlib.md5(name.encode()).hexdigest()
+
+
+def good_workloads() -> list[str]:
+    return [f"{name} {number} 0.25 {digest(name)} 0"
+            for name in runner.WORKLOAD_NAMES
+            for number in runner.REPETITIONS]
+
+
+def workload_text(rows: list[str], finished: bool = True) -> str:
+    return "\n".join(rows + ([runner.WORKLOADS_FINISHED] if finished else [])) + "\n"
+
+
+def good_probe() -> str:
+    lines = []
+    for case in runner.PROBE_CASES:
+        lines.append(f"case {case}")
+        lines.append("  fault signo=11 code=2 addr=R+0x1000 pc=libz.so+0x40 "
+                     "sp=S+0x10 pstate=0x0")
+        lines.append("  regs x00=0x1 x01=0x2 x02=R+0x20")
+    lines += ["done faults=%d" % len(runner.PROBE_CASES), "rc=0"]
+    return "\n".join(lines) + "\n"
+
+
+def good_scenario() -> dict:
+    text = workload_text(good_workloads())
+    return {"workloads": {"off": text, "on": text},
+            "probe": {"off": [good_probe()], "on": [good_probe()]},
+            "report": {"on": "binds 3 enters 9 steps 2 poisoned 0 refills 0\n",
+                       "off": None}}
+
+
+class RunnerTest(unittest.TestCase):
+    def run_runner(self, scenario: dict, *extra: str):
+        with tempfile.TemporaryDirectory(prefix="aot-runner-test-") as name:
+            root = pathlib.Path(name)
+            state = root / "state"
+            state.mkdir()
+            (state / "scenario.json").write_text(json.dumps(scenario))
+            launcher = root / "launcher.py"
+            launcher.write_text("import json\n" + FAKE_LAUNCHER)
+            adb = root / "adb"
+            adb.write_text(f"#!{sys.executable}\n" + FAKE_ADB)
+            adb.chmod(0o755)
+            wrapper = root / "wrapper.py"
+            wrapper.write_text(WRAPPER.format(
+                runner_directory=str(RUNNER_DIRECTORY),
+                support_directory=str(RUNNER_DIRECTORY.parent / "support"),
+                launcher=str(launcher)))
+            probe = root / "libaotprobe.so"
+            probe.write_bytes(b"probe")
+            environment = {**os.environ, "FAKE_GUEST_STATE": str(state),
+                           "PYTHONDONTWRITEBYTECODE": "1"}
+            return subprocess.run(
+                [sys.executable, "-B", str(wrapper), "--adb", str(adb),
+                 "--probe", str(probe), "--boot-timeout", "30", *extra],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=90, env=environment, check=False)
+
+    def passes(self, scenario: dict, *extra: str):
+        result = self.run_runner(scenario, *extra)
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+        self.assertIn("PASS", result.stdout)
+        return result
+
+    def fails(self, scenario: dict, expected: str, *extra: str):
+        result = self.run_runner(scenario, *extra)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("PASS", result.stdout)
+        self.assertIn(expected, result.stderr)
+
+    def both_arms(self, scenario: dict, rows: list[str], arm: str = "on",
+                  finished: bool = True) -> dict:
+        scenario["workloads"][arm] = workload_text(rows, finished)
+        return scenario
+
+    # The scripted guest the other rows start from.
+    def test_complete_identical_arms_pass(self):
+        result = self.passes(good_scenario())
+        self.assertIn("registers compared, identical", result.stdout)
+
+    def test_script_has_seven_workloads_and_three_repetitions(self):
+        self.assertEqual(len(runner.WORKLOAD_NAMES), 7)
+        self.assertEqual(runner.REPETITIONS, (1, 2, 3))
+
+    def test_empty_output_digest_fails(self):
+        rows = good_workloads()
+        rows[4] = f"{runner.WORKLOAD_NAMES[1]} 2 0.25 {runner.EMPTY_DIGEST} 0"
+        self.fails(self.both_arms(good_scenario(), rows), "printed nothing")
+        self.fails(self.both_arms(good_scenario(), rows, "off"),
+                   "printed nothing")
+
+    def test_workload_exit_status_fails(self):
+        rows = good_workloads()
+        rows[9] = rows[9][:-1] + "1"
+        self.fails(self.both_arms(good_scenario(), rows), "status 1")
+        rows[9] = rows[9][:-1] + "missing"
+        self.fails(self.both_arms(good_scenario(), rows, "off"),
+                   "status missing")
+
+    def test_missing_repetition_fails(self):
+        rows = good_workloads()
+        del rows[7]
+        self.fails(self.both_arms(good_scenario(), rows),
+                   "workload rows missing")
+
+    def test_missing_workload_fails(self):
+        rows = [row for row in good_workloads()
+                if not row.startswith(runner.WORKLOAD_NAMES[-1] + " ")]
+        self.fails(self.both_arms(good_scenario(), rows, "off"),
+                   "workload rows missing")
+        self.fails(self.both_arms(good_scenario(), []), "workload rows missing")
+
+    def test_unfinished_workloads_fail(self):
+        self.fails(self.both_arms(good_scenario(), good_workloads(),
+                                  finished=False), "did not run to their end")
+
+    def test_workload_command_status_fails(self):
+        scenario = good_scenario()
+        scenario["workloads_status"] = 1
+        self.fails(scenario, "the workload command exited 1")
+
+    def test_output_that_differs_between_arms_fails(self):
+        rows = good_workloads()
+        rows[0] = f"{runner.WORKLOAD_NAMES[0]} 1 0.25 {digest('other')} 0"
+        rows[1] = rows[1].replace(digest(runner.WORKLOAD_NAMES[0]),
+                                  digest("other"))
+        rows[2] = rows[2].replace(digest(runner.WORKLOAD_NAMES[0]),
+                                  digest("other"))
+        scenario = self.both_arms(good_scenario(), rows)
+        self.fails(scenario, "output differs with the component on")
+
+    def test_failed_push_fails(self):
+        scenario = good_scenario()
+        scenario["push_status"] = 1
+        self.fails(scenario, "pushing the probe exited 1")
+
+    def test_failed_probe_command_fails(self):
+        scenario = good_scenario()
+        scenario["probe_status"] = 1
+        self.fails(scenario, "the probe command exited 1")
+
+    # A probe that fails the same way in both arms is no difference between
+    # them, and still no result.
+    def bad_probe(self, text: str) -> dict:
+        scenario = good_scenario()
+        scenario["probe"] = {"off": [text], "on": [text]}
+        return scenario
+
+    def test_probe_ending_in_failure_fails(self):
+        self.fails(self.bad_probe(good_probe().replace("rc=0", "rc=1")),
+                   "not rc=0")
+
+    def test_probe_missing_a_scenario_fails(self):
+        self.fails(self.bad_probe(good_probe().replace(
+            "case patch-change\n", "case other\n")),
+            "did not take: patch-change")
+
+    def test_probe_that_skipped_patching_fails(self):
+        self.fails(self.bad_probe(good_probe().replace(
+            "case patch-before\n",
+            "case patch-before\n  patch cases skipped\n")),
+            "patch cases skipped")
+
+    def test_probe_without_faults_fails(self):
+        text = "\n".join(line for line in good_probe().splitlines()
+                         if not line.startswith("  regs")) + "\n"
+        self.fails(self.bad_probe(text), "no fault registers")
+        self.fails(self.bad_probe(good_probe().replace(
+            "done faults=%d" % len(runner.PROBE_CASES), "done faults=0")),
+            "closing record")
+
+    def test_probe_that_differs_between_arms_fails(self):
+        scenario = good_scenario()
+        scenario["probe"]["on"] = [good_probe().replace(
+            "x01=0x2", "x01=0x3")]
+        self.fails(scenario, "without the component")
+
+    def test_probe_that_does_not_run_to_its_end_fails(self):
+        self.fails(self.bad_probe(good_probe().replace(
+            "done faults=%d\n" % len(runner.PROBE_CASES), "")),
+            "closing record")
+
+    def test_diagnostics_report_is_judged(self):
+        self.passes(good_scenario(), "--diagnostics")
+        scenario = good_scenario()
+        scenario["report"]["on"] = "binds 3 enters 0 steps 0 poisoned 0\n"
+        self.fails(scenario, "never entered rewritten code", "--diagnostics")
+        scenario = good_scenario()
+        scenario["report"]["off"] = "binds 3 enters 4 steps 0 poisoned 0\n"
+        self.fails(scenario, "ran with the component off", "--diagnostics")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

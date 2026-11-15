@@ -15,6 +15,15 @@ uml_add_tooling_test(
     LABELS cpu
     TIMEOUT 60)
 
+# The AOT guest runner against scripted guests: it fails every incomplete or
+# failed run instead of reporting "identical".
+uml_add_tooling_test(
+    NAME arm64-aot-guest-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/arm64/test_aot_guest_runner.py
+    LABELS cpu
+    TIMEOUT 180)
+
 # The product compilation of the AOT runtime holds none of the counters,
 # report or test switches that a diagnostics build composes in separately.
 if(TARGET uml_arm64_aot_runtime)

@@ -12,11 +12,17 @@ rewritten libz code and patches covered text at run time.
 
 Checked:
 
+- every workload ran to its end, in all three repetitions, in both arms: each
+  row has a zero exit status and an output that is not empty, and a missing or
+  truncated row fails instead of being skipped;
 - every workload prints the same digest of its output in both arms and in
   every repetition: a result that depends on the component is a failure;
-- the probe prints the same text in both arms. Registers that differ between
-  two runs of the same engine (stack addresses under ASLR) are masked; the
-  others are compared for each fault;
+- the probe ran to its end (exit status, the closing "done" record), took
+  every one of its scenarios, took faults, and did not skip the scenarios that
+  patch covered text; it prints the same text in both arms. Registers that
+  differ between two runs of the same engine (stack addresses under ASLR) are
+  masked; the others are compared for each fault, and at least one must be;
+- every adb command and push reports success;
 - with --diagnostics (a framework built with UML_AOT_DIAGNOSTICS, which writes
   the report named by DARWIN_UML_AOT_REPORT): the AOT arm entered rewritten
   code, and the arm with the component off did not. With --manifest the
@@ -48,7 +54,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Callable
+from typing import Callable, NamedTuple
 
 REPOSITORY = pathlib.Path(__file__).resolve().parents[3]
 LAUNCHER = REPOSITORY / "tools" / "boot_android.py"
@@ -57,12 +63,14 @@ import slot_ports  # noqa: E402
 
 DEFAULT_ADB_PORT = 5585
 SETTLE_SECONDS = 20
+REPORT_SECONDS = 3
 WORKLOAD_SECONDS = 900
 PROBE_SECONDS = 120
 TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
-# One line per run: <name> <run> <seconds> <digest>. Each workload's output is
-# a pure function of the image, so the digest is the same in every run.
+# One line per run: <name> <run> <seconds> <digest> <exit status>. Each
+# workload's output is a pure function of the image, so the digest is the same
+# in every run.
 WORKLOADS = r"""
 T=/system/bin/toybox; D=/data/local/tmp; cd $D
 F=/system/lib64/libandroid_runtime.so; G=/system/lib64/libhwui.so
@@ -71,8 +79,10 @@ $T gzip -c $F > $D/w.gz
 run() {
   n=$1; shift
   for i in 1 2 3; do
-    r=$( { $T time -p sh -c "$*" > $D/o.out; } 2>&1 | $T grep real | $T cut -d" " -f2 )
-    echo "$n $i $r $($T md5sum $D/o.out | $T cut -d" " -f1)"
+    $T rm -f $D/rc
+    $T time -p sh -c "$*; echo \$? > $D/rc" > $D/o.out 2> $D/t.err
+    r=$( $T grep real $D/t.err | $T cut -d" " -f2 )
+    echo "$n $i $r $($T md5sum $D/o.out | $T cut -d" " -f1) $($T cat $D/rc 2>/dev/null || echo missing)"
   done
 }
 run zlib_deflate "$T gzip -c $F"
@@ -80,10 +90,27 @@ run zlib_inflate "$T gzip -cd $D/w.gz"
 run crypto_sha256 "$T sha256sum $F $G"
 run libc_sort "$T sort -r $D/n.txt"
 run libc_grep "$T grep -c 9.*9.*9 $D/n.txt"
-run pcre2_restorecon "restorecon -n -R /system/lib64; echo done"
+run pcre2_restorecon "restorecon -n -R /system/lib64 && echo done"
 run binder_cmd "i=0; while [ \$i -lt 5 ]; do cmd package list packages; i=\$((i+1)); done | $T wc -l"
-rm -f $D/w.gz $D/n.txt $D/o.out
+rm -f $D/w.gz $D/n.txt $D/o.out $D/t.err $D/rc
+echo workloads-done
 """
+
+# One row per workload and repetition, printed by the script above.
+WORKLOAD_NAMES = tuple(re.findall(r"^run (\w+) ", WORKLOADS, re.MULTILINE))
+REPETITIONS = (1, 2, 3)
+WORKLOADS_FINISHED = "workloads-done"
+# The MD5 of no output at all: a workload that failed before it printed.
+EMPTY_DIGEST = "d41d8cd98f00b204e9800998ecf8427e"
+
+# The scenarios aot_guest_probe.cpp takes, in the order it takes them.
+PROBE_CASES = (
+    "many-calls", "adler32-guard", "crc32-guard", "crc32_z-wholly-unmapped",
+    "adler32-null", "crc32-tagged-good", "crc32-tagged-guard", "compress2",
+    "inflate-output-guard", "inflate-input-guard", "inflate-output-readonly",
+    "inflate-whole", "adler32-repaired", "crc32-repaired",
+    "inflate-output-repaired", "patch-before", "patch-same-bytes",
+    "patch-change", "patch-restore", "patch-after")
 
 
 class Failure(RuntimeError):
@@ -155,16 +182,75 @@ def stop_launcher(guest: subprocess.Popen) -> None:
             guest.wait(timeout=30)
 
 
-def parse_workloads(text: str) -> dict[tuple[str, int], tuple[float, str]]:
-    runs: dict[tuple[str, int], tuple[float, str]] = {}
+class Run(NamedTuple):
+    seconds: float
+    digest: str
+    status: str
+
+
+def parse_workloads(text: str) -> dict[tuple[str, int], Run]:
+    runs: dict[tuple[str, int], Run] = {}
     for line in text.splitlines():
         fields = line.split()
-        if len(fields) == 4 and fields[1].isdigit():
+        if len(fields) == 5 and fields[1].isdigit():
             try:
-                runs[(fields[0], int(fields[1]))] = (float(fields[2]), fields[3])
+                runs[(fields[0], int(fields[1]))] = Run(
+                    float(fields[2]), fields[3], fields[4])
             except ValueError:
                 raise Failure(f"unreadable workload line: {line!r}")
     return runs
+
+
+def verify_workloads(output: str,
+                     runs: dict[tuple[str, int], Run]) -> None:
+    """Every workload ran to its end, in every repetition, and succeeded."""
+    if WORKLOADS_FINISHED not in output.split():
+        raise Failure(f"the workloads did not run to their end "
+                      f"(no {WORKLOADS_FINISHED!r} line):\n{output}")
+    expected = {(name, number) for name in WORKLOAD_NAMES
+                for number in REPETITIONS}
+    missing = sorted(expected - set(runs))
+    if missing:
+        raise Failure(f"workload rows missing: " + ", ".join(
+            f"{name} #{number}" for name, number in missing))
+    unknown = sorted(set(runs) - expected)
+    if unknown:
+        raise Failure(f"unexpected workload rows: " + ", ".join(
+            f"{name} #{number}" for name, number in unknown))
+    for key in sorted(expected):
+        run = runs[key]
+        if run.status != "0":
+            raise Failure(f"{key[0]} #{key[1]} exited with "
+                          f"status {run.status}")
+        if run.digest == EMPTY_DIGEST:
+            raise Failure(f"{key[0]} #{key[1]} printed nothing")
+
+
+def verify_probe(text: str) -> int:
+    """The probe ran to its end, took every scenario and its faults; returns
+    the number of fault records with registers."""
+    lines = text.splitlines()
+    cases = {line[5:] for line in lines if line.startswith("case ")}
+    absent = [case for case in PROBE_CASES if case not in cases]
+    if absent:
+        raise Failure(f"the probe did not take: " + ", ".join(absent))
+    status = [line for line in lines if line.startswith("rc=")]
+    if status != ["rc=0"] or lines[-1] != "rc=0":
+        raise Failure(f"the probe's last record is not rc=0:\n{text}")
+    done = [line for line in lines if line.startswith("done faults=")]
+    if len(done) != 1 or not done[0][len("done faults="):].isdigit() or \
+            int(done[0][len("done faults="):]) == 0:
+        raise Failure(f"the probe's closing record is {done!r}")
+    for problem in ("  patch cases skipped", "mmap failed"):
+        if problem in lines:
+            raise Failure(f"the probe reported {problem.strip()!r}")
+    if any("output DIFFERS" in line for line in lines):
+        raise Failure(f"a probe scenario's output differs from its "
+                      "source")
+    records = sum(1 for line in lines if line.startswith("  regs"))
+    if records == 0:
+        raise Failure(f"the probe recorded no fault registers")
+    return records
 
 
 def register_fields(line: str) -> dict[str, str]:
@@ -237,7 +323,7 @@ class Arm:
         self.aot = aot
         self.options = options
         self.scratch = scratch
-        self.workloads: dict[tuple[str, int], tuple[float, str]] = {}
+        self.workloads: dict[tuple[str, int], Run] = {}
         self.probe: list[str] = []
         self.report: dict[str, int] = {}
 
@@ -274,21 +360,35 @@ class Arm:
                      device.getprop("sys.boot_completed") == "1",
                      options.boot_timeout, guest)
             time.sleep(SETTLE_SECONDS)
-            output = device.run("-s", serial, "shell", WORKLOADS,
-                                timeout=WORKLOAD_SECONDS).stdout
-            self.workloads = parse_workloads(output)
-            if not self.workloads:
-                raise Failure(f"{self.label}: no workload ran:\n{output}")
+            result = device.run("-s", serial, "shell", WORKLOADS,
+                                timeout=WORKLOAD_SECONDS)
+            self.workloads = parse_workloads(result.stdout)
+            verify_workloads(result.stdout, self.workloads)
+            if result.returncode != 0:
+                raise Failure(f"the workload command exited "
+                              f"{result.returncode}:\n{result.stdout}")
             if options.probe:
-                device.run("-s", serial, "push", str(options.probe),
-                           "/data/local/tmp/libaotprobe.so", timeout=60)
+                pushed = device.run("-s", serial, "push", str(options.probe),
+                                    "/data/local/tmp/libaotprobe.so",
+                                    timeout=60)
+                if pushed.returncode != 0:
+                    raise Failure(f"pushing the probe exited "
+                                  f"{pushed.returncode}:\n{pushed.stdout}")
                 for _ in range(2 if not self.aot else 1):
-                    self.probe.append(device.run(
+                    ran = device.run(
                         "-s", serial, "shell",
                         "cd /data/local/tmp && LD_PRELOAD=/data/local/tmp/"
                         "libaotprobe.so /system/bin/toybox true; echo rc=$?",
-                        timeout=PROBE_SECONDS).stdout)
-            time.sleep(3)
+                        timeout=PROBE_SECONDS)
+                    if ran.returncode != 0:
+                        raise Failure(f"the probe command "
+                                      f"exited {ran.returncode}:\n{ran.stdout}")
+                    verify_probe(ran.stdout)
+                    self.probe.append(ran.stdout)
+            if guest.poll() is not None:
+                raise Failure(f"the launcher exited ({guest.returncode}) "
+                              "before the guest's work was done")
+            time.sleep(REPORT_SECONDS)
             self.report = read_report(report)
         except (Failure, subprocess.TimeoutExpired, OSError) as problem:
             tail = ""
@@ -313,22 +413,30 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
     names = sorted({name for name, _ in off.workloads})
     for arm in (off, on):
         for name in names:
-            digests = {digest for (n, _), (_, digest) in arm.workloads.items()
+            digests = {run.digest for (n, _), run in arm.workloads.items()
                        if n == name}
             if len(digests) != 1:
                 raise Failure(f"{arm.label}: {name} printed {len(digests)} "
                               "different outputs")
     for name in names:
-        before = {d for (n, _), (_, d) in off.workloads.items() if n == name}
-        after = {d for (n, _), (_, d) in on.workloads.items() if n == name}
+        before = {run.digest for (n, _), run in off.workloads.items()
+                  if n == name}
+        after = {run.digest for (n, _), run in on.workloads.items()
+                 if n == name}
         if before != after:
             raise Failure(f"{name}: the output differs with the component on")
-        seconds = [statistics.median(s for (n, _), (s, _) in arm.workloads.items()
-                                     if n == name) for arm in (off, on)]
+        seconds = [statistics.median(run.seconds for (n, _), run in
+                                     arm.workloads.items() if n == name)
+                   for arm in (off, on)]
         print(f"workload {name}: off {seconds[0]:.3f} s, on {seconds[1]:.3f} s, "
               f"output {next(iter(before))}")
     if options.probe:
+        if len(off.probe) != 2 or len(on.probe) != 1:
+            raise Failure(f"the probe ran {len(off.probe)} times without the "
+                          f"component and {len(on.probe)} with it, not 2 and 1")
         checked = compare_probe(off.probe[0], off.probe[1], on.probe[0])
+        if checked == 0:
+            raise Failure("the probe compared no registers")
         print(f"probe: {checked} registers compared, identical")
     if options.diagnostics:
         if on.report.get("enters", 0) == 0:
