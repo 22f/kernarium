@@ -422,6 +422,17 @@ class RunShim:
         return getattr(subprocess, name)
 
 
+def process_status(value) -> int:
+    """The status of a process that ends with `sys.exit(value)`: none is success, an integer is its low eight
+    bits (256 is success, -1 is 255), and any other object is printed to standard error and is status 1."""
+    if value is None:
+        return 0
+    if isinstance(value, int):
+        return value & 0xFF
+    print(value, file=sys.stderr)
+    return 1
+
+
 class Checkers:
     """The bundle check and the privacy-manifest check it runs, loaded once and run in this process.
     Run as commands, each of the fixtures starts two interpreters and asks `xcrun nm` for the symbols of
@@ -438,21 +449,18 @@ class Checkers:
         self.privacy.subprocess = RunShim(self.run_nm)
 
     def call(self, main, script: Path, arguments: list[str]) -> Outcome:
+        """Runs `main` as the script's command would end: what it returns or what it raises as `SystemExit`
+        is the exit value, and the process status is what `sys.exit` and the shell make of that value."""
         out, err = io.StringIO(), io.StringIO()
         saved = sys.argv
         sys.argv = [str(script), *arguments]
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 try:
-                    status = main()
+                    value = main()
                 except SystemExit as stop:
-                    status = stop.code
-                    if isinstance(status, str):
-                        # `raise SystemExit(message)` prints the message and ends with status 1.
-                        print(status, file=sys.stderr)
-                        status = 1
-                    elif status is None:
-                        status = 0
+                    value = stop.code
+                status = process_status(value)
         finally:
             sys.argv = saved
         return Outcome(status, out.getvalue(), err.getvalue())
@@ -1809,6 +1817,26 @@ def check_command_line(checker: Path, checkers: Checkers, root: Path, clean: Pat
                             f"command: {command}\nhere: {here}")
 
 
+def check_exit_values(checkers: Checkers, failures: list[str]) -> None:
+    """A checker that ends with a value the shell reads as success must not look like a rejection here
+    either: the run in this process ends as a process does, whether the value is returned by `main` or
+    raised as `SystemExit`. Each value is run as a process too, and the two must agree."""
+    def raised(value):
+        def main():
+            raise SystemExit(value)
+        return main
+
+    for value in (None, 0, 1, 2, 255, 256, 257, -1, True, "refused", 1.5):
+        child = subprocess.run(
+            [sys.executable, "-B", "-c", f"import sys; sys.exit({value!r})"], check=False,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
+        want = Outcome(child.returncode, "", child.stderr)
+        for how, main in (("returned", lambda value=value: value), ("raised", raised(value))):
+            got = checkers.call(main, Path("exit-values"), [])
+            if got != want:
+                failures.append(f"exit value {value!r} {how}: ends as {got}, a process ends as {want}")
+
+
 def check_examples(root: Path, check, clean: Path, config: Path, failures: list[str]) -> None:
     """The example files' own values are placeholders, and the App Store configuration refuses each
     one of them in the mode that judges it, whatever the other values are. A value added to an
@@ -2760,6 +2788,7 @@ def main() -> int:
               passes=False, expect="PrivacyInfo.xcprivacy")
 
         check_command_line(options.checker, checkers, root, clean, knob, failures)
+        check_exit_values(checkers, failures)
 
     for failure in failures:
         print(failure, file=sys.stderr)
