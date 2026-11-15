@@ -181,11 +181,14 @@ void ratioPinAsked(RatioPin& pin, std::uint64_t operation) noexcept
     pin.operation = operation;
 }
 
-bool ratioPinCompleted(RatioPin& pin, std::uint64_t operation, std::int32_t error) noexcept
+bool ratioPinCompleted(RatioPin& pin, std::uint64_t operation, std::int32_t error, RatioBoundary boundary,
+                       std::int64_t notBefore) noexcept
 {
     if (!pin.asked || pin.operation != operation) return false;
     pin.pending = false;
     pin.error = error;
+    pin.boundary = boundary;
+    pin.notBefore = notBefore;
     return true;
 }
 
@@ -215,6 +218,80 @@ RatioFrameStep ratioFrameStep(const RatioPin& pin) noexcept
 std::int32_t ratioPinErrorForStill(const RatioPin& pin) noexcept
 {
     return pin.timedOut ? ratioNoCompletion : pin.error;
+}
+
+bool ratioSampleDelivered(RatioPin& pin, std::optional<std::int64_t> captureNanoseconds, bool shapeIsAnchors) noexcept
+{
+    if (ratioFrameStep(pin) != RatioFrameStep::deliver) return false;
+    if (!pin.asked) return true;
+    const bool byShape = pin.boundary == RatioBoundary::shape || (pin.boundary == RatioBoundary::atTime && !captureNanoseconds);
+    if (pin.boundary == RatioBoundary::none) return true;
+    if (!byShape) return *captureNanoseconds >= pin.notBefore;
+    if (pin.shapeSeen) return true;
+    if (!shapeIsAnchors) return false;
+    pin.shapeSeen = true;
+    return true;
+}
+
+std::optional<std::int32_t> ratioNoteCode(const std::optional<RatioPin>& pin) noexcept
+{
+    if (!pin || !pin->asked) return std::nullopt;
+    return pin->pending || pin->timedOut ? ratioPending : pin->error;
+}
+
+void RatioPins::asked(std::size_t camera, std::uint64_t operation)
+{
+    ratioPinAsked(pins_[camera], operation);
+}
+
+RatioPins::Completion RatioPins::completed(std::size_t camera, std::uint64_t operation, std::int32_t error, RatioBoundary boundary,
+                                           std::int64_t notBefore)
+{
+    const auto found = pins_.find(camera);
+    if (found == pins_.end()) return Completion::ignored;
+    RatioPin& pin = found->second;
+    const bool wasTimedOut = pin.timedOut;
+    if (!ratioPinCompleted(pin, operation, error, boundary, notBefore)) return Completion::ignored;
+    if (wasTimedOut) return Completion::afterTimeout;
+    return error != 0 ? Completion::failed : Completion::succeeded;
+}
+
+std::optional<std::uint64_t> RatioPins::armed(std::size_t camera, std::uint64_t now)
+{
+    const auto found = pins_.find(camera);
+    if (found == pins_.end() || !ratioPinArmed(found->second, now)) return std::nullopt;
+    return found->second.operation;
+}
+
+bool RatioPins::timedOut(std::size_t camera, std::uint64_t operation, std::uint64_t now)
+{
+    const auto found = pins_.find(camera);
+    if (found == pins_.end() || found->second.operation != operation) return false;
+    return ratioPinTimedOut(found->second, now);
+}
+
+void RatioPins::invalidate(std::size_t camera)
+{
+    pins_.erase(camera);
+}
+
+std::optional<RatioPin> RatioPins::find(std::size_t camera) const
+{
+    const auto found = pins_.find(camera);
+    if (found == pins_.end()) return std::nullopt;
+    return found->second;
+}
+
+bool RatioPins::sampleDelivered(std::size_t camera, std::optional<std::int64_t> captureNanoseconds, bool shapeIsAnchors)
+{
+    const auto found = pins_.find(camera);
+    return found == pins_.end() || ratioSampleDelivered(found->second, captureNanoseconds, shapeIsAnchors);
+}
+
+bool RatioPins::holdsFrames(std::size_t camera) const
+{
+    const auto found = pins_.find(camera);
+    return found != pins_.end() && ratioFrameStep(found->second) != RatioFrameStep::deliver;
 }
 
 std::vector<std::string> heldNotesToDrop(const std::vector<HeldNoteUse>& held, const std::vector<std::string>& current,
