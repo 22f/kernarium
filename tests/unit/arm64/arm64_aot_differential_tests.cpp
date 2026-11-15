@@ -3373,6 +3373,15 @@ int main(int argc, char **argv)
 		return 0;
 	}
 	bool scenarios_done = false;
+	/* libz when the build holds it (some scenarios name its functions),
+	 * otherwise the first library. */
+	std::size_t scenario_index = libraries.front().index;
+	for (const auto &file : libraries) {
+		if (file.guest.ends_with("/libz.so")) {
+			scenario_index = file.index;
+			break;
+		}
+	}
 	for (const auto &file : libraries) {
 		if (cfg.library >= 0 &&
 		    static_cast<long>(file.index) != cfg.library)
@@ -3461,9 +3470,9 @@ int main(int argc, char **argv)
 			admission_history_survives_changes_as_a_hint_only(image);
 			rewritten_code_stays_within_a_stack_budget(image);
 		}
-		/* The scenarios use the first library: they are about the
-		 * mechanism, not about the code. */
-		if (file.index == libraries.front().index) {
+		/* The scenarios are about the mechanism, not about the code:
+		 * they run on one library, whatever order the build lists. */
+		if (file.index == scenario_index) {
 			if (file.guest.ends_with("/libz.so")) {
 				inline_hit_path_is_taken(image, functions);
 				return_loop_is_bounded(image);
@@ -3483,8 +3492,12 @@ int main(int argc, char **argv)
 		}
 	}
 	if (libraries.size() > 1 && cfg.library < 0) {
-		const auto &first = libraries[0];
-		const auto &second = libraries[1];
+		/* The scenario library and the one listed after it. */
+		std::size_t at = 0;
+		while (libraries[at].index != scenario_index)
+			++at;
+		const auto &first = libraries[at];
+		const auto &second = libraries[(at + 1) % libraries.size()];
 		const auto image = load_library(first.host);
 		const auto other = load_library(second.host);
 		cross_library_branches(image, load_functions(cfg.functions,
