@@ -1022,14 +1022,15 @@ the block on old targets, and as one that targets API 29. The old package, once
 the runner switches it on (after a run without that, which must not load the
 layer), reads a Java `byte[]` through the Dalvik offsets, hands it back to Java
 and the array functions, from a second thread too, writes it through the array
-functions, compares it with a global reference and the original, locks it, keeps it
-while more results arrive, pops it out of a local frame, grows a malloc buffer with
-`getline`, asks `malloc_usable_size`, reallocates and frees a block libc allocated,
-finds the function tables read-only again and allocates below 2 GiB, and passes; the runner also asserts the library's SELinux
-label. The modern package gets no layer, the raw read fails and the array
-operations give the runtime's own answers. `--host-shim` boots a release without
-the layer and loads a host-built copy from the old package after a control run
-without it, which qualifies the library and not the framework hook.
+functions, compares it with a global reference and the original, locks it, keeps
+it while more results arrive, pops it out of a local frame, has Java fill it and
+reads it again, grows a malloc buffer with `getline`, asks `malloc_usable_size`,
+reallocates and frees a block libc allocated, finds the function tables
+read-only again and allocates below 2 GiB, and passes; the runner also asserts
+the library's SELinux label. The modern package gets no layer, the raw read fails
+and the array operations give the runtime's own answers. `--host-shim` boots a
+release without the layer and loads a host-built copy from the old package after
+a control run without it, which qualifies the library and not the framework hook.
 `android17-oldapp-runner` (tooling) runs the package (manifest, DEX file, armv7
 build), the verdicts and the commands without a guest. The unit tests
 (`andarium-oldapp-*`) run the JNI interposer against a fake runtime that accepts

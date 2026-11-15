@@ -13,7 +13,7 @@ application of oldapp_probe_apk.py in its two variants and reads what each one r
   installs such an application): the layer is mapped in its process, the raw read of the `byte[]` returns the
   bytes (also from a thread of its own), the array still works as a JNI reference (handed back to Java, read
   and written through the array functions, one object with a global reference to it, locked, kept while more
-  results arrive, popped out of a local frame), getline and malloc_usable_size accept a block the application
+  results arrive, popped out of a local frame, filled by Java and read again), getline and malloc_usable_size accept a block the application
   allocated and the application reallocates and frees a block libc allocated, the JNI and invoke tables are
   read-only again, and every allocation lies below 2 GiB;
 - ``modern`` (targetSdkVersion 29): the layer is not mapped, and the raw read does not find the bytes (the
@@ -71,16 +71,17 @@ BROADCAST_SECONDS = 60
 #: What each variant must report: the lines that must read exactly so (the others are recorded).
 #: What an application does with an array and an allocation the runtime's own way: the layer must not change the verdicts.
 SEMANTICS = {"write_through": "pass", "identity": "pass", "retained": "pass", "monitor": "pass", "pop": "pass",
-             "getline": "pass", "usable_size": "pass", "libc_block": "pass", "table_read_only": "pass"}
+             "getline": "pass", "usable_size": "pass", "libc_block": "pass", "table_read_only": "pass",
+             "java_fill": "pass"}
 EXPECTED = {
     "old": {"shim_mapped": "yes", "raw_read": "pass", "passback": "pass", "elements": "pass", "global": "pass",
-            "thread_raw": "pass", **SEMANTICS, "low_heap": "pass", "done": "1"},
+            "thread_raw": "pass", **SEMANTICS, "java_fill_raw": "pass", "low_heap": "pass", "done": "1"},
     "modern": {"shim_mapped": "no", "raw_read": "fail", "passback": "pass", "elements": "pass", "global": "pass",
-               **SEMANTICS, "done": "1"},
+               **SEMANTICS, "java_fill_raw": "fail", "done": "1"},
     # The old application before the layer is loaded (a host-shim run's control, or an image's application that is not
     # switched on): what the layer changes.
     "control": {"shim_mapped": "no", "raw_read": "fail", "passback": "pass", "elements": "pass", "global": "pass",
-                **SEMANTICS, "done": "1"},
+                **SEMANTICS, "java_fill_raw": "fail", "done": "1"},
 }
 DATA = re.compile(r'data="(.*)"', re.DOTALL)
 

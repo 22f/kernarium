@@ -20,6 +20,9 @@
 //   identity     the array, a global reference made from it and the array a Java call returned
 //                are one object (IsSameObject)
 //   retained     a reference kept while 520 more results arrive still reads its own bytes
+//   java_fill    Java fills an array the native side passed it (System.arraycopy), and the native side reads the
+//                new bytes through GetByteArrayRegion and GetByteArrayElements
+//   java_fill_raw  and through the object pointer at the Dalvik offsets
 //   monitor      MonitorEnter and MonitorExit accept it
 //   pop          PopLocalFrame hands it out of the frame
 //   getline      getline grows a buffer the application allocated with malloc
@@ -343,6 +346,36 @@ void array_cases(Report& report, Env* env) {
         delete_local(env, held[i]);
     }
     report.verdict("retained", retained && !exception_check(env));
+
+    // Java writes into the array the native side passed it; the native side reads what Java wrote.
+    {
+        jclass system_class = find_class(env, "java/lang/System");
+        jmethodID arraycopy = static_method(env, system_class, "arraycopy", "(Ljava/lang/Object;ILjava/lang/Object;II)V");
+        jobject source = new_array(env, 4);
+        const jbyte filled[4] = {1, 2, 3, 4};
+        set_region(env, source, 0, 4, filled);
+        jobject target = result_of(make_original(9));
+        bool region_ok = false, elements_ok = false, raw_ok = false;
+        if (system_class != nullptr && arraycopy != nullptr && target != nullptr) {
+            entry<void (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kVoid, kVarargs))(
+                env, system_class, arraycopy, source, 0, target, 0, 4);
+            jbyte seen[4] = {};
+            get_region(env, target, 0, 4, seen);
+            region_ok = same(reinterpret_cast<const char*>(seen), reinterpret_cast<const char*>(filled), 4);
+            jbyte* elements = get_elements(env, target, nullptr);
+            elements_ok = elements != nullptr && same(reinterpret_cast<const char*>(elements), reinterpret_cast<const char*>(filled), 4);
+            if (elements != nullptr) {
+                release_elements(env, target, elements, kReleaseAbort);
+            }
+            char raw_bytes[4] = {};
+            raw_ok = safe_copy(raw_bytes, static_cast<const char*>(target) + 0x10, 4) &&
+                     same(raw_bytes, reinterpret_cast<const char*>(filled), 4);
+        }
+        report.verdict("java_fill", region_ok && elements_ok && !exception_check(env));
+        report.verdict("java_fill_raw", raw_ok);
+        delete_local(env, target);
+        delete_local(env, source);
+    }
 
     // PopLocalFrame.
     entry<jint (*)(Env*, jint)>(env, slot::PushLocalFrame)(env, 32);

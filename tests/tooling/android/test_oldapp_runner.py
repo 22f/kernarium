@@ -206,11 +206,12 @@ class ProbePackageTests(unittest.TestCase):
 
 class VerdictTests(unittest.TestCase):
     SEMANTICS = {"write_through": "pass", "identity": "pass", "retained": "pass", "monitor": "pass", "pop": "pass",
-                 "getline": "pass", "usable_size": "pass", "libc_block": "pass", "table_read_only": "pass"}
+                 "getline": "pass", "usable_size": "pass", "libc_block": "pass", "table_read_only": "pass",
+                 "java_fill": "pass"}
     OLD = {"shim_mapped": "yes", "raw_read": "pass", "passback": "pass", "elements": "pass", "global": "pass",
-           "thread_raw": "pass", **SEMANTICS, "low_heap": "pass", "done": "1"}
+           "thread_raw": "pass", **SEMANTICS, "java_fill_raw": "pass", "low_heap": "pass", "done": "1"}
     MODERN = {"shim_mapped": "no", "raw_read": "fail", "passback": "pass", "elements": "pass", "global": "pass",
-              "thread_raw": "fail", **SEMANTICS, "low_heap": "pass", "done": "1"}
+              "thread_raw": "fail", **SEMANTICS, "java_fill_raw": "fail", "low_heap": "pass", "done": "1"}
 
     def test_a_probe_that_reports_what_the_variant_must_passes(self) -> None:
         self.assertIn("raw_read=pass", runner.evaluate("old", self.OLD))
@@ -224,7 +225,7 @@ class VerdictTests(unittest.TestCase):
                            ("global", "fail"), ("thread_raw", "fail"), ("low_heap", "fail"),
                            ("write_through", "fail"), ("identity", "fail"), ("retained", "fail"), ("monitor", "fail"),
                            ("pop", "fail"), ("getline", "fail"), ("usable_size", "fail"), ("libc_block", "fail"),
-                           ("table_read_only", "fail"),
+                           ("table_read_only", "fail"), ("java_fill", "fail"), ("java_fill_raw", "fail"),
                            ("done", "")):
             with self.assertRaises(runner.Failure) as raised:
                 runner.evaluate("old", {**self.OLD, key: value})
