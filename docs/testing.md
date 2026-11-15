@@ -607,10 +607,12 @@ and its sender gets status 3. Run it in a terminal, detached with
 <label>` prints a launchd job that launchd never restarts, and creates nothing:
 make its log directory first; launchd must be able to open the job file and the
 log, so both belong on a volume with ownership enabled, and `--launchd-log`
-names the log); `stop --force` ends the watch before the host.
+names the log); `stop --force` ends the watch before the host. The printed job
+asks for interactive scheduling, and a running watch holds an idle-sleep
+assertion (never a display one) and logs any turn of its loop that starts late.
 The `kernarium-ipad-automation-watch` and
 `kernarium-ipad-automation-watch-process` tooling tests run the real script
-against fake `xcrun` and `xcodebuild` executables.
+against fake `xcrun`, `xcodebuild` and `caffeinate` executables.
 
 ### Edge gestures (device only)
 

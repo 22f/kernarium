@@ -18,6 +18,7 @@ from __future__ import annotations
 
 __import__("sys").dont_write_bytecode = True
 
+import contextlib
 import fcntl
 import importlib.util
 import json
@@ -1331,6 +1332,134 @@ class VerdictBoundaryTests(unittest.TestCase):
         launch.assert_not_called()
 
 
+class OverrunClock(FastClock):
+    """A fast clock whose next wait can take longer than it asked."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.extra = 0.0
+
+    def sleep(self, seconds: float) -> None:
+        extra, self.extra = self.extra, 0.0
+        self.advance(seconds + extra)
+
+
+class StallTests(unittest.TestCase):
+    """The watch says when its loop was not scheduled: a turn that starts more
+    than WATCH_STALL after the one before it is logged, with the gap and where
+    the time went. It is what names a stall such as a watch that made no poll
+    for over an hour while the Mac idled with its display off."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.options = automation.parse(
+            ["--device", "synthetic", "--state-dir", self.tmp.name, "watch"])
+        self.clock = OverrunClock()
+        self.messages: list[str] = []
+        for name, value in (("log", self.messages.append),
+                            ("local_record", lambda _: {})):
+            patcher = mock.patch.object(automation, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def late(self) -> list[str]:
+        return [message for message in self.messages if "poll loop" in message]
+
+    def run_turns(self, *turns, replace=None) -> None:
+        """Runs the watch's loop; each turn is what the observer's check does
+        in that turn (it may take time, and returns a reason or None). The
+        watch ends when the turns are over."""
+        script = list(turns)
+        del self.messages[:]
+        self.watch = automation.Watch(self.options, clock=self.clock)
+
+        def check(observer):
+            if not script:
+                self.watch.stop.set()
+                return None
+            return script.pop(0)(self.clock)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(automation.HostObserver, "check", check))
+            if replace is not None:
+                stack.enter_context(mock.patch.object(self.watch, "replace", replace))
+            self.assertEqual(self.watch.run(), 0)
+
+    @staticmethod
+    def quiet(clock):
+        return None
+
+    @staticmethod
+    def stalled(seconds: float):
+        """The wait after this turn takes `seconds` longer than asked."""
+        return lambda clock: setattr(clock, "extra", seconds)
+
+    @staticmethod
+    def works(seconds: float):
+        """This turn's read of the device takes `seconds`."""
+        return lambda clock: clock.advance(seconds)
+
+    def test_a_loop_that_was_not_scheduled_says_so_with_the_gap(self) -> None:
+        # Rule: one line, with the gap, for the turn that started late; the
+        # turns on time say nothing.
+        self.run_turns(*[self.quiet] * 5, self.stalled(4800), *[self.quiet] * 5)
+        self.assertEqual(len(self.late()), 1, self.messages)
+        message = self.late()[0]
+        self.assertIn("did not run for 4802.0 s by the monotonic clock", message)
+        self.assertIn("4802.0 s by the wall clock", message)
+        self.assertIn(f"a poll comes every {automation.WATCH_POLL} s", message)
+        self.assertIn("its wait took 4802.0 s and the rest of the turn 0.0 s", message)
+
+    def test_polls_on_time_say_nothing(self) -> None:
+        self.run_turns(*[self.quiet] * 40)
+        self.assertEqual(self.late(), [])
+
+    def test_the_bound_is_well_above_the_period(self) -> None:
+        # Rule: a gap of exactly the bound is on time; one more is not.
+        period = automation.WATCH_POLL
+        self.assertGreaterEqual(automation.WATCH_STALL, 5 * period)
+        self.run_turns(self.quiet, self.stalled(automation.WATCH_STALL - period),
+                       self.quiet, self.quiet)
+        self.assertEqual(self.late(), [])
+        self.run_turns(self.quiet, self.stalled(automation.WATCH_STALL - period + 0.5),
+                       self.quiet, self.quiet)
+        self.assertEqual(len(self.late()), 1, self.messages)
+
+    def test_each_late_turn_is_told_once(self) -> None:
+        self.run_turns(self.quiet, self.stalled(100), self.quiet, self.quiet,
+                       self.stalled(200), self.quiet, self.quiet)
+        self.assertEqual(len(self.late()), 2, self.messages)
+        self.assertIn("102.0 s", self.late()[0])
+        self.assertIn("202.0 s", self.late()[1])
+
+    def test_a_read_that_held_the_turn_is_told_apart_from_a_wait_that_did(self) -> None:
+        # Rule: the line says where the time went, so that a read of the device
+        # that timed out is not taken for a loop that was not run.
+        self.run_turns(self.quiet, self.works(60), self.quiet, self.quiet)
+        self.assertEqual(len(self.late()), 1, self.messages)
+        self.assertIn("its wait took 2.0 s and the rest of the turn 60.0 s",
+                      self.late()[0])
+
+    def test_a_sleep_of_the_mac_is_named_by_the_wall_clock(self) -> None:
+        # The monotonic clock stops while the Mac sleeps; the wall clock does
+        # not, and a turn that starts after the sleep is late by it.
+        self.run_turns(self.quiet, lambda clock: clock.suspend(3600), self.quiet,
+                       self.quiet)
+        self.assertEqual(len(self.late()), 1, self.messages)
+        self.assertIn("2.0 s by the monotonic clock and 3602.0 s by the wall clock",
+                      self.late()[0])
+
+    def test_a_replacement_is_not_a_late_turn(self) -> None:
+        # Rule: a replacement takes minutes and is not a poll; the turn after
+        # it is not late for it.
+        def replacement(reason):
+            self.clock.advance(100)
+        self.run_turns(self.quiet, lambda clock: "dead", self.quiet, self.quiet,
+                       replace=replacement)
+        self.assertEqual(self.late(), [])
+
+
 class ObserverTests(unittest.TestCase):
     """When a host is dead, from what a scripted device shows, on a clock the
     test moves (the real WATCH_ constants; no host process runs)."""
@@ -2531,6 +2660,81 @@ class StatusTests(WatchTestCase):
         status = automation.watch_summary(self.options("status"))
         self.assertFalse(status["running"])
         self.assertIn("without recording why", status["meaning"])
+
+
+class KeepAwakeTests(WatchTestCase):
+    """A running watch holds an idle-sleep assertion of its own, and nothing
+    more of the Mac's power: `caffeinate -i -w <pid>` (the fake one records its
+    arguments and holds until the process it is told to wait for ends)."""
+
+    def held(self) -> dict:
+        calls = self.device.caffeinated()
+        self.assertEqual(len(calls), 1, calls)
+        return calls[0]
+
+    def test_a_running_watch_holds_an_idle_sleep_assertion_and_nothing_more(self) -> None:
+        # Rule: idle sleep only, for this watch's own pid; never the display
+        # (-d), the user's activity (-u), system sleep (-s) or a timeout.
+        self.watch_over_host()
+        call = self.held()
+        self.assertEqual(call["argv"], ["-i", "-w", str(os.getpid())])
+        self.assertTrue(self.device.alive(call["pid"]))
+        self.assertEqual(self.last_watch.end(), 0)
+        self.assertFalse(self.device.alive(call["pid"]))
+
+    def test_the_assertion_ends_with_the_watch_however_it_ends(self) -> None:
+        # Rule: every exit path of the watch releases it before the watch
+        # returns: stopped, needs-approval, cannot-observe and an error.
+        def stopped():
+            self.watch_over_host()
+            self.assertEqual(self.last_watch.end(), 0)
+
+        def needs_approval():
+            self.device.scenarios([{"kind": "serve"}])
+            first = self.watch_over_host()
+            self.device.control(first, "relaunch-quiet")
+            self.assertEqual(self.last_watch.join(), automation.EXIT_NEEDS_APPROVAL,
+                             self.messages)
+
+        def cannot_observe():
+            self.assertEqual(self.run_watch().join(),
+                             automation.EXIT_WATCH_CANNOT_OBSERVE, self.messages)
+
+        def error():
+            def fail(watch):
+                # (the fake needs a moment to start and say it is holding)
+                self.device.wait(lambda: self.device.caffeinated(), 15,
+                                 "the assertion is held")
+                raise RuntimeError("boom")
+            with mock.patch.object(automation.Watch, "run", fail):
+                self.assertEqual(self.run_watch().join(), automation.EXIT_FAILED)
+
+        for ending in (stopped, needs_approval, cannot_observe, error):
+            with self.subTest(ending.__name__):
+                self.setUp()
+                ending()
+                self.assertFalse(self.device.alive(self.held()["pid"]))
+
+    def test_a_watch_that_does_not_get_its_lock_holds_no_assertion(self) -> None:
+        self.watch_over_host()
+        held = self.held()
+        self.assertEqual(self.run_watch().join(), automation.EXIT_WATCH_LOCKED)
+        self.assertEqual(self.device.caffeinated(), [held])
+        self.assertTrue(self.device.alive(held["pid"]))
+
+    def test_a_watch_runs_on_where_the_assertion_cannot_be_held(self) -> None:
+        # Rule: holding the assertion is not a condition of watching.
+        for found, said in ((None, "no caffeinate"),
+                            ("/nonexistent/caffeinate", "cannot start")):
+            with self.subTest(found):
+                self.setUp()
+                with mock.patch.object(automation.shutil, "which",
+                                       return_value=found):
+                    self.watch_over_host()
+                self.assertEqual(self.device.caffeinated(), [])
+                self.assertTrue(any(said in message for message in self.messages),
+                                self.messages)
+                self.assertEqual(self.last_watch.end(), 0)
 
 
 class LogSignalTests(unittest.TestCase):

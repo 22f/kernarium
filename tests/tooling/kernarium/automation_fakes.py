@@ -41,6 +41,9 @@ Scenario kinds:
   later (`after` sets the delay) before it says anything, as when whatever
   started it is killed first.
 
+A fake `caffeinate` records its arguments in `caffeinate.jsonl` and holds, as the
+real one does, until the process named by `-w` has ended (or it is signalled).
+
 Any scenario with `stubborn` set makes xcodebuild ignore SIGTERM, as a hung
 one does: only SIGKILL ends it. With `child` set it also starts a helper
 process (its pid is in the invocation record) that outlives it unless
@@ -306,6 +309,31 @@ while True:
     time.sleep(0.1)
 '''
 
+CAFFEINATE = r'''#!@PYTHON@
+import json
+import os
+import subprocess
+import sys
+import time
+
+with open(os.path.join(os.environ["FAKE_ROOT"], "caffeinate.jsonl"), "a") as handle:
+    handle.write(json.dumps({"pid": os.getpid(), "argv": sys.argv[1:],
+                             "time": time.time()}) + "\n")
+arguments = sys.argv[1:]
+watched = int(arguments[arguments.index("-w") + 1]) if "-w" in arguments else None
+
+
+def alive(pid):
+    shown = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                           stdout=subprocess.PIPE, text=True).stdout.strip()
+    return bool(shown) and not shown.startswith("Z")
+
+
+# The real tool holds until the process named by -w ends, however it ends.
+while watched is not None and alive(watched):
+    time.sleep(0.05)
+'''
+
 GOOD_SETTINGS = {
     "PreferredScreenCaptureFormat": "screenshots",
     "SystemAttachmentLifetime": "keepNever",
@@ -326,7 +354,8 @@ class FakeDevice:
         self.reports = self.root / "reports"
         self.channel = self.root / "container/Documents/automation"
         self.bin.mkdir()
-        for name, template in (("xcrun", XCRUN), ("xcodebuild", XCODEBUILD)):
+        for name, template in (("xcrun", XCRUN), ("xcodebuild", XCODEBUILD),
+                               ("caffeinate", CAFFEINATE)):
             path = self.bin / name
             path.write_text(template.replace("@PYTHON@", sys.executable))
             path.chmod(0o755)
@@ -368,6 +397,13 @@ class FakeDevice:
 
     def invocations(self) -> list[dict]:
         path = self.root / "invocations.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+    def caffeinated(self) -> list[dict]:
+        """The `caffeinate` processes the script started, in order."""
+        path = self.root / "caffeinate.jsonl"
         if not path.exists():
             return []
         return [json.loads(line) for line in path.read_text().splitlines() if line]
@@ -427,6 +463,19 @@ class FakeDevice:
                         except (ProcessLookupError, PermissionError):
                             pass
 
+    def kill_caffeinate(self) -> None:
+        for record in self.caffeinated():
+            shown = subprocess.run(
+                ["ps", "-o", "command=", "-p", str(record["pid"])],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True).stdout
+            if str(self.root) in shown:
+                try:
+                    os.kill(record["pid"], signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+
     def cleanup(self) -> None:
+        self.kill_caffeinate()
         self.kill_hosts()
         self.scratch.cleanup()

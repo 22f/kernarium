@@ -69,6 +69,12 @@ a volume with ownership enabled (the internal one) while the state directory
 may be anywhere: `--launchd-log` names the log, which is otherwise
 STATE_DIR/UDID/watch-launchd.log.
 
+The printed job asks launchd for interactive scheduling (ProcessType
+Interactive, LegacyTimers), and a running watch holds an idle-sleep assertion
+(`caffeinate -i -w PID`: never the display) that ends with it. The watch logs a
+line, with the gap, whenever a turn of its loop starts more than 15 s after the
+one before it.
+
 The watch acts only on evidence. A wrong restart ends a host that works, or
 puts an approval prompt on the device that nobody answers; a missed one costs
 the next look at `status`. Where it cannot tell, it replaces nothing, says
@@ -216,6 +222,10 @@ WATCH_BUSY_LIMIT = 1800
 # Mac sleeps) is a sleep or a clock change: what the watch saw before it says
 # nothing about the host now.
 WATCH_CLOCK_GAP = 10
+# The watch polls every WATCH_POLL; a turn of its loop that starts this much
+# later than the one before it was not scheduled (or was held by a read of the
+# device), and the watch says so, with the gap.
+WATCH_STALL = 15
 # After "Running tests..." XCTest gives the device's approval prompt 60 s: a
 # runner that is up and neither serves nor says why within this is ended, and
 # what it may have asked of the device is not known.
@@ -1835,6 +1845,49 @@ class HostObserver:
         return 0 if self.unknown_since is None else self.clock.monotonic() - self.unknown_since
 
 
+class Cadence:
+    """Tells when the watch's loop was not scheduled. A turn that starts more
+    than WATCH_STALL after the one before it (on the monotonic clock, which
+    stops while the Mac sleeps, or on the wall clock, which does not) is
+    described with the time its wait took and the time the rest of the turn
+    took, which tell a loop that was not run from one held by a read of the
+    device."""
+
+    def __init__(self, clock=CLOCK):
+        self.clock = clock
+        self.last = None
+        self.waited = 0.0
+
+    def turn(self):
+        """The message for a turn that starts late, or None. Call at the start
+        of every turn."""
+        now, wall = self.clock.monotonic(), self.clock.time()
+        last, self.last = self.last, (now, wall)
+        if last is None:
+            return None
+        gap, wall_gap = now - last[0], wall - last[1]
+        if max(gap, wall_gap) <= WATCH_STALL:
+            return None
+        return (f"the poll loop did not run for {gap:.1f} s by the monotonic "
+                f"clock and {wall_gap:.1f} s by the wall clock (a poll comes "
+                f"every {WATCH_POLL} s): its wait took {self.waited:.1f} s and "
+                f"the rest of the turn {max(0.0, gap - self.waited):.1f} s")
+
+    def wait(self, event, seconds):
+        """`clock.wait`, timed. True when `event` is set within `seconds`."""
+        began = self.clock.monotonic()
+        try:
+            return self.clock.wait(event, seconds)
+        finally:
+            self.waited = self.clock.monotonic() - began
+
+    def reset(self):
+        """What happened since is not a poll (a replacement, which takes
+        minutes): the next turn is not late."""
+        self.last = None
+        self.waited = 0.0
+
+
 # What Watch.replace returns when the verdict it was given did not stand and
 # the watch looks again.
 AGAIN = "again"
@@ -1856,6 +1909,7 @@ class Watch:
         self.observer = None
         self.adopted = False
         self.pending = None
+        self.cadence = Cadence(clock)
         self.blind_said = False
         self.restarts = 0
         self.restart_times = [t for t in self.record.data.get("restart_times", [])
@@ -1879,6 +1933,9 @@ class Watch:
         self.observer = HostObserver(self.options, None, None, clock=self.clock,
                                      on_progress=self.progress)
         while not self.stop.is_set():
+            late = self.cadence.turn()
+            if late:
+                self.say(late)
             reason = self.observer.check()
             if self.observer.switched or (self.observer.advanced and not self.adopted):
                 self.observer.switched = False
@@ -1889,11 +1946,12 @@ class Watch:
             if code is not None:
                 return code
             if reason is None:
-                self.clock.wait(self.stop, WATCH_POLL)
+                self.cadence.wait(self.stop, WATCH_POLL)
                 continue
             code = self.replace(reason)
+            self.cadence.reset()
             if code is AGAIN:
-                self.clock.wait(self.stop, WATCH_POLL)
+                self.cadence.wait(self.stop, WATCH_POLL)
             elif code is not None:
                 return code
         return self.stopped()
@@ -2337,7 +2395,15 @@ def launchd_job(options, label):
     after those would put a new prompt on the device. The price is that a
     watch that crashes is not replaced by launchd: its host is left serving,
     and the next poll of `status` shows the watch gone. Processes the watch
-    started are left running when it ends."""
+    started are left running when it ends.
+
+    The job asks launchd for interactive scheduling: ProcessType Interactive
+    (without it a job gets light resource limits that throttle its CPU and
+    I/O, which the supervisors and xcodebuild it starts inherit) and
+    LegacyTimers (its timers are not coalesced with other processes'), because
+    a watch of the default kind was once not run for over an hour while the
+    Mac idled with its display off. Nothing else is asked of the system: the
+    idle-sleep assertion is the watch's own (`keep_awake`)."""
     state = pathlib.Path(options.state_dir).resolve()
     arguments = [sys.executable, str(SCRIPT), "--device", options.device,
                  "--state-dir", str(state),
@@ -2369,6 +2435,8 @@ def launchd_job(options, label):
         "RunAtLoad": True,
         "AbandonProcessGroup": True,
         "LimitLoadToSessionType": "Aqua",
+        "ProcessType": "Interactive",
+        "LegacyTimers": True,
         "StandardOutPath": log_path,
         "StandardErrorPath": log_path,
     }
@@ -2402,6 +2470,40 @@ def detach_watch(options):
     return EXIT_FAILED
 
 
+def keep_awake():
+    """Holds an idle-sleep assertion for as long as this watch runs, and
+    returns the process that holds it (None when it cannot be started: the
+    watch runs without it). `caffeinate -i` keeps the Mac from idle sleep and
+    nothing else: never the display (`-d`), and it does not wake it (`-u`). With
+    `-w` it also ends by itself when this process does, however it ends."""
+    tool = shutil.which("caffeinate")
+    if tool is None:
+        log("no caffeinate: the watch runs without an idle-sleep assertion")
+        return None
+    try:
+        return subprocess.Popen(
+            [tool, "-i", "-w", str(os.getpid())], stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as error:
+        log(f"caffeinate cannot start ({error}): the watch runs without an "
+            "idle-sleep assertion")
+        return None
+
+
+def release_awake(holder):
+    """Ends what `keep_awake` started; waits for it, so that nothing is left."""
+    if holder is None:
+        return
+    try:
+        holder.terminate()
+        holder.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        holder.kill()
+        holder.wait()
+    except OSError:
+        pass
+
+
 def command_watch(options, stop=None):
     if options.print_launchd_job:
         job = launchd_job(options, options.print_launchd_job)
@@ -2423,7 +2525,9 @@ def command_watch(options, stop=None):
         for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             saved[number] = signal.signal(number, lambda *_: stop.set())
     watch = None
+    awake = None
     try:
+        awake = keep_awake()
         watch = Watch(options, stop)
         return watch.run()
     except Exception as error:  # the watch must say why it ended
@@ -2433,6 +2537,7 @@ def command_watch(options, stop=None):
                                 detail=f"{type(error).__name__}: {error}")
         return EXIT_FAILED
     finally:
+        release_awake(awake)
         for number, handler in saved.items():
             signal.signal(number, handler)
         lock.release()
