@@ -224,7 +224,8 @@ class VerdictTests(unittest.TestCase):
                  "getline": "pass", "usable_size": "pass", "libc_block": "pass", "table_read_only": "pass",
                  "java_fill": "pass", "commit_chunks": "pass", "clone": "pass", "alias_elements": "pass",
                  "alias_critical": "pass", "abi_args": "pass", "abi_returns": "pass", "ends_exception": "pass"}
-    ENDS = ("ends_lazy_thumb", "ends_lazy_arm", "ends_reg_thumb", "ends_reg_arm", "ends_recursion", "ends_onload")
+    ENDS = ("ends_lazy_thumb", "ends_lazy_arm", "ends_reg_thumb", "ends_reg_arm", "ends_recursion", "ends_onload",
+            "ends_outside")
     OLD = {"shim_mapped": "yes", "raw_read": "pass", "passback": "pass", "elements": "pass", "global": "pass",
            "thread_raw": "pass", **SEMANTICS, "java_fill_raw": "pass", "raw_write_java": "pass",
            "low_heap": "pass", **dict.fromkeys(ENDS, "pass"), "empty_us": "123456", "done": "1"}
@@ -249,6 +250,7 @@ class VerdictTests(unittest.TestCase):
                            ("abi_args", "fail"), ("abi_returns", "fail"), ("ends_exception", "fail"),
                            ("ends_lazy_thumb", "fail"), ("ends_lazy_arm", "fail"), ("ends_reg_thumb", "fail"),
                            ("ends_reg_arm", "fail"), ("ends_recursion", "fail"), ("ends_onload", "fail"),
+                           ("ends_outside", "fail"),
                            ("done", "")):
             with self.assertRaises(runner.Failure) as raised:
                 runner.evaluate("old", {**self.OLD, key: value})
@@ -437,6 +439,26 @@ class StepTests(unittest.TestCase):
 
         with self.assertRaises(runner.Failure):
             runner.switch(Refusing(), package, True)
+
+    def test_the_old_probe_is_told_where_another_packages_copy_of_the_library_is(self) -> None:
+        class Listing(FakeGuest):
+            def shell(self, command: str, timeout: float = 30) -> str:
+                if command.startswith("pm path"):
+                    return "package:/data/app/~~Qw3e==/org.example.andarium.oldappprobe.modern-Zx9==/base.apk\n"
+                if command.startswith("ls "):
+                    return "arm\n"
+                return super().shell(command, timeout)
+
+        guest = Listing("done=1;")
+        outside = runner.outside_library(guest)
+        self.assertEqual(outside, "/data/app/~~Qw3e==/org.example.andarium.oldappprobe.modern-Zx9==/lib/arm/libkoldprobe.so")
+        runner.run_variant(guest, "old", shim=False, outside=outside)
+        broadcast = next(c for c in guest.commands if "am broadcast" in c)
+        self.assertIn("--es opts '" + outside + "'", broadcast)
+
+    def test_a_missing_modern_package_fails_the_lookup(self) -> None:
+        with self.assertRaises(runner.Failure):
+            runner.outside_library(FakeGuest(""))
 
     def test_a_modern_run_asks_for_nothing_extra(self) -> None:
         guest = FakeGuest("done=1;")

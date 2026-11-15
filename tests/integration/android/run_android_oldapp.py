@@ -44,6 +44,7 @@ import argparse
 import importlib.util
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -77,7 +78,8 @@ SEMANTICS = {"write_through": "pass", "identity": "pass", "retained": "pass", "m
              "alias_critical": "pass", "abi_args": "pass", "abi_returns": "pass", "ends_exception": "pass"}
 #: What the layer adds: the blocks of a native method end when it returns (every row reads the block through the Dalvik
 #: offsets, so it is "fail" where the layer is not loaded, as java_fill_raw is).
-ENDS = ("ends_lazy_thumb", "ends_lazy_arm", "ends_reg_thumb", "ends_reg_arm", "ends_recursion", "ends_onload")
+ENDS = ("ends_lazy_thumb", "ends_lazy_arm", "ends_reg_thumb", "ends_reg_arm", "ends_recursion", "ends_onload",
+        "ends_outside")
 EXPECTED = {
     "old": {"shim_mapped": "yes", "raw_read": "pass", "passback": "pass", "elements": "pass", "global": "pass",
             "thread_raw": "pass", **SEMANTICS, "java_fill_raw": "pass", "raw_write_java": "pass", "low_heap": "pass",
@@ -249,7 +251,21 @@ def diagnosis(guest, package: str) -> str:
     return " | ".join(line.split(": ", 1)[-1][:200] for line in lines[-8:])
 
 
-def run_variant(guest, variant: str, *, shim: bool) -> tuple[dict[str, str], int]:
+def outside_library(guest) -> str:
+    """The probe library as the modern probe package installed it: a library of another package than the old probe's,
+    which the old process can load (the row ends_outside registers a native method from it)."""
+    output = guest.shell(f"pm path {probe.package_of('modern')}", timeout=30)
+    paths = [line[len("package:"):].strip() for line in output.splitlines() if line.startswith("package:")]
+    if not paths:
+        raise Failure(f"{probe.package_of('modern')} is not installed: {output.strip()[-200:]}")
+    directory = paths[0].rsplit("/", 1)[0] + "/lib"
+    abis = guest.shell(f"ls {shlex.quote(directory)}", timeout=30).split()
+    if not abis:
+        raise Failure(f"{directory} holds no native libraries: {abis}")
+    return f"{directory}/{abis[0]}/lib{probe.PROBE_LIBRARY}.so"
+
+
+def run_variant(guest, variant: str, *, shim: bool, outside: str | None = None) -> tuple[dict[str, str], int]:
     """Starts the probe with `am broadcast` (the zygote forks an ordinary application process) and reads the probe's
     report from the result data the broadcast prints, and how many installs the log gained meanwhile. A probe that
     did not finish leaves "log" among the entries, with what the guest's log says."""
@@ -258,6 +274,8 @@ def run_variant(guest, variant: str, *, shim: bool) -> tuple[dict[str, str], int
     guest.adb_run("shell", f"am force-stop {package}", timeout=30)
     before = installed_count(guest)
     extras = f" --es shim {probe.SHIM_LIBRARY}" if shim else ""
+    if outside is not None:
+        extras += f" --es opts {shlex.quote(outside)}"
     output = guest.shell(f"am broadcast -n {probe.component_of(variant)}{extras}", timeout=BROADCAST_SECONDS)
     if "Broadcast completed" not in output:
         raise Failure(f"the broadcast to {package} was not delivered: {output.strip()[-300:]}")
@@ -304,7 +322,7 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
 
         def old() -> str:
             declined_before = declined_count(guest)
-            result, installs = run_variant(guest, "old", shim=options.host_shim)
+            result, installs = run_variant(guest, "old", shim=options.host_shim, outside=outside_library(guest))
             note = evaluate("old", result)
             if not options.host_shim and installs < 1:
                 raise Failure(f"the log shows no install of the layer in the old process; {note}")
@@ -315,14 +333,14 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
             return f"{note}; installs logged: {installs}; declined-shadow lines: {declined}"
 
         def modern() -> str:
-            result, installs = run_variant(guest, "modern", shim=False)
+            result, installs = run_variant(guest, "modern", shim=False, outside=outside_library(guest))
             note = evaluate("modern", result)
             if installs != 0:
                 raise Failure(f"the layer installed itself in the modern process {installs} times; {note}")
             return note
 
         def control() -> str:
-            result, installs = run_variant(guest, "old", shim=False)
+            result, installs = run_variant(guest, "old", shim=False, outside=outside_library(guest))
             note = evaluate("control", result)
             if installs != 0:
                 raise Failure(f"the layer installed itself in an old process that is not switched on {installs} times; {note}")

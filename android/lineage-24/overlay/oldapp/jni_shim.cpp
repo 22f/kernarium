@@ -1417,9 +1417,21 @@ Counters counters() { return g.counters; }
 
 // ---- the end of a native method
 
+// The thunk of a native function, or the function itself.
+//
+// Only a function of the application's own native libraries gets one, decided by the address of the function
+// being registered or found (a platform or another package's library, such as WebView, keeps the runtime's
+// binding, whoever the caller is). The thunks are a fixed set (the platform's thunk_capacity, 1024): one for
+// each distinct function, kept for the life of the process. When they run out, the method is bound with no thunk,
+// as when the layer has none: it works as before, and its blocks end by DeleteLocalRef, PopLocalFrame and
+// DetachCurrentThread, or count toward the thread's 512 limit (a result beyond it stays the real reference, with its
+// log line). One log line says so, once.
 void* thunk_for(void* function) {
     if (function == nullptr || !g.installed || !g.shadows_on || g.platform.thunk_address == nullptr ||
-        g.thunk_capacity == 0 || !from_app(function)) {
+        g.thunk_capacity == 0) {
+        return function;
+    }
+    if (g.platform.is_own_library != nullptr ? !g.platform.is_own_library(function) : !from_app(function)) {
         return function;
     }
     while (__atomic_exchange_n(&g.thunk_lock, 1u, __ATOMIC_ACQUIRE) != 0) {

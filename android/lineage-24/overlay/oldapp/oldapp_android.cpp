@@ -23,6 +23,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "application_path.hpp"
 #include "elf_scan.hpp"
 #include "jni_shim.hpp"
 #include "low_arena.hpp"
@@ -86,6 +87,7 @@ bool g_arena_ready = false;
 int g_thread_key = 0;
 bool g_have_thread_key = false;  // a key is any int: bionic sets its top bit
 bool g_installed = false;
+char g_package[256];  // the package this process runs (its process name up to ':'); empty: unknown
 
 void log_line(const char* message, long a, long b) { oldapp_log_print(kLogInfo, kTag, "%s %ld %ld", message, a, b); }
 
@@ -270,6 +272,7 @@ struct Module {
     unsigned phnum;
     uint32_t name_hash;
     uint8_t app;    // application code (classification)
+    uint8_t own;    // the application's own library (its install or data directories): the native-method thunks' domain
     uint8_t libc;
     uint8_t skip;   // never touched: this library, the dynamic linker
     uint8_t consumers_done;
@@ -482,6 +485,7 @@ int collect_module(OldappPhdrInfo* info, size_t size, void* user) {
     module.phnum = info->phnum;
     module.name_hash = hash_text(info->name);
     module.app = !platform_path(info->name) && !is_self;
+    module.own = module.app && in_application_directories(info->name, g_package);
     module.libc = platform_path(info->name) && same_text(base, "libc.so");
     module.skip = is_self || is_linker || (info->name != nullptr && info->name[0] != '/');
     inherit_state(module);
@@ -577,8 +581,9 @@ void refresh_modules(bool force) {
 
 void refresh_if_changed() { refresh_modules(false); }
 
-// 1: application code, 0: platform code, -1: no mapping known for the address.
-int classify(uintptr_t address) {
+// 1: application code (own: the application's own library), 0: platform code (or, for own, another package's), -1: no
+// mapping known for the address.
+int classify(uintptr_t address, bool own) {
     for (;;) {
         const uint32_t before = __atomic_load_n(&g_module_seq, __ATOMIC_ACQUIRE);
         if ((before & 1u) != 0) {
@@ -594,7 +599,7 @@ int classify(uintptr_t address) {
             } else if (address >= __atomic_load_n(&g_modules[middle].hi, __ATOMIC_RELAXED)) {
                 low = middle + 1;
             } else {
-                verdict = __atomic_load_n(&g_modules[middle].app, __ATOMIC_RELAXED) != 0 ? 1 : 0;
+                verdict = __atomic_load_n(own ? &g_modules[middle].own : &g_modules[middle].app, __ATOMIC_RELAXED) != 0 ? 1 : 0;
                 break;
             }
         }
@@ -610,7 +615,7 @@ bool is_app_caller(const void* return_address) {
     if ((__atomic_add_fetch(&g_calls, 1u, __ATOMIC_RELAXED) % kCheckEvery) == 0) {
         refresh_if_changed();  // a library may have been opened with no JNI call from it
     }
-    int verdict = classify(address);
+    int verdict = classify(address, false);
     if (verdict >= 0) {
         return verdict == 1;
     }
@@ -622,7 +627,7 @@ bool is_app_caller(const void* return_address) {
         return false;
     }
     refresh_if_changed();
-    verdict = classify(address);
+    verdict = classify(address, false);
     if (verdict >= 0) {
         return verdict == 1;
     }
@@ -630,6 +635,40 @@ bool is_app_caller(const void* return_address) {
     g_negative_epoch[slot] = g_epoch;
     g_negative_hits[slot] = 0;
     return false;
+}
+
+// Whether the function is in one of the application's own libraries (the thunks' domain): asked once for each native
+// method the runtime binds, never per call. A library the list does not know yet is looked for after a refresh.
+bool is_own_library(const void* function) {
+    const uintptr_t address = reinterpret_cast<uintptr_t>(function) & ~uintptr_t{1};  // the Thumb bit
+    int verdict = classify(address, true);
+    if (verdict < 0) {
+        refresh_if_changed();
+        verdict = classify(address, true);
+    }
+    return verdict == 1;
+}
+
+// The package of this process, from its name (/proc/self/cmdline): left empty when it cannot be read, and every
+// application library is then the application's own.
+void read_package() {
+    constexpr int kReadOnly = 0;
+    constexpr int kCloseOnExec = 0x80000;
+    g_package[0] = '\0';
+    const int fd = oldapp_open("/proc/self/cmdline", kReadOnly | kCloseOnExec);
+    if (fd < 0) {
+        return;
+    }
+    char name[sizeof(g_package)];
+    const long n = oldapp_read(fd, name, sizeof(name) - 1);
+    oldapp_close(fd);
+    if (n <= 0) {
+        return;
+    }
+    name[n] = '\0';  // the file is the NUL-separated argument list: its first string is the process name
+    if (!package_of_process(name, g_package, sizeof(g_package))) {
+        g_package[0] = '\0';
+    }
 }
 
 // ---- the native methods of the application
@@ -884,9 +923,10 @@ extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void* vm_pointe
     } else {
         oldapp_log_print(kLogWarn, kTag, "no region below 2 GiB: allocator imports are left alone");
     }
+    read_package();
     const Platform platform{is_app_caller, thread_state, log_line, make_writable, make_read_only, describe_method, now_ms,
                             alloc_baseline, free_baseline, region != nullptr ? thunk_address : nullptr,
-                            region != nullptr ? thunk_count() : 0};
+                            region != nullptr ? thunk_count() : 0, is_own_library};
     refresh_modules(true);  // every library the application loaded before this one
     void** table = const_cast<void**>(env->functions);
     const bool jni_ok = install_jni_wrappers(table, platform, region != nullptr ? region + kArenaBytes : nullptr,

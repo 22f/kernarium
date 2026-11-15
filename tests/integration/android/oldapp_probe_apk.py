@@ -39,7 +39,7 @@ OVERLAY = REPOSITORY / "android" / "lineage-24" / "overlay" / "oldapp"
 PROBE_SOURCE = pathlib.Path(__file__).resolve().parent / "oldapp" / "oldapp_probe.cpp"
 SHIM_SOURCES = (OVERLAY / "oldapp_android.cpp", OVERLAY / "jni_shim.cpp", OVERLAY / "oldapp_thunks.S")
 #: The libraries each one's undefined symbols resolve in (compile_library).
-PROBE_NEEDED = ("libc.so",)
+PROBE_NEEDED = ("libc.so", "libdl.so")
 SHIM_NEEDED = ("libc.so", "libdl.so", "liblog.so")
 PROBE_LIBRARY = "koldprobe"
 SHIM_LIBRARY = "kernarium_oldapp"

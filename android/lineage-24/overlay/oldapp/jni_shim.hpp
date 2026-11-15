@@ -51,6 +51,10 @@ struct Platform {
     // the blocks of a native method end only with their references.
     void* (*thunk_address)(unsigned index);
     unsigned thunk_capacity;
+    // Whether the function (the one a native method is registered with, or found by name) is in one of the
+    // application's own native libraries, as opposed to a platform library or another package's: only those get a
+    // thunk. Null: any function of application code.
+    bool (*is_own_library)(const void* function);
 };
 
 struct Counters {
@@ -81,8 +85,9 @@ bool install_vm_wrappers(void** vm_table, const Platform& platform);
 
 // A native method of the application's own library gets a thunk: its entry (an address of thunk_address) pushes a
 // frame record, sets the return address to a stub and jumps to the function, so the blocks the method made end when it
-// returns, as Dalvik's local references did. thunk_for() is the function itself where there is no thunk (not
-// an application function, none left, or the layer's shadows are off).
+// returns, as Dalvik's local references did. thunk_for() is the function itself where there is no thunk: not a
+// function of the application's own libraries (the function's address decides, not the caller's), none left, or the
+// layer's shadows are off.
 void* thunk_for(void* function);
 
 struct ThunkEntry {

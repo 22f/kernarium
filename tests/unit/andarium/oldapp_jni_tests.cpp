@@ -106,13 +106,18 @@ jobject byte_array(const std::vector<uint8_t>& bytes) {
 
 bool g_app_caller = true;
 uint64_t g_epoch = 1;
-bool (*g_app_predicate)(const void*) = nullptr;  // set: decides by the address (a function of an application library)
 bool g_no_thread_state = false;                  // the platform has no thread state to give
+// Whether a native function is in the application's own libraries (the thunks' domain); a predicate decides by the
+// function's address. Independent of the caller (g_app_caller).
+bool g_own_default = true;
+bool (*g_own_predicate)(const void*) = nullptr;
+bool g_without_own_check = false;  // the next install gives the platform no is_own_library (not reset by reset_world)
 
-bool fake_is_app(const void* address) {
+bool fake_is_app(const void*) {
     ++world.app_checks;
-    return g_app_predicate != nullptr ? g_app_predicate(address) : g_app_caller;
+    return g_app_caller;
 }
+bool fake_is_own(const void* function) { return g_own_predicate != nullptr ? g_own_predicate(function) : g_own_default; }
 thread_local void* t_block = nullptr;
 thread_local uint64_t t_epoch = 0;
 void* fake_thread_state(size_t size) {
@@ -169,7 +174,8 @@ bool is_thunk(void* address) {
 }
 unsigned g_thunk_capacity = 1024;
 const Platform kPlatform{fake_is_app, fake_thread_state, fake_log, fake_make_writable, fake_make_read_only,
-                         fake_describe, fake_now, fake_alloc_baseline, fake_free_baseline, fake_thunk_address, 1024};
+                         fake_describe, fake_now, fake_alloc_baseline, fake_free_baseline, fake_thunk_address, 1024,
+                         fake_is_own};
 
 jsize f_GetArrayLength(Env*, jarray a) { return static_cast<jsize>(object_of(a)->bytes.size()); }
 jobject f_NewByteArray(Env*, jsize n) { return byte_array(std::vector<uint8_t>(static_cast<size_t>(n), 0)); }
@@ -530,7 +536,8 @@ void reset_world() {
     g_writable_ok = true;
     g_read_only_ok = true;
     g_baseline_fails = false;
-    g_app_predicate = nullptr;
+    g_own_predicate = nullptr;
+    g_own_default = true;
     g_no_thread_state = false;
     g_thunk_capacity = 1024;
     g_register_fail_at = -1;
@@ -543,6 +550,9 @@ Table* install(bool shadows = true, unsigned thunks = 1024) {
     Table* table = new Table;
     Platform platform = kPlatform;
     platform.thunk_capacity = thunks;
+    if (g_without_own_check) {
+        platform.is_own_library = nullptr;
+    }
     require(install_jni_wrappers(table->slots, platform, shadows ? g_shadow_region : nullptr,
                                  shadows ? sizeof(g_shadow_region) : 0),
             "the wrappers install");
@@ -1786,12 +1796,66 @@ void check_the_thunks_run_out() {
     require(thunk_for(app_function(4)) == app_function(4), "past it, none");
 }
 
-// Which functions get a thunk: the application's, with shadows on and thunks provided.
+// A native method that got no thunk (the thunks ran out) is bound as it is, with one log line: the runtime enters and
+// leaves it with no record, so its blocks end only by the other exact ends (DeleteLocalRef, PopLocalFrame,
+// DetachCurrentThread) or count toward the thread's 512, the result beyond it staying the real reference.
+void check_a_method_without_a_thunk_ends_by_the_other_ends() {
+    Fixture f = make(true, 2);
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    auto del = fn<void (*)(Env*, jobject)>(*f.table, slot::DeleteLocalRef);
+    require(is_thunk(thunk_for(app_function(0))) && is_thunk(thunk_for(app_function(1))), "two thunks, both in use");
+    void* without = app_function(2);
+    require(thunk_for(without) == without && thunk_for(app_function(3)) == app_function(3),
+            "the next functions are bound as they are");
+    require(counters().natives_wrapped == 2 && counters().natives_unwrapped == 2 && log_count("got no thunk") == 1,
+            "counted, and logged once");
+    // Called by the runtime directly: no record, no return stub. Its blocks stay until something ends them.
+    require(push(f.env, 16) == 0, "a frame");
+    for (int i = 0; i < 3; ++i) make_shadow_of(f, sample(4 + size_t(i)));
+    require(counters().shadows_live == 3, "the blocks of the method stay with their references");
+    pop(f.env, nullptr);
+    require(counters().shadows_live == 0 && counters().ended_by_pop == 3 && counters().ended_by_return == 0,
+            "PopLocalFrame ends them");
+    std::vector<Made> held;
+    for (int i = 0; i < 512; ++i) {
+        std::vector<uint8_t> payload = sample(4);
+        payload[0] = uint8_t(i);
+        held.push_back(make_shadow_of(f, payload));
+    }
+    require(counters().shadows_live == 512 && counters().shadows_declined == 0, "512 count toward the limit");
+    Made refused = make_shadow_of(f, sample(4));
+    require(!is_shadow_block(refused.shadow) && counters().shadows_declined == 1, "the 513th is the real reference");
+    del(f.env, held[7].shadow);
+    require(is_shadow_block(make_shadow_of(f, sample(4)).shadow), "DeleteLocalRef makes room");
+    struct Fns {
+        static jint detach(Vm*) { return 0; }
+        static jint other(Vm*, void**, jint) { return 0; }
+    };
+    void* vm_table[kVmSlotCount];
+    for (void*& entry : vm_table) entry = reinterpret_cast<void*>(&Fns::other);
+    vm_table[vmslot::DetachCurrentThread] = reinterpret_cast<void*>(&Fns::detach);
+    require(install_vm_wrappers(vm_table, kPlatform), "the invoke table installs");
+    Vm vm{vm_table};
+    reinterpret_cast<jint (*)(Vm*)>(vm_table[vmslot::DetachCurrentThread])(&vm);
+    require(counters().shadows_live == 0 && counters().ended_by_detach == 512 && world.globals.empty(),
+            "DetachCurrentThread ends the rest");
+}
+
+// Which functions get a thunk: those of the application's own libraries, with shadows on and thunks provided. The
+// function's address decides; who is calling does not.
 void check_which_functions_get_a_thunk() {
     make();
+    g_own_default = false;
+    require(thunk_for(app_function(1)) == app_function(1) && counters().natives_wrapped == 0,
+            "a function outside the application's own libraries (another package's, a platform library): none");
     g_app_caller = false;
-    require(thunk_for(app_function(1)) == app_function(1) && counters().natives_wrapped == 0, "a platform function: none");
+    g_own_default = true;
+    require(is_thunk(thunk_for(app_function(1))), "an own function gets its thunk whoever is calling");
     g_app_caller = true;
+    g_own_default = false;
+    require(thunk_for(app_function(2)) == app_function(2), "and a foreign one gets none from an application caller");
+    g_own_default = true;
     require(thunk_for(nullptr) == nullptr, "no function, none");
     make(/*shadows=*/false);
     require(thunk_for(app_function(1)) == app_function(1), "with no shadows the function stays as it is");
@@ -1799,15 +1863,22 @@ void check_which_functions_get_a_thunk() {
     require(thunk_for(app_function(1)) == app_function(1), "and with no thunks");
     reset_world();
     require(thunk_for(app_function(1)) == app_function(1), "and before the wrappers are installed");
+    // A platform that cannot tell the libraries apart: the application's code is the domain.
+    g_without_own_check = true;
+    make();
+    g_without_own_check = false;
+    require(is_thunk(thunk_for(app_function(1))), "with no own-library test, application code");
+    g_app_caller = false;
+    require(thunk_for(app_function(2)) == app_function(2), "and a platform function: none");
 }
 
-bool app_even(const void* address) { return ((reinterpret_cast<uintptr_t>(address) - 0x20000000u) / 32u) % 2 == 0; }
+bool own_even(const void* address) { return ((reinterpret_cast<uintptr_t>(address) - 0x20000000u) / 32u) % 2 == 0; }
 
 // RegisterNatives: the application's functions are registered through their thunks, in chunks, with the rest of
 // the call unchanged and the runtime's first failure ending it.
 void check_register_natives_registers_thunks() {
     Fixture f = make();
-    g_app_predicate = app_even;
+    g_own_predicate = own_even;
     std::vector<NativeMethod> methods;
     for (unsigned i = 0; i < 70; ++i) methods.push_back(NativeMethod{"name", "()V", app_function(i)});
     auto register_natives = fn<jint (*)(Env*, jclass, const NativeMethod*, jint)>(*f.table, slot::RegisterNatives);
@@ -1822,10 +1893,25 @@ void check_register_natives_registers_thunks() {
             require(is_thunk(got[i].function), "an application function is registered through its thunk");
             require(thunk_for(app_function(i)) == got[i].function, "which is its thunk");
         } else {
-            require(got[i].function == app_function(i), "a platform function as it is");
+            require(got[i].function == app_function(i), "a function outside the application's libraries as it is");
         }
     }
+    // The function's address decides, not the caller's: a platform library registering an own function gets its
+    // thunk, an application library registering a foreign one gets none.
+    g_own_predicate = nullptr;
     g_registered.clear();
+    methods.assign({NativeMethod{"a", "()V", app_function(100)}});
+    g_app_caller = false;
+    require(register_natives(f.env, f.cls, methods.data(), 1) == JNI_OK && is_thunk(g_registered.back()[0].function),
+            "a platform caller registering an own function: its thunk");
+    g_app_caller = true;
+    g_own_default = false;
+    methods.assign({NativeMethod{"b", "()V", app_function(101)}});
+    require(register_natives(f.env, f.cls, methods.data(), 1) == JNI_OK && g_registered.back()[0].function == app_function(101),
+            "an application caller registering a foreign function: as it is");
+    g_own_default = true;
+    g_registered.clear();
+    methods.assign(70, NativeMethod{"name", "()V", app_function(0)});
     g_register_fail_at = 1;
     require(register_natives(f.env, f.cls, methods.data(), 70) == JNI_ERR && g_registered.size() == 2,
             "the runtime's error ends the registration and is the result");
@@ -2131,6 +2217,7 @@ int main(int argc, char** argv) {
     check_an_abandoned_invocation_is_trimmed();
     check_an_unmatched_push_local_frame_ends_with_the_invocation();
     check_the_thunks_run_out();
+    check_a_method_without_a_thunk_ends_by_the_other_ends();
     check_which_functions_get_a_thunk();
     check_register_natives_registers_thunks();
     check_detach_ends_the_references_of_a_thread();

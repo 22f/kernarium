@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "application_path.hpp"
 #include "elf_scan.hpp"
 #include "require.hpp"
 
@@ -193,7 +194,54 @@ void check_protection() {
 
 }  // namespace
 
+// The application's own libraries (the native-method thunks' domain): the install and data directories of the package
+// of the process, and no other package's.
+void check_application_paths() {
+    char package[64];
+    require(package_of_process("com.example.game", package, sizeof(package)) && std::strcmp(package, "com.example.game") == 0,
+            "a process named for the package");
+    require(package_of_process("com.example.game:remote", package, sizeof(package)) && std::strcmp(package, "com.example.game") == 0,
+            "a private process of the package: up to the colon");
+    require(!package_of_process("", package, sizeof(package)) && !package_of_process(":x", package, sizeof(package)) &&
+                !package_of_process(nullptr, package, sizeof(package)),
+            "no name, no package");
+    require(!package_of_process("com.example.much.too.long.for.the.buffer", package, 16), "a name that does not fit");
+    const char* const own[] = {
+        "/data/app/~~Qw3e==/com.example.game-Zx9==/lib/arm/libgame.so",
+        "/data/app/~~Qw3e==/com.example.game-Zx9==/base.apk!/lib/armeabi-v7a/libgame.so",
+        "/data/app/~~Qw3e==/com.example.game-Zx9==/split_config.armeabi_v7a.apk!/lib/armeabi-v7a/libgame.so",
+        "/data/app/com.example.game-1/lib/arm/libgame.so",
+        "/data/data/com.example.game/files/libdownloaded.so",
+        "/data/user/0/com.example.game/code_cache/libx.so",
+        "/data/user_de/10/com.example.game/lib/libx.so",
+        "/mnt/expand/0123-4567/app/~~Aa==/com.example.game-Bb==/lib/arm/libgame.so",
+    };
+    for (const char* path : own) {
+        require(in_application_directories(path, "com.example.game"), "an own library");
+    }
+    const char* const other[] = {
+        "/data/app/~~Qw3e==/com.google.android.webview-Zx9==/lib/arm/libwebviewchromium.so",
+        "/data/app/~~Qw3e==/com.example.gamefoo-Zx9==/lib/arm/libgame.so",     // a longer package name
+        "/data/app/~~Qw3e==/com.example.game.extra-Zx9==/lib/arm/libgame.so",  // a package that extends the name
+        "/data/app/~~Qw3e==/xcom.example.game-Zx9==/lib/arm/libgame.so",
+        "/data/data/com.example.other/files/libx.so",
+        "/data/data/com.example.gamefoo/files/libx.so",
+        "/data/user/0/com.example.gamefoo/files/libx.so",
+        "/data/local/tmp/com.example.game/libx.so",  // not a directory the platform gives the package
+        "/system/lib/libc.so",
+        "libname.so",
+        "",
+    };
+    for (const char* path : other) {
+        require(!in_application_directories(path, "com.example.game"), "not an own library");
+    }
+    require(!in_application_directories(nullptr, "com.example.game"), "no path, none");
+    require(in_application_directories("/data/app/x/lib/arm/libgame.so", "") && in_application_directories("/data/app/x/lib/arm/libgame.so", nullptr),
+            "an unknown package: every application library is the application's own");
+}
+
 int main() {
+    check_application_paths();
     check_scan();
     check_capacity();
     check_masks();

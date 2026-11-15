@@ -40,6 +40,11 @@
 //   ends_recursion  a native method calls Java, which calls the native method, to a depth of 70 (past the 64 frame
 //                records of a thread): every level's block outlives the calls below it and ends with its own return
 //   ends_onload  the blocks JNI_OnLoad made end when it returns
+//   ends_outside  a library that is not the application's own (a copy of this library in another package's
+//                directory, whose path the options carry) registers the same native method: it gets no thunk, so
+//                the blocks of its calls are not ended by their returns and a result past the thread's 512 stays
+//                the runtime's own reference (the row passes when a call fails after the first: the layer left
+//                the method as it was)
 //   ends_exception  a native method that returns with an exception pending: the process goes on, the exception arrives
 //   abi_args, abi_returns  a native method gets its arguments (12, with jlong, jdouble and jfloat on the stack) and
 //                returns its result (every type) as without the thunk
@@ -83,6 +88,8 @@ size_t probe_usable_size(void*) __asm__("malloc_usable_size");
 int probe_pthread_create(unsigned long*, const void*, void* (*)(void*), void*) __asm__("pthread_create");
 int probe_pthread_join(unsigned long, void**) __asm__("pthread_join");
 int probe_clock_gettime(int, long*) __asm__("clock_gettime");  // struct timespec is two longs on bionic
+void* probe_dlopen(const char*, int) __asm__("dlopen");
+void* probe_dlsym(void*, const char*) __asm__("dlsym");
 }
 
 namespace {
@@ -676,8 +683,14 @@ uint64_t now_us() {
 // What a game's native method does: it gets a byte[] from Java, reads it at the Dalvik offsets and never deletes it
 // (Dalvik freed it when the method returned).
 jint tick_body(Env* env, jclass probe) {
-    jobject array = entry<jobject (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kObject, kVarargs))(
-        env, probe, g_payload_id);
+    // The payload method is looked up here, not taken from a global: the row ends_outside runs this function in a
+    // second copy of the library, whose globals nothing has set.
+    const jmethodID payload =
+        entry<jmethodID (*)(Env*, jclass, const char*, const char*)>(env, slot::GetStaticMethodID)(env, probe, "payload", "()[B");
+    if (payload == nullptr) {
+        return 0;
+    }
+    jobject array = entry<jobject (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kObject, kVarargs))(env, probe, payload);
     Report scratch;
     return array != nullptr && raw_read(scratch, array) ? 1 : 0;
 }
@@ -763,8 +776,46 @@ bool abi_returns(Env* env, jclass probe) {
     return ok && !exception_check(env);
 }
 
+// ends_outside: the native method tickReg is registered again with the tick function of another copy of this library
+// (a package other than the application's own: the layer gives its methods no thunk). A call whose block is not ended
+// at its return piles its blocks up in the frame of Probe.run, so the result past the thread's limit is the
+// runtime's own reference and its raw read fails. The row passes when the calls work for a while and then stop: with a
+// thunk they would all work, with a library that cannot run at all the first would fail.
+void outside_case(Report& report, Env* env, jclass probe, const char* path) {
+    if (path == nullptr || path[0] != '/') {
+        report.line("ends_outside", "skipped");
+        return;
+    }
+    const auto static_method = entry<jmethodID (*)(Env*, jclass, const char*, const char*)>(env, slot::GetStaticMethodID);
+    const auto call_int = entry<jint (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kInt, kVarargs));
+    const auto register_natives = entry<jint (*)(Env*, jclass, const NativeMethod*, jint)>(env, slot::RegisterNatives);
+    const auto exception_clear = entry<void (*)(Env*)>(env, slot::ExceptionClear);
+    void* handle = probe_dlopen(path, 2);  // RTLD_NOW
+    void* function = handle != nullptr ? probe_dlsym(handle, "Java_org_example_andarium_oldappprobe_Probe_tick") : nullptr;
+    const jmethodID tick = static_method(env, probe, "tickReg", "()I");
+    int stopped_at = -1;
+    bool registered = false;
+    if (function != nullptr && tick != nullptr) {
+        const NativeMethod method{"tickReg", "()I", function};
+        registered = register_natives(env, probe, &method, 1) == 0;
+        for (int i = 0; registered && i < kTicks; ++i) {
+            if (call_int(env, probe, tick) != 1) {
+                stopped_at = i;
+                break;
+            }
+        }
+    }
+    exception_clear(env);
+    char text[12] = "none";
+    if (stopped_at >= 0) {
+        decimal(text, static_cast<uint32_t>(stopped_at));
+    }
+    report.line("outside_stopped_at", text);
+    report.verdict("ends_outside", stopped_at > 0);
+}
+
 // The cases of the end of a native method (see the list at the top).
-void ends_cases(Report& report, Env* env, jclass probe) {
+void ends_cases(Report& report, Env* env, jclass probe, const char* options) {
     const auto static_method = entry<jmethodID (*)(Env*, jclass, const char*, const char*)>(env, slot::GetStaticMethodID);
     const auto call_int = entry<jint (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kInt, kVarargs));
     const auto call_object = entry<jobject (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kObject, kVarargs));
@@ -826,6 +877,7 @@ void ends_cases(Report& report, Env* env, jclass probe) {
     exception_clear(env);
     report.verdict("abi_returns", abi_returns(env, probe));
     exception_clear(env);
+    outside_case(report, env, probe, options);
 
     // The cost of a native call: an empty native method called from a Java loop, the least of three rounds.
     {
@@ -981,7 +1033,7 @@ extern "C" __attribute__((visibility("default"))) jstring Java_org_example_andar
         report.verdict("table_read_only", vm != nullptr && mapped_read_only(env->functions) && mapped_read_only(vm->functions));
     }
     report.verdict("low_heap", low_heap());
-    ends_cases(report, env, probe);
+    ends_cases(report, env, probe, opts);
 
     report.line("done", "1");
     if (options != nullptr) {
