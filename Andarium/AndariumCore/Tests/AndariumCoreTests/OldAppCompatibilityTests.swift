@@ -44,8 +44,8 @@ struct OldAppCompatibilityTests {
     }
 
     @Test func aLabelWithOddCharactersIsShownAsItIs() throws {
-        // Quotes, a percent sign, a backslash, an emoji, an Arabic name with direction marks, a CJK name.
-        let labels = ["Tom's \"Quest\" 100% \\ done", "Cats \u{1F431} Run", "\u{202B}\u{0644}\u{0639}\u{0628}\u{0629}\u{202C}", "\u{53E4}\u{3044}\u{30A2}\u{30D7}\u{30EA}", "$(rm -rf) `x` ;|&"]
+        // Quotes, a percent sign, a backslash, an emoji, an Arabic name, a CJK name.
+        let labels = ["Tom's \"Quest\" 100% \\ done", "Cats \u{1F431} Run", "\u{0644}\u{0639}\u{0628}\u{0629}", "\u{53E4}\u{3044}\u{30A2}\u{30D7}\u{30EA}", "$(rm -rf) `x` ;|&"]
         for (index, label) in labels.enumerated() {
             let text = header + "com.example.app\(index)\t\(label)\toff\t0\t5\n"
             guard case let .apps(apps) = OldAppCompatibility.parseListing(answer(text)) else {
@@ -54,6 +54,20 @@ struct OldAppCompatibilityTests {
             }
             #expect(apps.map(\.label) == [label])
         }
+    }
+
+    @Test func bidirectionalControlsAreDroppedSoANameCannotReorderItsTitle() {
+        // Embeddings, overrides and isolates (U+202A to U+202E, U+2066 to U+2069) go; the text between stays.
+        let marks = "\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}\u{2066}\u{2067}\u{2068}\u{2069}"
+        let text = header + "com.example.a\t\(marks)Evil\u{202E}\u{0644}\u{0639}\(marks) Name\toff\t0\t1\n"
+        guard case let .apps(apps) = OldAppCompatibility.parseListing(answer(text)) else {
+            Issue.record("not a listing")
+            return
+        }
+        #expect(apps.map(\.label) == ["Evil\u{0644}\u{0639} Name"])
+        // A name of nothing but those controls is the package name.
+        let only = header + "com.example.b\t\(marks)\toff\t0\t1\n"
+        #expect(OldAppCompatibility.parseListing(answer(only)) == .apps([OldApp(package: "com.example.b", label: "com.example.b", isOn: false, lastUpdate: 1)]))
     }
 
     @Test func controlCharactersAreSpacesAndTheNameIsTrimmedAndBounded() throws {
@@ -103,16 +117,24 @@ struct OldAppCompatibilityTests {
         #expect(OldAppCompatibility.parseListing(answer("", 127)) == .unavailable)
     }
 
+    @Test func aListThatTheImageAnswersAsAUsageErrorMakesItUnavailableToo() {
+        // Status 64: the image does not take `list` as this reader sends it, so it does not speak this version.
+        #expect(OldAppCompatibility.parseListing(answer("usage: kernarium_oldapp set <package> on|off\n", 64)) == .unavailable)
+        // Other statuses are a listing that got no answer.
+        for status in [1, 2, 126, 255] as [Int?] + [nil] {
+            #expect(OldAppCompatibility.parseListing(answer(header, status)) == .failed)
+        }
+    }
+
     @Test func aVersionAndroidDoesNotKnowMakesItUnavailable() {
         #expect(OldAppCompatibility.parseListing(answer("kernarium_oldapp 2\ncom.example.a\tA\ton\t0\t1\n")) == .unavailable)
         #expect(OldAppCompatibility.parseListing(answer("kernarium_oldapp 0\n")) == .unavailable)
     }
 
     @Test func anythingElseIsAFailure() {
-        // No exit status, another status, usage text, no version line, a version that is not a number.
+        // No exit status, another status, no version line, a version that is not a number.
         #expect(OldAppCompatibility.parseListing(answer(header, nil)) == .failed)
         #expect(OldAppCompatibility.parseListing(answer(header, 1)) == .failed)
-        #expect(OldAppCompatibility.parseListing(answer("", 64)) == .failed)
         #expect(OldAppCompatibility.parseListing(answer("")) == .failed)
         #expect(OldAppCompatibility.parseListing(answer("com.example.a\tA\ton\t0\t1\n")) == .failed)
         #expect(OldAppCompatibility.parseListing(answer("kernarium_oldapp one\n")) == .failed)
@@ -173,9 +195,11 @@ struct OldAppCompatibilityTests {
         var answers: [String: GuestShellOutput] = [:]
         var failing = false
         private(set) var commands: [String] = []
+        private(set) var limits: [Duration] = []
 
         func run(_ command: String, limit: Duration) async throws -> GuestShellOutput {
             commands.append(command)
+            limits.append(limit)
             if failing { throw AdbError.notAnswering }
             return answers[command] ?? GuestShellOutput(text: "", exitCode: 127)
         }
@@ -193,6 +217,15 @@ struct OldAppCompatibilityTests {
         #expect(shell.commands == [
             "kernarium_oldapp list", "pidof 'com.example.rally'", "kernarium_oldapp set 'com.example.rally' on",
         ])
+    }
+
+    @Test func aListingIsBoundedByTheLimitItIsGiven() async {
+        let shell = Shell()
+        shell.answers[OldAppCompatibility.listCommand] = answer(header)
+        let adapter = OldAppCompatibility(shell: shell)
+        _ = await adapter.list()
+        _ = await adapter.list(limit: OldAppCompatibility.installListLimit)
+        #expect(shell.limits == [.seconds(20), .seconds(5)])
     }
 
     @Test func aMissingCommandThroughTheShellIsUnavailable() async {

@@ -32,7 +32,8 @@ public enum OldAppListing: Equatable, Sendable {
     /// The apps the switch can apply to, by name. None is an answer too.
     case apps([OldApp])
     /// The image has no such command (an older one), or speaks a version of
-    /// it that this Andarium does not know: the feature is not offered.
+    /// it that this Andarium does not know (a version it numbers, or a `list`
+    /// it answers as a usage error): the feature is not offered.
     case unavailable
     /// The virtual machine could not be asked, or what it printed was not a
     /// listing.
@@ -70,11 +71,17 @@ public struct OldAppCompatibility: Sendable {
 
     /// The shell's status for a command it cannot find.
     private static let commandNotFound = 127
+    /// The image's status for arguments it does not know: a `list` it would
+    /// not take is a command that does not speak this version.
+    private static let usageStatus = 64
     /// The image's status for an app the switch does not apply to.
     private static let notEligibleStatus = 2
 
     /// A listing is a few lines per app: it is bounded in the time it may take.
-    static let listLimit = Duration.seconds(20)
+    public static let listLimit = Duration.seconds(20)
+    /// The listing taken around an install, which the install's result waits
+    /// for: a longer one is not worth the wait for a hint.
+    public static let installListLimit = Duration.seconds(5)
     static let setLimit = Duration.seconds(20)
     static let runningLimit = Duration.seconds(10)
 
@@ -89,9 +96,9 @@ public struct OldAppCompatibility: Sendable {
 
     // MARK: Questions
 
-    /// Lists the eligible apps.
-    public func list() async -> OldAppListing {
-        guard let answer = try? await shell.run(Self.listCommand, limit: Self.listLimit) else { return .failed }
+    /// Lists the eligible apps, within `limit`.
+    public func list(limit: Duration = OldAppCompatibility.listLimit) async -> OldAppListing {
+        guard let answer = try? await shell.run(Self.listCommand, limit: limit) else { return .failed }
         return Self.parseListing(answer)
     }
 
@@ -135,7 +142,7 @@ public struct OldAppCompatibility: Sendable {
     // MARK: Answers
 
     public static func parseListing(_ answer: GuestShellOutput) -> OldAppListing {
-        if answer.exitCode == commandNotFound { return .unavailable }
+        if answer.exitCode == commandNotFound || answer.exitCode == usageStatus { return .unavailable }
         guard answer.exitCode == 0 else { return .failed }
         let lines = answer.text.split(omittingEmptySubsequences: true, whereSeparator: \.isNewline).map(String.init)
         guard let head = lines.first else { return .failed }
@@ -170,16 +177,24 @@ public struct OldAppCompatibility: Sendable {
             turnedOn: Int(fields[3]) ?? 0, lastUpdate: Int(fields[4]) ?? 0)
     }
 
-    /// The app's own text as a name: control characters are spaces, the ends
-    /// are trimmed and an enormous one is cut; the package name stands for a
-    /// label that is empty.
+    /// The app's own text as a name: control characters are spaces, the
+    /// bidirectional controls (which would reorder the title the name is
+    /// quoted in) are dropped, the ends are trimmed and an enormous one is
+    /// cut; the package name stands for a label that is empty.
     static func label(_ text: String, package: String) -> String {
-        let plain = String(String.UnicodeScalarView(text.unicodeScalars.map {
-            $0.properties.generalCategory == .control ? " " : $0
+        let plain = String(String.UnicodeScalarView(text.unicodeScalars.compactMap {
+            if isBidirectionalControl($0) { return nil }
+            return $0.properties.generalCategory == .control ? " " : $0
         }))
         let trimmed = plain.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return package }
         return String(trimmed.prefix(longestLabel))
+    }
+
+    /// The embedding, override and isolate controls (U+202A to U+202E and
+    /// U+2066 to U+2069).
+    private static func isBidirectionalControl(_ scalar: Unicode.Scalar) -> Bool {
+        (0x202A...0x202E).contains(scalar.value) || (0x2066...0x2069).contains(scalar.value)
     }
 
     /// Alphabetical by label as the person reads it, the package name settling a tie.
