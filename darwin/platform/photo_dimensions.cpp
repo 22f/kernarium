@@ -685,6 +685,7 @@ Admission admit(const AdmitPlan& plan, const AdmitSteps& steps)
     if (plan.addVideo) {
         videoTried = true;
         if (!steps.addVideo()) return refuse(Admission::videoRefused);
+        if (steps.programVideo) steps.programVideo();
     }
     if (plan.addPhoto) {
         photoTried = true;

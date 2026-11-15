@@ -4,6 +4,8 @@
 #include "require.hpp"
 #include "video_stabilization.hpp"
 
+#include <vector>
+
 using namespace uml::platform;
 using uml::testing::require;
 
@@ -127,6 +129,50 @@ void theRecordNamesEveryState()
 
 } // namespace
 
+/* The connection the glue writes to, here a recorder. */
+struct RecordingPort final : VideoStabilizationPort {
+    explicit RecordingPort(VideoStabilizationSupport supported) : supported_(supported) {}
+    VideoStabilizationSupport support() override { return supported_; }
+    void write(VideoStabilization mode) override { written.push_back(mode); }
+    VideoStabilizationSupport supported_;
+    std::vector<VideoStabilization> written;
+};
+
+// The apply the glue runs (applyVideoStabilization) writes the connection once for a wish and not again for the same wish,
+// updates what the connection holds, and starts again on a new connection.
+void theApplyWritesAWishOnceForAConnection()
+{
+    RecordingPort port({true, false});
+    VideoStabilizationHeld held;
+    auto step = applyVideoStabilization(port, true, held);
+    require(port.written == std::vector<VideoStabilization> {VideoStabilization::standard} && step.write && step.note,
+            "the first apply of a wish writes the mode");
+    require(held.mode == VideoStabilization::standard && held.state == VideoStabilizationState::standard, "and the connection holds it");
+    step = applyVideoStabilization(port, true, held);
+    require(port.written.size() == 1 && !step.write && !step.note, "the same wish again writes and says nothing");
+    step = applyVideoStabilization(port, false, held);
+    require(port.written.size() == 2 && port.written.back() == VideoStabilization::off && step.note,
+            "a guest that stops asking is written off");
+    VideoStabilizationHeld fresh;
+    (void)applyVideoStabilization(port, true, fresh);
+    require(port.written.size() == 3 && port.written.back() == VideoStabilization::standard, "a new connection is written again");
+    RecordingPort none({false, false});
+    VideoStabilizationHeld unsupported;
+    step = applyVideoStabilization(none, true, unsupported);
+    require(none.written.empty() && step.unsupported && unsupported.state == VideoStabilizationState::unsupported,
+            "a format with no mode is written nothing and held as unsupported");
+}
+
+// A new video connection is programmed as it is admitted only where the camera's settings were applied once, so the
+// platform holds what the guest asks for; a guest that does not ask is not given a stabilization it would then lose.
+void anAdmissionProgramsOnlyWhatTheGuestHasAsked()
+{
+    require(admissionWantsStabilization(true, true), "applied settings that ask for stabilization are programmed");
+    require(!admissionWantsStabilization(true, false), "applied settings that do not ask program none (a photo preview)");
+    require(!admissionWantsStabilization(false, true), "settings never applied say nothing: the first apply decides");
+    require(!admissionWantsStabilization(false, false), "and none program none");
+}
+
 int main()
 {
     aGuestThatDoesNotWantStabilizationGetsNone();
@@ -140,5 +186,7 @@ int main()
     aFormatWithNoModeIsToldOnce();
     noChoiceIsEverTheAutomaticOrACinematicMode();
     theRecordNamesEveryState();
+    theApplyWritesAWishOnceForAConnection();
+    anAdmissionProgramsOnlyWhatTheGuestHasAsked();
     return 0;
 }

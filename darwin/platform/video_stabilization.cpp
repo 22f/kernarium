@@ -26,4 +26,12 @@ VideoStabilizationStep stabilizationStep(bool wanted, VideoStabilizationSupport 
     return step;
 }
 
+VideoStabilizationStep applyVideoStabilization(VideoStabilizationPort& port, bool wanted, VideoStabilizationHeld& held)
+{
+    const VideoStabilizationStep step = stabilizationStep(wanted, port.support(), held);
+    if (step.write) port.write(step.choice);
+    held = {step.choice, step.state};
+    return step;
+}
+
 } // namespace uml::platform

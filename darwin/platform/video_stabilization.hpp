@@ -83,4 +83,24 @@ struct VideoStabilizationStep {
 [[nodiscard]] VideoStabilizationStep stabilizationStep(bool wanted, VideoStabilizationSupport support,
                                                        const VideoStabilizationHeld& held) noexcept;
 
+// The capture connection a stabilization is written to: what its active format supports, and its preferred mode.
+class VideoStabilizationPort {
+public:
+    virtual ~VideoStabilizationPort() = default;
+    [[nodiscard]] virtual VideoStabilizationSupport support() = 0;
+    virtual void write(VideoStabilization mode) = 0;
+};
+
+// Puts a connection's stabilization where the guest wants it: writes the preferred mode when it differs from what the
+// connection holds (`held`, updated), and returns the step for the record. Every apply of the camera's settings calls it
+// first, and so does the admission of a video connection, before the session's configuration is committed.
+VideoStabilizationStep applyVideoStabilization(VideoStabilizationPort& port, bool wanted, VideoStabilizationHeld& held);
+
+// Whether the admission of a video connection programs the stabilization: the camera's settings were applied once, so
+// the platform holds what the guest asks for. Before that it asks nothing, and the first apply does.
+[[nodiscard]] constexpr bool admissionWantsStabilization(bool settingsApplied, bool settingsWantIt) noexcept
+{
+    return settingsApplied && settingsWantIt;
+}
+
 } // namespace uml::platform
