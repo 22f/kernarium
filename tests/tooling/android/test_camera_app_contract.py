@@ -7,7 +7,10 @@ patch series defines: the switch for free zoom (default on, off in the overlay) 
 that list each lens of the host. A name that one side renames leaves the overlay applying to nothing,
 and the verifier's constants must name the same settings and values as the overlay. The series also
 ends a recording when the camera closes with a recoverable error (the host ended the camera's video):
-the camera video-lost integration row relies on it.
+the camera video-lost integration row relies on it. The call that does it must be code in that branch,
+and the view model function behind it (the one stop, which the shutter uses too, and the guards of the
+stopped recording's controls) must be code as well: the checks read the patch's added lines without
+their comments, so a call that is commented out does not count.
 """
 
 from __future__ import annotations
@@ -29,7 +32,18 @@ ZOOM = "config_enableZoom"
 AUX_CAMERAS = "config_enableAuxCameras"
 IGNORED_AUX_CAMERAS = "config_ignoredAuxCameraIds"
 MAIN_CAMERAS = "LensZoomRatioUtils.getMainCameras("
-STOP_RECORDING = "viewModel.videoRecording.value?.stop()"
+ACTIVITY_FILE = "app/src/main/java/org/lineageos/aperture/CameraActivity.kt"
+VIEW_MODEL_FILE = "app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt"
+RECOVERABLE_BRANCH = "CameraXCameraState.ERROR_OTHER_RECOVERABLE_ERROR ->"
+RECOVERABLE_TOAST = "showToast(R.string.error_other_recoverable_error)"
+END_RECORDING = "viewModel.endVideoRecording()"
+# What the view model's patch must add as code, with the number of lines that must have it.
+VIEW_MODEL_CODE = (
+    ("fun endVideoRecording(): Boolean", 1),
+    ("recording.stop()", 1),
+    ("isVideoRecordingEnding(", 3),  # the definition, the pause and resume button, the microphone toggle
+    ("endingVideoRecording.compareAndSet(recordingId, 0L)", 1),  # the Finalize clears the mark of its own recording
+)
 
 
 def fail(message: str) -> None:
@@ -66,6 +80,76 @@ def series_patches(series_directory: Path) -> str:
     if not names:
         fail(f"{series_directory} lists no patch")
     return "\n".join((series_directory / name).read_text(encoding="utf-8") for name in names)
+
+
+def file_diffs(patches: str) -> dict[str, list[list[str]]]:
+    """The hunks of each file the patches change, by path: a hunk is the list of its lines that are context, added or removed
+    (the first character says which)."""
+    files: dict[str, list[list[str]]] = {}
+    hunk: list[str] | None = None
+    for line in patches.splitlines():
+        if line.startswith("diff --git "):
+            hunk = None
+            current = files.setdefault(line.split(" b/", 1)[1], [])
+        elif line.startswith("@@"):
+            hunk = []
+            current.append(hunk)
+        elif hunk is not None and line[:1] in (" ", "+", "-"):
+            hunk.append(line)
+    return files
+
+
+def code_of(body: list[tuple[bool, str]]) -> list[tuple[bool, str]]:
+    """The lines (added or not, text) with the comments taken out: `//` to the end of the line and `/* */`, which can span lines.
+    A call inside a comment is not code."""
+    result = []
+    in_block = False
+    for added, text in body:
+        code, rest = "", text
+        while rest:
+            if in_block:
+                end = rest.find("*/")
+                if end < 0:
+                    rest = ""
+                else:
+                    rest, in_block = rest[end + 2:], False
+                continue
+            line_comment, block = rest.find("//"), rest.find("/*")
+            if line_comment >= 0 and (block < 0 or line_comment < block):
+                code, rest = code + rest[:line_comment], ""
+            elif block >= 0:
+                code, rest, in_block = code + rest[:block], rest[block + 2:], True
+            else:
+                code, rest = code + rest, ""
+        result.append((added, code.strip()))
+    return result
+
+
+def body_of(hunk: list[str]) -> list[tuple[bool, str]]:
+    """What the file has after the hunk: context and added lines, whether each was added."""
+    return [(line[0] == "+", line[1:]) for line in hunk if line[0] != "-"]
+
+
+def recoverable_branch_code(patches: str) -> list[str]:
+    """The code that the patches ADD to the recoverable-error branch of the activity: the added lines between the branch's label
+    and its toast, in the hunk that holds the label, without comments."""
+    for hunk in file_diffs(patches).get(ACTIVITY_FILE, []):
+        body = body_of(hunk)
+        for start, (_, text) in enumerate(body):
+            if RECOVERABLE_BRANCH not in text:
+                continue
+            for end in range(start + 1, len(body)):
+                if RECOVERABLE_TOAST in body[end][1]:
+                    return [code for added, code in code_of(body[start + 1:end]) if added and code]
+    fail(f"the camera application's patches have no hunk of {ACTIVITY_FILE} that holds the recoverable-error branch up to its toast")
+
+
+def view_model_code(patches: str) -> list[str]:
+    """The code that the patches ADD to the view model, without comments."""
+    added = []
+    for hunk in file_diffs(patches).get(VIEW_MODEL_FILE, []):
+        added += [code for was_added, code in code_of(body_of(hunk)) if was_added and code]
+    return added
 
 
 def load_verifier(path: Path):
@@ -112,8 +196,18 @@ def check(android_root: Path) -> None:
         fail(f"the camera application's patches never group the cameras of a side: no line adds {MAIN_CAMERAS}")
     # The recording ends when the camera closes with a recoverable error: the host ending the camera's
     # video reaches the application as that error, and nothing else of the HAL's report ends the clip.
-    if not any(STOP_RECORDING in line for line in added):
-        fail(f"the camera application's patches never end a recording on the camera's recoverable error: no line adds {STOP_RECORDING}")
+    # The call is code in that branch (not a comment), and it is the view model's one function that stops
+    # a recording and marks it as ending until its Finalize, which the shutter's stop uses as well.
+    if not any(END_RECORDING in code for code in recoverable_branch_code(patches)):
+        fail("the camera application's patches never end a recording on the camera's recoverable error: "
+             f"no added line of that branch has {END_RECORDING} as code")
+    model = view_model_code(patches)
+    for needle, count in VIEW_MODEL_CODE:
+        found = sum(needle in code for code in model)
+        if found < count:
+            fail(f"the camera application's patches add {needle!r} as code on {found} line(s) of the view model, {count} needed")
+    if "endVideoRecording()" not in model:
+        fail("the camera application's patches do not stop a recording from the shutter through endVideoRecording()")
 
 
 def fixtures(android_root: Path) -> None:
@@ -158,9 +252,42 @@ def fixtures(android_root: Path) -> None:
                 patch.write_text(text, encoding="utf-8")
         for patch in sorted((copy / SERIES_DIRECTORY).glob("*.patch")):
             text = patch.read_text(encoding="utf-8")
-            if STOP_RECORDING in text:
-                patch.write_text(text.replace(STOP_RECORDING, "viewModel.videoRecording.value?.pause()"), encoding="utf-8")
-                expect_failure(lambda: check(copy), "a patch that does not end the recording on the camera's recoverable error")
+            if END_RECORDING not in text:
+                continue
+            # The call is gone, or it is there as text and no code: a comment of either kind.
+            for label, new in (
+                ("a patch that does not end the recording on the camera's recoverable error",
+                 "viewModel.videoRecording.value?.pause()"),
+                ("a patch whose call is commented out with //", "// " + END_RECORDING),
+                ("a patch whose call is commented out with /* */", "/* " + END_RECORDING + " */ false"),
+            ):
+                patch.write_text(text.replace(END_RECORDING, new), encoding="utf-8")
+                expect_failure(lambda: check(copy), label)
+            patch.write_text(text, encoding="utf-8")
+            # The call moved out of the branch (after its toast) is not the branch's.
+            lines = text.splitlines()
+            toast = next(line for line in lines if RECOVERABLE_TOAST in line)
+            call = next(line for line in lines if END_RECORDING in line)
+            moved = text.replace(call + "\n", "").replace(toast, toast + "\n" + call)
+            patch.write_text(moved, encoding="utf-8")
+            expect_failure(lambda: check(copy), "a patch whose call is after the branch's toast")
+            patch.write_text(text, encoding="utf-8")
+        for patch in sorted((copy / SERIES_DIRECTORY).glob("*.patch")):
+            text = patch.read_text(encoding="utf-8")
+            if "fun endVideoRecording" not in text:
+                continue
+            for label, old, new in (
+                ("a view model that never stops the recording", "+            recording.stop()", "+            // recording.stop()"),
+                ("a view model whose shutter stops the recording by itself", "+                endVideoRecording()",
+                 "+                videoRecording.value?.stop()"),
+                ("a pause and resume button without its guard", 'if (isVideoRecordingEnding("The pause or resume")) {', "if (false) {"),
+                ("a mute without its guard", 'if (!isVideoRecordingEnding("Muting the recording")) {', "if (true) {"),
+                ("a Finalize that never clears the mark", "endingVideoRecording.compareAndSet(recordingId, 0L)", "recordingId"),
+            ):
+                if old not in text:
+                    fail(f"the fixture for {label} found nothing to change in the patch")
+                patch.write_text(text.replace(old, new), encoding="utf-8")
+                expect_failure(lambda: check(copy), label)
                 patch.write_text(text, encoding="utf-8")
         check(copy)
 

@@ -353,7 +353,9 @@ keys keep their other actions (the shutter by default), and a tap on the
 active button does nothing. When CameraX closes the camera with a recoverable
 error and opens it again (the HAL's report that the host ended the camera's
 video, ERROR_DEVICE), the application ends the recording in progress and saves
-its clip, and stays open. A product overlay in
+its clip, and stays open; a start still waiting for its sound is cancelled, and
+the pause, resume and microphone controls of a recording that is ending do
+nothing until its clip is finalized. A product overlay in
 `overlay/overlay/packages/apps/Aperture` sets the switch and ignores camera
 ID 2, which only a host that publishes the wide lens twice has. The build
 installs it as a static runtime overlay of the application; the application
