@@ -422,8 +422,19 @@ when no other stream, still or torch holds it open; `camera_streams.hpp`, which
 states the two limits of the rule). An output that leaves the configuration closes with the
 reconfiguration. The Exif focal length in 35 mm film follows from the camera's
 stated focal length and physical sensor size and is left out where the camera
-states no size (`camera_exif.hpp`). The candidate's smoke test is
-`tests/integration/android/run_android_camera.py` (`android-camera`).
+states no size (`camera_exif.hpp`). A camera that states RAW
+(a lens whose colour data the host has learned) also states the lens shading
+map modes OFF and ON, which the stock device info requires of a RAW camera: it
+refuses the camera at boot otherwise, and the camera is never listed again. It
+states the hot pixel map modes OFF and ON and returns an empty hot pixel map for
+ON, since the host hands over no list of defective pixels, and it states that
+its lens shading is not applied to the RAW data (the host copies the platform's
+Bayer pixels as they are and the shading map it returns is all ones; whether
+the platform's own data is corrected is known only from a device). The
+candidate's smoke test is
+`tests/integration/android/run_android_camera.py` (`android-camera`; its
+restart mode, `android-camera-restart`, boots again over a lens's colour data
+and expects the same cameras).
 
 ### Networking
 

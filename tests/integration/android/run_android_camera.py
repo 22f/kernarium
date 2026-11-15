@@ -48,6 +48,16 @@ The runner checks, in this order:
 - blocked: the same cameras are listed, the preview is not the chart on two samples, each taken only while
   the camera application is the resumed activity and the device is awake (the application is brought back
   once; a second absence fails the step), and the camera key takes nothing;
+- restart: a live session that previews and takes one still of the primary back camera (the application is asked for
+  the back camera and must hold it), and of the last lens of a phone, with a calibration directory of its own that
+  the host keeps the colour data of the stills in, then a second boot of the same instance over the directory (the
+  layout the host composes for lenses with colour data, RAW among the capabilities), which must list the same camera
+  IDs as before and at least one camera with the RAW capability, each with the metadata Android requires of one (the
+  lens shading map and hot pixel map modes ON, whether the lens shading is applied). A camera the HAL cannot create
+  while it builds its list is gone until the next restart, and the host states RAW for exactly the lenses that have
+  colour data, so a RAW camera that the HAL rejects takes the lens it was taught from the guest for good. The second
+  session ends with a RAW still of the primary back camera: the application's RAW capture is switched on and the
+  still must leave a DNG beside its JPEG;
 - the camera switch and the platform's dialog: a blocked session is started with the launcher's hardware input,
   as the host's application starts it, so that the side-key device reports the camera lens cover; Android then
   holds the camera's hardware toggle (``dumpsys sensor_privacy``) and a live one does not. Opening the camera
@@ -66,7 +76,7 @@ guest is reached through the shared adb server, always named with ``-s``.
 
 The runner is opt-in: it needs the macos-android17 executable, an installed release and an adb client.
 usage: run_android_camera.py --emulator uml-darwin-android17 [--release DIR] [--layout NAME|auto]
-       [--camera-profile phone|tablet|laptop] [--mode live|blocked|none]
+       [--camera-profile phone|tablet|laptop] [--mode live|blocked|none|restart]
 """
 
 from __future__ import annotations
@@ -86,6 +96,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import xml.etree.ElementTree
 import xml.etree.ElementTree as ET
 import zlib
 from collections.abc import Callable
@@ -313,7 +324,28 @@ DEFAULT_LAYOUTS = {
     "tablet": "bf-small-flash-manual",
     "laptop": "front",
 }
-MODES = ("live", "blocked", "none")
+MODES = ("live", "blocked", "none", "restart")
+# The cameras Android lists again after the restart: the lazy provider starts when cameraserver first asks.
+RESTART_LIST_SECONDS = 60
+CALIBRATION_SECONDS = 30  # the host writes the colour data of a still when the still is done
+# The application starts on the primary back camera, whose first still teaches the host its colour data (a lens
+# keeps what a Bayer still of it shows). A phone has more lenses, and the restart mode takes a still on the last
+# lens button too, the telephoto lens, which is the camera with this ID, so that the colour data of more than one
+# lens has to survive the restart. A host with a single back camera lists no buttons.
+LENS_SELECTOR = "lensSelectorLayout"
+LAST_LENS_CAMERA = {"phone": "4"}
+# The first session starts the application on the primary back camera: it keeps the camera it last used, which an
+# instance of an earlier run may have left on the front one.
+PRIMARY_BACK_CAMERA = "0"
+UI_DUMP = "/sdcard/runner-ui.xml"
+UI_BOUNDS = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
+UI_DUMP_ATTEMPTS = 3
+# The RAW still: the application writes a DNG beside its JPEG once its setting is on (the pro mode button opens a
+# row with the settings button, and the setting is a row of the settings list, below the first screen).
+PRO_BUTTON = "proButton"
+SETTINGS_BUTTON = "settingsButton"
+RAW_SETTING = "Enable RAW image capture"
+RAW_STILL_SECONDS = 90
 
 
 class Failure(RuntimeError):
@@ -809,6 +841,10 @@ class StaticInfo:
     capabilities: frozenset[str]
     flash: bool
     af_modes: frozenset[str]
+    device: str = ""
+    hot_pixel_map_modes: frozenset[str] = frozenset()
+    lens_shading_map_modes: frozenset[str] = frozenset()
+    lens_shading_applied: tuple[str, ...] = ()
 
 
 # The dump prints each camera under a `== Camera HAL device <id> (v..) static information: ==` header,
@@ -818,7 +854,10 @@ class StaticInfo:
 # Android 17 prints the autofocus modes of the dump as numbers, the capabilities and the facing as names.
 AF_MODE_NAMES = {"0": "OFF", "1": "AUTO", "2": "MACRO", "3": "CONTINUOUS_VIDEO", "4": "CONTINUOUS_PICTURE",
                  "5": "EDOF"}
-STATIC_INFO_HEADER = re.compile(r"^\s*== Camera HAL device .* static information: ==\s*$")
+STATIC_INFO_HEADER = re.compile(r"^\s*== Camera HAL device (\S+) .* static information: ==\s*$")
+# The dump prints these enums as names or as numbers.
+MAP_MODE_NAMES = {"0": "OFF", "1": "ON"}
+BOOLEAN_NAMES = {"0": "FALSE", "1": "TRUE"}
 STATIC_INFO_ENTRY = re.compile(r"^\s*(android\.[A-Za-z0-9_.]+) \(([0-9a-f]+)\): ")
 STATIC_INFO_VALUES = re.compile(r"^\s*\[([^\]]*)\]\s*$")
 
@@ -830,7 +869,8 @@ def parse_static_info(text: str) -> list[StaticInfo]:
     entry: list[str] | None = None
     for line in text.splitlines():
         if line.lstrip().startswith("== "):
-            current = {} if STATIC_INFO_HEADER.match(line) else None
+            header = STATIC_INFO_HEADER.match(line)
+            current = {"device": [header[1].rsplit("/", 1)[-1]]} if header else None  # "device@1.1/internal/4" is "4"
             if current is not None:
                 cameras.append(current)
             entry = None
@@ -848,8 +888,33 @@ def parse_static_info(text: str) -> list[StaticInfo]:
         facing=camera["android.lens.facing"][0],
         capabilities=frozenset(camera.get("android.request.availableCapabilities", ())),
         flash=camera.get("android.flash.info.available", ["FALSE"])[:1] == ["TRUE"],
-        af_modes=frozenset(AF_MODE_NAMES.get(mode, mode) for mode in camera.get("android.control.afAvailableModes", ())))
+        af_modes=frozenset(AF_MODE_NAMES.get(mode, mode) for mode in camera.get("android.control.afAvailableModes", ())),
+        device=camera["device"][0],
+        hot_pixel_map_modes=frozenset(MAP_MODE_NAMES.get(mode, mode)
+                                      for mode in camera.get("android.statistics.info.availableHotPixelMapModes", ())),
+        lens_shading_map_modes=frozenset(MAP_MODE_NAMES.get(mode, mode)
+                                         for mode in camera.get("android.statistics.info.availableLensShadingMapModes", ())),
+        lens_shading_applied=tuple(BOOLEAN_NAMES.get(value, value)
+                                   for value in camera.get("android.sensor.info.lensShadingApplied", ())))
         for camera in cameras if camera.get("android.lens.facing")]
+
+
+def raw_metadata_problems(infos: list[StaticInfo]) -> list[str]:
+    """What a camera with the RAW capability leaves out of the metadata that Android requires of one: both map modes
+    ON (the lens shading map and the hot pixel map) and whether its lens shading is applied."""
+    problems = []
+    for info in infos:
+        if "RAW" not in info.capabilities:
+            continue
+        label = f"camera {info.device or '?'}"
+        if "ON" not in info.lens_shading_map_modes:
+            problems.append(f"{label} states RAW but the lens shading map modes {sorted(info.lens_shading_map_modes)} lack ON")
+        if "ON" not in info.hot_pixel_map_modes:
+            problems.append(f"{label} states RAW but the hot pixel map modes {sorted(info.hot_pixel_map_modes)} lack ON")
+        if len(info.lens_shading_applied) != 1 or info.lens_shading_applied[0] not in BOOLEAN_NAMES.values():
+            problems.append(f"{label} states RAW but not whether its lens shading is applied "
+                            f"(android.sensor.info.lensShadingApplied {list(info.lens_shading_applied)})")
+    return problems
 
 
 def features_of(infos: list[StaticInfo]) -> set[str]:
@@ -1454,9 +1519,10 @@ def wait_for_withheld_reminder(guest: Guest) -> None:
                   f"{SENSOR_REMINDER_LINE!r} for {CAMERA_PACKAGE} (after {SENSOR_REMINDER_SECONDS} s)")
 
 
-def check_preview(guest: Guest, plan: Plan) -> None:
-    """Live: the application holds a camera and its preview is the chart. Blocked: it is not."""
-    start_camera_application(guest)
+def check_preview(guest: Guest, plan: Plan, front: bool | None = None) -> None:
+    """Live: the application holds a camera and its preview is the chart. Blocked: it is not. `front` is the
+    application's camera choice (it keeps its last choice otherwise)."""
+    start_camera_application(guest, front=front)
     if plan.mode == "live":
         wait_for("the camera application holding a camera", PREVIEW_SECONDS,
                  lambda: None if camera_connected(guest.media_camera(), CAMERA_PACKAGE)
@@ -1584,6 +1650,273 @@ def check_still(guest: Guest, plan: Plan, before: set[str]) -> None:
         raise Failure(f"{remote} is {jpeg.width}x{jpeg.height}, outside the {plan.layout.tier or 'small'} "
                       f"tier's stills ({STILL_MINIMUM_SIDE} pixels a side to {plan.still_maximum_pixels} pixels)")
     print(f"  still: {found[-1]} {jpeg.width}x{jpeg.height}")
+
+
+def parse_lens_buttons(dump: str) -> list[tuple[str, int, int]]:
+    """`uiautomator dump`: the buttons inside the application's lens selector, left to right, as (text, x, y) of
+    their centres; none without a selector."""
+    elements = []
+    for element in xml.etree.ElementTree.fromstring(dump).iter("node"):
+        match = UI_BOUNDS.fullmatch(element.get("bounds", ""))
+        if match:
+            elements.append((element, tuple(map(int, match.groups()))))
+    selector = [box for element, box in elements if element.get("resource-id", "").endswith(f"/{LENS_SELECTOR}")]
+    if not selector:
+        return []
+    left, top, right, bottom = selector[0]
+    inside = [(element.get("text", ""), box) for element, box in elements
+              if element.get("class", "").endswith("Button") and box != selector[0]
+              and box[0] >= left and box[1] >= top and box[2] <= right and box[3] <= bottom]
+    return [(text, (box[0] + box[2]) // 2, (box[1] + box[3]) // 2) for text, box in sorted(inside, key=lambda item: (item[1][0], item[1][1]))]
+
+
+def ui_dump(guest: Guest) -> str:
+    """`uiautomator dump`: the hierarchy of the screen. The tool fails now and then while the screen changes, so it is
+    asked again a few times; the file is removed first, so that a failed dump cannot be read as the last one."""
+    for attempt in range(UI_DUMP_ATTEMPTS):
+        dump = guest.shell(f"rm -f {UI_DUMP}; uiautomator dump {UI_DUMP} >/dev/null 2>&1; cat {UI_DUMP}", timeout=120)
+        if "<hierarchy" in dump:
+            return dump[dump.index("<hierarchy"):]
+        if attempt + 1 < UI_DUMP_ATTEMPTS:
+            guest.alive()
+            time.sleep(2)
+    raise Failure(f"uiautomator printed no hierarchy in {UI_DUMP_ATTEMPTS} attempts")
+
+
+@dataclass(frozen=True)
+class UiNode:
+    """One element of `uiautomator dump`, as the runner taps and reads it."""
+    id: str  # the resource id without its package
+    text: str
+    kind: str  # the class
+    checked: bool
+    x: int  # the centre
+    y: int
+
+
+def parse_ui_nodes(dump: str) -> list[UiNode]:
+    nodes = []
+    for element in xml.etree.ElementTree.fromstring(dump).iter("node"):
+        match = UI_BOUNDS.fullmatch(element.get("bounds", ""))
+        if match:
+            left, top, right, bottom = map(int, match.groups())
+            nodes.append(UiNode(element.get("resource-id", "").split("/")[-1], element.get("text", ""),
+                                element.get("class", ""), element.get("checked") == "true",
+                                (left + right) // 2, (top + bottom) // 2))
+    return nodes
+
+
+def tap_node(guest: Guest, what: str, *, id: str | None = None, text: str | None = None) -> UiNode:
+    """Taps the first element of the screen with this resource id or text."""
+    found = [node for node in parse_ui_nodes(ui_dump(guest)) if (id is not None and node.id == id) or (text is not None and node.text == text)]
+    if not found:
+        raise Failure(f"the application shows no {what}")
+    guest.shell(f"input tap {found[0].x} {found[0].y}")
+    return found[0]
+
+
+def select_the_lens_that_learns(guest: Guest, plan: Plan) -> str | None:
+    """Makes the application use the last lens of a phone, the last lens button (the application then holds that
+    lens's camera); nothing on a host whose application has no buttons. Returns the label of the button it tapped."""
+    buttons = parse_lens_buttons(ui_dump(guest))
+    if not buttons:
+        if plan.profile in LAST_LENS_CAMERA:
+            raise Failure(f"the application lists no lens buttons on the {plan.profile} profile, which has more than one back lens")
+        return None
+    camera = LAST_LENS_CAMERA.get(plan.profile)
+    if camera is None:
+        raise Failure(f"the application lists lens buttons {[text for text, _, _ in buttons]} and the {plan.profile} profile "
+                      "has no lens that the runner knows how to reach")
+    text, x, y = buttons[-1]
+    guest.shell(f"input tap {x} {y}")
+    wait_for(f"the application holding camera {camera} after the tap on the lens button {text!r}", PREVIEW_SECONDS,
+             lambda: None if active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE) == {camera}
+             else f"it holds {sorted(active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE))}", guest)
+    time.sleep(3)  # the preview of the new lens settles before the camera key
+    return text
+
+
+def check_primary_back_camera(guest: Guest) -> None:
+    """The application holds the primary back camera, whatever camera an earlier session of the instance left it on:
+    its still is the one whose colour data the restart expects to come back as RAW."""
+    wait_for("the camera application holding the primary back camera", PREVIEW_SECONDS,
+             lambda: None if active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE) == {PRIMARY_BACK_CAMERA}
+             else f"it holds {sorted(active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE))}", guest)
+
+
+def run_restart_checks(guest: Guest, plan: Plan, calibration: pathlib.Path) -> list[str]:
+    """The first session of the restart mode: the layout, the cameras, one preview, a still of the primary back
+    camera and of the last lens, and the colour data those stills taught in the calibration directory. Returns the
+    camera IDs Android lists."""
+    print(f"layout {plan.layout.name}, profile {plan.profile}, restart (first session)")
+    check_layout(guest, plan)
+    check_camera_list(guest, plan)
+    before = guest.stills()
+    check_preview(guest, plan, front=False)
+    check_primary_back_camera(guest)
+    check_still(guest, plan, before)
+    taught = 1
+    lens = select_the_lens_that_learns(guest, plan)
+    if lens is not None:
+        print(f"  lens: the button {lens!r}")
+        check_still(guest, plan, guest.stills())
+        taught += 1
+    wait_for(f"the colour data of the back stills ({taught}) in the calibration directory", CALIBRATION_SECONDS,
+             lambda: None if len(list(calibration.glob("*.cal"))) >= taught
+             else f"{len(list(calibration.glob('*.cal')))} .cal files in {calibration}", guest)
+    ids = parse_camera_ids(guest.media_camera())
+    print(f"  calibration: {sorted(path.name for path in calibration.glob('*.cal'))}")
+    return ids
+
+
+def check_restart_keeps_cameras(guest: Guest, plan: Plan, before: list[str]) -> None:
+    """The guest has restarted over the calibration directory that a back still taught: the host composes the
+    layout of lenses with colour data (RAW among the capabilities) and Android lists the cameras it listed before,
+    one of them stating RAW. A camera that the HAL cannot create while it builds its list is not listed again by
+    that boot, and the colour data keeps it out of every later one."""
+    try:
+        check_layout(guest, plan)
+    except Failure as problem:
+        raise Failure(f"after the restart: {problem} (did the back still of the first session teach no colour data?)") from problem
+
+    def listed() -> str | None:
+        ids = parse_camera_ids(guest.media_camera())
+        if sorted(ids) != sorted(before):
+            return (f"cameras {ids}, not the {before} of the session before: missing {sorted(set(before) - set(ids))}, "
+                    f"extra {sorted(set(ids) - set(before))}")
+        return None
+
+    wait_for("the cameras Android lists after the restart (the HAL logs a camera it rejects while it builds its list, "
+             "as EmulatedCameraDeviceInfo, and it is not listed again)", RESTART_LIST_SECONDS, listed, guest)
+    stating_raw = [info for info in parse_static_info(guest.media_camera()) if "RAW" in info.capabilities]
+    if not stating_raw:
+        raise Failure("after the restart no camera states the RAW capability, though the host kept a back lens's colour "
+                      "data: the run did not exercise a RAW camera")
+    problems = raw_metadata_problems(parse_static_info(guest.media_camera()))
+    if problems:
+        raise Failure("after the restart the cameras that state RAW lack metadata Android requires of one: " + "; ".join(problems))
+    check_characteristics(guest, plan)
+    print(f"  restart: the cameras {sorted(before)} are listed again, {len(stating_raw)} of them with RAW and the metadata of one")
+
+
+def enable_raw_capture(guest: Guest) -> None:
+    """Switches the camera application's setting "Enable RAW image capture" on, through its pro mode button and its
+    settings (the application keeps the choice). A setting that is on already is left on."""
+    guest.shell(f"am force-stop {CAMERA_PACKAGE}")
+    start_camera_application(guest, front=False)
+    wait_for_chart(guest, PRIMARY_BACK_CAMERA, "photo, before the settings")
+    time.sleep(3)
+    tap_node(guest, "pro mode button", id=PRO_BUTTON)
+    time.sleep(2)
+    tap_node(guest, "settings button", id=SETTINGS_BUTTON)
+    time.sleep(3)
+    guest.shell(f"input swipe {DISPLAY_WIDTH // 2} {DISPLAY_HEIGHT * 3 // 4} {DISPLAY_WIDTH // 2} {DISPLAY_HEIGHT // 4} 400")
+    time.sleep(2)
+
+    def switch_of_row() -> UiNode | None:
+        nodes = parse_ui_nodes(ui_dump(guest))
+        title = next((node for node in nodes if node.text == RAW_SETTING), None)
+        if title is None:
+            raise Failure(f"the application's settings show no row {RAW_SETTING!r}")
+        return next((node for node in nodes if node.kind.endswith("Switch") and abs(node.y - title.y) < 60), None)
+
+    switch = switch_of_row()
+    if switch is None:
+        raise Failure(f"the row {RAW_SETTING!r} has no switch")
+    if not switch.checked:
+        tap_node(guest, f"row {RAW_SETTING!r}", text=RAW_SETTING)
+        time.sleep(2)
+        switch = switch_of_row()
+        if switch is None or not switch.checked:
+            raise Failure(f"the setting {RAW_SETTING!r} is not on after the tap on its row")
+    time.sleep(2)  # the application writes its preference asynchronously
+    guest.shell(f"am force-stop {CAMERA_PACKAGE}")
+
+
+TIFF_SUB_IFDS = 0x014A
+TIFF_PHOTOMETRIC = 0x0106
+PHOTOMETRIC_CFA = 32803
+DNG_VERSION = 0xC612
+DNG_COLOR_MATRIX1 = 0xC621
+
+
+@dataclass(frozen=True)
+class Dng:
+    """A DNG read as a TIFF: the tags of its first image directory, and the size and depth of its colour filter array image."""
+    tags: frozenset[int]
+    width: int
+    height: int
+    bits: int
+
+
+def parse_dng(data: bytes) -> Dng:
+    if data[:4] not in (b"II*\x00", b"MM\x00*"):
+        raise ValueError(f"not a TIFF file: it starts with {data[:4]!r}")
+    endian = "<" if data[:2] == b"II" else ">"
+    kinds = {1: ("B", 1), 3: ("H", 2), 4: ("I", 4), 6: ("b", 1), 8: ("h", 2), 9: ("i", 4), 16: ("Q", 8)}
+
+    def directory(offset: int) -> dict[int, list[int]]:
+        try:
+            (count,) = struct.unpack_from(endian + "H", data, offset)
+            tags: dict[int, list[int]] = {}
+            for index in range(count):
+                entry = offset + 2 + 12 * index
+                tag, kind, number, value = struct.unpack_from(endian + "HHII", data, entry)
+                if kind not in kinds or number > 64:
+                    tags[tag] = []
+                    continue
+                letter, size = kinds[kind]
+                tags[tag] = list(struct.unpack_from(endian + letter * number, data, entry + 8 if size * number <= 4 else value))
+            return tags
+        except struct.error as problem:
+            raise ValueError(f"a truncated image directory: {problem}") from problem
+
+    top = directory(struct.unpack_from(endian + "I", data, 4)[0])
+    images = [top] + [directory(offset) for offset in top.get(TIFF_SUB_IFDS, [])]
+    cfa = next((tags for tags in images if tags.get(TIFF_PHOTOMETRIC, [None])[0] == PHOTOMETRIC_CFA), None)
+    if cfa is None:
+        raise ValueError("no colour filter array image in the file")
+    return Dng(frozenset(top), cfa.get(0x0100, [0])[0], cfa.get(0x0101, [0])[0], cfa.get(0x0102, [0])[0])
+
+
+def check_raw_still(guest: Guest, plan: Plan) -> None:
+    """After the restart: a still of the primary back camera, which states RAW, with the application's RAW capture on.
+    The application writes a DNG beside its JPEG; the DNG is a TIFF with the DNG version and the camera's colour matrix
+    and a colour filter array image that is not smaller than a still can be."""
+    raw = [info for info in parse_static_info(guest.media_camera()) if "RAW" in info.capabilities]
+    if PRIMARY_BACK_CAMERA not in {info.device for info in raw}:
+        raise Failure(f"the primary back camera {PRIMARY_BACK_CAMERA} states no RAW (the cameras with RAW are "
+                      f"{sorted(info.device for info in raw)}): there is no RAW request to take")
+    enable_raw_capture(guest)
+    start_camera_application(guest, front=False)
+    wait_for_chart(guest, PRIMARY_BACK_CAMERA, "RAW still")
+    time.sleep(3)
+    before = parse_listing(guest.shell(f"ls {STILL_DIRECTORY} 2>&1 || true"))
+    guest.shell(f"input keyevent {CAMERA_KEYCODE}")
+    found: list[str] = []
+
+    def written() -> str | None:
+        added = parse_listing(guest.shell(f"ls {STILL_DIRECTORY} 2>&1 || true")) - before
+        dng = sorted(name for name in added if name.lower().endswith(".dng"))
+        jpeg = sorted(name for name in added if name.lower().endswith((".jpg", ".jpeg")))
+        if not dng or not jpeg:
+            return f"new files {sorted(added)}: DNG {dng}, JPEG {jpeg}"
+        found[:] = dng
+        return None
+
+    wait_for("a DNG and a JPEG in the camera folder", RAW_STILL_SECONDS, written, guest)
+    time.sleep(3)  # the files are written through; give the last write time to land
+    remote = f"{STILL_DIRECTORY}/{found[-1]}"
+    try:
+        dng = parse_dng(guest.pull(remote))
+    except ValueError as problem:
+        raise Failure(f"{remote} is not a DNG: {problem}") from problem
+    missing = [name for name, tag in (("DNGVersion", DNG_VERSION), ("ColorMatrix1", DNG_COLOR_MATRIX1)) if tag not in dng.tags]
+    if missing:
+        raise Failure(f"{remote} has no {' and no '.join(missing)}")
+    if min(dng.width, dng.height) < STILL_MINIMUM_SIDE or dng.bits < 10:
+        raise Failure(f"{remote} has a colour filter array image of {dng.width}x{dng.height} at {dng.bits} bits")
+    print(f"  RAW still: {found[-1]} {dng.width}x{dng.height} at {dng.bits} bits")
 
 
 @dataclass
@@ -2205,6 +2538,21 @@ def start_guest(options: argparse.Namespace, plan: Plan, adb: str, private: path
     return guest
 
 
+def restart_guest(options: argparse.Namespace, plan: Plan, adb: str, private: pathlib.Path,
+                  guest: Guest) -> tuple[Guest, Plan]:
+    """Stops the guest and boots the same instance again, the way the host's application restarts a guest: over the
+    calibration directory the first session kept, with the launcher composing the layout from the cameras (the
+    taught one). Returns the new guest and its plan."""
+    boot_android.disconnect_adb(adb, guest.serial)
+    boot_android.stop_guest(guest.process)
+    again = make_plan(auto_layout(plan.profile, True), plan.profile, "live", plan.switch_rounds)
+    second = private / "restart"
+    second.mkdir()
+    restarted = argparse.Namespace(**{**vars(options), "instance": options.instance or private / "instance",
+                                      "layout": AUTO_LAYOUT})
+    return start_guest(restarted, again, adb, second), again
+
+
 def positive_integer(text: str) -> int:
     try:
         value = int(text)
@@ -2234,6 +2582,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "profile's own")
     parser.add_argument("--mode", choices=MODES, default="live",
                         help="live: the synthetic chart; blocked: a session started with Camera off; "
+                        "restart: a preview and a back still, then a second boot over the colour data it taught; "
                         "none: no camera device")
     parser.add_argument("--adb", default="adb", help="adb client to use")
     parser.add_argument("--adb-port", type=int, default=slot_ports.slot_port(slot_ports.ADB_OFFSET, DEFAULT_ADB_PORT),
@@ -2265,7 +2614,8 @@ def build_parser() -> argparse.ArgumentParser:
 # The tags of the camera path and of the buffers it allocates; the application's own noise (the surface
 # composer's per-frame lines, adb's own polling of the camera folder) is left out.
 FAILURE_LOG_PATTERN = ("V4l2Stream|V4l2FrameSource|EmulatedSensor|EmulatedRequest|CameraService|Camera2Client|Camera3|"
-                       "cameraserver|camera.provider|CameraProvider|CameraX|Aperture|vrend|gralloc|minigbm|virtio|BufferQueue")
+                       "cameraserver|camera.provider|CameraProvider|CameraX|Aperture|vrend|gralloc|minigbm|virtio|BufferQueue|"
+                       "EmulatedCameraDeviceInfo|V4l2Characteristics")
 FAILURE_LOG_NOISE = ("SurfaceFlinger|adbd|out of bounds transparent region|minigbm:virtgpu_init|minigbm:virgl_get_caps|"
                      "minigbm:virgl_add_combination|vendor.minigbm.debug")
 FAILURE_LOG_LINES = 120
@@ -2325,10 +2675,18 @@ def main() -> int:
     if options.cpus <= 0 or options.boot_timeout <= 0:
         print("counts and timeouts must be positive", file=sys.stderr)
         return 2
+    if options.mode == "restart" and options.hardware_input:
+        print("the restart mode runs without the side keys; --hardware-input is for the live and blocked modes",
+              file=sys.stderr)
+        return 2
     # A session started with Camera off has the side keys, whose device reports the camera lens cover, as the
     # host's application starts it; without them nothing of the camera switch would reach Android.
     options.hardware_input = wants_hardware_input(options)
-    layout = options.layout or ("none" if options.mode == "none" else DEFAULT_LAYOUTS[options.camera_profile])
+    if options.mode == "restart" and AUTO_LAYOUTS[options.camera_profile] == auto_layout(options.camera_profile, False):
+        print(f"the {options.camera_profile} profile has no lens with colour data to restart over", file=sys.stderr)
+        return 2
+    default_layout = AUTO_LAYOUT if options.mode == "restart" else DEFAULT_LAYOUTS[options.camera_profile]
+    layout = options.layout or ("none" if options.mode == "none" else default_layout)
     if layout == AUTO_LAYOUT:
         if options.mode == "none":
             print("--layout auto needs a camera to compose it from", file=sys.stderr)
@@ -2341,7 +2699,8 @@ def main() -> int:
             print(f"{problem}", file=sys.stderr)
             return 2
     try:
-        plan = make_plan(layout, options.camera_profile, options.mode, options.switch_rounds)
+        plan = make_plan(layout, options.camera_profile, "live" if options.mode == "restart" else options.mode,
+                         options.switch_rounds)
     except ValueError as problem:
         print(f"{problem}", file=sys.stderr)
         return 2
@@ -2350,6 +2709,9 @@ def main() -> int:
     private = pathlib.Path(tempfile.mkdtemp(prefix="uml-camera-"))
     guest: Guest | None = None
     try:
+        if options.mode == "restart" and options.calibration_dir is None:
+            options.calibration_dir = private / "calibration"
+            options.calibration_dir.mkdir()
         guest = start_guest(options, plan, adb, private)
         if guest.hardware_input:
             # The sensor privacy checks judge the whole session: capture its logs from before the camera opens.
@@ -2357,7 +2719,13 @@ def main() -> int:
             output.mkdir(parents=True, exist_ok=True)
             guest.capture = SessionCapture(adb, guest.serial, output / f"camera-session-{plan.mode}.log")
             guest.capture.start()
-        run_checks(guest, plan)
+        if options.mode == "restart":
+            before = run_restart_checks(guest, plan, options.calibration_dir)
+            guest, again = restart_guest(options, plan, adb, private, guest)
+            check_restart_keeps_cameras(guest, again, before)
+            check_raw_still(guest, again)
+        else:
+            run_checks(guest, plan)
         print("PASS")
         return 0
     except (Failure, boot_android.LauncherError, subprocess.TimeoutExpired, OSError) as problem:
@@ -2365,7 +2733,7 @@ def main() -> int:
         if guest is not None and not isinstance(problem, boot_android.LauncherError):
             print_camera_log(guest)
             print_sensor_capture(guest)
-        log = private / "emulator.log"
+        log = guest.log if guest is not None else private / "emulator.log"
         if log.is_file():
             print("launcher log tail:\n" + "\n".join(log.read_text(errors="replace").splitlines()[-30:]),
                   file=sys.stderr)

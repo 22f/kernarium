@@ -857,19 +857,25 @@ anywhere is a blocker. The candidate must show:
 - **Cameras** (a guest started with `--camera=synthetic` and a camera layout on
   `androidboot.product.vendor.sku`). `android-camera` passes for the layouts
   the synthetic profiles compose, live and blocked, a blocked session showing
-  no sensor privacy reminder for the camera; the VTS camera provider test
+  no sensor privacy reminder for the camera, and `android-camera-restart`
+  passes for the phone profile; the VTS camera provider test
   (`VtsAidlHalCameraProvider_TargetTest`) passes against the lazy provider; and
   these CTS modules pass sharded, with the failures rerun alone and a result
   that differs from the accepted release's explained:
   `CtsCameraTestCases` (about 6 to 15 hours, as detached shards),
   `CtsCameraApi25TestCases`, `CtsMediaRecorderTestCases`, the camera parts of
   `CtsAppOpsTestCases` and `CtsPermissionTestCases`, and
-  `CtsSensorPrivacyTestCases` in a blocked session and in a live one. The
-  blocked CTS session runs without the side keys, so the hardware toggle is not
-  set there; with it set, the platform's camera reminder tests would fail by
-  design. The provider process runs from cameraserver's start until
-  cameraserver holds no camera, and again while an application holds one, no
-  denial of `hal_camera_default` appears in the log, and the verifier's check that
+  `CtsSensorPrivacyTestCases` in a blocked session and in a live one.
+  `CtsCameraTestCases` runs once more, for its RAW parts
+  (`ExtendedCameraCharacteristicsTest`, `CaptureResultTest`, `DngCreatorTest`,
+  `StillCaptureTest` and `CaptureRequestTest#testLensShadingMap`), on a guest
+  restarted over a saved calibration, since only then does the guest list a
+  RAW camera. The blocked CTS session runs without the side keys, so the
+  hardware toggle is not set there; with it set, the platform's camera reminder
+  tests would fail by design. The provider process runs from cameraserver's
+  start until cameraserver holds no camera, and again while an application
+  holds one, no denial of `hal_camera_default` appears in the log, and the
+  verifier's check that
   `libgooglecamerahwl_impl.so` holds the names of route `p0030` is not
   vacuous: it runs on the candidate's built library (a source tree has none)
   and is shown to fail on the stock one. The camera application shows a lens
@@ -1041,10 +1047,20 @@ and the input's log must say it made the time up; and one during which the
 emulator process is stopped, whose two tracks must show gaps of about the same
 length with no burst of made-up audio after them. The audio capture is seen to
 run before either is injected. In a blocked session the runner checks instead
-that the same cameras give black frames and no still.
-`android17-camera-runner` (tooling) runs its parsers and the expectations of
-every layout without a guest, and `android17-camera-layouts` (tooling) the
-layout set, its fallback order and the generated files.
+that the same cameras give black frames and no still. `android-camera-restart`
+(`--mode restart`) takes a preview and the still of the primary back camera and
+of a lens that learns colour data into a calibration directory of its own,
+boots the same instance again over it, expects the same camera IDs, one of them
+with RAW, because a camera the HAL refuses while it builds its list is not
+listed again, reads the static metadata those RAW cameras state (the lens
+shading map and hot pixel map modes, the lens shading state) and takes a RAW
+still of one, with its DNG. `android17-camera-runner` (tooling) runs its
+parsers and the expectations of every layout without a guest,
+`android17-camera-layouts` (tooling) the layout set, its fallback order and the
+generated files, and `andarium-camera-plan` (unit) the metadata a RAW camera
+states, which the HAL writes from the same function (`state_raw_metadata`).
+The HAL's result path (the lens shading map and the empty hot pixel map for the
+mode ON) has no check of its own outside the camera CTS modules.
 
 Every first-party script that reaches a guest over adb uses the one shared adb
 server, names the guest with `-s 127.0.0.1:<port>` and at the end only
