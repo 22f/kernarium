@@ -711,15 +711,19 @@ patches ART's one JNI function table in place and gives the application:
   that use one block at once share its memory as on Dalvik. Every
   synchronization of a block with its array, its own thread's included, runs
   under one process-wide lock that no call into Java holds, so the
-  synchronizations of all threads run one at a time; a raw write that races one
-  to a byte both sides wrote can be lost. A release goes to the block whose data
+  synchronizations of all threads run one at a time. Nothing under it waits for
+  the runtime's collector (a critical get that opens a region, an allocation in
+  the Java heap): those are made before it is taken, so a thread that waits for
+  it inside a critical region never holds up a collection. A raw write that
+  races one to a byte both sides wrote can be lost. A release goes to the block whose data
   starts at its pointer, whichever reference comes with it, and never reaches
   the runtime for a pointer in the region; a pointer inside the region that is
   not at a block's start is not read as a header, copies nothing, and counts as
   the release of the block of the reference that comes with it. A pointer the
   runtime itself handed out for a real reference to the array (the layer records
   those from `Get...Elements` and `Get...Critical` once the process has had a
-  block, until their release with mode 0 or `JNI_ABORT`) goes to the runtime's
+  block, under a lock of their own, until their release with mode 0 or
+  `JNI_ABORT`) goes to the runtime's
   own Release when it comes with a block's reference, with the block's array,
   and closes its critical region; any other pointer that comes with a block's
   reference is the application's own buffer, and is copied into the block. At

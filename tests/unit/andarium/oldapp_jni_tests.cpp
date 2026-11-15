@@ -10,6 +10,7 @@
 #include <atomic>
 #include <memory>
 #include <chrono>
+#include <condition_variable>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -88,6 +89,8 @@ struct World {
     int set_calls = 0;               // SetByteArrayRegion calls that reached the runtime
     std::vector<std::vector<uint8_t>> seen_arrays;  // the bytes of every array argument when the call ran
     std::vector<uint8_t> seen_receiver;             // the bytes of an array receiver when the call ran
+    int new_array_calls = 0;                        // NewByteArray calls that reached the runtime
+    bool new_array_fails = false;                   // NewByteArray fails (an exception)
     int get_calls = 0;                              // GetByteArrayRegion calls that reached the runtime
     int release_calls = 0;                          // Release...Elements / ReleasePrimitiveArrayCritical calls that reached the runtime
     std::vector<const void*> released;              // the pointers they were handed
@@ -104,11 +107,61 @@ struct World {
 };
 World world;
 
-// CheckJNI's rules: nothing but the critical pair runs inside a critical region, and almost nothing with an
-// exception pending.
+thread_local int t_ended_depth = 0;  // how deep this thread is in the ended lock (a wrapper is never entered under it)
+thread_local int t_regions = 0;      // the runtime critical regions this thread has open (the nesting the runtime's flip rule sees)
+
+// CheckJNI's rules: nothing but the critical pair runs inside a critical region (a thread's own), and almost nothing with
+// an exception pending.
 void jni_allowed(const char* what) {
-    require(world.critical == 0, what);
+    require(t_regions == 0, what);
     require(!world.exception_pending, what);
+}
+
+// The layer's mutex rule (the comment "What may run under the mutex" in jni_shim.cpp): under the mutex the layer calls the
+// runtime's region and reference functions, the releases, and a critical get that is nested in a region the thread holds
+// already. A thread that holds the mutex must never wait for the collector, because a thread inside a runtime critical
+// region may be waiting for the mutex while the collector's flip waits for that region. Every other fake function calls
+// this first, so a call that is not on the list fails in every row, whichever thread makes it.
+void not_under_mutex(const char* function) {
+    require(t_ended_depth == 0, function);
+}
+
+// The runtime's thread-flip rule (art/runtime/gc/heap.cc): ThreadFlipBegin sets the flag, then waits until no thread has a
+// region open; a critical get that opens a region (the thread has none open) waits while the flag is set; a nested one does
+// not. A wait that exceeds two seconds is counted (the real runtime waits for good) and the get goes on.
+std::mutex g_flip_mutex;
+std::condition_variable g_flip_cv;
+bool g_flip_running = false;      // a flip is pending or running
+int g_open_regions = 0;           // threads with a region open
+int g_gets_that_waited = 0;       // critical gets that found the flip pending and waited for it
+std::atomic<int> g_flip_timeouts{0};
+std::function<void()> g_before_first_critical;  // runs on the first thread that makes a critical get, before the get waits
+void flip_enter_region() {
+    std::unique_lock<std::mutex> l(g_flip_mutex);
+    if (g_flip_running) {
+        ++g_gets_that_waited;
+        g_flip_cv.notify_all();
+    }
+    if (!g_flip_cv.wait_for(l, std::chrono::seconds(2), [] { return !g_flip_running; })) ++g_flip_timeouts;
+    ++g_open_regions;
+}
+void flip_leave_region() {
+    std::lock_guard<std::mutex> l(g_flip_mutex);
+    --g_open_regions;
+    g_flip_cv.notify_all();
+}
+// The collector: sets the flag and waits for the open regions (false: the wait timed out, for good in the real runtime),
+// then the flip runs and ends.
+bool flip_begin_waits_for_regions() {
+    std::unique_lock<std::mutex> l(g_flip_mutex);
+    g_flip_running = true;
+    g_flip_cv.notify_all();
+    return g_flip_cv.wait_for(l, std::chrono::seconds(3), [] { return g_open_regions == 0; });
+}
+void flip_end() {
+    std::lock_guard<std::mutex> l(g_flip_mutex);
+    g_flip_running = false;
+    g_flip_cv.notify_all();
 }
 
 bool live(jobject ref) {
@@ -148,7 +201,6 @@ uint64_t g_epoch = 1;
 bool g_no_thread_state = false;                  // the platform has no thread state to give
 // Whether a native function is in the application's own libraries (the thunks' domain); a predicate decides by the
 // function's address. Independent of the caller (g_app_caller).
-thread_local int t_ended_depth = 0;  // how deep this thread is in the ended lock (a wrapper is never entered under it)
 bool g_own_default = true;
 bool (*g_own_predicate)(const void*) = nullptr;
 bool g_without_own_check = false;  // the next install gives the platform no is_own_library (not reset by reset_world)
@@ -234,8 +286,19 @@ const Platform kPlatform{fake_is_app, fake_thread_state, fake_log, fake_make_wri
                          fake_describe, fake_now, fake_alloc_baseline, fake_free_baseline, fake_thunk_address, 1024,
                          fake_is_own, fake_mutex_lock, fake_mutex_unlock};
 
-jsize f_GetArrayLength(Env*, jarray a) { return static_cast<jsize>(object_of(a)->bytes.size()); }
-jobject f_NewByteArray(Env*, jsize n) { return byte_array(std::vector<uint8_t>(static_cast<size_t>(n), 0)); }
+jsize f_GetArrayLength(Env*, jarray a) {
+    not_under_mutex("GetArrayLength is not on the list of calls under the mutex");
+    return static_cast<jsize>(object_of(a)->bytes.size());
+}
+jobject f_NewByteArray(Env*, jsize n) {
+    not_under_mutex("NewByteArray (an allocation in the Java heap can wait for the collector) under the mutex");
+    ++world.new_array_calls;
+    if (world.new_array_fails) {
+        world.exception_pending = true;
+        return nullptr;
+    }
+    return byte_array(std::vector<uint8_t>(static_cast<size_t>(n), 0));
+}
 std::function<void()> g_after_set;  // runs inside a SetByteArrayRegion, after it copied
 void f_SetByteArrayRegion(Env*, jarray a, jsize start, jsize len, const jbyte* buf) {
     revoke_if_asked();
@@ -271,6 +334,7 @@ void f_GetByteArrayRegion(Env*, jarray a, jsize start, jsize len, jbyte* buf) {
     }
 }
 jbyte* f_GetByteArrayElements(Env*, jarray a, jboolean* is_copy) {
+    not_under_mutex("GetByteArrayElements under the mutex");
     revoke_if_asked();
     jni_allowed("GetByteArrayElements where JNI is not allowed");
     if (is_copy) *is_copy = 0;
@@ -283,6 +347,18 @@ void f_ReleaseByteArrayElements(Env*, jarray a, jbyte* p, jint) {
     world.released.push_back(p);
 }
 void* f_GetPrimitiveArrayCritical(Env*, jarray a, jboolean* is_copy) {
+    const bool nested = t_regions > 0;
+    if (!nested) {
+        // The first get of a thread waits for a pending flip: not while this thread holds the mutex.
+        not_under_mutex("a critical get that is not nested in a region the thread holds, under the mutex");
+        if (g_before_first_critical) {
+            auto hook = g_before_first_critical;
+            g_before_first_critical = nullptr;
+            hook();
+        }
+        flip_enter_region();
+    }
+    ++t_regions;
     revoke_if_asked();
     if (is_copy) *is_copy = 0;
     ++world.critical;
@@ -293,8 +369,9 @@ void f_ReleasePrimitiveArrayCritical(Env*, jarray a, void* p, jint) {
     (void)object_of(a);
     ++world.release_calls;
     world.released.push_back(p);
-    require(world.critical > 0, "a critical region was open");
+    require(world.critical > 0 && t_regions > 0, "a critical region was open");
     --world.critical;
+    if (--t_regions == 0) flip_leave_region();
 }
 void f_DeleteLocalRef(Env*, jobject o) {
     Ref* ref = static_cast<Ref*>(o);
@@ -321,18 +398,20 @@ jobject f_NewWeakGlobalRef(Env*, jobject o) {
     return ref;
 }
 void f_DeleteWeakGlobalRef(Env*, jobject o) {
-    require(world.critical == 0, "DeleteWeakGlobalRef inside a critical region");
+    require(t_regions == 0, "DeleteWeakGlobalRef inside a critical region");
     Ref* ref = static_cast<Ref*>(o);
     require(world.weaks.erase(ref) == 1, "a weak reference is deleted once, and only while it is live");
     delete ref;
 }
 void f_ExceptionClear(Env*) { world.exception_pending = false; }
 jobject f_ExceptionOccurred(Env*) {
+    not_under_mutex("ExceptionOccurred is not on the list of calls under the mutex");
     if (!world.exception_pending) return nullptr;
     if (world.pending_object == nullptr) world.pending_object = new Obj{};
     return new_local(world.pending_object);
 }
 jint f_Throw(Env*, jobject throwable) {
+    not_under_mutex("Throw under the mutex");
     require(!world.exception_pending, "Throw with an exception pending");
     Obj* object = object_of(throwable);
     world.exception_pending = true;
@@ -354,7 +433,7 @@ std::function<void(Obj*)> g_on_global_deleted;  // runs inside DeleteGlobalRef, 
 std::function<void()> g_on_find_class;           // runs inside FindClass: Java code that enters the layer again
 bool g_ids_at_install = true;                    // the install gives the layer its environment, which resolves the ids
 void f_DeleteGlobalRef(Env*, jobject o) {
-    require(world.critical == 0, "DeleteGlobalRef inside a critical region");  // allowed with an exception pending
+    require(t_regions == 0, "DeleteGlobalRef inside a critical region");  // allowed with an exception pending
     Ref* ref = static_cast<Ref*>(o);
     if (g_on_global_deleted) {
         auto hook = g_on_global_deleted;
@@ -372,27 +451,31 @@ jobject f_NewLocalRef(Env*, jobject o) {
 }
 jboolean f_IsSameObject(Env*, jobject a, jobject b) {
     revoke_if_asked();
-    require(world.critical == 0, "IsSameObject inside a critical region");
+    require(t_regions == 0, "IsSameObject inside a critical region");
     ++world.same_calls;
     Obj* x = a == nullptr ? nullptr : object_of(a);
     Obj* y = b == nullptr ? nullptr : object_of(b);
     return x == y;
 }
 jobject f_GetObjectClass(Env*, jobject o) {
+    not_under_mutex("GetObjectClass under the mutex");
     (void)object_of(o);
     return new_local(new Obj{});
 }
 jboolean f_IsInstanceOf(Env*, jobject o, jclass) {
+    not_under_mutex("IsInstanceOf under the mutex");
     (void)object_of(o);
     return 1;
 }
 jint f_MonitorEnter(Env*, jobject o) {
+    not_under_mutex("MonitorEnter (it can wait for another thread) under the mutex");
     revoke_if_asked();
     (void)object_of(o);
     ++world.monitors;
     return 0;
 }
 jint f_MonitorExit(Env*, jobject o) {
+    not_under_mutex("MonitorExit under the mutex");
     revoke_if_asked();
     require(o != nullptr, "MonitorExit is handed an object");
     (void)object_of(o);
@@ -404,10 +487,12 @@ jint f_MonitorExit(Env*, jobject o) {
     return 0;
 }
 jint f_PushLocalFrame(Env*, jint) {
+    not_under_mutex("PushLocalFrame under the mutex");
     world.frames.emplace_back();
     return 0;
 }
 jobject f_PopLocalFrame(Env*, jobject result) {
+    not_under_mutex("PopLocalFrame under the mutex");
     require(!world.frames.empty(), "a frame was pushed");
     Obj* keep = result == nullptr ? nullptr : object_of(result);
     for (Ref* r : world.frames.back()) {
@@ -419,6 +504,7 @@ jobject f_PopLocalFrame(Env*, jobject result) {
 int g_register_fail_at = -1;                            // the call (counted from 0) that fails
 std::vector<std::vector<NativeMethod>> g_registered;    // what each call of the runtime's RegisterNatives received
 jint f_RegisterNatives(Env*, jclass, const NativeMethod* methods, jint count) {
+    not_under_mutex("RegisterNatives under the mutex");
     require(count > 0 && methods != nullptr, "the runtime is handed methods");
     g_registered.emplace_back(methods, methods + count);
     return int(g_registered.size()) - 1 == g_register_fail_at ? JNI_ERR : JNI_OK;
@@ -448,16 +534,19 @@ jmethodID f_GetMethodID(Env*, jclass, const char* name, const char* sig) {
     return id;
 }
 jfieldID f_GetFieldID(Env*, jclass, const char*, const char* sig) {
+    not_under_mutex("GetFieldID under the mutex");
     void* id = new int(0);
     world.fields[id] = sig;
     return id;
 }
 jobject f_GetObjectField(Env*, jobject o, jfieldID f) {
+    not_under_mutex("GetObjectField under the mutex");
     (void)object_of(o);
     require(world.fields.count(f) == 1, "a known field");
     return world.next_result;
 }
 jobject f_GetStaticObjectField(Env*, jclass, jfieldID f) {
+    not_under_mutex("GetStaticObjectField under the mutex");
     require(world.fields.count(f) == 1, "a known field");
     return world.next_result;
 }
@@ -512,6 +601,7 @@ std::vector<jvalue> decode_array(const std::string& sig, const jvalue* in) {
 
 // What the runtime saw: references must be real (a live reference of the fake), never a shadow.
 void record(const std::string& call, void* method, const std::vector<jvalue>& args) {
+    not_under_mutex("a call into Java under the mutex");
     const Method& m = world.methods.at(method);
     world.last_call = call;
     world.last_args = args;
@@ -551,6 +641,7 @@ jobject f_CallStaticObjectMethodV(Env*, jclass, jmethodID m, va_list ap) {
 }
 jobject f_CallStaticObjectMethodA(Env*, jclass, jmethodID m, const jvalue* a) {
     if (world.methods.at(m).name == "getRuntime") {  // the layer's own call
+        not_under_mutex("Runtime.getRuntime (Java code) under the mutex");
         jni_allowed("Runtime.getRuntime where JNI is not allowed");
         return new_local(new Obj{});
     }
@@ -578,6 +669,7 @@ jint f_CallStaticIntMethodA(Env*, jclass, jmethodID m, const jvalue* a) {
         hook();
     }
     if (world.methods.at(m).name == "identityHashCode") {  // the layer's own call
+        not_under_mutex("System.identityHashCode (Java code) under the mutex");
         jni_allowed("System.identityHashCode where JNI is not allowed");
         ++world.hash_calls;
         if (world.hash_fails) {
@@ -594,6 +686,7 @@ jint f_CallStaticIntMethodA(Env*, jclass, jmethodID m, const jvalue* a) {
 }
 void f_CallVoidMethodA(Env*, jobject o, jmethodID m, const jvalue*) {
     require(world.methods.at(m).name == "gc", "the layer calls Runtime.gc and no other instance method of its own");
+    not_under_mutex("Runtime.gc (a collection) under the mutex");
     jni_allowed("Runtime.gc where JNI is not allowed");
     (void)object_of(o);
     ++world.gc_calls;
@@ -644,13 +737,16 @@ jobject f_NewObjectV(Env*, jclass, jmethodID m, va_list ap) {
     return new_local(new Obj{});
 }
 void f_SetObjectField(Env*, jobject o, jfieldID, jobject value) {
+    not_under_mutex("SetObjectField under the mutex");
     (void)object_of(o);
     if (value != nullptr) (void)object_of(value);
 }
 void f_SetObjectArrayElement(Env*, jobject, jsize, jobject value) {
+    not_under_mutex("SetObjectArrayElement under the mutex");
     if (value != nullptr) (void)object_of(value);
 }
 jobject f_NewObjectArray(Env*, jsize, jclass, jobject initial) {
+    not_under_mutex("NewObjectArray (an allocation) under the mutex");
     if (initial != nullptr) (void)object_of(initial);
     return new_local(new Obj{});
 }
@@ -750,6 +846,15 @@ void reset_world() {
     g_in_call = nullptr;
     g_after_get = nullptr;
     g_after_set = nullptr;
+    g_before_first_critical = nullptr;
+    {
+        std::lock_guard<std::mutex> l(g_flip_mutex);
+        g_flip_running = false;
+        g_open_regions = 0;
+        g_gets_that_waited = 0;
+    }
+    t_regions = 0;
+    g_flip_timeouts = 0;
     g_thunk_capacity = 1024;
     g_register_fail_at = -1;
     g_registered.clear();
@@ -3721,6 +3826,164 @@ void check_live_blocks_of_many_threads_count_against_the_cap() {
 }
 
 
+// ---- the mutex holder never waits for the collector
+
+// A bounded wait for a condition another thread brings about (two seconds).
+template <class P>
+bool wait_until(P&& condition) {
+    for (int i = 0; i < 2000; ++i) {
+        if (condition()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return condition();
+}
+bool region_is_open() {
+    std::lock_guard<std::mutex> l(g_flip_mutex);
+    return g_open_regions == 1;
+}
+bool flip_is_pending() {
+    std::lock_guard<std::mutex> l(g_flip_mutex);
+    return g_flip_running;
+}
+bool a_get_waits_for_the_flip() {
+    std::lock_guard<std::mutex> l(g_flip_mutex);
+    return g_gets_that_waited != 0;
+}
+
+// A thread makes the critical get (or the release) of a block's pointer while another thread has a runtime region open,
+// waiting for the layer's mutex or not, and the collector begins a flip. In the runtime's rule the flip waits for the
+// region, and the first thread's get waits for the flip; if that thread held the mutex, the other, which takes it inside its
+// region, would never close the region. The model times the waits out, and the row counts the timeouts.
+void run_the_flip_cycle(bool a_releases, bool b_synchronizes_a_block) {
+    Fixture f = make();
+    Made k = make_held(f, sample(100));   // the block thread A uses
+    Made k2 = make_held(f, sample(100));  // the block thread B synchronizes inside its region
+    Other b(f);
+    jobject real = byte_array(sample(64));  // thread B's real array
+    std::atomic<bool> collector_waited_out{false};
+    std::thread b_thread, collector;
+    const auto inside_the_runtime_get = [&] {  // thread A is in the runtime's first critical get: it holds no mutex
+        b_thread = std::thread([&] {
+            void* p = get_critical(b.f, real);  // B's region opens (the layer records the pointer)
+            if (b_synchronizes_a_block) {
+                void* q = get_critical(b.f, k2.shadow);  // and B synchronizes a block inside it: the mutex
+                release_critical(b.f, k2.shadow, q, 0);
+            }
+            wait_until(a_get_waits_for_the_flip);  // B stays in its region until thread A's get waits for the flip
+            release_critical(b.f, real, p, 0);
+        });
+        require(wait_until(region_is_open), "thread B opened its region");
+        collector = std::thread([&] {
+            collector_waited_out = !flip_begin_waits_for_regions();
+            flip_end();
+        });
+        require(wait_until(flip_is_pending), "the collector's flip is pending");
+    };
+    void* p = nullptr;
+    if (a_releases) {
+        p = get_critical(f, k.shadow);
+        raw_of(k)[3] = 0x5A;  // the application writes through the pointer: the release merges it into the array
+        g_before_first_critical = inside_the_runtime_get;
+        release_critical(f, k.shadow, p, 0);
+    } else {
+        g_before_first_critical = inside_the_runtime_get;
+        p = get_critical(f, k.shadow);
+    }
+    if (b_thread.joinable()) b_thread.join();
+    if (collector.joinable()) collector.join();
+    require(g_flip_timeouts == 0 && !collector_waited_out,
+            "neither the critical get nor the collector's flip waited for good (the mutex holder waited for the collector)");
+    if (a_releases) {
+        require(k.object->bytes[3] == 0x5A, "the release reached the array");
+    } else {
+        require(p == static_cast<void*>(raw_of(k)), "the pointer is the block's");
+        release_critical(f, k.shadow, p, 0);
+    }
+    require(world.critical == 0 && t_regions == 0, "every region closed");
+}
+void check_a_block_critical_get_does_not_hold_the_mutex_while_it_waits_for_the_collector() {
+    run_the_flip_cycle(false, false);
+    run_the_flip_cycle(false, true);
+}
+void check_a_block_critical_release_does_not_hold_the_mutex_while_it_waits_for_the_collector() {
+    run_the_flip_cycle(true, false);
+    run_the_flip_cycle(true, true);
+}
+
+// The mutex is free while the thread's first critical get is in the runtime: another thread uses a block meanwhile.
+void check_the_mutex_is_free_while_the_first_critical_get_is_in_the_runtime() {
+    Fixture f = make();
+    Made k = make_held(f, sample(100));
+    Made other_block = make_held(f, sample(100));
+    Other c(f);
+    std::atomic<bool> c_done{false};
+    std::thread c_thread;
+    g_before_first_critical = [&] {
+        c_thread = std::thread([&] {
+            jbyte* e = get_elements(c.f, other_block.shadow);  // takes the mutex
+            release_elements(c.f, other_block.shadow, e, 0);
+            c_done = true;
+        });
+        require(wait_until([&] { return c_done.load(); }), "another thread used a block while the get was in the runtime");
+    };
+    void* p = get_critical(f, k.shadow);
+    c_thread.join();
+    require(p == static_cast<void*>(raw_of(k)), "and the get went on");
+    release_critical(f, k.shadow, p, 0);
+}
+
+// The table of the runtime's own pointers has a lock of its own: a thread that has just opened a region records the
+// pointer without the mutex, whoever holds it.
+void check_the_table_of_the_runtimes_pointers_does_not_wait_for_the_mutex() {
+    Fixture f = make();
+    (void)make_held(f, sample(100));  // a block has existed: the pointers are recorded
+    Other o(f);
+    jobject real = byte_array(sample(64));
+    g_ended_mutex.lock();  // another thread holds the layer's mutex
+    std::atomic<bool> done{false};
+    std::thread t([&] {
+        void* p = get_critical(o.f, real);
+        release_critical(o.f, real, p, 0);
+        jbyte* e = get_elements(o.f, real);
+        release_elements(o.f, real, e, 0);
+        done = true;
+    });
+    const bool finished = wait_until([&] { return done.load(); });
+    g_ended_mutex.unlock();
+    t.join();
+    require(finished, "a real array's pointers were recorded and forgotten without the layer's mutex");
+}
+
+// The sentinel's array is allocated outside the mutex (the fake fails an allocation under it): at the first end, and when
+// a collection is seen at a creation. Where the allocation fails the end goes on, no exception is left, and a later
+// creation makes the sentinel.
+void check_the_sentinels_array_is_made_outside_the_mutex() {
+    Fixture f = make();
+    Made a = make_shadow_of(f, sample(100));
+    require(world.new_array_calls == 0, "no sentinel before a block ends");
+    end_ref(f, a.shadow);
+    require(world.new_array_calls == 1 && is_ended_block(a.shadow), "the first end made the sentinel's array");
+    collect();  // the sentinel (a weak reference to an array nothing holds) is cleared
+    Made b = make_shadow_of(f, sample(100));
+    require(world.new_array_calls == 2 && counters().blocks_collected == 1,
+            "a collection seen at a creation renewed the sentinel (one array) and swept the ended block");
+    end_ref(f, b.shadow);
+    require(world.new_array_calls == 2, "a sentinel in place needs no array");
+}
+void check_a_failed_sentinel_allocation_is_survived() {
+    Fixture f = make();
+    world.new_array_fails = true;
+    Made a = make_shadow_of(f, sample(100));
+    end_ref(f, a.shadow);
+    require(!world.exception_pending && is_ended_block(a.shadow) && world.new_array_calls == 1,
+            "the end went on, and the allocation's exception is not left pending");
+    world.new_array_fails = false;
+    collect();
+    (void)make_shadow_of(f, sample(100));  // no sentinel: the creation sees a collection, makes the array outside the mutex
+    require(counters().blocks_collected == 1 && world.new_array_calls == 2 && !world.exception_pending,
+            "the next creation made the sentinel and swept");
+}
+
 void check_install_rules() {
     reset_world();
     Table table;
@@ -3865,6 +4128,12 @@ int main(int argc, char** argv) {
     check_a_release_of_a_pointer_inside_a_block_is_harmless();
     check_the_ids_are_resolved_before_the_first_block();
     check_live_blocks_of_many_threads_count_against_the_cap();
+    check_a_block_critical_get_does_not_hold_the_mutex_while_it_waits_for_the_collector();
+    check_a_block_critical_release_does_not_hold_the_mutex_while_it_waits_for_the_collector();
+    check_the_mutex_is_free_while_the_first_critical_get_is_in_the_runtime();
+    check_the_table_of_the_runtimes_pointers_does_not_wait_for_the_mutex();
+    check_the_sentinels_array_is_made_outside_the_mutex();
+    check_a_failed_sentinel_allocation_is_survived();
     check_install_rules();
     check_no_shadows_when_disabled();
     std::puts("old-application JNI: ok");

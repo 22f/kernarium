@@ -173,8 +173,9 @@ struct Globals {
     uint32_t collect_ms;       // when Runtime.gc() was last asked for
     uint32_t collect_asked;    // it has been asked for
     uint32_t collect_logged;
-    PointerRecord records[kRecordSlots];  // open addressing by pointer; under the ended lock
+    PointerRecord records[kRecordSlots];  // open addressing by pointer; under records_lock
     unsigned records_in_use;
+    uint32_t records_lock;     // the table's own lock (a leaf: nothing is called and no other lock is taken under it)
     uint32_t kind_pool_used;
     char kind_pool[kKindPoolBytes];
     MethodInfo methods[kMethodSlots];
@@ -531,12 +532,36 @@ void abort_block(Env* env, BlockHeader* header, jobject array) {
 // The same rules through the real array's critical pair, the only JNI calls that CheckJNI allows inside a critical
 // region (the application may be in one for another array when it asks for this block's critical pointer). The pair
 // is released with mode 0 only when a chunk went to the array.
-void sync_critical(Env* env, BlockHeader* header, jobject array) {
+//
+// The runtime's critical get that opens a region (the thread has none open) waits while a collection's thread flip is
+// pending, and the flip waits for every open region, so a thread must not make that get while it holds the mutex: another
+// thread inside a region may be waiting for the mutex. The caller makes it first (first_critical, no mutex held) and
+// passes the pointer; a thread that has a region open already (`nested`) makes the get here, which waits for nothing.
+void* first_critical(Env* env, const BlockHeader* header, jobject array) {
+    if (header->capacity == 0 || array == nullptr) {
+        return nullptr;
+    }
+    return original<void* (*)(Env*, jarray, jboolean*)>(slot::GetPrimitiveArrayCritical)(env, array, nullptr);
+}
+void release_critical_pair(Env* env, jobject array, void* pinned, jint mode) {
+    original<void (*)(Env*, jarray, void*, jint)>(slot::ReleasePrimitiveArrayCritical)(env, array, pinned, mode);
+}
+bool block_is_valid(const BlockHeader* header) {
+    const uint32_t magic = __atomic_load_n(&header->magic, __ATOMIC_ACQUIRE);
+    return magic == kBlockLive || magic == kBlockEnded;
+}
+void sync_critical(Env* env, BlockHeader* header, jobject array, void* pinned, bool nested) {
     if (header->capacity == 0 || array == nullptr) {
         return;
     }
-    void* pinned = original<void* (*)(Env*, jarray, jboolean*)>(slot::GetPrimitiveArrayCritical)(env, array, nullptr);
+    if (nested) {
+        pinned = first_critical(env, header, array);
+    }
     if (pinned == nullptr) {
+        return;
+    }
+    if (!block_is_valid(header)) {  // revalidated under this hold of the mutex: nothing to merge into
+        release_critical_pair(env, array, pinned, kReleaseAbort);
         return;
     }
     bool wrote = false;
@@ -552,21 +577,23 @@ void sync_critical(Env* env, BlockHeader* header, jobject array) {
             take_java(data_of(header) + offset, header->baseline + offset, static_cast<const uint8_t*>(pinned) + offset, length);
         }
     }
-    original<void (*)(Env*, jarray, void*, jint)>(slot::ReleasePrimitiveArrayCritical)(env, array, pinned,
-                                                                                      wrote ? 0 : kReleaseAbort);
+    release_critical_pair(env, array, pinned, wrote ? 0 : kReleaseAbort);
 }
-void abort_critical(Env* env, BlockHeader* header, jobject array) {
+void abort_critical(Env* env, BlockHeader* header, jobject array, void* pinned, bool nested) {
     if (header->capacity == 0 || array == nullptr) {
         return;
     }
-    void* pinned = original<void* (*)(Env*, jarray, jboolean*)>(slot::GetPrimitiveArrayCritical)(env, array, nullptr);
+    if (nested) {
+        pinned = first_critical(env, header, array);
+    }
     if (pinned == nullptr) {
         return;
     }
-    __builtin_memcpy(header->baseline, pinned, header->capacity);
-    adopt_baseline(header, 0, header->capacity);
-    original<void (*)(Env*, jarray, void*, jint)>(slot::ReleasePrimitiveArrayCritical)(env, array, pinned,
-                                                                                      kReleaseAbort);
+    if (block_is_valid(header)) {
+        __builtin_memcpy(header->baseline, pinned, header->capacity);
+        adopt_baseline(header, 0, header->capacity);
+    }
+    release_critical_pair(env, array, pinned, kReleaseAbort);
 }
 
 // ---- ended blocks
@@ -586,10 +613,9 @@ void abort_critical(Env* env, BlockHeader* header, jobject array) {
 // block pays nothing. Room is made on demand: a full sweep, then a Runtime.gc() (at most every kCollectIntervalMs), then
 // a full sweep again. The sentinel is a hint: that full sweep never reads it.
 //
-// The index, the list, the cursor and the frees are under one process-wide lock. The JNI calls made under it
-// (IsSameObject, New/DeleteWeakGlobalRef, NewGlobalRef) go to the runtime's own functions and never re-enter the layer;
-// Runtime.gc() runs outside the lock. Nothing here runs with an exception pending, and the critical wrappers never
-// start it, so no call here is made inside a critical region.
+// The index, the list, the cursor and the frees are under one process-wide lock, the mutex, whose rule is below (what may
+// run under the mutex). Runtime.gc() and the sentinel's array are made outside it. Nothing here runs with an exception
+// pending, and the critical wrappers never start it, so no call here is made inside a critical region.
 
 void lock_ended() {
     if (g.platform.mutex_lock != nullptr) {
@@ -706,54 +732,90 @@ void sweep(Env* env, unsigned limit) {
     }
 }
 
+// The array of a new sentinel: an empty byte[] nothing holds but this local reference. Its allocation can wait for a
+// collection, so it is made outside the mutex (make), by the thread that is about to take it, and the renewal under the
+// mutex only makes the weak reference from it. The reference goes with the Spare: a renewal that used it has deleted it.
+struct Spare {
+    Env* env;
+    jobject array;
+    bool failed;  // the allocation failed once: this thread's renewals go without
+    explicit Spare(Env* e) : env(e), array(nullptr), failed(false) {}
+    ~Spare() {
+        if (array != nullptr) {
+            original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, array);
+        }
+    }
+    Spare(const Spare&) = delete;
+    Spare& operator=(const Spare&) = delete;
+    // Not under the mutex; with no exception pending (every caller has checked).
+    void make() {
+        if (array != nullptr || failed) {
+            return;
+        }
+        array = original<jobject (*)(Env*, jsize)>(slot::NewByteArray)(env, 0);
+        if (array == nullptr) {
+            original<void (*)(Env*)>(slot::ExceptionClear)(env);
+            failed = true;
+        }
+    }
+    // Whether a renewal that is due can go on: it has an array, or none can be had.
+    bool ready() const { return array != nullptr || failed; }
+};
+
 // A collection has been seen (the sentinel was found cleared): counted once, by whichever sweep found it, and the
 // sentinel renewed. A full sweep is due while a collection is past the last full sweep.
-void renew_sentinel(Env* env);
-void note_collection(Env* env) {
+void renew_sentinel(Env* env, Spare& spare);
+void note_collection(Env* env, Spare& spare) {
     ++g.gc_seen;
-    renew_sentinel(env);
+    renew_sentinel(env, spare);
 }
-void renew_sentinel(Env* env) {
+// Under the mutex. Without an array in the spare (it could not be made) the sentinel stays unset: every creation then sees
+// a collection, as it did when the allocation failed under the mutex.
+void renew_sentinel(Env* env, Spare& spare) {
     if (g.sentinel != nullptr) {
         original<void (*)(Env*, jobject)>(slot::DeleteWeakGlobalRef)(env, g.sentinel);
         g.sentinel = nullptr;
     }
-    jobject array = original<jobject (*)(Env*, jsize)>(slot::NewByteArray)(env, 0);
-    if (array == nullptr) {
-        original<void (*)(Env*)>(slot::ExceptionClear)(env);
+    if (spare.array == nullptr) {
         return;
     }
-    g.sentinel = original<jobject (*)(Env*, jobject)>(slot::NewWeakGlobalRef)(env, array);
-    original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, array);
+    g.sentinel = original<jobject (*)(Env*, jobject)>(slot::NewWeakGlobalRef)(env, spare.array);
+    original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, spare.array);
+    spare.array = nullptr;
 }
 
 // At the creation of a block, under the lock: whether a collection ran since the last look, and then the next
-// kSweepStep ended blocks.
-void collection_step(Env* env) {
+// kSweepStep ended blocks. True: a collection was seen and the sentinel needs an array that the spare does not have yet;
+// nothing was changed, and the caller makes the array outside the mutex and comes back.
+bool collection_step(Env* env, Spare& spare) {
     if (g.ended_count == 0) {
-        return;
+        return false;
     }
     if (!g.sweeping) {
         if (g.sentinel != nullptr && !cleared(env, g.sentinel)) {
-            return;
+            return false;
         }
-        note_collection(env);
+        if (!spare.ready()) {
+            return true;
+        }
+        note_collection(env, spare);
         g.sweeping = true;
         g.sweep_cursor = g.ended_head.list_next;
     }
     sweep(env, kSweepStep);
+    return false;
 }
 
 // A full sweep is made for a creation that found no room. Under the lock. It is worth making when a collection ran that
 // no full sweep has seen (the step sweep, which tests a few blocks at a time, counts the collection it finds but does not
 // finish the list), or when a second has passed since the last one: the fallback that does not depend on the sentinel.
 // Declined results in between do not repeat a sweep that found nothing.
-bool full_sweep_due(Env* env) {
+bool full_sweep_due(Env* env, Spare& spare) {
     if (!g.full_swept || g.platform.now_ms == nullptr) {
         return true;
     }
     if (g.sentinel != nullptr && cleared(env, g.sentinel)) {
-        note_collection(env);
+        note_collection(env, spare);
     }
     if (g.gc_seen != g.gc_full_seen) {
         return true;
@@ -762,12 +824,12 @@ bool full_sweep_due(Env* env) {
 }
 // The sentinel is renewed before the list is tested: a collection that runs during the sweep clears the new one, and the
 // next creation sweeps again.
-void full_sweep(Env* env) {
+void full_sweep(Env* env, Spare& spare) {
     if (g.sentinel != nullptr && cleared(env, g.sentinel)) {
         ++g.gc_seen;
     }
     g.gc_full_seen = g.gc_seen;
-    renew_sentinel(env);
+    renew_sentinel(env, spare);
     sweep(env, 0);
     g.sweeping = false;
     g.full_swept = true;
@@ -857,7 +919,7 @@ bool identity_hash(Env* env, jobject local, uint32_t* hash) {
 // The end of a block's last reference, under the lock: the strong reference gives way to a weak one (unless a pin keeps
 // it) and the block waits in the index, so that no other thread can make a second block for the array in between. What
 // the application wrote through the pointer has gone to the array (push_dirty) in the same hold of the mutex.
-void end_locked(Env* env, BlockHeader* header) {
+void end_locked(Env* env, BlockHeader* header, Spare& spare) {
     if (__atomic_load_n(&header->pins, __ATOMIC_RELAXED) == 0) {
         jobject weak = original<jobject (*)(Env*, jobject)>(slot::NewWeakGlobalRef)(env, header->global);
         if (weak == nullptr) {
@@ -874,7 +936,7 @@ void end_locked(Env* env, BlockHeader* header) {
     header->owner = nullptr;
     ended_add(header);
     if (g.sentinel == nullptr) {
-        renew_sentinel(env);
+        renew_sentinel(env, spare);
     }
     __atomic_fetch_sub(&g.counters.shadows_live, 1u, __ATOMIC_RELAXED);
     __atomic_fetch_add(&g.counters.blocks_ended, 1u, __ATOMIC_RELAXED);
@@ -891,15 +953,23 @@ struct Ending {
     Ending& operator=(const Ending&) = delete;
 };
 
+// Whether the sentinel is missing, as a hint for the thread that is about to end a block: it makes the sentinel's array
+// before it takes the mutex. (A racy read of a pointer that is never passed anywhere; a wrong answer costs one spare.)
+bool sentinel_missing() { return __atomic_load_n(&g.sentinel, __ATOMIC_RELAXED) == nullptr; }
+
 void end_block(Env* env, BlockHeader* header) {
     if (!jni_usable(env)) {
         queue_pending(header);
         return;
     }
+    Spare spare(env);
+    if (sentinel_missing()) {
+        spare.make();
+    }
     Ending ending;
     EndedLock lock;
     push_dirty(env, header, header->global);  // under the mutex like every synchronization: another thread may be in one
-    end_locked(env, header);
+    end_locked(env, header, spare);
 }
 
 // The blocks that wait for an environment: with one, and no exception pending, their ends are finished. The exchange and
@@ -908,13 +978,17 @@ void drain_pending(Env* env) {
     if (!jni_usable(env)) {
         return;  // the next call without an exception finishes them
     }
+    Spare spare(env);
+    if (sentinel_missing()) {
+        spare.make();
+    }
     Ending ending;
     EndedLock lock;
     BlockHeader* list = __atomic_exchange_n(&g.pending, static_cast<BlockHeader*>(nullptr), __ATOMIC_ACQ_REL);
     while (list != nullptr) {
         BlockHeader* next = list->next;
         push_dirty(env, list, list->global);
-        end_locked(env, list);
+        end_locked(env, list, spare);
         __atomic_fetch_add(&g.counters.shadows_released, 1u, __ATOMIC_RELAXED);
         list = next;
     }
@@ -1108,18 +1182,24 @@ jobject make_shadow(Env* env, jobject local) {
     if (__atomic_load_n(&g.counters.shadows_ended, __ATOMIC_RELAXED) != 0 || __atomic_load_n(&g.ending, __ATOMIC_ACQUIRE) != 0) {
         BlockHeader* again = nullptr;
         bool no_global = false;
-        {
-            EndedLock lock;
-            collection_step(env);
-            if (g.ended_count != 0) {
-                again = take_ended(env, local, hash, bytes, &no_global);
-                if (again != nullptr) {
-                    again->refs = 1;
-                    again->owner = env;
-                    // Java's writes since it ended and the application's raw writes since meet here, before another
-                    // thread can use the block: a kept reference on another thread synchronizes under this mutex too.
-                    sync_all(env, again, local);
+        Spare spare(env);
+        for (bool want_array = true; want_array;) {
+            {
+                EndedLock lock;
+                want_array = collection_step(env, spare);
+                if (!want_array && g.ended_count != 0) {
+                    again = take_ended(env, local, hash, bytes, &no_global);
+                    if (again != nullptr) {
+                        again->refs = 1;
+                        again->owner = env;
+                        // Java's writes since it ended and the application's raw writes since meet here, before another
+                        // thread can use the block: a kept reference on another thread synchronizes under this mutex too.
+                        sync_all(env, again, local);
+                    }
                 }
+            }
+            if (want_array) {
+                spare.make();  // a collection was seen: the sentinel's new array is made outside the mutex
             }
         }
         if (no_global) {
@@ -1142,17 +1222,20 @@ jobject make_shadow(Env* env, jobject local) {
     if (room.raw == nullptr && __atomic_load_n(&g.counters.shadows_ended, __ATOMIC_RELAXED) != 0) {
         // Ended blocks hold the room: those whose arrays are gone are freed; if that is not enough, the runtime is
         // asked to collect (at most every kCollectIntervalMs), outside the lock, and they are looked at again.
+        Spare spare(env);
+        spare.make();  // the sentinel's array, made outside the mutex
         {
             EndedLock lock;
-            if (full_sweep_due(env)) {
-                full_sweep(env);
+            if (full_sweep_due(env, spare)) {
+                full_sweep(env, spare);
             }
         }
         room = allocate_block(need, bytes);
         if (room.raw == nullptr && ask_for_collection(env)) {
+            spare.make();
             {
                 EndedLock lock;
-                full_sweep(env);  // a collection has just run
+                full_sweep(env, spare);  // a collection has just run
             }
             room = allocate_block(need, bytes);
         }
@@ -1233,12 +1316,27 @@ jobject make_shadow(Env* env, jobject local) {
 //     memory of a freed block beyond reading its state. A reference whose array was collected and whose address now
 //     holds another array's block reaches that array (as a dangling pointer could on Dalvik).
 // Every synchronization of a block with its array, whichever thread makes it, runs under the one process-wide mutex that
-// also guards the ended index. It calls only the runtime's region and reference functions (never Java code), so a thread
-// cannot re-enter the layer inside one, and the mutex is never held across a call into Java: a call is synchronized
-// before and after, in two separate holds. A raw write that races a synchronization (to a byte that Java did not write
-// either) can be lost, as one racing Java's write could on Dalvik. The mutex serializes the synchronizations of all blocks,
-// not only of one: the layer has no per-block lock, since the only runtime calls under it are the region and reference
-// functions, which are short and never wait for another thread.
+// also guards the ended index. The mutex is never held across a call into Java: a call is synchronized before and after,
+// in two separate holds. It serializes the synchronizations of all blocks, not only of one: the layer has no per-block lock.
+//
+// What may run under the mutex. The collector's thread flip waits for every open runtime critical region, and sets its
+// flag before it waits; a critical get that opens a region (one the thread does not have open already) waits while the flag
+// is set; an allocation in the Java heap can wait for a collection. A thread inside a region may be waiting for the mutex,
+// so the thread that holds it must never wait for the collector. Under the mutex there is therefore
+//   - no critical get that is not nested in a region the calling thread holds already, and no allocation in the Java heap;
+//   - no Java code, and no wait for another thread; and
+//   - of the runtime only these calls, none of which waits for the collector to begin a flip:
+//       GetByteArrayRegion, SetByteArrayRegion;
+//       NewLocalRef, DeleteLocalRef, NewGlobalRef, DeleteGlobalRef, NewWeakGlobalRef, DeleteWeakGlobalRef, IsSameObject;
+//       ExceptionCheck, ExceptionClear;
+//       ReleasePrimitiveArrayCritical, ReleaseByteArrayElements (they close what a Get opened);
+//       GetPrimitiveArrayCritical nested in a region the calling thread holds.
+// A path that needs the first critical get of an array (a block's critical pointer, its release) makes it before it takes
+// the mutex, on a local reference of its own made in an earlier hold, and revalidates the block in the next (first_critical,
+// sync_critical). The sentinel's array is made the same way (Spare). The table of the runtime's own pointers has a lock of
+// its own, so that the thread that has just opened a region records it without the mutex. A thread inside a region may take
+// the mutex where a block must be synchronized: that is safe exactly because of the list above. The unit tests' fake runtime
+// fails any other call that arrives with the mutex held.
 
 // How a wrapper reaches the array of a block.
 struct Access {
@@ -2195,8 +2293,21 @@ jsize w_GetArrayLength(Env* e, jarray a) {
 // Get...Critical on real references, once the process has had a block, and a Release of a recorded pointer through a
 // block's reference goes to the runtime's own Release with the block's array. Any other pointer that comes with a block's
 // reference is the application's own buffer (a copy it made of the block), and is copied back as a write into the block.
-// The record is removed at a release with mode 0 or JNI_ABORT; JNI_COMMIT keeps it, as the pointer stays valid. Under the
-// ended lock.
+// The record is removed at a release with mode 0 or JNI_ABORT; JNI_COMMIT keeps it, as the pointer stays valid.
+//
+// The table has a lock of its own, a spin lock: the pointers are recorded and looked up by a thread that has a runtime
+// critical region open (its Get just returned, or its Release is about to), and such a thread must not wait for the
+// layer's mutex on this account. Nothing is called and no other lock is taken under it, and it is held for a few
+// instructions.
+struct TableLock {
+    TableLock() {
+        while (__atomic_exchange_n(&g.records_lock, 1u, __ATOMIC_ACQUIRE) != 0) {
+        }
+    }
+    ~TableLock() { __atomic_store_n(&g.records_lock, 0u, __ATOMIC_RELEASE); }
+    TableLock(const TableLock&) = delete;
+    TableLock& operator=(const TableLock&) = delete;
+};
 unsigned record_slot(const void* pointer) {
     return static_cast<unsigned>((static_cast<uint32_t>(reinterpret_cast<uintptr_t>(pointer) >> 2) * 2654435761u) % kRecordSlots);
 }
@@ -2234,7 +2345,7 @@ void record_runtime_pointer(const void* pointer, uint32_t kind) {
     if (pointer == nullptr || __atomic_load_n(&g.counters.shadows_created, __ATOMIC_RELAXED) == 0) {
         return;  // no block has been made yet: no block's reference can release it
     }
-    EndedLock lock;
+    TableLock lock;
     if (PointerRecord* record = find_record(pointer, kind)) {
         ++record->count;
         return;
@@ -2253,7 +2364,7 @@ bool is_recorded_pointer(const void* pointer, uint32_t kind) {
     if (pointer == nullptr || __atomic_load_n(&g.records_in_use, __ATOMIC_RELAXED) == 0) {
         return false;
     }
-    EndedLock lock;
+    TableLock lock;
     return find_record(pointer, kind) != nullptr;
 }
 // A release of the pointer (any reference): the record goes with the last Get unless the mode is JNI_COMMIT.
@@ -2261,7 +2372,7 @@ void forget_runtime_pointer(const void* pointer, uint32_t kind, jint mode) {
     if (mode == kReleaseCommit || pointer == nullptr || __atomic_load_n(&g.records_in_use, __ATOMIC_RELAXED) == 0) {
         return;
     }
-    EndedLock lock;
+    TableLock lock;
     PointerRecord* record = find_record(pointer, kind);
     if (record == nullptr) {
         return;
@@ -2312,12 +2423,14 @@ void release_block(Env* e, BlockHeader* header, const void* elements, jint mode,
     const bool in_region = critical && state != nullptr && state->critical_depth != 0;
     Access access = open_header(e, header, !in_region);
     if (access.block != nullptr && jni_usable(e)) {
+        // The critical pair's first get, when the thread has no region open, is made before the mutex is taken.
+        void* pinned = critical && !in_region ? first_critical(e, header, access.array) : nullptr;
         SyncScope scope;
         const jobject array = access.array;
         if (array != nullptr) {
             if (mode == kReleaseAbort) {
                 if (critical) {
-                    abort_critical(e, header, array);
+                    abort_critical(e, header, array, pinned, in_region);
                 } else {
                     abort_block(e, header, array);
                 }
@@ -2326,7 +2439,7 @@ void release_block(Env* e, BlockHeader* header, const void* elements, jint mode,
                     __builtin_memcpy(data_of(header), elements, header->capacity);
                 }
                 if (critical) {
-                    sync_critical(e, header, array);
+                    sync_critical(e, header, array, pinned, in_region);
                 } else {
                     sync_all(e, header, array);
                 }
@@ -2426,9 +2539,12 @@ void* w_GetPrimitiveArrayCritical(Env* e, jarray a, jboolean* is_copy) {
             close_access(e, access);
             return nullptr;
         }
+        const bool in_region = state != nullptr && state->critical_depth != 0;
+        // With no region open the first get is made before the mutex is taken (see first_critical).
+        void* pinned = in_region ? nullptr : first_critical(e, header, access.array);
         {
             SyncScope scope;
-            sync_critical(e, header, access.array);
+            sync_critical(e, header, access.array, pinned, in_region);
         }
         if (access.pinned) {
             access.pinned = false;  // the wrapper's pin becomes the pointer's
