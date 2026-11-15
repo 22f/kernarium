@@ -1581,6 +1581,169 @@ void clearStream(Rig& rig, std::uint32_t stream)
     rig.collect();
 }
 
+constexpr std::uint32_t endedFlags = errorFlag | interruptedFlag;
+constexpr std::uint32_t blackRecord = VIRTIO_VIDEO_CAMERA_FRAME_F_BLACK | VIRTIO_VIDEO_CAMERA_FRAME_F_INTERRUPTED;
+
+/* The application leaves the foreground while the guest has a camera in video mode (the record template asks for the
+ * picture stabilized): the video of that camera ends. Its buffers fail with the interrupted flag, the camera's records say
+ * black and interrupted, the platform's capture stops, and none of it is undone by the platform's recovery, by a guest
+ * suspend that stops the stream and starts it again, or by the guest's next buffer: only the guest's close of its last
+ * video stream of the camera ends it. */
+void testTheApplicationLeavingTheForegroundEndsTheVideoOfACameraInVideoMode()
+{
+    Rig rig;
+    videoStream(rig, 1, 0, 640, 480, 8);
+    rig.create(2, 0, metaKind);
+    for (std::uint32_t resource = 1; resource <= 8; ++resource) rig.attach(2, resource, metaSize);
+    rig.setOk(1, {{UML_V4L2_CID_IMAGE_STABILIZATION, 1, {}}});
+    for (std::uint32_t resource = 1; resource <= 2; ++resource) rig.queue(2, resource);
+    const auto a = rig.queue(1, 1), b = rig.queue(1, 2);
+    rig.pumpSteps(0, 2);
+    require(rig.result(a).base.flags == 0 && rig.result(b).base.flags == 0 && rig.videoModes.back(), "live video in video mode");
+
+    rig.camera->interrupt(CameraEventKind::interruptedInBackground);
+    rig.step();
+    require(rig.states.back() == CameraState::interrupted && !rig.videoModes.back(), "the application is told, and it is not video mode");
+    require(!rig.camera->videoRunning(0) && rig.camera->sessionsOpen() == 0, "the platform's capture is stopped and its session goes");
+    // The black timer answers the guest's next buffers, one at the stream's rate, and says why.
+    const auto c = rig.queue(1, 3), d = rig.queue(1, 4);
+    require(rig.waitFor([&] { return rig.done(c) && rig.done(d); }), "the buffers of the lost video are answered");
+    for (const auto id : {c, d}) {
+        const auto answer = rig.result(id);
+        require(answer.base.flags == endedFlags && answer.base.data_sizes[0] == 0, "a lost video's buffer fails, interrupted");
+    }
+    const auto first = rig.queue(2, 3), second = rig.queue(2, 4);
+    require(rig.waitFor([&] { return rig.done(first) && rig.done(second); }), "the records of the lost video are served");
+    for (std::uint32_t resource : {3u, 4u})
+        require(metaOf(rig, 2, resource).flags == blackRecord, "the camera's record is black and interrupted");
+
+    // The platform recovers: the video does not come back to the stream that was lost.
+    rig.camera->resume();
+    rig.step();
+    require(rig.states.back() == CameraState::interrupted, "the camera stays down for the guest");
+    const auto e = rig.queue(1, 5);
+    require(rig.waitFor([&] { return rig.done(e); }), "answered");
+    require(rig.result(e).base.flags == endedFlags && !rig.camera->videoRunning(0), "after the recovery too, and no capture is started for it");
+    // A guest suspend stops the stream and starts it again.
+    clearStream(rig, 1);
+    const auto f = rig.queue(1, 6);
+    require(rig.waitFor([&] { return rig.done(f); }), "answered after a suspend");
+    require(rig.result(f).base.flags == endedFlags && !rig.camera->videoRunning(0), "a restarted stream is still lost");
+
+    // The guest closes its video: the camera is its again, and a stream it opens next is an ordinary one.
+    rig.destroy(1);
+    require(rig.states.back() == CameraState::idle, "closed, the host is idle");
+    videoStream(rig, 3, 0, 640, 480, 3);
+    const auto g = rig.queue(3, 1);
+    require(rig.camera->videoRunning(0), "the camera opens again on demand");
+    require(rig.waitFor([&] { return rig.done(g); }), "a first picture");
+    require(rig.result(g).base.flags == (blackFlag | resumingFlag), "the new stream starts as any does");
+    const auto h = rig.queue(3, 2);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(h) && rig.result(h).base.flags == 0 && rig.states.back() == CameraState::streaming, "and then it is live");
+
+    // A reset forgets the loss as it forgets the streams.
+    Rig reset;
+    videoStream(reset, 1, 0, 640, 480, 2);
+    reset.queue(1, 1);
+    reset.camera->interrupt(CameraEventKind::interruptedInBackground);
+    reset.step();
+    reset.resetByTransport();
+    // The application is back in the foreground: a session opened now is not interrupted.
+    reset.camera->resume();
+    reset.step();
+    videoStream(reset, 1, 0, 640, 480, 2);
+    const auto k = reset.queue(1, 1);
+    require(reset.camera->videoRunning(0), "after a reset the camera runs again");
+    require(reset.waitFor([&] { return reset.done(k); }) && reset.result(k).base.flags == (blackFlag | resumingFlag),
+            "and its stream is an ordinary one");
+}
+
+/* Only the application's leaving the foreground ends a video, and only that of a camera in video mode: another
+ * application or a call, the multitasking of an iPad and the system's pressure are dark gaps that end by themselves, a
+ * camera with a viewfinder only comes back by itself, and a camera that is not in video mode beside a camera that is,
+ * keeps its dark gap. */
+void testOnlyTheBackgroundEndsAVideoAndOnlyInVideoMode()
+{
+    for (const auto kind : {CameraEventKind::interrupted, CameraEventKind::interruptedByMultitasking,
+                            CameraEventKind::interruptedBySystemPressure}) {
+        Rig rig;
+        videoStream(rig, 1, 0, 640, 480, 6);
+        rig.queue(1, 1);
+        rig.pumpSteps(0, 1);
+        rig.camera->interrupt(kind);
+        rig.step();
+        const auto a = rig.queue(1, 2);
+        require(rig.waitFor([&] { return rig.done(a); }), "answered");
+        require(rig.result(a).base.flags == (blackFlag | interruptedFlag), "a dark gap, not an end");
+        rig.camera->resume();
+        rig.step();
+        const auto b = rig.queue(1, 3);
+        require(rig.waitFor([&] { return rig.done(b); }) && rig.result(b).base.flags == (blackFlag | resumingFlag), "a restart");
+        const auto c = rig.queue(1, 4);
+        rig.camera->pump(0, 1);
+        rig.step();
+        require(rig.done(c) && rig.result(c).base.flags == 0 && rig.camera->videoRunning(0), "and live again");
+    }
+    {
+        // A camera with a viewfinder only: the preview template asks for no stabilization.
+        Rig rig;
+        videoStream(rig, 1, 0, 640, 480, 6);
+        rig.setOk(1, {{UML_V4L2_CID_IMAGE_STABILIZATION, 0, {}}});
+        rig.queue(1, 1);
+        rig.pumpSteps(0, 1);
+        rig.camera->interrupt(CameraEventKind::interruptedInBackground);
+        rig.step();
+        const auto a = rig.queue(1, 2);
+        require(rig.waitFor([&] { return rig.done(a); }), "answered");
+        require(rig.result(a).base.flags == (blackFlag | interruptedFlag), "a viewfinder only has a dark gap");
+        rig.camera->resume();
+        rig.step();
+        const auto b = rig.queue(1, 3);
+        rig.camera->pump(0, 1);
+        rig.step();
+        require(rig.waitFor([&] { return rig.done(b); }) && rig.camera->videoRunning(0), "and comes back by itself");
+    }
+    {
+        // Two cameras: the one in video mode is lost, the one with a viewfinder is not.
+        RigOptions options;
+        options.profile = SyntheticCameraProfile::tabletDualFront;
+        Rig rig(options);
+        videoStream(rig, 1, 0, 1600, 900, 4);
+        videoStream(rig, 2, 1, 640, 480, 4);
+        rig.setOk(2, {{UML_V4L2_CID_IMAGE_STABILIZATION, 0, {}}});
+        rig.queue(1, 1);
+        rig.queue(2, 1);
+        rig.camera->interrupt(CameraEventKind::interruptedInBackground);
+        rig.step();
+        const auto back = rig.queue(1, 2), front = rig.queue(2, 2);
+        require(rig.waitFor([&] { return rig.done(back) && rig.done(front); }), "answered");
+        require(rig.result(back).base.flags == endedFlags, "the camera in video mode is lost");
+        require(rig.result(front).base.flags == (blackFlag | interruptedFlag), "the other has its dark gap");
+        rig.camera->resume();
+        rig.step();
+        const auto back2 = rig.queue(1, 3), front2 = rig.queue(2, 3);
+        rig.camera->pump(1, 1);
+        rig.step();
+        require(rig.waitFor([&] { return rig.done(back2) && rig.done(front2); }), "answered again");
+        require(rig.result(back2).base.flags == endedFlags && rig.result(front2).base.flags != endedFlags, "and it stays so");
+    }
+    {
+        // A blocked session opens no capture, hears of no interruption and ends nothing.
+        RigOptions options;
+        options.mode = CameraMode::blocked;
+        Rig rig(options);
+        videoStream(rig, 1, 0, 640, 480, 3);
+        rig.queue(1, 1);
+        rig.camera->interrupt(CameraEventKind::interruptedInBackground);
+        rig.step();
+        const auto a = rig.queue(1, 2);
+        require(rig.waitFor([&] { return rig.done(a); }), "answered");
+        require(rig.result(a).base.flags == (blackFlag | blockedFlag), "a blocked session is black and blocked, never lost");
+    }
+}
+
 /* An iPad lists a wide and an ultra wide front camera over one sensor: the
  * guest sees the wide one, and a stream on it runs that device. */
 void testFrontCameraChoice()
@@ -3550,6 +3713,8 @@ int main()
     testBlockedSaysWhenTheGuestOpensACamera();
     testLiveNeverReportsBlockedUse();
     testInterruption();
+    testTheApplicationLeavingTheForegroundEndsTheVideoOfACameraInVideoMode();
+    testOnlyTheBackgroundEndsAVideoAndOnlyInVideoMode();
     testAccessDenied();
     testStillsAndCalibration();
     testControlsOnStreams();

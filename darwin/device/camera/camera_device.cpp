@@ -208,6 +208,12 @@ public:
         bool resuming {};
         bool videoRunning {};
         bool failed {};
+        /* The host ended the camera's video: the application left the foreground while the guest had the camera in video
+         * mode (`endsVideoWhenAppLeaves`). Every video stream of the camera, those the guest restarts after a suspend
+         * too, completes its buffers with the error flag and the interrupted flag and never gets a picture, until the
+         * guest has closed its last video stream of the camera: the guest's camera layer reads that as the loss of the
+         * camera and closes it. It is not a state the platform's recovery ends. */
+        bool lost {};
         /* The guest has been told the camera is interrupted (or gone) and not
          * yet that it is back; it is told once each way. */
         bool told {};
@@ -392,13 +398,13 @@ public:
 
     [[nodiscard]] bool blackMode(const Runtime& runtime) const
     {
-        return blocked() || runtime.failed || runtime.interruption != Interruption::none || runtime.resuming ||
+        return blocked() || runtime.failed || runtime.lost || runtime.interruption != Interruption::none || runtime.resuming ||
             runtime.controls.testPattern(runtime.values);
     }
 
     [[nodiscard]] static bool down(const Runtime& runtime) noexcept
     {
-        return runtime.interruption != Interruption::none || runtime.failed;
+        return runtime.interruption != Interruption::none || runtime.failed || runtime.lost;
     }
 
     /* The dequeue flags of a black frame. A capture that is starting is
@@ -464,11 +470,40 @@ public:
 
     [[nodiscard]] bool wantsVideo(const Runtime& runtime) const
     {
+        // A lost camera's streams get no capture.
+        if (runtime.lost) return false;
         for (const auto& [id, stream] : streams) {
             (void)id;
             if (stream.camera == runtime.description.index && startedVideo(stream)) return true;
         }
         return false;
+    }
+
+    [[nodiscard]] bool hasVideoStream(const Runtime& runtime) const
+    {
+        return std::any_of(streams.begin(), streams.end(), [&](const auto& entry) {
+            return entry.second.camera == runtime.description.index && entry.second.kind == VIRTIO_VIDEO_CAMERA_STREAM_VIDEO;
+        });
+    }
+
+    /* Whether the application's leaving the foreground ends the guest's video on a camera: a live session, a video stream
+     * the guest has open (it may be stopped, as a guest suspend stops it) and the guest's last controls ask for the
+     * picture stabilized, which Android's record template does and its preview and still templates do not. A camera with
+     * a viewfinder only is not lost: nothing is lost but a few frames, and the viewfinder comes back by itself. */
+    [[nodiscard]] bool endsVideoWhenAppLeaves(const Runtime& runtime) const
+    {
+        return !blocked() && !runtime.lost && hasVideoStream(runtime) && runtime.controls.settings(runtime.values).stabilization;
+    }
+
+    /* The guest closed its last video stream of a camera: the loss ends with it, and the camera, if it was told it is down
+     * for the loss only, is told it is back. */
+    void endLossIfClosed(Runtime& runtime)
+    {
+        if (!runtime.lost || hasVideoStream(runtime)) return;
+        runtime.lost = false;
+        settle(runtime);
+        updateBlackTimers(runtime);
+        reportState();
     }
 
     // ------------------------------------------------------------------------
@@ -612,7 +647,8 @@ public:
         std::uint32_t width = 0, height = 0, rate = 0;
         for (const auto& [id, stream] : streams) {
             (void)id;
-            if (stream.camera != runtime.description.index || !startedVideo(stream)) continue;
+            // The streams of a lost camera want no capture.
+            if (stream.camera != runtime.description.index || !startedVideo(stream) || runtime.lost) continue;
             width = std::max(width, stream.width);
             height = std::max(height, stream.height);
             rate = std::max(rate, rateOf(stream));
@@ -706,7 +742,7 @@ public:
             active |= runtime.videoRunning;
             if (runtime.interruption == Interruption::multitasking) multitasking = true;
             if (runtime.interruption == Interruption::pressure) pressure = true;
-            if (runtime.interruption == Interruption::interrupted || runtime.failed) interrupted = true;
+            if (runtime.interruption == Interruption::interrupted || runtime.failed || runtime.lost) interrupted = true;
         }
         bool blockedUse = false;
         for (const auto& [id, stream] : streams) {
@@ -1012,15 +1048,22 @@ public:
         stream.queued.pop_front();
         auto& resource = stream.resources.at(held.resource);
         const auto size = videoPlaneSize(stream);
+        // A lost camera's buffer fails, with the interrupted flag, and the camera's black record says why; the record
+        // comes first, so that the guest finds it when it sees the failure.
+        const bool lost = runtime->lost;
         bool ok = false;
-        if (!resource.planes.empty() && resource.capacity >= size) ok = writeBlack(stream, resource);
+        if (!lost && !resource.planes.empty() && resource.capacity >= size) ok = writeBlack(stream, resource);
         const auto sequence = ++runtime->sequence;
         const std::uint32_t metaFlags = blackMetaFlags(*runtime);
         ++stream.framesOut;
-        complete(id, held, 0, (ok ? blackFlags(*runtime) : VIRTIO_VIDEO_DEQUEUE_FLAG_ERR), ok ? size : 0, sequence);
         CameraExposure black;
         black.activeCamera = std::uint32_t(runtime->description.platformIndex);
-        pushMeta(*runtime, metaOf(*runtime, sequence, black, metaFlags), now());
+        if (lost) pushMeta(*runtime, metaOf(*runtime, sequence, black, metaFlags), now());
+        complete(id, held, 0,
+                 lost ? std::uint32_t(VIRTIO_VIDEO_DEQUEUE_FLAG_ERR) | std::uint32_t(VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED)
+                      : (ok ? blackFlags(*runtime) : VIRTIO_VIDEO_DEQUEUE_FLAG_ERR),
+                 ok ? size : 0, sequence);
+        if (!lost) pushMeta(*runtime, metaOf(*runtime, sequence, black, metaFlags), now());
     }
 
     /* Writes a black picture to a guest's buffer: the luma plane and then the
@@ -1672,16 +1715,31 @@ public:
         case CameraEventKind::interrupted:
         case CameraEventKind::interruptedByMultitasking:
         case CameraEventKind::interruptedBySystemPressure:
-        case CameraEventKind::unavailable:
+        case CameraEventKind::interruptedInBackground:
+        case CameraEventKind::unavailable: {
+            bool ended = false;
             each([&](Runtime& runtime) {
+                // The application left the foreground with the guest recording: the guest's video on this camera ends here,
+                // and it is the guest, when it next runs, that finds out (the application suspends it behind this).
+                const bool ends = platformEvent.kind == CameraEventKind::interruptedInBackground && endsVideoWhenAppLeaves(runtime);
                 runtime.interruption = platformEvent.kind == CameraEventKind::interruptedByMultitasking ? Interruption::multitasking
                     : platformEvent.kind == CameraEventKind::interruptedBySystemPressure ? Interruption::pressure
                                                                                           : Interruption::interrupted;
+                if (ends) {
+                    runtime.lost = ended = true;
+                    std::fprintf(stderr, "camera %u: the video ended: the application left the foreground\n",
+                                 unsigned(runtime.description.index));
+                }
                 markDown(runtime, platformEvent.kind == CameraEventKind::unavailable ? VIRTIO_VIDEO_EVENT_CAMERA_UNAVAILABLE
                                                                                       : VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED);
+                // The capture of the camera's video stops: the streams it served get no picture.
+                if (ends) reconfigure(runtime);
                 updateBlackTimers(runtime);
             });
+            // The lost camera holds no capture: the session goes unless a still or the torch keeps it.
+            if (ended) releaseSessionIfIdle();
             break;
+        }
         case CameraEventKind::resumed:
         case CameraEventKind::available:
             each([&](Runtime& runtime) {
@@ -2081,6 +2139,7 @@ public:
         case VIRTIO_VIDEO_CMD_STREAM_DESTROY:
             stopStream(stream);
             streams.erase(found);
+            endLossIfClosed(runtime);
             return done(reply(id));
         case VIRTIO_VIDEO_CMD_GET_PARAMS: {
             const auto q = load<virtio_video_get_params>(request);
@@ -2231,6 +2290,7 @@ public:
             runtime.interruption = Interruption::none;
             runtime.resuming = false;
             runtime.failed = false;
+            runtime.lost = false;
             runtime.told = false;
             runtime.toldUnavailable = false;
             runtime.videoRetry = 0;

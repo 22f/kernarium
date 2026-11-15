@@ -1003,6 +1003,9 @@ public:
                                            else if (reason.integerValue ==
                                                     AVCaptureSessionInterruptionReasonVideoDeviceNotAvailableDueToSystemPressure)
                                                kind = CameraEventKind::interruptedBySystemPressure;
+                                           else if (reason.integerValue ==
+                                                    AVCaptureSessionInterruptionReasonVideoDeviceNotAvailableInBackground)
+                                               kind = CameraEventKind::interruptedInBackground;
 #else
                                            (void)note;
 #endif
