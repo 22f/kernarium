@@ -3448,8 +3448,9 @@ std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 		/* FPCR.FIZ, AH and NEP change what an FP instruction computes
 		 * beyond what the host does under the same rounding mode,
 		 * flush-to-zero and default-NaN bits; the engine's twin gadgets
-		 * cover them, rewritten code does not. */
-		if ((cpu.fpcr & arm64::fpcr_afp_controls) != 0U) {
+		 * cover them, rewritten code does not. A state the runtime has
+		 * not loaded yet keeps its FPCR aside. */
+		if ((cpu.effective_fpcr() & arm64::fpcr_afp_controls) != 0U) {
 			arm64::aot::note_refusal(arm64::aot::Refusal::fp_environment);
 			break;
 		}

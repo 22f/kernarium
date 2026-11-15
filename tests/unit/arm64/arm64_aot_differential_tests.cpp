@@ -1557,6 +1557,58 @@ void open_exclusive_is_not_entered(const LibraryImage &image,
 	require(st.enters == 0);
 }
 
+/* A task's floating-point state the runtime has not loaded yet
+ * (CpuState::defer_fp_load) keeps its FPCR aside: the register file's
+ * `fpcr` is stale until the first access, and the entry conditions must
+ * read the guest's. An FPCR with FIZ, AH or NEP is the engine's alone;
+ * the same state without them is entered, and either way the result is
+ * the engine's. */
+void deferred_fp_state_is_judged_by_its_guest_fpcr(const LibraryImage &image,
+	const std::vector<Function> &functions)
+{
+	const auto bias = Fixture::bias;
+	for (const bool afp : {true, false}) {
+		Fixture ref{afp ? 4361UL : 4363UL, image},
+			got{afp ? 4362UL : 4364UL, image};
+		SplitMix rng{67};
+		auto c = make_case(rng, bias, functions[3].start, false, true,
+			arena_base(bias));
+		enterable(c);
+		std::vector<std::byte> saved(sizeof(c.cpu.vectors));
+		std::memcpy(saved.data(), c.cpu.vectors.data(), saved.size());
+		/* AH (bit 1) in the saved FPCR, the register file's own zero. */
+		const std::uint32_t guest_fpcr = (c.cpu.fpcr & ~0x7U) |
+			(afp ? 0x2U : 0U);
+		c.cpu.defer_fp_load(saved.data(), guest_fpcr, 0, ~0U);
+		c.cpu.fpcr = 0;
+		c.cpu.fpsr = 0;
+		require(!c.cpu.fp_loaded);
+		aot::reset_stats();
+		aot::set_enabled(false);
+		auto want = drive(ref.env, ref.arena, c, max_blocks);
+		aot::set_enabled(true);
+		auto have = drive(got.env, got.arena, c, aot_max_blocks);
+		aot::set_enabled(false);
+		/* Whether a run reached the state or not, compare the guest's. */
+		want.cpu.access_fp_state();
+		have.cpu.access_fp_state();
+		require(want.done());
+		require(same(want, have, c));
+		const auto st = aot::stats();
+		std::fprintf(stderr, "deferred FP state, AH %d: %llu entries, "
+			"%llu fp refusals\n", afp ? 1 : 0,
+			static_cast<unsigned long long>(st.enters),
+			static_cast<unsigned long long>(st.refusals[3]));
+		if (afp) {
+			require(st.refusals[3] > 0);
+			require(st.enters == 0);
+		} else {
+			require(st.refusals[3] == 0);
+			require(st.enters > 0);
+		}
+	}
+}
+
 /* The 64-bit page digests find a library; they authorize nothing. Two words
  * of a page are changed (the first to something the engine will run, the
  * second to make the digest come out the same), and the page is not the one
@@ -1780,6 +1832,8 @@ int main(int argc, char **argv)
 				return_loop_is_bounded(image);
 				misaligned_sp_at_a_pair_store(image);
 				open_exclusive_is_not_entered(image, functions);
+				deferred_fp_state_is_judged_by_its_guest_fpcr(image,
+					functions);
 				equal_digest_is_not_equal_code(image, functions);
 			}
 			preemption_is_bounded(image, sample);
