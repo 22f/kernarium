@@ -455,6 +455,29 @@
         }
       }
     },
+    "%@, Old app compatibility" : {
+      "comment" : "What VoiceOver reads for an app's switch on the Old app compatibility page: the app's name, then the feature's name.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@、古いアプリの互換性"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@，旧版应用兼容"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@，舊版應用程式相容性"
+          }
+        }
+      }
+    },
     "%lld" : {
       "localizations" : {
         "ja" : {
@@ -1860,6 +1883,29 @@
         }
       }
     },
+    "Android will run this app more like older versions did. This may help an app that closes as soon as it opens, but it can also make the app behave differently or close later on. You can turn it off again here." : {
+      "comment" : "The message of the alert that asks before Old app compatibility is turned on for an app.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidがこのアプリを以前のバージョンに近い方法で実行します。開いてすぐに終了するアプリの助けになることがありますが、アプリの動作が変わったり、しばらくしてから終了したりすることもあります。ここでいつでもオフに戻せます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android会以更接近旧版本的方式运行此应用。这可能有助于解决一打开就关闭的问题，但也可能让此应用表现不同，或在稍后关闭。你可以随时在此处重新关闭。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android會以更接近舊版本的方式執行此應用程式。這可能有助於解決一打開就關閉的問題，但也可能讓此應用程式表現不同，或在稍後關閉。你可以隨時在這裡再次關閉。"
+          }
+        }
+      }
+    },
     "Android, LineageOS, Linux and the other names and marks here belong to their owners. They identify the software built into Andarium and imply no endorsement." : {
       "localizations" : {
         "ja" : {
@@ -2193,6 +2239,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "建置版本"
+          }
+        }
+      }
+    },
+    "Built for Android before 4.0" : {
+      "comment" : "The header of the list of apps on the Old app compatibility page. Android and 4.0 stay as they are in every language.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android 4.0より前向けに作られたもの"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "为Android 4.0之前的版本构建"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "為Android 4.0之前的版本建置"
           }
         }
       }
@@ -4616,6 +4685,52 @@
         }
       }
     },
+    "It opens without old app compatibility next time." : {
+      "comment" : "The last sentence of the alert that asks before Old app compatibility is turned off for an app that is open.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "次回は古いアプリの互換性なしで開きます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下次打开时将不使用旧版应用兼容。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下次開啟時將不使用舊版應用程式相容性。"
+          }
+        }
+      }
+    },
+    "It was built for an Android version before 4.0. If it closes as soon as it opens, open Settings here and choose Old app compatibility." : {
+      "comment" : "Two sentences added to the install card after Install anyway installed an app built for an Android before 4.0 that Old app compatibility lists. They follow the sentence that the app is installed; \"open Settings here\" is the side keys' tip's wording.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリはAndroid 4.0より前のバージョン向けに作られています。開いてすぐに終了する場合は、ここで“設定”を開き、“古いアプリの互換性”を選択します。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "它是为Android 4.0之前的版本构建的。如果它一打开就关闭，请在此打开“设置”，然后选择“旧版应用兼容”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "它是為Android 4.0之前的版本建置的。若它一打開就關閉，請在此打開「設定」，然後選擇「舊版應用程式相容性」。"
+          }
+        }
+      }
+    },
     "Its storage isn’t ready yet. The files appear here in a moment." : {
       "localizations" : {
         "ja" : {
@@ -4900,6 +5015,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此裝置上的定位服務已關閉。請在「設定」的「隱私權與安全性」中將其開啟，然後回到Andarium使用位置功能。"
+          }
+        }
+      }
+    },
+    "Looking for old apps…" : {
+      "comment" : "Shown on the Old app compatibility page while the virtual machine is asked which installed apps it can apply to.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "古いアプリを探しています…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在查找旧版应用…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在尋找舊版應用程式…"
           }
         }
       }
@@ -5236,6 +5374,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "無法取用"
+          }
+        }
+      }
+    },
+    "No app built for Android before 4.0 is installed." : {
+      "comment" : "Shown on the Old app compatibility page when the virtual machine has no app the feature can apply to.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android 4.0より前向けに作られたアプリはインストールされていません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未安装为Android 4.0之前的版本构建的应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未安裝為Android 4.0之前的版本建置的應用程式。"
           }
         }
       }
@@ -5635,6 +5796,75 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "好"
+          }
+        }
+      }
+    },
+    "Old app compatibility" : {
+      "comment" : "The name of the feature: the row in Settings > Apps, the title of its page, and the end of the install card's second hint sentence. It makes Android run one old app (built for Android before 4.0) more like older versions did.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "古いアプリの互換性"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "旧版应用兼容"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "舊版應用程式相容性"
+          }
+        }
+      }
+    },
+    "Old app compatibility wasn’t changed" : {
+      "comment" : "The title of the alert shown when the virtual machine did not accept turning Old app compatibility on or off for an app.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "古いアプリの互換性は変更されませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "旧版应用兼容未更改"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "舊版應用程式相容性未更改"
+          }
+        }
+      }
+    },
+    "On" : {
+      "comment" : "The detail of the Old app compatibility row in Settings when the switch is on for at least one app.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オン"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "开"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "開啟"
           }
         }
       }
@@ -7110,6 +7340,29 @@
         }
       }
     },
+    "Some apps this old close as soon as they open, because they rely on how Android used to work. Old app compatibility makes Android run one app more like older versions did." : {
+      "comment" : "The first paragraph of the Old app compatibility page's footer: what the feature is for.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "古いアプリの中には、Androidの以前の動作に依存しているため、開いてすぐに終了するものがあります。古いアプリの互換性を使うと、Androidが1つのアプリを以前のバージョンに近い方法で実行します。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "一些这么旧的应用一打开就会关闭，因为它们依赖Android以前的运作方式。旧版应用兼容会让Android以更接近旧版本的方式运行某一个应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "有些這麼舊的應用程式一打開就會關閉，因為它們依賴Android以前的運作方式。舊版應用程式相容性會讓Android以更接近舊版本的方式執行某一個應用程式。"
+          }
+        }
+      }
+    },
     "Some of this snapshot’s files are missing, so it can’t be restored. It can only be deleted." : {
       "localizations" : {
         "ja" : {
@@ -8544,6 +8797,52 @@
         }
       }
     },
+    "The virtual machine didn’t accept the change. Try again." : {
+      "comment" : "The message of the alert shown when the virtual machine did not accept turning Old app compatibility on or off for an app.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンが変更を受け付けませんでした。もう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机没有接受此更改。请重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器沒有接受此變更。請再試一次。"
+          }
+        }
+      }
+    },
+    "The virtual machine didn’t answer. Try again." : {
+      "comment" : "Shown on the Old app compatibility page when the list of apps could not be read; the button below it is \"Try again\".",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンが応答しませんでした。もう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机没有响应。请重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器沒有回應。請再試一次。"
+          }
+        }
+      }
+    },
     "The virtual machine doesn’t have enough free space. Free some up in the virtual machine, or give it more storage with Resize." : {
       "localizations" : {
         "ja" : {
@@ -9854,6 +10153,144 @@
         }
       }
     },
+    "Try again" : {
+      "comment" : "The button under the message that the virtual machine didn’t answer, on the Old app compatibility page.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "再試行"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重试"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "再試一次"
+          }
+        }
+      }
+    },
+    "Turn it on only for an app that closes as soon as it opens: it can make an app that works today behave differently. Turning it on or off closes the app if it’s open. Only apps it can apply to are listed." : {
+      "comment" : "The second paragraph of the Old app compatibility page's footer: when to use the switch and what it does.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "開いてすぐに終了するアプリにだけオンにしてください。現在問題なく動作しているアプリの動作が変わることがあります。オンまたはオフにすると、そのアプリが開いている場合は終了します。ここには、適用できるアプリだけが表示されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅对一打开就关闭的应用开启此功能：它可能会让目前正常运行的应用表现不同。开启或关闭时，如果该应用正在运行，它会被关闭。此处只列出可以使用此功能的应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "只對一打開就關閉的應用程式開啟此功能：它可能讓目前正常運作的應用程式表現不同。開啟或關閉時，若該應用程式正開著，它會被關閉。這裡只列出可使用此功能的應用程式。"
+          }
+        }
+      }
+    },
+    "Turn off" : {
+      "comment" : "The confirming button of the alert that asks before Old app compatibility is turned off for an app that is open.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オフにする"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关闭"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "關閉"
+          }
+        }
+      }
+    },
+    "Turn off for “%@”?" : {
+      "comment" : "The title of the alert that asks before Old app compatibility is turned off for an app that is open; the app's own name is quoted.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」でオフにしますか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要为“%@”关闭吗？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要為「%@」關閉嗎？"
+          }
+        }
+      }
+    },
+    "Turn on" : {
+      "comment" : "The confirming button of the alert that asks before Old app compatibility is turned on for an app.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オンにする"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "开启"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "開啟"
+          }
+        }
+      }
+    },
+    "Turn on for “%@”?" : {
+      "comment" : "The title of the alert that asks before Old app compatibility is turned on for an app; the app's own name is quoted (Japanese and Traditional Chinese use their own corner quotes).",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」でオンにしますか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要为“%@”开启吗？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要為「%@」開啟嗎？"
+          }
+        }
+      }
+    },
     "Turn on USB debugging in the virtual machine’s Developer options to use ADB over network." : {
       "localizations" : {
         "ja" : {
@@ -10302,6 +10739,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "「%1$@」已在%2$@中"
+          }
+        }
+      }
+    },
+    "“%@” is open and closes now." : {
+      "comment" : "A sentence of the alerts that ask before Old app compatibility is turned on or off for an app that is open: Android closes the app when the switch changes. The app's own name is quoted.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」は開いているため、今すぐ終了します。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”已打开，现在将被关闭。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」已開啟，現在會被關閉。"
           }
         }
       }

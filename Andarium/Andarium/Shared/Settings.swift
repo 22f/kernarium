@@ -20,6 +20,8 @@ struct SessionSettingsSheet: View {
     @State private var filesBarInset: CGFloat = 0
     @State private var filesBarHeight: CGFloat = 0
     @State private var detent: PresentationDetent
+    /// The Old app compatibility page is pushed.
+    @State private var oldAppsOpen = false
 
     init(large: Bool) {
         _detent = State(initialValue: large ? .large : .medium)
@@ -45,6 +47,12 @@ struct SessionSettingsSheet: View {
                     try? await Task.sleep(for: .milliseconds(500))
                     proxy.scrollTo(target, anchor: .top)
                 }
+                .task {
+                    // A launch argument of the preview opens the page directly.
+                    guard model.sessionPreset.oldAppsPage else { return }
+                    try? await Task.sleep(for: .milliseconds(400))
+                    oldAppsOpen = true
+                }
             }
             .listSectionSpacing(.compact)
             .endingAboveFilesBar(filesBarHeight)
@@ -60,6 +68,7 @@ struct SessionSettingsSheet: View {
                     FolderPage(browser: browser, route: route, close: close)
                 }
             }
+            .navigationDestination(isPresented: $oldAppsOpen) { OldAppsPage() }
         }
         #if FEEDBACK_MAIL
         .sendFeedbackSheet(model)
@@ -229,6 +238,8 @@ struct SessionSettingsSheet: View {
                 }
             }
             .disabled(model.fileBrowser?.busy == true)
+            // Offered only when the last listing found an app it can apply to.
+            if model.session.oldApps.offered { OldAppsRow { oldAppsOpen = true } }
         }
     }
 

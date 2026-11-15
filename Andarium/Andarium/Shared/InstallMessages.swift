@@ -109,11 +109,34 @@ nonisolated enum ApkInstallOutcome: Equatable, Sendable {
     case installedDataNotPlaced
 }
 
+/// How the install of Settings' Install APK ended, with what the card adds to
+/// say it: after Install anyway of an app built for an Android before 4.0 that
+/// Old app compatibility lists, where its switch is (`OldAppsWords.installHint`).
+nonisolated struct ApkInstallResult: Sendable {
+    var outcome: ApkInstallOutcome
+    var oldAppHint = false
+}
+
+/// How the install flow ended, for the model: the outcome, and the listing of
+/// old apps taken before an Install anyway of an app built for an Android
+/// before 4.0 (nil for any other install).
+nonisolated struct LegacyInstallEnd: Sendable {
+    var outcome: ApkInstallOutcome
+    var oldAppsBefore: [OldApp]?
+}
+
 extension ApkInstallOutcome {
     /// What the install's card says, and how it presents it. An app that is in
     /// with some of its data not copied is a warning, with a title of its own, so
-    /// that it is not taken for a plain success.
-    func words(fileName name: String) -> BusyWords {
+    /// that it is not taken for a plain success. `oldAppHint` adds the two
+    /// sentences that say where Old app compatibility is.
+    func words(fileName name: String, oldAppHint: Bool = false) -> BusyWords {
+        let words = baseWords(fileName: name)
+        guard oldAppHint else { return words }
+        return BusyWords(title: words.title, detail: Sentences.join(words.detail, OldAppsWords.installHint), style: words.style)
+    }
+
+    private func baseWords(fileName name: String) -> BusyWords {
         switch self {
         case .installed:
             BusyWords(title: String(localized: "App installed"), detail: String(localized: "\(name) is installed in the virtual machine."))
