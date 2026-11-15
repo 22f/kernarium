@@ -1018,7 +1018,11 @@ and the input's log must say it made the time up; and one during which the
 emulator process is stopped, whose two tracks must show gaps of about the same
 length with no burst of made-up audio after them. The audio capture is seen to
 run before either is injected. In a blocked session the runner checks instead
-that the same cameras give black frames and no still.
+that the same cameras give black frames and no still. `android-camera-restart`
+(`--mode restart`) takes a preview and the still of a lens that learns colour
+data into a calibration directory of its own, boots the same instance again
+over it, and expects the same camera IDs, one of them with RAW, because a
+camera the HAL refuses while it builds its list is not listed again.
 `android17-camera-runner` (tooling) runs its parsers and the expectations of
 every layout without a guest, and `android17-camera-layouts` (tooling) the
 layout set, its fallback order and the generated files.

@@ -2283,5 +2283,238 @@ class ModeSwitchTests(unittest.TestCase):
         self.assertEqual(guest.settings["animator_duration_scale"], "1")
 
 
+class RestartTests(unittest.TestCase):
+    """The restart mode: a guest restarted over the colour data a back still taught lists the cameras it listed
+    before. The accepted r27 image lost every such lens: its HAL rejected a RAW camera whose static metadata lacked
+    the lens shading map mode ON, and a camera it rejects while it builds its list is never listed again."""
+
+    TAUGHT = "bf-small-flash-manual-raw"
+    PLAIN = "bf-small-flash-manual"
+    IDS = ["0", "1", "2", "3", "4"]
+
+    def dump(self, ids: list[str], raw_in: set[str]) -> str:
+        """`dumpsys media.camera` of a phone: the devices, then the characteristics of each (the front camera is 1)."""
+        text = "".join(f'   Device {n} maps to "{device}"\n' for n, device in enumerate(ids))
+        for device in ids:
+            front = device == "1"
+            capabilities = "BACKWARD_COMPATIBLE MANUAL_SENSOR READ_SENSOR_SETTINGS" + (" RAW" if device in raw_in else "")
+            text += static_info(device, "FRONT" if front else "BACK", capabilities, "FALSE" if front else "TRUE",
+                                "OFF AUTO CONTINUOUS_PICTURE" if front else "OFF AUTO MACRO CONTINUOUS_PICTURE")
+        return text
+
+    class Guest:
+        def __init__(self, sku: str, plan, dump: str) -> None:
+            self.sku, self.plan, self.dump = sku, plan, dump
+
+        def alive(self) -> None:
+            pass
+
+        def prop(self, name: str) -> str:
+            return {runner.camera_layouts.SKU_PROPERTY: self.sku,
+                    runner.camera_layouts.MEDIA_PROPERTY: self.plan.media_variant,
+                    "ro.vendor.camera.config": "v4l2"}[name]
+
+        def features(self) -> set[str]:
+            return set(self.plan.features)
+
+        def media_camera(self) -> str:
+            return self.dump
+
+    def check(self, ids: list[str], raw_in: set[str], sku: str | None = None) -> None:
+        plan = runner.make_plan(self.TAUGHT, "phone", "live")
+        guest = self.Guest(sku or self.TAUGHT, plan, self.dump(ids, raw_in))
+        with mock.patch.object(runner.time, "sleep"), mock.patch.object(runner, "RESTART_LIST_SECONDS", 0.05), \
+                contextlib.redirect_stdout(io.StringIO()):
+            runner.check_restart_keeps_cameras(guest, plan, list(self.IDS))
+
+    def test_the_same_cameras_with_a_raw_one_pass(self) -> None:
+        self.check(self.IDS, {"0", "3"})
+
+    def test_a_lens_that_went_missing_after_the_restart_is_named(self) -> None:
+        # What r27 did: the calibrated lenses were rejected at boot and Android never listed them.
+        with self.assertRaisesRegex(runner.Failure, r"EmulatedCameraDeviceInfo.*: cameras \['1'\], not the "
+                                    r"\['0', '1', '2', '3', '4'\] of the session before: missing \['0', '2', '3', '4'\], extra \[\]"):
+            self.check(["1"], set())
+
+    def test_an_extra_camera_is_not_the_same_list(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, r"extra \['5'\]"):
+            self.check(self.IDS + ["5"], {"0"})
+
+    def test_a_restart_without_a_raw_camera_exercised_nothing(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "no camera states the RAW capability"):
+            self.check(self.IDS, set())
+
+    def test_a_host_that_composed_the_untaught_layout_says_so(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "after the restart: the guest booted with the layout 'bf-small-flash-manual', "
+                                    "not 'bf-small-flash-manual-raw' .*teach no colour data"):
+            self.check(self.IDS, {"0"}, sku=self.PLAIN)
+
+    def test_the_first_session_returns_the_ids_once_the_colour_data_is_kept(self) -> None:
+        plan = runner.make_plan(self.PLAIN, "phone", "live")
+        guest = self.Guest(self.PLAIN, plan, self.dump(self.IDS, set()))
+        with tempfile.TemporaryDirectory() as directory:
+            calibration = Path(directory)
+            (calibration / "SyntheticPhone1_1.back-wide.cal").write_bytes(b"UMLCAL02")
+            guest.stills = lambda: set()
+            with mock.patch.object(runner, "check_preview"), mock.patch.object(runner, "check_still"), \
+                    mock.patch.object(runner, "check_camera_list"), mock.patch.object(runner, "check_layout"), \
+                    mock.patch.object(runner, "select_the_lens_that_learns", return_value="2.5"), \
+                    contextlib.redirect_stdout(io.StringIO()) as printed:
+                self.assertEqual(runner.run_restart_checks(guest, plan, calibration), self.IDS)
+            self.assertIn("lens: the button '2.5'", printed.getvalue())
+            self.assertIn("SyntheticPhone1_1.back-wide.cal", printed.getvalue())
+
+    def test_a_first_session_that_kept_nothing_fails_before_the_restart(self) -> None:
+        plan = runner.make_plan(self.PLAIN, "phone", "live")
+        guest = self.Guest(self.PLAIN, plan, self.dump(self.IDS, set()))
+        guest.stills = lambda: set()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(runner.time, "sleep"), \
+                mock.patch.object(runner, "CALIBRATION_SECONDS", 0.05), mock.patch.object(runner, "check_preview"), \
+                mock.patch.object(runner, "check_still"), mock.patch.object(runner, "check_camera_list"), \
+                mock.patch.object(runner, "check_layout"), mock.patch.object(runner, "select_the_lens_that_learns"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(runner.Failure, "the colour data of the back still in the calibration directory: no .cal file"):
+                runner.run_restart_checks(guest, plan, Path(directory))
+
+    def options(self, *arguments: str):
+        return runner.build_parser().parse_args(["--mode", "restart", *arguments])
+
+    # What `uiautomator dump` prints of the application with three lens buttons: the selector's layout holds a button
+    # for each lens, the shutter and the flip button are outside it.
+    LENS_DUMP = """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="org.lineageos.aperture" bounds="[0,0][720,1280]">
+    <node index="0" text="" resource-id="org.lineageos.aperture:id/lensSelectorLayout" class="android.widget.LinearLayout" bounds="[200,900][520,960]">
+      <node index="1" text="1\u00d7" resource-id="" class="android.widget.Button" bounds="[280,905][400,955]" />
+      <node index="0" text=".5" resource-id="" class="android.widget.Button" bounds="[205,905][275,955]" />
+      <node index="2" text="2.5" resource-id="" class="android.widget.Button" bounds="[405,905][515,955]" />
+    </node>
+    <node index="1" text="" resource-id="org.lineageos.aperture:id/shutter" class="android.widget.Button" bounds="[300,1000][420,1120]" />
+  </node>
+</hierarchy>
+"""
+
+    def test_the_lens_buttons_are_read_left_to_right_from_inside_the_selector(self) -> None:
+        self.assertEqual(runner.parse_lens_buttons(self.LENS_DUMP),
+                         [(".5", 240, 930), ("1\u00d7", 340, 930), ("2.5", 460, 930)])
+        self.assertEqual(runner.parse_lens_buttons(self.LENS_DUMP.replace("lensSelectorLayout", "other")), [])
+        self.assertEqual(runner.parse_lens_buttons('<hierarchy rotation="0"/>'), [])
+
+    class UiGuest:
+        def __init__(self, dump: str, holds: str = "4") -> None:
+            self.dump, self.holds, self.commands = dump, holds, []
+
+        def alive(self) -> None:
+            pass
+
+        def shell(self, command: str, timeout: float = 0) -> str:
+            self.commands.append(command)
+            return self.dump if command.startswith("uiautomator dump") else ""
+
+        def media_camera(self) -> str:
+            return ("Active Camera Clients:\n[\n(Camera ID: " + self.holds + ", Cost: 100, PID: 1301, Score: 0, State: 2User Id: 0, "
+                    "Client Package Name: org.lineageos.aperture, Conflicting Client Devices: {})\n]\n")
+
+    def select(self, dump: str, profile: str = "phone", holds: str = "4"):
+        guest = self.UiGuest(dump, holds)
+        plan = runner.make_plan("bf-small-flash-manual" if profile == "phone" else "bf-small-flash-manual", profile, "live")
+        with mock.patch.object(runner.time, "sleep"), mock.patch.object(runner, "PREVIEW_SECONDS", 0.05):
+            return guest, runner.select_the_lens_that_learns(guest, plan)
+
+    def test_a_phone_taps_the_last_lens_button_and_waits_for_the_telephoto_camera(self) -> None:
+        guest, label = self.select(self.LENS_DUMP)
+        self.assertEqual(label, "2.5")
+        self.assertIn("input tap 460 930", guest.commands)
+
+    def test_a_tap_that_does_not_bring_the_telephoto_camera_fails(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, r"holding camera 4 after the tap on the lens button '2.5': it holds \['0'\]"):
+            self.select(self.LENS_DUMP, holds="0")
+
+    def test_a_phone_without_lens_buttons_has_no_lens_to_teach(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "lists no lens buttons on the phone profile"):
+            self.select('<?xml version="1.0"?><hierarchy rotation="0"/>')
+
+    def test_a_tablet_without_buttons_teaches_with_its_own_camera(self) -> None:
+        guest, label = self.select('<?xml version="1.0"?><hierarchy rotation="0"/>', profile="tablet")
+        self.assertIsNone(label)
+        self.assertFalse([command for command in guest.commands if command.startswith("input tap")])
+
+    def test_the_restart_boots_the_same_instance_over_the_same_directory_with_the_taught_layout(self) -> None:
+        options = self.options("--calibration-dir", "/cal")
+        options.instance = None
+        plan = runner.make_plan("bf-small-flash-manual", "phone", "live")
+        first = mock.Mock(serial="127.0.0.1:5580")
+        started = []
+
+        def start(passed, again, adb, private):
+            started.append((passed, again, adb, private))
+            return "second guest"
+
+        with mock.patch.object(runner, "start_guest", side_effect=start), \
+                mock.patch.object(runner.boot_android, "disconnect_adb") as disconnect, \
+                mock.patch.object(runner.boot_android, "stop_guest") as stop, tempfile.TemporaryDirectory() as directory:
+            guest, again = runner.restart_guest(options, plan, "adb", Path(directory), first)
+        self.assertEqual(guest, "second guest")
+        disconnect.assert_called_once_with("adb", "127.0.0.1:5580")
+        stop.assert_called_once_with(first.process)
+        (passed, plan_again, adb, private), = started
+        self.assertEqual(again.layout.name, self.TAUGHT)
+        self.assertIs(plan_again, again)
+        self.assertEqual((passed.layout, passed.calibration_dir, passed.instance), (runner.AUTO_LAYOUT, Path("/cal"), Path(directory) / "instance"))
+        self.assertEqual(private, Path(directory) / "restart")
+        # The launcher composes the layout from the cameras and the directory, as the host's application does.
+        self.assertEqual(runner.launcher_arguments(again, True, passed.calibration_dir),
+                         ["--camera=synthetic", "--camera-profile=phone", "--camera-layout=auto",
+                          "--camera-calibration-dir=/cal"])
+
+    def test_an_instance_of_the_caller_is_the_one_restarted(self) -> None:
+        options = self.options("--instance", "/instance")
+        plan = runner.make_plan(self.PLAIN, "phone", "live")
+        with mock.patch.object(runner, "start_guest") as start, mock.patch.object(runner.boot_android, "disconnect_adb"), \
+                mock.patch.object(runner.boot_android, "stop_guest"), tempfile.TemporaryDirectory() as directory:
+            runner.restart_guest(options, plan, "adb", Path(directory), mock.Mock(serial="s"))
+        self.assertEqual(start.call_args.args[0].instance, Path("/instance"))
+
+    def test_a_profile_without_a_lens_that_learns_colour_data_is_refused(self) -> None:
+        with mock.patch.object(sys, "argv", ["run_android_camera.py", "--mode", "restart", "--camera-profile", "laptop"]), \
+                contextlib.redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(runner.main(), 2)
+        self.assertIn("no lens with colour data to restart over", error.getvalue())
+
+    def test_the_mode_runs_the_first_session_then_the_restart_then_the_check(self) -> None:
+        calls = []
+        directories = []
+        second = mock.Mock(serial="s2", process=mock.Mock(), log=Path("/none"))
+
+        def first(guest, plan, calibration):
+            calls.append(("first", plan.layout.name, plan.mode))
+            directories.append(calibration)
+            self.assertTrue(calibration.is_dir())
+            return list(self.IDS)
+
+        def restart(options, plan, adb, private, guest):
+            calls.append(("restart", options.calibration_dir == directories[0]))
+            return second, runner.make_plan(self.TAUGHT, "phone", "live")
+
+        def keep(guest, plan, before):
+            calls.append(("keeps", guest is second, plan.layout.name, before))
+
+        arguments = ["run_android_camera.py", "--mode", "restart", "--emulator", "/emulator", "--release", "/release"]
+        with mock.patch.object(sys, "argv", arguments), mock.patch.object(runner.boot_android, "resolve_executable", return_value="adb"), \
+                mock.patch.object(runner.boot_android, "disconnect_adb"), mock.patch.object(runner.boot_android, "stop_guest"), \
+                mock.patch.object(runner, "start_guest", return_value=mock.Mock(serial="s", process=mock.Mock(), log=Path("/none"))), \
+                mock.patch.object(runner, "run_restart_checks", side_effect=first), mock.patch.object(runner, "restart_guest", side_effect=restart), \
+                mock.patch.object(runner, "check_restart_keeps_cameras", side_effect=keep), contextlib.redirect_stdout(io.StringIO()) as printed:
+            self.assertEqual(runner.main(), 0)
+        self.assertEqual(calls, [("first", self.PLAIN, "live"), ("restart", True), ("keeps", True, self.TAUGHT, self.IDS)])
+        self.assertIn("PASS", printed.getvalue())
+        self.assertFalse(directories[0].exists(), "the run's own directory is removed at the end")
+
+    def test_the_mode_is_a_choice_of_the_parser_and_the_failure_log_names_the_device_info(self) -> None:
+        self.assertEqual(self.options().mode, "restart")
+        self.assertIn("EmulatedCameraDeviceInfo", runner.FAILURE_LOG_PATTERN)
+        self.assertIn("V4l2Characteristics", runner.FAILURE_LOG_PATTERN)
+
+
 if __name__ == "__main__":
     unittest.main()
