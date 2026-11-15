@@ -335,6 +335,7 @@ public final class OldAppCommandTest {
             }
         }
         same(0, fake.events.size(), "list writes nothing");
+        same(0, fake.locksTaken, "a listing with nothing to clear does not use the lock");
 
         Fake none = new Fake();
         Result empty = run(none, "list");
@@ -448,6 +449,7 @@ public final class OldAppCommandTest {
         same("kernarium_oldapp 1\norg.example.again\torg.example.again\toff\t0\t500\n", result.out,
                 "a reinstall after the clock went back is listed off");
         same(Arrays.asList("set " + key("org.example.again") + "="), back.events, "and its choice is cleared");
+        same(1, back.locksTaken, "a listing that clears a choice takes the lock once, for all it clears");
         same("", back.getProperty(key("org.example.again")), "the property is empty");
         back.events.clear();
         run(back, "list");

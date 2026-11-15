@@ -27,6 +27,14 @@ reports the process id, whether the layer's library is mapped into it and what i
 All receivers carry INTERNET: the probe class lists the network interfaces before its script runs, and without
 the permission the list is null and the class dies.
 
+Android 17 refuses a package that declares code and holds no classes.dex ("code is missing"), so each fixture has
+what it stands for. The ones that stand for an old game's native side (``old``, ``shared``, ``raised``,
+``oldshared``) declare ``hasCode=false``: nothing ever starts them, and the command reads only what the package
+manager keeps of a package (the target level, the shared user ID and the library directory the primary ABI
+follows), never its code. ``javaonly`` stands for an application with Java code and no native code, so it carries
+a DEX file (the probe class, with no component that names it). ``modern`` and ``running`` start processes, so
+they carry the receiver.
+
 The native library is a stand-in: a valid ELF32 ARM shared object that holds nothing, because only the
 package manager reads it (the primary ABI follows the directory it is in) and no application loads it.
 """
@@ -70,6 +78,19 @@ SUCCESSORS = {
 #: Eligible, with the receiver and debuggable: the application an image with the hook starts and watches.
 RUNNING = {"running": (PACKAGE_PREFIX + ".running", 4, 10, True, None, True)}
 SPECS = {**VARIANTS, **SUCCESSORS, **RUNNING}
+#: The fixtures that declare no code (hasCode=false) and the one with Java code only; the others have the receiver.
+NATIVE_ONLY = ("old", "shared", "raised", "oldshared")
+JAVA_ONLY = ("javaonly",)
+#: Fixtures signed with one key, so that the second installs over the first as an update (the package manager keeps
+#: the installation, and with it the first-install time): "raised" is the update of "old" that raises its target
+#: level. Every other fixture has a key of its own.
+SAME_KEY = ("old", "raised")
+
+
+def same_key(first: str, second: str) -> bool:
+    return first == second or (first in SAME_KEY and second in SAME_KEY)
+
+
 #: The library the hook loads into an application that is switched on (OLDGAMES-I: System.load of this file).
 LAYER_LIBRARY = "libkernarium_oldapp.so"
 
@@ -127,7 +148,8 @@ def probe_script(package: str, watched_property: str) -> str:
 def running_script(package: str, own_property: str) -> str:
     """What the ``running`` package's shell runs as that application: its process id (the shell's parent is the
     application's process), whether the layer's library is mapped into that process, and its own property as it
-    reads it, whether setting it is allowed, and the value afterwards."""
+    reads it, whether setting it is allowed, the process id of that `setprop` (the denial the log keeps names the
+    process that was refused, which is not the application's own) and the value afterwards."""
     directory = f"/data/data/{package}/files"
     return (
         f"d={directory}; mkdir -p $d; "
@@ -136,7 +158,9 @@ def running_script(package: str, own_property: str) -> str:
         'echo "pid=$PPID"; '
         f'echo "layer=$(grep -c {LAYER_LIBRARY} /proc/$PPID/maps 2>/dev/null)"; '
         f'echo "get=$(getprop {own_property})"; '
-        f"if setprop {own_property} 7 2>/dev/null; then echo set=allowed; else echo set=denied; fi; "
+        f"setprop {own_property} 7 2>/dev/null & p=$!; "
+        "if wait $p; then echo set=allowed; else echo set=denied; fi; "
+        'echo "setpid=$p"; '
         f'echo "after=$(getprop {own_property})"; '
         "echo done; "
         "} > $d/result.tmp && mv $d/result.tmp $d/result")
@@ -148,6 +172,8 @@ def manifest_tree(variant: str) -> binary_xml.Element:
     if shared is not None:
         attributes += (("sharedUserId", shared),)
     application = [("label", LABEL if variant in ("old", "raised", "oldshared") else f"Switch Probe {variant}")]
+    if variant in NATIVE_ONLY:
+        application.append(("hasCode", False))
     children: tuple[binary_xml.Element, ...] = ()
     permissions: tuple[binary_xml.Element, ...] = ()
     if probe:
@@ -161,8 +187,10 @@ def manifest_tree(variant: str) -> binary_xml.Element:
     ))
 
 
-def build_apk(destination: pathlib.Path, variant: str, workdir: pathlib.Path | None = None) -> pathlib.Path:
-    """The signed package of a variant at `destination`."""
+def build_apk(destination: pathlib.Path, variant: str, workdir: pathlib.Path | None = None,
+              keystore: pathlib.Path | None = None) -> pathlib.Path:
+    """The signed package of a variant at `destination`. The variants of SAME_KEY are signed with `keystore`
+    (a key made at that path on first use) when it is given."""
     _, _, _, native, _, probe = SPECS[variant]
     files: dict[str, bytes] = {}
     if native:
@@ -173,4 +201,7 @@ def build_apk(destination: pathlib.Path, variant: str, workdir: pathlib.Path | N
         watched = property_of(variant if variant in RUNNING else "old")
         files["classes.dex"] = property_probe_dex.build_dex(
             package_of(variant), watched, watched, shell_script=script)
-    return binary_xml.build_apk(destination, workdir, manifest_tree(variant), files)
+    elif variant in JAVA_ONLY:
+        files["classes.dex"] = property_probe_dex.build_dex(package_of(variant), "", "", shell_script="true")
+    return binary_xml.build_apk(destination, workdir, manifest_tree(variant), files,
+                                keystore if variant in SAME_KEY else None)
