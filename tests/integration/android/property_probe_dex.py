@@ -254,8 +254,10 @@ def script(package: str, control: str, key: str) -> str:
         "} > $d/result.tmp && mv $d/result.tmp $d/result")
 
 
-def build_dex(package: str, control: str, key: str) -> bytes:
-    """The DEX file of the probe class for an application of `package`."""
+def build_dex(package: str, control: str, key: str, shell_script: str | None = None) -> bytes:
+    """The DEX file of the probe class for an application of `package`. `shell_script` replaces the script
+    the receiver's shell runs (the default is `script`; $1 is the interface summary either way)."""
+    payload = shell_script if shell_script is not None else script(package, control, key)
     pools = Pools()
     owner = pools.type(descriptor(CLASS_NAME))
     pools.type(RECEIVER)
@@ -276,7 +278,7 @@ def build_dex(package: str, control: str, key: str) -> bytes:
     wait_for = pools.method(PROCESS, "waitFor", "I")
     for item in (INET6_ADDRESS, STRING_ARRAY, "V", "Z", "I"):
         pools.type(item)
-    for text in ("=yes ", "=no ", "/system/bin/sh", "-c", "sh", script(package, control, key)):
+    for text in ("=yes ", "=no ", "/system/bin/sh", "-c", "sh", payload):
         pools.string(text)
 
     constructor = Code(registers=1, ins=1, outs=1)
@@ -331,7 +333,7 @@ def build_dex(package: str, control: str, key: str) -> bytes:
     body.op("move-result-object", 6)
     body.op("const/4", 0, 5)
     body.op("new-array", 1, 0, STRING_ARRAY)
-    for number, text in enumerate(("/system/bin/sh", "-c", script(package, control, key), "sh")):
+    for number, text in enumerate(("/system/bin/sh", "-c", payload, "sh")):
         body.op("const/4", 0, number)
         body.op("const-string", 2, text)
         body.op("aput-object", 2, 1, 0)

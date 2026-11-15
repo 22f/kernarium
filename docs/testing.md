@@ -903,6 +903,22 @@ through Android's input dump and the probe's log, that the host's devices
 plug, are configured as the image says, deliver keys, the cursor, buttons and
 wheel, pass pointer capture both ways and unplug; `--instance` names the
 previous release's data disk to check the one-time on-screen keyboard change.
+`android-oldapp-switch` (integration) registers when
+`UML_ANDROID_OLDAPP_SWITCH_RELEASE` names a release built with the Old app
+compatibility command ([README](../android/lineage-24/README.md#old-application-switch)):
+as the adb shell user, `kernarium_oldapp` is in the image and lists an eligible
+probe application (installed past the block on old targets, with an armeabi-v7a
+stand-in library) with its label, off and last-update time, and none that fails
+one clause of the rule (a target level of 14 or more, no 32-bit native code, a
+shared user ID, a system application, an unknown package); `set` refuses those
+with status 2 and takes unknown arguments with status 64; `set on` stores the
+time and `list` shows it; an ordinary application (`untrusted_app_29`) reads the
+value and its attempt to set it is refused; `set off` clears it. `--real-apk`,
+`--real-package` and `--real-label` also list an application you provide whose
+label is a resource. `android17-oldapp-switch-runner` (tooling) runs the packages,
+parsers and steps against a scripted image, and `android17-oldapp-switch-command`
+(tooling; skipped without a JDK) runs the command's rule, listing, writes and exit
+statuses on a plain JVM; the Android calls need a built image.
 `android-video-suspend` (integration) registers when
 `UML_ANDROID_VIDEO_SUSPEND_RELEASE` names the release: the gallery's decoder and
 `screenrecord`'s encoder run across a suspend by the host's route (asked again
