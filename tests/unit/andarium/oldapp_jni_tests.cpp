@@ -2257,11 +2257,14 @@ void check_delete_local_ref_keeps_the_frames_right() {
     Made c = make_shadow_of(f, sample(6));
     require(push(f.env, 16) == 0, "push");
     Made d = make_shadow_of(f, sample(7));
-    del(f.env, b.shadow);  // an entry below the frame
+    del(f.env, b.shadow);  // an entry below the frame: both runtimes leave a reference of an outer frame alone
+    require(is_shadow_block(b.shadow) && counters().shadows_live == 4, "the outer reference was not deleted from the inner frame");
     pop(f.env, nullptr);
-    require(!is_shadow_block(d.shadow) && !is_shadow_block(b.shadow), "the frame's block ended, and the deleted one");
-    require(is_shadow_block(a.shadow) && is_shadow_block(c.shadow) && counters().shadows_live == 2,
-            "the pop did not end the entries below the frame, whatever was deleted there");
+    require(!is_shadow_block(d.shadow), "the frame's block ended");
+    require(is_shadow_block(a.shadow) && is_shadow_block(b.shadow) && is_shadow_block(c.shadow) && counters().shadows_live == 3,
+            "the pop did not end the entries below the frame");
+    del(f.env, b.shadow);
+    require(!is_shadow_block(b.shadow) && counters().shadows_live == 2, "and its own frame can delete it");
     // The same array twice is one block with two entries: the first delete leaves it, the second ends it.
     jobject array = byte_array(sample(12));
     Obj* object = object_of(array);
@@ -3392,6 +3395,39 @@ void check_the_record_of_a_runtime_pointer_ends_with_its_release() {
     require(world.released.size() == start + 5, "each release reached the runtime");
 }
 
+// ---- DeleteLocalRef only reaches the innermost frame
+
+// A nested native method (called from Java by the outer one, which holds the block's entry) deletes a reference of the
+// block that it did not make: both runtimes leave a reference of an outer frame alone, so the block stays live in the
+// outer frame, the outer call's synchronization goes on, and the outer return ends it. (Fails on 437d5edc: the nested
+// delete took the outer frame's entry.)
+void check_a_nested_native_method_cannot_delete_its_callers_reference() {
+    Fixture f = make();
+    void* outer_function = app_function(1);
+    void* inner_function = app_function(2);
+    const Native outer = thunk_of(outer_function);
+    const Native inner = thunk_of(inner_function);
+    require(enter_native(outer, outer_function, 0x100, 0x9000), "outer");
+    Made a = make_shadow_of(f, sample(32));
+    raw_of(a)[0] = 0x55;
+    g_in_call = [&] {
+        g_in_call = nullptr;
+        require(enter_native(inner, inner_function, 0x200, 0x8000), "inner, called from Java");
+        end_ref(f, a.shadow);  // the nested method frees the reference it was handed ("free the previous buffer")
+        require(is_shadow_block(a.shadow) && counters().shadows_live == 1, "the outer frame's entry is left alone");
+        Made own = make_shadow_of(f, sample(8));  // its own entry is the frame's: this one it can delete
+        end_ref(f, own.shadow);
+        require(!is_shadow_block(own.shadow) && counters().shadows_live == 1, "and an entry of its own ends");
+        leave_native(0x8000);
+    };
+    world.java_fill = 0x44;
+    require(call_static_int_v(f, f.consume, a.shadow) == 7, "the outer call completed");
+    world.java_fill = -1;
+    require(is_shadow_block(a.shadow) && raw_of(a)[0] == 0x44, "the block is live in the outer frame, with Java's writes");
+    leave_native(0x9000);
+    require(!is_shadow_block(a.shadow) && counters().shadows_live == 0, "and the outer return ends it");
+}
+
 // A full sweep follows every collection that no full sweep has seen, also one that the step sweep (a few blocks at a
 // creation) found first: a result that fits after one full pass is not declined.
 void check_a_collection_the_step_sweep_saw_is_swept_in_full() {
@@ -3647,6 +3683,7 @@ int main(int argc, char** argv) {
     check_a_critical_pointer_of_the_runtime_released_through_a_block_reaches_the_runtime();
     check_an_elements_pointer_of_the_runtime_released_through_a_block_reaches_the_runtime();
     check_the_record_of_a_runtime_pointer_ends_with_its_release();
+    check_a_nested_native_method_cannot_delete_its_callers_reference();
     check_a_collection_the_step_sweep_saw_is_swept_in_full();
     check_a_kept_reference_gives_a_critical_pointer();
     check_a_release_of_a_pointer_inside_a_block_is_harmless();

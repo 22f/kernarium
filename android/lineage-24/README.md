@@ -673,7 +673,9 @@ patches ART's one JNI function table in place and gives the application:
   outside those points (another thread, a callback after the native method
   returned) show at the next one, and a raw write from another thread while a
   point is running can be lost. A reference to a block ends where a Dalvik local
-  reference did: at `DeleteLocalRef`, at `PopLocalFrame`, at the return of a native
+  reference did: at `DeleteLocalRef` of a reference the innermost frame holds (a
+  reference of an outer frame is left alone, as both runtimes leave it), at
+  `PopLocalFrame`, at the return of a native
   method of the application's own libraries (found by name or registered; those
   installed with the application or in its private data directories; another
   package's library keeps the runtime's binding) and when its thread detaches. A

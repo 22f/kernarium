@@ -1948,8 +1948,11 @@ jint w_MonitorExit(Env* e, jobject o) {
     enter_any(e);
     return original<jint (*)(Env*, jobject)>(slot::MonitorExit)(e, Conv(e, o).get());
 }
-// The entry of the block that is the newest: DeleteLocalRef takes one reference of the block, and the frames above
-// the entry it leaves are one entry shorter.
+// The entry of the block that is the newest in the innermost frame: DeleteLocalRef takes one reference of the block. Both
+// runtimes search only the current frame (the segment a native method or PushLocalFrame opened) and leave a reference of
+// an outer frame alone (ART's LocalReferenceTable::Remove and Dalvik's IndirectRefTable::remove: "wrong segment", nothing
+// removed), so a nested native method that deletes a block's reference its caller's frame holds ends nothing here either.
+// With no frame record (a native method that got no thunk) every entry of the thread is the frame's.
 void w_DeleteLocalRef(Env* e, jobject o) {
     enter_any(e);
     if (is_shadow(o)) {
@@ -1958,23 +1961,19 @@ void w_DeleteLocalRef(Env* e, jobject o) {
         if (header == nullptr || state == nullptr) {
             return;
         }
-        for (unsigned i = state->count; i > 0; --i) {
+        const unsigned floor = state->frame_count > 0 ? state->frames[state->frame_count - 1].height : 0;
+        for (unsigned i = state->count; i > floor; --i) {
             if (state->blocks[i - 1] == header) {
                 const unsigned index = i - 1;
                 for (unsigned k = index; k + 1 < state->count; ++k) {
                     state->blocks[k] = state->blocks[k + 1];
                 }
-                --state->count;
-                for (unsigned f = 0; f < state->frame_count; ++f) {
-                    if (state->frames[f].height > index) {
-                        --state->frames[f].height;
-                    }
-                }
+                --state->count;  // (no frame's height is above the entry: the innermost frame's is the floor)
                 release_entry(e, state, header);  // the block goes with its last reference
                 return;
             }
         }
-        return;  // another thread's block: it goes with its thread
+        return;  // another thread's block, or a reference of an outer frame: it goes with its own
     }
     original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(e, o);
 }
