@@ -91,9 +91,11 @@ reads or opens the microphone, and no permission prompt can appear.
   microphone. Standby opens the input before the guest starts (mono until a
   recording has said otherwise, opened again if the recording asks for other
   channels). The guest's start is a boundary (`CaptureRing::restart`): what the
-  ring held, a buffer the audio thread received before it and writes after it,
-  and the frames of a buffer that began before it are dropped, so the recording
-  begins with audio captured after the start, not with sound from before it. It
+  ring held, what the sample-rate converter holds (`MicrophoneTap` resets it),
+  a buffer the audio thread received before it and writes after it, and the
+  frames of a buffer that began before it are dropped, so the recording begins
+  with audio captured after the start, not with sound from before it, and keeps
+  what the audio thread writes while the start is made. It
   changes neither the setting nor the permission, and it closes with video mode
   unless the guest is recording. The indicator is lit, and a Bluetooth headset
   is on the hands-free profile, from the open to the close, not from the
