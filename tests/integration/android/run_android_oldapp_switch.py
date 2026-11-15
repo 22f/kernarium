@@ -4,35 +4,48 @@
 
 android/lineage-24/overlay/oldapp_switch is `kernarium_oldapp`, a command that Andarium runs as the adb shell
 user: ``list`` names the applications the compatibility layer can apply to (not a system application, a 32-bit
-primary ABI, a target level below 14, no shared user ID) with their labels, ``set PACKAGE on|off`` writes or
-clears the persistent property ``persist.sys.kernarium.oldapp.<package>`` and stops the application. The
-property's SELinux type (overlay/sepolicy/system_ext/private/kernarium_oldapp_prop.te) lets the shell domain set
-it and every application domain read it, and no application domain set it. This runner installs the probe
-applications of oldswitch_probe_apk.py (one eligible, three that each fail one clause of the rule) and, as the
-adb shell user, checks that:
+primary ABI, a target level below 14, no shared user ID, a package name that can end a property name) with their
+labels, ``set PACKAGE on|off`` writes or clears the persistent property ``persist.sys.kernarium.oldapp.<package>``
+and stops the application. The property's SELinux type (overlay/sepolicy/system_ext/private/kernarium_oldapp_prop.te)
+lets the shell domain set it and every application domain read it, and no application domain set it. A choice
+does not outlive the installation it was made for: ``list`` clears the property of a package that is absent, is
+not eligible any more or was first installed after the turn-on time, and turning off is accepted for any name
+that can be a property name. This runner installs the probe applications of oldswitch_probe_apk.py (one eligible,
+three that each fail one clause of the rule) and, as the adb shell user, checks that:
 
 - the command and its jar are in the image and `kernarium_oldapp` resolves on the shell's PATH;
 - ``list`` starts with the version line, names the eligible application once, with its label (the TAB of the
   manifest's string turned into a space), ``off``, a turn-on time of 0 and a last-update time between the
   install's start and now, and names none of the others;
-- ``set`` refuses an application that fails a clause, a system application and a package that is not installed
-  with status 2 and one line on standard error, leaves the property empty, and takes unknown arguments with
-  status 64;
+- ``set on`` refuses an application that fails a clause, a system application and a package that is not installed
+  with status 2 and one line on standard error, and ``set off`` for the same packages exits 0 with ``<package>
+  <TAB>off``; a name that cannot be a property name (an empty segment, a trailing dot) is refused for both; the
+  property stays empty throughout; unknown arguments are status 64;
 - ``set old on`` exits 0 with ``<package><TAB>on``, the property holds the turn-on time (the guest's clock, which
   is the host's), and ``list`` shows ``on`` with that time;
 - an ordinary application (the modern probe, domain ``untrusted_app_29``, started with `am broadcast`) reads the
   property with that value and its attempt to set it is refused, with the value unchanged;
-- ``set old off`` exits 0 with ``<package><TAB>off``, the property reads empty and ``list`` shows ``off``.
+- ``set old off`` exits 0 with ``<package><TAB>off``, the property reads empty and ``list`` shows ``off``;
+- a choice does not outlive its installation: after the application is uninstalled and installed again, or
+  replaced by a package of the same name that is not eligible (a raised target level, a shared user ID), or
+  only uninstalled, the next ``list`` clears the property and shows the application ``off`` or not at all.
+
+``--hook`` (an image that also carries the framework hook and the compatibility library) adds the steps that
+need an old application's own process: the process of the ``running`` probe, started by `am broadcast` in the
+hook's domain (``untrusted_app_25``), reads the property and cannot set it (the denial leaves an avc line in the
+log when the log shows it); switching on or off ends that process; the process that starts afterwards has the
+layer's library mapped exactly while the switch is on; and a stale choice is gone from the next process. Not
+automated here: that the choice survives a restart or an Android update of the guest (the image proof's own
+recipe restarts the guest), and that a snapshot restore brings it back.
 
 ``--real-apk`` (with ``--real-package`` and ``--real-label``) also installs an application you provide, whose
 label is a resource of its own package, and requires the listing to show that label: the probe's label is a
 literal, so only this application exercises the resource path. The command stops a running application with
-`cmd activity force-stop`; the runner checks that it exits 0, not that a process died (the probe's components
-do not run before Android's permission review of an application that targets below API 23).
+`cmd activity force-stop`; without ``--hook`` the runner checks that it exits 0, not that a process died.
 
 Every wait has a deadline. The guest's launcher is stopped through its own process on any exit, and the guest is
 reached through the shared adb server, always named with `-s`.
-usage: run_android_oldapp_switch.py --emulator uml-darwin-android17 [--release DIR] [--serial HOST:PORT]
+usage: run_android_oldapp_switch.py --emulator uml-darwin-android17 [--release DIR] [--serial HOST:PORT] [--hook]
 """
 
 from __future__ import annotations
@@ -76,6 +89,12 @@ PROBE_SECONDS = 60
 #: The system application the command must refuse.
 SYSTEM_PACKAGE = "com.android.settings"
 UNKNOWN_PACKAGE = "org.example.andarium.oldswitchprobe.notinstalled"
+#: Package names the package manager installs and a property name cannot hold (an empty segment, a trailing dot).
+UNREPRESENTABLE_PACKAGES = ("org.example..oldapp", "org.example.oldapp.")
+#: The turn-on and the next first install must fall in different seconds (the rule compares whole seconds).
+INSTALL_GAP_SECONDS = 2
+#: The log the denial of the application's set appears in, and how long it is given to show.
+AVC_SECONDS = 10
 #: Slack between the host's reading of the guest's clock and a time the guest wrote.
 CLOCK_SLACK_SECONDS = 5
 
@@ -123,6 +142,29 @@ def parse_result(text: str) -> dict[str, str]:
         if key.strip():
             result[key.strip()] = value.strip()
     return result
+
+
+def evaluate_process(result: dict[str, str], value: str, mapped: bool) -> int:
+    """The process id of an old application's process that read `value` (empty for off), could not set the
+    property and had the layer's library mapped or not; raises when the view differs."""
+    context = result.get("context", "")
+    if not context.startswith("u:r:untrusted_app_25:"):
+        raise Failure(f"the process is not in the old application's domain untrusted_app_25: context {context!r}")
+    wrong = [f"{key}={result.get(key, '<missing>')!r} (expected {expected!r})"
+             for key, expected in (("get", value), ("set", "denied"), ("after", value), ("done", ""))
+             if result.get(key) != expected]
+    if wrong:
+        raise Failure("the old application's view of its property differs: " + ", ".join(wrong))
+    if not result.get("pid", "").isdigit():
+        raise Failure(f"the process reported no process id: {result.get('pid')!r}")
+    layer = result.get("layer", "")
+    if not layer.isdigit():
+        raise Failure(f"the process could not read its own memory map: layer={layer!r}")
+    if (int(layer) > 0) != mapped:
+        raise Failure(f"the layer's library is {'mapped' if int(layer) else 'not mapped'} in process "
+                      f"{result['pid']}; it must be {'mapped' if mapped else 'absent'} while the switch is "
+                      f"{'on' if mapped else 'off'}")
+    return int(result["pid"])
 
 
 def evaluate_probe(result: dict[str, str], expected: str) -> str:
@@ -232,22 +274,35 @@ def check_refusals(guest) -> str:
     targets += [(SYSTEM_PACKAGE, probe.STORE_PROPERTY_PREFIX + SYSTEM_PACKAGE),
                 (UNKNOWN_PACKAGE, probe.STORE_PROPERTY_PREFIX + UNKNOWN_PACKAGE)]
     for package, name in targets:
+        result = guest.run(f"{COMMAND} set {package} on")
+        lines = result.err.strip().splitlines()
+        if result.status != EXIT_REFUSED or result.out.strip() or len(lines) != 1:
+            raise Failure(f"set {package} on: status {result.status}, out {result.out.strip()!r}, "
+                          f"err {result.err.strip()!r}; expected status {EXIT_REFUSED} and one line on stderr")
+        # Off is accepted for any name that can be a property name, so that a choice nothing else could
+        # turn off can still be turned off.
+        result = guest.run(f"{COMMAND} set {package} off")
+        if result.status != 0 or result.out != f"{package}\toff\n" or result.err.strip():
+            raise Failure(f"set {package} off: status {result.status}, out {result.out!r}, "
+                          f"err {result.err.strip()!r}; expected status 0 and '{package}<TAB>off'")
+        if property_value(guest, name):
+            raise Failure(f"{name} holds a value after a refusal or an off")
+        notes.append(package.rsplit(".", 1)[-1])
+    for package in UNREPRESENTABLE_PACKAGES:
         for mode in ("on", "off"):
             result = guest.run(f"{COMMAND} set {package} {mode}")
-            lines = result.err.strip().splitlines()
-            if result.status != EXIT_REFUSED or result.out.strip() or len(lines) != 1:
+            if result.status != EXIT_REFUSED or result.out.strip() or len(result.err.strip().splitlines()) != 1:
                 raise Failure(f"set {package} {mode}: status {result.status}, out {result.out.strip()!r}, "
-                              f"err {result.err.strip()!r}; expected status {EXIT_REFUSED} and one line on stderr")
-        if property_value(guest, name):
-            raise Failure(f"{name} holds a value after a refusal")
-        notes.append(package.rsplit(".", 1)[-1])
+                              f"err {result.err.strip()!r}; a name that cannot be a property name is refused "
+                              f"(status {EXIT_REFUSED}, one line on stderr)")
     for arguments in ("", "list extra", "set", f"set {probe.package_of('old')}", f"set {probe.package_of('old')} maybe",
                       f"set {probe.package_of('old')} on extra", "frobnicate"):
         result = guest.run(f"{COMMAND} {arguments}".strip())
         if result.status != EXIT_USAGE or not result.err.startswith("usage: ") or result.out.strip():
             raise Failure(f"'{COMMAND} {arguments}': status {result.status}, out {result.out.strip()!r}, "
                           f"err {result.err.strip()!r}; expected status {EXIT_USAGE} and the usage on stderr")
-    return "refused (status 2, one line): " + ", ".join(notes) + "; unknown arguments: status 64"
+    return ("on refused (status 2, one line), off accepted: " + ", ".join(notes)
+            + "; unrepresentable names refused; unknown arguments: status 64")
 
 
 def switch_on(guest) -> tuple[str, int]:
@@ -267,11 +322,11 @@ def switch_on(guest) -> tuple[str, int]:
     return f"{name} = {value}; listed on", int(value)
 
 
-def application_view(guest, value: int) -> str:
-    """The modern probe, an ordinary application, reads the eligible application's property and tries to set it."""
-    package = probe.package_of("modern")
+def probe_result(guest, variant: str) -> dict[str, str]:
+    """Starts a process of the variant's receiver with `am broadcast` and returns the lines its script wrote."""
+    package = probe.package_of(variant)
     guest.adb_run("shell", f"run-as {package} rm -f {probe.RESULT_FILE}", timeout=30)
-    broadcast = guest.shell(f"am broadcast -n {probe.component_of('modern')}", timeout=60)
+    broadcast = guest.shell(f"am broadcast -n {probe.component_of(variant)}", timeout=60)
     if "Broadcast completed" not in broadcast:
         raise Failure(f"the probe broadcast was not delivered: {broadcast.strip()[-300:]}")
     deadline = time.monotonic() + PROBE_SECONDS
@@ -280,10 +335,14 @@ def application_view(guest, value: int) -> str:
         read = guest.run(f"run-as {package} cat {probe.RESULT_FILE}", timeout=30)
         result = parse_result(read.out) if read.status == 0 else {}
         if "done" in result:
-            break
+            return result
         time.sleep(1)
-    else:
-        raise Failure(f"the probe application wrote no result in {PROBE_SECONDS} s: {result}")
+    raise Failure(f"the probe application wrote no result in {PROBE_SECONDS} s: {result}")
+
+
+def application_view(guest, value: int) -> str:
+    """The modern probe, an ordinary application, reads the eligible application's property and tries to set it."""
+    result = probe_result(guest, "modern")
     note = evaluate_probe(result, str(value))
     held = property_value(guest, probe.property_of("old"))
     if held != str(value):
@@ -305,6 +364,160 @@ def switch_off(guest) -> str:
     return f"{name} is empty; listed off"
 
 
+def check_lifecycle(guest, apks: dict[str, pathlib.Path]) -> str:
+    """A choice does not outlive the installation it was made for: the next listing clears it. The property
+    survives the uninstall (it is on /data under its own name), so each case first looks for it still there."""
+    package, name = probe.package_of("old"), probe.property_of("old")
+    notes = []
+
+    def switched_on() -> str:
+        result = guest.run(f"{COMMAND} set {package} on")
+        if result.status != 0 or result.out != f"{package}\ton\n":
+            raise Failure(f"set {package} on: status {result.status}, out {result.out!r}, err {result.err.strip()!r}")
+        value = property_value(guest, name)
+        if not value.isdigit():
+            raise Failure(f"{name} holds {value!r} after set on")
+        # The next first install must be in a later second than the turn-on.
+        time.sleep(INSTALL_GAP_SECONDS)
+        return value
+
+    def still_stored(value: str, what: str) -> None:
+        held = property_value(guest, name)
+        if held != value:
+            raise Failure(f"{name} holds {held!r} after {what}, not {value}: the cleanup is not exercised")
+
+    # Uninstalled and installed again: first installed after the turn-on time.
+    value = switched_on()
+    install(guest, apks["old"], package)
+    still_stored(value, "the reinstall")
+    row = row_of(listing_of(guest), "old")
+    if row is None or (row.state, row.turned_on) != ("off", 0):
+        raise Failure(f"after a reinstall the listing shows {row}, not the application off")
+    if property_value(guest, name):
+        raise Failure(f"{name} still holds a value after the listing of a reinstalled application")
+    notes.append("reinstalled: cleared")
+
+    # Replaced by the same package name that is no longer eligible.
+    for successor, what in (("raised", "a raised target level"), ("oldshared", "a shared user ID")):
+        install(guest, apks["old"], package)
+        value = switched_on()
+        install(guest, apks[successor], package)
+        still_stored(value, f"the replacement with {what}")
+        if row_of(listing_of(guest), "old") is not None:
+            raise Failure(f"the package is listed after the replacement with {what}")
+        if property_value(guest, name):
+            raise Failure(f"{name} still holds a value after the listing, {what}")
+        result = guest.run(f"{COMMAND} set {package} off")
+        if result.status != 0 or result.out != f"{package}\toff\n" or result.err.strip():
+            raise Failure(f"set {package} off with {what}: status {result.status}, out {result.out!r}, "
+                          f"err {result.err.strip()!r}")
+        notes.append(f"{what}: cleared")
+
+    # Only uninstalled.
+    install(guest, apks["old"], package)
+    value = switched_on()
+    guest.adb_run("uninstall", package, timeout=60)
+    still_stored(value, "the uninstall")
+    if row_of(listing_of(guest), "old") is not None:
+        raise Failure("an uninstalled package is listed")
+    if property_value(guest, name):
+        raise Failure(f"{name} still holds a value after the listing of an uninstalled package")
+    notes.append("uninstalled: cleared")
+    return "; ".join(notes)
+
+
+def process_ids(guest, package: str) -> list[int]:
+    """The process ids of the application (`pidof` exits 1 with no output when it has none)."""
+    return [int(word) for word in guest.run(f"pidof {package}").out.split() if word.isdigit()]
+
+
+def avc_line(guest) -> str:
+    """The log line of the denial of an old application's set of the property, or '' when the log shows none."""
+    deadline = time.monotonic() + AVC_SECONDS
+    while True:
+        for line in guest.run("logcat -d -b all", timeout=60).out.splitlines():
+            if ("avc" in line and "denied" in line and "kernarium_oldapp_prop" in line
+                    and "scontext=u:r:untrusted_app_25:" in line):
+                return line.strip()[line.strip().index("avc"):][:300]
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(1)
+
+
+def check_hook(guest, apks: dict[str, pathlib.Path], report: Report) -> None:
+    """The steps that need the framework hook: an old application's own process and the layer in it."""
+    package, name = probe.package_of("running"), probe.property_of("running")
+    state: dict[str, int] = {}
+
+    def installed() -> str:
+        install(guest, apks["running"], package)
+        row = next((row for row in listing_of(guest) if row.package == package), None)
+        if row is None or (row.state, row.turned_on) != ("off", 0):
+            raise Failure(f"the running probe is listed as {row}, not off")
+        return f"{package} installed and listed off"
+
+    def off_process() -> str:
+        pid = evaluate_process(probe_result(guest, "running"), "", mapped=False)
+        if pid not in process_ids(guest, package):
+            raise Failure(f"process {pid} is not among the application's processes {process_ids(guest, package)}")
+        state["pid"] = pid
+        return f"process {pid} in untrusted_app_25, no layer mapped, property empty"
+
+    def switch(mode: str) -> str:
+        result = guest.run(f"{COMMAND} set {package} {mode}")
+        if result.status != 0 or result.out != f"{package}\t{mode}\n":
+            raise Failure(f"set {package} {mode}: status {result.status}, out {result.out!r}, err {result.err.strip()!r}")
+        remaining = process_ids(guest, package)
+        if remaining:
+            raise Failure(f"the application still has processes {remaining} after set {mode}")
+        return f"set {mode}: the application has no process"
+
+    def on_process() -> str:
+        value = property_value(guest, name)
+        if not value.isdigit():
+            raise Failure(f"{name} holds {value!r} after set on")
+        pid = evaluate_process(probe_result(guest, "running"), value, mapped=True)
+        if pid == state.get("pid"):
+            raise Failure(f"the process after set on is the earlier process {pid}")
+        state["pid"] = pid
+        return f"new process {pid}: layer mapped, read {value}, set refused"
+
+    def off_again() -> str:
+        pid = evaluate_process(probe_result(guest, "running"), "", mapped=False)
+        return f"new process {pid}: no layer, property empty"
+
+    def stale() -> str:
+        result = guest.run(f"{COMMAND} set {package} on")
+        if result.status != 0:
+            raise Failure(f"set {package} on: status {result.status}, err {result.err.strip()!r}")
+        value = property_value(guest, name)
+        time.sleep(INSTALL_GAP_SECONDS)
+        install(guest, apks["running"], package)
+        if property_value(guest, name) != value:
+            raise Failure(f"{name} did not survive the reinstall: the stale case is not exercised")
+        listing_of(guest)
+        pid = evaluate_process(probe_result(guest, "running"), "", mapped=False)
+        return f"after the reinstall and a listing, process {pid} has no layer and the property is empty"
+
+    try:
+        if not report.run("hook: the running probe is installed", installed):
+            return
+        report.run("hook: off, the old application's process has no layer", off_process)
+        report.run("hook: set on ends the application's process", lambda: switch("on"))
+        report.run("hook: on, the new process maps the layer and reads the property", on_process)
+        line = avc_line(guest)
+        if line:
+            report.add("hook: the denied set leaves an avc line", "PASS", line)
+        else:
+            report.add("hook: the denied set leaves an avc line", "SKIP",
+                       "the log shows no avc line for the denial; read it from the kernel log of the image proof")
+        report.run("hook: set off ends the process", lambda: switch("off"))
+        report.run("hook: off again, the next process has no layer", off_again)
+        report.run("hook: a stale choice is gone before the next process", stale)
+    finally:
+        guest.adb_run("uninstall", package, timeout=60)
+
+
 def check_real(guest, apk: pathlib.Path, package: str, label: str) -> str:
     """An application whose label is a resource of its own package is listed under that label."""
     install(guest, apk, package)
@@ -321,7 +534,8 @@ def check_real(guest, apk: pathlib.Path, package: str, label: str) -> str:
 
 def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report) -> None:
     private.mkdir(parents=True, exist_ok=True)
-    apks = {variant: probe.build_apk(private / f"{variant}.apk", variant) for variant in probe.VARIANTS}
+    built = [*probe.VARIANTS, *probe.SUCCESSORS, *(probe.RUNNING if options.hook else ())]
+    apks = {variant: probe.build_apk(private / f"{variant}.apk", variant) for variant in built}
     if options.serial:
         guest = Serial(adb, options.serial)
         stop = lambda: None  # noqa: E731
@@ -351,6 +565,9 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
                 report.run("an application reads it and cannot set it", lambda: application_view(guest, state["value"]))
         finally:
             report.run("set off", lambda: switch_off(guest))
+        report.run("a choice does not outlive its installation", lambda: check_lifecycle(guest, apks))
+        if options.hook:
+            check_hook(guest, apks, report)
         if options.real_apk:
             report.run("a resource label is listed", lambda: check_real(
                 guest, options.real_apk, options.real_package, options.real_label))
@@ -366,6 +583,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="the macos-android17 uml-darwin-android17 (the launcher's default)")
     parser.add_argument("--release", type=pathlib.Path, help="installed Android release built with the command")
     parser.add_argument("--serial", help="a running guest (host:port); no guest is launched")
+    parser.add_argument("--hook", action="store_true",
+                        help="the image also carries the framework hook and the compatibility library: add the "
+                        "steps that start an old application's process and look for the layer in it")
     parser.add_argument("--real-apk", type=pathlib.Path,
                         help="an old application whose label is a resource, to check the label path")
     parser.add_argument("--real-package", help="its package name (with --real-apk)")

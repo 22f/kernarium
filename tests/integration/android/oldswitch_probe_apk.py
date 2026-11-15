@@ -18,6 +18,15 @@ needs one eligible application and, for each clause of the rule, one that fails 
   its ABI;
 - ``shared``: targetSdkVersion 10 with a native library and a shared user ID. Not eligible by that.
 
+For the lifecycle of a stored choice, ``raised`` and ``oldshared`` replace ``old`` under its own package name (an
+update that raised the target level, a reinstall with a shared user ID). For an image that also carries the
+framework hook, ``running`` is a second eligible application (target 10, a 32-bit library, and the receiver of
+property_probe_dex.py): its broadcast starts a process of the hook's domain (``untrusted_app_25``), whose script
+reports the process id, whether the layer's library is mapped into it and what it reads of its own property.
+
+All receivers carry INTERNET: the probe class lists the network interfaces before its script runs, and without
+the permission the list is null and the class dies.
+
 The native library is a stand-in: a valid ELF32 ARM shared object that holds nothing, because only the
 package manager reads it (the primary ABI follows the directory it is in) and no application loads it.
 """
@@ -52,14 +61,25 @@ VARIANTS = {
 #: The variants the command must list, and the ones it must refuse.
 ELIGIBLE = ("old",)
 REFUSED = ("modern", "javaonly", "shared")
+#: Same tuple as VARIANTS. Packages that replace "old" under its package name: the application after an update that
+#: raised its target level, and after a reinstall that declares a shared user ID. Neither is eligible.
+SUCCESSORS = {
+    "raised": (PACKAGE_PREFIX, 21, 29, True, None, False),
+    "oldshared": (PACKAGE_PREFIX, 4, 10, True, PACKAGE_PREFIX + ".shareduid", False),
+}
+#: Eligible, with the receiver and debuggable: the application an image with the hook starts and watches.
+RUNNING = {"running": (PACKAGE_PREFIX + ".running", 4, 10, True, None, True)}
+SPECS = {**VARIANTS, **SUCCESSORS, **RUNNING}
+#: The library the hook loads into an application that is switched on (OLDGAMES-I: System.load of this file).
+LAYER_LIBRARY = "libkernarium_oldapp.so"
 
 
 def package_of(variant: str) -> str:
-    return VARIANTS[variant][0]
+    return SPECS[variant][0]
 
 
 def target_of(variant: str) -> int:
-    return VARIANTS[variant][2]
+    return SPECS[variant][2]
 
 
 def property_of(variant: str) -> str:
@@ -104,17 +124,38 @@ def probe_script(package: str, watched_property: str) -> str:
         "} > $d/result.tmp && mv $d/result.tmp $d/result")
 
 
+def running_script(package: str, own_property: str) -> str:
+    """What the ``running`` package's shell runs as that application: its process id (the shell's parent is the
+    application's process), whether the layer's library is mapped into that process, and its own property as it
+    reads it, whether setting it is allowed, and the value afterwards."""
+    directory = f"/data/data/{package}/files"
+    return (
+        f"d={directory}; mkdir -p $d; "
+        "{ "
+        'echo "context=$(id -Z)"; '
+        'echo "pid=$PPID"; '
+        f'echo "layer=$(grep -c {LAYER_LIBRARY} /proc/$PPID/maps 2>/dev/null)"; '
+        f'echo "get=$(getprop {own_property})"; '
+        f"if setprop {own_property} 7 2>/dev/null; then echo set=allowed; else echo set=denied; fi; "
+        f'echo "after=$(getprop {own_property})"; '
+        "echo done; "
+        "} > $d/result.tmp && mv $d/result.tmp $d/result")
+
+
 def manifest_tree(variant: str) -> binary_xml.Element:
-    package, minimum, target, _, shared, probe = VARIANTS[variant]
+    package, minimum, target, _, shared, probe = SPECS[variant]
     attributes: tuple[tuple[str, str | int | bool], ...] = (("package", package), ("versionCode", 1))
     if shared is not None:
         attributes += (("sharedUserId", shared),)
-    application = [("label", LABEL if variant == "old" else f"Switch Probe {variant}")]
+    application = [("label", LABEL if variant in ("old", "raised", "oldshared") else f"Switch Probe {variant}")]
     children: tuple[binary_xml.Element, ...] = ()
+    permissions: tuple[binary_xml.Element, ...] = ()
     if probe:
         application.append(("debuggable", True))
         children = (binary_xml.Element("receiver", (("name", RECEIVER), ("exported", True))),)
+        permissions = (binary_xml.Element("uses-permission", (("name", "android.permission.INTERNET"),)),)
     return binary_xml.Element("manifest", attributes, (
+        *permissions,
         binary_xml.Element("uses-sdk", (("minSdkVersion", minimum), ("targetSdkVersion", target))),
         binary_xml.Element("application", tuple(application), children),
     ))
@@ -122,12 +163,14 @@ def manifest_tree(variant: str) -> binary_xml.Element:
 
 def build_apk(destination: pathlib.Path, variant: str, workdir: pathlib.Path | None = None) -> pathlib.Path:
     """The signed package of a variant at `destination`."""
-    _, _, _, native, _, probe = VARIANTS[variant]
+    _, _, _, native, _, probe = SPECS[variant]
     files: dict[str, bytes] = {}
     if native:
         files[LIBRARY] = stand_in_library()
     if probe:
+        script = (running_script(package_of(variant), property_of(variant)) if variant in RUNNING
+                  else probe_script(package_of(variant), property_of("old")))
+        watched = property_of(variant if variant in RUNNING else "old")
         files["classes.dex"] = property_probe_dex.build_dex(
-            package_of(variant), property_of("old"), property_of("old"),
-            shell_script=probe_script(package_of(variant), property_of("old")))
+            package_of(variant), watched, watched, shell_script=script)
     return binary_xml.build_apk(destination, workdir, manifest_tree(variant), files)
