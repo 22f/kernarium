@@ -2249,7 +2249,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android 4.0より前向けに作られたもの"
+            "value" : "Android 4.0より前のバージョン向け"
           }
         },
         "zh-Hans" : {
@@ -5384,7 +5384,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android 4.0より前向けに作られたアプリはインストールされていません。"
+            "value" : "Android 4.0より前のバージョン向けのアプリはインストールされていません。"
           }
         },
         "zh-Hans" : {
@@ -5858,7 +5858,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "开"
+            "value" : "打开"
           }
         },
         "zh-Hant" : {
@@ -10188,13 +10188,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "仅对一打开就关闭的应用开启此功能：它可能会让目前正常运行的应用表现不同。开启或关闭时，如果该应用正在运行，它会被关闭。此处只列出可以使用此功能的应用。"
+            "value" : "仅对一打开就关闭的应用开启此功能：它可能会让目前正常运行的应用表现不同。开启或关闭此功能时，如果该应用正在运行，它会被关闭。此处只列出可以使用此功能的应用。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "只對一打開就關閉的應用程式開啟此功能：它可能讓目前正常運作的應用程式表現不同。開啟或關閉時，若該應用程式正開著，它會被關閉。這裡只列出可使用此功能的應用程式。"
+            "value" : "只對一打開就關閉的應用程式開啟此功能：它可能讓目前正常運作的應用程式表現不同。開啟或關閉時，若該應用程式正在執行，它會被關閉。這裡只列出可使用此功能的應用程式。"
           }
         }
       }
@@ -10228,19 +10228,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "「%@」でオフにしますか？"
+            "value" : "「%@」で古いアプリの互換性をオフにしますか？"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "要为“%@”关闭吗？"
+            "value" : "要为“%@”关闭旧版应用兼容吗？"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "要為「%@」關閉嗎？"
+            "value" : "要為「%@」關閉舊版應用程式相容性嗎？"
           }
         }
       }
@@ -10274,19 +10274,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "「%@」でオンにしますか？"
+            "value" : "「%@」で古いアプリの互換性をオンにしますか？"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "要为“%@”开启吗？"
+            "value" : "要为“%@”开启旧版应用兼容吗？"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "要為「%@」開啟嗎？"
+            "value" : "要為「%@」開啟舊版應用程式相容性嗎？"
           }
         }
       }
@@ -10755,13 +10755,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "“%@”已打开，现在将被关闭。"
+            "value" : "“%@”正在运行，现在将被关闭。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "「%@」已開啟，現在會被關閉。"
+            "value" : "「%@」正在執行，現在將會關閉。"
           }
         }
       }
