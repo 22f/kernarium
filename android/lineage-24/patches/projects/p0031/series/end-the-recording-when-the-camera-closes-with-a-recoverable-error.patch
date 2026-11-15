@@ -22,8 +22,8 @@ nothing happens when no video is recording.
 A stopped recording is closed, so pause, resume and mute throw on it,
 while the screen keeps showing it until it finalizes, about a second
 later when no frames come. The function marks the recording as ending
-until its own Finalize event: the pause or resume button, the
-microphone toggle and a second stop do nothing in that time. A start
+until its own Finalize event has reset the state: the pause or resume
+button, the microphone toggle and a second stop do nothing in that time. A start
 that still waits for its sound has no recording to stop: it is
 cancelled, the state goes back to idle and the activity puts the shutter
 back.
@@ -31,8 +31,8 @@ back.
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  .../org/lineageos/aperture/CameraActivity.kt  | 11 ++-
- .../aperture/viewmodels/CameraViewModel.kt    | 81 ++++++++++++++++++-
- 2 files changed, 88 insertions(+), 4 deletions(-)
+ .../aperture/viewmodels/CameraViewModel.kt    | 84 ++++++++++++++++++-
+ 2 files changed, 91 insertions(+), 4 deletions(-)
 
 diff --git a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
 index a1f5caa90d4d66ca80f4fa28910d7a3d60e3a95f..38512bdf2875c8d32f91fd51aebf3116b2c95d71 100644
@@ -57,7 +57,7 @@ index a1f5caa90d4d66ca80f4fa28910d7a3d60e3a95f..38512bdf2875c8d32f91fd51aebf3116
                          }
  
 diff --git a/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt b/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt
-index bc83de246e4288742eb3a6288bd4e66623dbefc4..80af5ec14579b32c1af4b27d8e7ef88ac1bcb8da 100644
+index bc83de246e4288742eb3a6288bd4e66623dbefc4..a9da6799429e60a3d658fdc892fffc94906fb461 100644
 --- a/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt
 +++ b/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt
 @@ -35,6 +35,7 @@ import androidx.lifecycle.asFlow
@@ -121,15 +121,17 @@ index bc83de246e4288742eb3a6288bd4e66623dbefc4..80af5ec14579b32c1af4b27d8e7ef88a
              delay(delayTime)
  
              // Start recording
-@@ -1221,6 +1243,7 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
-                     }
- 
-                     is VideoRecordEvent.Finalize -> {
+@@ -1234,13 +1256,67 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
+                         }
+                         cameraState.value = CameraState.IDLE
+                         videoRecording.value = null
++
++                        // Only now is the recording over for its controls: clear its mark,
++                        // and no later recording's
 +                        endingVideoRecording.compareAndSet(recordingId, 0L)
-                         cameraSoundsUtils.playStopVideoRecording()
-                         if (it.error != VideoRecordEvent.Finalize.ERROR_NO_VALID_DATA) {
-                             Log.d(
-@@ -1240,7 +1263,57 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
+                     }
+                 }
+             }
          }
      }
  
@@ -187,7 +189,7 @@ index bc83de246e4288742eb3a6288bd4e66623dbefc4..80af5ec14579b32c1af4b27d8e7ef88a
          when (cameraState.value) {
              CameraState.RECORDING_VIDEO -> videoRecording.value?.pause()
              CameraState.RECORDING_VIDEO_PAUSED -> videoRecording.value?.resume()
-@@ -1527,7 +1600,9 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
+@@ -1527,7 +1603,9 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
              false -> AudioConfig.AUDIO_DISABLED
          }
  
