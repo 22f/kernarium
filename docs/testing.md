@@ -1182,10 +1182,18 @@ once the application is started again after the person returns (that step starts
 the activity again and shows only that the camera can be opened again). The clip,
 which the runner pulls once it is a finished movie, holds encoded video samples,
 ends soon after the video before the loss, has the frame rate of a recording and
-no gap between two video samples, and its audio holds what its time stamps span
+no step between two video samples, and its audio holds what its time stamps span
 and ends with its video: CameraX keeps a recording over the reopening of a
-camera, so a clip with a gap and a dark tail means the camera application did
-not end it. Two more
+camera, so a clip with a step where the camera was away means the camera
+application did not end it. The checks read the clip's timing and cadence, not
+its pictures (the runner reads the container's tables and decodes no video). The pause and
+resume button is pressed at once after the loss, while the stopped recording is
+not finalized yet; the application's log must show that presses landed in that
+window and were ignored, and the application must not crash. A last case presses
+the start key and ends the camera at once, five times: a loss in the half second
+before the recording exists cancels the start, the application's log must show
+that at least once, and the recording the next key press starts must be an
+ordinary clip, not one that went on over the loss. Two more
 cases leave a viewfinder with no recording, the video mode's (which binds an
 encoder surface) and the photo mode's, and expect each live again within 45 s of
 the return (one deadline for the camera, the picture and the frame counters), in

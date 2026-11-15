@@ -335,11 +335,34 @@ MODES = ("live", "blocked", "none", "restart", "video-lost")
 # when the camera reports its recoverable error, and CameraX opens the camera again about a second after the loss; what the
 # camera delivers after that must not reach the clip), its video has no step of VIDEO_JUMP_MAXIMUM_SECONDS (a gap where the
 # camera was away) and the frame rate of a recording, and its audio holds what its time stamps span and ends with its video.
+# None of it looks at the pictures: the recording does not go on over the camera's reopening is what the row shows.
 CONTROL_VARIABLE = "UML_SYNTHETIC_CAMERA_CONTROL"
 LOST_HOLD_SECONDS = 4
 LOST_MINIMUM_SECONDS = 2.0
 LOST_END_SECONDS = 2.0
 LOST_WAIT_SECONDS = 60
+# The recording is closed when the application stops it, and its screen shows it until it finalizes, about a second later: the
+# pause and resume button is pressed LOST_TAPS times at once after the loss, and the application ignores the presses in that window
+# (it logs each one: the log counts how many landed inside it). The button is on the screen only while a recording runs, so its
+# place is read from the screen before the loss.
+LOST_TAPS = 3
+UI_STATE_BUTTON = "videoRecordingStateButton"
+# The application's log lines of the stop (CameraViewModel, debug level) and of an error (CameraActivity).
+APP_LOG_TAGS = "CameraViewModel:D CameraActivity:E"
+APP_IGNORED_LINE = "is ignored, the video recording ends"
+APP_CANCELLED_LINE = "The start of the video recording is cancelled"
+APP_STOPPED_LINE = "The video recording is stopped"
+APP_FINALIZE_LINE = "Video capture succeeded"
+# A loss inside the half second between the start key and the creation of the recording (the start sound): there is no recording
+# to stop, the application cancels the start. START_WINDOW_ATTEMPTS keys, each followed at once by the loss, hit the window
+# probably, and the application's log says which did. After the camera is back and START_WINDOW_SETTLE_SECONDS, the key either
+# starts a recording (the start was cancelled) or stops one that survived the loss, which lasts as long as the wait: the clip of
+# a recording of START_WINDOW_HOLD_SECONDS ends within START_WINDOW_MAXIMUM_SECONDS, and no clip of the attempt is longer.
+START_WINDOW_ATTEMPTS = 5
+START_WINDOW_SETTLE_SECONDS = 4
+START_WINDOW_HOLD_SECONDS = 3
+START_WINDOW_MINIMUM_SECONDS = 2.0
+START_WINDOW_MAXIMUM_SECONDS = START_WINDOW_HOLD_SECONDS + 1.5
 # The longest time between two samples of a video track that a recording may have: a camera that stalls or is away leaves a
 # step of its length, where the encoder's own steps are a frame (a few hundredths of a second).
 VIDEO_JUMP_MAXIMUM_SECONDS = 0.5
@@ -2398,42 +2421,52 @@ def require_no_stream_leak(guest: Guest, known: list[str], case: str) -> None:
 
 
 def check_video_lost(guest: Guest, plan: Plan) -> None:
-    """The host ends the video of a camera that records when the application leaves the foreground: the recording ends
-    and its clip, which must hold encoded video samples and has no gap or dark tail and an audio track in step with
-    its video (check_clip_of_the_loss), is saved without a second key press, the application stays in
-    front, and a recording works again. That last step STARTS THE APPLICATION AGAIN (a new activity start after the
-    return): it shows that the camera can be opened again, not that the viewfinder recovered by itself; the viewfinder
-    cases that follow show that. After the loss the camera service's log holds no leaked stream (require_no_stream_leak).
+    """The host ends the video of a camera that records when the application leaves the foreground: the recording ends and its
+    clip, which must hold encoded video samples, is saved without a second key press, and the clip does not go on over the
+    camera's reopening (no video step across it, the frame rate of a recording, an audio track in step with its video:
+    check_clip_of_the_loss; the pictures are not looked at). The pause and resume button is pressed at once after the loss,
+    while the stopped recording is not finalized yet: the application ignores it (check_taps_in_the_window), stays in front,
+    and a recording works again. That last step STARTS THE APPLICATION AGAIN (a new activity start after the return): it shows
+    that the camera can be opened again, not that the viewfinder recovered by itself; the viewfinder cases that follow show
+    that. After the loss the camera service's log holds no leaked stream (require_no_stream_leak). The viewfinder cases are
+    followed by the losses in the half second before a recording exists, which cancel its start (check_start_window).
     Needs an image whose HAL reports the loss (route p0030) and whose camera application ends a recording on the camera's
     recoverable error (route p0031): CameraX alone keeps the recording over the camera's reopening."""
     before, _ = guest.videos()
     leaks = guest.stream_leaks()
+    since = guest_time(guest)
     start_recording(guest, plan, restart_application=True)
+    began = time.monotonic()
+    button = recording_controls(guest)
     time.sleep(LOST_HOLD_SECONDS)
+    held = max(float(LOST_HOLD_SECONDS), time.monotonic() - began)
     guest.camera_control("interrupt background")
+    tapped = tap_the_recording_controls(guest, button)
     limit = time.monotonic() + LOST_WAIT_SECONDS
     row = new_movie(guest, before, LOST_WAIT_SECONDS, settle=0)
     path = row.get("_data", "")
+    require_no_crash(guest, since, "the pause and resume button was pressed while the recording ended")
     # The clip is finished a second or so after the loss and the runner has no better signal than the file itself: it is
     # pulled until it parses, within what is left of LOST_WAIT_SECONDS, not a fixed time after the row appeared.
     movie = finished_movie(guest, path, max(0.0, limit - time.monotonic()))
     if not movie.video:
         raise Failure(f"{path} has no video track")
     require_media_payload(path, movie)
-    if not LOST_MINIMUM_SECONDS <= movie.seconds <= LOST_HOLD_SECONDS + LOST_END_SECONDS:
-        raise Failure(f"{path} lasts {movie.seconds:.2f} s; the recording ran {LOST_HOLD_SECONDS} s before the loss "
-                      f"and must last between {LOST_MINIMUM_SECONDS:g} s and {LOST_HOLD_SECONDS + LOST_END_SECONDS:g} s: "
+    if not LOST_MINIMUM_SECONDS <= movie.seconds <= held + LOST_END_SECONDS:
+        raise Failure(f"{path} lasts {movie.seconds:.2f} s; the recording ran {held:g} s before the loss "
+                      f"and must last between {LOST_MINIMUM_SECONDS:g} s and {held + LOST_END_SECONDS:g} s: "
                       "the clip ends with the camera, and a recording that goes on over the camera's reopening keeps "
                       "what the new session delivers")
     print(f"  the recording ended by itself: {row.get('_display_name', path)} {movie.seconds:.2f} s, {movie.frames} frames")
     check_clip_of_the_loss(path, movie)
+    check_taps_in_the_window(guest, since, tapped)
     foreground = parse_foreground(guest.shell(FOREGROUND_COMMAND))
     if not foreground.resumed.startswith(CAMERA_PACKAGE):
         raise Failure(f"the camera application is not in front after the recording ended: {foreground.describe()}")
     print(f"  the application stays in front: {foreground.describe()}")
     # What the application does with its camera is its own: the open camera is reported, not required.
-    held = sorted(active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE))
-    print(f"  cameras the application holds after the loss: {held or 'none'}")
+    held_cameras = sorted(active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE))
+    print(f"  cameras the application holds after the loss: {held_cameras or 'none'}")
     require_no_stream_leak(guest, leaks, "recording")
     guest.camera_control("resume")
     after, _ = guest.videos()
@@ -2456,13 +2489,152 @@ def check_video_lost(guest: Guest, plan: Plan) -> None:
     print("  the HAL reported the end of the camera (ERROR_DEVICE besides the request errors)")
     check_viewfinder_returns(guest, plan, "video")
     check_viewfinder_returns(guest, plan, "photo")
+    check_start_window(guest, plan)
+
+
+def guest_time(guest: Guest) -> float:
+    """The guest's clock in seconds since the epoch, the time base of `logcat -v epoch`."""
+    return float(guest.shell("date +%s.%N").strip())
+
+
+APP_LOG_LINE = re.compile(r"^\s*(\d+\.\d+)\s+\d+\s+\d+\s+[VDIWEF]\s+(\S+?)\s*:\s(.*)$")
+
+
+def parse_application_events(log: str, since: float) -> list[tuple[float, str, str]]:
+    """The (time, tag, message) of the lines of a `logcat -v epoch` at or after `since`."""
+    events = []
+    for line in log.splitlines():
+        hit = APP_LOG_LINE.match(line)
+        if hit and float(hit[1]) >= since:
+            events.append((float(hit[1]), hit[2], hit[3]))
+    return events
+
+
+def application_events(guest: Guest, since: float) -> list[tuple[float, str, str]]:
+    return parse_application_events(guest.shell(f"logcat -d -v epoch -b all {APP_LOG_TAGS} '*:S' 2>&1 || true"), since)
+
+
+def recording_controls(guest: Guest) -> tuple[int, int]:
+    """The centre of the pause and resume button, which the screen shows while a recording runs."""
+    for node in parse_ui_nodes(ui_dump(guest)):
+        if node.id == UI_STATE_BUTTON:
+            return node.x, node.y
+    raise Failure("the application shows no pause and resume button while it records")
+
+
+def tap_the_recording_controls(guest: Guest, button: tuple[int, int]) -> int:
+    """LOST_TAPS presses of the button at once (separate input processes started together, so that they land within the
+    second after the loss that the stopped recording needs to finalize). Returns how many were sent."""
+    x, y = button
+    guest.shell(" ".join(f"input tap {x} {y} &" for _ in range(LOST_TAPS)) + " wait")
+    return LOST_TAPS
+
+
+def require_no_crash(guest: Guest, since: float, what: str) -> None:
+    """The camera application has not crashed since `since`: the crash buffer holds no fatal exception of its process."""
+    lines = [line.strip() for line in guest.shell("logcat -d -v epoch -b crash 2>&1 || true").splitlines()
+             if line.strip()[:1].isdigit() and float(line.split()[0]) >= since]
+    if any(f"Process: {CAMERA_PACKAGE}" in line for line in lines):
+        detail = [line.split(None, 5)[-1] for line in lines if "Exception" in line or "Error" in line][:2]
+        raise Failure(f"the camera application crashed after the loss ({what}): {' | '.join(detail) or lines[:2]}")
+
+
+def check_taps_in_the_window(guest: Guest, since: float, sent: int) -> None:
+    """The application's log counts the presses that landed while the stopped recording was not finalized (it logs each one it
+    ignores, and the Finalize line ends the window). At least one must have: otherwise the row has shown nothing."""
+    events = [(when, message) for when, tag, message in application_events(guest, since) if tag == "CameraViewModel"]
+    finalized = next((when for when, message in events if APP_FINALIZE_LINE in message), None)
+    ignored = [when for when, message in events if APP_IGNORED_LINE in message]
+    inside = [when for when in ignored if finalized is None or when <= finalized]
+    print(f"  the pause and resume button was pressed {sent} times at once after the loss: {len(inside)} presses landed "
+          f"while the recording ended and were ignored, {len(ignored) - len(inside)} after its Finalize (the application's log)")
+    if not inside:
+        raise Failure("no press of the pause and resume button landed while the stopped recording was not finalized yet, "
+                      "so the application's handling of it was not exercised (the image lacks the application's topic "
+                      "of route p0031, or the presses came after the Finalize)")
+
+
+def finished_new_movies(guest: Guest, before: dict[str, dict[str, str]], seconds: float) -> list[tuple[dict[str, str], Movie]]:
+    """The movies that appeared since `before` and parse as finished ones: looked at every half second until at least one does,
+    for at most `seconds`. A file that is still being written is not a finished movie and is left out."""
+    deadline = time.monotonic() + seconds
+    while True:
+        guest.alive()
+        found = []
+        rows, _ = guest.videos()
+        for _, row in sorted(rows.items()):
+            if row["_id"] in before:
+                continue
+            try:
+                found.append((row, parse_mp4(guest.pull(row.get("_data", "")))))
+            except ValueError:
+                continue
+        if found:
+            return found
+        if time.monotonic() >= deadline:
+            raise Failure(f"no movie that appeared since the start key is a finished one after {seconds:.0f} s")
+        time.sleep(0.5)
+
+
+def check_start_window(guest: Guest, plan: Plan) -> None:
+    """A loss in the half second between the start key and the creation of the recording (the start sound) finds no recording to
+    stop: the application cancels the start and stays idle. START_WINDOW_ATTEMPTS times: the start key, the loss at once, the
+    return, a wait, then the key again, a hold and the key again. A cancelled start leaves the viewfinder idle, so the second key
+    starts the recording that is held and the third stops it: one clip of about START_WINDOW_HOLD_SECONDS. A start that was not
+    cancelled makes a recording that goes on over the loss, which the second key stops: a clip as long as the wait, longer than
+    START_WINDOW_MAXIMUM_SECONDS. The application's log says which attempts cancelled a start; the loop needs one."""
+    camera = plan.camera_ids[0]
+    leaks = guest.stream_leaks()
+    start_camera_application(guest, VIDEO_ACTION, front=PROFILE_CAMERAS[plan.profile][0] == "front")
+    wait_for_chart(guest, camera, "video")
+    cancelled = 0
+    for number in range(1, START_WINDOW_ATTEMPTS + 1):
+        before, _ = guest.videos()
+        since = guest_time(guest)
+        guest.shell(f"input keyevent {CAMERA_KEYCODE}")
+        guest.camera_control("interrupt background")
+        time.sleep(LOST_END_SECONDS)
+        guest.camera_control("resume")
+        wait_for_chart(guest, camera, "video viewfinder", VIEWFINDER_RECOVERY_SECONDS)
+        time.sleep(START_WINDOW_SETTLE_SECONDS)
+        guest.shell(f"input keyevent {CAMERA_KEYCODE}")
+        time.sleep(START_WINDOW_HOLD_SECONDS)
+        guest.shell(f"input keyevent {CAMERA_KEYCODE}")
+        require_no_crash(guest, since, f"start window attempt {number}")
+        movies = finished_new_movies(guest, before, LOST_WAIT_SECONDS)
+        messages = [message for _, tag, message in application_events(guest, since) if tag == "CameraViewModel"]
+        verdict = ("the start was cancelled" if any(APP_CANCELLED_LINE in message for message in messages)
+                   else "the recording had started and was stopped" if any(APP_STOPPED_LINE in message for message in messages)
+                   else "no stop or cancel in the log")
+        cancelled += verdict == "the start was cancelled"
+        clips = ", ".join(f"{row.get('_display_name', '')} {movie.seconds:.2f} s" for row, movie in movies)
+        print(f"  start window {number} of {START_WINDOW_ATTEMPTS}: {verdict}; clips: {clips}")
+        for row, movie in movies:
+            if movie.seconds > START_WINDOW_MAXIMUM_SECONDS:
+                raise Failure(f"{row.get('_data', '')} lasts {movie.seconds:.2f} s (above {START_WINDOW_MAXIMUM_SECONDS:g} s): the "
+                              "recording that was started just before the loss went on over the camera's reopening instead "
+                              "of ending, and the key that should have started a recording stopped it")
+        if not any(movie.seconds >= START_WINDOW_MINIMUM_SECONDS for _, movie in movies):
+            raise Failure(f"the recording started after the loss in attempt {number} lasts under {START_WINDOW_MINIMUM_SECONDS:g} s "
+                          f"({clips}): the key did not start a recording")
+        foreground = parse_foreground(guest.shell(FOREGROUND_COMMAND))
+        if not foreground.resumed.startswith(CAMERA_PACKAGE):
+            raise Failure(f"the camera application is not in front after start window attempt {number}: {foreground.describe()}")
+    require_no_stream_leak(guest, leaks, "start window")
+    print(f"  the loss cancelled the start in {cancelled} of {START_WINDOW_ATTEMPTS} attempts; the application stayed in front and a "
+          "recording worked after each")
+    if not cancelled:
+        raise Failure(f"no loss cancelled a start in {START_WINDOW_ATTEMPTS} attempts (the application's log): the loss came after "
+                      "the recording was created each time, or the image lacks the application's topic of route p0031")
 
 
 def check_clip_of_the_loss(path: str, movie: Movie) -> None:
-    """The clip a loss ends has no gap and no dark tail: its frames over its duration reach VIDEO_MINIMUM_FPS and no two
-    video samples are more than VIDEO_JUMP_MAXIMUM_SECONDS apart (a recording that goes on over the camera's reopening has
-    the camera's absence as a step and then the frames of the session the host holds, dark), and its audio holds what its
-    time stamps span and ends with its video (check_audio). The track's numbers are printed before the checks."""
+    """The clip a loss ends does not go on over the camera's reopening: its frames over its duration reach VIDEO_MINIMUM_FPS
+    and no two video samples are more than VIDEO_JUMP_MAXIMUM_SECONDS apart (a recording that goes on over the camera's
+    reopening has the camera's absence as a step, and then the frames of the session the host holds), and its audio holds
+    what its time stamps span and ends with its video (check_audio). These are timing and cadence checks: the pictures are not
+    looked at (the runner reads the container's tables and decodes no video), so a steady dark tail would pass. The track's numbers are
+    printed before the checks."""
     print(f"  clip: {movie.frames} frames over {movie.video_seconds:.2f} s = {movie.fps:.1f} fps average, longest step of "
           f"its video sample times {movie.video_gap:.3f} s")
     if movie.fps < VIDEO_MINIMUM_FPS:

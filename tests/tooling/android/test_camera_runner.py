@@ -3083,8 +3083,34 @@ class VideoLostTests(unittest.TestCase):
             # The camera service logs a leaked stream at the nth time (counted from 1) the runner sends a control line:
             # {("interrupt background", 2)} is the loss of the video viewfinder, {("resume", 3)} the return of the photo one.
             self.leaks_at: set[tuple[str, int]] = set()
+            # The application's log as `logcat -v epoch` prints it, on a clock that every `date` advances by ten seconds, and its
+            # crash buffer. After the loss the application (route p0031) logs the stop at once and its Finalize 1.1 s later, and
+            # logs each press of the pause and resume button that it ignores: `ignored_inside` of the pressed ones land before
+            # the Finalize, `ignored_after` after it. An application without the topic crashes on the first press.
+            self.now = 1_000_000.0
+            self.app_log = ""
+            self.crash_log = ""
+            self.has_guard = True
+            self.ignored_inside = 3
+            self.ignored_after = 0
+            self.pause_button = True
+            # The loops of the start window, after the viewfinder cases: a loss just after the start key, per attempt, either
+            # cancels the start ("cancel"), finds the recording already created and stops it ("stopped"), or does neither and the
+            # recording goes on over the loss ("survives": the second key then stops it, and a clip as long as the wait appears).
+            self.window_modes = ["cancel"]
+            self.window_keys = 0
+            self.pending = False
+            self.window_clips = 0
+            self.survivor_seconds = 7.5
+            self.second_seconds = 3.4
+            self.files: dict[str, bytes] = {}
+
+        def note(self, offset: float, tag: str, message: str, level: str = "D") -> None:
+            self.app_log += f"{self.now + offset:.3f}  2179  2179 {level} {tag}: {message}\n"
 
         def pull(self, remote: str) -> bytes:
+            if remote in self.files:
+                return self.files[remote]
             if remote == "/sdcard/again.mp4" and self.again_movie is not None:
                 return self.again_movie
             if remote == "/sdcard/lost.mp4":
@@ -3099,10 +3125,26 @@ class VideoLostTests(unittest.TestCase):
             self.commands.append(f"<control {line}>")
             if (line, self.control_lines.count(line)) in self.leaks_at:
                 self.service_leaks.append(VideoLostTests.leak_line(len(self.control_lines)))
-            if line == "interrupt background" and self.recording:
+            if line == "interrupt background" and self.pending:
+                attempt = self.window_keys // 3
+                mode = self.window_modes[min(attempt, len(self.window_modes) - 1)]
+                self.pending = False
+                if mode == "cancel":
+                    self.note(0.02, "CameraViewModel", "The start of the video recording is cancelled")
+                elif mode == "stopped":
+                    self.note(0.02, "CameraViewModel", "The video recording is stopped")
+                else:
+                    self.recording = True
+                self.held = set()
+                self.log += VideoLostTests.END
+            elif line == "interrupt background" and self.recording:
                 if self.ends_on_loss:
                     self.recording = False
                     self.rows["2"] = {"_id": "2", "_data": "/sdcard/lost.mp4", "_display_name": "lost.mp4"}
+                    self.note(0.015, "CameraActivity", "Error: code: 3, type: RECOVERABLE", "E")
+                    if self.has_guard:
+                        self.note(0.016, "CameraViewModel", "The video recording is stopped")
+                    self.note(1.15, "CameraViewModel", "Video capture succeeded: content://media/external/video/media/2")
             elif line == "interrupt background" and self.photo:
                 if self.photo_lost:
                     self.held = set()
@@ -3122,7 +3164,57 @@ class VideoLostTests(unittest.TestCase):
                 if self.crash:
                     self.events_log += "11-15 16:50:00.000 I am_crash: [4711,0,org.lineageos.aperture]\n"
 
+        def window_key(self, command: str) -> str:
+            self.commands.append(command)
+            index = self.window_keys % 3
+            self.window_keys += 1
+            if index == 0:
+                self.pending = True
+            elif self.recording:
+                self.recording = False
+                self.window_clips += 1
+                path = f"/sdcard/window{self.window_clips}.mp4"
+                seconds = self.survivor_seconds if index == 1 else self.second_seconds
+                self.files[path] = movie(seconds, audio=sound(seconds))
+                identity = str(100 + self.window_clips)
+                self.rows[identity] = {"_id": identity, "_data": path, "_display_name": f"window{self.window_clips}.mp4"}
+                self.note(0.1, "CameraViewModel", "Video capture succeeded: content://media/external/video/media/9")
+            else:
+                self.recording = True
+            return ""
+
         def shell(self, command: str, timeout: float = 0) -> str:
+            if command == "date +%s.%N":
+                self.commands.append(command)
+                self.now += 10.0
+                return f"{self.now:.9f}\n"
+            if "uiautomator dump" in command:
+                self.commands.append(command)
+                node = ('<node index="0" text="" resource-id="org.lineageos.aperture:id/videoRecordingStateButton" '
+                        'class="android.widget.ImageButton" checked="false" bounds="[616,1039][659,1082]" />')
+                return f'<hierarchy rotation="0">{node if self.pause_button else ""}</hierarchy>'
+            if command.startswith("input tap ") and command.endswith(" wait"):
+                self.commands.append(command)
+                if self.has_guard:
+                    for number in range(self.ignored_inside):
+                        self.note(0.3 + 0.1 * number, "CameraViewModel", "The pause or resume is ignored, the video recording ends")
+                    for number in range(self.ignored_after):
+                        self.note(1.5 + 0.1 * number, "CameraViewModel", "The pause or resume is ignored, the video recording ends")
+                else:
+                    when = self.now + 0.4
+                    self.crash_log += (f"{when:.3f}  2179  2179 E AndroidRuntime: FATAL EXCEPTION: main\n"
+                                       f"{when:.3f}  2179  2179 E AndroidRuntime: Process: org.lineageos.aperture, PID: 2179\n"
+                                       f"{when:.3f}  2179  2179 E AndroidRuntime: java.lang.IllegalStateException: "
+                                       "The recording has been stopped.\n")
+                return ""
+            if command.startswith("logcat -d -v epoch -b all CameraViewModel:D"):
+                self.commands.append(command)
+                return self.app_log
+            if command.startswith("logcat -d -v epoch -b crash"):
+                self.commands.append(command)
+                return "--------- beginning of crash\n" + self.crash_log
+            if command == f"input keyevent {runner.CAMERA_KEYCODE}" and self.control_lines.count("resume") >= 3:
+                return self.window_key(command)
             if command.startswith("am start"):
                 self.photo = "STILL_IMAGE_CAMERA" in command
             if command.startswith("pidof "):
@@ -3166,9 +3258,11 @@ class VideoLostTests(unittest.TestCase):
         self.assertIn("photo viewfinder: the HAL did not end the camera and reopened its video streams", text)
         self.assertIn("video viewfinder: live again after the return, same process 4711, no error window", text)
         self.assertIn("photo viewfinder: live again after the return, same process 4711, no error window", text)
-        self.assertEqual(guest.control_lines, ["interrupt background", "resume"] * 3)
-        # The first recording is stopped by the loss, not by a second key press; the second is started and stopped by key.
-        self.assertEqual(guest.commands.count(f"input keyevent {runner.CAMERA_KEYCODE}"), 3)
+        # The recording, the two viewfinders and the five losses of the start window.
+        self.assertEqual(guest.control_lines, ["interrupt background", "resume"] * (3 + runner.START_WINDOW_ATTEMPTS))
+        # The first recording is stopped by the loss, not by a second key press; the second is started and stopped by key;
+        # each attempt of the start window presses it three times.
+        self.assertEqual(guest.commands.count(f"input keyevent {runner.CAMERA_KEYCODE}"), 3 + 3 * runner.START_WINDOW_ATTEMPTS)
         self.assertEqual(guest.commands.count(f"am force-stop {runner.CAMERA_PACKAGE}"), 1,
                          "only the first start stops the application: the second shows that it opens its camera again")
 
@@ -3179,7 +3273,8 @@ class VideoLostTests(unittest.TestCase):
         self.run_check(guest)
         tokens = ["start" if command.startswith("am start") else command[len("<control "):-1].split()[0]
                   for command in guest.commands if command.startswith("am start") or command.startswith("<control")]
-        self.assertEqual(tokens, ["start", "interrupt", "resume", "start", "interrupt", "resume", "start", "interrupt", "resume"])
+        self.assertEqual(tokens, ["start", "interrupt", "resume", "start", "interrupt", "resume", "start", "interrupt", "resume",
+                                  "start"] + ["interrupt", "resume"] * runner.START_WINDOW_ATTEMPTS)
 
     def test_a_recording_that_does_not_end_fails(self) -> None:
         guest = self.Guest(self.plan())
@@ -3258,6 +3353,178 @@ class VideoLostTests(unittest.TestCase):
         guest.again_movie = movie(3.5, samples=False)
         with self.assertRaisesRegex(runner.Failure, "with encoded video samples"):
             self.run_check(guest)
+
+    # The pause and resume button, pressed at once after the loss: the stopped recording is closed (pause, resume and mute throw
+    # on it) and the screen shows it until its Finalize.
+    def test_the_button_is_read_before_the_loss_and_pressed_at_once_after_it(self) -> None:
+        guest = self.Guest(self.plan())
+        text = self.run_check(guest)
+        taps = f"input tap 637 1060 & input tap 637 1060 & input tap 637 1060 & wait"
+        self.assertEqual(guest.commands.count(taps), 1)
+        index = guest.commands.index(taps)
+        self.assertEqual(guest.commands[index - 1], "<control interrupt background>", "nothing between the loss and the presses")
+        self.assertTrue(any("uiautomator dump" in command for command in guest.commands[:index]))
+        self.assertIn("the pause and resume button was pressed 3 times at once after the loss: 3 presses landed while the "
+                      "recording ended and were ignored, 0 after its Finalize (the application's log)", text)
+
+    def test_the_presses_are_counted_inside_the_window_and_after_it(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.ignored_inside, guest.ignored_after = 2, 1
+        self.assertIn("2 presses landed while the recording ended and were ignored, 1 after its Finalize", self.run_check(guest))
+
+    def test_presses_that_all_came_after_the_finalize_show_nothing_and_fail(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.ignored_inside, guest.ignored_after = 0, 3
+        with self.assertRaisesRegex(runner.Failure, "no press of the pause and resume button landed while the stopped recording "
+                                                    "was not finalized yet"):
+            self.run_check(guest)
+
+    def test_an_application_that_ignores_nothing_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.ignored_inside = 0
+        with self.assertRaisesRegex(runner.Failure, "no press of the pause and resume button landed"):
+            self.run_check(guest)
+
+    def test_an_application_that_crashes_on_the_press_fails_with_the_exception(self) -> None:
+        # An application with the stop and no managed transition: pause() on the closed recording throws.
+        guest = self.Guest(self.plan())
+        guest.has_guard = False
+        with self.assertRaisesRegex(runner.Failure, r"the camera application crashed after the loss .*IllegalStateException: "
+                                                    r"The recording has been stopped\."):
+            self.run_check(guest)
+        self.assertEqual(guest.lost_pulls, 0, "the crash is the failure, not a clip that never finishes")
+
+    def test_a_screen_without_the_button_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.pause_button = False
+        with self.assertRaisesRegex(runner.Failure, "shows no pause and resume button while it records"):
+            self.run_check(guest)
+
+    def test_the_clip_bound_follows_a_longer_hold_before_the_loss(self) -> None:
+        # The button is read from the screen during the hold, which can take a few seconds on a loaded guest: the clip may then
+        # last the real hold and LOST_END_SECONDS, not the nominal hold. 6.5 s fails after a 4 s hold and passes after 5 s.
+        clock = self.Clock()
+        guest = self.Guest(self.plan(), movies=movie(7.0, audio=sound(7.0)))
+        original = guest.shell
+
+        def shell(command: str, timeout: float = 0) -> str:
+            if "uiautomator dump" in command:
+                clock.sleep(5.0)
+            return original(command, timeout)
+
+        guest.shell = shell
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(runner.time, "monotonic", clock.monotonic), \
+                mock.patch.object(runner.time, "sleep", clock.sleep):
+            runner.check_video_lost(guest, guest.plan)
+        self.assertIn("the recording ended by itself: lost.mp4 7.00 s", out.getvalue())
+
+    def test_a_crash_is_the_applications_own_and_since_the_start(self) -> None:
+        crash = ("--------- beginning of crash\n"
+                 "99.000  1  1 E AndroidRuntime: FATAL EXCEPTION: main\n"
+                 "99.000  1  1 E AndroidRuntime: Process: org.lineageos.aperture, PID: 1\n"
+                 "99.001  1  1 E AndroidRuntime: java.lang.IllegalStateException: before\n"
+                 "200.000  7  7 E AndroidRuntime: FATAL EXCEPTION: main\n"
+                 "200.000  7  7 E AndroidRuntime: Process: com.other.app, PID: 7\n"
+                 "200.001  7  7 E AndroidRuntime: java.lang.RuntimeException: not ours\n")
+
+        class Stub:
+            def shell(self, command: str, timeout: float = 0) -> str:
+                return crash
+
+        runner.require_no_crash(Stub(), 100.0, "x")  # the first is before, the second is another process
+        with self.assertRaisesRegex(runner.Failure, r"crashed after the loss \(x\): .*before"):
+            runner.require_no_crash(Stub(), 50.0, "x")
+
+    def test_the_application_log_is_read_from_a_point_in_time(self) -> None:
+        log = ("--------- beginning of main\n"
+               "10.000  1  1 D CameraViewModel: before\n"
+               "20.500  1  2 D CameraViewModel: The video recording is stopped\n"
+               "20.600  1  2 E CameraActivity: Error: code: 3, type: RECOVERABLE\n")
+        self.assertEqual(runner.parse_application_events(log, 20.0),
+                         [(20.5, "CameraViewModel", "The video recording is stopped"),
+                          (20.6, "CameraActivity", "Error: code: 3, type: RECOVERABLE")])
+        self.assertEqual(runner.parse_application_events("", 0.0), [])
+
+    # A loss in the half second between the start key and the creation of the recording (the start sound).
+    def test_a_loss_just_after_the_start_key_cancels_the_start_in_every_attempt(self) -> None:
+        guest = self.Guest(self.plan())
+        text = self.run_check(guest)
+        for number in range(1, runner.START_WINDOW_ATTEMPTS + 1):
+            self.assertIn(f"start window {number} of 5: the start was cancelled; clips: window{number}.mp4 3.40 s", text)
+        self.assertIn("the loss cancelled the start in 5 of 5 attempts; the application stayed in front", text)
+        # Each attempt: the start key, the loss at once, the return, the key that starts, the key that stops.
+        loop = guest.commands[guest.commands.index("<control resume>", guest.commands.index("<control resume>",
+                                                   guest.commands.index("<control resume>") + 1) + 1) + 1:]
+        key = f"input keyevent {runner.CAMERA_KEYCODE}"
+        first = loop.index(key)
+        self.assertEqual(loop[first + 1], "<control interrupt background>", "no command between the key and the loss")
+
+    def test_a_start_that_was_not_cancelled_goes_on_over_the_loss_and_fails(self) -> None:
+        # The defect: the recording the person started before the loss runs over the reopening, and the key that should
+        # start a recording stops it: one clip as long as the wait.
+        guest = self.Guest(self.plan())
+        guest.window_modes = ["survives"]
+        with self.assertRaisesRegex(runner.Failure, r"window1\.mp4 lasts 7\.50 s \(above 4\.5 s\).*went on over the camera's reopening"):
+            self.run_check(guest)
+
+    def test_losses_that_all_came_after_the_recording_was_created_prove_nothing_and_fail(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.window_modes = ["stopped"]
+        with self.assertRaisesRegex(runner.Failure, "no loss cancelled a start in 5 attempts"):
+            self.run_check(guest)
+
+    def test_one_cancelled_start_among_misses_is_enough(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.window_modes = ["stopped", "stopped", "cancel", "stopped", "stopped"]
+        text = self.run_check(guest)
+        self.assertIn("start window 1 of 5: the recording had started and was stopped", text)
+        self.assertIn("start window 3 of 5: the start was cancelled", text)
+        self.assertIn("the loss cancelled the start in 1 of 5 attempts", text)
+
+    def test_a_recording_after_the_loss_that_is_too_short_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.second_seconds = 1.0
+        with self.assertRaisesRegex(runner.Failure, r"lasts under 2 s .*the key did not start a recording"):
+            self.run_check(guest)
+
+    def test_an_application_that_left_the_front_in_the_start_window_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        original = guest.shell
+
+        def shell(command: str, timeout: float = 0) -> str:
+            if command == runner.FOREGROUND_COMMAND and guest.window_keys >= 3:
+                return foreground_text("topResumedActivity=ActivityRecord{1 u0 com.android.launcher3/.Launcher t1}")
+            return original(command, timeout)
+
+        guest.shell = shell
+        with self.assertRaisesRegex(runner.Failure, "not in front after start window attempt 1"):
+            self.run_check(guest)
+
+    def test_the_movies_of_an_attempt_are_the_finished_ones_that_appeared(self) -> None:
+        files = {"/sdcard/done.mp4": movie(3.0, audio=sound(3.0)), "/sdcard/part.mp4": movie(3.0)[:100]}
+        rows = {"1": {"_id": "1", "_data": "/sdcard/old.mp4"},
+                "2": {"_id": "2", "_data": "/sdcard/part.mp4"}, "3": {"_id": "3", "_data": "/sdcard/done.mp4"}}
+
+        class Stub:
+            def alive(self) -> None:
+                pass
+
+            def videos(self):
+                return rows, ""
+
+            def pull(self, remote: str) -> bytes:
+                return files[remote]
+
+        with mock.patch.object(runner.time, "sleep", lambda seconds: None):
+            found = runner.finished_new_movies(Stub(), {"1": rows["1"]}, 5)
+            self.assertEqual([row["_id"] for row, _ in found], ["3"], "a file still being written is left out")
+            files.pop("/sdcard/done.mp4")
+            files["/sdcard/done.mp4"] = movie(3.0)[:100]
+            clock = self.Clock()
+            with mock.patch.object(runner.time, "monotonic", clock.monotonic), mock.patch.object(runner.time, "sleep", clock.sleep):
+                with self.assertRaisesRegex(runner.Failure, "no movie that appeared since the start key is a finished one after 5 s"):
+                    runner.finished_new_movies(Stub(), {"1": rows["1"]}, 5)
 
     def test_an_application_that_left_the_front_fails(self) -> None:
         guest = self.Guest(self.plan())
