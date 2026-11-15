@@ -286,10 +286,10 @@ MODES = ("live", "blocked", "none", "restart")
 # The cameras Android lists again after the restart: the lazy provider starts when cameraserver first asks.
 RESTART_LIST_SECONDS = 60
 CALIBRATION_SECONDS = 30  # the host writes the colour data of a still when the still is done
-# The application starts on the back zoom camera, which has no RAW stills of its own (the host teaches a physical lens
-# its colour data), so the restart mode takes its still on a lens the application lists as a button: the last, the
-# telephoto lens, which is the camera with this ID. A host with a single back camera lists no buttons, and the
-# application's own camera is the lens that learns.
+# The application starts on the primary back camera, whose first still teaches the host its colour data (a lens
+# keeps what a Bayer still of it shows). A phone has more lenses, and the restart mode takes a still on the last
+# lens button too, the telephoto lens, which is the camera with this ID, so that the colour data of more than one
+# lens has to survive the restart. A host with a single back camera lists no buttons.
 LENS_SELECTOR = "lensSelectorLayout"
 LAST_LENS_CAMERA = {"phone": "4"}
 UI_DUMP = "/sdcard/runner-ui.xml"
@@ -1381,15 +1381,13 @@ def parse_lens_buttons(dump: str) -> list[tuple[str, int, int]]:
 
 
 def select_the_lens_that_learns(guest: Guest, plan: Plan) -> str | None:
-    """Makes the application use the lens whose still teaches the host its colour data: the last lens button on a
-    phone (the application then holds that lens's camera), nothing on a host whose application has no buttons.
-    Returns the label of the button it tapped."""
+    """Makes the application use the last lens of a phone, the last lens button (the application then holds that
+    lens's camera); nothing on a host whose application has no buttons. Returns the label of the button it tapped."""
     dump = guest.shell(f"uiautomator dump {UI_DUMP} >/dev/null 2>&1; cat {UI_DUMP}", timeout=120)
     buttons = parse_lens_buttons(dump[dump.index("<hierarchy"):]) if "<hierarchy" in dump else []
     if not buttons:
         if plan.profile in LAST_LENS_CAMERA:
-            raise Failure(f"the application lists no lens buttons on the {plan.profile} profile, whose zoom camera learns no "
-                          "colour data: the run has no lens to teach")
+            raise Failure(f"the application lists no lens buttons on the {plan.profile} profile, which has more than one back lens")
         return None
     camera = LAST_LENS_CAMERA.get(plan.profile)
     if camera is None:
@@ -1405,19 +1403,24 @@ def select_the_lens_that_learns(guest: Guest, plan: Plan) -> str | None:
 
 
 def run_restart_checks(guest: Guest, plan: Plan, calibration: pathlib.Path) -> list[str]:
-    """The first session of the restart mode: the layout, the cameras, one preview and one back still, and the
-    colour data that still taught in the calibration directory. Returns the camera IDs Android lists."""
+    """The first session of the restart mode: the layout, the cameras, one preview, a still of the primary back
+    camera and of the last lens, and the colour data those stills taught in the calibration directory. Returns the
+    camera IDs Android lists."""
     print(f"layout {plan.layout.name}, profile {plan.profile}, restart (first session)")
     check_layout(guest, plan)
     check_camera_list(guest, plan)
     before = guest.stills()
     check_preview(guest, plan)
+    check_still(guest, plan, before)
+    taught = 1
     lens = select_the_lens_that_learns(guest, plan)
     if lens is not None:
         print(f"  lens: the button {lens!r}")
-    check_still(guest, plan, before)
-    wait_for("the colour data of the back still in the calibration directory", CALIBRATION_SECONDS,
-             lambda: None if any(calibration.glob("*.cal")) else f"no .cal file in {calibration}", guest)
+        check_still(guest, plan, guest.stills())
+        taught += 1
+    wait_for(f"the colour data of the back stills ({taught}) in the calibration directory", CALIBRATION_SECONDS,
+             lambda: None if len(list(calibration.glob("*.cal"))) >= taught
+             else f"{len(list(calibration.glob('*.cal')))} .cal files in {calibration}", guest)
     ids = parse_camera_ids(guest.media_camera())
     print(f"  calibration: {sorted(path.name for path in calibration.glob('*.cal'))}")
     return ids

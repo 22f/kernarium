@@ -2292,7 +2292,7 @@ class RestartTests(unittest.TestCase):
 
     TAUGHT = "bf-small-flash-manual-raw"
     PLAIN = "bf-small-flash-manual"
-    IDS = ["0", "1", "2", "3", "4"]
+    IDS = ["0", "1", "3", "4"]
 
     def dump(self, ids: list[str], raw_in: set[str]) -> str:
         """`dumpsys media.camera` of a phone: the devices, then the characteristics of each (the front camera is 1)."""
@@ -2335,7 +2335,7 @@ class RestartTests(unittest.TestCase):
     def test_a_lens_that_went_missing_after_the_restart_is_named(self) -> None:
         # What r27 did: the calibrated lenses were rejected at boot and Android never listed them.
         with self.assertRaisesRegex(runner.Failure, r"EmulatedCameraDeviceInfo.*: cameras \['1'\], not the "
-                                    r"\['0', '1', '2', '3', '4'\] of the session before: missing \['0', '2', '3', '4'\], extra \[\]"):
+                                    r"\['0', '1', '3', '4'\] of the session before: missing \['0', '3', '4'\], extra \[\]"):
             self.check(["1"], set())
 
     def test_an_extra_camera_is_not_the_same_list(self) -> None:
@@ -2357,6 +2357,7 @@ class RestartTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             calibration = Path(directory)
             (calibration / "SyntheticPhone1_1.back-wide.cal").write_bytes(b"UMLCAL02")
+            (calibration / "SyntheticPhone1_1.back-tele.cal").write_bytes(b"UMLCAL02")
             guest.stills = lambda: set()
             with mock.patch.object(runner, "check_preview"), mock.patch.object(runner, "check_still"), \
                     mock.patch.object(runner, "check_camera_list"), mock.patch.object(runner, "check_layout"), \
@@ -2365,6 +2366,7 @@ class RestartTests(unittest.TestCase):
                 self.assertEqual(runner.run_restart_checks(guest, plan, calibration), self.IDS)
             self.assertIn("lens: the button '2.5'", printed.getvalue())
             self.assertIn("SyntheticPhone1_1.back-wide.cal", printed.getvalue())
+            self.assertIn("SyntheticPhone1_1.back-tele.cal", printed.getvalue())
 
     def test_a_first_session_that_kept_nothing_fails_before_the_restart(self) -> None:
         plan = runner.make_plan(self.PLAIN, "phone", "live")
@@ -2375,7 +2377,7 @@ class RestartTests(unittest.TestCase):
                 mock.patch.object(runner, "check_still"), mock.patch.object(runner, "check_camera_list"), \
                 mock.patch.object(runner, "check_layout"), mock.patch.object(runner, "select_the_lens_that_learns"), \
                 contextlib.redirect_stdout(io.StringIO()):
-            with self.assertRaisesRegex(runner.Failure, "the colour data of the back still in the calibration directory: no .cal file"):
+            with self.assertRaisesRegex(runner.Failure, "the colour data of the back stills \\(2\\) in the calibration directory: 0 .cal files"):
                 runner.run_restart_checks(guest, plan, Path(directory))
 
     def options(self, *arguments: str):
