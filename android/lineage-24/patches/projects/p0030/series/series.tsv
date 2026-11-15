@@ -9,4 +9,3 @@ patch	call-the-camera-framework-without-the-provider-s-callbacks-lock.patch
 patch	list-only-the-keys-a-V4L2-camera-honours.patch
 patch	report-the-scene-mode-and-the-black-level-lock-of-a-camera.patch
 patch	handle-the-host-ending-the-video-of-a-camera.patch
-patch	state-the-crop-region-a-centred-camera-applies.patch

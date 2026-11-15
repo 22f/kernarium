@@ -1099,9 +1099,6 @@ against stub headers and runs its callback path (a request that met the loss
 returns every buffer as an error and tells the framework once, the requests the
 session still holds drain without the frame source); the rest of the series'
 wiring it reads as text, which is a structural check.
-`android17-camera-crop-region` (tooling) is a structural check as well: it reads
-what the series does to the request state, and the rule it uses is the unit row
-`andarium-camera-crop`.
 
 Every first-party script that reaches a guest over adb uses the one shared adb
 server, names the guest with `-s 127.0.0.1:<port>` and at the end only
