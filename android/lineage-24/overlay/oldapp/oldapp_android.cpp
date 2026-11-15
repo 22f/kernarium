@@ -2,14 +2,19 @@
 //
 // The old-application layer, bound to Android.
 //
-// ActivityThread loads this library into an application process only for a 32-bit
-// application that targets an API level below 14 (Android before 4.0), the applications
-// that Dalvik gave direct object pointers and a 32-bit heap below 2 GiB. JNI_OnLoad
-// installs the interposer on ART's shared function table (jni_shim.cpp) and keeps an
-// allocator below 2 GiB (low_arena.hpp) for the libraries the application ships: their
-// allocator imports are redirected when the library is first seen. The platform's own
-// libraries keep every original behaviour; a caller is told apart by the mapping its code
-// is in.
+// ActivityThread loads this library into the process of an application the person switched it
+// on for, a 32-bit application written for Dalvik (Android before 4.0): Dalvik gave its native
+// code direct object pointers and a heap below 2 GiB. JNI_OnLoad installs the interposer on ART's
+// shared function table (jni_shim.cpp) and keeps an allocator below 2 GiB (low_arena.hpp) for the
+// libraries the application ships.
+//
+// The allocator is pointed at by rewriting relocation slots, never code. Every module of the
+// process gets the calls that take a pointer (free, realloc, reallocarray, malloc_usable_size):
+// they send a block of the arena to the arena and anything else to libc, so a platform module,
+// libc's own getline, or the framework freeing a NativeActivity buffer can handle a block the
+// application allocated. Only the application's libraries get the calls that return memory.
+// All consumers are rewritten before any producer, so an arena block never exists where a
+// consumer would refuse it.
 //
 // This file declares the few libc and linker functions it uses itself, so it includes no
 // Android header.
@@ -21,6 +26,7 @@
 #include "elf_scan.hpp"
 #include "jni_shim.hpp"
 #include "low_arena.hpp"
+#include "protection.hpp"
 
 extern "C" {
 void* oldapp_mmap(void*, size_t, int, int, int, long) __asm__("mmap");
@@ -31,6 +37,10 @@ void* oldapp_calloc(size_t, size_t) __asm__("calloc");
 void* oldapp_realloc(void*, size_t) __asm__("realloc");
 void oldapp_free(void*) __asm__("free");
 size_t oldapp_usable_size(void*) __asm__("malloc_usable_size");
+int* oldapp_errno() __asm__("__errno");
+int oldapp_open(const char*, int, ...) __asm__("open");
+long oldapp_read(int, void*, size_t) __asm__("read");
+int oldapp_close(int) __asm__("close");
 int oldapp_pthread_key_create(int*, void (*)(void*)) __asm__("pthread_key_create");
 void* oldapp_pthread_getspecific(int) __asm__("pthread_getspecific");
 int oldapp_pthread_setspecific(int, const void*) __asm__("pthread_setspecific");
@@ -55,28 +65,15 @@ namespace {
 using namespace oldapp;
 
 constexpr size_t kArenaBytes = 64u << 20;
-constexpr size_t kShadowBytes = 16u << 20;
+constexpr size_t kShadowBytes = 32u << 20;
 constexpr uintptr_t kLowLimit = 0x7ff00000u;
+constexpr unsigned kMaxModules = 512;
+constexpr unsigned kMaxSlots = 160;
 constexpr unsigned kNegativeCache = 64;
+constexpr unsigned kCheckEvery = 256;  // JNI calls between two looks at the loader's counters
 constexpr int kLogInfo = 4;
 constexpr int kLogWarn = 5;
 constexpr const char* kTag = "kernarium_oldapp";
-
-struct Module {
-    uintptr_t lo;
-    uintptr_t hi;
-    bool app;
-};
-struct Snapshot {
-    unsigned count;
-    Module modules[1];  // sorted by lo; really `count` entries
-};
-
-Snapshot* volatile g_snapshot = nullptr;
-uintptr_t g_negative[kNegativeCache];
-uint32_t g_refresh_lock = 0;
-uint32_t g_patched[256];  // load biases of the libraries whose allocator imports are already redirected
-unsigned g_patched_count = 0;
 
 Arena g_arena;
 bool g_arena_ready = false;
@@ -97,16 +94,17 @@ void low_free(void* pointer) {
         return;
     }
     if (g_arena.contains(pointer)) {
-        g_arena.release(pointer);
+        g_arena.release(pointer);  // not a live block of the arena (a double free): ignored
     } else {
         oldapp_free(pointer);
     }
 }
 void* low_calloc(size_t count, size_t size) {
-    if (size != 0 && count > 0xffffffffu / size) {
+    size_t bytes;
+    if (__builtin_mul_overflow(count, size, &bytes)) {
+        *oldapp_errno() = 12;  // ENOMEM
         return nullptr;
     }
-    const size_t bytes = count * size;
     void* pointer = g_arena.allocate(bytes);
     if (pointer == nullptr) {
         return oldapp_calloc(count, size);
@@ -114,24 +112,32 @@ void* low_calloc(size_t count, size_t size) {
     __builtin_memset(pointer, 0, bytes);
     return pointer;
 }
+size_t low_usable_size(void* pointer) {
+    if (pointer == nullptr) {
+        return 0;
+    }
+    return g_arena.contains(pointer) ? g_arena.usable_size(pointer) : oldapp_usable_size(pointer);
+}
+// A block of the arena that outgrows it moves out to libc; the caller owns the new block as it owned the old.
+void* grow_out_of_arena(void* pointer, size_t size) {
+    void* outside = oldapp_malloc(size);
+    if (outside != nullptr) {
+        const size_t old = g_arena.usable_size(pointer);
+        __builtin_memcpy(outside, pointer, old < size ? old : size);
+        g_arena.release(pointer);
+    }
+    return outside;
+}
+// realloc as the application's libraries see it: a block from before the redirection moves into the arena.
 void* low_realloc(void* pointer, size_t size) {
     if (pointer == nullptr) {
         return low_malloc(size);
     }
     if (g_arena.contains(pointer)) {
         void* moved = g_arena.reallocate(pointer, size);
-        if (moved != nullptr) {
-            return moved;
-        }
-        void* outside = oldapp_malloc(size);  // the arena is full: the block moves out of it
-        if (outside != nullptr) {
-            const size_t old = g_arena.usable_size(pointer);
-            __builtin_memcpy(outside, pointer, old < size ? old : size);
-            g_arena.release(pointer);
-        }
-        return outside;
+        return moved != nullptr ? moved : grow_out_of_arena(pointer, size);
     }
-    void* inside = g_arena.allocate(size);  // a block from before the redirection moves in
+    void* inside = g_arena.allocate(size);
     if (inside == nullptr) {
         return oldapp_realloc(pointer, size);
     }
@@ -139,6 +145,30 @@ void* low_realloc(void* pointer, size_t size) {
     __builtin_memcpy(inside, pointer, old < size ? old : size);
     oldapp_free(pointer);
     return inside;
+}
+// realloc as a platform module sees it: its own blocks stay libc's, a block of the arena is resized there.
+void* platform_realloc(void* pointer, size_t size) {
+    if (pointer == nullptr || !g_arena.contains(pointer)) {
+        return oldapp_realloc(pointer, size);
+    }
+    void* moved = g_arena.reallocate(pointer, size);
+    return moved != nullptr ? moved : grow_out_of_arena(pointer, size);
+}
+void* low_reallocarray(void* pointer, size_t count, size_t size) {
+    size_t bytes;
+    if (__builtin_mul_overflow(count, size, &bytes)) {
+        *oldapp_errno() = 12;
+        return nullptr;
+    }
+    return low_realloc(pointer, bytes);
+}
+void* platform_reallocarray(void* pointer, size_t count, size_t size) {
+    size_t bytes;
+    if (__builtin_mul_overflow(count, size, &bytes)) {
+        *oldapp_errno() = 12;
+        return nullptr;
+    }
+    return platform_realloc(pointer, bytes);
 }
 char* low_strndup(const char* text, size_t limit) {
     size_t length = 0;
@@ -165,12 +195,16 @@ void low_delete(void* pointer) { low_free(pointer); }
 void low_delete_nothrow(void* pointer, const void*) { low_free(pointer); }
 void low_delete_sized(void* pointer, size_t) { low_free(pointer); }
 
-void* replacement_for(Import what) {
+void* replacement_for(Import what, bool app) {
     switch (what) {
         case Import::kMalloc: return reinterpret_cast<void*>(&low_malloc);
         case Import::kFree: return reinterpret_cast<void*>(&low_free);
         case Import::kCalloc: return reinterpret_cast<void*>(&low_calloc);
-        case Import::kRealloc: return reinterpret_cast<void*>(&low_realloc);
+        case Import::kRealloc:
+            return app ? reinterpret_cast<void*>(&low_realloc) : reinterpret_cast<void*>(&platform_realloc);
+        case Import::kReallocarray:
+            return app ? reinterpret_cast<void*>(&low_reallocarray) : reinterpret_cast<void*>(&platform_reallocarray);
+        case Import::kUsableSize: return reinterpret_cast<void*>(&low_usable_size);
         case Import::kStrdup: return reinterpret_cast<void*>(&low_strdup);
         case Import::kStrndup: return reinterpret_cast<void*>(&low_strndup);
         case Import::kNew:
@@ -190,6 +224,36 @@ void* replacement_for(Import what) {
 
 // ---- the modules of the process
 
+struct Module {
+    uintptr_t lo;
+    uintptr_t hi;
+    uintptr_t bias;
+    const Elf32Phdr* phdr;
+    unsigned phnum;
+    uint32_t name_hash;
+    uint8_t app;    // application code (classification)
+    uint8_t libc;
+    uint8_t skip;   // never touched: this library, the dynamic linker
+    uint8_t consumers_done;
+    uint8_t producers_done;
+    uintptr_t probe_address;  // a slot this module's rewrite wrote, to see whether it still holds our function
+    void* probe_value;
+};
+
+Module g_modules[kMaxModules];    // published: sorted by lo, read under g_module_seq
+unsigned g_module_count = 0;
+uint32_t g_module_seq = 0;
+Module g_work[kMaxModules];       // the refresh's working set, under g_refresh_lock
+unsigned g_work_count = 0;
+uint32_t g_refresh_lock = 0;
+uint64_t g_stamp_adds = ~uint64_t{0};
+uint64_t g_stamp_subs = ~uint64_t{0};
+uint32_t g_epoch = 1;
+uint32_t g_calls = 0;
+uintptr_t g_negative_page[kNegativeCache];
+uint32_t g_negative_epoch[kNegativeCache];
+uint32_t g_negative_hits[kNegativeCache];
+
 bool platform_path(const char* name) {
     static const char* const kPrefixes[] = {"/system/", "/system_ext/", "/vendor/", "/product/", "/odm/", "/apex/",
                                             "/linker", "/data/dalvik-cache/"};
@@ -208,51 +272,117 @@ bool platform_path(const char* name) {
     return false;
 }
 
-void lock_refresh() {
-    while (__atomic_exchange_n(&g_refresh_lock, 1u, __ATOMIC_ACQUIRE) != 0) {
+const char* base_name(const char* name) {
+    const char* base = name;
+    for (const char* p = name; p != nullptr && *p != '\0'; ++p) {
+        if (*p == '/') {
+            base = p + 1;
+        }
     }
+    return base != nullptr ? base : "";
 }
+
+bool same_text(const char* a, const char* b) {
+    while (*a != '\0' && *a == *b) {
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
+bool starts_with(const char* text, const char* prefix) {
+    while (*prefix != '\0' && *text == *prefix) {
+        ++text;
+        ++prefix;
+    }
+    return *prefix == '\0';
+}
+
+uint32_t hash_text(const char* text) {
+    uint32_t hash = 2166136261u;
+    for (; text != nullptr && *text != '\0'; ++text) {
+        hash = (hash ^ static_cast<uint8_t>(*text)) * 16777619u;
+    }
+    return hash;
+}
+
+// The refresh asks the dynamic linker for its list, and a thread that is inside dlopen (a constructor of the new
+// library calling JNI) holds the linker's lock: waiting here for another thread's refresh could deadlock with it,
+// so a thread that finds a refresh under way goes on with the list it has.
+bool try_lock_refresh() { return __atomic_exchange_n(&g_refresh_lock, 1u, __ATOMIC_ACQUIRE) == 0; }
 void unlock_refresh() { __atomic_store_n(&g_refresh_lock, 0u, __ATOMIC_RELEASE); }
 
-bool already_patched(uint32_t bias) {
-    for (unsigned i = 0; i < g_patched_count; ++i) {
-        if (g_patched[i] == bias) {
-            return true;
-        }
-    }
-    return false;
+bool protect_page(uintptr_t page, int protection) {
+    return oldapp_mprotect(reinterpret_cast<void*>(page), kPageSize, protection) == 0;
 }
 
-// Writes the arena's functions into the allocator imports of an application library.
-void redirect_allocator(const OldappPhdrInfo& info) {
-    if (!g_arena_ready || already_patched(info.addr) || g_patched_count >= 256) {
-        return;
+// Points `mask` imports of one module at the layer's functions. All or nothing for the module: when a page cannot
+// be opened, no slot is written. A slot in an executable page (a text relocation) is left alone: opening it would
+// take away its execute bit under the threads that run there.
+unsigned patch_module(const Module& module, uint32_t mask, bool include_defined, Module* record) {
+    ImportSlot slots[kMaxSlots];
+    const size_t found = scan_imports(module.bias, module.phdr, module.phnum, slots, kMaxSlots, mask, include_defined);
+    const size_t count = found < kMaxSlots ? found : kMaxSlots;
+    if (found > kMaxSlots) {
+        oldapp_log_print(kLogWarn, kTag, "%ld imports found, only %ld rewritten", static_cast<long>(found),
+                         static_cast<long>(count));
     }
-    g_patched[g_patched_count++] = info.addr;
-    ImportSlot slots[96];
-    const size_t found = scan_imports(info.addr, info.phdr, info.phnum, slots, 96);
-    const size_t count = found < 96 ? found : 96;
+    struct Planned {
+        uintptr_t address;
+        void* replacement;
+    };
+    Planned planned[kMaxSlots];
+    unsigned planned_count = 0;
+    PageWindow<bool (*)(uintptr_t, int)> window(&protect_page);
     for (size_t i = 0; i < count; ++i) {
-        void* replacement = replacement_for(slots[i].what);
-        uintptr_t address = info.addr + slots[i].vaddr;
-        const uintptr_t page = address & ~uintptr_t{4095};
-        const int protection = original_protection(info.phdr, info.phnum, slots[i].vaddr);
-        if (oldapp_mprotect(reinterpret_cast<void*>(page), 4096, 3) != 0) {
+        const uintptr_t address = module.bias + slots[i].vaddr;
+        bool inside = false;
+        for (unsigned k = 0; k < module.phnum; ++k) {
+            if (module.phdr[k].p_type == kPtLoad && slots[i].vaddr >= module.phdr[k].p_vaddr &&
+                slots[i].vaddr < module.phdr[k].p_vaddr + module.phdr[k].p_memsz) {
+                inside = true;
+            }
+        }
+        const int protection = original_protection(module.phdr, module.phnum, slots[i].vaddr);
+        void* replacement = replacement_for(slots[i].what, module.app != 0);
+        if (!inside || (protection & kProtExec) != 0 || replacement == nullptr) {
             continue;
         }
-        __atomic_store_n(reinterpret_cast<void**>(address), replacement, __ATOMIC_RELEASE);
-        oldapp_mprotect(reinterpret_cast<void*>(page), 4096, protection);
+        if (!window.open(address & ~(kPageSize - 1), protection)) {
+            oldapp_log_print(kLogWarn, kTag, "a page of the module at %lx could not be opened: its imports are left alone",
+                             static_cast<long>(module.lo));
+            return 0;
+        }
+        planned[planned_count++] = Planned{address, replacement};
     }
-    oldapp_log_print(kLogInfo, kTag, "allocator redirected in %s: %ld imports", info.name, static_cast<long>(count));
+    for (unsigned i = 0; i < planned_count; ++i) {
+        __atomic_store_n(reinterpret_cast<void**>(planned[i].address), planned[i].replacement, __ATOMIC_RELEASE);
+    }
+    if (!window.close()) {
+        oldapp_log_print(kLogWarn, kTag, "a page of the module at %lx could not be made read-only again",
+                         static_cast<long>(module.lo));
+    }
+    if (planned_count > 0 && record != nullptr && record->probe_address == 0) {
+        record->probe_address = planned[0].address;
+        record->probe_value = planned[0].replacement;
+    }
+    return planned_count;
 }
 
 struct Collect {
-    Module modules[512];
     unsigned count;
+    uint64_t adds;
+    uint64_t subs;
+    bool first;
 };
 
-int collect_module(OldappPhdrInfo* info, size_t, void* user) {
+int collect_module(OldappPhdrInfo* info, size_t size, void* user) {
     Collect* collect = static_cast<Collect*>(user);
+    if (collect->first) {
+        collect->first = false;
+        collect->adds = size >= sizeof(OldappPhdrInfo) ? info->adds : g_calls;
+        collect->subs = size >= sizeof(OldappPhdrInfo) ? info->subs : 0;
+    }
     uintptr_t lo = ~uintptr_t{0};
     uintptr_t hi = 0;
     for (unsigned i = 0; i < info->phnum; ++i) {
@@ -263,17 +393,33 @@ int collect_module(OldappPhdrInfo* info, size_t, void* user) {
             hi = end > hi ? end : hi;
         }
     }
-    if (hi == 0 || collect->count >= 512) {
+    if (hi == 0 || collect->count >= kMaxModules) {
         return 0;
     }
     // This library's own code is never the application's, wherever it was installed from.
     const uintptr_t self = reinterpret_cast<uintptr_t>(&collect_module);
-    const bool app = !platform_path(info->name) && !(self >= lo && self < hi);
-    collect->modules[collect->count++] = Module{lo, hi, app};
-    if (app) {
-        redirect_allocator(*info);
-    }
+    const bool is_self = self >= lo && self < hi;
+    const char* base = base_name(info->name);
+    const bool is_linker = starts_with(base, "linker") || same_text(base, "ld-android.so");
+    Module& module = g_work[collect->count++];
+    module = Module{};
+    module.lo = lo;
+    module.hi = hi;
+    module.bias = info->addr;
+    module.phdr = info->phdr;
+    module.phnum = info->phnum;
+    module.name_hash = hash_text(info->name);
+    module.app = !platform_path(info->name) && !is_self;
+    module.libc = platform_path(info->name) && same_text(base, "libc.so");
+    module.skip = is_self || is_linker || (info->name != nullptr && info->name[0] != '/');
     return 0;
+}
+
+int stamp_module(OldappPhdrInfo* info, size_t size, void* user) {
+    Collect* collect = static_cast<Collect*>(user);
+    collect->adds = size >= sizeof(OldappPhdrInfo) ? info->adds : g_calls;
+    collect->subs = size >= sizeof(OldappPhdrInfo) ? info->subs : 0;
+    return 1;
 }
 
 void sort_modules(Module* modules, unsigned count) {
@@ -288,114 +434,179 @@ void sort_modules(Module* modules, unsigned count) {
     }
 }
 
-void refresh_modules() {
-    lock_refresh();
-    static Collect collect;  // under the lock
-    collect.count = 0;
-    oldapp_dl_iterate_phdr(collect_module, &collect);
-    sort_modules(collect.modules, collect.count);
-    const size_t bytes = sizeof(unsigned) + sizeof(Module) * (collect.count != 0 ? collect.count : 1);
-    Snapshot* snapshot = static_cast<Snapshot*>(oldapp_malloc(bytes));
-    if (snapshot != nullptr) {  // earlier snapshots are not freed: a reader may still be using one
-        snapshot->count = collect.count;
-        __builtin_memcpy(snapshot->modules, collect.modules, sizeof(Module) * collect.count);
-        __atomic_store_n(&g_snapshot, snapshot, __ATOMIC_RELEASE);
+// Rebuilds the module list when the loader's counters moved, rewrites the modules that are new (or whose slots no
+// longer hold the layer's functions: a library closed and opened again at the same address), and publishes the list.
+void refresh_modules(bool force) {
+    Collect now{0, 0, 0, true};
+    oldapp_dl_iterate_phdr(stamp_module, &now);
+    if (!try_lock_refresh()) {
+        return;
     }
+    if (!force && now.adds == g_stamp_adds && now.subs == g_stamp_subs) {
+        unlock_refresh();  // another thread was first
+        return;
+    }
+    Collect collect{0, 0, 0, true};
+    oldapp_dl_iterate_phdr(collect_module, &collect);
+    g_work_count = collect.count;
+    sort_modules(g_work, g_work_count);
+    // What an earlier refresh already did to a module that is still there.
+    for (unsigned i = 0; i < g_work_count; ++i) {
+        Module& module = g_work[i];
+        for (unsigned k = 0; k < g_module_count; ++k) {
+            const Module& old = g_modules[k];
+            if (old.lo == module.lo && old.hi == module.hi && old.bias == module.bias && old.name_hash == module.name_hash) {
+                const bool intact = old.probe_address == 0 ||
+                                    *reinterpret_cast<void* volatile*>(old.probe_address) == old.probe_value;
+                if (intact) {
+                    module.consumers_done = old.consumers_done;
+                    module.producers_done = old.producers_done;
+                    module.probe_address = old.probe_address;
+                    module.probe_value = old.probe_value;
+                }
+                break;
+            }
+        }
+    }
+    unsigned consumers = 0, producers = 0;
+    if (g_arena_ready) {
+        // First every consumer, in every module; then the producers of the application's libraries.
+        for (unsigned i = 0; i < g_work_count; ++i) {
+            Module& module = g_work[i];
+            if (module.skip || module.consumers_done) {
+                continue;
+            }
+            module.consumers_done = 1;
+            consumers += patch_module(module, module.app ? kAppConsumers : kPlatformConsumers,
+                                      module.libc != 0, &module) > 0;
+        }
+        for (unsigned i = 0; i < g_work_count; ++i) {
+            Module& module = g_work[i];
+            if (module.skip || !module.app || module.producers_done) {
+                continue;
+            }
+            module.producers_done = 1;
+            producers += patch_module(module, kProducers, false, &module) > 0;
+        }
+    }
+    __atomic_store_n(&g_module_seq, g_module_seq + 1, __ATOMIC_RELEASE);  // odd: readers wait
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __builtin_memcpy(g_modules, g_work, sizeof(Module) * g_work_count);
+    __atomic_store_n(&g_module_count, g_work_count, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_module_seq, g_module_seq + 1, __ATOMIC_RELEASE);
+    g_stamp_adds = collect.adds;
+    g_stamp_subs = collect.subs;
+    ++g_epoch;
     unlock_refresh();
+    if (consumers != 0 || producers != 0) {
+        oldapp_log_print(kLogInfo, kTag, "modules %ld: consumers rewritten in %ld, producers in %ld",
+                         static_cast<long>(g_work_count), static_cast<long>(consumers), static_cast<long>(producers));
+    }
 }
+
+void refresh_if_changed() { refresh_modules(false); }
 
 // 1: application code, 0: platform code, -1: no mapping known for the address.
 int classify(uintptr_t address) {
-    const Snapshot* snapshot = __atomic_load_n(&g_snapshot, __ATOMIC_ACQUIRE);
-    if (snapshot == nullptr) {
-        return -1;
-    }
-    unsigned low = 0;
-    unsigned high = snapshot->count;
-    while (low < high) {
-        const unsigned middle = (low + high) / 2;
-        if (address < snapshot->modules[middle].lo) {
-            high = middle;
-        } else if (address >= snapshot->modules[middle].hi) {
-            low = middle + 1;
-        } else {
-            return snapshot->modules[middle].app ? 1 : 0;
+    for (;;) {
+        const uint32_t before = __atomic_load_n(&g_module_seq, __ATOMIC_ACQUIRE);
+        if ((before & 1u) != 0) {
+            continue;  // a refresh is publishing
+        }
+        int verdict = -1;
+        unsigned low = 0;
+        unsigned high = __atomic_load_n(&g_module_count, __ATOMIC_RELAXED);
+        while (low < high) {
+            const unsigned middle = (low + high) / 2;
+            if (address < __atomic_load_n(&g_modules[middle].lo, __ATOMIC_RELAXED)) {
+                high = middle;
+            } else if (address >= __atomic_load_n(&g_modules[middle].hi, __ATOMIC_RELAXED)) {
+                low = middle + 1;
+            } else {
+                verdict = __atomic_load_n(&g_modules[middle].app, __ATOMIC_RELAXED) != 0 ? 1 : 0;
+                break;
+            }
+        }
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&g_module_seq, __ATOMIC_RELAXED) == before) {
+            return verdict;
         }
     }
-    return -1;
 }
 
 bool is_app_caller(const void* return_address) {
     const uintptr_t address = reinterpret_cast<uintptr_t>(return_address) & ~uintptr_t{1};  // the Thumb bit
+    if ((__atomic_add_fetch(&g_calls, 1u, __ATOMIC_RELAXED) % kCheckEvery) == 0) {
+        refresh_if_changed();  // a library may have been opened with no JNI call from it
+    }
     int verdict = classify(address);
     if (verdict >= 0) {
         return verdict == 1;
     }
-    uintptr_t& cached = g_negative[(address >> 12) % kNegativeCache];
-    if (cached == (address >> 12)) {
+    // Code no mapping of the list covers: generated code, or a library loaded since the last refresh.
+    const uintptr_t page = address >> 12;
+    const unsigned slot = page % kNegativeCache;
+    if (g_negative_page[slot] == page && g_negative_epoch[slot] == g_epoch &&
+        (++g_negative_hits[slot] % kCheckEvery) != 0) {
         return false;
     }
-    refresh_modules();  // a library may have been loaded since the last look
+    refresh_if_changed();
     verdict = classify(address);
     if (verdict >= 0) {
         return verdict == 1;
     }
-    cached = address >> 12;  // code in no mapping the linker knows (generated code): not the application's
+    g_negative_page[slot] = page;
+    g_negative_epoch[slot] = g_epoch;
+    g_negative_hits[slot] = 0;
     return false;
 }
 
 // ---- protection of the interposed tables
 
-struct Opened {
-    uintptr_t page;
-    int protection;
-};
-Opened g_opened[8];
-unsigned g_opened_count = 0;
-
-struct Lookup {
-    uintptr_t address;
-    int protection;
-};
-int find_protection(OldappPhdrInfo* info, size_t, void* user) {
-    Lookup* lookup = static_cast<Lookup*>(user);
-    for (unsigned i = 0; i < info->phnum; ++i) {
-        if (info->phdr[i].p_type == kPtLoad && lookup->address >= info->addr + info->phdr[i].p_vaddr &&
-            lookup->address < info->addr + info->phdr[i].p_vaddr + info->phdr[i].p_memsz) {
-            lookup->protection = original_protection(info->phdr, info->phnum, lookup->address - info->addr);
-            return 1;
-        }
+bool read_maps(int fd, char* buffer, size_t capacity, size_t* got) {
+    const long n = oldapp_read(fd, buffer, capacity);
+    if (n < 0) {
+        return false;
     }
-    return 0;
+    *got = static_cast<size_t>(n);
+    return true;
 }
+
+int table_protection(uintptr_t address) {
+    constexpr int kReadOnly = 0;
+    constexpr int kCloseOnExec = 0x80000;
+    const int fd = oldapp_open("/proc/self/maps", kReadOnly | kCloseOnExec);
+    if (fd < 0) {
+        return -1;
+    }
+    const int protection =
+        maps_protection([fd](char* buffer, size_t capacity, size_t* got) { return read_maps(fd, buffer, capacity, got); },
+                        address);
+    oldapp_close(fd);
+    return protection;
+}
+
+PageWindow<bool (*)(uintptr_t, int)> g_window(&protect_page);
 
 bool make_writable(void* address, size_t length) {
-    g_opened_count = 0;
-    const uintptr_t first = reinterpret_cast<uintptr_t>(address) & ~uintptr_t{4095};
-    const uintptr_t last = (reinterpret_cast<uintptr_t>(address) + length - 1) & ~uintptr_t{4095};
-    for (uintptr_t page = first; page <= last; page += 4096) {
-        Lookup lookup{page, -1};
-        oldapp_dl_iterate_phdr(find_protection, &lookup);
-        if (lookup.protection < 0) {
-            lookup.protection = 3;  // not in a library: plain data, nothing to restore
+    g_window.rollback();
+    const uintptr_t start = reinterpret_cast<uintptr_t>(address);
+    const uintptr_t first = start & ~(kPageSize - 1);
+    const uintptr_t last = (start + length - 1) & ~(kPageSize - 1);
+    for (uintptr_t page = first; page <= last; page += kPageSize) {
+        const int protection = table_protection(page < start ? start : page);
+        if (protection < 0) {
+            g_window.rollback();
+            return false;  // no mapping is known for it: never assumed writable
         }
-        if (oldapp_mprotect(reinterpret_cast<void*>(page), 4096, 3) != 0) {
+        if (!g_window.open(page, protection)) {
             return false;
-        }
-        if (g_opened_count < 8) {
-            g_opened[g_opened_count++] = Opened{page, lookup.protection};
         }
     }
     return true;
 }
 
-bool make_read_only(void*, size_t) {
-    for (unsigned i = 0; i < g_opened_count; ++i) {
-        oldapp_mprotect(reinterpret_cast<void*>(g_opened[i].page), 4096, g_opened[i].protection);
-    }
-    g_opened_count = 0;
-    return true;
-}
+bool make_read_only(void*, size_t) { return g_window.close(); }
 
 // ---- per-thread state
 
@@ -416,6 +627,91 @@ void* thread_state(size_t size) {
         }
     }
     return state;
+}
+
+// ---- a method the layer did not see being looked up
+
+char kind_of_class_name(const char* name) {
+    static const struct {
+        const char* name;
+        char kind;
+    } kPrimitives[] = {{"boolean", 'Z'}, {"byte", 'B'}, {"char", 'C'}, {"short", 'S'},
+                       {"int", 'I'},     {"long", 'J'}, {"float", 'F'}, {"double", 'D'}};
+    for (const auto& primitive : kPrimitives) {
+        if (same_text(name, primitive.name)) {
+            return primitive.kind;
+        }
+    }
+    return 'L';
+}
+
+// Executable.getParameterTypes() of the method's reflected object, and the name of each class: every function is
+// taken from the table as it was before the layer, and the locals of the lookup are gone when it returns.
+bool describe_method(jni::Env* env, void* const* original, void* id, bool is_static, jni::jobject hint, char* kinds,
+                     unsigned capacity, unsigned* count) {
+    using namespace jni;
+    auto push_frame = reinterpret_cast<jint (*)(Env*, jint)>(original[slot::PushLocalFrame]);
+    auto pop_frame = reinterpret_cast<jobject (*)(Env*, jobject)>(original[slot::PopLocalFrame]);
+    auto exception_check = reinterpret_cast<jboolean (*)(Env*)>(original[slot::ExceptionCheck]);
+    auto exception_clear = reinterpret_cast<void (*)(Env*)>(original[slot::ExceptionClear]);
+    if (push_frame(env, 32) != JNI_OK) {
+        exception_clear(env);
+        return false;
+    }
+    bool ok = false;
+    do {
+        auto to_reflected = reinterpret_cast<jobject (*)(Env*, jclass, jmethodID, jboolean)>(original[slot::ToReflectedMethod]);
+        auto find_class = reinterpret_cast<jobject (*)(Env*, const char*)>(original[slot::FindClass]);
+        auto get_method = reinterpret_cast<jmethodID (*)(Env*, jclass, const char*, const char*)>(original[slot::GetMethodID]);
+        auto call_object = reinterpret_cast<jobject (*)(Env*, jobject, jmethodID, const jvalue*)>(
+            original[call_slot(kObject, kArray)]);
+        auto array_length = reinterpret_cast<jsize (*)(Env*, jarray)>(original[slot::GetArrayLength]);
+        auto element = reinterpret_cast<jobject (*)(Env*, jobject, jsize)>(original[slot::GetObjectArrayElement]);
+        auto utf_chars = reinterpret_cast<const char* (*)(Env*, jobject, jboolean*)>(original[slot::GetStringUTFChars]);
+        auto release_chars = reinterpret_cast<void (*)(Env*, jobject, const char*)>(original[slot::ReleaseStringUTFChars]);
+        jobject reflected = to_reflected(env, hint, id, is_static ? 1 : 0);
+        jobject executable = find_class(env, "java/lang/reflect/Executable");
+        jobject class_class = find_class(env, "java/lang/Class");
+        if (reflected == nullptr || executable == nullptr || class_class == nullptr || exception_check(env)) {
+            break;
+        }
+        jmethodID get_types = get_method(env, executable, "getParameterTypes", "()[Ljava/lang/Class;");
+        jmethodID get_name = get_method(env, class_class, "getName", "()Ljava/lang/String;");
+        if (get_types == nullptr || get_name == nullptr || exception_check(env)) {
+            break;
+        }
+        jobject types = call_object(env, reflected, get_types, nullptr);
+        if (types == nullptr || exception_check(env)) {
+            break;
+        }
+        const jsize n = array_length(env, types);
+        if (n < 0 || static_cast<unsigned>(n) > capacity) {
+            break;
+        }
+        bool all = true;
+        for (jsize i = 0; i < n && all; ++i) {
+            jobject type = element(env, types, i);
+            jobject name = type != nullptr ? call_object(env, type, get_name, nullptr) : nullptr;
+            const char* chars = name != nullptr && !exception_check(env) ? utf_chars(env, name, nullptr) : nullptr;
+            if (chars == nullptr) {
+                all = false;
+            } else {
+                kinds[i] = kind_of_class_name(chars);
+                release_chars(env, name, chars);
+            }
+        }
+        if (!all || exception_check(env)) {
+            break;
+        }
+        *count = static_cast<unsigned>(n);
+        ok = true;
+    } while (false);
+    if (exception_check(env)) {
+        exception_clear(env);
+        ok = false;
+    }
+    pop_frame(env, nullptr);
+    return ok;
 }
 
 // ---- the region below 2 GiB
@@ -464,11 +760,11 @@ extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void* vm_pointe
     } else {
         oldapp_log_print(kLogWarn, kTag, "no region below 2 GiB: allocator imports are left alone");
     }
-    const Platform platform{is_app_caller, thread_state, log_line, make_writable, make_read_only};
-    refresh_modules();  // the libraries the application loaded before this one
+    const Platform platform{is_app_caller, thread_state, log_line, make_writable, make_read_only, describe_method};
+    refresh_modules(true);  // every library the application loaded before this one
     void** table = const_cast<void**>(env->functions);
     const bool jni_ok = install_jni_wrappers(table, platform, region != nullptr ? region + kArenaBytes : nullptr,
-                                             region != nullptr ? kShadowBytes : 0, true, env);
+                                             region != nullptr ? kShadowBytes : 0);
     install_vm_wrappers(const_cast<void**>(vm->functions), platform);
     oldapp_log_print(kLogInfo, kTag, "installed: jni=%ld arena=%ld", static_cast<long>(jni_ok),
                      static_cast<long>(g_arena_ready));

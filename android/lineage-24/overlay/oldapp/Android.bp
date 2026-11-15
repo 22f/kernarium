@@ -4,10 +4,10 @@ package {
 }
 
 // The old-application layer. ActivityThread loads it into the process of a
-// 32-bit application that targets an API level below 14 (a frameworks/base
-// topic); it gives such an application what Dalvik gave it: a Java byte[]
-// that reads through the object pointer at the Dalvik offsets, local
-// references that need no cleanup, and a heap below 2 GiB. It includes no
+// 32-bit application that targets an API level below 14 and that the person
+// switched it on for (a frameworks/base topic); it gives such an application
+// what Dalvik gave it: a Java byte[] that reads through the object pointer at
+// the Dalvik offsets, and a heap below 2 GiB. It includes no
 // Android header (the Mac builds the same sources with -Werror for armv7), so
 // this module sets only -Wall -Wextra and keeps the platform's own warning
 // policy out of it.

@@ -579,32 +579,54 @@ qualifies this contract.
 
 A 32-bit application that targets an API level below 14 is a game written for
 Dalvik, which gave native code direct object pointers and a heap below 2 GiB.
-`ActivityThread.handleBindApplication` (a topic of route p0007) loads
-`/system/lib/libkernarium_oldapp.so` (`overlay/oldapp`) into the process of such
-an application and no other; a failed load is logged and the application starts
-as before. Applications that target below API 23 get Android's permission review
-before their first component runs. The library, which includes no Android
-header, patches ART's one JNI function table in place and gives the application:
+The layer that gives ART's process those two things is a choice made per
+application, off by default. `ActivityThread.handleBindApplication` (a topic of
+route p0007) loads `/system/lib/libkernarium_oldapp.so` (`overlay/oldapp`) into
+the process of an application that is 32-bit, targets below API 14 and is on the
+list of applications the person switched it on for, and into no other. The
+hook tests the bitness and the target level first and reads the list through one
+function (at present the system property `persist.sys.kernarium.oldapp`, a
+comma-separated list of packages). A user ID that several packages share gets
+the layer only when every package of it is eligible, because they share the one
+process. A failed load is logged and the application starts as before.
+Applications that target below API 23 get Android's permission review before
+their first component runs. The library, which includes no Android header,
+patches ART's one JNI function table in place and gives the application:
 
 - Dalvik's array layout for a Java `byte[]` that a call from the application's
-  own native code returns (a method or field of declared type `[B`): the value is
-  a block with the length at offset 8 and the bytes at offset 16, a snapshot that
-  a write does not change. Every JNI function and every object argument of a
-  `Call*`/`NewObject` converts a block back, so it stays a valid reference;
-- local references that need no cleanup: when the runtime refuses another one,
-  the oldest are released. The library probes the runtime when it installs, and
-  Android 17's table has no limit an application reaches, so nothing is released
-  there;
+  own native code returns (a method registered with the return type `[B`, or a
+  field of that type): the value is a block with the length at offset 8 and the
+  bytes at offset 16 that stands for the real array and holds a global reference
+  to it. Every JNI function that takes an object turns a block back into that
+  array for any caller, so identity (`IsSameObject`, `NewGlobalRef`, monitors)
+  and writes (`SetByteArrayRegion`, `Release*Elements`,
+  `ReleasePrimitiveArrayCritical`) keep their meaning; a write through the raw
+  pointer reaches the array at the next release. A thread holds at most 512 such
+  blocks (Dalvik's limit for local references) and the process 32 MiB of them;
+  beyond that the result is ART's own reference. A block lasts until its
+  reference is deleted or its thread ends, and is never recycled. An array the
+  application creates itself (`NewByteArray`) stays ART's own;
 - an allocator below 2 GiB for the libraries the application ships: their
-  `malloc`, `free`, `calloc`, `realloc`, `strdup`, `strndup` and `operator
-  new`/`delete` imports are redirected when the library is first seen.
+  `malloc`, `calloc`, `strdup`, `strndup` and `operator new` imports are
+  redirected as the library is first seen. Every loaded library's `free`,
+  `realloc`, `reallocarray`, `malloc_usable_size` and `operator delete` accepts
+  such a block, the platform's own included, so a buffer the application
+  allocated can be grown by `getline` or freed by the framework.
 
-Only the application's own code gets this: a caller is told apart by the mapping
-its return address is in, so the platform's libraries in the same process keep
-every original behaviour. Not covered: a `byte[]` passed into a native method as
-an argument, raw reads of other objects, writes through a block, packed
-relocations, `memalign`, constructors that ran before the library's first scan,
-and a pointer freed inside a platform library.
+Only the application's own code gets blocks: a caller is told apart by the
+mapping its return address is in, so the platform's libraries in the same
+process see the real arrays. Page protection is restored after each write, and
+a library whose pages cannot all be opened is left untouched.
+
+The layer cannot cover: a native method that returns a block to Java (ART
+decodes the returned reference itself), which is why it is a per-application
+choice; a `byte[]` passed into a native method as an argument or the elements
+of a `byte[][]`; raw reads of other objects; a call that bypasses the platform
+library's PLT; packed relocations; `memalign`; constructors that ran before the
+library's first scan; a library loaded with a plain `dlopen` that never calls
+JNI, which is found by the next periodic scan; a library whose relocation pages
+cannot be reopened, which keeps libc's `free`; and more than 512 loaded
+libraries.
 `tests/integration/android/run_android_oldapp.py` qualifies it
 ([testing](../../docs/testing.md#android)).
 

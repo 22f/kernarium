@@ -2,8 +2,9 @@
 //
 // The old-application layer's relocation scanner (android/lineage-24/overlay/oldapp/elf_scan.hpp)
 // over a synthetic ELF32 ARM image: the allocator imports in the PLT and the GOT are found, other
-// symbols, a library's own definitions and relative relocations are not, and a slot's original
-// protection follows the program headers.
+// symbols, a library's own definitions (unless asked for, as for libc) and relative relocations are
+// not, the consumer/producer masks pick what a platform module and an application library get, and
+// a slot's original protection follows the program headers.
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -43,7 +44,7 @@ void build(Image& image) {
     sym[2] = {name_at(image, cursor, "free"), 0, 0, 0x12, 0, 0};
     sym[3] = {name_at(image, cursor, "foo"), 0, 0, 0x12, 0, 0};
     sym[4] = {name_at(image, cursor, "_Znwj"), 0, 0, 0x12, 0, 0};
-    sym[5] = {2, 0x1234, 4, 0x12, 0, 7};  // "free" again, but defined by the library itself
+    sym[5] = {sym[2].st_name, 0x1234, 4, 0x12, 0, 7};  // "free" again, but defined by the library itself
     sym[6] = {name_at(image, cursor, "_ZdlPvRKSt9nothrow_t"), 0, 0, 0x12, 0, 0};
     sym[7] = {name_at(image, cursor, "strdup"), 0, 0, 0x12, 0, 0};
     Elf32Rel* rel = image.at<Elf32Rel>(kRelDyn);
@@ -76,7 +77,8 @@ void check_scan() {
     Image image;
     build(image);
     ImportSlot slots[16];
-    const size_t found = scan_imports(reinterpret_cast<uintptr_t>(image.bytes), image.phdrs, 4, slots, 16);
+    const size_t found = scan_imports(reinterpret_cast<uintptr_t>(image.bytes), image.phdrs, 4, slots, 16,
+                                      kAppConsumers | kProducers, false);
     require(found == 5, "free, operator new and the nothrow delete in the PLT; malloc and strdup in the GOT");
     require(slots[0].vaddr == 0x600 && slots[0].what == Import::kFree, "PLT free");
     require(slots[1].vaddr == 0x604 && slots[1].what == Import::kNew, "PLT operator new");
@@ -89,9 +91,39 @@ void check_capacity() {
     Image image;
     build(image);
     ImportSlot slots[2];
-    const size_t found = scan_imports(reinterpret_cast<uintptr_t>(image.bytes), image.phdrs, 4, slots, 2);
+    const size_t found = scan_imports(reinterpret_cast<uintptr_t>(image.bytes), image.phdrs, 4, slots, 2,
+                                      kAppConsumers | kProducers, false);
     require(found == 5, "the count is the number found, whatever the capacity");
     require(slots[0].vaddr == 0x600 && slots[1].vaddr == 0x604, "the first ones are written");
+}
+
+// A platform module gets only the calls that take a pointer; an application library gets those and the producers.
+void check_masks() {
+    Image image;
+    build(image);
+    ImportSlot slots[16];
+    const uintptr_t bias = reinterpret_cast<uintptr_t>(image.bytes);
+    size_t found = scan_imports(bias, image.phdrs, 4, slots, 16, kPlatformConsumers, false);
+    require(found == 1 && slots[0].what == Import::kFree && slots[0].vaddr == 0x600, "a platform module: free only (not the delete operators)");
+    found = scan_imports(bias, image.phdrs, 4, slots, 16, kAppConsumers, false);
+    require(found == 2 && slots[0].what == Import::kFree && slots[1].what == Import::kDeleteNothrow, "an application: free and the delete operators");
+    found = scan_imports(bias, image.phdrs, 4, slots, 16, kProducers, false);
+    require(found == 3, "producers: operator new, malloc, strdup");
+    for (size_t i = 0; i < found; ++i) {
+        require(slots[i].what == Import::kNew || slots[i].what == Import::kMalloc || slots[i].what == Import::kStrdup, "a producer");
+    }
+}
+
+// libc.so calls its own exports through its PLT: its defined `free` slot is wanted there, and only there.
+void check_defined_symbols() {
+    Image image;
+    build(image);
+    ImportSlot slots[16];
+    const uintptr_t bias = reinterpret_cast<uintptr_t>(image.bytes);
+    require(scan_imports(bias, image.phdrs, 4, slots, 16, kPlatformConsumers, false) == 1, "the library's own free is left alone");
+    const size_t found = scan_imports(bias, image.phdrs, 4, slots, 16, kPlatformConsumers, true);
+    require(found == 2 && slots[0].vaddr == 0x600 && slots[1].vaddr == 0x608 && slots[1].what == Import::kFree,
+            "libc's slots for its own free are found when asked for");
 }
 
 void check_no_dynamic_section() {
@@ -99,7 +131,7 @@ void check_no_dynamic_section() {
     build(image);
     image.phdrs[2].p_type = 0x70000000;
     ImportSlot slots[4];
-    require(scan_imports(reinterpret_cast<uintptr_t>(image.bytes), image.phdrs, 4, slots, 4) == 0,
+    require(scan_imports(reinterpret_cast<uintptr_t>(image.bytes), image.phdrs, 4, slots, 4, kAppConsumers | kProducers, false) == 0,
             "a library with no dynamic section has nothing to scan");
 }
 
@@ -108,18 +140,20 @@ void check_corrupt_name() {
     build(image);
     image.at<Elf32Sym>(kSym)[2].st_name = 0x7fffffff;  // beyond DT_STRSZ
     ImportSlot slots[8];
-    const size_t found = scan_imports(reinterpret_cast<uintptr_t>(image.bytes), image.phdrs, 4, slots, 8);
+    const size_t found = scan_imports(reinterpret_cast<uintptr_t>(image.bytes), image.phdrs, 4, slots, 8,
+                                      kAppConsumers | kProducers, false);
     require(found == 4, "a symbol whose name lies outside the string table is skipped");
 }
 
 void check_symbol_names() {
     Import what;
-    for (const char* name : {"malloc", "free", "calloc", "realloc", "strdup", "strndup", "_Znwj", "_Znaj",
+    for (const char* name : {"malloc", "free", "calloc", "realloc", "strdup", "strndup", "reallocarray", "malloc_usable_size",
+                             "_Znwj", "_Znaj",
                              "_ZnwjRKSt9nothrow_t", "_ZnajRKSt9nothrow_t", "_ZdlPv", "_ZdaPv",
                              "_ZdlPvRKSt9nothrow_t", "_ZdaPvRKSt9nothrow_t", "_ZdlPvj", "_ZdaPvj"}) {
         require(import_for_symbol(name, &what), name);
     }
-    for (const char* name : {"memalign", "posix_memalign", "mallinfo", "malloc_usable_size", "Znwj", ""}) {
+    for (const char* name : {"memalign", "posix_memalign", "mallinfo", "dlopen", "Znwj", ""}) {
         require(!import_for_symbol(name, &what), name);
     }
 }
@@ -137,6 +171,8 @@ void check_protection() {
 int main() {
     check_scan();
     check_capacity();
+    check_masks();
+    check_defined_symbols();
     check_no_dynamic_section();
     check_corrupt_name();
     check_symbol_names();

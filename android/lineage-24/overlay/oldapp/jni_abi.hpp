@@ -58,6 +58,8 @@ constexpr int kVmSlotCount = 8;
 constexpr jint JNI_OK = 0;
 constexpr jint JNI_ERR = -1;
 constexpr jint kRefTypeLocal = 1;
+constexpr jint kReleaseCommit = 1;  // JNI_COMMIT
+constexpr jint kReleaseAbort = 2;   // JNI_ABORT
 
 // The ten result types of Call*Method, in the table's order.
 enum Type : int {
@@ -85,6 +87,7 @@ namespace slot {
 enum : int {
     GetVersion = 4,
     FindClass = 6,
+    ToReflectedMethod = 9,
     GetSuperclass = 10,
     Throw = 13,
     ExceptionClear = 17,
@@ -107,6 +110,8 @@ enum : int {
     GetStaticFieldID = 144,
     NewString = 163,
     NewStringUTF = 167,
+    GetStringUTFChars = 169,
+    ReleaseStringUTFChars = 170,
     GetArrayLength = 171,
     NewObjectArray = 172,
     GetObjectArrayElement = 173,
@@ -118,6 +123,8 @@ enum : int {
     SetByteArrayRegion = 208,
     GetPrimitiveArrayCritical = 222,
     ReleasePrimitiveArrayCritical = 223,
+    MonitorEnter = 217,
+    MonitorExit = 218,
     NewWeakGlobalRef = 226,
     ExceptionCheck = 228,
     GetObjectRefType = 232,

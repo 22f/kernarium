@@ -11,21 +11,17 @@ namespace {
 
 using namespace jni;
 
-constexpr int kMaxParams = 16;
+constexpr int kMaxParams = 255;      // the JVM's limit on parameter slots
+constexpr int kInlineParams = 12;    // kinds kept in the registry entry; the rest go to a pool
+constexpr uint32_t kKindPoolBytes = 32768;
 constexpr uint32_t kMethodSlots = 8192;
 constexpr uint32_t kFieldSlots = 2048;
 constexpr unsigned kProbeLimit = 32;
-constexpr unsigned kMaxBlocks = 64;
-constexpr size_t kMaxBlockBytes = 16u << 20;
-constexpr unsigned kRingSize = 256;
-constexpr unsigned kProbeEvery = 64;
-constexpr jint kProbeRoom = 80;
-constexpr unsigned kKeepNewest = 64;
+constexpr unsigned kMaxBlocks = 512;  // Dalvik's limit on local references; a thread has no more live shadows
 constexpr uint32_t kDalvikArrayClass = 0x5a324241u;
 constexpr uint32_t kBlockLive = 0xb10c11feu;
 constexpr uint32_t kBlockDead = 0xdeadb10cu;
-constexpr size_t kBlockHead = 16;   // the layer's own header, in front of the Dalvik object
-constexpr size_t kBlockTail = 16;   // zeroes behind the data: raw readers overrun by a few bytes
+constexpr size_t kBlockTail = 16;  // zeroes behind the data: raw readers overrun by a few bytes
 
 template <class T>
 struct IsVoid {
@@ -33,6 +29,14 @@ struct IsVoid {
 };
 template <>
 struct IsVoid<void> {
+    static constexpr bool value = true;
+};
+template <class T>
+struct IsObject {
+    static constexpr bool value = false;
+};
+template <>
+struct IsObject<jobject> {
     static constexpr bool value = true;
 };
 
@@ -48,29 +52,27 @@ struct DalvikArray {
 static_assert(offsetof(DalvikArray, length) == 8, "Dalvik ArrayObject length offset");
 static_assert(offsetof(DalvikArray, data) == 16, "Dalvik ArrayObject contents offset");
 
+// The layer's own header in front of the Dalvik object.
 struct BlockHeader {
     uint32_t magic;
     uint32_t capacity;
-    uint32_t reserved[2];
+    jobject global;      // a global reference to the real array
+    BlockHeader* next;   // the queue of an ended thread's blocks
 };
-static_assert(sizeof(BlockHeader) == kBlockHead, "block header");
+constexpr size_t kBlockHead = (sizeof(BlockHeader) + 15) & ~size_t{15};
 
 struct MethodInfo {
     void* id;
     uint8_t nparams;
-    uint8_t usable;  // false: more parameters than the layer unpacks
+    uint8_t usable;  // false: the kinds are not known (pool exhausted, or the method could not be described)
     uint8_t returns_bytes;
-    char kinds[kMaxParams];
+    char kinds[kInlineParams];
+    const char* more;  // kinds from kInlineParams on
 };
 
 struct ThreadState {
-    DalvikArray* blocks[kMaxBlocks];
-    unsigned block_count;
-    size_t block_bytes;
-    jobject ring[kRingSize];
-    unsigned ring_head;
-    unsigned ring_count;
-    unsigned since_probe;
+    BlockHeader* blocks[kMaxBlocks];
+    unsigned count;
 };
 
 struct Globals {
@@ -80,11 +82,13 @@ struct Globals {
     bool installed;
     bool vm_installed;
     bool shadows_on;
-    bool relief_on;
     Arena shadow_arena;
     const uint8_t* shadow_lo;
     const uint8_t* shadow_hi;
+    BlockHeader* pending;  // blocks of ended threads, waiting for an environment
     uint32_t lock;
+    uint32_t kind_pool_used;
+    char kind_pool[kKindPoolBytes];
     MethodInfo methods[kMethodSlots];
     void* byte_fields[kFieldSlots];
     Counters counters;
@@ -114,6 +118,130 @@ inline uint32_t live_shadows() { return __atomic_load_n(&g.counters.shadows_live
 
 ThreadState* thread() { return static_cast<ThreadState*>(g.platform.thread_state(sizeof(ThreadState))); }
 
+// ---- shadow blocks
+
+BlockHeader* header_of(const void* block) {
+    return reinterpret_cast<BlockHeader*>(const_cast<uint8_t*>(static_cast<const uint8_t*>(block)) - kBlockHead);
+}
+
+// The header of a block that is live, otherwise null (a freed block, or an address that is not a block).
+BlockHeader* live_header(const void* object) {
+    if (!is_shadow(object)) {
+        return nullptr;
+    }
+    BlockHeader* header = header_of(object);
+    return header->magic == kBlockLive ? header : nullptr;
+}
+
+DalvikArray* array_of(BlockHeader* header) {
+    return reinterpret_cast<DalvikArray*>(reinterpret_cast<uint8_t*>(header) + kBlockHead);
+}
+
+// What the runtime is handed in place of `object`: the real array of a shadow (null for a block that has
+// been freed), anything else unchanged.
+jobject conv(jobject object) {
+    if (!is_shadow(object)) {
+        return object;
+    }
+    BlockHeader* header = live_header(object);
+    __atomic_fetch_add(&g.counters.conversions, 1u, __ATOMIC_RELAXED);
+    return header != nullptr ? header->global : nullptr;
+}
+
+void free_block(Env* env, BlockHeader* header) {
+    header->magic = kBlockDead;
+    original<void (*)(Env*, jobject)>(slot::DeleteGlobalRef)(env, header->global);
+    g.shadow_arena.release(header);
+    __atomic_fetch_sub(&g.counters.shadows_live, 1u, __ATOMIC_RELAXED);
+}
+
+// The blocks of ended threads: their global references need an environment to be deleted.
+void drain_pending(Env* env) {
+    BlockHeader* list = __atomic_exchange_n(&g.pending, static_cast<BlockHeader*>(nullptr), __ATOMIC_ACQ_REL);
+    while (list != nullptr) {
+        BlockHeader* next = list->next;
+        free_block(env, list);
+        __atomic_fetch_add(&g.counters.shadows_released, 1u, __ATOMIC_RELAXED);
+        list = next;
+    }
+}
+
+// Every wrapped function that has an environment starts here.
+inline bool enter(Env* env, const void* return_address) {
+    if (__atomic_load_n(&g.pending, __ATOMIC_RELAXED) != nullptr) {
+        drain_pending(env);
+    }
+    return from_app(return_address);
+}
+inline void enter_any(Env* env) {
+    if (__atomic_load_n(&g.pending, __ATOMIC_RELAXED) != nullptr) {
+        drain_pending(env);
+    }
+}
+
+// A shadow for the real local reference `local`, which it replaces: the block holds a global reference to the
+// array, the local reference is deleted. Null when the thread already has the limit or the region is full: the
+// caller keeps the real reference, as it would without the layer.
+jobject make_shadow(Env* env, jobject local) {
+    ThreadState* state = thread();
+    if (state == nullptr || state->count >= kMaxBlocks) {
+        ++g.counters.shadows_declined;
+        return nullptr;
+    }
+    const jsize length = original<jsize (*)(Env*, jarray)>(slot::GetArrayLength)(env, local);
+    if (length < 0) {
+        return nullptr;
+    }
+    const size_t bytes = static_cast<size_t>(length);
+    const size_t need = kBlockHead + offsetof(DalvikArray, data) + bytes + kBlockTail;
+    uint8_t* raw = static_cast<uint8_t*>(g.shadow_arena.allocate(need));
+    if (raw == nullptr) {
+        ++g.counters.shadows_declined;
+        return nullptr;
+    }
+    jobject global = original<jobject (*)(Env*, jobject)>(slot::NewGlobalRef)(env, local);
+    if (global == nullptr) {
+        g.shadow_arena.release(raw);
+        ++g.counters.shadows_declined;
+        return nullptr;
+    }
+    BlockHeader* header = reinterpret_cast<BlockHeader*>(raw);
+    header->magic = kBlockLive;
+    header->capacity = static_cast<uint32_t>(bytes);
+    header->global = global;
+    header->next = nullptr;
+    DalvikArray* block = array_of(header);
+    block->clazz = kDalvikArrayClass;
+    block->lock = 0;
+    block->length = static_cast<uint32_t>(bytes);
+    block->pad = 0;
+    if (bytes > 0) {
+        original<void (*)(Env*, jarray, jsize, jsize, jbyte*)>(slot::GetByteArrayRegion)(
+            env, local, 0, length, reinterpret_cast<jbyte*>(block->data));
+    }
+    __builtin_memset(block->data + bytes, 0, kBlockTail);
+    state->blocks[state->count++] = header;
+    original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, local);
+    __atomic_fetch_add(&g.counters.shadows_live, 1u, __ATOMIC_RELAXED);
+    ++g.counters.shadows_created;
+    return block;
+}
+
+// What an application gets for a reference-returning call: a shadow when the declared type is byte[].
+jobject post_result(Env* env, bool bytes, jobject reference) {
+    if (reference == nullptr || !bytes || !g.shadows_on) {
+        return reference;
+    }
+    jobject shadow = make_shadow(env, reference);
+    return shadow != nullptr ? shadow : reference;
+}
+
+// The array's bytes go to the real array: what a conformant Release or SetRegion does with a copy.
+void write_back(Env* env, BlockHeader* header, jsize start, jsize length, const void* source) {
+    original<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(slot::SetByteArrayRegion)(
+        env, header->global, start, length, static_cast<const jbyte*>(source));
+}
+
 // ---- signatures
 
 unsigned hash_of(const void* id, unsigned modulus) {
@@ -121,12 +249,17 @@ unsigned hash_of(const void* id, unsigned modulus) {
                                  modulus);
 }
 
-bool parse_signature(const char* sig, MethodInfo* info) {
+char kind_at(const MethodInfo& info, unsigned index) {
+    return index < kInlineParams ? info.kinds[index] : info.more[index - kInlineParams];
+}
+
+// The parameter kinds of a method signature into `kinds` (kMaxParams + 1 entries); false when it is malformed.
+bool parse_signature(const char* sig, char* kinds, unsigned* count, bool* returns_bytes) {
     if (sig == nullptr || sig[0] != '(') {
         return false;
     }
     const char* p = sig + 1;
-    unsigned count = 0;
+    unsigned n = 0;
     while (*p != '\0' && *p != ')') {
         char kind;
         switch (*p) {
@@ -161,44 +294,73 @@ bool parse_signature(const char* sig, MethodInfo* info) {
             default:
                 return false;
         }
-        if (count < kMaxParams) {
-            info->kinds[count] = kind;
+        if (n >= kMaxParams) {
+            return false;
         }
-        ++count;
+        kinds[n++] = kind;
     }
     if (*p != ')') {
         return false;
     }
     ++p;
-    info->nparams = static_cast<uint8_t>(count > kMaxParams ? kMaxParams : count);
-    info->usable = count <= kMaxParams;
-    info->returns_bytes = p[0] == '[' && p[1] == 'B' && p[2] == '\0';
+    *count = n;
+    *returns_bytes = p[0] == '[' && p[1] == 'B' && p[2] == '\0';
     return true;
+}
+
+// Stores an entry for `id`; false when the registry or the pool is full.
+bool store_method(void* id, const char* kinds, unsigned count, bool returns_bytes, bool usable = true) {
+    lock_registry();
+    MethodInfo parsed = {};
+    parsed.nparams = static_cast<uint8_t>(count);
+    parsed.returns_bytes = returns_bytes;
+    parsed.usable = usable;
+    for (unsigned i = 0; i < count && i < kInlineParams; ++i) {
+        parsed.kinds[i] = kinds[i];
+    }
+    if (count > kInlineParams) {
+        const unsigned extra = count - kInlineParams;
+        if (g.kind_pool_used + extra > kKindPoolBytes) {
+            parsed.usable = 0;  // the kinds are not kept: the call is forwarded unchanged
+        } else {
+            char* pool = g.kind_pool + g.kind_pool_used;
+            for (unsigned i = 0; i < extra; ++i) {
+                pool[i] = kinds[kInlineParams + i];
+            }
+            g.kind_pool_used += extra;
+            parsed.more = pool;
+        }
+    }
+    bool stored = false;
+    unsigned index = hash_of(id, kMethodSlots);
+    for (unsigned probe = 0; probe < kProbeLimit; ++probe, index = (index + 1) % kMethodSlots) {
+        MethodInfo& entry = g.methods[index];
+        if (entry.id == id) {
+            stored = true;  // already known
+            break;
+        }
+        if (entry.id == nullptr) {
+            entry = parsed;
+            entry.id = nullptr;
+            __atomic_store_n(&entry.id, id, __ATOMIC_RELEASE);
+            stored = true;
+            break;
+        }
+    }
+    unlock_registry();
+    return stored;
 }
 
 void register_method(void* id, const char* sig) {
     if (id == nullptr) {
         return;
     }
-    MethodInfo parsed = {};
-    if (!parse_signature(sig, &parsed)) {
-        return;
+    char kinds[kMaxParams + 1];
+    unsigned count = 0;
+    bool returns_bytes = false;
+    if (parse_signature(sig, kinds, &count, &returns_bytes)) {
+        store_method(id, kinds, count, returns_bytes);
     }
-    lock_registry();
-    unsigned index = hash_of(id, kMethodSlots);
-    for (unsigned probe = 0; probe < kProbeLimit; ++probe, index = (index + 1) % kMethodSlots) {
-        MethodInfo& entry = g.methods[index];
-        if (entry.id == id) {
-            break;  // already known
-        }
-        if (entry.id == nullptr) {
-            entry = parsed;
-            entry.id = nullptr;
-            __atomic_store_n(&entry.id, id, __ATOMIC_RELEASE);
-            break;
-        }
-    }
-    unlock_registry();
 }
 
 const MethodInfo* find_method(const void* id) {
@@ -217,6 +379,39 @@ const MethodInfo* find_method(const void* id) {
         }
     }
     return nullptr;
+}
+
+// A method ID the layer did not see being looked up (FromReflectedMethod, or one the registry dropped):
+// asks the platform, once, what its parameters are. `object_or_class` is the receiver (an instance call) or
+// the class (a static call or a constructor).
+const MethodInfo* learn_method(Env* env, void* id, bool is_static, jobject object_or_class) {
+    if (id == nullptr || object_or_class == nullptr || g.platform.describe_method == nullptr ||
+        original<jboolean (*)(Env*)>(slot::ExceptionCheck)(env) != 0) {
+        return nullptr;  // an exception is pending: no JNI function may be called
+    }
+    jobject hint = object_or_class;
+    jobject owned = nullptr;
+    if (!is_static) {
+        owned = original<jobject (*)(Env*, jobject)>(slot::GetObjectClass)(env, object_or_class);
+        hint = owned;
+        if (hint == nullptr) {
+            return nullptr;
+        }
+    }
+    char kinds[kMaxParams + 1];
+    unsigned count = 0;
+    const bool described = g.platform.describe_method(env, g.orig, id, is_static, hint, kinds, kMaxParams, &count);
+    if (owned != nullptr) {
+        original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, owned);
+    }
+    if (!described) {
+        store_method(id, kinds, 0, false, false);  // remember that it cannot be described: no new attempt
+        return nullptr;
+    }
+    if (!store_method(id, kinds, count, false)) {
+        return nullptr;
+    }
+    return find_method(id);
 }
 
 void register_byte_field(void* id, const char* sig) {
@@ -254,190 +449,9 @@ bool is_byte_field(const void* id) {
     return false;
 }
 
-// ---- shadow blocks
-
-BlockHeader* header_of(DalvikArray* block) {
-    return reinterpret_cast<BlockHeader*>(reinterpret_cast<uint8_t*>(block) - kBlockHead);
-}
-
-void free_block(DalvikArray* block) {
-    BlockHeader* header = header_of(block);
-    header->magic = kBlockDead;
-    g.shadow_arena.release(header);
-    __atomic_fetch_sub(&g.counters.shadows_live, 1u, __ATOMIC_RELAXED);
-}
-
-void evict_oldest(ThreadState* state) {
-    DalvikArray* block = state->blocks[0];
-    state->block_bytes -= block->length;
-    for (unsigned i = 1; i < state->block_count; ++i) {
-        state->blocks[i - 1] = state->blocks[i];
-    }
-    --state->block_count;
-    free_block(block);
-}
-
-void forget_all_blocks(ThreadState* state) {
-    while (state->block_count > 0) {
-        evict_oldest(state);
-    }
-}
-
-jobject make_shadow(Env* env, jobject local) {
-    const jsize length = original<jsize (*)(Env*, jarray)>(slot::GetArrayLength)(env, local);
-    ThreadState* state = thread();
-    if (length < 0 || state == nullptr) {
-        return nullptr;
-    }
-    const size_t bytes = static_cast<size_t>(length);
-    while (state->block_count > 0 && (state->block_count >= kMaxBlocks || state->block_bytes + bytes > kMaxBlockBytes)) {
-        evict_oldest(state);
-    }
-    const size_t need = kBlockHead + offsetof(DalvikArray, data) + bytes + kBlockTail;
-    uint8_t* raw = static_cast<uint8_t*>(g.shadow_arena.allocate(need));
-    if (raw == nullptr) {
-        forget_all_blocks(state);
-        raw = static_cast<uint8_t*>(g.shadow_arena.allocate(need));
-        if (raw == nullptr) {
-            return nullptr;
-        }
-    }
-    BlockHeader* header = reinterpret_cast<BlockHeader*>(raw);
-    header->magic = kBlockLive;
-    header->capacity = static_cast<uint32_t>(bytes);
-    DalvikArray* block = reinterpret_cast<DalvikArray*>(raw + kBlockHead);
-    block->clazz = kDalvikArrayClass;
-    block->lock = 0;
-    block->length = static_cast<uint32_t>(bytes);
-    block->pad = 0;
-    if (bytes > 0) {
-        original<void (*)(Env*, jarray, jsize, jsize, jbyte*)>(slot::GetByteArrayRegion)(
-            env, local, 0, length, reinterpret_cast<jbyte*>(block->data));
-    }
-    __builtin_memset(block->data + bytes, 0, kBlockTail);
-    state->blocks[state->block_count++] = block;
-    state->block_bytes += bytes;
-    original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, local);
-    __atomic_fetch_add(&g.counters.shadows_live, 1u, __ATOMIC_RELAXED);
-    ++g.counters.shadows_created;
-    return block;
-}
-
-// A real Java array holding the block's bytes: what the runtime is handed in place of a shadow.
-jobject unwrap_to_array(Env* env, jobject shadow) {
-    const DalvikArray* block = static_cast<const DalvikArray*>(shadow);
-    const jsize length = static_cast<jsize>(block->length);
-    jobject array = original<jobject (*)(Env*, jsize)>(slot::NewByteArray)(env, length);
-    if (array != nullptr && length > 0) {
-        original<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(slot::SetByteArrayRegion)(
-            env, array, 0, length, reinterpret_cast<const jbyte*>(block->data));
-    }
-    ++g.counters.shadows_unwrapped;
-    return array;
-}
-
-// The temporary Java arrays a call made for its shadow arguments, released when the call is done.
-struct Temps {
-    explicit Temps(Env* environment) : env(environment) {}
-    Temps(const Temps&) = delete;
-    Temps& operator=(const Temps&) = delete;
-    ~Temps() {
-        for (unsigned i = 0; i < count; ++i) {
-            original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, refs[i]);
-        }
-    }
-    jobject take(jobject object) {
-        if (!is_shadow(object)) {
-            return object;
-        }
-        jobject array = unwrap_to_array(env, object);
-        if (array != nullptr && count < kMaxParams + 2) {
-            refs[count++] = array;
-        }
-        return array;
-    }
-    Env* env;
-    jobject refs[kMaxParams + 2];
-    unsigned count = 0;
-};
-
-// ---- local reference relief
-
-void relieve(Env* env, ThreadState* state) {
-    ++g.counters.probes;
-    if (original<jboolean (*)(Env*)>(slot::ExceptionCheck)(env) != 0) {
-        return;  // never disturb a pending exception
-    }
-    if (original<jint (*)(Env*, jint)>(slot::EnsureLocalCapacity)(env, kProbeRoom) == JNI_OK) {
-        return;
-    }
-    original<void (*)(Env*)>(slot::ExceptionClear)(env);  // the OutOfMemoryError the refusal raised
-    ++g.counters.relief_rounds;
-    auto release = original<void (*)(Env*, jobject)>(slot::DeleteLocalRef);
-    while (state->ring_count > kKeepNewest) {
-        jobject oldest = state->ring[state->ring_head];
-        state->ring_head = (state->ring_head + 1) % kRingSize;
-        --state->ring_count;
-        if (oldest != nullptr) {
-            release(env, oldest);
-            ++g.counters.references_released;
-        }
-    }
-}
-
-void track(Env* env, jobject reference) {
-    if (!g.relief_on || reference == nullptr) {
-        return;
-    }
-    ThreadState* state = thread();
-    if (state == nullptr) {
-        return;
-    }
-    state->ring[(state->ring_head + state->ring_count) % kRingSize] = reference;
-    if (state->ring_count == kRingSize) {
-        state->ring_head = (state->ring_head + 1) % kRingSize;
-    } else {
-        ++state->ring_count;
-    }
-    if (++state->since_probe >= kProbeEvery) {
-        state->since_probe = 0;
-        relieve(env, state);
-    }
-}
-
-void untrack(jobject reference) {
-    ThreadState* state = thread();
-    if (state == nullptr) {
-        return;
-    }
-    for (unsigned k = state->ring_count; k > 0; --k) {
-        const unsigned index = (state->ring_head + k - 1) % kRingSize;
-        if (state->ring[index] == reference) {
-            state->ring[index] = nullptr;
-            return;
-        }
-    }
-}
-
-// What an application gets for a reference-returning call: a shadow when the declared type is byte[],
-// otherwise the reference, noted for relief.
-jobject post_result(Env* env, bool bytes, jobject reference) {
-    if (reference == nullptr) {
-        return reference;
-    }
-    if (bytes && g.shadows_on) {
-        jobject shadow = make_shadow(env, reference);
-        if (shadow != nullptr) {
-            return shadow;
-        }
-    }
-    track(env, reference);
-    return reference;
-}
-
 // ---- the Call families
 
-enum class Kind { kInstance, kNonvirtual, kStatic };
+enum class Kind { kInstance, kNonvirtual, kStatic, kConstructor };
 
 template <class R, Kind K>
 R call_original_v(int slot, Env* e, jobject l0, jobject l1, jmethodID m, va_list ap) {
@@ -477,13 +491,14 @@ R complete(Env* e, const MethodInfo* info, bool app, F&& call) {
     }
 }
 
-bool collect_va(const MethodInfo& info, va_list ap, jvalue* pack, Temps& temps) {
+// Whether any argument is a shadow; `pack` receives the arguments with every shadow replaced by its real array.
+bool collect_va(const MethodInfo& info, va_list ap, jvalue* pack) {
     va_list copy;
     va_copy(copy, ap);
     bool changed = false;
     for (unsigned i = 0; i < info.nparams; ++i) {
         pack[i].j = 0;
-        switch (info.kinds[i]) {
+        switch (kind_at(info, i)) {
             case 'Z': pack[i].z = static_cast<jboolean>(va_arg(copy, int)); break;
             case 'B': pack[i].b = static_cast<jbyte>(va_arg(copy, int)); break;
             case 'C': pack[i].c = static_cast<jchar>(va_arg(copy, int)); break;
@@ -495,11 +510,9 @@ bool collect_va(const MethodInfo& info, va_list ap, jvalue* pack, Temps& temps) 
             default: {
                 jobject object = va_arg(copy, jobject);
                 if (is_shadow(object)) {
-                    pack[i].l = temps.take(object);
                     changed = true;
-                } else {
-                    pack[i].l = object;
                 }
+                pack[i].l = conv(object);
             }
         }
     }
@@ -507,12 +520,12 @@ bool collect_va(const MethodInfo& info, va_list ap, jvalue* pack, Temps& temps) 
     return changed;
 }
 
-bool collect_array(const MethodInfo& info, const jvalue* in, jvalue* pack, Temps& temps) {
+bool collect_array(const MethodInfo& info, const jvalue* in, jvalue* pack) {
     bool changed = false;
     for (unsigned i = 0; i < info.nparams; ++i) {
         pack[i] = in[i];
-        if (info.kinds[i] == 'L' && is_shadow(in[i].l)) {
-            pack[i].l = temps.take(in[i].l);
+        if (kind_at(info, i) == 'L' && is_shadow(in[i].l)) {
+            pack[i].l = conv(in[i].l);
             changed = true;
         }
     }
@@ -521,13 +534,18 @@ bool collect_array(const MethodInfo& info, const jvalue* in, jvalue* pack, Temps
 
 template <class R, Kind K, int SlotV, int SlotA>
 R run_va(Env* e, jobject l0, jobject l1, jmethodID m, va_list ap, bool app) {
-    const MethodInfo* info = app ? find_method(m) : nullptr;
-    if (app && live_shadows() != 0) {
-        Temps temps(e);
-        jobject receiver = K == Kind::kStatic ? l0 : temps.take(l0);
-        jvalue pack[kMaxParams];
-        if (info != nullptr && info->usable && collect_va(*info, ap, pack, temps)) {
-            return complete<R>(e, info, app, [&] { return call_original_a<R, K>(SlotA, e, receiver, l1, m, pack); });
+    const uint32_t live = live_shadows();
+    const MethodInfo* info = ((IsObject<R>::value && app) || live != 0) ? find_method(m) : nullptr;
+    if (live != 0) {
+        jobject receiver = (K == Kind::kStatic || K == Kind::kConstructor) ? l0 : conv(l0);
+        if (info == nullptr) {
+            info = learn_method(e, m, K == Kind::kStatic, receiver);
+        }
+        if (info != nullptr && info->usable && info->nparams > 0) {
+            jvalue* pack = static_cast<jvalue*>(__builtin_alloca(info->nparams * sizeof(jvalue)));
+            if (collect_va(*info, ap, pack)) {
+                return complete<R>(e, info, app, [&] { return call_original_a<R, K>(SlotA, e, receiver, l1, m, pack); });
+            }
         }
         return complete<R>(e, info, app, [&] { return call_original_v<R, K>(SlotV, e, receiver, l1, m, ap); });
     }
@@ -536,13 +554,18 @@ R run_va(Env* e, jobject l0, jobject l1, jmethodID m, va_list ap, bool app) {
 
 template <class R, Kind K, int SlotV, int SlotA>
 R run_array(Env* e, jobject l0, jobject l1, jmethodID m, const jvalue* args, bool app) {
-    const MethodInfo* info = app ? find_method(m) : nullptr;
-    if (app && live_shadows() != 0) {
-        Temps temps(e);
-        jobject receiver = K == Kind::kStatic ? l0 : temps.take(l0);
-        jvalue pack[kMaxParams];
-        if (info != nullptr && info->usable && collect_array(*info, args, pack, temps)) {
-            args = pack;
+    const uint32_t live = live_shadows();
+    const MethodInfo* info = ((IsObject<R>::value && app) || live != 0) ? find_method(m) : nullptr;
+    if (live != 0) {
+        jobject receiver = (K == Kind::kStatic || K == Kind::kConstructor) ? l0 : conv(l0);
+        if (info == nullptr) {
+            info = learn_method(e, m, K == Kind::kStatic, receiver);
+        }
+        if (info != nullptr && info->usable && info->nparams > 0) {
+            jvalue* pack = static_cast<jvalue*>(__builtin_alloca(info->nparams * sizeof(jvalue)));
+            if (collect_array(*info, args, pack)) {
+                args = pack;
+            }
         }
         return complete<R>(e, info, app, [&] { return call_original_a<R, K>(SlotA, e, receiver, l1, m, args); });
     }
@@ -554,13 +577,13 @@ struct Instance {
     static constexpr int kSlotV = call_slot(static_cast<Type>(T), kVa);
     static constexpr int kSlotA = call_slot(static_cast<Type>(T), kArray);
     static R va(Env* e, jobject o, jmethodID m, va_list ap) {
-        return run_va<R, Kind::kInstance, kSlotV, kSlotA>(e, o, nullptr, m, ap, from_app(__builtin_return_address(0)));
+        return run_va<R, Kind::kInstance, kSlotV, kSlotA>(e, o, nullptr, m, ap, enter(e, __builtin_return_address(0)));
     }
     static R array(Env* e, jobject o, jmethodID m, const jvalue* a) {
-        return run_array<R, Kind::kInstance, kSlotV, kSlotA>(e, o, nullptr, m, a, from_app(__builtin_return_address(0)));
+        return run_array<R, Kind::kInstance, kSlotV, kSlotA>(e, o, nullptr, m, a, enter(e, __builtin_return_address(0)));
     }
     static R variadic(Env* e, jobject o, jmethodID m, ...) {
-        const bool app = from_app(__builtin_return_address(0));
+        const bool app = enter(e, __builtin_return_address(0));
         va_list ap;
         va_start(ap, m);
         if constexpr (IsVoid<R>::value) {
@@ -579,13 +602,13 @@ struct Nonvirtual {
     static constexpr int kSlotV = nonvirtual_slot(static_cast<Type>(T), kVa);
     static constexpr int kSlotA = nonvirtual_slot(static_cast<Type>(T), kArray);
     static R va(Env* e, jobject o, jclass c, jmethodID m, va_list ap) {
-        return run_va<R, Kind::kNonvirtual, kSlotV, kSlotA>(e, o, c, m, ap, from_app(__builtin_return_address(0)));
+        return run_va<R, Kind::kNonvirtual, kSlotV, kSlotA>(e, o, c, m, ap, enter(e, __builtin_return_address(0)));
     }
     static R array(Env* e, jobject o, jclass c, jmethodID m, const jvalue* a) {
-        return run_array<R, Kind::kNonvirtual, kSlotV, kSlotA>(e, o, c, m, a, from_app(__builtin_return_address(0)));
+        return run_array<R, Kind::kNonvirtual, kSlotV, kSlotA>(e, o, c, m, a, enter(e, __builtin_return_address(0)));
     }
     static R variadic(Env* e, jobject o, jclass c, jmethodID m, ...) {
-        const bool app = from_app(__builtin_return_address(0));
+        const bool app = enter(e, __builtin_return_address(0));
         va_list ap;
         va_start(ap, m);
         if constexpr (IsVoid<R>::value) {
@@ -599,27 +622,27 @@ struct Nonvirtual {
     }
 };
 
-// Static calls and constructors share the shape (jclass, jmethodID, arguments); `Base` is the first slot
-// of the family (Call...Method), `Index` the member of the family.
-template <class R, int SlotVarargs>
+// Static calls and constructors share the shape (jclass, jmethodID, arguments); `SlotVarargs` is the first slot
+// of the family (Call...Method).
+template <class R, int SlotVarargs, Kind K = Kind::kStatic>
 struct Static {
     static constexpr int kSlotV = SlotVarargs + 1;
     static constexpr int kSlotA = SlotVarargs + 2;
     static R va(Env* e, jclass c, jmethodID m, va_list ap) {
-        return run_va<R, Kind::kStatic, kSlotV, kSlotA>(e, c, nullptr, m, ap, from_app(__builtin_return_address(0)));
+        return run_va<R, K, kSlotV, kSlotA>(e, c, nullptr, m, ap, enter(e, __builtin_return_address(0)));
     }
     static R array(Env* e, jclass c, jmethodID m, const jvalue* a) {
-        return run_array<R, Kind::kStatic, kSlotV, kSlotA>(e, c, nullptr, m, a, from_app(__builtin_return_address(0)));
+        return run_array<R, K, kSlotV, kSlotA>(e, c, nullptr, m, a, enter(e, __builtin_return_address(0)));
     }
     static R variadic(Env* e, jclass c, jmethodID m, ...) {
-        const bool app = from_app(__builtin_return_address(0));
+        const bool app = enter(e, __builtin_return_address(0));
         va_list ap;
         va_start(ap, m);
         if constexpr (IsVoid<R>::value) {
-            run_va<R, Kind::kStatic, kSlotV, kSlotA>(e, c, nullptr, m, ap, app);
+            run_va<R, K, kSlotV, kSlotA>(e, c, nullptr, m, ap, app);
             va_end(ap);
         } else {
-            R result = run_va<R, Kind::kStatic, kSlotV, kSlotA>(e, c, nullptr, m, ap, app);
+            R result = run_va<R, K, kSlotV, kSlotA>(e, c, nullptr, m, ap, app);
             va_end(ap);
             return result;
         }
@@ -642,25 +665,29 @@ void install_family(void** table) {
     table[static_call_slot(static_cast<Type>(T), kArray)] = reinterpret_cast<void*>(&S::array);
 }
 
-// ---- registration, fields, strings, classes
+// ---- registration and fields
 
 jmethodID w_GetMethodID(Env* e, jclass c, const char* name, const char* sig) {
+    enter_any(e);
     jmethodID id = original<jmethodID (*)(Env*, jclass, const char*, const char*)>(slot::GetMethodID)(e, c, name, sig);
     register_method(id, sig);
     return id;
 }
 jmethodID w_GetStaticMethodID(Env* e, jclass c, const char* name, const char* sig) {
+    enter_any(e);
     jmethodID id =
         original<jmethodID (*)(Env*, jclass, const char*, const char*)>(slot::GetStaticMethodID)(e, c, name, sig);
     register_method(id, sig);
     return id;
 }
 jfieldID w_GetFieldID(Env* e, jclass c, const char* name, const char* sig) {
+    enter_any(e);
     jfieldID id = original<jfieldID (*)(Env*, jclass, const char*, const char*)>(slot::GetFieldID)(e, c, name, sig);
     register_byte_field(id, sig);
     return id;
 }
 jfieldID w_GetStaticFieldID(Env* e, jclass c, const char* name, const char* sig) {
+    enter_any(e);
     jfieldID id =
         original<jfieldID (*)(Env*, jclass, const char*, const char*)>(slot::GetStaticFieldID)(e, c, name, sig);
     register_byte_field(id, sig);
@@ -668,207 +695,193 @@ jfieldID w_GetStaticFieldID(Env* e, jclass c, const char* name, const char* sig)
 }
 
 jobject w_GetObjectField(Env* e, jobject o, jfieldID f) {
-    const bool app = from_app(__builtin_return_address(0));
-    Temps temps(e);
-    jobject receiver = app ? temps.take(o) : o;
-    jobject result = original<jobject (*)(Env*, jobject, jfieldID)>(get_field_slot(kObject))(e, receiver, f);
+    const bool app = enter(e, __builtin_return_address(0));
+    jobject result = original<jobject (*)(Env*, jobject, jfieldID)>(get_field_slot(kObject))(e, conv(o), f);
     return app ? post_result(e, is_byte_field(f), result) : result;
 }
 jobject w_GetStaticObjectField(Env* e, jclass c, jfieldID f) {
-    const bool app = from_app(__builtin_return_address(0));
+    const bool app = enter(e, __builtin_return_address(0));
     jobject result = original<jobject (*)(Env*, jclass, jfieldID)>(get_static_field_slot(kObject))(e, c, f);
     return app ? post_result(e, is_byte_field(f), result) : result;
 }
 void w_SetObjectField(Env* e, jobject o, jfieldID f, jobject value) {
-    Temps temps(e);
-    original<void (*)(Env*, jobject, jfieldID, jobject)>(set_field_slot(kObject))(
-        e, from_app(__builtin_return_address(0)) ? temps.take(o) : o, f, temps.take(value));
+    enter_any(e);
+    original<void (*)(Env*, jobject, jfieldID, jobject)>(set_field_slot(kObject))(e, conv(o), f, conv(value));
 }
 void w_SetStaticObjectField(Env* e, jclass c, jfieldID f, jobject value) {
-    Temps temps(e);
-    original<void (*)(Env*, jclass, jfieldID, jobject)>(set_static_field_slot(kObject))(e, c, f, temps.take(value));
-}
-jobject w_GetObjectArrayElement(Env* e, jobject array, jsize index) {
-    const bool app = from_app(__builtin_return_address(0));
-    jobject result = original<jobject (*)(Env*, jobject, jsize)>(slot::GetObjectArrayElement)(e, array, index);
-    if (app) {
-        track(e, result);
-    }
-    return result;
+    enter_any(e);
+    original<void (*)(Env*, jclass, jfieldID, jobject)>(set_static_field_slot(kObject))(e, c, f, conv(value));
 }
 void w_SetObjectArrayElement(Env* e, jobject array, jsize index, jobject value) {
-    Temps temps(e);
-    original<void (*)(Env*, jobject, jsize, jobject)>(slot::SetObjectArrayElement)(e, array, index, temps.take(value));
-}
-
-jobject track_result(Env* e, bool app, jobject result) {
-    if (app) {
-        track(e, result);
-    }
-    return result;
-}
-jobject w_NewStringUTF(Env* e, const char* bytes) {
-    const bool app = from_app(__builtin_return_address(0));
-    return track_result(e, app, original<jobject (*)(Env*, const char*)>(slot::NewStringUTF)(e, bytes));
-}
-jobject w_NewString(Env* e, const jchar* chars, jsize length) {
-    const bool app = from_app(__builtin_return_address(0));
-    return track_result(e, app, original<jobject (*)(Env*, const jchar*, jsize)>(slot::NewString)(e, chars, length));
-}
-jobject w_FindClass(Env* e, const char* name) {
-    const bool app = from_app(__builtin_return_address(0));
-    return track_result(e, app, original<jobject (*)(Env*, const char*)>(slot::FindClass)(e, name));
-}
-jobject w_GetSuperclass(Env* e, jclass c) {
-    const bool app = from_app(__builtin_return_address(0));
-    return track_result(e, app, original<jobject (*)(Env*, jclass)>(slot::GetSuperclass)(e, c));
+    enter_any(e);
+    original<void (*)(Env*, jobject, jsize, jobject)>(slot::SetObjectArrayElement)(e, array, index, conv(value));
 }
 jobject w_NewObjectArray(Env* e, jsize length, jclass c, jobject initial) {
-    const bool app = from_app(__builtin_return_address(0));
-    Temps temps(e);
-    return track_result(
-        e, app, original<jobject (*)(Env*, jsize, jclass, jobject)>(slot::NewObjectArray)(e, length, c, temps.take(initial)));
-}
-jobject w_NewByteArray(Env* e, jsize length) {
-    const bool app = from_app(__builtin_return_address(0));
-    return track_result(e, app, original<jobject (*)(Env*, jsize)>(slot::NewByteArray)(e, length));
+    enter_any(e);
+    return original<jobject (*)(Env*, jsize, jclass, jobject)>(slot::NewObjectArray)(e, length, c, conv(initial));
 }
 
 // ---- references and arrays that may be handed a shadow
 
 jobject w_GetObjectClass(Env* e, jobject o) {
-    const bool app = from_app(__builtin_return_address(0));
-    Temps temps(e);
-    return track_result(e, app, original<jobject (*)(Env*, jobject)>(slot::GetObjectClass)(e, temps.take(o)));
+    enter_any(e);
+    return original<jobject (*)(Env*, jobject)>(slot::GetObjectClass)(e, conv(o));
 }
 jboolean w_IsInstanceOf(Env* e, jobject o, jclass c) {
-    Temps temps(e);
-    return original<jboolean (*)(Env*, jobject, jclass)>(slot::IsInstanceOf)(e, temps.take(o), c);
+    enter_any(e);
+    return original<jboolean (*)(Env*, jobject, jclass)>(slot::IsInstanceOf)(e, conv(o), c);
 }
 jobject w_NewGlobalRef(Env* e, jobject o) {
-    Temps temps(e);
-    return original<jobject (*)(Env*, jobject)>(slot::NewGlobalRef)(e, temps.take(o));
+    enter_any(e);
+    return original<jobject (*)(Env*, jobject)>(slot::NewGlobalRef)(e, conv(o));
 }
 jobject w_NewWeakGlobalRef(Env* e, jobject o) {
-    Temps temps(e);
-    return original<jobject (*)(Env*, jobject)>(slot::NewWeakGlobalRef)(e, temps.take(o));
+    enter_any(e);
+    return original<jobject (*)(Env*, jobject)>(slot::NewWeakGlobalRef)(e, conv(o));
 }
 jobject w_NewLocalRef(Env* e, jobject o) {
-    const bool app = from_app(__builtin_return_address(0));
-    if (is_shadow(o)) {
-        jobject array = unwrap_to_array(e, o);
-        return track_result(e, app, array);
-    }
-    return track_result(e, app, original<jobject (*)(Env*, jobject)>(slot::NewLocalRef)(e, o));
+    enter_any(e);
+    return original<jobject (*)(Env*, jobject)>(slot::NewLocalRef)(e, conv(o));
 }
 jboolean w_IsSameObject(Env* e, jobject a, jobject b) {
-    if (is_shadow(a) || is_shadow(b)) {
-        return a == b;
-    }
-    return original<jboolean (*)(Env*, jobject, jobject)>(slot::IsSameObject)(e, a, b);
+    enter_any(e);
+    return original<jboolean (*)(Env*, jobject, jobject)>(slot::IsSameObject)(e, conv(a), conv(b));
 }
 jint w_GetObjectRefType(Env* e, jobject o) {
-    if (is_shadow(o)) {
+    enter_any(e);
+    if (live_header(o) != nullptr) {
         return kRefTypeLocal;
     }
-    return original<jint (*)(Env*, jobject)>(slot::GetObjectRefType)(e, o);
+    return original<jint (*)(Env*, jobject)>(slot::GetObjectRefType)(e, conv(o));
+}
+jint w_MonitorEnter(Env* e, jobject o) {
+    enter_any(e);
+    return original<jint (*)(Env*, jobject)>(slot::MonitorEnter)(e, conv(o));
+}
+jint w_MonitorExit(Env* e, jobject o) {
+    enter_any(e);
+    return original<jint (*)(Env*, jobject)>(slot::MonitorExit)(e, conv(o));
 }
 void w_DeleteLocalRef(Env* e, jobject o) {
-    const bool app = from_app(__builtin_return_address(0));
+    enter_any(e);
     if (is_shadow(o)) {
+        BlockHeader* header = live_header(o);
         ThreadState* state = thread();
-        if (state == nullptr) {
+        if (header == nullptr || state == nullptr) {
             return;
         }
-        for (unsigned i = state->block_count; i > 0; --i) {
-            if (state->blocks[i - 1] == o) {
-                DalvikArray* block = state->blocks[i - 1];
-                state->block_bytes -= block->length;
-                for (unsigned j = i; j < state->block_count; ++j) {
-                    state->blocks[j - 1] = state->blocks[j];
-                }
-                --state->block_count;
-                free_block(block);
+        for (unsigned i = state->count; i > 0; --i) {
+            if (state->blocks[i - 1] == header) {
+                state->blocks[i - 1] = state->blocks[--state->count];
+                free_block(e, header);
                 return;
             }
         }
-        return;  // another thread's block: its owner evicts it
-    }
-    if (app && g.relief_on) {
-        untrack(o);
+        return;  // another thread's block: it goes with its thread
     }
     original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(e, o);
 }
+// A shadow lives in no reference table, so popping the frame cannot take it: the original pop runs with no
+// result and the same block is returned.
 jobject w_PopLocalFrame(Env* e, jobject result) {
-    Temps temps(e);
-    jobject out = original<jobject (*)(Env*, jobject)>(slot::PopLocalFrame)(e, temps.take(result));
-    ThreadState* state = thread();
-    if (state != nullptr) {
-        state->ring_count = 0;  // the frame's references are gone
+    enter_any(e);
+    if (is_shadow(result)) {
+        original<jobject (*)(Env*, jobject)>(slot::PopLocalFrame)(e, nullptr);
+        return live_header(result) != nullptr ? result : nullptr;
     }
-    return out;
+    return original<jobject (*)(Env*, jobject)>(slot::PopLocalFrame)(e, result);
 }
 
 jsize w_GetArrayLength(Env* e, jarray a) {
+    enter_any(e);
     if (is_shadow(a)) {
-        return static_cast<jsize>(static_cast<const DalvikArray*>(a)->length);
+        BlockHeader* header = live_header(a);
+        return header != nullptr ? static_cast<jsize>(static_cast<const DalvikArray*>(a)->length) : 0;
     }
     return original<jsize (*)(Env*, jarray)>(slot::GetArrayLength)(e, a);
 }
 jbyte* w_GetByteArrayElements(Env* e, jarray a, jboolean* is_copy) {
+    enter_any(e);
     if (is_shadow(a)) {
         if (is_copy != nullptr) {
             *is_copy = 0;
         }
-        return reinterpret_cast<jbyte*>(static_cast<DalvikArray*>(a)->data);
+        return live_header(a) != nullptr ? reinterpret_cast<jbyte*>(static_cast<DalvikArray*>(a)->data) : nullptr;
     }
     return original<jbyte* (*)(Env*, jarray, jboolean*)>(slot::GetByteArrayElements)(e, a, is_copy);
 }
+// The block is the working copy: the array gets its bytes on Release (unless JNI_ABORT) and on a commit.
+void release_block(Env* e, jarray a, const void* elements, jint mode) {
+    BlockHeader* header = live_header(a);
+    if (header == nullptr || mode == kReleaseAbort) {
+        return;
+    }
+    DalvikArray* block = array_of(header);
+    const void* source = elements != nullptr ? elements : block->data;
+    if (source != block->data) {
+        __builtin_memcpy(block->data, source, block->length);
+    }
+    if (block->length > 0) {
+        write_back(e, header, 0, static_cast<jsize>(block->length), block->data);
+    }
+}
 void w_ReleaseByteArrayElements(Env* e, jarray a, jbyte* elements, jint mode) {
+    enter_any(e);
     if (is_shadow(a)) {
-        return;  // the application read the block itself
+        release_block(e, a, elements, mode);
+        return;
     }
     original<void (*)(Env*, jarray, jbyte*, jint)>(slot::ReleaseByteArrayElements)(e, a, elements, mode);
 }
 void* w_GetPrimitiveArrayCritical(Env* e, jarray a, jboolean* is_copy) {
+    enter_any(e);
     if (is_shadow(a)) {
         if (is_copy != nullptr) {
             *is_copy = 0;
         }
-        return static_cast<DalvikArray*>(a)->data;
+        return live_header(a) != nullptr ? static_cast<DalvikArray*>(a)->data : nullptr;
     }
     return original<void* (*)(Env*, jarray, jboolean*)>(slot::GetPrimitiveArrayCritical)(e, a, is_copy);
 }
 void w_ReleasePrimitiveArrayCritical(Env* e, jarray a, void* elements, jint mode) {
+    enter_any(e);
     if (is_shadow(a)) {
+        release_block(e, a, elements, mode);
         return;
     }
     original<void (*)(Env*, jarray, void*, jint)>(slot::ReleasePrimitiveArrayCritical)(e, a, elements, mode);
 }
 void w_GetByteArrayRegion(Env* e, jarray a, jsize start, jsize length, jbyte* buffer) {
+    enter_any(e);
     if (is_shadow(a)) {
-        const DalvikArray* block = static_cast<const DalvikArray*>(a);
+        BlockHeader* header = live_header(a);
+        if (header == nullptr) {
+            return;
+        }
+        const DalvikArray* block = array_of(header);
         if (start >= 0 && length >= 0 && static_cast<uint32_t>(start) + static_cast<uint32_t>(length) <= block->length) {
             __builtin_memcpy(buffer, block->data + start, static_cast<size_t>(length));
             return;
         }
-        Temps temps(e);  // a range the block does not have: the runtime throws for a real array
-        original<void (*)(Env*, jarray, jsize, jsize, jbyte*)>(slot::GetByteArrayRegion)(
-            e, temps.take(a), start, length, buffer);
+        // A range the block does not have: the runtime raises its exception for the real array.
+        original<void (*)(Env*, jarray, jsize, jsize, jbyte*)>(slot::GetByteArrayRegion)(e, header->global, start, length,
+                                                                                         buffer);
         return;
     }
     original<void (*)(Env*, jarray, jsize, jsize, jbyte*)>(slot::GetByteArrayRegion)(e, a, start, length, buffer);
 }
 void w_SetByteArrayRegion(Env* e, jarray a, jsize start, jsize length, const jbyte* buffer) {
+    enter_any(e);
     if (is_shadow(a)) {
-        DalvikArray* block = static_cast<DalvikArray*>(a);
-        if (start >= 0 && length >= 0 && static_cast<uint32_t>(start) + static_cast<uint32_t>(length) <= block->length) {
-            __builtin_memcpy(block->data + start, buffer, static_cast<size_t>(length));
+        BlockHeader* header = live_header(a);
+        if (header == nullptr) {
             return;
         }
-        Temps temps(e);
-        original<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(slot::SetByteArrayRegion)(
-            e, temps.take(a), start, length, buffer);
+        DalvikArray* block = array_of(header);
+        if (start >= 0 && length >= 0 && static_cast<uint32_t>(start) + static_cast<uint32_t>(length) <= block->length) {
+            __builtin_memcpy(block->data + start, buffer, static_cast<size_t>(length));
+        }
+        write_back(e, header, start, length, buffer);  // the real array takes the write, or raises the range error
         return;
     }
     original<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(slot::SetByteArrayRegion)(e, a, start, length, buffer);
@@ -893,20 +906,28 @@ jint vm_AttachCurrentThreadAsDaemon(Vm* vm, void** env, void* args) {
 
 }  // namespace
 
-bool is_shadow_block(const void* object) { return is_shadow(object); }
+bool is_shadow_block(const void* object) { return live_header(object) != nullptr; }
 
-void release_thread_state(void* state) {
-    if (state != nullptr && g.shadows_on) {
-        forget_all_blocks(static_cast<ThreadState*>(state));
+void release_thread_state(void* state_pointer) {
+    ThreadState* state = static_cast<ThreadState*>(state_pointer);
+    if (state == nullptr || !g.shadows_on) {
+        return;
     }
+    for (unsigned i = 0; i < state->count; ++i) {
+        BlockHeader* header = state->blocks[i];
+        BlockHeader* head = __atomic_load_n(&g.pending, __ATOMIC_RELAXED);
+        do {
+            header->next = head;
+        } while (!__atomic_compare_exchange_n(&g.pending, &head, header, true, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+    }
+    state->count = 0;
 }
 
 Counters counters() { return g.counters; }
 
 void reset_for_test() { __builtin_memset(&g, 0, sizeof(g)); }
 
-bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_region, size_t shadow_size,
-                          bool relief, Env* env) {
+bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_region, size_t shadow_size) {
     if (g.installed) {
         return false;
     }
@@ -914,26 +935,14 @@ bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_r
     for (int i = 0; i < kSlotCount; ++i) {
         g.orig[i] = table[i];
     }
-    g.relief_on = relief;
-    if (relief && env != nullptr) {
-        // A runtime that grants 4096 more references has no limit worth defending.
-        if (original<jint (*)(Env*, jint)>(slot::EnsureLocalCapacity)(env, 4096) == JNI_OK) {
-            g.relief_on = false;
-        } else {
-            original<void (*)(Env*)>(slot::ExceptionClear)(env);
-        }
-    }
     g.shadows_on = shadow_region != nullptr && shadow_size >= 4096 && g.shadow_arena.init(shadow_region, shadow_size);
-    if (g.shadows_on) {
-        g.shadow_lo = static_cast<const uint8_t*>(shadow_region);
-        g.shadow_hi = g.shadow_lo + shadow_size;
-    }
-    if (!g.shadows_on && !g.relief_on) {
+    if (!g.shadows_on) {
         return true;  // nothing to intercept
     }
+    g.shadow_lo = static_cast<const uint8_t*>(shadow_region) + kBlockHead;
+    g.shadow_hi = static_cast<const uint8_t*>(shadow_region) + shadow_size;
     if (!platform.make_writable(table, kSlotCount * sizeof(void*))) {
         g.shadows_on = false;
-        g.relief_on = false;
         return false;
     }
     g.installed = true;
@@ -951,7 +960,7 @@ bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_r
     install_family<jfloat, kFloat>(table);
     install_family<jdouble, kDouble>(table);
     install_family<void, kVoid>(table);
-    using ObjectConstructor = Static<jobject, slot::NewObject>;
+    using ObjectConstructor = Static<jobject, slot::NewObject, Kind::kConstructor>;
     table[slot::NewObject] = reinterpret_cast<void*>(&ObjectConstructor::variadic);
     table[slot::NewObjectV] = reinterpret_cast<void*>(&ObjectConstructor::va);
     table[slot::NewObjectA] = reinterpret_cast<void*>(&ObjectConstructor::array);
@@ -959,14 +968,8 @@ bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_r
     table[get_static_field_slot(kObject)] = reinterpret_cast<void*>(&w_GetStaticObjectField);
     table[set_field_slot(kObject)] = reinterpret_cast<void*>(&w_SetObjectField);
     table[set_static_field_slot(kObject)] = reinterpret_cast<void*>(&w_SetStaticObjectField);
-    table[slot::GetObjectArrayElement] = reinterpret_cast<void*>(&w_GetObjectArrayElement);
     table[slot::SetObjectArrayElement] = reinterpret_cast<void*>(&w_SetObjectArrayElement);
-    table[slot::NewStringUTF] = reinterpret_cast<void*>(&w_NewStringUTF);
-    table[slot::NewString] = reinterpret_cast<void*>(&w_NewString);
-    table[slot::FindClass] = reinterpret_cast<void*>(&w_FindClass);
-    table[slot::GetSuperclass] = reinterpret_cast<void*>(&w_GetSuperclass);
     table[slot::NewObjectArray] = reinterpret_cast<void*>(&w_NewObjectArray);
-    table[slot::NewByteArray] = reinterpret_cast<void*>(&w_NewByteArray);
     table[slot::GetObjectClass] = reinterpret_cast<void*>(&w_GetObjectClass);
     table[slot::IsInstanceOf] = reinterpret_cast<void*>(&w_IsInstanceOf);
     table[slot::NewGlobalRef] = reinterpret_cast<void*>(&w_NewGlobalRef);
@@ -974,6 +977,8 @@ bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_r
     table[slot::NewLocalRef] = reinterpret_cast<void*>(&w_NewLocalRef);
     table[slot::IsSameObject] = reinterpret_cast<void*>(&w_IsSameObject);
     table[slot::GetObjectRefType] = reinterpret_cast<void*>(&w_GetObjectRefType);
+    table[slot::MonitorEnter] = reinterpret_cast<void*>(&w_MonitorEnter);
+    table[slot::MonitorExit] = reinterpret_cast<void*>(&w_MonitorExit);
     table[slot::DeleteLocalRef] = reinterpret_cast<void*>(&w_DeleteLocalRef);
     table[slot::PopLocalFrame] = reinterpret_cast<void*>(&w_PopLocalFrame);
     table[slot::GetArrayLength] = reinterpret_cast<void*>(&w_GetArrayLength);
@@ -983,7 +988,9 @@ bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_r
     table[slot::ReleasePrimitiveArrayCritical] = reinterpret_cast<void*>(&w_ReleasePrimitiveArrayCritical);
     table[slot::GetByteArrayRegion] = reinterpret_cast<void*>(&w_GetByteArrayRegion);
     table[slot::SetByteArrayRegion] = reinterpret_cast<void*>(&w_SetByteArrayRegion);
-    platform.make_read_only(table, kSlotCount * sizeof(void*));
+    if (!platform.make_read_only(table, kSlotCount * sizeof(void*)) && platform.log != nullptr) {
+        platform.log("a page of the JNI function table could not be made read-only again", 0, 0);
+    }
     return true;
 }
 
@@ -991,6 +998,7 @@ bool install_vm_wrappers(void** vm_table, const Platform& platform) {
     if (g.vm_installed) {
         return false;
     }
+    g.platform = platform;
     for (int i = 0; i < kVmSlotCount; ++i) {
         g.orig_vm[i] = vm_table[i];
     }
@@ -1001,7 +1009,9 @@ bool install_vm_wrappers(void** vm_table, const Platform& platform) {
     vm_table[vmslot::GetEnv] = reinterpret_cast<void*>(&vm_GetEnv);
     vm_table[vmslot::AttachCurrentThread] = reinterpret_cast<void*>(&vm_AttachCurrentThread);
     vm_table[vmslot::AttachCurrentThreadAsDaemon] = reinterpret_cast<void*>(&vm_AttachCurrentThreadAsDaemon);
-    platform.make_read_only(vm_table, kVmSlotCount * sizeof(void*));
+    if (!platform.make_read_only(vm_table, kVmSlotCount * sizeof(void*)) && platform.log != nullptr) {
+        platform.log("a page of the JavaVM function table could not be made read-only again", 0, 0);
+    }
     return true;
 }
 

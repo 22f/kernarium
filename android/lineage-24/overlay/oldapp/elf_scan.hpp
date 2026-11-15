@@ -38,13 +38,28 @@ constexpr uint32_t kPfX = 1;
 constexpr uint32_t kPfW = 2;
 constexpr uint32_t kPfR = 4;
 
-// The imports the layer replaces.
+// The imports the layer replaces. A consumer takes a pointer that may be an arena block (free, realloc,
+// reallocarray, malloc_usable_size, delete); a producer returns memory (malloc, calloc, strdup, new).
 enum class Import : uint8_t {
-    kMalloc, kFree, kCalloc, kRealloc, kStrdup, kStrndup,
+    kMalloc, kFree, kCalloc, kRealloc, kStrdup, kStrndup, kReallocarray, kUsableSize,
     kNew, kNewArray, kNewNothrow, kNewArrayNothrow,
     kDelete, kDeleteArray, kDeleteNothrow, kDeleteArrayNothrow, kDeleteSized, kDeleteArraySized,
     kCount,
 };
+
+constexpr uint32_t bit(Import what) { return uint32_t{1} << static_cast<unsigned>(what); }
+
+// What every module gets (the platform's too): the calls that take a pointer.
+constexpr uint32_t kPlatformConsumers =
+    bit(Import::kFree) | bit(Import::kRealloc) | bit(Import::kReallocarray) | bit(Import::kUsableSize);
+// What an application library also gets: the delete operators, and every producer.
+constexpr uint32_t kDeleteOperators = bit(Import::kDelete) | bit(Import::kDeleteArray) | bit(Import::kDeleteNothrow) |
+                                      bit(Import::kDeleteArrayNothrow) | bit(Import::kDeleteSized) |
+                                      bit(Import::kDeleteArraySized);
+constexpr uint32_t kAppConsumers = kPlatformConsumers | kDeleteOperators;
+constexpr uint32_t kProducers = bit(Import::kMalloc) | bit(Import::kCalloc) | bit(Import::kStrdup) |
+                                bit(Import::kStrndup) | bit(Import::kNew) | bit(Import::kNewArray) |
+                                bit(Import::kNewNothrow) | bit(Import::kNewArrayNothrow);
 
 struct ImportSlot {
     uint32_t vaddr;  // relative to the library's load bias
@@ -63,6 +78,8 @@ inline bool import_for_symbol(const char* name, Import* out) {
         {"realloc", Import::kRealloc},
         {"strdup", Import::kStrdup},
         {"strndup", Import::kStrndup},
+        {"reallocarray", Import::kReallocarray},
+        {"malloc_usable_size", Import::kUsableSize},
         {"_Znwj", Import::kNew},
         {"_Znaj", Import::kNewArray},
         {"_ZnwjRKSt9nothrow_t", Import::kNewNothrow},
@@ -75,7 +92,7 @@ inline bool import_for_symbol(const char* name, Import* out) {
         {"_ZdaPvj", Import::kDeleteArraySized},
     };
     for (const Entry& entry : kEntries) {
-        if (__builtin_strcmp(entry.name, name) == 0) {
+        if (entry.name[0] == name[0] && __builtin_strcmp(entry.name, name) == 0) {
             *out = entry.what;
             return true;
         }
@@ -83,10 +100,12 @@ inline bool import_for_symbol(const char* name, Import* out) {
     return false;
 }
 
-// The slots of the library mapped at `load_bias` that import one of the symbols above. At most `capacity`
-// are written; the number found is returned (it may exceed `capacity`).
+// The slots of the library mapped at `load_bias` that import one of the symbols in `mask` (bits of Import). A
+// symbol the library defines itself is skipped unless `include_defined`: that is for libc.so, whose own calls
+// to its exports go through its PLT. At most `capacity` are written; the number found is returned (it may
+// exceed `capacity`).
 inline size_t scan_imports(uintptr_t load_bias, const Elf32Phdr* phdrs, unsigned phnum, ImportSlot* out,
-                           size_t capacity) {
+                           size_t capacity, uint32_t mask, bool include_defined) {
     constexpr int32_t kDtNull = 0, kDtPltRelSz = 2, kDtStrTab = 5, kDtSymTab = 6, kDtStrSz = 10, kDtRel = 17,
                       kDtRelSz = 18, kDtJmpRel = 23;
     constexpr uint32_t kRArmAbs32 = 2, kRArmGlobDat = 21, kRArmJumpSlot = 22;
@@ -134,11 +153,11 @@ inline size_t scan_imports(uintptr_t load_bias, const Elf32Phdr* phdrs, unsigned
                 continue;
             }
             const Elf32Sym& symbol = symbols[index];
-            if (symbol.st_shndx != 0 || (strsz != 0 && symbol.st_name >= strsz)) {
+            if ((symbol.st_shndx != 0 && !include_defined) || (strsz != 0 && symbol.st_name >= strsz)) {
                 continue;  // defined by the library itself, or a corrupt name
             }
             Import what;
-            if (!import_for_symbol(strings + symbol.st_name, &what)) {
+            if (!import_for_symbol(strings + symbol.st_name, &what) || (mask & bit(what)) == 0) {
                 continue;
             }
             if (found < capacity) {
