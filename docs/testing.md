@@ -507,6 +507,19 @@ do nothing unless `TEST_RUNNER_ANDARIUM_CAPTURE_DIR` names a folder.
 `GuestRecoveryTests` check that a recovery the guest asked for is a recovery
 session and its reboot a normal one.
 
+`OldAppCompatibilityTests` (`andarium-core`) read the image's old-app command on
+canned output of its specification (the version line and the five fields, an
+unknown trailing field, a label with odd characters, a missing command, an
+unknown version, a usage error, a refusal) and send it nothing that is not a
+package name; `OldAppsModelTests` play the page's model against a stub runtime
+and a scripted list (the run's first listing with Settings never opened, when
+the virtual machine is asked, a listing older than a change, an alert for a
+page that was closed, what each switch asks first, what a refused change
+leaves, the hint after Install anyway), `OldAppsScreenTests` host
+Settings and the page, `OldAppsOperationTests` run the adapter through the
+application's adb channel against the fake adbd, and `OldAppsWordsTests` read the
+words in each language.
+
 `AndariumUITests` is the UI-test target of the same scheme
 (`xcodebuild test -scheme Andarium -only-testing:AndariumUITests`, with
 `-parallel-testing-enabled NO`), run on an iPad Simulator and an iPhone
@@ -525,7 +538,11 @@ a session: an iPad's interface follows, an iPhone's stays portrait. The
 results carry how many attempts each repeated step took. The Simulator produces
 no Escape, Delete, Caps Lock, F13, lone Shift or Globe key, and no raw mouse
 motion under the pointer lock. `SideKeysTipUITests` leaves the side keys' tip
-on and taps the keys once: they open. `NoGoogleNoticeUITests` holds the one
+on and taps the keys once: they open. `OldAppsUITests` reach Settings > Apps > Old
+app compatibility in a probe session with a scripted list of old apps
+(`ANDARIUM_OLD_APPS_PROBE`) and flip the switches: the alert that asks before
+turning on, the one for an open app turned off, a change the virtual machine
+refuses, and no row without the command. `NoGoogleNoticeUITests` holds the one
 test of the target that is not a probe session, and boots a real guest: it
 creates a virtual machine in the Simulator and starts it for real, so it needs
 the Simulator Android runtime packaged and the system image staged
@@ -576,8 +593,9 @@ instead.
 Tooling tests cover `scripts/check-privacy-manifests.py`
 (`ios-privacy-manifests`, which `package-ios-frameworks.sh` also runs on every
 device slice it packages), `Andarium/scripts/check-app-store-bundle.py`
-(`andarium-app-store-bundle`, the last build phase of the AppStore
-configuration, [configurations](../Andarium/README.md#configurations)), the
+(`andarium-app-store-bundle`, the last build phase of the AppStore and
+TestFlight configurations,
+[configurations](../Andarium/README.md#configurations)), the
 tip sheet's words (`andarium-tip-words`: `Andarium/scripts/check-tip-words.py`
 rejects the forbidden terms of each language and a token amount in the
 `TipJar` table, and requires the statement that a tip is voluntary, one-time
@@ -856,11 +874,12 @@ anywhere is a blocker. The candidate must show:
   ([Keyboard and mouse](../android/lineage-24/README.md#keyboard-and-mouse)).
 - **Cameras** (a guest started with `--camera=synthetic` and a camera layout on
   `androidboot.product.vendor.sku`). `android-camera` passes for the layouts
-  the synthetic profiles compose, live and blocked, and `android-camera-restart`
-  passes for the phone profile; the VTS camera provider
-  test (`VtsAidlHalCameraProvider_TargetTest`) passes against the lazy
-  provider; and these CTS modules pass sharded, with the failures rerun alone
-  and a result that differs from the accepted release's explained:
+  the synthetic profiles compose, live and blocked, a blocked session showing
+  no sensor privacy reminder for the camera, and `android-camera-restart`
+  passes for the phone profile; the VTS camera provider test
+  (`VtsAidlHalCameraProvider_TargetTest`) passes against the lazy provider; and
+  these CTS modules pass sharded, with the failures rerun alone and a result
+  that differs from the accepted release's explained:
   `CtsCameraTestCases` (about 6 to 15 hours, as detached shards),
   `CtsCameraApi25TestCases`, `CtsMediaRecorderTestCases`, the camera parts of
   `CtsAppOpsTestCases` and `CtsPermissionTestCases`, and
@@ -869,10 +888,12 @@ anywhere is a blocker. The candidate must show:
   (`ExtendedCameraCharacteristicsTest`, `CaptureResultTest`, `DngCreatorTest`,
   `StillCaptureTest` and `CaptureRequestTest#testLensShadingMap`), on a guest
   restarted over a saved calibration, since only then does the guest list a
-  RAW camera. The
-  provider process runs from cameraserver's start until cameraserver holds no
-  camera, and again while an application holds one, no denial of
-  `hal_camera_default` appears in the log, and the verifier's check that
+  RAW camera. The blocked CTS session runs without the side keys, so the
+  hardware toggle is not set there; with it set, the platform's camera reminder
+  tests would fail by design. The provider process runs from cameraserver's
+  start until cameraserver holds no camera, and again while an application
+  holds one, no denial of `hal_camera_default` appears in the log, and the
+  verifier's check that
   `libgooglecamerahwl_impl.so` holds the names of route `p0030` is not
   vacuous: it runs on the candidate's built library (a source tree has none)
   and is shown to fail on the stock one. The camera application shows a lens

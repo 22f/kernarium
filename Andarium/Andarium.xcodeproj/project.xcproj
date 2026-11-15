@@ -4,6 +4,7 @@
     { "name": "AppStore", "file": "Config/Andarium.xcconfig" },
     { "name": "Debug", "file": "Config/Andarium.xcconfig" },
     { "name": "Release", "file": "Config/Andarium.xcconfig" },
+    { "name": "TestFlight", "file": "Config/Andarium.xcconfig" },
   ],
   "localizations": {
     "development": "en",
@@ -177,7 +178,7 @@
           "run-on-every-build": true,
           "shell": "/bin/sh",
           "script": [
-            "[ \"$CONFIGURATION\" = AppStore ] || exit 0",
+            "case \"$CONFIGURATION\" in AppStore|TestFlight) ;; *) exit 0 ;; esac",
             "/usr/bin/env python3 -B \"$SRCROOT/../scripts/check-embedded-artifacts.py\" --app \"$TARGET_BUILD_DIR/$WRAPPER_NAME\" --android-release --kernel android",
             "",
           ],
@@ -191,8 +192,8 @@
           "run-on-every-build": true,
           "shell": "/bin/sh",
           "script": [
-            "[ \"$CONFIGURATION\" = AppStore ] || exit 0",
-            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --feedback-address \"$FEEDBACK_ADDRESS\" --feedback-receiver \"$FEEDBACK_RECEIVER\" --tip-products \"$TIP_LITE,$TIP_PRO,$TIP_MAX,$TIP_ULTRA\" --tip-local-products \"$TIP_PRODUCT_LITE,$TIP_PRODUCT_PRO,$TIP_PRODUCT_MAX,$TIP_PRODUCT_ULTRA\" --review-id \"$REVIEW_ID\" --review-local-id \"$REVIEW_APP_ID\" --follow-x-handle \"$FOLLOW_X_HANDLE\" --developer-x-handle \"$DEVELOPER_X_HANDLE\" --developer-name \"$SHEET_DEVELOPER_NAME\" --developer-github \"$SHEET_DEVELOPER_GITHUB\" --developer-x \"$SHEET_DEVELOPER_X\" --developer-local-github \"$DEVELOPER_GITHUB_HANDLE\" --icp-number \"$ICP_NUMBER\" --icp-local-number \"$DEVELOPER_ICP_NUMBER\" --info-source \"$SRCROOT/Config/Info.plist\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
+            "case \"$CONFIGURATION\" in AppStore|TestFlight) ;; *) exit 0 ;; esac",
+            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --configuration \"$CONFIGURATION\" --feedback-address \"$FEEDBACK_ADDRESS\" --feedback-receiver \"$FEEDBACK_RECEIVER\" --tip-products \"$TIP_LITE,$TIP_PRO,$TIP_MAX,$TIP_ULTRA\" --tip-local-products \"$TIP_PRODUCT_LITE,$TIP_PRODUCT_PRO,$TIP_PRODUCT_MAX,$TIP_PRODUCT_ULTRA\" --review-id \"$REVIEW_ID\" --review-local-id \"$REVIEW_APP_ID\" --follow-x-handle \"$FOLLOW_X_HANDLE\" --developer-x-handle \"$DEVELOPER_X_HANDLE\" --developer-name \"$SHEET_DEVELOPER_NAME\" --developer-github \"$SHEET_DEVELOPER_GITHUB\" --developer-x \"$SHEET_DEVELOPER_X\" --developer-local-github \"$DEVELOPER_GITHUB_HANDLE\" --icp-number \"$ICP_NUMBER\" --icp-local-number \"$DEVELOPER_ICP_NUMBER\" --info-source \"$SRCROOT/Config/Info.plist\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
             "",
           ],
         }, {
@@ -205,7 +206,7 @@
           "run-on-every-build": true,
           "shell": "/bin/sh",
           "script": [
-            "[ \"$CONFIGURATION\" != AppStore ] || exit 0",
+            "case \"$CONFIGURATION\" in AppStore|TestFlight) exit 0 ;; esac",
             "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --feedback --configuration \"$CONFIGURATION\" --feedback-address \"$FEEDBACK_ADDRESS\" --feedback-receiver \"$FEEDBACK_RECEIVER\" --info-source \"$SRCROOT/Config/Info.plist\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
             "",
           ],
@@ -220,7 +221,7 @@
           "run-on-every-build": true,
           "shell": "/bin/sh",
           "script": [
-            "[ \"$CONFIGURATION\" != AppStore ] || exit 0",
+            "case \"$CONFIGURATION\" in AppStore|TestFlight) exit 0 ;; esac",
             "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --tip-jar --configuration \"$CONFIGURATION\" --tip-products \"$TIP_LITE,$TIP_PRO,$TIP_MAX,$TIP_ULTRA\" --tip-local-products \"$TIP_PRODUCT_LITE,$TIP_PRODUCT_PRO,$TIP_PRODUCT_MAX,$TIP_PRODUCT_ULTRA\" --developer-name \"$SHEET_DEVELOPER_NAME\" --developer-github \"$SHEET_DEVELOPER_GITHUB\" --developer-x \"$SHEET_DEVELOPER_X\" --developer-local-github \"$DEVELOPER_GITHUB_HANDLE\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
             "",
           ],
@@ -234,7 +235,7 @@
           "run-on-every-build": true,
           "shell": "/bin/sh",
           "script": [
-            "[ \"$CONFIGURATION\" != AppStore ] || exit 0",
+            "case \"$CONFIGURATION\" in AppStore|TestFlight) exit 0 ;; esac",
             "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --review --configuration \"$CONFIGURATION\" --review-id \"$REVIEW_ID\" --review-local-id \"$REVIEW_APP_ID\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
             "",
           ],
@@ -249,7 +250,7 @@
           "run-on-every-build": true,
           "shell": "/bin/sh",
           "script": [
-            "[ \"$CONFIGURATION\" != AppStore ] || exit 0",
+            "case \"$CONFIGURATION\" in AppStore|TestFlight) exit 0 ;; esac",
             "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --follow-x --configuration \"$CONFIGURATION\" --follow-x-handle \"$FOLLOW_X_HANDLE\" --developer-x \"$SHEET_DEVELOPER_X\" --developer-x-handle \"$DEVELOPER_X_HANDLE\" --info-source \"$SRCROOT/Config/Info.plist\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
             "",
           ],
@@ -263,7 +264,7 @@
           "run-on-every-build": true,
           "shell": "/bin/sh",
           "script": [
-            "[ \"$CONFIGURATION\" != AppStore ] || exit 0",
+            "case \"$CONFIGURATION\" in AppStore|TestFlight) exit 0 ;; esac",
             "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --icp --configuration \"$CONFIGURATION\" --icp-number \"$ICP_NUMBER\" --icp-local-number \"$DEVELOPER_ICP_NUMBER\" --info-source \"$SRCROOT/Config/Info.plist\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
             "",
           ],
@@ -276,7 +277,7 @@
           "run-on-every-build": true,
           "shell": "/bin/sh",
           "script": [
-            "[ \"$CONFIGURATION\" != AppStore ] || exit 0",
+            "case \"$CONFIGURATION\" in AppStore|TestFlight) exit 0 ;; esac",
             "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --pickers --configuration \"$CONFIGURATION\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
             "",
           ],
@@ -330,6 +331,7 @@
         "SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD[config=AppStore]": "YES",
         "SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD[config=Debug]": "YES",
         "SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD[config=Release]": "YES",
+        "SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD[config=TestFlight]": "YES",
         "SWIFT_APPROACHABLE_CONCURRENCY": "YES",
         "SWIFT_DEFAULT_ACTOR_ISOLATION": "MainActor",
         "SWIFT_EMIT_LOC_STRINGS": "YES",
@@ -500,8 +502,10 @@
     "DEBUG_INFORMATION_FORMAT[config=AppStore]": "dwarf-with-dsym",
     "DEBUG_INFORMATION_FORMAT[config=Debug]": "dwarf",
     "DEBUG_INFORMATION_FORMAT[config=Release]": "dwarf-with-dsym",
+    "DEBUG_INFORMATION_FORMAT[config=TestFlight]": "dwarf-with-dsym",
     "ENABLE_NS_ASSERTIONS[config=AppStore]": "NO",
     "ENABLE_NS_ASSERTIONS[config=Release]": "NO",
+    "ENABLE_NS_ASSERTIONS[config=TestFlight]": "NO",
     "ENABLE_STRICT_OBJC_MSGSEND": "YES",
     "ENABLE_TESTABILITY[config=Debug]": "YES",
     "ENABLE_USER_SCRIPT_SANDBOXING": "YES",
@@ -510,8 +514,16 @@
       "JIT.xcstrings",
       "$(inherited)",
     ],
+    "EXCLUDED_SOURCE_FILE_NAMES[config=TestFlight]": [
+      "JIT.xcstrings",
+      "$(inherited)",
+    ],
     "GCC_OPTIMIZATION_LEVEL[config=Debug]": "0",
     "GCC_PREPROCESSOR_DEFINITIONS[config=AppStore]": [
+      "UML_APP_STORE_APPLICATION=1",
+      "$(inherited)",
+    ],
+    "GCC_PREPROCESSOR_DEFINITIONS[config=TestFlight]": [
       "UML_APP_STORE_APPLICATION=1",
       "$(inherited)",
     ],
@@ -520,11 +532,14 @@
     "SDKROOT": "iphoneos",
     "SWIFT_ACTIVE_COMPILATION_CONDITIONS[config=AppStore]": "APP_STORE $(inherited)",
     "SWIFT_ACTIVE_COMPILATION_CONDITIONS[config=Debug]": "DEBUG $(inherited)",
+    "SWIFT_ACTIVE_COMPILATION_CONDITIONS[config=TestFlight]": "APP_STORE TESTFLIGHT $(inherited)",
     "SWIFT_COMPILATION_MODE[config=AppStore]": "wholemodule",
     "SWIFT_COMPILATION_MODE[config=Release]": "wholemodule",
+    "SWIFT_COMPILATION_MODE[config=TestFlight]": "wholemodule",
     "SWIFT_OPTIMIZATION_LEVEL[config=Debug]": "-Onone",
     "VALIDATE_PRODUCT[config=AppStore]": "YES",
     "VALIDATE_PRODUCT[config=Release]": "YES",
+    "VALIDATE_PRODUCT[config=TestFlight]": "YES",
   },
   "last-upgrade": "27.2",
   "last-swift-update": "27.2",

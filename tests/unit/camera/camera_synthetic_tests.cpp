@@ -676,6 +676,39 @@ void interruptionOutlivesSession()
     require(third.frames.size() == 1);
 }
 
+// The colour data of every synthetic calibration, whatever the profile and lens: a DNG forward matrix maps equal camera
+// values (1, 1, 1) to the D50 white point (0.9642, 1, 0.8249), which the DNG validation of the Android CTS checks (its
+// tolerance is 0.01; the rule here is exact). A new profile, lens or matrix is covered by taking a Bayer still of each.
+void everyCalibrationMapsEqualValuesToD50()
+{
+    constexpr double white[3] = {0.9642, 1.0, 0.8249};
+    std::size_t calibrations = 0, phoneCalibrations = 0;
+    for (const auto profile : {SyntheticCameraProfile::phone, SyntheticCameraProfile::tablet, SyntheticCameraProfile::tabletDualFront,
+                               SyntheticCameraProfile::laptop}) {
+        const auto camera = makeSyntheticCamera(manual(profile));
+        Recorder recorder;
+        auto session = camera->openSession(recorder);
+        const auto cameras = camera->cameras();
+        for (std::size_t index = 0; index < cameras.size(); ++index) {
+            if (!cameras[index].rawStills) continue;
+            CameraStillRequest request;
+            request.token = std::uint32_t(100 + index);
+            request.raw = true;
+            require(session->takeStill(index, request));
+            camera->pump(index, 0);
+            const auto& color = recorder.stills.back().second.color;
+            require(recorder.stills.back().second.ok && recorder.stills.back().second.token == request.token);
+            for (const auto* matrix : {&color.forwardMatrix1, &color.forwardMatrix2})
+                for (std::size_t row = 0; row < 3; ++row)
+                    require(std::abs((*matrix)[row * 3] + (*matrix)[row * 3 + 1] + (*matrix)[row * 3 + 2] - white[row]) < 1e-9);
+            ++calibrations;
+            if (profile == SyntheticCameraProfile::phone) ++phoneCalibrations;
+        }
+    }
+    // The rule is not vacuous: the phone's three lenses and the tablets' back cameras each have one.
+    require(phoneCalibrations == 3 && calibrations >= 5);
+}
+
 void stills()
 {
     const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tablet));
@@ -1028,6 +1061,7 @@ int main()
     stillOnlyCamerasCount();
     hardwareBudget();
     rawFailures();
+    everyCalibrationMapsEqualValuesToD50();
     interruptionOutlivesSession();
     stills();
     interruptions();

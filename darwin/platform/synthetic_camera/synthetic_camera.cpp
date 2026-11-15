@@ -404,6 +404,21 @@ std::vector<std::uint16_t> bayerStill(const Picture& chart, BayerOrder order, st
     return raw;
 }
 
+// A DNG forward matrix maps white-balanced camera values to XYZ with a D50 white, so equal camera values (1, 1, 1) must
+// land on the D50 white point; the DNG validation of the Android CTS rejects a matrix whose rows do not sum to it.
+// Every forward matrix of a synthetic calibration goes through here: each row of the shape given is scaled to the
+// white point's component, which keeps its zeros and the proportions of its entries.
+constexpr std::array<double, 3> d50White {0.9642, 1.0, 0.8249};
+
+std::array<double, 9> mapsEqualValuesToD50(std::array<double, 9> matrix)
+{
+    for (std::size_t row = 0; row < 3; ++row) {
+        const double sum = matrix[row * 3] + matrix[row * 3 + 1] + matrix[row * 3 + 2];
+        for (std::size_t column = 0; column < 3; ++column) matrix[row * 3 + column] *= d50White[row] / sum;
+    }
+    return matrix;
+}
+
 CameraColorData syntheticColor(const CameraInfo& info, BayerOrder order)
 {
     CameraColorData data;
@@ -416,8 +431,8 @@ CameraColorData syntheticColor(const CameraInfo& info, BayerOrder order)
     data.illuminant2 = 21;  // D65
     data.colorMatrix1 = {1.2, -0.3, -0.1, -0.4, 1.3, 0.1, -0.1, 0.2, 0.7};
     data.colorMatrix2 = {1.1, -0.2, -0.1, -0.3, 1.2, 0.1, -0.1, 0.2, 0.8};
-    data.forwardMatrix1 = {0.7, 0.2, 0.1, 0.3, 0.7, 0.0, 0.0, 0.1, 0.8};
-    data.forwardMatrix2 = {0.6, 0.3, 0.1, 0.3, 0.7, 0.0, 0.0, 0.0, 0.9};
+    data.forwardMatrix1 = mapsEqualValuesToD50({0.7, 0.2, 0.1, 0.3, 0.7, 0.0, 0.0, 0.1, 0.8});
+    data.forwardMatrix2 = mapsEqualValuesToD50({0.6, 0.3, 0.1, 0.3, 0.7, 0.0, 0.0, 0.0, 0.9});
     data.focalLengthMillimetres = info.lens == CameraLensKind::ultraWide ? 2.7 : info.lens == CameraLensKind::telephoto ? 9.0 : 6.9;
     data.intrinsics = {3000.0, 3000.0, info.pixelArrayWidth / 2.0, info.pixelArrayHeight / 2.0};
     return data;

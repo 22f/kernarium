@@ -21,6 +21,8 @@
 #include <optional>
 #include <thread>
 #include <vector>
+#include <type_traits>
+#include <utility>
 
 namespace {
 
@@ -103,7 +105,7 @@ public:
 
     /* What a buffer finds when it reaches the audio thread, which converts it and writes it a moment later. */
     struct Reception {
-        std::uint32_t epoch {};
+        std::uint64_t epoch {};
         std::uint64_t boundary {};
     };
     [[nodiscard]] Reception receive() const
@@ -532,6 +534,11 @@ void aBufferThatSpansTheBoundaryLosesItsLeadingFrames()
     require(uml::audio::framesBeforeBoundary(1'200'000'000, 1'100'000'000, 48000) == 0, "nor one that begins after it");
     require(uml::audio::framesBeforeBoundary(0, 1'100'000'000, 48000) == 0, "a buffer with no capture time is kept whole");
     require(uml::audio::framesBeforeBoundary(1'000'000'000, 0, 48000) == 0, "and so is one before any recording");
+    // A first sample captured any time before the boundary is left out, so the count is rounded up.
+    require(uml::audio::framesBeforeBoundary(1'000'000'000, 1'000'000'001, 48000) == 1, "a nanosecond before the boundary is a frame");
+    require(uml::audio::framesBeforeBoundary(1'000'000'000, 1'000'020'833, 48000) == 1, "just under a frame period is a frame");
+    require(uml::audio::framesBeforeBoundary(1'000'000'000, 1'000'020'834, 48000) == 2, "just over one is two");
+    require(uml::audio::framesBeforeBoundary(1'000'000'000, 1'100'000'001, 48000) == 4801, "and a whole count is not exceeded by more than a nanosecond");
 }
 
 /* A write that is under way when the recording begins is finished before the restart returns, and a buffer received
@@ -563,6 +570,92 @@ void aRestartLeavesNothingOfAnEarlierEpoch()
     }
     stopping.store(true);
     producer.join();
+}
+
+/* A restart paused at the points inside it where the audio thread's write can land. The functions run on the test's
+ * thread, where the restart runs, so the order is the test's; production has no such points (NoRestartSeam). */
+struct PausedRestart {
+    static inline std::function<void()> published;
+    static inline std::function<void()> waited;
+    static inline std::function<void()> cursor;
+    static void afterPublish() noexcept { call(published); }
+    static void afterWait() noexcept { call(waited); }
+    static void afterCursor() noexcept { call(cursor); }
+
+    static void call(const std::function<void()>& hook) noexcept
+    {
+        if (hook)
+            hook();
+    }
+
+    static void clear() noexcept
+    {
+        published = nullptr;
+        waited = nullptr;
+        cursor = nullptr;
+    }
+};
+
+using PausedRing = uml::audio::BasicCaptureRing<PausedRestart>;
+
+// A note of an earlier recording must never pass for the present one's: an epoch does not repeat while a ring lives.
+static_assert(std::is_same_v<decltype(std::declval<const PausedRing&>().epoch()), std::uint64_t>);
+
+/* What the audio thread does with a buffer: offers it under the epoch it saw when the buffer reached it. */
+std::size_t offer(PausedRing& ring, std::uint8_t value, std::size_t size, std::uint64_t epoch)
+{
+    return ring.write(std::vector<std::uint8_t>(size, value), epoch);
+}
+
+std::vector<std::uint8_t> drainAll(PausedRing& ring)
+{
+    std::vector<std::uint8_t> out(ring.size());
+    require(ring.read(out) == out.size(), "the ring held what it reported");
+    return out;
+}
+
+/* Audio the producer writes under the new epoch while a restart is under way is the recording's: kept, wherever in the
+ * restart it lands, and everything older is dropped. A buffer received before the restart is dropped whenever it
+ * is written. */
+void aBlockWrittenUnderTheNewEpochDuringARestartIsKept()
+{
+    enum class Point { published, waited, cursor };
+    for (const Point point : {Point::published, Point::waited, Point::cursor}) {
+        PausedRing ring(1024);
+        const auto earlier = ring.epoch();
+        require(offer(ring, 0x11, 100, earlier) == 100, "audio from before the recording is held");
+        const auto landing = [&] {
+            // A buffer the producer received before the restart, written late: dropped. Then two that it received after.
+            require(offer(ring, 0xee, 50, earlier) == 50, "a late buffer of the earlier epoch is reported as taken");
+            const auto next = ring.epoch();
+            require(next != earlier, "the new epoch is published");
+            require(offer(ring, 0x22, 64, next) == 64, "the first block of the new epoch is taken");
+            require(offer(ring, 0x23, 32, next) == 32, "and so is the next");
+        };
+        (point == Point::published ? PausedRestart::published : point == Point::waited ? PausedRestart::waited : PausedRestart::cursor) = landing;
+        ring.restart(5);
+        PausedRestart::clear();
+        const auto kept = drainAll(ring);
+        require(kept.size() == 96, "the new epoch's blocks are held, and nothing older");
+        require(std::all_of(kept.begin(), kept.begin() + 64, [](std::uint8_t byte) { return byte == 0x22; }), "the first block is intact");
+        require(std::all_of(kept.begin() + 64, kept.end(), [](std::uint8_t byte) { return byte == 0x23; }), "so is the second");
+    }
+}
+
+/* With nothing written under the new epoch, a restart empties the ring, and a record of an earlier epoch's first write
+ * does not keep what that epoch wrote. What is written after the restart is held. */
+void aRestartWithNothingNewEmptiesTheRingWhateverItHeld()
+{
+    PausedRing ring(1024);
+    require(offer(ring, 0x11, 100, ring.epoch()) == 100, "audio from before the recording is held");
+    ring.restart(1);
+    require(ring.size() == 0, "the first restart drops it");
+    require(offer(ring, 0x22, 64, ring.epoch()) == 64, "the recording's first block is held");
+    ring.restart(2);
+    require(ring.size() == 0, "a restart that finds nothing of the new epoch drops the earlier epoch's block too");
+    require(offer(ring, 0x33, 16, ring.epoch()) == 16, "audio after it is held");
+    const auto kept = drainAll(ring);
+    require(kept.size() == 16 && kept[0] == 0x33 && kept[15] == 0x33, "and only that");
 }
 
 void standbyDoesNotOverrideTheSettingOrAGuestThatRecords()
@@ -756,6 +849,8 @@ int main()
     aBufferHeldAcrossTheStartIsNotTheRecordings();
     aBufferThatSpansTheBoundaryLosesItsLeadingFrames();
     aRestartLeavesNothingOfAnEarlierEpoch();
+    aBlockWrittenUnderTheNewEpochDuringARestartIsKept();
+    aRestartWithNothingNewEmptiesTheRingWhateverItHeld();
     standbyDoesNotOverrideTheSettingOrAGuestThatRecords();
     aRecordingThatAsksForOtherChannelsOpensTheMicrophoneAgain();
     sourceDropsTheOldestAudioItCannotCatchUpWith();

@@ -388,10 +388,15 @@ and none declares `android.hardware.camera.level.full`.
 A session started with Camera off lists the same cameras and delivers black
 frames. The image expects the always-registered side-key device (1af4:0002) to
 report `SW_CAMERA_LENS_COVER` as 1 for the whole boot of such a session and 0
-otherwise; the framework overlay reads that switch
-(`config_supportsHardwareCamToggle`) and Android shows its own blocked-camera
-state. The host also sends black frames while it interrupts a camera, and the
-HAL passes them on as frames of the camera. When the host ends the video of a
+otherwise; Android then holds the camera's hardware toggle, and the sensor
+privacy service shows no reminder (dialog or notification) for the blocked
+camera, because the Unblock it would offer cannot lift a hardware toggle. A
+combined camera and microphone reminder becomes the microphone's. The service's
+`SensorPrivacyService` topic of route `p0007` does this, the framework overlay
+leaves the `config_sensorUseStartedActivity*` strings at the platform's
+defaults, and `android-camera` ([testing](../../docs/testing.md#android))
+checks it. The host also sends black frames while it interrupts a camera, and
+the HAL passes them on as frames of the camera. When the host ends the video of a
 camera (the application left the foreground while the guest had a video stream
 open on it), the camera's video buffers fail under a black, interrupted record
 for as long as the guest keeps the stream, and the HAL decides by the session's
@@ -875,8 +880,8 @@ the list. An object ID follows content, so it survives a history rewrite and a
 builder that works from an exported snapshot; the publisher takes it from the
 clean checkout it runs in. The accepted descriptor repeats the IDs
 (`LINEAGE24_ACCEPTED_INPUT_TREES`), and `install-release.py --print-acceptance`
-prints the whole descriptor for a candidate. The AppStore configuration of
-Andarium compares them with the commit it archives
+prints the whole descriptor for a candidate. The AppStore and TestFlight
+configurations of Andarium compare them with the commit they archive
 ([`scripts/check-embedded-artifacts.py`](../../scripts/check-embedded-artifacts.py)).
 Verifier-only tools, documentation and tests are excluded, and a tracked file
 under this directory that the list does not classify fails

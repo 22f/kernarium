@@ -42,8 +42,8 @@ covers nothing, so it cannot carry over to a later release. A dirty input, a
 staged or packaged artifact that is not the accepted one and a kernel that is
 not the descriptor's are never covered.
 
-Andarium's AppStore configuration runs it as a build phase before
-check-app-store-bundle.py.
+Andarium's AppStore and TestFlight configurations run it as a build phase
+before check-app-store-bundle.py.
 """
 
 from __future__ import annotations

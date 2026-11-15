@@ -210,6 +210,7 @@ def main() -> int:
         "microphone_tests": [
             here / "ios_microphone_tests.mm",
             sink / "apple_microphone_input.mm",
+            sink / "apple_microphone_tap.mm",
         ],
     }
     with tempfile.TemporaryDirectory(prefix="uml-audio-interruption-") as scratch:
