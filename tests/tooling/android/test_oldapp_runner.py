@@ -207,7 +207,7 @@ class ProbePackageTests(unittest.TestCase):
 class VerdictTests(unittest.TestCase):
     SEMANTICS = {"write_through": "pass", "identity": "pass", "retained": "pass", "monitor": "pass", "pop": "pass",
                  "getline": "pass", "usable_size": "pass", "libc_block": "pass", "table_read_only": "pass",
-                 "java_fill": "pass"}
+                 "java_fill": "pass", "commit_chunks": "pass", "clone": "pass"}
     OLD = {"shim_mapped": "yes", "raw_read": "pass", "passback": "pass", "elements": "pass", "global": "pass",
            "thread_raw": "pass", **SEMANTICS, "java_fill_raw": "pass", "raw_write_java": "pass",
            "low_heap": "pass", "done": "1"}
@@ -228,6 +228,7 @@ class VerdictTests(unittest.TestCase):
                            ("write_through", "fail"), ("identity", "fail"), ("retained", "fail"), ("monitor", "fail"),
                            ("pop", "fail"), ("getline", "fail"), ("usable_size", "fail"), ("libc_block", "fail"),
                            ("table_read_only", "fail"), ("java_fill", "fail"), ("java_fill_raw", "fail"), ("raw_write_java", "fail"),
+                           ("commit_chunks", "fail"), ("clone", "fail"),
                            ("done", "")):
             with self.assertRaises(runner.Failure) as raised:
                 runner.evaluate("old", {**self.OLD, key: value})

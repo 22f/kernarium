@@ -1033,8 +1033,10 @@ and the array functions, from a second thread too, writes it through the array
 functions, compares it with a global reference and the original, locks it, keeps
 it while more results arrive, pops it out of a local frame, has Java fill it and
 reads it again, writes it through the raw pointer without a release and hands it
-to a Java method that reads it, grows a malloc buffer with `getline`, asks `malloc_usable_size`,
-reallocates and frees a block libc allocated, finds the function tables
+to a Java method that reads it, opens it through its own critical pointer and the
+block's at once, clones it after a write through `GetByteArrayElements`, grows
+a malloc buffer with `getline`, asks `malloc_usable_size`, reallocates and
+frees a block libc allocated, finds the function tables
 read-only again and allocates below 2 GiB, and passes; the runner also asserts
 the library's SELinux label. The modern package gets no layer, the raw read fails
 and the array operations give the runtime's own answers. `--host-shim` boots a

@@ -26,6 +26,10 @@
 //   raw_write_java the native side fills an array through the object pointer, never releases it, and a Java
 //                method (Arrays.hashCode) that is passed the array returns the checksum of those bytes ("skipped"
 //                where the layer is not mapped: a reference is no pointer)
+//   commit_chunks  the array is open through its own critical pointer and through the block's: a write through
+//                each, in different 4 KiB chunks, both reach the array when both are released
+//   clone        the array's clone() sees a write made through the pointer GetByteArrayElements returned
+//                (released before the call when that pointer is a copy)
 //   monitor      MonitorEnter and MonitorExit accept it
 //   pop          PopLocalFrame hands it out of the frame
 //   getline      getline grows a buffer the application allocated with malloc
@@ -417,6 +421,67 @@ void array_cases(Report& report, Env* env) {
             report.verdict("raw_write_java", stored && static_cast<uint32_t>(got) == expected && kept && !exception_check(env));
         }
         delete_local(env, target);
+    }
+
+    // Conformant JNI, the runtime's own way: the array open through its own critical pointer and through the
+    // block's at once, a write through each in a different chunk, both released.
+    {
+        jobject big = new_array(env, 8192);
+        jobject target = big != nullptr ? result_of(big) : nullptr;
+        bool chunks = false;
+        if (target != nullptr) {
+            jbyte* real = static_cast<jbyte*>(critical(env, big, nullptr));
+            jbyte* block = static_cast<jbyte*>(critical(env, target, nullptr));
+            if (real != nullptr && block != nullptr) {
+                real[4096] = 0x41;
+                block[0] = 0x77;
+                release_critical(env, target, block, 0);
+                release_critical(env, big, real, 0);
+                jbyte seen[2] = {};
+                get_region(env, big, 0, 1, seen);
+                get_region(env, big, 4096, 1, seen + 1);
+                chunks = seen[0] == 0x77 && seen[1] == 0x41;
+            }
+        }
+        report.verdict("commit_chunks", chunks && !exception_check(env));
+        if (target != nullptr) {
+            delete_local(env, target);
+        }
+        delete_local(env, big);
+    }
+
+    // clone() of the array, with a write made through the pointer Get...Elements returned.
+    {
+        jobject small = new_array(env, 8);
+        jobject target = small != nullptr ? result_of(small) : nullptr;
+        bool cloned = false;
+        if (target != nullptr) {
+            jclass array_class = entry<jclass (*)(Env*, jobject)>(env, slot::GetObjectClass)(env, small);
+            jmethodID clone = array_class != nullptr ? method(env, array_class, "clone", "()Ljava/lang/Object;") : nullptr;
+            jboolean copy = 1;
+            jbyte* bytes = get_elements(env, target, &copy);
+            if (bytes != nullptr && clone != nullptr) {
+                bytes[0] = 0x77;
+                if (copy != 0) {
+                    release_elements(env, target, bytes, 0);
+                }
+                jobject copied = call_instance(env, target, clone);
+                jbyte seen = 0;
+                if (copied != nullptr) {
+                    get_region(env, copied, 0, 1, &seen);
+                    delete_local(env, copied);
+                }
+                cloned = seen == 0x77;
+                if (copy == 0) {
+                    release_elements(env, target, bytes, 0);
+                }
+            }
+        }
+        report.verdict("clone", cloned && !exception_check(env));
+        if (target != nullptr) {
+            delete_local(env, target);
+        }
+        delete_local(env, small);
     }
 
     // PopLocalFrame.

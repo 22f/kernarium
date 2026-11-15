@@ -597,7 +597,7 @@ application (neither `FLAG_SYSTEM` nor `FLAG_UPDATED_SYSTEM_APP`), then reads
 that property, and only an application that is below API 14, 32-bit, not a
 system application and switched on gets `/system/lib/libkernarium_oldapp.so`
 (`overlay/oldapp`) in its process; an application that is not eligible never
-reads the property. Packages that share a user ID share the process, so the
+reads the property. Packages that share a user ID can share a process, so the
 hook also leaves the layer out when the user ID has more than one package. A
 failed load is logged and the application starts as before.
 Applications that target below API 23 get Android's permission review before
@@ -611,27 +611,40 @@ patches ART's one JNI function table in place and gives the application:
   to it. Every JNI function that takes an object turns a block back into that
   array for any caller, so identity (`IsSameObject`, `NewGlobalRef`, monitors)
   and writes (`SetByteArrayRegion`, `Release*Elements`,
-  `ReleasePrimitiveArrayCritical`) keep their meaning. The block and its array
-  behave as one memory at the points where the application meets Java: before
-  and after a call that is passed the block, where the application asks for the
-  bytes (`Get...Elements`, `Get...Critical`, `GetByteArrayRegion`), around
-  `SetByteArrayRegion` and at a release. At each of them, in chunks of 4 KiB,
-  a chunk the application wrote through the raw pointer goes to the array and
-  any other chunk takes the array's bytes; where both changed the same chunk,
-  the application's bytes win. Bytes Java writes outside those points (another
-  thread, a callback after the native method returned) show at the next one. A
-  thread holds at most 512 such blocks (Dalvik's limit for local references)
-  and the process 32 MiB of them;
-  beyond that the result is ART's own reference. A block lasts until its
-  reference is deleted or its thread ends, and is never recycled. An array the
-  application creates itself (`NewByteArray`) stays ART's own;
+  `ReleasePrimitiveArrayCritical`) keep their meaning. The layer reads the
+  length from its own record, never from the length word, which the application
+  can overwrite. The block and its array behave as one memory at the points
+  where the application meets Java: before and after a call that is passed the
+  block (as an argument or as the receiver, so `clone()` and a method without
+  parameters see it), where the application asks for the bytes
+  (`Get...Elements`, `Get...Critical`, `GetByteArrayRegion`), around
+  `SetByteArrayRegion` and at a release. The block keeps a copy of its bytes as
+  of the last such point. At each point, in chunks of 4 KiB, a chunk whose block
+  differs from that copy was written through the raw pointer and goes to the
+  array, and any other chunk takes the array's bytes; where both sides changed
+  the same chunk, the application's bytes win for that chunk. A committing
+  release (mode 0 or `JNI_COMMIT`) is such a point and keeps Java's bytes in the
+  chunks the application did not write; `JNI_ABORT` discards the working copy,
+  and the block takes the array's bytes. Bytes Java writes outside those points
+  (another thread, a callback after the native method returned) show at the
+  next one, and a raw write from another thread while a point is running can be
+  lost. The same array returned again to the same thread is the same block
+  (among the thread's most recent ones), freed by the last of its
+  `DeleteLocalRef` calls. A thread holds at most 512 blocks over its life, not
+  per native method: a block lasts until its reference is deleted or its thread
+  ends, so a native method that takes a new array on every call and never
+  deletes it reaches the limit. The process holds 32 MiB of blocks, and each
+  block's copy takes as many bytes again in the ordinary heap. Beyond the
+  limits the result is ART's own reference. A block is never recycled. An array
+  the application creates itself (`NewByteArray`) stays ART's own;
 - an allocator below 2 GiB for the libraries the application ships: their
   `malloc`, `calloc`, `strdup`, `strndup`, `operator new` and `operator
   delete` imports are redirected as the library is first seen.
   Every loaded library's `free`, `realloc`, `reallocarray` and
   `malloc_usable_size` imports accept such a block, libc's own among them, so a
   buffer the application allocated can be grown by `getline` or freed by the
-  framework.
+  framework. A library's `realloc` and `reallocarray` hand out arena blocks only
+  once every one of its consumer imports is rewritten.
 
 Only the application's own code gets blocks: a caller is told apart by the
 mapping its return address is in, so the platform's libraries in the same
@@ -647,13 +660,17 @@ decodes the returned reference itself), which is why it is a per-application
 choice; a `byte[]` passed into a native method as an argument or the elements
 of a `byte[][]`; raw reads of other objects; bytes written through the pointer
 that Java reads without one of the points above (a block stored in a field and
-read after the native method returned); a call that bypasses the platform
-library's PLT; packed relocations; `memalign`; constructors that ran before the
-library's first scan; a library loaded with a plain `dlopen` that never calls
-JNI, which is found by the next periodic scan; a library with an allocator
-import in executable code (a text relocation) or whose relocation pages cannot
-be reopened, which keeps libc's allocator for its own blocks; and more than 512
-loaded libraries.
+read after the native method returned); a release or a synchronization with an
+exception pending, which a debuggable application (CheckJNI) aborts on; a
+call that bypasses the platform library's PLT; packed relocations; `memalign`;
+constructors that ran before the library's first scan; a library loaded
+without a call into JNI (found by the next periodic scan), which until then
+keeps libc's `free` and can abort on a block another library allocated; a
+library with an allocator import in executable code (a text relocation) or
+whose relocation pages cannot be reopened, which keeps libc's allocator,
+`realloc` included, for its own blocks; a freed block's address reused while
+the application still holds the old pointer; and more than 512 loaded
+libraries.
 `tests/integration/android/run_android_oldapp.py` qualifies it
 ([testing](../../docs/testing.md#android)).
 
