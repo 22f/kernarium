@@ -1152,8 +1152,11 @@ encoder surface) and the photo mode's, and expect each live again within 45 s of
 the return (one deadline for the camera, the picture and the frame counters), in
 the same process, with no activity start and no error window; the photo mode's
 viewfinder must not be told the device is gone, and the HAL's log must show that
-it closed and reopened its video streams once for the loss. The release must
-carry the HAL topic that handles the host's end of a camera's video.
+it closed and reopened its video streams once for the loss. After each loss
+the camera service's log must hold no leaked stream, the line it prints at the
+close of a device whose requests the HAL ended without a request error. The
+release must carry the HAL topic that handles the host's end of a camera's
+video.
 `android17-camera-runner` (tooling) runs its
 parsers and the expectations of every layout without a guest,
 `android17-camera-layouts` (tooling) the layout set, its fallback order and the

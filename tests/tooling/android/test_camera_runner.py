@@ -980,6 +980,8 @@ class FakeGuest:
         self.stream_text = ""
         self.still_files = {"IMG_old.jpg"}
         self.log = ""
+        # The camera service's lines that report a leaked stream (the video-lost mode's oracle).
+        self.service_leaks: list[str] = []
         # The log of a mode switch step. The video mode's start by round number n logs the events of the switch
         # (events[n] = (photo paused, video resumed), both by default) and then switch_logs[n]; the nth read of
         # the log is followed by late_logs[n] (lines that land after it) and, in wrap_after_read, by a log that
@@ -1141,6 +1143,9 @@ class FakeGuest:
 
     def hal_log(self) -> str:
         return self.log
+
+    def stream_leaks(self) -> list[str]:
+        return list(self.service_leaks)
 
     def pull(self, remote: str) -> bytes:
         return jpeg(4000, 3000) if remote.endswith(".jpg") else self.movie
@@ -3038,6 +3043,12 @@ class VideoLostTests(unittest.TestCase):
     within one deadline from the return and without an activity start. The HAL's own log lines name what it did."""
 
     LAYOUT = "bf-large-flash-manual-concurrent-front2160"
+
+    @staticmethod
+    def leak_line(second: int) -> str:
+        """What the camera service logs (threadtime format) when a device closes while a stream is still referenced."""
+        return f"11-16 03:12:{second % 60:02d}.123   588   600 E Camera3-Device: disconnectImpl: Stream 0 leaked! strong reference (1)!"
+
     END = "W V4l2FrameSource: camera 0: the host ended the camera: its video buffers fail under an interrupted record\n"
     REOPEN = "W V4l2FrameSource: camera 0: the host ended the camera's video: its video streams are closed and opened again\n"
 
@@ -3065,6 +3076,9 @@ class VideoLostTests(unittest.TestCase):
             self.photo_returns = True
             # The movie the second recording saved, when it is not the first one.
             self.again_movie: bytes | None = None
+            # The camera service logs a leaked stream at the nth time (counted from 1) the runner sends a control line:
+            # {("interrupt background", 2)} is the loss of the video viewfinder, {("resume", 3)} the return of the photo one.
+            self.leaks_at: set[tuple[str, int]] = set()
 
         def pull(self, remote: str) -> bytes:
             if remote == "/sdcard/again.mp4" and self.again_movie is not None:
@@ -3074,6 +3088,8 @@ class VideoLostTests(unittest.TestCase):
         def camera_control(self, line: str) -> None:
             self.control_lines.append(line)
             self.commands.append(f"<control {line}>")
+            if (line, self.control_lines.count(line)) in self.leaks_at:
+                self.service_leaks.append(VideoLostTests.leak_line(len(self.control_lines)))
             if line == "interrupt background" and self.recording:
                 if self.ends_on_loss:
                     self.recording = False
@@ -3270,6 +3286,79 @@ class VideoLostTests(unittest.TestCase):
                 mock.patch.object(runner, "VIEWFINDER_RECOVERY_SECONDS", 0), \
                 contextlib.redirect_stdout(io.StringIO()), mock.patch.object(runner.time, "sleep", lambda seconds: None):
             runner.check_viewfinder_returns(guest, guest.plan, "photo")
+
+    # The oracle that does not depend on how fast the application reacts: the camera service's own log of a leaked stream.
+    def test_no_leaked_stream_passes_and_says_so(self) -> None:
+        guest = self.Guest(self.plan())
+        text = self.run_check(guest)
+        self.assertIn("  the camera service reports no leaked stream\n", text)
+        self.assertIn("  video viewfinder: the camera service reports no leaked stream\n", text)
+        self.assertIn("  photo viewfinder: the camera service reports no leaked stream\n", text)
+
+    def test_a_stream_leaked_at_the_loss_fails_in_every_case(self) -> None:
+        for control, case in ((1, "recording"), (2, "video viewfinder"), (3, "photo viewfinder")):
+            with self.subTest(case=case):
+                guest = self.Guest(self.plan())
+                guest.leaks_at = {("interrupt background", control)}
+                with self.assertRaisesRegex(runner.Failure, rf"reports a leaked stream after the loss in the {case} \(1 line"):
+                    self.run_check(guest)
+
+    def test_a_stream_leaked_by_the_return_fails_in_every_case(self) -> None:
+        # The close can come after the person returns: the case's last look sees it.
+        for control, case in ((1, "recording"), (2, "video viewfinder"), (3, "photo viewfinder")):
+            with self.subTest(case=case):
+                guest = self.Guest(self.plan())
+                guest.leaks_at = {("resume", control)}
+                with self.assertRaisesRegex(runner.Failure, rf"reports a leaked stream after the loss in the {case}"):
+                    self.run_check(guest)
+
+    def test_the_failure_names_the_line_and_the_defect(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.leaks_at = {("interrupt background", 1)}
+        with self.assertRaises(runner.Failure) as raised:
+            self.run_check(guest)
+        self.assertIn("Stream 0 leaked! strong reference (1)!", str(raised.exception))
+        self.assertIn("without the framework being told that it failed", str(raised.exception))
+
+    def test_a_leak_from_before_the_row_is_not_the_losss(self) -> None:
+        # The log is cumulative: lines that were there when a case began do not count.
+        guest = self.Guest(self.plan())
+        guest.service_leaks = [self.leak_line(1), self.leak_line(2)]
+        text = self.run_check(guest)
+        self.assertIn("photo viewfinder: the camera service reports no leaked stream", text)
+
+    def test_the_leak_check_does_not_wait_for_the_application_to_react(self) -> None:
+        # The application stays in front and everything else is as in a good run: only the camera service's line decides.
+        guest = self.Guest(self.plan())
+        guest.leaks_at = {("interrupt background", 2)}
+        self.assertTrue(guest.in_front)
+        with self.assertRaisesRegex(runner.Failure, "reports a leaked stream after the loss in the video viewfinder"):
+            self.run_check(guest)
+
+    def test_the_parser_takes_the_services_leaked_stream_lines_only(self) -> None:
+        log = ("11-16 03:12:04.100   588   600 E Camera3-Device: disconnectImpl: Stream 1 leaked! strong reference (2)!\n"
+               "11-16 03:12:04.200   588   600 E Camera3-Device: processCaptureResult: Stream 3 error\n"
+               "11-16 03:12:04.300   588   600 E Camera3-Device: disconnectImpl: Stream 12 leaked! strong reference (1)!\n"
+               "--------- beginning of main\n")
+        self.assertEqual([line.split(": ", 1)[1] for line in runner.parse_stream_leaks(log)],
+                         ["disconnectImpl: Stream 1 leaked! strong reference (2)!",
+                          "disconnectImpl: Stream 12 leaked! strong reference (1)!"])
+        self.assertEqual(runner.parse_stream_leaks(""), [])
+        self.assertEqual(runner.parse_stream_leaks("11-16 03:12:04.300 588 600 E Camera3-Device: Stream 1 is idle\n"), [])
+
+    def test_the_guest_reads_the_services_error_log_with_timestamps(self) -> None:
+        asked: list[str] = []
+
+        class Stub:
+            def shell(self, command: str, timeout: float = 0) -> str:
+                asked.append(command)
+                return VideoLostTests.leak_line(5) + "\n"
+
+        self.assertEqual(len(runner.Guest.stream_leaks(Stub())), 1)
+        self.assertEqual(len(asked), 1)
+        self.assertIn("logcat -d -v threadtime", asked[0])
+        self.assertIn("Camera3-Device:E", asked[0])
+        self.assertIn("'*:S'", asked[0])
 
     # One deadline from the return covers the camera, the picture and the frame counters.
     class Clock:

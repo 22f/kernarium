@@ -347,6 +347,12 @@ LOST_AWAY_SECONDS = 8
 VIEWFINDER_RECOVERY_SECONDS = 45
 HAL_END_LINE = "the host ended the camera: its video buffers fail"
 HAL_REOPEN_LINE = "the host ended the camera's video: its video streams are closed and opened again"
+# The camera service logs, when it closes a device (CameraService's Camera3Device::disconnectImpl, tag Camera3-Device, error level),
+# every stream that something still holds a reference to. A frame whose request the HAL ended without telling the framework that
+# the request failed keeps its buffers, and with them its streams' references and the application's preview surface, until the
+# camera service ends: the application cannot open the camera again. The line does not depend on how fast the application reacts.
+SERVICE_LOG_TAG = "Camera3-Device"
+STREAM_LEAK = re.compile(r"\bStream \d+ leaked! strong reference \(\d+\)!")
 STILL_ACTION = "android.media.action.STILL_IMAGE_CAMERA"
 ERROR_WINDOW = re.compile(r"Application (Error|Not Responding)|isn't responding|has stopped|keeps stopping")
 # The cameras Android lists again after the restart: the lazy provider starts when cameraserver first asks.
@@ -1311,6 +1317,10 @@ class Guest:
 
     def hal_log(self) -> str:
         return self.shell("logcat -d -b all " + " ".join(f"{tag}:W" for tag in HAL_TAGS) + " '*:S' 2>&1 || true")
+
+    def stream_leaks(self) -> list[str]:
+        """The camera service's lines that say a stream outlived the close of its device (see STREAM_LEAK)."""
+        return parse_stream_leaks(self.shell(f"logcat -d -v threadtime -b all {SERVICE_LOG_TAG}:E '*:S' 2>&1 || true"))
 
     def screenshot(self) -> Image:
         result = self.adb_run("exec-out", "screencap", "-p", timeout=SCREENSHOT_SECONDS, binary=True)
@@ -2343,13 +2353,33 @@ def new_movie(guest: Guest, before: dict[str, dict[str, str]], seconds: float) -
     return found[-1]
 
 
+def parse_stream_leaks(log: str) -> list[str]:
+    """The lines of a `logcat -d -v threadtime` of the camera service's Camera3-Device tag that report a leaked stream."""
+    return [line.strip() for line in log.splitlines() if STREAM_LEAK.search(line)]
+
+
+def require_no_stream_leak(guest: Guest, known: list[str], case: str) -> None:
+    """The camera service reports no stream leaked since `known` was taken. A stream is leaked when the HAL ended a request
+    without the framework being told that it failed (ERROR_REQUEST): the buffers stay with the framework, and with them the
+    references to the stream, so the application's own reopening of the camera fails. Unlike the application's reaction,
+    which takes seconds and shows only as a camera application that is no longer in front, the line is there or it is not."""
+    new = [line for line in guest.stream_leaks() if line not in known]
+    if new:
+        raise Failure(f"the camera service reports a leaked stream after the loss in the {case} ({len(new)} line(s), the first: "
+                      f"{new[0]!r}): the HAL ended a request of the lost session without the framework being told that it "
+                      "failed, so the framework kept its buffers and the stream's references, and the application cannot open "
+                      "the camera again")
+
+
 def check_video_lost(guest: Guest, plan: Plan) -> None:
     """The host ends the video of a camera that records when the application leaves the foreground: the recording ends
     and its clip, which must hold encoded video samples, is saved without a second key press, the application stays in
     front, and a recording works again. That last step STARTS THE APPLICATION AGAIN (a new activity start after the
     return): it shows that the camera can be opened again, not that the viewfinder recovered by itself; the viewfinder
-    cases that follow show that. Needs an image whose HAL reports the loss (route p0030)."""
+    cases that follow show that. After the loss the camera service's log holds no leaked stream (require_no_stream_leak).
+    Needs an image whose HAL reports the loss (route p0030)."""
     before, _ = guest.videos()
+    leaks = guest.stream_leaks()
     start_recording(guest, plan, restart_application=True)
     time.sleep(LOST_HOLD_SECONDS)
     guest.camera_control("interrupt background")
@@ -2373,6 +2403,7 @@ def check_video_lost(guest: Guest, plan: Plan) -> None:
     # What the application does with its camera is its own: the open camera is reported, not required.
     held = sorted(active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE))
     print(f"  cameras the application holds after the loss: {held or 'none'}")
+    require_no_stream_leak(guest, leaks, "recording")
     guest.camera_control("resume")
     after, _ = guest.videos()
     start_recording(guest, plan, restart_application=False)  # a new activity start: see the docstring
@@ -2387,9 +2418,11 @@ def check_video_lost(guest: Guest, plan: Plan) -> None:
     require_media_payload(again.get("_data", ""), reopened)
     print(f"  the camera opened again for a new start of the application: {again.get('_display_name', '')} "
           f"{reopened.seconds:.2f} s, {reopened.frames} frames")
+    require_no_stream_leak(guest, leaks, "recording")
+    print("  the camera service reports no leaked stream")
     if HAL_END_LINE not in guest.hal_log():
         raise Failure("the camera HAL logged no end of the camera: the image lacks the HAL topic of route p0030")
-    print("  the HAL reported the end of the camera (ERROR_DEVICE)")
+    print("  the HAL reported the end of the camera (ERROR_DEVICE besides the request errors)")
     check_viewfinder_returns(guest, plan, "video")
     check_viewfinder_returns(guest, plan, "photo")
 
@@ -2427,6 +2460,7 @@ def check_viewfinder_returns(guest: Guest, plan: Plan, mode: str) -> None:
     crashes = guest.shell("logcat -d -b events | grep -a -E 'am_crash|am_anr|am_proc_died' || true")
     log = guest.hal_log()
     ended, reopened = log.count(HAL_END_LINE), log.count(HAL_REOPEN_LINE)
+    leaks = guest.stream_leaks()
     guest.camera_control("interrupt background")
     time.sleep(LOST_AWAY_SECONDS)
     log = guest.hal_log()
@@ -2437,6 +2471,7 @@ def check_viewfinder_returns(guest: Guest, plan: Plan, mode: str) -> None:
     if photo and lost:
         raise Failure("the HAL told the photo viewfinder that the device is gone (ERROR_DEVICE): only a session with an encoder "
                       "stream may be ended")
+    require_no_stream_leak(guest, leaks, label)
     guest.camera_control("resume")
     returned = time.monotonic()
     deadline = returned + VIEWFINDER_RECOVERY_SECONDS
@@ -2451,6 +2486,8 @@ def check_viewfinder_returns(guest: Guest, plan: Plan, mode: str) -> None:
     after = guest.shell("logcat -d -b events | grep -a -E 'am_crash|am_anr|am_proc_died' || true")
     if after != crashes:
         raise Failure(f"the application crashed or stopped responding around the loss: {after[len(crashes):][-300:]!r}")
+    require_no_stream_leak(guest, leaks, label)
+    print(f"  {label}: the camera service reports no leaked stream")
     reopens = guest.hal_log().count(HAL_REOPEN_LINE) - reopened
     if photo and reopens == 0:
         raise Failure("the HAL logged no reopening of its video streams: the host did not end the camera's video, or the image "
