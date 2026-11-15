@@ -176,6 +176,7 @@ struct Globals {
     PointerRecord records[kRecordSlots];  // open addressing by pointer; under records_lock
     unsigned records_in_use;
     uint32_t records_lock;     // the table's own lock (a leaf: nothing is called and no other lock is taken under it)
+    uint32_t records_full_logged;  // the first pointer that found the table full has been logged
     uint8_t scratch[kPullPiece];  // the bytes of the array that a pull or a merge reads; under the mutex (see "scratch")
     uint32_t kind_pool_used;
     char kind_pool[kKindPoolBytes];
@@ -2409,20 +2410,28 @@ void record_runtime_pointer(const void* pointer, uint32_t kind) {
     if (pointer == nullptr || __atomic_load_n(&g.counters.shadows_created, __ATOMIC_RELAXED) == 0) {
         return;  // no block has been made yet: no block's reference can release it
     }
-    TableLock lock;
-    if (PointerRecord* record = find_record(pointer, kind)) {
-        ++record->count;
-        return;
+    {
+        TableLock lock;
+        if (PointerRecord* record = find_record(pointer, kind)) {
+            ++record->count;
+            return;
+        }
+        if (g.records_in_use < kRecordSlots / 2) {
+            unsigned i = record_slot(pointer);
+            while (g.records[i].kind != kRecordFree) {
+                i = (i + 1) % kRecordSlots;
+            }
+            g.records[i] = PointerRecord{pointer, kind, 1};
+            ++g.records_in_use;
+            return;
+        }
     }
-    if (g.records_in_use >= kRecordSlots / 2) {
-        return;  // not recorded: a Release of it through a block's reference is treated as a buffer of the application's
+    // Not recorded: a Release of it through a block's reference is treated as a buffer of the application's. One line says
+    // so, once (after the table's lock is given up: the log is a call into the platform).
+    if (g.platform.log != nullptr && __atomic_exchange_n(&g.records_full_logged, 1u, __ATOMIC_RELAXED) == 0) {
+        g.platform.log("the table of the runtime's own pointers is full; later pointers are not recorded; pointers and slots:",
+                       static_cast<long>(kRecordSlots / 2), static_cast<long>(kRecordSlots));
     }
-    unsigned i = record_slot(pointer);
-    while (g.records[i].kind != kRecordFree) {
-        i = (i + 1) % kRecordSlots;
-    }
-    g.records[i] = PointerRecord{pointer, kind, 1};
-    ++g.records_in_use;
 }
 bool is_recorded_pointer(const void* pointer, uint32_t kind) {
     if (pointer == nullptr || __atomic_load_n(&g.records_in_use, __ATOMIC_RELAXED) == 0) {

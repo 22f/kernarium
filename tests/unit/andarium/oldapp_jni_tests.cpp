@@ -4072,6 +4072,32 @@ void check_scattered_application_bytes_keep_a_java_write_in_every_gap() {
     }
 }
 
+// ---- the table of the runtime's own pointers, when it is full
+
+// The table records 1024 pointers; the next one is not recorded (a Release of it through a block's reference is then taken
+// for a buffer of the application's, as before), and one line says so, once.
+void check_a_full_table_of_the_runtimes_pointers_logs_one_line() {
+    Fixture f = make();
+    (void)make_held(f, sample(8));  // a block has existed: the pointers are recorded
+    std::vector<jobject> arrays;
+    std::vector<void*> pointers;
+    for (int i = 0; i < 1024; ++i) {
+        arrays.push_back(byte_array(sample(8)));
+        pointers.push_back(get_critical(f, arrays.back()));
+    }
+    require(log_count("table of the runtime's own pointers") == 0, "nothing is logged while the table has room");
+    jobject one_more = byte_array(sample(8));
+    void* not_recorded = get_critical(f, one_more);
+    require(not_recorded != nullptr && log_count("table of the runtime's own pointers") == 1, "the first pointer past the table is logged");
+    jobject another = byte_array(sample(8));
+    void* also_not = get_critical(f, another);
+    require(also_not != nullptr && log_count("table of the runtime's own pointers") == 1, "and the second is not");
+    release_critical(f, another, also_not, 0);
+    release_critical(f, one_more, not_recorded, 0);
+    for (int i = 0; i < 1024; ++i) release_critical(f, arrays[size_t(i)], pointers[size_t(i)], 0);
+    require(world.critical == 0 && t_regions == 0, "every region closed");
+}
+
 // ---- little stack
 
 // Any wrapper can be called on a thread with a small stack (an audio thread, a thread of a library): a pull and a merge read
@@ -4366,6 +4392,7 @@ int main(int argc, char** argv) {
     check_the_table_of_the_runtimes_pointers_does_not_wait_for_the_mutex();
     check_the_sentinels_array_is_made_outside_the_mutex();
     check_a_failed_sentinel_allocation_is_survived();
+    check_a_full_table_of_the_runtimes_pointers_logs_one_line();
     check_the_synchronizations_need_little_stack();
     check_a_java_write_during_a_merge_is_kept();
     check_scattered_application_bytes_keep_a_java_write_in_every_gap();
