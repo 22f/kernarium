@@ -34,8 +34,9 @@ if(TARGET uml_arm64_aot_framework AND TARGET uml-darwin-android17)
         get_property(_uml_aot_manifest GLOBAL PROPERTY UML_AOT_MANIFEST)
         set(_uml_aot_diagnostics_args --diagnostics
             --manifest ${_uml_aot_manifest}
-            # Libraries the workloads and the booted system run.
-            --expect-entered libc.so,libz.so)
+            # Libraries the workloads and the booted system run: every one
+            # the framework covers.
+            --expect-entered libc.so,linker64,libart.so,libhwui.so,venus_gallium_dri.so,surfaceflinger,libcrypto.so,libpcre2.so,libbinder.so,libz.so)
     endif()
     uml_add_integration_test(
         NAME aot-guest-workloads

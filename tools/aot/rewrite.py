@@ -1090,7 +1090,9 @@ class Library:
             asm.word(A.msr("nzcv", T0))
         else:
             source, dest = host["s"], host["d"]
-            # Backward when 0 < (to - from) mod 2^56 < remaining.
+            # Backward when 0 < to_low - from_low < remaining, with the low
+            # 56 bits of each address and the subtraction in 64 bits: a
+            # negative difference wraps above any clamped count.
             asm.word(A.and_ones(T0, source, 56))
             asm.word(A.and_ones(T2, dest, 56))
             asm.word(A.add_reg(T2, T2, T0, sub=True))
