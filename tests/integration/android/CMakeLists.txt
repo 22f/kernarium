@@ -258,16 +258,18 @@ add_dependencies(integration-test-binaries uml_audio_hold)
 # Android lists, one preview frame and one still of the camera application, and,
 # in a blocked session, the same cameras with black frames and no still; a live
 # session also records, and holds the sound of its recordings to real time through
-# a stalled sound device and a stood-still guest. It boots Android with the macOS
-# launcher, so it is opt-in: name the release under test.
+# a stalled sound device and a stood-still guest. Its restart mode boots the release
+# twice over the colour data that a lens's still taught and expects the same cameras
+# to be listed again. It boots Android with the macOS launcher, so it is opt-in: name
+# the release under test.
 set(UML_ANDROID_CAMERA_RELEASE "" CACHE PATH
     "Installed Android release directory that the android-camera tests boot")
 if(UML_ANDROID_CAMERA_RELEASE AND TARGET uml-darwin-android17)
-    foreach(mode live blocked)
+    foreach(mode live blocked restart)
         if(mode STREQUAL "live")
             set(camera_test_name android-camera)
         else()
-            set(camera_test_name android-camera-blocked)
+            set(camera_test_name android-camera-${mode})
         endif()
         uml_add_integration_test(
             NAME ${camera_test_name}

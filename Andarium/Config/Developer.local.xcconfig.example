@@ -4,7 +4,8 @@
 // a name (shown as it is) and the handles of the profiles on GitHub and X. Store
 // a handle, never a whole address: `//` starts a comment in an xcconfig, and the
 // code builds the addresses. Only an AppStore build made with this file has what
-// they turn on; every other build carries none of it and no value.
+// they turn on, except that a TestFlight build has Follow developer on X; every
+// other build carries none of it and no value.
 //
 // DEVELOPER_X_HANDLE turns on Follow developer on X, an Info row that opens the
 // developer's profile on X, and the X button of the Buy me tokens header.
