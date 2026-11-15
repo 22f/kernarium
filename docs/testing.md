@@ -1163,8 +1163,9 @@ The HAL's result path (the lens shading map and the empty hot pixel map for the
 mode ON) has no check of its own outside the camera CTS modules.
 `android17-camera-device-lost` (tooling) compiles the series' sensor source
 against stub headers and runs its callback path (a request that met the loss
-returns every buffer as an error and tells the framework once, the requests the
-session still holds drain without the frame source); the rest of the series'
+returns every buffer as an error, fails as a request and tells the framework
+the device is gone once besides, the requests the session still holds drain
+without the frame source); the rest of the series'
 wiring it reads as text, which is a structural check.
 `android17-camera-crop-region` (tooling) is a structural check as well: it reads
 what the series does to the request state, and the rule it uses is the unit row

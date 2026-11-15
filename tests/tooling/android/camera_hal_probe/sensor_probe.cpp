@@ -108,11 +108,22 @@ int main(int argc, char** argv)
         std::printf("metadata %s\nlost %d\n", kept ? "kept" : "reset", sensor.session_health_->lost() ? 1 : 0);
         dump_and_clear("events");
     } else if (scenario == "drain") {
-        // The session is over: later requests, accepted before it, drain without touching the source.
+        // The session is over and the framework knows: later requests, accepted before it, drain without touching the source.
         sensor.session_health_->latch_lost();
         std::printf("claimed %d\n", sensor.session_health_->claim_device_error() ? 1 : 0); // the first request told it
         source.results = {OK};
         for (std::uint32_t frame = 8; frame <= 10; ++frame) {
+            const bool kept = run_request(sensor, frame, 2);
+            std::printf("frame %u metadata %s\n", frame, kept ? "kept" : "reset");
+        }
+        std::printf("source begun %d produced %d\n", source.begun, source.produced);
+        dump_and_clear("events");
+    } else if (scenario == "lost-first") {
+        // The session is over and no request has told the framework yet: the first request that reaches the sensor does, and
+        // fails as a request too; the next one only fails.
+        sensor.session_health_->latch_lost();
+        source.results = {OK};
+        for (std::uint32_t frame = 11; frame <= 12; ++frame) {
             const bool kept = run_request(sensor, frame, 2);
             std::printf("frame %u metadata %s\n", frame, kept ? "kept" : "reset");
         }

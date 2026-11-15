@@ -5,10 +5,10 @@
 When the application leaves the foreground the host ends the video of a camera that has a video stream open: its video buffers
 fail under a black, interrupted metadata record for as long as the guest keeps the stream (the wire README of kernel/common/video).
 The HAL (route p0030) decides by the session's streams. A session with a stream whose usage carries the video encoder bit is over:
-the request that met the loss fails as a whole with every output buffer returned as an error, the framework is told ERROR_DEVICE
-once per session, later requests drain as ERROR_REQUEST, and the session answers every later request, flush and configuration
-with the internal error. Any other session is told nothing: the frame source closes the camera's video streams between requests
-and opens them again.
+the request that met the loss fails as a whole with every output buffer returned as an error, the framework is told that the
+request failed (ERROR_REQUEST) and, once per session, ERROR_DEVICE besides, later requests drain as ERROR_REQUEST, and the session
+answers every later request and configuration with the internal error and a flush with OK once what it holds has drained. Any other
+session is told nothing: the frame source closes the camera's video streams between requests and opens them again.
 
 What this row holds. The callback path of the sensor is executed: the series' own EmulatedSensorHost.cpp is compiled unchanged
 against stub headers (camera_hal_probe/stub) and run with a scripted frame source, so the notifications and the buffers that come
@@ -110,6 +110,15 @@ class SensorCallbackTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         shutil.rmtree(cls.directory, ignore_errors=True)
 
+    def assert_every_device_error_is_a_failed_request(self, events: list[str]) -> None:
+        """The framework returns the buffers of a request only when it was told that the request failed: a request that only the
+        device error named keeps them (and the references to their streams) until the camera service ends."""
+        for event in events:
+            if event.startswith("ERROR_DEVICE f"):
+                frame = event.removeprefix("ERROR_DEVICE ")
+                self.assertIn(f"ERROR_REQUEST {frame}", events, f"{event} names a request the framework is never told failed")
+                self.assertLess(events.index(event), events.index(f"ERROR_REQUEST {frame}"), "after the device error")
+
     def run_raw(self, scenario: str) -> str:
         return subprocess.run([str(self.probe), scenario], check=True, capture_output=True, text=True, timeout=60).stdout
 
@@ -131,9 +140,11 @@ class SensorCallbackTests(unittest.TestCase):
     def test_one_output_completes_and_another_meets_the_loss(self) -> None:
         # The mixed completion of the HAL review: the first output was produced, the second failed under the lost camera.
         values, events = self.run_probe("mixed-completion")
-        self.assertEqual(events[0], "ERROR_DEVICE f7", "the framework is told the device is gone, first")
-        self.assertEqual(sorted(events[1:]), ["BUFFER f7 s1 ERROR", "BUFFER f7 s2 ERROR"],
+        self.assertEqual(events[:2], ["ERROR_DEVICE f7", "ERROR_REQUEST f7"],
+                         "the framework is told the device is gone, first, and that the request failed")
+        self.assertEqual(sorted(events[2:]), ["BUFFER f7 s1 ERROR", "BUFFER f7 s2 ERROR"],
                          "and every buffer of the request goes back with an error status, the one that was filled too")
+        self.assert_every_device_error_is_a_failed_request(events)
         self.assertNotIn("SHUTTER", " ".join(events), "a failed request has no shutter")
         self.assertNotIn("ERROR_BUFFER", " ".join(events), "and no buffer error of its own")
         self.assertEqual(values["metadata"], "reset", "nor results")
@@ -156,7 +167,26 @@ class SensorCallbackTests(unittest.TestCase):
         self.assertEqual(events.count("ERROR_DEVICE f5"), 1)
         self.assertNotIn("ERROR_DEVICE f6", events)
         self.assertIn("ERROR_REQUEST f6", events)
-        self.assertLess(events.index("ERROR_DEVICE f5"), events.index("ERROR_REQUEST f6"), "in order")
+        self.assertEqual(events.count("ERROR_REQUEST f5"), 1, "the request that met the loss failed as a request as well")
+        self.assertLess(events.index("ERROR_DEVICE f5"), events.index("ERROR_REQUEST f5"))
+        self.assertLess(events.index("ERROR_REQUEST f5"), events.index("ERROR_REQUEST f6"), "in order")
+        self.assert_every_device_error_is_a_failed_request(events)
+
+    def test_the_first_request_of_a_session_that_is_over_tells_the_device_gone_and_fails_as_a_request(self) -> None:
+        # The loss was latched earlier (by the frame source of an earlier sensor, or the session): the first request that reaches
+        # the sensor carries the news, and every buffer of it and of the next goes back as an error.
+        raw = self.run_raw("lost-first")
+        _, events = self.run_probe("lost-first")
+        self.assertEqual(events[:2], ["ERROR_DEVICE f11", "ERROR_REQUEST f11"])
+        self.assertEqual([e for e in events if e.startswith("ERROR")], ["ERROR_DEVICE f11", "ERROR_REQUEST f11", "ERROR_REQUEST f12"],
+                         "the next request only fails")
+        for frame in (11, 12):
+            buffers = sorted(e for e in events if e.startswith(f"BUFFER f{frame} "))
+            self.assertEqual(buffers, [f"BUFFER f{frame} s1 ERROR", f"BUFFER f{frame} s2 ERROR"])
+            self.assertLess(events.index(f"ERROR_REQUEST f{frame}"), events.index(buffers[0]), "after the request's error")
+        self.assertEqual(raw.count("metadata reset"), 2, "neither carries results")
+        self.assertIn("source begun 0 produced 0", raw)
+        self.assert_every_device_error_is_a_failed_request(events)
 
     def test_a_reconfiguration_does_not_clear_the_state_of_the_session(self) -> None:
         # A new sensor with a new source, the session's own health: the request drains, the new source is not touched.
@@ -236,19 +266,36 @@ class WiringTests(unittest.TestCase):
     def test_the_sensor_latches_the_loss_in_the_session_and_reports_the_device_gone_once(self) -> None:
         self.assertIn("session_health_->latch_lost();", self.sensor)
         self.assertEqual(self.sensor.count("claim_device_error()"), 2, "the draining path and the loss path claim it")
-        self.assertEqual(self.sensor.count("ErrorCode::kErrorDevice"), 2, "both as the claim's answer")
+        self.assertEqual(self.sensor.count("fail_request(session_health_->claim_device_error());"), 1)
+        self.assertEqual(self.sensor.count("fail_request(device_lost && session_health_->claim_device_error());"), 1)
         self.assertNotIn("frame_source_->DeviceLost() ? ErrorCode::kErrorDevice", self.sensor)
+
+    def test_a_failed_request_is_always_told_to_the_framework_and_the_device_gone_comes_besides(self) -> None:
+        fail = block(self.sensor, "auto fail_request = [&](bool device_error) {")
+        self.assertEqual(fail.count("ErrorCode::kErrorDevice"), 1, "the one place that names the device error")
+        self.assertEqual(fail.count("ErrorCode::kErrorRequest"), 1)
+        device = block(fail, "if (device_error) {")
+        self.assertIn("ErrorCode::kErrorDevice", device, "only the request that claimed it")
+        self.assertNotIn("ErrorCode::kErrorRequest", device, "the request error does not depend on the claim")
+        self.assertLess(fail.index("ErrorCode::kErrorDevice"), fail.index("ErrorCode::kErrorRequest"), "after the device error")
+        self.assertEqual(self.sensor.count("ErrorCode::kErrorDevice"), 1)
 
     def test_the_opened_session_owns_the_health_and_guards_its_entries(self) -> None:
         self.assertRegex(self.session, r"emulated_sensor->SetSessionHealth\(health_\);")
         # processCaptureRequest (SubmitRequestLocked), flush, configureStreams (ConfigurePipeline) and BuildPipelines.
         self.assertGreaterEqual(self.session.count("if (health_->lost()) {"), 4)
-        self.assertEqual(self.session.count("return UNKNOWN_ERROR;"), 4, "each answers the internal error")
+        self.assertEqual(self.session.count("return UNKNOWN_ERROR;"), 3, "all but the flush answer the internal error")
         self.assertRegex(self.session, r"health_->set_encoder_stream\(HasEncoderStream\(request_config\) \|\|\s*HasEncoderStream\(overall_config\)\);")
         self.assertIn("static_assert(GRALLOC_USAGE_HW_VIDEO_ENCODER == andarium::camera::usage_video_encoder", self.session)
         self.assertIn("std::shared_ptr<andarium::camera::SessionHealth> health_ =", added_lines(f"{HWL}/EmulatedCameraDeviceSessionHWLImpl.h"))
         self.assertIn("SetSessionHealth(std::shared_ptr<andarium::camera::SessionHealth> health)", self.sensor_header)
         self.assertIn("frame_source_->SetSessionHealth(session_health_);", self.sensor_setup)
+
+    def test_a_flush_of_a_session_that_is_over_drains_and_answers_ok(self) -> None:
+        # The framework flushes a device it was told is gone before it closes it; the interface wants OK once the requests
+        # drained, and the framework logs an error answer.
+        self.assertRegex(self.session, r"if \(health_->lost\(\)\) \{\n(?:\s*//[^\n]*\n)+\s*if \(request_processor_ != nullptr\) \{\n"
+                                       r"\s*request_processor_->Flush\(\);\n\s*\}\n\s*return OK;\n\s*\}")
 
     def test_nothing_else_reports_the_device_gone(self) -> None:
         # ERROR_DEVICE ends the session for the framework; an ordinary hiccup must never take that path.

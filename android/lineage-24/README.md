@@ -402,12 +402,14 @@ open on it), the camera's video buffers fail under a black, interrupted record
 for as long as the guest keeps the stream, and the HAL decides by the session's
 streams (`camera_session.hpp`). A session with a stream whose consumer is a
 video encoder is over: the request that met the loss fails with every output
-buffer returned as an error, the HAL reports `ERROR_DEVICE` once, the requests
-it still holds drain as `ERROR_REQUEST` without the frame source, and the opened
-session answers every later request, flush and configuration with the internal
-error; a close succeeds. Any other session is told nothing: the HAL closes the
-camera's video streams between requests, which ends the host's loss, and opens
-them again with the next request. The rules have limits: the camera service
+buffer returned as an error and an `ERROR_REQUEST` (the camera service returns a
+request's buffers only for a request it was told failed), the HAL reports
+`ERROR_DEVICE` once besides, the requests it still holds drain as
+`ERROR_REQUEST` without the frame source, and the opened session answers every
+later request and configuration with the internal error and a flush with OK once
+it has drained; a close succeeds. Any other session is told nothing: the HAL
+closes the camera's video streams between requests, which ends the host's loss,
+and opens them again with the next request. The rules have limits: the camera service
 refuses further work on a device in its error state, so a client that reaches the
 HAL after `ERROR_DEVICE` talks to the provider directly, and there a configuration
 is refused by the HAL, which reaches the client as an illegal-argument answer and
