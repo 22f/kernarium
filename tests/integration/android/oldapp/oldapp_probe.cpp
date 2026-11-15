@@ -85,6 +85,9 @@
 //   push_ns      recorded: nanoseconds for a Java call that is passed a 1 MiB block with every 4 KiB chunk written
 //                through the pointer (the push of the dirty chunks, and the pull after), and for the same call with the
 //                block clean
+//   push_scatter4_us, push_scatter2_us  recorded: microseconds for a Java call that is passed a 1 MiB block of which every
+//                4th (every other) byte is written through the pointer, new values each round: the worst case of the exact
+//                write-back, one region write for each run of written bytes (262144 and 524288 runs)
 //   real_pair_ns, real_critical_ns  recorded: nanoseconds for a Get...Elements / Release pair (JNI_ABORT) and for a critical
 //                pair on an array the application made, which stays the runtime's own (the layer records the runtime's
 //                pointers once it has made a block, so that a block's reference can release them)
@@ -1530,6 +1533,43 @@ void ended_cases(Report& report, Env* env, jclass probe) {
             report.line("push_dirty_ns", text);
             decimal(text, static_cast<uint32_t>(clean_us * 1000 / kRounds));
             report.line("push_clean_ns", text);
+        }
+        if (block != nullptr) {
+            delete_local(env, block);
+        }
+        exception_clear(env);
+    }
+
+    // The worst cases of the exact write-back (recorded): the same call with a block of which every 4th byte, and every other
+    // byte, is written through the pointer. The merge writes each run of written bytes to the array on its own, so these
+    // are the most region writes a 1 MiB block can cost. The chunks are written 4 KiB at a time (the other bytes of the
+    // pattern are the ones already there).
+    for (int scatter = 0; scatter < 2; ++scatter) {
+        const uint32_t step = scatter == 0 ? 4u : 2u;
+        const jmethodID echo = static_method(env, probe, "echo", "([B)I");
+        constexpr uint32_t n = 1u << 20;
+        constexpr int kRounds = 3;
+        jobject block = echo != nullptr ? call_object(env, probe, ids.asset, static_cast<jint>(n), 0x10) : nullptr;
+        if (block != nullptr && block_holds(block, n, 0x10)) {
+            uint64_t total_us = 0;
+            bool stored = true;
+            for (int round = 0; round < kRounds && stored; ++round) {
+                uint8_t pattern[4096];
+                for (uint32_t i = 0; i < sizeof(pattern); ++i) {
+                    pattern[i] = i % step == 0 ? static_cast<uint8_t>(0x20 + round) : 0x10;
+                }
+                for (uint32_t chunk = 0; chunk < n / 4096 && stored; ++chunk) {
+                    stored = safe_store(const_cast<char*>(static_cast<const char*>(block)) + 16 + chunk * 4096, pattern, sizeof(pattern));
+                }
+                const uint64_t start = now_us();
+                call_int(env, probe, echo, block);
+                total_us += now_us() - start;
+            }
+            if (stored) {
+                char text[12];
+                decimal(text, static_cast<uint32_t>(total_us / kRounds));
+                report.line(step == 4 ? "push_scatter4_us" : "push_scatter2_us", text);
+            }
         }
         if (block != nullptr) {
             delete_local(env, block);
