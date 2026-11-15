@@ -58,19 +58,36 @@ uml_add_tooling_test(
 # replaces nothing and ends with a status of its own. The tests run the real
 # script and its supervisor against fake `xcrun`, `xcodebuild` and
 # `caffeinate` executables in a scratch folder.
-uml_add_tooling_test(
-    NAME kernarium-ipad-automation-watch
-    COMMAND ${Python3_EXECUTABLE}
-        ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_ipad_automation_watch.py
-    LABELS kernarium
-    TIMEOUT 900)
+#
+# Both are pinned by real waits, so each file runs as several shards that CTest
+# runs side by side (`--shard INDEX/COUNT`, automation_shards.py): together
+# the shards run every test once. A shard's bound is sized from its share at
+# gate concurrency on a loaded host.
+function(_uml_add_watch_shards PREFIX SCRIPT COUNT)
+    math(EXPR _last "${COUNT} - 1")
+    foreach(_index RANGE ${_last})
+        math(EXPR _number "${_index} + 1")
+        uml_add_tooling_test(
+            NAME ${PREFIX}-shard${_number}
+            COMMAND ${Python3_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/${SCRIPT}
+                --shard ${_index}/${COUNT}
+            LABELS kernarium
+            TIMEOUT 300)
+    endforeach()
+endfunction()
+
+_uml_add_watch_shards(kernarium-ipad-automation-watch
+    test_ipad_automation_watch.py 6)
+_uml_add_watch_shards(kernarium-ipad-automation-watch-process
+    test_ipad_automation_watch_process.py 4)
 
 uml_add_tooling_test(
-    NAME kernarium-ipad-automation-watch-process
-    COMMAND ${Python3_EXECUTABLE}
-        ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_ipad_automation_watch_process.py
+    NAME kernarium-automation-shards
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_automation_shards.py
     LABELS kernarium
-    TIMEOUT 600)
+    TIMEOUT 120)
 
 uml_add_tooling_test(
     NAME kernarium-audio-interrupter

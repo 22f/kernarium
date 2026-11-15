@@ -169,7 +169,7 @@ class Code:
         self.items.append((mnemonic, *operands))
 
 
-# mnemonic -> (opcode, format). Formats: 10x 11n 11x 12x 21c 21t 20t 22c 23x 35c.
+# mnemonic -> (opcode, format). Formats: 10x 11n 11x 12x 21c 21t 22t 22b 20t 22c 23x 35c.
 OPCODES = {
     "return-void": (0x0E, "10x"),
     "return": (0x0F, "11x"),
@@ -184,6 +184,12 @@ OPCODES = {
     "move-result": (0x0A, "11x"),
     "move-result-object": (0x0C, "11x"),
     "if-eqz": (0x38, "21t"),
+    "if-ge": (0x35, "22t"),
+    "add-int/lit8": (0xD8, "22b"),
+    "and-int/2addr": (0xB5, "12x"),
+    "int-to-byte": (0x8D, "12x"),
+    "aget-byte": (0x48, "23x"),
+    "aput-byte": (0x4F, "23x"),
     "goto/16": (0x29, "20t"),
     "aput-object": (0x4D, "23x"),
     "invoke-virtual": (0x6E, "35c"),
@@ -191,7 +197,8 @@ OPCODES = {
     "invoke-static": (0x71, "35c"),
     "invoke-interface": (0x72, "35c"),
 }
-SIZES = {"10x": 1, "11n": 1, "11x": 1, "12x": 1, "21c-string": 2, "21c-type": 2, "22c-type": 2, "21t": 2, "20t": 2, "23x": 2, "35c": 3}
+SIZES = {"10x": 1, "11n": 1, "11x": 1, "12x": 1, "21c-string": 2, "21c-type": 2, "22c-type": 2, "21t": 2, "22t": 2,
+         "22b": 2, "20t": 2, "23x": 2, "35c": 3}
 
 
 def assemble(code: Code, pools: Pools) -> bytes:
@@ -227,6 +234,10 @@ def assemble(code: Code, pools: Pools) -> bytes:
             units += [operands[1] << 12 | operands[0] << 8 | opcode, pools.type_id(operands[2])]
         elif form == "21t":
             units += [operands[0] << 8 | opcode, (positions[operands[1]] - offset) & 0xFFFF]
+        elif form == "22t":
+            units += [operands[1] << 12 | operands[0] << 8 | opcode, (positions[operands[2]] - offset) & 0xFFFF]
+        elif form == "22b":
+            units += [operands[0] << 8 | opcode, (operands[2] & 0xFF) << 8 | operands[1]]
         elif form == "20t":
             units += [opcode, (positions[operands[0]] - offset) & 0xFFFF]
         elif form == "23x":

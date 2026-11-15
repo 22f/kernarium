@@ -7,18 +7,30 @@
 // of the array a shadow stands for, what the runtime is handed in place of a shadow (for any caller,
 // whatever the method), the limits (nothing in use is recycled), a thread that ends, PopLocalFrame,
 // and the calls of the platform's own libraries, which must see no shadow.
+#include <algorithm>
+#include <atomic>
+#include <memory>
+#include <chrono>
+#include <condition_variable>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <set>
 #include <sstream>
 #include <string>
+#include <mutex>
 #include <thread>
 #include <vector>
+
+#include <pthread.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include "jni_abi.hpp"
 #include "jni_shim.hpp"
@@ -35,19 +47,46 @@ namespace {
 struct Obj {
     std::vector<uint8_t> bytes;  // byte[] contents; strings keep their text here too
     bool is_array = false;
+    bool held = false;           // Java holds it: a collection does not take it
+    bool is_class = false;       // what FindClass gave
+    int hash = 0;                // its identity hash (given at the first ask)
+    bool is_string = false;      // a string: bytes hold its characters (one byte each)
+    bool compressed = false;     // a compressed string: its critical is a copy
+    bool non_moving = false;     // in the non-moving space
 };
+// The runtime raises a thread's flip count at a critical get only for a movable array or an uncompressed movable string
+// (art jni_internal.cc): an array of 12 KiB or more is in the large-object space and does not move, nor does one in the
+// non-moving space, and a compressed string's critical is a copy.
+bool raises_the_flip_count(const Obj* o) {
+    if (o->non_moving) return false;
+    if (o->is_string) return !o->compressed;
+    return o->bytes.size() < 12288;
+}
 struct Ref {
-    Obj* object;
+    Obj* object;                 // null: a weak reference whose object was collected
     bool global;
+    bool weak = false;
 };
 
 struct Method {
     std::string sig;
+    std::string name;
 };
 
 struct World {
     std::set<Ref*> locals;
     std::set<Ref*> globals;
+    std::set<Ref*> weaks;                   // weak global references
+    std::set<Ref*> class_globals;           // the layer's global references to the classes it calls (kept for good)
+    int gc_calls = 0;                       // Runtime.gc() calls
+    int hash_calls = 0;                     // System.identityHashCode calls
+    int next_hash = 100;
+    bool same_hash = false;                 // every object has the identity hash 4242
+    int weak_new_calls = 0;
+    int same_calls = 0;                     // IsSameObject calls that reached the runtime
+    bool find_fails = false;                // FindClass fails (an exception)
+    bool weak_fails = false;                // NewWeakGlobalRef gives nothing
+    bool hash_fails = false;                // System.identityHashCode leaves an exception
     std::vector<std::vector<Ref*>> frames;  // PushLocalFrame / PopLocalFrame
     std::map<void*, Method> methods;
     std::map<void*, std::string> fields;
@@ -67,26 +106,98 @@ struct World {
     int set_calls = 0;               // SetByteArrayRegion calls that reached the runtime
     std::vector<std::vector<uint8_t>> seen_arrays;  // the bytes of every array argument when the call ran
     std::vector<uint8_t> seen_receiver;             // the bytes of an array receiver when the call ran
+    int new_array_calls = 0;                        // NewByteArray calls that reached the runtime
+    int critical_gets = 0;                          // GetPrimitiveArrayCritical calls that reached the runtime
+    bool new_array_fails = false;                   // NewByteArray fails (an exception)
     int get_calls = 0;                              // GetByteArrayRegion calls that reached the runtime
+    int release_calls = 0;                          // Release...Elements / ReleasePrimitiveArrayCritical calls that reached the runtime
+    std::vector<const void*> released;              // the pointers they were handed
     struct LogLine {
         std::string message;
         long a, b;
     };
     std::vector<LogLine> logs;  // what the layer logged
     uint32_t clock_ms = 1000;   // the layer's clock
+    Obj* pending_object = nullptr;      // the exception that is pending (ExceptionOccurred hands out a reference to it)
+    Obj* monitor_exit_throws = nullptr; // MonitorExit raises this exception
+    std::set<Ref*> revoked;     // globals that stopped being valid (what a re-entrant end of a block would make them)
+    bool revoke_next = false;   // the next array function revokes the globals of every array first
+    int set_fails = 0;          // the next SetByteArrayRegion calls are refused (an exception, nothing written)
 };
 World world;
 
-// CheckJNI's rules: nothing but the critical pair runs inside a critical region, and almost nothing with an
-// exception pending.
+thread_local int t_ended_depth = 0;  // how deep this thread is in the ended lock (a wrapper is never entered under it)
+thread_local int t_regions = 0;      // the critical regions this thread has open (CheckJNI's rule: nothing else runs inside one)
+thread_local int t_flips = 0;        // the thread's flip count: raised only by a get that raises_the_flip_count (the nesting the flip rule sees)
+thread_local int t_app_regions = 0;  // the ones the application holds: the count after each of its own critical calls returned
+
+// CheckJNI's rules: nothing but the critical pair runs inside a critical region (a thread's own), and almost nothing with
+// an exception pending.
 void jni_allowed(const char* what) {
-    require(world.critical == 0, what);
+    require(t_regions == 0, what);
     require(!world.exception_pending, what);
+}
+
+// The layer's mutex rule (the comment "What may run under the mutex" in jni_shim.cpp): under the mutex the layer calls the
+// runtime's region and reference functions and the releases, and no critical get at all (a get it would call nested can be
+// the runtime's outermost, when the application's region is on an array that does not raise the flip count). A thread that
+// holds the mutex must never wait for the collector, because a thread inside a runtime critical region may be waiting for
+// the mutex while the collector's flip waits for that region. Every other fake function calls this first, so a call that is
+// not on the list fails in every row, whichever thread makes it.
+void not_under_mutex(const char* function) {
+    require(t_ended_depth == 0, function);
+    require(t_regions == t_app_regions, "a runtime call inside a region the layer opened (only its release is allowed)");
+}
+// A call on the list of the mutex rule (the region and reference functions, the exception checks): not inside a region the
+// layer itself opened. The layer opens one only to merge in place, and between the get and the release it makes no runtime
+// call but the release (CheckJNI aborts on any other JNI call inside a critical region).
+void on_the_list(const char*) {
+    require(t_regions == t_app_regions, "a runtime call inside a region the layer opened (only its release is allowed)");
+}
+
+// The runtime's thread-flip rule (art/runtime/gc/heap.cc): ThreadFlipBegin sets the flag, then waits until no thread has a
+// flip count; a critical get that raises the count from zero waits while the flag is set; one that raises it further does
+// not. A wait that exceeds two seconds is counted (the real runtime waits for good) and the get goes on.
+std::mutex g_flip_mutex;
+std::condition_variable g_flip_cv;
+bool g_flip_running = false;      // a flip is pending or running
+int g_open_regions = 0;           // threads with a region open
+int g_gets_that_waited = 0;       // critical gets that found the flip pending and waited for it
+std::atomic<int> g_flip_timeouts{0};
+std::function<void()> g_before_first_critical;  // runs on the first thread that makes a critical get, before the get waits
+void flip_enter_region() {
+    std::unique_lock<std::mutex> l(g_flip_mutex);
+    if (g_flip_running) {
+        ++g_gets_that_waited;
+        g_flip_cv.notify_all();
+    }
+    if (!g_flip_cv.wait_for(l, std::chrono::seconds(2), [] { return !g_flip_running; })) ++g_flip_timeouts;
+    ++g_open_regions;
+}
+void flip_leave_region() {
+    std::lock_guard<std::mutex> l(g_flip_mutex);
+    --g_open_regions;
+    g_flip_cv.notify_all();
+}
+// The collector: sets the flag and waits for the open regions (false: the wait timed out, for good in the real runtime),
+// then the flip runs and ends.
+bool flip_begin_waits_for_regions() {
+    std::unique_lock<std::mutex> l(g_flip_mutex);
+    g_flip_running = true;
+    g_flip_cv.notify_all();
+    return g_flip_cv.wait_for(l, std::chrono::seconds(3), [] { return g_open_regions == 0; });
+}
+void flip_end() {
+    std::lock_guard<std::mutex> l(g_flip_mutex);
+    g_flip_running = false;
+    g_flip_cv.notify_all();
 }
 
 bool live(jobject ref) {
     Ref* r = static_cast<Ref*>(ref);
-    return world.locals.count(r) != 0 || world.globals.count(r) != 0;
+    if (world.revoked.count(r) != 0) return false;
+    return world.locals.count(r) != 0 || world.globals.count(r) != 0 || world.weaks.count(r) != 0 ||
+           world.class_globals.count(r) != 0;
 }
 Ref* new_local(Obj* object) {
     Ref* ref = new Ref{object, false};
@@ -98,6 +209,16 @@ Obj* object_of(jobject ref) {
     require(live(ref), "the runtime is handed a live reference, never a shadow");
     return static_cast<Ref*>(ref)->object;
 }
+// Called first by the fake's functions that take an array: when a row asks for it, every global reference to an array
+// stops being valid at that point, as the end of a block by Java code that runs during the call would make it. A wrapper
+// that hands the runtime the block's own reference then fails the liveness requirement; one that made its own does not.
+void revoke_if_asked() {
+    if (!world.revoke_next) return;
+    world.revoke_next = false;
+    for (Ref* ref : world.globals) {
+        if (ref->object != nullptr && ref->object->is_array) world.revoked.insert(ref);
+    }
+}
 
 jobject byte_array(const std::vector<uint8_t>& bytes) {
     Obj* object = new Obj{bytes, true};
@@ -106,14 +227,26 @@ jobject byte_array(const std::vector<uint8_t>& bytes) {
 
 bool g_app_caller = true;
 uint64_t g_epoch = 1;
+bool g_no_thread_state = false;                  // the platform has no thread state to give
+// Whether a native function is in the application's own libraries (the thunks' domain); a predicate decides by the
+// function's address. Independent of the caller (g_app_caller).
+bool g_own_default = true;
+bool (*g_own_predicate)(const void*) = nullptr;
+bool g_without_own_check = false;  // the next install gives the platform no is_own_library (not reset by reset_world)
 
 bool fake_is_app(const void*) {
+    require(t_ended_depth == 0, "a wrapper was entered while the ended lock is held");
     ++world.app_checks;
     return g_app_caller;
 }
+bool fake_is_own(const void* function) { return g_own_predicate != nullptr ? g_own_predicate(function) : g_own_default; }
 thread_local void* t_block = nullptr;
 thread_local uint64_t t_epoch = 0;
 void* fake_thread_state(size_t size) {
+    require(t_ended_depth == 0, "the thread state was asked for under the ended lock");
+    if (g_no_thread_state) {
+        return nullptr;
+    }
     if (t_epoch != g_epoch) {
         std::free(t_block);
         t_block = std::calloc(1, size);
@@ -154,22 +287,76 @@ bool fake_describe(Env*, void* const*, void* id, bool, jobject, char* kinds, uns
     *count = n;
     return true;
 }
+// The thunks of the fake: thunk i is the address kThunkBase + 8 * i, as the assembly lays them out.
+constexpr uintptr_t kThunkBase = 0x70000000u;
+void* fake_thunk_address(unsigned index) { return reinterpret_cast<void*>(kThunkBase + 8u * index); }
+unsigned thunk_index_of(void* thunk) { return unsigned((reinterpret_cast<uintptr_t>(thunk) - kThunkBase) / 8u); }
+bool is_thunk(void* address) {
+    const uintptr_t a = reinterpret_cast<uintptr_t>(address);
+    return a >= kThunkBase && a < kThunkBase + 8u * 4096u;
+}
+unsigned g_thunk_capacity = 1024;
+// The ended blocks' lock: a mutex that no thread takes twice, and that a wrapper is never entered under (the layer
+// makes JNI calls under it, and they go to the runtime's own functions).
+std::mutex g_ended_mutex;
+int g_ended_locks = 0;
+void fake_mutex_lock() {
+    require(t_ended_depth == 0, "the ended lock is taken twice by one thread");
+    g_ended_mutex.lock();
+    ++t_ended_depth;
+    ++g_ended_locks;
+}
+void fake_mutex_unlock() {
+    require(t_ended_depth == 1, "the ended lock is released by its holder");
+    --t_ended_depth;
+    g_ended_mutex.unlock();
+}
+uint64_t fake_now_ns() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count());
+}
+void fake_yield() { std::this_thread::yield(); }
 const Platform kPlatform{fake_is_app, fake_thread_state, fake_log, fake_make_writable, fake_make_read_only,
-                         fake_describe, fake_now, fake_alloc_baseline, fake_free_baseline};
+                         fake_describe, fake_now, fake_alloc_baseline, fake_free_baseline, fake_thunk_address, 1024,
+                         fake_is_own, fake_mutex_lock, fake_mutex_unlock, fake_now_ns, fake_yield};
 
-jsize f_GetArrayLength(Env*, jarray a) { return static_cast<jsize>(object_of(a)->bytes.size()); }
-jobject f_NewByteArray(Env*, jsize n) { return byte_array(std::vector<uint8_t>(static_cast<size_t>(n), 0)); }
+jsize f_GetArrayLength(Env*, jarray a) {
+    not_under_mutex("GetArrayLength is not on the list of calls under the mutex");
+    return static_cast<jsize>(object_of(a)->bytes.size());
+}
+jobject f_NewByteArray(Env*, jsize n) {
+    not_under_mutex("NewByteArray (an allocation in the Java heap can wait for the collector) under the mutex");
+    ++world.new_array_calls;
+    if (world.new_array_fails) {
+        world.exception_pending = true;
+        return nullptr;
+    }
+    return byte_array(std::vector<uint8_t>(static_cast<size_t>(n), 0));
+}
+std::function<void()> g_after_set;  // runs inside a SetByteArrayRegion, after it copied
 void f_SetByteArrayRegion(Env*, jarray a, jsize start, jsize len, const jbyte* buf) {
+    on_the_list("SetByteArrayRegion");
+    revoke_if_asked();
     jni_allowed("SetByteArrayRegion where JNI is not allowed (a critical region, or an exception pending)");
     ++world.set_calls;
     auto& bytes = object_of(a)->bytes;
-    if (start < 0 || len < 0 || size_t(start) + size_t(len) > bytes.size()) {
+    if (start < 0 || len < 0 || size_t(start) + size_t(len) > bytes.size() || world.set_fails > 0) {
+        if (world.set_fails > 0) --world.set_fails;
         world.exception_pending = true;
         return;
     }
     std::memcpy(bytes.data() + start, buf, size_t(len));
+    if (g_after_set) {
+        auto hook = g_after_set;
+        g_after_set = nullptr;
+        hook();
+    }
 }
+std::function<void()> g_after_get;  // runs inside a GetByteArrayRegion, after it copied: another thread acts meanwhile
 void f_GetByteArrayRegion(Env*, jarray a, jsize start, jsize len, jbyte* buf) {
+    on_the_list("GetByteArrayRegion");
+    revoke_if_asked();
     jni_allowed("GetByteArrayRegion where JNI is not allowed (a critical region, or an exception pending)");
     ++world.get_calls;
     auto& bytes = object_of(a)->bytes;
@@ -178,24 +365,88 @@ void f_GetByteArrayRegion(Env*, jarray a, jsize start, jsize len, jbyte* buf) {
         return;
     }
     std::memcpy(buf, bytes.data() + start, size_t(len));
+    if (g_after_get) {
+        auto hook = g_after_get;
+        g_after_get = nullptr;
+        hook();
+    }
 }
 jbyte* f_GetByteArrayElements(Env*, jarray a, jboolean* is_copy) {
+    not_under_mutex("GetByteArrayElements under the mutex");
+    revoke_if_asked();
     jni_allowed("GetByteArrayElements where JNI is not allowed");
     if (is_copy) *is_copy = 0;
     return reinterpret_cast<jbyte*>(object_of(a)->bytes.data());
 }
-void f_ReleaseByteArrayElements(Env*, jarray a, jbyte*, jint) { (void)object_of(a); }
-void* f_GetPrimitiveArrayCritical(Env*, jarray a, jboolean* is_copy) {
-    if (is_copy) *is_copy = 0;
-    ++world.critical;
-    return object_of(a)->bytes.data();
-}
-void f_ReleasePrimitiveArrayCritical(Env*, jarray a, void*, jint) {
+void f_ReleaseByteArrayElements(Env*, jarray a, jbyte* p, jint) {
+    on_the_list("ReleaseByteArrayElements");
+    revoke_if_asked();
     (void)object_of(a);
-    require(world.critical > 0, "a critical region was open");
-    --world.critical;
+    ++world.release_calls;
+    world.released.push_back(p);
 }
+// A critical get of the runtime. Under the layer's mutex none is allowed, whether or not the thread has a region open: the
+// flip count decides whether a get waits, and the layer cannot know it. A get that raises the thread's count from zero waits
+// for a pending flip; the hook runs just before that wait.
+void begin_region(const Obj* object) {
+    if (raises_the_flip_count(object)) {
+        if (t_flips == 0) {
+            if (g_before_first_critical) {
+                auto hook = g_before_first_critical;
+                g_before_first_critical = nullptr;
+                hook();
+            }
+            flip_enter_region();
+        }
+        ++t_flips;
+    }
+    ++t_regions;
+    ++world.critical;
+}
+void end_region(const Obj* object) {
+    require(world.critical > 0 && t_regions > 0, "a critical region was open");
+    --world.critical;
+    --t_regions;
+    if (raises_the_flip_count(object)) {
+        require(t_flips > 0, "the thread's flip count was raised by the get");
+        if (--t_flips == 0) flip_leave_region();
+    }
+}
+void* f_GetPrimitiveArrayCritical(Env*, jarray a, jboolean* is_copy) {
+    on_the_list("GetPrimitiveArrayCritical");
+    ++world.critical_gets;
+    not_under_mutex("a critical get under the mutex");
+    Obj* object = object_of(a);
+    begin_region(object);
+    revoke_if_asked();
+    if (is_copy) *is_copy = 0;
+    return object->bytes.data();
+}
+std::function<void()> g_in_release_critical;  // runs inside a ReleasePrimitiveArrayCritical, after it closed the region
+void f_ReleasePrimitiveArrayCritical(Env*, jarray a, void* p, jint) {
+    revoke_if_asked();
+    Obj* object = object_of(a);
+    ++world.release_calls;
+    world.released.push_back(p);
+    end_region(object);
+    if (g_in_release_critical) {
+        auto hook = g_in_release_critical;
+        g_in_release_critical = nullptr;
+        hook();
+    }
+}
+// A string's critical: a compressed string's is a copy (no flip count), an uncompressed movable string's raises the count.
+const jchar* f_GetStringCritical(Env*, jstring s, jboolean* is_copy) {
+    on_the_list("GetStringCritical");
+    not_under_mutex("GetStringCritical under the mutex");
+    Obj* object = object_of(s);
+    begin_region(object);
+    if (is_copy) *is_copy = object->compressed ? 1 : 0;
+    return reinterpret_cast<const jchar*>(object->bytes.data());
+}
+void f_ReleaseStringCritical(Env*, jstring s, const jchar*) { end_region(object_of(s)); }
 void f_DeleteLocalRef(Env*, jobject o) {
+    on_the_list("DeleteLocalRef");
     Ref* ref = static_cast<Ref*>(o);
     require(world.locals.erase(ref) == 1, "a local reference is deleted once, and only while it is live");
     for (auto& frame : world.frames) {
@@ -204,47 +455,129 @@ void f_DeleteLocalRef(Env*, jobject o) {
     delete ref;
 }
 jobject f_NewGlobalRef(Env*, jobject o) {
+    on_the_list("NewGlobalRef");
     jni_allowed("NewGlobalRef where JNI is not allowed");
+    require(live(o), "NewGlobalRef is handed a live reference, never a shadow");
+    if (static_cast<Ref*>(o)->object == nullptr) return nullptr;  // a weak reference whose object was collected
     Ref* ref = new Ref{object_of(o), true};
-    world.globals.insert(ref);
+    (ref->object->is_class ? world.class_globals : world.globals).insert(ref);
     return ref;
 }
-jobject f_NewWeakGlobalRef(Env*, jobject o) { return f_NewGlobalRef(nullptr, o); }
-void f_DeleteGlobalRef(Env*, jobject o) {
-    jni_allowed("DeleteGlobalRef where JNI is not allowed");
+jobject f_NewWeakGlobalRef(Env*, jobject o) {
+    on_the_list("NewWeakGlobalRef");
+    jni_allowed("NewWeakGlobalRef where JNI is not allowed");
+    ++world.weak_new_calls;
+    if (world.weak_fails) return nullptr;
+    Ref* ref = new Ref{object_of(o), true, true};
+    world.weaks.insert(ref);
+    return ref;
+}
+void f_DeleteWeakGlobalRef(Env*, jobject o) {
+    on_the_list("DeleteWeakGlobalRef");
+    require(t_regions == 0, "DeleteWeakGlobalRef inside a critical region");
     Ref* ref = static_cast<Ref*>(o);
-    require(world.globals.erase(ref) == 1, "a global reference is deleted once, and only while it is live");
+    require(world.weaks.erase(ref) == 1, "a weak reference is deleted once, and only while it is live");
     delete ref;
 }
-jobject f_NewLocalRef(Env*, jobject o) { return new_local(object_of(o)); }
+void f_ExceptionClear(Env*) {
+    on_the_list("ExceptionClear");
+    world.exception_pending = false;
+}
+jobject f_ExceptionOccurred(Env*) {
+    not_under_mutex("ExceptionOccurred is not on the list of calls under the mutex");
+    if (!world.exception_pending) return nullptr;
+    if (world.pending_object == nullptr) world.pending_object = new Obj{};
+    return new_local(world.pending_object);
+}
+jint f_Throw(Env*, jobject throwable) {
+    not_under_mutex("Throw under the mutex");
+    require(!world.exception_pending, "Throw with an exception pending");
+    Obj* object = object_of(throwable);
+    world.exception_pending = true;
+    world.pending_object = object;
+    return 0;
+}
+// A collection: a weak reference to an object nothing holds is cleared. Held: a strong reference, or Java.
+// The weak references the ended blocks hold (the layer's sentinel, once a block has ended, is one more).
+size_t block_weaks() { return world.weaks.size() - (counters().blocks_ended != 0 ? 1 : 0); }
+bool g_collect_ignores_locals = false;  // a row that models a collector that clears a weak reference under a local one
+void collect() {
+    std::set<Obj*> reachable;
+    if (!g_collect_ignores_locals) {
+        for (Ref* r : world.locals) reachable.insert(r->object);
+    }
+    for (Ref* r : world.globals) reachable.insert(r->object);
+    for (Ref* r : world.weaks) {
+        if (r->object != nullptr && !r->object->held && reachable.count(r->object) == 0) r->object = nullptr;
+    }
+}
+std::function<void(Obj*)> g_on_global_deleted;  // runs inside DeleteGlobalRef, before the reference goes
+std::function<void()> g_on_find_class;           // runs inside FindClass: Java code that enters the layer again
+bool g_ids_at_install = true;                    // the install gives the layer its environment, which resolves the ids
+void f_DeleteGlobalRef(Env*, jobject o) {
+    on_the_list("DeleteGlobalRef");
+    require(t_regions == 0, "DeleteGlobalRef inside a critical region");  // allowed with an exception pending
+    Ref* ref = static_cast<Ref*>(o);
+    if (g_on_global_deleted) {
+        auto hook = g_on_global_deleted;
+        hook(ref->object);
+    }
+    require(world.globals.erase(ref) == 1, "a global reference is deleted once, and only while it is live");
+    world.revoked.erase(ref);
+    delete ref;
+}
+jobject f_NewLocalRef(Env*, jobject o) {
+    on_the_list("NewLocalRef");
+    jni_allowed("NewLocalRef where JNI is not allowed");
+    require(live(o), "NewLocalRef is handed a live reference, never a shadow");
+    if (static_cast<Ref*>(o)->object == nullptr) return nullptr;  // a weak reference whose object was collected
+    return new_local(object_of(o));
+}
 jboolean f_IsSameObject(Env*, jobject a, jobject b) {
+    on_the_list("IsSameObject");
+    revoke_if_asked();
+    require(t_regions == 0, "IsSameObject inside a critical region");
+    ++world.same_calls;
     Obj* x = a == nullptr ? nullptr : object_of(a);
     Obj* y = b == nullptr ? nullptr : object_of(b);
     return x == y;
 }
 jobject f_GetObjectClass(Env*, jobject o) {
+    not_under_mutex("GetObjectClass under the mutex");
     (void)object_of(o);
     return new_local(new Obj{});
 }
 jboolean f_IsInstanceOf(Env*, jobject o, jclass) {
+    not_under_mutex("IsInstanceOf under the mutex");
     (void)object_of(o);
     return 1;
 }
 jint f_MonitorEnter(Env*, jobject o) {
+    not_under_mutex("MonitorEnter (it can wait for another thread) under the mutex");
+    revoke_if_asked();
     (void)object_of(o);
     ++world.monitors;
     return 0;
 }
 jint f_MonitorExit(Env*, jobject o) {
+    not_under_mutex("MonitorExit under the mutex");
+    revoke_if_asked();
+    require(o != nullptr, "MonitorExit is handed an object");
     (void)object_of(o);
     --world.monitors;
+    if (world.monitor_exit_throws != nullptr) {
+        world.exception_pending = true;
+        world.pending_object = world.monitor_exit_throws;
+    }
     return 0;
 }
 jint f_PushLocalFrame(Env*, jint) {
+    not_under_mutex("PushLocalFrame under the mutex");
     world.frames.emplace_back();
     return 0;
 }
 jobject f_PopLocalFrame(Env*, jobject result) {
+    not_under_mutex("PopLocalFrame under the mutex");
     require(!world.frames.empty(), "a frame was pushed");
     Obj* keep = result == nullptr ? nullptr : object_of(result);
     for (Ref* r : world.frames.back()) {
@@ -253,24 +586,55 @@ jobject f_PopLocalFrame(Env*, jobject result) {
     world.frames.pop_back();
     return keep == nullptr ? nullptr : new_local(keep);
 }
-jboolean f_ExceptionCheck(Env*) { return world.exception_pending; }
-jobject f_FindClass(Env*, const char*) { return new_local(new Obj{}); }
-jmethodID f_GetMethodID(Env*, jclass, const char*, const char* sig) {
+int g_register_fail_at = -1;                            // the call (counted from 0) that fails
+std::vector<std::vector<NativeMethod>> g_registered;    // what each call of the runtime's RegisterNatives received
+jint f_RegisterNatives(Env*, jclass, const NativeMethod* methods, jint count) {
+    not_under_mutex("RegisterNatives under the mutex");
+    require(count > 0 && methods != nullptr, "the runtime is handed methods");
+    g_registered.emplace_back(methods, methods + count);
+    return int(g_registered.size()) - 1 == g_register_fail_at ? JNI_ERR : JNI_OK;
+}
+jboolean f_ExceptionCheck(Env*) {
+    on_the_list("ExceptionCheck");
+    return world.exception_pending;
+}
+jobject f_FindClass(Env*, const char*) {
+    jni_allowed("FindClass where JNI is not allowed");
+    require(t_ended_depth == 0, "FindClass runs Java: not under the ended lock");
+    if (g_on_find_class) {
+        auto hook = g_on_find_class;
+        g_on_find_class = nullptr;
+        hook();
+    }
+    if (world.find_fails) {
+        world.exception_pending = true;
+        return nullptr;
+    }
+    Obj* object = new Obj{};
+    object->is_class = true;
+    return new_local(object);
+}
+jmethodID f_GetMethodID(Env*, jclass, const char* name, const char* sig) {
+    jni_allowed("GetMethodID where JNI is not allowed");
+    require(t_ended_depth == 0, "a method lookup can run Java: not under the ended lock");
     void* id = new int(0);
-    world.methods[id] = Method{sig};
+    world.methods[id] = Method{sig, name};
     return id;
 }
 jfieldID f_GetFieldID(Env*, jclass, const char*, const char* sig) {
+    not_under_mutex("GetFieldID under the mutex");
     void* id = new int(0);
     world.fields[id] = sig;
     return id;
 }
 jobject f_GetObjectField(Env*, jobject o, jfieldID f) {
+    not_under_mutex("GetObjectField under the mutex");
     (void)object_of(o);
     require(world.fields.count(f) == 1, "a known field");
     return world.next_result;
 }
 jobject f_GetStaticObjectField(Env*, jclass, jfieldID f) {
+    not_under_mutex("GetStaticObjectField under the mutex");
     require(world.fields.count(f) == 1, "a known field");
     return world.next_result;
 }
@@ -325,6 +689,7 @@ std::vector<jvalue> decode_array(const std::string& sig, const jvalue* in) {
 
 // What the runtime saw: references must be real (a live reference of the fake), never a shadow.
 void record(const std::string& call, void* method, const std::vector<jvalue>& args) {
+    not_under_mutex("a call into Java under the mutex");
     const Method& m = world.methods.at(method);
     world.last_call = call;
     world.last_args = args;
@@ -363,6 +728,11 @@ jobject f_CallStaticObjectMethodV(Env*, jclass, jmethodID m, va_list ap) {
     return result_of(m);
 }
 jobject f_CallStaticObjectMethodA(Env*, jclass, jmethodID m, const jvalue* a) {
+    if (world.methods.at(m).name == "getRuntime") {  // the layer's own call
+        not_under_mutex("Runtime.getRuntime (Java code) under the mutex");
+        jni_allowed("Runtime.getRuntime where JNI is not allowed");
+        return new_local(new Obj{});
+    }
     record("static-object-A", m, decode_array(world.methods.at(m).sig, a));
     return result_of(m);
 }
@@ -370,13 +740,45 @@ jobject f_CallStaticObjectMethod(Env*, jclass, jmethodID, ...) {
     require(false, "the variadic entry of the original is not used by the wrappers");
     return nullptr;
 }
+std::function<void()> g_in_call;  // runs at the start of a static int call: another thread acts while it is under way
 jint f_CallStaticIntMethodV(Env*, jclass, jmethodID m, va_list ap) {
+    revoke_if_asked();
+    if (g_in_call) {
+        auto hook = g_in_call;
+        hook();
+    }
     record("static-int-V", m, decode_va(world.methods.at(m).sig, ap));
     return 7;
 }
 jint f_CallStaticIntMethodA(Env*, jclass, jmethodID m, const jvalue* a) {
+    if (world.methods.at(m).name != "identityHashCode") revoke_if_asked();
+    if (world.methods.at(m).name != "identityHashCode" && g_in_call) {
+        auto hook = g_in_call;
+        hook();
+    }
+    if (world.methods.at(m).name == "identityHashCode") {  // the layer's own call
+        not_under_mutex("System.identityHashCode (Java code) under the mutex");
+        jni_allowed("System.identityHashCode where JNI is not allowed");
+        ++world.hash_calls;
+        if (world.hash_fails) {
+            world.exception_pending = true;
+            return 0;
+        }
+        Obj* object = object_of(a[0].l);
+        if (world.same_hash) return 4242;
+        if (object->hash == 0) object->hash = world.next_hash++;
+        return object->hash;
+    }
     record("static-int-A", m, decode_array(world.methods.at(m).sig, a));
     return 7;
+}
+void f_CallVoidMethodA(Env*, jobject o, jmethodID m, const jvalue*) {
+    require(world.methods.at(m).name == "gc", "the layer calls Runtime.gc and no other instance method of its own");
+    not_under_mutex("Runtime.gc (a collection) under the mutex");
+    jni_allowed("Runtime.gc where JNI is not allowed");
+    (void)object_of(o);
+    ++world.gc_calls;
+    collect();
 }
 void f_CallStaticVoidMethodV(Env*, jclass, jmethodID m, va_list ap) {
     record("static-void-V", m, decode_va(world.methods.at(m).sig, ap));
@@ -390,6 +792,7 @@ jobject f_NewObjectA(Env*, jclass, jmethodID m, const jvalue* a) {
 }
 // What Java reads and writes through the receiver of an instance call.
 void touch_receiver(jobject o) {
+    revoke_if_asked();
     Obj* object = object_of(o);
     world.seen_receiver.clear();
     if (object->is_array) {
@@ -422,13 +825,16 @@ jobject f_NewObjectV(Env*, jclass, jmethodID m, va_list ap) {
     return new_local(new Obj{});
 }
 void f_SetObjectField(Env*, jobject o, jfieldID, jobject value) {
+    not_under_mutex("SetObjectField under the mutex");
     (void)object_of(o);
     if (value != nullptr) (void)object_of(value);
 }
 void f_SetObjectArrayElement(Env*, jobject, jsize, jobject value) {
+    not_under_mutex("SetObjectArrayElement under the mutex");
     if (value != nullptr) (void)object_of(value);
 }
 jobject f_NewObjectArray(Env*, jsize, jclass, jobject initial) {
+    not_under_mutex("NewObjectArray (an allocation) under the mutex");
     if (initial != nullptr) (void)object_of(initial);
     return new_local(new Obj{});
 }
@@ -451,9 +857,16 @@ struct Table {
         slots[slot::ReleaseByteArrayElements] = reinterpret_cast<void*>(&f_ReleaseByteArrayElements);
         slots[slot::GetPrimitiveArrayCritical] = reinterpret_cast<void*>(&f_GetPrimitiveArrayCritical);
         slots[slot::ReleasePrimitiveArrayCritical] = reinterpret_cast<void*>(&f_ReleasePrimitiveArrayCritical);
+        slots[slot::GetStringCritical] = reinterpret_cast<void*>(&f_GetStringCritical);
+        slots[slot::ReleaseStringCritical] = reinterpret_cast<void*>(&f_ReleaseStringCritical);
         slots[slot::DeleteLocalRef] = reinterpret_cast<void*>(&f_DeleteLocalRef);
         slots[slot::NewGlobalRef] = reinterpret_cast<void*>(&f_NewGlobalRef);
         slots[slot::NewWeakGlobalRef] = reinterpret_cast<void*>(&f_NewWeakGlobalRef);
+        slots[slot::DeleteWeakGlobalRef] = reinterpret_cast<void*>(&f_DeleteWeakGlobalRef);
+        slots[slot::ExceptionClear] = reinterpret_cast<void*>(&f_ExceptionClear);
+        slots[slot::ExceptionOccurred] = reinterpret_cast<void*>(&f_ExceptionOccurred);
+        slots[slot::Throw] = reinterpret_cast<void*>(&f_Throw);
+        slots[call_slot(kVoid, kArray)] = reinterpret_cast<void*>(&f_CallVoidMethodA);
         slots[slot::DeleteGlobalRef] = reinterpret_cast<void*>(&f_DeleteGlobalRef);
         slots[slot::NewLocalRef] = reinterpret_cast<void*>(&f_NewLocalRef);
         slots[slot::IsSameObject] = reinterpret_cast<void*>(&f_IsSameObject);
@@ -463,6 +876,7 @@ struct Table {
         slots[slot::MonitorExit] = reinterpret_cast<void*>(&f_MonitorExit);
         slots[slot::PushLocalFrame] = reinterpret_cast<void*>(&f_PushLocalFrame);
         slots[slot::PopLocalFrame] = reinterpret_cast<void*>(&f_PopLocalFrame);
+        slots[slot::RegisterNatives] = reinterpret_cast<void*>(&f_RegisterNatives);
         slots[slot::ExceptionCheck] = reinterpret_cast<void*>(&f_ExceptionCheck);
         slots[slot::FindClass] = reinterpret_cast<void*>(&f_FindClass);
         slots[slot::GetMethodID] = reinterpret_cast<void*>(&f_GetMethodID);
@@ -492,6 +906,9 @@ struct Table {
 };
 
 alignas(16) uint8_t g_shadow_region[2u << 20];
+alignas(16) uint8_t g_big_region[8u << 20];
+uint8_t* g_region = g_shadow_region;  // the memory of the blocks the next install uses
+size_t g_region_size = sizeof(g_shadow_region);
 
 template <class F>
 F fn(const Table& table, int slot) {
@@ -502,21 +919,86 @@ void reset_world() {
     reset_for_test();
     for (Ref* r : world.locals) delete r;
     for (Ref* r : world.globals) delete r;
+    for (Ref* r : world.weaks) delete r;
+    for (Ref* r : world.class_globals) delete r;
     world = World{};
     ++g_epoch;
     g_app_caller = true;
     g_writable_ok = true;
     g_read_only_ok = true;
     g_baseline_fails = false;
+    g_own_predicate = nullptr;
+    g_own_default = true;
+    g_no_thread_state = false;
+    g_ended_locks = 0;
+    g_on_global_deleted = nullptr;
+    g_on_find_class = nullptr;
+    g_in_call = nullptr;
+    g_after_get = nullptr;
+    g_after_set = nullptr;
+    g_before_first_critical = nullptr;
+    g_in_release_critical = nullptr;
+    g_collect_ignores_locals = false;
+    {
+        std::lock_guard<std::mutex> l(g_flip_mutex);
+        g_flip_running = false;
+        g_open_regions = 0;
+        g_gets_that_waited = 0;
+    }
+    t_regions = 0;
+    t_flips = 0;
+    t_app_regions = 0;
+    g_flip_timeouts = 0;
+    g_thunk_capacity = 1024;
+    g_register_fail_at = -1;
+    g_registered.clear();
+}
+
+void* (*g_wrapped_get_critical)(Env*, jarray, jboolean*) = nullptr;
+void (*g_wrapped_release_critical)(Env*, jarray, void*, jint) = nullptr;
+void* app_get_critical(Env* env, jarray a, jboolean* is_copy) {
+    void* pointer = g_wrapped_get_critical(env, a, is_copy);
+    t_app_regions = t_regions;
+    return pointer;
+}
+void app_release_critical(Env* env, jarray a, void* p, jint mode) {
+    g_wrapped_release_critical(env, a, p, mode);
+    t_app_regions = t_regions;
+}
+const jchar* (*g_wrapped_get_string_critical)(Env*, jstring, jboolean*) = nullptr;
+void (*g_wrapped_release_string_critical)(Env*, jstring, const jchar*) = nullptr;
+const jchar* app_get_string_critical(Env* env, jstring s, jboolean* is_copy) {
+    const jchar* chars = g_wrapped_get_string_critical(env, s, is_copy);
+    t_app_regions = t_regions;
+    return chars;
+}
+void app_release_string_critical(Env* env, jstring s, const jchar* chars) {
+    g_wrapped_release_string_critical(env, s, chars);
+    t_app_regions = t_regions;
 }
 
 // Installs over a fresh fake table.
-Table* install(bool shadows = true) {
+Table* install(bool shadows = true, unsigned thunks = 1024) {
     reset_world();
     Table* table = new Table;
-    require(install_jni_wrappers(table->slots, kPlatform, shadows ? g_shadow_region : nullptr,
-                                 shadows ? sizeof(g_shadow_region) : 0),
+    Platform platform = kPlatform;
+    platform.thunk_capacity = thunks;
+    if (g_without_own_check) {
+        platform.is_own_library = nullptr;
+    }
+    require(install_jni_wrappers(table->slots, platform, shadows ? g_region : nullptr, shadows ? g_region_size : 0,
+                                 g_ids_at_install ? &table->env : nullptr),
             "the wrappers install");
+    // The application's critical calls go through trampolines that count the regions it holds afterwards: whatever else is
+    // open while the layer runs is the layer's own.
+    g_wrapped_get_critical = reinterpret_cast<void* (*)(Env*, jarray, jboolean*)>(table->slots[slot::GetPrimitiveArrayCritical]);
+    g_wrapped_release_critical = reinterpret_cast<void (*)(Env*, jarray, void*, jint)>(table->slots[slot::ReleasePrimitiveArrayCritical]);
+    table->slots[slot::GetPrimitiveArrayCritical] = reinterpret_cast<void*>(&app_get_critical);
+    table->slots[slot::ReleasePrimitiveArrayCritical] = reinterpret_cast<void*>(&app_release_critical);
+    g_wrapped_get_string_critical = reinterpret_cast<const jchar* (*)(Env*, jstring, jboolean*)>(table->slots[slot::GetStringCritical]);
+    g_wrapped_release_string_critical = reinterpret_cast<void (*)(Env*, jstring, const jchar*)>(table->slots[slot::ReleaseStringCritical]);
+    table->slots[slot::GetStringCritical] = reinterpret_cast<void*>(&app_get_string_critical);
+    table->slots[slot::ReleaseStringCritical] = reinterpret_cast<void*>(&app_release_string_critical);
     return table;
 }
 
@@ -565,9 +1047,13 @@ void check_slot_constants(const char* fixture_path) {
     expect("FindClass", slot::FindClass);
     expect("GetSuperclass", slot::GetSuperclass);
     expect("Throw", slot::Throw);
+    expect("ThrowNew", slot::ThrowNew);
+    expect("DeleteWeakGlobalRef", slot::DeleteWeakGlobalRef);
     expect("ExceptionClear", slot::ExceptionClear);
+    expect("ExceptionOccurred", slot::ExceptionOccurred);
     expect("PushLocalFrame", slot::PushLocalFrame);
     expect("PopLocalFrame", slot::PopLocalFrame);
+    expect("RegisterNatives", slot::RegisterNatives);
     expect("NewGlobalRef", slot::NewGlobalRef);
     expect("DeleteGlobalRef", slot::DeleteGlobalRef);
     expect("DeleteLocalRef", slot::DeleteLocalRef);
@@ -625,9 +1111,9 @@ struct Fixture {
     jfieldID other_field;       // Ljava/lang/String;
 };
 
-Fixture make(bool shadows = true) {
+Fixture make(bool shadows = true, unsigned thunks = 1024) {
     Fixture f;
-    f.table = install(shadows);
+    f.table = install(shadows, thunks);
     f.env = &f.table->env;
     f.cls = new_local(new Obj{});
     auto get_static = fn<jmethodID (*)(Env*, jclass, const char*, const char*)>(*f.table, slot::GetStaticMethodID);
@@ -758,9 +1244,10 @@ void check_shadow_layout_and_use() {
     require(fn<jboolean (*)(Env*, jobject, jobject)>(*f.table, slot::IsSameObject)(f.env, shadow, nullptr) == 0, "not null");
 
     fn<void (*)(Env*, jobject)>(*f.table, slot::DeleteLocalRef)(f.env, shadow);
-    require(counters().shadows_live == 0 && world.globals.empty(), "DeleteLocalRef freed the block and its global reference");
-    require(!is_shadow_block(shadow), "a freed block is no shadow");
-    require(fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, shadow) == 0, "a freed block has no length");
+    require(counters().shadows_live == 0 && world.globals.empty(), "DeleteLocalRef ended the block and its global reference");
+    require(!is_shadow_block(shadow), "an ended block is no live shadow");
+    require(fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, shadow) == 100,
+            "an ended block still knows its length (its reference may be kept)");
     fn<void (*)(Env*, jobject)>(*f.table, slot::DeleteLocalRef)(f.env, shadow);  // a second delete is ignored
     require(counters().shadows_live == 0, "and a second delete changes nothing");
 }
@@ -911,7 +1398,7 @@ void check_unknown_and_long_signatures() {
     Fixture f = make();
     Made made = make_shadow_of(f, sample(16));
     void* unknown = new int(0);
-    world.methods[unknown] = Method{"(I[B)V"};
+    world.methods[unknown] = Method{"(I[B)V", "unknown"};
     call_static_void_v(f, unknown, 5, made.shadow);
     require(world.describe_calls == 1, "the signature of an unknown ID is asked for once");
     require(world.last_array_args.size() == 1 && world.last_array_args[0] == made.object, "and the shadow still became its array");
@@ -922,7 +1409,7 @@ void check_unknown_and_long_signatures() {
     require(world.describe_calls == 1 && world.last_array_args[0] == made.object, "the answer is kept (array form)");
 
     void* hopeless = new int(0);
-    world.methods[hopeless] = Method{"(I)V"};
+    world.methods[hopeless] = Method{"(I)V", "hopeless"};
     world.describe_fails = true;
     call_static_void_v(f, hopeless, 3);
     call_static_void_v(f, hopeless, 4);
@@ -1115,13 +1602,14 @@ void check_raw_write_reaches_a_call() {
     raw[0] = 0xAA;
     raw[1] = 0xAB;
     world.set_calls = 0;
+    world.critical_gets = 0;
     require(call_static_int_v(f, f.consume, made.shadow) == 7, "consume");
     require(world.seen_arrays.size() == 1 && world.seen_arrays[0][0] == 0xAA && world.seen_arrays[0][1] == 0xAB,
             "Java read what the application wrote through the pointer");
     require(raw[0] == 0xAA && raw[1] == 0xAB && made.object->bytes[0] == 0xAA, "and the bytes are still in both copies");
-    require(world.set_calls == 1, "one chunk went to the array");
+    require(world.critical_gets == 1 && world.set_calls == 0, "one chunk went to the array, in place: one critical pair, no region write");
     call_static_int_v(f, f.consume, made.shadow);
-    require(world.set_calls == 1, "a second call with nothing written changes nothing in the array");
+    require(world.critical_gets == 1, "a second call with nothing written makes no critical get");
 }
 
 // Java writes during the call and the application reads the pointer afterwards (the case MR1 fixed), while an earlier
@@ -1138,18 +1626,66 @@ void check_raw_write_and_java_write_in_one_call() {
     require(raw[0] == 0x41 && raw[7] == 0x41 && made.object->bytes[0] == 0x41, "and what Java wrote is in the block after it");
 }
 
-// Both sides changed the same chunk since the last synchronization: the application's bytes win for the chunk.
-void check_both_sides_changed_the_native_bytes_win() {
+// Both sides changed the same chunk since the last synchronization: each side's bytes survive in it, and where both
+// wrote the same byte the application's wins (the merge is byte by byte, in every synchronization).
+void check_both_sides_changed_one_chunk_both_survive() {
     Fixture f = make();
     Made made = make_shadow_of(f, std::vector<uint8_t>(8, 0x10));
     uint8_t* raw = raw_of(made);
     raw[0] = 0xAA;                // the application, through the pointer
+    raw[2] = 0xAD;                // the application, the byte Java also wrote
     made.object->bytes[1] = 0xBB;  // Java, in the same chunk
+    made.object->bytes[2] = 0xBD;
     jbyte buffer[8] = {};
     fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, made.shadow, 0, 8, buffer);
     require(static_cast<uint8_t>(buffer[0]) == 0xAA && made.object->bytes[0] == 0xAA, "the application's byte reached the array");
-    require(static_cast<uint8_t>(buffer[1]) == 0x10 && made.object->bytes[1] == 0x10,
-            "Java's byte in that chunk is replaced by the block's");
+    require(static_cast<uint8_t>(buffer[1]) == 0xBB && made.object->bytes[1] == 0xBB && raw[1] == 0xBB,
+            "Java's byte in that chunk survived, in the block too");
+    require(static_cast<uint8_t>(buffer[2]) == 0xAD && made.object->bytes[2] == 0xAD, "where both wrote one byte, the application's wins");
+    require(raw[3] == 0x10 && made.object->bytes[3] == 0x10, "the others are unchanged");
+    // The same through a call: the application's chunk is pushed before it, merged with what Java holds.
+    raw[4] = 0xC4;
+    made.object->bytes[5] = 0xC5;
+    call_static_int_v(f, f.consume, made.shadow);
+    require(world.seen_arrays.back()[4] == 0xC4 && world.seen_arrays.back()[5] == 0xC5, "Java saw both writes when the call began");
+    require(raw[4] == 0xC4 && raw[5] == 0xC5, "and the block holds both");
+}
+
+// The merge decides four bytes at once where it can; every word shape gives the byte-by-byte result: the application wrote
+// the whole word, Java did, both did (different bytes, and the same byte), and the last bytes that fill no word.
+void check_the_merge_by_words_is_byte_exact() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, std::vector<uint8_t>(4099, 0x10));
+    uint8_t* raw = raw_of(made);
+    for (unsigned i = 0; i < 4; ++i) {
+        raw[0 + i] = static_cast<uint8_t>(0xA0 + i);  // word 0: only the application wrote
+        made.object->bytes[4 + i] = static_cast<uint8_t>(0xB0 + i);  // word 1: only Java wrote
+    }
+    raw[8] = 0xC0;  // word 2: the application wrote the first and third bytes, Java the second and the third
+    raw[10] = 0xC2;
+    made.object->bytes[9] = 0xD1;
+    made.object->bytes[10] = 0xD2;
+    raw[12] = 0xE0;  // word 3: both wrote the first byte
+    made.object->bytes[12] = 0xE1;
+    raw[4096] = 0xF0;  // the three bytes after the last whole word of the block
+    raw[4098] = 0xF2;
+    made.object->bytes[4097] = 0xF1;
+    made.object->bytes[4098] = 0xF3;
+    jbyte buffer[16] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, made.shadow, 0, 16, buffer);
+    require(static_cast<uint8_t>(buffer[0]) == 0xA0 && static_cast<uint8_t>(buffer[3]) == 0xA3 && made.object->bytes[3] == 0xA3,
+            "the application's whole word reached the array");
+    require(static_cast<uint8_t>(buffer[4]) == 0xB0 && static_cast<uint8_t>(buffer[7]) == 0xB3 && raw[7] == 0xB3,
+            "Java's whole word reached the block");
+    require(static_cast<uint8_t>(buffer[8]) == 0xC0 && static_cast<uint8_t>(buffer[9]) == 0xD1 && static_cast<uint8_t>(buffer[10]) == 0xC2 &&
+                buffer[11] == 0x10,
+            "a word both wrote keeps each side's own bytes and the application's where it is the same byte");
+    require(static_cast<uint8_t>(buffer[12]) == 0xE0 && made.object->bytes[12] == 0xE0 && raw[12] == 0xE0, "the application wins the same byte");
+    jbyte tail[3] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, made.shadow, 4096, 3, tail);
+    require(static_cast<uint8_t>(tail[0]) == 0xF0 && static_cast<uint8_t>(tail[1]) == 0xF1 && static_cast<uint8_t>(tail[2]) == 0xF2 &&
+                made.object->bytes[4098] == 0xF2 && raw[4097] == 0xF1,
+            "the bytes after the last whole word merge the same way");
 }
 
 // The unit is a chunk of 4096 bytes: a write in one chunk does not hold back what Java wrote in another.
@@ -1160,12 +1696,14 @@ void check_synchronization_is_per_chunk() {
     raw[9000] = 0x77;                // chunk 2, the application
     made.object->bytes[10] = 0x55;   // chunk 0, Java
     world.set_calls = 0;
+    world.critical_gets = 0;
     jbyte buffer[20] = {};
     fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, made.shadow, 0, 20, buffer);
     require(static_cast<uint8_t>(buffer[10]) == 0x55 && raw[10] == 0x55, "a read of chunk 0 shows Java's write");
-    require(world.set_calls == 0 && made.object->bytes[9000] == 0, "and does not touch chunk 2");
+    require(world.set_calls == 0 && world.critical_gets == 0 && made.object->bytes[9000] == 0, "and does not touch chunk 2");
     fn<GetElems>(*f.table, slot::GetByteArrayElements)(f.env, made.shadow, nullptr);
-    require(made.object->bytes[9000] == 0x77 && world.set_calls == 1, "the whole array's turn pushes chunk 2, and only it");
+    require(made.object->bytes[9000] == 0x77 && world.critical_gets == 1 && world.set_calls == 0,
+            "the whole array's turn pushes chunk 2, and only it, in place");
 }
 
 // A block that neither side touched makes no write to the array at any synchronization point.
@@ -1327,8 +1865,9 @@ void check_an_exact_comparison_keeps_every_write() {
     require(std::memcmp(buffer, written.data(), 8) == 0 && made.object->bytes == written, "the write reached the array and the reader");
 }
 
-// A run of chunks that are alike is one region call, and a clean chunk is never written.
-void check_a_run_of_chunks_is_one_region_call() {
+// A block the application wrote goes to the array in place, through one critical pair and no region call; a clean block's
+// call reads the array through region calls in pieces of 16 KiB and makes no critical get; and a clean chunk is never written.
+void check_a_dirty_block_is_pushed_in_place_and_a_clean_one_read_through_regions() {
     Fixture f = make();
     Made made = make_shadow_of(f, sample(6 * 4096));
     raw_of(made)[2 * 4096] ^= 0x55;
@@ -1336,21 +1875,24 @@ void check_a_run_of_chunks_is_one_region_call() {
     raw_of(made)[4 * 4096 + 5] ^= 0x55;
     world.set_calls = 0;
     world.get_calls = 0;
+    world.critical_gets = 0;
     call_static_int_v(f, f.consume, made.shadow);
-    require(world.set_calls == 1, "chunks 2 to 4 went to the array in one call");
-    require(world.get_calls == 1, "and the six chunks came back in one");
+    require(world.critical_gets == 1 && world.set_calls == 0, "the bytes the application wrote went to the array in one pair, in place");
+    require(world.get_calls == 2, "and the block, clean after the push, came back through regions in two pieces");
     require(world.seen_arrays[0][2 * 4096] == raw_of(made)[2 * 4096] && world.seen_arrays[0][4 * 4096 + 5] == raw_of(made)[4 * 4096 + 5],
             "Java saw the writes");
     Made big = make_shadow_of(f, sample(256 * 4096));
     world.set_calls = 0;
     world.get_calls = 0;
+    world.critical_gets = 0;
     call_static_int_v(f, f.consume, big.shadow);
-    require(world.set_calls == 0 && world.get_calls == 1, "a clean 1 MiB block: one region call, no write");
+    require(world.set_calls == 0 && world.get_calls == 64 && world.critical_gets == 0,
+            "a clean 1 MiB block: 64 region reads of 16 KiB, no write, no critical get");
     // The range of a small read is one chunk's turn, and only the bytes asked for come over.
     world.get_calls = 0;
     jbyte sixteen[16];
     fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, big.shadow, 100000, 16, sixteen);
-    require(world.get_calls == 1 && world.set_calls == 0, "16 bytes: one small call");
+    require(world.get_calls == 1 && world.set_calls == 0 && world.critical_gets == 0, "16 bytes: one small call");
 }
 
 // A committing release applies the chunk rule: the chunk the application wrote goes to the array, Java's other chunks stay.
@@ -1531,6 +2073,533 @@ void check_a_stray_length_write_is_harmless() {
     world.exception_pending = false;
 }
 
+
+// ---- the end of a native method (the thunks, RegisterNatives, PushLocalFrame/PopLocalFrame, DetachCurrentThread)
+
+// A function of an application library and its thunk, as the assembly would run it: the thunk is entered with the
+// runtime's return address and a stack pointer; the stub that follows the method's return gives that stack pointer back.
+void* app_function(unsigned n) { return reinterpret_cast<void*>(uintptr_t{0x20000000u} + 32u * n); }
+struct Native {
+    void* thunk;
+    unsigned index;
+};
+Native thunk_of(void* function) {
+    void* thunk = thunk_for(function);
+    require(is_thunk(thunk), "an application function gets a thunk");
+    return Native{thunk, thunk_index_of(thunk)};
+}
+bool enter_native(const Native& native, void* function, uintptr_t lr, uintptr_t sp) {
+    const ThunkEntry entry = thunk_enter(native.index, reinterpret_cast<void*>(lr), reinterpret_cast<void*>(sp));
+    require(entry.target == function, "the thunk jumps to its function");
+    return entry.pushed == 1;
+}
+void* leave_native(uintptr_t sp) { return thunk_leave(reinterpret_cast<void*>(sp)); }
+
+// The blocks a native method made end when it returns, whether it deleted any reference or not.
+void check_a_native_invocation_ends_its_blocks() {
+    Fixture f = make();
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    require(thunk_for(function) == native.thunk, "one thunk for a function, however often it is registered");
+    require(counters().natives_wrapped == 1, "counted once");
+    require(enter_native(native, function, 0x1234, 0x8000), "a record is pushed");
+    Made a = make_shadow_of(f, sample(10));
+    Made b = make_shadow_of(f, sample(20));
+    Made c = make_shadow_of(f, sample(30));
+    require(counters().shadows_live == 3 && world.globals.size() == 3, "three blocks during the invocation");
+    require(is_shadow_block(a.shadow) && is_shadow_block(b.shadow) && is_shadow_block(c.shadow), "all usable");
+    require(leave_native(0x8000) == reinterpret_cast<void*>(0x1234), "the return stub goes back to the runtime");
+    require(counters().shadows_live == 0 && world.globals.empty() && counters().ended_by_return == 3,
+            "the blocks ended: no block, no global reference");
+    require(!is_shadow_block(a.shadow) && !is_shadow_block(c.shadow), "a block that ended is no block");
+    // A reference the method deleted itself is not ended twice.
+    require(enter_native(native, function, 0x1234, 0x8000), "again");
+    Made d = make_shadow_of(f, sample(10));
+    Made e = make_shadow_of(f, sample(10));
+    fn<void (*)(Env*, jobject)>(*f.table, slot::DeleteLocalRef)(f.env, d.shadow);
+    require(counters().shadows_live == 1, "the deleted one is gone");
+    leave_native(0x8000);
+    require(counters().shadows_live == 0 && world.globals.empty() && counters().ended_by_return == 4 &&
+                !is_shadow_block(e.shadow),
+            "the other ended at the return");
+    // The result of a call that is not byte[] is no block, and nothing else is touched.
+    const size_t locals = world.locals.size();
+    require(enter_native(native, function, 0x1234, 0x8000), "once more");
+    leave_native(0x8000);
+    require(world.locals.size() == locals, "an invocation that made no block ends nothing");
+}
+
+// A native method that calls Java, which calls native again: each return ends its own blocks and no more.
+void check_nested_invocations_end_their_own_blocks() {
+    Fixture f = make();
+    void* outer_function = app_function(1);
+    void* inner_function = app_function(2);
+    const Native outer = thunk_of(outer_function);
+    const Native inner = thunk_of(inner_function);
+    require(enter_native(outer, outer_function, 0x100, 0x9000), "outer");
+    Made a = make_shadow_of(f, sample(4));
+    require(enter_native(inner, inner_function, 0x200, 0x8000), "the outer method called Java, which called inner");
+    Made b = make_shadow_of(f, sample(5));
+    Made c = make_shadow_of(f, sample(6));
+    require(leave_native(0x8000) == reinterpret_cast<void*>(0x200), "inner returns to the runtime");
+    require(counters().shadows_live == 1 && is_shadow_block(a.shadow) && !is_shadow_block(b.shadow) &&
+                !is_shadow_block(c.shadow),
+            "inner's blocks ended, outer's did not");
+    require(fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, a.shadow) == 4, "outer's block still works");
+    Made d = make_shadow_of(f, sample(7));
+    require(leave_native(0x9000) == reinterpret_cast<void*>(0x100), "outer returns");
+    require(counters().shadows_live == 0 && world.globals.empty() && !is_shadow_block(a.shadow) && !is_shadow_block(d.shadow),
+            "and its blocks, the ones made before and after the inner call, ended");
+    // A recursion twenty levels deep: every level keeps its own block until its own return.
+    std::vector<Made> held;
+    for (unsigned depth = 0; depth < 20; ++depth) {
+        require(enter_native(outer, outer_function, 0x1000 + depth, 0x20000 - 0x100 * depth), "a level");
+        std::vector<uint8_t> payload = sample(8);
+        payload[0] = uint8_t(depth);
+        held.push_back(make_shadow_of(f, payload));
+    }
+    for (unsigned depth = 20; depth > 0; --depth) {
+        const unsigned level = depth - 1;
+        require(is_shadow_block(held[level].shadow) && raw_of(held[level])[0] == uint8_t(level), "the level's block is intact");
+        require(leave_native(0x20000 - 0x100 * level) == reinterpret_cast<void*>(uintptr_t{0x1000} + level), "the level returns");
+        require(!is_shadow_block(held[level].shadow) && counters().shadows_live == level, "and only its block ended");
+    }
+}
+
+// An exception pending at the return (the method threw, or a Java call it made did): the ends wait, with the blocks
+// still strong, because the weak reference and the array write they need are not allowed then; the exception stays, and
+// the next call without one finishes them.
+void check_a_native_method_that_returns_with_an_exception_pending() {
+    Fixture f = make();
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    require(enter_native(native, function, 0x1234, 0x8000), "enter");
+    Made a = make_shadow_of(f, sample(10));
+    Made b = make_shadow_of(f, sample(11));
+    world.exception_pending = true;
+    require(leave_native(0x8000) == reinterpret_cast<void*>(0x1234), "the stub goes back");
+    require(world.exception_pending && world.weaks.empty() && counters().shadows_ended == 0,
+            "no weak reference was made, the exception is still pending");
+    require(world.globals.size() == 2 && counters().shadows_live == 2, "the blocks wait, strong");
+    jobject plain = byte_array(sample(4));
+    fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, plain);
+    require(world.exception_pending && world.globals.size() == 2, "a call made with the exception still pending ends nothing");
+    world.exception_pending = false;
+    fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, plain);
+    require(counters().shadows_live == 0 && counters().shadows_ended == 2 && world.globals.empty() && block_weaks() == 2,
+            "the next call without one finished the ends: ended, weak");
+    require(is_ended_block(a.shadow) && is_ended_block(b.shadow) && !is_shadow_block(a.shadow), "two ended blocks");
+}
+
+// The 513th result of a thread is no longer the end of the game's shadows: a method per frame, a result per method.
+void check_six_hundred_invocations_decline_nothing() {
+    Fixture f = make();
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    for (unsigned i = 0; i < 600; ++i) {
+        require(enter_native(native, function, 0x1234, 0x8000), "enter");
+        std::vector<uint8_t> payload = sample(100);
+        payload[0] = uint8_t(i);
+        Made made = make_shadow_of(f, payload);
+        require(is_shadow_block(made.shadow) && raw_of(made)[0] == uint8_t(i), "a shadow, the 600th too");
+        leave_native(0x8000);
+    }
+    require(counters().shadows_declined == 0 && counters().shadows_live == 0 && counters().peak_thread_blocks == 1,
+            "none declined, none live, never more than one at a time");
+    require(counters().ended_by_return == 600 && world.globals.empty(), "every one ended at its return");
+}
+
+// Frame records: at most 64. A method entered beyond them has no record and returns as it is; its blocks end with
+// the nearest recorded invocation.
+void check_more_than_sixty_four_nested_invocations() {
+    Fixture f = make();
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    std::vector<Made> held;
+    for (unsigned i = 0; i < 70; ++i) {
+        const bool pushed = enter_native(native, function, 0x1000 + i, 0x40000 - 0x100 * i);
+        require(pushed == (i < 64), "a record for each of the first 64 nested invocations, none after");
+        held.push_back(make_shadow_of(f, sample(4)));
+    }
+    require(counters().shadows_live == 70, "70 blocks");
+    // The methods past the 64th return without the stub; the 64th one's return ends all of theirs.
+    require(leave_native(0x40000 - 0x100 * 63) == reinterpret_cast<void*>(uintptr_t{0x1000} + 63), "the 64th returns");
+    require(counters().shadows_live == 63, "its own and the six after it ended");
+    for (int i = 62; i >= 0; --i) {
+        require(leave_native(0x40000 - 0x100 * unsigned(i)) == reinterpret_cast<void*>(uintptr_t{0x1000} + unsigned(i)), "return");
+    }
+    require(counters().shadows_live == 0 && world.globals.empty(), "all ended");
+}
+
+// A thread the platform has no state for: no record, the method returns as it is.
+void check_no_thread_state_no_record() {
+    make();
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    g_no_thread_state = true;
+    require(!enter_native(native, function, 0x1234, 0x8000), "no record");
+    g_no_thread_state = false;
+}
+
+// A method that never returned (a longjmp over it): the outer return ends its blocks, and the records are trimmed.
+void check_an_abandoned_invocation_is_trimmed() {
+    Fixture f = make();
+    void* outer_function = app_function(1);
+    void* inner_function = app_function(2);
+    const Native outer = thunk_of(outer_function);
+    const Native inner = thunk_of(inner_function);
+    require(enter_native(outer, outer_function, 0x100, 0x9000), "outer");
+    make_shadow_of(f, sample(4));
+    require(enter_native(inner, inner_function, 0x200, 0x8000), "inner");
+    make_shadow_of(f, sample(5));
+    require(leave_native(0x9000) == reinterpret_cast<void*>(0x100), "outer returns over the inner invocation");
+    require(counters().shadows_live == 0 && world.globals.empty(), "both blocks ended");
+    // The thread goes on with clean records.
+    require(enter_native(outer, outer_function, 0x300, 0x9000), "outer again");
+    make_shadow_of(f, sample(4));
+    require(leave_native(0x9000) == reinterpret_cast<void*>(0x300) && counters().shadows_live == 0, "and returns");
+}
+
+// A PushLocalFrame the method never popped is part of its invocation: the return ends its entries, and ART's own
+// segment goes with the invocation.
+void check_an_unmatched_push_local_frame_ends_with_the_invocation() {
+    Fixture f = make();
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    require(enter_native(native, function, 0x1234, 0x8000), "enter");
+    make_shadow_of(f, sample(4));
+    require(push(f.env, 16) == 0, "push");
+    make_shadow_of(f, sample(4));
+    require(counters().shadows_live == 2, "two blocks");
+    leave_native(0x8000);
+    require(counters().shadows_live == 0 && world.globals.empty(), "the return ended the entries in both");
+    // A later method with a pop of its own works on its own frame.
+    require(enter_native(native, function, 0x1234, 0x8000), "enter again");
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    require(push(f.env, 16) == 0, "its own push");
+    make_shadow_of(f, sample(4));
+    pop(f.env, nullptr);
+    require(counters().shadows_live == 0, "its pop ended its own entry");
+    leave_native(0x8000);
+}
+
+// The distinct natives that can have a thunk: 1024; past them a function is registered as it is and the block it
+// makes ends with its references.
+void check_the_thunks_run_out() {
+    make();
+    for (unsigned i = 0; i < 1030; ++i) {
+        void* function = app_function(i);
+        void* thunk = thunk_for(function);
+        if (i < 1024) {
+            require(is_thunk(thunk) && thunk_index_of(thunk) == i, "the first 1024 functions get a thunk each");
+        } else {
+            require(thunk == function, "then the function itself");
+        }
+    }
+    require(counters().natives_wrapped == 1024 && counters().natives_unwrapped == 6, "counted");
+    require(log_count("got no thunk") == 1, "and the first one is logged, once");
+    require(thunk_for(app_function(5)) == fake_thunk_address(5), "a function that has a thunk still gets it");
+    require(counters().natives_unwrapped == 6, "which is not a new miss");
+    make(true, 4);
+    for (unsigned i = 0; i < 4; ++i) require(is_thunk(thunk_for(app_function(i))), "the platform's capacity is the limit");
+    require(thunk_for(app_function(4)) == app_function(4), "past it, none");
+}
+
+// A native method that got no thunk (the thunks ran out) is bound as it is, with one log line: the runtime enters and
+// leaves it with no record, so its blocks end only by the other exact ends (DeleteLocalRef, PopLocalFrame,
+// DetachCurrentThread) or count toward the thread's 512, the result beyond it staying the real reference.
+void check_a_method_without_a_thunk_ends_by_the_other_ends() {
+    Fixture f = make(true, 2);
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    auto del = fn<void (*)(Env*, jobject)>(*f.table, slot::DeleteLocalRef);
+    require(is_thunk(thunk_for(app_function(0))) && is_thunk(thunk_for(app_function(1))), "two thunks, both in use");
+    void* without = app_function(2);
+    require(thunk_for(without) == without && thunk_for(app_function(3)) == app_function(3),
+            "the next functions are bound as they are");
+    require(counters().natives_wrapped == 2 && counters().natives_unwrapped == 2 && log_count("got no thunk") == 1,
+            "counted, and logged once");
+    // Called by the runtime directly: no record, no return stub. Its blocks stay until something ends them.
+    require(push(f.env, 16) == 0, "a frame");
+    for (int i = 0; i < 3; ++i) make_shadow_of(f, sample(4 + size_t(i)));
+    require(counters().shadows_live == 3, "the blocks of the method stay with their references");
+    pop(f.env, nullptr);
+    require(counters().shadows_live == 0 && counters().ended_by_pop == 3 && counters().ended_by_return == 0,
+            "PopLocalFrame ends them");
+    std::vector<Made> held;
+    for (int i = 0; i < 512; ++i) {
+        std::vector<uint8_t> payload = sample(4);
+        payload[0] = uint8_t(i);
+        held.push_back(make_shadow_of(f, payload));
+    }
+    require(counters().shadows_live == 512 && counters().shadows_declined == 0, "512 count toward the limit");
+    Made refused = make_shadow_of(f, sample(4));
+    require(!is_shadow_block(refused.shadow) && counters().shadows_declined == 1, "the 513th is the real reference");
+    del(f.env, held[7].shadow);
+    require(is_shadow_block(make_shadow_of(f, sample(4)).shadow), "DeleteLocalRef makes room");
+    struct Fns {
+        static jint detach(Vm*) { return 0; }
+        static jint other(Vm*, void**, jint) { return 0; }
+    };
+    void* vm_table[kVmSlotCount];
+    for (void*& entry : vm_table) entry = reinterpret_cast<void*>(&Fns::other);
+    vm_table[vmslot::DetachCurrentThread] = reinterpret_cast<void*>(&Fns::detach);
+    require(install_vm_wrappers(vm_table, kPlatform), "the invoke table installs");
+    Vm vm{vm_table};
+    reinterpret_cast<jint (*)(Vm*)>(vm_table[vmslot::DetachCurrentThread])(&vm);
+    require(counters().shadows_live == 0 && counters().ended_by_detach == 512 && world.globals.empty(),
+            "DetachCurrentThread ends the rest");
+}
+
+// Which functions get a thunk: those of the application's own libraries, with shadows on and thunks provided. The
+// function's address decides; who is calling does not.
+void check_which_functions_get_a_thunk() {
+    make();
+    g_own_default = false;
+    require(thunk_for(app_function(1)) == app_function(1) && counters().natives_wrapped == 0,
+            "a function outside the application's own libraries (another package's, a platform library): none");
+    g_app_caller = false;
+    g_own_default = true;
+    require(is_thunk(thunk_for(app_function(1))), "an own function gets its thunk whoever is calling");
+    g_app_caller = true;
+    g_own_default = false;
+    require(thunk_for(app_function(2)) == app_function(2), "and a foreign one gets none from an application caller");
+    g_own_default = true;
+    require(thunk_for(nullptr) == nullptr, "no function, none");
+    make(/*shadows=*/false);
+    require(thunk_for(app_function(1)) == app_function(1), "with no shadows the function stays as it is");
+    make(true, 0);
+    require(thunk_for(app_function(1)) == app_function(1), "and with no thunks");
+    reset_world();
+    require(thunk_for(app_function(1)) == app_function(1), "and before the wrappers are installed");
+    // A platform that cannot tell the libraries apart: the application's code is the domain.
+    g_without_own_check = true;
+    make();
+    g_without_own_check = false;
+    require(is_thunk(thunk_for(app_function(1))), "with no own-library test, application code");
+    g_app_caller = false;
+    require(thunk_for(app_function(2)) == app_function(2), "and a platform function: none");
+}
+
+bool own_even(const void* address) { return ((reinterpret_cast<uintptr_t>(address) - 0x20000000u) / 32u) % 2 == 0; }
+
+// RegisterNatives: the application's functions are registered through their thunks, in chunks, with the rest of
+// the call unchanged and the runtime's first failure ending it.
+void check_register_natives_registers_thunks() {
+    Fixture f = make();
+    g_own_predicate = own_even;
+    std::vector<NativeMethod> methods;
+    for (unsigned i = 0; i < 70; ++i) methods.push_back(NativeMethod{"name", "()V", app_function(i)});
+    auto register_natives = fn<jint (*)(Env*, jclass, const NativeMethod*, jint)>(*f.table, slot::RegisterNatives);
+    require(register_natives(f.env, f.cls, methods.data(), 70) == JNI_OK, "registered");
+    std::vector<NativeMethod> got;
+    for (const auto& call : g_registered) got.insert(got.end(), call.begin(), call.end());
+    require(g_registered.size() == 3 && got.size() == 70, "three calls of the runtime, 32 + 32 + 6 methods");
+    for (unsigned i = 0; i < 70; ++i) {
+        require(got[i].name == methods[i].name && got[i].signature == methods[i].signature, "names and signatures unchanged");
+        require(methods[i].function == app_function(i), "the caller's array is unchanged");
+        if (i % 2 == 0) {
+            require(is_thunk(got[i].function), "an application function is registered through its thunk");
+            require(thunk_for(app_function(i)) == got[i].function, "which is its thunk");
+        } else {
+            require(got[i].function == app_function(i), "a function outside the application's libraries as it is");
+        }
+    }
+    // The function's address decides, not the caller's: a platform library registering an own function gets its
+    // thunk, an application library registering a foreign one gets none.
+    g_own_predicate = nullptr;
+    g_registered.clear();
+    methods.assign({NativeMethod{"a", "()V", app_function(100)}});
+    g_app_caller = false;
+    require(register_natives(f.env, f.cls, methods.data(), 1) == JNI_OK && is_thunk(g_registered.back()[0].function),
+            "a platform caller registering an own function: its thunk");
+    g_app_caller = true;
+    g_own_default = false;
+    methods.assign({NativeMethod{"b", "()V", app_function(101)}});
+    require(register_natives(f.env, f.cls, methods.data(), 1) == JNI_OK && g_registered.back()[0].function == app_function(101),
+            "an application caller registering a foreign function: as it is");
+    g_own_default = true;
+    g_registered.clear();
+    methods.assign(70, NativeMethod{"name", "()V", app_function(0)});
+    g_register_fail_at = 1;
+    require(register_natives(f.env, f.cls, methods.data(), 70) == JNI_ERR && g_registered.size() == 2,
+            "the runtime's error ends the registration and is the result");
+}
+
+// The attachment of a thread ends its references.
+void check_detach_ends_the_references_of_a_thread() {
+    Fixture f = make();
+    struct Fns {
+        static jint detach(Vm*) { return 0; }
+        static jint other(Vm*, void**, jint) { return 0; }
+    };
+    void* vm_table[kVmSlotCount];
+    for (void*& s : vm_table) s = reinterpret_cast<void*>(&Fns::other);
+    vm_table[vmslot::DetachCurrentThread] = reinterpret_cast<void*>(&Fns::detach);
+    require(install_vm_wrappers(vm_table, kPlatform), "the invoke table installs");
+    Vm vm{vm_table};
+    std::thread attached([&] {
+        for (int i = 0; i < 5; ++i) require(is_shadow_block(make_shadow_of(f, sample(8)).shadow), "a shadow");
+        require(counters().shadows_live == 5, "five references");
+        const jint rc = reinterpret_cast<jint (*)(Vm*)>(vm_table[vmslot::DetachCurrentThread])(&vm);
+        require(rc == 0, "the runtime's detach is the result");
+        require(counters().shadows_live == 0 && world.globals.empty() && counters().ended_by_detach == 5,
+                "the five ended with the attachment");
+        // Attached again, it makes more; its end (no detach) leaves them to the next call with an environment.
+        for (int i = 0; i < 2; ++i) make_shadow_of(f, sample(8));
+        require(counters().shadows_live == 2, "the new attachment has its own");
+        release_thread_state(t_block);
+    });
+    attached.join();
+    jobject plain = byte_array(sample(4));
+    fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, plain);
+    require(counters().shadows_live == 0 && world.globals.empty(), "and the thread's end freed those");
+}
+
+// PushLocalFrame and PopLocalFrame: the entries made in a frame end with it; the shadow a pop is handed stays, with an
+// entry in the outer frame.
+void check_push_and_pop_local_frame_end_their_entries() {
+    Fixture f = make();
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    auto del = fn<void (*)(Env*, jobject)>(*f.table, slot::DeleteLocalRef);
+    Made base = make_shadow_of(f, sample(4));
+    require(push(f.env, 16) == 0, "push");
+    make_shadow_of(f, sample(5));
+    make_shadow_of(f, sample(6));
+    require(counters().shadows_live == 3, "three blocks, two of them in the frame");
+    pop(f.env, nullptr);
+    require(counters().shadows_live == 1 && is_shadow_block(base.shadow) && counters().ended_by_pop == 2,
+            "the pop ended the frame's two, not the one below");
+    // Nested frames.
+    require(push(f.env, 16) == 0, "outer frame");
+    Made x = make_shadow_of(f, sample(7));
+    require(push(f.env, 16) == 0, "inner frame");
+    Made y = make_shadow_of(f, sample(8));
+    pop(f.env, nullptr);
+    require(is_shadow_block(x.shadow) && !is_shadow_block(y.shadow), "the inner pop ended the inner frame's block");
+    pop(f.env, nullptr);
+    require(!is_shadow_block(x.shadow) && is_shadow_block(base.shadow), "and the outer one the outer frame's");
+    // A shadow handed to the pop: it comes out into the outer frame and stays until it is deleted there.
+    require(push(f.env, 16) == 0, "a frame");
+    Made result = make_shadow_of(f, sample(9));
+    make_shadow_of(f, sample(9));
+    jobject out = pop(f.env, result.shadow);
+    require(out == result.shadow && is_shadow_block(result.shadow) && counters().shadows_live == 2,
+            "the result stayed, the other block of the frame ended");
+    del(f.env, result.shadow);
+    require(!is_shadow_block(result.shadow) && counters().shadows_live == 1, "the outer frame's reference is deleted once");
+    del(f.env, base.shadow);
+    require(counters().shadows_live == 0 && world.globals.empty(), "nothing is left");
+}
+
+// More PushLocalFrame calls than there are records: the pops of the unrecorded ones end nothing, the entries made
+// in them end with the last recorded frame.
+void check_frames_beyond_the_records() {
+    Fixture f = make();
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    for (unsigned i = 0; i < 70; ++i) {
+        require(push(f.env, 4) == 0, "push");
+        make_shadow_of(f, sample(4));
+    }
+    require(counters().shadows_live == 70, "70 blocks");
+    for (unsigned i = 0; i < 6; ++i) pop(f.env, nullptr);
+    require(counters().shadows_live == 70, "the six pops of unrecorded frames ended nothing");
+    pop(f.env, nullptr);
+    require(counters().shadows_live == 63, "the 64th frame's pop ended its entries and those of the frames after it");
+    for (unsigned i = 0; i < 63; ++i) pop(f.env, nullptr);
+    require(counters().shadows_live == 0 && world.globals.empty(), "and the rest");
+}
+
+// DeleteLocalRef takes the newest entry of the block; the frames above it stay right.
+void check_delete_local_ref_keeps_the_frames_right() {
+    Fixture f = make();
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    auto del = fn<void (*)(Env*, jobject)>(*f.table, slot::DeleteLocalRef);
+    Made a = make_shadow_of(f, sample(4));
+    Made b = make_shadow_of(f, sample(5));
+    Made c = make_shadow_of(f, sample(6));
+    require(push(f.env, 16) == 0, "push");
+    Made d = make_shadow_of(f, sample(7));
+    del(f.env, b.shadow);  // an entry below the frame: both runtimes leave a reference of an outer frame alone
+    require(is_shadow_block(b.shadow) && counters().shadows_live == 4, "the outer reference was not deleted from the inner frame");
+    pop(f.env, nullptr);
+    require(!is_shadow_block(d.shadow), "the frame's block ended");
+    require(is_shadow_block(a.shadow) && is_shadow_block(b.shadow) && is_shadow_block(c.shadow) && counters().shadows_live == 3,
+            "the pop did not end the entries below the frame");
+    del(f.env, b.shadow);
+    require(!is_shadow_block(b.shadow) && counters().shadows_live == 2, "and its own frame can delete it");
+    // The same array twice is one block with two entries: the first delete leaves it, the second ends it.
+    jobject array = byte_array(sample(12));
+    Obj* object = object_of(array);
+    world.next_result = array;
+    jobject first = call_static_object_v(f, f.get_bytes);
+    world.next_result = new_local(object);
+    jobject second = call_static_object_v(f, f.get_bytes);
+    require(first == second && counters().shadows_live == 3, "one block");
+    del(f.env, first);
+    require(is_shadow_block(first) && counters().shadows_live == 3, "one reference left");
+    del(f.env, second);
+    require(!is_shadow_block(first) && counters().shadows_live == 2, "and none");
+    // An entry made in a native invocation for an array the invocation's caller already holds goes with the invocation only.
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    jobject again = byte_array(sample(12));
+    Obj* again_object = object_of(again);
+    world.next_result = again;
+    jobject held = call_static_object_v(f, f.get_bytes);
+    require(enter_native(native, function, 0x1234, 0x8000), "enter");
+    world.next_result = new_local(again_object);
+    jobject same = call_static_object_v(f, f.get_bytes);
+    require(same == held, "the same array is the same block");
+    leave_native(0x8000);
+    require(is_shadow_block(held), "the invocation's reference ended, the block of the caller's stays");
+    del(f.env, held);
+    require(!is_shadow_block(held), "and goes with its own");
+}
+
+// The diagnosis lines of the thunks: the first block that ended at a return, and the first function that got none.
+void check_the_thunk_diagnosis_lines() {
+    Fixture f = make();
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    require(log_count("ended at the return of a native method") == 0, "nothing yet");
+    for (int i = 0; i < 3; ++i) {
+        enter_native(native, function, 0x1234, 0x8000);
+        make_shadow_of(f, sample(4));
+        make_shadow_of(f, sample(4));
+        leave_native(0x8000);
+    }
+    require(log_count("ended at the return of a native method") == 1, "once");
+    for (const auto& line : world.logs) {
+        if (line.message.find("ended at the return") != std::string::npos) {
+            require(line.a == 2 && line.b == 1, "with the references it ended and the natives with a thunk");
+        }
+    }
+    // The most one return has ended: logged when it grows, at most every 30 s, and a plateau reached inside the interval
+    // is logged by the next return after it.
+    const auto invocation = [&](int blocks) {
+        enter_native(native, function, 0x1234, 0x8000);
+        for (int i = 0; i < blocks; ++i) make_shadow_of(f, sample(4));
+        leave_native(0x8000);
+    };
+    require(log_count("the most references one native method call") == 0, "no line for the first return's count");
+    world.clock_ms += 31000;
+    invocation(5);
+    require(log_count("the most references one native method call") == 1 && world.logs.back().a == 5 && world.logs.back().b == 1,
+            "a larger count is logged after 30 s");
+    invocation(7);
+    require(log_count("the most references one native method call") == 1, "not again within 30 s");
+    world.clock_ms += 31000;
+    invocation(1);
+    require(log_count("the most references one native method call") == 2 && world.logs.back().a == 7,
+            "and the count reached in between, by the next return after 30 s");
+    require(counters().max_ended_by_return == 7, "the counter keeps the most");
+}
+
 // A thread ends: its blocks wait for an environment, then go with their global references.
 void check_thread_end() {
     Fixture f = make();
@@ -1571,6 +2640,2268 @@ void check_pop_local_frame() {
     require(world.locals.count(static_cast<Ref*>(out)) && !is_shadow_block(out), "a real result is the original's");
     push(f.env, 32);
     require(pop(f.env, nullptr) == nullptr, "no result");
+}
+
+// ---- ended blocks: a block whose references ended stays at its address until its array is collected
+
+void end_ref(Fixture& f, jobject shadow) { fn<void (*)(Env*, jobject)>(*f.table, slot::DeleteLocalRef)(f.env, shadow); }
+
+// A block of an array Java holds (a collection does not take it).
+Made make_held(Fixture& f, const std::vector<uint8_t>& payload) {
+    Made made = make_shadow_of(f, payload);
+    made.object->held = true;
+    return made;
+}
+
+// The same array obtained again from a call: a new local reference to the same object.
+Made obtain_again(Fixture& f, Obj* object) {
+    world.next_result = new_local(object);
+    return Made{call_static_object_v(f, f.get_bytes), object};
+}
+
+// A kept pointer reads its bytes after a thousand later blocks of the same size, and no address is reused.
+void check_a_kept_pointer_keeps_its_bytes() {
+    Fixture f = make();
+    std::vector<uint8_t> payload = sample(100);
+    Made kept = make_held(f, payload);
+    const uint8_t* p = static_cast<const uint8_t*>(kept.shadow);
+    end_ref(f, kept.shadow);
+    require(is_ended_block(p) && !is_shadow_block(p), "the block ended, and is no live block");
+    require(counters().shadows_live == 0 && counters().shadows_ended == 1 && counters().ended_bytes == 100 &&
+                world.globals.empty() && block_weaks() == 1,
+            "no strong reference is left, a weak one is, and the block is counted as ended");
+    std::set<const void*> addresses;
+    for (int i = 0; i < 1000; ++i) {
+        std::vector<uint8_t> other = sample(100);
+        other[0] = uint8_t(i);
+        Made temporary = make_shadow_of(f, other);
+        require(is_shadow_block(temporary.shadow) && temporary.shadow != kept.shadow, "a new block, not the kept one's address");
+        require(addresses.insert(temporary.shadow).second, "and no address is reused while nothing was collected");
+        end_ref(f, temporary.shadow);
+    }
+    require(std::memcmp(p + 16, payload.data(), 100) == 0, "the kept pointer reads the bytes it had");
+    require(counters().shadows_ended == 1001 && counters().shadows_declined == 0, "1001 ended blocks, none declined");
+    require(g_ended_locks > 0, "the index is under the ended lock");
+}
+
+// A collection: the next creations free the ended blocks whose arrays are gone, and the next block of the size takes
+// the address.
+void check_a_collection_frees_ended_blocks() {
+    Fixture f = make();
+    Made gone = make_shadow_of(f, sample(100));
+    Made kept = make_held(f, sample(100));
+    const void* gone_at = gone.shadow;
+    end_ref(f, gone.shadow);
+    end_ref(f, kept.shadow);
+    require(counters().shadows_ended == 2, "two ended blocks");
+    Made before = make_shadow_of(f, sample(50));  // no collection yet: nothing is tested
+    require(counters().blocks_collected == 0 && world.same_calls <= 1 + 8, "no collection, no sweep");
+    collect();
+    Made after = make_shadow_of(f, sample(100));
+    require(counters().blocks_collected == 1 && counters().shadows_ended == 1, "the block of the gone array was freed");
+    require(after.shadow == gone_at, "and the next block of that size takes its address");
+    require(is_ended_block(kept.shadow), "the block of the array Java holds stays");
+    require(block_weaks() == 1, "one weak reference is left");
+    (void)before;
+}
+
+// A sweep tests 32 ended blocks at a creation, one test of the sentinel when nothing was collected.
+void check_a_sweep_takes_thirty_two_blocks_at_a_creation() {
+    Fixture f = make();
+    for (int i = 0; i < 101; ++i) {
+        std::vector<uint8_t> payload = sample(20);
+        payload[0] = uint8_t(i);
+        end_ref(f, make_shadow_of(f, payload).shadow);
+    }
+    world.same_calls = 0;
+    end_ref(f, make_shadow_of(f, sample(30)).shadow);
+    require(world.same_calls == 1 && counters().blocks_collected == 0, "nothing was collected: one test, of the sentinel");
+    collect();
+    const uint32_t expected[4] = {32, 64, 96, 102};  // the blocks that ended after the collection are tested, not freed
+    for (int step = 0; step < 4; ++step) {
+        world.same_calls = 0;
+        std::vector<uint8_t> payload = sample(40);
+        payload[0] = uint8_t(step);
+        end_ref(f, make_shadow_of(f, payload).shadow);
+        require(world.same_calls <= 1 + 32 + 1, "at most the sentinel and 32 blocks are tested at a creation");
+        require(counters().blocks_collected == expected[step], "32 blocks at a creation, until the end of the list");
+    }
+    world.same_calls = 0;
+    end_ref(f, make_shadow_of(f, sample(50)).shadow);
+    require(world.same_calls == 1, "and then one test again, of the new sentinel");
+}
+
+// The end is a synchronization point: a raw write followed by a frame end reaches the array.
+void check_the_end_is_a_synchronization_point() {
+    Fixture f = make();
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    require(push(f.env, 16) == 0, "a frame");
+    Made made = make_held(f, sample(9000));
+    raw_of(made)[7] = 0x71;
+    raw_of(made)[5000] = 0x72;
+    require(made.object->bytes[7] != 0x71, "Java has not seen the writes");
+    pop(f.env, nullptr);
+    require(is_ended_block(made.shadow), "the frame's end ended the block");
+    require(made.object->bytes[7] == 0x71 && made.object->bytes[5000] == 0x72, "the writes reached the array at the end");
+    // The same at a native method's return.
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    require(enter_native(native, function, 0x1234, 0x8000), "enter");
+    Made second = make_held(f, sample(100));
+    raw_of(second)[3] = 0x73;
+    leave_native(0x8000);
+    require(is_ended_block(second.shadow) && second.object->bytes[3] == 0x73, "and at a return");
+}
+
+// The same array again: the same address, and Java's write to one chunk and the raw write to another both survive.
+void check_the_same_array_again_gets_its_block() {
+    Fixture f = make();
+    Made first = make_held(f, sample(9000));
+    const void* p = first.shadow;
+    uint8_t* raw = raw_of(first);
+    end_ref(f, first.shadow);
+    first.object->bytes[3] = 0xaa;  // Java writes to chunk 0 meanwhile
+    raw[16 + 5000 - 16] = 0;        // (no write: the block is only read here)
+    raw[5000] = 0xbb;               // the application writes through its kept pointer to chunk 1
+    Made again = obtain_again(f, first.object);
+    require(again.shadow == p && is_shadow_block(again.shadow), "the same array gets its block back: the pointer it kept");
+    require(counters().blocks_revived == 1 && counters().shadows_created == 1 && counters().shadows_ended == 0 &&
+                counters().shadows_live == 1 && world.globals.size() == 1 && block_weaks() == 0,
+            "a revival: no new block, a global reference again, the weak one gone");
+    require(raw_of(again)[3] == 0xaa, "Java's write to chunk 0 reached the block");
+    require(first.object->bytes[5000] == 0xbb, "the raw write to chunk 1 reached the array");
+    require(raw_of(again)[5000] == 0xbb && first.object->bytes[3] == 0xaa, "and both survive on both sides");
+    end_ref(f, again.shadow);
+    require(is_ended_block(p), "it ends again");
+}
+
+// An exception pending at a frame end: the end is deferred, no call the runtime forbids is made.
+void check_an_exception_pending_defers_a_frame_end() {
+    Fixture f = make();
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    require(push(f.env, 16) == 0, "a frame");
+    Made made = make_held(f, sample(100));
+    raw_of(made)[1] = 0x44;
+    world.exception_pending = true;
+    pop(f.env, nullptr);
+    require(world.exception_pending && is_shadow_block(made.shadow) && world.globals.size() == 1 && block_weaks() == 0 &&
+                made.object->bytes[1] != 0x44,
+            "the block waits, strong, with the raw write not yet pushed; the fake enforced the rules of CheckJNI");
+    world.exception_pending = false;
+    jobject plain = byte_array(sample(4));
+    fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, plain);
+    require(is_ended_block(made.shadow) && made.object->bytes[1] == 0x44 && world.globals.empty() && block_weaks() == 1,
+            "the next call without an exception finished the end");
+}
+
+// A thread that ends, and DetachCurrentThread: the blocks end, they are not freed.
+void check_thread_end_and_detach_end_blocks() {
+    Fixture f = make();
+    struct Fns {
+        static jint detach(Vm*) { return 0; }
+        static jint other(Vm*, void**, jint) { return 0; }
+    };
+    void* vm_table[kVmSlotCount];
+    for (void*& entry : vm_table) entry = reinterpret_cast<void*>(&Fns::other);
+    vm_table[vmslot::DetachCurrentThread] = reinterpret_cast<void*>(&Fns::detach);
+    require(install_vm_wrappers(vm_table, kPlatform), "the invoke table installs");
+    Vm vm{vm_table};
+    const void* attached_block = nullptr;
+    const void* ended_thread_block = nullptr;
+    std::thread attached([&] {
+        Made made = make_held(f, sample(64));
+        attached_block = made.shadow;
+        raw_of(made)[0] = 0x66;
+        reinterpret_cast<jint (*)(Vm*)>(vm_table[vmslot::DetachCurrentThread])(&vm);
+        require(is_ended_block(attached_block) && made.object->bytes[0] == 0x66, "detach ended the block and pushed the write");
+        Made other = make_held(f, sample(65));
+        ended_thread_block = other.shadow;
+        release_thread_state(t_block);  // the thread ends with no detach
+    });
+    attached.join();
+    require(is_shadow_block(ended_thread_block), "the block of a thread that ended waits for an environment, strong");
+    jobject plain = byte_array(sample(4));
+    fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, plain);
+    require(is_ended_block(ended_thread_block) && is_ended_block(attached_block) && counters().shadows_ended == 2 &&
+                counters().shadows_live == 0,
+            "and the next call with an environment ended it: both are ended, not freed");
+}
+
+// The arena is full of ended blocks whose arrays Java holds: one Runtime.gc(), a decline with the line, no second gc
+// within 10 s, and success once the arrays are gone.
+void check_an_arena_full_of_ended_blocks() {
+    Fixture f = make();
+    std::vector<Made> kept;
+    for (int i = 0; i < 100; ++i) {
+        Made made = make_held(f, std::vector<uint8_t>(100000, uint8_t(i)));
+        if (!is_shadow_block(made.shadow)) break;  // the region is full
+        kept.push_back(made);
+        end_ref(f, made.shadow);
+    }
+    require(kept.size() >= 10 && kept.size() < 100, "the region held some blocks and then no more");
+    const uint32_t ended = counters().shadows_ended;
+    require(counters().shadows_declined == 1 && ended == kept.size(), "the first that did not fit was declined");
+    require(world.gc_calls == 1 && counters().collections_asked == 1, "after one Runtime.gc()");
+    require(log_count("did not fit: the runtime was asked to collect") == 1 && log_count("stayed a real reference (no room") == 1 &&
+                log_count("waiting for their arrays' collection") == 1,
+            "the lines: the collection, the decline, the ended blocks waiting");
+    for (const auto& line : world.logs) {
+        if (line.message.find("waiting for their arrays' collection") != std::string::npos) {
+            require(line.a == long(ended) && line.b == long(ended) * 100000, "with the ended blocks and bytes");
+        }
+    }
+    world.clock_ms += 9000;
+    Made again = make_shadow_of(f, std::vector<uint8_t>(100000, 0x55));
+    require(!is_shadow_block(again.shadow) && world.gc_calls == 1, "no second collection within 10 s");
+    world.clock_ms += 1100;
+    Made third = make_shadow_of(f, std::vector<uint8_t>(100000, 0x56));
+    require(!is_shadow_block(third.shadow) && world.gc_calls == 2, "a second one after 10 s: the arrays are still held");
+    for (const Made& made : kept) made.object->held = false;
+    world.clock_ms += 11000;
+    Made fourth = make_shadow_of(f, std::vector<uint8_t>(100000, 0x57));
+    require(is_shadow_block(fourth.shadow) && world.gc_calls == 3, "and when the arrays are not held, a collection makes room");
+    require(counters().shadows_ended < ended, "the blocks of the gone arrays were freed");
+}
+
+// The sweep that makes room needs no sentinel: arrays the runtime cleared without the sentinel having been cleared
+// are found by the full sweep, with no call to the runtime.
+void check_the_full_sweep_does_not_need_the_sentinel() {
+    Fixture f = make();
+    std::vector<Made> kept;
+    for (int i = 0; i < 100; ++i) {
+        Made made = make_held(f, std::vector<uint8_t>(100000, uint8_t(i)));
+        if (!is_shadow_block(made.shadow)) break;
+        kept.push_back(made);
+        end_ref(f, made.shadow);
+    }
+    require(kept.size() >= 10 && kept.size() < 32 && world.gc_calls == 1, "the region is full of ended blocks");
+    for (const Made& made : kept) {
+        for (Ref* weak : world.weaks) {
+            if (weak->object == made.object) weak->object = nullptr;  // the runtime cleared these and not the sentinel
+        }
+    }
+    world.clock_ms += 1000;
+    Made fresh = make_shadow_of(f, std::vector<uint8_t>(100000, 0x77));
+    require(is_shadow_block(fresh.shadow), "room was made");
+    require(world.gc_calls == 1 && counters().blocks_collected == kept.size(), "by the full sweep, with no call to the runtime");
+}
+
+// The cap on the blocks that exist: 16384; a full sweep, a collection, then the result stays the real reference.
+void check_the_cap_of_ended_blocks() {
+    g_region = g_big_region;  // 16384 blocks do not fit in the small region
+    g_region_size = sizeof(g_big_region);
+    Fixture f = make();
+    g_region = g_shadow_region;
+    g_region_size = sizeof(g_shadow_region);
+    std::vector<Obj*> kept;
+    for (unsigned i = 0; i < 16384; ++i) {
+        Made made = make_held(f, std::vector<uint8_t>());
+        require(is_shadow_block(made.shadow), "a block up to the cap");
+        kept.push_back(made.object);
+        end_ref(f, made.shadow);
+    }
+    require(counters().shadows_ended == 16384 && counters().shadows_declined == 0, "16384 ended blocks");
+    Made over = make_shadow_of(f, sample(10));
+    require(!is_shadow_block(over.shadow) && counters().shadows_declined == 1 && world.gc_calls == 1,
+            "the next result stayed the real reference, after one collection");
+    require(log_count("too many blocks") == 1, "and the line names the cap");
+    for (Obj* object : kept) object->held = false;
+    world.clock_ms += 11000;
+    Made after = make_shadow_of(f, sample(10));
+    require(is_shadow_block(after.shadow) && counters().shadows_ended < 16384, "with the arrays gone a block fits again");
+}
+
+// 64 arrays of one length that Java keeps, each obtained 1000 times in turn: 64 blocks, 64 addresses, never a second
+// block, no decline.
+void check_arrays_that_java_keeps_are_obtained_again_and_again() {
+    Fixture f = make();
+    std::vector<Obj*> objects;
+    std::vector<const void*> addresses;
+    for (int i = 0; i < 64; ++i) {
+        std::vector<uint8_t> payload = sample(200);
+        payload[0] = uint8_t(i);
+        Made made = make_held(f, payload);
+        objects.push_back(made.object);
+        addresses.push_back(made.shadow);
+        end_ref(f, made.shadow);
+    }
+    require(std::set<const void*>(addresses.begin(), addresses.end()).size() == 64, "64 addresses");
+    for (int round = 0; round < 1000; ++round) {
+        for (int i = 0; i < 64; ++i) {
+            Made again = obtain_again(f, objects[size_t(i)]);
+            require(again.shadow == addresses[size_t(i)], "each array always gets its own block");
+            end_ref(f, again.shadow);
+        }
+    }
+    require(counters().shadows_created == 64 && counters().shadows_declined == 0 && counters().blocks_revived == 64000 &&
+                counters().shadows_ended == 64 && counters().shadows_live == 0,
+            "64 blocks, 64000 revivals, no second block, no decline");
+}
+
+// Arrays with the same identity hash are told apart by identity.
+void check_arrays_with_equal_hashes_get_their_own_blocks() {
+    Fixture f = make();
+    world.same_hash = true;
+    Made a = make_held(f, sample(100));
+    Made b = make_held(f, sample(100));
+    const void* pa = a.shadow;
+    const void* pb = b.shadow;
+    require(pa != pb, "two blocks");
+    end_ref(f, a.shadow);
+    end_ref(f, b.shadow);
+    Made b_again = obtain_again(f, b.object);
+    Made a_again = obtain_again(f, a.object);
+    require(b_again.shadow == pb && a_again.shadow == pa, "each gets its own block back, however the hashes compare");
+    Made c = make_shadow_of(f, sample(100));
+    require(c.shadow != pa && c.shadow != pb && counters().shadows_created == 3, "a third array gets a third block");
+}
+
+// Two ended blocks for one array (it was live on two threads): the newest is found.
+void check_the_newest_ended_block_of_an_array_is_found() {
+    Fixture f = make();
+    Made first = make_held(f, sample(100));
+    const void* first_at = first.shadow;
+    const void* second_at = nullptr;
+    std::thread other([&] {
+        Made second = obtain_again(f, first.object);  // live on the first thread: this thread gets a block of its own
+        second_at = second.shadow;
+        end_ref(f, second.shadow);
+    });
+    other.join();
+    require(second_at != nullptr && second_at != first_at, "a block of its own on the other thread");
+    end_ref(f, first.shadow);  // the first block ended last: it is the newest
+    Made again = obtain_again(f, first.object);
+    require(again.shadow == first_at, "the newest ended block is the one found");
+    end_ref(f, again.shadow);
+}
+
+// Where the identity hash cannot be had the result stays the real reference: a block made without one could not be found
+// again, and the array would get a second block. A failed look for the ids is made again after a while.
+void check_no_identity_hash_declines_the_result() {
+    g_ids_at_install = false;  // the lookup is left to the first result
+    Fixture f = make();
+    g_ids_at_install = true;
+    world.find_fails = true;
+    Made first = make_shadow_of(f, sample(100));
+    require(!is_shadow_block(first.shadow) && counters().shadows_created == 0 && counters().shadows_declined == 1,
+            "the result stays the real reference");
+    require(log_count("no identity hash") == 1, "and the line says why");
+    world.clock_ms += 100;
+    require(!is_shadow_block(make_shadow_of(f, sample(100)).shadow), "within the retry interval the lookup is not repeated");
+    world.find_fails = false;
+    world.clock_ms += 2000;
+    Made later = make_shadow_of(f, sample(100));
+    require(is_shadow_block(later.shadow), "after the interval the lookup is made again and the failure was not kept for good");
+}
+
+// A look for the hash that fails once does not make a second block for an array that has one.
+void check_a_failed_hash_call_makes_no_second_block() {
+    Fixture f = make();
+    Made made = make_held(f, sample(100));
+    const void* at = made.shadow;
+    end_ref(f, made.shadow);
+    world.hash_fails = true;
+    Made declined = obtain_again(f, made.object);
+    require(!is_shadow_block(declined.shadow) && counters().shadows_created == 1 && !world.exception_pending,
+            "the result stays the real reference, no second block, no exception left");
+    world.hash_fails = false;
+    Made again = obtain_again(f, made.object);
+    require(again.shadow == at && counters().shadows_created == 1, "and the next result is the block that was there");
+}
+
+// No weak reference to give at an end: the block is not freed (the application may hold its pointer, and the array may be
+// reachable only through it). It stays as it is, strong, and a later sweep gives it the weak reference.
+void check_no_weak_reference_keeps_the_block_strong() {
+    Fixture f = make();
+    Made made = make_held(f, sample(100));
+    const std::vector<uint8_t> payload = sample(100);
+    world.weak_fails = true;
+    end_ref(f, made.shadow);
+    require(is_ended_block(made.shadow) && counters().shadows_live == 0 && counters().shadows_ended == 1 &&
+                world.globals.size() == 1 && std::memcmp(raw_of(made), payload.data(), 100) == 0,
+            "the block is ended and strong, its pointer reads");
+    world.weak_fails = false;
+    collect();
+    end_ref(f, make_shadow_of(f, sample(10)).shadow);  // a creation after a collection sweeps
+    require(block_weaks() == 2 && world.globals.size() == 0 && is_ended_block(made.shadow), "the sweep made it weak");
+    Made again = obtain_again(f, made.object);
+    require(again.shadow == made.shadow && counters().shadows_created == 2, "and the array gets the same block back");
+}
+
+// Raw access to an ended block reads the bytes as of its end, and Java's later writes do not reach it.
+void check_an_ended_block_does_not_see_javas_later_writes() {
+    Fixture f = make();
+    Made made = make_held(f, sample(100));
+    const uint8_t first = raw_of(made)[10];
+    end_ref(f, made.shadow);
+    made.object->bytes[10] = uint8_t(first + 1);
+    require(raw_of(made)[10] == first, "the pointer still reads the bytes as of the end");
+    raw_of(made)[11] = 0x5e;  // a raw write with nothing to carry it: the stated limit
+    require(made.object->bytes[11] != 0x5e, "and a raw write does not reach Java until the array is obtained again");
+}
+
+
+// ---- pins, the references of ended blocks, and the merge (the review round of the block ends)
+
+using SetRegion = void (*)(Env*, jarray, jsize, jsize, const jbyte*);
+jbyte* get_elements(Fixture& f, jobject a) { return fn<GetElems>(*f.table, slot::GetByteArrayElements)(f.env, a, nullptr); }
+void release_elements(Fixture& f, jobject a, const void* p, jint mode) {
+    fn<void (*)(Env*, jarray, const void*, jint)>(*f.table, slot::ReleaseByteArrayElements)(f.env, a, p, mode);
+}
+void* get_critical(Fixture& f, jobject a) {
+    return fn<void* (*)(Env*, jarray, jboolean*)>(*f.table, slot::GetPrimitiveArrayCritical)(f.env, a, nullptr);
+}
+void release_critical(Fixture& f, jobject a, void* p, jint mode) {
+    fn<void (*)(Env*, jarray, void*, jint)>(*f.table, slot::ReleasePrimitiveArrayCritical)(f.env, a, p, mode);
+}
+// The object address of the block whose data starts at `p`.
+const uint8_t* object_at(const void* p) { return static_cast<const uint8_t*>(p) - 16; }
+jsize length_of(Fixture& f, jobject a) { return fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, a); }
+
+// A pointer from Get...Elements that is never released keeps the array reachable and the block valid, as Dalvik's pin
+// did: no collection takes it and no later block takes its address.
+void check_a_pointer_never_released_keeps_its_array() {
+    Fixture f = make();
+    const std::vector<uint8_t> payload = sample(4096);
+    Made kept = make_shadow_of(f, payload);  // Java holds nothing of this array
+    jbyte* p = get_elements(f, kept.shadow);
+    require(reinterpret_cast<uint8_t*>(p) == raw_of(kept), "the pointer is the block's bytes");
+    end_ref(f, kept.shadow);  // the native method returns; the pointer is never released
+    require(is_ended_block(object_at(p)) && counters().shadows_ended == 1 && world.globals.size() == 1 && block_weaks() == 0,
+            "the block ended, still held by a strong reference");
+    collect();
+    for (int i = 0; i < 100; ++i) {
+        std::vector<uint8_t> other = sample(4096);
+        other[0] = uint8_t(i + 1);
+        Made temporary = make_shadow_of(f, other);
+        require(temporary.shadow != kept.shadow, "no new block takes the kept pointer's address");
+        end_ref(f, temporary.shadow);
+        if (i % 10 == 9) collect();
+    }
+    require(is_ended_block(object_at(p)) && std::memcmp(p, payload.data(), payload.size()) == 0, "the kept pointer still reads its bytes");
+    // The array obtained again is the block, with its pin; the release through it ends the pin, and then the array can go.
+    Made again = obtain_again(f, kept.object);
+    require(again.shadow == kept.shadow && is_shadow_block(again.shadow), "the same array gets its block back");
+    release_elements(f, again.shadow, p, 0);
+    end_ref(f, again.shadow);
+    require(block_weaks() >= 1 && is_ended_block(object_at(p)), "unpinned, the block ended weakly like any other");
+    const uint32_t freed = counters().blocks_collected;
+    collect();
+    for (int i = 0; i < 40 && counters().blocks_collected == freed + 0; ++i) {
+        end_ref(f, make_shadow_of(f, sample(10)).shadow);  // a creation tests ended blocks
+    }
+    require(counters().blocks_collected > freed, "and a collection freed it");
+}
+
+// A Release goes to the block its pointer lies in, through whichever reference it arrives, and never to the runtime;
+// COMMIT keeps the pin, mode 0 and ABORT end it; the last pin of an ended block through a critical release waits for a sweep.
+void check_a_release_goes_to_the_block_its_pointer_lies_in() {
+    Fixture f = make();
+    Made m = make_held(f, sample(100));
+    jbyte* p = get_elements(f, m.shadow);
+    Ref* real = new_local(m.object);  // another reference to the same array
+    p[0] = 0x44;
+    world.released.clear();
+    release_elements(f, real, p, kReleaseCommit);
+    require(std::count(world.released.begin(), world.released.end(), static_cast<const void*>(p)) == 0,
+            "a release by a real reference with the block's pointer is not the runtime's");
+    require(m.object->bytes[0] == 0x44, "it synchronized the block");
+    end_ref(f, m.shadow);
+    require(is_ended_block(object_at(p)) && world.globals.size() == 1, "COMMIT did not end the pin: the ended block is held strongly");
+    release_elements(f, real, p, 0);
+    require(std::count(world.released.begin(), world.released.end(), static_cast<const void*>(p)) == 0 && world.globals.empty() &&
+                block_weaks() == 1,
+            "mode 0 through the real reference ended the pin of the ended block: it waits weakly now");
+    // ABORT, a stale reference of the ended block, and a pointer that is a freed block's
+    Made n = make_held(f, sample(100));
+    jbyte* q = get_elements(f, n.shadow);
+    end_ref(f, n.shadow);
+    release_elements(f, n.shadow, q, kReleaseAbort);
+    require(std::count(world.released.begin(), world.released.end(), static_cast<const void*>(q)) == 0 && block_weaks() == 2,
+            "ABORT through the ended block's own reference ended the pin too");
+    n.object->held = false;
+    m.object->held = false;
+    end_ref(f, real);  // the plain reference to the array goes too
+    const uint32_t freed = counters().blocks_collected;
+    collect();
+    for (int i = 0; i < 40 && counters().blocks_collected < freed + 2; ++i) end_ref(f, make_shadow_of(f, sample(10)).shadow);
+    require(counters().blocks_collected >= freed + 2, "the blocks were freed");
+    Ref* plain = new_local(m.object);
+    release_elements(f, plain, q, 0);
+    require(std::count(world.released.begin(), world.released.end(), static_cast<const void*>(q)) == 0,
+            "a freed block's pointer is not the runtime's either");
+    // the critical pair: the last pin of an ended block waits for a sweep
+    Made c = make_shadow_of(f, sample(100));
+    void* r = get_critical(f, c.shadow);
+    end_ref(f, c.shadow);
+    world.released.clear();
+    release_critical(f, new_local(c.object), r, 0);
+    require(world.critical == 0 && is_ended_block(object_at(r)), "a critical release by a real reference: the block's");
+    for (const void* released : world.released) {
+        require(released != r, "the runtime was never handed the block's pointer");
+    }
+    const size_t strong = world.globals.size();
+    collect();
+    end_ref(f, make_shadow_of(f, sample(10)).shadow);  // a creation after a collection sweeps, and the unpinned block weakens
+    require(world.globals.size() < strong, "the sweep gave the unpinned block's strong reference up");
+}
+
+// The reference of an ended block works in every wrapper (an application keeps a byte[] in a C global across native
+// calls). The use makes no entry and moves no block: the block stays ended, and the wrapper hands the runtime a local
+// reference of its own that it deletes when it returns. A release, a delete and the length ask nothing of the array. The
+// reference of a block whose array was collected converts to nothing.
+void check_the_reference_of_an_ended_block_keeps_working() {
+    for (int with_live = 0; with_live < 2; ++with_live) {
+        Fixture f = make();
+        const std::vector<uint8_t> payload = sample(100);
+        Made other = with_live ? make_held(f, sample(50)) : Made{nullptr, nullptr};
+        Made kept = make_held(f, payload);
+        end_ref(f, kept.shadow);
+        require(is_ended_block(kept.shadow) && !is_shadow_block(kept.shadow), "the block ended");
+        const uint32_t revived = counters().blocks_revived;
+        const size_t locals = world.locals.size();
+        const auto unchanged = [&](const char* what) {
+            require(is_ended_block(kept.shadow) && counters().blocks_revived == revived && counters().shadows_live == (with_live ? 1u : 0u) &&
+                        world.locals.size() == locals,
+                    what);
+        };
+
+        require(length_of(f, kept.shadow) == 100, "the length");
+        unchanged("the length asks nothing");
+        jbyte* p = get_elements(f, kept.shadow);
+        require(p == reinterpret_cast<jbyte*>(raw_of(kept)) && std::memcmp(p, payload.data(), 100) == 0, "the elements are the block's");
+        unchanged("the elements made no entry and left no local reference");
+        require(world.globals.size() == size_t(1 + with_live), "the pointer pinned the block with a strong reference of its own");
+        release_elements(f, kept.shadow, p, 0);
+        unchanged("the release too");
+        require(block_weaks() == 1 && world.globals.size() == size_t(with_live), "the last release gave the strong reference up");
+
+        jbyte buffer[10] = {};
+        fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, kept.shadow, 5, 10, buffer);
+        require(std::memcmp(buffer, payload.data() + 5, 10) == 0, "a region read has the bytes");
+        const jbyte patch[3] = {1, 2, 3};
+        fn<SetRegion>(*f.table, slot::SetByteArrayRegion)(f.env, kept.shadow, 0, 3, patch);
+        require(kept.object->bytes[0] == 1 && kept.object->bytes[2] == 3 && raw_of(kept)[1] == 2, "a region write reaches the array");
+        unchanged("the regions");
+
+        require(call_static_int_v(f, f.consume, kept.shadow) == 7 && world.last_array_args.size() == 1 &&
+                    world.last_array_args[0] == kept.object,
+                "a call is handed the real array");
+        unchanged("the call");
+        world.next_result = nullptr;  // the call returns nothing
+        call_object_v(f, kept.shadow, f.instance_bytes);
+        require(world.seen_receiver.size() == 100, "and so is the receiver of an instance call");
+        unchanged("the instance call");
+
+        require(fn<jboolean (*)(Env*, jobject, jobject)>(*f.table, slot::IsSameObject)(f.env, kept.shadow, kept.shadow) == 1,
+                "IsSameObject");
+        jobject global = fn<jobject (*)(Env*, jobject)>(*f.table, slot::NewGlobalRef)(f.env, kept.shadow);
+        require(global != nullptr && object_of(global) == kept.object, "NewGlobalRef is a real reference to the array");
+        fn<void (*)(Env*, jobject)>(*f.table, slot::DeleteGlobalRef)(f.env, global);
+        world.next_result = nullptr;
+        fn<void (*)(Env*, jobject, jfieldID, jobject)>(*f.table, set_field_slot(kObject))(f.env, f.cls, f.bytes_field, kept.shadow);
+        unchanged("the identity and the field");
+
+        // A delete, a release of a buffer the layer did not hand out, the critical pair.
+        world.release_calls = 0;
+        end_ref(f, kept.shadow);
+        release_elements(f, kept.shadow, payload.data(), 0);
+        void* critical = get_critical(f, kept.shadow);
+        require(critical == raw_of(kept), "the critical entry gives the block's memory");
+        release_critical(f, kept.shadow, critical, 0);
+        bool handed = false;
+        for (const void* released : world.released) handed = handed || released == critical || released == payload.data();
+        require(!handed && is_ended_block(kept.shadow) && counters().blocks_revived == revived,
+                "none of them handed the runtime the block's pointer or revived the block");
+        (void)other;
+    }
+
+    // A block whose array was collected: the reference converts to nothing, and nothing in the layer crashes.
+    Fixture f = make();
+    Made gone = make_shadow_of(f, sample(100));
+    end_ref(f, gone.shadow);
+    collect();
+    require(length_of(f, gone.shadow) == 100, "the length is the block's");
+    require(get_elements(f, gone.shadow) == nullptr, "no elements: the array is gone");
+    jbyte buffer[4] = {1, 1, 1, 1};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, gone.shadow, 0, 4, buffer);
+    require(buffer[0] == 1, "a region read copies nothing");
+    require(call_static_int_v(f, f.consume, gone.shadow) == 7 && world.last_array_args.size() == 1 &&
+                world.last_array_args[0] == nullptr,
+            "a call is handed null");
+    require(fn<jboolean (*)(Env*, jobject, jobject)>(*f.table, slot::IsSameObject)(f.env, gone.shadow, nullptr) == 1,
+            "and the reference is the null reference");
+}
+
+// The merge is byte by byte in every synchronization, the end and the revival included: a byte Java wrote in a chunk the
+// application also wrote survives.
+void check_a_merge_is_byte_exact_across_an_end() {
+    Fixture f = make();
+    Made made = make_held(f, std::vector<uint8_t>(8192, 0x10));
+    raw_of(made)[20] = 0xB2;        // the application, through the pointer
+    made.object->bytes[10] = 0xA1;  // Java, in the same chunk
+    end_ref(f, made.shadow);
+    require(made.object->bytes[10] == 0xA1 && made.object->bytes[20] == 0xB2, "the end merged both into the array");
+    Made again = obtain_again(f, made.object);
+    require(again.shadow == made.shadow && raw_of(again)[10] == 0xA1 && raw_of(again)[20] == 0xB2, "and the revived block has both");
+    raw_of(again)[30] = 0xC3;
+    made.object->bytes[31] = 0xC4;
+    void* pinned = get_critical(f, again.shadow);
+    require(made.object->bytes[30] == 0xC3 && made.object->bytes[31] == 0xC4 && raw_of(again)[31] == 0xC4,
+            "the critical pair merges the same way");
+    release_critical(f, again.shadow, pinned, kReleaseAbort);
+    // A copy of the elements the application wrote into and released: only the bytes it changed.
+    jbyte* elements = get_elements(f, again.shadow);
+    made.object->bytes[40] = 0xD0;  // Java, after the elements were taken
+    std::vector<uint8_t> copy(elements, elements + 8192);
+    copy[50] = 0xD1;
+    release_elements(f, again.shadow, copy.data(), 0);
+    require(made.object->bytes[50] == 0xD1 && made.object->bytes[40] == 0xD0, "a release of a copy: its changed byte, and Java's");
+}
+
+// Declined results do not sweep again and again: a full sweep needs a collection since the last one, or a second.
+void check_declined_results_do_not_repeat_a_full_sweep() {
+    Fixture f = make();
+    std::vector<Made> kept;
+    for (int i = 0; i < 100; ++i) {
+        Made made = make_held(f, std::vector<uint8_t>(100000, uint8_t(i)));
+        if (!is_shadow_block(made.shadow)) break;
+        kept.push_back(made);
+        end_ref(f, made.shadow);
+    }
+    require(kept.size() >= 10 && world.gc_calls == 1 && counters().shadows_declined == 1, "the region is full of ended blocks");
+    int before = world.same_calls;
+    for (int i = 0; i < 20; ++i) {
+        require(!is_shadow_block(make_shadow_of(f, std::vector<uint8_t>(100000, uint8_t(i))).shadow), "declined");
+    }
+    require(world.same_calls - before <= 3 * 20, "no full sweep: no more than the tests of the sentinel for each");
+    world.clock_ms += 1000;  // the fallback that does not depend on the sentinel
+    before = world.same_calls;
+    make_shadow_of(f, std::vector<uint8_t>(100000, 1));
+    require(world.same_calls - before >= int(kept.size()), "after a second, one full sweep");
+    before = world.same_calls;
+    make_shadow_of(f, std::vector<uint8_t>(100000, 2));
+    require(world.same_calls - before <= 4, "and only one");
+    collect();
+    before = world.same_calls;
+    make_shadow_of(f, std::vector<uint8_t>(100000, 3));
+    require(world.same_calls - before >= int(kept.size()), "a collection since the last one makes another at once");
+}
+
+// A second thread that obtains the array while an end runs gets the block the end makes, not a block of its own: the weak
+// reference and the index entry come in one step under the lock.
+void check_an_end_and_a_second_thread_make_one_block() {
+    Fixture f = make();
+    Made made = make_held(f, sample(100));
+    Obj* object = made.object;
+    std::atomic<bool> done{false};
+    const void* other_at = nullptr;
+    std::thread other;
+    g_on_global_deleted = [&](Obj* gone) {  // inside the end: the strong reference goes, the block is not in the index yet
+        if (gone != object || other.joinable()) return;
+        world.next_result = new_local(object);
+        other = std::thread([&] {
+            other_at = call_static_object_v(f, f.get_bytes);
+            done = true;
+        });
+        for (int i = 0; i < 300 && !done; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    };
+    end_ref(f, made.shadow);
+    g_on_global_deleted = nullptr;
+    other.join();
+    require(other_at == made.shadow && counters().shadows_created == 1, "the other thread got the block back");
+    end_ref(f, const_cast<void*>(other_at));
+}
+
+// The same for the ends that waited for an environment (a thread that ended, an exception): the exchange and the ends are
+// one step.
+void check_draining_the_ends_and_a_second_thread_make_one_block() {
+    Fixture f = make();
+    Obj* object = nullptr;
+    const void* first_at = nullptr;
+    std::thread owner([&] {
+        Made made = make_held(f, sample(100));
+        object = made.object;
+        first_at = made.shadow;
+        release_thread_state(t_block);  // the thread ends with no detach: its block waits for an environment
+    });
+    owner.join();
+    std::atomic<bool> done{false};
+    const void* other_at = nullptr;
+    std::thread other;
+    g_on_global_deleted = [&](Obj* gone) {
+        if (gone != object || other.joinable()) return;
+        world.next_result = new_local(object);
+        other = std::thread([&] {
+            other_at = call_static_object_v(f, f.get_bytes);
+            done = true;
+        });
+        for (int i = 0; i < 300 && !done; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    };
+    jobject plain = byte_array(sample(4));
+    length_of(f, plain);  // the next call with an environment drains
+    g_on_global_deleted = nullptr;
+    if (other.joinable()) other.join();
+    require(other_at == first_at && counters().shadows_created == 1, "the other thread got the block back");
+}
+
+// The lookup of the classes runs Java and may enter the layer again, on the same thread: it holds no lock of the layer.
+void check_the_class_lookup_may_enter_the_layer() {
+    g_ids_at_install = false;  // the lookup is left to the first result
+    Fixture f = make();
+    g_ids_at_install = true;
+    bool inner_block = false;
+    g_on_find_class = [&] {
+        Made inner = make_shadow_of(f, sample(10));
+        inner_block = is_shadow_block(inner.shadow);
+        end_ref(f, inner.shadow);
+    };
+    Made outer = make_held(f, sample(20));
+    require(!inner_block && is_shadow_block(outer.shadow),
+            "the result made during the lookup stays the real reference (no hash yet); the outer one is a block");
+    end_ref(f, outer.shadow);
+    Made again = obtain_again(f, outer.object);
+    require(again.shadow == outer.shadow, "and the lookup finished: the array is found again");
+}
+
+
+// ---- the use of a kept reference by other threads, and the accounting of the blocks that exist
+
+// Another thread: an environment of its own over the same table, as every thread of the runtime has.
+struct Other {
+    Env env;
+    Fixture f;
+    explicit Other(const Fixture& base) : env(*base.env), f(base) { f.env = &env; }
+    Other(const Other&) = delete;
+    Other& operator=(const Other&) = delete;
+};
+
+// A kept reference used on a second thread while the owner's native method returns: the call of the second thread is
+// handed a local reference of its own, never the global reference that the end deletes. The block stays where it was (it
+// ended), and the second thread, with no native frame, holds nothing afterwards.
+void check_a_kept_reference_on_a_second_thread_survives_the_owners_end() {
+    Fixture f = make();
+    Made kept = make_held(f, sample(100));  // live on this thread
+    Other other(f);
+    std::atomic<int> stage{0};
+    g_in_call = [&] {
+        g_in_call = nullptr;
+        stage = 1;
+        while (stage != 2) std::this_thread::yield();
+    };
+    jint result = 0;
+    std::thread second([&] {
+        result = call_static_int_v(other.f, f.consume, kept.shadow);
+        stage = 3;
+    });
+    while (stage != 1) std::this_thread::yield();
+    end_ref(f, kept.shadow);  // the owner's native method returns while the call is under way
+    stage = 2;
+    second.join();
+    require(result == 7 && world.last_array_args.size() == 1 && world.last_array_args[0] == kept.object,
+            "the call was handed the array, a live reference");
+    require(is_ended_block(kept.shadow) && counters().shadows_live == 0 && counters().blocks_revived == 0 &&
+                world.globals.empty() && block_weaks() == 1,
+            "the block ended, as the owner's return made it; the second thread made no entry");
+    Made again = obtain_again(f, kept.object);
+    require(again.shadow == kept.shadow && counters().shadows_created == 1, "and the array gets the same block back");
+}
+
+// A kept reference used on a thread with no native frame (an attached audio thread) makes no entry: nothing on that thread
+// would end it, and the owner would get a second block for the array.
+void check_a_kept_reference_on_a_thread_without_frames_makes_no_entry() {
+    Fixture f = make();
+    Made kept = make_held(f, sample(100));
+    end_ref(f, kept.shadow);
+    Other other(f);
+    std::thread second([&] {
+        require(length_of(other.f, kept.shadow) == 100, "the length");
+        jbyte* p = get_elements(other.f, kept.shadow);
+        require(p == reinterpret_cast<jbyte*>(raw_of(kept)), "the elements are the block's");
+        release_elements(other.f, kept.shadow, p, 0);
+        require(call_static_int_v(other.f, f.consume, kept.shadow) == 7, "a call");
+    });
+    second.join();
+    require(is_ended_block(kept.shadow) && counters().shadows_live == 0 && counters().blocks_revived == 0,
+            "the block stayed ended and no thread holds an entry of it");
+    Made again = obtain_again(f, kept.object);
+    require(again.shadow == kept.shadow && counters().shadows_created == 1, "the owner gets the same block");
+}
+
+// A thread that holds 512 entries can still use a kept reference: the use needs no entry.
+void check_a_thread_at_its_limit_can_use_a_kept_reference() {
+    Fixture f = make();
+    Made kept = make_held(f, sample(100));
+    end_ref(f, kept.shadow);
+    for (int i = 0; i < 512; ++i) {
+        require(is_shadow_block(make_shadow_of(f, sample(10)).shadow), "an entry up to the limit");
+    }
+    jbyte* p = get_elements(f, kept.shadow);
+    require(p == reinterpret_cast<jbyte*>(raw_of(kept)), "the elements");
+    release_elements(f, kept.shadow, p, 0);
+    require(call_static_int_v(f, f.consume, kept.shadow) == 7 && world.last_array_args[0] == kept.object, "and a call");
+}
+
+// ---- no owner exemption: every wrapper holds a reference of its own, every synchronization runs under the mutex
+
+// Every wrapper that gives the runtime an array for a block hands it a reference of the wrapper's own, also on the
+// block's owner thread: the block's global stops being valid at the wrapper's first runtime call, as the end of the block by
+// a callback would make it, and each wrapper still works. (Fails on c3b1ffc7: the owner's wrappers used the global.)
+void check_no_wrapper_hands_the_runtime_the_blocks_own_reference() {
+    Fixture f = make();
+    Made made = make_held(f, sample(64));
+    Made other = make_held(f, sample(64));
+    jbyte buffer[64] = {};
+    const auto revoked = [&](auto&& use) {
+        raw_of(made)[3] = 0x77;  // something for the synchronization to do
+        world.revoke_next = true;
+        use();
+        require(!world.revoke_next, "the wrapper called the runtime");
+        world.revoke_next = false;
+        world.revoked.clear();
+    };
+    revoked([&] { fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, made.shadow, 0, 64, buffer); });
+    require(static_cast<uint8_t>(buffer[3]) == 0x77, "the region read has the raw write");
+    revoked([&] {
+        const jbyte one = 0x12;
+        fn<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(*f.table, slot::SetByteArrayRegion)(f.env, made.shadow, 5, 1, &one);
+    });
+    jbyte* elements = nullptr;
+    revoked([&] { elements = get_elements(f, made.shadow); });
+    revoked([&] { release_elements(f, made.shadow, elements, 0); });
+    void* critical = nullptr;
+    revoked([&] { critical = get_critical(f, made.shadow); });
+    revoked([&] { release_critical(f, made.shadow, critical, 0); });
+    revoked([&] { require(call_static_int_v(f, f.consume, made.shadow) == 7, "a call with the block as its argument"); });
+    revoked([&] {
+        auto get_method = fn<jmethodID (*)(Env*, jclass, const char*, const char*)>(*f.table, slot::GetMethodID);
+        call_object_v(f, made.shadow, get_method(f.env, f.cls, "clone", "()Ljava/lang/Object;"));
+    });
+    revoked([&] {
+        require(fn<jboolean (*)(Env*, jobject, jobject)>(*f.table, slot::IsSameObject)(f.env, made.shadow, other.shadow) == 0,
+                "identity");
+    });
+    revoked([&] { fn<jint (*)(Env*, jobject)>(*f.table, slot::MonitorEnter)(f.env, made.shadow); });
+    revoked([&] { fn<jint (*)(Env*, jobject)>(*f.table, slot::MonitorExit)(f.env, made.shadow); });
+    require(length_of(f, made.shadow) == 64, "the length asks nothing of the array");
+    require(made.object->bytes[3] == 0x77 && made.object->bytes[5] == 0x12, "and the writes reached the array");
+}
+
+// Java code that runs during a call ends the block (a native method it calls deletes the last reference): the call's
+// synchronization after it goes on with the wrapper's own reference, and Java's writes during the call reach the block
+// that has ended. (Fails on c3b1ffc7: the after-synchronization used the deleted global.)
+void check_a_callback_that_ends_the_block_leaves_the_call_a_live_reference() {
+    Fixture f = make();
+    Made a = make_held(f, std::vector<uint8_t>(32, 0x11));
+    raw_of(a)[0] = 0x22;
+    g_in_call = [&] {
+        g_in_call = nullptr;
+        end_ref(f, a.shadow);
+        require(is_ended_block(a.shadow), "the callback ended the block");
+    };
+    world.java_fill = 0x44;
+    require(call_static_int_v(f, f.consume, a.shadow) == 7, "the call completed");
+    world.java_fill = -1;
+    require(is_ended_block(a.shadow), "the block ended");
+    require(raw_of(a)[0] == 0x44 && raw_of(a)[31] == 0x44, "Java's writes during the call reached the ended block");
+    require(world.globals.empty() && block_weaks() == 1, "the block holds a weak reference now, and no global");
+}
+
+// The owner's synchronization is serialized with another thread's access to the block: a write that completes while the
+// owner is merging is not undone by it. The hook runs in the runtime's ReleasePrimitiveArrayCritical that closes the
+// merge's pair, which the layer makes inside its second hold (the other thread's SetByteArrayRegion starts then and
+// waits for the mutex). (Fails on c3b1ffc7: the owner's merge wrote its stale snapshot over block and baseline;
+// Java=31,42 and block=00,00 afterwards.)
+void check_the_owners_merge_is_not_undone_by_another_threads_write() {
+    Fixture f = make();
+    Made a = make_held(f, std::vector<uint8_t>(32, 0));
+    Other other(f);
+    raw_of(a)[0] = 0x31;
+    std::thread worker;
+    std::atomic<bool> finished{false};
+    g_in_release_critical = [&] {
+        worker = std::thread([&] {
+            const jbyte value = 0x42;
+            fn<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(*f.table, slot::SetByteArrayRegion)(other.f.env, a.shadow, 1, 1, &value);
+            finished = true;
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(60);
+        while (!finished && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        require(!finished, "the other thread's write waits for the owner's merge: the mutex is held");
+    };
+    jbyte result[32] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 32, result);
+    worker.join();
+    require(a.object->bytes[0] == 0x31 && a.object->bytes[1] == 0x42, "Java has both writes");
+    require(raw_of(a)[0] == 0x31 && raw_of(a)[1] == 0x42, "and so does the block");
+    jbyte again[32] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 32, again);
+    require(static_cast<uint8_t>(again[0]) == 0x31 && static_cast<uint8_t>(again[1]) == 0x42, "and the next read agrees");
+}
+
+// The reverse order: the owner pulls what Java wrote (the baseline takes it first), and another thread's synchronization of
+// the same block, through a kept reference, must not read that half-way state as an application write and push the old byte
+// back over Java's. (Fails on c3b1ffc7: Java's 0xA1 was lost.)
+void check_another_threads_synchronization_does_not_undo_the_owners_pull() {
+    Fixture f = make();
+    Made a = make_held(f, std::vector<uint8_t>(64, 0x3a));
+    Other other(f);
+    a.object->bytes[10] = 0xA1;  // Java wrote it; nobody wrote through the pointer
+    std::thread worker;
+    std::atomic<bool> finished{false};
+    g_after_get = [&] {
+        worker = std::thread([&] {
+            jbyte* p = get_elements(other.f, a.shadow);
+            release_elements(other.f, a.shadow, p, 0);
+            finished = true;
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(60);
+        while (!finished && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+    };
+    jbyte result[64] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 64, result);
+    worker.join();
+    require(a.object->bytes[10] == 0xA1 && raw_of(a)[10] == 0xA1 && static_cast<uint8_t>(result[10]) == 0xA1,
+            "Java's write is in the array, the block and the owner's read");
+}
+
+// The end of a block is a synchronization point too, and runs under the mutex: a second thread's access to the kept
+// reference meets a synchronized block. The hook runs in the Release that closes the end's merge pair, which the layer
+// makes inside its second hold, where the second thread starts its own SetByteArrayRegion. (Fails on c3b1ffc7: the end
+// pushed before it took the mutex.)
+void check_an_end_is_serialized_with_a_second_threads_access() {
+    Fixture f = make();
+    Made a = make_held(f, std::vector<uint8_t>(32, 0));
+    Other other(f);
+    raw_of(a)[0] = 0x31;
+    std::thread worker;
+    std::atomic<bool> finished{false};
+    g_in_release_critical = [&] {  // (the end's push is a merge of the dirty chunk, in place)
+        worker = std::thread([&] {
+            const jbyte value = 0x42;
+            fn<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(*f.table, slot::SetByteArrayRegion)(other.f.env, a.shadow, 1, 1, &value);
+            finished = true;
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(60);
+        while (!finished && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        require(!finished, "the other thread's access waits for the end: the mutex is held");
+    };
+    end_ref(f, a.shadow);
+    worker.join();
+    require(is_ended_block(a.shadow), "the block ended");
+    require(a.object->bytes[0] == 0x31 && a.object->bytes[1] == 0x42, "Java has the application's write and the other thread's");
+    require(raw_of(a)[0] == 0x31 && raw_of(a)[1] == 0x42, "and so does the block");
+}
+
+// ---- the runtime's own pointers released through a block's reference
+
+// A pointer from GetPrimitiveArrayCritical on a real reference (a global the application made of a block), released
+// through the block's own reference: the runtime's Release runs, so its critical region closes and the layer's count
+// goes down with it. (Fails on 27123b5b: the Release was swallowed; the region stayed open and the kept reference
+// of an ended block could no longer be given a critical pointer.)
+void check_a_critical_pointer_of_the_runtime_released_through_a_block_reaches_the_runtime() {
+    Fixture f = make();
+    Made made = make_held(f, sample(64));
+    jobject global = fn<jobject (*)(Env*, jobject)>(*f.table, slot::NewGlobalRef)(f.env, made.shadow);
+    require(!is_shadow_block(global), "a real global");
+    void* pointer = get_critical(f, global);
+    require(pointer != nullptr && pointer == made.object->bytes.data() && world.critical == 1, "the runtime's region is open");
+    const int before = world.release_calls;
+    release_critical(f, made.shadow, pointer, 0);
+    require(world.critical == 0 && world.release_calls == before + 1 && world.released.back() == pointer,
+            "the runtime's own Release ran with its own pointer");
+    end_ref(f, made.shadow);  // the block ends: a kept reference with only a weak reference behind it
+    void* mine = get_critical(f, made.shadow);
+    require(mine == static_cast<void*>(raw_of(made)), "the layer's count is zero: the kept reference is given its pointer");
+    release_critical(f, made.shadow, mine, 0);
+    // The same through an ended block, whose array only a weak reference holds, inside the region the pointer opened.
+    void* again = get_critical(f, global);
+    const int second = world.release_calls;
+    release_critical(f, made.shadow, again, 0);
+    require(world.critical == 0 && world.release_calls == second + 1, "also through an ended block");
+}
+
+// The elements twin: the runtime's copy is released (not leaked), and the layer unpins nothing: a pin of its own on the
+// block stays, so the ended block keeps its strong reference until its own pointer is released.
+void check_an_elements_pointer_of_the_runtime_released_through_a_block_reaches_the_runtime() {
+    Fixture f = make();
+    Made made = make_held(f, sample(64));
+    jobject global = fn<jobject (*)(Env*, jobject)>(*f.table, slot::NewGlobalRef)(f.env, made.shadow);
+    jbyte* mine = get_elements(f, made.shadow);  // the layer's own pin
+    jbyte* theirs = get_elements(f, global);
+    require(theirs == reinterpret_cast<jbyte*>(made.object->bytes.data()) && mine == reinterpret_cast<jbyte*>(raw_of(made)),
+            "two different pointers");
+    const size_t released = world.released.size();
+    release_elements(f, made.shadow, theirs, 0);
+    require(world.released.size() == released + 1 && world.released.back() == theirs,
+            "the runtime's Release ran with its own pointer");
+    end_ref(f, made.shadow);
+    require(is_ended_block(made.shadow) && world.globals.size() == 2, "the block's pin is still held: it stays strong");
+    release_elements(f, made.shadow, mine, 0);
+    require(block_weaks() == 1 && world.globals.size() == 1, "its own release gives the strong reference up");
+}
+
+// JNI_COMMIT keeps the record (the pointer stays valid); mode 0 removes it, and then the address is nobody's again; a
+// release through the real reference removes it too.
+void check_the_record_of_a_runtime_pointer_ends_with_its_release() {
+    Fixture f = make();
+    Made made = make_held(f, sample(64));
+    jobject global = fn<jobject (*)(Env*, jobject)>(*f.table, slot::NewGlobalRef)(f.env, made.shadow);
+    const size_t start = world.released.size();  // (the layer's own synchronizations release too: count from here)
+    jbyte* theirs = get_elements(f, global);
+    release_elements(f, made.shadow, theirs, 1 /* JNI_COMMIT */);
+    release_elements(f, made.shadow, theirs, 0);
+    require(world.released.size() == start + 2, "the commit kept the pointer's record; the release after it reached the runtime too");
+    release_elements(f, made.shadow, theirs, 0);
+    require(world.released.size() == start + 2, "the record is gone: the address is a buffer of the application's now");
+    jbyte* second = get_elements(f, global);
+    release_elements(f, global, second, 0);
+    require(world.released.size() == start + 3, "a release through the real reference");
+    release_elements(f, made.shadow, second, 0);
+    require(world.released.size() == start + 3, "and it removed the record");
+    // Two Gets of the same address (a runtime that gives the array's own memory): one record each.
+    jbyte* one = get_elements(f, global);
+    jbyte* two = get_elements(f, global);
+    require(one == two, "the same address");
+    release_elements(f, made.shadow, one, 0);
+    release_elements(f, made.shadow, two, 0);
+    require(world.released.size() == start + 5, "each release reached the runtime");
+}
+
+// ---- DeleteLocalRef only reaches the innermost frame
+
+// A nested native method (called from Java by the outer one, which holds the block's entry) deletes a reference of the
+// block that it did not make: both runtimes leave a reference of an outer frame alone, so the block stays live in the
+// outer frame, the outer call's synchronization goes on, and the outer return ends it. (Fails on 437d5edc: the nested
+// delete took the outer frame's entry.)
+void check_a_nested_native_method_cannot_delete_its_callers_reference() {
+    Fixture f = make();
+    void* outer_function = app_function(1);
+    void* inner_function = app_function(2);
+    const Native outer = thunk_of(outer_function);
+    const Native inner = thunk_of(inner_function);
+    require(enter_native(outer, outer_function, 0x100, 0x9000), "outer");
+    Made a = make_shadow_of(f, sample(32));
+    raw_of(a)[0] = 0x55;
+    g_in_call = [&] {
+        g_in_call = nullptr;
+        require(enter_native(inner, inner_function, 0x200, 0x8000), "inner, called from Java");
+        end_ref(f, a.shadow);  // the nested method frees the reference it was handed ("free the previous buffer")
+        require(is_shadow_block(a.shadow) && counters().shadows_live == 1, "the outer frame's entry is left alone");
+        Made own = make_shadow_of(f, sample(8));  // its own entry is the frame's: this one it can delete
+        end_ref(f, own.shadow);
+        require(!is_shadow_block(own.shadow) && counters().shadows_live == 1, "and an entry of its own ends");
+        leave_native(0x8000);
+    };
+    world.java_fill = 0x44;
+    require(call_static_int_v(f, f.consume, a.shadow) == 7, "the outer call completed");
+    world.java_fill = -1;
+    require(is_shadow_block(a.shadow) && raw_of(a)[0] == 0x44, "the block is live in the outer frame, with Java's writes");
+    leave_native(0x9000);
+    require(!is_shadow_block(a.shadow) && counters().shadows_live == 0, "and the outer return ends it");
+}
+
+// ---- MonitorExit with an exception pending
+
+// MonitorExit of a block's reference with an exception pending (a scoped monitor's unlock after a Java call threw): the
+// runtime is handed the array, the monitor is released, and the same exception is still pending afterwards. For the three
+// kinds of block: one that ended (only a weak reference behind it), one live on another thread, one of this thread's.
+// (Fails on 24093fc5: the runtime was handed NULL, and the monitor stayed held.)
+void check_monitor_exit_with_an_exception_pending() {
+    for (int kind = 0; kind < 3; ++kind) {
+        Fixture f = make();
+        Made made = make_held(f, sample(16));
+        std::unique_ptr<Other> other;
+        std::thread holder;
+        Fixture* user = &f;
+        if (kind == 0) {
+            end_ref(f, made.shadow);
+        } else if (kind == 1) {
+            other.reset(new Other(f));
+            user = &other->f;
+        }
+        auto enter = fn<jint (*)(Env*, jobject)>(*f.table, slot::MonitorEnter);
+        auto leave = fn<jint (*)(Env*, jobject)>(*f.table, slot::MonitorExit);
+        require(enter(user->env, made.shadow) == 0 && world.monitors == 1, "the monitor is taken");
+        const size_t locals = world.locals.size();
+        Obj exception;
+        world.pending_object = &exception;
+        world.exception_pending = true;  // a Java call threw
+        require(leave(user->env, made.shadow) == 0 && world.monitors == 0, "the monitor is released with an exception pending");
+        require(world.exception_pending && world.pending_object == &exception, "and the same exception is still pending");
+        world.exception_pending = false;
+        world.pending_object = nullptr;
+        // MonitorExit that raises an exception of its own keeps that one.
+        require(enter(user->env, made.shadow) == 0, "the monitor is taken again");
+        Obj first, second;
+        world.pending_object = &first;
+        world.exception_pending = true;
+        world.monitor_exit_throws = &second;
+        leave(user->env, made.shadow);
+        require(world.exception_pending && world.pending_object == &second, "the exception MonitorExit raised stays");
+        world.exception_pending = false;
+        world.monitor_exit_throws = nullptr;
+        require(world.locals.size() == locals, "no local reference is left behind (the saved exception's is deleted)");
+        // A block whose array is gone has no monitor: refused, not handed to the runtime as NULL.
+        if (kind == 0) {
+            made.object->held = false;
+            collect();
+            require(enter(user->env, made.shadow) != 0 && leave(user->env, made.shadow) != 0, "a collected array is refused");
+        }
+    }
+}
+
+// ---- stores that land where a test wants another thread's write to land
+
+// A store that lands exactly where a test wants another thread's write to land. The page is made read-only; the first
+// store into it faults; the handler writes the other thread's byte, opens the page and lets the store go on. That is the
+// interleaving a few instructions wide between the layer's comparison and its store, which no call into the fake runtime
+// falls into: a word store there would carry the old value of the neighbouring byte over the other thread's.
+struct Watch {
+    uint8_t* page = nullptr;
+    size_t size = 0;
+    volatile uint8_t* racing = nullptr;  // where the other thread's write goes
+    uint8_t value = 0;
+    uint8_t* const* more = nullptr;      // and more of them, all written at the same fault
+    size_t more_count = 0;
+    volatile int hits = 0;
+};
+Watch g_watch;
+struct sigaction g_watch_old_bus, g_watch_old_segv;
+void watch_handler(int signal_number, siginfo_t* info, void*) {
+    uint8_t* at = static_cast<uint8_t*>(info->si_addr);
+    if (g_watch.page != nullptr && at >= g_watch.page && at < g_watch.page + g_watch.size) {
+        mprotect(g_watch.page, g_watch.size, PROT_READ | PROT_WRITE);
+        g_watch.hits = g_watch.hits + 1;
+        *g_watch.racing = g_watch.value;
+        for (size_t i = 0; i < g_watch.more_count; ++i) *g_watch.more[i] = g_watch.value;
+        return;
+    }
+    struct sigaction default_action;
+    std::memset(&default_action, 0, sizeof(default_action));
+    default_action.sa_handler = SIG_DFL;
+    sigaction(signal_number, &default_action, nullptr);  // a fault of anything else: the default, on its return
+}
+// The first whole page inside [memory, memory + length).
+uint8_t* page_inside(uint8_t* memory, size_t length) {
+    const size_t page = size_t(getpagesize());
+    uint8_t* first = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(memory) + page - 1) & ~(page - 1));
+    require(first + page <= memory + length, "a whole page lies inside the memory");
+    return first;
+}
+void arm_watch(uint8_t* page, uint8_t* racing, uint8_t value, uint8_t* const* more = nullptr, size_t more_count = 0) {
+    g_watch.page = page;
+    g_watch.size = size_t(getpagesize());
+    g_watch.racing = racing;
+    g_watch.value = value;
+    g_watch.more = more;
+    g_watch.more_count = more_count;
+    g_watch.hits = 0;
+    struct sigaction action;
+    std::memset(&action, 0, sizeof(action));
+    action.sa_sigaction = watch_handler;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGBUS, &action, &g_watch_old_bus);
+    sigaction(SIGSEGV, &action, &g_watch_old_segv);
+    require(mprotect(page, g_watch.size, PROT_READ) == 0, "the page is made read-only");
+}
+int disarm_watch() {
+    const int hits = g_watch.hits;
+    mprotect(g_watch.page, g_watch.size, PROT_READ | PROT_WRITE);
+    sigaction(SIGBUS, &g_watch_old_bus, nullptr);
+    sigaction(SIGSEGV, &g_watch_old_segv, nullptr);
+    g_watch.page = nullptr;
+    return hits;
+}
+
+// ---- a synchronization writes only the bytes Java changed into the block
+
+// A raw write to a byte of a clean chunk, made while the synchronization is pulling Java's bytes in (the hook runs in the
+// runtime's region read, after it copied), is not overwritten by the pull: Java wrote a neighbouring byte, the application
+// wrote this one, and both are in the block afterwards; the next synchronization pushes the application's byte. (Fails on
+// ecb411ce: the pull copied whole chunks into the block.)
+void check_a_pull_does_not_overwrite_a_raw_write_to_another_byte() {
+    Fixture f = make();
+    Made a = make_held(f, std::vector<uint8_t>(64, 0x3a));
+    a.object->bytes[10] = 0xA1;  // Java wrote it
+    g_after_get = [&] { raw_of(a)[20] = 0x99; };  // the application wrote another byte of the chunk meanwhile
+    jbyte result[64] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 64, result);
+    require(raw_of(a)[10] == 0xA1 && raw_of(a)[20] == 0x99, "the block has Java's byte and the application's");
+    require(a.object->bytes[20] == 0x3a, "the array does not have the raw write yet");
+    jbyte again[64] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 64, again);
+    require(a.object->bytes[20] == 0x99 && a.object->bytes[10] == 0xA1 && static_cast<uint8_t>(again[20]) == 0x99,
+            "and the next synchronization pushes it");
+}
+
+// The same for a chunk the application had written: the merge stores into the block only the byte Java changed, so a raw
+// write to a third byte that races the merge survives it. The write is placed at the layer's store of Java's byte into the
+// block (the watch below, defined further down). (Fails on ecb411ce: the merged run was copied over the block.)
+void check_a_merge_does_not_overwrite_a_raw_write_to_a_third_byte() {
+    Fixture f = make();
+    const size_t size = 65536;
+    Made a = make_held(f, std::vector<uint8_t>(size, 0x3a));
+    uint8_t* data = raw_of(a);
+    uint8_t* page = page_inside(data, size);
+    const size_t at = size_t(page - data);
+    a.object->bytes[at + 10] = 0xA1;  // Java wrote one byte
+    data[at + 0] = 0x31;              // the application wrote another: the chunk is dirty
+    arm_watch(page, page + 40, 0x99);  // and a third, at the merge's store of Java's byte into the block
+    jbyte result[64] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, jsize(at), 64, result);
+    const int hits = disarm_watch();
+    require(hits == 1, "the store of Java's byte was where the raw write landed");
+    require(a.object->bytes[at + 0] == 0x31 && a.object->bytes[at + 10] == 0xA1, "Java has both of the earlier writes");
+    require(data[at + 0] == 0x31 && data[at + 10] == 0xA1 && data[at + 40] == 0x99, "the block has all three");
+    require(a.object->bytes[at + 40] == 0x3a, "the raw write is not in the array yet");
+    jbyte again[64] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, jsize(at), 64, again);
+    require(a.object->bytes[at + 40] == 0x99, "and the next synchronization pushes it");
+}
+// Where both sides wrote the same byte at the pull, the application's byte stays and goes to the array next time.
+void check_a_byte_both_sides_wrote_keeps_the_applications_at_a_racing_pull() {
+    Fixture f = make();
+    Made a = make_held(f, std::vector<uint8_t>(64, 0x3a));
+    a.object->bytes[10] = 0xA1;
+    g_after_get = [&] { raw_of(a)[10] = 0x55; };
+    jbyte result[64] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 64, result);
+    require(raw_of(a)[10] == 0x55, "the application's byte stays in the block");
+    jbyte again[64] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 64, again);
+    require(a.object->bytes[10] == 0x55 && static_cast<uint8_t>(again[10]) == 0x55, "and reaches the array at the next synchronization");
+}
+
+// Random writes from both sides, over sizes around the scan block, the chunk and the pull piece: after one read of the
+// whole block both copies agree with the per-byte rule (a byte the application wrote is the application's, else a byte Java
+// wrote is Java's, else it is as it was), and a second read changes nothing.
+void check_the_synchronization_is_byte_exact_for_random_writes() {
+    uint32_t seed = 12345;
+    const auto next = [&] {
+        seed = seed * 1664525u + 1013904223u;
+        return seed >> 8;
+    };
+    const unsigned sizes[] = {1, 3, 4, 5, 255, 256, 257, 511, 512, 513, 4095, 4096, 4097, 8191, 16383, 16384, 16385, 20000, 40000};
+    for (unsigned trial = 0; trial < 190; ++trial) {
+        const unsigned n = sizes[trial % (sizeof(sizes) / sizeof(sizes[0]))];
+        Fixture f = make();
+        std::vector<uint8_t> original(n);
+        for (unsigned i = 0; i < n; ++i) original[i] = uint8_t(next());
+        Made a = make_held(f, original);
+        std::vector<uint8_t> expected = original;
+        const unsigned density = 1 + next() % 200;  // one in `density` bytes
+        for (unsigned i = 0; i < n; ++i) {
+            const bool java = next() % density == 0, app = next() % density == 0;
+            if (java) {
+                a.object->bytes[i] = uint8_t(original[i] ^ 0xA5);
+                expected[i] = a.object->bytes[i];
+            }
+            if (app) {
+                raw_of(a)[i] = uint8_t(original[i] ^ 0x5A);
+                expected[i] = raw_of(a)[i];
+            }
+        }
+        std::vector<jbyte> result(n);
+        fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, jsize(n), result.data());
+        require(std::memcmp(result.data(), expected.data(), n) == 0, "the read has the rule's bytes");
+        require(a.object->bytes == expected && std::memcmp(raw_of(a), expected.data(), n) == 0, "so have the array and the block");
+        fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, jsize(n), result.data());
+        require(a.object->bytes == expected && std::memcmp(raw_of(a), expected.data(), n) == 0, "and a second read changes nothing");
+        reset_world();
+    }
+}
+
+// A full sweep follows every collection that no full sweep has seen, also one that the step sweep (a few blocks at a
+// creation) found first: a result that fits after one full pass is not declined.
+void check_a_collection_the_step_sweep_saw_is_swept_in_full() {
+    Fixture f = make();
+    std::vector<Made> kept;
+    for (int i = 0; i < 200; ++i) {
+        Made made = make_held(f, std::vector<uint8_t>(20000, uint8_t(i)));
+        if (!is_shadow_block(made.shadow)) break;
+        kept.push_back(made);
+        end_ref(f, made.shadow);
+    }
+    require(kept.size() > 40 && counters().shadows_declined == 1, "the region is full of ended blocks");
+    for (Made& made : kept) made.object->held = false;
+    collect();
+    Made big = make_shadow_of(f, std::vector<uint8_t>(1200 * 1024, 7));
+    require(is_shadow_block(big.shadow), "the result fits: the collection was swept in full, not only 32 blocks of it");
+}
+
+// The critical pair on a kept reference: with no critical region open the block is held and pinned like any other (an
+// ended block that only a weak reference held gets a global one for the pin); inside a region, where no call that makes a
+// reference may be made, a block with a strong reference of its own works and one without gives nothing.
+void check_a_kept_reference_gives_a_critical_pointer() {
+    Fixture f = make();
+    const std::vector<uint8_t> payload = sample(100);
+    Made kept = make_held(f, payload);
+    end_ref(f, kept.shadow);
+    Made live = make_held(f, sample(60));
+    jobject real = byte_array(sample(8));
+    void* region = fn<void* (*)(Env*, jarray, jboolean*)>(*f.table, slot::GetPrimitiveArrayCritical)(f.env, real, nullptr);
+    require(region != nullptr, "a critical region of the runtime is open");
+    require(get_critical(f, kept.shadow) == nullptr, "inside it a block that only a weak reference holds gives nothing");
+    void* inside = get_critical(f, live.shadow);
+    require(inside == raw_of(live), "and a live block works");
+    release_critical(f, live.shadow, inside, 0);
+    fn<void (*)(Env*, jarray, void*, jint)>(*f.table, slot::ReleasePrimitiveArrayCritical)(f.env, real, region, 0);
+    void* p = get_critical(f, kept.shadow);
+    require(p == raw_of(kept) && std::memcmp(p, payload.data(), 100) == 0, "outside any region the same reference works");
+    require(is_ended_block(kept.shadow) && counters().blocks_revived == 0 && counters().shadows_live == 1, "the block stayed ended");
+    require(world.globals.size() == 2, "and it holds a strong reference while the pointer is out");
+    release_critical(f, kept.shadow, p, 0);
+    collect();
+    end_ref(f, make_shadow_of(f, sample(10)).shadow);  // a sweep: the last pin is gone
+    require(block_weaks() == 2, "after the release the block waits for a collection again");
+}
+
+// A release of a pointer that lies inside a block but not at its start is nothing to copy from: the old runtime ignored
+// the pointer. Through the block's reference it counts as the release of the pin; through a real reference it is dropped.
+void check_a_release_of_a_pointer_inside_a_block_is_harmless() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, sample(4096));
+    jbyte* p = get_elements(f, made.shadow);
+    const std::vector<uint8_t> before(raw_of(made), raw_of(made) + 4096);
+    world.release_calls = 0;
+    release_elements(f, made.shadow, p + 100, 0);
+    require(std::memcmp(raw_of(made), before.data(), 4096) == 0 && made.object->bytes == before, "nothing was copied over the block");
+    end_ref(f, made.shadow);
+    require(block_weaks() == 1 && world.globals.empty(), "the pin was counted off: the block ended with a weak reference");
+    jbyte* q = get_elements(f, made.shadow);
+    jobject real = byte_array(before);
+    release_elements(f, real, q + 32, 0);  // aligned, inside the block, through a real reference
+    release_elements(f, real, q + 33, 0);
+    require(world.release_calls == 0, "dropped: the runtime is not handed a pointer it never gave");
+    require(std::memcmp(raw_of(made), before.data(), 4096) == 0, "and the block is as it was");
+}
+
+// The ids of the layer's own calls are resolved at the installation, before the first block can be made.
+void check_the_ids_are_resolved_before_the_first_block() {
+    Fixture f = make();
+    require(world.class_globals.size() == 2 && world.hash_calls == 0, "the classes were looked up at the installation");
+    g_on_find_class = [&] { require(false, "no lookup is left for a result"); };
+    Made made = make_shadow_of(f, sample(10));
+    require(is_shadow_block(made.shadow), "the first result is a block");
+}
+
+// Every block that exists holds a reservation against the cap, live ones included: live blocks on several threads cannot
+// end past it (each end makes a weak global reference, and the runtime's table is limited).
+void check_live_blocks_of_many_threads_count_against_the_cap() {
+    g_region = g_big_region;
+    g_region_size = sizeof(g_big_region);
+    Fixture f = make();
+    g_region = g_shadow_region;
+    g_region_size = sizeof(g_shadow_region);
+    std::vector<Obj*> kept;
+    for (unsigned i = 0; i < 16000; ++i) {
+        Made made = make_held(f, std::vector<uint8_t>());
+        kept.push_back(made.object);
+        end_ref(f, made.shadow);
+    }
+    require(counters().shadows_ended == 16000, "16000 ended blocks");
+    constexpr int kThreads = 3;
+    std::vector<std::unique_ptr<Other>> others;
+    std::vector<std::vector<jobject>> shadows(kThreads);
+    for (int t = 0; t < kThreads; ++t) others.emplace_back(new Other(f));
+    std::atomic<int> turn{0};
+    const auto wait_for = [&](int value) {
+        while (turn != value) std::this_thread::yield();
+    };
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t] {
+            wait_for(t);  // one thread at a time: the fake runtime is not thread-safe
+            for (int i = 0; i < 512; ++i) {
+                Made made = make_held(others[size_t(t)]->f, std::vector<uint8_t>());
+                if (is_shadow_block(made.shadow)) shadows[size_t(t)].push_back(made.shadow);
+                kept.push_back(made.object);
+            }
+            ++turn;
+            wait_for(kThreads + t);
+            for (jobject shadow : shadows[size_t(t)]) end_ref(others[size_t(t)]->f, shadow);
+            ++turn;
+        });
+    }
+    wait_for(kThreads);  // all have made theirs and hold them
+    require(counters().shadows_live + counters().shadows_ended <= 16384, "live and ended blocks together stay under the cap");
+    require(counters().shadows_declined > 0, "the results past it stayed real references");
+    turn = kThreads;
+    for (auto& thread : threads) thread.join();
+    require(counters().shadows_ended <= 16384 && counters().shadows_live == 0, "and so do the ended ones after every end");
+    require(block_weaks() <= 16384, "the weak references the layer holds are bounded by the cap");
+}
+
+
+// ---- the mutex holder never waits for the collector
+
+// A bounded wait for a condition another thread brings about (two seconds).
+template <class P>
+bool wait_until(P&& condition) {
+    for (int i = 0; i < 2000; ++i) {
+        if (condition()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return condition();
+}
+bool region_is_open() {
+    std::lock_guard<std::mutex> l(g_flip_mutex);
+    return g_open_regions == 1;
+}
+bool flip_is_pending() {
+    std::lock_guard<std::mutex> l(g_flip_mutex);
+    return g_flip_running;
+}
+bool a_get_waits_for_the_flip() {
+    std::lock_guard<std::mutex> l(g_flip_mutex);
+    return g_gets_that_waited != 0;
+}
+
+// A thread makes the critical get (or the release) of a block's pointer while another thread has a runtime region open,
+// waiting for the layer's mutex or not, and the collector begins a flip. In the runtime's rule the flip waits for the
+// region, and the first thread's get waits for the flip; if that thread held the mutex, the other, which takes it inside its
+// region, would never close the region. The model times the waits out, and the row counts the timeouts.
+void run_the_flip_cycle(bool a_releases, bool b_synchronizes_a_block) {
+    Fixture f = make();
+    Made k = make_held(f, sample(100));   // the block thread A uses
+    Made k2 = make_held(f, sample(100));  // the block thread B synchronizes inside its region
+    Other b(f);
+    jobject real = byte_array(sample(64));  // thread B's real array
+    std::atomic<bool> collector_waited_out{false};
+    std::thread b_thread, collector;
+    const auto inside_the_runtime_get = [&] {  // thread A is in the runtime's first critical get: it holds no mutex
+        b_thread = std::thread([&] {
+            void* p = get_critical(b.f, real);  // B's region opens (the layer records the pointer)
+            if (b_synchronizes_a_block) {
+                void* q = get_critical(b.f, k2.shadow);  // and B synchronizes a block inside it: the mutex
+                release_critical(b.f, k2.shadow, q, 0);
+            }
+            wait_until(a_get_waits_for_the_flip);  // B stays in its region until thread A's get waits for the flip
+            release_critical(b.f, real, p, 0);
+        });
+        require(wait_until(region_is_open), "thread B opened its region");
+        collector = std::thread([&] {
+            collector_waited_out = !flip_begin_waits_for_regions();
+            flip_end();
+        });
+        require(wait_until(flip_is_pending), "the collector's flip is pending");
+    };
+    void* p = nullptr;
+    if (a_releases) {
+        p = get_critical(f, k.shadow);
+        raw_of(k)[3] = 0x5A;  // the application writes through the pointer: the release merges it into the array
+        g_before_first_critical = inside_the_runtime_get;
+        release_critical(f, k.shadow, p, 0);
+    } else {
+        g_before_first_critical = inside_the_runtime_get;
+        p = get_critical(f, k.shadow);
+    }
+    if (b_thread.joinable()) b_thread.join();
+    if (collector.joinable()) collector.join();
+    require(g_flip_timeouts == 0 && !collector_waited_out,
+            "neither the critical get nor the collector's flip waited for good (the mutex holder waited for the collector)");
+    if (a_releases) {
+        require(k.object->bytes[3] == 0x5A, "the release reached the array");
+    } else {
+        require(p == static_cast<void*>(raw_of(k)), "the pointer is the block's");
+        release_critical(f, k.shadow, p, 0);
+    }
+    require(world.critical == 0 && t_regions == 0, "every region closed");
+}
+void check_a_block_critical_get_does_not_hold_the_mutex_while_it_waits_for_the_collector() {
+    run_the_flip_cycle(false, false);
+    run_the_flip_cycle(false, true);
+}
+void check_a_block_critical_release_does_not_hold_the_mutex_while_it_waits_for_the_collector() {
+    run_the_flip_cycle(true, false);
+    run_the_flip_cycle(true, true);
+}
+
+// The mutex is free while the thread's first critical get is in the runtime: another thread uses a block meanwhile.
+void check_the_mutex_is_free_while_the_first_critical_get_is_in_the_runtime() {
+    Fixture f = make();
+    Made k = make_held(f, sample(100));
+    Made other_block = make_held(f, sample(100));
+    Other c(f);
+    std::atomic<bool> c_done{false};
+    std::thread c_thread;
+    g_before_first_critical = [&] {
+        c_thread = std::thread([&] {
+            jbyte* e = get_elements(c.f, other_block.shadow);  // takes the mutex
+            release_elements(c.f, other_block.shadow, e, 0);
+            c_done = true;
+        });
+        require(wait_until([&] { return c_done.load(); }), "another thread used a block while the get was in the runtime");
+    };
+    void* p = get_critical(f, k.shadow);
+    c_thread.join();
+    require(p == static_cast<void*>(raw_of(k)), "and the get went on");
+    release_critical(f, k.shadow, p, 0);
+}
+
+// ---- a critical get is never made under the mutex, wherever the thread's region is
+
+// Opens, as the application, a region of the runtime on an object of the kind, and returns what closes it. The kinds differ
+// in whether the runtime raises the thread's flip count: 0 a small array (it does), 1 an array of 16 KiB (large-object
+// space: it does not), 2 a small array in the non-moving space (no), 3 a compressed string (its critical is a copy: no),
+// 4 an uncompressed string (yes).
+constexpr int kRegionKinds = 5;
+std::function<void()> open_region(Fixture& f, int kind) {
+    if (kind <= 2) {
+        Obj* object = new Obj{kind == 1 ? std::vector<uint8_t>(16384, 1) : sample(64), true};
+        object->non_moving = kind == 2;
+        jobject array = new_local(object);
+        void* pointer = get_critical(f, array);
+        require(pointer != nullptr, "the application's region is open");
+        return [&f, array, pointer] { release_critical(f, array, pointer, 0); };
+    }
+    Obj* object = new Obj{std::vector<uint8_t>{'a', 'b', 'c', 'd'}, false};
+    object->is_string = true;
+    object->compressed = kind == 3;
+    jobject string = new_local(object);
+    const jchar* chars = fn<const jchar* (*)(Env*, jstring, jboolean*)>(*f.table, slot::GetStringCritical)(f.env, string, nullptr);
+    require(chars != nullptr, "the application's string region is open");
+    return [&f, string, chars] { fn<void (*)(Env*, jstring, const jchar*)>(*f.table, slot::ReleaseStringCritical)(f.env, string, chars); };
+}
+
+// A block's critical pointer, and its commit and abort releases, inside a region of the application's own on each kind of
+// object: the layer's gets are made before the mutex is taken whatever the runtime's count is (the fake fails any get
+// under it), the application's bytes reach the array at the commit, and the abort gives the block the array's bytes.
+void check_a_block_critical_pointer_inside_any_region_makes_its_gets_outside_the_mutex() {
+    for (int kind = 0; kind < kRegionKinds; ++kind) {
+        Fixture f = make();
+        Made k = make_held(f, sample(100));
+        raw_of(k)[3] ^= 0x5A;  // the application wrote through the pointer: the chunk is dirty
+        const uint8_t written = raw_of(k)[3];
+        auto close = open_region(f, kind);
+        world.critical_gets = 0;
+        void* p = get_critical(f, k.shadow);
+        require(p == static_cast<void*>(raw_of(k)), "the block's pointer inside the region");
+        require(world.critical_gets == 1 && k.object->bytes[3] == written, "one get, and the application's byte reached the array");
+        raw_of(k)[4] ^= 0x33;
+        release_critical(f, k.shadow, p, 0);  // a commit: dirty, merged in place
+        require(k.object->bytes[4] == raw_of(k)[4], "the commit's merge reached the array");
+        void* q = get_critical(f, k.shadow);
+        const uint8_t before = raw_of(k)[5];
+        raw_of(k)[5] ^= 0x77;
+        release_critical(f, k.shadow, q, kReleaseAbort);  // the abort path
+        require(raw_of(k)[5] == before && k.object->bytes[5] == before, "an abort gives the block the array's bytes");
+        require(world.critical == 1, "only the application's region is open");
+        close();
+        require(world.critical == 0 && t_regions == 0 && t_flips == 0, "every region closed");
+    }
+}
+
+// The cycle the runtime's rule makes with a get under the mutex. Thread H holds a region that does not raise the runtime's
+// flip count and gets (or releases) a block's pointer, which the runtime treats as its outermost get; meanwhile thread X, in
+// a region of its own that does raise the count, takes the mutex for a block's pair of its own, and the collector's flip
+// waits for X. A mutex held by H across its wait for the flip would hold X, X's region, the flip and H in a cycle. The
+// model times the waits out and the row counts the timeouts.
+void run_the_foreign_region_cycle(int kind, bool h_releases) {
+    Fixture f = make();
+    Made k = make_held(f, sample(100));
+    Made k2 = make_held(f, sample(50));
+    Other x(f);
+    jobject small = byte_array(sample(64));
+    std::atomic<int> x_stage{0};
+    std::atomic<bool> go{false};
+    std::atomic<bool> flip_ok{false};
+    std::thread x_thread, collector;
+    raw_of(k)[3] ^= 0x5A;
+    void* p = h_releases ? get_critical(f, k.shadow) : nullptr;
+    raw_of(k)[4] ^= 0x33;
+    auto close = open_region(f, kind);
+    g_before_first_critical = [&] {  // H's get of the block's array, the runtime's outermost: no mutex may be held
+        x_thread = std::thread([&] {
+            void* region = get_critical(x.f, small);  // X's region (the flip count rises)
+            x_stage = 1;
+            wait_until([&] { return go.load(); });
+            void* pair = get_critical(x.f, k2.shadow);  // a block's pair inside it: the mutex
+            x_stage = 2;
+            release_critical(x.f, k2.shadow, pair, 0);
+            release_critical(x.f, small, region, 0);
+            x_stage = 3;
+        });
+        require(wait_until([&] { return x_stage.load() >= 1; }), "X's region is open");
+        collector = std::thread([&] {
+            flip_ok = flip_begin_waits_for_regions();
+            flip_end();
+        });
+        require(wait_until(flip_is_pending), "the collector's flip is pending");
+        go = true;
+    };
+    if (h_releases) {
+        release_critical(f, k.shadow, p, 0);
+    } else {
+        p = get_critical(f, k.shadow);
+    }
+    x_thread.join();
+    collector.join();
+    require(x_stage == 3 && flip_ok && g_flip_timeouts == 0,
+            "X's pair, the flip and H's get all completed: H held no mutex while it waited for the flip");
+    require(k.object->bytes[3] == raw_of(k)[3], "H's merge reached the array");
+    if (!h_releases) {
+        release_critical(f, k.shadow, p, 0);
+    }
+    close();
+    require(world.critical == 0 && t_regions == 0 && t_flips == 0, "every region closed");
+}
+void check_a_block_get_in_a_region_that_does_not_raise_the_flip_count_does_not_hold_the_mutex() {
+    for (int kind : {1, 2, 3}) run_the_foreign_region_cycle(kind, false);
+}
+void check_a_block_release_in_a_region_that_does_not_raise_the_flip_count_does_not_hold_the_mutex() {
+    for (int kind : {1, 2, 3}) run_the_foreign_region_cycle(kind, true);
+}
+
+// The longest a critical region the layer opened stayed open is kept, from the get's return to the release's, and
+// includes the wait for the mutex: another thread holds it for 30 ms between the two holds.
+void check_the_longest_layer_opened_region_is_counted() {
+    Fixture f = make();
+    Made a = make_held(f, sample(100));
+    require(counters().longest_region_us == 0, "none yet");
+    raw_of(a)[3] ^= 0x5A;
+    std::thread holder;
+    std::atomic<bool> holds{false};
+    g_before_first_critical = [&] {  // in the runtime's get, with no mutex held: another thread takes it for a while
+        holder = std::thread([&] {
+            g_ended_mutex.lock();
+            holds = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            g_ended_mutex.unlock();
+        });
+        require(wait_until([&] { return holds.load(); }), "the other thread holds the layer's mutex");
+    };
+    jbyte* e = get_elements(f, a.shadow);  // a dirty synchronization: the pair waits for the mutex
+    holder.join();
+    release_elements(f, a.shadow, e, 0);
+    require(counters().longest_region_us >= 20000 && counters().longest_region_us < 2000000,
+            "the region stayed open while the pair waited for the mutex");
+}
+
+// The table of the runtime's own pointers has a lock of its own: a thread that has just opened a region records the
+// pointer without the mutex, whoever holds it.
+void check_the_table_of_the_runtimes_pointers_does_not_wait_for_the_mutex() {
+    Fixture f = make();
+    (void)make_held(f, sample(100));  // a block has existed: the pointers are recorded
+    Other o(f);
+    jobject real = byte_array(sample(64));
+    g_ended_mutex.lock();  // another thread holds the layer's mutex
+    std::atomic<bool> done{false};
+    std::thread t([&] {
+        void* p = get_critical(o.f, real);
+        release_critical(o.f, real, p, 0);
+        jbyte* e = get_elements(o.f, real);
+        release_elements(o.f, real, e, 0);
+        done = true;
+    });
+    const bool finished = wait_until([&] { return done.load(); });
+    g_ended_mutex.unlock();
+    t.join();
+    require(finished, "a real array's pointers were recorded and forgotten without the layer's mutex");
+}
+
+// The sentinel's array is allocated outside the mutex (the fake fails an allocation under it): at the first end, and when
+// a collection is seen at a creation. Where the allocation fails the end goes on, no exception is left, and a later
+// creation makes the sentinel.
+void check_the_sentinels_array_is_made_outside_the_mutex() {
+    Fixture f = make();
+    Made a = make_shadow_of(f, sample(100));
+    require(world.new_array_calls == 0, "no sentinel before a block ends");
+    end_ref(f, a.shadow);
+    require(world.new_array_calls == 1 && is_ended_block(a.shadow), "the first end made the sentinel's array");
+    collect();  // the sentinel (a weak reference to an array nothing holds) is cleared
+    Made b = make_shadow_of(f, sample(100));
+    require(world.new_array_calls == 2 && counters().blocks_collected == 1,
+            "a collection seen at a creation renewed the sentinel (one array) and swept the ended block");
+    end_ref(f, b.shadow);
+    require(world.new_array_calls == 2, "a sentinel in place needs no array");
+}
+void check_a_failed_sentinel_allocation_is_survived() {
+    Fixture f = make();
+    world.new_array_fails = true;
+    Made a = make_shadow_of(f, sample(100));
+    end_ref(f, a.shadow);
+    require(!world.exception_pending && is_ended_block(a.shadow) && world.new_array_calls == 1,
+            "the end went on, and the allocation's exception is not left pending");
+    world.new_array_fails = false;
+    collect();
+    (void)make_shadow_of(f, sample(100));  // no sentinel: the creation sees a collection, makes the array outside the mutex
+    require(counters().blocks_collected == 1 && world.new_array_calls == 2 && !world.exception_pending,
+            "the next creation made the sentinel and swept");
+}
+
+// ---- which calls make a critical get, and which write through regions
+
+// A clean block's call never makes a critical get and never writes the array: it reads Java's bytes through region calls,
+// in a call to Java, the elements and the regions, and at the end of the block.
+void check_a_clean_blocks_calls_make_no_critical_get() {
+    Fixture f = make();
+    Made a = make_held(f, sample(3 * 4096));
+    a.object->bytes[100] = 0x77;  // Java wrote a byte; the application wrote none
+    world.critical_gets = 0;
+    world.set_calls = 0;
+    world.get_calls = 0;
+    call_static_int_v(f, f.consume, a.shadow);
+    require(raw_of(a)[100] == 0x77, "the call gave the block Java's byte");
+    require(world.critical_gets == 0 && world.set_calls == 0 && world.get_calls > 0, "by region reads: no critical get, no write");
+    a.object->bytes[200] = 0x78;
+    jbyte* elements = get_elements(f, a.shadow);
+    release_elements(f, a.shadow, elements, 0);
+    require(raw_of(a)[200] == 0x78 && world.critical_gets == 0 && world.set_calls == 0, "the elements: no critical get");
+    a.object->bytes[300] = 0x79;
+    jbyte buffer[400] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 400, buffer);
+    const jbyte value = 0x42;
+    fn<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(*f.table, slot::SetByteArrayRegion)(f.env, a.shadow, 5000, 1, &value);
+    require(static_cast<uint8_t>(buffer[300]) == 0x79 && a.object->bytes[5000] == 0x42, "the regions work");
+    require(world.critical_gets == 0, "and make no critical get either");
+    end_ref(f, a.shadow);
+    require(is_ended_block(a.shadow) && world.critical_gets == 0, "the end of a clean block makes no critical get");
+}
+
+// An exception pending synchronizes nothing: a native call that returns with one is not followed by a pull, an ended block
+// waits with the application's writes where they are and no runtime call is made for it; the next call without an
+// exception makes the end through the one path that writes through regions (exact runs of the bytes the application
+// wrote, never a gap byte), and makes no critical get for it.
+void check_an_exception_pending_synchronizes_nothing_and_a_deferred_end_writes_exact_runs() {
+    Fixture f = make();
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    require(push(f.env, 16) == 0, "a frame");
+    const size_t size = 3 * 4096;
+    Made a = make_held(f, sample(size));
+    const std::vector<uint8_t> before = a.object->bytes;
+    std::vector<std::pair<size_t, size_t>> runs;  // start, length
+    for (size_t at = 3; at < size; at += 97) {
+        if (at + 1 >= 250 && at < 262) continue;  // the run across 256 is below
+        if (at + 1 >= 4090 && at < 4102) continue;
+        runs.push_back({at, 1});
+    }
+    runs.push_back({250, 12});
+    runs.push_back({4090, 12});
+    std::sort(runs.begin(), runs.end());
+    for (const auto& run : runs) {
+        for (size_t i = run.first; i < run.first + run.second; ++i) raw_of(a)[i] ^= 0x55;
+    }
+    std::vector<size_t> gaps;  // the first byte of every gap between two runs
+    for (size_t k = 0; k + 1 < runs.size(); ++k) {
+        const size_t end = runs[k].first + runs[k].second;
+        require(end < runs[k + 1].first, "the runs are apart");
+        gaps.push_back(end);
+    }
+    world.exception_pending = true;
+    world.critical_gets = 0;
+    world.set_calls = 0;
+    world.get_calls = 0;
+    call_static_int_v(f, f.consume, a.shadow);
+    require(world.critical_gets == 0 && world.set_calls == 0 && world.get_calls == 0, "a call with an exception pending synchronizes nothing");
+    pop(f.env, nullptr);
+    require(is_shadow_block(a.shadow) && world.critical_gets == 0 && world.set_calls == 0 && world.get_calls == 0 &&
+                a.object->bytes == before,
+            "the end waits: no runtime call, the array untouched");
+    world.exception_pending = false;
+    g_after_get = [&] {  // Java writes the first byte of every gap while the deferred end reads the dirty run
+        for (size_t gap : gaps) a.object->bytes[gap] = 0xB2;
+    };
+    jobject plain = byte_array(sample(4));
+    fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, plain);
+    require(is_ended_block(a.shadow), "the next call without an exception finished the end");
+    require(world.critical_gets == 0, "the deferred end made no critical get");
+    require(world.set_calls == int(runs.size()), "one region write for each run of the application's bytes");
+    for (const auto& run : runs) {
+        for (size_t i = run.first; i < run.first + run.second; ++i) {
+            require(a.object->bytes[i] == uint8_t(before[i] ^ 0x55), "the application's byte is in the array");
+        }
+    }
+    for (size_t gap : gaps) {
+        require(a.object->bytes[gap] == 0xB2, "Java's write into the gap is in the array");
+    }
+    size_t others = 0;
+    for (size_t i = 0; i < size; ++i) {
+        bool in_run = false;
+        for (const auto& run : runs) in_run = in_run || (i >= run.first && i < run.first + run.second);
+        if (!in_run && std::find(gaps.begin(), gaps.end(), i) == gaps.end()) {
+            require(a.object->bytes[i] == before[i], "no other byte of the array changed");
+            ++others;
+        }
+    }
+    require(others > 0, "the rows' bytes include untouched ones");
+}
+
+// The array of a block is collected between the two holds of a dirty synchronization: the first hold decided "dirty", the
+// first critical get runs with no lock held (the hook acts there), and the block is freed before the second hold. The
+// second hold revalidates: it writes nothing into a freed block's array, closes the pair, and the layer's state is whole.
+// (In the runtime a local reference keeps the array alive, so the row has the fake's collector clear the weak reference
+// under it: the layer must not depend on that.)
+void check_a_block_freed_between_the_two_holds_is_not_merged() {
+    Fixture f = make();
+    Made gone = make_shadow_of(f, sample(100));
+    end_ref(f, gone.shadow);  // ended: the weak reference is all that holds the block's array
+    require(is_ended_block(gone.shadow), "the block ended");
+    raw_of(gone)[3] ^= 0x55;  // the application writes through the pointer it kept: the chunk is dirty
+    const std::vector<uint8_t> array_before = gone.object->bytes;
+    Other other(f);
+    g_before_first_critical = [&] {  // in the runtime's first critical get: no lock held
+        g_collect_ignores_locals = true;
+        collect();
+        g_collect_ignores_locals = false;
+        std::thread([&] { (void)make_shadow_of(other.f, sample(10)); }).join();  // a creation sweeps: the block is freed
+    };
+    world.critical_gets = 0;
+    jbyte buffer[16] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, gone.shadow, 0, 16, buffer);
+    require(world.critical_gets == 1 && counters().blocks_collected == 1, "the get was made, and the block was freed meanwhile");
+    require(gone.object->bytes == array_before, "nothing was written into the array of the freed block");
+    require(world.critical == 0 && t_regions == 0 && !world.exception_pending, "the pair was closed");
+}
+
+// ---- a merge writes back exactly the bytes the application wrote
+
+// A Java thread's write to a byte the application did not write, landing while the merge stores the application's byte into
+// the live array, is neither undone in the array nor lost to the block: the merge stores that one byte and no other. The
+// write is placed by the page-protection handler at the layer's first store into the array.
+void check_a_java_write_during_a_merge_is_kept() {
+    Fixture f = make();
+    const size_t size = 65536;
+    Made a = make_held(f, sample(size));
+    uint8_t* array = a.object->bytes.data();
+    uint8_t* page = page_inside(array, size);
+    const size_t at = size_t(page + 20 - array);
+    raw_of(a)[at] = uint8_t(array[at] ^ 0x55);  // the application wrote this byte: the chunk is dirty
+    const uint8_t written = raw_of(a)[at];
+    arm_watch(page, page + 21, 0xB2);           // Java writes the next byte meanwhile
+    jbyte* elements = get_elements(f, a.shadow);  // a synchronization point: the dirty chunk is merged
+    const int hits = disarm_watch();
+    require(hits == 1, "the merge stored into the array where Java's write landed");
+    require(array[at] == written, "the application's byte reached the array");
+    require(array[at + 1] == 0xB2, "and Java's byte, which the merge did not read as the application's, is still there");
+    release_elements(f, a.shadow, elements, 0);
+    require(array[at + 1] == 0xB2 && raw_of(a)[at + 1] == 0xB2 && raw_of(a)[at] == written,
+            "the next point gave the block Java's byte, and the application's stayed");
+}
+
+// Scattered bytes of the application, in runs of one byte and across the edges of a scan block (256) and of a chunk, and a
+// Java write into the first byte of every gap, all placed by the page-protection handler at the merge's first store into
+// the array: one critical pair and no region write, every gap byte keeps Java's value, and the block has them at the next
+// point.
+void check_scattered_application_bytes_keep_a_java_write_in_every_gap() {
+    Fixture f = make();
+    const size_t size = 65536;
+    Made a = make_held(f, sample(size));
+    uint8_t* array = a.object->bytes.data();
+    const std::vector<uint8_t> before = a.object->bytes;
+    std::vector<std::pair<size_t, size_t>> runs;  // start, length
+    for (size_t at = 3; at < size; at += 97) {
+        if (at + 1 >= 250 && at < 262) continue;  // the run across 256 is below
+        if (at + 1 >= 4090 && at < 4102) continue;
+        runs.push_back({at, 1});
+    }
+    runs.push_back({250, 12});
+    runs.push_back({4090, 12});
+    std::sort(runs.begin(), runs.end());
+    for (const auto& run : runs) {
+        for (size_t i = run.first; i < run.first + run.second; ++i) raw_of(a)[i] ^= 0x55;
+    }
+    std::vector<size_t> gaps;  // the first byte of every gap between two runs
+    for (size_t k = 0; k + 1 < runs.size(); ++k) {
+        const size_t end = runs[k].first + runs[k].second;
+        require(end < runs[k + 1].first, "the runs are apart");
+        gaps.push_back(end);
+    }
+    std::vector<uint8_t*> targets;
+    for (size_t gap : gaps) targets.push_back(array + gap);
+    uint8_t* page = page_inside(array, size);
+    arm_watch(page, targets[0], 0xB2, targets.data() + 1, targets.size() - 1);
+    world.set_calls = 0;
+    world.critical_gets = 0;
+    call_static_int_v(f, f.consume, a.shadow);
+    const int hits = disarm_watch();
+    require(hits == 1, "Java wrote the gaps at the merge's first store into the array");
+    require(world.critical_gets == 1 && world.set_calls == 0, "one critical pair and no region write");
+    for (const auto& run : runs) {
+        for (size_t i = run.first; i < run.first + run.second; ++i) {
+            require(a.object->bytes[i] == uint8_t(before[i] ^ 0x55), "the application's byte is in the array");
+        }
+    }
+    for (size_t gap : gaps) {
+        require(a.object->bytes[gap] == 0xB2, "Java's write into the gap is in the array");
+    }
+    size_t others = 0;
+    for (size_t i = 0; i < size; ++i) {
+        bool in_run = false;
+        for (const auto& run : runs) in_run = in_run || (i >= run.first && i < run.first + run.second);
+        if (!in_run && std::find(gaps.begin(), gaps.end(), i) == gaps.end()) {
+            require(a.object->bytes[i] == before[i], "no other byte of the array changed");
+            ++others;
+        }
+    }
+    require(others > 0, "the rows' bytes include untouched ones");
+    std::vector<jbyte> whole(size);
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, jsize(size), whole.data());  // a point: the block takes Java's bytes
+    for (size_t gap : gaps) {
+        require(raw_of(a)[gap] == 0xB2, "the block has Java's byte of the gap");
+    }
+    for (const auto& run : runs) {
+        require(raw_of(a)[run.first] == uint8_t(before[run.first] ^ 0x55), "and kept the application's");
+    }
+}
+
+// ---- the table of the runtime's own pointers, when it is full
+
+// The table records 1024 pointers; the next one is not recorded (a Release of it through a block's reference is then taken
+// for a buffer of the application's, as before), and one line says so, once.
+void check_a_full_table_of_the_runtimes_pointers_logs_one_line() {
+    Fixture f = make();
+    (void)make_held(f, sample(8));  // a block has existed: the pointers are recorded
+    std::vector<jobject> arrays;
+    std::vector<void*> pointers;
+    for (int i = 0; i < 1024; ++i) {
+        arrays.push_back(byte_array(sample(8)));
+        pointers.push_back(get_critical(f, arrays.back()));
+    }
+    require(log_count("table of the runtime's own pointers") == 0, "nothing is logged while the table has room");
+    jobject one_more = byte_array(sample(8));
+    void* not_recorded = get_critical(f, one_more);
+    require(not_recorded != nullptr && log_count("table of the runtime's own pointers") == 1, "the first pointer past the table is logged");
+    jobject another = byte_array(sample(8));
+    void* also_not = get_critical(f, another);
+    require(also_not != nullptr && log_count("table of the runtime's own pointers") == 1, "and the second is not");
+    release_critical(f, another, also_not, 0);
+    release_critical(f, one_more, not_recorded, 0);
+    for (int i = 0; i < 1024; ++i) release_critical(f, arrays[size_t(i)], pointers[size_t(i)], 0);
+    require(world.critical == 0 && t_regions == 0, "every region closed");
+}
+
+// ---- little stack
+
+// Any wrapper can be called on a thread with a small stack (an audio thread, a thread of a library): a pull and a merge read
+// the array into one static buffer, not onto the stack. The thread has exactly 16 KiB (a stack of our own, with a guard
+// page below), the size of the old pull's buffer alone.
+void check_the_synchronizations_need_little_stack() {
+    Fixture f = make();
+    const size_t size = 256 * 4096;
+    Made a = make_held(f, sample(size));
+    raw_of(a)[5 * 4096 + 1] ^= 0x55;  // a dirty chunk: a merge of one chunk
+    for (size_t i = 40 * 4096; i < 48 * 4096; ++i) raw_of(a)[i] ^= 0x55;  // eight dirty chunks: a merge longer than the buffer
+    a.object->bytes[100000] ^= 0x33;  // Java's change, taken by a pull
+    Other o(f);
+    struct Job {
+        Other* thread;
+        Made* made;
+        std::vector<jbyte> copy;
+        size_t size;
+    } job{&o, &a, std::vector<jbyte>(size), size};
+    const size_t page = size_t(getpagesize());
+    require(page == 16384, "the host page is 16 KiB");
+    uint8_t* stack = static_cast<uint8_t*>(mmap(nullptr, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0));
+    require(stack != MAP_FAILED && mprotect(stack, page, PROT_NONE) == 0, "a stack and its guard page");
+    pthread_attr_t attributes;
+    pthread_attr_init(&attributes);
+    require(pthread_attr_setstack(&attributes, stack + page, page) == 0, "a thread with a 16 KiB stack");
+    pthread_t thread;
+    require(pthread_create(&thread, &attributes, [](void* argument) -> void* {
+        Job* work = static_cast<Job*>(argument);
+        fn<GetRegion>(*work->thread->f.table, slot::GetByteArrayRegion)(work->thread->f.env, work->made->shadow, 0,
+                                                                         jsize(work->size), work->copy.data());
+        return nullptr;
+    }, &job) == 0, "the thread starts");
+    pthread_join(thread, nullptr);
+    pthread_attr_destroy(&attributes);
+    munmap(stack, 2 * page);
+    require(a.object->bytes[5 * 4096 + 1] == uint8_t(sample(size)[5 * 4096 + 1] ^ 0x55) &&
+                a.object->bytes[47 * 4096 + 7] == uint8_t(sample(size)[47 * 4096 + 7] ^ 0x55),
+            "the merges reached the array");
+    require(raw_of(a)[100000] == uint8_t(sample(size)[100000] ^ 0x33) && uint8_t(job.copy[100000]) == raw_of(a)[100000],
+            "the pull gave the block and the reader Java's byte");
+}
+
+// ---- stores that touch only the bytes the rule chose
+
+// ---- one load of every Java byte a merge takes
+
+// A Java thread's write that lands while the layer takes Java's bytes into the block must not leave the block different
+// from the baseline for a byte the application never wrote: the next synchronization would take that for the application's
+// write and put the old value back into the array. The page-protection handler places the write at the layer's first
+// store into the block's page, between the layer's load of Java's byte and any second load of it (a second load is what
+// the fast path of take_java_words made; the product is built with optimization, as these tests are).
+struct WordRace {
+    Made a;
+    uint8_t* block;
+    uint8_t* array;
+    uint8_t* page;
+    size_t at;  // the offset of a word in the page, on the word grid and 20 bytes or more into its chunk
+};
+WordRace word_race(Fixture& f, size_t size = 65536) {
+    WordRace race{make_held(f, std::vector<uint8_t>(size, 0)), nullptr, nullptr, nullptr, 0};
+    race.block = raw_of(race.a);
+    race.array = race.a.object->bytes.data();
+    race.page = page_inside(race.block, size);
+    race.at = size_t(race.page - race.block) + 20;
+    while (race.at % 4096 < 20 || race.at % 4 != 0) race.at += (race.at % 4 != 0) ? 1 : 4;
+    require(race.block + race.at + 4 <= race.page + size_t(getpagesize()), "the word lies in the watched page");
+    return race;
+}
+// The array and the block after a read-only release (the application never wrote the byte at `at + which`): Java's racing
+// write is in the array and, a point later, in the block.
+void require_java_write_kept(Fixture& f, WordRace& race, size_t which, uint8_t java_value, const char* what) {
+    jbyte* p = get_elements(f, race.a.shadow);
+    release_elements(f, race.a.shadow, p, 0);
+    require(race.array[race.at + which] == java_value, what);
+    require(race.block[race.at + which] == java_value, "and the block took it at the next point");
+    p = get_elements(f, race.a.shadow);
+    release_elements(f, race.a.shadow, p, 0);
+    require(race.array[race.at + which] == java_value && race.block[race.at + which] == java_value, "and they stay alike");
+}
+
+// The fast path: Java changed all four bytes of a word, the application none, and a Java write to the first of them lands
+// at the store of that byte into the block. The merge of the dirty chunk goes through the live array's critical pair.
+void check_a_java_write_during_the_word_path_of_a_merge_is_not_reverted() {
+    Fixture f = make();
+    WordRace r = word_race(f);
+    r.block[r.at - 16] = 0x41;  // the application wrote a byte of the chunk: it is merged in the live array
+    for (size_t i = 0; i < 4; ++i) r.array[r.at + i] = 0x52;
+    arm_watch(r.page, r.array + r.at, 0x63);
+    jbyte* p = get_elements(f, r.a.shadow);
+    const int hits = disarm_watch();
+    require(hits == 1, "Java's write landed at the layer's store of the word's first byte");
+    require(r.array[r.at] == 0x63 && r.array[r.at - 16] == 0x41, "the point left Java's write, and pushed the application's");
+    release_elements(f, r.a.shadow, p, 0);
+    require(r.array[r.at] == 0x63, "a read-only release cannot revert a Java-only write");
+    require_java_write_kept(f, r, 0, 0x63, "and neither can a later point");
+    require(r.array[r.at + 1] == 0x52 && r.block[r.at + 1] == 0x52, "the word's other bytes are Java's");
+}
+
+// The byte path: Java changed three bytes of a word, so each is decided on its own; a Java write to the second lands at the
+// store of the first.
+void check_a_java_write_during_the_byte_path_of_a_merge_is_not_reverted() {
+    Fixture f = make();
+    WordRace r = word_race(f);
+    r.block[r.at - 16] = 0x41;
+    for (size_t i = 0; i < 3; ++i) r.array[r.at + i] = 0x52;
+    arm_watch(r.page, r.array + r.at + 1, 0x63);
+    jbyte* p = get_elements(f, r.a.shadow);
+    const int hits = disarm_watch();
+    require(hits == 1, "Java's write landed at the layer's store of the word's first byte");
+    release_elements(f, r.a.shadow, p, 0);
+    require(r.array[r.at + 1] == 0x63, "a read-only release cannot revert a Java-only write");
+    require_java_write_kept(f, r, 1, 0x63, "and neither can a later point");
+    require(r.block[r.at] == 0x52 && r.block[r.at + 2] == 0x52 && r.array[r.at + 3] == 0, "the other bytes are as Java left them");
+}
+
+// The critical merge (a block's critical pointer, then its release), the same race.
+void check_a_java_write_during_a_critical_merge_is_not_reverted() {
+    Fixture f = make();
+    WordRace r = word_race(f);
+    r.block[r.at - 16] = 0x41;
+    for (size_t i = 0; i < 4; ++i) r.array[r.at + i] = 0x52;
+    arm_watch(r.page, r.array + r.at, 0x63);
+    void* p = get_critical(f, r.a.shadow);
+    const int hits = disarm_watch();
+    require(hits == 1, "Java's write landed at the layer's store of the word's first byte");
+    release_critical(f, r.a.shadow, p, 0);  // the application wrote nothing at `at`
+    require(r.array[r.at] == 0x63, "a release cannot revert a Java-only write");
+    require_java_write_kept(f, r, 0, 0x63, "and neither can a later point");
+}
+
+// The pull of a clean chunk inside the same critical pair (the block has a dirty chunk elsewhere, so the pair is made), the
+// same race.
+void check_a_java_write_during_the_pull_in_place_is_not_reverted() {
+    Fixture f = make();
+    WordRace r = word_race(f);
+    const size_t far_chunk = (r.at / 4096 == 0) ? 3 * 4096 : 0;
+    r.block[far_chunk + 1] = 0x41;  // a dirty chunk elsewhere: the pair is made; the chunk of the word is clean
+    for (size_t i = 0; i < 4; ++i) r.array[r.at + i] = 0x52;
+    world.critical_gets = 0;
+    arm_watch(r.page, r.array + r.at, 0x63);
+    jbyte* p = get_elements(f, r.a.shadow);
+    const int hits = disarm_watch();
+    require(world.critical_gets == 1 && hits == 1, "the pair pulled the clean chunk, and Java's write landed at its store");
+    release_elements(f, r.a.shadow, p, 0);
+    require(r.array[r.at] == 0x63, "a read-only release cannot revert a Java-only write");
+    require_java_write_kept(f, r, 0, 0x63, "and neither can a later point");
+}
+
+// A pull through a region copy of a clean block: the copy is a snapshot, block and baseline take the copy's byte, and Java's
+// write after the copy is taken at the next point.
+void check_a_java_write_during_a_region_pull_is_taken_at_the_next_point() {
+    Fixture f = make();
+    WordRace r = word_race(f);
+    for (size_t i = 0; i < 4; ++i) r.array[r.at + i] = 0x52;
+    world.critical_gets = 0;
+    arm_watch(r.page, r.array + r.at, 0x63);
+    std::vector<jbyte> copy(65536);
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, r.a.shadow, 0, 65536, copy.data());
+    const int hits = disarm_watch();
+    require(hits == 1 && world.critical_gets == 0, "a region pull, and Java's write landed at its store");
+    require(r.array[r.at] == 0x63, "the array keeps Java's write");
+    require_java_write_kept(f, r, 0, 0x63, "and no later point reverts it");
+}
+
+// The deferred end of a block (the one merge through region calls): its copy is a snapshot too.
+void check_a_java_write_during_a_deferred_ends_merge_is_kept() {
+    Fixture f = make();
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    require(push(f.env, 16) == 0, "a frame");
+    WordRace r = word_race(f);
+    r.block[r.at - 16] = 0x41;
+    for (size_t i = 0; i < 4; ++i) r.array[r.at + i] = 0x52;
+    world.exception_pending = true;
+    pop(f.env, nullptr);  // the end waits for a call without an exception
+    world.exception_pending = false;
+    arm_watch(r.page, r.array + r.at, 0x63);
+    jobject plain = byte_array(sample(4));
+    fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, plain);  // the end is finished here
+    const int hits = disarm_watch();
+    require(hits == 1 && is_ended_block(r.a.shadow), "the end took Java's word, and Java's write landed at its store");
+    require(r.array[r.at] == 0x63 && r.array[r.at - 16] == 0x41, "Java's write is kept, and the application's byte is in the array");
+    jbyte* p = get_elements(f, r.a.shadow);  // the kept reference of the ended block: a point
+    release_elements(f, r.a.shadow, p, 0);
+    require(r.array[r.at] == 0x63 && r.block[r.at] == 0x63, "and the next point gave the block Java's byte");
+}
+
+// A span that a pull found equal to the baseline is skipped; what Java writes afterwards is taken at the next point.
+void check_a_java_write_after_a_skipped_span_is_taken_at_the_next_point() {
+    Fixture f = make();
+    Made a = make_held(f, std::vector<uint8_t>(4096, 0x11));
+    g_after_get = [&] { a.object->bytes[1000] = 0x77; };  // after the copy, which was equal to the baseline
+    jbyte buffer[4096];
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 4096, buffer);
+    require(raw_of(a)[1000] == 0x11 && a.object->bytes[1000] == 0x77, "the point did not see the write");
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 4096, buffer);
+    require(raw_of(a)[1000] == 0x77 && static_cast<uint8_t>(buffer[1000]) == 0x77, "the next point took it");
+}
+
+// ---- the application's last write is never lost to the merge's own store
+
+// The merge stores the application's byte W into the array and the pull that follows reads the array; were it to take W for a
+// Java change against the old baseline K, an application thread that wrote K back in between would have W stored over its
+// last write, in its own memory and in the array, on a byte Java never wrote. The merge makes W the baseline at its decision,
+// so the block (K) differs from it and K goes to the array at the next point. The page-protection handler places the
+// application's write of K at the merge's store of W into the live array, between the load of the block byte (the one load
+// every decision rests on) and the baseline write: a second load of the block byte there would see K and write it to the
+// baseline instead.
+void check_the_applications_write_back_to_the_old_value_during_a_critical_merge_is_kept() {
+    for (size_t bytes : {size_t(1), size_t(4)}) {  // the byte path, and the word path
+        Fixture f = make();
+        const size_t size = 65536;
+        Made a = make_held(f, std::vector<uint8_t>(size, 0));
+        uint8_t* block = raw_of(a);
+        uint8_t* array = a.object->bytes.data();
+        uint8_t* apage = page_inside(array, size);
+        size_t at = size_t(apage - array) + 100;
+        at -= at % 4;
+        for (size_t i = 0; i < bytes; ++i) block[at + i] = 0x41;  // the application's first write; the last point's value is 0
+        arm_watch(apage, block + at, 0x00);  // at the merge's store into the array the application writes 0 back
+        jbyte* p = get_elements(f, a.shadow);
+        const int hits = disarm_watch();
+        require(hits == 1, "the application's write landed at the merge's first store into the array");
+        require(array[at] == 0x41 && block[at] == 0x00, "the array has the merge's byte, the block the application's last write");
+        release_elements(f, a.shadow, p, 0);  // a point: block 0 != baseline 0x41, so 0 goes to the array
+        require(block[at] == 0x00 && array[at] == 0x00, "the application's last write reached the array");
+        p = get_elements(f, a.shadow);
+        release_elements(f, a.shadow, p, 0);
+        require(block[at] == 0x00 && array[at] == 0x00, "and the next point keeps it");
+        for (size_t i = 1; i < bytes; ++i) require(block[at + i] == 0x41 && array[at + i] == 0x41, "the other bytes are the application's");
+    }
+}
+
+// The same through the one region merge (a deferred end): the second write lands after the run's region write.
+void check_the_applications_write_back_to_the_old_value_during_a_deferred_ends_merge_is_kept() {
+    Fixture f = make();
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    require(push(f.env, 16) == 0, "a frame");
+    Made a = make_held(f, std::vector<uint8_t>(65536, 0));
+    uint8_t* block = raw_of(a);
+    const size_t at = 5000;
+    block[at] = 0x41;
+    world.exception_pending = true;
+    pop(f.env, nullptr);  // the end waits for a call without an exception
+    world.exception_pending = false;
+    g_after_set = [&] { block[at] = 0x00; };  // after the run's region write: the application writes 0 back
+    jobject plain = byte_array(sample(4));
+    fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, plain);  // the end is finished here
+    require(is_ended_block(a.shadow) && a.object->bytes[at] == 0x41 && block[at] == 0x00, "the end pushed the byte, and the block holds the last write");
+    jbyte* p = get_elements(f, a.shadow);
+    release_elements(f, a.shadow, p, 0);
+    require(block[at] == 0x00 && a.object->bytes[at] == 0x00, "the next point pushed the application's last write");
+}
+
+// A region write the runtime refuses leaves the baseline as it was: the bytes are still the application's at the next point.
+// Two runs; the first write is refused, the second accepted.
+void check_a_refused_region_write_of_a_deferred_end_leaves_the_bytes_to_the_next_point() {
+    Fixture f = make();
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    require(push(f.env, 16) == 0, "a frame");
+    Made a = make_held(f, std::vector<uint8_t>(65536, 0));
+    uint8_t* block = raw_of(a);
+    a.object->bytes[2000] = 0x66;  // Java wrote a byte of the same chunk: it is taken at the end
+    block[1000] = 0x41;            // run 1
+    block[3000] = 0x42;            // run 2
+    world.exception_pending = true;
+    pop(f.env, nullptr);
+    world.exception_pending = false;
+    world.set_fails = 1;
+    world.set_calls = 0;
+    jobject plain = byte_array(sample(4));
+    fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, plain);
+    require(is_ended_block(a.shadow) && world.set_calls == 2 && !world.exception_pending, "both writes were tried, no exception is left");
+    require(a.object->bytes[1000] == 0 && a.object->bytes[3000] == 0x42, "the refused run is not in the array, the other is");
+    require(block[2000] == 0x66, "Java's byte was taken into the block");
+    world.set_calls = 0;
+    jbyte* p = get_elements(f, a.shadow);  // the next point
+    release_elements(f, a.shadow, p, 0);
+    require(a.object->bytes[1000] == 0x41 && a.object->bytes[3000] == 0x42 && a.object->bytes[2000] == 0x66,
+            "the next point pushed the refused bytes, and nothing else is lost");
+    require(block[1000] == 0x41 && block[3000] == 0x42 && world.set_calls == 0, "the pair, not a region write, did it");
+}
+
+// A pull stores the byte Java changed and no other byte of its word: another thread's raw write to the next byte, landing
+// at that store, survives, and reaches the array at the next point.
+void check_a_pull_stores_only_the_byte_java_changed() {
+    Fixture f = make();
+    const size_t size = 65536;
+    Made a = make_held(f, std::vector<uint8_t>(size, 0x11));
+    uint8_t* data = raw_of(a);
+    uint8_t* page = page_inside(data, size);
+    uint8_t* changed = page + 33;  // Java's byte, in the middle of a word whose other bytes nobody changed
+    uint8_t* neighbour = page + 34;
+    a.object->bytes[size_t(changed - data)] = 0xA1;
+    arm_watch(page, neighbour, 0x77);
+    std::vector<jbyte> copy(size);
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, jsize(size), copy.data());
+    const int hits = disarm_watch();
+    require(hits == 1, "the store of Java's byte was where the other thread's write landed");
+    require(*changed == 0xA1 && *neighbour == 0x77, "the block has Java's byte and the other thread's write");
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, jsize(size), copy.data());
+    require(a.object->bytes[size_t(neighbour - data)] == 0x77 && a.object->bytes[size_t(changed - data)] == 0xA1,
+            "and the next point took the write to the array");
+}
+
+// The merge in the live array of a critical get stores the byte the application wrote and no other byte of its word: a Java
+// thread's write to the next byte, landing at that store, survives.
+void check_the_critical_merge_stores_only_the_byte_the_application_wrote() {
+    Fixture f = make();
+    const size_t size = 524288;
+    Made a = make_held(f, std::vector<uint8_t>(size, 0x11));
+    uint8_t* data = raw_of(a);
+    uint8_t* array = a.object->bytes.data();
+    uint8_t* page = page_inside(array, size);
+    const size_t at = size_t(page + 33 - array);
+    data[at] = 0x5A;  // the application writes through the pointer
+    arm_watch(page, page + 34, 0x99);  // and Java writes the next byte of the array, as the merge stores
+    void* p = get_critical(f, a.shadow);
+    const int hits = disarm_watch();
+    require(hits == 1, "the merge stored into the array where the other write landed");
+    require(array[at] == 0x5A && array[at + 1] == 0x99, "the array has the application's byte and Java's write");
+    release_critical(f, a.shadow, p, 0);
+    require(data[at + 1] == 0x99, "and the block has Java's write after the release");
 }
 
 void check_install_rules() {
@@ -1632,12 +4963,13 @@ int main(int argc, char** argv) {
     check_exception_leaves_the_block();
     check_raw_write_reaches_a_call();
     check_raw_write_and_java_write_in_one_call();
-    check_both_sides_changed_the_native_bytes_win();
+    check_both_sides_changed_one_chunk_both_survive();
+    check_the_merge_by_words_is_byte_exact();
     check_synchronization_is_per_chunk();
     check_a_clean_block_makes_no_array_write();
     check_set_region_keeps_other_raw_writes();
     check_an_exact_comparison_keeps_every_write();
-    check_a_run_of_chunks_is_one_region_call();
+    check_a_dirty_block_is_pushed_in_place_and_a_clean_one_read_through_regions();
     check_committing_release_keeps_java_bytes_in_clean_chunks();
     check_nested_critical_release_keeps_the_other_pointers_bytes();
     check_a_receiver_is_synchronized();
@@ -1652,6 +4984,99 @@ int main(int argc, char** argv) {
     check_diagnosis_lines();
     check_thread_end();
     check_pop_local_frame();
+    check_a_native_invocation_ends_its_blocks();
+    check_nested_invocations_end_their_own_blocks();
+    check_a_native_method_that_returns_with_an_exception_pending();
+    check_six_hundred_invocations_decline_nothing();
+    check_more_than_sixty_four_nested_invocations();
+    check_no_thread_state_no_record();
+    check_an_abandoned_invocation_is_trimmed();
+    check_an_unmatched_push_local_frame_ends_with_the_invocation();
+    check_the_thunks_run_out();
+    check_a_method_without_a_thunk_ends_by_the_other_ends();
+    check_which_functions_get_a_thunk();
+    check_register_natives_registers_thunks();
+    check_detach_ends_the_references_of_a_thread();
+    check_push_and_pop_local_frame_end_their_entries();
+    check_frames_beyond_the_records();
+    check_delete_local_ref_keeps_the_frames_right();
+    check_the_thunk_diagnosis_lines();
+    check_a_kept_pointer_keeps_its_bytes();
+    check_a_collection_frees_ended_blocks();
+    check_a_sweep_takes_thirty_two_blocks_at_a_creation();
+    check_the_end_is_a_synchronization_point();
+    check_the_same_array_again_gets_its_block();
+    check_an_exception_pending_defers_a_frame_end();
+    check_thread_end_and_detach_end_blocks();
+    check_an_arena_full_of_ended_blocks();
+    check_the_full_sweep_does_not_need_the_sentinel();
+    check_the_cap_of_ended_blocks();
+    check_arrays_that_java_keeps_are_obtained_again_and_again();
+    check_arrays_with_equal_hashes_get_their_own_blocks();
+    check_the_newest_ended_block_of_an_array_is_found();
+    check_no_identity_hash_declines_the_result();
+    check_a_failed_hash_call_makes_no_second_block();
+    check_no_weak_reference_keeps_the_block_strong();
+    check_an_ended_block_does_not_see_javas_later_writes();
+    check_a_pointer_never_released_keeps_its_array();
+    check_a_release_goes_to_the_block_its_pointer_lies_in();
+    check_the_reference_of_an_ended_block_keeps_working();
+    check_a_merge_is_byte_exact_across_an_end();
+    check_declined_results_do_not_repeat_a_full_sweep();
+    check_an_end_and_a_second_thread_make_one_block();
+    check_draining_the_ends_and_a_second_thread_make_one_block();
+    check_the_class_lookup_may_enter_the_layer();
+    check_a_kept_reference_on_a_second_thread_survives_the_owners_end();
+    check_a_kept_reference_on_a_thread_without_frames_makes_no_entry();
+    check_a_thread_at_its_limit_can_use_a_kept_reference();
+    check_no_wrapper_hands_the_runtime_the_blocks_own_reference();
+    check_a_callback_that_ends_the_block_leaves_the_call_a_live_reference();
+    check_the_owners_merge_is_not_undone_by_another_threads_write();
+    check_another_threads_synchronization_does_not_undo_the_owners_pull();
+    check_an_end_is_serialized_with_a_second_threads_access();
+    check_a_critical_pointer_of_the_runtime_released_through_a_block_reaches_the_runtime();
+    check_an_elements_pointer_of_the_runtime_released_through_a_block_reaches_the_runtime();
+    check_the_record_of_a_runtime_pointer_ends_with_its_release();
+    check_a_nested_native_method_cannot_delete_its_callers_reference();
+    check_monitor_exit_with_an_exception_pending();
+    check_a_pull_does_not_overwrite_a_raw_write_to_another_byte();
+    check_a_merge_does_not_overwrite_a_raw_write_to_a_third_byte();
+    check_a_byte_both_sides_wrote_keeps_the_applications_at_a_racing_pull();
+    check_the_synchronization_is_byte_exact_for_random_writes();
+    check_a_collection_the_step_sweep_saw_is_swept_in_full();
+    check_a_kept_reference_gives_a_critical_pointer();
+    check_a_release_of_a_pointer_inside_a_block_is_harmless();
+    check_the_ids_are_resolved_before_the_first_block();
+    check_live_blocks_of_many_threads_count_against_the_cap();
+    check_a_block_critical_get_does_not_hold_the_mutex_while_it_waits_for_the_collector();
+    check_a_block_critical_release_does_not_hold_the_mutex_while_it_waits_for_the_collector();
+    check_the_mutex_is_free_while_the_first_critical_get_is_in_the_runtime();
+    check_a_block_critical_pointer_inside_any_region_makes_its_gets_outside_the_mutex();
+    check_a_block_get_in_a_region_that_does_not_raise_the_flip_count_does_not_hold_the_mutex();
+    check_a_block_release_in_a_region_that_does_not_raise_the_flip_count_does_not_hold_the_mutex();
+    check_the_longest_layer_opened_region_is_counted();
+    check_the_table_of_the_runtimes_pointers_does_not_wait_for_the_mutex();
+    check_the_sentinels_array_is_made_outside_the_mutex();
+    check_a_failed_sentinel_allocation_is_survived();
+    check_a_full_table_of_the_runtimes_pointers_logs_one_line();
+    check_the_synchronizations_need_little_stack();
+    check_a_clean_blocks_calls_make_no_critical_get();
+    check_an_exception_pending_synchronizes_nothing_and_a_deferred_end_writes_exact_runs();
+    check_a_block_freed_between_the_two_holds_is_not_merged();
+    check_a_java_write_during_a_merge_is_kept();
+    check_scattered_application_bytes_keep_a_java_write_in_every_gap();
+    check_a_java_write_during_the_word_path_of_a_merge_is_not_reverted();
+    check_a_java_write_during_the_byte_path_of_a_merge_is_not_reverted();
+    check_a_java_write_during_a_critical_merge_is_not_reverted();
+    check_a_java_write_during_the_pull_in_place_is_not_reverted();
+    check_a_java_write_during_a_region_pull_is_taken_at_the_next_point();
+    check_a_java_write_during_a_deferred_ends_merge_is_kept();
+    check_a_java_write_after_a_skipped_span_is_taken_at_the_next_point();
+    check_the_applications_write_back_to_the_old_value_during_a_critical_merge_is_kept();
+    check_the_applications_write_back_to_the_old_value_during_a_deferred_ends_merge_is_kept();
+    check_a_refused_region_write_of_a_deferred_end_leaves_the_bytes_to_the_next_point();
+    check_a_pull_stores_only_the_byte_java_changed();
+    check_the_critical_merge_stores_only_the_byte_the_application_wrote();
     check_install_rules();
     check_no_shadows_when_disabled();
     std::puts("old-application JNI: ok");

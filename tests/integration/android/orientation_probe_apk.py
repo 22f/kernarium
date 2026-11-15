@@ -36,6 +36,7 @@ ATTRIBUTES = {
     "hasCode": 0x0101000C,
     "debuggable": 0x0101000F,
     "exported": 0x01010010,
+    "process": 0x01010011,
     "screenOrientation": 0x0101001E,
     "minSdkVersion": 0x0101020C,
     "versionCode": 0x0101021B,
@@ -230,10 +231,13 @@ def decode_manifest(data: bytes) -> Node:
 
 
 def build_apk(destination: pathlib.Path, workdir: pathlib.Path | None = None,
-              tree: Element | None = None, files: dict[str, bytes] | None = None) -> pathlib.Path:
+              tree: Element | None = None, files: dict[str, bytes] | None = None,
+              keystore: pathlib.Path | None = None) -> pathlib.Path:
     """Writes the signed package to `destination`: a throwaway key signs it, so the result belongs to no one.
     The package is this module's orientation probe, or the application of another manifest `tree` with the
-    other entries `files` names, such as classes.dex (property_probe_apk.py)."""
+    other entries `files` names, such as classes.dex (property_probe_apk.py). `keystore` names a throwaway
+    key to share between packages (made on first use, and left in place): packages signed with one key can
+    update each other."""
     own = workdir is None
     scratch = pathlib.Path(tempfile.mkdtemp(prefix="uml-orientation-apk-")) if own else workdir
     try:
@@ -242,13 +246,14 @@ def build_apk(destination: pathlib.Path, workdir: pathlib.Path | None = None,
             package.writestr("AndroidManifest.xml", encode_manifest(tree))
             for name, content in (files or {}).items():
                 package.writestr(name, content)
-        keystore = scratch / "throwaway.p12"
+        keystore = keystore or scratch / "throwaway.p12"
         run = lambda *command: subprocess.run(  # noqa: E731
             command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, timeout=120, check=True)
-        run("keytool", "-genkeypair", "-keystore", str(keystore), "-storetype", "PKCS12", "-storepass", "orientation",
-            "-keypass", "orientation", "-alias", "probe", "-keyalg", "RSA", "-keysize", "2048", "-validity", "30",
-            "-dname", "CN=Orientation Probe")
+        if not keystore.exists():
+            run("keytool", "-genkeypair", "-keystore", str(keystore), "-storetype", "PKCS12", "-storepass",
+                "orientation", "-keypass", "orientation", "-alias", "probe", "-keyalg", "RSA", "-keysize", "2048",
+                "-validity", "30", "-dname", "CN=Orientation Probe")
         run("jarsigner", "-keystore", str(keystore), "-storepass", "orientation", "-sigalg", "SHA256withRSA",
             "-digestalg", "SHA-256", str(unsigned), "probe")
         destination.write_bytes(unsigned.read_bytes())

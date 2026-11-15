@@ -2107,6 +2107,102 @@ void cache_chains_indirect_transfers()
 		"a shared-tier eviction cost a site its own trained target");
 }
 
+/* A transfer to the all-ones address, which is also what every empty cell of
+ * the indirect caches holds, leaves a site that holds two other targets as it
+ * leaves a cold one: through the exit that reports the target, never through
+ * an empty cell's link. */
+void indirect_transfers_to_the_all_ones_address_leave_like_a_cold_site()
+{
+	using namespace uml::cpu::x86_64;
+	constexpr std::uint64_t all_ones = ~std::uint64_t{};
+	for (const auto target : {all_ones, all_ones - 3, all_ones - 7,
+		     std::uint64_t{0x8000'0000'0000'0000}}) {
+		TestMemory memory;
+		memory.load(0, {0xff, 0xe0}); /* jmp rax */
+		memory.load(16, {0xb8, 0x2a, 0x00, 0x00, 0x00, 0x0f, 0x05});
+		memory.load(24, {0xb8, 0x2b, 0x00, 0x00, 0x00, 0x0f, 0x05});
+		memory.load(32, {0xc3}); /* ret */
+		memory.load(48, {0xff, 0xe0}); /* a cold jmp rax */
+		memory.load(64, {0xc3}); /* a cold ret */
+		const auto stack = [&](std::uint64_t slot, std::uint64_t value) {
+			for (unsigned byte = 0; byte < 8; ++byte)
+				memory.load(512 + slot * 8 + byte,
+					{static_cast<std::uint8_t>(value >> (8 * byte))});
+		};
+		stack(0, 16);
+		stack(1, 24);
+		stack(2, 16);
+		stack(3, target);
+
+		gadgets::Executor executor;
+		executor.prepare(memory, 42, 1, 1);
+		const auto program = [&](std::uint64_t rip) {
+			const auto selected =
+				executor.select_program(memory, rip, ExecutionMode::long64);
+			require(selected.program != nullptr,
+				"an indirect branch did not cache");
+			return selected.program;
+		};
+		const auto jump = program(0);
+		const auto ret = program(32);
+		const auto cold_jump = program(48);
+		const auto cold_ret = program(64);
+		const auto first = program(16);
+		const auto second = program(24);
+		require(first != nullptr && second != nullptr);
+
+		const auto exit_of = [&](const gadgets::Program *branch,
+					  std::uint64_t rip, std::uint64_t value,
+					  std::uint64_t slot) {
+			CpuState cpu{};
+			cpu.gpr(Register::rax) = value;
+			cpu.gpr(Register::rsp) = 512 + slot * 8;
+			cpu.rip = rip;
+			const auto result =
+				gadgets::execute(*branch, cpu, memory, executor, 64);
+			return std::pair{result, cpu};
+		};
+		const auto [cold_jump_result, cold_jump_cpu] =
+			exit_of(cold_jump, 48, target, 0);
+		const auto [cold_ret_result, cold_ret_cpu] =
+			exit_of(cold_ret, 64, 0, 3);
+		/* {one, two, one} through each site fills both its cells. */
+		for (const auto visit : {16ULL, 24ULL, 16ULL}) {
+			const auto [jumped, jumped_cpu] =
+				exit_of(jump, 0, visit, 0);
+			require(jumped.event == uml::cpu::EngineEvent::system_call,
+				"a trained jump did not reach its target");
+		}
+		for (const auto slot : {0ULL, 1ULL, 2ULL}) {
+			const auto [returned, returned_cpu] =
+				exit_of(ret, 32, 0, slot);
+			require(returned.event == uml::cpu::EngineEvent::system_call,
+				"a trained return did not reach its target");
+		}
+		const auto [jump_result, jump_cpu] = exit_of(jump, 0, target, 0);
+		const auto [ret_result, ret_cpu] = exit_of(ret, 32, 0, 3);
+		require(cold_jump_result.event != uml::cpu::EngineEvent::system_call &&
+				cold_ret_result.retired_instructions == 1 &&
+				cold_jump_result.retired_instructions == 1,
+			"a cold transfer to an unmapped address did not retire once");
+		require(jump_result.event == cold_jump_result.event &&
+				jump_result.retired_instructions ==
+					cold_jump_result.retired_instructions &&
+				jump_cpu.rip == cold_jump_cpu.rip,
+			"a trained jump to the all-ones address left differently from "
+			"a cold one");
+		require(ret_result.event == cold_ret_result.event &&
+				ret_result.retired_instructions ==
+					cold_ret_result.retired_instructions &&
+				ret_cpu.rip == cold_ret_cpu.rip,
+			"a trained return to the all-ones address left differently from "
+			"a cold one");
+		require(jump_result.event != uml::cpu::EngineEvent::system_call &&
+				ret_result.event != uml::cpu::EngineEvent::system_call,
+			"a transfer to an unmapped address ran code");
+	}
+}
+
 /* No other test here binds an execution context, so `code_link_safe` has never
  * been reachable: without one it refuses every link and the engine leaves the
  * stream. The two call tests below are about exactly that decision, so they
@@ -10863,6 +10959,7 @@ int main(int argc, char **argv)
 	cache_links_common_successors();
 	cache_chains_direct_branches();
 	cache_chains_indirect_transfers();
+	indirect_transfers_to_the_all_ones_address_leave_like_a_cold_site();
 	an_unrelated_code_change_leaves_a_link_armed();
 	with_sharing(false, a_link_sweep_releases_what_only_replaced_blocks_named);
 	linked_call_crosses_a_disjoint_executable_stack_write();

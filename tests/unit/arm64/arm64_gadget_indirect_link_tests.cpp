@@ -294,6 +294,87 @@ int main()
 			return_site.entries[0].link == &resume.link);
 	}
 
+	/* The guest can return to the all-ones address, which is also the PC of
+	 * every empty cell and of an empty return record. A site whose cells both
+	 * hold other targets, and a ring with no record to pop, leave through the
+	 * ordinary miss with the target as the PC, whatever the ring's top: the
+	 * empty record names no link to follow, so it is not popped either. A
+	 * published target table answers through its empty entry's unlinked
+	 * record, and a cold site through its empty cell's, as before. */
+	{
+		constexpr auto all_ones = ~std::uint64_t{};
+		auto first_target = build_target(0x5000, 41);
+		auto second_target = build_target(0x6000, 42);
+		LinkTarget first{0x5000};
+		LinkTarget second{0x6000};
+		first.resolve(first_target);
+		second.resolve(second_target);
+		std::array<gadgets::IndirectLinkEntry, gadgets::target_tier_entries>
+			table;
+		table.fill({all_ones, &empty.link});
+
+		for (const unsigned source : {12U, 30U}) {
+			gadgets::IndirectLink site{};
+			site.entries[0] = {first.link.guest_pc, &first.link};
+			site.entries[1] = {second.link.guest_pc, &second.link};
+			auto ret = build_cached(
+				source_pc, return_register(source), site);
+			require(ret.program.words()[0] ==
+				address(source == 30 ?
+					uml_arm64_gadget_return_x30_cached :
+					uml_arm64_gadget_return_cached));
+			for (const std::uint8_t top : {0, 1, 5, 15}) {
+				for (const bool published : {false, true}) {
+					arm64::CpuState cpu{};
+					cpu.registers[source] = all_ones;
+					cpu.gadget_return_top = top;
+					if (published)
+						cpu.gadget_target_tier = table.data();
+					::uml::memory::Tlb tlb;
+					std::size_t executed = 0;
+					require(gadgets::execute(
+							ret.program, cpu, tlb, executed) ==
+						::uml::cpu::EngineEvent::continued);
+					require(cpu.pc == all_ones && executed == 1);
+					require(cpu.gadget_indirect_miss ==
+						(published ? nullptr : &site));
+					require(cpu.gadget_return_top == top);
+					require(site.entries[0].guest_pc == 0x5000 &&
+						site.entries[0].link == &first.link &&
+						site.entries[1].guest_pc == 0x6000 &&
+						site.entries[1].link == &second.link);
+				}
+			}
+		}
+
+		/* A record that names the target and a link is still popped. */
+		gadgets::IndirectLink site{};
+		site.entries[0] = {first.link.guest_pc, &first.link};
+		site.entries[1] = {second.link.guest_pc, &second.link};
+		auto ret = build_cached(source_pc, return_register(12), site);
+		arm64::CpuState cpu{};
+		cpu.registers[12] = 0x9000;
+		cpu.gadget_return_stack[0] = {0x9000, &first.link};
+		cpu.gadget_return_top = 1;
+		::uml::memory::Tlb tlb;
+		std::size_t executed = 0;
+		require(gadgets::execute(ret.program, cpu, tlb, executed) ==
+			::uml::cpu::EngineEvent::system_call);
+		require(cpu.registers[0] == 41 && cpu.gadget_return_top == 0);
+
+		/* A cold site answers through its empty cell. */
+		gadgets::IndirectLink cold{};
+		initialize(cold, empty);
+		auto cold_ret = build_cached(source_pc, return_register(12), cold);
+		arm64::CpuState cold_cpu{};
+		cold_cpu.registers[12] = all_ones;
+		executed = 0;
+		require(gadgets::execute(cold_ret.program, cold_cpu, tlb, executed) ==
+			::uml::cpu::EngineEvent::continued);
+		require(cold_cpu.pc == all_ones && executed == 1 &&
+			cold_cpu.gadget_indirect_miss == nullptr);
+	}
+
 	/* A target the site's cells do not hold is followed through the address
 	 * space's target table, which also fills the site's empty cell; without
 	 * a matching record, or with no table published, the site exits as

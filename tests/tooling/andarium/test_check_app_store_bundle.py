@@ -8,6 +8,7 @@ __import__("sys").dont_write_bytecode = True
 
 import argparse
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 TIMEOUT_SECONDS = 120
 
@@ -388,6 +390,116 @@ def run(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProc
     )
 
 
+def load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class Outcome(NamedTuple):
+    """How a run of a script ended: its status and its two streams."""
+    returncode: int
+    out: str
+    err: str
+
+    @property
+    def stdout(self) -> str:
+        """Both streams as one pipe holds them: a script's standard error is written as it goes and
+        its standard output, block-buffered, at its end."""
+        return self.err + self.out
+
+
+class RunShim:
+    """`subprocess` as a checker module sees it, with its `run` replaced."""
+
+    def __init__(self, run) -> None:
+        self.run = run
+
+    def __getattr__(self, name: str):
+        return getattr(subprocess, name)
+
+
+def process_status(value) -> int:
+    """The status of a process that ends with `sys.exit(value)`: none is success, an integer is its low eight
+    bits (256 is success, -1 is 255), and any other object is printed to standard error and is status 1."""
+    if value is None:
+        return 0
+    if isinstance(value, int):
+        return value & 0xFF
+    print(value, file=sys.stderr)
+    return 1
+
+
+class Checkers:
+    """The bundle check and the privacy-manifest check it runs, loaded once and run in this process.
+    Run as commands, each of the fixtures starts two interpreters and asks `xcrun nm` for the symbols of
+    a binary the other fixtures hold a copy of; here the symbols of a binary are asked once per distinct
+    content. `check_command_line` runs the real command for what only the command owns."""
+
+    def __init__(self, checker: Path) -> None:
+        self.script = checker
+        self.module = load_module("check_app_store_bundle_under_test", checker)
+        self.privacy_script = Path(self.module.CHECKER)
+        self.privacy = load_module("check_privacy_manifests_under_test", self.privacy_script)
+        self.symbols: dict[tuple, subprocess.CompletedProcess[str]] = {}
+        self.module.subprocess = RunShim(self.run_privacy_checker)
+        self.privacy.subprocess = RunShim(self.run_nm)
+
+    def call(self, main, script: Path, arguments: list[str]) -> Outcome:
+        """Runs `main` as the script's command would end: what it returns or what it raises as `SystemExit`
+        is the exit value, and the process status is what `sys.exit` and the shell make of that value."""
+        out, err = io.StringIO(), io.StringIO()
+        saved = sys.argv
+        sys.argv = [str(script), *arguments]
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    value = main()
+                except SystemExit as stop:
+                    value = stop.code
+                status = process_status(value)
+        finally:
+            sys.argv = saved
+        return Outcome(status, out.getvalue(), err.getvalue())
+
+    def run(self, arguments: list[str]) -> Outcome:
+        # The checker remembers the icons of a catalog by its path, for the life of a process. A command
+        # reads every catalog afresh, and a fixture's catalog changes under its path between two runs
+        # (the same application under both configurations), so no run here starts with what another read.
+        self.module.catalog_icons.cache_clear()
+        return self.call(self.module.main, self.script, arguments)
+
+    def run_privacy_checker(self, command: list[str], **options) -> subprocess.CompletedProcess[str]:
+        if command[0] == sys.executable and command[1] == "-B" and Path(command[2]) == self.privacy_script:
+            done = self.call(self.privacy.main, self.privacy_script, command[3:])
+            return subprocess.CompletedProcess(command, done.returncode, done.out, done.err)
+        return subprocess.run(command, **options)
+
+    def run_nm(self, command: list[str], **options) -> subprocess.CompletedProcess[str]:
+        if command[:2] != ["xcrun", "nm"]:
+            return subprocess.run(command, **options)
+        key = (tuple(command[:-1]), hashlib.sha256(Path(command[-1]).read_bytes()).digest())
+        done = self.symbols.get(key)
+        if done is None:
+            done = subprocess.run(command, **options)
+            # A failure names the path it was asked about, so it is asked again.
+            if done.returncode == 0:
+                self.symbols[key] = done
+        return done
+
+
+def run_command(checker: Path, arguments: list[str]) -> Outcome:
+    """The real command, with its streams apart."""
+    done = subprocess.run(
+        [sys.executable, "-B", str(checker), *arguments],
+        check=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, timeout=TIMEOUT_SECONDS)
+    return Outcome(done.returncode, done.stdout, done.stderr)
+
+
 def build(root: Path, name: str, source: str, extra: list[str] | None = None,
           pickers: str = IN_PLACE_PICKERS) -> Path:
     """A library of `source` and of the document pickers `pickers` (the App
@@ -451,7 +563,14 @@ def strip_debug_map(library: Path) -> Path:
     return stripped
 
 
+def icon_info(name: str) -> dict:
+    """The icon blocks of an Info.plist whose primary icon, for the iPhone and the iPad, is `name`."""
+    return {key: {"CFBundlePrimaryIcon": {"CFBundleIconFiles": [f"{name}60x60"], "CFBundleIconName": name}}
+            for key in ("CFBundleIcons", "CFBundleIcons~ipad")}
+
+
 def app_info(**overrides: object) -> dict:
+    """An Info.plist as the AppStore configuration builds one, with its icon (DuskJade)."""
     keys: dict[str, object] = {
         "CFBundleIdentifier": "org.example.Fixture",
         "CFBundleExecutable": "Fixture",
@@ -466,6 +585,7 @@ def app_info(**overrides: object) -> dict:
         "NSCameraUsageDescription": "Uses the camera only while Camera is on.",
         "NSMicrophoneUsageDescription": "Records only while Microphone is on.",
         "NSLocationWhenInUseUsageDescription": "Shares the location only while Location is on.",
+        **icon_info("DuskJade"),
     }
     keys.update(overrides)
     return {key: value for key, value in keys.items() if value is not None}
@@ -518,7 +638,8 @@ def write_notes(app: Path, entries: list[dict] | None, strings: dict[str, str],
     and the compiled table of their translations in each language, which both tracks share."""
     if entries is not None:
         (app / track).write_text(
-            json.dumps([{"build": 11, "version": "1.0 (11)", "entries": entries}]), encoding="utf-8")
+            json.dumps([{"build": 11, "version": "1.0 (11)", "entries": entries}] if entries else []),
+            encoding="utf-8")
     for language in languages:
         lproj = app / f"{language}.lproj"
         lproj.mkdir(exist_ok=True)
@@ -541,6 +662,60 @@ CATALOG_ASSETS = {
     "AndariumFollowXHandle": "XLogo", "AndariumDeveloperX": "XLogo",
     "AndariumDeveloperName": "DeveloperAvatar", "AndariumDeveloperGitHub": "GitHubLogo",
 }
+
+
+# The compiled asset catalogs the fixtures hold, by what they hold: an app icon (DuskJade or
+# DuskEmber, alone), both of them, one of them with a second icon group (`aliased-<icon>`),
+# and none ("plain"). They are compiled once per run with actool from the application's own icon
+# documents, as the platform's reader (`assetutil`) the checker uses needs real catalogs.
+CATALOGS: dict[str, Path] = {}
+
+PLAIN_COLOR = {"colors": [{"color": {"color-space": "srgb", "components": {
+    "alpha": "1.000", "blue": "0.500", "green": "0.500", "red": "0.500"}}, "idiom": "universal"}],
+    "info": {"author": "xcode", "version": 1}}
+
+
+def compile_catalogs(work: Path, icons: Path) -> None:
+    """Compiles the fixtures' catalogs into `work` from the icon documents in `icons` (Shared)."""
+    work.mkdir()
+    jade, ember = icons / "DuskJade.icon", icons / "DuskEmber.icon"
+    alias = work / "ArchiveArtwork.icon"
+    shutil.copytree(ember, alias)
+    plain = work / "Plain.xcassets"
+    (plain / "AccentColor.colorset").mkdir(parents=True)
+    (plain / "Contents.json").write_text(json.dumps({"info": {"author": "xcode", "version": 1}}), encoding="utf-8")
+    (plain / "AccentColor.colorset" / "Contents.json").write_text(json.dumps(PLAIN_COLOR), encoding="utf-8")
+    cases = {
+        "DuskJade": ([jade], "DuskJade", False), "DuskEmber": ([ember], "DuskEmber", False),
+        "plain": ([plain], None, False), "both": ([jade, ember], "DuskJade", True),
+        "aliased-DuskJade": ([jade, alias], "DuskJade", True), "aliased-DuskEmber": ([ember, alias], "DuskEmber", True),
+    }
+    running = []
+    for label, (sources, icon, everything) in cases.items():
+        out = work / label
+        out.mkdir()
+        command = ["xcrun", "actool", *map(str, sources), "--compile", str(out), "--output-format",
+                   "human-readable-text", "--output-partial-info-plist", str(out / "partial.plist"),
+                   "--minimum-deployment-target", "27.0", "--platform", "iphoneos", "--target-device", "iphone",
+                   "--target-device", "ipad", "--development-region", "en"]
+        if icon:
+            command += ["--app-icon", icon]
+        if everything:
+            command += ["--include-all-app-icons"]
+        running.append((label, out, subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                                     stderr=subprocess.STDOUT, text=True)))
+    for label, out, process in running:
+        said = process.communicate(timeout=240)[0]
+        if process.returncode != 0 or not (out / "Assets.car").is_file():
+            raise SystemExit(f"actool could not compile the {label} catalog:\n{said}")
+        CATALOGS[label] = out / "Assets.car"
+
+
+def clone(source: Path, destination: Path) -> None:
+    """A copy of a (large) catalog that shares its blocks where the volume can."""
+    if subprocess.run(["cp", "-c", str(source), str(destination)], stdin=subprocess.DEVNULL,
+                      capture_output=True).returncode != 0:
+        shutil.copyfile(source, destination)
 
 
 def make_app(
@@ -568,10 +743,16 @@ def make_app(
     if follow_x_tables:
         write_follow_x_tables(app)
     wanted = {asset for key, asset in CATALOG_ASSETS.items() if key in info}
+    primary = info.get("CFBundleIcons", {}).get("CFBundlePrimaryIcon", {}).get("CFBundleIconName")
     for asset, present in {**(assets or {}), **({} if follow_x_logo is None else {"XLogo": follow_x_logo})}.items():
         (wanted.add if present else wanted.discard)(asset)
-    if wanted:
-        (app / "Assets.car").write_bytes(b"\0BOMStore\0" + b"".join(item.encode() + b"\0" for item in sorted(wanted)))
+    # The catalog is a compiled one with the application's icon in it (`assets` can leave it out), and
+    # the names of the other assets after its end, where the checker's byte search finds them.
+    icon = primary in CATALOGS and (assets or {}).get(primary, True)
+    if wanted or icon:
+        clone(CATALOGS[primary] if icon else CATALOGS["plain"], app / "Assets.car")
+        with (app / "Assets.car").open("ab") as handle:
+            handle.write(b"".join(b"\0" + item.encode() for item in sorted(wanted)) + b"\0")
     if manifest:
         (app / "PrivacyInfo.xcprivacy").write_bytes(plistlib.dumps(MANIFEST))
     if framework is not None:
@@ -1609,15 +1790,11 @@ def check_whole_bundle(root: Path, check, clean: Path) -> None:
                   args=[*configuration_args, *local])
 
 
-def check_one_walk(checker: Path, root: Path, clean: Path, failures: list[str]) -> None:
+def check_one_walk(checkers: Checkers, root: Path, clean: Path, failures: list[str]) -> None:
     """A run asks every leak question in one walk over the bundle (a gigabyte with the staged system
     image), whichever phase of the build it is: the run of the App Store, and the phases of the other
     configurations. A question the plan lacks would walk again, which this test counts."""
-    spec = importlib.util.spec_from_file_location("check_app_store_bundle_under_test", checker)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module, checker = checkers.module, checkers.script
     walk = module.scan_bundle
     app = make_app(root, "one-walk", clean, app_info())
     values = ["--feedback-receiver", "local@receiver.fixture",
@@ -1672,6 +1849,67 @@ def check_one_walk(checker: Path, root: Path, clean: Path, failures: list[str]) 
         failures.append("the check of a framework walks its path for a leak")
 
 
+def check_command_line(checker: Path, checkers: Checkers, root: Path, clean: Path, knob: Path,
+                       failures: list[str]) -> None:
+    """What only the command owns: its exit status, which stream says what, and its arguments. Every
+    other case of this test runs in this process, so each case here runs as the command and in this
+    process, and the two must agree."""
+    def application(name: str, executable: Path, **options) -> Path:
+        fixture = make_app(root, name, executable, app_info(), **options)
+        (fixture / APP_STORE_NOTES).write_text("[]", encoding="utf-8")
+        return fixture
+
+    ready = application("command-ready", clean, framework=clean)
+    refused = application("command-refused", knob)
+    # What the case is, its arguments, the status, and a text each of the two streams holds.
+    cases = (
+        ("a ready application", [str(ready)], 0, "ready for the App Store", ""),
+        ("a refused application", [str(refused)], 1, "", "KERNARIUM_HOST_FORWARD"),
+        ("a framework alone", ["--runtime", str(ready / "Frameworks" / "Runtime.framework")], 0, "", ""),
+        ("a missing application", [str(root / "absent.app")], 1, "", ""),
+        ("an unknown option", ["--no-such-option", str(ready)], 2, "", "usage:"),
+        ("no application", [], 2, "", "usage:"),
+    )
+    for what, arguments, status, said, complained in cases:
+        command = run_command(checker, arguments)
+        if command.returncode != status:
+            failures.append(f"the command on {what}: status {command.returncode}, expected {status}:\n"
+                            f"{command.err}")
+        elif said not in command.out or complained not in command.err:
+            failures.append(f"the command on {what}: lacks {said!r} on standard output or "
+                            f"{complained!r} on standard error:\n{command.out}{command.err}")
+        elif (status == 0) != (not command.err):
+            failures.append(f"the command on {what}: standard error is {'empty' if status else 'not empty'} "
+                            "where it should not be")
+        # The streams of a refusal: the report's lines are on standard output only where it says ready.
+        if status == 1 and "ready for" in command.out:
+            failures.append(f"the command on {what}: reports it ready and fails")
+        here = checkers.run(arguments)
+        if here != command:
+            failures.append(f"the command on {what} differs from the run in this process:\n"
+                            f"command: {command}\nhere: {here}")
+
+
+def check_exit_values(checkers: Checkers, failures: list[str]) -> None:
+    """A checker that ends with a value the shell reads as success must not look like a rejection here
+    either: the run in this process ends as a process does, whether the value is returned by `main` or
+    raised as `SystemExit`. Each value is run as a process too, and the two must agree."""
+    def raised(value):
+        def main():
+            raise SystemExit(value)
+        return main
+
+    for value in (None, 0, 1, 2, 255, 256, 257, -1, True, "refused", 1.5):
+        child = subprocess.run(
+            [sys.executable, "-B", "-c", f"import sys; sys.exit({value!r})"], check=False,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
+        want = Outcome(child.returncode, "", child.stderr)
+        for how, main in (("returned", lambda value=value: value), ("raised", raised(value))):
+            got = checkers.call(main, Path("exit-values"), [])
+            if got != want:
+                failures.append(f"exit value {value!r} {how}: ends as {got}, a process ends as {want}")
+
+
 def check_examples(root: Path, check, clean: Path, config: Path, failures: list[str]) -> None:
     """The example files' own values are placeholders, and the App Store configuration refuses each
     one of them in the mode that judges it, whatever the other values are. A value added to an
@@ -1720,17 +1958,46 @@ def main() -> int:
     options = parser.parse_args()
 
     failures: list[str] = []
+    checkers = Checkers(options.checker)
 
     # The modes that judge one feature, or a framework: they read no What's New notes.
     modes = {"--feedback", "--follow-x", "--icp", "--pickers", "--tip-jar", "--review", "--runtime",
              "--host-traces"}
     injected: dict[Path, str] = {}
+    # The icon a fixture names where the harness set it: DuskJade, as `app_info` writes, until a run
+    # under TestFlight makes it DuskEmber.
+    iconic: dict[Path, str] = {}
+
+    def retarget_icon(app: Path, configuration: str) -> None:
+        """A fixture that names the AppStore's icon gets TestFlight's (and back) in its Info.plist and
+        its asset catalog, as the configuration's build compiles its own."""
+        want = "DuskEmber" if configuration == "TestFlight" else "DuskJade"
+        have = iconic.get(app, "DuskJade")
+        if have == want:
+            return
+        iconic[app] = want
+        try:
+            with (app / "Info.plist").open("rb") as handle:
+                info = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            return
+        info.update(icon_info(want))
+        (app / "Info.plist").write_bytes(plistlib.dumps(info))
+        catalog = app / "Assets.car"
+        if catalog.exists():
+            data, old = catalog.read_bytes(), CATALOGS[have].read_bytes()
+            if data.startswith(old):
+                catalog.write_bytes(CATALOGS[want].read_bytes() + data[len(old):])
 
     def check(app: Path, *, passes: bool, expect: str = "", args: list[str] | None = None,
-              never: str = "", notes: bool = True) -> None:
+              never: str = "", notes: bool = True, icon: bool = True) -> None:
         """Runs the checker on `app`. A fixture of the full check that carries no What's New notes
-        gets its configuration's track, an empty list, as every build has one, unless `notes` is false."""
+        gets its configuration's track, an empty list, as every build has one, unless `notes` is false;
+        and one that has the AppStore's icon has the configuration's, unless `icon` is false."""
         arguments = args or []
+        if icon and not modes.intersection(arguments):
+            retarget_icon(app, arguments[arguments.index("--configuration") + 1]
+                          if "--configuration" in arguments else "AppStore")
         if notes and not modes.intersection(arguments):
             configuration = arguments[arguments.index("--configuration") + 1] if "--configuration" in arguments \
                 else "AppStore"
@@ -1741,7 +2008,7 @@ def main() -> int:
             if not (app / APP_STORE_NOTES).exists() and not (app / BETA_NOTES).exists():
                 (app / wanted).write_text("[]", encoding="utf-8")
                 injected[app] = wanted
-        result = run([sys.executable, "-B", str(options.checker), *arguments, str(app)])
+        result = checkers.run([*arguments, str(app)])
         label = app.parent.name
         if never and never in result.stdout:
             # The output itself is not repeated: it holds what must not be printed.
@@ -1753,6 +2020,7 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="andarium-app-store-") as directory:
         root = Path(directory)
+        compile_catalogs(root / "catalogs", options.checker.parent.parent / "Andarium" / "Shared")
         clean = build(root, "clean", CLEAN)
         knob = build(root, "knob", KNOB)
         launch = build(root, "launch", LAUNCH_KNOB)
@@ -1862,16 +2130,14 @@ def main() -> int:
         # stabs name is not reported as a path.
         check(make_app(root, "framework-debug-map-home", clean, app_info(), framework=mapped_home),
               passes=False, expect="Runtime.framework/Runtime: carries the linker's debug map")
-        home_result = run([sys.executable, "-B", str(options.checker),
-                           str(root / "framework-debug-map-home" / "Fixture.app")])
+        home_result = checkers.run([str(root / "framework-debug-map-home" / "Fixture.app")])
         if "home directory" in home_result.stdout:
             failures.append(
                 "a debug map's source directory was reported as a path:\n"
                 + home_result.stdout)
         check(make_app(root, "framework-debug-map", clean, app_info(), framework=mapped),
               passes=False, expect="Runtime.framework/Runtime: carries the linker's debug map")
-        mapped_result = run([sys.executable, "-B", str(options.checker),
-                             str(root / "framework-debug-map" / "Fixture.app")])
+        mapped_result = checkers.run([str(root / "framework-debug-map" / "Fixture.app")])
         if "mounted volume" in mapped_result.stdout:
             failures.append(
                 "a debug map's object paths were reported as paths:\n"
@@ -1911,7 +2177,7 @@ def main() -> int:
             ("ready", True, ""),
         ):
             framework = root / name / "Fixture.app" / "Frameworks" / "Runtime.framework"
-            result = run([sys.executable, "-B", str(options.checker), "--runtime", str(framework)])
+            result = checkers.run(["--runtime", str(framework)])
             if (result.returncode == 0) != passes or expect not in result.stdout:
                 failures.append(f"--runtime {name}: unexpected result ({result.returncode}):\n{result.stdout}")
 
@@ -1927,7 +2193,7 @@ def main() -> int:
             ("stripped-debug-map", True, ""),
         ):
             framework = root / name / "Fixture.app" / "Frameworks" / "Runtime.framework"
-            result = run([sys.executable, "-B", str(options.checker), "--host-traces", str(framework)])
+            result = checkers.run(["--host-traces", str(framework)])
             if (result.returncode == 0) != passes or expect not in result.stdout:
                 failures.append(f"--host-traces {name}: unexpected result ({result.returncode}):\n{result.stdout}")
 
@@ -1945,18 +2211,15 @@ def main() -> int:
                 # TestFlight is held to the same rule.
                 check(make_app(root, f"tf-debug-app-{index}", library, app_info()),
                       passes=False, expect=expect, args=["--configuration", "TestFlight"])
-            runtime_only = run([
-                sys.executable, "-B", str(options.checker), "--runtime",
-                str(debug_app / "Frameworks" / "Runtime.framework")])
+            runtime_only = checkers.run(["--runtime", str(debug_app / "Frameworks" / "Runtime.framework")])
             if runtime_only.returncode == 0 or expect not in runtime_only.stdout:
                 failures.append(f"--runtime debug {index} ({kind}): unexpected result "
                                 f"({runtime_only.returncode}):\n{runtime_only.stdout}")
         stand_ins = build(root, "stand-ins", STAND_INS)
         check(make_app(root, "stand-ins-app", stand_ins, app_info(), framework=stand_ins),
               passes=True, expect="ready for the App Store")
-        stand_in_runtime = run([
-            sys.executable, "-B", str(options.checker), "--runtime",
-            str(root / "stand-ins-app" / "Fixture.app" / "Frameworks" / "Runtime.framework")])
+        stand_in_runtime = checkers.run([
+            "--runtime", str(root / "stand-ins-app" / "Fixture.app" / "Frameworks" / "Runtime.framework")])
         if stand_in_runtime.returncode != 0:
             failures.append(f"--runtime stand-ins: unexpected result:\n{stand_in_runtime.stdout}")
 
@@ -2097,6 +2360,44 @@ def main() -> int:
             empty = make_app(root, f"notes-track-empty-{label}", clean, app_info())
             (empty / file).write_text("[]", encoding="utf-8")
             check(empty, passes=True, expect=says, args=flags, notes=False)
+            # A list the application would not accept is no notes file: it shows no notes.
+            entry = {"id": "a", "title": "A", "text": "B", "symbol": "s"}
+            for name, releases, expect in (
+                    ("empty-release", [{}], "a release has no build number or version"),
+                    ("extra-release-key", [{"build": 11, "version": "v", "entries": [entry], "x": 1}],
+                     "a release is not an object with only"),
+                    ("no-entries", [{"build": 11, "version": "v", "entries": []}], "has no entry"),
+                    ("empty-entry", [{"build": 11, "version": "v", "entries": [{}]}], "an entry lacks its id"),
+                    ("extra-entry-key", [{"build": 11, "version": "v", "entries": [{**entry, "x": 1}]}],
+                     "an entry is not an object with only the keys"),
+                    ("no-text", [{"build": 11, "version": "v", "entries": [{**entry, "text": None}]}],
+                     "has an empty text"),
+                    ("neither", [{"build": 11, "version": "v",
+                                  "entries": [{key: value for key, value in entry.items() if key != "text"}]}],
+                     "has neither text nor points"),
+                    ("empty-points", [{"build": 11, "version": "v", "entries": [{**entry, "points": [""]}]}],
+                     "has an empty list of points or an empty point"),
+                    ("twice", [{"build": 11, "version": "v", "entries": [entry, entry]}], "appears twice"),
+                    ("two-builds", [{"build": 11, "version": "v", "entries": [entry]},
+                                    {"build": 11, "version": "w", "entries": [{**entry, "id": "b"}]}],
+                     "build 11 has two releases")):
+                refused = make_app(root, f"notes-track-{name}-{label}", clean, app_info())
+                (refused / file).write_text(json.dumps(releases), encoding="utf-8")
+                check(refused, passes=False, expect=expect, args=flags, notes=False)
+            good = make_app(root, f"notes-track-good-{label}", clean, app_info())
+            (good / file).write_text(json.dumps([{"build": 11, "version": "v", "date": "2026-11-15",
+                                                  "entries": [{**entry, "points": ["C"], "place": "sessionSettings",
+                                                               "requirement": {"device": "pad"}}]}]),
+                                     encoding="utf-8")
+            check(good, passes=True, expect=says, args=flags, notes=False)
+            # The application reads the file at the bundle root alone: a copy elsewhere is a stray.
+            for place in ("Resources/WhatsNew.json", "ja.lproj/WhatsNewAppStore.json", "Frameworks/X.framework/WhatsNew.json"):
+                copied = make_app(root, f"notes-track-copy-{label}-{place.replace('/', '-')}", clean, app_info())
+                write_notes(copied, hidden, NOTES_STRINGS, track=file)
+                (copied / place).parent.mkdir(parents=True, exist_ok=True)
+                (copied / place).write_text("[]", encoding="utf-8")
+                check(copied, passes=False, expect=f"{place}: is a copy of a What's New notes file",
+                      args=flags, notes=False)
         # The notes' table is one for both tracks, so an AppStore bundle whose own track has
         # no entry about Send feedback still holds the beta track's strings of it. The beta
         # track's source file (--beta-notes) says which they are; without it, or for a string
@@ -2120,6 +2421,25 @@ def main() -> int:
         write_notes(stray, [], {**NOTES_STRINGS, "Fixed Send feedback not opening": "x"}, track=APP_STORE_NOTES)
         check(stray, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings",
               args=["--beta-notes", str(beta_source)])
+        # The exemption never hides what a bundled entry shows: the beta track's entry about
+        # Send feedback copied into the App Store file without its requirement is shown by a
+        # product that has no feedback, and so is a string that a bundled entry without the mark
+        # shares with a marked one, whichever track marks it.
+        copied_entry = {**FEEDBACK_ENTRY, "requirement": None}
+        for name, entries in (
+                ("copied-unmarked", [copied_entry, PLAIN_ENTRY]),
+                ("copied-other-requirement", [{**FEEDBACK_ENTRY, "requirement": {"device": "pad"}}, PLAIN_ENTRY]),
+                ("shared-title", [FEEDBACK_ENTRY, {**PLAIN_ENTRY, "id": "same-title", "title": FEEDBACK_ENTRY["title"]}])):
+            overlap = make_app(root, f"notes-beta-{name}", clean, app_info())
+            write_notes(overlap, entries, NOTES_STRINGS, track=APP_STORE_NOTES)
+            check(overlap, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings",
+                  args=["--beta-notes", str(beta_source)])
+            check(overlap, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings")
+        # An entry that keeps the mark is hidden, with the beta source or without it.
+        marked = make_app(root, "notes-beta-copied-marked", clean, app_info())
+        write_notes(marked, [FEEDBACK_ENTRY, PLAIN_ENTRY], NOTES_STRINGS, track=APP_STORE_NOTES)
+        check(marked, passes=True, expect="Send feedback is not compiled in",
+              args=["--beta-notes", str(beta_source)])
         # Only an AppStore bundle takes the exemption from there: a bundle of the beta track
         # has the notes it carries.
         flagged = make_app(root, "notes-beta-testflight", clean, app_info())
@@ -2136,6 +2456,88 @@ def main() -> int:
         write_notes(shipped, [], strings, track=APP_STORE_NOTES)
         check(shipped, passes=True, expect="What's New notes are the App Store track",
               args=["--beta-notes", str(real_notes)])
+
+        # The app icon is the configuration's own and no other: the AppStore bundle has DuskJade and
+        # nothing of DuskEmber, the TestFlight bundle the reverse. The icon is the primary icon of the
+        # iPhone's and the iPad's Info.plist block, which name no other icon, and the one app icon of
+        # Assets.car, a catalog compiled in this run and read by its typed renditions; no catalog of a
+        # nested bundle holds the other icon, and no icon file or document is of its name. Text that
+        # only mentions an icon's name is no icon.
+        for label, flags, own, other in (("appstore", [], "DuskJade", "DuskEmber"),
+                                         ("testflight", testflight, "DuskEmber", "DuskJade")):
+            ready = make_app(root, f"icon-{label}", clean, app_info())
+            check(ready, passes=True, expect=f"app icon is {own}", args=flags)
+            # Both configurations run on one fixture in turn, each with its own icon.
+            check(ready, passes=True, expect=f"app icon is {'DuskEmber' if own == 'DuskJade' else 'DuskJade'}",
+                  args=testflight if not flags else [])
+            for name, info in (
+                    ("other-primary", app_info(**icon_info(other))),
+                    ("no-icon", app_info(CFBundleIcons=None, **{"CFBundleIcons~ipad": None})),
+                    ("iphone-other", app_info(CFBundleIcons=icon_info(other)["CFBundleIcons"],
+                                              **{"CFBundleIcons~ipad": icon_info(own)["CFBundleIcons~ipad"]})),
+                    ("ipad-other", app_info(**{"CFBundleIcons~ipad": icon_info(other)["CFBundleIcons~ipad"],
+                                               "CFBundleIcons": icon_info(own)["CFBundleIcons"]})),
+                    ("no-icon-name", app_info(CFBundleIcons={"CFBundlePrimaryIcon": {"CFBundleIconFiles": ["x"]}}))):
+                wrong = make_app(root, f"icon-{name}-{label}", clean, info)
+                check(wrong, passes=False, expect="Info.plist: CFBundleIcons", args=flags, icon=False)
+            # The icon metadata names no other icon: not in the files of the primary icon, nor in an
+            # alternate icon.
+            for name, key, extra in (
+                    ("files", "CFBundleIcons", {"CFBundlePrimaryIcon": {"CFBundleIconName": own, "CFBundleIconFiles": [f"{other}60x60"]}}),
+                    ("alternate", "CFBundleIcons~ipad", {**icon_info(own)["CFBundleIcons~ipad"],
+                                                         "CFBundleAlternateIcons": {"Other": {"CFBundleIconName": other}}})):
+                names = make_app(root, f"icon-metadata-{name}-{label}", clean, app_info(**{**icon_info(own), key: extra}))
+                check(names, passes=False, expect=f"Info.plist: {key} names the {other} icon", args=flags,
+                      icon=False)
+            # The compiled catalog is the application's icon alone, as the platform's reader lists it: the
+            # Info.plist alone is not enough, and neither is a catalog of another icon, of both, or with a
+            # second icon group under any name, or one that cannot be read. (A catalog compiled from the
+            # other icon's artwork under this icon's name is not told from it; the name is what a
+            # catalog states.)
+            for name, kind, said in (
+                    ("no-catalog", None, f"Assets.car: lacks the {own} icon"),
+                    ("plain-catalog", "plain", f"Assets.car: lacks the {own} icon"),
+                    ("other-catalog", other, f"Assets.car: lacks the {own} icon"),
+                    ("other-catalog-holds", other, f"Assets.car: holds the {other} icon"),
+                    ("both-catalog", "both", f"Assets.car: holds the {other} icon"),
+                    ("aliased-catalog", f"aliased-{own}", "Assets.car: holds the ArchiveArtwork icon"),
+                    ("unreadable-catalog", "unreadable", "Assets.car: cannot be read for its app icons")):
+                bare = make_app(root, f"icon-{name}-{label}", clean, app_info(**icon_info(own)), assets={own: False})
+                if kind == "unreadable":
+                    (bare / "Assets.car").write_bytes(b"not a catalog")
+                elif kind:
+                    clone(CATALOGS[kind], bare / "Assets.car")
+                check(bare, passes=False, expect=said, args=flags, icon=False)
+            # The other icon in the catalog of a nested bundle, in a file or a document of its name.
+            nested = make_app(root, f"icon-nested-catalog-{label}", clean, app_info(**icon_info(own)))
+            (nested / "Feature.bundle").mkdir()
+            clone(CATALOGS[other], nested / "Feature.bundle" / "Assets.car")
+            check(nested, passes=False, expect=f"Feature.bundle/Assets.car: holds the {other} icon", args=flags,
+                  icon=False)
+            for name, path, said in (
+                    ("png", f"{other}60x60@2x.png", f"{other}60x60@2x.png: is a file of the {other} icon"),
+                    ("png-nested", f"Feature.bundle/{other}76x76@2x~ipad.png",
+                     f"Feature.bundle/{other}76x76@2x~ipad.png: is a file of the {other} icon"),
+                    ("document", f"{other}.icon", f"{other}.icon: is a file of the {other} icon")):
+                stray = make_app(root, f"icon-{name}-{label}", clean, app_info(**icon_info(own)))
+                (stray / path).parent.mkdir(parents=True, exist_ok=True)
+                (stray / path).write_bytes(b"\x89PNG")
+                check(stray, passes=False, expect=said, args=flags, icon=False)
+            # Text that only mentions an icon's name is no icon: a text file, a property list, UTF-16, a
+            # lower-case spelling, a file named for the icon that is no icon file, and a binary with the
+            # name in its code. The name of the icon the bundle has is in its files without harm too.
+            inside = build(root, f"icon-code-{label}", f'const char *fixture(void) {{ return "{other}"; }}\n')
+            for name, path, data in (
+                    ("text", "History.txt", f"{other} is the TestFlight icon; this build uses {own}.".encode()),
+                    ("plist", "Extra.plist", plistlib.dumps({"icon": other})),
+                    ("utf-16", "Extra.dat", other.encode("utf-16-le")),
+                    ("case", "Extra.txt", other.lower().encode()),
+                    ("named-text", f"{other}-history.txt", b"the history of the icon"),
+                    ("own", f"{own}60x60@2x.png", b"\x89PNG")):
+                fine = make_app(root, f"icon-mention-{name}-{label}", inside if name == "text" else clean,
+                                app_info(**icon_info(own)))
+                (fine / path).write_bytes(data)
+                check(fine, passes=True, expect=f"app icon is {own}", args=flags, icon=False)
         # The feature's own strings table (Feedback.strings, and the stringsdict of
         # its plurals) is the feature's: a product without the receiver holds none,
         # found by the file name though the table says nothing of the feature.
@@ -2305,7 +2707,7 @@ def main() -> int:
         check_icp(root, check, clean)
         check_testflight(root, check, clean, feature, receiver)
         check_whole_bundle(root, check, clean)
-        check_one_walk(options.checker, root, clean, failures)
+        check_one_walk(checkers, root, clean, failures)
         check_examples(root, check, clean, options.checker.parent.parent / "Config", failures)
         # Follow developer on X is compiled in only where the build names a handle,
         # by the same rule. The fixtures stand for the application with it (the
@@ -2464,8 +2866,8 @@ def main() -> int:
               passes=True, expect="Follow developer on X is not compiled in (Debug)",
               args=[*x_other, "Debug", "--developer-x", "example_handle"])
         # Both features' phase in one run says both.
-        both = run([sys.executable, "-B", str(options.checker), "--feedback", "--follow-x", "--configuration", "Debug",
-                    str(make_app(root, "x-both", clean, app_info()))])
+        both = checkers.run(["--feedback", "--follow-x", "--configuration", "Debug",
+                             str(make_app(root, "x-both", clean, app_info()))])
         if both.returncode != 0 or "Send feedback is not compiled in (Debug)" not in both.stdout \
                 or "Follow developer on X is not compiled in (Debug)" not in both.stdout:
             failures.append(f"x-both: expected both features reported:\n{both.stdout}")
@@ -2626,9 +3028,8 @@ def main() -> int:
         check(make_app(root, "no-manifest", clean, app_info(), manifest=False),
               passes=False, expect="PrivacyInfo.xcprivacy")
 
-        missing = run([sys.executable, "-B", str(options.checker), str(root / "absent.app")])
-        if missing.returncode == 0:
-            failures.append("a missing application passed")
+        check_command_line(options.checker, checkers, root, clean, knob, failures)
+        check_exit_values(checkers, failures)
 
     for failure in failures:
         print(failure, file=sys.stderr)
