@@ -5240,25 +5240,25 @@
         }
       }
     },
-    "No Google apps, on purpose" : {
+    "No Google apps" : {
       "comment" : "The title of the panel on the boot screen of a first start: Android in the virtual machine has no Google apps, on purpose. The only text of the application that names Google. Google stays in Latin letters in every language.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Googleのアプリは意図的に非搭載"
+            "value" : "Googleのアプリは非搭載"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "有意不含Google应用"
+            "value" : "不含Google应用"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "刻意不內建Google應用程式"
+            "value" : "不內建Google應用程式"
           }
         }
       }

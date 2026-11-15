@@ -48,7 +48,7 @@ final class NoGoogleNoticeUITests: XCTestCase {
         start.tap()
 
         // The first start's boot screen: its own note, and below it the panel.
-        let panel = labelled("No Google apps, on purpose", in: app)
+        let panel = labelled("No Google apps", in: app)
         XCTAssertTrue(panel.waitForExistence(timeout: 120), "the first start has no panel")
         XCTAssertTrue(panel.label.contains(reason), "the panel says \(panel.label)")
         XCTAssertTrue(

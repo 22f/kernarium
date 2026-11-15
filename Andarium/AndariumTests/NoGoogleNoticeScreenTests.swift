@@ -142,7 +142,7 @@ struct NoGoogleNoticeScreenTests {
             "the first start has no panel")
         // One element, the title and then the text, and the boot's own note stays above it.
         let label = try #require(panel.accessibilityLabel)
-        #expect(label.hasPrefix("No Google apps, on purpose"))
+        #expect(label.hasPrefix("No Google apps"))
         #expect(label.contains(Self.reason))
         #expect(label.contains("Install apps from files you have; many work without them."))
         #expect(labelled("The first-run setup may take a few minutes.", in: controller.view) != nil)
@@ -247,7 +247,7 @@ struct NoGoogleNoticeScreenTests {
         func text(_ key: String.LocalizationValue, table: String? = nil) -> String {
             String(localized: LocalizedStringResource(key, table: table, locale: Locale(identifier: language), bundle: .main))
         }
-        let title = text("No Google apps, on purpose")
+        let title = text("No Google apps")
         let body = text("Google licenses its apps and Google Play services only to makers of certified devices. Install apps from files you have; many work without them.")
         func inLatinLetters(_ words: [String]) {
             for word in words {
@@ -257,10 +257,10 @@ struct NoGoogleNoticeScreenTests {
         }
         inLatinLetters([title, body])
         if language == "en" {
-            #expect(title == "No Google apps, on purpose")
+            #expect(title == "No Google apps")
             #expect(body == Self.body && body.hasPrefix(Self.reason))
         } else {
-            #expect(title != "No Google apps, on purpose" && body != Self.body, "\(language) says it in English")
+            #expect(title != "No Google apps" && body != Self.body, "\(language) says it in English")
             #expect(title.contains("Google"), "\(language): the title does not name Google")
             #expect(body.hasPrefix("Google") && body.contains("Google Play"), "\(language): the text does not name Google and Google Play")
         }

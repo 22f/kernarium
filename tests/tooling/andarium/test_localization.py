@@ -198,7 +198,7 @@ class CheckTests(unittest.TestCase):
 
     def put_notice(self, catalog_name: str, translations: dict[str, str] | None = None) -> str:
         """The no-Google-apps notice's own title in a catalog, as the application carries it."""
-        key = "No Google apps, on purpose" if catalog_name == "Localizable" else "Missing Google apps?"
+        key = "No Google apps" if catalog_name == "Localizable" else "Missing Google apps?"
         self.assertIn(key, self.script.GOOGLE_NOTICE_KEYS[catalog_name])
         values = {"ja": "Googleのアプリは意図的に非搭載", "zh_Hans": "有意不含Google应用", "zh_Hant": "刻意不內建Google應用程式"}
         values.update(translations or {})
@@ -208,7 +208,7 @@ class CheckTests(unittest.TestCase):
     def test_the_notice_may_name_google_in_every_language(self) -> None:
         for catalog_name in ("Localizable", "Feedback"):
             self.put_notice(catalog_name)
-        body = next(iter(sorted(self.script.GOOGLE_NOTICE_KEYS["Localizable"] - {"No Google apps, on purpose"})))
+        body = next(iter(sorted(self.script.GOOGLE_NOTICE_KEYS["Localizable"] - {"No Google apps"})))
         self.tree.files["Localizable"]["strings"][body] = entry(
             ja="Googleは、自社のアプリとGoogle Play開発者サービスを、認定済みデバイスのメーカーにのみライセンス供与しています。",
             zh_Hans="Google仅向制造商授权其应用和Google Play服务。",

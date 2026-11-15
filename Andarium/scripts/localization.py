@@ -152,7 +152,7 @@ GOOGLE_NAMES = re.compile(
 # "Google Play商店" or a 谷歌 in them is still a problem.
 GOOGLE_NOTICE_KEYS = {
     "Localizable": {
-        "No Google apps, on purpose",
+        "No Google apps",
         "Google licenses its apps and Google Play services only to makers of certified devices. "
         "Install apps from files you have; many work without them.",
     },
