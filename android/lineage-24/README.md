@@ -402,9 +402,18 @@ declared. A camera lists the keys it honours: the frame duration and the black
 level lock only with `MANUAL_SENSOR`, the AF regions only with autofocus, and no
 camera lists the tone map mode or curves or states the available tone map modes
 (the templates carry no tone map key). Every result carries the scene mode
-(`DISABLED`) and, with `MANUAL_SENSOR`, the black level lock. The candidate's
-smoke test is `tests/integration/android/run_android_camera.py`
-(`android-camera`).
+(`DISABLED`) and, with `MANUAL_SENSOR`, the black level lock. A video output
+that stays configured but leaves the requests has its host stream closed after
+half a second and two requests without a still; a request that takes a still
+counts for nothing and starts the count again for every open video output, so
+a still, or a queue of stills and other captures, never closes the stream of a
+preview waiting behind it (the host would close and reopen its capture session
+when no other stream, still or torch holds it open; `camera_streams.hpp`, which
+states the two limits of the rule). An output that leaves the configuration closes with the
+reconfiguration. The Exif focal length in 35 mm film follows from the camera's
+stated focal length and physical sensor size and is left out where the camera
+states no size (`camera_exif.hpp`). The candidate's smoke test is
+`tests/integration/android/run_android_camera.py` (`android-camera`).
 
 ### Networking
 

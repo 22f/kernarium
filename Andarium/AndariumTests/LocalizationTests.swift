@@ -100,6 +100,21 @@ struct LocalizationTests {
         }
     }
 
+    /// Words the store screenshot review settled: Traditional Chinese says
+    /// 影格速率 for the frame rate and 匯入 for importing, and Japanese
+    /// writes a label and its figure with no colon between them (iOS sets the
+    /// gap between Japanese and Latin text itself).
+    @Test func theReviewedWordsAreSaid() {
+        #expect(text("Frame rate", in: "zh-Hant") == "影格速率")
+        #expect(text("Import", in: "zh-Hant") == "匯入")
+        #expect(text("Folders and packages can\u{2019}t be imported.", in: "zh-Hant") == "無法匯入檔案夾和套件。")
+        let items = "13項目", free = "7.5 GiB"
+        #expect(text("\(items) \u{00B7} \(free) free", in: "ja") == "13項目 \u{00B7} 空き容量7.5 GiB")
+        #expect(text("\(free) free on this \("iPhone")", in: "ja") == "このiPhoneの空き容量7.5 GiB")
+        #expect(text("\(free) on this \("iPhone")", in: "ja") == "このiPhoneでの使用量7.5 GiB")
+        #expect(text("From \(free)", in: "ja") == "元のサイズ7.5 GiB")
+    }
+
     /// A number interpolated into a localized string takes the language's
     /// grouping (5,555), so a port is passed as text and shows its digits.
     @Test func aPortIsWrittenWithoutGrouping() {

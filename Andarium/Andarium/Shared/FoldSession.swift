@@ -127,6 +127,8 @@ struct RailStats: View {
         .onDisappear { model.statistics(.pill, visible: false) }
     }
 
+    /// The titles are plain strings: the capsule says CPU, RAM, VRAM and FPS
+    /// in every language.
     private func metric(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(title)
