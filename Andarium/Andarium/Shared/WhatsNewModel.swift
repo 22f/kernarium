@@ -73,15 +73,46 @@ extension AppModel {
     }
 }
 
+/// The two tracks of release notes, each its own file of `Shared`. A build
+/// bundles and reads one: the build setting `WHATS_NEW_TRACK` (Andarium.xcconfig)
+/// leaves the other's file out of the bundle and defines the compilation
+/// condition that picks the file read here.
+nonisolated enum WhatsNewTrack: CaseIterable, Sendable {
+    /// The notes per beta build: Debug, Release and TestFlight builds.
+    case beta
+    /// The notes per App Store build: AppStore builds. It has no release until
+    /// the App Store version has notes.
+    case appStore
+
+    /// The bundled file's name, without its extension.
+    var resource: String {
+        switch self {
+        case .beta: "WhatsNew"
+        case .appStore: "WhatsNewAppStore"
+        }
+    }
+
+    /// The track this build bundles.
+    static var bundled: WhatsNewTrack {
+        #if WHATS_NEW_TRACK_APP_STORE
+        .appStore
+        #else
+        .beta
+        #endif
+    }
+}
+
 extension WhatsNewCatalog {
-    /// The notes the application bundles, `WhatsNew.json`; none if the
-    /// resource is missing or unreadable.
-    nonisolated static func load(from bundle: Bundle = .main) -> [WhatsNewRelease] {
-        guard let url = bundle.url(forResource: "WhatsNew", withExtension: "json"),
+    /// The notes of a track as the application bundles them, this build's own
+    /// by default; none if the file is missing or unreadable.
+    nonisolated static func load(
+        _ track: WhatsNewTrack = .bundled, from bundle: Bundle = .main
+    ) -> [WhatsNewRelease] {
+        guard let url = bundle.url(forResource: track.resource, withExtension: "json"),
               let data = try? Data(contentsOf: url),
               let releases = try? decode(data)
         else {
-            assertionFailure("WhatsNew.json is missing or unreadable")
+            assertionFailure("\(track.resource).json is missing or unreadable")
             return []
         }
         return releases

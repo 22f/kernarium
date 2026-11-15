@@ -11,12 +11,18 @@ extension AppEntry {
     /// never uses it up. `vCPUs` is the guest's count, at which the device's
     /// memory is measured for an entry's requirement; `features` is what the
     /// build has (`AppModel.buildFeatures`), and notes about one it lacks are
-    /// in neither the ribbon nor Info.
+    /// in neither the ribbon nor Info. A track with no notes at all (the App
+    /// Store's, until its version has some) has nothing to announce or to have
+    /// seen: its launch lists none, shows no ribbon and keeps no record.
     @MainActor
     func announceWhatsNew(
         on model: AppModel, hasGuest: Bool, vCPUs: Int, features: Set<WhatsNewFeature>? = nil,
         notes: [WhatsNewRelease] = WhatsNewCatalog.load()
     ) {
+        guard !notes.isEmpty else {
+            model.whatsNew.list([])
+            return
+        }
         let features = features ?? model.buildFeatures
         let notes = WhatsNewCatalog.available(notes, features: features)
         guard announcesWhatsNew, let build else {
