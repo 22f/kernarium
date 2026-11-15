@@ -350,6 +350,8 @@ UI_STATE_BUTTON = "videoRecordingStateButton"
 # The application's log lines of the stop (CameraViewModel, debug level) and of an error (CameraActivity).
 APP_LOG_TAGS = "CameraViewModel:D CameraActivity:E"
 APP_IGNORED_LINE = "is ignored, the video recording ends"
+# A press of the pause and resume button that finds no recording (the Finalize had reset the state): logged and ignored too.
+APP_NO_RECORDING_LINE = "is ignored, no recording runs"
 APP_CANCELLED_LINE = "The start of the video recording is cancelled"
 APP_STOPPED_LINE = "The video recording is stopped"
 APP_FINALIZE_LINE = "Video capture succeeded"
@@ -2546,21 +2548,26 @@ def check_taps_in_the_window(guest: Guest, since: float, sent: int) -> None:
     finalized = next((when for when, message in events if APP_FINALIZE_LINE in message), None)
     ignored = [when for when, message in events if APP_IGNORED_LINE in message]
     inside = [when for when in ignored if finalized is None or when <= finalized]
+    without = sum(APP_NO_RECORDING_LINE in message for _, message in events)
     print(f"  the pause and resume button was pressed {sent} times at once after the loss: {len(inside)} presses landed "
-          f"while the recording ended and were ignored, {len(ignored) - len(inside)} after its Finalize (the application's log)")
+          f"while the recording ended and were ignored, {len(ignored) - len(inside)} after its Finalize line but before the "
+          f"state was reset, {without} found no recording (the application's log)")
     if not inside:
         raise Failure("no press of the pause and resume button landed while the stopped recording was not finalized yet, "
                       "so the application's handling of it was not exercised (the image lacks the application's topic "
                       "of route p0031, or the presses came after the Finalize)")
 
 
-def finished_new_movies(guest: Guest, before: dict[str, dict[str, str]], seconds: float) -> list[tuple[dict[str, str], Movie]]:
-    """The movies that appeared since `before` and parse as finished ones: looked at every half second until at least one does,
-    for at most `seconds`. A file that is still being written is not a finished movie and is left out."""
+def finished_new_movies(guest: Guest, before: dict[str, dict[str, str]], seconds: float,
+                        minimum: float = 0.0) -> list[tuple[dict[str, str], Movie]]:
+    """The movies that appeared since `before` and parse as finished ones, looked at every half second until one lasts at least
+    `minimum` seconds or every new row parses (and there is one), for at most `seconds`; then what parsed (the caller judges it),
+    or the failure if nothing did. A file that is still being written is not a finished movie and is left out: a clip that a loss
+    ended can be finished while the one a later key stopped is not yet, so the first look does not decide."""
     deadline = time.monotonic() + seconds
     while True:
         guest.alive()
-        found = []
+        found, unfinished = [], 0
         rows, _ = guest.videos()
         for _, row in sorted(rows.items()):
             if row["_id"] in before:
@@ -2568,10 +2575,12 @@ def finished_new_movies(guest: Guest, before: dict[str, dict[str, str]], seconds
             try:
                 found.append((row, parse_mp4(guest.pull(row.get("_data", "")))))
             except ValueError:
-                continue
-        if found:
+                unfinished += 1
+        if found and (not unfinished or any(movie.seconds >= minimum for _, movie in found)):
             return found
         if time.monotonic() >= deadline:
+            if found:
+                return found
             raise Failure(f"no movie that appeared since the start key is a finished one after {seconds:.0f} s")
         time.sleep(0.5)
 
@@ -2601,11 +2610,15 @@ def check_start_window(guest: Guest, plan: Plan) -> None:
         time.sleep(START_WINDOW_HOLD_SECONDS)
         guest.shell(f"input keyevent {CAMERA_KEYCODE}")
         require_no_crash(guest, since, f"start window attempt {number}")
-        movies = finished_new_movies(guest, before, LOST_WAIT_SECONDS)
+        movies = finished_new_movies(guest, before, LOST_WAIT_SECONDS, START_WINDOW_MINIMUM_SECONDS)
         messages = [message for _, tag, message in application_events(guest, since) if tag == "CameraViewModel"]
+        # The key that stops the recording of the attempt logs a stop of its own, so a loss that stopped a recording that had
+        # started is the second stop line.
+        stops = sum(APP_STOPPED_LINE in message for message in messages)
         verdict = ("the start was cancelled" if any(APP_CANCELLED_LINE in message for message in messages)
-                   else "the recording had started and was stopped" if any(APP_STOPPED_LINE in message for message in messages)
-                   else "no stop or cancel in the log")
+                   else "the recording had started and the loss stopped it" if stops >= 2
+                   else "the loss cancelled and stopped nothing in the log" if stops == 1
+                   else "no cancel or stop in the log")
         cancelled += verdict == "the start was cancelled"
         clips = ", ".join(f"{row.get('_display_name', '')} {movie.seconds:.2f} s" for row, movie in movies)
         print(f"  start window {number} of {START_WINDOW_ATTEMPTS}: {verdict}; clips: {clips}")

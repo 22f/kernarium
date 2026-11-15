@@ -1190,7 +1190,7 @@ its pictures (the runner reads the container's tables and decodes no video). The
 resume button is pressed at once after the loss, while the stopped recording is
 not finalized yet; the application's log must show that presses landed in that
 window and were ignored, and the application must not crash. A last case presses
-the start key and ends the camera at once, five times: a loss in the half second
+the start key and ends the camera at once, in a loop: a loss in the half second
 before the recording exists cancels the start, the application's log must show
 that at least once, and the recording the next key press starts must be an
 ordinary clip, not one that went on over the loss. Two more
