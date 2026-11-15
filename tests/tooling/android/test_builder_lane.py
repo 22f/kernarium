@@ -326,51 +326,6 @@ def synthetic_overlay_manifest(target_package: str | None, static: bool | None, 
     return struct.pack("<HHI", 0x0003, 8, 8 + len(payload)) + payload
 
 
-def synthetic_quiet_manifest(package: str, activity: str | None, *, exported: bool | None = False,
-                             theme: int | None = 0x01030055, utf8: bool = False) -> bytes:
-    """A compiled manifest of the application that stands in for the sensor privacy dialog: a <manifest>
-    that carries android:package (a string), an <application> and, when `activity` is given, an
-    <activity> with android:name (a string), android:exported (a literal boolean, when given) and
-    android:theme (a resource reference, when given), as aapt2 writes them."""
-    strings = ["package", "name", "exported", "theme", "manifest", "application", "activity", package,
-               activity or ""]
-    pool_strings = b""
-    offsets = []
-    for text in strings:
-        offsets.append(len(pool_strings))
-        if utf8:
-            pool_strings += bytes([len(text), len(text)]) + text.encode() + b"\0"
-        else:
-            pool_strings += struct.pack("<H", len(text)) + text.encode("utf-16-le") + b"\0\0"
-    pool_strings += b"\0" * (-len(pool_strings) % 4)
-    strings_start = 28 + 4 * len(strings)
-    pool = struct.pack(
-        "<HHIIIIII", 0x0001, 28, strings_start + len(pool_strings), len(strings),
-        0, 0x100 if utf8 else 0, strings_start, 0,
-    ) + b"".join(struct.pack("<I", offset) for offset in offsets) + pool_strings
-    # "package" is not a framework attribute; name, exported and theme carry their framework IDs.
-    ids = [0, 0x01010003, 0x01010010, 0x01010000]
-    resource_map = struct.pack("<HHI", 0x0180, 8, 8 + 4 * len(ids)) + b"".join(
-        struct.pack("<I", value) for value in ids)
-
-    def element(name: int, attributes: bytes) -> bytes:
-        body = struct.pack(
-            "<IIHHHHHH", 0xFFFFFFFF, name, 20, 20, len(attributes) // 20, 0, 0, 0
-        ) + attributes
-        return struct.pack("<HHIII", 0x0102, 16, 16 + len(body), 1, 0xFFFFFFFF) + body
-
-    elements = element(4, struct.pack("<IIIHBBI", 0xFFFFFFFF, 0, 7, 8, 0, 0x03, 7)) + element(5, b"")
-    if activity is not None:
-        attributes = struct.pack("<IIIHBBI", 0xFFFFFFFF, 1, 8, 8, 0, 0x03, 8)
-        if exported is not None:
-            attributes += struct.pack("<IIIHBBI", 0xFFFFFFFF, 2, 0xFFFFFFFF, 8, 0, 0x12, 0xFFFFFFFF if exported else 0)
-        if theme is not None:
-            attributes += struct.pack("<IIIHBBI", 0xFFFFFFFF, 3, 0xFFFFFFFF, 8, 0, 0x01, theme)
-        elements += element(6, attributes)
-    payload = pool + resource_map + elements
-    return struct.pack("<HHI", 0x0003, 8, 8 + len(payload)) + payload
-
-
 def run_in_process(module, *arguments: object) -> subprocess.CompletedProcess[str]:
     """Run a loaded tool's main() as `run_tool` would run its script.
 
@@ -454,12 +409,10 @@ def synthetic_resource_table(
     arrays: list[tuple[str, list[str]]], *, utf8: bool = True,
     booleans: list[tuple[str, bool]] = (), compact: bool = False,
     integers: list[tuple[str, int]] = (), overlayable: bool = False, qualified: frozenset[str] = frozenset(),
-    strings: list[tuple[str, str]] = (),
 ) -> bytes:
     """A compiled resource table whose one package holds the given string-array resources, bool
-    resources, integer resources and plain string resources (the bools and integers as compact entries
-    when `compact` is set, as a recent aapt2 writes them), and an <overlayable> section when
-    `overlayable` is set. The resources
+    resources and integer resources (the latter two as compact entries when `compact` is set, as a
+    recent aapt2 writes them), and an <overlayable> section when `overlayable` is set. The resources
     named in `qualified` are defined under a resource configuration (portrait), not by default."""
 
     def pool(strings: list[str]) -> bytes:
@@ -477,9 +430,8 @@ def synthetic_resource_table(
                             0x100 if utf8 else 0, start, 0)
                 + struct.pack(f"<{len(strings)}I", *offsets) + data)
 
-    values = sorted({item for _, items in arrays for item in items} | {text for _, text in strings})
-    names = ([name for name, _ in arrays] + [name for name, _ in booleans] + [name for name, _ in integers]
-             + [name for name, _ in strings])
+    values = sorted({item for _, items in arrays for item in items})
+    names = [name for name, _ in arrays] + [name for name, _ in booleans] + [name for name, _ in integers]
     configuration = struct.pack("<I", 64) + b"\x00" * 60
     portrait = struct.pack("<I", 64) + b"\x00" * 8 + b"\x01" + b"\x00" * 51  # the orientation qualifier
     type_header = 20 + len(configuration)
@@ -515,10 +467,6 @@ def synthetic_resource_table(
         else:
             integer_entries.append(struct.pack("<HHI", 8, 0, index) + struct.pack("<HBBI", 8, 0, 0x10, data))
 
-    string_entries = []
-    for index, (_, text) in enumerate(strings, start=len(arrays) + len(booleans) + len(integers)):
-        string_entries.append(struct.pack("<HHI", 8, 0, index) + struct.pack("<HBBI", 8, 0, 0x03, values.index(text)))
-
     def configured(type_id: int, entries: list[bytes], entry_names: list[str], *, always: bool) -> bytes:
         """The type's chunk of default definitions and, when some are qualified, a chunk of those."""
         plain = [entry for entry, name in zip(entries, entry_names) if name not in qualified]
@@ -531,8 +479,7 @@ def synthetic_resource_table(
         chunks += struct.pack("<HHI", 0x0204, 1032, 1032) + b"\x00" * 1024
     type_names = ["array"]
     for type_name, typed, typed_names in (("bool", bool_entries, [name for name, _ in booleans]),
-                                          ("integer", integer_entries, [name for name, _ in integers]),
-                                          ("string", string_entries, [name for name, _ in strings])):
+                                          ("integer", integer_entries, [name for name, _ in integers])):
         if typed:
             type_names.append(type_name)
             chunks += configured(len(type_names), typed, typed_names, always=False)
@@ -812,7 +759,6 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         and entry != pinner_overlay_entry
         and entry != wifi_overlay_entry  # written with its own resources
         and entry != tool.CAMERA_APP  # written with its own resources
-        and entry != tool.SENSOR_USE_APK  # written with its own manifest
     )
     arm_preopt_apks = sorted(tool.REQUIRED_ARM_PREOPT_APKS)
     uml_fstab = tracked_fstab(verifier.parents[1])
@@ -953,11 +899,6 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         camera_app_path = "PRODUCT/app/Aperture/Aperture.apk"
         camera_overlay_path = tool.CAMERA_APP_OVERLAY
         camera_app_package = tool.CAMERA_APP_PACKAGE
-        sensor_use_apk = tool.SENSOR_USE_APK
-        sensor_use_package = tool.SENSOR_USE_PACKAGE
-        sensor_use_activity = tool.SENSOR_USE_ACTIVITY
-        sensor_use_string = tool.SENSOR_USE_HW_TOGGLE_ACTIVITY
-        theme_no_display = tool.THEME_NO_DISPLAY
         good_camera_rc = (
             f"service vendor.camera-provider-2-7-google /vendor/bin/hw/{camera_provider}\n"
             "    interface aidl android.hardware.camera.provider.ICameraProvider/internal/0\n"
@@ -2742,26 +2683,13 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         "toggle-missing": [],
                         "toggle-duplicate": [True, False],
                     }.get(camera_variant, [True])
-                    # The activity the sensor privacy service starts for a camera that a hardware switch blocks.
-                    sensor_use_component = f"{sensor_use_package}/{sensor_use_activity}"
-                    sensor_use_values = {
-                        "quiet-string-missing": [],
-                        "quiet-string-stock": ["com.android.systemui/"
-                                               "com.android.systemui.sensorprivacy.SensorUseStartedActivity"],
-                        "quiet-string-other-class": [f"{sensor_use_package}/{sensor_use_package}.Other"],
-                        "quiet-string-empty": [""],
-                        "quiet-string-duplicate": [sensor_use_component, "com.example/.Other"],
-                    }.get(camera_variant, [sensor_use_component])
                     network_table = synthetic_resource_table(
                         [*network_time.items(), *extra_definitions], utf8=network_time_variant != "utf16-pool",
                         booleans=[("config_flipToScreenOffEnabled", value) for value in flip_values]
                         + [("config_supportsHardwareCamToggle", value) for value in toggle_values],
                         compact=flip_variant == "compact",
-                        strings=[(sensor_use_string, value) for value in sensor_use_values],
                         qualified=frozenset({"config_supportsHardwareCamToggle"})
-                        if camera_variant == "toggle-only-qualified" else
-                        frozenset({sensor_use_string})
-                        if camera_variant == "quiet-string-only-qualified" else frozenset(),
+                        if camera_variant == "toggle-only-qualified" else frozenset(),
                     )
                     framework_apk = io.BytesIO()
                     with zipfile.ZipFile(framework_apk, "w") as overlay:
@@ -2866,26 +2794,6 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     apk.writestr("AndroidManifest.xml", synthetic_compiled_manifest(None))
                     apk.writestr("resources.arsc", aperture_table)
                 archive.writestr(camera_app_path, aperture_apk.getvalue())
-                # The quiet activity of the sensor privacy service: a package whose one activity ends at
-                # once (Theme.NoDisplay), not exported, with code.
-                quiet_apk = io.BytesIO()
-                quiet_package = "com.example.other" if camera_variant == "quiet-package-other" else sensor_use_package
-                quiet_activity = (f"{sensor_use_package}.Other" if camera_variant == "quiet-activity-other"
-                                  else sensor_use_activity)
-                quiet_theme = {"quiet-theme-other": 0x01030005, "quiet-theme-missing": None}.get(
-                    camera_variant, theme_no_display)
-                with zipfile.ZipFile(quiet_apk, "w") as apk:
-                    if camera_variant == "quiet-manifest-unreadable":
-                        apk.writestr("AndroidManifest.xml", b"not a compiled manifest")
-                    else:
-                        apk.writestr("AndroidManifest.xml", synthetic_quiet_manifest(
-                            quiet_package, None if camera_variant == "quiet-activity-missing" else quiet_activity,
-                            exported=True if camera_variant == "quiet-exported" else
-                            None if camera_variant == "quiet-exported-unstated" else False,
-                            theme=quiet_theme, utf8=camera_variant == "compact"))
-                    if camera_variant != "quiet-no-code":
-                        apk.writestr("classes.dex", b"dex\n035\0")
-                archive.writestr(sensor_use_apk, quiet_apk.getvalue())
                 overlay_apk = io.BytesIO()
                 overlay_target, overlay_static = {
                     "overlay-target": ("com.example.other", True),
@@ -5741,38 +5649,6 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             # The camera application and the camera switch.
             ("missing-camera-application", {"entries": {camera_app_path: None}},
              "required entries are missing"),
-            # The activity that stands in for the platform's Unblock dialog when the camera switch blocks the camera.
-            ("missing-sensor-use-application", {"entries": {tool.SENSOR_USE_APK: None}},
-             "required entries are missing"),
-            ("sensor-use-manifest-unreadable", {"camera_variant": "quiet-manifest-unreadable"},
-             "KernariumSensorUseQuiet.apk has no readable manifest"),
-            ("sensor-use-other-package", {"camera_variant": "quiet-package-other"},
-             "must be the package android.kernarium.sensoruse"),
-            ("sensor-use-activity-missing", {"camera_variant": "quiet-activity-missing"},
-             "must declare the activity android.kernarium.sensoruse.QuietActivity"),
-            ("sensor-use-other-activity", {"camera_variant": "quiet-activity-other"},
-             "must declare the activity android.kernarium.sensoruse.QuietActivity"),
-            ("sensor-use-exported", {"camera_variant": "quiet-exported"},
-             "must not export android.kernarium.sensoruse.QuietActivity"),
-            ("sensor-use-export-unstated", {"camera_variant": "quiet-exported-unstated"},
-             "must not export android.kernarium.sensoruse.QuietActivity"),
-            ("sensor-use-theme-other", {"camera_variant": "quiet-theme-other"},
-             "must have the theme android:style/Theme.NoDisplay"),
-            ("sensor-use-theme-missing", {"camera_variant": "quiet-theme-missing"},
-             "must have the theme android:style/Theme.NoDisplay"),
-            ("sensor-use-no-code", {"camera_variant": "quiet-no-code"}, "has no classes.dex"),
-            ("sensor-use-string-missing", {"camera_variant": "quiet-string-missing"},
-             "must set config_sensorUseStartedActivity_hwToggle to"),
-            ("sensor-use-string-stock", {"camera_variant": "quiet-string-stock"},
-             "must set config_sensorUseStartedActivity_hwToggle to"),
-            ("sensor-use-string-other-class", {"camera_variant": "quiet-string-other-class"},
-             "must set config_sensorUseStartedActivity_hwToggle to"),
-            ("sensor-use-string-empty", {"camera_variant": "quiet-string-empty"},
-             "must set config_sensorUseStartedActivity_hwToggle to"),
-            ("sensor-use-string-defined-twice", {"camera_variant": "quiet-string-duplicate"},
-             "must set config_sensorUseStartedActivity_hwToggle to"),
-            ("sensor-use-string-only-qualified", {"camera_variant": "quiet-string-only-qualified"},
-             "defines config_sensorUseStartedActivity_hwToggle only under a resource configuration"),
             ("camera-lens-launcher", {"entries": {
                 "PRODUCT/app/ApertureLensLauncher/ApertureLensLauncher.apk": synthetic_apk()}},
              "unneeded built-in application payload is forbidden"),

@@ -227,8 +227,6 @@ REQUIRED_ENTRIES = {
     "VENDOR/lib64/libgooglecamerahwl_impl.so",
     "VENDOR/etc/config/emu_camera_v4l2.json",
     "PRODUCT/app/Aperture/Aperture.apk",
-    # The activity the framework overlay names for a camera that a hardware switch blocks.
-    "PRODUCT/app/KernariumSensorUseQuiet/KernariumSensorUseQuiet.apk",
 
     "BOOT/kernel",
     "INIT_BOOT/RAMDISK/init",
@@ -2204,24 +2202,6 @@ def resource_integers(table: bytes) -> dict[str, list[int]]:
     return integers
 
 
-def resource_strings(table: bytes) -> dict[str, list[str]]:
-    """Every plain string resource of a compiled resource table, by name: its value in each
-    definition (an array or a style is not a plain string, and is left out)."""
-    strings: dict[str, list[str]] = {}
-    values = resource_string_pool(table, struct.unpack_from("<H", table, 2)[0])
-    for name, entry, flags in resource_entries(table, "string"):
-        if flags & 0x08:  # compact: the value type is the flags' high byte, the data follows
-            data_type, data = flags >> 8, struct.unpack_from("<I", table, entry + 4)[0]
-        elif flags & 0x01:
-            continue
-        else:
-            size = struct.unpack_from("<H", table, entry)[0]
-            _, _, data_type, data = struct.unpack_from("<HBBI", table, entry + size)
-        if data_type == 0x03 and data < len(values):  # TYPE_STRING
-            strings.setdefault(name, []).append(values[data])
-    return strings
-
-
 # The chunks of a compiled resource table that declare an <overlayable> section and its policies.
 RES_TABLE_PACKAGE_TYPE = 0x0200
 RES_TABLE_OVERLAYABLE_TYPES = (0x0204, 0x0205)
@@ -3729,71 +3709,7 @@ def check_camera(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) ->
     check_camera_layout_files(archive, infos)
     check_camera_configuration(archive, infos)
     check_camera_app(archive, infos)
-    check_camera_blocked_dialog(archive, infos)
 
-
-# A session started with Camera off reports the camera lens cover, which the input manager hands to the
-# sensor privacy service as the camera's hardware toggle. When an application then uses the camera, the
-# service starts the activity that config_sensorUseStartedActivity_hwToggle names over the application's
-# task: SystemUI's "Unblock device camera?" dialog by default, whose Unblock button writes the software
-# toggle and cannot lift a hardware one. The product names an activity that shows nothing instead
-# (overlay/apps/KernariumSensorUseQuiet). The service starts the component without a try block, so one
-# that is not in the image would end system_server: the string and the application must agree, and the
-# activity must be one the service can start (not exported: the system uid needs no export) and must not
-# stay on screen (Theme.NoDisplay, whose activity has to finish before it resumes).
-SENSOR_USE_APK = "PRODUCT/app/KernariumSensorUseQuiet/KernariumSensorUseQuiet.apk"
-SENSOR_USE_APK_LIMIT = 8 << 20
-SENSOR_USE_PACKAGE = "android.kernarium.sensoruse"
-SENSOR_USE_ACTIVITY = "android.kernarium.sensoruse.QuietActivity"
-SENSOR_USE_HW_TOGGLE_ACTIVITY = "config_sensorUseStartedActivity_hwToggle"
-MANIFEST_THEME_ATTRIBUTE = 0x01010000
-THEME_NO_DISPLAY = 0x01030055  # android:style/Theme.NoDisplay
-AXML_REFERENCE_TYPE = 0x01
-
-
-def check_camera_blocked_dialog(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
-    """The activity that replaces the sensor privacy dialog of a blocked camera is in the image, quiet,
-    and the one the framework overlay names."""
-    info = infos.get(SENSOR_USE_APK)
-    if info is None or info.is_dir():
-        fail(f"{SENSOR_USE_APK} is missing: the framework overlay names its activity for a camera that "
-             "a hardware switch blocks, and the sensor privacy service would end system_server starting it")
-    try:
-        with zipfile.ZipFile(io.BytesIO(read_small(archive, info, SENSOR_USE_APK_LIMIT))) as apk:
-            manifest = apk.read("AndroidManifest.xml")
-            has_code = "classes.dex" in apk.namelist()
-        root = manifest_element_attributes(manifest, "manifest")
-        activity = manifest_element_attributes(manifest, "activity")
-        theme = manifest_attribute(manifest, MANIFEST_THEME_ATTRIBUTE)
-    except (KeyError, OSError, ValueError, struct.error, IndexError, zipfile.BadZipFile) as error:
-        fail(f"{SENSOR_USE_APK} has no readable manifest: {error}")
-    if root is None or root.get("package") != SENSOR_USE_PACKAGE:
-        fail(f"{SENSOR_USE_APK} must be the package {SENSOR_USE_PACKAGE}: {root and root.get('package')}")
-    if activity is None or activity.get("name") != SENSOR_USE_ACTIVITY:
-        fail(f"{SENSOR_USE_APK} must declare the activity {SENSOR_USE_ACTIVITY}: {activity and activity.get('name')}")
-    if activity.get("exported") is not False:
-        fail(f"{SENSOR_USE_APK} must not export {SENSOR_USE_ACTIVITY}: {activity.get('exported')}; "
-             "the system uid starts it and nothing else may")
-    if theme != (AXML_REFERENCE_TYPE, THEME_NO_DISPLAY):
-        fail(f"{SENSOR_USE_ACTIVITY} must have the theme android:style/Theme.NoDisplay: {theme}; "
-             "any other would show a window over the camera application")
-    if not has_code:
-        fail(f"{SENSOR_USE_APK} has no classes.dex: the activity would not load")
-    try:
-        table = camera_resources(archive, infos, FRAMEWORK_OVERLAY, FRAMEWORK_OVERLAY_LIMIT)
-        values = resource_strings(table).get(SENSOR_USE_HW_TOGGLE_ACTIVITY)
-        defaults = resource_default_names(table, "string")
-    except (ValueError, struct.error, IndexError) as error:
-        fail(f"{FRAMEWORK_OVERLAY} has no readable resource table: {error}")
-    component = f"{SENSOR_USE_PACKAGE}/{SENSOR_USE_ACTIVITY}"
-    if values != [component]:
-        fail(
-            f"{FRAMEWORK_OVERLAY} must set {SENSOR_USE_HW_TOGGLE_ACTIVITY} to {component}: {values}; "
-            "the default is SystemUI's Unblock dialog, which cannot lift a hardware switch"
-        )
-    if SENSOR_USE_HW_TOGGLE_ACTIVITY not in defaults:
-        fail(f"{FRAMEWORK_OVERLAY} defines {SENSOR_USE_HW_TOGGLE_ACTIVITY} only under a resource "
-             "configuration: it must be in the default configuration")
 
 
 # The gamepad relay (overlay/gamepad) turns the host's game controllers into HID devices through

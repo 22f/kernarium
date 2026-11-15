@@ -21,22 +21,11 @@
 
     <!-- The camera has a hardware switch: a guest that starts with Camera off (or with the host's
          camera access refused) reports SW_CAMERA_LENS_COVER as 1 for the whole boot, on the side-key
-         device (1af4:0002), the one input device that is always registered. The input manager
-         hands that switch to the sensor privacy service as the camera's hardware toggle whatever
-         this flag says (the service sets it without asking whether it is supported); the camera
-         service then mutes every camera, which the host answers with black frames. The flag states
-         that the product has such a toggle (SensorPrivacyManager.supportsSensorToggle). A live
+         device (1af4:0002), the one input device that is always registered. With this flag the
+         sensor privacy service reads that switch and shows Android's own blocked-camera state; the
+         camera service then mutes every camera, which the host answers with black frames. A live
          session reports 0. -->
     <bool name="config_supportsHardwareCamToggle">true</bool>
-    <!-- When an application uses a sensor that a hardware toggle blocks, the sensor privacy
-         service starts this activity over the application's task. It reads the string only
-         while the hardware toggle is on, so a live session never reaches it. The platform's
-         default is SystemUI's "Unblock device camera?" dialog, whose Unblock button writes the
-         software toggle, which a hardware toggle outranks (this product supports no software
-         camera toggle). KernariumSensorUseQuiet ends at once and shows nothing; the host's
-         application explains the block. The component must exist: the service starts it
-         without a try block, so a missing one would end system_server. -->
-    <string name="config_sensorUseStartedActivity_hwToggle" translatable="false">android.kernarium.sensoruse/android.kernarium.sensoruse.QuietActivity</string>
     <integer name="config_audio_notif_vol_default">7</integer>
     <integer name="config_audio_ring_vol_default">7</integer>
 
