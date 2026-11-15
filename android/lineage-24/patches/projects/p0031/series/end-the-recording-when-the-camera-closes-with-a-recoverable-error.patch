@@ -21,18 +21,23 @@ nothing happens when no video is recording.
 
 A stopped recording is closed, so pause, resume and mute throw on it,
 while the screen keeps showing it until it finalizes, about a second
-later when no frames come. The function marks the recording as ending
-until its own Finalize event has reset the state: the pause or resume
-button, the microphone toggle and a second stop do nothing in that time. A start
-that still waits for its sound has no recording to stop: it is
+later when no frames come. The function marks the recording as ending,
+with its identity, until its own Finalize event has reset the state. In
+that time the pause or resume button and the call that mutes the
+recording do nothing (the microphone setting still applies to the next
+recording), and a second stop does nothing. The button pressed when no
+recording runs, as a press queued behind the Finalize is, is logged and
+ignored where it used to throw.
+
+A start that still waits for its sound has no recording to stop: it is
 cancelled, the state goes back to idle and the activity puts the shutter
 back.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  .../org/lineageos/aperture/CameraActivity.kt  | 11 ++-
- .../aperture/viewmodels/CameraViewModel.kt    | 84 ++++++++++++++++++-
- 2 files changed, 91 insertions(+), 4 deletions(-)
+ .../aperture/viewmodels/CameraViewModel.kt    | 90 +++++++++++++++++--
+ 2 files changed, 95 insertions(+), 6 deletions(-)
 
 diff --git a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
 index a1f5caa90d4d66ca80f4fa28910d7a3d60e3a95f..38512bdf2875c8d32f91fd51aebf3116b2c95d71 100644
@@ -57,7 +62,7 @@ index a1f5caa90d4d66ca80f4fa28910d7a3d60e3a95f..38512bdf2875c8d32f91fd51aebf3116
                          }
  
 diff --git a/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt b/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt
-index bc83de246e4288742eb3a6288bd4e66623dbefc4..a9da6799429e60a3d658fdc892fffc94906fb461 100644
+index bc83de246e4288742eb3a6288bd4e66623dbefc4..e58529930d62d4397435f54ba253d07ccf77dccb 100644
 --- a/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt
 +++ b/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt
 @@ -35,6 +35,7 @@ import androidx.lifecycle.asFlow
@@ -121,7 +126,7 @@ index bc83de246e4288742eb3a6288bd4e66623dbefc4..a9da6799429e60a3d658fdc892fffc94
              delay(delayTime)
  
              // Start recording
-@@ -1234,13 +1256,67 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
+@@ -1234,18 +1256,74 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
                          }
                          cameraState.value = CameraState.IDLE
                          videoRecording.value = null
@@ -189,7 +194,16 @@ index bc83de246e4288742eb3a6288bd4e66623dbefc4..a9da6799429e60a3d658fdc892fffc94
          when (cameraState.value) {
              CameraState.RECORDING_VIDEO -> videoRecording.value?.pause()
              CameraState.RECORDING_VIDEO_PAUSED -> videoRecording.value?.resume()
-@@ -1527,7 +1603,9 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
+-            else -> error(
+-                "videoRecordingStateButton clicked while in invalid state: ${cameraState.value}"
++            // A press queued behind the Finalize finds no recording, do not throw
++            else -> Log.w(
++                LOG_TAG,
++                "The pause or resume is ignored, no recording runs (${cameraState.value})",
+             )
+         }
+     }
+@@ -1527,7 +1605,9 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
              false -> AudioConfig.AUDIO_DISABLED
          }
  

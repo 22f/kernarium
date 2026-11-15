@@ -43,7 +43,10 @@ VIEW_MODEL_CODE = (
     ("recording.stop()", 1),
     ("isVideoRecordingEnding(", 3),  # the definition, the pause and resume button, the microphone toggle
     ("endingVideoRecording.compareAndSet(recordingId, 0L)", 1),  # the Finalize clears the mark of its own recording
+    ("else -> Log.w(", 1),  # the button pressed with no recording to pause or resume is logged, it does not throw
 )
+FINALIZE_CLEAR = "endingVideoRecording.compareAndSet(recordingId, 0L)"
+FINALIZE_RESET = ("cameraState.value = CameraState.IDLE", "videoRecording.value = null")
 
 
 def fail(message: str) -> None:
@@ -152,6 +155,24 @@ def view_model_code(patches: str) -> list[str]:
     return added
 
 
+def clears_after_the_reset(patches: str) -> bool:
+    """The Finalize handler clears the ending mark after it has reset the state and dropped the recording: a press handled before
+    that still finds the closed recording and throws on it. In the hunk that adds the clear, the state reset and the drop come
+    before it, in that order."""
+    for hunk in file_diffs(patches).get(VIEW_MODEL_FILE, []):
+        body = code_of(body_of(hunk))
+        for index, (added, code) in enumerate(body):
+            if added and FINALIZE_CLEAR in code:
+                before = [text for _, text in body[:index]]
+                try:
+                    reset = len(before) - 1 - before[::-1].index(FINALIZE_RESET[0])
+                    drop = len(before) - 1 - before[::-1].index(FINALIZE_RESET[1])
+                except ValueError:
+                    return False
+                return reset < drop
+    return False
+
+
 def load_verifier(path: Path):
     specification = importlib.util.spec_from_file_location("verify_target_files", path)
     module = importlib.util.module_from_spec(specification)
@@ -208,6 +229,9 @@ def check(android_root: Path) -> None:
             fail(f"the camera application's patches add {needle!r} as code on {found} line(s) of the view model, {count} needed")
     if "endVideoRecording()" not in model:
         fail("the camera application's patches do not stop a recording from the shutter through endVideoRecording()")
+    if not clears_after_the_reset(patches):
+        fail("the camera application's patches do not clear the ending mark after the Finalize handler has reset the state and "
+             "dropped the recording")
 
 
 def fixtures(android_root: Path) -> None:
@@ -283,12 +307,26 @@ def fixtures(android_root: Path) -> None:
                 ("a pause and resume button without its guard", 'if (isVideoRecordingEnding("The pause or resume")) {', "if (false) {"),
                 ("a mute without its guard", 'if (!isVideoRecordingEnding("Muting the recording")) {', "if (true) {"),
                 ("a Finalize that never clears the mark", "endingVideoRecording.compareAndSet(recordingId, 0L)", "recordingId"),
+                ("a button that throws with no recording to press", "else -> Log.w(", "else -> error("),
             ):
                 if old not in text:
                     fail(f"the fixture for {label} found nothing to change in the patch")
                 patch.write_text(text.replace(old, new), encoding="utf-8")
                 expect_failure(lambda: check(copy), label)
                 patch.write_text(text, encoding="utf-8")
+        for patch in sorted((copy / SERIES_DIRECTORY).glob("*.patch")):
+            text = patch.read_text(encoding="utf-8")
+            if FINALIZE_CLEAR not in text:
+                continue
+            # The earlier order: the clear before the state reset, as the first commit of the topic had it.
+            lines = text.split("\n")
+            clear = next(number for number, line in enumerate(lines) if line.startswith("+") and FINALIZE_CLEAR in line)
+            reset = next(number for number, line in enumerate(lines[:-1])
+                         if line.startswith(" ") and FINALIZE_RESET[0] in line and FINALIZE_RESET[1] in lines[number + 1])
+            moved = lines[:reset] + [lines[clear]] + lines[reset:clear] + lines[clear + 1:]
+            patch.write_text("\n".join(moved), encoding="utf-8")
+            expect_failure(lambda: check(copy), "a patch that clears the ending mark before the state is reset")
+            patch.write_text(text, encoding="utf-8")
         check(copy)
 
 
