@@ -90,6 +90,10 @@ uint32_t now_ms() {
     return static_cast<uint32_t>(now[0]) * 1000u + static_cast<uint32_t>(now[1] / 1000000);
 }
 
+// The baselines of the byte[] blocks live in libc's heap: they need no low address.
+void* alloc_baseline(size_t bytes) { return oldapp_malloc(bytes); }
+void free_baseline(void* baseline) { oldapp_free(baseline); }
+
 // The first allocation the arena could not serve: one log line, for the sessions of real games.
 uint32_t g_fallback_logged = 0;
 void note_fallback(size_t requested) {
@@ -819,7 +823,8 @@ extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void* vm_pointe
     } else {
         oldapp_log_print(kLogWarn, kTag, "no region below 2 GiB: allocator imports are left alone");
     }
-    const Platform platform{is_app_caller, thread_state, log_line, make_writable, make_read_only, describe_method, now_ms};
+    const Platform platform{is_app_caller, thread_state, log_line, make_writable, make_read_only, describe_method, now_ms,
+                            alloc_baseline, free_baseline};
     refresh_modules(true);  // every library the application loaded before this one
     void** table = const_cast<void**>(env->functions);
     const bool jni_ok = install_jni_wrappers(table, platform, region != nullptr ? region + kArenaBytes : nullptr,

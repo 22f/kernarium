@@ -42,6 +42,10 @@ struct Platform {
                             jni::jobject hint, char* kinds, unsigned capacity, unsigned* count);
     // A monotonic clock in milliseconds (it may wrap): the rate limit of the diagnosis lines. Null: no limit.
     uint32_t (*now_ms)();
+    // The memory of a block's baseline (the bytes as of its last synchronization): outside the low arena, any
+    // address. Without them nothing is intercepted.
+    void* (*alloc_baseline)(size_t bytes);
+    void (*free_baseline)(void* baseline);
 };
 
 struct Counters {

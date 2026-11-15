@@ -66,6 +66,8 @@ struct World {
     int critical = 0;                // open critical regions of the fake runtime
     int set_calls = 0;               // SetByteArrayRegion calls that reached the runtime
     std::vector<std::vector<uint8_t>> seen_arrays;  // the bytes of every array argument when the call ran
+    std::vector<uint8_t> seen_receiver;             // the bytes of an array receiver when the call ran
+    int get_calls = 0;                              // GetByteArrayRegion calls that reached the runtime
     struct LogLine {
         std::string message;
         long a, b;
@@ -121,6 +123,9 @@ void* fake_thread_state(size_t size) {
 }
 void fake_log(const char* message, long a, long b) { world.logs.push_back({message, a, b}); }
 uint32_t fake_now() { return world.clock_ms; }
+bool g_baseline_fails = false;
+void* fake_alloc_baseline(size_t bytes) { return g_baseline_fails ? nullptr : std::malloc(bytes); }
+void fake_free_baseline(void* baseline) { std::free(baseline); }
 bool g_writable_ok = true;
 bool g_read_only_ok = true;
 bool fake_make_writable(void*, size_t) { return g_writable_ok; }
@@ -150,7 +155,7 @@ bool fake_describe(Env*, void* const*, void* id, bool, jobject, char* kinds, uns
     return true;
 }
 const Platform kPlatform{fake_is_app, fake_thread_state, fake_log, fake_make_writable, fake_make_read_only,
-                         fake_describe, fake_now};
+                         fake_describe, fake_now, fake_alloc_baseline, fake_free_baseline};
 
 jsize f_GetArrayLength(Env*, jarray a) { return static_cast<jsize>(object_of(a)->bytes.size()); }
 jobject f_NewByteArray(Env*, jsize n) { return byte_array(std::vector<uint8_t>(static_cast<size_t>(n), 0)); }
@@ -166,6 +171,7 @@ void f_SetByteArrayRegion(Env*, jarray a, jsize start, jsize len, const jbyte* b
 }
 void f_GetByteArrayRegion(Env*, jarray a, jsize start, jsize len, jbyte* buf) {
     jni_allowed("GetByteArrayRegion where JNI is not allowed (a critical region, or an exception pending)");
+    ++world.get_calls;
     auto& bytes = object_of(a)->bytes;
     if (start < 0 || len < 0 || size_t(start) + size_t(len) > bytes.size()) {
         world.exception_pending = true;
@@ -382,14 +388,33 @@ jobject f_NewObjectA(Env*, jclass, jmethodID m, const jvalue* a) {
     record("new-A", m, decode_array(world.methods.at(m).sig, a));
     return new_local(new Obj{});
 }
+// What Java reads and writes through the receiver of an instance call.
+void touch_receiver(jobject o) {
+    Obj* object = object_of(o);
+    world.seen_receiver.clear();
+    if (object->is_array) {
+        world.seen_receiver = object->bytes;
+        if (world.java_fill >= 0) std::fill(object->bytes.begin(), object->bytes.end(), uint8_t(world.java_fill));
+    }
+}
 jobject f_CallObjectMethodA(Env*, jobject o, jmethodID m, const jvalue* a) {
-    (void)object_of(o);
+    touch_receiver(o);
     record("object-A", m, decode_array(world.methods.at(m).sig, a));
     return result_of(m);
 }
 jobject f_CallObjectMethodV(Env*, jobject o, jmethodID m, va_list ap) {
-    (void)object_of(o);
+    touch_receiver(o);
     record("object-V", m, decode_va(world.methods.at(m).sig, ap));
+    return result_of(m);
+}
+jobject f_CallNonvirtualObjectMethodA(Env*, jobject o, jclass, jmethodID m, const jvalue* a) {
+    touch_receiver(o);
+    record("nonvirtual-A", m, decode_array(world.methods.at(m).sig, a));
+    return result_of(m);
+}
+jobject f_CallNonvirtualObjectMethodV(Env*, jobject o, jclass, jmethodID m, va_list ap) {
+    touch_receiver(o);
+    record("nonvirtual-V", m, decode_va(world.methods.at(m).sig, ap));
     return result_of(m);
 }
 jobject f_NewObjectV(Env*, jclass, jmethodID m, va_list ap) {
@@ -459,6 +484,8 @@ struct Table {
         slots[call_slot(kObject, kArray)] = reinterpret_cast<void*>(&f_CallObjectMethodA);
         slots[slot::NewObjectA] = reinterpret_cast<void*>(&f_NewObjectA);
         slots[call_slot(kObject, kVa)] = reinterpret_cast<void*>(&f_CallObjectMethodV);
+        slots[nonvirtual_slot(kObject, kArray)] = reinterpret_cast<void*>(&f_CallNonvirtualObjectMethodA);
+        slots[nonvirtual_slot(kObject, kVa)] = reinterpret_cast<void*>(&f_CallNonvirtualObjectMethodV);
         slots[slot::NewObjectV] = reinterpret_cast<void*>(&f_NewObjectV);
         env.functions = slots;
     }
@@ -480,6 +507,7 @@ void reset_world() {
     g_app_caller = true;
     g_writable_ok = true;
     g_read_only_ok = true;
+    g_baseline_fails = false;
 }
 
 // Installs over a fresh fake table.
@@ -636,6 +664,13 @@ jint call_static_int_v(Fixture& f, jmethodID m, ...) {
     va_list ap;
     va_start(ap, m);
     jint r = fn<jint (*)(Env*, jclass, jmethodID, va_list)>(*f.table, static_call_slot(kInt, kVa))(f.env, f.cls, m, ap);
+    va_end(ap);
+    return r;
+}
+jobject call_object_v(Fixture& f, jobject receiver, jmethodID m, ...) {
+    va_list ap;
+    va_start(ap, m);
+    jobject r = fn<jobject (*)(Env*, jobject, jmethodID, va_list)>(*f.table, call_slot(kObject, kVa))(f.env, receiver, m, ap);
     va_end(ap);
     return r;
 }
@@ -1277,6 +1312,179 @@ void check_diagnosis_lines() {
     }
 }
 
+
+// The comparison with the baseline is exact: two words that a 32-bit digest would have called unchanged are a write.
+void check_an_exact_comparison_keeps_every_write() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, std::vector<uint8_t>(8, 0));
+    const uint32_t first = 0x00000001u, second = 0x4f69ba21u;  // the pair the reviewer found with equal digests
+    std::memcpy(raw_of(made), &first, 4);
+    std::memcpy(raw_of(made) + 4, &second, 4);
+    std::vector<uint8_t> written(raw_of(made), raw_of(made) + 8);
+    jbyte buffer[8] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, made.shadow, 0, 8, buffer);
+    require(std::memcmp(buffer, written.data(), 8) == 0 && made.object->bytes == written, "the write reached the array and the reader");
+}
+
+// A run of chunks that are alike is one region call, and a clean chunk is never written.
+void check_a_run_of_chunks_is_one_region_call() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, sample(6 * 4096));
+    raw_of(made)[2 * 4096] ^= 0x55;
+    raw_of(made)[3 * 4096] ^= 0x55;
+    raw_of(made)[4 * 4096 + 5] ^= 0x55;
+    world.set_calls = 0;
+    world.get_calls = 0;
+    call_static_int_v(f, f.consume, made.shadow);
+    require(world.set_calls == 1, "chunks 2 to 4 went to the array in one call");
+    require(world.get_calls == 1, "and the six chunks came back in one");
+    require(world.seen_arrays[0][2 * 4096] == raw_of(made)[2 * 4096] && world.seen_arrays[0][4 * 4096 + 5] == raw_of(made)[4 * 4096 + 5],
+            "Java saw the writes");
+    Made big = make_shadow_of(f, sample(256 * 4096));
+    world.set_calls = 0;
+    world.get_calls = 0;
+    call_static_int_v(f, f.consume, big.shadow);
+    require(world.set_calls == 0 && world.get_calls == 1, "a clean 1 MiB block: one region call, no write");
+    // The range of a small read is one chunk's turn, and only the bytes asked for come over.
+    world.get_calls = 0;
+    jbyte sixteen[16];
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, big.shadow, 100000, 16, sixteen);
+    require(world.get_calls == 1 && world.set_calls == 0, "16 bytes: one small call");
+}
+
+// A committing release applies the chunk rule: the chunk the application wrote goes to the array, Java's other chunks stay.
+void check_committing_release_keeps_java_bytes_in_clean_chunks() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, std::vector<uint8_t>(8192, 0));
+    auto elements = fn<jbyte* (*)(Env*, jarray, jboolean*)>(*f.table, slot::GetByteArrayElements)(f.env, made.shadow, nullptr);
+    auto release = fn<void (*)(Env*, jarray, jbyte*, jint)>(*f.table, slot::ReleaseByteArrayElements);
+    elements[0] = 0x77;
+    made.object->bytes[4096] = 0x41;  // Java, in the other chunk
+    release(f.env, made.shadow, elements, 0);
+    require(made.object->bytes[0] == 0x77 && made.object->bytes[4096] == 0x41, "mode 0: the application's chunk goes, Java's stays");
+    require(raw_of(made)[4096] == 0x41, "and the block follows the array");
+    elements[1] = 0x78;
+    made.object->bytes[5000] = 0x42;
+    release(f.env, made.shadow, elements, kReleaseCommit);
+    require(made.object->bytes[1] == 0x78 && made.object->bytes[5000] == 0x42, "COMMIT the same");
+    elements[2] = 0x79;
+    release(f.env, made.shadow, elements, kReleaseAbort);
+    require(made.object->bytes[2] == 0 && raw_of(made)[2] == 0, "ABORT discards the working copy");
+    require(raw_of(made)[0] == 0x77 && raw_of(made)[1] == 0x78, "and keeps what had been committed");
+}
+
+// The reviewer's nested case: the array is open through its own critical pointer and through the block's.
+void check_nested_critical_release_keeps_the_other_pointers_bytes() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, std::vector<uint8_t>(8192, 0));
+    Ref* real = new_local(made.object);
+    auto critical = fn<void* (*)(Env*, jarray, jboolean*)>(*f.table, slot::GetPrimitiveArrayCritical);
+    auto release = fn<void (*)(Env*, jarray, void*, jint)>(*f.table, slot::ReleasePrimitiveArrayCritical);
+    uint8_t* original_pointer = static_cast<uint8_t*>(critical(f.env, real, nullptr));
+    uint8_t* shadow_pointer = static_cast<uint8_t*>(critical(f.env, made.shadow, nullptr));
+    original_pointer[4096] = 0x41;
+    shadow_pointer[0] = 0x77;
+    release(f.env, made.shadow, shadow_pointer, 0);
+    release(f.env, real, original_pointer, 0);
+    require(made.object->bytes[0] == 0x77, "the block's write reached the array");
+    require(made.object->bytes[4096] == 0x41, "the other pointer's write in the other chunk survived");
+    require(raw_of(made)[4096] == 0x41, "and the block shows it");
+    // ABORT through the critical pair discards the block's writes.
+    shadow_pointer = static_cast<uint8_t*>(critical(f.env, made.shadow, nullptr));
+    shadow_pointer[8] = 0x55;
+    release(f.env, made.shadow, shadow_pointer, kReleaseAbort);
+    require(made.object->bytes[8] == 0 && raw_of(made)[8] == 0, "critical ABORT: the working copy is discarded");
+}
+
+// A shadow used as the receiver is synchronized like a parameter, in every call form, also for a method with no parameters.
+void check_a_receiver_is_synchronized() {
+    Fixture f = make();
+    auto get_method = fn<jmethodID (*)(Env*, jclass, const char*, const char*)>(*f.table, slot::GetMethodID);
+    jmethodID clone = get_method(f.env, f.cls, "clone", "()Ljava/lang/Object;");
+    Made made = make_shadow_of(f, std::vector<uint8_t>(8, 0));
+    const jvalue none[1] = {};
+    for (int form = 0; form < 5; ++form) {
+        raw_of(made)[0] = uint8_t(0xA0 + form);
+        world.seen_receiver.clear();
+        switch (form) {
+            case 0: fn<jobject (*)(Env*, jobject, jmethodID, ...)>(*f.table, call_slot(kObject, kVarargs))(f.env, made.shadow, clone); break;
+            case 1: call_object_v(f, made.shadow, clone); break;
+            case 2: fn<jobject (*)(Env*, jobject, jmethodID, const jvalue*)>(*f.table, call_slot(kObject, kArray))(f.env, made.shadow, clone, none); break;
+            case 3: fn<jobject (*)(Env*, jobject, jclass, jmethodID, const jvalue*)>(*f.table, nonvirtual_slot(kObject, kArray))(f.env, made.shadow, f.cls, clone, none); break;
+            default: fn<jobject (*)(Env*, jobject, jclass, jmethodID, ...)>(*f.table, nonvirtual_slot(kObject, kVarargs))(f.env, made.shadow, f.cls, clone); break;
+        }
+        require(world.seen_receiver.size() == 8 && world.seen_receiver[0] == uint8_t(0xA0 + form), "Java read the receiver's bytes");
+    }
+    // What Java writes through the receiver shows in the block afterwards.
+    world.java_fill = 0x31;
+    fn<jobject (*)(Env*, jobject, jmethodID, const jvalue*)>(*f.table, call_slot(kObject, kArray))(f.env, made.shadow, clone, none);
+    world.java_fill = -1;
+    require(raw_of(made)[0] == 0x31 && raw_of(made)[7] == 0x31, "and Java's writes through it come back");
+}
+
+// The same array returned twice is one block, counted twice.
+void check_one_block_per_array() {
+    Fixture f = make();
+    jobject array = byte_array(std::vector<uint8_t>(8, 0));
+    Obj* object = object_of(array);
+    world.next_result = array;
+    jobject first = call_static_object_v(f, f.get_bytes);
+    world.next_result = new_local(object);
+    jobject second = call_static_object_v(f, f.get_bytes);
+    require(is_shadow_block(first) && second == first, "the same array is the same block");
+    require(counters().shadows_live == 1 && world.globals.size() == 1, "one block, one global reference");
+    static_cast<uint8_t*>(first)[16] = 0x66;
+    call_static_int_v(f, f.consume, second);
+    require(world.seen_arrays[0][0] == 0x66, "a write through the first is seen by Java when the second is passed");
+    world.next_result = byte_array(std::vector<uint8_t>(8, 1));
+    jobject other = call_static_object_v(f, f.get_bytes);
+    require(other != first && counters().shadows_live == 2, "another array is another block");
+    auto del = fn<void (*)(Env*, jobject)>(*f.table, slot::DeleteLocalRef);
+    del(f.env, first);
+    require(is_shadow_block(second) && counters().shadows_live == 2, "the block outlives one of its two references");
+    del(f.env, second);
+    require(counters().shadows_live == 1 && world.globals.size() == 1, "and goes with the last");
+    // An array of another size, or one that is not among the recent blocks, is not mistaken for it.
+    world.next_result = new_local(object);
+    require(!is_shadow_block(first) && is_shadow_block(call_static_object_v(f, f.get_bytes)), "it is a new block once the old one is gone");
+}
+
+// The length word of the Dalvik object is the application's to write: the layer trusts only its own capacity.
+void check_a_stray_length_write_is_harmless() {
+    Fixture f = make();
+    std::vector<uint8_t> bytes;
+    bytes.reserve(8 + 64);
+    bytes.assign(8, 0x10);
+    std::memset(bytes.data() + 8, 0xEE, 64);  // behind the array: what an overrun would hit
+    jobject array = new_local(new Obj{std::move(bytes), true});
+    Obj* object = object_of(array);
+    world.next_result = array;
+    jobject shadow = call_static_object_v(f, f.get_bytes);
+    require(is_shadow_block(shadow), "a shadow");
+    const uint32_t stray = 100000;
+    std::memcpy(static_cast<uint8_t*>(shadow) + 8, &stray, 4);
+    require(fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, shadow) == 8, "the length is the capacity");
+    auto elements = fn<jbyte* (*)(Env*, jarray, jboolean*)>(*f.table, slot::GetByteArrayElements)(f.env, shadow, nullptr);
+    auto release = fn<void (*)(Env*, jarray, jbyte*, jint)>(*f.table, slot::ReleaseByteArrayElements);
+    elements[0] = 0x21;
+    release(f.env, shadow, elements, 0);
+    auto critical = fn<void* (*)(Env*, jarray, jboolean*)>(*f.table, slot::GetPrimitiveArrayCritical);
+    auto release_critical = fn<void (*)(Env*, jarray, void*, jint)>(*f.table, slot::ReleasePrimitiveArrayCritical);
+    uint8_t* pinned = static_cast<uint8_t*>(critical(f.env, shadow, nullptr));
+    pinned[1] = 0x22;
+    release_critical(f.env, shadow, pinned, 0);
+    release_critical(f.env, shadow, critical(f.env, shadow, nullptr), kReleaseAbort);
+    jbyte buffer[8] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, shadow, 0, 8, buffer);
+    call_static_int_v(f, f.consume, shadow);
+    require(object->bytes[0] == 0x21 && object->bytes[1] == 0x22, "the writes reached the array");
+    for (int i = 0; i < 64; ++i) require(object->bytes.data()[8 + i] == 0xEE, "and nothing behind it was written");
+    jbyte wide[16] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, shadow, 0, 16, wide);
+    require(world.exception_pending, "a range beyond the capacity is the runtime's exception, whatever the length word says");
+    world.exception_pending = false;
+}
+
 // A thread ends: its blocks wait for an environment, then go with their global references.
 void check_thread_end() {
     Fixture f = make();
@@ -1382,6 +1590,13 @@ int main(int argc, char** argv) {
     check_synchronization_is_per_chunk();
     check_a_clean_block_makes_no_array_write();
     check_set_region_keeps_other_raw_writes();
+    check_an_exact_comparison_keeps_every_write();
+    check_a_run_of_chunks_is_one_region_call();
+    check_committing_release_keeps_java_bytes_in_clean_chunks();
+    check_nested_critical_release_keeps_the_other_pointers_bytes();
+    check_a_receiver_is_synchronized();
+    check_one_block_per_array();
+    check_a_stray_length_write_is_harmless();
     check_no_synchronization_with_an_exception_pending();
     check_critical_pair_inside_a_region();
     check_critical_entries_do_not_drain();
