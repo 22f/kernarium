@@ -32,8 +32,9 @@ namespace uml::cpu::x86_64::gadgets {
 	return mode == ExecutionMode::compat32 ? 1U : 0U;
 }
 
-/* The unreachable guest address an untrained indirect cell and an empty
- * target-table entry name. */
+/* The vacant key an untrained indirect cell and an empty target-table entry
+ * name, with a safe unlinked fallback link beside it. A guest can branch
+ * there; no block begins at it. */
 [[nodiscard]] constexpr std::uint64_t empty_target(ExecutionMode mode) noexcept
 {
 	return normalize_instruction_pointer(mode, ~std::uint64_t{});

@@ -739,10 +739,10 @@ blocker in every one of them.
 
 - `arm64-instruction-corpus` runs the generated A64 corpus through both
   engines; the special records (native SME, absent features, the SM = 0 family,
-  top-byte ignore, native floating-point traps) have their own
-  `arm64-instruction-corpus-*` and `arm64-absent-*` tests that re-derive them
-  from their generators, and records that need SME or FEAT_AFP/BF16 run only on
-  a host that has them.
+  top-byte ignore, indirect-branch targets, native floating-point traps) have
+  their own `arm64-instruction-corpus-*` and `arm64-absent-*` tests that
+  re-derive them from their generators, and records that need SME or
+  FEAT_AFP/BF16 run only on a host that has them.
   The runner also runs a case again, up to 16 attempts in all, when its
   program is a load, one store-exclusive that discards its status, CLREX and
   SVC in four straight-line words and the only difference from the pack is
