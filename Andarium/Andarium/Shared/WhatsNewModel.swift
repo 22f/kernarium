@@ -92,12 +92,15 @@ nonisolated enum WhatsNewTrack: CaseIterable, Sendable {
         }
     }
 
-    /// The track this build bundles.
+    /// The track this build bundles. A build setting that names neither track
+    /// stops the compile; no track is read by default.
     static var bundled: WhatsNewTrack {
         #if WHATS_NEW_TRACK_APP_STORE
         .appStore
-        #else
+        #elseif WHATS_NEW_TRACK_BETA
         .beta
+        #else
+        #error("WHATS_NEW_TRACK in Config/Andarium.xcconfig is BETA or APP_STORE")
         #endif
     }
 }
