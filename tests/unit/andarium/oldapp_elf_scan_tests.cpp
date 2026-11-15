@@ -114,6 +114,17 @@ void check_masks() {
     }
 }
 
+// realloc and reallocarray are in both passes. The consumer pass gives every module the version that never puts a block
+// in the arena; only the producer pass, for a module whose consumers were all rewritten, promotes an application library
+// to the one that does. A module that kept a free it could not rewrite therefore never gets an arena block from realloc.
+void check_realloc_is_in_both_passes() {
+    const uint32_t both = bit(Import::kRealloc) | bit(Import::kReallocarray);
+    require((kPlatformConsumers & both) == both && (kAppConsumers & both) == both, "every module gets the consumer versions");
+    require((kProducers & both) == both, "the producer pass promotes them");
+    require((kPlatformConsumers & kProducers) == both && (kAppConsumers & kProducers) == both,
+            "and they are the only imports in both passes");
+}
+
 // libc.so calls its own exports through its PLT: its defined `free` slot is wanted there, and only there.
 void check_defined_symbols() {
     Image image;
@@ -172,6 +183,7 @@ int main() {
     check_scan();
     check_capacity();
     check_masks();
+    check_realloc_is_in_both_passes();
     check_defined_symbols();
     check_no_dynamic_section();
     check_corrupt_name();

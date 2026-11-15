@@ -57,9 +57,13 @@ constexpr uint32_t kDeleteOperators = bit(Import::kDelete) | bit(Import::kDelete
                                       bit(Import::kDeleteArrayNothrow) | bit(Import::kDeleteSized) |
                                       bit(Import::kDeleteArraySized);
 constexpr uint32_t kAppConsumers = kPlatformConsumers | kDeleteOperators;
+// realloc and reallocarray are in both: a consumer pass gives every module the calls that never put a block in the
+// arena, and the producer pass, for a module whose consumers are all rewritten, gives the application's libraries the
+// ones that do (a block libc allocated moves into the arena when they reallocate it).
 constexpr uint32_t kProducers = bit(Import::kMalloc) | bit(Import::kCalloc) | bit(Import::kStrdup) |
                                 bit(Import::kStrndup) | bit(Import::kNew) | bit(Import::kNewArray) |
-                                bit(Import::kNewNothrow) | bit(Import::kNewArrayNothrow);
+                                bit(Import::kNewNothrow) | bit(Import::kNewArrayNothrow) | bit(Import::kRealloc) |
+                                bit(Import::kReallocarray);
 
 struct ImportSlot {
     uint32_t vaddr;  // relative to the library's load bias

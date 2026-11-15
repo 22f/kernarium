@@ -218,15 +218,18 @@ void low_delete(void* pointer) { low_free(pointer); }
 void low_delete_nothrow(void* pointer, const void*) { low_free(pointer); }
 void low_delete_sized(void* pointer, size_t) { low_free(pointer); }
 
-void* replacement_for(Import what, bool app) {
+// `producing`: the producer pass of an application library, which may hand out memory of the arena. The consumer pass
+// gives every module the realloc that never does, so a module whose free cannot be rewritten stays free of arena blocks.
+void* replacement_for(Import what, bool producing) {
     switch (what) {
         case Import::kMalloc: return reinterpret_cast<void*>(&low_malloc);
         case Import::kFree: return reinterpret_cast<void*>(&low_free);
         case Import::kCalloc: return reinterpret_cast<void*>(&low_calloc);
         case Import::kRealloc:
-            return app ? reinterpret_cast<void*>(&low_realloc) : reinterpret_cast<void*>(&platform_realloc);
+            return producing ? reinterpret_cast<void*>(&low_realloc) : reinterpret_cast<void*>(&platform_realloc);
         case Import::kReallocarray:
-            return app ? reinterpret_cast<void*>(&low_reallocarray) : reinterpret_cast<void*>(&platform_reallocarray);
+            return producing ? reinterpret_cast<void*>(&low_reallocarray)
+                             : reinterpret_cast<void*>(&platform_reallocarray);
         case Import::kUsableSize: return reinterpret_cast<void*>(&low_usable_size);
         case Import::kStrdup: return reinterpret_cast<void*>(&low_strdup);
         case Import::kStrndup: return reinterpret_cast<void*>(&low_strndup);
@@ -349,7 +352,7 @@ struct Patched {
 // be opened, no slot is written. A slot in an executable page (a text relocation) is left alone: opening it would
 // take away its execute bit under the threads that run there. It runs inside the loader's iteration of the modules,
 // so the module cannot be closed under it.
-Patched patch_module(const Module& module, uint32_t mask, bool include_defined, Module* record) {
+Patched patch_module(const Module& module, uint32_t mask, bool include_defined, bool producing, Module* record) {
     ImportSlot slots[kMaxSlots];
     const size_t found = scan_imports(module.bias, module.phdr, module.phnum, slots, kMaxSlots, mask, include_defined);
     const size_t count = found < kMaxSlots ? found : kMaxSlots;
@@ -375,7 +378,7 @@ Patched patch_module(const Module& module, uint32_t mask, bool include_defined, 
             }
         }
         const int protection = original_protection(module.phdr, module.phnum, slots[i].vaddr);
-        void* replacement = replacement_for(slots[i].what, module.app != 0);
+        void* replacement = replacement_for(slots[i].what, producing);
         if (!inside || (protection & kProtExec) != 0) {
             whole = false;
             continue;
@@ -474,7 +477,7 @@ int collect_module(OldappPhdrInfo* info, size_t size, void* user) {
     // pass of their own, so no arena pointer exists before every module that was loaded accepts it.
     if (g_arena_ready && !module.skip && !module.consumers_done) {
         module.consumers_done = 1;
-        const Patched done = patch_module(module, module.app ? kAppConsumers : kPlatformConsumers, module.libc != 0, &module);
+        const Patched done = patch_module(module, module.app ? kAppConsumers : kPlatformConsumers, module.libc != 0, false, &module);
         module.consumers_whole = done.whole;
         collect->consumers += done.written > 0;
     }
@@ -496,7 +499,7 @@ int producer_module(OldappPhdrInfo* info, size_t, void* user) {
         }
         module.producers_done = 1;
         if (module.consumers_whole) {
-            collect->producers += patch_module(module, kProducers, false, &module).written > 0;
+            collect->producers += patch_module(module, kProducers, false, true, &module).written > 0;
         } else {
             oldapp_log_print(kLogWarn, kTag, "the module at %lx keeps an import of free that cannot be rewritten: its "
                              "allocations stay in libc", static_cast<long>(module.lo));
