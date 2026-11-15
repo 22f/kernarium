@@ -610,12 +610,17 @@ patches ART's one JNI function table in place and gives the application:
   to it. Every JNI function that takes an object turns a block back into that
   array for any caller, so identity (`IsSameObject`, `NewGlobalRef`, monitors)
   and writes (`SetByteArrayRegion`, `Release*Elements`,
-  `ReleasePrimitiveArrayCritical`) keep their meaning. The block follows the
-  array where the application asks for its bytes (`Get...Elements`,
-  `Get...Critical`, `GetByteArrayRegion`) and after a call that was passed it;
-  a write through the raw pointer reaches the array only at a release or
-  `SetByteArrayRegion`, and a refresh replaces one that was not released. A thread holds at most 512 such
-  blocks (Dalvik's limit for local references) and the process 32 MiB of them;
+  `ReleasePrimitiveArrayCritical`) keep their meaning. The block and its array
+  behave as one memory at the points where the application meets Java: before
+  and after a call that is passed the block, where the application asks for the
+  bytes (`Get...Elements`, `Get...Critical`, `GetByteArrayRegion`), around
+  `SetByteArrayRegion` and at a release. At each of them, in chunks of 4 KiB,
+  a chunk the application wrote through the raw pointer goes to the array and
+  any other chunk takes the array's bytes; where both changed the same chunk,
+  the application's bytes win. Bytes Java writes outside those points (another
+  thread, a callback after the native method returned) show at the next one. A
+  thread holds at most 512 such blocks (Dalvik's limit for local references)
+  and the process 32 MiB of them;
   beyond that the result is ART's own reference. A block lasts until its
   reference is deleted or its thread ends, and is never recycled. An array the
   application creates itself (`NewByteArray`) stays ART's own;
@@ -635,7 +640,9 @@ a library whose pages cannot all be opened is left untouched.
 The layer cannot cover: a native method that returns a block to Java (ART
 decodes the returned reference itself), which is why it is a per-application
 choice; a `byte[]` passed into a native method as an argument or the elements
-of a `byte[][]`; raw reads of other objects; a call that bypasses the platform
+of a `byte[][]`; raw reads of other objects; bytes written through the pointer
+that Java reads without one of the points above (a block stored in a field and
+read after the native method returned); a call that bypasses the platform
 library's PLT; packed relocations; `memalign`; constructors that ran before the
 library's first scan; a library loaded with a plain `dlopen` that never calls
 JNI, which is found by the next periodic scan; a library with an allocator

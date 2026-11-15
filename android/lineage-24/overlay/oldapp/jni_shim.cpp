@@ -22,6 +22,7 @@ constexpr uint32_t kDalvikArrayClass = 0x5a324241u;
 constexpr uint32_t kBlockLive = 0xb10c11feu;
 constexpr uint32_t kBlockDead = 0xdeadb10cu;
 constexpr size_t kBlockTail = 16;  // zeroes behind the data: raw readers overrun by a few bytes
+constexpr uint32_t kChunk = 4096;  // the unit of the block's synchronization with its array
 
 template <class T>
 struct IsVoid {
@@ -179,6 +180,198 @@ inline void enter_any(Env* env) {
     }
 }
 
+// ---- the block and its array are one memory
+
+// On Dalvik the application's pointer and Java saw the same bytes. Here a block and its array are two copies, kept
+// alike by synchronizing them in chunks of kChunk bytes. For each chunk the block keeps a digest of the bytes it held
+// at the last synchronization. At a synchronization point a chunk whose digest differs was written through the raw
+// pointer: the block's bytes go to the array (when both sides changed, the application's bytes win). A chunk whose
+// digest is unchanged takes the array's bytes, which Java may have written. A chunk neither side touched costs a
+// read of the block and a copy in, and writes nothing to the array.
+// The digest runs four independent multiply lanes over the 32-bit words, so it reads the block at about the speed
+// of the copy beside it; any change inside one word changes it, and a change spread over several words goes
+// unnoticed with a chance of 2^-32 (the application's raw write is then replaced by the array's bytes).
+// The synchronization points: before a call that is passed the block (a dirty chunk goes to the array), after that
+// call, at the start of Get...Elements, Get...Critical and GetByteArrayRegion (the chunks of the range), before and
+// after SetByteArrayRegion, and at a Release (mode 0 or COMMIT gives the array the block; JNI_ABORT gives the block
+// the array). A call that left an exception pending is not followed by a synchronization: almost no JNI function may
+// run then.
+inline unsigned chunk_count(size_t bytes) { return static_cast<unsigned>((bytes + kChunk - 1) / kChunk); }
+
+uint32_t digest_of(const uint8_t* data, size_t length) {
+    constexpr uint32_t kMul = 0x9e3779b1u;
+    uint32_t lane[4] = {0x811c9dc5u ^ static_cast<uint32_t>(length), 0x01000193u, 0x85ebca6bu, 0xc2b2ae35u};
+    size_t i = 0;
+    for (; i + 16 <= length; i += 16) {
+        for (int k = 0; k < 4; ++k) {
+            uint32_t word;
+            __builtin_memcpy(&word, data + i + 4 * k, 4);
+            lane[k] = (lane[k] ^ word) * kMul;
+            lane[k] ^= lane[k] >> 15;
+        }
+    }
+    int k = 0;
+    for (; i < length; i += 4, k = (k + 1) & 3) {
+        uint32_t word = 0;
+        __builtin_memcpy(&word, data + i, length - i < 4 ? length - i : 4);
+        lane[k] = (lane[k] ^ word) * kMul;
+        lane[k] ^= lane[k] >> 15;
+    }
+    uint32_t digest = lane[0];
+    for (int j = 1; j < 4; ++j) {
+        digest = (digest ^ lane[j]) * kMul;
+        digest ^= digest >> 13;
+    }
+    return digest;
+}
+
+uint32_t* digests_of(BlockHeader* header) {
+    const uintptr_t end = reinterpret_cast<uintptr_t>(array_of(header)->data) + header->capacity + kBlockTail;
+    return reinterpret_cast<uint32_t*>((end + 3) & ~uintptr_t{3});
+}
+
+inline uint32_t chunk_offset(unsigned chunk) { return chunk * kChunk; }
+inline uint32_t chunk_length(const BlockHeader* header, unsigned chunk) {
+    const uint32_t offset = chunk_offset(chunk);
+    return header->capacity - offset < kChunk ? header->capacity - offset : kChunk;
+}
+
+void stamp_chunk(BlockHeader* header, unsigned chunk) {
+    digests_of(header)[chunk] = digest_of(array_of(header)->data + chunk_offset(chunk), chunk_length(header, chunk));
+}
+void stamp_all(BlockHeader* header) {
+    for (unsigned c = 0, n = chunk_count(header->capacity); c < n; ++c) {
+        stamp_chunk(header, c);
+    }
+}
+
+bool chunk_dirty(BlockHeader* header, unsigned chunk) {
+    return digest_of(array_of(header)->data + chunk_offset(chunk), chunk_length(header, chunk)) !=
+           digests_of(header)[chunk];
+}
+
+// The array's bytes go to the real array: what a conformant Release or SetRegion does with a copy.
+void write_back(Env* env, BlockHeader* header, jsize start, jsize length, const void* source) {
+    original<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(slot::SetByteArrayRegion)(
+        env, header->global, start, length, static_cast<const jbyte*>(source));
+}
+
+void push_chunk(Env* env, BlockHeader* header, unsigned chunk) {
+    write_back(env, header, static_cast<jsize>(chunk_offset(chunk)), static_cast<jsize>(chunk_length(header, chunk)),
+               array_of(header)->data + chunk_offset(chunk));
+    stamp_chunk(header, chunk);
+}
+void pull_chunk(Env* env, BlockHeader* header, unsigned chunk) {
+    original<void (*)(Env*, jarray, jsize, jsize, jbyte*)>(slot::GetByteArrayRegion)(
+        env, header->global, static_cast<jsize>(chunk_offset(chunk)), static_cast<jsize>(chunk_length(header, chunk)),
+        reinterpret_cast<jbyte*>(array_of(header)->data + chunk_offset(chunk)));
+    stamp_chunk(header, chunk);
+}
+
+// The chunks that overlap [start, start + length) (inside the block), the application's bytes winning.
+void sync_range(Env* env, BlockHeader* header, uint32_t start, uint32_t length) {
+    if (length == 0) {
+        return;
+    }
+    for (unsigned c = start / kChunk, last = (start + length - 1) / kChunk; c <= last; ++c) {
+        if (chunk_dirty(header, c)) {
+            push_chunk(env, header, c);
+        } else {
+            pull_chunk(env, header, c);
+        }
+    }
+}
+void sync_all(Env* env, BlockHeader* header) { sync_range(env, header, 0, header->capacity); }
+
+// Before a call that is passed the block: what the application wrote through the pointer reaches the array. Nothing
+// is read back, and a clean chunk costs no array write.
+void push_dirty(Env* env, BlockHeader* header) {
+    for (unsigned c = 0, n = chunk_count(header->capacity); c < n; ++c) {
+        if (chunk_dirty(header, c)) {
+            push_chunk(env, header, c);
+        }
+    }
+}
+
+// The same through the real array's critical pair, the only JNI calls that CheckJNI allows inside a critical region
+// (the application may be in one for another array when it asks for this block's critical pointer).
+void sync_all_critical(Env* env, BlockHeader* header) {
+    DalvikArray* block = array_of(header);
+    if (block->length == 0) {
+        return;
+    }
+    void* pinned = original<void* (*)(Env*, jarray, jboolean*)>(slot::GetPrimitiveArrayCritical)(env, header->global,
+                                                                                               nullptr);
+    if (pinned == nullptr) {
+        return;
+    }
+    bool wrote = false;
+    for (unsigned c = 0, n = chunk_count(header->capacity); c < n; ++c) {
+        const uint32_t offset = chunk_offset(c), length = chunk_length(header, c);
+        if (chunk_dirty(header, c)) {
+            __builtin_memcpy(static_cast<uint8_t*>(pinned) + offset, block->data + offset, length);
+            wrote = true;
+        } else {
+            __builtin_memcpy(block->data + offset, static_cast<const uint8_t*>(pinned) + offset, length);
+        }
+        stamp_chunk(header, c);
+    }
+    original<void (*)(Env*, jarray, void*, jint)>(slot::ReleasePrimitiveArrayCritical)(
+        env, header->global, pinned, wrote ? 0 : kReleaseAbort);
+}
+
+// A release of the critical region: the block goes to the array (mode 0 or COMMIT), or the array to the block (ABORT).
+void release_critical(Env* env, BlockHeader* header, bool to_array) {
+    DalvikArray* block = array_of(header);
+    if (block->length == 0) {
+        return;
+    }
+    void* pinned = original<void* (*)(Env*, jarray, jboolean*)>(slot::GetPrimitiveArrayCritical)(env, header->global,
+                                                                                               nullptr);
+    if (pinned == nullptr) {
+        return;
+    }
+    if (to_array) {
+        __builtin_memcpy(pinned, block->data, block->length);
+    } else {
+        __builtin_memcpy(block->data, pinned, block->length);
+    }
+    original<void (*)(Env*, jarray, void*, jint)>(slot::ReleasePrimitiveArrayCritical)(env, header->global, pinned,
+                                                                                      to_array ? 0 : kReleaseAbort);
+    stamp_all(header);
+}
+
+// Whether a call that took the blocks may be followed by JNI calls: not with an exception pending.
+bool jni_usable(Env* env) { return !original<jboolean (*)(Env*)>(slot::ExceptionCheck)(env); }
+
+template <class R, class F>
+R call_synced(Env* env, BlockHeader* const* touched, unsigned count, F&& call) {
+    if (count != 0 && jni_usable(env)) {
+        for (unsigned i = 0; i < count; ++i) {
+            if (touched[i]->magic == kBlockLive) {
+                push_dirty(env, touched[i]);
+            }
+        }
+    }
+    const auto after = [&] {
+        if (count != 0 && jni_usable(env)) {
+            for (unsigned i = 0; i < count; ++i) {
+                if (touched[i]->magic == kBlockLive) {
+                    sync_all(env, touched[i]);
+                }
+            }
+        }
+    };
+    if constexpr (IsVoid<R>::value) {
+        call();
+        after();
+    } else {
+        R result = call();
+        after();
+        return result;
+    }
+}
+
 // A shadow for the real local reference `local`, which it replaces: the block holds a global reference to the
 // array, the local reference is deleted. Null when the thread already has the limit or the region is full: the
 // caller keeps the real reference, as it would without the layer.
@@ -193,7 +386,8 @@ jobject make_shadow(Env* env, jobject local) {
         return nullptr;
     }
     const size_t bytes = static_cast<size_t>(length);
-    const size_t need = kBlockHead + offsetof(DalvikArray, data) + bytes + kBlockTail;
+    const size_t need = kBlockHead + offsetof(DalvikArray, data) + bytes + kBlockTail + 3 +
+                        sizeof(uint32_t) * chunk_count(bytes);
     uint8_t* raw = static_cast<uint8_t*>(g.shadow_arena.allocate(need));
     if (raw == nullptr) {
         ++g.counters.shadows_declined;
@@ -220,6 +414,7 @@ jobject make_shadow(Env* env, jobject local) {
             env, local, 0, length, reinterpret_cast<jbyte*>(block->data));
     }
     __builtin_memset(block->data + bytes, 0, kBlockTail);
+    stamp_all(header);
     state->blocks[state->count++] = header;
     original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, local);
     __atomic_fetch_add(&g.counters.shadows_live, 1u, __ATOMIC_RELAXED);
@@ -234,80 +429,6 @@ jobject post_result(Env* env, bool bytes, jobject reference) {
     }
     jobject shadow = make_shadow(env, reference);
     return shadow != nullptr ? shadow : reference;
-}
-
-// The array's bytes go to the real array: what a conformant Release or SetRegion does with a copy.
-void write_back(Env* env, BlockHeader* header, jsize start, jsize length, const void* source) {
-    original<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(slot::SetByteArrayRegion)(
-        env, header->global, start, length, static_cast<const jbyte*>(source));
-}
-
-// The block follows the real array. Java writes into the array behind the block (a call it was passed to, another
-// thread, another library), and the block, which an application reads through the raw pointer, would not show it.
-// So the block is refreshed from the array where the application asks for the array's bytes (Get...Elements,
-// Get...Critical, GetByteArrayRegion) and after a call that was passed the block. The converse holds only at a
-// release: a write through the raw pointer reaches the array at SetByteArrayRegion or Release (mode 0 or COMMIT), and a
-// refresh replaces a raw write that has not been released.
-void refresh_block(Env* env, BlockHeader* header) {
-    DalvikArray* block = array_of(header);
-    if (block->length > 0) {
-        original<void (*)(Env*, jarray, jsize, jsize, jbyte*)>(slot::GetByteArrayRegion)(
-            env, header->global, 0, static_cast<jsize>(block->length), reinterpret_cast<jbyte*>(block->data));
-    }
-}
-
-// The same through the real array's critical pair, the only JNI calls that CheckJNI allows inside a critical
-// region (the application may be in one for another array when it asks for this block's critical pointer).
-void refresh_block_critical(Env* env, BlockHeader* header) {
-    DalvikArray* block = array_of(header);
-    if (block->length == 0) {
-        return;
-    }
-    void* pinned = original<void* (*)(Env*, jarray, jboolean*)>(slot::GetPrimitiveArrayCritical)(env, header->global,
-                                                                                               nullptr);
-    if (pinned != nullptr) {
-        __builtin_memcpy(block->data, pinned, block->length);
-        original<void (*)(Env*, jarray, void*, jint)>(slot::ReleasePrimitiveArrayCritical)(env, header->global, pinned,
-                                                                                          kReleaseAbort);
-    }
-}
-
-void write_back_critical(Env* env, BlockHeader* header) {
-    DalvikArray* block = array_of(header);
-    if (block->length == 0) {
-        return;
-    }
-    void* pinned = original<void* (*)(Env*, jarray, jboolean*)>(slot::GetPrimitiveArrayCritical)(env, header->global,
-                                                                                               nullptr);
-    if (pinned != nullptr) {
-        __builtin_memcpy(pinned, block->data, block->length);
-        original<void (*)(Env*, jarray, void*, jint)>(slot::ReleasePrimitiveArrayCritical)(env, header->global, pinned, 0);
-    }
-}
-
-// After a call that was passed these blocks. A call that raised an exception leaves the blocks as they were: almost
-// no JNI function may run with an exception pending.
-void refresh_touched(Env* env, BlockHeader* const* touched, unsigned count) {
-    if (count == 0 || original<jboolean (*)(Env*)>(slot::ExceptionCheck)(env)) {
-        return;
-    }
-    for (unsigned i = 0; i < count; ++i) {
-        if (touched[i]->magic == kBlockLive) {
-            refresh_block(env, touched[i]);
-        }
-    }
-}
-
-template <class R, class F>
-R call_then_refresh(Env* env, BlockHeader* const* touched, unsigned count, F&& call) {
-    if constexpr (IsVoid<R>::value) {
-        call();
-        refresh_touched(env, touched, count);
-    } else {
-        R result = call();
-        refresh_touched(env, touched, count);
-        return result;
-    }
 }
 
 // ---- signatures
@@ -624,7 +745,7 @@ R run_va(Env* e, jobject l0, jobject l1, jmethodID m, va_list ap, bool app) {
             unsigned touched_count = 0;
             if (collect_va(*info, ap, pack, touched, &touched_count)) {
                 return complete<R>(e, info, app, [&] {
-                    return call_then_refresh<R>(e, touched, touched_count,
+                    return call_synced<R>(e, touched, touched_count,
                                                 [&] { return call_original_a<R, K>(SlotA, e, receiver, l1, m, pack); });
                 });
             }
@@ -649,7 +770,7 @@ R run_array(Env* e, jobject l0, jobject l1, jmethodID m, const jvalue* args, boo
             unsigned touched_count = 0;
             if (collect_array(*info, args, pack, touched, &touched_count)) {
                 return complete<R>(e, info, app, [&] {
-                    return call_then_refresh<R>(e, touched, touched_count,
+                    return call_synced<R>(e, touched, touched_count,
                                                 [&] { return call_original_a<R, K>(SlotA, e, receiver, l1, m, pack); });
                 });
             }
@@ -897,7 +1018,7 @@ jbyte* w_GetByteArrayElements(Env* e, jarray a, jboolean* is_copy) {
         if (header == nullptr) {
             return nullptr;
         }
-        refresh_block(e, header);
+        sync_all(e, header);
         return reinterpret_cast<jbyte*>(array_of(header)->data);
     }
     return original<jbyte* (*)(Env*, jarray, jboolean*)>(slot::GetByteArrayElements)(e, a, is_copy);
@@ -910,24 +1031,27 @@ void release_block(Env* e, jarray a, const void* elements, jint mode, bool criti
     if (header == nullptr) {
         return;
     }
+    DalvikArray* block = array_of(header);
     if (mode == kReleaseAbort) {
         if (critical) {
-            refresh_block_critical(e, header);
-        } else {
-            refresh_block(e, header);
+            release_critical(e, header, false);
+        } else if (block->length > 0) {
+            for (unsigned c = 0, n = chunk_count(header->capacity); c < n; ++c) {
+                pull_chunk(e, header, c);
+            }
         }
         return;
     }
-    DalvikArray* block = array_of(header);
     const void* source = elements != nullptr ? elements : block->data;
     if (source != block->data) {
         __builtin_memcpy(block->data, source, block->length);
     }
     if (block->length > 0) {
         if (critical) {
-            write_back_critical(e, header);
+            release_critical(e, header, true);
         } else {
             write_back(e, header, 0, static_cast<jsize>(block->length), block->data);
+            stamp_all(header);
         }
     }
 }
@@ -950,7 +1074,7 @@ void* w_GetPrimitiveArrayCritical(Env* e, jarray a, jboolean* is_copy) {
         if (header == nullptr) {
             return nullptr;
         }
-        refresh_block_critical(e, header);
+        sync_all_critical(e, header);
         return array_of(header)->data;
     }
     return original<void* (*)(Env*, jarray, jboolean*)>(slot::GetPrimitiveArrayCritical)(e, a, is_copy);
@@ -971,12 +1095,8 @@ void w_GetByteArrayRegion(Env* e, jarray a, jsize start, jsize length, jbyte* bu
         }
         DalvikArray* block = array_of(header);
         if (start >= 0 && length >= 0 && static_cast<uint32_t>(start) + static_cast<uint32_t>(length) <= block->length) {
-            // The range comes from the real array (Java may have written it), into the block and the caller's buffer.
-            if (length > 0) {
-                original<void (*)(Env*, jarray, jsize, jsize, jbyte*)>(slot::GetByteArrayRegion)(
-                    e, header->global, start, length, reinterpret_cast<jbyte*>(block->data + start));
-                __builtin_memcpy(buffer, block->data + start, static_cast<size_t>(length));
-            }
+            sync_range(e, header, static_cast<uint32_t>(start), static_cast<uint32_t>(length));
+            __builtin_memcpy(buffer, block->data + start, static_cast<size_t>(length));
             return;
         }
         // A range the block does not have: the runtime raises its exception for the real array.
@@ -995,9 +1115,20 @@ void w_SetByteArrayRegion(Env* e, jarray a, jsize start, jsize length, const jby
         }
         DalvikArray* block = array_of(header);
         if (start >= 0 && length >= 0 && static_cast<uint32_t>(start) + static_cast<uint32_t>(length) <= block->length) {
-            __builtin_memcpy(block->data + start, buffer, static_cast<size_t>(length));
+            if (length > 0) {
+                // What the application wrote through the pointer elsewhere in these chunks reaches the array first.
+                sync_range(e, header, static_cast<uint32_t>(start), static_cast<uint32_t>(length));
+                __builtin_memcpy(block->data + start, buffer, static_cast<size_t>(length));
+                write_back(e, header, start, length, buffer);
+                for (unsigned c = static_cast<uint32_t>(start) / kChunk,
+                              last = (static_cast<uint32_t>(start) + static_cast<uint32_t>(length) - 1) / kChunk;
+                     c <= last; ++c) {
+                    stamp_chunk(header, c);
+                }
+            }
+            return;
         }
-        write_back(e, header, start, length, buffer);  // the real array takes the write, or raises the range error
+        write_back(e, header, start, length, buffer);  // the real array raises the range error
         return;
     }
     original<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(slot::SetByteArrayRegion)(e, a, start, length, buffer);
