@@ -16,7 +16,15 @@ the work and this module only lays out a class with several methods. The Java it
         public static byte[] payload() { return PAYLOAD.getBytes(); }
         public static int echo(byte[] data) { return data.length; }
         public static int spin(int n) { int i = 0; while (i < n) { empty(); i++; } return i; }
+        public static byte[] asset(int n, int v) { byte[] a = new byte[n]; Arrays.fill(a, (byte) v); return a; }
+        public static int peek(byte[] a, int i) { return a[i]; }
+        public static int scene(int frames) {
+            int ok = sceneInit();
+            for (int i = 0; i < frames; i++) ok &= sceneFrame(i);
+            return ok;
+        }
         public static native int tick(), tickArm(), tickReg(), tickRegArm(), recurse(int depth), abi0();
+        public static native int sceneInit(), sceneFrame(int frame);
         public static native void throws_(), empty();
         ... the argument and result types the thunks must carry through (NATIVES below)
     }
@@ -24,7 +32,8 @@ the work and this module only lays out a class with several methods. The Java it
 `payload` is the byte[] the native code reads the way a Dalvik-era application does; `echo` is what it
 passes the array back to. The other native methods are what the native code calls to see the end of a native
 method (blocks that end when it returns) and that the thunks pass every argument and result through; `spin` is the
-loop that times a native call.
+loop that times a native call. `asset` is what an application's asset reader does (a fresh array of a given length
+for every call), `scene` the loop of its render thread: one native init method, then one native method per frame.
 """
 
 from __future__ import annotations
@@ -40,6 +49,7 @@ import property_probe_dex as base
 CLASS_NAME = "org.example.andarium.oldappprobe.Probe"
 PAYLOAD = "OLD-APP-PAYLOAD-0123456789abcdef"
 SYSTEM = "Ljava/lang/System;"
+ARRAYS = "Ljava/util/Arrays;"
 BYTES = "[B"
 ACC_STATIC = 0x8
 ACC_NATIVE = 0x100
@@ -53,6 +63,7 @@ NATIVES = (
     ("retZ", "Z", ("Z",)), ("retB", "B", ("B",)), ("retC", "C", ("C",)), ("retS", "S", ("S",)), ("retI", "I", ("I",)),
     ("retJ", "J", ("J",)), ("retF", "F", ("F",)), ("retD", "D", ("D",)), ("retL", base.STRING, (base.STRING,)),
     ("retV", "V", ("I",)), ("readV", "I", ()),
+    ("sceneInit", "I", ()), ("sceneFrame", "I", ("I",)),
 )
 
 
@@ -73,6 +84,10 @@ def build_dex() -> bytes:
     get_bytes = pools.method(base.STRING, "getBytes", BYTES)
     natives = {name: pools.method(owner, name, result, parameters) for name, result, parameters in NATIVES}
     spin = pools.method(owner, "spin", "I", ("I",))
+    asset = pools.method(owner, "asset", BYTES, ("I", "I"))
+    peek = pools.method(owner, "peek", "I", (BYTES, "I"))
+    scene = pools.method(owner, "scene", "I", ("I",))
+    fill = pools.method(ARRAYS, "fill", "V", (BYTES, "B"))
     for item in ("V", "I", BYTES, "Z", "B", "C", "S", "J", "F", "D"):
         pools.type(item)
     for text in ("shim", "koldprobe", "opts", PAYLOAD):
@@ -121,6 +136,32 @@ def build_dex() -> bytes:
     spin_body.label("done")
     spin_body.op("return", 0)
 
+    # v0 the array, v1 its length n, v2 the value v: a fresh array of n bytes, every byte v.
+    asset_body = base.Code(registers=3, ins=2, outs=2)
+    asset_body.op("new-array", 0, 1, BYTES)
+    asset_body.op("int-to-byte", 2, 2)
+    asset_body.op("invoke-static", fill, 0, 2)
+    asset_body.op("return-object", 0)
+
+    peek_body = base.Code(registers=3, ins=2, outs=0)  # v1 the array, v2 the index
+    peek_body.op("aget-byte", 0, 1, 2)
+    peek_body.op("return", 0)
+
+    # v0 the status, v1 the frame, v2 a temporary, v3 the number of frames: the render thread's loop.
+    scene_body = base.Code(registers=4, ins=1, outs=1)
+    scene_body.op("invoke-static", natives["sceneInit"])
+    scene_body.op("move-result", 0)
+    scene_body.op("const/4", 1, 0)
+    scene_body.label("loop")
+    scene_body.op("if-ge", 1, 3, "done")
+    scene_body.op("invoke-static", natives["sceneFrame"], 1)
+    scene_body.op("move-result", 2)
+    scene_body.op("and-int/2addr", 0, 2)
+    scene_body.op("add-int/lit8", 1, 1, 1)
+    scene_body.op("goto/16", "loop")
+    scene_body.label("done")
+    scene_body.op("return", 0)
+
     pools.finish()
     string_count, type_count = len(pools.sorted_strings), len(pools.sorted_types)
     proto_count, method_count = len(pools.sorted_protos), len(pools.sorted_methods)
@@ -152,7 +193,8 @@ def build_dex() -> bytes:
     if list_offsets:
         sections.append((base.TYPE_TYPE_LIST, len(list_offsets), first))
 
-    bodies = {init: constructor, on_receive: receive, payload: payload_body, echo: echo_body, spin: spin_body}
+    bodies = {init: constructor, on_receive: receive, payload: payload_body, echo: echo_body, spin: spin_body,
+              asset: asset_body, peek: peek_body, scene: scene_body}
     code_offsets: dict[object, int] = {}
     first_code = None
     for method, body in bodies.items():
@@ -177,6 +219,9 @@ def build_dex() -> bytes:
          (pools.method_id(payload), base.ACC_PUBLIC | ACC_STATIC, code_offsets[payload]),
          (pools.method_id(echo), base.ACC_PUBLIC | ACC_STATIC, code_offsets[echo]),
          (pools.method_id(spin), base.ACC_PUBLIC | ACC_STATIC, code_offsets[spin]),
+         (pools.method_id(asset), base.ACC_PUBLIC | ACC_STATIC, code_offsets[asset]),
+         (pools.method_id(peek), base.ACC_PUBLIC | ACC_STATIC, code_offsets[peek]),
+         (pools.method_id(scene), base.ACC_PUBLIC | ACC_STATIC, code_offsets[scene]),
          *((pools.method_id(method), base.ACC_PUBLIC | ACC_STATIC | ACC_NATIVE, 0) for method in natives.values())))
     virtual = [(pools.method_id(on_receive), base.ACC_PUBLIC, code_offsets[on_receive])]
     class_data_offset = data_off + len(data)

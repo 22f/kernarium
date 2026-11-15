@@ -1068,6 +1068,12 @@ the library's SELinux label and that the log names the first declined shadow onc
 and the array operations give the runtime's own answers. `--host-shim` boots a
 release without the layer and loads a host-built copy from the old package after
 a control run without it, which qualifies the library and not the framework hook.
+The scene row is the acceptance of the block ends: an application's render thread (a
+Java loop that enters one lazily bound native init method and one per frame, which
+get 5000 or more `byte[]` results of seeded lengths from a Java asset reader and
+never delete them) runs in a process of its own in every variant, and once more
+debuggable (CheckJNI); with the layer the log shows no declined result, no
+allocation that left the arena and a thread peak below the limit.
 `android17-oldapp-runner` (tooling) runs the package (manifest, DEX file, armv7
 build), the verdicts and the commands without a guest. The unit tests
 (`andarium-oldapp-*`) run the JNI interposer against a fake runtime that accepts

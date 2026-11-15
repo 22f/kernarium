@@ -115,11 +115,12 @@ class ProbePackageTests(unittest.TestCase):
         dex = Dex(probe.oldapp_probe_dex.build_dex())
         methods = dex.class_methods()
         natives = {"run"} | {name for name, _, _ in probe.oldapp_probe_dex.NATIVES}
-        self.assertEqual(set(methods), {"<init>", "onReceive", "payload", "echo", "spin"} | natives)
+        java = {"payload", "echo", "spin", "asset", "peek", "scene"}
+        self.assertEqual(set(methods), {"<init>", "onReceive"} | java | natives)
         for name in natives:
             self.assertEqual(methods[name][0], ACC_PUBLIC | ACC_STATIC | ACC_NATIVE, name)
             self.assertEqual(methods[name][1], 0, f"{name}: a native method has no code")
-        for name in ("<init>", "onReceive", "payload", "echo", "spin"):
+        for name in {"<init>", "onReceive"} | java:
             self.assertNotEqual(methods[name][1], 0, name)
         self.assertEqual(methods["onReceive"][0], ACC_PUBLIC)
         self.assertEqual(methods["payload"][0], ACC_PUBLIC | ACC_STATIC)
@@ -156,6 +157,24 @@ class ProbePackageTests(unittest.TestCase):
         self.assertEqual(spin[0], 0x0012, "const/4 v0, #0")
         self.assertEqual(spin[1] & 0xFF, 0x35, "if-ge")
         self.assertEqual(spin[-1], 0x000F, "return v0")
+
+    def test_the_asset_reader_and_the_scene_loop(self) -> None:
+        dex = Dex(probe.oldapp_probe_dex.build_dex())
+        methods = dex.class_methods()
+        asset = dex.instructions(methods["asset"][1])
+        self.assertEqual(asset[0] & 0xFF, 0x23, "new-array")
+        self.assertEqual(asset[2] & 0xFF, 0x8D, "int-to-byte: Arrays.fill takes a byte")
+        self.assertEqual(asset[-1] & 0xFF, 0x11, "return-object")
+        self.assertEqual(dex.instructions(methods["peek"][1])[0] & 0xFF, 0x48, "aget-byte")
+        scene = dex.instructions(methods["scene"][1])
+        self.assertEqual(scene[-1], 0x0F | 0 << 8, "return v0")
+        self.assertIn(0xB5, [unit & 0xFF for unit in scene], "and-int/2addr: every frame's status is kept")
+        owner = "Lorg/example/andarium/oldappprobe/Probe;"
+        listed = {(name, shorty, ret) for klass, name, shorty, ret in dex.methods if klass == owner}
+        self.assertIn(("asset", "LII", "[B"), listed)
+        self.assertIn(("peek", "ILI", "I"), listed)
+        self.assertIn(("scene", "II", "I"), listed)
+        self.assertIn(("sceneFrame", "II", "I"), listed)
 
     def test_the_variants_differ_in_package_and_target_level_only(self) -> None:
         old = binary_xml.decode_manifest(binary_xml.encode_manifest(probe.manifest_tree("old")))
@@ -322,6 +341,98 @@ class FakeGuest:
         return f"Broadcast completed: result=0{data}\n"
 
 
+LAYER_LOG = ("I/kernarium_oldapp( 1): installed: jni=1 arena=1\n"
+             "I/kernarium_oldapp( 1): most live byte[] blocks one thread has held; blocks live in the process: 241 241\n"
+             "I/kernarium_oldapp( 1): the first byte[] blocks ended at the return of a native method; references ended, "
+             "native methods with a thunk: 400 4\n"
+             "I/kernarium_oldapp( 1): the most references one native method call has ended at its return; native "
+             "methods with a thunk: 171 6\n")
+SCENE_RESULT = "scene_complete=pass;scene_data=pass;scene_write=pass;peak_result=pass;done=1;"
+
+
+class SceneGuest(FakeGuest):
+    """Answers the log of a scene: the layer's lines (or none) after the first read of the install count."""
+
+    def __init__(self, log: str) -> None:
+        super().__init__(SCENE_RESULT)
+        self.log = log
+
+    def adb_run(self, *arguments: str, timeout: float = 30) -> CompletedProcess:
+        if arguments[0] == "logcat":
+            self.commands.append(" ".join(arguments))
+            if "-c" in arguments:
+                return CompletedProcess(arguments, 0, "")
+            self.log_reads += 1
+            if "-s" in arguments:  # the install count: nothing before the run, what the log says after
+                return CompletedProcess(arguments, 0, "" if self.log_reads == 1 else self.log)
+            return CompletedProcess(arguments, 0, self.log)
+        return super().adb_run(*arguments, timeout=timeout)
+
+
+class SceneTests(unittest.TestCase):
+    def test_the_scene_must_pass_in_every_variant(self) -> None:
+        self.assertEqual(set(runner.EXPECTED["scene"]), {"scene_complete", "scene_data", "scene_write", "done"})
+        with self.assertRaises(runner.Failure) as raised:
+            runner.evaluate("scene", {"scene_complete": "pass", "scene_data": "fail", "scene_write": "pass", "done": "1"})
+        self.assertIn("scene_data=fail", str(raised.exception))
+
+    def test_the_peaks_are_read_from_the_layers_lines(self) -> None:
+        self.assertEqual(runner.thread_peak(LAYER_LOG), 241)
+        self.assertEqual(runner.thread_peak(""), 0)
+        service = "I/adbd( 5): adbd service requested 'shell,v2:logcat -d -s kernarium_oldapp:I'\n"
+        self.assertEqual(runner.layer_lines(service + LAYER_LOG).count("\n"), LAYER_LOG.count("\n") - 1,
+                         "the adb service lines that name the tag are not the layer's")
+
+    def test_a_log_with_the_layers_lines_and_none_of_the_forbidden_ones_is_clean(self) -> None:
+        self.assertEqual(runner.scene_log_problems(LAYER_LOG, layer=True), [])
+
+    def test_every_forbidden_line_is_named(self) -> None:
+        declined = LAYER_LOG + "I/kernarium_oldapp( 1): the first byte[] result stayed a real reference (thread limit); x 512 9\n"
+        self.assertIn("a result stayed ART's own reference", runner.scene_log_problems(declined, layer=True))
+        arena = LAYER_LOG + "I/kernarium_oldapp( 1): the low arena has no room: an allocation went to libc; bytes 1 2\n"
+        self.assertIn("an allocation left the arena", runner.scene_log_problems(arena, layer=True))
+        for word in runner.CRASH_WORDS:
+            self.assertTrue(runner.scene_log_problems(LAYER_LOG + f"F/libc: {word} here\n", layer=True), word)
+        at_limit = LAYER_LOG.replace("241 241", "512 512")
+        self.assertTrue(any("most live blocks" in p for p in runner.scene_log_problems(at_limit, layer=True)))
+        small = LAYER_LOG.replace("241 241", "12 12")
+        self.assertTrue(any("most live blocks" in p for p in runner.scene_log_problems(small, layer=True)))
+        no_ends = "\n".join(line for line in LAYER_LOG.splitlines() if "first byte[] blocks ended" not in line)
+        self.assertTrue(any("no block ended" in p for p in runner.scene_log_problems(no_ends, layer=True)))
+
+    def test_without_the_layer_its_lines_are_a_problem(self) -> None:
+        self.assertEqual(runner.scene_log_problems("I/art( 1): hello\nI/adbd( 5): service 'logcat -s kernarium_oldapp:I'\n",
+                                                   layer=False), [])
+        self.assertTrue(runner.scene_log_problems(LAYER_LOG, layer=False))
+
+    def test_a_scene_with_the_layer_runs_twice_in_one_process_and_reads_the_log(self) -> None:
+        guest = SceneGuest(LAYER_LOG)
+        with mock.patch.object(runner, "PEAK_WAIT_SECONDS", 0):
+            note = runner.scene(guest, "old", shim=True, layer=True)
+        self.assertIn("most live blocks of a thread 241", note)
+        broadcasts = [c for c in guest.commands if "am broadcast" in c]
+        self.assertEqual(len(broadcasts), 2)
+        self.assertIn("--es opts scene", broadcasts[0])
+        self.assertIn("--es opts peak", broadcasts[1])
+        stops = [c for c in guest.commands if "am force-stop" in c]
+        self.assertEqual(len(stops), 1, "the second run goes to the process of the first")
+
+    def test_a_debuggable_scene_must_have_run_with_checkjni(self) -> None:
+        with mock.patch.object(runner, "PEAK_WAIT_SECONDS", 0):
+            with self.assertRaises(runner.Failure) as raised:
+                runner.scene(SceneGuest(LAYER_LOG), "old", shim=True, layer=True, checked=True)
+            self.assertIn("CheckJNI", str(raised.exception))
+            runner.scene(SceneGuest(LAYER_LOG + "I/art( 1): Late-enabling -Xcheck:jni\n"), "old", shim=True, layer=True,
+                         checked=True)
+
+    def test_a_scene_without_the_layer_is_one_run_and_installs_nothing(self) -> None:
+        guest = SceneGuest("I/art( 1): hello\n")
+        runner.scene(guest, "modern", shim=False, layer=False)
+        self.assertEqual(len([c for c in guest.commands if "am broadcast" in c]), 1)
+        with self.assertRaises(runner.Failure):
+            runner.scene(SceneGuest(LAYER_LOG), "modern", shim=False, layer=False)
+
+
 class StepTests(unittest.TestCase):
     def test_an_application_is_installed_past_the_block_on_old_targets(self) -> None:
         guest = FakeGuest("")
@@ -452,7 +563,7 @@ class StepTests(unittest.TestCase):
         guest = Listing("done=1;")
         outside = runner.outside_library(guest)
         self.assertEqual(outside, "/data/app/~~Qw3e==/org.example.andarium.oldappprobe.modern-Zx9==/lib/arm/libkoldprobe.so")
-        runner.run_variant(guest, "old", shim=False, outside=outside)
+        runner.run_variant(guest, "old", shim=False, options=outside)
         broadcast = next(c for c in guest.commands if "am broadcast" in c)
         self.assertIn("--es opts '" + outside + "'", broadcast)
 

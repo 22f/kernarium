@@ -15,8 +15,9 @@ The two variants have the same code and differ in the package and the target lev
 
 The old variant installs only past the package manager's block on old targets (`adb install
 --bypass-low-target-sdk-block`, the path Andarium's installer takes for them). The packages are not
-debuggable, as a game's is not (ART runs a debuggable application with CheckJNI): the probe reports through
-the broadcast's result data, which `am broadcast` prints.
+debuggable, as a game's is not (ART runs a debuggable application with CheckJNI), except the old package built a
+second time for the scene row's CheckJNI run: the probe reports through the broadcast's result data, which
+`am broadcast` prints.
 
 The native libraries are built here with the host's clang and lld, freestanding for armeabi-v7a (the sources
 include no Android header): the probe, and for a run on an image that lacks the layer, the layer itself.
@@ -68,12 +69,12 @@ def component_of(variant: str) -> str:
     return f"{package_of(variant)}/{RECEIVER}"
 
 
-def manifest_tree(variant: str) -> binary_xml.Element:
-    """An application with one exported receiver that has no intent filter."""
+def manifest_tree(variant: str, debuggable: bool = False) -> binary_xml.Element:
+    """An application with one exported receiver that has no intent filter. A debuggable one runs with CheckJNI."""
     package, minimum, target = VARIANTS[variant]
     return binary_xml.Element("manifest", (("package", package), ("versionCode", 1)), (
         binary_xml.Element("uses-sdk", (("minSdkVersion", minimum), ("targetSdkVersion", target))),
-        binary_xml.Element("application", (("label", "Old App Probe"),), (
+        binary_xml.Element("application", (("label", "Old App Probe"), *((("debuggable", True),) if debuggable else ())), (
             binary_xml.Element("receiver", (("name", RECEIVER), ("exported", True))),
         )),
     ))
@@ -129,7 +130,8 @@ def compile_library(sources: tuple[pathlib.Path, ...], destination: pathlib.Path
 
 
 def build_apk(destination: pathlib.Path, variant: str, probe_library: pathlib.Path,
-              shim_library: pathlib.Path | None = None, workdir: pathlib.Path | None = None) -> pathlib.Path:
+              shim_library: pathlib.Path | None = None, workdir: pathlib.Path | None = None,
+              debuggable: bool = False) -> pathlib.Path:
     """The signed package of a variant at `destination`. `shim_library` bundles the layer into the package, for a
     run on an image that does not carry it (the receiver loads it when its intent says ``--es shim
     kernarium_oldapp``)."""
@@ -139,4 +141,4 @@ def build_apk(destination: pathlib.Path, variant: str, probe_library: pathlib.Pa
     }
     if shim_library is not None:
         files[f"{ABI_DIRECTORY}/lib{SHIM_LIBRARY}.so"] = shim_library.read_bytes()
-    return binary_xml.build_apk(destination, workdir, manifest_tree(variant), files)
+    return binary_xml.build_apk(destination, workdir, manifest_tree(variant, debuggable), files)

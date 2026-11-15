@@ -48,6 +48,16 @@
 //   ends_exception  a native method that returns with an exception pending: the process goes on, the exception arrives
 //   abi_args, abi_returns  a native method gets its arguments (12, with jlong, jdouble and jfloat on the stack) and
 //                returns its result (every type) as without the thunk
+//   scene_complete, scene_data, scene_write  (the options "scene": a run of its own, in a fresh process) the render
+//                thread of an application. A thread attached by the probe calls a Java loop that enters two
+//                lazily bound native methods of this library directly from Java: an init method that gets 170
+//                fresh byte[] results from a Java asset reader, and a frame method (800 frames) that gets a few
+//                per frame and 100 to 150 in a burst every 100 frames (a map change), 5000 or more in all, of
+//                seeded lengths from 16 bytes to 320 KB, none repeated, none deleted, no local frame. Each is
+//                read as the length and content Java gave it (through the JNI functions, and through the
+//                object pointer where the layer is mapped); every eighth gets four bytes written (through the
+//                pointer where the layer is mapped) and Java reads them back. The runner reads the layer's
+//                log lines for the process: no declined result, no allocation that left the arena
 //   empty_us     microseconds for 10^6 calls of an empty native method from a Java loop (recorded, not judged)
 //   monitor      MonitorEnter and MonitorExit accept it
 //   pop          PopLocalFrame hands it out of the frame
@@ -814,6 +824,222 @@ void outside_case(Report& report, Env* env, jclass probe, const char* path) {
     report.verdict("ends_outside", stopped_at > 0);
 }
 
+// ---- the application scene (the options "scene")
+
+constexpr int kSceneFrames = 800;
+constexpr int kSceneInitResults = 170;
+constexpr int kSceneBurstEvery = 100;  // a burst at frame % 100 == 60
+constexpr uint32_t kSceneMinimumResults = 5000;
+constexpr uint32_t kSceneMinimumBursts = 5;
+
+struct Scene {
+    uint32_t rng = 0x2545F491u;
+    jmethodID asset = nullptr;  // Probe.asset(II)[B
+    jmethodID peek = nullptr;   // Probe.peek([BI)I
+    bool layer = false;         // the layer is mapped: results are read through the object pointer too
+    uint32_t results = 0;
+    uint32_t bursts = 0;
+    uint64_t bytes = 0;
+    uint32_t failed_at = 0;  // the number of the first result that did not read right
+    uint32_t failure = 0;    // which check
+    uint32_t write_failed_at = 0;
+    uint32_t largest = 0;
+};
+Scene g_scene;
+
+uint32_t scene_random() {
+    uint32_t x = g_scene.rng;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    g_scene.rng = x;
+    return x;
+}
+
+// The lengths of an asset reader: most are small, a few are large. 16 bytes to 320 KB.
+uint32_t scene_length() {
+    const uint32_t pick = scene_random() % 1000;
+    const uint32_t spread = scene_random();
+    if (pick < 700) return 16 + spread % 1985;
+    if (pick < 950) return 2000 + spread % 38000;
+    if (pick < 995) return 40000 + spread % 80000;
+    return 120000 + spread % 200000;
+}
+
+bool all_equal(const uint8_t* bytes, size_t n, uint8_t value) {
+    for (size_t i = 0; i < n; ++i) {
+        if (bytes[i] != value) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool scene_fail(uint32_t code) {
+    if (g_scene.failed_at == 0) {
+        g_scene.failed_at = g_scene.results;
+        g_scene.failure = code;
+    }
+    return false;
+}
+
+// One result of the asset reader: a fresh array of a seeded length, never deleted.
+bool scene_result(Env* env, jclass probe) {
+    Scene& scene = g_scene;
+    const auto call_object = entry<jobject (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kObject, kVarargs));
+    const auto call_int = entry<jint (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kInt, kVarargs));
+    const auto array_length = entry<jsize (*)(Env*, jarray)>(env, slot::GetArrayLength);
+    const auto get_region = entry<void (*)(Env*, jarray, jsize, jsize, void*)>(env, slot::GetByteArrayRegion);
+    const auto set_region = entry<void (*)(Env*, jarray, jsize, jsize, const void*)>(env, slot::SetByteArrayRegion);
+    const uint32_t n = scene_length();
+    const uint8_t value = static_cast<uint8_t>(1 + scene_random() % 250);
+    jobject array = call_object(env, probe, scene.asset, static_cast<jint>(n), static_cast<jint>(value));
+    ++scene.results;
+    scene.bytes += n;
+    scene.largest = n > scene.largest ? n : scene.largest;
+    if (array == nullptr) {
+        return scene_fail(1);
+    }
+    if (static_cast<uint32_t>(array_length(env, array)) != n) {
+        return scene_fail(2);
+    }
+    const uint32_t samples[3] = {0, n / 2 - 8, n - 16};
+    uint8_t seen[16];
+    for (uint32_t at : samples) {
+        get_region(env, array, static_cast<jsize>(at), 16, seen);
+        if (!all_equal(seen, 16, value)) {
+            return scene_fail(3);
+        }
+    }
+    const char* raw = static_cast<const char*>(array);
+    if (scene.layer) {
+        uint8_t head[32];
+        int32_t length = 0;
+        if (!safe_copy(head, raw, sizeof(head))) {
+            return scene_fail(4);  // the result is no block: the application would read from a reference
+        }
+        __builtin_memcpy(&length, head + 8, sizeof(length));
+        if (static_cast<uint32_t>(length) != n) {
+            return scene_fail(5);
+        }
+        if (!all_equal(head + 16, 16, value)) {
+            return scene_fail(6);
+        }
+        const uint32_t tails[2] = {n / 2 - 8, n - 16};
+        for (uint32_t at : tails) {
+            if (!safe_copy(seen, raw + 16 + at, 16) || !all_equal(seen, 16, value)) {
+                return scene_fail(7);
+            }
+        }
+    }
+    if ((scene.results & 7) == 0) {
+        const uint32_t at = n / 3;
+        const uint8_t marks[4] = {static_cast<uint8_t>(value ^ 0x5a), static_cast<uint8_t>(value ^ 0xa5),
+                                  static_cast<uint8_t>(value ^ 0x33), static_cast<uint8_t>(value ^ 0xcc)};
+        if (scene.layer) {
+            if (!safe_store(const_cast<char*>(raw) + 16 + at, marks, sizeof(marks))) {
+                return scene_fail(8);
+            }
+        } else {
+            set_region(env, array, static_cast<jsize>(at), 4, marks);
+        }
+        for (uint32_t k = 0; k < 4; ++k) {
+            if (static_cast<uint8_t>(call_int(env, probe, scene.peek, array, static_cast<jint>(at + k))) != marks[k]) {
+                if (scene.write_failed_at == 0) {
+                    scene.write_failed_at = scene.results;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+extern "C" __attribute__((visibility("default"))) jint Java_org_example_andarium_oldappprobe_Probe_sceneInit(Env* env,
+                                                                                                           jclass probe) {
+    bool ok = g_scene.failed_at == 0;
+    for (int i = 0; ok && i < kSceneInitResults; ++i) {
+        ok = scene_result(env, probe);
+    }
+    return ok ? 1 : 0;
+}
+
+extern "C" __attribute__((visibility("default"))) jint Java_org_example_andarium_oldappprobe_Probe_sceneFrame(
+    Env* env, jclass probe, jint frame) {
+    if (g_scene.failed_at != 0) {
+        return 0;
+    }
+    const bool burst = frame % kSceneBurstEvery == 60;
+    const uint32_t count = burst ? 100 + scene_random() % 51 : 4 + scene_random() % 5;
+    g_scene.bursts += burst ? 1 : 0;
+    bool ok = true;
+    for (uint32_t i = 0; ok && i < count; ++i) {
+        ok = scene_result(env, probe);
+    }
+    return ok ? 1 : 0;
+}
+
+namespace {
+
+struct SceneWork {
+    Vm* vm;
+    jclass probe;  // a global reference
+    jmethodID scene;
+    jint status;
+};
+
+void* scene_thread_main(void* argument) {
+    SceneWork* work = static_cast<SceneWork*>(argument);
+    Env* env = nullptr;
+    if (entry<jint (*)(Vm*, void**, void*)>(reinterpret_cast<Env*>(work->vm), vmslot::AttachCurrentThread)(
+            work->vm, reinterpret_cast<void**>(&env), nullptr) != 0) {
+        return nullptr;
+    }
+    work->status = entry<jint (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kInt, kVarargs))(
+        env, work->probe, work->scene, kSceneFrames);
+    entry<jint (*)(Vm*)>(reinterpret_cast<Env*>(work->vm), vmslot::DetachCurrentThread)(work->vm);
+    return nullptr;
+}
+
+// The scene on a thread of its own, as a render thread: the rows scene_complete, scene_data and scene_write.
+void scene_cases(Report& report, Env* env, jclass probe) {
+    const auto static_method = entry<jmethodID (*)(Env*, jclass, const char*, const char*)>(env, slot::GetStaticMethodID);
+    g_scene = Scene{};
+    g_scene.asset = static_method(env, probe, "asset", "(II)[B");
+    g_scene.peek = static_method(env, probe, "peek", "([BI)I");
+    g_scene.layer = shim_mapped();
+    SceneWork work{nullptr, nullptr, static_method(env, probe, "scene", "(I)I"), 0};
+    bool started = false;
+    if (g_scene.asset != nullptr && g_scene.peek != nullptr && work.scene != nullptr &&
+        entry<jint (*)(Env*, Vm**)>(env, 219)(env, &work.vm) == 0) {  // GetJavaVM
+        work.probe = static_cast<jclass>(entry<jobject (*)(Env*, jobject)>(env, slot::NewGlobalRef)(env, probe));
+        unsigned long thread = 0;
+        started = probe_pthread_create(&thread, nullptr, scene_thread_main, &work) == 0;
+        if (started) {
+            probe_pthread_join(thread, nullptr);
+        }
+        entry<void (*)(Env*, jobject)>(env, slot::DeleteGlobalRef)(env, work.probe);
+    }
+    char text[12];
+    decimal(text, g_scene.results);
+    report.line("scene_results", text);
+    decimal(text, g_scene.bursts);
+    report.line("scene_bursts", text);
+    decimal(text, static_cast<uint32_t>(g_scene.bytes >> 10));
+    report.line("scene_kib", text);
+    decimal(text, g_scene.largest);
+    report.line("scene_largest", text);
+    decimal(text, g_scene.failed_at);
+    report.line("scene_failed_at", text);
+    decimal(text, g_scene.failure);
+    report.line("scene_failure", text);
+    report.verdict("scene_complete", started && work.status == 1 && g_scene.results >= kSceneMinimumResults &&
+                                         g_scene.bursts >= kSceneMinimumBursts);
+    report.verdict("scene_data", started && g_scene.failed_at == 0);
+    report.verdict("scene_write", started && g_scene.write_failed_at == 0);
+}
+
 // The cases of the end of a native method (see the list at the top).
 void ends_cases(Report& report, Env* env, jclass probe, const char* options) {
     const auto static_method = entry<jmethodID (*)(Env*, jclass, const char*, const char*)>(env, slot::GetStaticMethodID);
@@ -974,6 +1200,23 @@ extern "C" __attribute__((visibility("default"))) jstring Java_org_example_andar
     const char* opts = options != nullptr ? entry<GetUtf>(env, 169)(env, options, nullptr) : "";  // GetStringUTFChars
     Report report;
     report.line("shim_mapped", shim_mapped() ? "yes" : "no");
+    // The options "scene" and "peak" (the text includes the NUL): the scene alone, in a process of its own; and one more
+    // result from this process, after the layer's 30 s between two diagnosis lines, so that the peaks it kept appear in
+    // the log (a result and a return are what log them).
+    const bool scene_only = same(opts, "scene", 6), peak_only = same(opts, "peak", 5);
+    if (scene_only || peak_only) {
+        if (scene_only) {
+            scene_cases(report, env, probe);
+        } else {
+            const auto static_method = entry<jmethodID (*)(Env*, jclass, const char*, const char*)>(env, slot::GetStaticMethodID);
+            const auto call_object = entry<jobject (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kObject, kVarargs));
+            const jmethodID once = static_method(env, probe, "payload", "()[B");
+            report.verdict("peak_result", once != nullptr && call_object(env, probe, once) != nullptr);
+        }
+        report.line("done", "1");
+        entry<ReleaseUtf>(env, 170)(env, options, opts);
+        return entry<jstring (*)(Env*, const char*)>(env, slot::NewStringUTF)(env, report.text);
+    }
 
     const auto method_id = entry<jmethodID (*)(Env*, jclass, const char*, const char*)>(env, slot::GetStaticMethodID);
     const auto call_object = entry<jobject (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kObject, kVarargs));
