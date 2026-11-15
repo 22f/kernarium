@@ -1866,13 +1866,17 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 oldapp_jar = io.BytesIO()
                 with zipfile.ZipFile(oldapp_jar, "w") as jar:
                     jar.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
-                    if oldapp_variant != "jar-stripped":
+                    if oldapp_variant not in ("jar-stripped", "preopt-code", "preopt-half"):
                         jar.writestr(
                             "classes.dex",
                             b"dex\n035\0"
                             + (b"Lcom/kernarium/oldapp/Other;" if oldapp_variant == "jar-without-class"
                                else b"Lcom/kernarium/oldapp/Main;"),
                         )
+                if oldapp_variant in ("preopt-code", "preopt-half"):
+                    # Dexpreopting strips the code from the jar into the files beside it.
+                    for suffix in ("odex", "vdex") if oldapp_variant == "preopt-code" else ("vdex",):
+                        archive.writestr(f"SYSTEM_EXT/framework/oat/arm64/kernarium_oldapp.{suffix}", b"oat")
                 if oldapp_variant == "jar-not-zip":
                     archive.writestr("SYSTEM_EXT/framework/kernarium_oldapp.jar", b"not a jar")
                 elif oldapp_variant != "missing-jar":
@@ -2086,6 +2090,18 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                        else "kernarium_keyboard_default_prop ")
                     + ("" if oldapp_variant == "not-system" else "kernarium_oldapp_prop ")
                     + "))\n"
+                    # The scope of the Old app switch's property: restricted, readable by every
+                    # application domain, which an internal one is not for the non-core ones.
+                    + (
+                        "(typeattributeset system_internal_property_type (kernarium_oldapp_prop))\n"
+                        if oldapp_variant == "internal-scope"
+                        else ""
+                    )
+                    + (
+                        ""
+                        if oldapp_variant in ("not-restricted", "internal-scope")
+                        else "(typeattributeset system_restricted_property_type (kernarium_oldapp_prop))\n"
+                    )
                     + (
                         ""
                         if wifi_network_variant == "missing-transition"
@@ -2205,6 +2221,19 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     + (
                         ""
                         if oldapp_variant == "no-app-read"
+                        else "(allow appdomain kernarium_oldapp_prop (file (read)))\n"
+                        if oldapp_variant == "partial-app-read"
+                        else "".join(
+                            f"(allow {domain} kernarium_oldapp_prop (file (read getattr map open)))\n"
+                            for domain in (
+                                "runas_app", "untrusted_app", "untrusted_app_34", "untrusted_app_30",
+                                "untrusted_app_29", "untrusted_app_25", "gmscore_app", "mediaprovider_app",
+                                "platform_app", "platform_app_36", "priv_app", "priv_app_36", "isolated_app",
+                                "ephemeral_app", "system_app", "sdk_sandbox_34", "sdk_sandbox_audit",
+                                "sdk_sandbox_next",
+                            )
+                        )
+                        if oldapp_variant == "per-domain-reads"
                         else "(allow appdomain kernarium_oldapp_prop (file (read getattr map open)))\n"
                     )
                     + {
@@ -2214,10 +2243,25 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         "appdomain-sets": "(allow appdomain kernarium_oldapp_prop (property_service (set)))\n",
                         "runas-app-sets": "(allow runas_app kernarium_oldapp_prop (property_service (set)))\n",
                     }.get(oldapp_variant or "", "")
+                    # What the restricted macro emits for the type (the non-core domains may not
+                    # set it), and the neverallow of the application domains.
                     + (
                         ""
                         if oldapp_variant == "no-neverallow"
-                        else "(neverallow base_typeattr_9 kernarium_oldapp_prop (property_service (set)))\n"
+                        else "(typeattributeset base_typeattr_241 (and (domain ) (not (coredomain ))))\n"
+                        "(neverallow base_typeattr_241 kernarium_oldapp_prop (property_service (set)))\n"
+                    )
+                    + (
+                        ""
+                        if oldapp_variant in ("no-neverallow", "vendor-style-neverallow")
+                        else "(typeattributeset base_typeattr_955 (untrusted_app_all ))\n"
+                        if oldapp_variant == "partial-neverallow"
+                        else "(typeattributeset base_typeattr_955 (and (appdomain ) (not (shell ))))\n"
+                    )
+                    + (
+                        ""
+                        if oldapp_variant in ("no-neverallow", "vendor-style-neverallow")
+                        else "(neverallow base_typeattr_955 kernarium_oldapp_prop (property_service (set)))\n"
                     )
                     + (
                         ""
@@ -5516,6 +5560,23 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "runas_app may set persist.sys.kernarium.oldapp."),
             ("oldapp-no-neverallow", {"oldapp_variant": "no-neverallow"},
              "no neverallow that keeps application domains from setting kernarium_oldapp_prop"),
+            # The restricted macro's own rule is of the vendor kind (domain without the core
+            # domains) and covers the two non-core application domains alone.
+            ("oldapp-vendor-style-neverallow", {"oldapp_variant": "vendor-style-neverallow"},
+             "no neverallow that keeps application domains from setting kernarium_oldapp_prop"),
+            ("oldapp-partial-neverallow", {"oldapp_variant": "partial-neverallow"},
+             "no neverallow that keeps application domains from setting kernarium_oldapp_prop: none covers"),
+            ("oldapp-internal-scope", {"oldapp_variant": "internal-scope"},
+             "kernarium_oldapp_prop is a system_internal_prop"),
+            ("oldapp-not-restricted", {"oldapp_variant": "not-restricted"},
+             "kernarium_oldapp_prop is not declared with system_restricted_prop"),
+            ("oldapp-partial-app-read", {"oldapp_variant": "partial-app-read"},
+             "may not read persist.sys.kernarium.oldapp.<package>, labelled kernarium_oldapp_prop "
+             r"\(getattr, map, open, read on the file\)"),
+            ("oldapp-jar-stripped", {"oldapp_variant": "jar-stripped"},
+             "kernarium_oldapp.jar has no classes.dex and no preoptimized odex and vdex"),
+            ("oldapp-preopt-half", {"oldapp_variant": "preopt-half"},
+             "kernarium_oldapp.jar has no classes.dex and no preoptimized odex and vdex"),
             ("missing-side-key-layout", {"entries": {input_device_files["Vendor_1af4_Product_0002.kl"]: None}},
              "required entries are missing"),
             ("missing-keyboard-configuration", {"entries": {input_device_files["Vendor_1af4_Product_0003.idc"]: None}},
@@ -5926,6 +5987,19 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "defines config_supportsHardwareCamToggle only under a resource configuration"),
         ):
             reject(label, options, reason)
+
+        # What the checks accept besides the baseline: the grant to every application domain by its
+        # own rule and not through the attribute, and the command's code preoptimized beside a jar
+        # that holds none.
+        for label, options in (
+            ("oldapp-per-domain-reads", {"oldapp_variant": "per-domain-reads"}),
+            ("oldapp-preoptimized-code", {"oldapp_variant": "preopt-code"}),
+        ):
+            fixture = root / f"good-{label}.zip"
+            write_fixture(fixture, **options)
+            result = run_in_process(tool, "--target-files", fixture, *kernel_options)
+            if result.returncode != 0:
+                fail(f"target-files verifier rejected the {label} fixture: {result.stdout}")
 
         for index, case in enumerate(rejections.values()):
             label = "/".join(case["labels"])

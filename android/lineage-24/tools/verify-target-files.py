@@ -735,6 +735,7 @@ PROPERTY_CONTEXT_FILES = (
 )
 CIL_DONTAUDIT_RULE = re.compile(rb"^\(dontaudit (\S+) (\S+) \((\w+) \(([^)]*)\)\)\)$", re.MULTILINE)
 CIL_ALLOW_RULE = re.compile(rb"^\(allow (\S+) (\S+) \((\w+) \(([^)]*)\)\)\)$", re.MULTILINE)
+CIL_NEVERALLOW_RULE = re.compile(rb"^\(neverallow (\S+) (\S+) \((\w+) \(([^)]*)\)\)\)$", re.MULTILINE)
 CIL_PERMISSIVE_TYPE = re.compile(rb"^\(typepermissive (\S+)\)$", re.MULTILINE)
 # The only domain that may be permissive, and only in the diagnostics build: the userdebug
 # root shell. A user build has none.
@@ -935,7 +936,8 @@ KEYBOARD_DEFAULT_TRANSITION = re.compile(
 # carries its wrapper script and its jar on system_ext. The property has a type of its own under
 # the existing persist.sys.kernarium. policy: the shell domain sets it, every application domain
 # reads it (the framework hook reads it in the application's own process) and no other application
-# domain may set it.
+# domain may set it. Two application domains are not core domains, which a system_internal_prop
+# keeps from reading, so the type is system_restricted_prop.
 OLDAPP_COMMAND = "kernarium_oldapp"
 OLDAPP_WRAPPER = "SYSTEM_EXT/bin/kernarium_oldapp"
 OLDAPP_JAR = "SYSTEM_EXT/framework/kernarium_oldapp.jar"
@@ -949,6 +951,8 @@ OLDAPP_WRAPPER_REQUIRED = (
 OLDAPP_PROPERTY_PREFIX = "persist.sys.kernarium.oldapp."
 OLDAPP_PROPERTY_TYPE = "kernarium_oldapp_prop"
 OLDAPP_SETTER = "shell"
+# What get_prop grants for a property type: a read of the property area needs all four.
+OLDAPP_READ_PERMISSIONS = frozenset({"read", "getattr", "map", "open"})
 # The partition the host grew is filled on every boot, once /data is mounted
 # (init.vendor.rc says why): the kernel's online resize needs neither a fsck nor
 # a recorded check. resize2fs runs as root with the group of /data's owner, so
@@ -1568,7 +1572,9 @@ def check_boot_policy(
         read_small(archive, infos["SYSTEM_EXT/bin/kernarium_keyboard_default.sh"]),
     )
     check_oldapp_switch(
-        read_small(archive, infos[OLDAPP_WRAPPER]), read_small(archive, infos[OLDAPP_JAR])
+        read_small(archive, infos[OLDAPP_WRAPPER]),
+        read_small(archive, infos[OLDAPP_JAR]),
+        set(infos),
     )
     check_media_codecs_c2(read_small(archive, infos["VENDOR/etc/media_codecs_c2.xml"]))
 
@@ -4614,8 +4620,9 @@ def check_keyboard_default_policy(
         fail(f"system_ext property contexts do not label {KEYBOARD_DEFAULT_MARKER}")
 
 
-def check_oldapp_switch(wrapper: bytes, jar: bytes) -> None:
-    """The shell command is a wrapper script that starts the Java tool's class from its jar."""
+def check_oldapp_switch(wrapper: bytes, jar: bytes, packaged: set[str]) -> None:
+    """The shell command is a wrapper script that starts the Java tool's class from its jar, and
+    the image carries the tool's code: in the jar, or preoptimized beside it."""
     text = "\n".join(
         line
         for line in wrapper.decode("utf-8", errors="strict").splitlines()
@@ -4630,17 +4637,33 @@ def check_oldapp_switch(wrapper: bytes, jar: bytes) -> None:
             dex = archive.read("classes.dex") if "classes.dex" in names else None
     except (zipfile.BadZipFile, OSError, zlib.error) as problem:
         fail(f"{OLDAPP_JAR} is not a readable jar: {problem}")
-    # Dexpreopting may strip the code from the jar into the odex and vdex beside it; a jar that
-    # keeps it must hold the command's class.
-    if dex is not None and b"L" + OLDAPP_CLASS.replace(".", "/").encode() + b";" not in dex:
-        fail(f"{OLDAPP_JAR} holds code without the class {OLDAPP_CLASS}")
+    if dex is not None:
+        if b"L" + OLDAPP_CLASS.replace(".", "/").encode() + b";" not in dex:
+            fail(f"{OLDAPP_JAR} holds code without the class {OLDAPP_CLASS}")
+        return
+    # Dexpreopting may strip the code from the jar into the odex and vdex beside it: one such pair
+    # must be packaged, or there is no code to start.
+    stem = PurePosixPath(OLDAPP_JAR)
+    for isa in sorted(APP_ISAS):
+        pair = [f"{stem.parent}/oat/{isa}/{stem.stem}.{suffix}" for suffix in ("odex", "vdex")]
+        if all(name in packaged for name in pair):
+            return
+    fail(
+        f"{OLDAPP_JAR} has no classes.dex and no preoptimized odex and vdex of it is packaged "
+        f"(framework/oat/<isa>/{stem.stem}.odex and .vdex): the command {OLDAPP_COMMAND} has no code"
+    )
 
 
 def check_oldapp_switch_policy(
     contexts: list[str], policies: tuple[bytes, ...], system_ext_policy: bytes
 ) -> None:
     """The choice's property has a type of its own: the shell domain sets it, every application
-    domain reads it, and no application domain but the shell may set it."""
+    domain reads it, and no application domain but the shell may set it.
+
+    The type is declared system_restricted_prop: an internal type forbids the read to the
+    application domains that are not core domains (gceservice, vzwomatrigger_app), and the
+    restricted macro's own neverallow names only the non-core domains for the write, so a
+    neverallow of the application domains is checked here by what its source set covers."""
     sample = OLDAPP_PROPERTY_PREFIX + "org.example.package"
     label = property_label(sample, contexts) or "default_prop"
     if label != OLDAPP_PROPERTY_TYPE:
@@ -4651,11 +4674,22 @@ def check_oldapp_switch_policy(
         )
     if OLDAPP_PROPERTY_TYPE not in cil_attribute_members(system_ext_policy, "system_property_type"):
         fail(f"system_ext policy does not define the system-owned {OLDAPP_PROPERTY_TYPE}")
+    if OLDAPP_PROPERTY_TYPE in cil_attribute_members(system_ext_policy, "system_internal_property_type"):
+        fail(
+            f"{OLDAPP_PROPERTY_TYPE} is a system_internal_prop: the platform forbids the application "
+            "domains that are not core domains to read it"
+        )
+    if OLDAPP_PROPERTY_TYPE not in cil_attribute_members(
+        system_ext_policy, "system_restricted_property_type"
+    ):
+        fail(f"{OLDAPP_PROPERTY_TYPE} is not declared with system_restricted_prop")
     if not cil_allows_property_set(policies, OLDAPP_SETTER, label):
         fail(
             f"the {OLDAPP_SETTER} domain may not set {OLDAPP_PROPERTY_PREFIX}<package>, labelled "
             f"{label}: Andarium's adb could not switch Old app compatibility"
         )
+    # The concrete types that run applications (the shell among them), not the attribute names: a
+    # grant that reaches each of them through the attribute or on its own is the same grant.
     members = {
         member
         for policy in policies
@@ -4664,28 +4698,35 @@ def check_oldapp_switch_policy(
     }
     if not any(cil_attribute_members(policy, "appdomain") for policy in policies):
         fail("the policy lists no type for appdomain: the check could not tell who runs applications")
-    for domain in sorted({OLDAPP_SETTER, *ADB_KEY_APP_DOMAINS, *members}):
-        if not cil_allows_file_read(policies, domain, label):
+    for domain in sorted(members | {OLDAPP_SETTER}):
+        if not cil_allows(policies, domain, label, "file", set(OLDAPP_READ_PERMISSIONS)):
             fail(
-                f"{domain} may not read {OLDAPP_PROPERTY_PREFIX}<package>, labelled {label}: the "
-                "framework hook (the shell command for the shell domain) could not read the choice"
+                f"{domain} may not read {OLDAPP_PROPERTY_PREFIX}<package>, labelled {label} "
+                f"({', '.join(sorted(OLDAPP_READ_PERMISSIONS))} on the file): the framework hook "
+                "(the shell command for the shell domain) could not read the choice"
             )
-    for domain in sorted((set(ADB_KEY_APP_DOMAINS) | members) - {OLDAPP_SETTER, "appdomain"}):
+    applications = sorted(members - {OLDAPP_SETTER})
+    for domain in applications:
         if cil_allows_property_set(policies, domain, label):
             fail(
                 f"{domain} may set {OLDAPP_PROPERTY_PREFIX}<package>, labelled {label}: an "
                 "application could turn Old app compatibility on for itself"
             )
-    if not any(
-        match.group(2).decode() == label
-        for policy in policies
-        for match in re.finditer(
-            rb"^\(neverallow (\S+) (\S+) \(property_service \(([^)]*\bset\b[^)]*)\)\)\)$",
-            policy,
-            re.MULTILINE,
-        )
-    ):
-        fail(f"system_ext policy has no neverallow that keeps application domains from setting {label}")
+    targets = cil_types_and_attributes(policies, label)
+    for domain in applications:
+        sources = cil_types_and_attributes(policies, domain)
+        if not any(
+            CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode()) in sources
+            and CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(2).decode()) in targets
+            and match.group(3) == b"property_service"
+            and b"set" in match.group(4).split()
+            for policy in policies
+            for match in CIL_NEVERALLOW_RULE.finditer(policy)
+        ):
+            fail(
+                f"system_ext policy has no neverallow that keeps application domains from setting "
+                f"{label}: none covers {domain}"
+            )
 
 
 # The host's keyboard and mouse are virtio-input devices that Android finds by vendor and product
