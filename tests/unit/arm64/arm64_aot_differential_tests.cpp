@@ -1645,28 +1645,36 @@ void open_exclusive_is_not_entered(const LibraryImage &image,
  * (CpuState::defer_fp_load) keeps its FPCR aside: the register file's
  * `fpcr` is stale until the first access, and the entry conditions must
  * read the guest's. An FPCR with FIZ, AH or NEP is the engine's alone;
- * the same state without them is entered, and either way the result is
- * the engine's. */
+ * the same state without them is entered, whatever the stale value holds
+ * (both directions: stale zero under current bits, stale bits under a
+ * current zero), and either way the result is the engine's. */
 void deferred_fp_state_is_judged_by_its_guest_fpcr(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
 	const auto bias = Fixture::bias;
-	for (const bool afp : {true, false}) {
-		Fixture ref{afp ? 4361UL : 4363UL, image},
-			got{afp ? 4362UL : 4364UL, image};
+	struct Combination final {
+		std::uint32_t stale, guest;
+	};
+	constexpr Combination combinations[] = {
+		{0, 1}, {0, 2}, {0, 4}, {0, 7}, {1, 0}, {2, 0}, {4, 0}, {7, 0},
+		{7, 7}, {0, 0}};
+	unsigned long generation = 4500;
+	for (const auto &combination : combinations) {
+		Fixture ref{generation++, image}, got{generation++, image};
 		SplitMix rng{67};
 		auto c = make_case(rng, bias, functions[3].start, false, true,
 			arena_base(bias));
 		enterable(c);
 		std::vector<std::byte> saved(sizeof(c.cpu.vectors));
 		std::memcpy(saved.data(), c.cpu.vectors.data(), saved.size());
-		/* AH (bit 1) in the saved FPCR, the register file's own zero. */
-		const std::uint32_t guest_fpcr = (c.cpu.fpcr & ~0x7U) |
-			(afp ? 0x2U : 0U);
+		const std::uint32_t guest_fpcr =
+			(c.cpu.fpcr & ~0x7U) | combination.guest;
 		c.cpu.defer_fp_load(saved.data(), guest_fpcr, 0, ~0U);
-		c.cpu.fpcr = 0;
+		/* The register file's own, stale value: not loaded yet. */
+		c.cpu.fpcr = combination.stale;
 		c.cpu.fpsr = 0;
 		require(!c.cpu.fp_loaded);
+		const bool refused = combination.guest != 0;
 		aot::reset_stats();
 		aot::set_enabled(false);
 		auto want = drive(ref.env, ref.arena, c, max_blocks);
@@ -1679,11 +1687,11 @@ void deferred_fp_state_is_judged_by_its_guest_fpcr(const LibraryImage &image,
 		require(want.done());
 		require(same(want, have, c));
 		const auto st = aot::stats();
-		std::fprintf(stderr, "deferred FP state, AH %d: %llu entries, "
-			"%llu fp refusals\n", afp ? 1 : 0,
-			static_cast<unsigned long long>(st.enters),
+		std::fprintf(stderr, "deferred FP state, stale %u guest %u: %llu "
+			"entries, %llu fp refusals\n", combination.stale,
+			combination.guest, static_cast<unsigned long long>(st.enters),
 			static_cast<unsigned long long>(st.refusals[3]));
-		if (afp) {
+		if (refused) {
 			require(st.refusals[3] > 0);
 			require(st.enters == 0);
 		} else {
