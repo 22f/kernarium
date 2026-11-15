@@ -448,6 +448,49 @@ class WideningTests(unittest.TestCase):
         for text, (made, assembled) in self.ENCODINGS.items():
             self.assertEqual(made, assembled, f"{text}: {made:#x}")
 
+    def test_shared_memory_loops_match_an_assembler(self) -> None:
+        # Words from the system assembler for the loops the differential test
+        # runs on one shared cell (fixture.hammer_code).
+        code = fixture.hammer_code()
+        add, cas, llsc = (fixture.HAMMER_ADD, fixture.HAMMER_CAS,
+                          fixture.HAMMER_LLSC)
+        expected = {
+            add: 0xd2800023, add + 4: 0xf8230044, add + 8: 0xf1000400,
+            add + 12: 0x54ffffc1, add + 16: 0xd65f03c0,
+            cas: 0xf9400045, cas + 4: 0x910004a6, cas + 8: 0xaa0503e7,
+            cas + 12: 0xc8a77c46, cas + 16: 0xeb0500ff,
+            cas + 20: 0x54ffff61, cas + 24: 0xf1000400,
+            cas + 28: 0x54ffff21, cas + 32: 0xd65f03c0,
+            llsc: 0xc85f7c45, llsc + 4: 0x910004a5, llsc + 8: 0xc8067c45,
+            llsc + 12: 0x35ffffa6, llsc + 16: 0xf1000400,
+            llsc + 20: 0x54ffff61, llsc + 24: 0xd65f03c0}
+        self.assertEqual(code, expected)
+
+    def test_the_differential_test_finds_the_forms_it_names(self) -> None:
+        # The test addresses cas_<size>_<ordering> by arithmetic.
+        names = [name for name, _ in fixture.forms()]
+        for size in range(4):
+            for order in range(4):
+                self.assertEqual(
+                    names[177 + 2 * (size * 4 + order)],
+                    f"cas_{size}_{order}")
+        self.assertLessEqual(
+            fixture.FORMS_AT + len(names) * fixture.FORM_SIZE,
+            fixture.HAMMER_AT)
+
+    def test_only_the_exclusive_loop_leaves_rewritten_code(self) -> None:
+        elf = elf64.Elf(fixture.build())
+        library = rewrite.Library(
+            0, "/aot-test/libaotfixture.so", elf,
+            a64decode.Decoder(a64decode.DEFAULT_TABLE),
+            rewrite.read_layout(rewrite.LAYOUT_HEADER))
+        library.build([1] * ((library.table_end - library.table_base) // 4096))
+        stepped = sorted(offset for offset, _ in library.step_list
+                         if fixture.HAMMER_AT <= offset < fixture.HAMMER_AT
+                         + 0x100)
+        self.assertEqual(stepped, [fixture.HAMMER_LLSC,
+                                   fixture.HAMMER_LLSC + 8])
+
     def test_what_steps_is_what_the_engine_must_run(self) -> None:
         elf = elf64.Elf(fixture.build())
         library = rewrite.Library(

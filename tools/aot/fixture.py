@@ -274,6 +274,57 @@ def form_functions() -> tuple[tuple[int, int], ...]:
                  for index in range(len(forms())))
 
 
+# ---- shared-memory loops --------------------------------------------------
+# Three loops that add one to the 64-bit cell at [x2], x0 times, each by a
+# different instruction family: LDADD (inlined as a native atomic), a CAS
+# retry loop (inlined) and LDXR/STXR (left to the engine, which opens and
+# closes the exclusive monitor between entries of rewritten code). The
+# differential test runs one in rewritten code and another in the engine
+# on the same cell, so a lost update shows as a final count that is short.
+HAMMER_AT = TEXT + 0x1a00
+HAMMER_ADD = HAMMER_AT
+HAMMER_CAS = HAMMER_AT + 0x40
+HAMMER_LLSC = HAMMER_AT + 0x80
+SUBS_X0_X0_1 = 0xf1000400
+MOV_X7_X5 = 0xaa0503e7
+CMP_X7_X5 = 0xeb0500ff
+
+
+def cbnz_w(rt: int, here: int, target: int) -> int:
+    return 0x35000000 | (((target - here) // 4) & 0x7ffff) << 5 | rt
+
+
+def hammer_code() -> dict[int, int]:
+    code: dict[int, int] = {}
+
+    def put(at: int, *words: int) -> None:
+        for index, word in enumerate(words):
+            code[at + 4 * index] = word
+
+    a = HAMMER_ADD
+    put(a, 0xd2800023,                              # movz x3, #1
+        amo(3, 0, 0, 3, 0, False, 2, 4),            # ldadd x3, x4, [x2]
+        SUBS_X0_X0_1, b_cond(1, a + 12, a + 4), RET)
+    c = HAMMER_CAS
+    put(c, 0xf9400045,                              # ldr x5, [x2]
+        0x910004a6,                                 # add x6, x5, #1
+        MOV_X7_X5,
+        cas(3, 0, 0, 7, 2, 6),                      # cas x7, x6, [x2]
+        CMP_X7_X5, b_cond(1, c + 20, c),            # retry on a lost race
+        SUBS_X0_X0_1, b_cond(1, c + 28, c), RET)
+    d = HAMMER_LLSC
+    put(d, 0xc85f7c45,                              # ldxr x5, [x2]
+        0x910004a5,                                 # add x5, x5, #1
+        0xc8067c45,                                 # stxr w6, x5, [x2]
+        cbnz_w(6, d + 12, d),
+        SUBS_X0_X0_1, b_cond(1, d + 20, d), RET)
+    return code
+
+
+def hammer_functions() -> tuple[tuple[int, int], ...]:
+    return ((HAMMER_ADD, 0x14), (HAMMER_CAS, 0x24), (HAMMER_LLSC, 0x1c))
+
+
 def eh_frame() -> bytes:
     # CIE: version 1, "zR", code alignment 4, data alignment -8, return
     # address x30, pointers are pc-relative signed 32-bit.
@@ -281,7 +332,8 @@ def eh_frame() -> bytes:
                 bytes([4, 0x78, 30, 1, 0x1b, 0x0c, 31, 0]))
     cie_body += bytes(-(len(cie_body) + 4) % 8)
     out = bytearray(struct.pack("<I", len(cie_body)) + cie_body)
-    for start, size in FUNCTIONS + form_functions() + edge_functions():
+    for start, size in (FUNCTIONS + form_functions() + edge_functions() +
+                        hammer_functions()):
         position = len(out)
         field = EH_FRAME + position + 8
         body = struct.pack("<Iii", position + 4, start - field, size)
@@ -301,6 +353,10 @@ def build() -> bytes:
     for address, word in form_code().items():
         struct.pack_into("<I", text, address - TEXT, word)
     for address, word in edge_code().items():
+        struct.pack_into("<I", text, address - TEXT, word)
+    if FORMS_AT + len(forms()) * FORM_SIZE > HAMMER_AT:
+        raise ValueError("the forms run into the shared-memory loops")
+    for address, word in hammer_code().items():
         struct.pack_into("<I", text, address - TEXT, word)
     for index, word in enumerate(PLT_CODE):
         struct.pack_into("<I", text, PLT - TEXT + 4 * index, word)

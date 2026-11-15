@@ -16,11 +16,14 @@
 #include "cpu/arm64/aot/aot_runtime.hpp"
 #include "cpu/arm64/fp_environment.hpp"
 #include "cpu/arm64/gadgets/executor.hpp"
+#include "cpu/host_capabilities.hpp"
+#include "platform/apple/host_features.hpp"
 
 #include <algorithm>
 #include <array>
 #include <arm_acle.h>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -394,9 +397,14 @@ struct Environment final {
 	gadgets::GadgetExecutor executor;
 };
 
+/* What the engine reports of a fault: where, which access, whether it was an
+ * alignment fault, and the floating-point syndrome (zero unless a trapped
+ * floating-point exception ended the block). */
 struct Fault final {
 	std::uint64_t pc, address;
 	std::uint32_t access;
+	bool alignment;
+	std::uint32_t syndrome;
 	bool operator==(const Fault &) const = default;
 };
 
@@ -405,6 +413,10 @@ struct Result final {
 	std::vector<Fault> faults;
 	std::vector<std::byte> memory;
 	EngineEvent last{EngineEvent::continued};
+	/* The floating-point syndrome and alignment flag the engine reported
+	 * for the event that ended the run. */
+	std::uint32_t end_syndrome{};
+	bool end_alignment{};
 	bool finished{};
 	std::size_t blocks{};
 	std::size_t max_block{};
@@ -494,6 +506,8 @@ struct BlockLog final {
 			continue;
 		}
 		arm64::restore_native_fp_environment(c.cpu);
+		r.end_syndrome = executor.floating_point_syndrome();
+		r.end_alignment = executor.fault_alignment();
 		if (out.event == EngineEvent::system_call) {
 			r.finished = true;
 			break;
@@ -502,7 +516,9 @@ struct BlockLog final {
 			break;
 		const auto address = executor.fault_address();
 		r.faults.push_back({c.cpu.pc, address,
-			static_cast<std::uint32_t>(executor.fault_access())});
+			static_cast<std::uint32_t>(executor.fault_access()),
+			executor.fault_alignment(),
+			executor.floating_point_syndrome()});
 		const auto untagged = address & 0x00ff'ffff'ffff'ffffULL;
 		if (untagged < arena.base() ||
 		    untagged >= arena.base() + arena.total() * page_bytes ||
@@ -538,6 +554,8 @@ void describe(const char *what, const Case &c)
 [[nodiscard]] bool identical(const Result &a, const Result &b)
 {
 	if (a.finished != b.finished || a.last != b.last ||
+	    a.end_syndrome != b.end_syndrome ||
+	    a.end_alignment != b.end_alignment ||
 	    a.faults != b.faults || a.cpu.sp != b.cpu.sp ||
 	    a.cpu.pc != b.cpu.pc || a.cpu.nzcv != b.cpu.nzcv ||
 	    a.cpu.fpcr != b.cpu.fpcr || a.cpu.fpsr != b.cpu.fpsr ||
@@ -560,6 +578,13 @@ void describe(const char *what, const Case &c)
 	};
 	if (a.finished != b.finished || a.last != b.last)
 		say("event");
+	if (a.end_syndrome != b.end_syndrome ||
+	    a.end_alignment != b.end_alignment) {
+		say("syndrome");
+		std::fprintf(stderr, "  syndrome ref %x aot %x alignment ref %d "
+			"aot %d\n", a.end_syndrome, b.end_syndrome,
+			a.end_alignment ? 1 : 0, b.end_alignment ? 1 : 0);
+	}
 	if (a.faults != b.faults)
 		say("faults");
 	for (std::size_t i = 0; i < a.cpu.registers.size(); ++i)
@@ -716,6 +741,12 @@ void describe(const char *what, const Case &c)
 	/* FIZ, AH and NEP, which rewritten code is not entered under. */
 	if (rng.below(8) == 0)
 		c.cpu.fpcr |= static_cast<std::uint32_t>(1 + rng.below(7));
+	/* A floating-point trap enable (IOE, DZE, OFE, UFE, IXE, IDE): the
+	 * engine runs the code one instruction at a time and reports the
+	 * syndrome of an exception that traps. */
+	if (rng.below(16) == 0)
+		c.cpu.fpcr |= static_cast<std::uint32_t>(
+			(1 + rng.below(31)) << 8) | (rng.below(2) << 15);
 	c.cpu.fpsr = 0;
 	return c;
 }
@@ -835,9 +866,11 @@ void describe(const char *what, const Case &c)
 		ended.faults.size(), ended.done(),
 		static_cast<unsigned long long>(ended.cpu.pc));
 	for (const auto &f : ended.faults)
-		std::fprintf(stderr, "  fault pc %llx address %llx access %u\n",
+		std::fprintf(stderr, "  fault pc %llx address %llx access %u "
+			"alignment %d syndrome %x\n",
 			static_cast<unsigned long long>(f.pc),
-			static_cast<unsigned long long>(f.address), f.access);
+			static_cast<unsigned long long>(f.address), f.access,
+			f.alignment ? 1 : 0, f.syndrome);
 	if (!reported) {
 		std::fprintf(stderr, "every AOT exit state is on the reference path "
 			"(%zu exits, reference step %zu of %zu)\n", exits, at,
@@ -1577,6 +1610,9 @@ void enterable(Case &c)
 {
 	c.cpu.sp &= ~0xfULL;
 	c.cpu.fpcr &= ~static_cast<std::uint32_t>(arm64::fpcr_afp_controls);
+	/* Nor under a floating-point trap enable, which the engine runs one
+	 * instruction at a time. */
+	c.cpu.fpcr &= ~0x9f00U;
 }
 
 /* Forty instructions and a RET that returns to the start of the run: a lap
@@ -1992,6 +2028,400 @@ void edge_into_another_instance(const LibraryImage &image)
 	}
 }
 
+/* ---- scenarios on the fixture's shared-memory loops and CAS forms ------- */
+
+/* tools/aot/fixture.py: the loops that add one to the cell at [x2] x0 times,
+ * and the first of the instruction forms (cas_<size>_<ordering> is form
+ * 177 + 2 * (4 * size + ordering); the tooling test pins it). */
+constexpr std::uint64_t hammer_add = 0x2a00, hammer_cas = 0x2a40,
+	hammer_llsc = 0x2a80;
+constexpr std::uint64_t forms_at = 0x1100, form_size = 0x14;
+
+[[nodiscard]] constexpr std::uint64_t cas_form(unsigned size, unsigned order)
+{
+	return forms_at + (177 + 2 * (4 * size + order)) * form_size;
+}
+
+/* The library mapped at `bias` with a stub of its own, in an address space
+ * `generation` that other copies and an arena share. */
+struct Copy final {
+	Copy(unsigned long generation, std::uint64_t bias,
+		const LibraryImage &image)
+		: text{image.pages}, stub{1},
+		  text_map{generation, bias, text, image.pages,
+			PROT_READ | PROT_EXEC, true},
+		  stub_map{generation, bias + stub_offset, stub, 1,
+			PROT_READ | PROT_EXEC, true}
+	{
+		text.put(0, image.bytes);
+		stub.put32(0, system_call);
+	}
+	JitBacking text, stub;
+	GenerationMapping text_map, stub_map;
+};
+
+/* Run `c` on `executor` through the AOT dispatcher until the guest returns to
+ * its stub, whatever interrupts or other blocks come between. Memory is
+ * whatever the other vCPUs and the arena hold: nothing is reset. */
+std::size_t run_until_stub(GadgetExecutor &executor, StaticGuestMemory &memory,
+	unsigned long generation, arm64::CpuState &cpu,
+	std::size_t *interrupts = nullptr)
+{
+	std::size_t blocks = 0;
+	for (;; ++blocks) {
+		require(blocks < 20'000'000);
+		require(executor.begin_execution(generation, cpu.pc));
+		std::size_t executed = 0;
+		const auto event =
+			executor.run_aot_block(cpu, memory, generation, executed);
+		executor.end_execution();
+		if (event == EngineEvent::system_call)
+			break;
+		require(event == EngineEvent::continued ||
+			event == EngineEvent::interrupt);
+		if (event == EngineEvent::interrupt && interrupts != nullptr)
+			++*interrupts;
+	}
+	arm64::restore_native_fp_environment(cpu);
+	return blocks;
+}
+
+/* A state at a loop of the fixture that rewritten code is entered under. */
+[[nodiscard]] Case loop_case(std::uint64_t seed, std::uint64_t code_bias,
+	std::uint64_t offset, std::uint64_t arena_at)
+{
+	SplitMix rng{seed};
+	auto c = make_case(rng, code_bias, offset, false, true, arena_at);
+	enterable(c);
+	c.cpu.pc = code_bias + offset;
+	c.cpu.registers[30] = code_bias + stub_offset;
+	return c;
+}
+
+[[nodiscard]] std::uint64_t cell_value(const Arena &arena, std::size_t at)
+{
+	const auto bytes = arena.snapshot();
+	std::uint64_t value;
+	std::memcpy(&value, &bytes[at], 8);
+	return value;
+}
+
+/* Rewritten code and the engine add to one cell from two vCPUs. The second
+ * vCPU runs a copy of the library whose bytes differ from the framework's
+ * (so the engine runs every instruction of it), or the same copy as the
+ * first. A lost update would leave the count short. */
+void atomics_are_shared_between_aot_and_engine(const LibraryImage &image)
+{
+	constexpr std::uint64_t bias_a = 0x7173'0000'0000ULL;
+	constexpr std::uint64_t bias_b = 0x7174'0000'0000ULL;
+	constexpr std::uint64_t iterations = 30000;
+	constexpr unsigned long generation = 4510;
+	auto changed = image;
+	const std::uint32_t nop = 0xd503201fU;
+	std::memcpy(&changed.bytes[0x2ff0], &nop, 4); /* filler on the loops' page */
+	struct Pair {
+		bool second_changed;
+		std::uint64_t first, second;
+		const char *name;
+	};
+	const Pair pairs[] = {
+		{true, hammer_add, hammer_add, "ldadd / ldadd"},
+		{true, hammer_add, hammer_cas, "ldadd / cas"},
+		{true, hammer_cas, hammer_add, "cas / ldadd"},
+		{true, hammer_cas, hammer_llsc, "cas / ldxr+stxr"},
+		{true, hammer_llsc, hammer_add, "ldxr+stxr / ldadd"},
+		{true, hammer_llsc, hammer_llsc, "ldxr+stxr / ldxr+stxr"},
+		{false, hammer_add, hammer_add, "ldadd / ldadd (both rewritten)"},
+		{false, hammer_add, hammer_cas, "ldadd / cas (both rewritten)"},
+		{false, hammer_cas, hammer_cas, "cas / cas (both rewritten)"},
+		{false, hammer_llsc, hammer_add, "ldxr+stxr / ldadd (both rewritten)"},
+	};
+	Copy first_copy{generation, bias_a, image};
+	Copy second_copy{generation, bias_b, changed};
+	Arena arena{generation, arena_base(bias_a)};
+	StaticGuestMemory memory_a, memory_b;
+	GadgetExecutor executor_a, executor_b;
+	const auto cell = arena_base(bias_a) + 0x100;
+	for (std::size_t i = 0; i < arena.total(); ++i)
+		arena.set_kind(i, 2);
+	aot::set_enabled(true);
+	/* The changed copy is the engine's alone. */
+	{
+		aot::reset_stats();
+		SplitMix fill{3};
+		arena.fill(fill);
+		auto c = loop_case(7, bias_b, hammer_add, arena_base(bias_a));
+		c.cpu.registers[0] = 100;
+		c.cpu.registers[2] = cell;
+		run_until_stub(executor_b, memory_b, generation, c.cpu);
+		require(aot::stats().enters == 0);
+		auto d = loop_case(7, bias_a, hammer_add, arena_base(bias_a));
+		d.cpu.registers[0] = 100;
+		d.cpu.registers[2] = cell;
+		run_until_stub(executor_a, memory_a, generation, d.cpu);
+		require(aot::stats().enters > 0);
+	}
+	for (const auto &pair : pairs) {
+		SplitMix fill{11};
+		arena.fill(fill);
+		const auto initial = cell_value(arena, 0x100);
+		aot::reset_stats();
+		auto a = loop_case(21, bias_a, pair.first, arena_base(bias_a));
+		auto b = loop_case(22, pair.second_changed ? bias_b : bias_a,
+			pair.second, arena_base(bias_a));
+		a.cpu.registers[0] = b.cpu.registers[0] = iterations;
+		a.cpu.registers[2] = b.cpu.registers[2] = cell;
+		std::atomic<bool> go{false};
+		std::thread other{[&] {
+			while (!go.load(std::memory_order_acquire))
+				std::this_thread::yield();
+			run_until_stub(executor_b, memory_b, generation, b.cpu);
+		}};
+		go.store(true, std::memory_order_release);
+		run_until_stub(executor_a, memory_a, generation, a.cpu);
+		other.join();
+		const auto total = cell_value(arena, 0x100);
+		const auto st = aot::stats();
+		std::fprintf(stderr, "shared cell, %s: %llu of %llu, enters %llu "
+			"steps %llu\n", pair.name,
+			static_cast<unsigned long long>(total - initial),
+			static_cast<unsigned long long>(2 * iterations),
+			static_cast<unsigned long long>(st.enters),
+			static_cast<unsigned long long>(st.steps));
+		require(total - initial == 2 * iterations);
+		require(a.cpu.registers[0] == 0 && b.cpu.registers[0] == 0);
+		require(st.enters > 0);
+		require(st.poisoned <= 1);
+		/* The exclusive pair is the engine's even in rewritten code. */
+		if (pair.first == hammer_llsc ||
+		    (!pair.second_changed && pair.second == hammer_llsc))
+			require(st.steps > 0);
+	}
+	aot::set_enabled(false);
+}
+
+/* CAS with the fixture's forms at every width and ordering: the compare
+ * value matching and not, on a writable page, a read-only one, an unmapped
+ * one and a misaligned address. Rewritten code and the engine end in the
+ * same registers, memory and fault; the engine's own results are checked
+ * against the architecture's too. */
+void cas_outcomes_and_permissions(const LibraryImage &image)
+{
+	constexpr unsigned long generation_ref = 4530, generation_aot = 4531;
+	const auto bias = Fixture::bias;
+	Fixture ref{generation_ref, image}, got{generation_aot, image};
+	const std::uint64_t masks[4] = {0xff, 0xffff, 0xffff'ffffULL, ~0ULL};
+	std::size_t compared = 0, faulted = 0;
+	enum Where { writable, read_only, unmapped, misaligned, count };
+	aot::reset_stats();
+	for (unsigned size = 0; size < 4; ++size)
+		for (unsigned order = 0; order < 4; ++order)
+			for (int where = 0; where < count; ++where)
+				for (const bool match : {true, false}) {
+					if (where == misaligned && size == 0)
+						continue;
+					SplitMix rng{1000 + 64 * size + 16 * order +
+						4 * where + (match ? 1 : 0)};
+					auto c = loop_case(rng.next(), bias,
+						cas_form(size, order), arena_base(bias));
+					c.kinds.assign(arena_pages + stack_pages, 2);
+					c.kinds[0] = where == read_only ? 1 :
+						where == unmapped ? 0 : 2;
+					const auto cell = arena_base(bias) +
+						(where == misaligned ? 0x103 : 0x100);
+					/* What the arena holds at the cell. */
+					SplitMix seeded{c.seed};
+					ref.arena.fill(seeded);
+					std::uint64_t old;
+					const auto bytes = ref.arena.snapshot();
+					std::memcpy(&old, &bytes[cell - arena_base(bias)], 8);
+					old &= masks[size];
+					c.cpu.registers[1] = cell;
+					c.cpu.registers[2] = 0x1122'3344'5566'7788ULL;
+					c.cpu.registers[3] = match ? old : (old ^ 1);
+					aot::set_enabled(false);
+					const auto want = drive(ref.env, ref.arena, c,
+						max_blocks);
+					require(want.done());
+					aot::set_enabled(true);
+					const auto have = drive(got.env, got.arena, c,
+						aot_max_blocks);
+					aot::set_enabled(false);
+					require(same(want, have, c));
+					++compared;
+					/* The architecture's answer, from the engine's run. */
+					const auto fresh = [&] {
+						std::uint64_t value;
+						std::memcpy(&value,
+							&want.memory[cell - arena_base(bias)], 8);
+						return value & masks[size];
+					}();
+					if (where == writable) {
+						require(want.faults.empty());
+						require(want.cpu.registers[3] == old);
+						require(fresh == (match ?
+							(c.cpu.registers[2] & masks[size]) : old));
+					} else if (where == read_only || where == unmapped) {
+						/* A write fault, whether or not the compare
+						 * would have matched. */
+						require(want.faults.size() >= 1);
+						require(want.faults.front().address == cell);
+						++faulted;
+					}
+				}
+	const auto st = aot::stats();
+	std::fprintf(stderr, "cas matrix: %zu cases compared, %zu faulting; "
+		"enters %llu\n", compared, faulted,
+		static_cast<unsigned long long>(st.enters));
+	require(compared == 4 * 4 * 2 * count - 4 * 2);
+	require(faulted == 4 * 4 * 2 * 2);
+	require(st.enters > compared / 2);
+	require(st.poisoned == 0);
+}
+
+/* A naturally misaligned CAS inside one 16-byte granule: the engine faults
+ * it under the baseline profile (no FEAT_LSE2) and performs it under the
+ * profile the runtime probes. Rewritten code leaves such an
+ * access to the engine, so it ends as the engine does under either. */
+void misaligned_cas_follows_the_profile(const LibraryImage &image)
+{
+	const auto bias = Fixture::bias;
+	const auto probed = ::uml::platform::apple::probed_host_capabilities();
+	for (const bool lse2 : {false, true}) {
+		if (lse2 && !probed.has(::uml::cpu::ArmFeature::lse2))
+			continue;
+		const ::uml::cpu::HostCapabilitiesScope scope{
+			lse2 ? probed : ::uml::cpu::baseline_host_capabilities()};
+		Fixture ref{4570 + (lse2 ? 2UL : 0UL), image};
+		Fixture got{4571 + (lse2 ? 2UL : 0UL), image};
+		SplitMix rng{91};
+		auto c = loop_case(rng.next(), bias, cas_form(3, 0),
+			arena_base(bias));
+		c.cpu.registers[1] = arena_base(bias) + 0x103;
+		c.cpu.registers[2] = 0x1122'3344'5566'7788ULL;
+		c.cpu.registers[3] = 0;
+		aot::set_enabled(false);
+		const auto want = drive(ref.env, ref.arena, c, max_blocks);
+		aot::set_enabled(true);
+		const auto have = drive(got.env, got.arena, c, aot_max_blocks);
+		aot::set_enabled(false);
+		require(want.done());
+		require(same(want, have, c));
+		std::fprintf(stderr, "misaligned cas, lse2 %d: %zu faults, "
+			"alignment %d\n", lse2 ? 1 : 0, want.faults.size(),
+			want.faults.empty() ? 0 : want.faults.front().alignment ? 1 : 0);
+		if (lse2) {
+			require(want.faults.empty());
+		} else {
+			require(!want.faults.empty() && want.faults.front().alignment);
+		}
+	}
+}
+
+/* More instances than the binder holds: the library mapped at 70 biases is
+ * run copy by copy, twice. The ones it dropped are bound again, and every
+ * run ends as the engine's does. */
+void more_instances_than_the_binder_holds(const LibraryImage &image)
+{
+	constexpr std::size_t copies = 70;
+	constexpr unsigned long generation = 4540;
+	const auto first_bias = 0x7300'0000'0000ULL;
+	const auto bias_of = [&](std::size_t index) {
+		return first_bias + index * 0x1'0000'0000ULL;
+	};
+	std::vector<std::unique_ptr<Copy>> maps;
+	for (std::size_t i = 0; i < copies; ++i)
+		maps.push_back(std::make_unique<Copy>(generation, bias_of(i), image));
+	Arena arena{generation, arena_base(bias_of(0))};
+	StaticGuestMemory memory;
+	GadgetExecutor executor;
+	std::vector<Case> cases;
+	for (std::size_t i = 0; i < copies; ++i) {
+		/* The first loop of the fixture, counting to x3. */
+		auto c = loop_case(500 + i, bias_of(i), 0x1000, arena_base(bias_of(0)));
+		c.cpu.registers[3] = 50 + i;
+		cases.push_back(c);
+	}
+	std::vector<Result> want;
+	aot::set_enabled(false);
+	for (std::size_t i = 0; i < copies; ++i)
+		want.push_back(drive_on(executor, memory, generation, bias_of(i),
+			arena, cases[i], max_blocks));
+	aot::reset_stats();
+	aot::set_enabled(true);
+	for (int round = 0; round < 2; ++round)
+		for (std::size_t i = 0; i < copies; ++i) {
+			const auto have = drive_on(executor, memory, generation,
+				bias_of(i), arena, cases[i], aot_max_blocks);
+			require(want[i].done());
+			require(same(want[i], have, cases[i]));
+		}
+	aot::set_enabled(false);
+	const auto st = aot::stats();
+	std::fprintf(stderr, "%zu instances: binds %llu enters %llu\n", copies,
+		static_cast<unsigned long long>(st.binds),
+		static_cast<unsigned long long>(st.enters));
+	/* Each copy is bound the first time, and the ones the 64 slots dropped
+	 * again in the second round. */
+	require(st.binds >= copies + (copies - 64));
+	require(st.enters >= 2 * copies);
+	require(st.poisoned == 0);
+}
+
+/* A shootdown (a mapping change by another thread) arrives while rewritten
+ * code runs a long loop: the vCPU leaves at its next return to the
+ * dispatcher, the writer is never kept waiting, and the loop ends in the
+ * state the engine reaches. */
+void a_shootdown_reaches_a_native_loop(const LibraryImage &image)
+{
+	constexpr unsigned long generation = 4560;
+	constexpr std::uint64_t iterations = 20'000'000;
+	const auto bias = Fixture::bias;
+	Fixture got{generation, image};
+	JitBacking spare{1};
+	std::atomic<bool> done{false};
+	std::atomic<std::size_t> shootdowns{0};
+	/* A loop of three instructions per count: x0 counts up to x3. */
+	auto c = loop_case(77, bias, 0x1000, arena_base(bias));
+	c.cpu.registers[3] = iterations;
+	for (std::size_t i = 0; i < got.arena.total(); ++i)
+		got.arena.set_kind(i, 2);
+	aot::reset_stats();
+	aot::set_enabled(true);
+	std::thread writer{[&] {
+		/* Mappings elsewhere in the address space, made and removed, each
+		 * of which closes the execution gate and interrupts the vCPU. */
+		while (!done.load(std::memory_order_acquire) &&
+		       shootdowns.load() < 20000) {
+			GenerationMapping map{generation,
+				got.env.bias + 0x3000'0000ULL, spare, 1,
+				PROT_READ | PROT_WRITE, false};
+			shootdowns.fetch_add(1);
+			std::this_thread::yield();
+		}
+	}};
+	std::size_t interrupts = 0;
+	const auto began = std::chrono::steady_clock::now();
+	std::size_t blocks = run_until_stub(got.env.executor, got.env.memory,
+		generation, c.cpu, &interrupts);
+	done.store(true, std::memory_order_release);
+	writer.join();
+	aot::set_enabled(false);
+	const auto seconds = std::chrono::duration<double>(
+		std::chrono::steady_clock::now() - began).count();
+	const auto st = aot::stats();
+	std::fprintf(stderr, "shootdowns during a native loop: %zu mapping "
+		"changes, %zu interrupts, %zu blocks, %.2f s, enters %llu\n",
+		shootdowns.load(), interrupts, blocks, seconds,
+		static_cast<unsigned long long>(st.enters));
+	require(c.cpu.registers[0] == iterations);
+	require(st.enters > 0);
+	require(shootdowns.load() > 10);
+	require(interrupts > 0);
+	require(seconds < 120);
+	require(st.poisoned == 0);
+}
+
 /* The 64-bit page digests find a library; they authorize nothing. Two words
  * of a page are changed (the first to something the engine will run, the
  * second to make the digest come out the same), and the page is not the one
@@ -2020,11 +2450,14 @@ void edge_into_another_instance(const LibraryImage &image)
 	return crc;
 }
 
-void equal_digest_is_not_equal_code(const LibraryImage &image,
-	const std::vector<Function> &functions)
+/* `image` with the first word of the code at `start` changed (to
+ * `mov x0, #120`) and the last word of its page chosen so that the page's
+ * digest is the one the framework was built from: a page that is not the
+ * stored one and that no digest tells from it. */
+[[nodiscard]] LibraryImage with_equal_digest(const LibraryImage &image,
+	std::uint64_t start)
 {
 	LibraryImage other = image;
-	const auto start = functions[2].start;
 	const auto page = start / page_bytes * page_bytes;
 	const auto fixup = page + page_bytes - 4;
 	require(start + 4 < fixup);
@@ -2082,6 +2515,14 @@ void equal_digest_is_not_equal_code(const LibraryImage &image,
 	require(digest_of(work.data()) == digest_of(original.data()));
 	require(std::memcmp(work.data(), original.data(), page_bytes) != 0);
 
+	return other;
+}
+
+void equal_digest_is_not_equal_code(const LibraryImage &image,
+	const std::vector<Function> &functions)
+{
+	const auto start = functions[2].start;
+	const auto other = with_equal_digest(image, start);
 	SplitMix rng{61};
 	const auto bias = Fixture::bias;
 	Fixture ref{4351, other}, got{4352, other};
@@ -2102,6 +2543,95 @@ void equal_digest_is_not_equal_code(const LibraryImage &image,
 	require(st.poisoned == 1);
 	require(st.enters == 0);
 }
+
+/* A text page changes after it was compared, and more code changes are
+ * published than the history keeps: the binder cannot tell which pages the
+ * dropped ones named, so it compares them again. The change is one that a
+ * page digest does not show (the page's digest is the framework's), so the
+ * exact comparison is all that stands between the stored code and the
+ * guest's. */
+void code_change_history_overflows(const LibraryImage &image,
+	const std::vector<Function> &functions)
+{
+	SplitMix rng{29};
+	const auto bias = Fixture::bias;
+	const auto fn = functions[5];
+	auto c = make_case(rng, bias, fn.start, false, true, arena_base(bias));
+	std::uint64_t offset = 0;
+	for (const auto &f : functions)
+		if ((f.start >> 12) != (fn.start >> 12) &&
+		    f.start % page_bytes < page_bytes - 64) {
+			offset = f.start;
+			break;
+		}
+	require(offset != 0);
+	const auto collided = with_equal_digest(image, offset);
+	const auto page = offset / page_bytes * page_bytes;
+	const auto fixup = page + page_bytes - 4;
+	std::uint32_t patched, fixed, original, original_fixup;
+	std::memcpy(&patched, &collided.bytes[offset], 4);
+	std::memcpy(&fixed, &collided.bytes[fixup], 4);
+	std::memcpy(&original, &image.bytes[offset], 4);
+	std::memcpy(&original_fixup, &image.bytes[fixup], 4);
+	const auto d = make_case(rng, bias, offset, false, true, arena_base(bias));
+	Fixture ref_changed{4551, collided}, ref_original{4553, image};
+	aot::set_enabled(false);
+	const auto want_c = drive(ref_original.env, ref_original.arena, c,
+		max_blocks);
+	const auto want_changed = drive(ref_changed.env, ref_changed.arena, d,
+		max_blocks);
+	const auto want_original = drive(ref_original.env, ref_original.arena, d,
+		max_blocks);
+	require(want_changed.cpu.registers[0] != want_original.cpu.registers[0]);
+
+	Fixture got{4552, image};
+	const auto publish_elsewhere = [&](std::size_t count, std::size_t from) {
+		for (std::size_t i = 0; i < count; ++i)
+			got.env.memory.invalidate_code(
+				bias + 0x2000'0000ULL + (from + i) * 0x10000);
+	};
+	const auto run = [&](const Case &which) {
+		aot::set_enabled(true);
+		auto result = drive(got.env, got.arena, which, aot_max_blocks);
+		aot::set_enabled(false);
+		return result;
+	};
+	aot::reset_stats();
+	require(same(want_c, run(c), c));
+	require(same(want_original, run(d), d));
+	auto st = aot::stats();
+	require(st.enters > 0);
+	/* A few unrelated publications: what was compared stays compared. */
+	publish_elsewhere(3, 0);
+	const auto hashed = st.pages_hashed;
+	require(same(want_c, run(c), c));
+	require(same(want_original, run(d), d));
+	st = aot::stats();
+	require(st.pages_hashed == hashed);
+	/* The page of d becomes the digest-equal other one, and its
+	 * publication is followed by more than the history holds. */
+	got.env.backing.put32(offset, patched);
+	got.env.backing.put32(fixup, fixed);
+	got.env.memory.invalidate_code(got.env.bias + offset);
+	publish_elsewhere(40, 100);
+	const auto before = aot::stats().enters;
+	require(same(want_changed, run(d), d));
+	st = aot::stats();
+	require(st.enters == before);
+	/* The exact comparison found the page different: the instance is
+	 * the engine's from then on, whatever the guest does next. */
+	require(st.poisoned == 1);
+	require(st.pages_hashed > hashed);
+	require(same(want_c, run(c), c));
+	got.env.backing.put32(offset, original);
+	got.env.backing.put32(fixup, original_fixup);
+	got.env.memory.invalidate_code(got.env.bias + offset);
+	publish_elsewhere(40, 200);
+	require(same(want_original, run(d), d));
+	st = aot::stats();
+	require(st.enters == before);
+}
+
 
 } // namespace
 
@@ -2215,12 +2745,36 @@ int main(int argc, char **argv)
 		require(st.refusals[1] > 0);
 		require(st.refusals[3] > 0);
 		if (file.guest.ends_with("/libaotfixture.so")) {
+			/* The same cases under the profile the runtime probes, named
+			 * here whatever default the test binary installs (LSE2 among
+			 * its features: unaligned atomics inside a granule do not
+			 * fault). */
+			const auto probed =
+				::uml::platform::apple::probed_host_capabilities();
+			const ::uml::cpu::HostCapabilitiesScope scope{probed};
+			aot::reset_stats();
+			const auto p = differential(cfg, image, sample, sites);
+			const auto ps = aot::stats();
+			std::fprintf(stderr, "probed profile (lse2 %d): %zu cases, "
+				"%zu compared, %zu finished, %zu faults; enters %llu\n",
+				probed.has(::uml::cpu::ArmFeature::lse2) ? 1 : 0, p.cases,
+				p.compared, p.finished, p.fault_events,
+				static_cast<unsigned long long>(ps.enters));
+			require(p.compared > p.cases / 2);
+			require(ps.enters > p.compared / 2);
+			require(ps.poisoned == 0);
 			loop_through_another_range(image, functions);
 			code_change_in_the_dispatch_window(image, functions);
 			edges_into_a_page_that_differs(image);
 			edges_into_a_page_that_matches(image);
 			next_page_changes_after_its_neighbour_was_compared(image);
 			edge_into_another_instance(image);
+			atomics_are_shared_between_aot_and_engine(image);
+			cas_outcomes_and_permissions(image);
+			misaligned_cas_follows_the_profile(image);
+			more_instances_than_the_binder_holds(image);
+			code_change_history_overflows(image, functions);
+			a_shootdown_reaches_a_native_loop(image);
 		}
 		/* The scenarios use the first library: they are about the
 		 * mechanism, not about the code. */
