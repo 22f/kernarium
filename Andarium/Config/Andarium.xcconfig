@@ -16,6 +16,12 @@
 // track (WhatsNewAppStore.json) for AppStore. WHATS_NEW_TRACK names the one a
 // build bundles and reads (below).
 //
+// The app icon is DuskJade (Shared/DuskJade.icon) in every configuration but
+// TestFlight, which has DuskEmber (Shared/DuskEmber.icon) so that a TestFlight
+// build is told from the others in App Store Connect. APP_ICON_NAME names the
+// one a build compiles, and the other document is left out of the build, so an
+// AppStore bundle holds nothing of DuskEmber.
+//
 // Send feedback exists only in an AppStore or TestFlight build whose maker has
 // the ignored Feedback.local.xcconfig beside this file
 // (Feedback.local.xcconfig.example) with a receiver address, so a fork, or a
@@ -127,6 +133,15 @@ WHATS_NEW_CONDITION = WHATS_NEW_TRACK_$(WHATS_NEW_TRACK)
 WHATS_NEW_ABSENT_BETA = WhatsNewAppStore.json
 WHATS_NEW_ABSENT_APP_STORE = WhatsNew.json
 
+// The app icon a build compiles (the target's ASSETCATALOG_COMPILER_APPICON_NAME),
+// and the document of the other icon, which the build leaves out. Only the
+// compiled icon's assets go in, not every app icon asset of the target.
+APP_ICON_NAME = DuskJade
+APP_ICON_NAME[config=TestFlight] = DuskEmber
+APP_ICON_ABSENT_DuskJade = DuskEmber.icon
+APP_ICON_ABSENT_DuskEmber = DuskJade.icon
+ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO
+
 // The Feedback, TipJar and Review string tables are each compiled only where
 // their feature is. An empty value names the setting FEEDBACK_CATALOG_ (and so
 // on) and excludes the catalog; any other lands on an undefined name and
@@ -237,7 +252,7 @@ FOLLOW_X_UNUSED_local = XLogoGlyph.xcassets
 SHEET_ARTWORK_UNUSED_ = GitHubLogoLocal.xcassets DeveloperAvatarLocal.xcassets
 SHEET_ARTWORK_UNUSED_local = GitHubLogoGlyph.xcassets DeveloperAvatarGlyph.xcassets
 
-EXCLUDED_SOURCE_FILE_NAMES = $(FEEDBACK_CATALOG_$(FEEDBACK_ADDRESS:identifier):default=) $(TIP_JAR_CATALOG_$(TIP_JAR_NAMED):default=) $(REVIEW_CATALOG_$(REVIEW_NAMED):default=) $(FOLLOW_X_ABSENT_$(FOLLOW_X_HANDLE:identifier):default=) $(X_LOGO_ABSENT_$(X_LOGO_NAMED):default=) $(GITHUB_LOGO_ABSENT_$(SHEET_DEVELOPER_GITHUB:identifier):default=) $(AVATAR_ABSENT_$(SHEET_DEVELOPER_NAME:identifier):default=) $(FOLLOW_X_UNUSED_$(FOLLOW_X_LOGO_SOURCE:identifier):default=) $(SHEET_ARTWORK_UNUSED_$(SHEET_ARTWORK_SOURCE:identifier):default=) $(WHATS_NEW_ABSENT_$(WHATS_NEW_TRACK))
+EXCLUDED_SOURCE_FILE_NAMES = $(FEEDBACK_CATALOG_$(FEEDBACK_ADDRESS:identifier):default=) $(TIP_JAR_CATALOG_$(TIP_JAR_NAMED):default=) $(REVIEW_CATALOG_$(REVIEW_NAMED):default=) $(FOLLOW_X_ABSENT_$(FOLLOW_X_HANDLE:identifier):default=) $(X_LOGO_ABSENT_$(X_LOGO_NAMED):default=) $(GITHUB_LOGO_ABSENT_$(SHEET_DEVELOPER_GITHUB:identifier):default=) $(AVATAR_ABSENT_$(SHEET_DEVELOPER_NAME:identifier):default=) $(FOLLOW_X_UNUSED_$(FOLLOW_X_LOGO_SOURCE:identifier):default=) $(SHEET_ARTWORK_UNUSED_$(SHEET_ARTWORK_SOURCE:identifier):default=) $(WHATS_NEW_ABSENT_$(WHATS_NEW_TRACK)) $(APP_ICON_ABSENT_$(APP_ICON_NAME))
 
 // The filing number at the bottom of Info (China's ICP filing) is the same
 // file's DEVELOPER_ICP_NUMBER, with a switch of its own: it needs no tip, review
