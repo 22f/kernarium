@@ -500,29 +500,24 @@ class StepTests(unittest.TestCase):
         self.assertLess(stop, next(i for i, c in enumerate(guest.commands) if "am broadcast" in c),
                         "a process of an earlier run is gone before the new one starts")
 
-    def test_the_review_buttons_centre_is_found_in_a_dump(self) -> None:
-        dump = ("<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation=\"0\">"
-                "<node index=\"0\" text=\"Cancel\" resource-id=\"com.android.permissioncontroller:id/cancel_button\" "
-                "bounds=\"[500,1144][600,1216]\" />"
-                "<node index=\"1\" text=\"Continue\" resource-id=\"com.android.permissioncontroller:id/continue_button\" "
-                "bounds=\"[609,1144][720,1216]\" /></hierarchy>")
-        self.assertEqual(runner.continue_button(dump), (664, 1180))
-        self.assertIsNone(runner.continue_button("<hierarchy/>"))
-        self.assertIsNone(runner.continue_button("not xml"))
-
-    def test_a_review_is_completed_by_pressing_continue(self) -> None:
-        flagged = "REVIEW_REQUIRED|USER_SENSITIVE_WHEN_GRANTED"
-        clear = "USER_SET|USER_SENSITIVE_WHEN_GRANTED"
+    def test_the_review_is_completed_with_the_shared_helper(self) -> None:
+        """The runner presses Continue with permission_review.py, which reads the package's whole runtime
+        permissions block: the flag on a late row of many is found, and the failure is the runner's."""
+        rows = "\n".join(f"        android.permission.P{index}: granted=true, flags=[ ]" for index in range(9))
+        flagged = ("  Package [p] (abc):\n    User 0: installed=true\n      runtime permissions:\n" + rows +
+                   "\n        android.permission.LATE: granted=true, flags=[ REVIEW_REQUIRED]\n    other: x\n")
+        clear = flagged.replace("REVIEW_REQUIRED", "USER_SET")
         button = ("<hierarchy><node resource-id=\"com.android.permissioncontroller:id/continue_button\" "
                   "bounds=\"[0,100][200,200]\" /></hierarchy>")
 
         class Reviewing(FakeGuest):
             pending = True
+            button_shown = True
 
             def adb_run(self, *arguments: str, timeout: float = 30) -> CompletedProcess:
                 self.commands.append(" ".join(arguments))
-                if "cat /data/local/tmp/oldapp-ui.xml" in arguments[-1]:
-                    return CompletedProcess(arguments, 0, button)
+                if arguments[-1] == f"cat {runner.permission_review.UI_DUMP}":
+                    return CompletedProcess(arguments, 0, button if self.button_shown else "<hierarchy/>")
                 return CompletedProcess(arguments, 0, "")
 
             def shell(self, command: str, timeout: float = 30) -> str:
@@ -534,13 +529,16 @@ class StepTests(unittest.TestCase):
                 return ""
 
         guest = Reviewing("")
-        with mock.patch.object(runner.time, "sleep"):
-            self.assertEqual(runner.complete_review(guest, "org.example.andarium.oldappprobe"),
+        with mock.patch("time.sleep"):
+            self.assertEqual(runner.permission_review.complete_review(guest, "p", runner.Failure),
                              "permission review completed")
-        self.assertIn("shell input tap 100 150", guest.commands)
-        self.assertTrue(any("android.intent.action.REVIEW_PERMISSIONS" in c for c in guest.commands))
-        with mock.patch.object(runner.time, "sleep"):
-            self.assertEqual(runner.complete_review(guest, "org.example.andarium.oldappprobe"), "no review pending")
+            self.assertIn("shell input tap 100 150", guest.commands)
+            self.assertTrue(any("android.intent.action.REVIEW_PERMISSIONS" in c for c in guest.commands))
+            self.assertEqual(runner.permission_review.complete_review(guest, "p", runner.Failure), "no review pending")
+            guest.pending, guest.button_shown = True, False
+            with mock.patch.object(runner.permission_review, "REVIEW_SECONDS", 0):
+                with self.assertRaises(runner.Failure):
+                    runner.permission_review.complete_review(guest, "p", runner.Failure)
 
     def test_the_library_in_the_image_carries_the_label_an_application_may_execute(self) -> None:
         class Listing(FakeGuest):

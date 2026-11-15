@@ -50,12 +50,12 @@ import subprocess
 import sys
 import tempfile
 import time
-import xml.etree.ElementTree as ElementTree
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / "integration" / "support"))
 sys.path.insert(0, str(HERE))
 import oldapp_probe_apk as probe  # noqa: E402
+import permission_review  # noqa: E402
 
 # The orientation runner owns the guest: its launcher and its adb.
 SPEC = importlib.util.spec_from_file_location("run_android_orientation", HERE / "run_android_orientation.py")
@@ -171,52 +171,6 @@ def install(guest, apk: pathlib.Path, variant: str) -> str:
     if result.returncode != 0 or "Success" not in result.stdout:
         raise Failure(f"installing {probe.package_of(variant)}: {result.stdout.strip()[-400:]}")
     return f"{probe.package_of(variant)} installed"
-
-
-REVIEW_FLAG = "REVIEW_REQUIRED"
-REVIEW_SECONDS = 60
-BOUNDS = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
-
-
-def continue_button(ui: str) -> tuple[int, int] | None:
-    """The centre of the permission review's Continue button in a `uiautomator dump`, if it is on screen."""
-    try:
-        root = ElementTree.fromstring(ui)
-    except ElementTree.ParseError:
-        return None
-    for node in root.iter("node"):
-        if node.get("resource-id", "").endswith(":id/continue_button"):
-            match = BOUNDS.fullmatch(node.get("bounds", ""))
-            if match:
-                left, top, right, bottom = (int(group) for group in match.groups())
-                return (left + right) // 2, (top + bottom) // 2
-    return None
-
-
-def review_pending(guest, package: str) -> bool:
-    return REVIEW_FLAG in guest.shell(f"dumpsys package {package} | grep -A4 'runtime permissions'")
-
-
-def complete_review(guest, package: str) -> str:
-    """Android shows an application that targets below API 23 the permission review before its first component
-    runs (a broadcast is skipped until then). The user's Continue is pressed here, as it is on the first launch of
-    such a game."""
-    if not review_pending(guest, package):
-        return "no review pending"
-    guest.shell(f"am start -W -a android.intent.action.REVIEW_PERMISSIONS "
-                f"--es android.intent.extra.PACKAGE_NAME {package}", timeout=60)
-    deadline = time.monotonic() + REVIEW_SECONDS
-    while time.monotonic() < deadline:
-        guest.adb_run("shell", "uiautomator dump /data/local/tmp/oldapp-ui.xml", timeout=60)
-        dump = guest.adb_run("shell", "cat /data/local/tmp/oldapp-ui.xml", timeout=30)
-        button = continue_button(dump.stdout) if dump.returncode == 0 else None
-        if button is not None:
-            guest.shell(f"input tap {button[0]} {button[1]}")
-            time.sleep(2)
-            if not review_pending(guest, package):
-                return "permission review completed"
-        time.sleep(2)
-    raise Failure(f"the permission review of {package} was not completed")
 
 
 def layer_in_image(guest) -> str:
@@ -436,7 +390,7 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
             report.run(f"{variant}: install", lambda variant=variant: install(guest, apks[variant], variant))
         for variant in probe.VARIANTS:
             report.run(f"{variant}: permission review",
-                       lambda variant=variant: complete_review(guest, probe.package_of(variant)))
+                       lambda variant=variant: permission_review.complete_review(guest, probe.package_of(variant), Failure))
 
         def old() -> str:
             declined_before = declined_count(guest)
@@ -503,7 +457,7 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
         report.run("modern: the layer is left out", modern)
         report.run("modern: the render thread's scene", lambda: scene(guest, "modern", shim=False, layer=False))
         report.run("old, debuggable: install", lambda: install(guest, debug_apk, "old"))
-        report.run("old, debuggable: permission review", lambda: complete_review(guest, package))
+        report.run("old, debuggable: permission review", lambda: permission_review.complete_review(guest, package, Failure))
         if not options.host_shim:
             report.run("old, debuggable: switched on", lambda: switch(guest, package, True))
         try:
