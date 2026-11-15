@@ -805,7 +805,7 @@ public:
 	{
 		train_target(target_pc, target);
 		/* Training is the only thing C++ does to move a site off its
-		 * empty cells, and empty_pc is unreachable as a guest target, so
+		 * empty cells, and empty_pc is never a trained target, so
 		 * a site still holding two empty cells is untrained since its
 		 * last reset -- which makes this the transition that enrols it.
 		 * Translated code trains cells too, without enrolling; such a
