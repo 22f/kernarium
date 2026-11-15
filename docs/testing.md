@@ -756,6 +756,8 @@ blocker in every one of them.
   states (the first, a middle and the last byte faulting, both directions,
   overlap, zero length, a copy across an unmapped page), and the registers,
   flags and memory at every fault must equal the engine's.
+  A short function run 200 times is entered a handful of times, and a copy
+  that faults on five pages is entered for once.
   One row per Advanced SIMD structure form (loads and stores, lanes and
   replicating loads, post-index by immediate and register, virtual base and
   index registers) is started the same way.

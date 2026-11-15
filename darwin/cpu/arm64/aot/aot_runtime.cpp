@@ -143,6 +143,7 @@ enum class FindResult : unsigned {
 std::atomic<bool> g_refill_stress{false};
 std::atomic<void (*)(void *)> g_run_hook{nullptr};
 std::atomic<void *> g_run_hook_context{nullptr};
+std::atomic<std::uint64_t> g_learning_epoch{0};
 
 /* Leave every general and vector register the caller could rely on holding
  * something else: the refill thunk saves x0-x17, x30, NZCV and q0-q31 around
@@ -192,7 +193,7 @@ std::atomic<std::uint64_t> binds{0}, verifications{0}, pages_hashed{0},
 	refill_failures{0}, cross_hits{0}, cross_misses{0}, max_retired{0},
 	verify_nanos{0}, step_nanos{0}, steps_run{0}, code_bumps{0},
 	history_queries{0}, mops_slow{0}, mops_fault{0}, mops_illegal{0};
-std::array<std::atomic<std::uint64_t>, 4> refusals{};
+std::array<std::atomic<std::uint64_t>, 5> refusals{};
 /* The guest addresses AOT code stepped at most: library << 40 | offset. */
 constexpr std::size_t step_slots = 32768;
 std::array<std::atomic<std::uint64_t>, step_slots> step_key{};
@@ -300,9 +301,11 @@ void write_report() noexcept
 		get(counters::code_bumps), get(counters::history_queries),
 		get(counters::mops_slow), get(counters::mops_fault),
 		get(counters::mops_illegal));
-	std::fprintf(file, "refused tbi %llu sp %llu exclusive %llu fp %llu\n",
+	std::fprintf(file, "refused tbi %llu sp %llu exclusive %llu fp %llu "
+		"short %llu\n",
 		get(counters::refusals[0]), get(counters::refusals[1]),
-		get(counters::refusals[2]), get(counters::refusals[3]));
+		get(counters::refusals[2]), get(counters::refusals[3]),
+		get(counters::refusals[4]));
 	std::fprintf(file, "find");
 	for (std::size_t kind = 0; kind < counters::find_results.size(); ++kind)
 		std::fprintf(file, " %s %llu", find_result_name(kind),
@@ -504,6 +507,15 @@ void note_run_start() noexcept
 #endif
 }
 
+std::uint64_t learning_epoch() noexcept
+{
+#if UML_AOT_DIAGNOSTICS
+	return g_learning_epoch.load(std::memory_order_relaxed);
+#else
+	return 0;
+#endif
+}
+
 std::uint64_t step_begin() noexcept
 {
 #if UML_AOT_DIAGNOSTICS
@@ -531,6 +543,7 @@ namespace diagnostics {
 
 void set_enabled(std::optional<bool> state) noexcept
 {
+	g_learning_epoch.fetch_add(1, std::memory_order_relaxed);
 	g_state.store(!state.has_value() ? -1 :
 		(*state && directory().valid ? 1 : 0), std::memory_order_relaxed);
 }

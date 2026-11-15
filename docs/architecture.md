@@ -547,11 +547,19 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   applies to every SP-based access.
 - Exit: whatever the framework does not inline stops with committed state and
   the engine runs exactly that instruction, so faults, system calls, signals
-  and debugger exits are the engine's own. An entry runs at most the engine's
-  chaining limit of instructions, and the executor goes on into the next
-  entry only while nothing the dispatcher checks has changed (the interrupt,
-  mapping and code-change sequences, SVCR, the FPCR trap enables), so
-  interrupts and shootdowns are noticed as they are in the engine.
+  and debugger exits are the engine's own. When such an instruction faults,
+  the engine also runs it again where the guest resumes (a copy into fresh
+  memory faults once per page), without entering rewritten code for it. An
+  entry runs at most the engine's chaining limit of instructions, and the
+  executor goes on into the next entry only while nothing the dispatcher
+  checks has changed (the interrupt, mapping and code-change sequences,
+  SVCR, the FPCR trap enables), so interrupts and shootdowns are noticed as
+  they are in the engine.
+- Admission: entering and leaving rewritten code costs about what the engine
+  takes for 48 instructions. An address whose last two entries each retired
+  fewer is left to the engine, except one entry in 64, which tells whether it
+  has become worth entering (a callback that a library calls into code
+  outside the framework is the common case).
 - Memory and atomics: an inline probe of the engine's TLB entry, refilled
   through the executor on a miss; ordered accesses, the LSE atomic operations
   and compare-and-swap run as the host's own instruction on naturally aligned

@@ -32,7 +32,7 @@ struct Stats final {
 	std::uint64_t refill_failures{};
 	std::uint64_t cross_hits{};
 	std::uint64_t cross_misses{};
-	std::array<std::uint64_t, 4> refusals{};
+	std::array<std::uint64_t, 5> refusals{};
 	/* Instructions the largest single entry ran (measured by counting each
 	 * one, not estimated from the budget) and nanoseconds spent verifying
 	 * instances. */

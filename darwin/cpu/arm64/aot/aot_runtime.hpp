@@ -29,6 +29,7 @@ enum class Refusal : unsigned {
 	sp_misaligned,
 	exclusive_monitor,
 	fp_environment,
+	short_entry,
 	count,
 };
 void note_refusal(Refusal reason) noexcept;
@@ -36,6 +37,10 @@ void note_refusal(Refusal reason) noexcept;
  * address space's sequences, before anything is looked up (nothing in a
  * production build). */
 void note_run_start() noexcept;
+/* A number that changes when a diagnostics build's tests switch the
+ * component on or off: the engine forgets what it learned about instructions
+ * that faulted and about short entries (always 0 in a production build). */
+[[nodiscard]] std::uint64_t learning_epoch() noexcept;
 /* Bracket the engine's execution of one instruction rewritten code left to
  * it (counted and timed in a diagnostics build only). */
 [[nodiscard]] std::uint64_t step_begin() noexcept;

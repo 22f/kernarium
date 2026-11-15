@@ -2888,6 +2888,53 @@ void memory_copy_and_set_match_the_engine(const LibraryImage &image)
 		page_at(2) + 0x100, 100, plain);
 	require(aot::stats().mops_slow == 1);
 	require(aot::stats().steps == 0);
+
+	/* A copy that faults on every page: the engine runs the instruction
+	 * again at each resume, and rewritten code is entered for it once. */
+	{
+		auto kinds = plain;
+		for (std::size_t page = 6; page < 11; ++page)
+			kinds[page] = 0;
+		aot::reset_stats();
+		mops_row(ref, got, rng, small, row_cpyf, page_at(6), page_at(0),
+			5 * page_bytes, kinds);
+		const auto resumed = aot::stats();
+		require(resumed.mops_fault >= 1);
+		require(resumed.mops_fault <= 2);
+	}
+}
+
+/* A function that retires a handful of instructions costs more to enter than
+ * the engine takes to run it: after two such entries in a row the engine runs
+ * it, and rewritten code is entered again one time in 64. */
+void short_entries_are_left_to_the_engine(const LibraryImage &image)
+{
+	const auto bias = Fixture::bias;
+	Fixture ref{4701, image}, got{4702, image};
+	SplitMix rng{37};
+	auto c = make_case_from_seed(rng.next(), bias, mops_at + row_cpyf * mops_step,
+		true, true, arena_base(bias));
+	enterable(c);
+	const auto base = arena_base(bias);
+	c.cpu.registers[0] = base + 4 * page_bytes + 0x300;
+	c.cpu.registers[2] = 7;
+	c.cpu.registers[1] = base + 2 * page_bytes + 0x100;
+	c.kinds.assign(arena_pages + stack_pages, 2);
+	aot::set_enabled(false);
+	const auto want = drive(ref.env, ref.arena, c, max_blocks);
+	require(want.done());
+	aot::set_enabled(true);
+	aot::reset_stats();
+	for (int i = 0; i < 200; ++i)
+		require(same(want, drive(got.env, got.arena, c, aot_max_blocks), c));
+	aot::set_enabled(false);
+	const auto st = aot::stats();
+	std::fprintf(stderr, "short entries: 200 runs, enters %llu, left to the "
+		"engine %llu\n", static_cast<unsigned long long>(st.enters),
+		static_cast<unsigned long long>(st.refusals[4]));
+	require(st.enters >= 2);
+	require(st.enters < 100);
+	require(st.refusals[4] > 100);
 }
 
 } // namespace
@@ -3033,6 +3080,7 @@ int main(int argc, char **argv)
 			code_change_history_overflows(image, functions);
 			a_shootdown_reaches_a_native_loop(image);
 			memory_copy_and_set_match_the_engine(image);
+			short_entries_are_left_to_the_engine(image);
 		}
 		/* The scenarios use the first library: they are about the
 		 * mechanism, not about the code. */

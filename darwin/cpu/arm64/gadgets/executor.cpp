@@ -2913,6 +2913,23 @@ struct GadgetExecutor::AotState final {
 	static constexpr std::size_t step_slots = 2048;
 	arm64::aot::Binder binder;
 	std::array<StepSlot, step_slots> steps{};
+	/* The address of the last instruction the engine ran for rewritten code
+	 * and that faulted (1: none). The guest resumes at it once the fault is
+	 * handled, and the engine runs it again: a copy into fresh memory
+	 * faults once per page, and entering rewritten code at each resume costs
+	 * more than the page's copy. */
+	std::uint64_t retry_pc{1};
+	/* How many entries in a row at an address retired fewer instructions
+	 * than aot_short_entry, by address. */
+	struct ShortSlot final {
+		std::uint64_t pc{1};
+		std::uint8_t streak{};
+		std::uint8_t skipped{};
+	};
+	static constexpr std::size_t short_slots = 4096;
+	std::array<ShortSlot, short_slots> shorts{};
+	/* The learning_epoch retry_pc and shorts were learned in. */
+	std::uint64_t learning_epoch{};
 };
 #else
 struct GadgetExecutor::AotState final {};
@@ -3396,6 +3413,13 @@ GadgetExecutor::run_block_body(
  * between two returns to its dispatcher, which bounds how long a vCPU goes
  * without polling for an interrupt. */
 constexpr std::uint64_t aot_entry_budget = 4096;
+/* Entering and leaving rewritten code costs about what the engine takes for
+ * this many instructions, so an address whose entries keep retiring fewer
+ * is left to the engine, except for one entry in aot_short_again, which
+ * tells whether it has become worth entering. */
+constexpr std::uint64_t aot_short_entry = 48;
+constexpr std::uint8_t aot_short_streak = 2;
+constexpr std::uint8_t aot_short_again = 64;
 
 ::uml::cpu::EngineEvent GadgetExecutor::step_aot(
 	arm64::CpuState &cpu, StaticGuestMemory &memory, std::size_t &executed)
@@ -3444,6 +3468,14 @@ std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 {
 	if (!aot_)
 		aot_ = std::make_unique<AotState>();
+	if (aot_->learning_epoch != arm64::aot::learning_epoch()) {
+		aot_->learning_epoch = arm64::aot::learning_epoch();
+		aot_->retry_pc = 1;
+		aot_->shorts = {};
+	}
+	if (cpu.pc == aot_->retry_pc)
+		return std::nullopt;
+	aot_->retry_pc = 1;
 	/* The sequences are the ones run_block read: the lookups below
 	 * validate against them, the engine's ISB compares with them
 	 * (cpu.code_sequence_seen) and the loop leaves when either has moved
@@ -3480,6 +3512,12 @@ std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 			arm64::aot::note_refusal(arm64::aot::Refusal::fp_environment);
 			break;
 		}
+		auto &shorty = aot_->shorts[(cpu.pc >> 2) % AotState::short_slots];
+		if (shorty.pc == cpu.pc && shorty.streak >= aot_short_streak &&
+		    ++shorty.skipped % aot_short_again != 0U) {
+			arm64::aot::note_refusal(arm64::aot::Refusal::short_entry);
+			break;
+		}
 		const auto hit = aot_->binder.find(memory, execution_context_,
 			generation, code_changes, cpu.pc);
 		if (hit.native == nullptr)
@@ -3492,6 +3530,18 @@ std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 			aot_entry_budget - total,
 			aot_->binder.cross(generation, code_changes));
 		total += static_cast<std::size_t>(result.retired);
+		if (shorty.pc != start) {
+			shorty.pc = start;
+			shorty.streak = 0;
+			shorty.skipped = 0;
+		}
+		if (result.retired < aot_short_entry &&
+		    result.reason != arm64::aot::Reason::step) {
+			if (shorty.streak < 255U)
+				++shorty.streak;
+		} else {
+			shorty.streak = 0;
+		}
 		if (result.reason == arm64::aot::Reason::step) {
 			/* The engine runs the one instruction the rewritten code
 			 * left to it: it needs the guest's floating-point
@@ -3503,6 +3553,8 @@ std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 			arm64::aot::step_end(began);
 			total += stepped;
 			if (event != ::uml::cpu::EngineEvent::continued) {
+				if (event == ::uml::cpu::EngineEvent::memory_fault)
+					aot_->retry_pc = cpu.pc;
 				executed = total;
 				return event;
 			}
