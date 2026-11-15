@@ -647,8 +647,9 @@ patches ART's one JNI function table in place and gives the application:
   bytes at offset 16 that stands for the real array and holds a global reference
   to it. The JNI functions that take an object accept a reference to a block, from
   any caller, as a reference to that array: the wrapper makes a local reference of
-  its own to the array (under the layer's lock when the block is not its thread's)
-  and gives the runtime only that, never the block's own reference, so identity
+  its own to the array, under the layer's lock, whichever thread's block it is,
+  and gives the runtime only that, never the block's own reference (Java code that
+  runs during a call can end the block), so identity
   (`IsSameObject`, `NewGlobalRef`, monitors) and writes (`SetByteArrayRegion`,
   `Release*Elements`, `ReleasePrimitiveArrayCritical`) keep their meaning. The layer reads the
   length from its own record, never from the length word, which the application
@@ -698,9 +699,13 @@ patches ART's one JNI function table in place and gives the application:
   `Get...Elements` unless the thread already has a runtime critical region open
   (`GetPrimitiveArrayCritical`, `GetStringCritical`), where no call that makes a
   reference may be made: it then returns the block as it is when a pin or a live
-  reference keeps its array, and NULL otherwise. Two threads that use one block
-  at once share its memory as on Dalvik; their synchronizations with the array
-  run one at a time, and a raw write racing one can be lost. A release goes to
+  reference keeps its array, and NULL otherwise. With an exception pending a
+  conversion uses the block's strong reference under a pin of the wrapper's own,
+  and synchronizes nothing. Two threads that use one block at once share its
+  memory as on Dalvik. Every synchronization of a block with its array, its own
+  thread's included, runs under one process-wide lock that no call into Java
+  holds, so the synchronizations of all threads run one at a time, and a raw
+  write that races one can be lost. A release goes to
   the block whose data starts at its pointer, whichever reference comes with it,
   and never reaches the runtime for a pointer in the region; a pointer inside
   the region that is not at a block's start is not read as a header, copies

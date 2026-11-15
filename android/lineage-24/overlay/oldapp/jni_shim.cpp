@@ -223,7 +223,6 @@ void drain_pending(Env* env);
 // Whether a JNI call may follow: not with an exception pending (almost no function may run then).
 bool jni_usable(Env* env) { return !original<jboolean (*)(Env*)>(slot::ExceptionCheck)(env); }
 
-// A live block that cannot become an ended one (no weak reference to give): its global reference and its memory go.
 // Blocks that wait for an environment without a pending exception: a thread that ended, or an end with an exception
 // pending.
 void queue_pending(BlockHeader* header) {
@@ -770,7 +769,7 @@ bool identity_hash(Env* env, jobject local, uint32_t* hash) {
 
 // The end of a block's last reference, under the lock: the strong reference gives way to a weak one (unless a pin keeps
 // it) and the block waits in the index, so that no other thread can make a second block for the array in between. What
-// the application wrote through the pointer has gone to the array (push_dirty) before.
+// the application wrote through the pointer has gone to the array (push_dirty) in the same hold of the mutex.
 void end_locked(Env* env, BlockHeader* header) {
     if (__atomic_load_n(&header->pins, __ATOMIC_RELAXED) == 0) {
         jobject weak = original<jobject (*)(Env*, jobject)>(slot::NewWeakGlobalRef)(env, header->global);
@@ -811,8 +810,8 @@ void end_block(Env* env, BlockHeader* header) {
         return;
     }
     Ending ending;
-    push_dirty(env, header, header->global);
     EndedLock lock;
+    push_dirty(env, header, header->global);  // under the mutex like every synchronization: another thread may be in one
     end_locked(env, header);
 }
 
@@ -1000,8 +999,11 @@ jobject make_shadow(Env* env, jobject local) {
             ++known->refs;
             state->blocks[state->count++] = known;
             state->env = env;
+            {
+                EndedLock lock;
+                sync_all(env, known, local);  // what Java wrote meanwhile shows, and what the application wrote reaches the array
+            }
             original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, local);
-            sync_all(env, known, known->global);  // what Java wrote meanwhile shows, and what the application wrote reaches the array
             return array_of(known);
         }
     }
@@ -1024,6 +1026,13 @@ jobject make_shadow(Env* env, jobject local) {
             collection_step(env);
             if (g.ended_count != 0) {
                 again = take_ended(env, local, hash, bytes, &no_global);
+                if (again != nullptr) {
+                    again->refs = 1;
+                    again->owner = env;
+                    // Java's writes since it ended and the application's raw writes since meet here, before another
+                    // thread can use the block: a kept reference on another thread synchronizes under this mutex too.
+                    sync_all(env, again, local);
+                }
             }
         }
         if (no_global) {
@@ -1031,15 +1040,12 @@ jobject make_shadow(Env* env, jobject local) {
             return nullptr;
         }
         if (again != nullptr) {
-            again->refs = 1;
-            again->owner = env;
             state->blocks[state->count++] = again;
             state->env = env;
             state->bytes += static_cast<uint32_t>(bytes);
             original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, local);
             __atomic_fetch_add(&g.counters.shadows_live, 1u, __ATOMIC_RELAXED);
             __atomic_fetch_add(&g.counters.blocks_revived, 1u, __ATOMIC_RELAXED);
-            sync_all(env, again, again->global);  // Java's writes since it ended and the application's raw writes since meet here
             note_peak(state->count);
             return array_of(again);
         }
@@ -1117,36 +1123,42 @@ jobject make_shadow(Env* env, jobject local) {
 //
 // The reference to a block outlives the block's entry: an application keeps a byte[] it got in a native-library global
 // (Dalvik's local reference was invalid once the native method returned, but its direct pointer to a reachable array
-// was not), and may use it from another thread. The rules for the use of such a reference in a wrapper:
-//   - a wrapper never hands the runtime a reference that belongs to a block (its global or weak reference): another
-//     thread's end, weakening or sweep could delete it meanwhile. The block of the calling thread's own entries is the
-//     one exception, since only that thread can end it. For any other block (an ended one, a pinned one, one that is live
-//     on another thread, one that waits for an environment) the wrapper makes a local reference of its own from the
-//     block's reference, under the mutex, uses only that, and deletes it when it returns. The array cannot be
-//     collected meanwhile, and the block's own reference may change hands without harm;
+// was not), and may use it from another thread. There is no owner exemption in the rules for its use in a wrapper:
+//   - every wrapper that gives the runtime an array for a block makes a local reference of its own under the mutex, from
+//     the block's global or weak reference, uses only that, and deletes it when it returns. It never hands the runtime a
+//     reference that belongs to the block: any thread's end, weakening or sweep can delete that, and so can the thread's
+//     own, since Java code that runs during a call (a callback that calls a native method that deletes the last reference)
+//     ends the block while the wrapper is still using it. The local reference keeps the array reachable meanwhile, so the
+//     block is ended at most, never freed, and a synchronization after the call still has an array to reach;
 //   - the use of a reference makes no entry and moves no block to the using thread: a block stays ended, or live on its
 //     owner. Only an array that arrives as a result revives into an entry (make_shadow). A thread with no native frame
 //     holds nothing afterwards, and a thread with 512 entries can still use a kept reference;
 //   - a pointer from Get...Elements or Get...Critical on such a reference pins the block (an ended block that only a
 //     weak reference held gets a global one for the pin) until the release; no entry is needed;
-//   - DeleteLocalRef and GetArrayLength ask nothing of the array; a release does not need a local reference when the pin
-//     holds the array;
+//   - where no reference can be made (an exception is pending, or a runtime critical region is open and this is the
+//     critical pair) the wrapper takes a pin of its own on the block, under the mutex, and uses the block's strong
+//     reference, which an end then leaves alone (end_locked); the pin is given back when the wrapper returns. A block
+//     that only a weak reference holds has no strong reference to use, and the wrapper finds no array;
+//   - DeleteLocalRef and GetArrayLength ask nothing of the array;
 //   - the reference of a block whose array was collected (the weak reference is cleared) or whose block was freed
 //     converts to nothing, as a reference to a freed block always did: the wrapper then does what it does for a null
 //     array (a length of 0, no elements, no copy). Dalvik's behaviour there was undefined; the layer does not touch the
 //     memory of a freed block beyond reading its state. A reference whose array was collected and whose address now
 //     holds another array's block reaches that array (as a dangling pointer could on Dalvik).
-// Two threads that use one block at once: Dalvik gave them the same memory, and so do the blocks (one address). The
-// synchronizations of a thread that does not own the block run under the mutex and so one at a time, with each other and
-// with the ends, revivals and sweeps. The owner's own synchronizations take no lock; a raw write racing a synchronization
-// on another thread can be lost, as one racing Java's write could on Dalvik.
+// Every synchronization of a block with its array, whichever thread makes it, runs under the one process-wide mutex that
+// also guards the ended index. It calls only the runtime's region and reference functions (never Java code), so a thread
+// cannot re-enter the layer inside one, and the mutex is never held across a call into Java: a call is synchronized
+// before and after, in two separate holds. A raw write that races a synchronization (to a byte that Java did not write
+// either) can be lost, as one racing Java's write could on Dalvik. The mutex serializes the synchronizations of all blocks,
+// not only of one: the layer has no per-block lock, since the only runtime calls under it are the region and reference
+// functions, which are short and never wait for another thread.
 
 // How a wrapper reaches the array of a block.
 struct Access {
     BlockHeader* block;  // null: the block is freed or its array is gone, and there is nothing to reach
-    jobject array;       // what the runtime is handed: the block's own global (an entry of this thread) or a local reference
+    jobject array;       // what the runtime is handed: a local reference of the wrapper's own, or a pinned block's global
     bool own_ref;        // `array` is a local reference of the wrapper's own: it is deleted at the end
-    bool shared;         // the block is not this thread's: its synchronizations run under the mutex
+    bool pinned;         // the wrapper holds a pin of its own on the block: it is given back at the end
 };
 
 // The block a wrapper is handed the reference `object` of: live or ended, otherwise null (a freed block).
@@ -1159,30 +1171,37 @@ BlockHeader* block_of(const void* object) {
     return magic == kBlockLive || magic == kBlockEnded ? header : nullptr;
 }
 
-Access open_header(Env* env, BlockHeader* header) {
+// A pin: see pin_block.
+void count_pin(BlockHeader* header) { __atomic_fetch_add(&header->pins, 1u, __ATOMIC_RELAXED); }
+bool unpin(BlockHeader* header) {
+    uint32_t pins = __atomic_load_n(&header->pins, __ATOMIC_RELAXED);
+    while (pins > 0 && !__atomic_compare_exchange_n(&header->pins, &pins, pins - 1, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+    }
+    return pins == 1;  // the last one
+}
+Access open_header(Env* env, BlockHeader* header, bool may_reference = true) {
     Access access{header, nullptr, false, false};
-    if (__atomic_load_n(&header->magic, __ATOMIC_ACQUIRE) == kBlockLive && __atomic_load_n(&header->owner, __ATOMIC_RELAXED) == env) {
-        access.array = header->global;  // an entry of this thread: nobody else can end it
-        return access;
-    }
-    access.shared = true;
-    if (!jni_usable(env)) {
-        return access;  // no JNI call may be made: the block is there, a reference to its array is not
-    }
     EndedLock lock;
     const uint32_t magic = header->magic;
     if (magic != kBlockLive && magic != kBlockEnded) {
         access.block = nullptr;
         return access;
     }
-    jobject local = original<jobject (*)(Env*, jobject)>(slot::NewLocalRef)(env, header->global != nullptr ? header->global
-                                                                                                           : header->weak);
-    if (local == nullptr) {
-        access.block = nullptr;  // the array was collected: the next sweep frees the block
-        return access;
+    if (may_reference && jni_usable(env)) {
+        jobject local = original<jobject (*)(Env*, jobject)>(slot::NewLocalRef)(env, header->global != nullptr ? header->global
+                                                                                                                : header->weak);
+        if (local == nullptr) {
+            access.block = nullptr;  // the array was collected: the next sweep frees the block
+            return access;
+        }
+        access.array = local;
+        access.own_ref = true;
+    } else if (header->global != nullptr) {
+        // No reference can be made: the block's strong reference, kept by a pin for as long as the wrapper uses it.
+        count_pin(header);
+        access.array = header->global;
+        access.pinned = true;
     }
-    access.array = local;
-    access.own_ref = true;
     return access;
 }
 Access open_block(Env* env, const void* object) {
@@ -1193,40 +1212,30 @@ void close_access(Env* env, Access& access) {
     if (access.own_ref && access.array != nullptr) {
         original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, access.array);
     }
+    if (access.pinned) {
+        unpin(access.block);  // an ended block that this was the last pin of gives way to a weak reference at a later sweep
+    }
     access.array = nullptr;
     access.own_ref = false;
+    access.pinned = false;
 }
 
-// A synchronization of a block that is not the calling thread's runs under the mutex.
+// A synchronization of a block, whichever thread's it is, runs under the mutex.
 struct SyncScope {
-    bool locked;
-    explicit SyncScope(const Access& access) : locked(access.shared) {
-        if (locked) {
-            lock_ended();
-        }
-    }
-    ~SyncScope() {
-        if (locked) {
-            unlock_ended();
-        }
-    }
+    SyncScope() { lock_ended(); }
+    ~SyncScope() { unlock_ended(); }
     SyncScope(const SyncScope&) = delete;
     SyncScope& operator=(const SyncScope&) = delete;
 };
 
 // A pointer from Get...Elements or Get...Critical is a pin: the array stays reachable, and the block valid, until the
-// pointer is released with mode 0 or JNI_ABORT (JNI_COMMIT keeps it). Dalvik pinned the array the same way. A block of this
-// thread needs the count only. Any other is pinned under the mutex, so an end cannot swap its strong reference for a weak
-// one in between, and an ended block that only a weak reference holds is given a global reference for the pin first.
+// pointer is released with mode 0 or JNI_ABORT (JNI_COMMIT keeps it). Dalvik pinned the array the same way. The pin is
+// taken under the mutex, so an end cannot swap the block's strong reference for a weak one in between, and an ended block
+// that only a weak reference holds is given a global reference for the pin first.
 // False: the pin could not be had (the array is gone, or no global reference).
-void count_pin(BlockHeader* header) { __atomic_fetch_add(&header->pins, 1u, __ATOMIC_RELAXED); }
 bool pin_block(Env* env, const Access& access) {
     if (access.block == nullptr) {
         return false;
-    }
-    if (!access.shared) {
-        count_pin(access.block);
-        return true;
     }
     EndedLock lock;
     BlockHeader* header = access.block;
@@ -1248,12 +1257,6 @@ bool pin_block(Env* env, const Access& access) {
     }
     count_pin(header);
     return true;
-}
-bool unpin(BlockHeader* header) {
-    uint32_t pins = __atomic_load_n(&header->pins, __ATOMIC_RELAXED);
-    while (pins > 0 && !__atomic_compare_exchange_n(&header->pins, &pins, pins - 1, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
-    }
-    return pins == 1;  // the last one
 }
 
 // What the runtime is handed in place of one reference of a wrapper: the real array of a block, held for the wrapper's
@@ -1333,7 +1336,7 @@ R call_synced(Env* env, const HoldSet& receiver, const HoldSet& arguments, F&& c
             const Access& access = set.items[i];
             const uint32_t magic = access.block != nullptr ? __atomic_load_n(&access.block->magic, __ATOMIC_ACQUIRE) : 0;
             if (access.array != nullptr && (magic == kBlockLive || magic == kBlockEnded)) {
-                SyncScope scope(access);
+                SyncScope scope;
                 step(access);
             }
         }
@@ -2084,7 +2087,7 @@ jbyte* w_GetByteArrayElements(Env* e, jarray a, jboolean* is_copy) {
             return nullptr;
         }
         {
-            SyncScope scope(access);
+            SyncScope scope;
             sync_all(e, access.block, access.array);
         }
         jbyte* elements = pin_block(e, access) ? reinterpret_cast<jbyte*>(array_of(access.block)->data) : nullptr;
@@ -2097,35 +2100,34 @@ jbyte* w_GetByteArrayElements(Env* e, jarray a, jboolean* is_copy) {
 // chunks the application wrote are merged into the array, byte by byte; JNI_ABORT discards the working copy (the block
 // takes the array's bytes). A buffer other than the block (an application that copied it) is the application's write
 // into the block first; a pointer into the block's own memory but not at its start is nothing to copy from (the old
-// runtime ignored the pointer; it only counts as the release of the block's pin). The critical pair may run inside another
-// array's critical region, where only the critical pair of the real array may be called: it uses the block's own
-// reference, which the pin being released keeps. A release with an exception pending that the wrapper cannot hold the array
-// for synchronizes nothing: the working copy keeps its writes for the next point.
+// runtime ignored the pointer; it only counts as the release of the block's pin). The release has a local reference of its
+// own for the array. The critical pair may run inside another array's critical region, where none can be made: it uses
+// the block's own strong reference, which the pin being released keeps, and a pin of its own besides (open_header). A
+// release with an exception pending synchronizes nothing (no region call may follow), and neither does one that finds no
+// array: the working copy keeps its writes for the next point.
 void release_block(Env* e, BlockHeader* header, const void* elements, jint mode, bool critical) {
-    Access access{header, nullptr, false, true};
-    if (critical) {
-        access.array = __atomic_load_n(&header->global, __ATOMIC_ACQUIRE);
-        access.shared = !(__atomic_load_n(&header->magic, __ATOMIC_ACQUIRE) == kBlockLive &&
-                          __atomic_load_n(&header->owner, __ATOMIC_RELAXED) == e);
-    } else {
-        access = open_header(e, header);
-    }
-    if (access.block != nullptr && access.array != nullptr) {
-        SyncScope scope(access);
-        if (mode == kReleaseAbort) {
-            if (critical) {
-                abort_critical(e, header, access.array);
+    ThreadState* state = thread();
+    const bool in_region = critical && state != nullptr && state->critical_depth != 0;
+    Access access = open_header(e, header, !in_region);
+    if (access.block != nullptr && jni_usable(e)) {
+        SyncScope scope;
+        const jobject array = access.array;
+        if (array != nullptr) {
+            if (mode == kReleaseAbort) {
+                if (critical) {
+                    abort_critical(e, header, array);
+                } else {
+                    abort_block(e, header, array);
+                }
             } else {
-                abort_block(e, header, access.array);
-            }
-        } else {
-            if (elements != nullptr && elements != data_of(header) && !is_shadow(elements) && header->capacity > 0) {
-                __builtin_memcpy(data_of(header), elements, header->capacity);
-            }
-            if (critical) {
-                sync_critical(e, header, access.array);
-            } else {
-                sync_all(e, header, access.array);
+                if (elements != nullptr && elements != data_of(header) && !is_shadow(elements) && header->capacity > 0) {
+                    __builtin_memcpy(data_of(header), elements, header->capacity);
+                }
+                if (critical) {
+                    sync_critical(e, header, array);
+                } else {
+                    sync_all(e, header, array);
+                }
             }
         }
     }
@@ -2177,31 +2179,21 @@ void* w_GetPrimitiveArrayCritical(Env* e, jarray a, jboolean* is_copy) {
             return nullptr;
         }
         ThreadState* state = thread();
-        Access access{header, nullptr, false, true};
-        bool pinned = false;
-        if (jni_usable(e) && (state == nullptr || state->critical_depth == 0)) {
-            access = open_header(e, header);
-            if (access.block == nullptr) {
-                return nullptr;
-            }
-        } else if (__atomic_load_n(&header->magic, __ATOMIC_ACQUIRE) == kBlockLive &&
-                   __atomic_load_n(&header->owner, __ATOMIC_RELAXED) == e) {
-            access.array = header->global;
-            access.shared = false;
-        } else {
-            EndedLock lock;
-            if ((header->magic != kBlockLive && header->magic != kBlockEnded) || header->global == nullptr) {
-                return nullptr;
-            }
-            access.array = header->global;
-            count_pin(header);  // the pin keeps the block's strong reference
-            pinned = true;
+        // With a runtime critical region open, or an exception pending, no reference can be made: the block's strong
+        // reference is used, kept by the pin that the pointer is.
+        const bool restricted = !jni_usable(e) || (state != nullptr && state->critical_depth != 0);
+        Access access = open_header(e, header, !restricted);
+        if (access.block == nullptr || access.array == nullptr) {
+            close_access(e, access);
+            return nullptr;
         }
         {
-            SyncScope scope(access);
+            SyncScope scope;
             sync_critical(e, header, access.array);
         }
-        if (!pinned && !pin_block(e, access)) {
+        if (access.pinned) {
+            access.pinned = false;  // the wrapper's pin becomes the pointer's
+        } else if (!pin_block(e, access)) {
             close_access(e, access);
             return nullptr;
         }
@@ -2254,7 +2246,7 @@ void w_GetByteArrayRegion(Env* e, jarray a, jsize start, jsize length, jbyte* bu
         BlockHeader* header = access.block;
         if (start >= 0 && length >= 0 && static_cast<uint64_t>(start) + static_cast<uint64_t>(length) <= header->capacity) {
             {
-                SyncScope scope(access);
+                SyncScope scope;
                 sync_bytes(e, header, access.array, static_cast<uint32_t>(start),
                            static_cast<uint32_t>(start) + static_cast<uint32_t>(length), true);
             }
@@ -2281,7 +2273,7 @@ void w_SetByteArrayRegion(Env* e, jarray a, jsize start, jsize length, const jby
             if (length > 0 && access.array != nullptr) {
                 // What the application wrote through the pointer in these chunks reaches the array first; the range
                 // itself is about to be replaced, so nothing is read back.
-                SyncScope scope(access);
+                SyncScope scope;
                 sync_bytes(e, header, access.array, static_cast<uint32_t>(start),
                            static_cast<uint32_t>(start) + static_cast<uint32_t>(length), false);
                 __builtin_memcpy(data_of(header) + start, buffer, static_cast<size_t>(length));

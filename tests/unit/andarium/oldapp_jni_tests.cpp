@@ -97,6 +97,8 @@ struct World {
     };
     std::vector<LogLine> logs;  // what the layer logged
     uint32_t clock_ms = 1000;   // the layer's clock
+    std::set<Ref*> revoked;     // globals that stopped being valid (what a re-entrant end of a block would make them)
+    bool revoke_next = false;   // the next array function revokes the globals of every array first
 };
 World world;
 
@@ -109,6 +111,7 @@ void jni_allowed(const char* what) {
 
 bool live(jobject ref) {
     Ref* r = static_cast<Ref*>(ref);
+    if (world.revoked.count(r) != 0) return false;
     return world.locals.count(r) != 0 || world.globals.count(r) != 0 || world.weaks.count(r) != 0 ||
            world.class_globals.count(r) != 0;
 }
@@ -121,6 +124,16 @@ Ref* new_local(Obj* object) {
 Obj* object_of(jobject ref) {
     require(live(ref), "the runtime is handed a live reference, never a shadow");
     return static_cast<Ref*>(ref)->object;
+}
+// Called first by the fake's functions that take an array: when a row asks for it, every global reference to an array
+// stops being valid at that point, as the end of a block by Java code that runs during the call would make it. A wrapper
+// that hands the runtime the block's own reference then fails the liveness requirement; one that made its own does not.
+void revoke_if_asked() {
+    if (!world.revoke_next) return;
+    world.revoke_next = false;
+    for (Ref* ref : world.globals) {
+        if (ref->object != nullptr && ref->object->is_array) world.revoked.insert(ref);
+    }
 }
 
 jobject byte_array(const std::vector<uint8_t>& bytes) {
@@ -222,6 +235,7 @@ const Platform kPlatform{fake_is_app, fake_thread_state, fake_log, fake_make_wri
 jsize f_GetArrayLength(Env*, jarray a) { return static_cast<jsize>(object_of(a)->bytes.size()); }
 jobject f_NewByteArray(Env*, jsize n) { return byte_array(std::vector<uint8_t>(static_cast<size_t>(n), 0)); }
 void f_SetByteArrayRegion(Env*, jarray a, jsize start, jsize len, const jbyte* buf) {
+    revoke_if_asked();
     jni_allowed("SetByteArrayRegion where JNI is not allowed (a critical region, or an exception pending)");
     ++world.set_calls;
     auto& bytes = object_of(a)->bytes;
@@ -231,7 +245,9 @@ void f_SetByteArrayRegion(Env*, jarray a, jsize start, jsize len, const jbyte* b
     }
     std::memcpy(bytes.data() + start, buf, size_t(len));
 }
+std::function<void()> g_after_get;  // runs inside a GetByteArrayRegion, after it copied: another thread acts meanwhile
 void f_GetByteArrayRegion(Env*, jarray a, jsize start, jsize len, jbyte* buf) {
+    revoke_if_asked();
     jni_allowed("GetByteArrayRegion where JNI is not allowed (a critical region, or an exception pending)");
     ++world.get_calls;
     auto& bytes = object_of(a)->bytes;
@@ -240,23 +256,32 @@ void f_GetByteArrayRegion(Env*, jarray a, jsize start, jsize len, jbyte* buf) {
         return;
     }
     std::memcpy(buf, bytes.data() + start, size_t(len));
+    if (g_after_get) {
+        auto hook = g_after_get;
+        g_after_get = nullptr;
+        hook();
+    }
 }
 jbyte* f_GetByteArrayElements(Env*, jarray a, jboolean* is_copy) {
+    revoke_if_asked();
     jni_allowed("GetByteArrayElements where JNI is not allowed");
     if (is_copy) *is_copy = 0;
     return reinterpret_cast<jbyte*>(object_of(a)->bytes.data());
 }
 void f_ReleaseByteArrayElements(Env*, jarray a, jbyte* p, jint) {
+    revoke_if_asked();
     (void)object_of(a);
     ++world.release_calls;
     world.released.push_back(p);
 }
 void* f_GetPrimitiveArrayCritical(Env*, jarray a, jboolean* is_copy) {
+    revoke_if_asked();
     if (is_copy) *is_copy = 0;
     ++world.critical;
     return object_of(a)->bytes.data();
 }
 void f_ReleasePrimitiveArrayCritical(Env*, jarray a, void* p, jint) {
+    revoke_if_asked();
     (void)object_of(a);
     ++world.release_calls;
     world.released.push_back(p);
@@ -316,6 +341,7 @@ void f_DeleteGlobalRef(Env*, jobject o) {
         hook(ref->object);
     }
     require(world.globals.erase(ref) == 1, "a global reference is deleted once, and only while it is live");
+    world.revoked.erase(ref);
     delete ref;
 }
 jobject f_NewLocalRef(Env*, jobject o) {
@@ -325,6 +351,7 @@ jobject f_NewLocalRef(Env*, jobject o) {
     return new_local(object_of(o));
 }
 jboolean f_IsSameObject(Env*, jobject a, jobject b) {
+    revoke_if_asked();
     require(world.critical == 0, "IsSameObject inside a critical region");
     ++world.same_calls;
     Obj* x = a == nullptr ? nullptr : object_of(a);
@@ -340,11 +367,13 @@ jboolean f_IsInstanceOf(Env*, jobject o, jclass) {
     return 1;
 }
 jint f_MonitorEnter(Env*, jobject o) {
+    revoke_if_asked();
     (void)object_of(o);
     ++world.monitors;
     return 0;
 }
 jint f_MonitorExit(Env*, jobject o) {
+    revoke_if_asked();
     (void)object_of(o);
     --world.monitors;
     return 0;
@@ -509,6 +538,7 @@ jobject f_CallStaticObjectMethod(Env*, jclass, jmethodID, ...) {
 }
 std::function<void()> g_in_call;  // runs at the start of a static int call: another thread acts while it is under way
 jint f_CallStaticIntMethodV(Env*, jclass, jmethodID m, va_list ap) {
+    revoke_if_asked();
     if (g_in_call) {
         auto hook = g_in_call;
         hook();
@@ -517,6 +547,7 @@ jint f_CallStaticIntMethodV(Env*, jclass, jmethodID m, va_list ap) {
     return 7;
 }
 jint f_CallStaticIntMethodA(Env*, jclass, jmethodID m, const jvalue* a) {
+    if (world.methods.at(m).name != "identityHashCode") revoke_if_asked();
     if (world.methods.at(m).name != "identityHashCode" && g_in_call) {
         auto hook = g_in_call;
         hook();
@@ -555,6 +586,7 @@ jobject f_NewObjectA(Env*, jclass, jmethodID m, const jvalue* a) {
 }
 // What Java reads and writes through the receiver of an instance call.
 void touch_receiver(jobject o) {
+    revoke_if_asked();
     Obj* object = object_of(o);
     world.seen_receiver.clear();
     if (object->is_array) {
@@ -689,6 +721,7 @@ void reset_world() {
     g_on_global_deleted = nullptr;
     g_on_find_class = nullptr;
     g_in_call = nullptr;
+    g_after_get = nullptr;
     g_thunk_capacity = 1024;
     g_register_fail_at = -1;
     g_registered.clear();
@@ -3137,6 +3170,153 @@ void check_a_thread_at_its_limit_can_use_a_kept_reference() {
     require(call_static_int_v(f, f.consume, kept.shadow) == 7 && world.last_array_args[0] == kept.object, "and a call");
 }
 
+// ---- no owner exemption: every wrapper holds a reference of its own, every synchronization runs under the mutex
+
+// Every wrapper that gives the runtime an array for a block hands it a reference of the wrapper's own, also on the
+// block's owner thread: the block's global stops being valid at the wrapper's first runtime call, as the end of the block by
+// a callback would make it, and each wrapper still works. (Fails on c3b1ffc7: the owner's wrappers used the global.)
+void check_no_wrapper_hands_the_runtime_the_blocks_own_reference() {
+    Fixture f = make();
+    Made made = make_held(f, sample(64));
+    Made other = make_held(f, sample(64));
+    jbyte buffer[64] = {};
+    const auto revoked = [&](auto&& use) {
+        raw_of(made)[3] = 0x77;  // something for the synchronization to do
+        world.revoke_next = true;
+        use();
+        require(!world.revoke_next, "the wrapper called the runtime");
+        world.revoke_next = false;
+        world.revoked.clear();
+    };
+    revoked([&] { fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, made.shadow, 0, 64, buffer); });
+    require(static_cast<uint8_t>(buffer[3]) == 0x77, "the region read has the raw write");
+    revoked([&] {
+        const jbyte one = 0x12;
+        fn<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(*f.table, slot::SetByteArrayRegion)(f.env, made.shadow, 5, 1, &one);
+    });
+    jbyte* elements = nullptr;
+    revoked([&] { elements = get_elements(f, made.shadow); });
+    revoked([&] { release_elements(f, made.shadow, elements, 0); });
+    void* critical = nullptr;
+    revoked([&] { critical = get_critical(f, made.shadow); });
+    revoked([&] { release_critical(f, made.shadow, critical, 0); });
+    revoked([&] { require(call_static_int_v(f, f.consume, made.shadow) == 7, "a call with the block as its argument"); });
+    revoked([&] {
+        auto get_method = fn<jmethodID (*)(Env*, jclass, const char*, const char*)>(*f.table, slot::GetMethodID);
+        call_object_v(f, made.shadow, get_method(f.env, f.cls, "clone", "()Ljava/lang/Object;"));
+    });
+    revoked([&] {
+        require(fn<jboolean (*)(Env*, jobject, jobject)>(*f.table, slot::IsSameObject)(f.env, made.shadow, other.shadow) == 0,
+                "identity");
+    });
+    revoked([&] { fn<jint (*)(Env*, jobject)>(*f.table, slot::MonitorEnter)(f.env, made.shadow); });
+    revoked([&] { fn<jint (*)(Env*, jobject)>(*f.table, slot::MonitorExit)(f.env, made.shadow); });
+    require(length_of(f, made.shadow) == 64, "the length asks nothing of the array");
+    require(made.object->bytes[3] == 0x77 && made.object->bytes[5] == 0x12, "and the writes reached the array");
+}
+
+// Java code that runs during a call ends the block (a native method it calls deletes the last reference): the call's
+// synchronization after it goes on with the wrapper's own reference, and Java's writes during the call reach the block
+// that has ended. (Fails on c3b1ffc7: the after-synchronization used the deleted global.)
+void check_a_callback_that_ends_the_block_leaves_the_call_a_live_reference() {
+    Fixture f = make();
+    Made a = make_held(f, std::vector<uint8_t>(32, 0x11));
+    raw_of(a)[0] = 0x22;
+    g_in_call = [&] {
+        g_in_call = nullptr;
+        end_ref(f, a.shadow);
+        require(is_ended_block(a.shadow), "the callback ended the block");
+    };
+    world.java_fill = 0x44;
+    require(call_static_int_v(f, f.consume, a.shadow) == 7, "the call completed");
+    world.java_fill = -1;
+    require(is_ended_block(a.shadow), "the block ended");
+    require(raw_of(a)[0] == 0x44 && raw_of(a)[31] == 0x44, "Java's writes during the call reached the ended block");
+    require(world.globals.empty() && block_weaks() == 1, "the block holds a weak reference now, and no global");
+}
+
+// The owner's synchronization is serialized with another thread's access to the block: a write that completes while the
+// owner is merging is not undone by it. The hook runs in the runtime's GetByteArrayRegion, after it copied Java's old
+// bytes (the other thread's SetByteArrayRegion starts then and waits for the mutex). (Fails on c3b1ffc7: the owner's
+// merge wrote its stale snapshot over block and baseline; Java=31,42 and block=00,00 afterwards.)
+void check_the_owners_merge_is_not_undone_by_another_threads_write() {
+    Fixture f = make();
+    Made a = make_held(f, std::vector<uint8_t>(32, 0));
+    Other other(f);
+    raw_of(a)[0] = 0x31;
+    std::thread worker;
+    std::atomic<bool> finished{false};
+    g_after_get = [&] {
+        worker = std::thread([&] {
+            const jbyte value = 0x42;
+            fn<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(*f.table, slot::SetByteArrayRegion)(other.f.env, a.shadow, 1, 1, &value);
+            finished = true;
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(60);
+        while (!finished && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+    };
+    jbyte result[32] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 32, result);
+    worker.join();
+    require(a.object->bytes[0] == 0x31 && a.object->bytes[1] == 0x42, "Java has both writes");
+    require(raw_of(a)[0] == 0x31 && raw_of(a)[1] == 0x42, "and so does the block");
+    jbyte again[32] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 32, again);
+    require(static_cast<uint8_t>(again[0]) == 0x31 && static_cast<uint8_t>(again[1]) == 0x42, "and the next read agrees");
+}
+
+// The reverse order: the owner pulls what Java wrote (the baseline takes it first), and another thread's synchronization of
+// the same block, through a kept reference, must not read that half-way state as an application write and push the old byte
+// back over Java's. (Fails on c3b1ffc7: Java's 0xA1 was lost.)
+void check_another_threads_synchronization_does_not_undo_the_owners_pull() {
+    Fixture f = make();
+    Made a = make_held(f, std::vector<uint8_t>(64, 0x3a));
+    Other other(f);
+    a.object->bytes[10] = 0xA1;  // Java wrote it; nobody wrote through the pointer
+    std::thread worker;
+    std::atomic<bool> finished{false};
+    g_after_get = [&] {
+        worker = std::thread([&] {
+            jbyte* p = get_elements(other.f, a.shadow);
+            release_elements(other.f, a.shadow, p, 0);
+            finished = true;
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(60);
+        while (!finished && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+    };
+    jbyte result[64] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 64, result);
+    worker.join();
+    require(a.object->bytes[10] == 0xA1 && raw_of(a)[10] == 0xA1 && static_cast<uint8_t>(result[10]) == 0xA1,
+            "Java's write is in the array, the block and the owner's read");
+}
+
+// The end of a block is a synchronization point too, and runs under the mutex: a second thread's access to the kept
+// reference meets a synchronized block. The hook runs in the runtime's region call of the end's push, where the second
+// thread starts its own SetByteArrayRegion. (Fails on c3b1ffc7: the end pushed before it took the mutex.)
+void check_an_end_is_serialized_with_a_second_threads_access() {
+    Fixture f = make();
+    Made a = make_held(f, std::vector<uint8_t>(32, 0));
+    Other other(f);
+    raw_of(a)[0] = 0x31;
+    std::thread worker;
+    std::atomic<bool> finished{false};
+    g_after_get = [&] {  // (the merge's read: the end's push is a merge of the dirty chunk)
+        worker = std::thread([&] {
+            const jbyte value = 0x42;
+            fn<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(*f.table, slot::SetByteArrayRegion)(other.f.env, a.shadow, 1, 1, &value);
+            finished = true;
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(60);
+        while (!finished && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+    };
+    end_ref(f, a.shadow);
+    worker.join();
+    require(is_ended_block(a.shadow), "the block ended");
+    require(a.object->bytes[0] == 0x31 && a.object->bytes[1] == 0x42, "Java has the application's write and the other thread's");
+    require(raw_of(a)[0] == 0x31 && raw_of(a)[1] == 0x42, "and so does the block");
+}
+
 // A full sweep follows every collection that no full sweep has seen, also one that the step sweep (a few blocks at a
 // creation) found first: a result that fits after one full pass is not declined.
 void check_a_collection_the_step_sweep_saw_is_swept_in_full() {
@@ -3384,6 +3564,11 @@ int main(int argc, char** argv) {
     check_a_kept_reference_on_a_second_thread_survives_the_owners_end();
     check_a_kept_reference_on_a_thread_without_frames_makes_no_entry();
     check_a_thread_at_its_limit_can_use_a_kept_reference();
+    check_no_wrapper_hands_the_runtime_the_blocks_own_reference();
+    check_a_callback_that_ends_the_block_leaves_the_call_a_live_reference();
+    check_the_owners_merge_is_not_undone_by_another_threads_write();
+    check_another_threads_synchronization_does_not_undo_the_owners_pull();
+    check_an_end_is_serialized_with_a_second_threads_access();
     check_a_collection_the_step_sweep_saw_is_swept_in_full();
     check_a_kept_reference_gives_a_critical_pointer();
     check_a_release_of_a_pointer_inside_a_block_is_harmless();
