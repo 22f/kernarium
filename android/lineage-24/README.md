@@ -703,7 +703,10 @@ patches ART's one JNI function table in place and gives the application:
   reference may be made: it then returns the block as it is when a pin or a live
   reference keeps its array, and NULL otherwise. With an exception pending a
   conversion uses the block's strong reference under a pin of the wrapper's own,
-  and synchronizes nothing. Two threads that use one block at once share its
+  and synchronizes nothing; `MonitorExit` of a block's reference, which JNI
+  allows then, takes the exception out, releases the monitor with the array and
+  puts the exception back (one `MonitorExit` raised itself stays). A monitor
+  call on a block whose array is gone is refused with `JNI_ERR`. Two threads that use one block at once share its
   memory as on Dalvik. Every synchronization of a block with its array, its own
   thread's included, runs under one process-wide lock that no call into Java
   holds, so the synchronizations of all threads run one at a time, and a raw

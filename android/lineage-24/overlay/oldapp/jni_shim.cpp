@@ -1940,13 +1940,40 @@ jint w_GetObjectRefType(Env* e, jobject o) {
     }
     return original<jint (*)(Env*, jobject)>(slot::GetObjectRefType)(e, Conv(e, o).get());
 }
+// A block whose array is gone has no monitor to take: the runtime aborts on a null object, so the call is refused (JNI_ERR).
 jint w_MonitorEnter(Env* e, jobject o) {
     enter_any(e);
-    return original<jint (*)(Env*, jobject)>(slot::MonitorEnter)(e, Conv(e, o).get());
+    Conv array(e, o);
+    if (is_shadow(o) && array.get() == nullptr) {
+        return JNI_ERR;
+    }
+    return original<jint (*)(Env*, jobject)>(slot::MonitorEnter)(e, array.get());
 }
+// MonitorExit is one of the functions JNI allows with an exception pending (a scoped monitor's unlock after a Java call
+// threw), and a block's array cannot be reached with one pending: the exception is taken out, the array converted, the
+// monitor released, and the exception put back unless MonitorExit left one of its own. The saved reference is deleted on
+// every path.
 jint w_MonitorExit(Env* e, jobject o) {
     enter_any(e);
-    return original<jint (*)(Env*, jobject)>(slot::MonitorExit)(e, Conv(e, o).get());
+    jobject pending = nullptr;
+    if (is_shadow(o) && !jni_usable(e)) {
+        pending = original<jobject (*)(Env*)>(slot::ExceptionOccurred)(e);
+        original<void (*)(Env*)>(slot::ExceptionClear)(e);
+    }
+    jint result = JNI_ERR;
+    {
+        Conv array(e, o);
+        if (!is_shadow(o) || array.get() != nullptr) {
+            result = original<jint (*)(Env*, jobject)>(slot::MonitorExit)(e, array.get());
+        }
+    }
+    if (pending != nullptr) {
+        if (jni_usable(e)) {
+            original<jint (*)(Env*, jobject)>(slot::Throw)(e, pending);
+        }
+        original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(e, pending);
+    }
+    return result;
 }
 // The entry of the block that is the newest in the innermost frame: DeleteLocalRef takes one reference of the block. Both
 // runtimes search only the current frame (the segment a native method or PushLocalFrame opened) and leave a reference of

@@ -97,6 +97,8 @@ struct World {
     };
     std::vector<LogLine> logs;  // what the layer logged
     uint32_t clock_ms = 1000;   // the layer's clock
+    Obj* pending_object = nullptr;      // the exception that is pending (ExceptionOccurred hands out a reference to it)
+    Obj* monitor_exit_throws = nullptr; // MonitorExit raises this exception
     std::set<Ref*> revoked;     // globals that stopped being valid (what a re-entrant end of a block would make them)
     bool revoke_next = false;   // the next array function revokes the globals of every array first
 };
@@ -319,6 +321,18 @@ void f_DeleteWeakGlobalRef(Env*, jobject o) {
     delete ref;
 }
 void f_ExceptionClear(Env*) { world.exception_pending = false; }
+jobject f_ExceptionOccurred(Env*) {
+    if (!world.exception_pending) return nullptr;
+    if (world.pending_object == nullptr) world.pending_object = new Obj{};
+    return new_local(world.pending_object);
+}
+jint f_Throw(Env*, jobject throwable) {
+    require(!world.exception_pending, "Throw with an exception pending");
+    Obj* object = object_of(throwable);
+    world.exception_pending = true;
+    world.pending_object = object;
+    return 0;
+}
 // A collection: a weak reference to an object nothing holds is cleared. Held: a strong reference, or Java.
 // The weak references the ended blocks hold (the layer's sentinel, once a block has ended, is one more).
 size_t block_weaks() { return world.weaks.size() - (counters().blocks_ended != 0 ? 1 : 0); }
@@ -374,8 +388,13 @@ jint f_MonitorEnter(Env*, jobject o) {
 }
 jint f_MonitorExit(Env*, jobject o) {
     revoke_if_asked();
+    require(o != nullptr, "MonitorExit is handed an object");
     (void)object_of(o);
     --world.monitors;
+    if (world.monitor_exit_throws != nullptr) {
+        world.exception_pending = true;
+        world.pending_object = world.monitor_exit_throws;
+    }
     return 0;
 }
 jint f_PushLocalFrame(Env*, jint) {
@@ -653,6 +672,8 @@ struct Table {
         slots[slot::NewWeakGlobalRef] = reinterpret_cast<void*>(&f_NewWeakGlobalRef);
         slots[slot::DeleteWeakGlobalRef] = reinterpret_cast<void*>(&f_DeleteWeakGlobalRef);
         slots[slot::ExceptionClear] = reinterpret_cast<void*>(&f_ExceptionClear);
+        slots[slot::ExceptionOccurred] = reinterpret_cast<void*>(&f_ExceptionOccurred);
+        slots[slot::Throw] = reinterpret_cast<void*>(&f_Throw);
         slots[call_slot(kVoid, kArray)] = reinterpret_cast<void*>(&f_CallVoidMethodA);
         slots[slot::DeleteGlobalRef] = reinterpret_cast<void*>(&f_DeleteGlobalRef);
         slots[slot::NewLocalRef] = reinterpret_cast<void*>(&f_NewLocalRef);
@@ -790,6 +811,7 @@ void check_slot_constants(const char* fixture_path) {
     expect("ThrowNew", slot::ThrowNew);
     expect("DeleteWeakGlobalRef", slot::DeleteWeakGlobalRef);
     expect("ExceptionClear", slot::ExceptionClear);
+    expect("ExceptionOccurred", slot::ExceptionOccurred);
     expect("PushLocalFrame", slot::PushLocalFrame);
     expect("PopLocalFrame", slot::PopLocalFrame);
     expect("RegisterNatives", slot::RegisterNatives);
@@ -3428,6 +3450,56 @@ void check_a_nested_native_method_cannot_delete_its_callers_reference() {
     require(!is_shadow_block(a.shadow) && counters().shadows_live == 0, "and the outer return ends it");
 }
 
+// ---- MonitorExit with an exception pending
+
+// MonitorExit of a block's reference with an exception pending (a scoped monitor's unlock after a Java call threw): the
+// runtime is handed the array, the monitor is released, and the same exception is still pending afterwards. For the three
+// kinds of block: one that ended (only a weak reference behind it), one live on another thread, one of this thread's.
+// (Fails on 24093fc5: the runtime was handed NULL, and the monitor stayed held.)
+void check_monitor_exit_with_an_exception_pending() {
+    for (int kind = 0; kind < 3; ++kind) {
+        Fixture f = make();
+        Made made = make_held(f, sample(16));
+        std::unique_ptr<Other> other;
+        std::thread holder;
+        Fixture* user = &f;
+        if (kind == 0) {
+            end_ref(f, made.shadow);
+        } else if (kind == 1) {
+            other.reset(new Other(f));
+            user = &other->f;
+        }
+        auto enter = fn<jint (*)(Env*, jobject)>(*f.table, slot::MonitorEnter);
+        auto leave = fn<jint (*)(Env*, jobject)>(*f.table, slot::MonitorExit);
+        require(enter(user->env, made.shadow) == 0 && world.monitors == 1, "the monitor is taken");
+        const size_t locals = world.locals.size();
+        Obj exception;
+        world.pending_object = &exception;
+        world.exception_pending = true;  // a Java call threw
+        require(leave(user->env, made.shadow) == 0 && world.monitors == 0, "the monitor is released with an exception pending");
+        require(world.exception_pending && world.pending_object == &exception, "and the same exception is still pending");
+        world.exception_pending = false;
+        world.pending_object = nullptr;
+        // MonitorExit that raises an exception of its own keeps that one.
+        require(enter(user->env, made.shadow) == 0, "the monitor is taken again");
+        Obj first, second;
+        world.pending_object = &first;
+        world.exception_pending = true;
+        world.monitor_exit_throws = &second;
+        leave(user->env, made.shadow);
+        require(world.exception_pending && world.pending_object == &second, "the exception MonitorExit raised stays");
+        world.exception_pending = false;
+        world.monitor_exit_throws = nullptr;
+        require(world.locals.size() == locals, "no local reference is left behind (the saved exception's is deleted)");
+        // A block whose array is gone has no monitor: refused, not handed to the runtime as NULL.
+        if (kind == 0) {
+            made.object->held = false;
+            collect();
+            require(enter(user->env, made.shadow) != 0 && leave(user->env, made.shadow) != 0, "a collected array is refused");
+        }
+    }
+}
+
 // A full sweep follows every collection that no full sweep has seen, also one that the step sweep (a few blocks at a
 // creation) found first: a result that fits after one full pass is not declined.
 void check_a_collection_the_step_sweep_saw_is_swept_in_full() {
@@ -3684,6 +3756,7 @@ int main(int argc, char** argv) {
     check_an_elements_pointer_of_the_runtime_released_through_a_block_reaches_the_runtime();
     check_the_record_of_a_runtime_pointer_ends_with_its_release();
     check_a_nested_native_method_cannot_delete_its_callers_reference();
+    check_monitor_exit_with_an_exception_pending();
     check_a_collection_the_step_sweep_saw_is_swept_in_full();
     check_a_kept_reference_gives_a_critical_pointer();
     check_a_release_of_a_pointer_inside_a_block_is_harmless();

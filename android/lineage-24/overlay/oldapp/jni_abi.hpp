@@ -91,6 +91,7 @@ enum : int {
     GetSuperclass = 10,
     Throw = 13,
     ThrowNew = 14,
+    ExceptionOccurred = 15,
     ExceptionClear = 17,
     PushLocalFrame = 19,
     PopLocalFrame = 20,
