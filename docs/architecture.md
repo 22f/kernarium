@@ -573,11 +573,13 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
 - Floating point and SIMD run under the guest FPCR/FPSR in the host registers
   the way gadget code does; the engine restores the host environment at the
   dispatcher boundary.
-- Diagnostics: the CMake option `UML_AOT_DIAGNOSTICS` (off) builds counters,
-  a step histogram, a report file written by a thread of its own, and the
-  test switches. A product build has none of it, and in no build does a vCPU
-  thread do file I/O or allocate while it is inside rewritten code. The
-  differential test (`arm64-aot-differential`) needs the option.
+- Diagnostics: the CMake option `UML_AOT_DIAGNOSTICS` (off) composes a second
+  compilation of the runtime with counters, a step histogram, a report file
+  written by a thread of its own, and the test switches. The product target
+  holds none of it in any configuration (`arm64-aot-runtime-product` checks
+  the object), and in no build does a vCPU thread do file I/O or allocate
+  while it is inside rewritten code. The differential test
+  (`arm64-aot-differential`) needs the option.
 
 Build and tests: `tools/aot/README.md`.
 

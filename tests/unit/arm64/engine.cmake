@@ -21,8 +21,9 @@
         $<TARGET_OBJECTS:uml_runtime_context>)
     if(TARGET uml_arm64_aot_framework)
         # The executor enters the ahead-of-time code of an accepted release.
+        get_property(_uml_aot_runtime GLOBAL PROPERTY UML_AOT_RUNTIME_TARGET)
         list(APPEND UML_STATIC_RUNTIME_TEST_BASE_OBJECTS
-            $<TARGET_OBJECTS:uml_arm64_aot_runtime>)
+            $<TARGET_OBJECTS:${_uml_aot_runtime}>)
         link_libraries(uml_arm64_aot_framework)
     endif()
     if(TARGET uml_x86_64_gadgets)

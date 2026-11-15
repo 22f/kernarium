@@ -35,7 +35,7 @@ set(UML_AOT_LIBRARIES
     CACHE STRING
     "Libraries of the release to rewrite, as absolute guest paths")
 option(UML_AOT_DIAGNOSTICS
-    "Build the AOT runtime with its counters, report and test switches (never for a product)" OFF)
+    "Compose the AOT runtime variant with its counters, report and test switches (never for a product)" OFF)
 set(UML_AOT OFF)
 if(UML_AOT_IMAGE)
     if(NOT UML_TARGET_MACOS OR UML_APP_STORE_RUNTIME)
@@ -502,7 +502,8 @@ function(_uml_add_gadget_executor TARGET SLOTS)
     # The program slabs and record tables come from the memory layer's heaps.
     target_link_libraries(${TARGET} PUBLIC uml_arm64_gadgets UML::MemoryHeap)
     if(UML_AOT)
-        target_link_libraries(${TARGET} PUBLIC uml_arm64_aot_runtime)
+        get_property(_aot_runtime GLOBAL PROPERTY UML_AOT_RUNTIME_TARGET)
+        target_link_libraries(${TARGET} PUBLIC ${_aot_runtime})
     endif()
     target_compile_definitions(${TARGET} PRIVATE
         UML_AOT=$<BOOL:${UML_AOT}>
@@ -590,10 +591,11 @@ target_sources(uml_cpu_engine_objects INTERFACE
     $<TARGET_OBJECTS:uml_arm64_gadgets>
     $<TARGET_OBJECTS:uml_arm64_execution_helpers>)
 if(UML_AOT)
+    get_property(_aot_runtime GLOBAL PROPERTY UML_AOT_RUNTIME_TARGET)
     target_link_libraries(uml_cpu_engine_objects INTERFACE
         uml_arm64_aot_framework)
     target_sources(uml_cpu_engine_objects INTERFACE
-        $<TARGET_OBJECTS:uml_arm64_aot_runtime>)
+        $<TARGET_OBJECTS:${_aot_runtime}>)
 endif()
 # The JIT engine's objects, and the executable-memory owner they alone link.
 if(UML_ARM64_JIT_ENGINE)

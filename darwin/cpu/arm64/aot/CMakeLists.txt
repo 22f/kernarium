@@ -212,13 +212,29 @@ set_property(GLOBAL PROPERTY UML_AOT_FUNCTIONS "${_uml_aot_dir}/functions.txt")
 set_property(GLOBAL PROPERTY UML_AOT_LIBRARY_FILES "${_uml_aot_dir}/libraries.txt")
 set_property(GLOBAL PROPERTY UML_AOT_SITES "${_uml_aot_dir}/sites.txt")
 
-# The part the gadget executor links: the binder and the entry call.
-add_library(uml_arm64_aot_runtime OBJECT aot_runtime.cpp)
-uml_declare_architecture_target(uml_arm64_aot_runtime cpu gadget)
-target_link_libraries(uml_arm64_aot_runtime
-    PUBLIC uml_arm64_aot_framework
-    PRIVATE UML::BridgeAbi UML::CpuContract UML::MemoryContract)
-target_include_directories(uml_arm64_aot_runtime PRIVATE
-    ${PROJECT_SOURCE_DIR}/darwin)
-target_compile_definitions(uml_arm64_aot_runtime PRIVATE
-    UML_AOT_DIAGNOSTICS=$<BOOL:${UML_AOT_DIAGNOSTICS}>)
+# The part the gadget executor links: the binder and the entry call. The
+# product target is compiled with no counter, report or test switch in any
+# configuration. A diagnostics build links a second compilation of the same
+# source with them instead (UML_AOT_RUNTIME_TARGET names the one a composition
+# links); tests that exercise the switches use only that one.
+function(_uml_aot_add_runtime TARGET DIAGNOSTICS)
+    add_library(${TARGET} OBJECT aot_runtime.cpp)
+    uml_declare_architecture_target(${TARGET} cpu gadget)
+    target_link_libraries(${TARGET}
+        PUBLIC uml_arm64_aot_framework
+        PRIVATE UML::BridgeAbi UML::CpuContract UML::MemoryContract)
+    target_include_directories(${TARGET} PRIVATE
+        ${PROJECT_SOURCE_DIR}/darwin)
+    target_compile_definitions(${TARGET} PRIVATE
+        UML_AOT_DIAGNOSTICS=${DIAGNOSTICS})
+endfunction()
+
+_uml_aot_add_runtime(uml_arm64_aot_runtime 0)
+if(UML_AOT_DIAGNOSTICS)
+    _uml_aot_add_runtime(uml_arm64_aot_runtime_diagnostics 1)
+    set_property(GLOBAL PROPERTY UML_AOT_RUNTIME_TARGET
+        uml_arm64_aot_runtime_diagnostics)
+else()
+    set_property(GLOBAL PROPERTY UML_AOT_RUNTIME_TARGET
+        uml_arm64_aot_runtime)
+endif()

@@ -189,8 +189,9 @@ private:
 	unsigned long sync_generation_{};
 	std::uint64_t sync_changes_{};
 	/* The last code-change sequence find() was given (a diagnostics build
-	 * counts how often it moves). */
-	std::uint64_t last_changes_{};
+	 * counts how often it moves). The layout is the same in both
+	 * compilations of the runtime, which share the executor's object. */
+	[[maybe_unused]] std::uint64_t last_changes_{};
 	/* Moves whenever the set of usable instances changes. */
 	std::uint64_t epoch_{1};
 	CrossTable cross_{};
