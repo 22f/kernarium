@@ -22,7 +22,8 @@ framework is generated and never committed.
   come from; `licences.py` records, per library, the notice the image itself
   states (generated beside the framework, not tracked).
 - `fixture.py` writes the small library of the differential test (a
-  diagnostics build only).
+  diagnostics build only): page-edge branches, loops that update one cell,
+  and one function per instruction form.
 
 Tools: the build needs a Python 3 and an `fsck.erofs` that decodes
 Zstandard (`UML_AOT_FSCK_EROFS`), as the Android build produces; the

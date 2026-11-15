@@ -516,70 +516,54 @@ clean and file-backed and one copy serves every process at any load bias.
 `GadgetExecutor::run_aot`; it includes no engine and reaches memory only
 through the executor's TLB and `StaticGuestMemory::fetch`.
 
-- Switch: `DARWIN_UML_AOT=1` at start-up; off, nothing changes.
-- Units: each library is a self-contained unit of the framework (its own
-  exits and thunks, an entry table with one slot per guest instruction, and
-  the digests of its code pages), page aligned in the blob. Branches between
-  libraries verified in the same address space (up to 64 instances) stay in
-  rewritten code; any other target leaves to the engine.
-- Binding: the framework stands for exact guest bytes and stores them: the
-  text pages of each library, read-only. A mapped page authorizes native
-  execution only by an exact comparison with the stored page; a 64-bit digest
-  of each 4 KiB page merely finds which library a page belongs to. An
-  instance is verified in full before its code first runs, then only for the
-  pages the address space's code-change history names. A page the guest has
-  not mapped yet defers the instance and a later lookup tries again, with
-  the pages already compared kept; any other difference retires the instance
-  for that address space, and the engine runs the code.
-- Entry: only at an instruction the framework covers, with PSTATE.SM clear,
-  no FPCR trap enable and FPCR.FIZ, AH and NEP clear, no single step, no open
-  exclusive monitor, top-byte ignore on (the framework probes the TLB with
-  the address without its tag) and a 16-byte aligned SP. Guest state is
-  canonical at every instruction boundary, so entry and exit are possible at
-  any covered instruction. Rewritten code keeps SP aligned: an instruction
-  that can leave it misaligned ends the entry after it commits, so the
-  engine's SP-alignment check applies to every SP-based access.
+- Switch: `DARWIN_UML_AOT=1` at start-up selects the dispatch path when the
+  execution engine is made. With it off the engine runs the path it has
+  without the component.
+- Units: each library is a self-contained unit of the framework. Branches
+  between libraries mapped in one address space stay in rewritten code when
+  the target page is compared (below); any other target leaves to the engine.
+- Binding: the framework stores the exact guest bytes it stands for. A mapped
+  text page authorizes native execution only after an exact comparison with
+  the stored page, made at the first entry into that page and again after the
+  address space's code-change history names it or no longer reaches back; a
+  digest of a page only finds which library it belongs to. Every edge that
+  leaves a compared page (a branch, a fall-through, an indirect branch, a
+  call between libraries) tests the state of the page it reaches, so
+  rewritten code never runs from a page that was not compared. A page the
+  guest has not mapped yet is not entered and is tried again later; a page
+  that differs retires the library's instance for that address space, and the
+  engine runs the code.
+- Entry: only at an instruction the framework covers, in a state the engine
+  would run the same way: no single step, PSTATE.SM clear, no FPCR trap
+  enable, FPCR.FIZ, AH and NEP clear (read as the guest's, whether or not its
+  floating-point state is loaded yet), no open exclusive monitor, top-byte
+  ignore on, and a 16-byte aligned SP. Guest state is canonical at every
+  instruction boundary, so entry and exit are possible at any covered
+  instruction. Rewritten code keeps SP aligned: an instruction that can leave
+  it misaligned ends the entry after it commits, so the engine's check
+  applies to every SP-based access.
 - Exit: whatever the framework does not inline stops with committed state and
-  the engine runs exactly that instruction (a cached one-instruction
-  program, as `run_trap_enabled_instruction` builds it) before the next
-  entry, so faults, system calls, signals and debugger exits are the
-  engine's own. The executor goes on into the next entry without returning to
-  its dispatcher while nothing the dispatcher checks has changed (the
-  interrupt, mapping and code sequences, SVCR, the FPCR trap enables) and
-  fewer than 4096 instructions have run. The budget of an entry is 4096 instructions,
-  the engine's chaining limit. It is charged in advance at function entries,
-  every backward-branch target, call targets and points inserted so that no
-  run of code from a point is longer than 32 instructions; a branch, a
-  fall-through or a landing through the entry table into a point pays it, and
-  an indirect branch pays for itself and for the run it lands in. Every
-  cycle therefore pays at least what it executes, and an entry retires at
-  most 4096 + 32 instructions, so interrupt and mapping-change polling are
-  those of the engine. A diagnostics build counts the instructions to check
-  the bound; a product reports the budget used.
-- Memory: inline TLB probe of the engine's entry (the page of the access's
-  last byte, read or write key); a page crossing steps; a miss calls the
-  executor's refill once, with every register the host ABI lets a callee
-  change saved, and restarts the instruction. It steps only if the host
-  cannot fill the entry (a fault). The framework calls nothing else.
-- Ordered accesses, atomics and MOPS: LDAR and STLR, the LSE atomic memory
-  operations and compare-and-swap probe the entry of a naturally aligned
-  address (an unaligned one steps, so the engine decides between the LSE2
-  completion and the alignment fault) and run as the host's own instruction.
-  The prologue and main stages of CPY, CPYF and SET are inlined as the
-  engine's option B defines them
-  (`darwin/cpu/arm64/detail/memory_copy_set.hpp`); the
-  epilogue moves the data and is the engine's. An SP base, pairs, exclusives
-  and the other members of these groups step.
+  the engine runs exactly that instruction, so faults, system calls, signals
+  and debugger exits are the engine's own. An entry runs at most the engine's
+  chaining limit of instructions, and the executor goes on into the next
+  entry only while nothing the dispatcher checks has changed (the interrupt,
+  mapping and code-change sequences, SVCR, the FPCR trap enables), so
+  interrupts and shootdowns are noticed as they are in the engine.
+- Memory and atomics: an inline probe of the engine's TLB entry, refilled
+  through the executor on a miss; ordered accesses, the LSE atomic operations
+  and compare-and-swap run as the host's own instruction on naturally aligned
+  addresses. An unaligned address, an SP base, a pair, an exclusive and the
+  epilogue of CPY, CPYF and SET (the engine's option B,
+  `darwin/cpu/arm64/detail/memory_copy_set.hpp`) are the engine's.
 - Floating point and SIMD run under the guest FPCR/FPSR in the host registers
   the way gadget code does; the engine restores the host environment at the
   dispatcher boundary.
 - Diagnostics: the CMake option `UML_AOT_DIAGNOSTICS` (off) composes a second
-  compilation of the runtime with counters, a step histogram, a report file
-  written by a thread of its own, and the test switches. The product target
-  holds none of it in any configuration (`arm64-aot-runtime-product` checks
-  the object), and in no build does a vCPU thread do file I/O or allocate
-  while it is inside rewritten code. The differential test
-  (`arm64-aot-differential`) needs the option.
+  compilation of the runtime with counters, a report file written by a thread
+  of its own, and the test switches. The product target holds none of it in
+  any configuration (`arm64-aot-runtime-product` checks the object), and in
+  no build does a vCPU thread do file I/O or allocate while it is inside
+  rewritten code.
 
 Build and tests: `tools/aot/README.md`.
 

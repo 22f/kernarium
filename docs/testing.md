@@ -739,22 +739,34 @@ blocker in every one of them.
   `UML_AOT_IMAGE`, `UML_AOT_FSCK_EROFS` and `UML_AOT_DIAGNOSTICS`: it runs
   functions of every rewritten library through the gadget engine with and
   without ahead-of-time code and compares all guest state, memory and faults
-  (thread pointer, misaligned stack pointer, faulting stack pages and floating-
-  point modes included), then the unhappy paths (single step, preemption
-  bound, two load biases, other or changed bytes, tagged pointers, page
-  crossings, forced refills) in the product's code layout; with
-  `UML_AOT_COUNT_RETIRED=ON` the libraries are rewritten to count each
-  instruction an entry runs, which checks the budget's bound exactly. A
-  generated library holds one function per
-  instruction form of the ordered, atomic and MOPS classes, so each form runs
-  from random states. `arm64-aot-tools` checks the generator's encoders and
-  classifier, including which forms are left to the engine.
+  (thread pointer, misaligned stack pointer, faulting stack pages, floating-
+  point modes, and the alignment flag and floating-point syndrome of the
+  ending event included), then the unhappy paths: single step, preemption
+  bound, two load biases, other or changed bytes, pages that appear or change
+  after their neighbours were compared, edges into such pages, more code
+  changes than the history keeps, more libraries than the binder holds,
+  tagged pointers, page crossings, forced refills, and a shootdown by another
+  thread while rewritten code loops. The runs use the product's code layout;
+  `UML_AOT_COUNT_RETIRED=ON` rewrites the libraries to count each instruction
+  an entry runs, which checks the budget's bound exactly. A generated library
+  holds one function per instruction form of the ordered, atomic and MOPS
+  classes, so each form runs from random states, compare-and-swap with every
+  outcome and permission, and loops that update one cell from rewritten code
+  and the engine on two vCPUs. `arm64-aot-tools` checks the generator's
+  encoders and classifier, including which forms are left to the engine.
+- `arm64-aot-runtime-product` checks that the product compilation of the AOT
+  runtime holds none of the diagnostics or test switches.
+- `arm64-aot-guest-runner` drives the guest runner of the next test against
+  scripted guests: a complete pair of arms passes, and every failed or
+  incomplete one (an exit status, a missing or empty workload row, a probe
+  that skipped scenarios or recorded no faults) fails.
 - `aot-guest-workloads` (integration, opt-in like the other Android guest
   tests: it exists where `UML_AOT_IMAGE` and the Android launcher target do)
-  boots the release twice, without and with `DARWIN_UML_AOT=1`, runs one
-  workload per covered library family and the guest probe (faults inside
-  rewritten libz code, text patched at run time), and requires identical
-  output; speed is printed, not judged.
+  boots the release twice, without and with `DARWIN_UML_AOT=1`, runs the
+  covered library families' workloads, three times each, and the guest probe
+  (faults inside rewritten libz code, text patched at run time), requires
+  every command to succeed and identical output, and, in a diagnostics build,
+  that the libraries it names were entered; speed is printed, not judged.
 - `arm64-instruction-corpus` runs the generated A64 corpus through both
   engines; the special records (native SME, absent features, the SM = 0 family,
   top-byte ignore, native floating-point traps) have their own
