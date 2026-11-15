@@ -23,9 +23,19 @@
 // `idle_output_still_free_requests` requests that took no still began since its
 // last use and it has been unused for `idle_output_limit_ns`. A request that
 // takes a still is not counted, however long it lasts and however many follow
-// one another, so a queue of stills never closes a preview that waits behind it.
-// Any other stream (a still's, or a picture the HAL makes from a frame) is
-// closed after `idle_stream_limit_ns` unused.
+// one another, and the absences that every open video output earned before such
+// a request start again from zero when it begins (the idle time is left as it
+// is): the requests that wait behind a still wait behind all of it, so a queue of
+// stills, or of YUV and JPEG captures mixed, never closes a preview that waits
+// behind it. Any other stream (a still's, or a picture the HAL makes from a
+// frame) is closed after `idle_stream_limit_ns` unused.
+//
+// Two limits, neither of which gives a wrong picture, because such requests
+// cannot be told, request by request, from an output the client dropped. A
+// recording output that was dropped while every request that follows takes a
+// still (a repeating preview and RAW request, say) stays open until a request
+// without a still or a reconfiguration. Sixteen or more consecutive captures
+// that leave the preview out and take no still close the preview's stream.
 #pragma once
 
 #include <cstdint>

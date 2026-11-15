@@ -32,6 +32,7 @@ constexpr std::int64_t second = 1'000 * ms;
 // takes a still.
 constexpr int preview = 1;
 constexpr int recording = 2;
+constexpr int yuv = 3;
 constexpr int jpeg = 100;
 constexpr int raw = 101;
 
@@ -58,9 +59,12 @@ class Hal {
 public:
     // `count_stills`: whether a request that takes a still advances the count
     // (the rule of the first version of the change, which a queue of stills
-    // defeated); `skip_used`: whether a stream the request uses is asked about.
-    explicit Hal(Rule rule = closes_when_idle, bool skip_used = true, bool count_stills = false)
-        : rule_(std::move(rule)), skip_used_(skip_used), count_stills_(count_stills) {}
+    // defeated); `skip_used`: whether a stream the request uses is asked about;
+    // `restart`: whether a request that takes a still starts the count again for
+    // every open video output (the rule of the second version, which a mixed
+    // queue of captures defeated).
+    explicit Hal(Rule rule = closes_when_idle, bool skip_used = true, bool count_stills = false, bool restart = true)
+        : rule_(std::move(rule)), skip_used_(skip_used), count_stills_(count_stills), restart_(restart) {}
 
     struct Stream {
         std::uint64_t last_request = 0;
@@ -81,7 +85,12 @@ public:
                 ++it;
             }
         }
-        if (count_stills_ || !takes_a_still(uses)) ++begun_;
+        if (count_stills_ || !takes_a_still(uses)) {
+            ++begun_;
+        } else if (restart_) {
+            for (auto& [id, stream] : streams_)
+                if (is_output(id)) stream.last_request = begun_;
+        }
         for (int id : uses) {
             if (streams_.count(id) == 0) opened_.push_back({id, now});
             streams_[id].last_request = begun_;
@@ -133,6 +142,7 @@ private:
     Rule rule_;
     bool skip_used_;
     bool count_stills_;
+    bool restart_;
     std::uint64_t begun_ = 0;
     std::map<int, Stream> streams_;
     Events closed_, opened_;
@@ -214,7 +224,7 @@ void check_a_burst_of_stills()
     // The rule of the first version of the change counted every request; the same bursts closed the preview then (three
     // at 0.3 s, five at 0.25 s, eight at 1 s), which is what the model has to show for the test to mean something.
     for (const auto& [count, hold] : {std::pair<int, std::int64_t>{3, 300 * ms}, {5, 250 * ms}, {8, 1000 * ms}}) {
-        Hal counted(closes_when_idle, true, true);
+        Hal counted(closes_when_idle, true, true, false);
         std::int64_t now = counted.preview_requests(0, second, 33 * ms);
         now = counted.burst(now + 33 * ms, count, hold);
         counted.preview_requests(now, now + second, 33 * ms);
@@ -229,6 +239,48 @@ void check_a_burst_of_stills()
         now = mixed.request(now, {preview}, 0) + 33 * ms;
     }
     require(mixed.closes(preview) == 0, "stills with preview requests between them close nothing");
+}
+
+// A legal burst can mix captures that take no still (two YUV image reader captures) with JPEG or RAW ones, while the
+// repeating preview waits behind the whole list. The two YUV captures are absences of the preview, and the second
+// of the stills 0.9 s after the first used to close the preview's stream: the absences earned before a request that takes
+// a still start again from zero when it begins.
+void check_a_mixed_burst()
+{
+    for (const int still : {jpeg, raw}) {
+        for (const std::int64_t hold : {300 * ms, 900 * ms}) {
+            Hal restarting;
+            Hal carrying(closes_when_idle, true, false, false);
+            for (Hal* hal : {&restarting, &carrying}) {
+                std::int64_t now = hal->preview_requests(0, second, 33 * ms);
+                now = hal->request(now, {yuv}, 0);
+                now = hal->request(now + 33 * ms, {yuv}, 0);
+                now = hal->request(now + 33 * ms, {still}, hold);
+                now = hal->request(now, {still}, hold);
+                hal->preview_requests(now, now + second, 33 * ms);
+            }
+            require(restarting.closes(preview) == 0 && restarting.opens(preview) == 1,
+                    "a mixed burst of two YUV and two stills leaves the preview its stream");
+            if (hold == 900 * ms) {
+                require(carrying.closes(preview) == 1, "carrying the absences over the stills, it closed the preview behind them");
+            }
+        }
+    }
+
+    // The stream of a dropped recording still goes at the second still-free request after the half second, when
+    // stills and captures without one come before it in any order.
+    Hal hal;
+    std::int64_t now = hal.preview_requests(0, 2 * second, 33 * ms, {preview, recording});
+    now = hal.request(now, {yuv}, 0);
+    now = hal.request(now + 33 * ms, {jpeg}, 900 * ms);
+    now = hal.request(now, {raw}, 300 * ms);
+    require(hal.open(recording) && hal.open(preview), "the burst closed nothing");
+    hal.request(now, {preview}, 0);
+    hal.request(now + 33 * ms, {preview}, 0);
+    require(hal.open(recording), "two still-free requests after the burst are not enough");
+    hal.request(now + 66 * ms, {preview}, 0);
+    require(!hal.open(recording) && hal.closes(recording) == 1 && hal.closes(preview) == 0,
+            "the dropped recording goes at the third, the preview stays");
 }
 
 // The edge of the rule: one still-free request without the stream is tolerated,
@@ -325,6 +377,7 @@ int main()
 {
     check_preview_behind_a_still();
     check_a_burst_of_stills();
+    check_a_mixed_burst();
     check_boundary();
     check_an_output_that_leaves_the_requests();
     check_two_outputs();
