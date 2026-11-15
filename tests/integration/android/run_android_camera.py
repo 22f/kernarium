@@ -282,7 +282,16 @@ DEFAULT_LAYOUTS = {
     "tablet": "bf-small-flash-manual",
     "laptop": "front",
 }
-MODES = ("live", "blocked", "none", "restart")
+MODES = ("live", "blocked", "none", "restart", "video-lost")
+# The video-lost mode: the synthetic camera reads its test-only control pipe, and the runner tells it that the application
+# left the foreground (the host ends the video of a camera that records; docs/testing.md). The recording ends by itself
+# and the clip is saved, the application stays the resumed activity, and the camera opens again when the person returns
+# and uses it: LOST_HOLD_SECONDS of video before the loss, a clip of at least LOST_MINIMUM_SECONDS, and LOST_WAIT_SECONDS
+# for the clip to appear.
+CONTROL_VARIABLE = "UML_SYNTHETIC_CAMERA_CONTROL"
+LOST_HOLD_SECONDS = 4
+LOST_MINIMUM_SECONDS = 2.0
+LOST_WAIT_SECONDS = 60
 # The cameras Android lists again after the restart: the lazy provider starts when cameraserver first asks.
 RESTART_LIST_SECONDS = 60
 CALIBRATION_SECONDS = 30  # the host writes the colour data of a still when the still is done
@@ -1003,7 +1012,8 @@ def parse_jpeg(data: bytes) -> Jpeg:
 
 class Guest:
     def __init__(self, adb: str, serial: str, process: subprocess.Popen, log: pathlib.Path,
-                 private: pathlib.Path, hold_directory: pathlib.Path | None = None) -> None:
+                 private: pathlib.Path, hold_directory: pathlib.Path | None = None,
+                 control: pathlib.Path | None = None) -> None:
         self.adb = adb
         self.serial = serial
         self.process = process
@@ -1011,6 +1021,20 @@ class Guest:
         self.private = private
         # Where the launcher's audio hold library (--audio-hold-library) takes its requests; None without one.
         self.hold_directory = hold_directory
+        # The synthetic camera's control pipe (the video-lost mode); None without one.
+        self.control = control
+
+    def camera_control(self, line: str) -> None:
+        """Writes one line to the synthetic camera's control pipe: `interrupt background`, `interrupt`, `resume`."""
+        if self.control is None:
+            raise Failure("no control pipe: the run was not started in the video-lost mode")
+        wait_for("the synthetic camera's control pipe", COMMAND_SECONDS,
+                 lambda: None if self.control.exists() else f"{self.control} does not exist", self)
+        descriptor = os.open(self.control, os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            os.write(descriptor, f"{line}\n".encode())
+        finally:
+            os.close(descriptor)
 
     def adb_run(self, *arguments: str, timeout: float = COMMAND_SECONDS,
                 binary: bool = False) -> subprocess.CompletedProcess:
@@ -1715,6 +1739,77 @@ def check_video(guest: Guest, plan: Plan) -> None:
     check_audio(path, movie)
 
 
+def start_recording(guest: Guest, plan: Plan, restart_application: bool) -> None:
+    """The video mode of the application on the profile's first camera is in front with the chart in its preview, and
+    the shutter key has started a recording. With `restart_application` the application is stopped first."""
+    if restart_application:
+        guest.shell(f"am force-stop {CAMERA_PACKAGE}")
+    start_camera_application(guest, VIDEO_ACTION, front=PROFILE_CAMERAS[plan.profile][0] == "front")
+    wait_for_chart(guest, plan.camera_ids[0], "video")
+    guest.shell(f"input keyevent {CAMERA_KEYCODE}")
+
+
+def new_movie(guest: Guest, before: dict[str, dict[str, str]], seconds: float) -> dict[str, str]:
+    """MediaStore's row of the movie that appeared since `before` was read, waiting at most `seconds`."""
+    found: list[dict[str, str]] = []
+
+    def recorded() -> str | None:
+        rows, query = guest.videos()
+        added = [row for _, row in sorted(rows.items()) if row["_id"] not in before]
+        if not added:
+            return f"MediaStore lists no new movie (query: {query.strip()[-200:]!r})"
+        found[:] = added
+        return None
+
+    wait_for("a movie in MediaStore", seconds, recorded, guest)
+    time.sleep(3)  # the file is finished when the application has closed it
+    return found[-1]
+
+
+def check_video_lost(guest: Guest, plan: Plan) -> None:
+    """The host ends the video of a camera that records when the application leaves the foreground: the recording ends
+    and its clip is saved without a second key press, the application stays in front, and when the person returns the
+    camera opens again and a recording works. Needs an image whose HAL reports the loss (route p0030, last topic)."""
+    before, _ = guest.videos()
+    start_recording(guest, plan, restart_application=True)
+    time.sleep(LOST_HOLD_SECONDS)
+    guest.camera_control("interrupt background")
+    row = new_movie(guest, before, LOST_WAIT_SECONDS)
+    path = row.get("_data", "")
+    try:
+        movie = parse_mp4(guest.pull(path))
+    except ValueError as problem:
+        raise Failure(f"{path} is not a finished movie: {problem}") from problem
+    if not movie.video:
+        raise Failure(f"{path} has no video track")
+    if not LOST_MINIMUM_SECONDS <= movie.seconds <= LOST_HOLD_SECONDS + VIDEO_MAXIMUM_SECONDS:
+        raise Failure(f"{path} lasts {movie.seconds:.2f} s; the recording ran {LOST_HOLD_SECONDS} s before the loss "
+                      f"and must last between {LOST_MINIMUM_SECONDS:g} s and the time the loss took to be noticed")
+    print(f"  the recording ended by itself: {row.get('_display_name', path)} {movie.seconds:.2f} s, {movie.frames} frames")
+    foreground = parse_foreground(guest.shell(FOREGROUND_COMMAND))
+    if not foreground.resumed.startswith(CAMERA_PACKAGE):
+        raise Failure(f"the camera application is not in front after the recording ended: {foreground.describe()}")
+    print(f"  the application stays in front: {foreground.describe()}")
+    # What the application does with its camera is its own: the open camera is reported, not required.
+    held = sorted(active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE))
+    print(f"  cameras the application holds after the loss: {held or 'none'}")
+    guest.camera_control("resume")
+    after, _ = guest.videos()
+    start_recording(guest, plan, restart_application=False)
+    time.sleep(VIDEO_HOLD_SECONDS)
+    guest.shell(f"input keyevent {CAMERA_KEYCODE}")
+    again = new_movie(guest, after, VIDEO_SECONDS)
+    reopened = parse_mp4(guest.pull(again.get("_data", "")))
+    if not reopened.video or reopened.seconds < VIDEO_MINIMUM_SECONDS:
+        raise Failure(f"the recording after the person returned is not a movie of at least {VIDEO_MINIMUM_SECONDS:g} s: "
+                      f"{reopened.seconds:.2f} s, video track {'yes' if reopened.video else 'no'}")
+    print(f"  the camera opened again: {again.get('_display_name', '')} {reopened.seconds:.2f} s, {reopened.frames} frames")
+    log = guest.hal_log()
+    if "the host ended the camera" not in log:
+        raise Failure("the camera HAL logged no end of the camera: the image lacks the HAL topic of route p0030")
+    print("  the HAL reported the end of the camera (ERROR_DEVICE)")
+
+
 def check_audio_stall(guest: Guest, plan: Plan) -> None:
     """A recording during which the thread that serves the Virtio sound device is held STALL_SECONDS, DISTURB_COUNT
     times, with the audio capture seen to run first: the video goes on (no gap of VIDEO_GAP_MAXIMUM_SECONDS) while the
@@ -1902,6 +1997,9 @@ def run_checks(guest: Guest, plan: Plan) -> None:
     if plan.camera_ids:
         check_characteristics(guest, plan)
     print(f"  cameras {list(plan.camera_ids)} and features {sorted(plan.features)}")
+    if plan.mode == "video-lost":
+        check_video_lost(guest, plan)
+        return
     if plan.mode == "none":
         if guest.provider_pids():
             raise Failure(f"a layout without cameras runs the camera provider: {guest.provider_pids()}")
@@ -2043,11 +2141,16 @@ def start_guest(options: argparse.Namespace, plan: Plan, adb: str, private: path
         hold_directory.mkdir()
         environment["DYLD_INSERT_LIBRARIES"] = str(options.audio_hold_library.resolve())
         environment["UML_AUDIO_HOLD_DIRECTORY"] = str(hold_directory)
+    control = None
+    if plan.mode == "video-lost":
+        # The pipe is made by the camera device of the launcher, under this name.
+        control = private / "camera-control"
+        environment[CONTROL_VARIABLE] = str(control)
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
                                start_new_session=True, env=environment)
     stream.close()
     serial = f"127.0.0.1:{options.adb_port}"
-    guest = Guest(adb, serial, process, log, private, hold_directory)
+    guest = Guest(adb, serial, process, log, private, hold_directory, control)
     boot_android.wait_for_adb(adb, serial, process, options.boot_timeout)
     if not boot_android.wait_for_boot_completed(adb, serial, process, options.boot_timeout):
         raise Failure("Android did not reach sys.boot_completed")

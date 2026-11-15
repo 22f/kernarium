@@ -18,6 +18,7 @@ import contextlib
 import importlib.util
 import io
 import itertools
+import os
 from pathlib import Path
 import re
 import struct
@@ -2518,6 +2519,105 @@ class RestartTests(unittest.TestCase):
         self.assertEqual(self.options().mode, "restart")
         self.assertIn("EmulatedCameraDeviceInfo", runner.FAILURE_LOG_PATTERN)
         self.assertIn("V4l2Characteristics", runner.FAILURE_LOG_PATTERN)
+
+
+class VideoLostTests(unittest.TestCase):
+    """The video-lost mode: the synthetic camera's control pipe tells the guest's camera that the application left the
+    foreground. The recording ends by itself with its clip saved, the application stays in front, and the camera opens
+    again for a recording after the person returns. The HAL's own log line names the end of the camera."""
+
+    LAYOUT = "bf-large-flash-manual-concurrent-front2160"
+
+    class Guest(FakeGuest):
+        def __init__(self, plan, **kwargs) -> None:
+            super().__init__(plan, **kwargs)
+            self.control_lines: list[str] = []
+            self.ends_on_loss = True
+            self.in_front = True
+            self.log = "W V4l2FrameSource: camera 0: the host ended the camera: its video buffers fail\n"
+
+        def camera_control(self, line: str) -> None:
+            self.control_lines.append(line)
+            if line == "interrupt background" and self.ends_on_loss:
+                self.recording = False
+                self.rows["2"] = {"_id": "2", "_data": "/sdcard/lost.mp4", "_display_name": "lost.mp4"}
+
+        def shell(self, command: str, timeout: float = 0) -> str:
+            if command == runner.FOREGROUND_COMMAND:
+                return foreground_text() if self.in_front else foreground_text("topResumedActivity=ActivityRecord{1 u0 com.android.launcher3/.Launcher t1}")
+            if command == f"input keyevent {runner.CAMERA_KEYCODE}" and self.recording and "2" in self.rows:
+                # The key that stops the second recording: a new row, not the one the loss made.
+                self.recording = False
+                self.rows["3"] = {"_id": "3", "_data": "/sdcard/again.mp4", "_display_name": "again.mp4"}
+                self.commands.append(command)
+                return ""
+            return super().shell(command, timeout)
+
+    def run_check(self, guest) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(runner.time, "sleep", lambda seconds: None):
+            runner.check_video_lost(guest, guest.plan)
+        return out.getvalue()
+
+    def plan(self):
+        return runner.make_plan(self.LAYOUT, "phone", "video-lost")
+
+    def test_the_mode_is_a_plan_of_the_live_cameras(self) -> None:
+        plan = self.plan()
+        self.assertEqual(plan.camera_ids, runner.PROFILE_CAMERAS["phone"][1])
+        self.assertIn("video-lost", runner.MODES)
+        self.assertEqual(runner.CONTROL_VARIABLE, "UML_SYNTHETIC_CAMERA_CONTROL")
+
+    def test_the_loss_ends_the_recording_and_the_camera_opens_again(self) -> None:
+        guest = self.Guest(self.plan())
+        text = self.run_check(guest)
+        self.assertEqual(guest.control_lines, ["interrupt background", "resume"])
+        self.assertIn("the recording ended by itself: lost.mp4", text)
+        self.assertIn("the application stays in front", text)
+        self.assertIn("the camera opened again: again.mp4", text)
+        self.assertIn("the HAL reported the end of the camera", text)
+        # The first recording is stopped by the loss, not by a second key press; the second is started and stopped by key.
+        self.assertEqual(guest.commands.count(f"input keyevent {runner.CAMERA_KEYCODE}"), 3)
+        starts = [command for command in guest.commands if command.startswith("am start")]
+        self.assertEqual(len(starts), 2)
+        self.assertEqual(guest.commands.count(f"am force-stop {runner.CAMERA_PACKAGE}"), 1,
+                         "only the first start stops the application: the second shows that it opens its camera again")
+
+    def test_a_recording_that_does_not_end_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.ends_on_loss = False
+        with self.assertRaisesRegex(runner.Failure, "a movie in MediaStore"), \
+                mock.patch.object(runner, "LOST_WAIT_SECONDS", 0):
+            self.run_check(guest)
+
+    def test_an_application_that_left_the_front_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.in_front = False
+        with self.assertRaisesRegex(runner.Failure, "not in front after the recording ended"):
+            self.run_check(guest)
+
+    def test_a_hal_without_the_topic_fails_after_the_camera_opened_again(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.log = ""
+        with self.assertRaisesRegex(runner.Failure, "image lacks the HAL topic"):
+            self.run_check(guest)
+
+    def test_the_pipe_takes_one_line_and_is_waited_for(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pipe = Path(directory) / "control"
+            process = mock.Mock(pid=4242)
+            process.poll.return_value = None
+            log = Path(directory) / "emulator.log"
+            log.write_text("")
+            guest = runner.Guest("adb", "127.0.0.1:1", process, log, Path(directory), None, pipe)
+            self.assertRaises(runner.Failure, runner.Guest("adb", "127.0.0.1:1", process, log, Path(directory)).camera_control, "resume")
+            os.mkfifo(pipe)
+            reader = os.open(pipe, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                guest.camera_control("interrupt background")
+                self.assertEqual(os.read(reader, 100), b"interrupt background\n")
+            finally:
+                os.close(reader)
 
 
 if __name__ == "__main__":
