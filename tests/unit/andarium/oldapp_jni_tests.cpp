@@ -26,6 +26,10 @@
 #include <thread>
 #include <vector>
 
+#include <signal.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
 #include "jni_abi.hpp"
 #include "jni_shim.hpp"
 #include "require.hpp"
@@ -3984,6 +3988,107 @@ void check_a_failed_sentinel_allocation_is_survived() {
             "the next creation made the sentinel and swept");
 }
 
+// ---- stores that touch only the bytes the rule chose
+
+// A store that lands exactly where a test wants another thread's write to land. The page is made read-only; the first
+// store into it faults; the handler writes the other thread's byte, opens the page and lets the store go on. That is the
+// interleaving a few instructions wide between the layer's comparison and its store, which no call into the fake runtime
+// falls into: a word store there would carry the old value of the neighbouring byte over the other thread's.
+struct Watch {
+    uint8_t* page = nullptr;
+    size_t size = 0;
+    volatile uint8_t* racing = nullptr;  // where the other thread's write goes
+    uint8_t value = 0;
+    volatile int hits = 0;
+};
+Watch g_watch;
+struct sigaction g_watch_old_bus, g_watch_old_segv;
+void watch_handler(int signal_number, siginfo_t* info, void*) {
+    uint8_t* at = static_cast<uint8_t*>(info->si_addr);
+    if (g_watch.page != nullptr && at >= g_watch.page && at < g_watch.page + g_watch.size) {
+        mprotect(g_watch.page, g_watch.size, PROT_READ | PROT_WRITE);
+        g_watch.hits = g_watch.hits + 1;
+        *g_watch.racing = g_watch.value;
+        return;
+    }
+    struct sigaction default_action;
+    std::memset(&default_action, 0, sizeof(default_action));
+    default_action.sa_handler = SIG_DFL;
+    sigaction(signal_number, &default_action, nullptr);  // a fault of anything else: the default, on its return
+}
+// The first whole page inside [memory, memory + length).
+uint8_t* page_inside(uint8_t* memory, size_t length) {
+    const size_t page = size_t(getpagesize());
+    uint8_t* first = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(memory) + page - 1) & ~(page - 1));
+    require(first + page <= memory + length, "a whole page lies inside the memory");
+    return first;
+}
+void arm_watch(uint8_t* page, uint8_t* racing, uint8_t value) {
+    g_watch.page = page;
+    g_watch.size = size_t(getpagesize());
+    g_watch.racing = racing;
+    g_watch.value = value;
+    g_watch.hits = 0;
+    struct sigaction action;
+    std::memset(&action, 0, sizeof(action));
+    action.sa_sigaction = watch_handler;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGBUS, &action, &g_watch_old_bus);
+    sigaction(SIGSEGV, &action, &g_watch_old_segv);
+    require(mprotect(page, g_watch.size, PROT_READ) == 0, "the page is made read-only");
+}
+int disarm_watch() {
+    const int hits = g_watch.hits;
+    mprotect(g_watch.page, g_watch.size, PROT_READ | PROT_WRITE);
+    sigaction(SIGBUS, &g_watch_old_bus, nullptr);
+    sigaction(SIGSEGV, &g_watch_old_segv, nullptr);
+    g_watch.page = nullptr;
+    return hits;
+}
+
+// A pull stores the byte Java changed and no other byte of its word: another thread's raw write to the next byte, landing
+// at that store, survives, and reaches the array at the next point.
+void check_a_pull_stores_only_the_byte_java_changed() {
+    Fixture f = make();
+    const size_t size = 65536;
+    Made a = make_held(f, std::vector<uint8_t>(size, 0x11));
+    uint8_t* data = raw_of(a);
+    uint8_t* page = page_inside(data, size);
+    uint8_t* changed = page + 33;  // Java's byte, in the middle of a word whose other bytes nobody changed
+    uint8_t* neighbour = page + 34;
+    a.object->bytes[size_t(changed - data)] = 0xA1;
+    arm_watch(page, neighbour, 0x77);
+    std::vector<jbyte> copy(size);
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, jsize(size), copy.data());
+    const int hits = disarm_watch();
+    require(hits == 1, "the store of Java's byte was where the other thread's write landed");
+    require(*changed == 0xA1 && *neighbour == 0x77, "the block has Java's byte and the other thread's write");
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, jsize(size), copy.data());
+    require(a.object->bytes[size_t(neighbour - data)] == 0x77 && a.object->bytes[size_t(changed - data)] == 0xA1,
+            "and the next point took the write to the array");
+}
+
+// The merge in the live array of a critical get stores the byte the application wrote and no other byte of its word: a Java
+// thread's write to the next byte, landing at that store, survives.
+void check_the_critical_merge_stores_only_the_byte_the_application_wrote() {
+    Fixture f = make();
+    const size_t size = 524288;
+    Made a = make_held(f, std::vector<uint8_t>(size, 0x11));
+    uint8_t* data = raw_of(a);
+    uint8_t* array = a.object->bytes.data();
+    uint8_t* page = page_inside(array, size);
+    const size_t at = size_t(page + 33 - array);
+    data[at] = 0x5A;  // the application writes through the pointer
+    arm_watch(page, page + 34, 0x99);  // and Java writes the next byte of the array, as the merge stores
+    void* p = get_critical(f, a.shadow);
+    const int hits = disarm_watch();
+    require(hits == 1, "the merge stored into the array where the other write landed");
+    require(array[at] == 0x5A && array[at + 1] == 0x99, "the array has the application's byte and Java's write");
+    release_critical(f, a.shadow, p, 0);
+    require(data[at + 1] == 0x99, "and the block has Java's write after the release");
+}
+
 void check_install_rules() {
     reset_world();
     Table table;
@@ -4134,6 +4239,8 @@ int main(int argc, char** argv) {
     check_the_table_of_the_runtimes_pointers_does_not_wait_for_the_mutex();
     check_the_sentinels_array_is_made_outside_the_mutex();
     check_a_failed_sentinel_allocation_is_survived();
+    check_a_pull_stores_only_the_byte_java_changed();
+    check_the_critical_merge_stores_only_the_byte_the_application_wrote();
     check_install_rules();
     check_no_shadows_when_disabled();
     std::puts("old-application JNI: ok");

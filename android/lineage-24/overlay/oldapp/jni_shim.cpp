@@ -295,7 +295,8 @@ inline void enter_any(Env* env) {
 // differs from its baseline) goes to the array, every other byte of the chunk takes the array's if Java changed it since
 // the baseline; where both wrote the same byte, the application's wins. Any other chunk takes the bytes Java changed.
 // The block never takes a byte Java did not change, so a raw write by another thread to such a byte, racing the
-// synchronization, survives it and goes to the array at the next one. A chunk neither side touched costs two
+// synchronization, survives it and goes to the array at the next one; the stores are byte stores, so not even the
+// bytes next to a changed one are stored to. A chunk neither side touched costs two
 // comparisons and a read, and writes nothing to the array or the block. A run of adjacent chunks that are alike is read
 // in pieces of kPullPiece bytes; a run the application wrote costs two region calls (the array's bytes are read, merged
 // and written).
@@ -331,6 +332,16 @@ void adopt_baseline(BlockHeader* header, uint32_t from, uint32_t to) {
     }
 }
 
+// The bytes are compared by words and stored one at a time: a store to the block (which other threads write through the
+// raw pointer) or to the live array (which Java threads write) touches only a byte the rule has chosen, never its
+// neighbours. The stores are relaxed atomics so that the compiler cannot merge neighbouring ones into a wider store.
+inline void store_byte(uint8_t* at, uint8_t value) { __atomic_store_n(at, value, __ATOMIC_RELAXED); }
+// Whether no byte of `a` equals the byte of `b` at its position (x has no zero byte).
+inline bool all_bytes_differ(uint32_t a, uint32_t b) {
+    const uint32_t x = a ^ b;
+    return ((x - 0x01010101u) & ~x & 0x80808080u) == 0;
+}
+
 // The array's bytes `java` become the baseline, and the block takes the ones Java changed since the baseline, unless the
 // application has written that byte meanwhile (block != baseline): a raw write by another thread to a byte Java did not
 // write survives a synchronization that races it, and the next one pushes it; where both sides wrote, the application's
@@ -342,7 +353,7 @@ inline void take_java_byte(uint8_t* block, uint8_t* baseline, uint8_t java, uint
     }
     baseline[at] = java;
     if (block[at] == old) {
-        block[at] = java;
+        store_byte(block + at, java);
     }
 }
 void take_java_words(uint8_t* block, uint8_t* baseline, const uint8_t* java, uint32_t n) {
@@ -356,9 +367,11 @@ void take_java_words(uint8_t* block, uint8_t* baseline, const uint8_t* java, uin
         }
         uint32_t b;
         __builtin_memcpy(&b, block + i, 4);
-        if (b == k) {  // the application wrote none of the four: the block takes all of Java's
-            __builtin_memcpy(block + i, &j, 4);
-            __builtin_memcpy(baseline + i, &j, 4);
+        if (b == k && all_bytes_differ(j, k)) {  // Java changed all four and the application none: four byte stores
+            for (uint32_t m = i; m < i + 4; ++m) {
+                store_byte(block + m, java[m]);
+                baseline[m] = java[m];
+            }
             continue;
         }
         for (uint32_t m = i; m < i + 4; ++m) {
@@ -383,9 +396,9 @@ void take_java(uint8_t* block, uint8_t* baseline, const uint8_t* java, uint32_t 
 }
 
 // The byte-by-byte rule over n bytes: a byte the application wrote (block != baseline) replaces the array's `java`
-// byte, unless that is the same already. Returns whether `java` changed. Where the array's four bytes are the baseline's
-// the application's four bytes are the result, so a word at a time decides most of a run; any other word is decided
-// byte by byte.
+// byte, unless that is the same already. Returns whether `java` changed. Words are compared at a time and bytes stored one
+// at a time: where the application wrote all four bytes of a word and Java none, the four are stored; any other word is
+// decided byte by byte, so a byte the rule leaves alone is never stored to.
 bool merge_words(uint8_t* java, const uint8_t* block, const uint8_t* baseline, uint32_t n) {
     bool differs = false;
     uint32_t i = 0;
@@ -397,21 +410,27 @@ bool merge_words(uint8_t* java, const uint8_t* block, const uint8_t* baseline, u
             continue;  // the application wrote none of the four: the array's bytes stay
         }
         __builtin_memcpy(&j, java + i, 4);
-        if (j == k) {
-            __builtin_memcpy(java + i, &b, 4);  // Java wrote none of them: the application's replace them
+        if (j == k && all_bytes_differ(b, k)) {
+            uint8_t written[4];
+            __builtin_memcpy(written, &b, 4);
+            for (uint32_t m = 0; m < 4; ++m) {
+                store_byte(java + i + m, written[m]);  // the application wrote all four and Java none
+            }
             differs = true;
             continue;
         }
         for (uint32_t m = i; m < i + 4; ++m) {
-            if (block[m] != baseline[m] && java[m] != block[m]) {
-                java[m] = block[m];
+            const uint8_t written = block[m];
+            if (written != baseline[m] && java[m] != written) {
+                store_byte(java + m, written);
                 differs = true;
             }
         }
     }
     for (; i < n; ++i) {
-        if (block[i] != baseline[i] && java[i] != block[i]) {
-            java[i] = block[i];
+        const uint8_t written = block[i];
+        if (written != baseline[i] && java[i] != written) {
+            store_byte(java + i, written);
             differs = true;
         }
     }
