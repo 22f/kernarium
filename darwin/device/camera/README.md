@@ -213,21 +213,20 @@ application's statements (the sensor orientation, the rotation that
 - **Lost video.** The platform reports that the application left the
   foreground (`CameraEventKind::interruptedInBackground`, which the Apple
   backend raises for the system's reason that a camera is not available to an
-  application in the background). If the guest has a camera in video mode then
-  (a video stream open on it, even one a suspend has stopped, and its last
-  controls asking for the picture stabilized, as Android's record template does
-  and its preview and still templates do not), the camera's video is lost: the
-  capture stops, and every buffer of every video stream of the camera completes
-  with the error and interrupted flags at the stream's rate, with a black
-  interrupted record, whatever the platform does afterwards and for a stream the
-  guest restarts after a suspend, until the guest has closed its last video
-  stream of the camera. A stream it opens next is an ordinary one, so the
-  camera opens again on demand. The guest's camera layer ends the camera on it
-  (the wire's README has the rule). Every other interruption (another
-  application or a call, iPad multitasking, the system's pressure, a restart
-  after an error), and a camera in photo mode, only get the dark gap above. A
-  blocked session hears of none. The report line names the camera and says the
-  video ended.
+  application in the background). If the guest has a video stream open on a
+  camera then (even one a suspend has stopped; nothing else decides it, as the
+  host cannot tell a recording from a viewfinder), the camera's video is lost:
+  the capture stops, and every buffer of every video stream of the camera
+  completes with the error and interrupted flags at the stream's rate, with a
+  black interrupted record, whatever the platform does afterwards and for a
+  stream the guest restarts after a suspend, until the guest has closed its
+  last video stream of the camera. A stream it opens next is an ordinary one, so
+  the camera opens again on demand. What the guest's client sees of it is for
+  the guest's camera HAL to decide (the wire's README has the rule). Every other
+  interruption (another application or a call, iPad multitasking, the system's
+  pressure, a restart after an error), and a camera with no video stream, only
+  get the dark gap above. A blocked session hears of none. The report line names
+  the camera and says the video ended.
 - **Video mode.** The device tells its owner (`onVideoMode`) whether the guest
   is in video mode: a live camera's video runs, uninterrupted, and the guest
   asks for the picture stabilized, which Android's record template does and its

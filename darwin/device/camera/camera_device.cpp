@@ -208,11 +208,11 @@ public:
         bool resuming {};
         bool videoRunning {};
         bool failed {};
-        /* The host ended the camera's video: the application left the foreground while the guest had the camera in video
-         * mode (`endsVideoWhenAppLeaves`). Every video stream of the camera, those the guest restarts after a suspend
+        /* The host ended the camera's video: the application left the foreground while the guest had a video stream open on
+         * the camera (`endsVideoWhenAppLeaves`). Every video stream of the camera, those the guest restarts after a suspend
          * too, completes its buffers with the error flag and the interrupted flag and never gets a picture, until the
-         * guest has closed its last video stream of the camera: the guest's camera layer reads that as the loss of the
-         * camera and closes it. It is not a state the platform's recovery ends. */
+         * guest has closed its last video stream of the camera: the guest's camera layer decides what to do with that news.
+         * It is not a state the platform's recovery ends. */
         bool lost {};
         /* The guest has been told the camera is interrupted (or gone) and not
          * yet that it is back; it is told once each way. */
@@ -486,13 +486,14 @@ public:
         });
     }
 
-    /* Whether the application's leaving the foreground ends the guest's video on a camera: a live session, a video stream
-     * the guest has open (it may be stopped, as a guest suspend stops it) and the guest's last controls ask for the
-     * picture stabilized, which Android's record template does and its preview and still templates do not. A camera with
-     * a viewfinder only is not lost: nothing is lost but a few frames, and the viewfinder comes back by itself. */
+    /* Whether the application's leaving the foreground ends the guest's video on a camera: a live session and a video stream
+     * the guest has open (it may be stopped, as a guest suspend stops it). Nothing else decides it: the host cannot tell a
+     * recording from a viewfinder, and the guest's camera HAL decides what its client sees (a session with an encoder stream
+     * is told the device is gone; any other closes its video streams, which ends the loss, and opens them again). A camera
+     * with no video stream, a still or the torch alone, is not lost. */
     [[nodiscard]] bool endsVideoWhenAppLeaves(const Runtime& runtime) const
     {
-        return !blocked() && !runtime.lost && hasVideoStream(runtime) && runtime.controls.settings(runtime.values).stabilization;
+        return !blocked() && !runtime.lost && hasVideoStream(runtime);
     }
 
     /* The guest closed its last video stream of a camera: the loss ends with it, and the camera, if it was told it is down
@@ -1731,8 +1732,8 @@ public:
         case CameraEventKind::unavailable: {
             bool ended = false;
             each([&](Runtime& runtime) {
-                // The application left the foreground with the guest recording: the guest's video on this camera ends here,
-                // and it is the guest, when it next runs, that finds out (the application suspends it behind this).
+                // The application left the foreground with the guest's video open on this camera: that video ends here, and
+                // it is the guest, when it next runs, that finds out (the application suspends it behind this).
                 const bool ends = platformEvent.kind == CameraEventKind::interruptedInBackground && endsVideoWhenAppLeaves(runtime);
                 runtime.interruption = platformEvent.kind == CameraEventKind::interruptedByMultitasking ? Interruption::multitasking
                     : platformEvent.kind == CameraEventKind::interruptedBySystemPressure ? Interruption::pressure

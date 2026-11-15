@@ -161,15 +161,15 @@ streams, and a metadata node, for its meta streams.
   was closed and opened again meanwhile, and a capture that failed is reported
   back when it delivers a frame. The guest driver does not act on the events; the
   frames and the metadata carry the news. One interruption is final for a
-  stream: the application left the foreground while the guest had the camera in
-  video mode (its last controls ask for the picture stabilized). From then on
+  stream: the application left the foreground while the guest had a video stream
+  open on the camera. From then on
   every buffer of every video stream of that camera, a stream a guest suspend
   stopped and started again too, completes with `VIRTIO_VIDEO_DEQUEUE_FLAG_ERR`
   and `_INTERRUPTED` (a V4L2 buffer with `V4L2_BUF_FLAG_ERROR`), paced at the
   stream's rate, and the camera's metadata records are black and interrupted,
-  until the guest has closed its last video stream of the camera. A guest's
-  camera layer reads a failed video buffer under an interrupted record as the
-  loss of the camera. The host opens no capture for it.
+  until the guest has closed its last video stream of the camera, which ends the
+  loss. The camera HAL reads a failed video buffer under an interrupted record as
+  the loss of the camera. The host opens no capture for it.
 - **Suspend and reset.** The camera's event buffers stay in the guest's ring:
   the device answers one only when it has an event, and the buffer the guest
   posted waits in the ring, across a suspend as well. The device keeps the

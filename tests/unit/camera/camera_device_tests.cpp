@@ -1616,12 +1616,12 @@ void clearStream(Rig& rig, std::uint32_t stream)
 constexpr std::uint32_t endedFlags = errorFlag | interruptedFlag;
 constexpr std::uint32_t blackRecord = VIRTIO_VIDEO_CAMERA_FRAME_F_BLACK | VIRTIO_VIDEO_CAMERA_FRAME_F_INTERRUPTED;
 
-/* The application leaves the foreground while the guest has a camera in video mode (the record template asks for the
- * picture stabilized): the video of that camera ends. Its buffers fail with the interrupted flag, the camera's records say
- * black and interrupted, the platform's capture stops, and none of it is undone by the platform's recovery, by a guest
- * suspend that stops the stream and starts it again, or by the guest's next buffer: only the guest's close of its last
- * video stream of the camera ends it. */
-void testTheApplicationLeavingTheForegroundEndsTheVideoOfACameraInVideoMode()
+/* The application leaves the foreground while the guest has a video stream open on a camera (a recording, which asks for
+ * the picture stabilized, or a viewfinder; the host cannot tell them apart): the video of that camera ends. Its buffers
+ * fail with the interrupted flag, the camera's records say black and interrupted, the platform's capture stops, and none
+ * of it is undone by the platform's recovery, by a guest suspend that stops the stream and starts it again, or by the
+ * guest's next buffer: only the guest's close of its last video stream of the camera ends it. */
+void testTheApplicationLeavingTheForegroundEndsTheVideoOfACamera()
 {
     Rig rig;
     videoStream(rig, 1, 0, 640, 480, 8);
@@ -1692,11 +1692,82 @@ void testTheApplicationLeavingTheForegroundEndsTheVideoOfACameraInVideoMode()
             "and its stream is an ordinary one");
 }
 
-/* Only the application's leaving the foreground ends a video, and only that of a camera in video mode: another
+/* The loss does not depend on what the guest asks for the picture: a recording that asks for no stabilization, and a
+ * viewfinder, are ended as a recording that asks for it is. The guest's camera HAL decides what its client sees; one that
+ * keeps its client closes its video streams and opens them again, which ends the loss on the host and gives it an ordinary
+ * stream, dark while the application is away and live when it is back. */
+void testTheLossDoesNotDependOnTheStabilization()
+{
+    for (const std::uint32_t stabilization : {0u, 1u}) {
+        Rig rig;
+        videoStream(rig, 1, 0, 640, 480, 6);
+        rig.setOk(1, {{UML_V4L2_CID_IMAGE_STABILIZATION, stabilization, {}}});
+        rig.queue(1, 1);
+        rig.pumpSteps(0, 1);
+        rig.camera->interrupt(CameraEventKind::interruptedInBackground);
+        rig.step();
+        const auto a = rig.queue(1, 2);
+        require(rig.waitFor([&] { return rig.done(a); }), "answered");
+        require(rig.result(a).base.flags == endedFlags && !rig.camera->videoRunning(0), "the video ended, whatever it asked for");
+        rig.camera->resume();
+        rig.step();
+        const auto b = rig.queue(1, 3);
+        require(rig.waitFor([&] { return rig.done(b); }) && rig.result(b).base.flags == endedFlags,
+                "and the application's return does not undo it");
+        // The guest's camera HAL closes its video streams and opens them again.
+        rig.destroy(1);
+        require(rig.states.back() == CameraState::idle, "closed, the host is idle");
+        videoStream(rig, 2, 0, 640, 480, 4);
+        const auto c = rig.queue(2, 1);
+        require(rig.waitFor([&] { return rig.done(c); }) && rig.result(c).base.flags == (blackFlag | resumingFlag),
+                "the new stream starts as any does");
+        const auto d = rig.queue(2, 2);
+        rig.camera->pump(0, 1);
+        rig.step();
+        require(rig.done(d) && rig.result(d).base.flags == 0 && rig.states.back() == CameraState::streaming, "and is live");
+    }
+    {
+        // The application leaves again while the guest's camera HAL has just opened its streams again: the new stream is lost
+        // as well, and a second reopening gives an ordinary stream once the application is back.
+        Rig rig;
+        videoStream(rig, 1, 0, 640, 480, 4);
+        rig.setOk(1, {{UML_V4L2_CID_IMAGE_STABILIZATION, 0, {}}});
+        rig.queue(1, 1);
+        rig.pumpSteps(0, 1);
+        rig.camera->interrupt(CameraEventKind::interruptedInBackground);
+        rig.step();
+        const auto a = rig.queue(1, 2);
+        require(rig.waitFor([&] { return rig.done(a); }) && rig.result(a).base.flags == endedFlags, "ended");
+        rig.camera->resume();
+        rig.step();
+        rig.destroy(1);
+        videoStream(rig, 2, 0, 640, 480, 4);
+        const auto b = rig.queue(2, 1);
+        require(rig.waitFor([&] { return rig.done(b); }) && rig.result(b).base.flags == (blackFlag | resumingFlag),
+                "the new stream starts as any does");
+        rig.camera->interrupt(CameraEventKind::interruptedInBackground);
+        rig.step();
+        const auto c = rig.queue(2, 2);
+        require(rig.waitFor([&] { return rig.done(c); }) && rig.result(c).base.flags == endedFlags, "and is lost by the second departure");
+        rig.camera->resume();
+        rig.step();
+        rig.destroy(2);
+        videoStream(rig, 3, 0, 640, 480, 4);
+        const auto d = rig.queue(3, 1);
+        require(rig.waitFor([&] { return rig.done(d); }) && rig.result(d).base.flags == (blackFlag | resumingFlag),
+                "the next stream starts as any does");
+        const auto e = rig.queue(3, 2);
+        rig.camera->pump(0, 1);
+        rig.step();
+        require(rig.waitFor([&] { return rig.done(e); }) && rig.result(e).base.flags == 0 && rig.camera->videoRunning(0),
+                "and is live");
+    }
+}
+
+/* Only the application's leaving the foreground ends a video, and only that of a camera that has a video stream: another
  * application or a call, the multitasking of an iPad and the system's pressure are dark gaps that end by themselves, a
- * camera with a viewfinder only comes back by itself, and a camera that is not in video mode beside a camera that is,
- * keeps its dark gap. */
-void testOnlyTheBackgroundEndsAVideoAndOnlyInVideoMode()
+ * camera with no video stream is not lost, and the camera beside one that is keeps its dark gap. */
+void testOnlyTheBackgroundEndsAVideoAndOnlyOfACameraWithAVideoStream()
 {
     for (const auto kind : {CameraEventKind::interrupted, CameraEventKind::interruptedByMultitasking,
                             CameraEventKind::interruptedBySystemPressure}) {
@@ -1719,47 +1790,28 @@ void testOnlyTheBackgroundEndsAVideoAndOnlyInVideoMode()
         require(rig.done(c) && rig.result(c).base.flags == 0 && rig.camera->videoRunning(0), "and live again");
     }
     {
-        // A camera with a viewfinder only: the preview template asks for no stabilization.
-        Rig rig;
-        videoStream(rig, 1, 0, 640, 480, 6);
-        rig.setOk(1, {{UML_V4L2_CID_IMAGE_STABILIZATION, 0, {}}});
-        rig.queue(1, 1);
-        rig.pumpSteps(0, 1);
-        rig.camera->interrupt(CameraEventKind::interruptedInBackground);
-        rig.step();
-        const auto a = rig.queue(1, 2);
-        require(rig.waitFor([&] { return rig.done(a); }), "answered");
-        require(rig.result(a).base.flags == (blackFlag | interruptedFlag), "a viewfinder only has a dark gap");
-        rig.camera->resume();
-        rig.step();
-        const auto b = rig.queue(1, 3);
-        rig.camera->pump(0, 1);
-        rig.step();
-        require(rig.waitFor([&] { return rig.done(b); }) && rig.camera->videoRunning(0), "and comes back by itself");
-    }
-    {
-        // Two cameras: the one in video mode is lost, the one with a viewfinder is not.
+        // Two cameras with a video stream each are both lost, and each ends its loss by closing its own streams.
         RigOptions options;
         options.profile = SyntheticCameraProfile::tabletDualFront;
         Rig rig(options);
         videoStream(rig, 1, 0, 1600, 900, 4);
         videoStream(rig, 2, 1, 640, 480, 4);
-        rig.setOk(2, {{UML_V4L2_CID_IMAGE_STABILIZATION, 0, {}}});
         rig.queue(1, 1);
         rig.queue(2, 1);
         rig.camera->interrupt(CameraEventKind::interruptedInBackground);
         rig.step();
         const auto back = rig.queue(1, 2), front = rig.queue(2, 2);
         require(rig.waitFor([&] { return rig.done(back) && rig.done(front); }), "answered");
-        require(rig.result(back).base.flags == endedFlags, "the camera in video mode is lost");
-        require(rig.result(front).base.flags == (blackFlag | interruptedFlag), "the other has its dark gap");
+        require(rig.result(back).base.flags == endedFlags && rig.result(front).base.flags == endedFlags,
+                "every camera with a video stream is lost");
         rig.camera->resume();
         rig.step();
-        const auto back2 = rig.queue(1, 3), front2 = rig.queue(2, 3);
-        rig.camera->pump(1, 1);
-        rig.step();
+        rig.destroy(1);
+        videoStream(rig, 3, 0, 1600, 900, 4);
+        const auto back2 = rig.queue(3, 1), front2 = rig.queue(2, 3);
         require(rig.waitFor([&] { return rig.done(back2) && rig.done(front2); }), "answered again");
-        require(rig.result(back2).base.flags == endedFlags && rig.result(front2).base.flags != endedFlags, "and it stays so");
+        require(rig.result(back2).base.flags != endedFlags, "the camera whose streams were closed is an ordinary one again");
+        require(rig.result(front2).base.flags == endedFlags, "and the other stays lost until its own streams are closed");
     }
     {
         // A blocked session opens no capture, hears of no interruption and ends nothing.
@@ -3839,8 +3891,9 @@ int main()
     testBlockedSaysWhenTheGuestOpensACamera();
     testLiveNeverReportsBlockedUse();
     testInterruption();
-    testTheApplicationLeavingTheForegroundEndsTheVideoOfACameraInVideoMode();
-    testOnlyTheBackgroundEndsAVideoAndOnlyInVideoMode();
+    testTheApplicationLeavingTheForegroundEndsTheVideoOfACamera();
+    testTheLossDoesNotDependOnTheStabilization();
+    testOnlyTheBackgroundEndsAVideoAndOnlyOfACameraWithAVideoStream();
     testAccessDenied();
     testStillsAndCalibration();
     testControlsOnStreams();
