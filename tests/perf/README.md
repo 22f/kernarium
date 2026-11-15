@@ -140,14 +140,18 @@ not measurements. `check-unit-census` checks such a build
 
 ## Focused assembly probes
 
-[`probes.tsv`](probes.tsv) is the complete inventory of freestanding A64 probe
-sources, with each one's mechanism, required guest feature, runner and
-retained purpose. [`CMakeLists.txt`](CMakeLists.txt) builds every row, so a
+[`probes.tsv`](probes.tsv) is the complete inventory of freestanding A64 and
+x86-64 probe sources, with each one's mechanism, required guest feature, runner
+and retained purpose. [`CMakeLists.txt`](CMakeLists.txt) builds every row, so a
 row without its source fails the build; keep one row per `guest_*.S` file.
 Build all probes with the `performance-probe-binaries` target and run one
 through the runner `probes.tsv` names. Probes are self-checking and succeed
 only when the measured guest command finishes, the guest shuts down, and the
 emulator exits zero. They are not CTest registrations.
+
+A row whose required feature is `x86-64` is a `guest_x86_64_*.S` probe on
+[`x86_64_probe_harness.inc`](x86_64_probe_harness.inc). It runs in an x86-64
+guest: the `macos-x86_64` emulator with an x86-64 image as `--rootfs`.
 
 The `guest_tagged_*_loop.S` probes reach memory through a pointer tagged in its
 top byte, as a process with heap pointer tagging does; the emulator ignores

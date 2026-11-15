@@ -8,7 +8,7 @@ text is the key. The strings live in:
 
   Andarium/Localization/Localizable.xcstrings   the application's screens
   Andarium/Localization/InfoPlist.xcstrings     the permission explanations
-  Andarium/Localization/WhatsNew.xcstrings      the notes of Shared/WhatsNew.json
+  Andarium/Localization/WhatsNew.xcstrings      the notes of both tracks, Shared/WhatsNew.json and Shared/WhatsNewAppStore.json
   Andarium/Localization/JIT.xcstrings           the JIT texts (table "JIT"), carried by the builds that have JIT only
   Andarium/Localization/Feedback.xcstrings      the texts of Send feedback (table "Feedback"), carried by the builds that have it only
   Andarium/Localization/TipJar.xcstrings        the texts of Buy me tokens (table "TipJar"), carried by the builds that have it only
@@ -32,8 +32,8 @@ Localization/english-only.json; a word the glossary retired (the guest is
 虚拟机 and 虛擬機器, never 客户机 or 客體; Chinese says 你, never 您); a space
 between Chinese or Japanese text and a Latin word or number (iOS writes none);
 a half-width question mark, exclamation mark or comma after Chinese or
-Japanese text; an Info.plist permission text, or a note of WhatsNew.json,
-without a catalog entry. A key is its English text, or a name with the English
+Japanese text; an Info.plist permission text, or a note of either What's New
+file, without a catalog entry. A key is its English text, or a name with the English
 text as its `en` value.
 
 The list in english-only.json records decisions, not a census: `identical`
@@ -109,7 +109,8 @@ CATALOGS = {
     "AndariumCore": CORE_CATALOG,
 }
 ENGLISH_ONLY = "Andarium/Localization/english-only.json"
-WHATS_NEW = "Andarium/Andarium/Shared/WhatsNew.json"
+# The two tracks of release notes (the beta builds' and the App Store's); one table serves both.
+WHATS_NEW = ("Andarium/Andarium/Shared/WhatsNew.json", "Andarium/Andarium/Shared/WhatsNewAppStore.json")
 PROJECT = "Andarium/Andarium.xcodeproj/project.xcproj"
 # The target of the application: its settings name the permission texts.
 APPLICATION_TARGET = "Andarium"
@@ -449,8 +450,9 @@ def check_info_plist(root: pathlib.Path, info_keys: set[str], problems: Problems
         problems.add("InfoPlist.xcstrings", f"{key} is not a permission text of the {APPLICATION_TARGET} target")
 
 
-def whats_new_texts(root: pathlib.Path) -> set[str]:
-    path = root / WHATS_NEW
+def whats_new_texts(root: pathlib.Path, relative: str) -> set[str]:
+    """The notes of one track's file; none if it is missing (`check_whats_new` says so)."""
+    path = root / relative
     if not path.is_file():
         return set()
     texts: set[str] = set()
@@ -464,11 +466,17 @@ def whats_new_texts(root: pathlib.Path) -> set[str]:
 
 
 def check_whats_new(root: pathlib.Path, keys: set[str], problems: Problems) -> None:
-    texts = whats_new_texts(root)
-    for text in sorted(texts - keys):
-        problems.add("WhatsNew.xcstrings", f"has no entry for the note {text!r} of {WHATS_NEW}")
+    """The table holds the notes of both tracks: each has an entry, and every entry is a note of one."""
+    texts: set[str] = set()
+    for relative in WHATS_NEW:
+        if not (root / relative).is_file():
+            problems.add(relative, "is missing")
+        notes = whats_new_texts(root, relative)
+        texts |= notes
+        for text in sorted(notes - keys):
+            problems.add("WhatsNew.xcstrings", f"has no entry for the note {text!r} of {relative}")
     for key in sorted(keys - texts):
-        problems.add("WhatsNew.xcstrings", f"{key!r} is no note of {WHATS_NEW}")
+        problems.add("WhatsNew.xcstrings", f"{key!r} is no note of {' or '.join(WHATS_NEW)}")
 
 
 def check(root: pathlib.Path) -> list[str]:

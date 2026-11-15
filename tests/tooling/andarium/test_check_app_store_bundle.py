@@ -506,12 +506,18 @@ def write_feedback_tables(app: Path, languages: tuple[str, ...] = ("ja", "zh-Han
             plistlib.dumps({"Send feedback": "Feedback fixture"}, fmt=plistlib.FMT_BINARY))
 
 
+# The notes file of each track: the App Store configuration bundles the first, every other
+# configuration the second.
+APP_STORE_NOTES = "WhatsNewAppStore.json"
+BETA_NOTES = "WhatsNew.json"
+
+
 def write_notes(app: Path, entries: list[dict] | None, strings: dict[str, str],
-                languages: tuple[str, ...] = ("ja", "zh-Hans")) -> None:
-    """The What's New notes a build bundles whole (WhatsNew.json, none if `entries`
-    is None) and the compiled table of their translations in each language."""
+                languages: tuple[str, ...] = ("ja", "zh-Hans"), track: str = APP_STORE_NOTES) -> None:
+    """The What's New notes a build bundles (the file of `track`, none if `entries` is None)
+    and the compiled table of their translations in each language, which both tracks share."""
     if entries is not None:
-        (app / "WhatsNew.json").write_text(
+        (app / track).write_text(
             json.dumps([{"build": 11, "version": "1.0 (11)", "entries": entries}]), encoding="utf-8")
     for language in languages:
         lproj = app / f"{language}.lproj"
@@ -1715,9 +1721,27 @@ def main() -> int:
 
     failures: list[str] = []
 
+    # The modes that judge one feature, or a framework: they read no What's New notes.
+    modes = {"--feedback", "--follow-x", "--icp", "--pickers", "--tip-jar", "--review", "--runtime",
+             "--host-traces"}
+    injected: dict[Path, str] = {}
+
     def check(app: Path, *, passes: bool, expect: str = "", args: list[str] | None = None,
-              never: str = "") -> None:
-        result = run([sys.executable, "-B", str(options.checker), *(args or []), str(app)])
+              never: str = "", notes: bool = True) -> None:
+        """Runs the checker on `app`. A fixture of the full check that carries no What's New notes
+        gets its configuration's track, an empty list, as every build has one, unless `notes` is false."""
+        arguments = args or []
+        if notes and not modes.intersection(arguments):
+            configuration = arguments[arguments.index("--configuration") + 1] if "--configuration" in arguments \
+                else "AppStore"
+            wanted = APP_STORE_NOTES if configuration == "AppStore" else BETA_NOTES
+            # A fixture that runs under two configurations gets the track of each in turn.
+            if injected.get(app, wanted) != wanted:
+                (app / injected.pop(app)).unlink()
+            if not (app / APP_STORE_NOTES).exists() and not (app / BETA_NOTES).exists():
+                (app / wanted).write_text("[]", encoding="utf-8")
+                injected[app] = wanted
+        result = run([sys.executable, "-B", str(options.checker), *arguments, str(app)])
         label = app.parent.name
         if never and never in result.stdout:
             # The output itself is not repeated: it holds what must not be printed.
@@ -1995,44 +2019,123 @@ def main() -> int:
         (words / "en.lproj" / "Localizable.strings").write_bytes(
             plistlib.dumps({"Send feedback": "Send feedback"}, fmt=plistlib.FMT_BINARY))
         check(words, passes=False, expect="has Send feedback strings")
-        # The What's New notes bundle the entry about Send feedback in every build, and
-        # the build hides it unless it has the feature: its strings, found through the
-        # bundled notes, are the one text of the feature a product without it may hold,
-        # in the notes' table alone and by the entry's own strings alone.
+        # The What's New notes have two tracks, and the notes' table is one for both. A track's
+        # entry about Send feedback is bundled and hidden by a product without the feature: its
+        # strings, found through the bundled notes, are the one text of the feature such a
+        # product may hold, in the notes' table alone and by the entry's own strings alone. The
+        # AppStore bundle carries the App Store track's file and TestFlight the beta track's.
         hidden = [FEEDBACK_ENTRY, FEEDBACK_POINTS_ENTRY, PLAIN_ENTRY]
-        notes = make_app(root, "notes-hidden", clean, app_info())
-        write_notes(notes, hidden, NOTES_STRINGS)
-        check(notes, passes=True, expect="Send feedback is not compiled in")
+        testflight = ["--configuration", "TestFlight"]
+        tracks = (("appstore", APP_STORE_NOTES, BETA_NOTES, [], "App Store"),
+                  ("testflight", BETA_NOTES, APP_STORE_NOTES, testflight, "beta"))
+        for label, file, _other_file, flags, _track in tracks:
+            notes = make_app(root, f"notes-hidden-{label}", clean, app_info())
+            write_notes(notes, hidden, NOTES_STRINGS, track=file)
+            check(notes, passes=True, expect="Send feedback is not compiled in", args=flags)
+            for name, other in (
+                    ("key", {"Fixed Send feedback not opening": "x"}),
+                    ("value", {"Snapshots": "Andarium feedback"}),
+                    ("word", {"Andarium feedback": "x"})):
+                leak = make_app(root, f"notes-other-{name}-{label}", clean, app_info())
+                write_notes(leak, hidden, {**NOTES_STRINGS, **other}, track=file)
+                check(leak, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings",
+                      args=flags)
+            # Marked entries only: an entry with no mark, or another one, is shown in a
+            # build without the feature, and so is a table with no notes beside it.
+            for name, entries in (
+                    ("unmarked", [{**FEEDBACK_ENTRY, "requirement": None}, PLAIN_ENTRY]),
+                    ("other-feature", [{**FEEDBACK_ENTRY, "requirement": {"feature": "other"}}, PLAIN_ENTRY]),
+                    ("other-requirement", [{**FEEDBACK_ENTRY, "requirement": {"device": "pad"}}, PLAIN_ENTRY]),
+                    ("no-notes", None), ("broken-notes", None)):
+                shown = make_app(root, f"notes-{name}-{label}", clean, app_info())
+                write_notes(shown, entries, NOTES_STRINGS, track=file)
+                if name == "broken-notes":
+                    (shown / file).write_text("[{", encoding="utf-8")
+                check(shown, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings",
+                      args=flags)
+            # The exemption is the notes' table and nothing else.
+            elsewhere = make_app(root, f"notes-elsewhere-{label}", clean, app_info())
+            write_notes(elsewhere, hidden, {"Snapshots": "スナップショット"}, track=file)
+            (elsewhere / "ja.lproj" / "Localizable.strings").write_bytes(
+                plistlib.dumps({"Send feedback": "x"}, fmt=plistlib.FMT_BINARY))
+            check(elsewhere, passes=False, expect="ja.lproj/Localizable.strings: has Send feedback strings",
+                  args=flags)
+        # The phases of the other configurations read the beta track's file alone.
+        beta_hidden = make_app(root, "notes-hidden-release", clean, app_info())
+        write_notes(beta_hidden, hidden, NOTES_STRINGS, track=BETA_NOTES)
+        beta_leak = make_app(root, "notes-other-release", clean, app_info())
+        write_notes(beta_leak, hidden, {**NOTES_STRINGS, "Andarium feedback": "x"}, track=BETA_NOTES)
         for configuration in ("Debug", "Release"):
-            check(notes, passes=True, expect=f"Send feedback is not compiled in ({configuration})",
+            check(beta_hidden, passes=True, expect=f"Send feedback is not compiled in ({configuration})",
                   args=["--feedback", "--configuration", configuration])
-        for name, other in (
-                ("key", {"Fixed Send feedback not opening": "x"}),
-                ("value", {"Snapshots": "Andarium feedback"}),
-                ("word", {"Andarium feedback": "x"})):
-            leak = make_app(root, f"notes-other-{name}", clean, app_info())
-            write_notes(leak, hidden, {**NOTES_STRINGS, **other})
-            check(leak, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings")
-            check(leak, passes=False, expect="has Send feedback strings",
-                  args=["--feedback", "--configuration", "Release"])
-        # Marked entries only: an entry with no mark, or another one, is shown in a
-        # build without the feature, and so is a table with no notes beside it.
-        for name, entries in (
-                ("unmarked", [{**FEEDBACK_ENTRY, "requirement": None}, PLAIN_ENTRY]),
-                ("other-feature", [{**FEEDBACK_ENTRY, "requirement": {"feature": "other"}}, PLAIN_ENTRY]),
-                ("other-requirement", [{**FEEDBACK_ENTRY, "requirement": {"device": "pad"}}, PLAIN_ENTRY]),
-                ("no-notes", None), ("broken-notes", None)):
-            shown = make_app(root, f"notes-{name}", clean, app_info())
-            write_notes(shown, entries, NOTES_STRINGS)
-            if name == "broken-notes":
-                (shown / "WhatsNew.json").write_text("[{", encoding="utf-8")
-            check(shown, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings")
-        # The exemption is the notes' table and nothing else.
-        elsewhere = make_app(root, "notes-elsewhere", clean, app_info())
-        write_notes(elsewhere, hidden, {"Snapshots": "スナップショット"})
-        (elsewhere / "ja.lproj" / "Localizable.strings").write_bytes(
-            plistlib.dumps({"Send feedback": "x"}, fmt=plistlib.FMT_BINARY))
-        check(elsewhere, passes=False, expect="ja.lproj/Localizable.strings: has Send feedback strings")
+            check(beta_leak, passes=False, expect="has Send feedback strings",
+                  args=["--feedback", "--configuration", configuration])
+        # Each bundle carries its configuration's track and not the other, each a list of
+        # releases; the report says which it carries.
+        for label, file, other_file, flags, track in tracks:
+            says = f"What's New notes are the {track} track ({file})"
+            own = make_app(root, f"notes-track-{label}", clean, app_info())
+            write_notes(own, hidden, NOTES_STRINGS, track=file)
+            check(own, passes=True, expect=says, args=flags)
+            wrong = make_app(root, f"notes-track-wrong-{label}", clean, app_info())
+            write_notes(wrong, hidden, NOTES_STRINGS, track=other_file)
+            for expect in (f"{file}: is missing; {flags[1] if flags else 'AppStore'} bundles the {track} track",
+                           f"{other_file}: is the other track's What's New notes"):
+                check(wrong, passes=False, expect=expect, args=flags, notes=False)
+            both = make_app(root, f"notes-track-both-{label}", clean, app_info())
+            write_notes(both, hidden, NOTES_STRINGS, track=file)
+            write_notes(both, hidden, NOTES_STRINGS, track=other_file)
+            check(both, passes=False, expect=f"{other_file}: is the other track's What's New notes",
+                  args=flags, notes=False)
+            bare = make_app(root, f"notes-track-none-{label}", clean, app_info())
+            check(bare, passes=False, expect=f"{file}: is missing", args=flags, notes=False)
+            for name, text in (("object", '{"build": 11}'), ("unreadable", "[{")):
+                bad = make_app(root, f"notes-track-{name}-{label}", clean, app_info())
+                (bad / file).write_text(text, encoding="utf-8")
+                check(bad, passes=False, expect=f"{file}: is not a list of releases", args=flags, notes=False)
+            # The track with no release is a list too.
+            empty = make_app(root, f"notes-track-empty-{label}", clean, app_info())
+            (empty / file).write_text("[]", encoding="utf-8")
+            check(empty, passes=True, expect=says, args=flags, notes=False)
+        # The notes' table is one for both tracks, so an AppStore bundle whose own track has
+        # no entry about Send feedback still holds the beta track's strings of it. The beta
+        # track's source file (--beta-notes) says which they are; without it, or for a string
+        # it does not name, they are Send feedback text in a product that has none.
+        beta_source = root / "beta-source" / BETA_NOTES
+        beta_source.parent.mkdir()
+        beta_source.write_text(json.dumps([{"build": 11, "version": "1.0 (11)", "entries": hidden}]),
+                               encoding="utf-8")
+        carried = make_app(root, "notes-beta-strings", clean, app_info())
+        write_notes(carried, [], NOTES_STRINGS, track=APP_STORE_NOTES)
+        check(carried, passes=True, expect="Send feedback is not compiled in",
+              args=["--beta-notes", str(beta_source)])
+        check(carried, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings")
+        for name, source in (("missing", root / "beta-source" / "absent.json"), ("unreadable", None)):
+            if source is None:
+                source = root / "beta-source" / "unreadable.json"
+                source.write_text("[{", encoding="utf-8")
+            check(carried, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings",
+                  args=["--beta-notes", str(source)])
+        stray = make_app(root, "notes-beta-stray", clean, app_info())
+        write_notes(stray, [], {**NOTES_STRINGS, "Fixed Send feedback not opening": "x"}, track=APP_STORE_NOTES)
+        check(stray, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings",
+              args=["--beta-notes", str(beta_source)])
+        # Only an AppStore bundle takes the exemption from there: a bundle of the beta track
+        # has the notes it carries.
+        flagged = make_app(root, "notes-beta-testflight", clean, app_info())
+        write_notes(flagged, [PLAIN_ENTRY], NOTES_STRINGS, track=BETA_NOTES)
+        check(flagged, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings",
+              args=[*testflight, "--beta-notes", str(beta_source)])
+        # The phase's real input: the application's beta notes, in a table that holds all of
+        # their strings, beside the App Store track's empty list.
+        real_notes = options.checker.parent.parent / "Andarium" / "Shared" / BETA_NOTES
+        real = json.loads(real_notes.read_text(encoding="utf-8"))
+        strings = {text: text for release in real for entry in release["entries"]
+                   for text in (entry["title"], entry.get("text"), *entry.get("points", ())) if text}
+        shipped = make_app(root, "notes-beta-real", clean, app_info())
+        write_notes(shipped, [], strings, track=APP_STORE_NOTES)
+        check(shipped, passes=True, expect="What's New notes are the App Store track",
+              args=["--beta-notes", str(real_notes)])
         # The feature's own strings table (Feedback.strings, and the stringsdict of
         # its plurals) is the feature's: a product without the receiver holds none,
         # found by the file name though the table says nothing of the feature.

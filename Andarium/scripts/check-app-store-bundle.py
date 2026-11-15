@@ -60,7 +60,10 @@ application that must:
     with it has the table in Japanese and both Chinese. The What's New
     notes are the one exception: the entry about Send feedback is bundled
     in every product and hidden by one without it, so the strings of that
-    entry, and no other string of the notes' table, may stay; and
+    entry, and no other string of the notes' table, may stay. The table is
+    one for both tracks, so an AppStore bundle holds the beta track's strings
+    too: those of its entries about Send feedback are read from the beta
+    track's source file (--beta-notes); and
   - carry Buy me tokens (Andarium/README.md#buy-me-tokens) only when the build
     names its four product identifiers: the feature is compiled in exactly where
     the ignored local configuration holds all four, in this configuration alone.
@@ -115,6 +118,10 @@ application that must:
     build named, and the number in no other file. The local number is in no
     file of a bundle whose build does not name it, as UTF-8 or as the UTF-16 of
     a property list, and is never printed; and
+  - bundle the What's New notes of its own track alone: the AppStore bundle
+    holds the App Store track's file (WhatsNewAppStore.json) and not the beta
+    track's, a TestFlight bundle the beta track's (WhatsNew.json) and not the
+    App Store track's, each a list of releases; and
   - open the files of the two document pickers (Install APK and the file
     browser's Import) in place, through SwiftUI's fileImporter, and hold no
     trace of the copy-mode presenter every other configuration uses
@@ -224,7 +231,8 @@ CHECKER = Path(__file__).resolve().parents[2] / "scripts" / "check-privacy-manif
 # the AppStore product without Buy me tokens, Review on the App Store and the
 # ICP filing number: it carries none of the three, whatever its build names.
 TESTFLIGHT = "TestFlight"
-STORE_CONFIGURATIONS = ("AppStore", TESTFLIGHT)
+APP_STORE = "AppStore"
+STORE_CONFIGURATIONS = (APP_STORE, TESTFLIGHT)
 
 
 def is_store(configuration: str) -> bool:
@@ -285,12 +293,16 @@ FEEDBACK_FRAGMENTS = (
     b"SendFeedback", b"MFMailCompose", b"PhotosUI.framework", *FEEDBACK_REQUIRED)
 # Words the feature puts in a String Catalog.
 FEEDBACK_WORDS = ("Send feedback", "Andarium feedback")
-# The What's New notes (Shared/WhatsNew.json, bundled whole in every build) have
-# an entry about Send feedback, marked with the feature it is about. A build
-# without the feature hides the entry at run time (WhatsNewFeature in
-# AndariumCore), so its strings stay in that table, which a String Catalog
-# compiles whole, and are the one place the words may remain.
-NOTES_FILE = "WhatsNew.json"
+# The What's New notes have two tracks, each its own file of Shared that the
+# configurations bundle alone: the beta track (Shared/WhatsNew.json) in every
+# configuration but AppStore, and the App Store track (Shared/WhatsNewAppStore.json)
+# in AppStore. A track's entry about Send feedback is marked with the feature it
+# is about. A build without the feature hides the entry at run time
+# (WhatsNewFeature in AndariumCore), so its strings stay in the notes' table,
+# which a String Catalog compiles whole for both tracks, and are the one place
+# the words may remain.
+BETA_NOTES_FILE = "WhatsNew.json"
+APP_STORE_NOTES_FILE = "WhatsNewAppStore.json"
 NOTES_TABLE = "WhatsNew"
 NOTES_FEATURE = "sendFeedback"
 # The feature's own table (Localization/Feedback.xcstrings), which a String
@@ -1116,13 +1128,18 @@ def info_source_problems(app: Path, source: Path) -> list[str]:
     return found
 
 
-def hidden_notes(app: Path) -> frozenset[str]:
-    """The strings (title, text and points) of the entries of the bundled What's
-    New notes that are about Send feedback, which the notes' table holds under
-    their English text. Empty if the notes are missing or unreadable, so
-    nothing is then exempt."""
+def notes_file(configuration: str) -> str:
+    """The notes file a configuration bundles: the App Store track's in AppStore,
+    the beta track's in every other configuration (TestFlight included)."""
+    return APP_STORE_NOTES_FILE if configuration == APP_STORE else BETA_NOTES_FILE
+
+
+def notes_about_feedback(path: Path) -> frozenset[str]:
+    """The strings (title, text and points) of the entries of a notes file that are
+    about Send feedback, which the notes' table holds under their English text.
+    Empty if the file is missing or unreadable, so nothing is then exempt."""
     try:
-        releases = json.loads((app / NOTES_FILE).read_text(encoding="utf-8"))
+        releases = json.loads(path.read_text(encoding="utf-8"))
         entries = [entry for release in releases for entry in release["entries"]]
     except (OSError, ValueError, KeyError, TypeError):
         return frozenset()
@@ -1138,12 +1155,23 @@ def hidden_notes(app: Path) -> frozenset[str]:
     return frozenset(found)
 
 
-def feedback_strings(app: Path) -> list[str]:
+def hidden_notes(app: Path, configuration: str, beta_notes: Path | None = None) -> frozenset[str]:
+    """The strings of the entries about Send feedback in the notes the bundle
+    carries (`notes_file`). The table is one for both tracks, so an AppStore
+    bundle holds the beta track's strings too, and `beta_notes`, the beta
+    track's source file, says which of them are about Send feedback."""
+    found = notes_about_feedback(app / notes_file(configuration))
+    if configuration == APP_STORE and beta_notes is not None:
+        found |= notes_about_feedback(beta_notes)
+    return found
+
+
+def feedback_strings(app: Path, configuration: str, beta_notes: Path | None = None) -> list[str]:
     """The String Catalog tables of the application that mention Send feedback,
-    leaving out the strings of the notes' entry about it (`hidden_notes`) and
+    leaving out the strings of the notes' entries about it (`hidden_notes`) and
     nothing else of the notes' table."""
     found = []
-    hidden = hidden_notes(app)
+    hidden = hidden_notes(app, configuration, beta_notes)
     for path in sorted(app.glob("*.lproj/*.strings")):
         try:
             with path.open("rb") as handle:
@@ -1160,6 +1188,28 @@ def feedback_strings(app: Path) -> list[str]:
     return found
 
 
+def notes_problems(app: Path, configuration: str) -> tuple[list[str], str]:
+    """Whether the bundle carries the notes file of its configuration's track and not
+    the other track's, and the line that says which it carries. Each file is a list
+    of releases (the application refuses anything else, and shows no notes)."""
+    own = notes_file(configuration)
+    other = BETA_NOTES_FILE if own == APP_STORE_NOTES_FILE else APP_STORE_NOTES_FILE
+    track = "App Store" if own == APP_STORE_NOTES_FILE else "beta"
+    problems = []
+    try:
+        releases = json.loads((app / own).read_text(encoding="utf-8"))
+        if not isinstance(releases, list):
+            raise ValueError
+    except OSError:
+        problems.append(f"{own}: is missing; {configuration} bundles the {track} track of the What's New notes")
+    except ValueError:
+        problems.append(f"{own}: is not a list of releases; {configuration} bundles the {track} track of the "
+                        "What's New notes")
+    if (app / other).exists():
+        problems.append(f"{other}: is the other track's What's New notes; {configuration} bundles {own} alone")
+    return problems, f"What's New notes are the {track} track ({own})"
+
+
 def feedback_tables(app: Path) -> list[Path]:
     """The Feedback table of any language, found by its file name."""
     return sorted(path for path in app.glob("*.lproj/*")
@@ -1167,7 +1217,7 @@ def feedback_tables(app: Path) -> list[Path]:
 
 
 def feedback_problems(
-    app: Path, configuration: str, address: str, receiver: str = "",
+    app: Path, configuration: str, address: str, receiver: str = "", beta_notes: Path | None = None,
 ) -> tuple[list[str], bool]:
     """Whether the product holds Send feedback as the build said it would, and
     whether it holds it. `address` is the build setting FEEDBACK_ADDRESS: the
@@ -1175,7 +1225,8 @@ def feedback_problems(
     otherwise, or the example address a test or capture script arranged.
     `receiver` is the local configuration's own receiver, whatever the
     configuration: wherever the build does not name it, no file of the
-    bundle holds it."""
+    bundle holds it. `beta_notes` is the beta track's source file (see
+    `hidden_notes`)."""
     problems = feedback_address_problems(configuration, address)
     expected = bool(address) and not problems
     if receiver and (not expected or receiver != address):
@@ -1199,7 +1250,7 @@ def feedback_problems(
             keyed = plistlib.load(handle).get(FEEDBACK_KEY)
     except (OSError, plistlib.InvalidFileException, ValueError):
         keyed = None
-    words = feedback_strings(app)
+    words = feedback_strings(app, configuration, beta_notes)
     tables = feedback_tables(app)
     compiled = bool(fragments) or keyed is not None or bool(words) or bool(tables)
     if not expected:
@@ -1898,6 +1949,10 @@ def main() -> int:
         "--info-source", type=Path, default=None,
         help="Config/Info.plist, whose values the built Info.plist keeps")
     parser.add_argument(
+        "--beta-notes", type=Path, default=None,
+        help="Shared/WhatsNew.json, the beta track's notes, whose entries about Send feedback an AppStore "
+             "bundle's notes table may still hold")
+    parser.add_argument(
         "--follow-x-handle", default="",
         help="the build setting FOLLOW_X_HANDLE: the handle the build names, "
              "empty when it names none")
@@ -1996,7 +2051,8 @@ def check(options: argparse.Namespace) -> int:
         lines = []
         if options.feedback:
             more, compiled = feedback_problems(
-                app, options.configuration, options.feedback_address, options.feedback_receiver)
+                app, options.configuration, options.feedback_address, options.feedback_receiver,
+                options.beta_notes)
             found.extend(more)
             lines.append(f"{app.name}: Send feedback is {'compiled in' if compiled else 'not compiled in'}"
                          f" ({options.configuration})")
@@ -2087,9 +2143,13 @@ def check(options: argparse.Namespace) -> int:
     if options.info_source is not None:
         problems.extend(info_source_problems(app, options.info_source))
     feedback, compiled = feedback_problems(
-        app, options.configuration, options.feedback_address, options.feedback_receiver)
+        app, options.configuration, options.feedback_address, options.feedback_receiver, options.beta_notes)
     problems.extend(feedback)
     emit(f"{app.name}: Send feedback is {'compiled in' if compiled else 'not compiled in'}")
+    notes, bundled = notes_problems(app, options.configuration)
+    problems.extend(f"{app.name}: {problem}" for problem in notes)
+    if not notes:
+        emit(f"{app.name}: {bundled}")
     follow, compiled = follow_x_problems(
         app, options.configuration, options.follow_x_handle, options.developer_x_handle, options.developer_x)
     problems.extend(follow)

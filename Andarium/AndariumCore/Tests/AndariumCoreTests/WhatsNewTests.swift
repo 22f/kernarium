@@ -101,6 +101,37 @@ struct WhatsNewRulesTests {
         #expect(record == WhatsNewRecord(seenBuild: 6))
     }
 
+    /// The App Store track has no release until its version has notes: a list
+    /// with none announces nothing on any install. (The application keeps no
+    /// record for it either: `AppEntry.announceWhatsNew`.)
+    @Test func aTrackWithNoReleaseAnnouncesNothing() {
+        let installs: [(WhatsNewRecord?, Bool)] = [
+            (nil, false), (nil, true), (WhatsNewRecord(seenBuild: 5), true),
+            (WhatsNewRecord(seenBuild: 9, ribbonBuild: 11, ribbonLaunches: 2), true),
+        ]
+        for (record, hasGuest) in installs {
+            let launch = WhatsNewRules.launch(
+                releases: [], record: record, currentBuild: 12, hasGuest: hasGuest, offers: all)
+            #expect(launch.pending.isEmpty)
+        }
+    }
+
+    /// Without a record, an install that has a guest is an update from the
+    /// first public release, so notes that come to a track later reach an
+    /// install that ran its earlier, empty builds.
+    @Test func aTrackThatGainsNotesLaterOffersThemToAnInstallThatKeptNoRecord() {
+        let later = [release(14, ["a"])]
+        let launch = WhatsNewRules.launch(
+            releases: later, record: nil, currentBuild: 14, hasGuest: true, offers: all)
+        #expect(launch.pending.map(\.build) == [14])
+        #expect(launch.record == WhatsNewRecord(seenBuild: 5, ribbonBuild: 14, ribbonLaunches: 1))
+        // A build numbered below the notes offers none of them yet.
+        let before = WhatsNewRules.launch(
+            releases: later, record: nil, currentBuild: 13, hasGuest: true, offers: all)
+        #expect(before.pending.isEmpty)
+        #expect(before.record == WhatsNewRecord(seenBuild: 13))
+    }
+
     @Test func aBuildOlderThanTheLastSeenAnnouncesNothingAndKeepsTheRecord() {
         let launch = WhatsNewRules.launch(
             releases: releases, record: WhatsNewRecord(seenBuild: 6), currentBuild: 5, hasGuest: true, offers: all)
@@ -386,21 +417,36 @@ struct WhatsNewCatalogTests {
         }
     }
 
+    /// A track's file, where the application keeps it.
+    private func trackFile(_ name: String) -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Andarium/Shared/\(name)")
+    }
+
     /// The application's own notes, read where they are, so a mistake in them
     /// fails `swift test` and does not wait for the hosted run: a release
     /// archive runs no test, and unreadable notes show no ribbon and an empty
-    /// Info.
-    @Test func theBundledNotesDecode() throws {
-        let file = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent("Andarium/Shared/WhatsNew.json")
-        let releases = try WhatsNewCatalog.decode(Data(contentsOf: file))
+    /// Info. The beta track is the one of Debug, Release and TestFlight.
+    @Test func theBetaTracksBundledNotesDecode() throws {
+        let releases = try WhatsNewCatalog.decode(Data(contentsOf: trackFile("WhatsNew.json")))
         #expect(releases.map(\.build) == releases.map(\.build).sorted(by: >))
         #expect(releases.allSatisfy { !$0.entries.isEmpty })
         // Every feature and device the notes name is one the code knows: that
         // is what decoding them proves.
         let named = releases.flatMap(\.entries).compactMap(\.requirement)
         #expect(named.contains { $0.feature == .sendFeedback } && named.contains { $0.device == .pad })
+    }
+
+    /// The App Store track is a list of releases like the beta track's, keyed
+    /// by the App Store builds; it is empty until the App Store version has
+    /// notes, and an empty list is a track.
+    @Test func theAppStoreTracksBundledNotesDecode() throws {
+        let releases = try WhatsNewCatalog.decode(Data(contentsOf: trackFile("WhatsNewAppStore.json")))
+        #expect(releases.map(\.build) == releases.map(\.build).sorted(by: >))
+        #expect(releases.allSatisfy { !$0.entries.isEmpty })
+        #expect(try decode("[]").isEmpty)
+        #expect(WhatsNewCatalog.available([], features: []).isEmpty)
     }
 
     /// Notes and the code that reads them ship in one build, so a device the
