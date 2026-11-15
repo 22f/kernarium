@@ -38,7 +38,9 @@ the largest open size comes then; an output that leaves the configuration closes
 reconfiguration, which makes a new frame source. A request that takes a still counts for nothing:
 a still holds the pipeline for as long as the host takes to make the picture, and the requests of
 the preview wait behind it, behind one still or a queue of them, so that preview keeps its stream
-and the host its capture session; a stream that the request about to begin uses is never closed
+and the host its capture session; the absences that a video output earned before such a request
+start again from zero at it, so that a queue of mixed captures (two YUV, then two JPEG) does not
+close the preview that waits behind it; a stream that the request about to begin uses is never closed
 (camera_streams.hpp). With auto-exposure on, the camera runs at the top of the requested frame rate
 range, not at its midpoint. A JPEG made here from a frame that the device made black (blocked,
 interrupted, resuming) fails, as a native still does. The Exif exposure time and aperture are
@@ -60,28 +62,28 @@ deadline: 3 seconds, or 15 with a still (the host gives a started still 10 and t
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 ---
- devices/EmulatedCamera/hwl/Android.bp         |   8 +
- devices/EmulatedCamera/hwl/ConfigUtils.cpp    |   6 +
- devices/EmulatedCamera/hwl/ConfigUtils.h      |   5 +
- devices/EmulatedCamera/hwl/EmulatedSensor.cpp |  10 +
- devices/EmulatedCamera/hwl/JpegCompressor.cpp |  22 +-
- devices/EmulatedCamera/hwl/JpegCompressor.h   |  30 +-
- .../hwl/SensorCharacteristics.h               |   6 +-
- .../hwl/V4l2Characteristics.cpp               | 403 +++++++
- .../EmulatedCamera/hwl/V4l2Characteristics.h  |  37 +
- .../EmulatedCamera/hwl/V4l2FrameSource.cpp    | 997 ++++++++++++++++++
- devices/EmulatedCamera/hwl/V4l2FrameSource.h  | 178 ++++
- devices/EmulatedCamera/hwl/V4l2Stream.cpp     | 468 ++++++++
- devices/EmulatedCamera/hwl/V4l2Stream.h       | 179 ++++
- devices/EmulatedCamera/hwl/V4l2Thumbnail.cpp  | 180 ++++
- devices/EmulatedCamera/hwl/V4l2Thumbnail.h    |  36 +
- devices/EmulatedCamera/hwl/V4l2Utils.cpp      | 479 +++++++++
- devices/EmulatedCamera/hwl/V4l2Utils.h        | 154 +++
- devices/EmulatedCamera/hwl/configs/Android.bp |   6 +
- .../hwl/configs/emu_camera_v4l2.json          | 592 +++++++++++
- .../EmulatedCamera/hwl/utils/ExifUtils.cpp    |  44 +-
- devices/EmulatedCamera/hwl/utils/HWLUtils.cpp |  16 +
- 21 files changed, 3823 insertions(+), 33 deletions(-)
+ devices/EmulatedCamera/hwl/Android.bp         |    8 +
+ devices/EmulatedCamera/hwl/ConfigUtils.cpp    |    6 +
+ devices/EmulatedCamera/hwl/ConfigUtils.h      |    5 +
+ devices/EmulatedCamera/hwl/EmulatedSensor.cpp |   10 +
+ devices/EmulatedCamera/hwl/JpegCompressor.cpp |   22 +-
+ devices/EmulatedCamera/hwl/JpegCompressor.h   |   30 +-
+ .../hwl/SensorCharacteristics.h               |    6 +-
+ .../hwl/V4l2Characteristics.cpp               |  403 +++++++
+ .../EmulatedCamera/hwl/V4l2Characteristics.h  |   37 +
+ .../EmulatedCamera/hwl/V4l2FrameSource.cpp    | 1011 +++++++++++++++++
+ devices/EmulatedCamera/hwl/V4l2FrameSource.h  |  180 +++
+ devices/EmulatedCamera/hwl/V4l2Stream.cpp     |  468 ++++++++
+ devices/EmulatedCamera/hwl/V4l2Stream.h       |  179 +++
+ devices/EmulatedCamera/hwl/V4l2Thumbnail.cpp  |  180 +++
+ devices/EmulatedCamera/hwl/V4l2Thumbnail.h    |   36 +
+ devices/EmulatedCamera/hwl/V4l2Utils.cpp      |  479 ++++++++
+ devices/EmulatedCamera/hwl/V4l2Utils.h        |  154 +++
+ devices/EmulatedCamera/hwl/configs/Android.bp |    6 +
+ .../hwl/configs/emu_camera_v4l2.json          |  592 ++++++++++
+ .../EmulatedCamera/hwl/utils/ExifUtils.cpp    |   44 +-
+ devices/EmulatedCamera/hwl/utils/HWLUtils.cpp |   16 +
+ 21 files changed, 3839 insertions(+), 33 deletions(-)
  create mode 100644 devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
  create mode 100644 devices/EmulatedCamera/hwl/V4l2Characteristics.h
  create mode 100644 devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
@@ -776,10 +778,10 @@ index 0000000000000000000000000000000000000000..413d37e1691516ce3b8346be27a98014
 +#endif  // HW_EMULATOR_CAMERA_V4L2_CHARACTERISTICS_H
 diff --git a/devices/EmulatedCamera/hwl/V4l2FrameSource.cpp b/devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3a1b6ea96ec524313085b5ce22bb40bbab7a8b6e
+index 0000000000000000000000000000000000000000..a8abb58cc4209beb6a2539b77019f402046b4831
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
-@@ -0,0 +1,997 @@
+@@ -0,0 +1,1011 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -1082,7 +1084,9 @@ index 0000000000000000000000000000000000000000..3a1b6ea96ec524313085b5ce22bb40bb
 +// framework's reconfiguration makes a new frame source. A stream that the
 +// request about to begin uses is never closed, and a request that takes a still
 +// does not count towards an absence, because a still holds the pipeline and the
-+// preview's requests wait behind it: the rule is in camera_streams.hpp.
++// preview's requests wait behind it, and the absences that a video output earned
++// before such a request start again from zero at it: the rule is in
++// camera_streams.hpp.
 +void V4l2FrameSource::CloseIdleStreams(Camera* camera, const std::set<StreamKey>& used) {
 +  const nsecs_t now = systemTime(SYSTEM_TIME_MONOTONIC);
 +  for (auto it = camera->streams.begin(); it != camera->streams.end();) {
@@ -1238,6 +1242,18 @@ index 0000000000000000000000000000000000000000..3a1b6ea96ec524313085b5ce22bb40bb
 +  }
 +  if (!any_still) {
 +    ++still_free_requests_begun_;
++  } else {
++    // The absences a video output earned before this request do not carry over
++    // it: the requests that wait behind a still wait behind all of it, so the
++    // count of the requests without a still starts again for every open video
++    // output (the idle time is left as it is).
++    for (auto& entry : cameras_) {
++      for (const auto& stream : entry.second.streams) {
++        if (stream.first.output != 0) {
++          entry.second.stream_last_request[stream.first] = still_free_requests_begun_;
++        }
++      }
++    }
 +  }
 +
 +  std::map<uint32_t, bool> controls_written;
@@ -1779,10 +1795,10 @@ index 0000000000000000000000000000000000000000..3a1b6ea96ec524313085b5ce22bb40bb
 +}  // namespace android
 diff --git a/devices/EmulatedCamera/hwl/V4l2FrameSource.h b/devices/EmulatedCamera/hwl/V4l2FrameSource.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..056ca1b6990d0bea34e055910250a40fce2e8433
+index 0000000000000000000000000000000000000000..715b9241d8e7a547a69ee3abf3e07391c448e75e
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/V4l2FrameSource.h
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,180 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -1902,8 +1918,9 @@ index 0000000000000000000000000000000000000000..056ca1b6990d0bea34e055910250a40f
 +    std::vector<uint32_t> unsupported_controls;
 +    std::unique_ptr<v4l2cam::V4l2MetaReader> meta;
 +    std::map<StreamKey, std::unique_ptr<v4l2cam::V4l2Stream>> streams;
-+    // What still_free_requests_begun_ was when a request last used each stream,
-+    // for the rule that closes an idle stream.
++    // What still_free_requests_begun_ was when a request last used each stream
++    // (or, for a video output, when a request that takes a still began), for the
++    // rule that closes an idle stream.
 +    std::map<StreamKey, uint64_t> stream_last_request;
 +    uint32_t buffers = 4;
 +    uint32_t fps = 0;
@@ -1948,7 +1965,8 @@ index 0000000000000000000000000000000000000000..056ca1b6990d0bea34e055910250a40f
 +  std::map<const SensorBuffer*, Pending> pending_;
 +  // The requests that took no still and have begun so far. A request that takes
 +  // a still does not count: it holds the pipeline for as long as the host takes
-+  // to make the picture, and the requests of the preview wait behind it.
++  // to make the picture, and the requests of the preview wait behind it, and it
++  // starts the count of absences again for every open video output.
 +  uint64_t still_free_requests_begun_ = 0;
 +  // A flush or a close is under way (Interrupt); the sensor clears it as it takes the next request.
 +  std::atomic<bool> interrupted_{false};
