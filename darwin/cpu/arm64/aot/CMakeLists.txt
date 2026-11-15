@@ -122,6 +122,24 @@ foreach(_library IN LISTS UML_AOT_LIBRARIES)
     endif()
 endforeach()
 
+# A diagnostics build also rewrites a small library of its own, whose control
+# flow the differential test needs and no release library is certain to have.
+set(_uml_aot_generated_args)
+set(_uml_aot_generated_files)
+if(UML_AOT_DIAGNOSTICS)
+    set(_uml_aot_fixture ${_uml_aot_dir}/fixture/libaotfixture.so)
+    add_custom_command(
+        OUTPUT ${_uml_aot_fixture}
+        COMMAND ${Python3_EXECUTABLE} -B ${_uml_aot_tools}/fixture.py
+            --out ${_uml_aot_fixture}
+        DEPENDS ${_uml_aot_tools}/fixture.py
+        COMMENT "Generating the AOT test library"
+        VERBATIM)
+    list(APPEND _uml_aot_generated_args
+        --generated "/aot-test/libaotfixture.so=${_uml_aot_fixture}")
+    list(APPEND _uml_aot_generated_files ${_uml_aot_fixture})
+endif()
+
 # Rewrite the libraries into one position-independent blob.
 add_custom_command(
     OUTPUT ${_uml_aot_blob} ${_uml_aot_manifest}
@@ -131,9 +149,11 @@ add_custom_command(
         --root ${_uml_aot_image_dir}/root
         ${_uml_aot_mount_args}
         ${_uml_aot_library_args}
+        ${_uml_aot_generated_args}
         --release-id "${_uml_aot_release_id}"
         --out ${_uml_aot_dir}
     DEPENDS ${_uml_aot_trees} ${_uml_aot_tool_sources}
+        ${_uml_aot_generated_files}
         ${PROJECT_SOURCE_DIR}/tests/unit/arm64/a64_instruction_decode_partitions.tsv
         ${PROJECT_SOURCE_DIR}/darwin/cpu/arm64/layout/assembly_offsets.h
     COMMENT "Rewriting the AOT libraries"

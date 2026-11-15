@@ -3409,6 +3409,14 @@ std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 		arm64::aot::note_refusal(arm64::aot::Refusal::sp_misaligned);
 		return std::nullopt;
 	}
+	/* FPCR.FIZ, AH and NEP change what an FP instruction computes beyond
+	 * what the host does under the same rounding mode, flush-to-zero and
+	 * default-NaN bits; the engine's twin gadgets cover them, rewritten
+	 * code does not. */
+	if ((cpu.fpcr & arm64::fpcr_afp_controls) != 0U) {
+		arm64::aot::note_refusal(arm64::aot::Refusal::fp_environment);
+		return std::nullopt;
+	}
 	if (!aot_)
 		aot_ = std::make_unique<AotState>();
 	const auto hit = aot_->binder.find(memory, execution_context_,

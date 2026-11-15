@@ -118,6 +118,43 @@ struct Directory final {
 std::atomic<int> g_state{-1};
 
 #if UML_AOT_DIAGNOSTICS
+std::atomic<bool> g_refill_stress{false};
+
+/* Leave every general and vector register the caller could rely on holding
+ * something else: the refill thunk saves x0-x17, x30, NZCV and q0-q31 around
+ * the call and must hand them back as they were. Callee-saved registers are
+ * the compiler's to restore (the upper halves of v8-v15 are not). */
+[[gnu::noinline]] void scramble_registers() noexcept
+{
+	asm volatile(
+		"movz x0, #0xdead\n movk x0, #0xbeef, lsl #16\n"
+		"mov x1, x0\n mov x2, x0\n mov x3, x0\n mov x4, x0\n"
+		"mov x5, x0\n mov x6, x0\n mov x7, x0\n mov x8, x0\n"
+		"mov x9, x0\n mov x10, x0\n mov x11, x0\n mov x12, x0\n"
+		"mov x13, x0\n mov x14, x0\n mov x15, x0\n mov x16, x0\n"
+		"mov x17, x0\n"
+		"movi v0.16b, #0xa5\n movi v1.16b, #0xa5\n movi v2.16b, #0xa5\n"
+		"movi v3.16b, #0xa5\n movi v4.16b, #0xa5\n movi v5.16b, #0xa5\n"
+		"movi v6.16b, #0xa5\n movi v7.16b, #0xa5\n movi v8.16b, #0xa5\n"
+		"movi v9.16b, #0xa5\n movi v10.16b, #0xa5\n movi v11.16b, #0xa5\n"
+		"movi v12.16b, #0xa5\n movi v13.16b, #0xa5\n movi v14.16b, #0xa5\n"
+		"movi v15.16b, #0xa5\n movi v16.16b, #0xa5\n movi v17.16b, #0xa5\n"
+		"movi v18.16b, #0xa5\n movi v19.16b, #0xa5\n movi v20.16b, #0xa5\n"
+		"movi v21.16b, #0xa5\n movi v22.16b, #0xa5\n movi v23.16b, #0xa5\n"
+		"movi v24.16b, #0xa5\n movi v25.16b, #0xa5\n movi v26.16b, #0xa5\n"
+		"movi v27.16b, #0xa5\n movi v28.16b, #0xa5\n movi v29.16b, #0xa5\n"
+		"movi v30.16b, #0xa5\n movi v31.16b, #0xa5\n"
+		"msr nzcv, x0\n"
+		:
+		:
+		: "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9",
+		  "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "v0",
+		  "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10",
+		  "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19",
+		  "v20", "v21", "v22", "v23", "v24", "v25", "v26", "v27", "v28",
+		  "v29", "v30", "v31", "cc");
+}
+
 namespace counters {
 std::atomic<std::uint64_t> binds{0}, verifications{0}, pages_hashed{0},
 	unreadable{0}, poisoned{0}, enters{0}, steps{0}, retired{0}, refills{0},
@@ -243,8 +280,19 @@ std::uint64_t refill(void *tlb_pointer, std::uint64_t address,
 	}
 	const auto page = address >> DARWIN_UML_GUEST_PAGE_SHIFT;
 	const auto &entry = tlb.entries[page & (::uml::memory::tlb_entry_count - 1)];
-	return (kind == ::uml::memory::Access::write ? entry.write_page :
-		entry.read_page) == page ? 1 : 0;
+	const bool filled = (kind == ::uml::memory::Access::write ?
+		entry.write_page : entry.read_page) == page;
+#if UML_AOT_DIAGNOSTICS
+	if (filled && g_refill_stress.load(std::memory_order_relaxed)) {
+		/* Leave only this access's entry in the TLB. */
+		for (auto &other : tlb.entries)
+			other = ::uml::memory::TlbEntry{};
+		if (tlb.translate(address, kind) == nullptr)
+			return 0;
+		scramble_registers();
+	}
+#endif
+	return filled ? 1 : 0;
 }
 
 /* Rewritten code branches to an address outside its own library: answer the
@@ -303,6 +351,11 @@ void set_enabled(std::optional<bool> state) noexcept
 {
 	g_state.store(!state.has_value() ? -1 :
 		(*state && directory().valid ? 1 : 0), std::memory_order_relaxed);
+}
+
+void set_refill_stress(bool on) noexcept
+{
+	g_refill_stress.store(on, std::memory_order_relaxed);
 }
 
 Stats stats() noexcept

@@ -1210,6 +1210,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--library", action="append", required=True,
                         help="a library's guest path, e.g. "
                         "/system/lib64/libz.so; repeatable")
+    parser.add_argument("--generated", action="append", default=[],
+                        metavar="GUESTPATH=FILE",
+                        help="a library generated for the tests (tools/aot/"
+                        "fixture.py), not part of the release; it has no "
+                        "licence notice; repeatable")
     parser.add_argument("--release-id", required=True)
     parser.add_argument("--out", type=pathlib.Path, required=True,
                         help="output directory (blob.bin, manifest.json)")
@@ -1222,6 +1227,9 @@ def main(argv: list[str] | None = None) -> int:
         mounts[guest.rstrip("/")] = pathlib.Path(directory)
     jobs = [(index, path, str(resolve_library(arguments.root, mounts, path)))
             for index, path in enumerate(arguments.library)]
+    for item in arguments.generated:
+        guest, _, host = item.partition("=")
+        jobs.append((len(jobs), guest, host))
     workers = arguments.jobs or max(1, (os.cpu_count() or 2) // 2)
     order = sorted(jobs, key=lambda job: -pathlib.Path(job[2]).stat().st_size)
     if workers == 1 or len(jobs) == 1:

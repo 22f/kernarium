@@ -132,6 +132,13 @@ class Elf:
                 if range_ > 0:
                     found.append((begin, begin + range_))
             position += 4 + length
+        # The PLT has no unwind entries: its stubs (adrp, ldr, add, br) are
+        # code like any other and the calls through them are the hottest
+        # indirect branches.
+        if ".plt" in self.sections:
+            plt_addr, _, plt_size = self.sections[".plt"]
+            if plt_size > 0:
+                found.append((plt_addr, plt_addr + plt_size))
         found.sort()
         merged: list[Function] = []
         for begin, finish in found:

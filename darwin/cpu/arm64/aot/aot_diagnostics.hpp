@@ -37,6 +37,10 @@ struct Stats final {
 
 /* Override DARWIN_UML_AOT (nullopt: read the environment again). */
 void set_enabled(std::optional<bool> state) noexcept;
+/* Make every refill flush the TLB first (so that the next access to any
+ * other page or kind misses too) and leave every register that the refill
+ * thunk must preserve scrambled when the callback returns. */
+void set_refill_stress(bool on) noexcept;
 [[nodiscard]] Stats stats() noexcept;
 void reset_stats() noexcept;
 

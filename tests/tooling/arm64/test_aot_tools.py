@@ -20,6 +20,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "tools" /
 import a64decode  # noqa: E402
 import asm as A  # noqa: E402
 import elf64  # noqa: E402
+import fixture  # noqa: E402
 import rewrite  # noqa: E402
 
 ENCODERS = [
@@ -227,6 +228,31 @@ class SimdRegisterFieldTests(unittest.TestCase):
         for rd in (18, 28):
             umov = 0x4e003c00 | 8 << 16 | 4 << 5 | rd
             self.assertEqual(self.fields(umov)[1], [(0, False)])
+
+
+class FixtureTests(unittest.TestCase):
+    """The generated test library has the control flow the harness needs."""
+
+    def setUp(self) -> None:
+        self.elf = elf64.Elf(fixture.build())
+        self.library = rewrite.Library(
+            0, "/aot-test/libaotfixture.so", self.elf,
+            a64decode.Decoder(a64decode.DEFAULT_TABLE),
+            rewrite.read_layout(rewrite.LAYOUT_HEADER))
+
+    def test_ranges_and_plt(self) -> None:
+        self.assertEqual(
+            [(f.start, f.end) for f in self.elf.functions()],
+            [(0x1000, 0x1010), (0x1020, 0x1030), (0x1040, 0x1050)])
+
+    def test_loop_branch_lands_inside_another_range(self) -> None:
+        # b.lo at 0x1028 (range B) targets 0x1004 (inside range A), and no
+        # function entry lies on the cycle.
+        target = self.library._direct_target(
+            fixture.CODE[0x1028], 0x1028)
+        self.assertEqual(target, 0x1004)
+        self.assertIn(0x1004, self.library.budget_extent)
+        self.assertNotIn(0x1008, self.library.budget_extent)
 
 
 class BudgetTests(unittest.TestCase):

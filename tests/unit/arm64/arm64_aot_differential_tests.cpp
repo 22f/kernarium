@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -31,8 +32,11 @@
 #include <unistd.h>
 #include <memory>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace arm64 = uml::cpu::arm64;
@@ -145,6 +149,10 @@ struct LibraryImage final {
  * instruction which writes SP from a register gets that register set to a
  * stack address, aligned or not (see sp_source). */
 const LibraryImage *g_sites_image = nullptr;
+
+/* Addresses in another library mapped in the same address space: some
+ * registers (and the return address) of a case hold one. */
+std::vector<std::uint64_t> g_cross_targets;
 
 /* The register an instruction writes SP from, or -1: the 64-bit
  * add/sub (immediate and extended register) and logical (immediate) forms
@@ -282,15 +290,25 @@ private:
 	std::vector<std::uint8_t> kinds_;
 };
 
+/* One vCPU: the guest memory view and the executor of a thread. */
+struct Vcpu final {
+	StaticGuestMemory memory;
+	gadgets::GadgetExecutor executor;
+};
+
 /* One address space holding the library at `bias` and a stub that makes a
- * system call, with its own executor. */
+ * system call, with its own executor. `mapped_pages` maps only the first
+ * pages of the library (map_rest() maps the others, as a loader would
+ * later); add_library() maps a second library into the same address space. */
 struct Environment final {
 	Environment(unsigned long generation_, std::uint64_t bias_,
-		const LibraryImage &image_)
+		const LibraryImage &image_,
+		std::size_t mapped_pages = SIZE_MAX)
 		: generation{generation_}, bias{bias_},
 		  backing{image_.pages},
 		  stub_backing{1},
-		  map{generation, bias, backing, image_.pages,
+		  mapped{std::min(mapped_pages, image_.pages)},
+		  map{generation, bias, backing, mapped,
 			PROT_READ | PROT_EXEC},
 		  stub_map{generation, bias + stub_offset, stub_backing, 1,
 			PROT_READ | PROT_EXEC, true}
@@ -299,12 +317,48 @@ struct Environment final {
 		stub_backing.put32(0, system_call);
 	}
 
+	/* Map the pages of the library that were left out. */
+	void map_rest(const LibraryImage &image)
+	{
+		const auto pages = image.pages - mapped;
+		if (pages == 0)
+			return;
+		tail_backing = std::make_unique<JitBacking>(pages);
+		tail_backing->put(0, std::span{image.bytes}.subspan(
+			mapped * page_bytes, pages * page_bytes));
+		tail_map = std::make_unique<GenerationMapping>(generation,
+			bias + mapped * page_bytes, *tail_backing, pages,
+			PROT_READ | PROT_EXEC, true);
+		mapped = image.pages;
+	}
+
+	void add_library(std::uint64_t other_bias, const LibraryImage &image)
+	{
+		extra_backing = std::make_unique<JitBacking>(image.pages);
+		extra_backing->put(0, image.bytes);
+		extra_map = std::make_unique<GenerationMapping>(generation,
+			other_bias, *extra_backing, image.pages,
+			PROT_READ | PROT_EXEC, true);
+		extra_stub_backing = std::make_unique<JitBacking>(1);
+		extra_stub_backing->put32(0, system_call);
+		extra_stub_map = std::make_unique<GenerationMapping>(generation,
+			other_bias + stub_offset, *extra_stub_backing, 1,
+			PROT_READ | PROT_EXEC, true);
+	}
+
 	unsigned long generation;
 	std::uint64_t bias;
 	JitBacking backing;
 	JitBacking stub_backing;
+	std::size_t mapped;
 	JitMapping map;
 	GenerationMapping stub_map;
+	std::unique_ptr<JitBacking> tail_backing;
+	std::unique_ptr<GenerationMapping> tail_map;
+	std::unique_ptr<JitBacking> extra_backing;
+	std::unique_ptr<GenerationMapping> extra_map;
+	std::unique_ptr<JitBacking> extra_stub_backing;
+	std::unique_ptr<GenerationMapping> extra_stub_map;
 	StaticGuestMemory memory;
 	gadgets::GadgetExecutor executor;
 };
@@ -366,11 +420,12 @@ struct BlockLog final {
 	std::vector<std::array<std::uint64_t, 5>> blocks;
 } g_log;
 
-[[nodiscard]] Result drive(Environment &env, Arena &arena, Case c,
-	std::size_t blocks, const Observer &observer = {})
+[[nodiscard]] Result drive_on(gadgets::GadgetExecutor &executor,
+	StaticGuestMemory &memory, unsigned long generation, std::uint64_t bias,
+	Arena &arena, Case c, std::size_t blocks, const Observer &observer = {})
 {
 	Result r;
-	c.cpu.pc = env.bias + c.pc_offset;
+	c.cpu.pc = bias + c.pc_offset;
 	for (std::size_t i = 0; i < arena.total(); ++i)
 		if (i < c.kinds.size())
 			arena.set_kind(i, c.kinds[i]);
@@ -380,7 +435,7 @@ struct BlockLog final {
 	for (; r.blocks < blocks; ++r.blocks) {
 		const auto before = c.cpu.pc;
 		const auto out = run_once(
-			env.executor, env.memory, env.generation, c.cpu);
+			executor, memory, generation, c.cpu);
 		if (g_log.enabled)
 			g_log.blocks.push_back({before,
 				static_cast<std::uint64_t>(out.event), out.executed,
@@ -400,9 +455,9 @@ struct BlockLog final {
 		}
 		if (out.event != EngineEvent::memory_fault)
 			break;
-		const auto address = env.executor.fault_address();
+		const auto address = executor.fault_address();
 		r.faults.push_back({c.cpu.pc, address,
-			static_cast<std::uint32_t>(env.executor.fault_access())});
+			static_cast<std::uint32_t>(executor.fault_access())});
 		const auto untagged = address & 0x00ff'ffff'ffff'ffffULL;
 		if (untagged < arena.base() ||
 		    untagged >= arena.base() + arena.total() * page_bytes ||
@@ -417,6 +472,13 @@ struct BlockLog final {
 	r.cpu = c.cpu;
 	r.memory = arena.snapshot();
 	return r;
+}
+
+[[nodiscard]] Result drive(Environment &env, Arena &arena, Case c,
+	std::size_t blocks, const Observer &observer = {})
+{
+	return drive_on(env.executor, env.memory, env.generation, env.bias,
+		arena, std::move(c), blocks, observer);
 }
 
 void describe(const char *what, const Case &c)
@@ -560,6 +622,15 @@ void describe(const char *what, const Case &c)
 	c.cpu.tls = arena_base + rng.below(arena_pages) * page_bytes +
 		0x40 * rng.below(32);
 	c.cpu.registers[30] = bias + stub_offset;
+	if (!g_cross_targets.empty()) {
+		for (std::size_t i = 0; i < 29; ++i)
+			if (rng.below(6) == 0)
+				c.cpu.registers[i] = g_cross_targets[
+					rng.below(g_cross_targets.size())];
+		if (rng.below(4) == 0)
+			c.cpu.registers[30] = g_cross_targets[
+				rng.below(g_cross_targets.size())];
+	}
 	c.cpu.nzcv = static_cast<std::uint32_t>(rng.below(16)) << 28;
 	for (auto &v : c.cpu.vectors)
 		for (auto &b : v.bytes)
@@ -568,6 +639,9 @@ void describe(const char *what, const Case &c)
 	 * the rewritten code must honour alike. */
 	c.cpu.fpcr = static_cast<std::uint32_t>(
 		(rng.below(4) << 22) | (rng.below(2) << 24) | (rng.below(2) << 25));
+	/* FIZ, AH and NEP, which rewritten code is not entered under. */
+	if (rng.below(8) == 0)
+		c.cpu.fpcr |= static_cast<std::uint32_t>(1 + rng.below(7));
 	c.cpu.fpsr = 0;
 	return c;
 }
@@ -1050,6 +1124,274 @@ void inline_hit_path_is_taken(const LibraryImage &image,
 	}
 }
 
+/* Every access that leaves the page of the last one refills, and the
+ * refill callback leaves every register and flag the thunk saves scrambled:
+ * the results must still be the engine's. */
+void refill_keeps_state(const LibraryImage &image,
+	const std::vector<Function> &functions)
+{
+	SplitMix rng{29};
+	const auto bias = Fixture::bias;
+	Fixture ref{4261, image}, got{4262, image};
+	aot::reset_stats();
+	aot::set_refill_stress(true);
+	std::size_t compared = 0;
+	for (std::size_t f = 0; f < functions.size(); ++f)
+		for (int which = 0; which < 3; ++which) {
+			const auto pc = which == 0 ? functions[f].start :
+				functions[f].start + 4 * rng.below(
+					(functions[f].end - functions[f].start) / 4);
+			const auto c = make_case(rng, bias, pc, rng.below(4) == 0,
+				true, arena_base(bias));
+			aot::set_enabled(false);
+			const auto want = drive(ref.env, ref.arena, c, max_blocks);
+			if (!want.done())
+				continue;
+			aot::set_enabled(true);
+			const auto have = drive(got.env, got.arena, c,
+				aot_max_blocks);
+			aot::set_enabled(false);
+			require(same(want, have, c));
+			++compared;
+		}
+	aot::set_refill_stress(false);
+	const auto st = aot::stats();
+	std::fprintf(stderr, "refill stress: %zu cases; enters %llu refills %llu "
+		"refill failures %llu steps %llu\n", compared,
+		static_cast<unsigned long long>(st.enters),
+		static_cast<unsigned long long>(st.refills),
+		static_cast<unsigned long long>(st.refill_failures),
+		static_cast<unsigned long long>(st.steps));
+	require(compared > 20);
+	require(st.refills > compared);
+}
+
+/* A library whose last code page is not mapped yet: the instance cannot be
+ * verified, so nothing is entered and the engine runs everything as usual;
+ * once the page is mapped the code is entered. */
+void partially_mapped_library(const LibraryImage &image,
+	const std::vector<Function> &functions)
+{
+	std::uint64_t code_end = 0;
+	for (const auto &f : functions)
+		code_end = std::max(code_end, f.end);
+	const auto last_page = (code_end - 1) / page_bytes;
+	require(last_page >= 1);
+	std::vector<Function> below;
+	for (const auto &f : functions)
+		if (f.end <= last_page * page_bytes)
+			below.push_back(f);
+	require(below.size() > 8);
+	SplitMix rng{31};
+	const auto bias = Fixture::bias;
+	Environment ref{4281, bias, image};
+	Arena ref_arena{ref.generation, arena_base(bias)};
+	Environment got{4282, bias, image, last_page};
+	Arena got_arena{got.generation, arena_base(bias)};
+	aot::reset_stats();
+	std::size_t compared = 0;
+	for (std::size_t f = 0; f < below.size() && compared < 6; ++f) {
+		const auto c = make_case(rng, bias, below[f].start, false, true,
+			arena_base(bias));
+		aot::set_enabled(false);
+		auto want = drive(ref, ref_arena, c, max_blocks);
+		if (!want.done())
+			continue;
+		aot::set_enabled(true);
+		const auto have = drive(got, got_arena, c, aot_max_blocks);
+		aot::set_enabled(false);
+		/* The code ran with the tail of the library missing: only
+		 * calls into the missing page differ from a full mapping, so
+		 * compare cases that never fault on an instruction fetch. */
+		if (have.faults.empty())
+			require(same(want, have, c));
+		++compared;
+	}
+	require(compared > 3);
+	auto st = aot::stats();
+	require(st.enters == 0);
+	require(st.unreadable > 0);
+	/* The loader maps the rest: the next verification that is due binds
+	 * the library and the code is entered. */
+	got.map_rest(image);
+	std::size_t attempts = 0;
+	while (aot::stats().enters == 0 && attempts < 4000) {
+		const auto c = make_case(rng, bias,
+			below[attempts % below.size()].start, false, true,
+			arena_base(bias));
+		aot::set_enabled(true);
+		(void)drive(got, got_arena, c, aot_max_blocks);
+		aot::set_enabled(false);
+		++attempts;
+	}
+	st = aot::stats();
+	std::fprintf(stderr, "partial mapping: after the rest was mapped, entered "
+		"after %zu cases; unreadable %llu\n", attempts,
+		static_cast<unsigned long long>(st.unreadable));
+	require(st.enters > 0);
+	require(st.poisoned == 0);
+}
+
+/* Two vCPUs of one address space run rewritten code at once, each with its
+ * own binder, TLB and arena; every case ends as the engine's would. */
+void two_vcpus(const LibraryImage &image, const std::vector<Function> &functions)
+{
+	constexpr std::uint64_t bias = 0x7163'0000'0000ULL;
+	constexpr std::size_t per_thread = 120;
+	const std::uint64_t base[2] = {arena_base(bias),
+		arena_base(bias) + 0x40'0000};
+	Environment ref{4291, bias, image};
+	Arena ref_arena[2] = {{ref.generation, base[0]},
+		{ref.generation, base[1]}};
+	Environment env{4292, bias, image};
+	Arena arena[2] = {{env.generation, base[0]}, {env.generation, base[1]}};
+	Vcpu second;
+	SplitMix rng{37};
+	std::vector<Case> cases[2];
+	std::vector<Result> want[2], have[2];
+	aot::set_enabled(false);
+	for (int t = 0; t < 2; ++t)
+		for (std::size_t i = 0; i < per_thread; ++i) {
+			const auto &f = functions[rng.below(functions.size())];
+			cases[t].push_back(make_case(rng, bias, f.start +
+				4 * rng.below((f.end - f.start) / 4), rng.below(3) == 0,
+				rng.below(4) != 0, base[t]));
+			want[t].push_back(drive_on(ref.executor, ref.memory,
+				ref.generation, bias, ref_arena[t], cases[t].back(),
+				max_blocks));
+		}
+	aot::reset_stats();
+	aot::set_enabled(true);
+	std::atomic<bool> go{false};
+	std::thread threads[2];
+	for (int t = 0; t < 2; ++t)
+		threads[t] = std::thread{[&, t] {
+			auto &executor = t == 0 ? env.executor : second.executor;
+			auto &memory = t == 0 ? env.memory : second.memory;
+			while (!go.load(std::memory_order_acquire))
+				std::this_thread::yield();
+			for (const auto &c : cases[t])
+				have[t].push_back(drive_on(executor, memory,
+					env.generation, bias, arena[t], c,
+					aot_max_blocks));
+		}};
+	go.store(true, std::memory_order_release);
+	for (auto &thread : threads)
+		thread.join();
+	aot::set_enabled(false);
+	std::size_t compared = 0;
+	for (int t = 0; t < 2; ++t)
+		for (std::size_t i = 0; i < per_thread; ++i) {
+			if (!want[t][i].done())
+				continue;
+			require(same(want[t][i], have[t][i], cases[t][i]));
+			++compared;
+		}
+	const auto st = aot::stats();
+	std::fprintf(stderr, "two vCPUs: %zu cases compared; enters %llu binds "
+		"%llu steps %llu\n", compared,
+		static_cast<unsigned long long>(st.enters),
+		static_cast<unsigned long long>(st.binds),
+		static_cast<unsigned long long>(st.steps));
+	require(compared > per_thread);
+	require(st.enters > compared / 2);
+	require(st.binds >= 2);
+	require(st.poisoned == 0);
+}
+
+/* Two libraries in one address space, each reaching the other through a
+ * register (as a call through a PLT does): the branch stays in rewritten
+ * code when the other library is verified. */
+void cross_library_branches(const LibraryImage &image,
+	const std::vector<Function> &functions, const LibraryImage &other,
+	const std::vector<Function> &other_functions)
+{
+	constexpr std::uint64_t bias = 0x7173'0000'0000ULL;
+	constexpr std::uint64_t other_bias = 0x7183'0000'0000ULL;
+	Environment ref{4301, bias, image};
+	Environment got{4302, bias, image};
+	ref.add_library(other_bias, other);
+	got.add_library(other_bias, other);
+	Arena ref_arena{ref.generation, arena_base(bias)};
+	Arena got_arena{got.generation, arena_base(bias)};
+	g_cross_targets.clear();
+	for (const auto &f : other_functions)
+		g_cross_targets.push_back(other_bias + f.start);
+	SplitMix rng{41};
+	aot::reset_stats();
+	std::size_t compared = 0;
+	for (std::size_t round = 0; round < 3; ++round)
+		for (std::size_t i = 0; i < functions.size(); ++i) {
+			/* Some cases start in the other library, so that its
+			 * instance is verified before library one branches. */
+			const bool in_other = rng.below(4) == 0;
+			const auto &f = in_other ?
+				other_functions[rng.below(other_functions.size())] :
+				functions[i];
+			const auto at = in_other ? other_bias : bias;
+			auto c = make_case(rng, at, f.start, false, true,
+				arena_base(bias));
+			c.pc_offset = f.start;
+			aot::set_enabled(false);
+			const auto want = drive_on(ref.executor, ref.memory,
+				ref.generation, at, ref_arena, c, max_blocks);
+			if (!want.done())
+				continue;
+			aot::set_enabled(true);
+			const auto have = drive_on(got.executor, got.memory,
+				got.generation, at, got_arena, c, aot_max_blocks);
+			aot::set_enabled(false);
+			require(same(want, have, c));
+			++compared;
+		}
+	g_cross_targets.clear();
+	const auto st = aot::stats();
+	std::fprintf(stderr, "cross-library: %zu cases; enters %llu steps %llu "
+		"cross hits %llu cross misses %llu\n", compared,
+		static_cast<unsigned long long>(st.enters),
+		static_cast<unsigned long long>(st.steps),
+		static_cast<unsigned long long>(st.cross_hits),
+		static_cast<unsigned long long>(st.cross_misses));
+	require(compared > 20);
+	require(st.cross_hits > 0);
+	require(st.poisoned == 0);
+}
+
+/* A loop whose backward branch lands inside another unwind range
+ * (tools/aot/fixture.py): every pass through it is charged against the
+ * entry's budget, so a long run comes back to the engine about every 4096
+ * instructions and ends where the engine's run ends. */
+void loop_through_another_range(const LibraryImage &image,
+	const std::vector<Function> &functions)
+{
+	/* The two ranges of the loop and the PLT stub after them. */
+	require(functions.size() == 3);
+	const auto bias = Fixture::bias;
+	Fixture ref{4311, image}, got{4312, image};
+	SplitMix rng{43};
+	auto c = make_case(rng, bias, functions[0].start, false, true,
+		arena_base(bias));
+	c.cpu.registers[0] = 0;
+	c.cpu.registers[1] = 0;
+	c.cpu.registers[3] = 50000;
+	aot::set_enabled(false);
+	const auto want = drive(ref.env, ref.arena, c, max_blocks);
+	require(want.finished);
+	require(want.cpu.registers[0] == 50000);
+	aot::reset_stats();
+	aot::set_enabled(true);
+	const auto have = drive(got.env, got.arena, c, aot_max_blocks);
+	aot::set_enabled(false);
+	require(same(want, have, c));
+	const auto st = aot::stats();
+	std::fprintf(stderr, "loop through another range: %llu entries, longest "
+		"block %zu instructions, %zu blocks\n",
+		static_cast<unsigned long long>(st.enters), have.max_block,
+		have.blocks);
+	require(st.enters >= 40);
+	require(have.max_block <= 4096 + 64);
+}
+
 } // namespace
 
 /* A host fault inside rewritten code is a bug; say where before dying. */
@@ -1129,7 +1471,7 @@ int main(int argc, char **argv)
 			"differential: %zu cases, %zu compared, %zu unbounded, "
 			"%zu finished, %zu faulting, %zu faults; enters %llu steps %llu "
 			"binds %llu verifications %llu retired %llu refills %llu "
-			"refusals sp %llu\n",
+			"refusals sp %llu fp %llu\n",
 			t.cases, t.compared, t.skipped, t.finished, t.faulted,
 			t.fault_events, static_cast<unsigned long long>(st.enters),
 			static_cast<unsigned long long>(st.steps),
@@ -1137,10 +1479,16 @@ int main(int argc, char **argv)
 			static_cast<unsigned long long>(st.verifications),
 			static_cast<unsigned long long>(st.retired),
 			static_cast<unsigned long long>(st.refills),
-			static_cast<unsigned long long>(st.refusals[1]));
+			static_cast<unsigned long long>(st.refusals[1]),
+			static_cast<unsigned long long>(st.refusals[3]));
 		require(t.compared > t.cases / 2);
 		require(st.enters > t.compared / 2);
 		require(st.poisoned == 0);
+		/* Both entry refusals are exercised by every library's cases. */
+		require(st.refusals[1] > 0);
+		require(st.refusals[3] > 0);
+		if (file.guest.ends_with("/libaotfixture.so"))
+			loop_through_another_range(image, functions);
 		/* The scenarios use the first library: they are about the
 		 * mechanism, not about the code. */
 		if (file.index == libraries.front().index) {
@@ -1150,7 +1498,19 @@ int main(int argc, char **argv)
 			two_load_biases(image, sample);
 			other_bytes_fall_back(image, sample);
 			changed_text_falls_back_for_good(image, functions);
+			refill_keeps_state(image, sample);
+			partially_mapped_library(image, functions);
+			two_vcpus(image, sample);
 		}
+	}
+	if (libraries.size() > 1 && cfg.library < 0) {
+		const auto &first = libraries[0];
+		const auto &second = libraries[1];
+		const auto image = load_library(first.host);
+		const auto other = load_library(second.host);
+		cross_library_branches(image, load_functions(cfg.functions,
+			first.index), other, load_functions(cfg.functions,
+			second.index));
 	}
 	return 0;
 }
