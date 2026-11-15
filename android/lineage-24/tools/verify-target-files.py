@@ -953,10 +953,11 @@ OLDAPP_PROPERTY_PREFIX = "persist.sys.kernarium.oldapp."
 OLDAPP_PROPERTY_TYPE = "kernarium_oldapp_prop"
 OLDAPP_SETTER = "shell"
 # The command serialises its changes with an exclusive lock on a file in the shell user's own data
-# directory (/data/local/tmp, shell_data_file): the shell domain must create and lock files there.
+# directory (/data/local/tmp, shell_data_file): the shell domain must create and lock files there, and
+# tighten (setattr) one that someone left open to other users.
 OLDAPP_LOCK_TYPE = "shell_data_file"
 OLDAPP_LOCK_PERMISSIONS = (
-    ("file", frozenset({"create", "open", "read", "write", "lock", "getattr"})),
+    ("file", frozenset({"create", "open", "read", "write", "lock", "getattr", "setattr"})),
     ("dir", frozenset({"search", "add_name", "write"})),
 )
 # What get_prop grants for a property type: a read of the property area needs all four.

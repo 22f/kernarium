@@ -2263,6 +2263,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         ""
                         if oldapp_variant == "no-lock-file"
                         else "(allow shell shell_data_file (file (create open read write lock getattr)))\n"
+                        if oldapp_variant == "no-lock-setattr"
+                        else "(allow shell shell_data_file (file (create open read write lock getattr setattr)))\n"
                     )
                     + (
                         ""
@@ -5680,6 +5682,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "may not read persist.sys.kernarium.oldapp.<package>, labelled kernarium_oldapp_prop "
              r"\(getattr, map, open, read on the file\)"),
             ("oldapp-no-lock-file", {"oldapp_variant": "no-lock-file"},
+             "shell domain may not create and lock files of shell_data_file"),
+            ("oldapp-no-lock-setattr", {"oldapp_variant": "no-lock-setattr"},
              "shell domain may not create and lock files of shell_data_file"),
             ("oldapp-no-lock-dir", {"oldapp_variant": "no-lock-dir"},
              "shell domain may not create and lock files of shell_data_file"),
