@@ -992,6 +992,13 @@ public:
             std::lock_guard lock(state->mutex);
             if (state->session) state->session->requestRecovery();
         };
+#if TARGET_OS_IOS
+        // The system interrupts a session that starts while the application is in the background with the same reason
+        // as one that was running when the application left, and keeps its start request for the return. Only the
+        // second has video to lose: the session reports the departure when frames have reached it since it started
+        // or since its last interruption ended (deliverFrame), and an ordinary interruption otherwise.
+        auto ranInForeground = ranInForeground_;
+#endif
         interrupted_ = [center addObserverForName:AVCaptureSessionWasInterruptedNotification
                                            object:session_
                                             queue:nil
@@ -1006,7 +1013,8 @@ public:
                                                     AVCaptureSessionInterruptionReasonVideoDeviceNotAvailableDueToSystemPressure)
                                                kind = CameraEventKind::interruptedBySystemPressure;
                                            else if (reason.integerValue ==
-                                                    AVCaptureSessionInterruptionReasonVideoDeviceNotAvailableInBackground)
+                                                        AVCaptureSessionInterruptionReasonVideoDeviceNotAvailableInBackground &&
+                                                    ranInForeground->exchange(false))
                                                kind = CameraEventKind::interruptedInBackground;
 #else
                                            (void)note;
@@ -1605,6 +1613,8 @@ public:
     void deliverFrame(std::size_t camera, CMSampleBufferRef sample)
     {
         if (camera >= entries_.size()) return;
+        // The session runs in the foreground: a departure from now on is its own.
+        ranInForeground_->store(true, std::memory_order_relaxed);
         // What the capture made before the cameras were put back in their anchors does not get here
         // (RepairBoundary, applied by the output delegate before it calls this).
         const CMTime presentation = CMSampleBufferGetPresentationTimeStamp(sample);
@@ -2860,6 +2870,9 @@ private:
     id failed_ {};
     id started_ {};
     std::shared_ptr<std::atomic_bool> restarting_ {std::make_shared<std::atomic_bool>(false)};
+    /* Frames have reached the session since it started or since the application's departure was last reported; the
+     * interruption observer holds a copy, as it may run after the session is gone. */
+    std::shared_ptr<std::atomic_bool> ranInForeground_ {std::make_shared<std::atomic_bool>(false)};
     bool multiCamera_ {};
     // What the anchors were chosen for: the still cap bounds a photo output.
     CameraLimits limits_;

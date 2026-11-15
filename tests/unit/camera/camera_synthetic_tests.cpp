@@ -1045,9 +1045,72 @@ void controlPipe()
     ::unlink(path.c_str());
 }
 
+// The application's departure ends a video only for a session that was running when it left. A session opened while the
+// application is away never had the video: it reports an ordinary interruption, whatever cause outlives it, and every other
+// cause is reported as it was.
+void sessionOpenedWhileAway()
+{
+    const auto kindsOfFreshSession = [](CameraEventKind cause) {
+        const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tablet));
+        camera->interrupt(cause);
+        Recorder recorder;
+        auto session = camera->openSession(recorder);
+        std::lock_guard lock(recorder.mutex);
+        std::vector<CameraEventKind> kinds;
+        for (const auto& event : recorder.events) {
+            require(event.camera == allCameras, "an interruption belongs to the whole session");
+            kinds.push_back(event.kind);
+        }
+        return kinds;
+    };
+    using Kinds = std::vector<CameraEventKind>;
+    require(kindsOfFreshSession(CameraEventKind::interruptedInBackground) == Kinds {CameraEventKind::interrupted},
+            "opened while the application is away: interrupted, not the application's departure");
+    require(kindsOfFreshSession(CameraEventKind::interrupted) == Kinds {CameraEventKind::interrupted});
+    require(kindsOfFreshSession(CameraEventKind::interruptedByMultitasking) == Kinds {CameraEventKind::interruptedByMultitasking});
+    require(kindsOfFreshSession(CameraEventKind::interruptedBySystemPressure) == Kinds {CameraEventKind::interruptedBySystemPressure});
+
+    // A session that was running when the application left hears the departure; the session opened after it, still away,
+    // hears an ordinary interruption, and both are told when the application is back.
+    const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tablet));
+    Recorder running;
+    auto first = camera->openSession(running);
+    require(running.events.empty(), "a session opened in the foreground hears nothing");
+    camera->interrupt(CameraEventKind::interruptedInBackground);
+    {
+        std::lock_guard lock(running.mutex);
+        require(running.events.size() == 1 && running.events[0].kind == CameraEventKind::interruptedInBackground,
+                "the session that was running hears the departure");
+    }
+    first.reset();
+    require(camera->sessionsOpen() == 0);
+    Recorder reopened;
+    auto second = camera->openSession(reopened);
+    {
+        std::lock_guard lock(reopened.mutex);
+        require(reopened.events.size() == 1 && reopened.events[0].kind == CameraEventKind::interrupted,
+                "the session opened while away is interrupted");
+    }
+    camera->resume();
+    // The return ends the interruption of the session opened in the foreground state as well; a later departure is the
+    // application's again.
+    second.reset();
+    Recorder back;
+    auto third = camera->openSession(back);
+    require(back.events.empty(), "opened with the application back in the foreground: nothing to report");
+    camera->interrupt(CameraEventKind::interruptedInBackground);
+    {
+        std::lock_guard lock(back.mutex);
+        require(back.events.size() == 1 && back.events[0].kind == CameraEventKind::interruptedInBackground,
+                "a second departure is reported as one again");
+    }
+    third.reset();
+}
+
 int main()
 {
     controlPipe();
+    sessionOpenedWhileAway();
     profiles();
     unauthorized();
     video();
