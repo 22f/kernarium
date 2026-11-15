@@ -46,6 +46,11 @@ void* oldapp_pthread_getspecific(int) __asm__("pthread_getspecific");
 int oldapp_pthread_setspecific(int, const void*) __asm__("pthread_setspecific");
 int oldapp_log_print(int, const char*, const char*, ...) __asm__("__android_log_print");
 int oldapp_clock_gettime(int, long*) __asm__("clock_gettime");  // struct timespec is two longs on bionic
+void* oldapp_dlsym(void*, const char*) __asm__("dlsym");
+
+// The native-method thunks (oldapp_thunks.S): thunk i is at oldapp_thunks + 8 * i.
+void oldapp_thunks();
+void oldapp_thunks_end();
 
 // bionic's struct dl_phdr_info, 32-bit layout.
 struct OldappPhdrInfo {
@@ -222,6 +227,8 @@ void low_delete(void* pointer) { low_free(pointer); }
 void low_delete_nothrow(void* pointer, const void*) { low_free(pointer); }
 void low_delete_sized(void* pointer, size_t) { low_free(pointer); }
 
+void* layer_dlsym(void* handle, const char* name);
+
 // `producing`: the producer pass of an application library, which may hand out memory of the arena. The consumer pass
 // gives every module the realloc that never does, so a module whose free cannot be rewritten stays free of arena blocks.
 void* replacement_for(Import what, bool producing) {
@@ -247,6 +254,7 @@ void* replacement_for(Import what, bool producing) {
         case Import::kDeleteArrayNothrow: return reinterpret_cast<void*>(&low_delete_nothrow);
         case Import::kDeleteSized:
         case Import::kDeleteArraySized: return reinterpret_cast<void*>(&low_delete_sized);
+        case Import::kDlsym: return reinterpret_cast<void*>(&layer_dlsym);
         case Import::kCount: break;
     }
     return nullptr;
@@ -624,6 +632,59 @@ bool is_app_caller(const void* return_address) {
     return false;
 }
 
+// ---- the native methods of the application
+
+constexpr unsigned kThunkBytes = 8;  // movw ip, #index; b entry
+
+void* thunk_address(unsigned index) {
+    return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(&oldapp_thunks) + kThunkBytes * index);
+}
+unsigned thunk_count() {
+    return static_cast<unsigned>((reinterpret_cast<uintptr_t>(&oldapp_thunks_end) - reinterpret_cast<uintptr_t>(&oldapp_thunks)) /
+                                 kThunkBytes);
+}
+
+// ART's lookup of a symbol in the library it loaded (SharedLibrary::FindSymbolWithoutNativeBridge: dlsym with the
+// library's handle) finds the application's JNI_OnLoad and the Java_ functions its native methods are bound to by
+// name. The function of the application's own library comes back as its thunk; any other lookup is the loader's
+// answer. Only libart's import of dlsym is pointed here.
+__attribute__((noinline)) void* layer_dlsym_found(void* handle, const char* name) {
+    void* function = oldapp_dlsym(handle, name);
+    if (function == nullptr || !(starts_with(name, "Java_") || same_text(name, "JNI_OnLoad"))) {
+        return function;
+    }
+    return thunk_for(function);
+}
+void* layer_dlsym(void* handle, const char* name) {
+    // RTLD_DEFAULT (0) and RTLD_NEXT (-1) look up from the caller's namespace: they go to the loader as libart's own
+    // call (a tail call, so the caller is still libart).
+    if (handle == nullptr || handle == reinterpret_cast<void*>(-1)) {
+        return oldapp_dlsym(handle, name);
+    }
+    return layer_dlsym_found(handle, name);
+}
+
+int rewrite_art_module(OldappPhdrInfo* info, size_t, void* user) {
+    if (!platform_path(info->name) || !same_text(base_name(info->name), "libart.so")) {
+        return 0;
+    }
+    Module module{};
+    module.lo = info->addr;
+    module.bias = info->addr;
+    module.phdr = info->phdr;
+    module.phnum = info->phnum;
+    *static_cast<unsigned*>(user) += patch_module(module, kDlsymImport, false, false, nullptr).written;
+    return 1;
+}
+
+// Points libart's dlsym slot at layer_dlsym: the number of slots rewritten (0: the native methods get no thunk when they
+// are bound by name).
+unsigned rewrite_art_dlsym() {
+    unsigned written = 0;
+    oldapp_dl_iterate_phdr(rewrite_art_module, &written);
+    return written;
+}
+
 // ---- protection of the interposed tables
 
 bool read_maps(int fd, char* buffer, size_t capacity, size_t* got) {
@@ -824,7 +885,8 @@ extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void* vm_pointe
         oldapp_log_print(kLogWarn, kTag, "no region below 2 GiB: allocator imports are left alone");
     }
     const Platform platform{is_app_caller, thread_state, log_line, make_writable, make_read_only, describe_method, now_ms,
-                            alloc_baseline, free_baseline};
+                            alloc_baseline, free_baseline, region != nullptr ? thunk_address : nullptr,
+                            region != nullptr ? thunk_count() : 0};
     refresh_modules(true);  // every library the application loaded before this one
     void** table = const_cast<void**>(env->functions);
     const bool jni_ok = install_jni_wrappers(table, platform, region != nullptr ? region + kArenaBytes : nullptr,
@@ -832,5 +894,8 @@ extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void* vm_pointe
     install_vm_wrappers(const_cast<void**>(vm->functions), platform);
     oldapp_log_print(kLogInfo, kTag, "installed: jni=%ld arena=%ld", static_cast<long>(jni_ok),
                      static_cast<long>(g_arena_ready));
+    const unsigned art_slots = jni_ok && region != nullptr ? rewrite_art_dlsym() : 0;
+    oldapp_log_print(kLogInfo, kTag, "native-method thunks: ready %ld, libart's dlsym rewritten %ld",
+                     static_cast<long>(jni_ok && region != nullptr ? thunk_count() : 0), static_cast<long>(art_slots));
     return kJniVersion;
 }

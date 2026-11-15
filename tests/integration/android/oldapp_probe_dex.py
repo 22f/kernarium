@@ -15,10 +15,16 @@ the work and this module only lays out a class with several methods. The Java it
         public static native String run(String options);
         public static byte[] payload() { return PAYLOAD.getBytes(); }
         public static int echo(byte[] data) { return data.length; }
+        public static int spin(int n) { int i = 0; while (i < n) { empty(); i++; } return i; }
+        public static native int tick(), tickArm(), tickReg(), tickRegArm(), recurse(int depth), abi0();
+        public static native void throws_(), empty();
+        ... the argument and result types the thunks must carry through (NATIVES below)
     }
 
 `payload` is the byte[] the native code reads the way a Dalvik-era application does; `echo` is what it
-passes the array back to.
+passes the array back to. The other native methods are what the native code calls to see the end of a native
+method (blocks that end when it returns) and that the thunks pass every argument and result through; `spin` is the
+loop that times a native call.
 """
 
 from __future__ import annotations
@@ -37,6 +43,17 @@ SYSTEM = "Ljava/lang/System;"
 BYTES = "[B"
 ACC_STATIC = 0x8
 ACC_NATIVE = 0x100
+ABI12 = ("I", "J", "D", "F", "I", "J", "D", "F", "I", "I", "I", "I")  # 64-bit arguments past the registers, aligned
+#: (name, return type, parameters) of the static native methods besides `run`. tick/tickArm are bound by name (Thumb and
+#: ARM functions of the library), tickReg/tickRegArm and abi12Arm by RegisterNatives.
+NATIVES = (
+    ("tick", "I", ()), ("tickArm", "I", ()), ("tickReg", "I", ()), ("tickRegArm", "I", ()),
+    ("recurse", "I", ("I",)), ("throwing", "V", ()), ("empty", "V", ()),
+    ("abi0", "I", ()), ("abi12", "J", ABI12), ("abi12Arm", "J", ABI12),
+    ("retZ", "Z", ("Z",)), ("retB", "B", ("B",)), ("retC", "C", ("C",)), ("retS", "S", ("S",)), ("retI", "I", ("I",)),
+    ("retJ", "J", ("J",)), ("retF", "F", ("F",)), ("retD", "D", ("D",)), ("retL", base.STRING, (base.STRING,)),
+    ("retV", "V", ("I",)), ("readV", "I", ()),
+)
 
 
 def build_dex() -> bytes:
@@ -54,7 +71,9 @@ def build_dex() -> bytes:
     load_library = pools.method(SYSTEM, "loadLibrary", "V", (base.STRING,))
     set_result = pools.method(base.RECEIVER, "setResultData", "V", (base.STRING,))
     get_bytes = pools.method(base.STRING, "getBytes", BYTES)
-    for item in ("V", "I", BYTES):
+    natives = {name: pools.method(owner, name, result, parameters) for name, result, parameters in NATIVES}
+    spin = pools.method(owner, "spin", "I", ("I",))
+    for item in ("V", "I", BYTES, "Z", "B", "C", "S", "J", "F", "D"):
         pools.type(item)
     for text in ("shim", "koldprobe", "opts", PAYLOAD):
         pools.string(text)
@@ -91,6 +110,17 @@ def build_dex() -> bytes:
     echo_body.op("array-length", 0, 1)
     echo_body.op("return", 0)
 
+    # v0 the counter, v2 the argument n: the loop that calls the empty native method n times.
+    spin_body = base.Code(registers=3, ins=1, outs=0)
+    spin_body.op("const/4", 0, 0)
+    spin_body.label("loop")
+    spin_body.op("if-ge", 0, 2, "done")
+    spin_body.op("invoke-static", natives["empty"])
+    spin_body.op("add-int/lit8", 0, 0, 1)
+    spin_body.op("goto/16", "loop")
+    spin_body.label("done")
+    spin_body.op("return", 0)
+
     pools.finish()
     string_count, type_count = len(pools.sorted_strings), len(pools.sorted_types)
     proto_count, method_count = len(pools.sorted_protos), len(pools.sorted_methods)
@@ -122,7 +152,7 @@ def build_dex() -> bytes:
     if list_offsets:
         sections.append((base.TYPE_TYPE_LIST, len(list_offsets), first))
 
-    bodies = {init: constructor, on_receive: receive, payload: payload_body, echo: echo_body}
+    bodies = {init: constructor, on_receive: receive, payload: payload_body, echo: echo_body, spin: spin_body}
     code_offsets: dict[object, int] = {}
     first_code = None
     for method, body in bodies.items():
@@ -145,7 +175,9 @@ def build_dex() -> bytes:
         ((pools.method_id(init), base.ACC_PUBLIC | base.ACC_CONSTRUCTOR, code_offsets[init]),
          (pools.method_id(run), base.ACC_PUBLIC | ACC_STATIC | ACC_NATIVE, 0),
          (pools.method_id(payload), base.ACC_PUBLIC | ACC_STATIC, code_offsets[payload]),
-         (pools.method_id(echo), base.ACC_PUBLIC | ACC_STATIC, code_offsets[echo])))
+         (pools.method_id(echo), base.ACC_PUBLIC | ACC_STATIC, code_offsets[echo]),
+         (pools.method_id(spin), base.ACC_PUBLIC | ACC_STATIC, code_offsets[spin]),
+         *((pools.method_id(method), base.ACC_PUBLIC | ACC_STATIC | ACC_NATIVE, 0) for method in natives.values())))
     virtual = [(pools.method_id(on_receive), base.ACC_PUBLIC, code_offsets[on_receive])]
     class_data_offset = data_off + len(data)
     data += base.uleb128(0) + base.uleb128(0) + base.uleb128(len(direct)) + base.uleb128(len(virtual))

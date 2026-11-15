@@ -47,6 +47,7 @@ void build(Image& image) {
     sym[5] = {sym[2].st_name, 0x1234, 4, 0x12, 0, 7};  // "free" again, but defined by the library itself
     sym[6] = {name_at(image, cursor, "_ZdlPvRKSt9nothrow_t"), 0, 0, 0x12, 0, 0};
     sym[7] = {name_at(image, cursor, "strdup"), 0, 0, 0x12, 0, 0};
+    sym[8] = {name_at(image, cursor, "dlsym"), 0, 0, 0x12, 0, 0};
     Elf32Rel* rel = image.at<Elf32Rel>(kRelDyn);
     rel[0] = {0x500, (1u << 8) | kRArmGlobDat};        // malloc
     rel[1] = {0x504, (3u << 8) | kRArmAbs32};          // foo: not an import
@@ -57,6 +58,7 @@ void build(Image& image) {
     jmp[1] = {0x604, (4u << 8) | kRArmJumpSlot};       // operator new
     jmp[2] = {0x608, (5u << 8) | kRArmJumpSlot};       // the library's own free: left alone
     jmp[3] = {0x60c, (6u << 8) | kRArmJumpSlot};       // operator delete (nothrow)
+    jmp[4] = {0x610, (8u << 8) | kRArmJumpSlot};       // dlsym: libart's symbol lookup
     Elf32Dyn* dyn = image.at<Elf32Dyn>(kDynamic);
     int i = 0;
     dyn[i++] = {6, kSym};
@@ -65,7 +67,7 @@ void build(Image& image) {
     dyn[i++] = {17, kRelDyn};
     dyn[i++] = {18, 4 * sizeof(Elf32Rel)};
     dyn[i++] = {23, kJmpRel};
-    dyn[i++] = {2, 4 * sizeof(Elf32Rel)};
+    dyn[i++] = {2, 5 * sizeof(Elf32Rel)};
     dyn[i++] = {0, 0};
     image.phdrs[0] = {kPtLoad, 0, 0, 0, 0x1000, 0x1000, kPfR | kPfX, 0x1000};
     image.phdrs[1] = {kPtLoad, 0x1000, 0x1000, 0x1000, 0x1000, 0x1000, kPfR | kPfW, 0x1000};
@@ -137,6 +139,18 @@ void check_defined_symbols() {
             "libc's slots for its own free are found when asked for");
 }
 
+// libart's dlsym is the one slot outside the allocator masks: only its own mask finds it.
+void check_dlsym_import() {
+    Image image;
+    build(image);
+    ImportSlot slots[16];
+    const uintptr_t bias = reinterpret_cast<uintptr_t>(image.bytes);
+    const size_t found = scan_imports(bias, image.phdrs, 4, slots, 16, kDlsymImport, false);
+    require(found == 1 && slots[0].vaddr == 0x610 && slots[0].what == Import::kDlsym, "the dlsym slot");
+    require(scan_imports(bias, image.phdrs, 4, slots, 16, kAppConsumers | kProducers | kPlatformConsumers, false) == 5,
+            "and no allocator mask picks it up");
+}
+
 void check_no_dynamic_section() {
     Image image;
     build(image);
@@ -158,13 +172,13 @@ void check_corrupt_name() {
 
 void check_symbol_names() {
     Import what;
-    for (const char* name : {"malloc", "free", "calloc", "realloc", "strdup", "strndup", "reallocarray", "malloc_usable_size",
+    for (const char* name : {"malloc", "free", "calloc", "realloc", "strdup", "strndup", "reallocarray", "malloc_usable_size", "dlsym",
                              "_Znwj", "_Znaj",
                              "_ZnwjRKSt9nothrow_t", "_ZnajRKSt9nothrow_t", "_ZdlPv", "_ZdaPv",
                              "_ZdlPvRKSt9nothrow_t", "_ZdaPvRKSt9nothrow_t", "_ZdlPvj", "_ZdaPvj"}) {
         require(import_for_symbol(name, &what), name);
     }
-    for (const char* name : {"memalign", "posix_memalign", "mallinfo", "dlopen", "Znwj", ""}) {
+    for (const char* name : {"memalign", "posix_memalign", "mallinfo", "dlopen", "dlsymx", "Znwj", ""}) {
         require(!import_for_symbol(name, &what), name);
     }
 }
@@ -183,6 +197,7 @@ int main() {
     check_scan();
     check_capacity();
     check_masks();
+    check_dlsym_import();
     check_realloc_is_in_both_passes();
     check_defined_symbols();
     check_no_dynamic_section();

@@ -46,6 +46,11 @@ struct Platform {
     // address. Without them nothing is intercepted.
     void* (*alloc_baseline)(size_t bytes);
     void (*free_baseline)(void* baseline);
+    // The static native-method thunks (arm32 assembly): the entry of thunk `index`, which jumps to the function the
+    // layer registered for it (thunk_enter/thunk_leave below) with a frame record pushed. Null or zero: no thunks, and
+    // the blocks of a native method end only with their references.
+    void* (*thunk_address)(unsigned index);
+    unsigned thunk_capacity;
 };
 
 struct Counters {
@@ -55,6 +60,12 @@ struct Counters {
     uint32_t conversions;        // shadows turned back into the real array for the runtime
     uint32_t shadows_released;   // blocks of ended threads that were freed later
     uint32_t peak_thread_blocks; // the most live blocks any one thread has held
+    uint32_t ended_by_return;    // references ended by the return of a native method
+    uint32_t max_ended_by_return;  // the most references one return has ended (a native method that made many)
+    uint32_t ended_by_pop;       // ... by PopLocalFrame
+    uint32_t ended_by_detach;    // ... by DetachCurrentThread
+    uint32_t natives_wrapped;    // distinct native functions that got a thunk
+    uint32_t natives_unwrapped;  // application natives that got none (the thunks were all in use)
 };
 
 // `table` is the shared function table (kSlotCount entries), `shadow_region` the memory of the byte[]
@@ -62,9 +73,26 @@ struct Counters {
 // written.
 bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_region, size_t shadow_size);
 
-// The invoke interface: only the "a library may have loaded" notification (is_app_caller is asked for the
-// caller) on GetEnv and the attach calls.
+// The invoke interface: the "a library may have loaded" notification (is_app_caller is asked for the caller) on
+// GetEnv and the attach calls, and the end of a thread's references at DetachCurrentThread.
 bool install_vm_wrappers(void** vm_table, const Platform& platform);
+
+// ---- the end of a native method
+
+// A native method of the application's own library gets a thunk: its entry (an address of thunk_address) pushes a
+// frame record, sets the return address to a stub and jumps to the function, so the blocks the method made end when it
+// returns, as Dalvik's local references did. thunk_for() is the function itself where there is no thunk (not
+// an application function, none left, or the layer's shadows are off).
+void* thunk_for(void* function);
+
+struct ThunkEntry {
+    void* target;      // the function to jump to
+    uint32_t pushed;   // 1: a record was pushed, and the return stub must run thunk_leave
+};
+// The thunk's entry and the return stub, from the assembly (oldapp_thunks.S) and the host tests. `sp` is the stack
+// pointer the native method is entered and left with.
+ThunkEntry thunk_enter(unsigned index, void* return_address, void* sp);
+void* thunk_leave(void* sp);  // the return address thunk_enter was given
 
 bool is_shadow_block(const void* object);
 Counters counters();
@@ -78,3 +106,8 @@ void release_thread_state(void* state);
 void reset_for_test();
 
 }  // namespace oldapp
+
+// What the assembly calls: thunk_enter with the two words of a 64-bit result (the target in r0, the pushed flag in
+// r1), and thunk_leave.
+extern "C" uint64_t oldapp_thunk_enter(unsigned index, void* return_address, void* sp);
+extern "C" void* oldapp_thunk_leave(void* sp);

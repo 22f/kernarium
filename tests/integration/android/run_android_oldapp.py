@@ -74,17 +74,22 @@ BROADCAST_SECONDS = 60
 SEMANTICS = {"write_through": "pass", "identity": "pass", "retained": "pass", "monitor": "pass", "pop": "pass",
              "getline": "pass", "usable_size": "pass", "libc_block": "pass", "table_read_only": "pass",
              "java_fill": "pass", "commit_chunks": "pass", "clone": "pass", "alias_elements": "pass",
-             "alias_critical": "pass"}
+             "alias_critical": "pass", "abi_args": "pass", "abi_returns": "pass", "ends_exception": "pass"}
+#: What the layer adds: the blocks of a native method end when it returns (every row reads the block through the Dalvik
+#: offsets, so it is "fail" where the layer is not loaded, as java_fill_raw is).
+ENDS = ("ends_lazy_thumb", "ends_lazy_arm", "ends_reg_thumb", "ends_reg_arm", "ends_recursion", "ends_onload")
 EXPECTED = {
     "old": {"shim_mapped": "yes", "raw_read": "pass", "passback": "pass", "elements": "pass", "global": "pass",
             "thread_raw": "pass", **SEMANTICS, "java_fill_raw": "pass", "raw_write_java": "pass", "low_heap": "pass",
-            "done": "1"},
+            **dict.fromkeys(ENDS, "pass"), "done": "1"},
     "modern": {"shim_mapped": "no", "raw_read": "fail", "passback": "pass", "elements": "pass", "global": "pass",
-               **SEMANTICS, "java_fill_raw": "fail", "raw_write_java": "skipped", "done": "1"},
+               **SEMANTICS, "java_fill_raw": "fail", "raw_write_java": "skipped", **dict.fromkeys(ENDS, "fail"),
+               "done": "1"},
     # The old application before the layer is loaded (a host-shim run's control, or an image's application that is not
     # switched on): what the layer changes.
     "control": {"shim_mapped": "no", "raw_read": "fail", "passback": "pass", "elements": "pass", "global": "pass",
-                **SEMANTICS, "java_fill_raw": "fail", "raw_write_java": "skipped", "done": "1"},
+                **SEMANTICS, "java_fill_raw": "fail", "raw_write_java": "skipped", **dict.fromkeys(ENDS, "fail"),
+                "done": "1"},
 }
 DATA = re.compile(r'data="(.*)"', re.DOTALL)
 

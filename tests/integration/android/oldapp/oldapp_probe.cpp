@@ -33,6 +33,17 @@
 //   alias_elements  a write through the pointer GetByteArrayElements returned, committed when the pointer says it is a
 //                copy, shows through a second (real) reference to the array
 //   alias_critical  the same through GetPrimitiveArrayCritical, against the array's own pinned pointer
+//   ends_lazy_thumb, ends_lazy_arm, ends_reg_thumb, ends_reg_arm  600 calls of a native method that each get a byte[]
+//                result from Java and read it through the object pointer, never deleting it: the blocks end when the
+//                method returns, as Dalvik's local references did (a Thumb or an ARM function, bound by name or by
+//                RegisterNatives). Past 512 a result would stay the runtime's own reference and the raw read fail
+//   ends_recursion  a native method calls Java, which calls the native method, to a depth of 70 (past the 64 frame
+//                records of a thread): every level's block outlives the calls below it and ends with its own return
+//   ends_onload  the blocks JNI_OnLoad made end when it returns
+//   ends_exception  a native method that returns with an exception pending: the process goes on, the exception arrives
+//   abi_args, abi_returns  a native method gets its arguments (12, with jlong, jdouble and jfloat on the stack) and
+//                returns its result (every type) as without the thunk
+//   empty_us     microseconds for 10^6 calls of an empty native method from a Java loop (recorded, not judged)
 //   monitor      MonitorEnter and MonitorExit accept it
 //   pop          PopLocalFrame hands it out of the frame
 //   getline      getline grows a buffer the application allocated with malloc
@@ -71,6 +82,7 @@ long probe_getline(char**, size_t*, void*) __asm__("getline");
 size_t probe_usable_size(void*) __asm__("malloc_usable_size");
 int probe_pthread_create(unsigned long*, const void*, void* (*)(void*), void*) __asm__("pthread_create");
 int probe_pthread_join(unsigned long, void**) __asm__("pthread_join");
+int probe_clock_gettime(int, long*) __asm__("clock_gettime");  // struct timespec is two longs on bionic
 }
 
 namespace {
@@ -130,7 +142,7 @@ F entry(Env* env, int slot) {
 }
 
 struct Report {
-    char text[1024];
+    char text[2048];
     size_t length = 0;
     void append(const char* piece) {
         for (size_t i = 0; piece[i] != '\0' && length + 1 < sizeof(text); ++i) {
@@ -631,7 +643,276 @@ bool thread_raw_read(Env* env, jclass probe, jmethodID payload) {
     return started && work.ok;
 }
 
+
+// ---- the end of a native method
+
+jmethodID g_payload_id = nullptr;  // Probe.payload()[B
+jmethodID g_recurse_id = nullptr;  // Probe.recurse(I)I
+jint g_retv = 0;                   // what retV(I)V stored
+bool g_onload_made = false;        // JNI_OnLoad got its byte[] results
+constexpr int kTicks = 600;        // past Dalvik's 512 local references
+constexpr int kOnLoadBlocks = 400;
+constexpr jint kAbi0 = 0x1234abc;
+
+void decimal(char* out, uint32_t value) {
+    char digits[11];
+    int n = 0;
+    do {
+        digits[n++] = static_cast<char>('0' + value % 10);
+        value /= 10;
+    } while (value != 0);
+    for (int i = 0; i < n; ++i) {
+        out[i] = digits[n - 1 - i];
+    }
+    out[n] = '\0';
+}
+
+uint64_t now_us() {
+    long t[2] = {0, 0};
+    probe_clock_gettime(1, t);  // CLOCK_MONOTONIC
+    return static_cast<uint64_t>(t[0]) * 1000000u + static_cast<uint64_t>(t[1]) / 1000u;
+}
+
+// What a game's native method does: it gets a byte[] from Java, reads it at the Dalvik offsets and never deletes it
+// (Dalvik freed it when the method returned).
+jint tick_body(Env* env, jclass probe) {
+    jobject array = entry<jobject (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kObject, kVarargs))(
+        env, probe, g_payload_id);
+    Report scratch;
+    return array != nullptr && raw_read(scratch, array) ? 1 : 0;
+}
+
+// A level that calls Java, which calls the native method again: the block is read before and after the call below.
+jint recurse_body(Env* env, jclass probe, jint depth) {
+    const auto call_object = entry<jobject (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kObject, kVarargs));
+    const auto call_int = entry<jint (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kInt, kVarargs));
+    const auto array_length = entry<jsize (*)(Env*, jarray)>(env, slot::GetArrayLength);
+    const auto exception_check = entry<jboolean (*)(Env*)>(env, slot::ExceptionCheck);
+    jobject array = call_object(env, probe, g_payload_id);
+    Report scratch;
+    bool ok = array != nullptr && raw_read(scratch, array);
+    jint inner = depth > 0 ? call_int(env, probe, g_recurse_id, depth - 1) : 0;
+    ok = ok && inner >= 0 && !exception_check(env) && array_length(env, array) == kPayloadLength && raw_read(scratch, array);
+    return ok ? inner + 1 : -1;
+}
+
+jlong abi_sum(jint a, jlong b, jdouble c, jfloat d, jint e, jlong f, jdouble g, jfloat h, jint i, jint j, jint k, jint l) {
+    // The conversions go through jint: a conversion to a 64-bit integer is a library call, and this library links none.
+    return jlong{a} + 3 * b + jlong{static_cast<jint>(c * 8.0)} + jlong{static_cast<jint>(d * 16.0f)} + 5 * jlong{e} + 7 * f +
+           jlong{static_cast<jint>(g * 32.0)} + jlong{static_cast<jint>(h * 64.0f)} + 11 * jlong{i} + 13 * jlong{j} +
+           17 * jlong{k} + 19 * jlong{l};
+}
+
+jint tick_reg(Env* env, jclass probe) { return tick_body(env, probe); }
+__attribute__((target("arm"))) jint tick_reg_arm(Env* env, jclass probe) { return tick_body(env, probe); }
+__attribute__((target("arm"))) jlong abi12_arm(Env*, jclass, jint a, jlong b, jdouble c, jfloat d, jint e, jlong f, jdouble g,
+                                               jfloat h, jint i, jint j, jint k, jint l) {
+    return abi_sum(a, b, c, d, e, f, g, h, i, j, k, l);
+}
+
+bool abi_args(Env* env, jclass probe) {
+    const auto static_method = entry<jmethodID (*)(Env*, jclass, const char*, const char*)>(env, slot::GetStaticMethodID);
+    const auto call_int = entry<jint (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kInt, kVarargs));
+    const auto call_long = entry<jlong (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kLong, kVarargs));
+    const auto exception_check = entry<jboolean (*)(Env*)>(env, slot::ExceptionCheck);
+    const char* const signature = "(IJDFIJDFIIII)J";
+    jmethodID zero = static_method(env, probe, "abi0", "()I");
+    jmethodID thumb = static_method(env, probe, "abi12", signature);
+    jmethodID arm = static_method(env, probe, "abi12Arm", signature);
+    if (zero == nullptr || thumb == nullptr || arm == nullptr) {
+        return false;
+    }
+    const jlong expected = abi_sum(7, 0x100000001LL, 2.5, 3.25f, -9, -0x200000003LL, 6.75, 0.5f, 100, -200, 300, -400);
+    bool ok = call_int(env, probe, zero) == kAbi0;
+    jmethodID methods[2] = {thumb, arm};
+    for (jmethodID method : methods) {
+        ok = ok && call_long(env, probe, method, 7, 0x100000001LL, 2.5, 3.25f, -9, -0x200000003LL, 6.75, 0.5f, 100, -200,
+                             300, -400) == expected;
+    }
+    return ok && !exception_check(env);
+}
+
+bool abi_returns(Env* env, jclass probe) {
+    const auto static_method = entry<jmethodID (*)(Env*, jclass, const char*, const char*)>(env, slot::GetStaticMethodID);
+    const auto exception_check = entry<jboolean (*)(Env*)>(env, slot::ExceptionCheck);
+    const auto same_object = entry<jboolean (*)(Env*, jobject, jobject)>(env, slot::IsSameObject);
+    const auto new_string = entry<jstring (*)(Env*, const char*)>(env, slot::NewStringUTF);
+    jmethodID z = static_method(env, probe, "retZ", "(Z)Z"), b = static_method(env, probe, "retB", "(B)B"),
+              c = static_method(env, probe, "retC", "(C)C"), s = static_method(env, probe, "retS", "(S)S"),
+              i = static_method(env, probe, "retI", "(I)I"), j = static_method(env, probe, "retJ", "(J)J"),
+              f = static_method(env, probe, "retF", "(F)F"), d = static_method(env, probe, "retD", "(D)D"),
+              l = static_method(env, probe, "retL", "(Ljava/lang/String;)Ljava/lang/String;"),
+              v = static_method(env, probe, "retV", "(I)V"), r = static_method(env, probe, "readV", "()I");
+    if (!z || !b || !c || !s || !i || !j || !f || !d || !l || !v || !r) {
+        return false;
+    }
+    bool ok = entry<jboolean (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kBoolean, kVarargs))(env, probe, z, 1) == 1;
+    ok = ok && entry<jbyte (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kByte, kVarargs))(env, probe, b, -5) == -5;
+    ok = ok && entry<jchar (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kChar, kVarargs))(env, probe, c, 0xabcd) == 0xabcd;
+    ok = ok && entry<jshort (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kShort, kVarargs))(env, probe, s, -1234) == -1234;
+    ok = ok && entry<jint (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kInt, kVarargs))(env, probe, i, 0x12345678) == 0x12345678;
+    ok = ok && entry<jlong (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kLong, kVarargs))(
+                   env, probe, j, 0x123456789abcdefLL) == 0x123456789abcdefLL;
+    ok = ok && entry<jfloat (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kFloat, kVarargs))(env, probe, f, 1.5f) == 1.5f;
+    ok = ok && entry<jdouble (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kDouble, kVarargs))(env, probe, d, 2.25) == 2.25;
+    jstring text = new_string(env, "thunk");
+    jobject echoed = entry<jobject (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kObject, kVarargs))(env, probe, l, text);
+    ok = ok && echoed != nullptr && same_object(env, echoed, text);
+    entry<void (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kVoid, kVarargs))(env, probe, v, 91);
+    ok = ok && entry<jint (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kInt, kVarargs))(env, probe, r) == 91;
+    return ok && !exception_check(env);
+}
+
+// The cases of the end of a native method (see the list at the top).
+void ends_cases(Report& report, Env* env, jclass probe) {
+    const auto static_method = entry<jmethodID (*)(Env*, jclass, const char*, const char*)>(env, slot::GetStaticMethodID);
+    const auto call_int = entry<jint (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kInt, kVarargs));
+    const auto call_object = entry<jobject (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kObject, kVarargs));
+    const auto call_void = entry<void (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kVoid, kVarargs));
+    const auto delete_local = entry<void (*)(Env*, jobject)>(env, slot::DeleteLocalRef);
+    const auto exception_check = entry<jboolean (*)(Env*)>(env, slot::ExceptionCheck);
+    const auto exception_clear = entry<void (*)(Env*)>(env, slot::ExceptionClear);
+    g_payload_id = static_method(env, probe, "payload", "()[B");
+    g_recurse_id = static_method(env, probe, "recurse", "(I)I");
+    const auto ticks = [&](const char* name) {
+        jmethodID id = static_method(env, probe, name, "()I");
+        bool ok = id != nullptr && g_payload_id != nullptr;
+        for (int i = 0; ok && i < kTicks; ++i) {
+            ok = call_int(env, probe, id) == 1;
+        }
+        ok = ok && !exception_check(env);
+        exception_clear(env);
+        return ok;
+    };
+    report.verdict("ends_lazy_thumb", ticks("tick"));
+    report.verdict("ends_lazy_arm", ticks("tickArm"));
+    report.verdict("ends_reg_thumb", ticks("tickReg"));
+    report.verdict("ends_reg_arm", ticks("tickRegArm"));
+    report.verdict("ends_recursion", g_recurse_id != nullptr && call_int(env, probe, g_recurse_id, 70) == 71 && !exception_check(env));
+    exception_clear(env);
+
+    // JNI_OnLoad made 400 results and returned: the 400 made here would be past the limit if those still counted.
+    {
+        bool ok = g_onload_made && g_payload_id != nullptr;
+        jobject held[kOnLoadBlocks] = {};
+        for (int i = 0; ok && i < kOnLoadBlocks; ++i) {
+            Report scratch;
+            held[i] = call_object(env, probe, g_payload_id);
+            ok = held[i] != nullptr && raw_read(scratch, held[i]);
+        }
+        for (jobject reference : held) {
+            if (reference != nullptr) {
+                delete_local(env, reference);
+            }
+        }
+        report.verdict("ends_onload", ok && !exception_check(env));
+        exception_clear(env);
+    }
+
+    // A native method that returns with an exception pending.
+    {
+        jmethodID throwing = static_method(env, probe, "throwing", "()V");
+        jmethodID zero = static_method(env, probe, "abi0", "()I");
+        bool raised = false;
+        if (throwing != nullptr) {
+            call_void(env, probe, throwing);
+            raised = exception_check(env) != 0;
+            exception_clear(env);
+        }
+        report.verdict("ends_exception", raised && zero != nullptr && call_int(env, probe, zero) == kAbi0 && !exception_check(env));
+        exception_clear(env);
+    }
+    report.verdict("abi_args", abi_args(env, probe));
+    exception_clear(env);
+    report.verdict("abi_returns", abi_returns(env, probe));
+    exception_clear(env);
+
+    // The cost of a native call: an empty native method called from a Java loop, the least of three rounds.
+    {
+        jmethodID spin = static_method(env, probe, "spin", "(I)I");
+        uint64_t best = ~uint64_t{0};
+        for (int round = 0; spin != nullptr && round < 3; ++round) {
+            const uint64_t start = now_us();
+            call_int(env, probe, spin, 1000000);
+            const uint64_t elapsed = now_us() - start;
+            best = elapsed < best ? elapsed : best;
+        }
+        char text[12] = "none";
+        if (best != ~uint64_t{0}) {
+            decimal(text, static_cast<uint32_t>(best));
+        }
+        report.line("empty_us", text);
+        exception_clear(env);
+    }
+}
+
 }  // namespace
+
+// The native methods the cases call. tick and tickArm are bound by name (a Thumb and an ARM function); the others
+// that are not listed in JNI_OnLoad are bound by name too.
+extern "C" __attribute__((visibility("default"))) jint Java_org_example_andarium_oldappprobe_Probe_tick(Env* env, jclass probe) {
+    return tick_body(env, probe);
+}
+extern "C" __attribute__((visibility("default"), target("arm"))) jint Java_org_example_andarium_oldappprobe_Probe_tickArm(
+    Env* env, jclass probe) {
+    return tick_body(env, probe);
+}
+extern "C" __attribute__((visibility("default"))) jint Java_org_example_andarium_oldappprobe_Probe_recurse(Env* env, jclass probe,
+                                                                                                         jint depth) {
+    return recurse_body(env, probe, depth);
+}
+// A byte[] result, a portable check of it, an exception, and the return: the layer ends the block with an exception pending.
+extern "C" __attribute__((visibility("default"))) void Java_org_example_andarium_oldappprobe_Probe_throwing(Env* env,
+                                                                                                            jclass probe) {
+    jobject array = entry<jobject (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kObject, kVarargs))(
+        env, probe, g_payload_id);
+    const jsize length = array != nullptr ? entry<jsize (*)(Env*, jarray)>(env, slot::GetArrayLength)(env, array) : -1;
+    jclass exception = entry<jclass (*)(Env*, const char*)>(env, slot::FindClass)(env, "java/lang/RuntimeException");
+    if (exception != nullptr && length == kPayloadLength) {
+        entry<jint (*)(Env*, jclass, const char*)>(env, slot::ThrowNew)(env, exception, "thunk probe");
+    }
+}
+extern "C" __attribute__((visibility("default"))) void Java_org_example_andarium_oldappprobe_Probe_empty(Env*, jclass) {}
+extern "C" __attribute__((visibility("default"))) jint Java_org_example_andarium_oldappprobe_Probe_abi0(Env*, jclass) {
+    return kAbi0;
+}
+extern "C" __attribute__((visibility("default"))) jlong Java_org_example_andarium_oldappprobe_Probe_abi12(
+    Env*, jclass, jint a, jlong b, jdouble c, jfloat d, jint e, jlong f, jdouble g, jfloat h, jint i, jint j, jint k, jint l) {
+    return abi_sum(a, b, c, d, e, f, g, h, i, j, k, l);
+}
+extern "C" __attribute__((visibility("default"))) jboolean Java_org_example_andarium_oldappprobe_Probe_retZ(Env*, jclass, jboolean v) {
+    return v;
+}
+extern "C" __attribute__((visibility("default"))) jbyte Java_org_example_andarium_oldappprobe_Probe_retB(Env*, jclass, jbyte v) {
+    return v;
+}
+extern "C" __attribute__((visibility("default"))) jchar Java_org_example_andarium_oldappprobe_Probe_retC(Env*, jclass, jchar v) {
+    return v;
+}
+extern "C" __attribute__((visibility("default"))) jshort Java_org_example_andarium_oldappprobe_Probe_retS(Env*, jclass, jshort v) {
+    return v;
+}
+extern "C" __attribute__((visibility("default"))) jint Java_org_example_andarium_oldappprobe_Probe_retI(Env*, jclass, jint v) {
+    return v;
+}
+extern "C" __attribute__((visibility("default"))) jlong Java_org_example_andarium_oldappprobe_Probe_retJ(Env*, jclass, jlong v) {
+    return v;
+}
+extern "C" __attribute__((visibility("default"))) jfloat Java_org_example_andarium_oldappprobe_Probe_retF(Env*, jclass, jfloat v) {
+    return v;
+}
+extern "C" __attribute__((visibility("default"))) jdouble Java_org_example_andarium_oldappprobe_Probe_retD(Env*, jclass, jdouble v) {
+    return v;
+}
+extern "C" __attribute__((visibility("default"))) jstring Java_org_example_andarium_oldappprobe_Probe_retL(Env*, jclass, jstring v) {
+    return v;
+}
+extern "C" __attribute__((visibility("default"))) void Java_org_example_andarium_oldappprobe_Probe_retV(Env*, jclass, jint v) {
+    g_retv = v;
+}
+extern "C" __attribute__((visibility("default"))) jint Java_org_example_andarium_oldappprobe_Probe_readV(Env*, jclass) {
+    return g_retv;
+}
 
 // Probe.run(String options): the native method of the Java receiver; the text it returns is the report.
 extern "C" __attribute__((visibility("default"))) jstring Java_org_example_andarium_oldappprobe_Probe_run(
@@ -700,6 +981,7 @@ extern "C" __attribute__((visibility("default"))) jstring Java_org_example_andar
         report.verdict("table_read_only", vm != nullptr && mapped_read_only(env->functions) && mapped_read_only(vm->functions));
     }
     report.verdict("low_heap", low_heap());
+    ends_cases(report, env, probe);
 
     report.line("done", "1");
     if (options != nullptr) {
@@ -711,7 +993,33 @@ extern "C" __attribute__((visibility("default"))) jstring Java_org_example_andar
 extern "C" __attribute__((visibility("default"))) jint JNI_OnLoad(Vm* vm, void*) {
     // The ordinary first call of a JNI library: it is also what makes the old-application
     // layer look at this library's allocator imports.
-    void* env = nullptr;
-    entry<jint (*)(Vm*, void**, jint)>(reinterpret_cast<Env*>(vm), vmslot::GetEnv)(vm, &env, 0x00010006);
+    void* env_pointer = nullptr;
+    entry<jint (*)(Vm*, void**, jint)>(reinterpret_cast<Env*>(vm), vmslot::GetEnv)(vm, &env_pointer, 0x00010006);
+    Env* env = static_cast<Env*>(env_pointer);
+    if (env == nullptr) {
+        return 0x00010006;
+    }
+    // Two natives are bound here (RegisterNatives): a Thumb and an ARM function. The results this call gets from
+    // Java are never deleted: they must end with JNI_OnLoad.
+    jclass probe = entry<jclass (*)(Env*, const char*)>(env, slot::FindClass)(env, "org/example/andarium/oldappprobe/Probe");
+    if (probe != nullptr) {
+        const NativeMethod methods[] = {
+            {"tickReg", "()I", reinterpret_cast<void*>(&tick_reg)},
+            {"tickRegArm", "()I", reinterpret_cast<void*>(&tick_reg_arm)},
+            {"abi12Arm", "(IJDFIJDFIIII)J", reinterpret_cast<void*>(&abi12_arm)},
+        };
+        entry<jint (*)(Env*, jclass, const NativeMethod*, jint)>(env, slot::RegisterNatives)(env, probe, methods, 3);
+        jmethodID payload = entry<jmethodID (*)(Env*, jclass, const char*, const char*)>(env, slot::GetStaticMethodID)(
+            env, probe, "payload", "()[B");
+        if (payload != nullptr) {
+            const auto call_object = entry<jobject (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kObject, kVarargs));
+            for (int i = 0; i < kOnLoadBlocks; ++i) {
+                g_onload_made = call_object(env, probe, payload) != nullptr;
+            }
+        }
+        if (entry<jboolean (*)(Env*)>(env, slot::ExceptionCheck)(env)) {
+            entry<void (*)(Env*)>(env, slot::ExceptionClear)(env);
+        }
+    }
     return 0x00010006;
 }

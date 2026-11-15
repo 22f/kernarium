@@ -17,7 +17,10 @@ constexpr uint32_t kKindPoolBytes = 32768;
 constexpr uint32_t kMethodSlots = 8192;
 constexpr uint32_t kFieldSlots = 2048;
 constexpr unsigned kProbeLimit = 32;
-constexpr unsigned kMaxBlocks = 512;  // Dalvik's limit on local references; a thread has no more live shadows
+constexpr unsigned kMaxBlocks = 512;  // Dalvik's limit on local references; a thread has no more live references
+constexpr unsigned kMaxFrames = 64;   // frame records of a thread (PushLocalFrame and native invocations)
+constexpr unsigned kMaxThunks = 1024; // native functions that can get a thunk
+constexpr unsigned kRegisterChunk = 32;  // RegisterNatives methods copied at a time
 constexpr uint32_t kDalvikArrayClass = 0x5a324241u;
 constexpr uint32_t kBlockLive = 0xb10c11feu;
 constexpr uint32_t kBlockDead = 0xdeadb10cu;
@@ -73,10 +76,25 @@ struct MethodInfo {
     const char* more;  // kinds from kInlineParams on
 };
 
+// A frame of the thread's local references: the entries below `height` belong to outer frames.
+enum FrameKind : uint8_t { kFramePush = 1, kFrameNative = 2 };
+struct FrameRecord {
+    uint16_t height;
+    uint8_t kind;
+    void* lr;  // kFrameNative: the return address into the runtime
+    void* sp;  // kFrameNative: the stack pointer the native method was entered with
+};
+
+// The references the application holds to byte[] blocks, in the order it got them: one entry for each result, so a
+// block the same array was returned as twice has two entries (`refs` counts them), as Dalvik had two local references.
 struct ThreadState {
     BlockHeader* blocks[kMaxBlocks];
     unsigned count;
     uint32_t bytes;  // the capacity of the live blocks
+    Env* env;        // this thread's environment, as of the last entry made (the ends of references need it)
+    FrameRecord frames[kMaxFrames];
+    unsigned frame_count;
+    unsigned frame_overflow;  // PushLocalFrame calls past kMaxFrames: their pops end nothing
 };
 
 struct Globals {
@@ -94,6 +112,14 @@ struct Globals {
     uint32_t peak_logged;      // the highest block count that has been logged, and when
     uint32_t peak_logged_ms;
     uint32_t lock;
+    uint32_t thunk_lock;
+    void* thunk_target[kMaxThunks];
+    unsigned thunk_count;
+    unsigned thunk_capacity;
+    uint32_t thunk_none_logged;   // the first application native that got no thunk has been logged
+    uint32_t ended_logged;        // the first block that ended at a return has been logged
+    uint32_t ended_max_logged;    // the highest number of references one return has ended that has been logged, and when
+    uint32_t ended_max_logged_ms;
     uint32_t kind_pool_used;
     char kind_pool[kKindPoolBytes];
     MethodInfo methods[kMethodSlots];
@@ -163,6 +189,33 @@ void free_block(Env* env, BlockHeader* header) {
     }
     g.shadow_arena.release(header);
     __atomic_fetch_sub(&g.counters.shadows_live, 1u, __ATOMIC_RELAXED);
+}
+
+// A reference of the thread ended: the block goes with its last reference. A thread that has made entries has an
+// environment; without one (it cannot be), the block waits for the next wrapped call that has one.
+void release_entry(Env* env, ThreadState* state, BlockHeader* header) {
+    if (--header->refs > 0) {
+        return;
+    }
+    state->bytes -= header->capacity;
+    if (env != nullptr) {
+        free_block(env, header);
+        return;
+    }
+    BlockHeader* head = __atomic_load_n(&g.pending, __ATOMIC_RELAXED);
+    do {
+        header->next = head;
+    } while (!__atomic_compare_exchange_n(&g.pending, &head, header, true, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+}
+
+// Ends the entries above `height`, the newest first; returns how many.
+unsigned end_entries(ThreadState* state, unsigned height) {
+    unsigned ended = 0;
+    while (state->count > height) {
+        release_entry(state->env, state, state->blocks[--state->count]);
+        ++ended;
+    }
+    return ended;
 }
 
 // The blocks of ended threads: their global references need an environment to be deleted.
@@ -418,19 +471,21 @@ jobject make_shadow(Env* env, jobject local) {
         return nullptr;
     }
     const size_t bytes = static_cast<size_t>(length);
+    if (state->count >= kMaxBlocks) {
+        note_declined(state, "the first byte[] result stayed a real reference (thread limit); blocks and bytes held:");
+        return nullptr;
+    }
     for (unsigned i = 0; i < kReuseWindow && i < state->count; ++i) {
         BlockHeader* known = state->blocks[state->count - 1 - i];
         if (known->capacity == bytes &&
             original<jboolean (*)(Env*, jobject, jobject)>(slot::IsSameObject)(env, local, known->global) != 0) {
             ++known->refs;
+            state->blocks[state->count++] = known;
+            state->env = env;
             original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, local);
             sync_all(env, known);  // what Java wrote meanwhile shows, and what the application wrote reaches the array
             return array_of(known);
         }
-    }
-    if (state->count >= kMaxBlocks) {
-        note_declined(state, "the first byte[] result stayed a real reference (thread limit); blocks and bytes held:");
-        return nullptr;
     }
     const size_t need = kBlockHead + offsetof(DalvikArray, data) + bytes + kBlockTail;
     uint8_t* raw = static_cast<uint8_t*>(g.shadow_arena.allocate(need));
@@ -475,6 +530,7 @@ jobject make_shadow(Env* env, jobject local) {
     }
     __builtin_memset(block->data + bytes, 0, kBlockTail);
     state->blocks[state->count++] = header;
+    state->env = env;
     state->bytes += static_cast<uint32_t>(bytes);
     original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, local);
     __atomic_fetch_add(&g.counters.shadows_live, 1u, __ATOMIC_RELAXED);
@@ -1062,6 +1118,8 @@ jint w_MonitorExit(Env* e, jobject o) {
     enter_any(e);
     return original<jint (*)(Env*, jobject)>(slot::MonitorExit)(e, conv(o));
 }
+// The entry of the block that is the newest: DeleteLocalRef takes one reference of the block, and the frames above
+// the entry it leaves are one entry shorter.
 void w_DeleteLocalRef(Env* e, jobject o) {
     enter_any(e);
     if (is_shadow(o)) {
@@ -1072,12 +1130,17 @@ void w_DeleteLocalRef(Env* e, jobject o) {
         }
         for (unsigned i = state->count; i > 0; --i) {
             if (state->blocks[i - 1] == header) {
-                if (--header->refs > 0) {
-                    return;  // the same array was returned more than once: the block goes with its last reference
+                const unsigned index = i - 1;
+                for (unsigned k = index; k + 1 < state->count; ++k) {
+                    state->blocks[k] = state->blocks[k + 1];
                 }
-                state->blocks[i - 1] = state->blocks[--state->count];
-                state->bytes -= header->capacity;
-                free_block(e, header);
+                --state->count;
+                for (unsigned f = 0; f < state->frame_count; ++f) {
+                    if (state->frames[f].height > index) {
+                        --state->frames[f].height;
+                    }
+                }
+                release_entry(e, state, header);  // the block goes with its last reference
                 return;
             }
         }
@@ -1085,15 +1148,80 @@ void w_DeleteLocalRef(Env* e, jobject o) {
     }
     original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(e, o);
 }
-// A shadow lives in no reference table, so popping the frame cannot take it: the original pop runs with no
-// result and the same block is returned.
+
+// PushLocalFrame opens a frame of the thread's references: PopLocalFrame ends the entries made in it.
+jint w_PushLocalFrame(Env* e, jint capacity) {
+    enter_any(e);
+    const jint result = original<jint (*)(Env*, jint)>(slot::PushLocalFrame)(e, capacity);
+    if (result != JNI_OK) {
+        return result;
+    }
+    ThreadState* state = thread();
+    if (state == nullptr) {
+        return result;
+    }
+    if (state->frame_count < kMaxFrames) {
+        state->frames[state->frame_count++] = FrameRecord{static_cast<uint16_t>(state->count), kFramePush, nullptr, nullptr};
+    } else {
+        ++state->frame_overflow;
+    }
+    return result;
+}
+// A shadow lives in no reference table, so popping the frame cannot take it: the original pop runs with no result
+// and the same block is returned, which gets an entry in the outer frame as the real result would. The entries made
+// in the frame end with it.
 jobject w_PopLocalFrame(Env* e, jobject result) {
     enter_any(e);
-    if (is_shadow(result)) {
-        original<jobject (*)(Env*, jobject)>(slot::PopLocalFrame)(e, nullptr);
+    const bool shadow_result = is_shadow(result);
+    BlockHeader* keep = shadow_result ? live_header(result) : nullptr;
+    jobject returned = original<jobject (*)(Env*, jobject)>(slot::PopLocalFrame)(e, shadow_result ? nullptr : result);
+    ThreadState* state = thread();
+    if (state != nullptr) {
+        if (state->frame_overflow > 0) {
+            --state->frame_overflow;  // the pop of a frame no record was made for
+        } else if (state->frame_count > 0 && state->frames[state->frame_count - 1].kind == kFramePush) {
+            const unsigned height = state->frames[--state->frame_count].height;
+            const bool outer_entry = keep != nullptr && height < kMaxBlocks;
+            if (outer_entry) {
+                ++keep->refs;  // taken before the frame's entries end, so the block survives them
+            }
+            const unsigned ended = end_entries(state, height);
+            if (ended != 0) {
+                __atomic_fetch_add(&g.counters.ended_by_pop, ended, __ATOMIC_RELAXED);
+            }
+            if (outer_entry) {
+                state->blocks[state->count++] = keep;
+                state->env = e;
+            }
+        }
+    }
+    if (shadow_result) {
         return live_header(result) != nullptr ? result : nullptr;
     }
-    return original<jobject (*)(Env*, jobject)>(slot::PopLocalFrame)(e, result);
+    return returned;
+}
+
+// RegisterNatives: the functions of the application's libraries are registered through their thunks.
+jint w_RegisterNatives(Env* e, jclass c, const NativeMethod* methods, jint count) {
+    enter_any(e);
+    auto call = original<jint (*)(Env*, jclass, const NativeMethod*, jint)>(slot::RegisterNatives);
+    if (methods == nullptr || count <= 0 || g.platform.thunk_address == nullptr) {
+        return call(e, c, methods, count);
+    }
+    NativeMethod chunk[kRegisterChunk];
+    for (jint done = 0; done < count;) {
+        const jint n = count - done < static_cast<jint>(kRegisterChunk) ? count - done : static_cast<jint>(kRegisterChunk);
+        for (jint i = 0; i < n; ++i) {
+            chunk[i] = methods[done + i];
+            chunk[i].function = thunk_for(chunk[i].function);
+        }
+        const jint result = call(e, c, chunk, n);
+        if (result != JNI_OK) {
+            return result;
+        }
+        done += n;
+    }
+    return JNI_OK;
 }
 
 jsize w_GetArrayLength(Env* e, jarray a) {
@@ -1244,6 +1372,20 @@ jint vm_AttachCurrentThreadAsDaemon(Vm* vm, void** env, void* args) {
     vm_note(__builtin_return_address(0));
     return reinterpret_cast<jint (*)(Vm*, void**, void*)>(g.orig_vm[vmslot::AttachCurrentThreadAsDaemon])(vm, env, args);
 }
+// The thread's references end with its attachment (its environment is gone after the call).
+jint vm_DetachCurrentThread(Vm* vm) {
+    ThreadState* state = g.shadows_on ? thread() : nullptr;
+    if (state != nullptr) {
+        const unsigned ended = end_entries(state, 0);
+        if (ended != 0) {
+            __atomic_fetch_add(&g.counters.ended_by_detach, ended, __ATOMIC_RELAXED);
+        }
+        state->frame_count = 0;
+        state->frame_overflow = 0;
+        state->env = nullptr;
+    }
+    return reinterpret_cast<jint (*)(Vm*)>(g.orig_vm[vmslot::DetachCurrentThread])(vm);
+}
 
 }  // namespace
 
@@ -1256,6 +1398,9 @@ void release_thread_state(void* state_pointer) {
     }
     for (unsigned i = 0; i < state->count; ++i) {
         BlockHeader* header = state->blocks[i];
+        if (--header->refs > 0) {
+            continue;  // the block has more entries: it is queued with its last
+        }
         BlockHeader* head = __atomic_load_n(&g.pending, __ATOMIC_RELAXED);
         do {
             header->next = head;
@@ -1263,9 +1408,116 @@ void release_thread_state(void* state_pointer) {
     }
     state->count = 0;
     state->bytes = 0;
+    state->frame_count = 0;
+    state->frame_overflow = 0;
+    state->env = nullptr;
 }
 
 Counters counters() { return g.counters; }
+
+// ---- the end of a native method
+
+void* thunk_for(void* function) {
+    if (function == nullptr || !g.installed || !g.shadows_on || g.platform.thunk_address == nullptr ||
+        g.thunk_capacity == 0 || !from_app(function)) {
+        return function;
+    }
+    while (__atomic_exchange_n(&g.thunk_lock, 1u, __ATOMIC_ACQUIRE) != 0) {
+    }
+    unsigned index = 0;
+    while (index < g.thunk_count && g.thunk_target[index] != function) {
+        ++index;
+    }
+    bool exhausted = false;
+    if (index == g.thunk_count) {
+        if (g.thunk_count >= g.thunk_capacity) {
+            exhausted = true;
+        } else {
+            __atomic_store_n(&g.thunk_target[index], function, __ATOMIC_RELEASE);
+            ++g.thunk_count;
+            __atomic_fetch_add(&g.counters.natives_wrapped, 1u, __ATOMIC_RELAXED);
+        }
+    }
+    const unsigned wrapped = g.thunk_count;
+    __atomic_store_n(&g.thunk_lock, 0u, __ATOMIC_RELEASE);
+    if (exhausted) {
+        __atomic_fetch_add(&g.counters.natives_unwrapped, 1u, __ATOMIC_RELAXED);
+        if (g.platform.log != nullptr && __atomic_exchange_n(&g.thunk_none_logged, 1u, __ATOMIC_RELAXED) == 0) {
+            g.platform.log("an application native method got no thunk (all in use): its blocks end only with their references; "
+                           "thunks in use:", static_cast<long>(wrapped), 0);
+        }
+        return function;
+    }
+    return g.platform.thunk_address(index);
+}
+
+// The diagnosis lines of the thunks: the first return that ended references, and the most one return has ended (a
+// native method that makes many blocks in one call is what can reach the thread's limit), at most every kPeakLogMs.
+static void note_ended_at_return(unsigned ended) {
+    if (g.platform.log == nullptr) {
+        return;
+    }
+    const uint32_t now = g.platform.now_ms != nullptr ? g.platform.now_ms() : 0;
+    if (__atomic_exchange_n(&g.ended_logged, 1u, __ATOMIC_RELAXED) == 0) {
+        __atomic_store_n(&g.ended_max_logged, ended, __ATOMIC_RELAXED);
+        __atomic_store_n(&g.ended_max_logged_ms, now, __ATOMIC_RELAXED);
+        g.platform.log("the first byte[] blocks ended at the return of a native method; references ended, native "
+                       "methods with a thunk:", static_cast<long>(ended), static_cast<long>(g.thunk_count));
+        return;
+    }
+    uint32_t most = __atomic_load_n(&g.counters.max_ended_by_return, __ATOMIC_RELAXED);
+    const uint32_t logged = __atomic_load_n(&g.ended_max_logged, __ATOMIC_RELAXED);
+    if (most <= logged ||
+        (g.platform.now_ms != nullptr && now - __atomic_load_n(&g.ended_max_logged_ms, __ATOMIC_RELAXED) < kPeakLogMs)) {
+        return;
+    }
+    uint32_t expected = logged;
+    if (__atomic_compare_exchange_n(&g.ended_max_logged, &expected, most, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+        __atomic_store_n(&g.ended_max_logged_ms, now, __ATOMIC_RELAXED);
+        g.platform.log("the most references one native method call has ended at its return; native methods with a thunk:",
+                       static_cast<long>(most), static_cast<long>(g.thunk_count));
+    }
+}
+
+ThunkEntry thunk_enter(unsigned index, void* return_address, void* sp) {
+    void* target = __atomic_load_n(&g.thunk_target[index < kMaxThunks ? index : 0], __ATOMIC_ACQUIRE);
+    ThreadState* state = thread();
+    if (state == nullptr || state->frame_count >= kMaxFrames) {
+        return ThunkEntry{target, 0};  // no record: the method returns to the runtime as it is, its blocks end by themselves
+    }
+    state->frames[state->frame_count++] =
+        FrameRecord{static_cast<uint16_t>(state->count), kFrameNative, return_address, sp};
+    return ThunkEntry{target, 1};
+}
+
+void* thunk_leave(void* sp) {
+    ThreadState* state = thread();
+    if (state == nullptr) {
+        __builtin_trap();  // the entry made the state: there is no return address to go back to
+    }
+    // The record of this invocation, the newest one entered with this stack pointer. The records above it are the
+    // method's own unmatched PushLocalFrame calls, or invocations that never returned (a longjmp over them).
+    unsigned k = state->frame_count;
+    while (k > 0 && !(state->frames[k - 1].kind == kFrameNative && state->frames[k - 1].sp == sp)) {
+        --k;
+    }
+    if (k == 0) {
+        __builtin_trap();
+    }
+    const FrameRecord record = state->frames[k - 1];
+    state->frame_count = k - 1;
+    state->frame_overflow = 0;
+    const unsigned ended = end_entries(state, record.height);
+    if (ended != 0) {
+        __atomic_fetch_add(&g.counters.ended_by_return, ended, __ATOMIC_RELAXED);
+        uint32_t most = __atomic_load_n(&g.counters.max_ended_by_return, __ATOMIC_RELAXED);
+        while (ended > most && !__atomic_compare_exchange_n(&g.counters.max_ended_by_return, &most, ended, true,
+                                                            __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+        }
+        note_ended_at_return(ended);
+    }
+    return record.lr;
+}
 
 void reset_for_test() { __builtin_memset(&g, 0, sizeof(g)); }
 
@@ -1289,6 +1541,9 @@ bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_r
         return false;
     }
     g.installed = true;
+    g.thunk_capacity = platform.thunk_address != nullptr
+                           ? (platform.thunk_capacity < kMaxThunks ? platform.thunk_capacity : kMaxThunks)
+                           : 0;
     table[slot::GetMethodID] = reinterpret_cast<void*>(&w_GetMethodID);
     table[slot::GetStaticMethodID] = reinterpret_cast<void*>(&w_GetStaticMethodID);
     table[slot::GetFieldID] = reinterpret_cast<void*>(&w_GetFieldID);
@@ -1323,7 +1578,9 @@ bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_r
     table[slot::MonitorEnter] = reinterpret_cast<void*>(&w_MonitorEnter);
     table[slot::MonitorExit] = reinterpret_cast<void*>(&w_MonitorExit);
     table[slot::DeleteLocalRef] = reinterpret_cast<void*>(&w_DeleteLocalRef);
+    table[slot::PushLocalFrame] = reinterpret_cast<void*>(&w_PushLocalFrame);
     table[slot::PopLocalFrame] = reinterpret_cast<void*>(&w_PopLocalFrame);
+    table[slot::RegisterNatives] = reinterpret_cast<void*>(&w_RegisterNatives);
     table[slot::GetArrayLength] = reinterpret_cast<void*>(&w_GetArrayLength);
     table[slot::GetByteArrayElements] = reinterpret_cast<void*>(&w_GetByteArrayElements);
     table[slot::ReleaseByteArrayElements] = reinterpret_cast<void*>(&w_ReleaseByteArrayElements);
@@ -1352,6 +1609,7 @@ bool install_vm_wrappers(void** vm_table, const Platform& platform) {
     vm_table[vmslot::GetEnv] = reinterpret_cast<void*>(&vm_GetEnv);
     vm_table[vmslot::AttachCurrentThread] = reinterpret_cast<void*>(&vm_AttachCurrentThread);
     vm_table[vmslot::AttachCurrentThreadAsDaemon] = reinterpret_cast<void*>(&vm_AttachCurrentThreadAsDaemon);
+    vm_table[vmslot::DetachCurrentThread] = reinterpret_cast<void*>(&vm_DetachCurrentThread);
     if (!platform.make_read_only(vm_table, kVmSlotCount * sizeof(void*)) && platform.log != nullptr) {
         platform.log("a page of the JavaVM function table could not be made read-only again", 0, 0);
     }
@@ -1359,3 +1617,10 @@ bool install_vm_wrappers(void** vm_table, const Platform& platform) {
 }
 
 }  // namespace oldapp
+
+extern "C" uint64_t oldapp_thunk_enter(unsigned index, void* return_address, void* sp) {
+    const oldapp::ThunkEntry entry = oldapp::thunk_enter(index, return_address, sp);
+    return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(entry.target)) | (static_cast<uint64_t>(entry.pushed) << 32);
+}
+
+extern "C" void* oldapp_thunk_leave(void* sp) { return oldapp::thunk_leave(sp); }

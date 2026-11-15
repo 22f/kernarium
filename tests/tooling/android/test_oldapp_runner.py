@@ -111,14 +111,15 @@ class ProbePackageTests(unittest.TestCase):
         self.assertEqual(dex.types[struct.unpack_from("<I", data, dex.class_off)[0]],
                          "Lorg/example/andarium/oldappprobe/Probe;")
 
-    def test_the_class_has_one_native_method_and_the_methods_the_native_code_calls(self) -> None:
+    def test_the_class_has_the_native_methods_and_the_methods_the_native_code_calls(self) -> None:
         dex = Dex(probe.oldapp_probe_dex.build_dex())
         methods = dex.class_methods()
-        self.assertEqual(set(methods), {"<init>", "onReceive", "run", "payload", "echo"})
-        run_access, run_code = methods["run"]
-        self.assertEqual(run_access, ACC_PUBLIC | ACC_STATIC | ACC_NATIVE)
-        self.assertEqual(run_code, 0, "a native method has no code")
-        for name in ("<init>", "onReceive", "payload", "echo"):
+        natives = {"run"} | {name for name, _, _ in probe.oldapp_probe_dex.NATIVES}
+        self.assertEqual(set(methods), {"<init>", "onReceive", "payload", "echo", "spin"} | natives)
+        for name in natives:
+            self.assertEqual(methods[name][0], ACC_PUBLIC | ACC_STATIC | ACC_NATIVE, name)
+            self.assertEqual(methods[name][1], 0, f"{name}: a native method has no code")
+        for name in ("<init>", "onReceive", "payload", "echo", "spin"):
             self.assertNotEqual(methods[name][1], 0, name)
         self.assertEqual(methods["onReceive"][0], ACC_PUBLIC)
         self.assertEqual(methods["payload"][0], ACC_PUBLIC | ACC_STATIC)
@@ -141,6 +142,20 @@ class ProbePackageTests(unittest.TestCase):
         source = probe.PROBE_SOURCE.read_text()
         self.assertIn(f'kPayload[] = "{probe.oldapp_probe_dex.PAYLOAD}"', source)
         self.assertIn("Java_org_example_andarium_oldappprobe_Probe_run", source)
+
+    def test_every_native_method_of_the_class_is_bound_in_the_native_probe(self) -> None:
+        source = probe.PROBE_SOURCE.read_text()
+        for name, _, _ in probe.oldapp_probe_dex.NATIVES:
+            bound_by_name = f"Java_org_example_andarium_oldappprobe_Probe_{name}" in source
+            registered = f'{{"{name}",' in source
+            self.assertTrue(bound_by_name or registered, name)
+
+    def test_the_spin_loop_calls_the_empty_native_method_n_times(self) -> None:
+        dex = Dex(probe.oldapp_probe_dex.build_dex())
+        spin = dex.instructions(dex.class_methods()["spin"][1])
+        self.assertEqual(spin[0], 0x0012, "const/4 v0, #0")
+        self.assertEqual(spin[1] & 0xFF, 0x35, "if-ge")
+        self.assertEqual(spin[-1], 0x000F, "return v0")
 
     def test_the_variants_differ_in_package_and_target_level_only(self) -> None:
         old = binary_xml.decode_manifest(binary_xml.encode_manifest(probe.manifest_tree("old")))
@@ -208,13 +223,14 @@ class VerdictTests(unittest.TestCase):
     SEMANTICS = {"write_through": "pass", "identity": "pass", "retained": "pass", "monitor": "pass", "pop": "pass",
                  "getline": "pass", "usable_size": "pass", "libc_block": "pass", "table_read_only": "pass",
                  "java_fill": "pass", "commit_chunks": "pass", "clone": "pass", "alias_elements": "pass",
-                 "alias_critical": "pass"}
+                 "alias_critical": "pass", "abi_args": "pass", "abi_returns": "pass", "ends_exception": "pass"}
+    ENDS = ("ends_lazy_thumb", "ends_lazy_arm", "ends_reg_thumb", "ends_reg_arm", "ends_recursion", "ends_onload")
     OLD = {"shim_mapped": "yes", "raw_read": "pass", "passback": "pass", "elements": "pass", "global": "pass",
            "thread_raw": "pass", **SEMANTICS, "java_fill_raw": "pass", "raw_write_java": "pass",
-           "low_heap": "pass", "done": "1"}
+           "low_heap": "pass", **dict.fromkeys(ENDS, "pass"), "empty_us": "123456", "done": "1"}
     MODERN = {"shim_mapped": "no", "raw_read": "fail", "passback": "pass", "elements": "pass", "global": "pass",
               "thread_raw": "fail", **SEMANTICS, "java_fill_raw": "fail", "raw_write_java": "skipped",
-              "low_heap": "pass", "done": "1"}
+              "low_heap": "pass", **dict.fromkeys(ENDS, "fail"), "empty_us": "123456", "done": "1"}
 
     def test_a_probe_that_reports_what_the_variant_must_passes(self) -> None:
         self.assertIn("raw_read=pass", runner.evaluate("old", self.OLD))
@@ -230,6 +246,9 @@ class VerdictTests(unittest.TestCase):
                            ("pop", "fail"), ("getline", "fail"), ("usable_size", "fail"), ("libc_block", "fail"),
                            ("table_read_only", "fail"), ("java_fill", "fail"), ("java_fill_raw", "fail"), ("raw_write_java", "fail"),
                            ("commit_chunks", "fail"), ("clone", "fail"), ("alias_elements", "fail"), ("alias_critical", "fail"),
+                           ("abi_args", "fail"), ("abi_returns", "fail"), ("ends_exception", "fail"),
+                           ("ends_lazy_thumb", "fail"), ("ends_lazy_arm", "fail"), ("ends_reg_thumb", "fail"),
+                           ("ends_reg_arm", "fail"), ("ends_recursion", "fail"), ("ends_onload", "fail"),
                            ("done", "")):
             with self.assertRaises(runner.Failure) as raised:
                 runner.evaluate("old", {**self.OLD, key: value})

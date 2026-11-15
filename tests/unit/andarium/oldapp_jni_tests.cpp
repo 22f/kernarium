@@ -106,14 +106,19 @@ jobject byte_array(const std::vector<uint8_t>& bytes) {
 
 bool g_app_caller = true;
 uint64_t g_epoch = 1;
+bool (*g_app_predicate)(const void*) = nullptr;  // set: decides by the address (a function of an application library)
+bool g_no_thread_state = false;                  // the platform has no thread state to give
 
-bool fake_is_app(const void*) {
+bool fake_is_app(const void* address) {
     ++world.app_checks;
-    return g_app_caller;
+    return g_app_predicate != nullptr ? g_app_predicate(address) : g_app_caller;
 }
 thread_local void* t_block = nullptr;
 thread_local uint64_t t_epoch = 0;
 void* fake_thread_state(size_t size) {
+    if (g_no_thread_state) {
+        return nullptr;
+    }
     if (t_epoch != g_epoch) {
         std::free(t_block);
         t_block = std::calloc(1, size);
@@ -154,8 +159,17 @@ bool fake_describe(Env*, void* const*, void* id, bool, jobject, char* kinds, uns
     *count = n;
     return true;
 }
+// The thunks of the fake: thunk i is the address kThunkBase + 8 * i, as the assembly lays them out.
+constexpr uintptr_t kThunkBase = 0x70000000u;
+void* fake_thunk_address(unsigned index) { return reinterpret_cast<void*>(kThunkBase + 8u * index); }
+unsigned thunk_index_of(void* thunk) { return unsigned((reinterpret_cast<uintptr_t>(thunk) - kThunkBase) / 8u); }
+bool is_thunk(void* address) {
+    const uintptr_t a = reinterpret_cast<uintptr_t>(address);
+    return a >= kThunkBase && a < kThunkBase + 8u * 4096u;
+}
+unsigned g_thunk_capacity = 1024;
 const Platform kPlatform{fake_is_app, fake_thread_state, fake_log, fake_make_writable, fake_make_read_only,
-                         fake_describe, fake_now, fake_alloc_baseline, fake_free_baseline};
+                         fake_describe, fake_now, fake_alloc_baseline, fake_free_baseline, fake_thunk_address, 1024};
 
 jsize f_GetArrayLength(Env*, jarray a) { return static_cast<jsize>(object_of(a)->bytes.size()); }
 jobject f_NewByteArray(Env*, jsize n) { return byte_array(std::vector<uint8_t>(static_cast<size_t>(n), 0)); }
@@ -211,7 +225,7 @@ jobject f_NewGlobalRef(Env*, jobject o) {
 }
 jobject f_NewWeakGlobalRef(Env*, jobject o) { return f_NewGlobalRef(nullptr, o); }
 void f_DeleteGlobalRef(Env*, jobject o) {
-    jni_allowed("DeleteGlobalRef where JNI is not allowed");
+    require(world.critical == 0, "DeleteGlobalRef inside a critical region");  // allowed with an exception pending
     Ref* ref = static_cast<Ref*>(o);
     require(world.globals.erase(ref) == 1, "a global reference is deleted once, and only while it is live");
     delete ref;
@@ -252,6 +266,13 @@ jobject f_PopLocalFrame(Env*, jobject result) {
     }
     world.frames.pop_back();
     return keep == nullptr ? nullptr : new_local(keep);
+}
+int g_register_fail_at = -1;                            // the call (counted from 0) that fails
+std::vector<std::vector<NativeMethod>> g_registered;    // what each call of the runtime's RegisterNatives received
+jint f_RegisterNatives(Env*, jclass, const NativeMethod* methods, jint count) {
+    require(count > 0 && methods != nullptr, "the runtime is handed methods");
+    g_registered.emplace_back(methods, methods + count);
+    return int(g_registered.size()) - 1 == g_register_fail_at ? JNI_ERR : JNI_OK;
 }
 jboolean f_ExceptionCheck(Env*) { return world.exception_pending; }
 jobject f_FindClass(Env*, const char*) { return new_local(new Obj{}); }
@@ -463,6 +484,7 @@ struct Table {
         slots[slot::MonitorExit] = reinterpret_cast<void*>(&f_MonitorExit);
         slots[slot::PushLocalFrame] = reinterpret_cast<void*>(&f_PushLocalFrame);
         slots[slot::PopLocalFrame] = reinterpret_cast<void*>(&f_PopLocalFrame);
+        slots[slot::RegisterNatives] = reinterpret_cast<void*>(&f_RegisterNatives);
         slots[slot::ExceptionCheck] = reinterpret_cast<void*>(&f_ExceptionCheck);
         slots[slot::FindClass] = reinterpret_cast<void*>(&f_FindClass);
         slots[slot::GetMethodID] = reinterpret_cast<void*>(&f_GetMethodID);
@@ -508,13 +530,20 @@ void reset_world() {
     g_writable_ok = true;
     g_read_only_ok = true;
     g_baseline_fails = false;
+    g_app_predicate = nullptr;
+    g_no_thread_state = false;
+    g_thunk_capacity = 1024;
+    g_register_fail_at = -1;
+    g_registered.clear();
 }
 
 // Installs over a fresh fake table.
-Table* install(bool shadows = true) {
+Table* install(bool shadows = true, unsigned thunks = 1024) {
     reset_world();
     Table* table = new Table;
-    require(install_jni_wrappers(table->slots, kPlatform, shadows ? g_shadow_region : nullptr,
+    Platform platform = kPlatform;
+    platform.thunk_capacity = thunks;
+    require(install_jni_wrappers(table->slots, platform, shadows ? g_shadow_region : nullptr,
                                  shadows ? sizeof(g_shadow_region) : 0),
             "the wrappers install");
     return table;
@@ -565,9 +594,11 @@ void check_slot_constants(const char* fixture_path) {
     expect("FindClass", slot::FindClass);
     expect("GetSuperclass", slot::GetSuperclass);
     expect("Throw", slot::Throw);
+    expect("ThrowNew", slot::ThrowNew);
     expect("ExceptionClear", slot::ExceptionClear);
     expect("PushLocalFrame", slot::PushLocalFrame);
     expect("PopLocalFrame", slot::PopLocalFrame);
+    expect("RegisterNatives", slot::RegisterNatives);
     expect("NewGlobalRef", slot::NewGlobalRef);
     expect("DeleteGlobalRef", slot::DeleteGlobalRef);
     expect("DeleteLocalRef", slot::DeleteLocalRef);
@@ -625,9 +656,9 @@ struct Fixture {
     jfieldID other_field;       // Ljava/lang/String;
 };
 
-Fixture make(bool shadows = true) {
+Fixture make(bool shadows = true, unsigned thunks = 1024) {
     Fixture f;
-    f.table = install(shadows);
+    f.table = install(shadows, thunks);
     f.env = &f.table->env;
     f.cls = new_local(new Obj{});
     auto get_static = fn<jmethodID (*)(Env*, jclass, const char*, const char*)>(*f.table, slot::GetStaticMethodID);
@@ -1531,6 +1562,445 @@ void check_a_stray_length_write_is_harmless() {
     world.exception_pending = false;
 }
 
+
+// ---- the end of a native method (the thunks, RegisterNatives, PushLocalFrame/PopLocalFrame, DetachCurrentThread)
+
+// A function of an application library and its thunk, as the assembly would run it: the thunk is entered with the
+// runtime's return address and a stack pointer; the stub that follows the method's return gives that stack pointer back.
+void* app_function(unsigned n) { return reinterpret_cast<void*>(uintptr_t{0x20000000u} + 32u * n); }
+struct Native {
+    void* thunk;
+    unsigned index;
+};
+Native thunk_of(void* function) {
+    void* thunk = thunk_for(function);
+    require(is_thunk(thunk), "an application function gets a thunk");
+    return Native{thunk, thunk_index_of(thunk)};
+}
+bool enter_native(const Native& native, void* function, uintptr_t lr, uintptr_t sp) {
+    const ThunkEntry entry = thunk_enter(native.index, reinterpret_cast<void*>(lr), reinterpret_cast<void*>(sp));
+    require(entry.target == function, "the thunk jumps to its function");
+    return entry.pushed == 1;
+}
+void* leave_native(uintptr_t sp) { return thunk_leave(reinterpret_cast<void*>(sp)); }
+
+// The blocks a native method made end when it returns, whether it deleted any reference or not.
+void check_a_native_invocation_ends_its_blocks() {
+    Fixture f = make();
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    require(thunk_for(function) == native.thunk, "one thunk for a function, however often it is registered");
+    require(counters().natives_wrapped == 1, "counted once");
+    require(enter_native(native, function, 0x1234, 0x8000), "a record is pushed");
+    Made a = make_shadow_of(f, sample(10));
+    Made b = make_shadow_of(f, sample(20));
+    Made c = make_shadow_of(f, sample(30));
+    require(counters().shadows_live == 3 && world.globals.size() == 3, "three blocks during the invocation");
+    require(is_shadow_block(a.shadow) && is_shadow_block(b.shadow) && is_shadow_block(c.shadow), "all usable");
+    require(leave_native(0x8000) == reinterpret_cast<void*>(0x1234), "the return stub goes back to the runtime");
+    require(counters().shadows_live == 0 && world.globals.empty() && counters().ended_by_return == 3,
+            "the blocks ended: no block, no global reference");
+    require(!is_shadow_block(a.shadow) && !is_shadow_block(c.shadow), "a block that ended is no block");
+    // A reference the method deleted itself is not ended twice.
+    require(enter_native(native, function, 0x1234, 0x8000), "again");
+    Made d = make_shadow_of(f, sample(10));
+    Made e = make_shadow_of(f, sample(10));
+    fn<void (*)(Env*, jobject)>(*f.table, slot::DeleteLocalRef)(f.env, d.shadow);
+    require(counters().shadows_live == 1, "the deleted one is gone");
+    leave_native(0x8000);
+    require(counters().shadows_live == 0 && world.globals.empty() && counters().ended_by_return == 4 &&
+                !is_shadow_block(e.shadow),
+            "the other ended at the return");
+    // The result of a call that is not byte[] is no block, and nothing else is touched.
+    const size_t locals = world.locals.size();
+    require(enter_native(native, function, 0x1234, 0x8000), "once more");
+    leave_native(0x8000);
+    require(world.locals.size() == locals, "an invocation that made no block ends nothing");
+}
+
+// A native method that calls Java, which calls native again: each return ends its own blocks and no more.
+void check_nested_invocations_end_their_own_blocks() {
+    Fixture f = make();
+    void* outer_function = app_function(1);
+    void* inner_function = app_function(2);
+    const Native outer = thunk_of(outer_function);
+    const Native inner = thunk_of(inner_function);
+    require(enter_native(outer, outer_function, 0x100, 0x9000), "outer");
+    Made a = make_shadow_of(f, sample(4));
+    require(enter_native(inner, inner_function, 0x200, 0x8000), "the outer method called Java, which called inner");
+    Made b = make_shadow_of(f, sample(5));
+    Made c = make_shadow_of(f, sample(6));
+    require(leave_native(0x8000) == reinterpret_cast<void*>(0x200), "inner returns to the runtime");
+    require(counters().shadows_live == 1 && is_shadow_block(a.shadow) && !is_shadow_block(b.shadow) &&
+                !is_shadow_block(c.shadow),
+            "inner's blocks ended, outer's did not");
+    require(fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, a.shadow) == 4, "outer's block still works");
+    Made d = make_shadow_of(f, sample(7));
+    require(leave_native(0x9000) == reinterpret_cast<void*>(0x100), "outer returns");
+    require(counters().shadows_live == 0 && world.globals.empty() && !is_shadow_block(a.shadow) && !is_shadow_block(d.shadow),
+            "and its blocks, the ones made before and after the inner call, ended");
+    // A recursion twenty levels deep: every level keeps its own block until its own return.
+    std::vector<Made> held;
+    for (unsigned depth = 0; depth < 20; ++depth) {
+        require(enter_native(outer, outer_function, 0x1000 + depth, 0x20000 - 0x100 * depth), "a level");
+        std::vector<uint8_t> payload = sample(8);
+        payload[0] = uint8_t(depth);
+        held.push_back(make_shadow_of(f, payload));
+    }
+    for (unsigned depth = 20; depth > 0; --depth) {
+        const unsigned level = depth - 1;
+        require(is_shadow_block(held[level].shadow) && raw_of(held[level])[0] == uint8_t(level), "the level's block is intact");
+        require(leave_native(0x20000 - 0x100 * level) == reinterpret_cast<void*>(uintptr_t{0x1000} + level), "the level returns");
+        require(!is_shadow_block(held[level].shadow) && counters().shadows_live == level, "and only its block ended");
+    }
+}
+
+// An exception pending at the return (the method threw, or a Java call it made did): the blocks end all the same, with
+// the one function CheckJNI allows then, and the exception stays.
+void check_a_native_method_that_returns_with_an_exception_pending() {
+    Fixture f = make();
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    require(enter_native(native, function, 0x1234, 0x8000), "enter");
+    make_shadow_of(f, sample(10));
+    make_shadow_of(f, sample(10));
+    world.exception_pending = true;
+    require(leave_native(0x8000) == reinterpret_cast<void*>(0x1234), "the stub goes back");
+    require(counters().shadows_live == 0 && world.globals.empty() && world.exception_pending,
+            "the blocks ended, the exception is still pending");
+    world.exception_pending = false;
+}
+
+// The 513th result of a thread is no longer the end of the game's shadows: a method per frame, a result per method.
+void check_six_hundred_invocations_decline_nothing() {
+    Fixture f = make();
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    for (unsigned i = 0; i < 600; ++i) {
+        require(enter_native(native, function, 0x1234, 0x8000), "enter");
+        std::vector<uint8_t> payload = sample(100);
+        payload[0] = uint8_t(i);
+        Made made = make_shadow_of(f, payload);
+        require(is_shadow_block(made.shadow) && raw_of(made)[0] == uint8_t(i), "a shadow, the 600th too");
+        leave_native(0x8000);
+    }
+    require(counters().shadows_declined == 0 && counters().shadows_live == 0 && counters().peak_thread_blocks == 1,
+            "none declined, none live, never more than one at a time");
+    require(counters().ended_by_return == 600 && world.globals.empty(), "every one ended at its return");
+}
+
+// Frame records: at most 64. A method entered beyond them has no record and returns as it is; its blocks end with
+// the nearest recorded invocation.
+void check_more_than_sixty_four_nested_invocations() {
+    Fixture f = make();
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    std::vector<Made> held;
+    for (unsigned i = 0; i < 70; ++i) {
+        const bool pushed = enter_native(native, function, 0x1000 + i, 0x40000 - 0x100 * i);
+        require(pushed == (i < 64), "a record for each of the first 64 nested invocations, none after");
+        held.push_back(make_shadow_of(f, sample(4)));
+    }
+    require(counters().shadows_live == 70, "70 blocks");
+    // The methods past the 64th return without the stub; the 64th one's return ends all of theirs.
+    require(leave_native(0x40000 - 0x100 * 63) == reinterpret_cast<void*>(uintptr_t{0x1000} + 63), "the 64th returns");
+    require(counters().shadows_live == 63, "its own and the six after it ended");
+    for (int i = 62; i >= 0; --i) {
+        require(leave_native(0x40000 - 0x100 * unsigned(i)) == reinterpret_cast<void*>(uintptr_t{0x1000} + unsigned(i)), "return");
+    }
+    require(counters().shadows_live == 0 && world.globals.empty(), "all ended");
+}
+
+// A thread the platform has no state for: no record, the method returns as it is.
+void check_no_thread_state_no_record() {
+    make();
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    g_no_thread_state = true;
+    require(!enter_native(native, function, 0x1234, 0x8000), "no record");
+    g_no_thread_state = false;
+}
+
+// A method that never returned (a longjmp over it): the outer return ends its blocks, and the records are trimmed.
+void check_an_abandoned_invocation_is_trimmed() {
+    Fixture f = make();
+    void* outer_function = app_function(1);
+    void* inner_function = app_function(2);
+    const Native outer = thunk_of(outer_function);
+    const Native inner = thunk_of(inner_function);
+    require(enter_native(outer, outer_function, 0x100, 0x9000), "outer");
+    make_shadow_of(f, sample(4));
+    require(enter_native(inner, inner_function, 0x200, 0x8000), "inner");
+    make_shadow_of(f, sample(5));
+    require(leave_native(0x9000) == reinterpret_cast<void*>(0x100), "outer returns over the inner invocation");
+    require(counters().shadows_live == 0 && world.globals.empty(), "both blocks ended");
+    // The thread goes on with clean records.
+    require(enter_native(outer, outer_function, 0x300, 0x9000), "outer again");
+    make_shadow_of(f, sample(4));
+    require(leave_native(0x9000) == reinterpret_cast<void*>(0x300) && counters().shadows_live == 0, "and returns");
+}
+
+// A PushLocalFrame the method never popped is part of its invocation: the return ends its entries, and ART's own
+// segment goes with the invocation.
+void check_an_unmatched_push_local_frame_ends_with_the_invocation() {
+    Fixture f = make();
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    require(enter_native(native, function, 0x1234, 0x8000), "enter");
+    make_shadow_of(f, sample(4));
+    require(push(f.env, 16) == 0, "push");
+    make_shadow_of(f, sample(4));
+    require(counters().shadows_live == 2, "two blocks");
+    leave_native(0x8000);
+    require(counters().shadows_live == 0 && world.globals.empty(), "the return ended the entries in both");
+    // A later method with a pop of its own works on its own frame.
+    require(enter_native(native, function, 0x1234, 0x8000), "enter again");
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    require(push(f.env, 16) == 0, "its own push");
+    make_shadow_of(f, sample(4));
+    pop(f.env, nullptr);
+    require(counters().shadows_live == 0, "its pop ended its own entry");
+    leave_native(0x8000);
+}
+
+// The distinct natives that can have a thunk: 1024; past them a function is registered as it is and the block it
+// makes ends with its references.
+void check_the_thunks_run_out() {
+    make();
+    for (unsigned i = 0; i < 1030; ++i) {
+        void* function = app_function(i);
+        void* thunk = thunk_for(function);
+        if (i < 1024) {
+            require(is_thunk(thunk) && thunk_index_of(thunk) == i, "the first 1024 functions get a thunk each");
+        } else {
+            require(thunk == function, "then the function itself");
+        }
+    }
+    require(counters().natives_wrapped == 1024 && counters().natives_unwrapped == 6, "counted");
+    require(log_count("got no thunk") == 1, "and the first one is logged, once");
+    require(thunk_for(app_function(5)) == fake_thunk_address(5), "a function that has a thunk still gets it");
+    require(counters().natives_unwrapped == 6, "which is not a new miss");
+    make(true, 4);
+    for (unsigned i = 0; i < 4; ++i) require(is_thunk(thunk_for(app_function(i))), "the platform's capacity is the limit");
+    require(thunk_for(app_function(4)) == app_function(4), "past it, none");
+}
+
+// Which functions get a thunk: the application's, with shadows on and thunks provided.
+void check_which_functions_get_a_thunk() {
+    make();
+    g_app_caller = false;
+    require(thunk_for(app_function(1)) == app_function(1) && counters().natives_wrapped == 0, "a platform function: none");
+    g_app_caller = true;
+    require(thunk_for(nullptr) == nullptr, "no function, none");
+    make(/*shadows=*/false);
+    require(thunk_for(app_function(1)) == app_function(1), "with no shadows the function stays as it is");
+    make(true, 0);
+    require(thunk_for(app_function(1)) == app_function(1), "and with no thunks");
+    reset_world();
+    require(thunk_for(app_function(1)) == app_function(1), "and before the wrappers are installed");
+}
+
+bool app_even(const void* address) { return ((reinterpret_cast<uintptr_t>(address) - 0x20000000u) / 32u) % 2 == 0; }
+
+// RegisterNatives: the application's functions are registered through their thunks, in chunks, with the rest of
+// the call unchanged and the runtime's first failure ending it.
+void check_register_natives_registers_thunks() {
+    Fixture f = make();
+    g_app_predicate = app_even;
+    std::vector<NativeMethod> methods;
+    for (unsigned i = 0; i < 70; ++i) methods.push_back(NativeMethod{"name", "()V", app_function(i)});
+    auto register_natives = fn<jint (*)(Env*, jclass, const NativeMethod*, jint)>(*f.table, slot::RegisterNatives);
+    require(register_natives(f.env, f.cls, methods.data(), 70) == JNI_OK, "registered");
+    std::vector<NativeMethod> got;
+    for (const auto& call : g_registered) got.insert(got.end(), call.begin(), call.end());
+    require(g_registered.size() == 3 && got.size() == 70, "three calls of the runtime, 32 + 32 + 6 methods");
+    for (unsigned i = 0; i < 70; ++i) {
+        require(got[i].name == methods[i].name && got[i].signature == methods[i].signature, "names and signatures unchanged");
+        require(methods[i].function == app_function(i), "the caller's array is unchanged");
+        if (i % 2 == 0) {
+            require(is_thunk(got[i].function), "an application function is registered through its thunk");
+            require(thunk_for(app_function(i)) == got[i].function, "which is its thunk");
+        } else {
+            require(got[i].function == app_function(i), "a platform function as it is");
+        }
+    }
+    g_registered.clear();
+    g_register_fail_at = 1;
+    require(register_natives(f.env, f.cls, methods.data(), 70) == JNI_ERR && g_registered.size() == 2,
+            "the runtime's error ends the registration and is the result");
+}
+
+// The attachment of a thread ends its references.
+void check_detach_ends_the_references_of_a_thread() {
+    Fixture f = make();
+    struct Fns {
+        static jint detach(Vm*) { return 0; }
+        static jint other(Vm*, void**, jint) { return 0; }
+    };
+    void* vm_table[kVmSlotCount];
+    for (void*& s : vm_table) s = reinterpret_cast<void*>(&Fns::other);
+    vm_table[vmslot::DetachCurrentThread] = reinterpret_cast<void*>(&Fns::detach);
+    require(install_vm_wrappers(vm_table, kPlatform), "the invoke table installs");
+    Vm vm{vm_table};
+    std::thread attached([&] {
+        for (int i = 0; i < 5; ++i) require(is_shadow_block(make_shadow_of(f, sample(8)).shadow), "a shadow");
+        require(counters().shadows_live == 5, "five references");
+        const jint rc = reinterpret_cast<jint (*)(Vm*)>(vm_table[vmslot::DetachCurrentThread])(&vm);
+        require(rc == 0, "the runtime's detach is the result");
+        require(counters().shadows_live == 0 && world.globals.empty() && counters().ended_by_detach == 5,
+                "the five ended with the attachment");
+        // Attached again, it makes more; its end (no detach) leaves them to the next call with an environment.
+        for (int i = 0; i < 2; ++i) make_shadow_of(f, sample(8));
+        require(counters().shadows_live == 2, "the new attachment has its own");
+        release_thread_state(t_block);
+    });
+    attached.join();
+    jobject plain = byte_array(sample(4));
+    fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, plain);
+    require(counters().shadows_live == 0 && world.globals.empty(), "and the thread's end freed those");
+}
+
+// PushLocalFrame and PopLocalFrame: the entries made in a frame end with it; the shadow a pop is handed stays, with an
+// entry in the outer frame.
+void check_push_and_pop_local_frame_end_their_entries() {
+    Fixture f = make();
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    auto del = fn<void (*)(Env*, jobject)>(*f.table, slot::DeleteLocalRef);
+    Made base = make_shadow_of(f, sample(4));
+    require(push(f.env, 16) == 0, "push");
+    make_shadow_of(f, sample(5));
+    make_shadow_of(f, sample(6));
+    require(counters().shadows_live == 3, "three blocks, two of them in the frame");
+    pop(f.env, nullptr);
+    require(counters().shadows_live == 1 && is_shadow_block(base.shadow) && counters().ended_by_pop == 2,
+            "the pop ended the frame's two, not the one below");
+    // Nested frames.
+    require(push(f.env, 16) == 0, "outer frame");
+    Made x = make_shadow_of(f, sample(7));
+    require(push(f.env, 16) == 0, "inner frame");
+    Made y = make_shadow_of(f, sample(8));
+    pop(f.env, nullptr);
+    require(is_shadow_block(x.shadow) && !is_shadow_block(y.shadow), "the inner pop ended the inner frame's block");
+    pop(f.env, nullptr);
+    require(!is_shadow_block(x.shadow) && is_shadow_block(base.shadow), "and the outer one the outer frame's");
+    // A shadow handed to the pop: it comes out into the outer frame and stays until it is deleted there.
+    require(push(f.env, 16) == 0, "a frame");
+    Made result = make_shadow_of(f, sample(9));
+    make_shadow_of(f, sample(9));
+    jobject out = pop(f.env, result.shadow);
+    require(out == result.shadow && is_shadow_block(result.shadow) && counters().shadows_live == 2,
+            "the result stayed, the other block of the frame ended");
+    del(f.env, result.shadow);
+    require(!is_shadow_block(result.shadow) && counters().shadows_live == 1, "the outer frame's reference is deleted once");
+    del(f.env, base.shadow);
+    require(counters().shadows_live == 0 && world.globals.empty(), "nothing is left");
+}
+
+// More PushLocalFrame calls than there are records: the pops of the unrecorded ones end nothing, the entries made
+// in them end with the last recorded frame.
+void check_frames_beyond_the_records() {
+    Fixture f = make();
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    for (unsigned i = 0; i < 70; ++i) {
+        require(push(f.env, 4) == 0, "push");
+        make_shadow_of(f, sample(4));
+    }
+    require(counters().shadows_live == 70, "70 blocks");
+    for (unsigned i = 0; i < 6; ++i) pop(f.env, nullptr);
+    require(counters().shadows_live == 70, "the six pops of unrecorded frames ended nothing");
+    pop(f.env, nullptr);
+    require(counters().shadows_live == 63, "the 64th frame's pop ended its entries and those of the frames after it");
+    for (unsigned i = 0; i < 63; ++i) pop(f.env, nullptr);
+    require(counters().shadows_live == 0 && world.globals.empty(), "and the rest");
+}
+
+// DeleteLocalRef takes the newest entry of the block; the frames above it stay right.
+void check_delete_local_ref_keeps_the_frames_right() {
+    Fixture f = make();
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    auto del = fn<void (*)(Env*, jobject)>(*f.table, slot::DeleteLocalRef);
+    Made a = make_shadow_of(f, sample(4));
+    Made b = make_shadow_of(f, sample(5));
+    Made c = make_shadow_of(f, sample(6));
+    require(push(f.env, 16) == 0, "push");
+    Made d = make_shadow_of(f, sample(7));
+    del(f.env, b.shadow);  // an entry below the frame
+    pop(f.env, nullptr);
+    require(!is_shadow_block(d.shadow) && !is_shadow_block(b.shadow), "the frame's block ended, and the deleted one");
+    require(is_shadow_block(a.shadow) && is_shadow_block(c.shadow) && counters().shadows_live == 2,
+            "the pop did not end the entries below the frame, whatever was deleted there");
+    // The same array twice is one block with two entries: the first delete leaves it, the second ends it.
+    jobject array = byte_array(sample(12));
+    Obj* object = object_of(array);
+    world.next_result = array;
+    jobject first = call_static_object_v(f, f.get_bytes);
+    world.next_result = new_local(object);
+    jobject second = call_static_object_v(f, f.get_bytes);
+    require(first == second && counters().shadows_live == 3, "one block");
+    del(f.env, first);
+    require(is_shadow_block(first) && counters().shadows_live == 3, "one reference left");
+    del(f.env, second);
+    require(!is_shadow_block(first) && counters().shadows_live == 2, "and none");
+    // An entry made in a native invocation for an array the invocation's caller already holds goes with the invocation only.
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    jobject again = byte_array(sample(12));
+    Obj* again_object = object_of(again);
+    world.next_result = again;
+    jobject held = call_static_object_v(f, f.get_bytes);
+    require(enter_native(native, function, 0x1234, 0x8000), "enter");
+    world.next_result = new_local(again_object);
+    jobject same = call_static_object_v(f, f.get_bytes);
+    require(same == held, "the same array is the same block");
+    leave_native(0x8000);
+    require(is_shadow_block(held), "the invocation's reference ended, the block of the caller's stays");
+    del(f.env, held);
+    require(!is_shadow_block(held), "and goes with its own");
+}
+
+// The diagnosis lines of the thunks: the first block that ended at a return, and the first function that got none.
+void check_the_thunk_diagnosis_lines() {
+    Fixture f = make();
+    void* function = app_function(1);
+    const Native native = thunk_of(function);
+    require(log_count("ended at the return of a native method") == 0, "nothing yet");
+    for (int i = 0; i < 3; ++i) {
+        enter_native(native, function, 0x1234, 0x8000);
+        make_shadow_of(f, sample(4));
+        make_shadow_of(f, sample(4));
+        leave_native(0x8000);
+    }
+    require(log_count("ended at the return of a native method") == 1, "once");
+    for (const auto& line : world.logs) {
+        if (line.message.find("ended at the return") != std::string::npos) {
+            require(line.a == 2 && line.b == 1, "with the references it ended and the natives with a thunk");
+        }
+    }
+    // The most one return has ended: logged when it grows, at most every 30 s, and a plateau reached inside the interval
+    // is logged by the next return after it.
+    const auto invocation = [&](int blocks) {
+        enter_native(native, function, 0x1234, 0x8000);
+        for (int i = 0; i < blocks; ++i) make_shadow_of(f, sample(4));
+        leave_native(0x8000);
+    };
+    require(log_count("the most references one native method call") == 0, "no line for the first return's count");
+    world.clock_ms += 31000;
+    invocation(5);
+    require(log_count("the most references one native method call") == 1 && world.logs.back().a == 5 && world.logs.back().b == 1,
+            "a larger count is logged after 30 s");
+    invocation(7);
+    require(log_count("the most references one native method call") == 1, "not again within 30 s");
+    world.clock_ms += 31000;
+    invocation(1);
+    require(log_count("the most references one native method call") == 2 && world.logs.back().a == 7,
+            "and the count reached in between, by the next return after 30 s");
+    require(counters().max_ended_by_return == 7, "the counter keeps the most");
+}
+
 // A thread ends: its blocks wait for an environment, then go with their global references.
 void check_thread_end() {
     Fixture f = make();
@@ -1652,6 +2122,22 @@ int main(int argc, char** argv) {
     check_diagnosis_lines();
     check_thread_end();
     check_pop_local_frame();
+    check_a_native_invocation_ends_its_blocks();
+    check_nested_invocations_end_their_own_blocks();
+    check_a_native_method_that_returns_with_an_exception_pending();
+    check_six_hundred_invocations_decline_nothing();
+    check_more_than_sixty_four_nested_invocations();
+    check_no_thread_state_no_record();
+    check_an_abandoned_invocation_is_trimmed();
+    check_an_unmatched_push_local_frame_ends_with_the_invocation();
+    check_the_thunks_run_out();
+    check_which_functions_get_a_thunk();
+    check_register_natives_registers_thunks();
+    check_detach_ends_the_references_of_a_thread();
+    check_push_and_pop_local_frame_end_their_entries();
+    check_frames_beyond_the_records();
+    check_delete_local_ref_keeps_the_frames_right();
+    check_the_thunk_diagnosis_lines();
     check_install_rules();
     check_no_shadows_when_disabled();
     std::puts("old-application JNI: ok");

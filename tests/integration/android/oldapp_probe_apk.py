@@ -37,7 +37,7 @@ import orientation_probe_apk as binary_xml
 REPOSITORY = pathlib.Path(__file__).resolve().parents[3]
 OVERLAY = REPOSITORY / "android" / "lineage-24" / "overlay" / "oldapp"
 PROBE_SOURCE = pathlib.Path(__file__).resolve().parent / "oldapp" / "oldapp_probe.cpp"
-SHIM_SOURCES = (OVERLAY / "oldapp_android.cpp", OVERLAY / "jni_shim.cpp")
+SHIM_SOURCES = (OVERLAY / "oldapp_android.cpp", OVERLAY / "jni_shim.cpp", OVERLAY / "oldapp_thunks.S")
 #: The libraries each one's undefined symbols resolve in (compile_library).
 PROBE_NEEDED = ("libc.so",)
 SHIM_NEEDED = ("libc.so", "libdl.so", "liblog.so")
@@ -82,7 +82,8 @@ def manifest_tree(variant: str) -> binary_xml.Element:
 def compile_library(sources: tuple[pathlib.Path, ...], destination: pathlib.Path, soname: str, *,
                     clang: str, lld: str, needed: tuple[str, ...] = ("libc.so",),
                     include: pathlib.Path = OVERLAY) -> pathlib.Path:
-    """Builds a freestanding armv7 (Thumb) shared library from C++ sources that include no platform header.
+    """Builds a freestanding armv7 (Thumb) shared library from C++ sources that include no platform header (and the
+    assembly files next to them).
     The library names `needed` become its DT_NEEDED entries: bionic resolves a library's undefined symbols
     only in the libraries it names (and the program's), and the host has no copies of them to link against,
     so each is linked as an empty stand-in of that soname."""
@@ -104,11 +105,16 @@ def compile_library(sources: tuple[pathlib.Path, ...], destination: pathlib.Path
         objects = []
         for source in sources:
             obj = scratch / (source.stem + ".o")
+            if source.suffix == ".S":
+                command = [clang, "--target=armv7-linux-androideabi", "-march=armv7-a", "-Werror", f"-I{include}", "-c",
+                           str(source), "-o", str(obj)]
+            else:
+                command = [clang, "--target=armv7-linux-androideabi", "-march=armv7-a", "-mthumb", "-mfloat-abi=softfp",
+                           "-std=c++20", "-ffreestanding", "-fPIC", "-fvisibility=hidden", "-fno-exceptions", "-fno-rtti",
+                           "-fno-threadsafe-statics", "-O2", "-Wall", "-Wextra", "-Werror", "-nostdinc++", f"-I{include}",
+                           "-c", str(source), "-o", str(obj)]
             subprocess.run(
-                [clang, "--target=armv7-linux-androideabi", "-march=armv7-a", "-mthumb", "-mfloat-abi=softfp",
-                 "-std=c++20", "-ffreestanding", "-fPIC", "-fvisibility=hidden", "-fno-exceptions", "-fno-rtti",
-                 "-fno-threadsafe-statics", "-O2", "-Wall", "-Wextra", "-Werror", "-nostdinc++", f"-I{include}",
-                 "-c", str(source), "-o", str(obj)],
+                command,
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                 timeout=300, check=True)
             objects.append(str(obj))

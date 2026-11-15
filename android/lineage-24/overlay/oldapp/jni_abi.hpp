@@ -90,6 +90,7 @@ enum : int {
     ToReflectedMethod = 9,
     GetSuperclass = 10,
     Throw = 13,
+    ThrowNew = 14,
     ExceptionClear = 17,
     PushLocalFrame = 19,
     PopLocalFrame = 20,
@@ -123,6 +124,7 @@ enum : int {
     SetByteArrayRegion = 208,
     GetPrimitiveArrayCritical = 222,
     ReleasePrimitiveArrayCritical = 223,
+    RegisterNatives = 215,
     MonitorEnter = 217,
     MonitorExit = 218,
     NewWeakGlobalRef = 226,
@@ -130,6 +132,13 @@ enum : int {
     GetObjectRefType = 232,
 };
 }  // namespace slot
+
+// JNINativeMethod: what RegisterNatives takes an array of.
+struct NativeMethod {
+    const char* name;
+    const char* signature;
+    void* function;
+};
 
 // The JavaVM invoke interface.
 namespace vmslot {
