@@ -190,7 +190,9 @@ the console lines the iPad harness reads. AppStore builds as Release does and
 leaves out everything that exists for automation or only pretends. TestFlight
 is AppStore in every respect below (the same compilation condition, runtime,
 embedded-artifact check and bundle check) except in the last item, which
-names the optional features it carries.
+names the optional features it carries. It also defines `TESTFLIGHT`, which
+only names the configuration in [Send feedback](#send-feedback)'s information
+block.
 
 - `APP_STORE` is a Swift compilation condition that compiles out the launch
   environment (`Live/LaunchEnvironment.swift`, so no `ANDARIUM_` or
