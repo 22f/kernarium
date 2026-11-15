@@ -637,8 +637,10 @@ control out.
   version has notes, and then keyed by its own builds). A build bundles and
   reads its configuration's track alone (`WHATS_NEW_TRACK` in
   `Config/Andarium.xcconfig` leaves the other's file out and picks the file
-  `WhatsNewTrack` loads), which the bundle check of an AppStore or TestFlight
-  build requires. One string table, `Localization/WhatsNew.xcstrings`,
+  `WhatsNewTrack` loads, and any value but `BETA` or `APP_STORE` stops the
+  compile), which the bundle check of an AppStore or TestFlight build
+  requires; `andarium-whats-new-track` runs the loader's source under each
+  configuration's resolved condition. One string table, `Localization/WhatsNew.xcstrings`,
   serves both.
   The first launch of an update that carries notes shows a ribbon above Start,
   on at most three launches, that opens them; a build shows the notes up to its

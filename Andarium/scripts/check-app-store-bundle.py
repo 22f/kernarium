@@ -1140,36 +1140,40 @@ def notes_file(configuration: str) -> str:
     return APP_STORE_NOTES_FILE if configuration == APP_STORE else BETA_NOTES_FILE
 
 
-def notes_about_feedback(path: Path) -> frozenset[str]:
-    """The strings (title, text and points) of the entries of a notes file that are
-    about Send feedback, which the notes' table holds under their English text.
-    Empty if the file is missing or unreadable, so nothing is then exempt."""
+def note_strings(path: Path) -> tuple[frozenset[str], frozenset[str]]:
+    """The strings (title, text and points) of the entries of a notes file, which the
+    notes' table holds under their English text: those of the entries about Send
+    feedback (marked with its requirement), and those of every other entry. Both
+    are empty if the file is missing or unreadable, so nothing is then exempt."""
     try:
         releases = json.loads(path.read_text(encoding="utf-8"))
         entries = [entry for release in releases for entry in release["entries"]]
     except (OSError, ValueError, KeyError, TypeError):
-        return frozenset()
-    found: set[str] = set()
+        return frozenset(), frozenset()
+    marked: set[str] = set()
+    shown: set[str] = set()
     for entry in entries:
         requirement = entry.get("requirement") if isinstance(entry, dict) else None
-        if not isinstance(requirement, dict) or requirement.get("feature") != NOTES_FEATURE:
-            continue
-        points = entry.get("points")
-        for note in (entry.get("title"), entry.get("text"), *(points if isinstance(points, list) else ())):
+        about = isinstance(requirement, dict) and requirement.get("feature") == NOTES_FEATURE
+        points = entry.get("points") if isinstance(entry, dict) else None
+        for note in (entry.get("title"), entry.get("text"), *(points if isinstance(points, list) else ())) \
+                if isinstance(entry, dict) else ():
             if isinstance(note, str):
-                found.add(note)
-    return frozenset(found)
+                (marked if about else shown).add(note)
+    return frozenset(marked), frozenset(shown)
 
 
 def hidden_notes(app: Path, configuration: str, beta_notes: Path | None = None) -> frozenset[str]:
     """The strings of the entries about Send feedback in the notes the bundle
     carries (`notes_file`). The table is one for both tracks, so an AppStore
     bundle holds the beta track's strings too, and `beta_notes`, the beta
-    track's source file, says which of them are about Send feedback."""
-    found = notes_about_feedback(app / notes_file(configuration))
+    track's source file, says which of them are about Send feedback. A string
+    that an entry of the bundled notes without the mark uses is shown by that
+    entry, whichever track has it marked, so it is never hidden."""
+    marked, shown = note_strings(app / notes_file(configuration))
     if configuration == APP_STORE and beta_notes is not None:
-        found |= notes_about_feedback(beta_notes)
-    return found
+        marked |= note_strings(beta_notes)[0]
+    return marked - shown
 
 
 def feedback_strings(app: Path, configuration: str, beta_notes: Path | None = None) -> list[str]:
@@ -1194,10 +1198,58 @@ def feedback_strings(app: Path, configuration: str, beta_notes: Path | None = No
     return found
 
 
+# What the application's decoder (WhatsNewRelease, WhatsNewEntry and
+# WhatsNewCatalog in AndariumCore) accepts of a notes file, in the part that a bundle
+# can break: the keys of a release and of an entry, what each holds, and a build or
+# an entry's id that appears once. A requirement and a date are the application's
+# own tests' to read.
+RELEASE_KEYS = frozenset({"build", "version", "date", "entries"})
+ENTRY_KEYS = frozenset({"id", "title", "text", "points", "symbol", "place", "requirement"})
+
+
+def release_problem(releases: list) -> str | None:
+    """Why the application would not accept this list of releases, or None."""
+    def text(value: object) -> bool:
+        return isinstance(value, str) and bool(value)
+
+    builds: set[int] = set()
+    ids: set[str] = set()
+    for release in releases:
+        if not isinstance(release, dict) or not set(release) <= RELEASE_KEYS:
+            return "a release is not an object with only build, version, date and entries"
+        build = release.get("build")
+        if isinstance(build, bool) or not isinstance(build, int) or not isinstance(release.get("version"), str):
+            return "a release has no build number or version"
+        if build in builds:
+            return f"build {build} has two releases"
+        builds.add(build)
+        entries = release.get("entries")
+        if not isinstance(entries, list) or not entries:
+            return f"the release of build {build} has no entry"
+        for entry in entries:
+            if not isinstance(entry, dict) or not set(entry) <= ENTRY_KEYS:
+                return "an entry is not an object with only the keys the application reads"
+            if not (text(entry.get("id")) and text(entry.get("title")) and text(entry.get("symbol"))):
+                return "an entry lacks its id, title or symbol"
+            points = entry.get("points")
+            if "text" in entry and not text(entry["text"]):
+                return f"the entry {entry['id']} has an empty text"
+            if points is not None and (not isinstance(points, list) or not points
+                                       or not all(text(point) for point in points)):
+                return f"the entry {entry['id']} has an empty list of points or an empty point"
+            if "text" not in entry and points is None:
+                return f"the entry {entry['id']} has neither text nor points"
+            if entry["id"] in ids:
+                return f"the entry {entry['id']} appears twice"
+            ids.add(entry["id"])
+    return None
+
+
 def notes_problems(app: Path, configuration: str) -> tuple[list[str], str]:
-    """Whether the bundle carries the notes file of its configuration's track and not
-    the other track's, and the line that says which it carries. Each file is a list
-    of releases (the application refuses anything else, and shows no notes)."""
+    """Whether the bundle carries the notes file of its configuration's track at its
+    root, and not the other track's or a copy elsewhere, and the line that says which
+    it carries. Each file is a list of releases the application accepts (it
+    refuses anything else, and shows no notes)."""
     own = notes_file(configuration)
     other = BETA_NOTES_FILE if own == APP_STORE_NOTES_FILE else APP_STORE_NOTES_FILE
     track = "App Store" if own == APP_STORE_NOTES_FILE else "beta"
@@ -1206,6 +1258,9 @@ def notes_problems(app: Path, configuration: str) -> tuple[list[str], str]:
         releases = json.loads((app / own).read_text(encoding="utf-8"))
         if not isinstance(releases, list):
             raise ValueError
+        why = release_problem(releases)
+        if why:
+            problems.append(f"{own}: {why}; the application accepts no such release")
     except OSError:
         problems.append(f"{own}: is missing; {configuration} bundles the {track} track of the What's New notes")
     except ValueError:
@@ -1213,6 +1268,11 @@ def notes_problems(app: Path, configuration: str) -> tuple[list[str], str]:
                         "What's New notes")
     if (app / other).exists():
         problems.append(f"{other}: is the other track's What's New notes; {configuration} bundles {own} alone")
+    for directory, _names, files in os.walk(app):
+        for name in sorted(files):
+            if name in (BETA_NOTES_FILE, APP_STORE_NOTES_FILE) and Path(directory) != app:
+                problems.append(f"{(Path(directory) / name).relative_to(app)}: is a copy of a What's New notes "
+                                f"file; {configuration} bundles {own} at the bundle root alone")
     return problems, f"What's New notes are the {track} track ({own})"
 
 

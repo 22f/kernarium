@@ -94,6 +94,18 @@ uml_add_tooling_test(
     LABELS andarium
     TIMEOUT 60)
 
+# Each configuration reads its own track of What's New notes: the target's resolved
+# build settings give the compilation conditions, the loader's own source is compiled
+# with them and run against a bundle that holds a different list in each track's file,
+# and a track value that names neither track stops the compile.
+uml_add_tooling_test(
+    NAME andarium-whats-new-track
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_whats_new_track.py
+        --root ${PROJECT_SOURCE_DIR}
+    LABELS andarium
+    TIMEOUT 180)
+
 # The release build refuses an embedded artifact that is behind the commit it
 # archives; the fixtures build a repository, a staged system and an application
 # with a kernel carrying a banner and a configuration, and change one thing each.

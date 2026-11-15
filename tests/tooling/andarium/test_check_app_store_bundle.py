@@ -526,7 +526,8 @@ def write_notes(app: Path, entries: list[dict] | None, strings: dict[str, str],
     and the compiled table of their translations in each language, which both tracks share."""
     if entries is not None:
         (app / track).write_text(
-            json.dumps([{"build": 11, "version": "1.0 (11)", "entries": entries}]), encoding="utf-8")
+            json.dumps([{"build": 11, "version": "1.0 (11)", "entries": entries}] if entries else []),
+            encoding="utf-8")
     for language in languages:
         lproj = app / f"{language}.lproj"
         lproj.mkdir(exist_ok=True)
@@ -2134,6 +2135,44 @@ def main() -> int:
             empty = make_app(root, f"notes-track-empty-{label}", clean, app_info())
             (empty / file).write_text("[]", encoding="utf-8")
             check(empty, passes=True, expect=says, args=flags, notes=False)
+            # A list the application would not accept is no notes file: it shows no notes.
+            entry = {"id": "a", "title": "A", "text": "B", "symbol": "s"}
+            for name, releases, expect in (
+                    ("empty-release", [{}], "a release has no build number or version"),
+                    ("extra-release-key", [{"build": 11, "version": "v", "entries": [entry], "x": 1}],
+                     "a release is not an object with only"),
+                    ("no-entries", [{"build": 11, "version": "v", "entries": []}], "has no entry"),
+                    ("empty-entry", [{"build": 11, "version": "v", "entries": [{}]}], "an entry lacks its id"),
+                    ("extra-entry-key", [{"build": 11, "version": "v", "entries": [{**entry, "x": 1}]}],
+                     "an entry is not an object with only the keys"),
+                    ("no-text", [{"build": 11, "version": "v", "entries": [{**entry, "text": None}]}],
+                     "has an empty text"),
+                    ("neither", [{"build": 11, "version": "v",
+                                  "entries": [{key: value for key, value in entry.items() if key != "text"}]}],
+                     "has neither text nor points"),
+                    ("empty-points", [{"build": 11, "version": "v", "entries": [{**entry, "points": [""]}]}],
+                     "has an empty list of points or an empty point"),
+                    ("twice", [{"build": 11, "version": "v", "entries": [entry, entry]}], "appears twice"),
+                    ("two-builds", [{"build": 11, "version": "v", "entries": [entry]},
+                                    {"build": 11, "version": "w", "entries": [{**entry, "id": "b"}]}],
+                     "build 11 has two releases")):
+                refused = make_app(root, f"notes-track-{name}-{label}", clean, app_info())
+                (refused / file).write_text(json.dumps(releases), encoding="utf-8")
+                check(refused, passes=False, expect=expect, args=flags, notes=False)
+            good = make_app(root, f"notes-track-good-{label}", clean, app_info())
+            (good / file).write_text(json.dumps([{"build": 11, "version": "v", "date": "2026-11-15",
+                                                  "entries": [{**entry, "points": ["C"], "place": "sessionSettings",
+                                                               "requirement": {"device": "pad"}}]}]),
+                                     encoding="utf-8")
+            check(good, passes=True, expect=says, args=flags, notes=False)
+            # The application reads the file at the bundle root alone: a copy elsewhere is a stray.
+            for place in ("Resources/WhatsNew.json", "ja.lproj/WhatsNewAppStore.json", "Frameworks/X.framework/WhatsNew.json"):
+                copied = make_app(root, f"notes-track-copy-{label}-{place.replace('/', '-')}", clean, app_info())
+                write_notes(copied, hidden, NOTES_STRINGS, track=file)
+                (copied / place).parent.mkdir(parents=True, exist_ok=True)
+                (copied / place).write_text("[]", encoding="utf-8")
+                check(copied, passes=False, expect=f"{place}: is a copy of a What's New notes file",
+                      args=flags, notes=False)
         # The notes' table is one for both tracks, so an AppStore bundle whose own track has
         # no entry about Send feedback still holds the beta track's strings of it. The beta
         # track's source file (--beta-notes) says which they are; without it, or for a string
@@ -2156,6 +2195,25 @@ def main() -> int:
         stray = make_app(root, "notes-beta-stray", clean, app_info())
         write_notes(stray, [], {**NOTES_STRINGS, "Fixed Send feedback not opening": "x"}, track=APP_STORE_NOTES)
         check(stray, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings",
+              args=["--beta-notes", str(beta_source)])
+        # The exemption never hides what a bundled entry shows: the beta track's entry about
+        # Send feedback copied into the App Store file without its requirement is shown by a
+        # product that has no feedback, and so is a string that a bundled entry without the mark
+        # shares with a marked one, whichever track marks it.
+        copied_entry = {**FEEDBACK_ENTRY, "requirement": None}
+        for name, entries in (
+                ("copied-unmarked", [copied_entry, PLAIN_ENTRY]),
+                ("copied-other-requirement", [{**FEEDBACK_ENTRY, "requirement": {"device": "pad"}}, PLAIN_ENTRY]),
+                ("shared-title", [FEEDBACK_ENTRY, {**PLAIN_ENTRY, "id": "same-title", "title": FEEDBACK_ENTRY["title"]}])):
+            overlap = make_app(root, f"notes-beta-{name}", clean, app_info())
+            write_notes(overlap, entries, NOTES_STRINGS, track=APP_STORE_NOTES)
+            check(overlap, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings",
+                  args=["--beta-notes", str(beta_source)])
+            check(overlap, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings")
+        # An entry that keeps the mark is hidden, with the beta source or without it.
+        marked = make_app(root, "notes-beta-copied-marked", clean, app_info())
+        write_notes(marked, [FEEDBACK_ENTRY, PLAIN_ENTRY], NOTES_STRINGS, track=APP_STORE_NOTES)
+        check(marked, passes=True, expect="Send feedback is not compiled in",
               args=["--beta-notes", str(beta_source)])
         # Only an AppStore bundle takes the exemption from there: a bundle of the beta track
         # has the notes it carries.
