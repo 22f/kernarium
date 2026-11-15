@@ -23,6 +23,10 @@ Checked:
   differ between two runs of the same engine (stack addresses under ASLR) are
   masked; the others are compared for each fault, and at least one must be;
 - every adb command and push reports success;
+- without --diagnostics (the product emulator, which states nothing itself):
+  the AOT arm read and ran the framework, judged from outside by the resident
+  size of the framework's text in the emulator process (vmmap), which is a
+  few pages with the component off and megabytes once it has entered code;
 - with --diagnostics (a framework built with UML_AOT_DIAGNOSTICS, which writes
   the report named by DARWIN_UML_AOT_REPORT): the AOT arm entered rewritten
   code, and the arm with the component off did not. With --manifest the
@@ -64,6 +68,10 @@ import slot_ports  # noqa: E402
 DEFAULT_ADB_PORT = 5585
 SETTLE_SECONDS = 20
 REPORT_SECONDS = 3
+# The resident size of the framework's text that separates "loaded" from
+# "run": a component that is off leaves a few pages, one that entered code
+# has megabytes.
+MIN_RESIDENT_BYTES = 1 << 20
 WORKLOAD_SECONDS = 900
 PROBE_SECONDS = 120
 TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
@@ -253,6 +261,51 @@ def verify_probe(text: str) -> int:
     return records
 
 
+def emulator_pid(root: int) -> int | None:
+    """The emulator process below the launcher `root`, or None."""
+    rows = subprocess.run(
+        ["ps", "-axo", "pid=,ppid=,command="], text=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, check=False, timeout=30).stdout
+    children: dict[int, list[tuple[int, str]]] = {}
+    for line in rows.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) == 3 and fields[0].isdigit() and fields[1].isdigit():
+            children.setdefault(int(fields[1]), []).append(
+                (int(fields[0]), fields[2]))
+    stack = [root]
+    while stack:
+        for pid, command in children.get(stack.pop(), []):
+            if pathlib.PurePosixPath(command.split(" ")[0]).name == \
+                    "uml-darwin-android17":
+                return pid
+            stack.append(pid)
+    return None
+
+
+def size_bytes(text: str) -> int:
+    """A vmmap size such as 16K, 19.3M or 1.2G."""
+    units = {"B": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30}
+    if not text or text[-1] not in units or not text[:-1].replace(".", "", 1).isdigit():
+        raise Failure(f"unreadable size {text!r}")
+    return int(float(text[:-1]) * units[text[-1]])
+
+
+def framework_resident(vmmap: str, pid: int) -> int:
+    """The resident bytes of the AOT framework's text in process `pid`."""
+    result = subprocess.run(
+        [vmmap, "-wide", str(pid)], text=True, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+        timeout=120)
+    if result.returncode != 0:
+        raise Failure(f"vmmap exited {result.returncode}:\n{result.stdout}")
+    for line in result.stdout.splitlines():
+        match = re.match(r"__TEXT\s+\S+\s+\[\s*(\S+)\s+(\S+)\s", line)
+        if match and "UmlArm64Aot" in line:
+            return size_bytes(match.group(2))
+    raise Failure("vmmap shows no text of the AOT framework in the emulator")
+
+
 def register_fields(line: str) -> dict[str, str]:
     return dict(re.findall(r"(x\d\d)=(\S+)", line))
 
@@ -326,6 +379,7 @@ class Arm:
         self.workloads: dict[tuple[str, int], Run] = {}
         self.probe: list[str] = []
         self.report: dict[str, int] = {}
+        self.resident: int | None = None
 
     def run(self) -> None:
         options = self.options
@@ -388,6 +442,11 @@ class Arm:
             if guest.poll() is not None:
                 raise Failure(f"the launcher exited ({guest.returncode}) "
                               "before the guest's work was done")
+            if not options.diagnostics:
+                pid = emulator_pid(guest.pid)
+                if pid is None:
+                    raise Failure("no emulator process below the launcher")
+                self.resident = framework_resident(options.vmmap, pid)
             time.sleep(REPORT_SECONDS)
             self.report = read_report(report)
         except (Failure, subprocess.TimeoutExpired, OSError) as problem:
@@ -438,6 +497,16 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
         if checked == 0:
             raise Failure("the probe compared no registers")
         print(f"probe: {checked} registers compared, identical")
+    if not options.diagnostics:
+        assert off.resident is not None and on.resident is not None
+        if on.resident < MIN_RESIDENT_BYTES:
+            raise Failure("the AOT arm never ran rewritten code (the "
+                          f"framework's text is {on.resident} bytes resident)")
+        if off.resident >= MIN_RESIDENT_BYTES:
+            raise Failure("the framework's text ran with the component off "
+                          f"({off.resident} bytes resident)")
+        print(f"framework text resident: off {off.resident >> 10} KiB, "
+              f"on {on.resident >> 10} KiB")
     if options.diagnostics:
         if on.report.get("enters", 0) == 0:
             raise Failure("the AOT arm never entered rewritten code")
@@ -491,6 +560,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--boot-timeout", type=int, default=900)
     parser.add_argument("--probe", type=pathlib.Path,
                         help="the built guest probe (libaotprobe.so)")
+    parser.add_argument("--vmmap", default="vmmap",
+                        help="the tool that lists the emulator's regions "
+                        "(the product mode reads the framework's residency)")
     parser.add_argument("--diagnostics", action="store_true",
                         help="the framework is a diagnostics build")
     parser.add_argument("--manifest", type=pathlib.Path,

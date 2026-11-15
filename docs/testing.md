@@ -759,14 +759,18 @@ blocker in every one of them.
 - `arm64-aot-guest-runner` drives the guest runner of the next test against
   scripted guests: a complete pair of arms passes, and every failed or
   incomplete one (an exit status, a missing or empty workload row, a probe
-  that skipped scenarios or recorded no faults) fails.
+  that skipped scenarios or recorded no faults, a product arm whose framework
+  never became resident) fails.
 - `aot-guest-workloads` (integration, opt-in like the other Android guest
   tests: it exists where `UML_AOT_IMAGE` and the Android launcher target do)
   boots the release twice, without and with `DARWIN_UML_AOT=1`, runs the
   covered library families' workloads, three times each, and the guest probe
   (faults inside rewritten libz code, text patched at run time), requires
-  every command to succeed and identical output, and, in a diagnostics build,
-  that the libraries it names were entered; speed is printed, not judged.
+  every command to succeed and identical output, and that the AOT arm ran
+  rewritten code: in a diagnostics build, that the libraries it names were
+  entered; in a product build, which states nothing itself, that the
+  framework's text became resident in the emulator process (`vmmap`, macOS)
+  and was not with the component off. Speed is printed, not judged.
 - `arm64-instruction-corpus` runs the generated A64 corpus through both
   engines; the special records (native SME, absent features, the SM = 0 family,
   top-byte ignore, native floating-point traps) have their own

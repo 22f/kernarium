@@ -36,10 +36,41 @@ scenario = json.loads((state / "scenario.json").read_text())
 report = os.environ.get("DARWIN_UML_AOT_REPORT")
 if report and scenario.get("report", {}).get(arm) is not None:
     pathlib.Path(report).write_text(scenario["report"][arm])
+# The emulator: a process of that name below the launcher.
+import subprocess
+link = state / "uml-darwin-android17"
+if not link.exists():
+    link.symlink_to("/bin/sleep")
+child = subprocess.Popen([str(link), "120"])
+def stop(*_):
+    child.kill()
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop)
 deadline = time.monotonic() + 120
 while time.monotonic() < deadline:
     time.sleep(0.05)
+child.kill()
 """
+
+FAKE_VMMAP = """\
+import json, os, pathlib, sys
+state = pathlib.Path(os.environ["FAKE_GUEST_STATE"])
+scenario = json.loads((state / "scenario.json").read_text())
+arm = (state / "arm").read_text() if (state / "arm").exists() else "off"
+sys.stdout.write(scenario["vmmap"][arm])
+sys.exit(scenario.get("vmmap_status", 0))
+"""
+
+def vmmap_text(resident: str, framework: str = "UmlArm64Aot") -> str:
+    return ("REGION TYPE                    START - END         [ VSIZE  RSDNT"
+            "  DIRTY   SWAP] PRT/MAX SHRMOD PURGE    REGION DETAIL\n"
+            "__TEXT                      114450000-123808000    [243.7M"
+            f"  {resident}     0K     0K] r-x/rwx SM=COW          "
+            f"/x/bin/Frameworks/{framework}.framework/{framework}\n"
+            "__LINKEDIT                  123808000-123884000    [  496K"
+            "    16K     0K     0K] r--/rwx SM=COW          "
+            f"/x/bin/Frameworks/{framework}.framework/{framework}\n")
+
 
 FAKE_ADB = """\
 import json, os, pathlib, sys
@@ -111,7 +142,8 @@ def good_scenario() -> dict:
     return {"workloads": {"off": text, "on": text},
             "probe": {"off": [good_probe()], "on": [good_probe()]},
             "report": {"on": "binds 3 enters 9 steps 2 poisoned 0 refills 0\n",
-                       "off": None}}
+                       "off": None},
+            "vmmap": {"off": vmmap_text("16K"), "on": vmmap_text("19.3M")}}
 
 
 class RunnerTest(unittest.TestCase):
@@ -131,13 +163,17 @@ class RunnerTest(unittest.TestCase):
                 runner_directory=str(RUNNER_DIRECTORY),
                 support_directory=str(RUNNER_DIRECTORY.parent / "support"),
                 launcher=str(launcher)))
+            vmmap = root / "vmmap"
+            vmmap.write_text(f"#!{sys.executable}\n" + FAKE_VMMAP)
+            vmmap.chmod(0o755)
             probe = root / "libaotprobe.so"
             probe.write_bytes(b"probe")
             environment = {**os.environ, "FAKE_GUEST_STATE": str(state),
                            "PYTHONDONTWRITEBYTECODE": "1"}
             return subprocess.run(
                 [sys.executable, "-B", str(wrapper), "--adb", str(adb),
-                 "--probe", str(probe), "--boot-timeout", "30", *extra],
+                 "--probe", str(probe), "--vmmap", str(vmmap),
+                 "--boot-timeout", "30", *extra],
                 stdin=subprocess.DEVNULL, capture_output=True, text=True,
                 timeout=90, env=environment, check=False)
 
@@ -265,6 +301,36 @@ class RunnerTest(unittest.TestCase):
         self.fails(self.bad_probe(good_probe().replace(
             "done faults=%d\n" % len(runner.PROBE_CASES), "")),
             "closing record")
+
+    def test_product_arm_that_never_ran_the_framework_fails(self):
+        scenario = good_scenario()
+        scenario["vmmap"]["on"] = vmmap_text("16K")
+        self.fails(scenario, "never ran rewritten code")
+        scenario = good_scenario()
+        scenario["vmmap"]["on"] = vmmap_text("512K")
+        self.fails(scenario, "never ran rewritten code")
+
+    def test_framework_that_ran_with_the_component_off_fails(self):
+        scenario = good_scenario()
+        scenario["vmmap"]["off"] = vmmap_text("19.3M")
+        self.fails(scenario, "ran with the component off")
+
+    def test_product_mode_without_evidence_fails(self):
+        scenario = good_scenario()
+        scenario["vmmap_status"] = 1
+        self.fails(scenario, "vmmap exited 1")
+        scenario = good_scenario()
+        scenario["vmmap"] = {"off": "nothing\n", "on": "nothing\n"}
+        self.fails(scenario, "no text of the AOT framework")
+        scenario = good_scenario()
+        scenario["vmmap"] = {"off": vmmap_text("16K", "Other"),
+                             "on": vmmap_text("19.3M", "Other")}
+        self.fails(scenario, "no text of the AOT framework")
+
+    def test_diagnostics_mode_does_not_need_the_framework_regions(self):
+        scenario = good_scenario()
+        scenario["vmmap"] = {"off": "nothing\n", "on": "nothing\n"}
+        self.passes(scenario, "--diagnostics")
 
     def test_diagnostics_report_is_judged(self):
         self.passes(good_scenario(), "--diagnostics")
