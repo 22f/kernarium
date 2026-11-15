@@ -20,6 +20,8 @@ import argparse
 import collections
 import dataclasses
 import json
+import multiprocessing
+import os
 import pathlib
 import re
 import struct
@@ -30,6 +32,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import a64decode  # noqa: E402
 import asm as A  # noqa: E402
 import elf64  # noqa: E402
+import licences  # noqa: E402
 
 # ---- the register plan (docs/architecture.md, section "AOT code") -------
 
@@ -38,7 +41,7 @@ SCRATCH = (T0, T1, T2)
 
 FRAME = 0x100
 SLOT_CPU, SLOT_BIAS, SLOT_BUD0, SLOT_SP = 0xA0, 0xA8, 0xB0, 0xB8
-SLOT_REFILL = 0xF0
+SLOT_XTAB = 0xF0
 # The refill thunk's own frame: x0-x17, x30, NZCV, then q0-q31.
 REFILL_FRAME = 0x2a0
 VSLOT = {18: 0xC0, 24: 0xC8, 25: 0xD0, 26: 0xD8, 27: 0xE0, 28: 0xE8}
@@ -188,11 +191,29 @@ class Library:
             for offset in range(0, len(data), 4):
                 self.words[function.start + offset] = struct.unpack_from(
                     "<I", data, offset)[0]
-        self.step_sites: set[int] = set()
-        self.miss_sites: dict[int, str] = {}
-        self.budget_sites: dict[int, int] = {}
-        self.exit_targets: set[int] = set()
         self.entry_labels: list[int] = []
+        self.step_list: list[tuple[int, str]] = []
+        # Per function, cleared as each is emitted: the cold stubs it needs.
+        self.fn_start = 0
+        self.fn_mm: list[tuple[int, str, int]] = []
+        self.fn_xu: set[int] = set()
+        self.fn_xb: set[int] = set()
+        self.fn_ma: list[int] = []
+        # Where a budget is charged: every function entry and loop header.
+        # A cycle contains a direct branch to a lower address (or to itself),
+        # whatever the unwind ranges say, so every such target charges; calls
+        # and returns that close a cycle are charged by the entry they reach
+        # or by the indirect branch itself.
+        self.budget_extent: dict[int, int] = {}
+        for function in self.functions:
+            self.budget_extent[function.start] = 8
+        for offset, word in self.words.items():
+            target = self._direct_target(word, offset)
+            if target is None or target > offset or target not in self.covered:
+                continue
+            extent = (offset - target) // 4 + 1
+            self.budget_extent[target] = max(
+                self.budget_extent.get(target, 0), extent)
 
     # labels
     def lab(self, kind: str, value: int) -> str:
@@ -200,28 +221,38 @@ class Library:
 
     def goto_label(self, target: int) -> str:
         if target in self.covered:
-            return self.lab("G", target)
-        self.exit_targets.add(target)
-        return self.lab("XB", target)
+            # The branch charges the budget where the target is a charge point.
+            return self.lab("G" if target in self.budget_extent else "E",
+                            target)
+        self.fn_xb.add(target)
+        return self.xb_label(target)
+
+    def xb_label(self, target: int) -> str:
+        return f"L{self.index}XB{self.fn_start:x}_{target:x}"
 
     # emission -------------------------------------------------------------
-    def emit(self, asm: A.Assembler) -> None:
-        self.asm = asm
+    def build(self, digests: list[int]) -> dict:
+        """Emit the whole library as one self-contained unit."""
+        asm = self.asm = A.Assembler()
+        asm.label("UNIT")
+        emit_exits(asm, self)
         for function in self.functions:
             self.stats.functions += 1
             self._emit_function(function)
-        self._emit_stubs()
-
-    def _loop_headers(self, function: elf64.Function) -> dict[int, int]:
-        headers: dict[int, int] = {}
-        for offset in range(function.start, function.end, 4):
-            word = self.words[offset]
-            target = self._direct_target(word, offset)
-            if target is None or not (function.start <= target <= offset):
-                continue
-            extent = (offset - target) // 4 + 1
-            headers[target] = max(headers.get(target, 0), extent)
-        return headers
+        asm.label("TAB")
+        asm.data(bytes(4 * self.table_words))
+        asm.label("DIG")
+        asm.data(b"".join(struct.pack("<Q", d) for d in digests))
+        unit = bytearray(asm.resolve())
+        table_at = asm.label_address("TAB")
+        view = memoryview(unit)[table_at:table_at + 4 * self.table_words
+                                ].cast("I")
+        for offset in self.entry_labels:
+            view[(offset - self.table_base) // 4] = asm.label_address(
+                self.lab("E", offset))
+        view.release()
+        return {"unit": bytes(unit), "table_at": table_at,
+                "digest_at": asm.label_address("DIG")}
 
     def _direct_target(self, word: int, offset: int) -> int | None:
         encoding = self.decoder.decode(word)
@@ -240,26 +271,28 @@ class Library:
 
     def _emit_function(self, function: elf64.Function) -> None:
         asm = self.asm
-        headers = self._loop_headers(function)
+        self.fn_start = function.start
+        self.fn_mm = []
+        self.fn_xu = set()
+        self.fn_xb = set()
+        self.fn_ma = []
         last_falls_through = True
         for offset in range(function.start, function.end, 4):
             word = self.words[offset]
-            asm.label(self.lab("G", offset))
-            extent = 8 if offset == function.start else 0
-            if offset in headers:
-                extent = max(extent, headers[offset])
+            extent = self.budget_extent.get(offset, 0)
             if extent:
                 extent = min(extent, 4095)
-                site = self.lab("XU", offset)
-                self.budget_sites[offset] = extent
+                asm.label(self.lab("G", offset))
+                self.fn_xu.add(offset)
                 asm.word(A.add_imm(BUD, BUD, extent, sub=True))
-                asm.tbz(BUD, 63, site, nz=True)
+                asm.tbz(BUD, 63, self.lab("XU", offset), nz=True)
             asm.label(self.lab("E", offset))
             self.entry_labels.append(offset)
             self.stats.instructions += 1
             last_falls_through = self._emit_instruction(offset, word)
         if last_falls_through:
             asm.b(self.goto_label(function.end))
+        self._emit_stubs(function)
 
     # classification of one instruction; returns whether it falls through
     def _emit_instruction(self, offset: int, word: int) -> bool:
@@ -345,7 +378,9 @@ class Library:
             return None
         if cls in SIMD_CLASSES and feature in SIMD_FEATURES and \
                 mnemonic not in FP_NAMES and not mnemonic.startswith("F"):
-            if cls == "asimdins":
+            if cls == "asimdins" and not (word >> 29) & 1:
+                # INS (general), DUP (general), SMOV and UMOV (op = 0); INS
+                # (element) (op = 1) names vector registers only.
                 imm4 = (word >> 11) & 15
                 if imm4 in (1, 3):
                     return [(5, False)]
@@ -361,15 +396,20 @@ class Library:
         return value
 
     def _step(self, offset: int, cause: str) -> bool:
-        self.step_sites.add(offset)
-        self.asm.b(self.lab("XS", offset))
+        """Leave at this instruction with committed state: the engine runs it."""
+        self._exit_to(offset, "EXIT_STEP")
+        self.step_list.append((offset, cause))
         self.stats.steps += 1
         self.stats.steps_by_cause[cause] += 1
         return False
 
-    def _step_label(self, offset: int) -> str:
-        self.step_sites.add(offset)
-        return self.lab("XS", offset)
+    def _exit_to(self, offset: int, routine: str) -> None:
+        """T0 = the guest offset, then the named exit routine."""
+        asm = self.asm
+        asm.word(A.movz(T0, offset & 0xffff))
+        if offset >> 16:
+            asm.word(A.movk(T0, (offset >> 16) & 0xffff, 1))
+        asm.b(routine)
 
     def _load_guest(self, host: int, guest) -> None:
         self.asm.word(A.ldr_x(host, 31, slot_of(guest)))
@@ -417,11 +457,40 @@ class Library:
                 if guest in mapping:
                     patched = (patched & ~(31 << lsb)) | (mapping[guest] << lsb)
             self.asm.word(patched)
+            written = {self._resolve(word & 31, sp_capable)
+                       for lsb, sp_capable in fields if lsb == 0}
             for guest in needed:
-                self._store_guest(mapping[guest], guest)
+                if guest in written:
+                    self._store_guest(mapping[guest], guest)
+            if "sp" in written and (word & 31) == 31:
+                self._sp_aligned_after(offset, word, encoding, mapping["sp"])
         self.stats.inlined += 1
         self.stats.kinds[encoding.mnemonic] += 1
         return True
+
+    def _sp_aligned_after(self, offset: int, word: int, encoding,
+                          register: int) -> None:
+        """Keep the invariant that AOT code runs with a 16-byte aligned SP.
+
+        The engine faults an SP-based access made with a misaligned SP. AOT is
+        entered only with an aligned SP (GadgetExecutor::run_aot), and an
+        instruction that leaves SP misaligned ends the entry after it
+        commits, so the engine runs the rest. A write that adds a multiple of
+        sixteen to an aligned SP needs no test. The test leaves the flags
+        alone.
+        """
+        if encoding.decode_class == "addsub_imm" and (word >> 5) & 31 == 31:
+            amount = ((word >> 10) & 0xfff) << (12 if (word >> 22) & 1 else 0)
+            if amount % 16 == 0:
+                return
+        self._guard_sp(offset, register)
+
+    def _guard_sp(self, offset: int, register: int) -> None:
+        asm = self.asm
+        check = T1 if register != T1 else T2
+        asm.word(A.ubfx(check, register, 0, 4))
+        self.fn_ma.append(offset)
+        asm.cbz(check, self.lab("MA", offset), nz=True)
 
     def _tpidr(self, offset: int, word: int) -> bool:
         asm = self.asm
@@ -496,10 +565,9 @@ class Library:
     def _indirect_branch(self, offset: int, word: int, mnemonic: str) -> bool:
         asm = self.asm
         rn = (word >> 5) & 31
-        site = self.lab("XU", offset)
-        self.budget_sites[offset] = 4
+        self.fn_xu.add(offset)
         asm.word(A.add_imm(BUD, BUD, 4, sub=True))
-        asm.tbz(BUD, 63, site, nz=True)
+        asm.tbz(BUD, 63, self.lab("XU", offset), nz=True)
         guest = self._resolve(rn, False)
         if guest in VIRTUAL:
             self._load_guest(T0, guest)
@@ -514,7 +582,7 @@ class Library:
             asm.word(A.add_imm(T1, T1, base_pages, sub=True, shift12=True))
         asm.word(A.ror_imm(T2, T1, 2))
         asm.word(A.lsr_imm(T2, T2, self.log_span - 2))
-        asm.cbz(T2, "EXIT_BRANCH_ABS", nz=True)
+        asm.cbz(T2, "XLIB", nz=True)
         # The test above passes anything below the next power of two; the
         # table covers exactly the code span.
         span = self.table_end - self.table_base
@@ -524,11 +592,11 @@ class Library:
             asm.word(A.movz(T2, span & 0xffff))
             asm.word(A.movk(T2, (span >> 16) & 0xffff, 1))
             asm.word(A.add_reg(T2, T1, T2, sub=True))
-        asm.tbz(T2, 63, "EXIT_BRANCH_ABS", nz=False)
-        asm.adrp_add(T2, self.lab("TAB", 0))
+        asm.tbz(T2, 63, "XLIB", nz=False)
+        asm.adrp_add(T2, "TAB")
         asm.word(A.ldr_reg_w(T1, T2, T1))
         asm.cbz(T1, "EXIT_BRANCH_ABS", sf=0, nz=False)
-        asm.adrp_add(T2, "BLOB")
+        asm.adrp_add(T2, "UNIT")
         asm.word(A.add_reg(T2, T2, T1))
         asm.word(A.br(T2))
         self.stats.inlined += 1
@@ -628,7 +696,6 @@ class Library:
         if pair and len(virtual_operands) == 2 and virtual_operands[0] == \
                 virtual_operands[1]:
             return self._step(offset, "pair-same-virtual")
-        step = self._step_label(offset)
         # ---- the effective address, in a host register
         if literal is not None:
             self._materialize(T0, literal)
@@ -663,30 +730,28 @@ class Library:
             else:
                 self._add_immediate(T0, host_base, effective)
                 ea = T0
-        # ---- the TLB sequence: first byte's page must be the entry's page.
-        # The engine keys its entries by the address without its top byte
-        # (TBI is on for every Android process, and the executor enters AOT
-        # code only then), so the probe and the access use that address.
-        if literal is None:
+        # ---- the probe. The engine keys its entries by the address without
+        # its top byte (TBI is on for every Android process, and the executor
+        # enters AOT code only then) and strips it for every base but SP, so
+        # the probe and the access use that address. An access that spans
+        # bytes is probed by the page of its final byte: the direct index never
+        # puts neighbouring pages in one entry (darwin/memory/tlb.hpp), so a
+        # crossing is a miss. A miss restarts the instruction from its entry
+        # after the host fills the entry, or steps it when the host cannot.
+        if literal is None and base_g != "sp":
             asm.word(A.ubfx(T0, ea, 0, 56))
-            ea = T0
         entry = 0 if load else 16
-        # A miss asks the host to fill the entry and probes again; the
-        # instruction steps only when the host cannot (a fault).
-        self.miss_sites[offset] = "LOAD" if load else "STORE"
-        asm.label(self.lab("MR", offset))
-        asm.word(A.ubfx(T2, ea, 12, 14))
+        self.fn_mm.append((offset, "LOAD" if load else "STORE", total))
+        asm.word(A.ubfx(T2, T0, 12, 14))
         asm.word(A.add_reg(T2, TLB, T2, shift=0, amount=5))
         asm.word(A.ldp_x(T1, T2, T2, entry))
-        asm.word(A.eor_reg(T1, T1, ea, shift=1, amount=12))
-        asm.cbz(T1, self.lab("MM", offset), sf=1, nz=True)
         if total > 1:
-            asm.word(A.add_imm(T1, ea, total - 1))
-            asm.word(A.eor_reg(T1, T1, ea))
-            asm.tbz(T1, 12, step, nz=True)
+            asm.word(A.add_reg(T2, T2, T0))
+            asm.word(A.add_imm(T0, T0, total - 1))
+        asm.word(A.eor_reg(T1, T1, T0, shift=1, amount=12))
+        asm.cbz(T1, self.lab("MM", offset), sf=1, nz=True)
         # ---- the access, through the entry's host delta
         if pair:
-            asm.word(A.add_reg(T2, T2, ea))
             keep = word & ((3 << 30) | (1 << 26) | (1 << 22))
             hosts = []
             if vector:
@@ -719,19 +784,24 @@ class Library:
                     self._load_guest(T1, guest_rt)
             elif guest_rt == "zr":
                 host_rt = 31
-            asm.word((size << 30) | (0b111 << 27) | (vector << 26) |
-                     (mem_opc << 22) | (1 << 21) | (ea << 16) |
-                     (0b011 << 13) | (0b10 << 10) | (T2 << 5) | host_rt)
+            if total > 1:
+                asm.word((size << 30) | (0b111 << 27) | (vector << 26) |
+                         (0b01 << 24) | (mem_opc << 22) | (T2 << 5) | host_rt)
+            else:
+                asm.word((size << 30) | (0b111 << 27) | (vector << 26) |
+                         (mem_opc << 22) | (1 << 21) | (T0 << 16) |
+                         (0b011 << 13) | (0b10 << 10) | (T2 << 5) | host_rt)
             if guest_rt in VIRTUAL and load:
                 self._store_guest(T1, guest_rt)
         # ---- writeback of the base register, after the access succeeded
         if wb_mode != "none":
             if base_virtual:
-                # T0 holds the address without its tag: the base register
-                # keeps its own.
+                # T0 was changed by the probe; the base keeps its own tag.
                 self._load_guest(T0, base_g)
                 self._add_immediate(T0, T0, imm)
                 self._store_guest(T0, base_g)
+                if base_g == "sp" and imm % 16:
+                    self._guard_sp(offset, T0)
             else:
                 self._add_immediate(base, base, imm)
         self.stats.inlined += 1
@@ -758,34 +828,32 @@ class Library:
             asm.word(A.add_imm(rd, source, high, sub=sub, shift12=True))
 
     # --- cold stubs --------------------------------------------------------------
-    def _stub(self, label: str, offset: int, exit_label: str) -> None:
+    def _emit_stubs(self, function: elf64.Function) -> None:
+        """The function's out-of-line exits, right after its code."""
         asm = self.asm
-        asm.label(label)
-        asm.word(A.movz(T0, offset & 0xffff))
-        if offset >> 16:
-            asm.word(A.movk(T0, (offset >> 16) & 0xffff, 1))
-        asm.b(exit_label)
-
-    def _emit_stubs(self) -> None:
-        for offset in sorted(self.miss_sites):
-            asm = self.asm
+        for offset, kind, total in self.fn_mm:
+            # The thunk gets the instruction's slot in the entry table in T1
+            # and the access in the routine it enters.
             asm.label(self.lab("MM", offset))
-            asm.adrp_add(T1, self.lab("MF", offset))
-            asm.b("REFILL_" + self.miss_sites[offset])
-            asm.label(self.lab("MF", offset))
-            asm.b(self.lab("XS", offset))
-            asm.b(self.lab("MR", offset))
-        for offset in sorted(self.step_sites):
-            self._stub(self.lab("XS", offset), offset, "EXIT_STEP")
-        for offset in sorted(self.budget_sites):
-            self._stub(self.lab("XU", offset), offset, "EXIT_BUDGET")
-        for target in sorted(self.exit_targets):
-            self._stub(self.lab("XB", target), target, "EXIT_BRANCH")
+            slot = offset - self.table_base
+            asm.word(A.movz(T1, slot & 0xffff))
+            if slot >> 16:
+                asm.word(A.movk(T1, (slot >> 16) & 0xffff, 1))
+            asm.b(f"REFILL_{kind}_{total}")
+        for offset in sorted(self.fn_xu):
+            asm.label(self.lab("XU", offset))
+            self._exit_to(offset, "EXIT_BUDGET")
+        for offset in self.fn_ma:
+            asm.label(self.lab("MA", offset))
+            self._exit_to(offset + 4, "EXIT_BRANCH")
+        for target in sorted(self.fn_xb):
+            asm.label(self.xb_label(target))
+            self._exit_to(target, "EXIT_BRANCH")
 
 
 # ---- the entry and exit routines -----------------------------------------
 
-def emit_runtime(asm: A.Assembler, layout: dict[str, int]) -> None:
+def emit_enter(asm: A.Assembler, layout: dict[str, int]) -> None:
     L = layout
     cpu_regs = L["UML_GADGET_CPU_X0"]
     v0 = L["UML_GADGET_CPU_V0"]
@@ -801,7 +869,7 @@ def emit_runtime(asm: A.Assembler, layout: dict[str, int]) -> None:
     asm.word(A.str_x(0, 31, SLOT_CPU))
     asm.word(A.str_x(2, 31, SLOT_BIAS))
     asm.word(A.str_x(4, 31, SLOT_BUD0))
-    asm.word(A.str_x(5, 31, SLOT_REFILL))
+    asm.word(A.str_x(5, 31, SLOT_XTAB))
     asm.word(A.mov_reg(TLB, 1))
     asm.word(A.mov_reg(BUD, 4))
     asm.word(A.mov_reg(T0, 3))
@@ -850,6 +918,13 @@ def emit_runtime(asm: A.Assembler, layout: dict[str, int]) -> None:
     asm.word(A.ldr_x(16, 16, cpu_regs + 8 * 16))
     asm.word(A.br(T0))
 
+
+def emit_exits(asm: A.Assembler, library: "Library") -> None:
+    """The exit routines and the refill thunk, once in every unit so that no
+    branch needs more than a unit's reach."""
+    L = library.layout
+    cpu_regs = L["UML_GADGET_CPU_X0"]
+    v0 = L["UML_GADGET_CPU_V0"]
     for name, reason in (("EXIT_BUDGET", EXIT_BUDGET),
                          ("EXIT_BRANCH", EXIT_BRANCH),
                          ("EXIT_STEP", EXIT_STEP),
@@ -899,153 +974,226 @@ def emit_runtime(asm: A.Assembler, layout: dict[str, int]) -> None:
     asm.word(A.add_imm(31, 31, FRAME))
     asm.word(A.ret_())
 
-    # The refill thunk. In: T0 = the address without its tag, T1 = the
-    # landing for a failed refill (the word after it is the landing for a
-    # successful one). It saves every register a C++ call may change, asks
-    # the host to fill the TLB entry for T0, restores, and branches.
+    # The host-call thunks. Both save every register a C++ call may change,
+    # call through a pointer in the table that ENTER's last argument names,
+    # restore, and branch.
+    #
+    # State the C++ call may change and the thunks therefore save: x0-x17,
+    # x30, NZCV and q0-q31 (the caller-saved set of the host ABI). They keep
+    # nothing else: x19-x28 (BUD, TLB, T0-T2) and d8-d15 are callee-saved,
+    # host x18 is never used, FPCR/FPSR belong to the guest while an entry is
+    # live and the callees do no floating point, and nothing below sp is
+    # touched.
+    rf = REFILL_FRAME
+
+    def save() -> None:
+        asm.word(A.add_imm(31, 31, rf, sub=True))
+        for index in range(0, 18, 2):
+            asm.word(A.stp_x(index, index + 1, 31, 8 * index))
+        asm.word(A.str_x(30, 31, 0x90))
+        asm.word(A.mrs(9, "nzcv"))
+        asm.word(A.str_x(9, 31, 0x98))
+        for index in range(16):
+            asm.word(A.ldp_q(2 * index, 2 * index + 1, 31, 0xa0 + 32 * index,
+                             load=False))
+
+    def restore() -> None:
+        for index in range(16):
+            asm.word(A.ldp_q(2 * index, 2 * index + 1, 31, 0xa0 + 32 * index))
+        asm.word(A.ldr_x(9, 31, 0x98))
+        asm.word(A.msr("nzcv", 9))
+        asm.word(A.ldr_x(30, 31, 0x90))
+        for index in range(0, 18, 2):
+            asm.word(A.ldp_x(index, index + 1, 31, 8 * index))
+        asm.word(A.add_imm(31, 31, rf))
+
+    # A cold miss stub enters REFILL_<kind>_<bytes> with T0 = the address the
+    # probe formed (an access of more than one byte leaves the address of its
+    # last byte) and T1 = the instruction's slot in this library's entry
+    # table. The thunk asks the host to fill the TLB entry; when that succeeds
+    # the instruction restarts from its entry (no state of the instruction was
+    # changed before the probe), and when it cannot, or the access crosses a
+    # page, the instruction steps.
     for kind, access in (("LOAD", 0), ("STORE", 1)):
-        asm.label("REFILL_" + kind)
-        asm.word(A.movz(T2, access))
-        if kind == "LOAD":
+        for total in (1, 2, 4, 8, 16, 32):
+            asm.label(f"REFILL_{kind}_{total}")
+            asm.word(A.movz(T2, access | (total << 8)))
             asm.b("REFILL")
     asm.label("REFILL")
-    rf = REFILL_FRAME
-    asm.word(A.add_imm(31, 31, rf, sub=True))
-    for index in range(0, 18, 2):
-        asm.word(A.stp_x(index, index + 1, 31, 8 * index))
-    asm.word(A.str_x(30, 31, 0x90))
-    asm.word(A.mrs(9, "nzcv"))
-    asm.word(A.str_x(9, 31, 0x98))
-    for index in range(16):
-        asm.word(A.ldp_q(2 * index, 2 * index + 1, 31, 0xa0 + 32 * index,
-                         load=False))
-    asm.word(A.ldr_x(9, 31, rf + SLOT_REFILL))
+    save()
+    asm.word(A.ldr_x(9, 31, rf + SLOT_XTAB))
+    asm.word(A.ldr_x(9, 9, 0))
     asm.word(A.mov_reg(0, TLB))
     asm.word(A.mov_reg(1, T0))
     asm.word(A.mov_reg(2, T2))
     asm.word(A.blr(9))
     asm.word(A.mov_reg(T2, 0))
-    for index in range(16):
-        asm.word(A.ldp_q(2 * index, 2 * index + 1, 31, 0xa0 + 32 * index))
-    asm.word(A.ldr_x(9, 31, 0x98))
-    asm.word(A.msr("nzcv", 9))
-    asm.word(A.ldr_x(30, 31, 0x90))
-    for index in range(0, 18, 2):
-        asm.word(A.ldp_x(index, index + 1, 31, 8 * index))
-    asm.word(A.add_imm(31, 31, rf))
+    restore()
     asm.cbz(T2, "REFILL_FAIL", sf=1, nz=False)
-    asm.word(A.add_imm(T1, T1, 4))
+    asm.adrp_add(T2, "TAB")
+    asm.word(A.ldr_reg_w(T1, T2, T1))
+    asm.adrp_add(T2, "UNIT")
+    asm.word(A.add_reg(T2, T2, T1))
+    asm.word(A.br(T2))
     asm.label("REFILL_FAIL")
-    asm.word(A.br(T1))
+    base_pages = library.table_base >> 12
+    if library.table_base & 0xfff or base_pages >= 4096:
+        raise A.AsmError("a library's code must start below 16 MiB")
+    asm.word(A.add_imm(T0, T1, base_pages, shift12=True))
+    asm.b("EXIT_STEP")
+
+    # An indirect branch to an address outside this library: T0 = the target.
+    # When the host knows a verified library instance that holds it, the
+    # branch goes on in that instance's code (and its load bias); otherwise
+    # the entry ends at the branch and the engine takes it.
+    asm.label("XLIB")
+    save()
+    asm.word(A.ldr_x(0, 31, rf + SLOT_XTAB))
+    asm.word(A.ldr_x(9, 0, 8))
+    asm.word(A.mov_reg(1, T0))
+    asm.word(A.blr(9))
+    asm.word(A.mov_reg(T2, 0))
+    asm.word(A.mov_reg(T1, 1))
+    restore()
+    asm.cbz(T2, "EXIT_BRANCH_ABS", sf=1, nz=False)
+    asm.word(A.str_x(T1, 31, SLOT_BIAS))
+    asm.word(A.br(T2))
 
 
 # ---- the blob ----------------------------------------------------------------
 
-def build_blob(libraries: list[Library], layout: dict[str, int],
+def resolve_library(root: pathlib.Path, mounts: dict[str, pathlib.Path],
+                    path: str) -> pathlib.Path:
+    """A guest path to its file: the longest mount prefix, else the root."""
+    best = ""
+    for prefix in mounts:
+        if (path == prefix or path.startswith(prefix + "/")) and \
+                len(prefix) > len(best):
+            best = prefix
+    if best:
+        return mounts[best] / path[len(best):].lstrip("/")
+    return root / path.lstrip("/")
+
+
+def build_unit(job: tuple) -> dict:
+    """One library to its self-contained unit (runs in a worker process)."""
+    index, name, file_path = job
+    decoder = a64decode.Decoder(a64decode.DEFAULT_TABLE)
+    layout = read_layout(LAYOUT_HEADER)
+    data = pathlib.Path(file_path).read_bytes()
+    library = Library(index, name, elf64.Elf(data), decoder, layout)
+    segment = library.segment
+    digests = []
+    for page_vaddr in range(library.table_base, library.table_end, PAGE):
+        file_offset = segment.offset + (page_vaddr - segment.vaddr)
+        page = bytes(library.elf.data[file_offset:file_offset + PAGE])
+        page += bytes(PAGE - len(page))
+        digests.append(page_digest(page))
+    unit = library.build(digests)
+    unit.update({
+        "index": index,
+        "path": name,
+        "sha256": library.elf.sha256,
+        "build_id": library.elf.build_id,
+        "digests": digests,
+        "table_base": library.table_base,
+        "table_end": library.table_end,
+        "table_words": library.table_words,
+        "text_end": segment.vaddr + segment.filesz,
+        "vaddr": segment.vaddr,
+        "filesz": segment.filesz,
+        "functions": [(f.start, f.end) for f in library.functions],
+        "step_list": library.step_list,
+        "host_path": file_path,
+        "stats": {"functions": library.stats.functions,
+                  "instructions": library.stats.instructions,
+                  "inlined": library.stats.inlined,
+                  "steps": library.stats.steps,
+                  "steps_by_cause": dict(library.stats.steps_by_cause),
+                  "inlined_by_kind": dict(library.stats.kinds)},
+    })
+    return unit
+
+
+def build_blob(units: list[dict], layout: dict[str, int],
                release_id: str) -> tuple[bytes, dict]:
-    asm = A.Assembler()
-    asm.label("BLOB")
-    asm.data(bytes(HEADER_SIZE + LIB_RECORD_SIZE * len(libraries)))
-    asm.align(64)
-    emit_runtime(asm, layout)
-    for library in libraries:
-        library.emit(asm)
-    asm.align(64)
-    # tables are filled after layout; reserve their space now
-    for library in libraries:
-        asm.label(f"L{library.index}TAB0")
-        asm.data(bytes(4 * library.table_words))
-        asm.align(64)
-    # per-library digest arrays
-    digests_by_library: list[list[int]] = []
-    for library in libraries:
-        segment = library.segment
-        first = library.table_base
-        pages = []
-        for page_vaddr in range(first, library.table_end, PAGE):
-            file_offset = segment.offset + (page_vaddr - segment.vaddr)
-            page = bytes(library.elf.data[file_offset:file_offset + PAGE])
-            page += bytes(PAGE - len(page))
-            pages.append(page_digest(page))
-        digests_by_library.append(pages)
-        asm.label(f"L{library.index}DIG")
-        asm.data(bytes(8 * len(pages)))
-        asm.align(64)
+    """Place the units after the header and ENTER; add the digest hash."""
+    units = sorted(units, key=lambda unit: unit["index"])
+    enter_asm = A.Assembler()
+    emit_enter(enter_asm, layout)
+    enter_code = enter_asm.resolve()
+    header_size = HEADER_SIZE + LIB_RECORD_SIZE * len(units)
+
+    def align(value: int, boundary: int = 64) -> int:
+        return (value + boundary - 1) // boundary * boundary
+
+    enter_at = align(header_size)
+    # A unit's address-forming instructions are page-relative: it starts on
+    # a page boundary of the framework, which is itself page aligned.
+    cursor = align(enter_at + len(enter_code), PAGE)
+    bases = []
+    for unit in units:
+        bases.append(cursor)
+        cursor = align(cursor + len(unit["unit"]), PAGE)
+    total_pages = sum(len(unit["digests"]) for unit in units)
     slots = 16
-    total_pages = sum(len(p) for p in digests_by_library)
     while slots < 2 * total_pages:
         slots *= 2
-    asm.label("HASH")
-    asm.data(bytes(16 * slots))
-    asm.align(PAGE)
-    asm.label("END")
-    blob = bytearray(asm.resolve())
-    # fill the tables
-    names = {}
-    for library in libraries:
-        table_at = asm.label_address(f"L{library.index}TAB0")
-        for offset in library.entry_labels:
-            native = asm.label_address(library.lab("E", offset))
-            index = (offset - library.table_base) // 4
-            struct.pack_into("<I", blob, table_at + 4 * index, native)
-        digest_at = asm.label_address(f"L{library.index}DIG")
-        for page_index, digest in enumerate(digests_by_library[library.index]):
-            struct.pack_into("<Q", blob, digest_at + 8 * page_index, digest)
-    # the global page-digest hash
-    hash_at = asm.label_address("HASH")
+    hash_at = cursor
+    end = align(hash_at + 16 * slots, PAGE)
+    blob = bytearray(end)
+    blob[enter_at:enter_at + len(enter_code)] = enter_code
+    for unit, base in zip(units, bases):
+        blob[base:base + len(unit["unit"])] = unit["unit"]
+    # the global page-digest hash: digests that identify one page only
     occupancy: dict[int, int] = collections.Counter()
-    for pages in digests_by_library:
-        occupancy.update(pages)
-    for library in libraries:
-        for page_index, digest in enumerate(digests_by_library[library.index]):
+    for unit in units:
+        occupancy.update(unit["digests"])
+    for unit in units:
+        for page_index, digest in enumerate(unit["digests"]):
             if occupancy[digest] != 1:
                 continue
             slot = digest & (slots - 1)
             while struct.unpack_from("<Q", blob, hash_at + 16 * slot)[0]:
                 slot = (slot + 1) & (slots - 1)
             struct.pack_into("<QII", blob, hash_at + 16 * slot, digest,
-                             library.index, page_index)
-    # the header and the library records
+                             unit["index"], page_index)
     record_at = HEADER_SIZE
     struct.pack_into("<8sIIIIIII", blob, 0, ENTRY_MAGIC, 1, HEADER_SIZE,
-                     len(libraries), record_at,
-                     asm.label_address("ENTER"), hash_at, slots)
-    release = release_id.encode()[:96]
-    struct.pack_into("96s", blob, 0x30, release)
-    for library in libraries:
-        elf = library.elf
-        name = library.name.encode()
+                     len(units), record_at, enter_at, hash_at, slots)
+    struct.pack_into("96s", blob, 0x30, release_id.encode()[:96])
+    for unit, base in zip(units, bases):
+        name = unit["path"].encode()
         if len(name) > 95:
             raise ValueError("library path too long")
-        base = record_at + LIB_RECORD_SIZE * library.index
-        struct.pack_into("96s", blob, base, name)
-        struct.pack_into("32s", blob, base + 96, bytes.fromhex(elf.sha256))
-        struct.pack_into("24s", blob, base + 128, elf.build_id[:24])
+        record = record_at + LIB_RECORD_SIZE * unit["index"]
+        struct.pack_into("96s", blob, record, name)
+        struct.pack_into("32s", blob, record + 96,
+                         bytes.fromhex(unit["sha256"]))
+        struct.pack_into("24s", blob, record + 128, unit["build_id"][:24])
         struct.pack_into(
-            "<QQIIIIQII", blob, base + 152, library.table_base,
-            library.table_end, asm.label_address(f"L{library.index}TAB0"),
-            library.table_words, asm.label_address(f"L{library.index}DIG"),
-            len(digests_by_library[library.index]),
-            library.segment.vaddr + library.segment.filesz,
-            library.stats.instructions, library.stats.steps)
+            "<QQIIIIQIII", blob, record + 152, unit["table_base"],
+            unit["table_end"], base + unit["table_at"], unit["table_words"],
+            base + unit["digest_at"], len(unit["digests"]), unit["text_end"],
+            unit["stats"]["instructions"], unit["stats"]["steps"], base)
     manifest = {
         "release_id": release_id,
         "blob_bytes": len(blob),
         "libraries": [{
-            "path": library.name,
-            "elf_sha256": library.elf.sha256,
-            "build_id": library.elf.build_id.hex(),
-            "executable_segment": {
-                "vaddr": library.segment.vaddr,
-                "filesz": library.segment.filesz},
-            "functions": library.stats.functions,
-            "instructions": library.stats.instructions,
-            "inlined": library.stats.inlined,
-            "steps": library.stats.steps,
-            "steps_by_cause": dict(library.stats.steps_by_cause),
-            "inlined_by_kind": dict(library.stats.kinds),
-            "log_span": library.log_span,
-        } for library in libraries],
+            "path": unit["path"],
+            "elf_sha256": unit["sha256"],
+            "build_id": unit["build_id"].hex(),
+            "executable_segment": {"vaddr": unit["vaddr"],
+                                   "filesz": unit["filesz"]},
+            "unit_bytes": len(unit["unit"]),
+            "table_bytes": 4 * unit["table_words"],
+            "functions": unit["stats"]["functions"],
+            "instructions": unit["stats"]["instructions"],
+            "inlined": unit["stats"]["inlined"],
+            "steps": unit["stats"]["steps"],
+            "steps_by_cause": unit["stats"]["steps_by_cause"],
+            "inlined_by_kind": unit["stats"]["inlined_by_kind"],
+        } for unit in units],
     }
     return bytes(blob), manifest
 
@@ -1053,34 +1201,63 @@ def build_blob(libraries: list[Library], layout: dict[str, int],
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=pathlib.Path, required=True,
-                        help="the unpacked partition holding the libraries")
+                        help="the unpacked partition that holds / (system)")
+    parser.add_argument("--mount", action="append", default=[],
+                        metavar="GUESTPATH=DIR",
+                        help="another unpacked tree (a partition or an "
+                        "APEX payload) that holds the files under GUESTPATH; "
+                        "repeatable")
     parser.add_argument("--library", action="append", required=True,
-                        help="a library path inside --root, e.g. "
+                        help="a library's guest path, e.g. "
                         "/system/lib64/libz.so; repeatable")
     parser.add_argument("--release-id", required=True)
     parser.add_argument("--out", type=pathlib.Path, required=True,
                         help="output directory (blob.bin, manifest.json)")
-    parser.add_argument("--decode-table", type=pathlib.Path,
-                        default=a64decode.DEFAULT_TABLE)
+    parser.add_argument("--jobs", type=int, default=0,
+                        help="worker processes (default: about half the CPUs)")
     arguments = parser.parse_args(argv)
-    decoder = a64decode.Decoder(arguments.decode_table)
+    mounts: dict[str, pathlib.Path] = {}
+    for item in arguments.mount:
+        guest, _, directory = item.partition("=")
+        mounts[guest.rstrip("/")] = pathlib.Path(directory)
+    jobs = [(index, path, str(resolve_library(arguments.root, mounts, path)))
+            for index, path in enumerate(arguments.library)]
+    workers = arguments.jobs or max(1, (os.cpu_count() or 2) // 2)
+    order = sorted(jobs, key=lambda job: -pathlib.Path(job[2]).stat().st_size)
+    if workers == 1 or len(jobs) == 1:
+        units = [build_unit(job) for job in order]
+    else:
+        with multiprocessing.Pool(min(workers, len(jobs))) as pool:
+            units = list(pool.imap_unordered(build_unit, order))
     layout = read_layout(LAYOUT_HEADER)
-    libraries = []
-    for index, path in enumerate(arguments.library):
-        data = (arguments.root / path.lstrip("/")).read_bytes()
-        libraries.append(Library(index, path, elf64.Elf(data), decoder,
-                                 layout))
-    blob, manifest = build_blob(libraries, layout, arguments.release_id)
+    blob, manifest = build_blob(units, layout, arguments.release_id)
     arguments.out.mkdir(parents=True, exist_ok=True)
+    # The notice of each library as the image states it: generated output
+    # beside the framework, never tracked.
+    try:
+        notices = licences.record(arguments.root, mounts, arguments.library)
+    except licences.NoticeError as error:
+        print(f"rewrite.py: {error}", file=sys.stderr)
+        return 1
+    (arguments.out / "licences.json").write_text(
+        json.dumps({"release_id": arguments.release_id, "libraries": notices},
+                   indent=2, sort_keys=True) + "\n")
     (arguments.out / "blob.bin").write_bytes(blob)
     (arguments.out / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    with open(arguments.out / "libraries.txt", "w") as handle:
+        for unit in sorted(units, key=lambda unit: unit["index"]):
+            handle.write(f"{unit['index']}\t{unit['path']}\t"
+                         f"{unit['host_path']}\n")
+    with open(arguments.out / "steps.txt", "w") as handle:
+        for unit in sorted(units, key=lambda unit: unit["index"]):
+            for offset, cause in sorted(unit["step_list"]):
+                handle.write(f"{unit['index']} {offset:x} {cause}\n")
     # The functions the blob covers, for the tests that walk them.
     with open(arguments.out / "functions.txt", "w") as handle:
-        for library in libraries:
-            for function in library.functions:
-                handle.write(f"{library.name} {function.start:#x} "
-                             f"{function.end:#x}\n")
+        for unit in sorted(units, key=lambda unit: unit["index"]):
+            for start, stop in unit["functions"]:
+                handle.write(f"{unit['index']} {start:#x} {stop:#x}\n")
     return 0
 
 

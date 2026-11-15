@@ -477,13 +477,16 @@
         uml_add_arm64_unit_test(gadget_${GADGET_RUNTIME_TEST} WITHOUT_HARNESS
             OBJECTS ${UML_ARM64_GADGET_RUNTIME_TEST_OBJECTS})
     endforeach()
-    if(TARGET uml_arm64_aot_framework)
-        uml_add_arm64_unit_test(aot_libz WITHOUT_HARNESS
+    # The differential harness drives the executor with the AOT component on
+    # and off and reads the diagnostics build's counters.
+    if(TARGET uml_arm64_aot_framework AND UML_AOT_DIAGNOSTICS)
+        uml_add_arm64_unit_test(aot_differential WITHOUT_HARNESS
             OBJECTS ${UML_ARM64_GADGET_RUNTIME_TEST_OBJECTS})
-        get_property(_uml_aot_root GLOBAL PROPERTY UML_AOT_IMAGE_ROOT)
+        get_property(_uml_aot_libraries GLOBAL PROPERTY UML_AOT_LIBRARY_FILES)
         get_property(_uml_aot_functions GLOBAL PROPERTY UML_AOT_FUNCTIONS)
-        target_compile_definitions(uml_arm64_aot_libz_tests PRIVATE
-            AOT_TEST_ROOT="${_uml_aot_root}"
+        target_compile_definitions(uml_arm64_aot_differential_tests PRIVATE
+            UML_AOT_DIAGNOSTICS=1
+            AOT_TEST_LIBRARIES="${_uml_aot_libraries}"
             AOT_TEST_FUNCTIONS="${_uml_aot_functions}")
     endif()
     # The AArch32 gadget tests read the library-exit counters, which only the

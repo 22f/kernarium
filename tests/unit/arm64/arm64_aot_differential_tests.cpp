@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* The ahead-of-time code for the accepted release's libz.so against the
+/* The ahead-of-time code for every library of the configured set against the
  * gadget engine, which stays the reference: the same registers, the same
  * guest memory and the same faults must end in the same guest state and
- * memory, with the AOT code entered by the running engine. The scenarios
- * are the unhappy paths of docs/architecture.md, "Ahead-of-time code". */
+ * memory, with the AOT code entered by the running engine. The harness is
+ * general: it reads the libraries and functions the build generated and runs
+ * the same cases over each. The scenarios are the unhappy paths of
+ * docs/architecture.md, "Ahead-of-time code". */
 
 #include "arm64_gadget_runtime_test_support.hpp"
 #include "jit_test_support.hpp"
 #include "runtime_test_route.hpp"
 #include "static_mmu_test_support.hpp"
 
+#include "cpu/arm64/aot/aot_diagnostics.hpp"
 #include "cpu/arm64/aot/aot_runtime.hpp"
 #include "cpu/arm64/fp_environment.hpp"
 #include "cpu/arm64/gadgets/executor.hpp"
@@ -33,7 +36,8 @@
 #include <vector>
 
 namespace arm64 = uml::cpu::arm64;
-namespace aot = arm64::aot;
+namespace aot = arm64::aot::diagnostics;
+namespace aot_runtime = arm64::aot;
 namespace gadgets = arm64::gadgets;
 using uml::emulator::tests::GenerationMapping;
 using uml::emulator::tests::JitBacking;
@@ -137,21 +141,70 @@ struct LibraryImage final {
 	return image;
 }
 
+/* The library whose cases are being generated: a case that starts at an
+ * instruction which writes SP from a register gets that register set to a
+ * stack address, aligned or not (see sp_source). */
+const LibraryImage *g_sites_image = nullptr;
+
+/* The register an instruction writes SP from, or -1: the 64-bit
+ * add/sub (immediate and extended register) and logical (immediate) forms
+ * whose destination is SP and whose first source is a register. */
+[[nodiscard]] int sp_source(const LibraryImage &image,
+	std::uint64_t offset) noexcept
+{
+	if (offset + 4 > image.bytes.size())
+		return -1;
+	std::uint32_t w;
+	std::memcpy(&w, &image.bytes[offset], 4);
+	if ((w & 31U) != 31U || (w >> 31) == 0U || ((w >> 5) & 31U) == 31U)
+		return -1;
+	const bool add_sub_immediate = (w & 0x1f000000U) == 0x11000000U;
+	const bool add_sub_extended = (w & 0x1fe00000U) == 0x0b200000U;
+	const bool logical_immediate = (w & 0x1f800000U) == 0x12000000U;
+	return add_sub_immediate || add_sub_extended || logical_immediate ?
+		static_cast<int>((w >> 5) & 31U) : -1;
+}
+
 struct Function final {
 	std::uint64_t start, end;
 };
 
 [[nodiscard]] std::vector<Function> load_functions(
-	const std::string &path, const std::string &library)
+	const std::string &path, std::size_t library)
 {
 	std::ifstream in{path};
 	require(in.good());
 	std::vector<Function> out;
-	std::string name, a, b;
-	while (in >> name >> a >> b)
-		if (name == library)
+	std::size_t index;
+	std::string a, b;
+	while (in >> index >> a >> b)
+		if (index == library)
 			out.push_back({std::strtoull(a.c_str(), nullptr, 0),
 				std::strtoull(b.c_str(), nullptr, 0)});
+	require(!out.empty());
+	return out;
+}
+
+/* One line per library the build rewrote: index, guest path, host file. */
+struct LibraryFile final {
+	std::size_t index;
+	std::string guest, host;
+};
+
+[[nodiscard]] std::vector<LibraryFile> load_libraries(const std::string &path)
+{
+	std::ifstream in{path};
+	require(in.good());
+	std::vector<LibraryFile> out;
+	std::string line;
+	while (std::getline(in, line)) {
+		const auto first = line.find('\t');
+		const auto second = line.find('\t', first + 1);
+		require(first != std::string::npos && second != std::string::npos);
+		out.push_back({std::strtoul(line.c_str(), nullptr, 10),
+			line.substr(first + 1, second - first - 1),
+			line.substr(second + 1)});
+	}
 	require(!out.empty());
 	return out;
 }
@@ -399,6 +452,12 @@ void describe(const char *what, const Case &c)
 			static_cast<unsigned long long>(a.cpu.sp),
 			static_cast<unsigned long long>(b.cpu.sp));
 	}
+	if (a.cpu.tls != b.cpu.tls) {
+		say("tls");
+		std::fprintf(stderr, "  tls ref %llx aot %llx\n",
+			static_cast<unsigned long long>(a.cpu.tls),
+			static_cast<unsigned long long>(b.cpu.tls));
+	}
 	if (a.cpu.pc != b.cpu.pc) {
 		say("pc");
 		std::fprintf(stderr, "  pc ref %llx aot %llx\n",
@@ -433,8 +492,11 @@ void describe(const char *what, const Case &c)
 	c.faulting = faulting;
 	c.cpu.tbi_enabled = tbi;
 	c.kinds.assign(arena_pages + stack_pages, 2);
+	/* The data pages and, in a faulting case, the stack pages are each
+	 * unmapped, read-only or writable (a store to the stack that faults, a
+	 * pre-index pair store that faults after the address was formed). */
 	if (faulting)
-		for (std::size_t i = 0; i < arena_pages; ++i) {
+		for (std::size_t i = 0; i < arena_pages + stack_pages; ++i) {
 			const auto roll = rng.below(10);
 			c.kinds[i] = roll < 2 ? 0 : roll < 4 ? 1 : 2;
 		}
@@ -471,13 +533,41 @@ void describe(const char *what, const Case &c)
 	const auto stack_top = arena_base + (arena_pages + stack_pages) *
 		page_bytes - 0x40;
 	c.cpu.sp = stack_top;
+	/* One case in eight starts with an SP that is not 16-byte aligned: the
+	 * engine faults an SP-based access, so AOT code must not be entered. */
+	if (rng.below(8) == 0)
+		c.cpu.sp -= 8 * (1 + rng.below(3));
 	c.cpu.registers[29] = stack_top;
+	/* One case in five makes the frame pointer a stack address that is not
+	 * 16-byte aligned: `mov sp, x29` and `add sp, x29, #n` then leave SP
+	 * misaligned inside rewritten code, where the engine faults the next
+	 * SP-based access. */
+	if (rng.below(5) == 0)
+		c.cpu.registers[29] = stack_top - 8 * (1 + rng.below(3)) -
+			16 * rng.below(8);
+	if (g_sites_image != nullptr) {
+		/* A case that starts at an SP write takes the value from a stack
+		 * address, aligned in one case in three. */
+		const int source = sp_source(*g_sites_image, pc_offset);
+		if (source >= 0 && source < 29) {
+			const bool aligned = rng.below(3) == 0;
+			c.cpu.registers[source] = stack_top - 16 * rng.below(8) -
+				(aligned ? 0 : 8 * (1 + rng.below(3)));
+		}
+	}
+	/* A thread pointer that points into guest data, so that the stack
+	 * protector's canary load works and the function runs to its return. */
+	c.cpu.tls = arena_base + rng.below(arena_pages) * page_bytes +
+		0x40 * rng.below(32);
 	c.cpu.registers[30] = bias + stub_offset;
 	c.cpu.nzcv = static_cast<std::uint32_t>(rng.below(16)) << 28;
 	for (auto &v : c.cpu.vectors)
 		for (auto &b : v.bytes)
 			b = static_cast<std::byte>(rng.next());
-	c.cpu.fpcr = 0;
+	/* Rounding mode, flush-to-zero and default NaN, which the engine and
+	 * the rewritten code must honour alike. */
+	c.cpu.fpcr = static_cast<std::uint32_t>(
+		(rng.below(4) << 22) | (rng.below(2) << 24) | (rng.below(2) << 25));
 	c.cpu.fpsr = 0;
 	return c;
 }
@@ -622,17 +712,21 @@ struct Totals final {
 };
 
 struct Config final {
-	std::string root, functions;
+	std::string libraries, functions;
+	/* Run only the library with this index (-1: all). */
+	long library{-1};
+	/* At most this many functions of a library are sampled. */
+	std::size_t sample{400};
 	/* seed:pc_offset:faulting:tbi of one case to run alone. */
 	std::string only;
-	std::size_t starts{12}, interior{8};
+	std::size_t starts{12}, interior{8}, sp_sites{6};
 	std::uint64_t master{0x5eed};
 };
 
 [[nodiscard]] Config config(int argc, char **argv)
 {
 	Config c;
-	c.root = AOT_TEST_ROOT;
+	c.libraries = AOT_TEST_LIBRARIES;
 	c.functions = AOT_TEST_FUNCTIONS;
 	for (int i = 1; i + 1 < argc; i += 2) {
 		const std::string key{argv[i]};
@@ -640,10 +734,16 @@ struct Config final {
 			c.starts = std::strtoul(argv[i + 1], nullptr, 0);
 		else if (key == "--interior")
 			c.interior = std::strtoul(argv[i + 1], nullptr, 0);
+		else if (key == "--sp-sites")
+			c.sp_sites = std::strtoul(argv[i + 1], nullptr, 0);
 		else if (key == "--master")
 			c.master = std::strtoull(argv[i + 1], nullptr, 0);
 		else if (key == "--case")
 			c.only = argv[i + 1];
+		else if (key == "--library")
+			c.library = std::strtol(argv[i + 1], nullptr, 0);
+		else if (key == "--sample")
+			c.sample = std::strtoul(argv[i + 1], nullptr, 0);
 	}
 	return c;
 }
@@ -668,6 +768,12 @@ Totals differential(const Config &config, const LibraryImage &image,
 		for (std::size_t i = 0; i < config.interior; ++i)
 			starts.push_back(function.start + 4 * rng.below(
 				(function.end - function.start) / 4));
+		/* Every instruction that writes SP from a register, from itself,
+		 * with that register aligned or not. */
+		for (auto at = function.start; at < function.end; at += 4)
+			if (sp_source(image, at) >= 0)
+				for (std::size_t i = 0; i < config.sp_sites; ++i)
+					starts.push_back(at);
 		for (const auto pc : starts) {
 			const bool faulting = rng.below(3) == 0;
 			const bool tbi = rng.below(4) != 0;
@@ -724,7 +830,7 @@ struct Fixture final {
 void default_off_and_single_step(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
-	require(!aot::enabled());
+	require(!aot_runtime::enabled());
 	SplitMix rng{7};
 	const auto bias = Fixture::bias;
 	Fixture ref{4201, image}, one{4202, image};
@@ -979,10 +1085,8 @@ int main(int argc, char **argv)
 	}
 	const uml::testing::RuntimeTestRoute runtime_route;
 	const auto cfg = config(argc, argv);
-	const auto image = load_library(cfg.root + "/system/lib64/libz.so");
-	const auto functions = load_functions(cfg.functions,
-		"/system/lib64/libz.so");
-	require(!aot::enabled());
+	const auto libraries = load_libraries(cfg.libraries);
+	require(!aot_runtime::enabled());
 	if (!cfg.only.empty()) {
 		/* One case from a failure report, under the diagnosis. */
 		unsigned long long seed = 0, pc = 0;
@@ -990,31 +1094,63 @@ int main(int argc, char **argv)
 		require(std::sscanf(cfg.only.c_str(), "%llx:%llx:%d:%d", &seed,
 			&pc, &faulting, &tbi) == 4);
 		constexpr std::uint64_t bias = 0x7123'0000'0000ULL;
+		const auto image = load_library(
+			libraries[cfg.library < 0 ? 0 : cfg.library].host);
+		g_sites_image = &image;
 		const auto c = make_case_from_seed(seed, bias, pc, faulting != 0,
 			tbi != 0, arena_base(bias));
 		diagnose(c, image, bias);
 		return 0;
 	}
-	default_off_and_single_step(image, functions);
-	const auto t = differential(cfg, image, functions);
-	const auto st = aot::stats();
-	std::fprintf(stderr,
-		"differential: %zu cases, %zu compared, %zu unbounded, "
-		"%zu finished, %zu faulting, %zu faults; enters %llu steps %llu "
-		"binds %llu verifications %llu retired %llu\n",
-		t.cases, t.compared, t.skipped, t.finished, t.faulted,
-		t.fault_events, static_cast<unsigned long long>(st.enters),
-		static_cast<unsigned long long>(st.steps),
-		static_cast<unsigned long long>(st.binds),
-		static_cast<unsigned long long>(st.verifications),
-		static_cast<unsigned long long>(st.retired));
-	require(t.compared > t.cases / 2);
-	require(st.enters > t.compared / 2);
-	require(st.poisoned == 0);
-	inline_hit_path_is_taken(image, functions);
-	preemption_is_bounded(image, functions);
-	two_load_biases(image, functions);
-	other_bytes_fall_back(image, functions);
-	changed_text_falls_back_for_good(image, functions);
+	bool scenarios_done = false;
+	for (const auto &file : libraries) {
+		if (cfg.library >= 0 &&
+		    static_cast<long>(file.index) != cfg.library)
+			continue;
+		const auto image = load_library(file.host);
+		g_sites_image = &image;
+		const auto functions = load_functions(cfg.functions, file.index);
+		std::fprintf(stderr, "library %zu %s: %zu functions\n", file.index,
+			file.guest.c_str(), functions.size());
+		/* A sample of a large library: evenly spaced functions. */
+		std::vector<Function> sample;
+		const auto stride = std::max<std::size_t>(
+			1, functions.size() / cfg.sample);
+		for (std::size_t i = 0; i < functions.size(); i += stride)
+			sample.push_back(functions[i]);
+		if (!scenarios_done) {
+			default_off_and_single_step(image, sample);
+			scenarios_done = true;
+		}
+		aot::reset_stats();
+		const auto t = differential(cfg, image, sample);
+		const auto st = aot::stats();
+		std::fprintf(stderr,
+			"differential: %zu cases, %zu compared, %zu unbounded, "
+			"%zu finished, %zu faulting, %zu faults; enters %llu steps %llu "
+			"binds %llu verifications %llu retired %llu refills %llu "
+			"refusals sp %llu\n",
+			t.cases, t.compared, t.skipped, t.finished, t.faulted,
+			t.fault_events, static_cast<unsigned long long>(st.enters),
+			static_cast<unsigned long long>(st.steps),
+			static_cast<unsigned long long>(st.binds),
+			static_cast<unsigned long long>(st.verifications),
+			static_cast<unsigned long long>(st.retired),
+			static_cast<unsigned long long>(st.refills),
+			static_cast<unsigned long long>(st.refusals[1]));
+		require(t.compared > t.cases / 2);
+		require(st.enters > t.compared / 2);
+		require(st.poisoned == 0);
+		/* The scenarios use the first library: they are about the
+		 * mechanism, not about the code. */
+		if (file.index == libraries.front().index) {
+			if (file.guest.ends_with("/libz.so"))
+				inline_hit_path_is_taken(image, functions);
+			preemption_is_bounded(image, sample);
+			two_load_biases(image, sample);
+			other_bytes_fall_back(image, sample);
+			changed_text_falls_back_for_good(image, functions);
+		}
+	}
 	return 0;
 }

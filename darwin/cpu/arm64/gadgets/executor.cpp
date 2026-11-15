@@ -3395,21 +3395,32 @@ std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 {
 	/* An open exclusive monitor is the engine's to complete. The rewritten
 	 * code ignores the top address byte, as every Android process runs
-	 * with. */
-	if (cpu.exclusive_size != 0U || !cpu.tbi_enabled)
+	 * with, and keeps SP 16-byte aligned, which the engine checks for every
+	 * SP-based access; a guest that has neither is the engine's alone. */
+	if (cpu.exclusive_size != 0U) {
+		arm64::aot::note_refusal(arm64::aot::Refusal::exclusive_monitor);
 		return std::nullopt;
+	}
+	if (!cpu.tbi_enabled) {
+		arm64::aot::note_refusal(arm64::aot::Refusal::tbi_disabled);
+		return std::nullopt;
+	}
+	if ((cpu.sp & 0xfU) != 0U) {
+		arm64::aot::note_refusal(arm64::aot::Refusal::sp_misaligned);
+		return std::nullopt;
+	}
 	if (!aot_)
 		aot_ = std::make_unique<AotState>();
-	const auto hit = aot_->binder.find(
-		memory, generation, code_changes, cpu.pc);
+	const auto hit = aot_->binder.find(memory, execution_context_,
+		generation, code_changes, cpu.pc);
 	if (hit.native == nullptr)
 		return std::nullopt;
 	const auto start = cpu.pc;
 	/* Rewritten code reads and writes the vector registers in place. */
 	cpu.access_fp_state();
 	cpu.gadget_indirect_miss = nullptr;
-	const auto result = arm64::aot::enter(
-		cpu, tlb_, hit.bias, hit.native, aot_entry_budget);
+	const auto result = arm64::aot::enter(cpu, tlb_, hit, aot_entry_budget,
+		aot_->binder.cross(generation, code_changes));
 	executed = static_cast<std::size_t>(result.retired);
 	if (result.reason == arm64::aot::Reason::step) {
 		/* The engine runs the one instruction the rewritten code left

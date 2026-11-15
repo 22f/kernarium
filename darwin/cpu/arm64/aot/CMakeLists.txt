@@ -67,28 +67,73 @@ set(_uml_aot_tool_sources
     ${_uml_aot_tools}/rewrite.py)
 
 # Unpack the release's system partition (a Zstandard EROFS image) once.
+set(_uml_aot_extract ${Python3_EXECUTABLE} -B ${_uml_aot_tools}/extract_image.py
+    --release "${UML_AOT_IMAGE}" --fsck-erofs "${UML_AOT_FSCK_EROFS}")
+set(_uml_aot_extract_inputs ${_uml_aot_tools}/extract_image.py
+    "${UML_AOT_IMAGE}/release-manifest.json"
+    "${UML_AOT_IMAGE}/guest/partition-layout.json")
 add_custom_command(
     OUTPUT ${_uml_aot_image_dir}/identity.json
-    COMMAND ${Python3_EXECUTABLE} -B ${_uml_aot_tools}/extract_image.py
-        --release "${UML_AOT_IMAGE}"
-        --fsck-erofs "${UML_AOT_FSCK_EROFS}"
-        --out ${_uml_aot_image_dir}
-    DEPENDS ${_uml_aot_tools}/extract_image.py
-        "${UML_AOT_IMAGE}/release-manifest.json"
-        "${UML_AOT_IMAGE}/guest/partition-layout.json"
-    COMMENT "Unpacking the accepted release for the AOT framework"
+    COMMAND ${_uml_aot_extract} --out ${_uml_aot_image_dir}
+    DEPENDS ${_uml_aot_extract_inputs}
+    COMMENT "Unpacking the accepted release's system partition for AOT"
     VERBATIM)
+set(_uml_aot_trees ${_uml_aot_image_dir}/identity.json)
+set(_uml_aot_mount_args)
+
+# A library outside the system partition comes from its own partition (a
+# path under /vendor, /product, /system_ext or /odm) or from an APEX (a path
+# under /apex/<name>); each is unpacked once.
+set(_uml_aot_seen)
+foreach(_library IN LISTS UML_AOT_LIBRARIES)
+    if(_library MATCHES "^/apex/([^/]+)/")
+        set(_name "${CMAKE_MATCH_1}")
+        set(_key "apex-${_name}")
+        if(NOT _key IN_LIST _uml_aot_seen)
+            list(APPEND _uml_aot_seen "${_key}")
+            set(_dir ${_uml_aot_image_dir}/${_key})
+            add_custom_command(
+                OUTPUT ${_dir}/identity.json
+                COMMAND ${_uml_aot_extract} --apex ${_name}
+                    --system-root ${_uml_aot_image_dir}/root --out ${_dir}
+                DEPENDS ${_uml_aot_extract_inputs}
+                    ${_uml_aot_image_dir}/identity.json
+                COMMENT "Unpacking the ${_name} APEX for AOT"
+                VERBATIM)
+            list(APPEND _uml_aot_trees ${_dir}/identity.json)
+            list(APPEND _uml_aot_mount_args
+                --mount "/apex/${_name}=${_dir}/root")
+        endif()
+    elseif(_library MATCHES "^/(vendor|product|system_ext|odm)/")
+        set(_name "${CMAKE_MATCH_1}")
+        set(_key "partition-${_name}")
+        if(NOT _key IN_LIST _uml_aot_seen)
+            list(APPEND _uml_aot_seen "${_key}")
+            set(_dir ${_uml_aot_image_dir}/${_key})
+            add_custom_command(
+                OUTPUT ${_dir}/identity.json
+                COMMAND ${_uml_aot_extract} --partition ${_name} --out ${_dir}
+                DEPENDS ${_uml_aot_extract_inputs}
+                COMMENT "Unpacking the ${_name} partition for AOT"
+                VERBATIM)
+            list(APPEND _uml_aot_trees ${_dir}/identity.json)
+            list(APPEND _uml_aot_mount_args "--mount" "/${_name}=${_dir}/root")
+        endif()
+    endif()
+endforeach()
 
 # Rewrite the libraries into one position-independent blob.
 add_custom_command(
     OUTPUT ${_uml_aot_blob} ${_uml_aot_manifest}
-        ${_uml_aot_dir}/functions.txt
+        ${_uml_aot_dir}/functions.txt ${_uml_aot_dir}/libraries.txt
+        ${_uml_aot_dir}/steps.txt ${_uml_aot_dir}/licences.json
     COMMAND ${Python3_EXECUTABLE} -B ${_uml_aot_tools}/rewrite.py
         --root ${_uml_aot_image_dir}/root
+        ${_uml_aot_mount_args}
         ${_uml_aot_library_args}
         --release-id "${_uml_aot_release_id}"
         --out ${_uml_aot_dir}
-    DEPENDS ${_uml_aot_image_dir}/identity.json ${_uml_aot_tool_sources}
+    DEPENDS ${_uml_aot_trees} ${_uml_aot_tool_sources}
         ${PROJECT_SOURCE_DIR}/tests/unit/arm64/a64_instruction_decode_partitions.tsv
         ${PROJECT_SOURCE_DIR}/darwin/cpu/arm64/layout/assembly_offsets.h
     COMMENT "Rewriting the AOT libraries"
@@ -97,12 +142,15 @@ add_custom_command(
 add_library(uml_arm64_aot_framework SHARED
     aot_blob.S
     ${_uml_aot_blob}
-    ${_uml_aot_dir}/functions.txt)
+    ${_uml_aot_dir}/functions.txt
+    ${_uml_aot_dir}/libraries.txt
+    ${_uml_aot_dir}/steps.txt)
 uml_declare_architecture_target(uml_arm64_aot_framework cpu gadget)
 set_source_files_properties(aot_blob.S PROPERTIES
     COMPILE_DEFINITIONS "AOT_BLOB=\"${_uml_aot_blob}\""
     OBJECT_DEPENDS ${_uml_aot_blob})
 set_source_files_properties(${_uml_aot_blob} ${_uml_aot_dir}/functions.txt
+    ${_uml_aot_dir}/libraries.txt ${_uml_aot_dir}/steps.txt
     PROPERTIES GENERATED TRUE HEADER_FILE_ONLY TRUE)
 set_target_properties(uml_arm64_aot_framework PROPERTIES
     LINKER_LANGUAGE C
@@ -124,6 +172,7 @@ set_property(GLOBAL PROPERTY UML_AOT_FRAMEWORK_TARGET
 set_property(GLOBAL PROPERTY UML_AOT_MANIFEST "${_uml_aot_manifest}")
 set_property(GLOBAL PROPERTY UML_AOT_IMAGE_ROOT "${_uml_aot_image_dir}/root")
 set_property(GLOBAL PROPERTY UML_AOT_FUNCTIONS "${_uml_aot_dir}/functions.txt")
+set_property(GLOBAL PROPERTY UML_AOT_LIBRARY_FILES "${_uml_aot_dir}/libraries.txt")
 
 # The part the gadget executor links: the binder and the entry call.
 add_library(uml_arm64_aot_runtime OBJECT aot_runtime.cpp)
@@ -133,3 +182,5 @@ target_link_libraries(uml_arm64_aot_runtime
     PRIVATE UML::BridgeAbi UML::CpuContract UML::MemoryContract)
 target_include_directories(uml_arm64_aot_runtime PRIVATE
     ${PROJECT_SOURCE_DIR}/darwin)
+target_compile_definitions(uml_arm64_aot_runtime PRIVATE
+    UML_AOT_DIAGNOSTICS=$<BOOL:${UML_AOT_DIAGNOSTICS}>)

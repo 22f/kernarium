@@ -8,35 +8,29 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <optional>
 
 /* Ahead-of-time native code for the Android image's own arm64 libraries
  * (docs/architecture.md, "Ahead-of-time code"). The framework holds one
- * generated blob (tools/aot/rewrite.py): the entry routine, the rewritten
- * code, per-instruction entry tables and page digests. This header is the
- * whole boundary the gadget executor sees. */
+ * generated blob (tools/aot/rewrite.py): the entry routine, one unit of
+ * rewritten code per library with its entry table and page digests. This
+ * header is the whole boundary the gadget executor sees. Counters, reports
+ * and test switches are in aot_diagnostics.hpp and exist only in builds that
+ * set UML_AOT_DIAGNOSTICS. */
 namespace uml::cpu::arm64::aot {
 
-struct Stats final {
-	std::uint64_t binds{};
-	std::uint64_t verifications{};
-	/* Verifications that found a page unreadable (the guest has not mapped
-	 * it yet): the instance is tried again later. */
-	std::uint64_t unreadable{};
-	/* Instances whose pages differ from the ones the code stands for: never
-	 * entered again in that address space. */
-	std::uint64_t poisoned{};
-	std::uint64_t enters{};
-	std::uint64_t steps{};
-	std::uint64_t retired{};
-};
-
-/* Whether AOT code may be entered: DARWIN_UML_AOT=1 at start-up, or the last
- * set_enabled(). Off by default. */
+/* Whether AOT code may be entered: DARWIN_UML_AOT=1 at start-up. Off by
+ * default. */
 [[nodiscard]] bool enabled() noexcept;
-void set_enabled(std::optional<bool> state) noexcept;
-[[nodiscard]] Stats stats() noexcept;
-void reset_stats() noexcept;
+
+/* Why an entry was refused, for the diagnostics build's counters. */
+enum class Refusal : unsigned {
+	tbi_disabled,
+	sp_misaligned,
+	exclusive_monitor,
+	fp_environment,
+	count,
+};
+void note_refusal(Refusal reason) noexcept;
 
 /* Why AOT code returned; the numbers are the generator's. */
 enum class Reason : std::uint64_t {
@@ -55,28 +49,72 @@ struct Hit final {
 	const void *native{};
 	std::uint64_t bias{};
 	std::uint32_t instance{};
+	std::uint32_t library{};
+};
+
+/* The answer of a cross-library lookup: the native code of a guest address
+ * in another verified library instance and that instance's load bias. */
+struct Target final {
+	const void *native;
+	std::uint64_t bias;
+};
+
+/* What rewritten code asks the host for, and the libraries it may branch to
+ * without leaving: the verified instances of the entered address space. The
+ * first two members are read by the generated refill and lookup thunks. */
+struct CrossTable final {
+	static constexpr std::size_t capacity = 64;
+	struct Entry final {
+		std::uint64_t low;
+		std::uint64_t high;
+		std::uint64_t bias;
+		std::uint32_t library;
+		std::uint32_t reserved;
+	};
+	/* Fill the TLB entry of an access: `address` is the address the probe
+	 * formed (the last byte of an access of more than one byte) and `code`
+	 * is 0 or 1 (read or write) | bytes << 8. Answers whether the entry now
+	 * holds the page and the access fits in it. */
+	std::uint64_t (*refill)(void *tlb, std::uint64_t address,
+		std::uint64_t code) noexcept;
+	Target (*lookup)(const CrossTable *table, std::uint64_t address) noexcept;
+	std::uint64_t count{};
+	std::array<Entry, capacity> entries{};
 };
 
 /* The libraries an address space has mapped, identified by the digest of
- * their code pages and verified whole before any of their code runs. An
- * instance whose bytes differ, or whose pages cannot be read, is never entered
- * again in that address space generation. One binder belongs to one executor
- * thread. */
+ * their code pages and verified before any of their code runs. An instance
+ * whose bytes differ is never entered again in that address space generation;
+ * one whose pages cannot be read yet is tried again later. After the first
+ * full verification an instance is re-verified only for the pages that the
+ * address space's code-change history names. One binder belongs to one
+ * executor thread. */
 class Binder final {
 public:
-	/* The AOT entry for `pc`, or an empty Hit. */
+	Binder() noexcept;
+
+	/* The AOT entry for `pc`, or an empty Hit. `context` is the executor's
+	 * execution context (it names the code-change history). */
 	[[nodiscard]] Hit find(::uml::memory::StaticGuestMemory &memory,
-		unsigned long generation, std::uint64_t code_changes,
+		void *context, unsigned long generation, std::uint64_t code_changes,
 		std::uint64_t pc) noexcept;
 	/* The entry for `pc` in an instance find() returned, or an empty Hit. */
 	[[nodiscard]] Hit entry(std::uint32_t instance,
 		std::uint64_t pc) const noexcept;
+	/* The instances rewritten code may branch to, as of `code_changes`. */
+	[[nodiscard]] const CrossTable &cross(unsigned long generation,
+		std::uint64_t code_changes) noexcept;
+	/* The library and offset a guest address belongs to, for reports. */
+	[[nodiscard]] bool locate(unsigned long generation, std::uint64_t address,
+		std::uint32_t &library, std::uint64_t &offset) const noexcept;
 
 private:
 	struct Instance final {
 		unsigned long generation{};
 		std::uint32_t library{};
 		std::uint64_t bias{};
+		/* The code-change sequence the instance's bytes were last known
+		 * to match at. */
 		std::uint64_t verified_changes{};
 		/* Not tried again before this many lookups (an unreadable page
 		 * stays unreadable for a while). */
@@ -84,10 +122,11 @@ private:
 		std::uint64_t backoff{};
 		bool poisoned{};
 		bool used{};
+		bool verified{};
 	};
 	struct PageSlot final {
 		unsigned long generation{};
-		std::uint64_t code_changes{};
+		std::uint64_t stamp{};
 		std::uint64_t page{1};
 		std::int32_t instance{-1};
 	};
@@ -98,23 +137,40 @@ private:
 	static constexpr std::int32_t not_ready = -2;
 	enum class Verdict { match, unreadable, mismatch };
 	[[nodiscard]] std::int32_t resolve(
-		::uml::memory::StaticGuestMemory &memory, unsigned long generation,
-		std::uint64_t code_changes, std::uint64_t page) noexcept;
+		::uml::memory::StaticGuestMemory &memory, void *context,
+		unsigned long generation, std::uint64_t code_changes,
+		std::uint64_t page) noexcept;
+	/* Bring the instance up to `code_changes`: hash its pages in full the
+	 * first time, then only the pages the history names. */
 	[[nodiscard]] Verdict verify(::uml::memory::StaticGuestMemory &memory,
-		const Instance &instance) noexcept;
+		void *context, Instance &instance,
+		std::uint64_t code_changes) noexcept;
+	[[nodiscard]] Verdict verify_pages(
+		::uml::memory::StaticGuestMemory &memory, const Instance &instance,
+		std::uint64_t first, std::uint64_t last) noexcept;
+	/* Whether a code change after `sequence` touches [low, high). */
+	[[nodiscard]] static bool changed_since(void *context,
+		std::uint64_t sequence, std::uint64_t low, std::uint64_t high,
+		std::uint64_t &current) noexcept;
 
-	static constexpr std::size_t instance_capacity = 64;
+	static constexpr std::size_t instance_capacity = CrossTable::capacity;
 	static constexpr std::size_t page_slots = 2048;
 	std::array<Instance, instance_capacity> instances_{};
 	std::array<PageSlot, page_slots> pages_{};
 	std::size_t next_instance_{};
 	std::uint64_t ticks_{};
+	/* Moves whenever the set of usable instances changes. */
+	std::uint64_t epoch_{1};
+	CrossTable cross_{};
+	unsigned long cross_generation_{};
+	std::uint64_t cross_epoch_{};
+	std::uint64_t cross_changes_{};
 };
 
-/* Run rewritten code from `native` until it leaves. `budget` bounds the
+/* Run rewritten code from `hit` until it leaves. `budget` bounds the
  * instructions it may retire before it returns. The guest registers, vectors
  * and flags are committed in `cpu` on every return. */
 [[nodiscard]] EnterResult enter(CpuState &cpu, ::uml::memory::Tlb &tlb,
-	std::uint64_t bias, const void *native, std::uint64_t budget) noexcept;
+	const Hit &hit, std::uint64_t budget, const CrossTable &table) noexcept;
 
 } // namespace uml::cpu::arm64::aot

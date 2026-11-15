@@ -23,6 +23,8 @@ set(UML_AOT_FSCK_EROFS "" CACHE FILEPATH
     "An fsck.erofs that decodes Zstandard, used to unpack UML_AOT_IMAGE")
 set(UML_AOT_LIBRARIES "/system/lib64/libz.so" CACHE STRING
     "Libraries of the release to rewrite, as absolute guest paths")
+option(UML_AOT_DIAGNOSTICS
+    "Build the AOT runtime with its counters, report and test switches (never for a product)" OFF)
 set(UML_AOT OFF)
 if(UML_AOT_IMAGE)
     if(NOT UML_TARGET_MACOS OR UML_APP_STORE_RUNTIME)

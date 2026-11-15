@@ -9,8 +9,9 @@ from __future__ import annotations
 
 __import__("sys").dont_write_bytecode = True
 
-import dataclasses
+import bisect
 import struct
+from array import array
 
 XZR = 31
 SP = 31
@@ -242,171 +243,173 @@ def adrp_word(rd: int, delta_pages: int) -> int:
 
 # ---- the assembler -------------------------------------------------------
 
-@dataclasses.dataclass
-class _Item:
-    kind: str
-    args: tuple
-    long: bool = False
-    address: int = 0
-
-    def size(self) -> int:
-        if self.kind == "word":
-            return 4
-        if self.kind == "align":
-            return 0  # computed in layout
-        if self.kind == "adrp_add":
-            return 8
-        if self.kind in ("bc", "cbz", "tbz"):
-            return 8 if self.long else 4
-        if self.kind == "b":
-            return 4
-        if self.kind == "data":
-            return len(self.args[0])
-        raise AsmError(self.kind)
+_B, _BC, _CBZ, _TBZ, _ADRP = range(5)
 
 
 class Assembler:
-    """Collects words and label references, then lays them out."""
+    """Collects words and label references, then lays them out.
+
+    Plain words live in one array. A word that names a label is recorded in
+    a side table at its position and is encoded when the layout is known; a
+    conditional branch out of range is relaxed to an inverted branch over an
+    unconditional one, which adds one word at that position. An address is
+    its word index plus the number of added words before it. The assembler is
+    sized for blobs of tens of millions of words.
+    """
 
     def __init__(self) -> None:
-        self._items: list[_Item] = []
+        self._w = array("I")
+        self._sp: dict[int, tuple] = {}
         self._labels: dict[str, int] = {}
-        self._label_at: dict[int, list[str]] = {}
-        self._pending_labels: list[str] = []
+        self._pending: list[str] = []
+        self._ex: list[int] = []
+        self._resolved = False
 
     # emission
     def label(self, name: str) -> None:
-        if name in self._labels or name in self._pending_labels:
+        if name in self._labels or name in self._pending:
             raise AsmError(f"duplicate label {name}")
-        self._pending_labels.append(name)
+        self._pending.append(name)
 
-    def _push(self, item: _Item) -> None:
-        index = len(self._items)
-        for name in self._pending_labels:
-            self._labels[name] = index
-        self._pending_labels.clear()
-        self._items.append(item)
+    def _here(self) -> int:
+        position = len(self._w)
+        if self._pending:
+            for name in self._pending:
+                self._labels[name] = position
+            self._pending.clear()
+        return position
 
     def word(self, value: int) -> None:
-        self._push(_Item("word", (value & 0xffffffff,)))
+        if self._pending:
+            self._here()
+        self._w.append(value & 0xffffffff)
 
     def words(self, values) -> None:
         for value in values:
             self.word(value)
 
     def data(self, blob: bytes) -> None:
-        self._push(_Item("data", (bytes(blob),)))
-
-    def align(self, boundary: int) -> None:
-        self._push(_Item("align", (boundary,)))
+        if len(blob) % 4:
+            raise AsmError("data must be a multiple of four bytes")
+        if self._pending:
+            self._here()
+        self._w.frombytes(blob)
 
     def b(self, target: str) -> None:
-        self._push(_Item("b", (target,)))
+        self._sp[self._here()] = (_B, target)
+        self._w.append(0)
 
     def bcond(self, cond: int, target: str) -> None:
-        self._push(_Item("bc", (cond, target)))
+        self._sp[self._here()] = (_BC, cond, target)
+        self._w.append(0)
 
     def cbz(self, rt: int, target: str, *, sf: int = 1, nz: bool = False
             ) -> None:
-        self._push(_Item("cbz", (rt, target, sf, nz)))
+        self._sp[self._here()] = (_CBZ, rt, target, sf, nz)
+        self._w.append(0)
 
     def tbz(self, rt: int, bit: int, target: str, *, nz: bool = False
             ) -> None:
-        self._push(_Item("tbz", (rt, bit, target, nz)))
+        self._sp[self._here()] = (_TBZ, rt, bit, target, nz)
+        self._w.append(0)
 
     def adrp_add(self, rd: int, target: str) -> None:
-        self._push(_Item("adrp_add", (rd, target)))
+        self._sp[self._here()] = (_ADRP, rd, target)
+        self._w.append(0)
+        self._w.append(0)
 
     # layout
-    def _layout(self) -> int:
-        address = 0
-        for item in self._items:
-            if item.kind == "align":
-                boundary = item.args[0]
-                padded = (address + boundary - 1) // boundary * boundary
-                item.address = address
-                item.args = (boundary, padded - address)
-                address = padded
-            else:
-                item.address = address
-                address += item.size()
-        return address
+    def _address(self, index: int) -> int:
+        return 4 * (index + bisect.bisect_left(self._ex, index))
 
-    def _label_address(self, name: str) -> int:
+    def _label_index(self, name: str) -> int:
         try:
-            index = self._labels[name]
+            return self._labels[name]
         except KeyError:
             raise AsmError(f"undefined label {name}") from None
-        if index == len(self._items):
-            return self._end
-        return self._items[index].address
 
     def resolve(self) -> bytes:
         """Lay out with relaxation, then return the encoded bytes."""
-        if self._pending_labels:
-            for name in self._pending_labels:
-                self._labels[name] = len(self._items)
-            self._pending_labels.clear()
+        self._here()
+        sp = self._sp
+        labels = self._labels
+        expanded: set[int] = set()
         while True:
-            self._end = self._layout()
-            changed = False
-            for item in self._items:
-                if item.kind in ("bc", "cbz", "tbz") and not item.long:
-                    target = item.args[1] if item.kind != "tbz" else item.args[2]
-                    delta = self._label_address(target) - item.address
-                    reach = 1 << (15 if item.kind == "tbz" else 20)
-                    if not -reach <= delta < reach:
-                        item.long = True
-                        changed = True
-            if not changed:
+            self._ex = sorted(expanded)
+            ex = self._ex
+            added = False
+            for position, item in sp.items():
+                kind = item[0]
+                if kind == _B or kind == _ADRP or position in expanded:
+                    continue
+                target = item[3] if kind == _TBZ else item[2]
+                index = self._label_index(target)
+                delta = (index + bisect.bisect_left(ex, index) -
+                         position - bisect.bisect_left(ex, position)) * 4
+                reach = 1 << (15 if kind == _TBZ else 20)
+                if not -reach <= delta < reach:
+                    expanded.add(position)
+                    added = True
+            if not added:
                 break
-        out = bytearray()
-        for item in self._items:
-            assert len(out) == item.address, (len(out), item.address)
-            out += self._encode(item)
-        assert len(out) == self._end
-        return bytes(out)
+        self._ex = ex = sorted(expanded)
+        out = array("I")
+        words = self._w
+        last = 0
+        for position in sorted(sp):
+            if position > last:
+                out.extend(words[last:position])
+            item = sp[position]
+            kind = item[0]
+            here = 4 * len(out)
+            if kind == _B:
+                delta = self._address(self._label_index(item[1])) - here
+                out.append(b_word(delta // 4))
+                last = position + 1
+            elif kind == _ADRP:
+                rd, target = item[1], item[2]
+                address = self._address(self._label_index(target))
+                out.append(adrp_word(rd, (address >> 12) - (here >> 12)))
+                out.append(add_imm(rd, rd, address & 0xfff))
+                last = position + 2
+            else:
+                long = position in expanded
+                if kind == _BC:
+                    cond, target = item[1], item[2]
+                    delta = self._address(self._label_index(target)) - here
+                    if not long:
+                        out.append(bcond_word(cond, delta // 4))
+                    elif cond >= 14:
+                        # AL and NV have no inverse: AL is a branch, NV a
+                        # no-op; the second word keeps the size.
+                        out.append(b_word(delta // 4) if cond == 14 else nop())
+                        out.append(nop())
+                    else:
+                        out.append(bcond_word(cond ^ 1, 2))
+                        out.append(b_word((delta - 4) // 4))
+                elif kind == _CBZ:
+                    rt, target, sf, nz = item[1:]
+                    delta = self._address(self._label_index(target)) - here
+                    if not long:
+                        out.append(cbz_word(rt, delta // 4, sf=sf, nz=nz))
+                    else:
+                        out.append(cbz_word(rt, 2, sf=sf, nz=not nz))
+                        out.append(b_word((delta - 4) // 4))
+                else:
+                    rt, bit, target, nz = item[1:]
+                    delta = self._address(self._label_index(target)) - here
+                    if not long:
+                        out.append(tbz_word(rt, bit, delta // 4, nz=nz))
+                    else:
+                        out.append(tbz_word(rt, bit, 2, nz=not nz))
+                        out.append(b_word((delta - 4) // 4))
+                last = position + 1
+        out.extend(words[last:])
+        self._resolved = True
+        return out.tobytes()
 
     def label_address(self, name: str) -> int:
-        return self._label_address(name)
+        return self._address(self._label_index(name))
 
-    def _encode(self, item: _Item) -> bytes:
-        kind = item.kind
-        if kind == "word":
-            return struct.pack("<I", item.args[0])
-        if kind == "data":
-            return item.args[0]
-        if kind == "align":
-            return b"\0" * item.args[1]
-        here = item.address
-        if kind == "b":
-            delta = self._label_address(item.args[0]) - here
-            return struct.pack("<I", b_word(delta // 4))
-        if kind == "adrp_add":
-            rd, target = item.args
-            address = self._label_address(target)
-            pages = (address >> 12) - (here >> 12)
-            return struct.pack("<II", adrp_word(rd, pages),
-                               add_imm(rd, rd, address & 0xfff))
-        if kind == "bc":
-            cond, target = item.args
-            delta = self._label_address(target) - here
-            if not item.long:
-                return struct.pack("<I", bcond_word(cond, delta // 4))
-            skip = bcond_word(cond ^ 1, 2)
-            return struct.pack("<II", skip, b_word((delta - 4) // 4))
-        if kind == "cbz":
-            rt, target, sf, nz = item.args
-            delta = self._label_address(target) - here
-            if not item.long:
-                return struct.pack("<I", cbz_word(rt, delta // 4, sf=sf, nz=nz))
-            skip = cbz_word(rt, 2, sf=sf, nz=not nz)
-            return struct.pack("<II", skip, b_word((delta - 4) // 4))
-        if kind == "tbz":
-            rt, bit, target, nz = item.args
-            delta = self._label_address(target) - here
-            if not item.long:
-                return struct.pack("<I", tbz_word(rt, bit, delta // 4, nz=nz))
-            skip = tbz_word(rt, bit, 2, nz=not nz)
-            return struct.pack("<II", skip, b_word((delta - 4) // 4))
-        raise AsmError(kind)
+    def end_address(self) -> int:
+        return self._address(len(self._w))

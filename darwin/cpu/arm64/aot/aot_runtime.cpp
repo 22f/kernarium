@@ -3,12 +3,20 @@
 
 #include <arm_acle.h>
 
+#include "uml_darwin_static_mmu.h"
+
 #include <algorithm>
 #include <atomic>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <vector>
+
+#if UML_AOT_DIAGNOSTICS
+#include "cpu/arm64/aot/aot_diagnostics.hpp"
+
+#include <chrono>
+#include <cstdio>
+#include <thread>
+#endif
 
 /* The framework's blob (aot_blob.S). */
 extern "C" const std::uint8_t uml_aot_blob[];
@@ -32,6 +40,7 @@ constexpr std::size_t record_table_offset = 168;
 constexpr std::size_t record_table_words = 172;
 constexpr std::size_t record_digests = 176;
 constexpr std::size_t record_pages = 180;
+constexpr std::size_t record_unit_offset = 200;
 
 template<typename T>
 [[nodiscard]] T read(std::size_t offset) noexcept
@@ -48,6 +57,7 @@ struct Library final {
 	std::size_t table_words;
 	std::size_t digests;
 	std::size_t pages;
+	std::size_t unit_offset;
 };
 
 struct Directory final {
@@ -66,7 +76,8 @@ struct Directory final {
 			read<std::uint32_t>(base + record_table_offset),
 			read<std::uint32_t>(base + record_table_words),
 			read<std::uint32_t>(base + record_digests),
-			read<std::uint32_t>(base + record_pages)};
+			read<std::uint32_t>(base + record_pages),
+			read<std::uint32_t>(base + record_unit_offset)};
 	}
 };
 
@@ -103,38 +114,43 @@ struct Directory final {
 	return digest != 0 ? digest : 1;
 }
 
+
 std::atomic<int> g_state{-1};
-std::atomic<std::uint64_t> g_binds{0};
-std::atomic<std::uint64_t> g_verifications{0};
-std::atomic<std::uint64_t> g_unreadable{0};
-std::atomic<std::uint64_t> g_poisoned{0};
-std::atomic<std::uint64_t> g_enters{0};
-std::atomic<std::uint64_t> g_steps{0};
-std::atomic<std::uint64_t> g_retired{0};
 
-/* The guest addresses AOT code stepped at most, for the report. */
-constexpr std::size_t step_slots = 8192;
-std::atomic<std::uint64_t> g_step_pc[step_slots];
-std::atomic<std::uint64_t> g_step_count[step_slots];
-std::atomic<bool> g_step_histogram{false};
+#if UML_AOT_DIAGNOSTICS
+namespace counters {
+std::atomic<std::uint64_t> binds{0}, verifications{0}, pages_hashed{0},
+	unreadable{0}, poisoned{0}, enters{0}, steps{0}, retired{0}, refills{0},
+	refill_failures{0}, cross_hits{0}, cross_misses{0};
+std::array<std::atomic<std::uint64_t>, 4> refusals{};
+/* The guest addresses AOT code stepped at most: library << 40 | offset. */
+constexpr std::size_t step_slots = 32768;
+std::array<std::atomic<std::uint64_t>, step_slots> step_key{};
+std::array<std::atomic<std::uint64_t>, step_slots> step_count{};
+std::array<std::atomic<std::uint64_t>, 64> library_enters{};
+std::array<std::atomic<std::uint64_t>, 64> library_steps{};
+std::atomic<bool> reporter_started{false};
+} // namespace counters
 
-void note_step(std::uint64_t pc) noexcept
+#define UML_AOT_COUNT(name, amount) \
+	counters::name.fetch_add((amount), std::memory_order_relaxed)
+
+void note_step(std::uint64_t key) noexcept
 {
-	std::size_t slot = (pc >> 2) * 0x9e3779b97f4a7c15ULL >> 51;
-	for (std::size_t probe = 0; probe < 16; ++probe) {
-		const auto at = (slot + probe) % step_slots;
-		auto seen = g_step_pc[at].load(std::memory_order_relaxed);
+	std::size_t slot = (key * 0x9e3779b97f4a7c15ULL) >> 49;
+	for (std::size_t probe = 0; probe < 32; ++probe) {
+		const auto at = (slot + probe) % counters::step_slots;
+		auto seen = counters::step_key[at].load(std::memory_order_relaxed);
 		if (seen == 0)
-			g_step_pc[at].compare_exchange_strong(seen, pc);
-		if (g_step_pc[at].load(std::memory_order_relaxed) == pc) {
-			g_step_count[at].fetch_add(1, std::memory_order_relaxed);
+			counters::step_key[at].compare_exchange_strong(seen, key);
+		if (counters::step_key[at].load(std::memory_order_relaxed) == key) {
+			counters::step_count[at].fetch_add(1, std::memory_order_relaxed);
 			return;
 		}
 	}
 }
 
-/* DARWIN_UML_AOT_REPORT=<path>: the counters, rewritten every 65536 entries
- * and at exit, for a run whose stderr nobody reads. */
+/* Written from a thread of its own: it allocates and does file I/O. */
 void write_report() noexcept
 {
 	const char *path = std::getenv("DARWIN_UML_AOT_REPORT");
@@ -143,33 +159,57 @@ void write_report() noexcept
 	std::FILE *file = std::fopen(path, "w");
 	if (file == nullptr)
 		return;
+	auto get = [](const std::atomic<std::uint64_t> &value) {
+		return static_cast<unsigned long long>(
+			value.load(std::memory_order_relaxed));
+	};
 	std::fprintf(file,
-		"binds %llu verifications %llu unreadable %llu poisoned %llu "
-		"enters %llu steps %llu retired %llu\n",
-		static_cast<unsigned long long>(g_binds.load()),
-		static_cast<unsigned long long>(g_verifications.load()),
-		static_cast<unsigned long long>(g_unreadable.load()),
-		static_cast<unsigned long long>(g_poisoned.load()),
-		static_cast<unsigned long long>(g_enters.load()),
-		static_cast<unsigned long long>(g_steps.load()),
-		static_cast<unsigned long long>(g_retired.load()));
-	/* The hottest step sites, from a copy of the counts. */
-	std::vector<std::uint64_t> counts(step_slots);
-	for (std::size_t i = 0; i < step_slots; ++i)
-		counts[i] = g_step_count[i].load(std::memory_order_relaxed);
-	for (int rank = 0; rank < 16; ++rank) {
-		const auto best = static_cast<std::size_t>(
-			std::max_element(counts.begin(), counts.end()) - counts.begin());
-		if (counts[best] == 0)
-			break;
-		std::fprintf(file, "step %llx %llu\n",
-			static_cast<unsigned long long>(
-				g_step_pc[best].load(std::memory_order_relaxed)),
-			static_cast<unsigned long long>(counts[best]));
-		counts[best] = 0;
+		"binds %llu verifications %llu pages_hashed %llu unreadable %llu "
+		"poisoned %llu enters %llu steps %llu retired %llu refills %llu "
+		"refill_failures %llu cross_hits %llu cross_misses %llu\n",
+		get(counters::binds), get(counters::verifications),
+		get(counters::pages_hashed), get(counters::unreadable),
+		get(counters::poisoned), get(counters::enters), get(counters::steps),
+		get(counters::retired), get(counters::refills),
+		get(counters::refill_failures), get(counters::cross_hits),
+		get(counters::cross_misses));
+	std::fprintf(file, "refused tbi %llu sp %llu exclusive %llu fp %llu\n",
+		get(counters::refusals[0]), get(counters::refusals[1]),
+		get(counters::refusals[2]), get(counters::refusals[3]));
+	for (std::size_t library = 0; library < 64; ++library)
+		if (get(counters::library_enters[library]) != 0)
+			std::fprintf(file, "library %zu enters %llu steps %llu\n", library,
+				get(counters::library_enters[library]),
+				get(counters::library_steps[library]));
+	for (std::size_t slot = 0; slot < counters::step_slots; ++slot) {
+		const auto count = get(counters::step_count[slot]);
+		if (count != 0) {
+			const auto key = get(counters::step_key[slot]);
+			std::fprintf(file, "step %llu %llx %llu\n", key >> 40,
+				key & ((1ULL << 40) - 1), count);
+		}
 	}
 	std::fclose(file);
 }
+
+void start_reporter() noexcept
+{
+	if (std::getenv("DARWIN_UML_AOT_REPORT") == nullptr ||
+	    counters::reporter_started.exchange(true))
+		return;
+	try {
+		std::thread([] {
+			for (;;) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(500));
+				write_report();
+			}
+		}).detach();
+	} catch (...) {
+	}
+}
+#else
+#define UML_AOT_COUNT(name, amount) ((void)0)
+#endif
 
 [[nodiscard]] bool environment_enabled() noexcept
 {
@@ -181,19 +221,53 @@ void write_report() noexcept
 /* Rewritten code asks for the TLB entry of a page it missed (see the refill
  * thunk in tools/aot/rewrite.py): fill it as the engine does and say whether
  * the entry now holds the page. A fault is not recorded for the guest here;
- * the instruction steps and the engine takes it. */
-extern "C" std::uint64_t uml_aot_refill(
-	void *tlb_pointer, std::uint64_t address, std::uint64_t access) noexcept
+ * the instruction steps and the engine takes it. An access that crosses a
+ * page also steps: the probe found it as a miss. */
+std::uint64_t refill(void *tlb_pointer, std::uint64_t address,
+	std::uint64_t code) noexcept
 {
+	UML_AOT_COUNT(refills, 1);
 	auto &tlb = *static_cast<::uml::memory::Tlb *>(tlb_pointer);
-	const auto kind = access == 1 ? ::uml::memory::Access::write :
+	const auto kind = (code & 0xff) == 1 ? ::uml::memory::Access::write :
 		::uml::memory::Access::read;
-	if (tlb.translate(address, kind) == nullptr)
+	const auto bytes = code >> 8;
+	if (bytes > 1)
+		address -= bytes - 1;
+	if ((address & (page_size - 1)) + bytes > page_size) {
+		UML_AOT_COUNT(refill_failures, 1);
 		return 0;
+	}
+	if (tlb.translate(address, kind) == nullptr) {
+		UML_AOT_COUNT(refill_failures, 1);
+		return 0;
+	}
 	const auto page = address >> DARWIN_UML_GUEST_PAGE_SHIFT;
 	const auto &entry = tlb.entries[page & (::uml::memory::tlb_entry_count - 1)];
 	return (kind == ::uml::memory::Access::write ? entry.write_page :
 		entry.read_page) == page ? 1 : 0;
+}
+
+/* Rewritten code branches to an address outside its own library: answer the
+ * native code of the verified instance that holds it, or none. */
+Target lookup(const CrossTable *table, std::uint64_t address) noexcept
+{
+	for (std::uint64_t index = 0; index < table->count; ++index) {
+		const auto &entry = table->entries[index];
+		if (address < entry.low || address >= entry.high)
+			continue;
+		const auto library = directory().library(entry.library);
+		const std::uint64_t offset = address - entry.bias;
+		if ((offset & 3U) != 0)
+			break;
+		const auto native = read<std::uint32_t>(library.table_offset +
+			4 * ((offset - library.table_base) / 4));
+		if (native == 0)
+			break;
+		UML_AOT_COUNT(cross_hits, 1);
+		return {uml_aot_blob + library.unit_offset + native, entry.bias};
+	}
+	UML_AOT_COUNT(cross_misses, 1);
+	return {};
 }
 
 } // namespace
@@ -204,13 +278,26 @@ bool enabled() noexcept
 	if (state < 0) {
 		state = environment_enabled() ? 1 : 0;
 		g_state.store(state, std::memory_order_relaxed);
-		if (state != 0 && std::getenv("DARWIN_UML_AOT_REPORT") != nullptr) {
-			g_step_histogram.store(true, std::memory_order_relaxed);
-			std::atexit(write_report);
-		}
+#if UML_AOT_DIAGNOSTICS
+		if (state != 0)
+			start_reporter();
+#endif
 	}
 	return state != 0;
 }
+
+void note_refusal(Refusal reason) noexcept
+{
+#if UML_AOT_DIAGNOSTICS
+	counters::refusals[static_cast<std::size_t>(reason)].fetch_add(
+		1, std::memory_order_relaxed);
+#else
+	(void)reason;
+#endif
+}
+
+#if UML_AOT_DIAGNOSTICS
+namespace diagnostics {
 
 void set_enabled(std::optional<bool> state) noexcept
 {
@@ -220,38 +307,76 @@ void set_enabled(std::optional<bool> state) noexcept
 
 Stats stats() noexcept
 {
-	return {g_binds.load(std::memory_order_relaxed),
-		g_verifications.load(std::memory_order_relaxed),
-		g_unreadable.load(std::memory_order_relaxed),
-		g_poisoned.load(std::memory_order_relaxed),
-		g_enters.load(std::memory_order_relaxed),
-		g_steps.load(std::memory_order_relaxed),
-		g_retired.load(std::memory_order_relaxed)};
+	auto get = [](const std::atomic<std::uint64_t> &value) {
+		return value.load(std::memory_order_relaxed);
+	};
+	Stats result{get(counters::binds), get(counters::verifications),
+		get(counters::pages_hashed), get(counters::unreadable),
+		get(counters::poisoned), get(counters::enters), get(counters::steps),
+		get(counters::retired), get(counters::refills),
+		get(counters::refill_failures), get(counters::cross_hits),
+		get(counters::cross_misses), {}};
+	for (std::size_t i = 0; i < result.refusals.size(); ++i)
+		result.refusals[i] = get(counters::refusals[i]);
+	return result;
 }
 
 void reset_stats() noexcept
 {
-	g_binds = 0;
-	g_verifications = 0;
-	g_unreadable = 0;
-	g_poisoned = 0;
-	g_enters = 0;
-	g_steps = 0;
-	g_retired = 0;
+	for (auto *counter : {&counters::binds, &counters::verifications,
+		     &counters::pages_hashed, &counters::unreadable,
+		     &counters::poisoned, &counters::enters, &counters::steps,
+		     &counters::retired, &counters::refills,
+		     &counters::refill_failures, &counters::cross_hits,
+		     &counters::cross_misses})
+		counter->store(0, std::memory_order_relaxed);
+	for (auto &counter : counters::refusals)
+		counter.store(0, std::memory_order_relaxed);
 }
 
-Binder::Verdict Binder::verify(::uml::memory::StaticGuestMemory &memory,
-	const Instance &instance) noexcept
+} // namespace diagnostics
+#endif
+
+Binder::Binder() noexcept
 {
-	g_verifications.fetch_add(1, std::memory_order_relaxed);
+	cross_.refill = &refill;
+	cross_.lookup = &lookup;
+}
+
+bool Binder::changed_since(void *context, std::uint64_t sequence,
+	std::uint64_t low, std::uint64_t high, std::uint64_t &current) noexcept
+{
+	if (context == nullptr)
+		return true;
+	darwin_uml_static_code_change ranges[32];
+	const int count = darwin_uml_static_vm_execution_context_code_change_ranges(
+		context, sequence, ranges, 32, &current);
+	if (count < 0)
+		return true;
+	for (int index = 0; index < count; ++index) {
+		/* A range of length zero names the whole address space. */
+		if (ranges[index].length == 0)
+			return true;
+		if (ranges[index].address < high &&
+		    ranges[index].address + ranges[index].length > low)
+			return true;
+	}
+	return false;
+}
+
+Binder::Verdict Binder::verify_pages(
+	::uml::memory::StaticGuestMemory &memory, const Instance &instance,
+	std::uint64_t first, std::uint64_t last) noexcept
+{
 	const auto &dir = directory();
 	const auto library = dir.library(instance.library);
 	alignas(8) std::array<std::byte, page_size> page;
-	for (std::size_t index = 0; index < library.pages; ++index) {
+	for (std::uint64_t index = first; index < last; ++index) {
 		const auto address =
 			instance.bias + library.table_base + index * page_size;
 		if (!memory.fetch(address, page))
 			return Verdict::unreadable;
+		UML_AOT_COUNT(pages_hashed, 1);
 		if (page_digest(page.data()) !=
 		    read<std::uint64_t>(library.digests + 8 * index))
 			return Verdict::mismatch;
@@ -259,9 +384,54 @@ Binder::Verdict Binder::verify(::uml::memory::StaticGuestMemory &memory,
 	return Verdict::match;
 }
 
+Binder::Verdict Binder::verify(::uml::memory::StaticGuestMemory &memory,
+	void *context, Instance &instance, std::uint64_t code_changes) noexcept
+{
+	const auto library = directory().library(instance.library);
+	Verdict verdict = Verdict::match;
+	bool full = !instance.verified;
+	darwin_uml_static_code_change ranges[32];
+	int count = 0;
+	std::uint64_t current = 0;
+	if (!full) {
+		count = context == nullptr ? -1 :
+			darwin_uml_static_vm_execution_context_code_change_ranges(
+				context, instance.verified_changes, ranges, 32, &current);
+		full = count < 0;
+	}
+	const std::uint64_t low = instance.bias + library.table_base;
+	const std::uint64_t high = instance.bias + library.table_end;
+	if (full) {
+		UML_AOT_COUNT(verifications, 1);
+		verdict = verify_pages(memory, instance, 0, library.pages);
+	} else {
+		for (int index = 0; index < count && verdict == Verdict::match;
+		     ++index) {
+			std::uint64_t from = ranges[index].address;
+			std::uint64_t to = from + ranges[index].length;
+			if (ranges[index].length == 0) {
+				from = low;
+				to = high;
+			}
+			if (from >= high || to <= low)
+				continue;
+			from = std::max(from, low);
+			to = std::min(to, high);
+			verdict = verify_pages(memory, instance,
+				(from - low) / page_size,
+				(to - low + page_size - 1) / page_size);
+		}
+	}
+	if (verdict == Verdict::match) {
+		instance.verified = true;
+		instance.verified_changes = code_changes;
+		instance.backoff = 0;
+	}
+	return verdict;
+}
+
 std::int32_t Binder::resolve(::uml::memory::StaticGuestMemory &memory,
-	unsigned long generation, std::uint64_t code_changes,
-	std::uint64_t page_va) noexcept
+	void *, unsigned long generation, std::uint64_t, std::uint64_t page_va) noexcept
 {
 	const auto &dir = directory();
 	alignas(8) std::array<std::byte, page_size> page;
@@ -301,35 +471,15 @@ std::int32_t Binder::resolve(::uml::memory::StaticGuestMemory &memory,
 			if (slot_entry.instance == static_cast<std::int32_t>(victim))
 				slot_entry = PageSlot{};
 		found = &instances_[victim];
-		*found = Instance{generation, library_index, bias, ~code_changes, 0,
-			0, false, true};
+		*found = Instance{generation, library_index, bias, 0, 0, 0, false,
+			true, false};
+		++epoch_;
 	}
-	if (found->poisoned)
-		return none;
-	if (found->verified_changes != code_changes) {
-		if (ticks_ < found->retry_at)
-			return not_ready;
-		switch (verify(memory, *found)) {
-		case Verdict::match:
-			found->verified_changes = code_changes;
-			found->backoff = 0;
-			break;
-		case Verdict::unreadable:
-			g_unreadable.fetch_add(1, std::memory_order_relaxed);
-			found->backoff = std::min<std::uint64_t>(
-				std::max<std::uint64_t>(found->backoff * 2, 64), 65536);
-			found->retry_at = ticks_ + found->backoff;
-			return not_ready;
-		case Verdict::mismatch:
-			found->poisoned = true;
-			g_poisoned.fetch_add(1, std::memory_order_relaxed);
-			return none;
-		}
-	}
-	return static_cast<std::int32_t>(found - instances_.data());
+	return found->poisoned ? none :
+		static_cast<std::int32_t>(found - instances_.data());
 }
 
-Hit Binder::find(::uml::memory::StaticGuestMemory &memory,
+Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 	unsigned long generation, std::uint64_t code_changes,
 	std::uint64_t pc) noexcept
 {
@@ -338,20 +488,56 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory,
 	++ticks_;
 	const auto page_va = pc & ~(page_size - 1);
 	auto &slot = pages_[((page_va >> 12) ^ generation) % page_slots];
-	if (slot.page != page_va || slot.generation != generation ||
-	    slot.code_changes != code_changes) {
-		g_binds.fetch_add(1, std::memory_order_relaxed);
+	bool fresh = slot.page == page_va && slot.generation == generation;
+	if (fresh && slot.stamp != code_changes) {
+		std::uint64_t current = 0;
+		if (changed_since(context, slot.stamp, page_va, page_va + page_size,
+			    current))
+			fresh = false;
+		else
+			slot.stamp = code_changes;
+	}
+	if (!fresh) {
+		UML_AOT_COUNT(binds, 1);
 		const auto answer =
-			resolve(memory, generation, code_changes, page_va);
+			resolve(memory, context, generation, code_changes, page_va);
 		if (answer == not_ready)
 			return {};
 		slot.instance = answer;
 		slot.page = page_va;
 		slot.generation = generation;
-		slot.code_changes = code_changes;
+		slot.stamp = code_changes;
 	}
 	if (slot.instance < 0)
 		return {};
+	auto &instance = instances_[static_cast<std::size_t>(slot.instance)];
+	if (!instance.used || instance.poisoned ||
+	    instance.generation != generation) {
+		slot = PageSlot{};
+		return {};
+	}
+	if (!instance.verified || instance.verified_changes != code_changes) {
+		if (ticks_ < instance.retry_at)
+			return {};
+		switch (verify(memory, context, instance, code_changes)) {
+		case Verdict::match:
+			++epoch_;
+			break;
+		case Verdict::unreadable:
+			UML_AOT_COUNT(unreadable, 1);
+			instance.backoff = std::min<std::uint64_t>(
+				std::max<std::uint64_t>(instance.backoff * 2, 64), 65536);
+			instance.retry_at = ticks_ + instance.backoff;
+			instance.verified = false;
+			return {};
+		case Verdict::mismatch:
+			instance.poisoned = true;
+			instance.verified = false;
+			UML_AOT_COUNT(poisoned, 1);
+			++epoch_;
+			return {};
+		}
+	}
 	return entry(static_cast<std::uint32_t>(slot.instance), pc);
 }
 
@@ -359,7 +545,7 @@ Hit Binder::entry(std::uint32_t instance_index,
 	std::uint64_t pc) const noexcept
 {
 	const auto &instance = instances_[instance_index];
-	if (!instance.used || instance.poisoned)
+	if (!instance.used || instance.poisoned || !instance.verified)
 		return {};
 	const auto library = directory().library(instance.library);
 	const std::uint64_t offset = pc - instance.bias;
@@ -371,31 +557,92 @@ Hit Binder::entry(std::uint32_t instance_index,
 		read<std::uint32_t>(library.table_offset + 4 * word);
 	if (native == 0)
 		return {};
-	return {uml_aot_blob + native, instance.bias, instance_index};
+	return {uml_aot_blob + library.unit_offset + native, instance.bias,
+		instance_index, instance.library};
 }
 
-EnterResult enter(CpuState &cpu, ::uml::memory::Tlb &tlb,
-	std::uint64_t bias, const void *native, std::uint64_t budget) noexcept
+const CrossTable &Binder::cross(unsigned long generation,
+	std::uint64_t code_changes) noexcept
+{
+	if (cross_generation_ == generation && cross_epoch_ == epoch_ &&
+	    cross_changes_ == code_changes)
+		return cross_;
+	cross_.count = 0;
+	for (const auto &instance : instances_) {
+		if (!instance.used || instance.poisoned || !instance.verified ||
+		    instance.generation != generation ||
+		    instance.verified_changes != code_changes)
+			continue;
+		const auto library = directory().library(instance.library);
+		cross_.entries[cross_.count++] = {
+			instance.bias + library.table_base,
+			instance.bias + library.table_end, instance.bias,
+			instance.library, 0};
+	}
+	std::sort(cross_.entries.begin(), cross_.entries.begin() +
+		static_cast<std::ptrdiff_t>(cross_.count),
+		[](const CrossTable::Entry &a, const CrossTable::Entry &b) {
+			return a.low < b.low;
+		});
+	cross_generation_ = generation;
+	cross_epoch_ = epoch_;
+	cross_changes_ = code_changes;
+	return cross_;
+}
+
+bool Binder::locate(unsigned long generation, std::uint64_t address,
+	std::uint32_t &library, std::uint64_t &offset) const noexcept
+{
+	for (const auto &instance : instances_) {
+		if (!instance.used || instance.generation != generation)
+			continue;
+		const auto record = directory().library(instance.library);
+		if (address >= instance.bias + record.table_base &&
+		    address < instance.bias + record.table_end) {
+			library = instance.library;
+			offset = address - instance.bias;
+			return true;
+		}
+	}
+	return false;
+}
+
+EnterResult enter(CpuState &cpu, ::uml::memory::Tlb &tlb, const Hit &hit,
+	std::uint64_t budget, const CrossTable &table) noexcept
 {
 	using Entry = EnterResult (*)(CpuState *, void *, std::uint64_t,
-		const void *, std::uint64_t, std::uint64_t (*)(void *,
-			std::uint64_t, std::uint64_t) noexcept);
+		const void *, std::uint64_t, const CrossTable *);
 	/* The probe indexes the entries from the pointer the refill gets. */
 	if (static_cast<const void *>(tlb.entries.data()) !=
 	    static_cast<const void *>(&tlb))
 		std::abort();
 	const auto function = reinterpret_cast<Entry>(
 		const_cast<std::uint8_t *>(uml_aot_blob) + directory().enter);
-	if ((g_enters.fetch_add(1, std::memory_order_relaxed) & 0xffff) == 0xffff)
-		write_report();
-	const auto result = function(&cpu, &tlb, bias, native, budget,
-		uml_aot_refill);
-	g_retired.fetch_add(result.retired, std::memory_order_relaxed);
+	UML_AOT_COUNT(enters, 1);
+#if UML_AOT_DIAGNOSTICS
+	if (hit.library < 64)
+		counters::library_enters[hit.library].fetch_add(
+			1, std::memory_order_relaxed);
+#endif
+	const auto result = function(&cpu, &tlb, hit.bias, hit.native, budget,
+		&table);
+	UML_AOT_COUNT(retired, result.retired);
+#if UML_AOT_DIAGNOSTICS
 	if (result.reason == Reason::step) {
-		g_steps.fetch_add(1, std::memory_order_relaxed);
-		if (g_step_histogram.load(std::memory_order_relaxed))
-			note_step(cpu.pc - bias);
+		counters::steps.fetch_add(1, std::memory_order_relaxed);
+		for (std::uint64_t index = 0; index < table.count; ++index) {
+			const auto &entry = table.entries[index];
+			if (cpu.pc >= entry.low && cpu.pc < entry.high) {
+				if (entry.library < 64)
+					counters::library_steps[entry.library].fetch_add(
+						1, std::memory_order_relaxed);
+				note_step((std::uint64_t{entry.library} << 40) |
+					(cpu.pc - entry.bias));
+				break;
+			}
+		}
 	}
+#endif
 	return result;
 }
 
