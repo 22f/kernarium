@@ -1951,8 +1951,10 @@ def build_blob(units: list[dict], layout: dict[str, int],
         bases.append(cursor)
         cursor = align(cursor + len(unit["unit"]), PAGE)
     total_pages = sum(len(unit["digests"]) for unit in units)
+    # The hash is read once per page's first comparison: a load of 60% costs
+    # about two probes per hit.
     slots = 16
-    while slots < 2 * total_pages:
+    while 3 * slots < 5 * total_pages:
         slots *= 2
     hash_at = cursor
     end = align(hash_at + 16 * slots, PAGE)
