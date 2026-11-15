@@ -36,6 +36,7 @@ ATTRIBUTES = {
     "hasCode": 0x0101000C,
     "debuggable": 0x0101000F,
     "exported": 0x01010010,
+    "process": 0x01010011,
     "screenOrientation": 0x0101001E,
     "minSdkVersion": 0x0101020C,
     "versionCode": 0x0101021B,
