@@ -12,7 +12,11 @@ emulated back camera without the features this device does not offer), with the 
 description earns: MANUAL_SENSOR and READ_SENSOR_SETTINGS for a single lens and RAW once calibrated.
 A camera that states RAW also states the lens shading map modes OFF and ON, as the device info
 requires of every RAW capable camera (the template's OFF alone made it reject a calibrated lens at
-boot, and the camera was gone from the list); a camera without RAW keeps the template's OFF.
+boot, and the camera was gone from the list), the hot pixel map modes OFF and ON with the map among
+its result keys, and that its RAW data has no lens shading correction applied
+(android.sensor.info.lensShadingApplied FALSE: the host copies the platform's Bayer pixels and the
+HAL's shading map is all ones). A result for the hot pixel map mode ON carries an empty map, since
+the host hands over no list of defective pixels. A camera without RAW keeps the template's values.
 BURST_CAPTURE is never declared, because the host cannot meet its conditions, and the maximum latency
 is unknown.
 
@@ -68,11 +72,11 @@ Co-Authored-By: Claude <noreply@anthropic.com>
  devices/EmulatedCamera/hwl/Android.bp         |    8 +
  devices/EmulatedCamera/hwl/ConfigUtils.cpp    |    6 +
  devices/EmulatedCamera/hwl/ConfigUtils.h      |    5 +
- devices/EmulatedCamera/hwl/EmulatedSensor.cpp |   10 +
+ devices/EmulatedCamera/hwl/EmulatedSensor.cpp |   24 +
  devices/EmulatedCamera/hwl/JpegCompressor.cpp |   22 +-
  devices/EmulatedCamera/hwl/JpegCompressor.h   |   30 +-
- .../hwl/SensorCharacteristics.h               |    6 +-
- .../hwl/V4l2Characteristics.cpp               |  407 +++++++
+ .../hwl/SensorCharacteristics.h               |    8 +-
+ .../hwl/V4l2Characteristics.cpp               |  445 ++++++++
  .../EmulatedCamera/hwl/V4l2Characteristics.h  |   37 +
  .../EmulatedCamera/hwl/V4l2FrameSource.cpp    | 1011 +++++++++++++++++
  devices/EmulatedCamera/hwl/V4l2FrameSource.h  |  180 +++
@@ -85,8 +89,8 @@ Co-Authored-By: Claude <noreply@anthropic.com>
  devices/EmulatedCamera/hwl/configs/Android.bp |    6 +
  .../hwl/configs/emu_camera_v4l2.json          |  592 ++++++++++
  .../EmulatedCamera/hwl/utils/ExifUtils.cpp    |   44 +-
- devices/EmulatedCamera/hwl/utils/HWLUtils.cpp |   16 +
- 21 files changed, 3843 insertions(+), 33 deletions(-)
+ devices/EmulatedCamera/hwl/utils/HWLUtils.cpp |   26 +
+ 21 files changed, 3907 insertions(+), 33 deletions(-)
  create mode 100644 devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
  create mode 100644 devices/EmulatedCamera/hwl/V4l2Characteristics.h
  create mode 100644 devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
@@ -173,7 +177,7 @@ index 751b8494c9212015282e821993dbd9a33ecd9e52..a0e21aa0a0c44de02230c3365c4b5a15
  
  #endif  // EMULATOR_CAMERA_HAL_HWL_CONFIG_UTILS_H
 diff --git a/devices/EmulatedCamera/hwl/EmulatedSensor.cpp b/devices/EmulatedCamera/hwl/EmulatedSensor.cpp
-index 2e4b787abd8180e8db0772dcb2811cd40055a16f..4672ae56bf78e3884ffc92a3101e268cc3cb7a42 100644
+index 2e4b787abd8180e8db0772dcb2811cd40055a16f..8ab54a26637656a9e9639734b7b8937a9decb426 100644
 --- a/devices/EmulatedCamera/hwl/EmulatedSensor.cpp
 +++ b/devices/EmulatedCamera/hwl/EmulatedSensor.cpp
 @@ -39,6 +39,7 @@
@@ -207,6 +211,27 @@ index 2e4b787abd8180e8db0772dcb2811cd40055a16f..4672ae56bf78e3884ffc92a3101e268c
    } else {
      frame_source_ =
          std::make_unique<EmulatedFrameSource>(*chars_, logical_camera_id);
+@@ -1129,6 +1139,20 @@ void EmulatedSensor::ReturnResults(
+                                      lens_shading_map.size());
+       }
+     }
++    if (device_chars->second.hot_pixel_map_supported) {
++      camera_metadata_ro_entry_t hot_pixel_map_mode;
++      if ((result->result_metadata->Get(ANDROID_STATISTICS_HOT_PIXEL_MAP_MODE,
++                                        &hot_pixel_map_mode) == OK) &&
++          (hot_pixel_map_mode.count == 1) &&
++          (hot_pixel_map_mode.data.u8[0] ==
++           ANDROID_STATISTICS_HOT_PIXEL_MAP_MODE_ON)) {
++        // The host's Bayer data comes with no list of defective pixels, so the
++        // map is empty: no hot pixel is known, which is a valid map.
++        const int32_t no_hot_pixels[2] = {0, 0};
++        result->result_metadata->Set(ANDROID_STATISTICS_HOT_PIXEL_MAP,
++                                     no_hot_pixels, 0);
++      }
++    }
+     if (logical_settings->second.report_video_stab) {
+       result->result_metadata->Set(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE,
+                                    &logical_settings->second.video_stab, 1);
 diff --git a/devices/EmulatedCamera/hwl/JpegCompressor.cpp b/devices/EmulatedCamera/hwl/JpegCompressor.cpp
 index b47228fea019810cb2803cf74c1eb5a148aa3838..5c33e8d1e64d9b9275f938a95fe6b4786b0a49d1 100644
 --- a/devices/EmulatedCamera/hwl/JpegCompressor.cpp
@@ -311,10 +336,10 @@ index e836ca6a27cbb96c662db51f6993a2866463416c..8d0eb5ecd5ab93acfbd31035563ff846
    size_t JpegRCompressYUV420Frame(YUV420Frame p010_frame);
    void ThreadLoop();
 diff --git a/devices/EmulatedCamera/hwl/SensorCharacteristics.h b/devices/EmulatedCamera/hwl/SensorCharacteristics.h
-index 355cee16c72667a672d317596d56e165bfb99a9a..ff85ba6d16c138d9453f4daaa396a0f1f6921dbc 100644
+index 355cee16c72667a672d317596d56e165bfb99a9a..85638d6bb5ef28e5db068a2520be2c42a954c95f 100644
 --- a/devices/EmulatedCamera/hwl/SensorCharacteristics.h
 +++ b/devices/EmulatedCamera/hwl/SensorCharacteristics.h
-@@ -99,7 +99,11 @@ struct SensorCharacteristics {
+@@ -99,9 +99,15 @@ struct SensorCharacteristics {
    uint32_t max_processed_streams = 0;
    uint32_t max_stalling_streams = 0;
    uint32_t max_input_streams = 0;
@@ -326,13 +351,17 @@ index 355cee16c72667a672d317596d56e165bfb99a9a..ff85ba6d16c138d9453f4daaa396a0f1
 +  float focal_length = 0.f;
    bool is_flash_supported = false;
    uint32_t lens_shading_map_size[2] = {0};
++  // The camera states the hot pixel map mode ON: a result of a request for the map carries one.
++  bool hot_pixel_map_supported = false;
    uint32_t max_pipeline_depth = 0;
+   uint32_t orientation = 0;
+   bool is_front_facing = false;
 diff --git a/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp b/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..61dfe4a449cee286fab33d7b44907321ceb0af1a
+index 0000000000000000000000000000000000000000..f4237ca777f78b4078eb9de9c868072a84daafec
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
-@@ -0,0 +1,407 @@
+@@ -0,0 +1,445 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -362,6 +391,8 @@ index 0000000000000000000000000000000000000000..61dfe4a449cee286fab33d7b44907321
 +#include <map>
 +#include <memory>
 +#include <set>
++#include <span>
++#include <vector>
 +
 +#include "EmulatedSensor.h"
 +#include "SensorCharacteristics.h"
@@ -421,6 +452,40 @@ index 0000000000000000000000000000000000000000..61dfe4a449cee286fab33d7b44907321
 +  EditKeyList(metadata, ANDROID_REQUEST_AVAILABLE_CHARACTERISTICS_KEYS, {},
 +              {static_cast<int32_t>(tag)});
 +}
++
++// Where camera_plan.hpp's state_raw_metadata writes: the camera's static metadata. The plan has no Android
++// headers and names the tags and values by number.
++class MetadataSink {
++ public:
++  explicit MetadataSink(HalCameraMetadata* metadata) : metadata_(metadata) {}
++
++  void put_bytes(int32_t tag, std::span<const uint8_t> values) {
++    Put(metadata_, static_cast<uint32_t>(tag), std::vector<uint8_t>(values.begin(), values.end()));
++  }
++  void list_characteristic(int32_t tag) { AddCharacteristic(metadata_, static_cast<uint32_t>(tag)); }
++  void list_result(int32_t tag) {
++    EditKeyList(metadata_, ANDROID_REQUEST_AVAILABLE_RESULT_KEYS, {}, {tag});
++  }
++
++ private:
++  HalCameraMetadata* metadata_;
++};
++
++static_assert(plan::tag::sensor_info_lens_shading_applied == ANDROID_SENSOR_INFO_LENS_SHADING_APPLIED);
++static_assert(plan::tag::statistics_hot_pixel_map == ANDROID_STATISTICS_HOT_PIXEL_MAP);
++static_assert(plan::tag::statistics_hot_pixel_map_mode == ANDROID_STATISTICS_HOT_PIXEL_MAP_MODE);
++static_assert(plan::tag::statistics_lens_shading_map == ANDROID_STATISTICS_LENS_SHADING_MAP);
++static_assert(plan::tag::statistics_lens_shading_map_mode == ANDROID_STATISTICS_LENS_SHADING_MAP_MODE);
++static_assert(plan::tag::statistics_info_available_hot_pixel_map_modes ==
++              ANDROID_STATISTICS_INFO_AVAILABLE_HOT_PIXEL_MAP_MODES);
++static_assert(plan::tag::statistics_info_available_lens_shading_map_modes ==
++              ANDROID_STATISTICS_INFO_AVAILABLE_LENS_SHADING_MAP_MODES);
++static_assert(plan::map_mode::off == static_cast<int>(ANDROID_STATISTICS_LENS_SHADING_MAP_MODE_OFF) &&
++              plan::map_mode::on == static_cast<int>(ANDROID_STATISTICS_LENS_SHADING_MAP_MODE_ON) &&
++              plan::map_mode::off == static_cast<int>(ANDROID_STATISTICS_HOT_PIXEL_MAP_MODE_OFF) &&
++              plan::map_mode::on == static_cast<int>(ANDROID_STATISTICS_HOT_PIXEL_MAP_MODE_ON));
++static_assert(plan::lens_shading_applied_false == static_cast<int>(ANDROID_SENSOR_INFO_LENS_SHADING_APPLIED_FALSE) &&
++              plan::lens_shading_applied_true == static_cast<int>(ANDROID_SENSOR_INFO_LENS_SHADING_APPLIED_TRUE));
 +
 +camera_metadata_rational_t Rational(int32_t q16) {
 +  return {q16, 65536};
@@ -621,10 +686,12 @@ index 0000000000000000000000000000000000000000..61dfe4a449cee286fab33d7b44907321
 +        break;
 +    }
 +    PutOne<uint8_t>(m, ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT, arrangement);
-+    // The device info rejects a RAW capable camera that cannot report its lens shading map, and the
-+    // camera is then gone from the list: the template, made for a camera without RAW, states OFF only.
-+    Put<uint8_t>(m, ANDROID_STATISTICS_INFO_AVAILABLE_LENS_SHADING_MAP_MODES,
-+                 {ANDROID_STATISTICS_LENS_SHADING_MAP_MODE_OFF, ANDROID_STATISTICS_LENS_SHADING_MAP_MODE_ON});
++    // The template, made for a camera without RAW, states OFF alone for the lens shading map and the hot pixel
++    // map and lists neither the hot pixel map nor the shading state: the device info rejects a RAW capable
++    // camera like that at boot, and the camera is then gone from the list (camera_plan.hpp,
++    // state_raw_metadata).
++    MetadataSink sink(m);
++    plan::state_raw_metadata(sink);
 +    PutOne<int32_t>(m, ANDROID_SENSOR_INFO_WHITE_LEVEL, static_cast<int32_t>(desc.white_level));
 +    const int32_t black = static_cast<int32_t>(desc.black_level);
 +    Put<int32_t>(m, ANDROID_SENSOR_BLACK_LEVEL_PATTERN, {black, black, black, black});
@@ -4223,7 +4290,7 @@ index 2f3ca4c85933547400d0963174cebf69ded3da70..ea839e861cc491069d7ca9ffbb10a3f3
        ALOGE("%s: setting F number failed.", __FUNCTION__);
        return false;
 diff --git a/devices/EmulatedCamera/hwl/utils/HWLUtils.cpp b/devices/EmulatedCamera/hwl/utils/HWLUtils.cpp
-index 2d156ab877eba6084da1dfb2f2e865740409a1f0..7cfddefb61b4fd79a158c4ad4a5dbe5f4c402073 100644
+index 2d156ab877eba6084da1dfb2f2e865740409a1f0..62135a80c2b94947769f039ea73133202e1e8258 100644
 --- a/devices/EmulatedCamera/hwl/utils/HWLUtils.cpp
 +++ b/devices/EmulatedCamera/hwl/utils/HWLUtils.cpp
 @@ -87,6 +87,22 @@ status_t GetSensorCharacteristics(const HalCameraMetadata* metadata,
@@ -4249,3 +4316,20 @@ index 2d156ab877eba6084da1dfb2f2e865740409a1f0..7cfddefb61b4fd79a158c4ad4a5dbe5f
    ret = metadata->Get(ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE_MAXIMUM_RESOLUTION,
                        &entry);
    if ((ret == OK) && (entry.count == 2)) {
+@@ -294,6 +310,16 @@ status_t GetSensorCharacteristics(const HalCameraMetadata* metadata,
+       return BAD_VALUE;
+     }
+ 
++    // A RAW camera that states the hot pixel map mode ON returns the map for a request of it.
++    ret = metadata->Get(ANDROID_STATISTICS_INFO_AVAILABLE_HOT_PIXEL_MAP_MODES, &entry);
++    if (ret == OK) {
++      for (size_t i = 0; i < entry.count; i++) {
++        if (entry.data.u8[i] == ANDROID_STATISTICS_HOT_PIXEL_MAP_MODE_ON) {
++          sensor_chars->hot_pixel_map_supported = true;
++        }
++      }
++    }
++
+     ret = metadata->Get(ANDROID_SENSOR_COLOR_TRANSFORM1, &entry);
+     if ((ret != OK) || (entry.count != (3 * 3))) {  // 3x3 rational matrix
+       ALOGE("%s: Invalid ANDROID_SENSOR_COLOR_TRANSFORM1!", __FUNCTION__);
