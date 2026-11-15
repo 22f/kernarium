@@ -761,6 +761,8 @@ struct RunningCamera : StreamCache {
     bool applied {};
     // What the video connection holds of the stabilization, as this backend wrote it; a new connection holds none.
     VideoStabilizationHeld stabilization;
+    // What the guest last asked of it, as the applies of the camera's settings said (also those that left the rest alone).
+    StabilizationWish stabilizationWish;
 };
 
 // The rate a stream runs at while the system's pressure caps it, and how it is
@@ -1147,31 +1149,55 @@ public:
     }
 
 #if TARGET_OS_IOS
+    // The connection and format a stabilization is written to (video_stabilization.hpp).
+    class ConnectionStabilization final : public VideoStabilizationPort {
+    public:
+        ConnectionStabilization(AVCaptureDeviceFormat* format, AVCaptureConnection* connection)
+            : format_(format), connection_(connection) {}
+        VideoStabilizationSupport support() override
+        {
+            return {[format_ isVideoStabilizationModeSupported:AVCaptureVideoStabilizationModeStandard],
+                    [format_ isVideoStabilizationModeSupported:AVCaptureVideoStabilizationModeLowLatency]};
+        }
+        void write(VideoStabilization mode) override { connection_.preferredVideoStabilizationMode = stabilizationModeOf(mode); }
+
+    private:
+        AVCaptureDeviceFormat* format_;
+        AVCaptureConnection* connection_;
+    };
+
     // The video connection's stabilization for what the guest wants (video_stabilization.hpp), written when it differs from
     // what the connection holds. Never the automatic mode: the preview and the recording share this one output, and the
     // system's choice for it is a cinematic mode that holds the viewfinder a second or more behind. A wish the connection
     // already holds changes nothing, so the view does not move when the guest first changes another setting. A format that
     // supports no mode leaves the picture unstabilized, and the record says so, once for the connection.
-    void putStabilization(std::size_t camera, AVCaptureDevice* device, RunningCamera& running, bool wanted)
+    std::optional<VideoStabilizationStep> writeStabilization(std::size_t camera, AVCaptureDevice* device, AVCaptureConnection* connection,
+                                                             VideoStabilizationHeld& held, bool wanted)
     {
-        if (running.connection == nil) return;
+        if (connection == nil) return std::nullopt;
         @try {
-            AVCaptureDeviceFormat* format = device.activeFormat;
-            const VideoStabilizationStep step = stabilizationStep(
-                wanted,
-                {[format isVideoStabilizationModeSupported:AVCaptureVideoStabilizationModeStandard],
-                 [format isVideoStabilizationModeSupported:AVCaptureVideoStabilizationModeLowLatency]},
-                running.stabilization);
-            if (step.write) running.connection.preferredVideoStabilizationMode = stabilizationModeOf(step.choice);
-            running.stabilization = {step.choice, step.state};
-            if (step.unsupported)
-                std::fprintf(stderr, "Camera: camera %zu: the active format supports no video stabilization; the picture stays unstabilized\n",
-                             camera);
-            if (step.note) note(camera, [&](CameraPresentation& held) { held.videoStabilization = step.state; });
+            ConnectionStabilization port(device.activeFormat, connection);
+            return applyVideoStabilization(port, wanted, held);
         } @catch (NSException* exception) {
             std::fprintf(stderr, "Camera: camera %zu: the video stabilization was refused: %s\n", camera,
                          exception.reason != nil ? exception.reason.UTF8String : "");
         }
+        return std::nullopt;
+    }
+
+    // What the record and the log say of a connection's stabilization step.
+    void recordStabilization(std::size_t camera, const VideoStabilizationStep& step)
+    {
+        if (step.unsupported)
+            std::fprintf(stderr, "Camera: camera %zu: the active format supports no video stabilization; the picture stays unstabilized\n",
+                         camera);
+        if (step.note) note(camera, [&](CameraPresentation& held) { held.videoStabilization = step.state; });
+    }
+
+    void putStabilization(std::size_t camera, AVCaptureDevice* device, RunningCamera& running, bool wanted)
+    {
+        if (const auto step = writeStabilization(camera, device, running.connection, running.stabilization, wanted))
+            recordStabilization(camera, *step);
     }
 #endif
 
@@ -1180,12 +1206,21 @@ public:
     void applyOnQueue(std::size_t camera, const CameraSettings& settings, bool force)
     {
         auto& running = cameras_[camera];
+        (void)applyCameraSettings(
+            running, running.stabilizationWish, settings.stabilization, force,
+            running.settings == settings && running.focusSerial == settings.focusTriggerSerial,
+            [&] {
 #if TARGET_OS_IOS
-        // Before the exit for settings that are the ones applied: the cache of a new connection holds the defaults, which
-        // are what the guest asks for in video mode, and the connection holds no stabilization until one is written.
-        putStabilization(camera, entries_[camera].device, running, settings.stabilization);
+                putStabilization(camera, entries_[camera].device, running, settings.stabilization);
 #endif
-        if (running.mayLeaveSettings(force, running.settings == settings && running.focusSerial == settings.focusTriggerSerial)) return;
+            },
+            [&] { writeSettingsOnQueue(camera, settings, force); });
+    }
+
+    // The settings other than the stabilization, put on the device.
+    void writeSettingsOnQueue(std::size_t camera, const CameraSettings& settings, bool force)
+    {
+        auto& running = cameras_[camera];
         // What the device holds is not known (a restore was refused): everything is written.
         force = force || running.unrestored;
         const Entry& entry = entries_[camera];
@@ -1878,14 +1913,9 @@ private:
         // The photo output's compensation as it reads now that the admission committed the configuration, of the output this
         // admission added (the camera's entry does not hold it yet); the reading taken as the output was attached stays
         // where the output is gone again (admissionCompensationReading).
-        std::optional<PhotoOutputFacts> photo = attached;
-        if (photo && addedPhoto != nil &&
-            admissionCompensationReading(admitted, true) == CameraReading::afterCommit) {
-            const PhotoOutputFacts committed = readCompensation(addedPhoto, CameraReading::afterCommit);
-            photo->compensationSupported = committed.compensationSupported;
-            photo->compensationEnabled = committed.compensationEnabled;
-            photo->reading = committed.reading;
-        }
+        const std::optional<PhotoOutputFacts> photo = committedPhotoFacts(attached, addedPhoto, admitted, [](AVCapturePhotoOutput* output) {
+            return readCompensation(output, CameraReading::afterCommit);
+        });
         AVCaptureDevice* device = entries_[camera].device;
         const CameraFact center = factOf(device.centerStageActive);
         const CameraFact distortion = factOf(device.geometricDistortionCorrectionEnabled);
@@ -2240,6 +2270,9 @@ private:
         std::optional<PhotoOutputFacts> photoFacts;
         std::optional<CameraStillSize> photoMaximumSet;
         std::optional<RatioFacts> ratioFacts;
+        // The stabilization the new video connection was programmed with before the configuration committed.
+        VideoStabilizationHeld admittedStabilization;
+        std::optional<VideoStabilizationStep> admittedStabilizationStep;
 #endif
         AdmitSteps steps;
         steps.begin = [&] { [session_ beginConfiguration]; };
@@ -2309,6 +2342,15 @@ private:
                 return true;
             });
         };
+#if TARGET_OS_IOS
+        // The stabilization the guest asks for, on the connection before the configuration commits: a session that runs
+        // already (a lens added to it) starts the new output at the commit, and a session that starts after it delivers from
+        // its first frame, so no frame of this connection has another crop than the rest.
+        steps.programVideo = [&] {
+            admittedStabilizationStep = writeStabilization(camera, entry.device, newConnection, admittedStabilization,
+                                                           running.stabilizationWish.atAdmission());
+        };
+#endif
         steps.addPhoto = [&] {
             return guarded(camera, [&] {
                 AVCapturePhotoOutput* output = [[AVCapturePhotoOutput alloc] init];
@@ -2431,7 +2473,12 @@ private:
             running.videoOutput = newVideo;
             running.delegate = newDelegate;
             running.connection = newConnection;
+#if TARGET_OS_IOS
+            running.stabilization = admittedStabilization;
+            if (admittedStabilizationStep) recordStabilization(camera, *admittedStabilizationStep);
+#else
             running.stabilization = {};
+#endif
         }
         if (newPhoto != nil) {
             running.photoOutput = newPhoto;

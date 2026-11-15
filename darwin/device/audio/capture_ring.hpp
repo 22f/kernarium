@@ -9,16 +9,36 @@
 #include <cstring>
 #include <memory>
 #include <span>
+#include <thread>
 
 namespace uml::audio {
+
+/* The frames at the start of a buffer, captured from `capturedNanoseconds`, that were captured before the boundary: zero
+ * where either time is not known (zero). Times are on one clock. */
+[[nodiscard]] constexpr std::size_t framesBeforeBoundary(
+    std::uint64_t capturedNanoseconds, std::uint64_t boundaryNanoseconds, std::uint32_t rate) noexcept
+{
+    if (capturedNanoseconds == 0 || boundaryNanoseconds <= capturedNanoseconds)
+        return 0;
+    return static_cast<std::size_t>(
+        (boundaryNanoseconds - capturedNanoseconds) * rate / 1'000'000'000ULL);
+}
 
 /* A bounded single-producer, single-consumer ring of bytes, for a capture
  * source whose audio arrives on a thread of its own. Neither side allocates
  * or locks. The producer calls write() only; the consumer calls read(),
- * discard() and clear() only. A full ring drops the bytes the producer
- * offers beyond its room, and the consumer discards the oldest bytes it does
- * not want, so a source that runs ahead of the guest bounds its latency
- * instead of growing it. */
+ * discard(), clear() and restart() only. A full ring drops the bytes the
+ * producer offers beyond its room, and the consumer discards the oldest bytes
+ * it does not want, so a source that runs ahead of the guest bounds its
+ * latency instead of growing it.
+ *
+ * A consumer that begins a recording restart()s the ring: the audio the
+ * producer captured before then must not reach it, including a buffer the
+ * producer holds, converting it, when the restart is made. The producer reads
+ * epoch() and boundaryNanoseconds() as a buffer reaches it and offers the
+ * buffer with that epoch (write(data, epoch)): a restart in between drops it,
+ * and a buffer that began before the boundary has its leading frames trimmed
+ * by the producer (framesBeforeBoundary). */
 class CaptureRing final {
 public:
     explicit CaptureRing(std::size_t capacityBytes)
@@ -36,6 +56,34 @@ public:
         copyIn(head, data.first(count));
         head_.store(head + count, std::memory_order_release);
         return count;
+    }
+
+    /* The same, for a buffer that reached the producer when the ring was at `epoch`: dropped (and reported as taken) if
+     * a restart has been made since. */
+    std::size_t write(std::span<const std::uint8_t> data, std::uint32_t epoch) noexcept
+    {
+        // Sequentially consistent: either this sees the restart's epoch, or the restart sees this write under way.
+        writing_.store(true, std::memory_order_seq_cst);
+        std::size_t taken = data.size();
+        if (epoch_.load(std::memory_order_seq_cst) == epoch)
+            taken = write(data);
+        writing_.store(false, std::memory_order_release);
+        return taken;
+    }
+
+    /* The epoch and the boundary as they stand, for a buffer that has just reached the producer. */
+    [[nodiscard]] std::uint32_t epoch() const noexcept { return epoch_.load(std::memory_order_acquire); }
+    [[nodiscard]] std::uint64_t boundaryNanoseconds() const noexcept { return boundary_.load(std::memory_order_acquire); }
+
+    /* Begins a recording at `boundaryNanoseconds` (the producer's clock): drops what is held and every buffer a producer
+     * received before this call, whenever it writes it. A write that is under way is waited for, a copy of one buffer. */
+    void restart(std::uint64_t boundaryNanoseconds) noexcept
+    {
+        boundary_.store(boundaryNanoseconds, std::memory_order_release);
+        epoch_.fetch_add(1, std::memory_order_seq_cst);
+        while (writing_.load(std::memory_order_seq_cst))
+            std::this_thread::yield();
+        clear();
     }
 
     /* Moves up to out.size() of the oldest bytes into `out`. */
@@ -90,6 +138,9 @@ private:
     // Free-running positions; their difference is the fill.
     std::atomic<std::size_t> head_ {};
     std::atomic<std::size_t> tail_ {};
+    std::atomic<std::uint32_t> epoch_ {};
+    std::atomic<std::uint64_t> boundary_ {};
+    std::atomic<bool> writing_ {};
 };
 
 } // namespace uml::audio

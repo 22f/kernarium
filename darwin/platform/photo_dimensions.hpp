@@ -16,6 +16,7 @@
 
 #include "camera.hpp"
 #include "frame_bytes.hpp"
+#include "video_stabilization.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -91,6 +92,21 @@ enum class CompensationStep : std::uint8_t { proceed, enable, refuse };
 [[nodiscard]] constexpr CameraReading admissionCompensationReading(bool admitted, bool outputAdded) noexcept
 {
     return admitted && outputAdded ? CameraReading::afterCommit : CameraReading::beforeCommit;
+}
+
+// The photo output facts an admission records: the ones taken as the output was attached, with the compensation read again
+// from the output the admission added (`added`, null where it added none) once the configuration committed. `read` takes
+// the output and returns its facts as they read now. An admission that was undone keeps the facts it has.
+template <typename Facts, typename Output, typename Read>
+[[nodiscard]] std::optional<Facts> committedPhotoFacts(std::optional<Facts> attached, Output* added, bool admitted, Read&& read)
+{
+    if (attached && added != nullptr && admissionCompensationReading(admitted, true) == CameraReading::afterCommit) {
+        const Facts committed = read(added);
+        attached->compensationSupported = committed.compensationSupported;
+        attached->compensationEnabled = committed.compensationEnabled;
+        attached->reading = committed.reading;
+    }
+    return attached;
 }
 
 // What a still does about the dynamic aspect ratio its camera's anchor pins: nothing where it pins none or the device
@@ -679,6 +695,10 @@ struct AdmitSteps {
     std::function<void()> snapshotTiming;  // empty: nothing to take
     std::function<bool()> activate;
     std::function<bool()> addVideo;
+    // Empty: nothing to program. Called when the video output is added, still inside the configuration, before it is
+    // committed: what the new connection needs so that its first frame is the picture the rest are (a session that runs
+    // already starts the output at the commit).
+    std::function<void()> programVideo;
     // Attaches the photo output and sets its maximum (preparePhotoOutput).
     std::function<bool()> addPhoto;
     // Whether the session is over its hardware budget with what was added.
@@ -739,6 +759,23 @@ struct StreamCache {
     // they were not known, and the settings written before are to be written again.
     bool timingWritten() noexcept;
 };
+
+// Applies a camera's settings: the stabilization wish is noted and `stabilize` runs first, whatever the other settings
+// are, and `write` puts the other settings unless they may be left (`unchanged`: they are the ones applied; see
+// StreamCache::mayLeaveSettings). The stabilization comes first because the settings a new video connection's cache holds
+// are the defaults, which are what the guest asks for in video mode: an apply that left them as they were left the
+// connection unstabilized, and the admission of a connection has the wish only from an apply that left them. Returns
+// whether `write` ran.
+template <typename Stabilize, typename Write>
+bool applyCameraSettings(const StreamCache& cache, StabilizationWish& wish, bool wanted, bool force, bool unchanged,
+                         Stabilize&& stabilize, Write&& write)
+{
+    wish.note(wanted);
+    stabilize();
+    if (cache.mayLeaveSettings(force, unchanged)) return false;
+    write();
+    return true;
+}
 
 // An interruption has ended, or the session restarted after an error, and the
 // system may have moved a device to another format meanwhile. Every camera that

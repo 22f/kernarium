@@ -12,6 +12,7 @@
 #include "wire_bytes.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -98,6 +99,25 @@ public:
         require(running && ring != nullptr, "the microphone is not running");
         const std::vector<std::uint8_t> data(count, value);
         require(ring->write(data) == count);
+    }
+
+    /* What a buffer finds when it reaches the audio thread, which converts it and writes it a moment later. */
+    struct Reception {
+        std::uint32_t epoch {};
+        std::uint64_t boundary {};
+    };
+    [[nodiscard]] Reception receive() const
+    {
+        require(running && ring != nullptr, "the microphone is not running");
+        return {ring->epoch(), ring->boundaryNanoseconds()};
+    }
+
+    /* The write of a buffer that reached the audio thread at `reception`. */
+    void deliverReceived(const Reception& reception, std::uint8_t value, std::size_t count)
+    {
+        require(running && ring != nullptr, "the microphone is not running");
+        const std::vector<std::uint8_t> data(count, value);
+        require(ring->write(data, reception.epoch) == count);
     }
 
     CaptureRing* ring {};
@@ -475,6 +495,76 @@ void standbyOpensTheMicrophoneBeforeTheGuestRecords()
     require(fixture.input->stops == 1 && !fixture.input->running, "when video mode ends the microphone closes");
 }
 
+/* A buffer the audio thread received before the guest started, and writes after it, is sound from before the recording. */
+void aBufferHeldAcrossTheStartIsNotTheRecordings()
+{
+    Source fixture(false);
+    fixture.allow();
+    fixture.microphone->setStandby(true);
+    fixture.source->handleEvents();
+    fixture.source->configure({.periodBytes = 480, .sampleRate = 48000, .channels = 1, .bytesPerSample = 2});
+    fixture.source->prepare();
+    require(fixture.input->starts == 1 && fixture.input->channels == 1, "mono standby");
+    const auto held = fixture.input->receive();
+    const auto boundaryBefore = fixture.input->ring->boundaryNanoseconds();
+    fixture.source->start();
+    require(fixture.input->starts == 1, "the guest's start finds the microphone open");
+    require(fixture.input->ring->boundaryNanoseconds() > boundaryBefore, "and states the boundary of the recording");
+    fixture.input->deliverReceived(held, 0x44, 960);
+    std::vector<std::uint8_t> pcm(960, 0x55);
+    require(fixture.source->read(pcm) == 0, "the buffer received before the start and written after it is not delivered");
+    const auto fresh = fixture.input->receive();
+    fixture.input->deliverReceived(fresh, 0x66, 960);
+    require(fixture.source->read(pcm) == 960 && pcm[0] == 0x66 && pcm[959] == 0x66, "a buffer received after the start is");
+    // The second recording of the same open microphone has its own boundary.
+    const auto second = fixture.input->receive();
+    fixture.source->stop();
+    fixture.source->start();
+    fixture.input->deliverReceived(second, 0x77, 480);
+    require(fixture.source->read(pcm) == 0, "and the next start drops the buffers received before it too");
+}
+
+/* The frames of a buffer that began before the boundary are trimmed. */
+void aBufferThatSpansTheBoundaryLosesItsLeadingFrames()
+{
+    require(uml::audio::framesBeforeBoundary(1'000'000'000, 1'100'000'000, 48000) == 4800, "a tenth of a second before the boundary is 4800 frames");
+    require(uml::audio::framesBeforeBoundary(1'100'000'000, 1'100'000'000, 48000) == 0, "a buffer that begins at the boundary loses none");
+    require(uml::audio::framesBeforeBoundary(1'200'000'000, 1'100'000'000, 48000) == 0, "nor one that begins after it");
+    require(uml::audio::framesBeforeBoundary(0, 1'100'000'000, 48000) == 0, "a buffer with no capture time is kept whole");
+    require(uml::audio::framesBeforeBoundary(1'000'000'000, 0, 48000) == 0, "and so is one before any recording");
+}
+
+/* A write that is under way when the recording begins is finished before the restart returns, and a buffer received
+ * earlier is dropped: nothing of an earlier epoch is held once a restart has returned. */
+void aRestartLeavesNothingOfAnEarlierEpoch()
+{
+    CaptureRing ring(128U * 1024U);
+    std::atomic<bool> stopping {};
+    // Writes of 32 KiB, so that a write is under way for a while when a restart arrives.
+    std::thread producer([&] {
+        std::vector<std::uint8_t> data(32U * 1024U);
+        while (!stopping.load()) {
+            const auto epoch = ring.epoch();
+            std::fill(data.begin(), data.end(), static_cast<std::uint8_t>(epoch));
+            (void)ring.write(data, epoch);
+        }
+    });
+    std::vector<std::uint8_t> drained(128U * 1024U);
+    for (std::uint64_t round = 1; round <= 2000; ++round) {
+        ring.restart(round);
+        const auto epoch = static_cast<std::uint8_t>(ring.epoch());
+        // A write that was under way and published late would have landed by now.
+        for (const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(40);
+             std::chrono::steady_clock::now() < until;) {
+        }
+        const auto count = ring.read(drained);
+        for (std::size_t index = 0; index < count; ++index)
+            require(drained[index] == epoch, "a byte of an earlier epoch is held after the restart returned");
+    }
+    stopping.store(true);
+    producer.join();
+}
+
 void standbyDoesNotOverrideTheSettingOrAGuestThatRecords()
 {
     Source fixture;
@@ -663,6 +753,9 @@ int main()
     sourceFollowsTheSettingUnderARecordingGuest();
     sourceTriesAgainAfterAStartThatFailed();
     standbyOpensTheMicrophoneBeforeTheGuestRecords();
+    aBufferHeldAcrossTheStartIsNotTheRecordings();
+    aBufferThatSpansTheBoundaryLosesItsLeadingFrames();
+    aRestartLeavesNothingOfAnEarlierEpoch();
     standbyDoesNotOverrideTheSettingOrAGuestThatRecords();
     aRecordingThatAsksForOtherChannelsOpensTheMicrophoneAgain();
     sourceDropsTheOldestAudioItCannotCatchUpWith();

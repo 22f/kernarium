@@ -2,10 +2,18 @@
 
 #include "microphone_capture_source.hpp"
 
+#include <time.h>
+
 #include <utility>
 
 namespace uml::audio {
 namespace {
+
+// The clock the system stamps captured audio with (AVAudioTime's host time, in nanoseconds).
+std::uint64_t uptimeNanoseconds() noexcept
+{
+    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+}
 
 // Room for 340 ms of 48 kHz stereo. The system delivers the microphone in
 // bursts of 100 ms or more.
@@ -54,10 +62,11 @@ public:
     {
         recording_ = true;
         // A microphone that has been open since before the guest started holds
-        // audio from before the recording: the recording begins with the next
-        // audio, so the sound is not behind the picture by what it holds.
-        if (capturing_)
-            ring_.clear();
+        // audio from before the recording, and its audio thread may hold a
+        // buffer it captured earlier: the recording begins with audio captured
+        // after this start, so the sound is not behind the picture by what
+        // came before it.
+        ring_.restart(uptimeNanoseconds());
         reconcile();
     }
 

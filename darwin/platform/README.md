@@ -220,8 +220,12 @@ interface to the wire.
   low-latency mode where the active format supports it, else the standard one,
   else none (`video_stabilization.hpp`), and never the system's automatic choice.
   The mode is written at a video connection's first apply, whatever the other
-  settings say, and a later apply of the same wish writes nothing. iOS only:
-  macOS has no connection property for it.
+  settings say, and a later apply of the same wish writes nothing. A new video
+  connection is programmed as it is admitted, inside the configuration and
+  before it commits (`AdmitSteps::programVideo`), with what the camera's
+  settings last said, which the device applies before it starts the video; so a
+  lens added to a running session delivers its first frame stabilized as well.
+  iOS only: macOS has no connection property for it.
 - **Stills** are a JPEG, a Bayer still, or both from one capture. A Bayer still
   carries its DNG's colour data (`dng_color.hpp`), the only place the host
   reveals it. A part that fails leaves the others: a capture fails only when

@@ -162,6 +162,24 @@ public:
     std::set<std::uint64_t> holding;
     /* The most the delivered results' payloads held when a capture was started. */
     std::size_t payloadWhenStarting {};
+    /* What the platform was asked, in order: a camera's settings applied (with the stabilization they ask for) or its video
+     * started (the platform camera). */
+    struct PlatformCall {
+        enum class Kind : std::uint8_t { apply, startVideo } kind;
+        std::size_t camera;
+        bool stabilization;
+    };
+    std::vector<PlatformCall> calls;
+    /* Called inside startVideo once the capture runs, where a platform's output queue can deliver a frame before the call
+     * returns (AVFoundation's does). */
+    std::function<void(std::size_t)> afterStart;
+    /* What the settings applied for a camera were when each frame of it arrived: how many applies, and the stabilization
+     * of the latest. */
+    struct FrameSight {
+        std::size_t applies;
+        bool stabilization;
+    };
+    std::vector<FrameSight> framesSeen;
 
     std::mutex pauseMutex;
     std::condition_variable pauseCondition;
@@ -206,14 +224,21 @@ public:
         Session(WatchedCamera& owner, std::unique_ptr<CameraSession> session) : camera(owner), inner(std::move(session)) {}
         bool startVideo(std::size_t index, std::uint32_t width, std::uint32_t height, std::uint32_t rate) override
         {
+            camera.calls.push_back({PlatformCall::Kind::startVideo, index, false});
             if (camera.refuseNextStart) {
                 camera.refuseNextStart = false;
                 return false;
             }
-            return inner->startVideo(index, width, height, rate);
+            const bool started = inner->startVideo(index, width, height, rate);
+            if (started && camera.afterStart) camera.afterStart(index);
+            return started;
         }
         void stopVideo(std::size_t index) override { inner->stopVideo(index); }
-        void apply(std::size_t index, const CameraSettings& settings) override { inner->apply(index, settings); }
+        void apply(std::size_t index, const CameraSettings& settings) override
+        {
+            camera.calls.push_back({PlatformCall::Kind::apply, index, settings.stabilization});
+            inner->apply(index, settings);
+        }
         bool takeStill(std::size_t index, const CameraStillRequest& request) override
         {
             camera.payloadWhenStarting = std::max(camera.payloadWhenStarting, payload_watch::bytes());
@@ -246,6 +271,13 @@ public:
     }
     void cameraFrame(std::size_t index, CameraFrame frame) override
     {
+        FrameSight sight {};
+        for (const auto& call : calls)
+            if (call.kind == PlatformCall::Kind::apply && call.camera == index) {
+                ++sight.applies;
+                sight.stabilization = call.stabilization;
+            }
+        framesSeen.push_back(sight);
         {
             std::unique_lock lock(pauseMutex);
             if (pauseFrame) {
@@ -2829,6 +2861,96 @@ void testARefusedChangeLeavesTheCaptureChargedUntilItStops()
     require(!rig.camera->videoRunning(0), "and the stream's end stops it, whatever the last change did");
 }
 
+// The guest's stabilization wish reaches the platform before the video starts, so the platform programs the new video
+// connection before the capture can deliver a frame: a platform whose output queue delivers inside startVideo makes a
+// first frame that has the crop the rest have. (Applied after the start, the first picture came unstabilized and the crop
+// changed under a guest that already showed it.) This is the device's order; the platform programs what it was told in the
+// admission.
+void testTheSettingsReachThePlatformBeforeTheVideoStarts()
+{
+    using Kind = WatchedCamera::PlatformCall::Kind;
+    Rig rig;
+    rig.watched->afterStart = [&](std::size_t camera) { rig.camera->pump(camera, 1); };
+    rig.create(1, 0, videoKind);
+    rig.setVideo(1, 640, 480);
+    rig.attach(1, 1, nv12Size(640, 480));
+    rig.attach(1, 2, nv12Size(640, 480));
+    rig.queue(1, 1);
+    const auto& calls = rig.watched->calls;
+    require(calls.size() >= 2 && calls[0].kind == Kind::apply && calls[0].camera == 0 && calls[0].stabilization &&
+                calls[1].kind == Kind::startVideo && calls[1].camera == 0,
+            "the settings, asking for stabilization (the default), are applied before the video starts");
+    require(!rig.watched->framesSeen.empty() && rig.watched->framesSeen.front().applies >= 1 && rig.watched->framesSeen.front().stabilization,
+            "the first frame the platform made found the stabilization asked for");
+    require(rig.videoModes == std::vector<bool> {true}, "and the device is in video mode");
+
+    // A preview that asks for none (photo mode) is told so before the start: the platform stabilizes nothing it would lose.
+    Rig photo;
+    photo.create(1, 0, videoKind);
+    photo.setVideo(1, 640, 480);
+    photo.attach(1, 1, nv12Size(640, 480));
+    photo.attach(1, 2, nv12Size(640, 480));
+    photo.setOk(1, {{UML_V4L2_CID_IMAGE_STABILIZATION, 0, {}}});
+    photo.queue(1, 1);
+    require(photo.watched->calls.size() >= 2 && photo.watched->calls[0].kind == Kind::apply && !photo.watched->calls[0].stabilization &&
+                photo.watched->calls[1].kind == Kind::startVideo,
+            "a guest that does not ask is applied without it before the start");
+}
+
+// A lens added to a session that runs already starts its output at the commit of the platform's configuration: its settings
+// are applied before its video starts too, not after the first camera's.
+void testALensAddedToARunningSessionIsAppliedBeforeItsVideoStarts()
+{
+    using Kind = WatchedCamera::PlatformCall::Kind;
+    Rig rig;
+    rig.watched->afterStart = [&](std::size_t camera) { rig.camera->pump(camera, 1); };
+    videoStream(rig, 1, 0, 640, 480, 2);
+    (void)rig.queue(1, 1);
+    require(rig.camera->videoRunning(0), "the first camera runs");
+    rig.watched->calls.clear();
+    rig.watched->framesSeen.clear();
+    videoStream(rig, 2, 1, 640, 480, 2);
+    (void)rig.queue(2, 1);
+    require(rig.camera->videoRunning(1), "the second camera joins the running session");
+    const auto& calls = rig.watched->calls;
+    const auto applied = std::find_if(calls.begin(), calls.end(), [](const auto& call) { return call.kind == Kind::apply && call.camera == 1; });
+    const auto started = std::find_if(calls.begin(), calls.end(), [](const auto& call) { return call.kind == Kind::startVideo && call.camera == 1; });
+    require(applied != calls.end() && started != calls.end() && applied < started && applied->stabilization,
+            "its settings, asking for stabilization, are applied before its video starts");
+}
+
+// Video mode is told whenever a camera comes to run, whatever brought it: a start the platform refused that succeeds when the
+// device tries again, and a rate change that starts a video that never ran. The microphone is held for it either way.
+void testVideoModeFollowsAStartThatSucceedsOnRetry()
+{
+    Rig rig;
+    rig.watched->refuseNextStart = true;
+    rig.create(1, 0, videoKind);
+    rig.setVideo(1, 640, 480);
+    rig.attach(1, 1, nv12Size(640, 480));
+    rig.attach(1, 2, nv12Size(640, 480));
+    rig.queue(1, 1);
+    require(!rig.camera->videoRunning(0) && rig.videoModes.empty(), "a start the platform refused is not video mode");
+    rig.camera->advanceClock(1'100'000'000);
+    require(rig.waitFor([&] { return rig.camera->videoRunning(0); }), "the camera is tried again a second later");
+    require(rig.videoModes == std::vector<bool> {true}, "and the retry that succeeded is video mode, told");
+}
+
+void testVideoModeFollowsARateChangeThatStartsAVideoThatNeverRan()
+{
+    Rig rig;
+    rig.watched->refuseNextStart = true;
+    rig.create(1, 0, videoKind);
+    rig.setVideo(1, 640, 480);
+    rig.attach(1, 1, nv12Size(640, 480));
+    rig.attach(1, 2, nv12Size(640, 480));
+    rig.queue(1, 1);
+    require(!rig.camera->videoRunning(0) && rig.videoModes.empty(), "a start the platform refused is not video mode");
+    require(Rig::type(rig.setInterval(1, 1, 15)) == VIRTIO_VIDEO_RESP_OK_NODATA, "the guest changes the rate");
+    require(rig.camera->videoRunning(0), "which starts the video");
+    require(rig.videoModes == std::vector<bool> {true}, "and that is video mode, told");
+}
+
 // A platform callback that is in progress when a camera's video stops reaches the device after the stop: it keeps no frame,
 // for the camera is no longer counted and the frame holds the capture's buffer.
 void testALateFrameOfAStoppedCameraIsNotKept()
@@ -3704,6 +3826,10 @@ int main()
     testThePresentationStatesWhatTheGuestIsTold();
     testVideoModeIsWhatTheGuestAsksStabilizationFor();
     testVideoModeIsNeverToldForABlockedSessionOrAfterTheStreamStops();
+    testTheSettingsReachThePlatformBeforeTheVideoStarts();
+    testALensAddedToARunningSessionIsAppliedBeforeItsVideoStarts();
+    testVideoModeFollowsAStartThatSucceedsOnRetry();
+    testVideoModeFollowsARateChangeThatStartsAVideoThatNeverRan();
     testHandshake();
     testStreamsAndParameters();
     testVideoAndMetadata();
