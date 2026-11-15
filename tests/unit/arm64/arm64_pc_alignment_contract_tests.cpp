@@ -325,6 +325,8 @@ constexpr std::uint64_t target_one = code_base + 0x10;
 constexpr std::uint64_t target_two = code_base + 0x20;
 constexpr std::uint64_t frames = 0x800;
 constexpr std::uint64_t all_ones = ~std::uint64_t{};
+/* N and C set: a return that faults must leave the flags as they were. */
+constexpr std::uint32_t seeded_nzcv = 0xa000'0000U;
 
 constexpr std::array return_forms{
 	ReturnForm{"RET X15", code_base + 0x000, code_base + 0x080, 1, movn_x15},
@@ -387,6 +389,7 @@ void put_return_code(JitBacking &backing)
 {
 	::uml::cpu::arm64::CpuState cpu;
 	cpu.pc = site;
+	cpu.nzcv = seeded_nzcv;
 	cpu.tbi_enabled = tbi;
 	if (&form == &return_forms[0]) {
 		cpu.registers[15] = target;
@@ -426,8 +429,14 @@ void require_same_exit(const ::uml::cpu::ExecutionResult &actual,
 		actual.fault.address == cold.fault.address &&
 		actual.fault.access == cold.fault.access &&
 		actual.fault.alignment == cold.fault.alignment &&
+		actual.syndrome == cold.syndrome &&
 		actual_cpu.pc == cold_cpu.pc,
 		"a trained return site exited differently from a cold one");
+	/* A fetch fault has no syndrome, and the flags are the guest's own. */
+	require(actual.syndrome == 0 && cold.syndrome == 0,
+		"a return fault reported a syndrome");
+	require(actual_cpu.nzcv == seeded_nzcv && cold_cpu.nzcv == seeded_nzcv,
+		"a return fault changed the flags");
 }
 
 /* One world per case, so that no site, table or ring survives from another.
