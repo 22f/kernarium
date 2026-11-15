@@ -87,11 +87,13 @@ reads or opens the microphone, and no permission prompt can appear.
   records and the switch is active, so the system's recording indicator is lit
   only while a guest listens, and while the switch's standby holds: a camera of
   the guest is in video mode (`CameraDeviceOptions::onVideoMode`), which is
-  when the guest is about to record and the system takes a quarter of a second
-  or more to open the microphone. Standby opens the input before the guest
-  starts (mono until a recording has said otherwise, opened again if the
-  recording asks for other channels), and the guest's start drops what it held,
-  so the recording begins with the next audio, not with sound from before it. It
+  when the guest is about to record and the system needs time to open the
+  microphone. Standby opens the input before the guest starts (mono until a
+  recording has said otherwise, opened again if the recording asks for other
+  channels). The guest's start is a boundary (`CaptureRing::restart`): what the
+  ring held, a buffer the audio thread received before it and writes after it,
+  and the frames of a buffer that began before it are dropped, so the recording
+  begins with audio captured after the start, not with sound from before it. It
   changes neither the setting nor the permission, and it closes with video mode
   unless the guest is recording. The indicator is lit, and a Bluetooth headset
   is on the hands-free profile, from the open to the close, not from the
