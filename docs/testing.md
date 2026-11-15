@@ -1038,7 +1038,7 @@ block's at once, clones it after a write through `GetByteArrayElements`, grows
 a malloc buffer with `getline`, asks `malloc_usable_size`, reallocates and
 frees a block libc allocated, finds the function tables
 read-only again and allocates below 2 GiB, and passes; the runner also asserts
-the library's SELinux label. The modern package gets no layer, the raw read fails
+the library's SELinux label and that the log names the first declined shadow once. The modern package gets no layer, the raw read fails
 and the array operations give the runtime's own answers. `--host-shim` boots a
 release without the layer and loads a host-built copy from the old package after
 a control run without it, which qualifies the library and not the framework hook.

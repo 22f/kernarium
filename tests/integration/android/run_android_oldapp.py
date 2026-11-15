@@ -119,6 +119,15 @@ def installs_in_log(text: str) -> int:
     return sum(1 for line in text.splitlines() if LOG_TAG in line and INSTALLED in line)
 
 
+#: The layer's diagnosis line for the first byte[] result that stayed ART's own reference (the real games' sessions read it).
+DECLINED = "stayed a real reference"
+
+
+def lines_in_log(text: str, marker: str) -> int:
+    """How many lines of the layer's tag carry `marker`."""
+    return sum(1 for line in text.splitlines() if LOG_TAG in line and marker in line)
+
+
 class Serial:
     """A running guest named by its adb serial: the part of the launcher's Guest that the steps use."""
 
@@ -217,6 +226,10 @@ def installed_count(guest) -> int:
     return installs_in_log(guest.adb_run("logcat", "-d", "-s", f"{LOG_TAG}:I", timeout=90).stdout)
 
 
+def declined_count(guest) -> int:
+    return lines_in_log(guest.adb_run("logcat", "-d", "-s", f"{LOG_TAG}:I", timeout=90).stdout, DECLINED)
+
+
 DIAGNOSIS_WORDS = ("FATAL EXCEPTION", "UnsatisfiedLinkError", "Fatal signal", "backtrace:", "signal 11",
                    LOG_TAG, "died")
 
@@ -284,11 +297,16 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
                        lambda variant=variant: complete_review(guest, probe.package_of(variant)))
 
         def old() -> str:
+            declined_before = declined_count(guest)
             result, installs = run_variant(guest, "old", shim=options.host_shim)
             note = evaluate("old", result)
             if not options.host_shim and installs < 1:
                 raise Failure(f"the log shows no install of the layer in the old process; {note}")
-            return f"{note}; installs logged: {installs}"
+            # The probe holds 520 results at once: the 513th stays ART's own reference, and the log says so once.
+            declined = declined_count(guest) - declined_before
+            if declined != 1:
+                raise Failure(f"the log shows {declined} lines for the first declined shadow of the process, not 1; {note}")
+            return f"{note}; installs logged: {installs}; declined-shadow lines: {declined}"
 
         def modern() -> str:
             result, installs = run_variant(guest, "modern", shim=False)

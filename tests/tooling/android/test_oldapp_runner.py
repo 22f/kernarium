@@ -266,6 +266,11 @@ class VerdictTests(unittest.TestCase):
                "11-15 kernarium_oldapp: installed: jni=1 arena=1\n"
                "11-15 other: installed: nothing\n")
         self.assertEqual(runner.installs_in_log(log), 1)
+        declined = ("11-15 kernarium_oldapp: the first byte[] result stayed a real reference (thread limit); "
+                    "blocks and bytes held: 512 2048\n"
+                    "11-15 other: the first byte[] result stayed a real reference\n")
+        self.assertEqual(runner.lines_in_log(declined + log, runner.DECLINED), 1)
+        self.assertEqual(runner.lines_in_log(log, runner.DECLINED), 0)
 
 
 class FakeGuest:
