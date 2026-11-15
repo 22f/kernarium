@@ -95,7 +95,7 @@ inline std::array<std::int32_t, 3> max_regions_of(const abi::Desc& desc) noexcep
     return {1, 0, (desc.flags & abi::feature::autofocus) != 0 ? 1 : 0};
 }
 
-// Tags of camera_metadata_tags.h that unlisted_keys names; the HAL asserts them.
+// Tags of camera_metadata_tags.h that unlisted_keys and state_raw_metadata name; the HAL asserts them.
 namespace tag {
 constexpr std::int32_t control_ae_regions = 0x10004;
 constexpr std::int32_t control_af_regions = 0x10008;
@@ -107,6 +107,13 @@ constexpr std::int32_t tonemap_curve_green = 0x130001;
 constexpr std::int32_t tonemap_curve_red = 0x130002;
 constexpr std::int32_t tonemap_mode = 0x130003;
 constexpr std::int32_t tonemap_available_tone_map_modes = 0x130005;
+constexpr std::int32_t sensor_info_lens_shading_applied = 0xf0009;
+constexpr std::int32_t statistics_hot_pixel_map = 0x11000f;
+constexpr std::int32_t statistics_hot_pixel_map_mode = 0x110003;
+constexpr std::int32_t statistics_info_available_hot_pixel_map_modes = 0x120006;
+constexpr std::int32_t statistics_info_available_lens_shading_map_modes = 0x120007;
+constexpr std::int32_t statistics_lens_shading_map = 0x11000b;
+constexpr std::int32_t statistics_lens_shading_map_mode = 0x110010;
 } // namespace tag
 
 // The keys of the template's request and result key lists that this camera does
@@ -141,6 +148,49 @@ inline std::vector<std::int32_t> unlisted_keys(const abi::Desc& desc, const Capa
 inline std::vector<std::int32_t> unstated_characteristics()
 {
     return {tag::tonemap_available_tone_map_modes};
+}
+
+// The values of android.statistics.lensShadingMapMode and android.statistics.hotPixelMapMode, which are the same two.
+namespace map_mode {
+constexpr std::uint8_t off = 0;
+constexpr std::uint8_t on = 1;
+} // namespace map_mode
+
+// The values of android.sensor.info.lensShadingApplied.
+constexpr std::uint8_t lens_shading_applied_false = 0;
+constexpr std::uint8_t lens_shading_applied_true = 1;
+
+// Whether the RAW data of a camera has its lens shading corrected. The host's Bayer still is the platform's pixel
+// buffer, copied as the platform hands it over: neither the host nor the HAL multiplies it by a gain map, and the DNG
+// that comes with the still is read for its colour and exposure data, not for corrections. The lens shading map that
+// the HAL returns is all ones, so the data needs none either. The value is FALSE, which says what the host does (it
+// applies none); whether the platform's own Bayer data is already corrected cannot be seen from the host's code, only
+// from a device.
+constexpr std::uint8_t lens_shading_applied = lens_shading_applied_false;
+
+// The static metadata that a camera with RAW states beyond the sensor's own numbers. The template is a camera without
+// RAW: it states OFF alone for the lens shading map and the hot pixel map, lists no hot pixel map among the results
+// and no shading state among the characteristics. The device info rejects a RAW capable camera that cannot report its
+// lens shading map when the HAL builds its list, and the camera is then gone from it; Android requires a RAW camera to
+// state the hot pixel map mode ON (with the map among its results) and whether the shading is applied. A camera without
+// RAW keeps the template's values.
+//  - Lens shading map: OFF and ON. The HAL returns a map of ones for ON, a lens with no shading to correct.
+//  - Hot pixel map: OFF and ON, and the map as a result key. The host hands over no list of defective pixels, so the HAL
+//    returns an empty map for ON: no hot pixel is known, which is a valid map.
+//  - Lens shading applied (lens_shading_applied), as a characteristic.
+// `sink` takes the writes: put_bytes(tag, bytes), list_characteristic(tag) and list_result(tag).
+template <typename Sink>
+void state_raw_metadata(Sink& sink)
+{
+    const std::array<std::uint8_t, 2> modes = {map_mode::off, map_mode::on};
+    sink.put_bytes(tag::statistics_info_available_lens_shading_map_modes, modes);
+    sink.put_bytes(tag::statistics_info_available_hot_pixel_map_modes, modes);
+    const std::array<std::uint8_t, 1> applied = {lens_shading_applied};
+    sink.put_bytes(tag::sensor_info_lens_shading_applied, applied);
+    sink.list_characteristic(tag::statistics_info_available_lens_shading_map_modes);
+    sink.list_characteristic(tag::statistics_info_available_hot_pixel_map_modes);
+    sink.list_characteristic(tag::sensor_info_lens_shading_applied);
+    sink.list_result(tag::statistics_hot_pixel_map);
 }
 
 // The size of the array that RAW and the field of view are stated in: the Bayer
