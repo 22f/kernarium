@@ -605,8 +605,11 @@ patches ART's one JNI function table in place and gives the application:
   to it. Every JNI function that takes an object turns a block back into that
   array for any caller, so identity (`IsSameObject`, `NewGlobalRef`, monitors)
   and writes (`SetByteArrayRegion`, `Release*Elements`,
-  `ReleasePrimitiveArrayCritical`) keep their meaning; a write through the raw
-  pointer reaches the array at the next release. A thread holds at most 512 such
+  `ReleasePrimitiveArrayCritical`) keep their meaning. The block follows the
+  array where the application asks for its bytes (`Get...Elements`,
+  `Get...Critical`, `GetByteArrayRegion`) and after a call that was passed it;
+  a write through the raw pointer reaches the array only at a release or
+  `SetByteArrayRegion`, and a refresh replaces one that was not released. A thread holds at most 512 such
   blocks (Dalvik's limit for local references) and the process 32 MiB of them;
   beyond that the result is ART's own reference. A block lasts until its
   reference is deleted or its thread ends, and is never recycled. An array the
@@ -630,9 +633,10 @@ choice; a `byte[]` passed into a native method as an argument or the elements
 of a `byte[][]`; raw reads of other objects; a call that bypasses the platform
 library's PLT; packed relocations; `memalign`; constructors that ran before the
 library's first scan; a library loaded with a plain `dlopen` that never calls
-JNI, which is found by the next periodic scan; a library whose relocation pages
-cannot be reopened, which keeps libc's `free`; and more than 512 loaded
-libraries.
+JNI, which is found by the next periodic scan; a library with an allocator
+import in executable code (a text relocation) or whose relocation pages cannot
+be reopened, which keeps libc's allocator for its own blocks; and more than 512
+loaded libraries.
 `tests/integration/android/run_android_oldapp.py` qualifies it
 ([testing](../../docs/testing.md#android)).
 

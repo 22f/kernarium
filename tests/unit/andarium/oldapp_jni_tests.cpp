@@ -61,8 +61,18 @@ struct World {
     bool describe_fails = false;
     int monitors = 0;
     jobject next_result = nullptr;
+    int java_fill = -1;              // >= 0: every array argument of a call is filled with this byte during the call
+    bool throw_after_call = false;   // a call leaves an exception pending
+    int critical = 0;                // open critical regions of the fake runtime
 };
 World world;
+
+// CheckJNI's rules: nothing but the critical pair runs inside a critical region, and almost nothing with an
+// exception pending.
+void jni_allowed(const char* what) {
+    require(world.critical == 0, what);
+    require(!world.exception_pending, what);
+}
 
 bool live(jobject ref) {
     Ref* r = static_cast<Ref*>(ref);
@@ -136,6 +146,7 @@ const Platform kPlatform{fake_is_app, fake_thread_state, fake_log, fake_make_wri
 jsize f_GetArrayLength(Env*, jarray a) { return static_cast<jsize>(object_of(a)->bytes.size()); }
 jobject f_NewByteArray(Env*, jsize n) { return byte_array(std::vector<uint8_t>(static_cast<size_t>(n), 0)); }
 void f_SetByteArrayRegion(Env*, jarray a, jsize start, jsize len, const jbyte* buf) {
+    jni_allowed("SetByteArrayRegion where JNI is not allowed (a critical region, or an exception pending)");
     auto& bytes = object_of(a)->bytes;
     if (start < 0 || len < 0 || size_t(start) + size_t(len) > bytes.size()) {
         world.exception_pending = true;
@@ -144,6 +155,7 @@ void f_SetByteArrayRegion(Env*, jarray a, jsize start, jsize len, const jbyte* b
     std::memcpy(bytes.data() + start, buf, size_t(len));
 }
 void f_GetByteArrayRegion(Env*, jarray a, jsize start, jsize len, jbyte* buf) {
+    jni_allowed("GetByteArrayRegion where JNI is not allowed (a critical region, or an exception pending)");
     auto& bytes = object_of(a)->bytes;
     if (start < 0 || len < 0 || size_t(start) + size_t(len) > bytes.size()) {
         world.exception_pending = true;
@@ -152,10 +164,21 @@ void f_GetByteArrayRegion(Env*, jarray a, jsize start, jsize len, jbyte* buf) {
     std::memcpy(buf, bytes.data() + start, size_t(len));
 }
 jbyte* f_GetByteArrayElements(Env*, jarray a, jboolean* is_copy) {
+    jni_allowed("GetByteArrayElements where JNI is not allowed");
     if (is_copy) *is_copy = 0;
     return reinterpret_cast<jbyte*>(object_of(a)->bytes.data());
 }
 void f_ReleaseByteArrayElements(Env*, jarray a, jbyte*, jint) { (void)object_of(a); }
+void* f_GetPrimitiveArrayCritical(Env*, jarray a, jboolean* is_copy) {
+    if (is_copy) *is_copy = 0;
+    ++world.critical;
+    return object_of(a)->bytes.data();
+}
+void f_ReleasePrimitiveArrayCritical(Env*, jarray a, void*, jint) {
+    (void)object_of(a);
+    require(world.critical > 0, "a critical region was open");
+    --world.critical;
+}
 void f_DeleteLocalRef(Env*, jobject o) {
     Ref* ref = static_cast<Ref*>(o);
     require(world.locals.erase(ref) == 1, "a local reference is deleted once, and only while it is live");
@@ -165,12 +188,14 @@ void f_DeleteLocalRef(Env*, jobject o) {
     delete ref;
 }
 jobject f_NewGlobalRef(Env*, jobject o) {
+    jni_allowed("NewGlobalRef where JNI is not allowed");
     Ref* ref = new Ref{object_of(o), true};
     world.globals.insert(ref);
     return ref;
 }
 jobject f_NewWeakGlobalRef(Env*, jobject o) { return f_NewGlobalRef(nullptr, o); }
 void f_DeleteGlobalRef(Env*, jobject o) {
+    jni_allowed("DeleteGlobalRef where JNI is not allowed");
     Ref* ref = static_cast<Ref*>(o);
     require(world.globals.erase(ref) == 1, "a global reference is deleted once, and only while it is live");
     delete ref;
@@ -301,9 +326,12 @@ void record(const std::string& call, void* method, const std::vector<jvalue>& ar
                 world.last_array_args.push_back(nullptr);
                 continue;
             }
-            world.last_array_args.push_back(object_of(args[n].l));
+            Obj* object = object_of(args[n].l);
+            if (world.java_fill >= 0) std::fill(object->bytes.begin(), object->bytes.end(), uint8_t(world.java_fill));
+            world.last_array_args.push_back(object);
         }
     }
+    if (world.throw_after_call) world.exception_pending = true;
 }
 jobject result_of(void* method) {
     const Method& m = world.methods.at(method);
@@ -384,6 +412,8 @@ struct Table {
         slots[slot::GetByteArrayRegion] = reinterpret_cast<void*>(&f_GetByteArrayRegion);
         slots[slot::GetByteArrayElements] = reinterpret_cast<void*>(&f_GetByteArrayElements);
         slots[slot::ReleaseByteArrayElements] = reinterpret_cast<void*>(&f_ReleaseByteArrayElements);
+        slots[slot::GetPrimitiveArrayCritical] = reinterpret_cast<void*>(&f_GetPrimitiveArrayCritical);
+        slots[slot::ReleasePrimitiveArrayCritical] = reinterpret_cast<void*>(&f_ReleasePrimitiveArrayCritical);
         slots[slot::DeleteLocalRef] = reinterpret_cast<void*>(&f_DeleteLocalRef);
         slots[slot::NewGlobalRef] = reinterpret_cast<void*>(&f_NewGlobalRef);
         slots[slot::NewWeakGlobalRef] = reinterpret_cast<void*>(&f_NewWeakGlobalRef);
@@ -647,7 +677,9 @@ void check_shadow_layout_and_use() {
     auto release = fn<void (*)(Env*, jarray, jbyte*, jint)>(*f.table, slot::ReleaseByteArrayElements);
     elements[0] = 99;
     release(f.env, shadow, elements, kReleaseAbort);
-    require(object->bytes[0] == payload[0], "JNI_ABORT leaves the array as it was");
+    require(object->bytes[0] == payload[0] && raw[0x10] == payload[0],
+            "JNI_ABORT leaves the array as it was, and the block shows it again");
+    elements[0] = 99;
     release(f.env, shadow, elements, kReleaseCommit);
     require(object->bytes[0] == 99, "a commit copies the block back");
     elements[1] = 98;
@@ -717,6 +749,7 @@ void check_identity_and_writes() {
     bytes[0] = 88;
     release_critical(f.env, made.shadow, bytes, kReleaseAbort);
     require(made.object->bytes[0] == payload[0], "an aborted critical region leaves the array");
+    bytes[0] = 88;
     release_critical(f.env, made.shadow, bytes, 0);
     require(made.object->bytes[0] == 88, "a released critical region reaches the array");
     // A buffer that is not the block (the application copied the elements) is what Release writes back.
@@ -893,6 +926,130 @@ void check_fields_and_other_results() {
     require(!is_shadow_block(fresh) && world.locals.count(static_cast<Ref*>(fresh)), "NewByteArray gives the real reference");
 }
 
+// Java writes into the array a block stands for: the block follows it where the application asks for the bytes, and
+// after a call that was passed the block.
+using GetRegion = void (*)(Env*, jarray, jsize, jsize, jbyte*);
+using GetElems = jbyte* (*)(Env*, jarray, jboolean*);
+using RelElems = void (*)(Env*, jarray, jbyte*, jint);
+
+// The call that was passed the block fills the array: the raw pointer shows it at once.
+void check_block_follows_a_call() {
+    Fixture f = make();
+    Made passed = make_shadow_of(f, std::vector<uint8_t>(8, 0));
+    const uint8_t* raw = static_cast<const uint8_t*>(passed.shadow) + 16;
+    world.java_fill = 0x41;
+    require(call_static_int_v(f, f.consume, passed.shadow) == 7, "consume");
+    require(raw[0] == 0x41 && raw[7] == 0x41, "(variadic form) the block shows what Java wrote during the call");
+    std::fill(passed.object->bytes.begin(), passed.object->bytes.end(), uint8_t(0));
+    jvalue args[1];
+    args[0].l = passed.shadow;
+    world.java_fill = 0x42;
+    require(fn<jint (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, static_call_slot(kInt, kArray))(f.env, f.cls, f.consume, args) == 7,
+            "consume(A)");
+    require(raw[0] == 0x42 && raw[7] == 0x42, "(array form) the same");
+    world.java_fill = 0x43;
+    jobject built = fn<jobject (*)(Env*, jclass, jmethodID, ...)>(*f.table, slot::NewObject)(f.env, f.cls, f.construct, passed.shadow);
+    require(built != nullptr && raw[0] == 0x43, "(NewObject) the same");
+    world.java_fill = -1;
+}
+
+// Java writes later (another thread, a callback): every way to ask for the bytes shows it, and a release of a
+// one-byte change keeps what Java wrote.
+void check_block_follows_later_writes() {
+    Fixture f = make();
+    Made later = make_shadow_of(f, std::vector<uint8_t>(8, 0));
+    const uint8_t* later_raw = static_cast<const uint8_t*>(later.shadow) + 16;
+    std::fill(later.object->bytes.begin(), later.object->bytes.end(), uint8_t(0x41));
+    jbyte buffer[8] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, later.shadow, 0, 8, buffer);
+    require(static_cast<uint8_t>(buffer[0]) == 0x41 && static_cast<uint8_t>(buffer[7]) == 0x41 && later_raw[0] == 0x41,
+            "GetByteArrayRegion gives Java's bytes, and the block takes them");
+    std::fill(later.object->bytes.begin(), later.object->bytes.end(), uint8_t(0x44));
+    jbyte* elements = fn<GetElems>(*f.table, slot::GetByteArrayElements)(f.env, later.shadow, nullptr);
+    require(static_cast<uint8_t>(elements[0]) == 0x44 && static_cast<uint8_t>(elements[7]) == 0x44,
+            "GetByteArrayElements gives Java's bytes");
+    elements[0] = 0x01;
+    fn<RelElems>(*f.table, slot::ReleaseByteArrayElements)(f.env, later.shadow, elements, 0);
+    require(later.object->bytes[0] == 0x01 && later.object->bytes[5] == 0x44, "Release(0) keeps the bytes Java wrote");
+}
+
+// JNI_ABORT: the change is gone from the array and from the block.
+void check_abort_gives_the_arrays_bytes_back() {
+    Fixture f = make();
+    Made aborted = make_shadow_of(f, std::vector<uint8_t>(8, 0x10));
+    jbyte* elements = fn<GetElems>(*f.table, slot::GetByteArrayElements)(f.env, aborted.shadow, nullptr);
+    elements[0] = 0x77;
+    fn<RelElems>(*f.table, slot::ReleaseByteArrayElements)(f.env, aborted.shadow, elements, kReleaseAbort);
+    jbyte one = 0;
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, aborted.shadow, 0, 1, &one);
+    require(static_cast<uint8_t>(one) == 0x10 && aborted.object->bytes[0] == 0x10, "after JNI_ABORT the bytes are Java's");
+}
+
+// A call that raised an exception leaves the block as it was (no JNI call runs with an exception pending); the next
+// request for the bytes shows what Java wrote.
+void check_exception_leaves_the_block() {
+    Fixture f = make();
+    Made thrown = make_shadow_of(f, std::vector<uint8_t>(8, 0));
+    const uint8_t* thrown_raw = static_cast<const uint8_t*>(thrown.shadow) + 16;
+    world.java_fill = 0x55;
+    world.throw_after_call = true;
+    call_static_int_v(f, f.consume, thrown.shadow);
+    world.java_fill = -1;
+    world.throw_after_call = false;
+    require(world.exception_pending && thrown_raw[0] == 0, "an exception pending: nothing was called to refresh");
+    world.exception_pending = false;
+    jbyte one = 0;
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, thrown.shadow, 0, 1, &one);
+    require(static_cast<uint8_t>(one) == 0x55 && thrown_raw[0] == 0x55, "and the next request shows Java's bytes");
+}
+
+// The critical pair runs inside another array's critical region: only the real array's critical pair is called.
+void check_critical_pair_inside_a_region() {
+    Fixture f = make();
+    auto critical = fn<void* (*)(Env*, jarray, jboolean*)>(*f.table, slot::GetPrimitiveArrayCritical);
+    auto release_critical = fn<void (*)(Env*, jarray, void*, jint)>(*f.table, slot::ReleasePrimitiveArrayCritical);
+    Made made = make_shadow_of(f, std::vector<uint8_t>(8, 0x10));
+    std::fill(made.object->bytes.begin(), made.object->bytes.end(), uint8_t(0x42));  // what Java wrote
+    jobject plain = byte_array(sample(4));
+    void* pinned = critical(f.env, plain, nullptr);
+    require(world.critical == 1, "a critical region of a real array is open");
+    auto* bytes = static_cast<jbyte*>(critical(f.env, made.shadow, nullptr));
+    require(static_cast<uint8_t>(bytes[0]) == 0x42, "the critical pointer shows what Java wrote");
+    bytes[1] = 0x66;
+    release_critical(f.env, made.shadow, bytes, 0);
+    require(made.object->bytes[1] == 0x66 && made.object->bytes[2] == 0x42, "and its release reaches the array");
+    bytes = static_cast<jbyte*>(critical(f.env, made.shadow, nullptr));
+    bytes[3] = 0x11;
+    release_critical(f.env, made.shadow, bytes, kReleaseAbort);
+    require(made.object->bytes[3] == 0x42 && static_cast<const uint8_t*>(made.shadow)[16 + 3] == 0x42,
+            "an aborted release gives the block the array's bytes back");
+    release_critical(f.env, plain, pinned, 0);
+    require(world.critical == 0, "the real region closed");
+}
+
+// The blocks of ended threads wait for a wrapped call outside any critical region.
+void check_critical_entries_do_not_drain() {
+    Fixture f = make();
+    auto critical = fn<void* (*)(Env*, jarray, jboolean*)>(*f.table, slot::GetPrimitiveArrayCritical);
+    auto release_critical = fn<void (*)(Env*, jarray, void*, jint)>(*f.table, slot::ReleasePrimitiveArrayCritical);
+    Made made = make_shadow_of(f, std::vector<uint8_t>(8, 0x10));
+    std::thread other([&] {
+        for (int i = 0; i < 2; ++i) require(is_shadow_block(make_shadow_of(f, sample(8)).shadow), "a shadow");
+        release_thread_state(t_block);
+    });
+    other.join();
+    jobject plain = byte_array(sample(4));
+    void* pinned = critical(f.env, plain, nullptr);
+    const size_t globals = world.globals.size();
+    auto* bytes = static_cast<jbyte*>(critical(f.env, made.shadow, nullptr));
+    release_critical(f.env, made.shadow, bytes, 0);
+    require(world.critical == 1 && world.globals.size() == globals && counters().shadows_released == 0,
+            "inside the region no global reference was deleted, and nothing was drained");
+    release_critical(f.env, plain, pinned, 0);
+    fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, plain);
+    require(counters().shadows_released == 2, "the next wrapped call outside a region drained them");
+}
+
 // A thread holds at most 512 live shadows; past that, and when the region is full, the result is the real
 // reference. Nothing a caller may still use is ever recycled.
 void check_limits_without_recycling() {
@@ -1028,6 +1185,12 @@ int main(int argc, char** argv) {
     check_monitor();
     check_unknown_and_long_signatures();
     check_fields_and_other_results();
+    check_block_follows_a_call();
+    check_block_follows_later_writes();
+    check_abort_gives_the_arrays_bytes_back();
+    check_exception_leaves_the_block();
+    check_critical_pair_inside_a_region();
+    check_critical_entries_do_not_drain();
     check_limits_without_recycling();
     check_thread_end();
     check_pop_local_frame();

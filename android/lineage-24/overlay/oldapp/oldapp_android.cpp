@@ -235,6 +235,7 @@ struct Module {
     uint8_t libc;
     uint8_t skip;   // never touched: this library, the dynamic linker
     uint8_t consumers_done;
+    uint8_t consumers_whole;  // every consumer slot of the module was rewritten (none left in an executable page)
     uint8_t producers_done;
     uintptr_t probe_address;  // a slot this module's rewrite wrote, to see whether it still holds our function
     void* probe_value;
@@ -316,13 +317,20 @@ bool protect_page(uintptr_t page, int protection) {
     return oldapp_mprotect(reinterpret_cast<void*>(page), kPageSize, protection) == 0;
 }
 
+struct Patched {
+    unsigned written;   // slots rewritten
+    bool whole;         // no slot was left alone: not in an executable page, and every page could be opened
+};
+
 // Points `mask` imports of one module at the layer's functions. All or nothing for the module: when a page cannot
 // be opened, no slot is written. A slot in an executable page (a text relocation) is left alone: opening it would
-// take away its execute bit under the threads that run there.
-unsigned patch_module(const Module& module, uint32_t mask, bool include_defined, Module* record) {
+// take away its execute bit under the threads that run there. It runs inside the loader's iteration of the modules,
+// so the module cannot be closed under it.
+Patched patch_module(const Module& module, uint32_t mask, bool include_defined, Module* record) {
     ImportSlot slots[kMaxSlots];
     const size_t found = scan_imports(module.bias, module.phdr, module.phnum, slots, kMaxSlots, mask, include_defined);
     const size_t count = found < kMaxSlots ? found : kMaxSlots;
+    bool whole = found <= kMaxSlots;
     if (found > kMaxSlots) {
         oldapp_log_print(kLogWarn, kTag, "%ld imports found, only %ld rewritten", static_cast<long>(found),
                          static_cast<long>(count));
@@ -345,13 +353,17 @@ unsigned patch_module(const Module& module, uint32_t mask, bool include_defined,
         }
         const int protection = original_protection(module.phdr, module.phnum, slots[i].vaddr);
         void* replacement = replacement_for(slots[i].what, module.app != 0);
-        if (!inside || (protection & kProtExec) != 0 || replacement == nullptr) {
+        if (!inside || (protection & kProtExec) != 0) {
+            whole = false;
+            continue;
+        }
+        if (replacement == nullptr) {
             continue;
         }
         if (!window.open(address & ~(kPageSize - 1), protection)) {
             oldapp_log_print(kLogWarn, kTag, "a page of the module at %lx could not be opened: its imports are left alone",
                              static_cast<long>(module.lo));
-            return 0;
+            return Patched{0, false};
         }
         planned[planned_count++] = Planned{address, replacement};
     }
@@ -366,7 +378,7 @@ unsigned patch_module(const Module& module, uint32_t mask, bool include_defined,
         record->probe_address = planned[0].address;
         record->probe_value = planned[0].replacement;
     }
-    return planned_count;
+    return Patched{planned_count, whole};
 }
 
 struct Collect {
@@ -374,7 +386,29 @@ struct Collect {
     uint64_t adds;
     uint64_t subs;
     bool first;
+    unsigned consumers;  // modules whose consumers this refresh rewrote
+    unsigned producers;
 };
+
+// What an earlier refresh already did to this module, if it is still the same library at the same place.
+void inherit_state(Module& module) {
+    for (unsigned k = 0; k < g_module_count; ++k) {
+        const Module& old = g_modules[k];
+        if (old.lo == module.lo && old.hi == module.hi && old.bias == module.bias && old.name_hash == module.name_hash) {
+            // The module is loaded now (the loader holds its list for the caller), so its pages can be read.
+            const bool intact = old.probe_address == 0 ||
+                                *reinterpret_cast<void* volatile*>(old.probe_address) == old.probe_value;
+            if (intact) {
+                module.consumers_done = old.consumers_done;
+                module.consumers_whole = old.consumers_whole;
+                module.producers_done = old.producers_done;
+                module.probe_address = old.probe_address;
+                module.probe_value = old.probe_value;
+            }
+            return;
+        }
+    }
+}
 
 int collect_module(OldappPhdrInfo* info, size_t size, void* user) {
     Collect* collect = static_cast<Collect*>(user);
@@ -412,6 +446,40 @@ int collect_module(OldappPhdrInfo* info, size_t size, void* user) {
     module.app = !platform_path(info->name) && !is_self;
     module.libc = platform_path(info->name) && same_text(base, "libc.so");
     module.skip = is_self || is_linker || (info->name != nullptr && info->name[0] != '/');
+    inherit_state(module);
+    // First every consumer, in every module (this pass); the producers of the application's libraries follow in a
+    // pass of their own, so no arena pointer exists before every module that was loaded accepts it.
+    if (g_arena_ready && !module.skip && !module.consumers_done) {
+        module.consumers_done = 1;
+        const Patched done = patch_module(module, module.app ? kAppConsumers : kPlatformConsumers, module.libc != 0, &module);
+        module.consumers_whole = done.whole;
+        collect->consumers += done.written > 0;
+    }
+    return 0;
+}
+
+// Pass two: the producers, in the application's libraries whose consumers were all rewritten (a library that kept
+// a consumer slot in an executable page would hand an arena block to libc's free).
+int producer_module(OldappPhdrInfo* info, size_t, void* user) {
+    Collect* collect = static_cast<Collect*>(user);
+    const uint32_t name_hash = hash_text(info->name);
+    for (unsigned i = 0; i < g_work_count; ++i) {
+        Module& module = g_work[i];
+        if (module.bias != info->addr || module.name_hash != name_hash || module.phdr != info->phdr) {
+            continue;
+        }
+        if (module.skip || !module.app || module.producers_done) {
+            return 0;
+        }
+        module.producers_done = 1;
+        if (module.consumers_whole) {
+            collect->producers += patch_module(module, kProducers, false, &module).written > 0;
+        } else {
+            oldapp_log_print(kLogWarn, kTag, "the module at %lx keeps an import of free that cannot be rewritten: its "
+                             "allocations stay in libc", static_cast<long>(module.lo));
+        }
+        return 0;
+    }
     return 0;
 }
 
@@ -437,7 +505,7 @@ void sort_modules(Module* modules, unsigned count) {
 // Rebuilds the module list when the loader's counters moved, rewrites the modules that are new (or whose slots no
 // longer hold the layer's functions: a library closed and opened again at the same address), and publishes the list.
 void refresh_modules(bool force) {
-    Collect now{0, 0, 0, true};
+    Collect now{0, 0, 0, true, 0, 0};
     oldapp_dl_iterate_phdr(stamp_module, &now);
     if (!try_lock_refresh()) {
         return;
@@ -446,49 +514,14 @@ void refresh_modules(bool force) {
         unlock_refresh();  // another thread was first
         return;
     }
-    Collect collect{0, 0, 0, true};
+    Collect collect{0, 0, 0, true, 0, 0};
     oldapp_dl_iterate_phdr(collect_module, &collect);
     g_work_count = collect.count;
     sort_modules(g_work, g_work_count);
-    // What an earlier refresh already did to a module that is still there.
-    for (unsigned i = 0; i < g_work_count; ++i) {
-        Module& module = g_work[i];
-        for (unsigned k = 0; k < g_module_count; ++k) {
-            const Module& old = g_modules[k];
-            if (old.lo == module.lo && old.hi == module.hi && old.bias == module.bias && old.name_hash == module.name_hash) {
-                const bool intact = old.probe_address == 0 ||
-                                    *reinterpret_cast<void* volatile*>(old.probe_address) == old.probe_value;
-                if (intact) {
-                    module.consumers_done = old.consumers_done;
-                    module.producers_done = old.producers_done;
-                    module.probe_address = old.probe_address;
-                    module.probe_value = old.probe_value;
-                }
-                break;
-            }
-        }
-    }
-    unsigned consumers = 0, producers = 0;
     if (g_arena_ready) {
-        // First every consumer, in every module; then the producers of the application's libraries.
-        for (unsigned i = 0; i < g_work_count; ++i) {
-            Module& module = g_work[i];
-            if (module.skip || module.consumers_done) {
-                continue;
-            }
-            module.consumers_done = 1;
-            consumers += patch_module(module, module.app ? kAppConsumers : kPlatformConsumers,
-                                      module.libc != 0, &module) > 0;
-        }
-        for (unsigned i = 0; i < g_work_count; ++i) {
-            Module& module = g_work[i];
-            if (module.skip || !module.app || module.producers_done) {
-                continue;
-            }
-            module.producers_done = 1;
-            producers += patch_module(module, kProducers, false, &module) > 0;
-        }
+        oldapp_dl_iterate_phdr(producer_module, &collect);
     }
+    const unsigned consumers = collect.consumers, producers = collect.producers;
     __atomic_store_n(&g_module_seq, g_module_seq + 1, __ATOMIC_RELEASE);  // odd: readers wait
     __atomic_thread_fence(__ATOMIC_RELEASE);
     __builtin_memcpy(g_modules, g_work, sizeof(Module) * g_work_count);
