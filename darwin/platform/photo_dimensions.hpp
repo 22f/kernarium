@@ -16,6 +16,7 @@
 
 #include "camera.hpp"
 #include "frame_bytes.hpp"
+#include "video_stabilization.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -759,13 +760,17 @@ struct StreamCache {
     bool timingWritten() noexcept;
 };
 
-// Applies a camera's settings: `stabilize` first, whatever the other settings are, and `write` for the other settings
-// unless they may be left (`unchanged`: they are the ones applied; see StreamCache::mayLeaveSettings). The stabilization
-// comes first because the settings a new video connection's cache holds are the defaults, which are what the guest asks
-// for in video mode: an apply that left them as they were left the connection unstabilized. Returns whether `write` ran.
+// Applies a camera's settings: the stabilization wish is noted and `stabilize` runs first, whatever the other settings
+// are, and `write` puts the other settings unless they may be left (`unchanged`: they are the ones applied; see
+// StreamCache::mayLeaveSettings). The stabilization comes first because the settings a new video connection's cache holds
+// are the defaults, which are what the guest asks for in video mode: an apply that left them as they were left the
+// connection unstabilized, and the admission of a connection has the wish only from an apply that left them. Returns
+// whether `write` ran.
 template <typename Stabilize, typename Write>
-bool applyCameraSettings(const StreamCache& cache, bool force, bool unchanged, Stabilize&& stabilize, Write&& write)
+bool applyCameraSettings(const StreamCache& cache, StabilizationWish& wish, bool wanted, bool force, bool unchanged,
+                         Stabilize&& stabilize, Write&& write)
 {
+    wish.note(wanted);
     stabilize();
     if (cache.mayLeaveSettings(force, unchanged)) return false;
     write();

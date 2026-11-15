@@ -96,11 +96,19 @@ public:
 // first, and so does the admission of a video connection, before the session's configuration is committed.
 VideoStabilizationStep applyVideoStabilization(VideoStabilizationPort& port, bool wanted, VideoStabilizationHeld& held);
 
-// Whether the admission of a video connection programs the stabilization: the camera's settings were applied once, so
-// the platform holds what the guest asks for. Before that it asks nothing, and the first apply does.
-[[nodiscard]] constexpr bool admissionWantsStabilization(bool settingsApplied, bool settingsWantIt) noexcept
-{
-    return settingsApplied && settingsWantIt;
-}
+// What the guest last asked of a camera's stabilization, as every apply of the camera's settings says it: also an apply
+// that leaves the other settings alone because they are the ones the platform holds (a guest that asks for the defaults,
+// as video mode does). The admission of a new video connection programs the wish before the connection can deliver; where
+// no apply has been made it asks nothing, and the first apply does.
+struct StabilizationWish {
+    bool known {};
+    bool asked {};
+    void note(bool wanted) noexcept
+    {
+        known = true;
+        asked = wanted;
+    }
+    [[nodiscard]] bool atAdmission() const noexcept { return known && asked; }
+};
 
 } // namespace uml::platform

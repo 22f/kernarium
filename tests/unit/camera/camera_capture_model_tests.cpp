@@ -1012,6 +1012,7 @@ struct FakeBackend {
     // What the connection holds of the stabilization and what was written to it, through the production apply
     // (applyVideoStabilization) and the production order of an apply (applyCameraSettings), as the glue calls them.
     VideoStabilizationHeld stabilization;
+    StabilizationWish wish;
     std::vector<VideoStabilization> stabilizationWrites;
     std::vector<VideoStabilizationState> stabilizationNotes;
     struct Port final : VideoStabilizationPort {
@@ -1032,13 +1033,15 @@ struct FakeBackend {
     {
         asked = exposure;
         (void)applyCameraSettings(
-            cache, force, applied && appliedExposure == exposure, [&] { putStabilization(wanted, support); }, [&] { write(exposure); });
+            cache, wish, wanted, force, applied && appliedExposure == exposure, [&] { putStabilization(wanted, support); },
+            [&] { write(exposure); });
     }
     void apply(CameraTime exposure, bool force)
     {
         asked = exposure;
+        StabilizationWish ignored;
         (void)applyCameraSettings(
-            cache, force, applied && appliedExposure == exposure, [] {}, [&] { write(exposure); });
+            cache, ignored, false, force, applied && appliedExposure == exposure, [] {}, [&] { write(exposure); });
     }
     void write(CameraTime exposure)
     {
@@ -1180,6 +1183,20 @@ void aNewConnectionIsStabilizedByAnApplyThatLeavesTheOtherSettingsAlone()
     require(backend.stabilizationWrites.size() == 1 && backend.written("exposure") == 1,
             "a later apply writes the changed setting and leaves the stabilization alone: the view does not jump");
     require(backend.stabilizationNotes.size() == 1, "and says nothing");
+}
+
+// The apply that leaves the other settings alone is also what tells the platform that the guest wants the stabilization:
+// the admission of a connection that follows programs it from that wish, before the connection can deliver. (A camera
+// whose guest asks for the defaults, as video mode does, never writes a setting.)
+void anApplyThatLeavesTheSettingsAloneStillStatesTheWish()
+{
+    FakeBackend backend;
+    require(!backend.wish.atAdmission(), "before any apply the admission asks nothing");
+    backend.applyAll(true, {}, backend.appliedExposure, false);
+    require(backend.written("exposure") == 0, "the apply wrote none of the settings");
+    require(backend.wish.atAdmission(), "and the admission now programs the stabilization the guest asked for");
+    backend.applyAll(false, {}, backend.appliedExposure, false);
+    require(!backend.wish.atAdmission(), "a guest that stops asking is no longer programmed");
 }
 
 void aFormatThatSupportsNoModeLeavesTheConnectionAloneAndSaysSoOnce()
@@ -2716,6 +2733,7 @@ int main()
     settingsAreWrittenAgainAfterARefusedRestoreEvenWhenUnchanged();
     theRecordStatesTheReadingTakenAfterTheAdmissionCommitted();
     aNewConnectionIsStabilizedByAnApplyThatLeavesTheOtherSettingsAlone();
+    anApplyThatLeavesTheSettingsAloneStillStatesTheWish();
     aFormatThatSupportsNoModeLeavesTheConnectionAloneAndSaysSoOnce();
     aRefusedFirstJoinWithARefusedRestoreIsWrittenAgainByTheNextJoin();
     theStreamCacheSaysWhatIsKnown();

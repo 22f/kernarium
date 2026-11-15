@@ -761,6 +761,8 @@ struct RunningCamera : StreamCache {
     bool applied {};
     // What the video connection holds of the stabilization, as this backend wrote it; a new connection holds none.
     VideoStabilizationHeld stabilization;
+    // What the guest last asked of it, as the applies of the camera's settings said (also those that left the rest alone).
+    StabilizationWish stabilizationWish;
 };
 
 // The rate a stream runs at while the system's pressure caps it, and how it is
@@ -1202,7 +1204,8 @@ public:
     {
         auto& running = cameras_[camera];
         (void)applyCameraSettings(
-            running, force, running.settings == settings && running.focusSerial == settings.focusTriggerSerial,
+            running, running.stabilizationWish, settings.stabilization, force,
+            running.settings == settings && running.focusSerial == settings.focusTriggerSerial,
             [&] {
 #if TARGET_OS_IOS
                 putStabilization(camera, entries_[camera].device, running, settings.stabilization);
@@ -2342,7 +2345,7 @@ private:
         // its first frame, so no frame of this connection has another crop than the rest.
         steps.programVideo = [&] {
             admittedStabilizationStep = writeStabilization(camera, entry.device, newConnection, admittedStabilization,
-                                                           admissionWantsStabilization(running.applied, running.settings.stabilization));
+                                                           running.stabilizationWish.atAdmission());
         };
 #endif
         steps.addPhoto = [&] {

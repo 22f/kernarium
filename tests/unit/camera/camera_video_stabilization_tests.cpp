@@ -163,14 +163,16 @@ void theApplyWritesAWishOnceForAConnection()
             "a format with no mode is written nothing and held as unsupported");
 }
 
-// A new video connection is programmed as it is admitted only where the camera's settings were applied once, so the
-// platform holds what the guest asks for; a guest that does not ask is not given a stabilization it would then lose.
+// The admission of a new video connection programs the stabilization only where an apply has said what the guest asks
+// for; a guest that does not ask is not given a stabilization it would then lose.
 void anAdmissionProgramsOnlyWhatTheGuestHasAsked()
 {
-    require(admissionWantsStabilization(true, true), "applied settings that ask for stabilization are programmed");
-    require(!admissionWantsStabilization(true, false), "applied settings that do not ask program none (a photo preview)");
-    require(!admissionWantsStabilization(false, true), "settings never applied say nothing: the first apply decides");
-    require(!admissionWantsStabilization(false, false), "and none program none");
+    StabilizationWish wish;
+    require(!wish.atAdmission(), "settings never applied say nothing: the first apply decides");
+    wish.note(true);
+    require(wish.atAdmission(), "a guest that asked for stabilization is programmed");
+    wish.note(false);
+    require(!wish.atAdmission(), "one that stopped asking (a photo preview) is programmed none");
 }
 
 int main()
