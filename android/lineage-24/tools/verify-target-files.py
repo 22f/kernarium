@@ -951,6 +951,13 @@ OLDAPP_WRAPPER_REQUIRED = (
 OLDAPP_PROPERTY_PREFIX = "persist.sys.kernarium.oldapp."
 OLDAPP_PROPERTY_TYPE = "kernarium_oldapp_prop"
 OLDAPP_SETTER = "shell"
+# The command serialises its changes with an exclusive lock on a file in the shell user's own data
+# directory (/data/local/tmp, shell_data_file): the shell domain must create and lock files there.
+OLDAPP_LOCK_TYPE = "shell_data_file"
+OLDAPP_LOCK_PERMISSIONS = (
+    ("file", frozenset({"create", "open", "read", "write", "lock", "getattr"})),
+    ("dir", frozenset({"search", "add_name", "write"})),
+)
 # What get_prop grants for a property type: a read of the property area needs all four.
 OLDAPP_READ_PERMISSIONS = frozenset({"read", "getattr", "map", "open"})
 # The partition the host grew is filled on every boot, once /data is mounted
@@ -4743,6 +4750,13 @@ def check_oldapp_switch_policy(
             f"the {OLDAPP_SETTER} domain may not set {OLDAPP_PROPERTY_PREFIX}<package>, labelled "
             f"{label}: Andarium's adb could not switch Old app compatibility"
         )
+    for object_class, permissions in OLDAPP_LOCK_PERMISSIONS:
+        if not cil_allows(policies, OLDAPP_SETTER, OLDAPP_LOCK_TYPE, object_class, set(permissions)):
+            fail(
+                f"the {OLDAPP_SETTER} domain may not create and lock files of {OLDAPP_LOCK_TYPE} "
+                f"({object_class} {', '.join(sorted(permissions))}): {OLDAPP_COMMAND} could not take "
+                "its lock"
+            )
     # The concrete types that run applications (the shell among them), not the attribute names: a
     # grant that reaches each of them through the attribute or on its own is the same grant.
     members = {

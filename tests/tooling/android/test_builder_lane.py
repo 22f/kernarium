@@ -2257,6 +2257,17 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         else "(allow shell kernarium_oldapp_prop (property_service (set)))\n"
                     )
                     + "(allow shell kernarium_oldapp_prop (file (read getattr map open)))\n"
+                    # The command's lock file, in the shell user's own data directory.
+                    + (
+                        ""
+                        if oldapp_variant == "no-lock-file"
+                        else "(allow shell shell_data_file (file (create open read write lock getattr)))\n"
+                    )
+                    + (
+                        ""
+                        if oldapp_variant == "no-lock-dir"
+                        else "(allow shell shell_data_file (dir (search add_name write)))\n"
+                    )
                     + (
                         ""
                         if oldapp_variant == "no-app-read"
@@ -5630,6 +5641,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("oldapp-partial-app-read", {"oldapp_variant": "partial-app-read"},
              "may not read persist.sys.kernarium.oldapp.<package>, labelled kernarium_oldapp_prop "
              r"\(getattr, map, open, read on the file\)"),
+            ("oldapp-no-lock-file", {"oldapp_variant": "no-lock-file"},
+             "shell domain may not create and lock files of shell_data_file"),
+            ("oldapp-no-lock-dir", {"oldapp_variant": "no-lock-dir"},
+             "shell domain may not create and lock files of shell_data_file"),
             ("oldapp-jar-stripped", {"oldapp_variant": "jar-stripped"},
              "kernarium_oldapp.jar has no classes.dex and no preoptimized odex and vdex"),
             ("oldapp-preopt-half", {"oldapp_variant": "preopt-half"},
