@@ -28,8 +28,9 @@
 namespace uml::platform {
 
 enum class SyntheticCameraProfile : std::uint8_t {
-    // A phone: a back zoom camera over wide, ultra wide and telephoto lenses,
-    // and a front camera. The wide lens has 48 MP stills and Bayer stills.
+    // A phone: wide, ultra wide and telephoto lenses and a front camera, and no
+    // zoom camera. Only the wide lens runs with the front camera. The wide lens
+    // has 48 MP stills and Bayer stills.
     phone,
     // A tablet: a back wide camera and a front camera. The back camera lists the
     // capture formats an iPad mini's does (CameraInfo::captureFormats), so the

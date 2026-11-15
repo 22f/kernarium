@@ -2,6 +2,7 @@
 #pragma once
 
 #include "guest_statistics.hpp"
+#include "platform/camera_presentation.hpp"
 #include "platform/camera_still_failure.hpp"
 
 #include <cstddef>
@@ -284,6 +285,19 @@ inline constexpr unsigned session_camera_failures_kept = 8;
  * handler: it may wait for another writer of the slot. */
 void note_camera_still_failure(
 	const uml::platform::CameraStillFailure &failure) noexcept;
+
+/* The cameras the camera slot keeps a note of: the guest's numbers 0 to 7 (the
+ * camera device offers at most eight). */
+inline constexpr unsigned session_cameras_kept = 8;
+
+/* Records how the platform presented one of the guest's cameras in the camera
+ * slot of the session that is open: the camera's whole note replaces its
+ * earlier one, and the slot keeps the newest note of each camera
+ * (note_camera_still_failure's rules for the rest). The camera device reports
+ * each change through its owner. Nothing without an open session, and nothing
+ * for a camera number the slot has no room for. */
+void note_camera_presentation(
+	const uml::platform::CameraPresentation &presentation) noexcept;
 
 enum class SessionEnd : std::uint8_t {
 	running,

@@ -16,12 +16,15 @@
   limitations under the License.
 -->
 <resources>
-    <!-- Each back lens of the host is its own camera device (ID 2 wide, 3 ultra wide, 4 telephoto)
-         beside the zoom camera "0", which zooms across the lenses on its own. The lens buttons open
-         the lens cameras, which have manual control. The wide lens is the zoom camera's 1x, so its
-         button comes from "0" and the lens camera "2" stays out of the list. A host that lacks a
-         lens has no camera for it. -->
+    <!-- The camera has one button per lens of the host and no free zoom. Each back lens of the host
+         is a camera device of its own with a lens button (0 is the main lens, 3 the ultra wide, 4
+         the telephoto), labelled by its focal length against the main lens. There is no pinch to
+         zoom, no zoom slider and no Zoom action for the hardware keys, and tapping the active
+         lens button does nothing. -->
+    <bool name="config_enableZoom">false</bool>
     <bool name="config_enableAuxCameras">true</bool>
+    <!-- ID 2 never gets a button: a host that publishes the wide lens a second time, as 2 beside
+         its camera 0, would show it twice. A host that publishes no ID 2 is not affected. -->
     <string-array name="config_ignoredAuxCameraIds">
         <item>2</item>
     </string-array>
