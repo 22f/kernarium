@@ -145,9 +145,14 @@ void profiles()
     const auto dual = makeSyntheticCamera(manual(SyntheticCameraProfile::tabletDualFront))->cameras();
     require(dual.size() == 3 && dual[1].position == CameraPosition::front && dual[1].lens == CameraLensKind::wide &&
             dual[2].position == CameraPosition::front && dual[2].lens == CameraLensKind::ultraWide);
+    // The phone lists its three lenses and its front camera, and no zoom camera, with the zoom the system recommends for
+    // each lens of a phone of three lenses.
     const auto phone = makeSyntheticCamera(manual(SyntheticCameraProfile::phone))->cameras();
-    require(phone.size() == 5 && phone[0].lens == CameraLensKind::zoom && !phone[0].manualExposure);
-    require(phone[1].manualExposure && phone[1].rawStills && phone[1].stillSizes.front().width == 8064);
+    require(phone.size() == 4 && phone[0].lens == CameraLensKind::wide && phone[1].lens == CameraLensKind::ultraWide &&
+            phone[2].lens == CameraLensKind::telephoto && phone[3].position == CameraPosition::front);
+    for (const auto& info : phone) require(info.lens != CameraLensKind::zoom && info.zoomMinimum == 1.0f && info.constituents.empty());
+    require(phone[0].zoomMaximum == 6.0f && phone[1].zoomMaximum == 3.0f && phone[2].zoomMaximum == 3.0f);
+    require(phone[0].manualExposure && phone[0].rawStills && phone[0].stillSizes.front().width == 8064);
     require(makeSyntheticCamera(manual(SyntheticCameraProfile::laptop))->cameras().size() == 1);
 }
 
@@ -413,47 +418,23 @@ void everyProfileExposes()
     require(recorder.frames.back().second.exposure.exposureNanoseconds == 33'333'333 && recorder.frames.back().second.exposure.iso == 100);
 }
 
-void zoomCamera()
-{
-    const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::phone));
-    Recorder recorder;
-    auto session = camera->openSession(recorder);
-    require(session->startVideo(0, 640, 480, 30));
-    // A zoom camera takes automatic exposure only, and reports the lens in use.
-    CameraSettings settings;
-    settings.exposureMode = CameraExposureMode::manual;
-    settings.exposureNanoseconds = 1'000'000;
-    settings.iso = 800;
-    settings.zoomRatio = 0.5f;
-    session->apply(0, settings);
-    camera->pump(0, 1);
-    require(recorder.frames.back().second.exposure.activeCamera == 2);  // ultra wide
-    require(recorder.frames.back().second.exposure.ae == CameraControlState::converged);
-    settings.zoomRatio = 2.0f;
-    session->apply(0, settings);
-    camera->pump(0, 1);
-    require(recorder.frames.back().second.exposure.activeCamera == 1);  // wide
-    settings.zoomRatio = 5.0f;
-    session->apply(0, settings);
-    camera->pump(0, 1);
-    require(recorder.frames.back().second.exposure.activeCamera == 3);  // telephoto
-}
-
 void multiCamera()
 {
     const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::phone));
     Recorder recorder;
     auto session = camera->openSession(recorder);
-    require(session->startVideo(4, 1280, 720, 30));    // the front camera
-    require(session->startVideo(1, 1280, 720, 30));    // wide: in a set with the front
-    require(!session->startVideo(2, 1280, 720, 30));   // ultra wide would not share a set with both
-    require(!session->startVideo(3, 640, 480, 30));    // nor would the telephoto
-    session->stopVideo(1);
-    require(session->startVideo(2, 1280, 720, 30));    // front and ultra wide are a set
+    require(session->startVideo(3, 1280, 720, 30));    // the front camera
+    require(session->startVideo(0, 1280, 720, 30));    // wide: in a set with the front
+    require(!session->startVideo(1, 1280, 720, 30));   // ultra wide is in no set with both
+    require(!session->startVideo(2, 640, 480, 30));    // nor is the telephoto
+    session->stopVideo(0);
+    require(!session->startVideo(1, 1280, 720, 30));   // the ultra wide is in no set with the front camera
+    require(!session->startVideo(2, 1280, 720, 30));   // nor is the telephoto
+    require(session->startVideo(0, 1280, 720, 30));    // the wide lens is
     // A format a multi-camera session does not take is refused while two run.
-    require(!session->startVideo(2, 3840, 2160, 30));
-    session->stopVideo(4);
-    require(session->startVideo(2, 3840, 2160, 30));   // alone, it may use it
+    require(!session->startVideo(0, 3840, 2160, 30));
+    session->stopVideo(3);
+    require(session->startVideo(0, 3840, 2160, 30));   // alone, it may use it
 }
 
 // A camera alone runs any format; cameras that run together run formats a
@@ -964,7 +945,6 @@ int main()
     controls();
     exposureReport();
     everyProfileExposes();
-    zoomCamera();
     multiCamera();
     multiCameraFormats();
     anchoredCamera();

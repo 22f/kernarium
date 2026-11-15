@@ -354,6 +354,9 @@ ID 2, which only a host that publishes the wide lens twice has. The build
 installs it as a static runtime overlay of the application; the application
 declares no overlayable section, so Android applies the preinstalled overlay,
 and the target-files verifier reads the overlay, not the application.
+The host publishes each back lens as a camera of its own and no zoom camera,
+and a phone's cameras are the wide lens "0", the front camera "1", the ultra
+wide "3" and the telephoto "4".
 
 The image states no camera feature of its own. The host composes a camera
 layout from the cameras it has and passes its name as

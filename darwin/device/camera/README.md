@@ -26,13 +26,32 @@ application's statements (the sensor orientation, the rotation that
   metadata stream alone is not use) and `idle` once the guest has closed every
   camera, so each open is reported once and a live session never reports it. A
   host that has not granted access behaves as an interrupted live session.
-- **Cameras.** Wire order is the back zoom camera (else the primary back lens),
-  the front camera, the other back lenses, then external cameras, at most eight.
-  A zoom camera and its lenses conflict; cameras run together where the host
-  says they can. The zoom camera takes automatic controls only. A lens publishes
-  manual exposure, focus and white balance where the host allows them. Of the
-  front lenses (an iPad lists a wide and an ultra wide one over a single
-  sensor) the guest sees the wide one.
+- **Cameras.** Wire order is the primary back lens (the wide, else the ultra
+  wide, else the telephoto), the front camera, the other back lenses (wide,
+  ultra wide, telephoto), then external cameras, at most eight. The device
+  publishes no zoom camera (a virtual device that switches lenses): every back
+  lens is a camera of its own, so a guest switches lenses by switching
+  cameras, and each keeps its own formats, controls and Bayer stills. The
+  Android image numbers a phone's cameras 0 wide, 1 front, 3 ultra wide and 4
+  telephoto. Cameras run together where the platform's multi-camera sets say
+  they can, two at once (the device runs no more, which is the layout's
+  `CameraUse::streams`): the guest is told the primary back camera with the
+  front camera first, then the front camera with each other camera a set
+  names, then other pairs, and every other pair conflicts, so the guest never
+  takes a group of more than two as one it may run at once. The log names the
+  pairs and the platform's sets at start.
+  A lens publishes manual exposure, focus and white balance where the host
+  allows them. Of the front lenses (an iPad lists a wide and an ultra wide one
+  over a single sensor) the guest sees the wide one.
+- **Zoom.** Every camera's ratio range starts at 1.0, its own full field of view.
+  A camera that runs in an anchor ends at the zoom the system recommends for the
+  anchor's format, and where the system gives none at what the anchor's format
+  itself delivers, never above the device's largest.
+- **Sensor size and focal length.** A camera publishes them as a pair that
+  gives its field of view, which the guest takes its lens labels and 35 mm
+  equivalents from. A lens that has learned its colour data publishes the
+  physical focal length of its Bayer still, and the size then follows the field
+  of view in the pixel array's shape.
 - **Tiers.** The small tier limits a session to 1080p video, 12 MP stills and
   four buffers; the large tier is 4K, 48 MP and six, for a fixed GPU budget of
   1 GiB or more. Every host is given the small tier for now
@@ -149,7 +168,16 @@ application's statements (the sensor orientation, the rotation that
   the last few in the session record's camera slot. A whole request that waited
   for the host's budget until its time ran out is one of them. One that an
   interruption or a blocked session ends, and one that delivered its JPEG
-  (whatever its RAW did), report nothing.
+  (whatever its RAW did), report nothing. How the platform presented each
+  camera (its mounting, what its connections and photo output were set to, its
+  aspect ratio: `darwin/platform/camera_presentation.hpp`) is reported under the
+  guest's number of the camera (`CameraDeviceOptions::onCameraPresentation`) and
+  kept in the same slot, with the orientation of the guest's own description
+  (the application may turn it for a tablet's boot layout) and the platform's
+  as a second number where they differ. A still the platform refuses carries the
+  photo output's last compensation reading and when it was taken. The platform
+  session opens at the first use of a camera, so a run that used none names
+  none.
 - **Metadata.** A meta stream completes one `virtio_video_camera_meta` per
   exposure, with the sequence the frames and stills carry; black frames get a
   record too. The exposure time, ISO, aperture, focal length, neutral point and
