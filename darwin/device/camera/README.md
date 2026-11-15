@@ -118,11 +118,16 @@ application's statements (the sensor orientation, the rotation that
   scaler, see [`darwin/platform`](../../platform/README.md)), writes a picture
   that needs none of it straight into the guest's rows, and drops frames to a
   stream's rate. A frame with no queued buffer is dropped and its number spent.
-- **Stabilization.** The guest's request for it is met with the host's
+- **Stabilization.** The guest's request for it (Android's record template
+  makes it, so video mode asks and photo mode does not) is met with the host's
   low-latency mode where the active format supports it, else the standard one,
   else none, and never with the system's automatic choice, which on an iPhone
   holds the viewfinder a second or more behind (the preview and the recording
-  share one output).
+  share one output). The mode is on from the video connection's first apply,
+  cropped from the first frame and a few tens of milliseconds later, so the
+  view does not move when the guest first changes a setting. A format that
+  supports no mode leaves the picture unstabilized, and the session record's
+  video line for the camera says `stab unsupported`.
 - **Stills.** A JPEG buffer carries the platform's file behind a reserved Exif
   APP1 segment for the guest to fill in place (`jpeg_gap.hpp`); a RAW buffer
   carries 16-bit rows at the 16-byte pitch. Buffers of one non-zero cookie
