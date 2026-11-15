@@ -532,7 +532,10 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   rewritten code never runs from a page that was not compared. A page the
   guest has not mapped yet is not entered and is tried again later; a page
   that differs retires the library's instance for that address space, and the
-  engine runs the code.
+  engine runs the code. Covered text must not be writable through another
+  alias or from another process, because only the address space's own
+  code-change history reaches the binder; today only the Android image's own
+  read-only files are covered.
 - Entry: only at an instruction the framework covers, in a state the engine
   would run the same way: no single step, PSTATE.SM clear, no FPCR trap
   enable, FPCR.FIZ, AH and NEP clear (read as the guest's, whether or not its
