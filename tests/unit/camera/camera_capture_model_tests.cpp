@@ -7,6 +7,7 @@
 #include "front_tables.hpp"
 #include "photo_dimensions.hpp"
 #include "require.hpp"
+#include "video_stabilization.hpp"
 
 #include <Block.h>
 
@@ -980,6 +981,24 @@ struct FakeBackend {
         cache.frameRate = 15;
         applied = true;
     }
+    // What the connection holds of the stabilization and what was written to it (the glue's putStabilization).
+    VideoStabilizationHeld stabilization;
+    std::vector<VideoStabilization> stabilizationWrites;
+    std::vector<VideoStabilizationState> stabilizationNotes;
+    void putStabilization(bool wanted, VideoStabilizationSupport support)
+    {
+        const VideoStabilizationStep step = stabilizationStep(wanted, support, stabilization);
+        if (step.write) stabilizationWrites.push_back(step.choice);
+        stabilization = {step.choice, step.state};
+        if (step.note) stabilizationNotes.push_back(step.state);
+    }
+    // The glue's applyOnQueue: the stabilization comes before the exit for settings that are the ones applied. A fresh
+    // settings cache holds the defaults, which are the settings the guest asks for in video mode (stabilization on).
+    void applyAll(bool wanted, VideoStabilizationSupport support, CameraTime exposure, bool force)
+    {
+        putStabilization(wanted, support);
+        apply(exposure, force);
+    }
     void apply(CameraTime exposure, bool force)
     {
         asked = exposure;
@@ -1102,6 +1121,48 @@ void aRestoreThatIsRefusedLeavesNothingInTheCacheTrue()
             "after it, the cache stands for what the device holds");
     backend.device.writes.clear();
     require(backend.start(640, 480, 15) && backend.device.writes.empty(), "and an identical request writes nothing");
+}
+
+// The guest's request for stabilization in video mode equals the settings a new connection's cache holds, so an apply
+// skipped for unchanged settings left the picture unstabilized until the first setting changed (a tap), when it was
+// stabilized at once and the view jumped. The stabilization is decided before that exit.
+void aNewConnectionIsStabilizedByAnApplyThatLeavesTheOtherSettingsAlone()
+{
+    FakeBackend backend;
+    const VideoStabilizationSupport standard {true, false};
+    backend.applyAll(true, standard, backend.appliedExposure, false);
+    require(backend.stabilizationWrites == std::vector<VideoStabilization> {VideoStabilization::standard},
+            "the first apply stabilizes the connection although its settings are the ones applied");
+    require(backend.written("exposure") == 0, "and writes none of the other settings");
+    require(backend.stabilizationNotes == std::vector<VideoStabilizationState> {VideoStabilizationState::standard},
+            "the record is told once");
+    // The first tap changes a setting: the apply that follows carries the same wish.
+    backend.applyAll(true, standard, CameraTime {1, 20}, false);
+    require(backend.stabilizationWrites.size() == 1 && backend.written("exposure") == 1,
+            "a later apply writes the changed setting and leaves the stabilization alone: the view does not jump");
+    require(backend.stabilizationNotes.size() == 1, "and says nothing");
+}
+
+void aFormatThatSupportsNoModeLeavesTheConnectionAloneAndSaysSoOnce()
+{
+    FakeBackend backend;
+    backend.applyAll(true, {}, backend.appliedExposure, false);
+    backend.applyAll(true, {}, CameraTime {1, 20}, false);
+    require(backend.stabilizationWrites.empty() && backend.stabilizationNotes == std::vector<VideoStabilizationState> {VideoStabilizationState::unsupported},
+            "nothing is written and the record says the format supports none, once");
+}
+
+// The record's photo line states the compensation read after the admission committed the session's configuration. The
+// note is made as the admission returns, before the camera's entry holds the output it added, so it reads the added
+// output; reading the entry's left every camera's line at the reading taken as the output was attached.
+void theRecordStatesTheReadingTakenAfterTheAdmissionCommitted()
+{
+    require(admissionCompensationReading(true, true) == CameraReading::afterCommit,
+            "an admission that added the photo output records the reading taken after its commit");
+    require(admissionCompensationReading(false, true) == CameraReading::beforeCommit,
+            "one that was refused and undone keeps the reading taken as the output was attached");
+    require(admissionCompensationReading(true, false) == CameraReading::beforeCommit,
+            "one that added no output has no later reading to take");
 }
 
 void aRequestAfterARefusedRestoreFailsWhileTheDeviceCannotBeWritten()
@@ -2578,6 +2639,9 @@ int main()
     aRestoreThatIsRefusedLeavesNothingInTheCacheTrue();
     aRequestAfterARefusedRestoreFailsWhileTheDeviceCannotBeWritten();
     settingsAreWrittenAgainAfterARefusedRestoreEvenWhenUnchanged();
+    theRecordStatesTheReadingTakenAfterTheAdmissionCommitted();
+    aNewConnectionIsStabilizedByAnApplyThatLeavesTheOtherSettingsAlone();
+    aFormatThatSupportsNoModeLeavesTheConnectionAloneAndSaysSoOnce();
     aRefusedFirstJoinWithARefusedRestoreIsWrittenAgainByTheNextJoin();
     theStreamCacheSaysWhatIsKnown();
     aSpansWholeRatesSnapToTheNearWholeNumber();

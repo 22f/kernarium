@@ -293,7 +293,9 @@ void switchWakesItsSourceOnEveryChange()
 }
 
 struct Source final {
-    Source()
+    /* A guest that has not opened its capture stream yet (`configured` false)
+     * has said nothing about its channels. */
+    explicit Source(bool configured = true)
         : authorization(std::make_shared<FakeAuthorization>())
         , microphone(std::make_shared<MicrophoneSwitch>(authorization))
         , waker(std::make_shared<CountingWaker>())
@@ -302,6 +304,8 @@ struct Source final {
         input = owned.get();
         source = uml::audio::makeMicrophoneCaptureSource(
             microphone, std::move(owned), waker);
+        if (!configured)
+            return;
         source->configure({.periodBytes = 960, .sampleRate = 48000,
                            .channels = 2, .bytesPerSample = 2});
         source->prepare();
@@ -432,6 +436,94 @@ void sourceDropsTheOldestAudioItCannotCatchUpWith()
     for (std::uint8_t period = 11; period <= 60; ++period)
         require(fixture.source->read(pcm) == 960 && pcm[0] == period);
     require(fixture.source->read(pcm) == 0);
+}
+
+/* A camera of the guest in video mode opens the microphone before the guest
+ * records, so the recording does not begin with the silence of the system
+ * opening it. */
+void standbyOpensTheMicrophoneBeforeTheGuestRecords()
+{
+    Source fixture(false);
+    fixture.allow();
+    require(fixture.input->starts == 0, "on and permitted, but no camera is in video mode: the microphone stays off");
+    fixture.microphone->setStandby(true);
+    fixture.source->handleEvents();
+    require(fixture.input->starts == 1 && fixture.input->running && fixture.input->channels == 1,
+            "a camera in video mode opens it, mono before any recording has said otherwise");
+    // The image's camera app records mono: its first recording finds the microphone as it needs it.
+    fixture.source->configure({.periodBytes = 480, .sampleRate = 48000, .channels = 1, .bytesPerSample = 2});
+    fixture.source->prepare();
+    // Audio captured while the guest does not record is not the guest's: nothing is read, and the start drops it.
+    fixture.input->deliver(0x44, 1920);
+    std::vector<std::uint8_t> pcm(960, 0x55);
+    require(fixture.source->read(pcm) == 960, "the ring holds what the microphone delivered");
+    fixture.source->start();
+    require(fixture.input->starts == 1, "the guest's start finds the microphone open and opens nothing");
+    require(fixture.source->read(pcm) == 0, "what was captured before the start is not delivered");
+    fixture.input->deliver(0x66, 960);
+    require(fixture.source->read(pcm) == 960 && pcm[0] == 0x66, "the first audio is what the microphone captures after the start");
+    // The guest stops: the microphone stays open for the next recording while the camera is in video mode.
+    fixture.source->stop();
+    require(fixture.input->stops == 0 && fixture.input->running, "a stop keeps the microphone open under standby");
+    fixture.source->start();
+    require(fixture.input->starts == 1, "and the next recording finds it open too");
+    fixture.source->release();
+    require(fixture.input->stops == 0 && fixture.input->running, "so does a release");
+    // Video mode ends: the microphone goes out.
+    fixture.microphone->setStandby(false);
+    fixture.source->handleEvents();
+    require(fixture.input->stops == 1 && !fixture.input->running, "when video mode ends the microphone closes");
+}
+
+void standbyDoesNotOverrideTheSettingOrAGuestThatRecords()
+{
+    Source fixture;
+    fixture.microphone->setStandby(true);
+    fixture.source->handleEvents();
+    require(fixture.input->starts == 0 && fixture.authorization->requests == 0,
+            "with the setting off video mode opens nothing and asks for nothing");
+    fixture.allow();
+    require(fixture.input->starts == 1 && fixture.input->running, "the setting turned on under a camera in video mode opens it");
+    // The user turns the setting off: the microphone closes, standby or not.
+    fixture.microphone->disable();
+    fixture.source->handleEvents();
+    require(fixture.input->stops == 1 && !fixture.input->running, "turning the setting off closes it");
+    (void)fixture.microphone->restore();
+    fixture.source->handleEvents();
+    // The system takes the permission away.
+    fixture.authorization->current = MicrophonePermission::denied;
+    fixture.source->handleEvents();
+    require(!fixture.input->running, "a denied permission closes it");
+    // A guest that records while video mode ends keeps the microphone.
+    fixture.authorization->current = MicrophonePermission::granted;
+    fixture.source->handleEvents();
+    fixture.source->start();
+    require(fixture.input->running, "the guest records");
+    fixture.microphone->setStandby(false);
+    fixture.source->handleEvents();
+    require(fixture.input->running, "the end of video mode does not stop a recording");
+    fixture.source->stop();
+    require(!fixture.input->running, "its end does");
+}
+
+void aRecordingThatAsksForOtherChannelsOpensTheMicrophoneAgain()
+{
+    Source fixture(false);
+    fixture.allow();
+    fixture.microphone->setStandby(true);
+    fixture.source->handleEvents();
+    require(fixture.input->starts == 1 && fixture.input->channels == 1, "mono under standby");
+    fixture.source->configure({.periodBytes = 960, .sampleRate = 48000, .channels = 2, .bytesPerSample = 2});
+    fixture.source->prepare();
+    fixture.source->start();
+    require(fixture.input->starts == 2 && fixture.input->stops == 1 && fixture.input->channels == 2 && fixture.input->running,
+            "a stereo recording opens it again as stereo");
+    fixture.source->stop();
+    fixture.microphone->setStandby(false);
+    fixture.source->handleEvents();
+    fixture.microphone->setStandby(true);
+    fixture.source->handleEvents();
+    require(fixture.input->channels == 2, "and the next video mode opens it as the last recording was");
 }
 
 void sourceStopsTheMicrophoneWhenTheDeviceGoesAway()
@@ -570,6 +662,9 @@ int main()
     sourceRecordsFromTheMicrophoneOnlyWhileTheGuestRecords();
     sourceFollowsTheSettingUnderARecordingGuest();
     sourceTriesAgainAfterAStartThatFailed();
+    standbyOpensTheMicrophoneBeforeTheGuestRecords();
+    standbyDoesNotOverrideTheSettingOrAGuestThatRecords();
+    aRecordingThatAsksForOtherChannelsOpensTheMicrophoneAgain();
     sourceDropsTheOldestAudioItCannotCatchUpWith();
     sourceStopsTheMicrophoneWhenTheDeviceGoesAway();
     deviceDeliversMicrophoneAudioOnItsOwnClock();

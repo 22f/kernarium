@@ -1946,6 +1946,15 @@ private:
                 [](const uml::platform::CameraPresentation& presentation) {
                     uml::runtime::note_camera_presentation(presentation);
                 };
+            /* A camera of the guest in video mode (its video runs and the
+             * guest asks for it stabilized) opens the microphone before the
+             * guest records, when the Microphone setting allows it, so a
+             * recording does not begin in silence. */
+            cameraOptions.onVideoMode = [](bool inMode) {
+                std::printf("Kernarium: camera video mode %s\n",
+                            inMode ? "on" : "off");
+                microphoneSwitch()->setStandby(inMode);
+            };
             boot->camera = uml::camera::makeInProcessCameraService(
                 cameras_.source, std::move(cameraOptions),
                 sharedMemoryRegions_);

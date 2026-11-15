@@ -219,6 +219,9 @@ interface to the wire.
   exposure, focus and white balance only. A stabilization request takes the
   low-latency mode where the active format supports it, else the standard one,
   else none (`video_stabilization.hpp`), and never the system's automatic choice.
+  The mode is written at a video connection's first apply, whatever the other
+  settings say, and a later apply of the same wish writes nothing. iOS only:
+  macOS has no connection property for it.
 - **Stills** are a JPEG, a Bayer still, or both from one capture. A Bayer still
   carries its DNG's colour data (`dng_color.hpp`), the only place the host
   reveals it. A part that fails leaves the others: a capture fails only when

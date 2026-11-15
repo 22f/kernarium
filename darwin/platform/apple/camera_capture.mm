@@ -759,6 +759,8 @@ struct RunningCamera : StreamCache {
     // Settings have been applied to the device at least once, so that a format
     // change (which reverts some of them) can put them back.
     bool applied {};
+    // What the video connection holds of the stabilization, as this backend wrote it; a new connection holds none.
+    VideoStabilizationHeld stabilization;
 };
 
 // The rate a stream runs at while the system's pressure caps it, and how it is
@@ -1141,11 +1143,45 @@ public:
         onQueue([&] { applyOnQueue(camera, settings, false); });
     }
 
+#if TARGET_OS_IOS
+    // The video connection's stabilization for what the guest wants (video_stabilization.hpp), written when it differs from
+    // what the connection holds. Never the automatic mode: the preview and the recording share this one output, and the
+    // system's choice for it is a cinematic mode that holds the viewfinder a second or more behind. A wish the connection
+    // already holds changes nothing, so the view does not move when the guest first changes another setting. A format that
+    // supports no mode leaves the picture unstabilized, and the record says so, once for the connection.
+    void putStabilization(std::size_t camera, AVCaptureDevice* device, RunningCamera& running, bool wanted)
+    {
+        if (running.connection == nil) return;
+        @try {
+            AVCaptureDeviceFormat* format = device.activeFormat;
+            const VideoStabilizationStep step = stabilizationStep(
+                wanted,
+                {[format isVideoStabilizationModeSupported:AVCaptureVideoStabilizationModeStandard],
+                 [format isVideoStabilizationModeSupported:AVCaptureVideoStabilizationModeLowLatency]},
+                running.stabilization);
+            if (step.write) running.connection.preferredVideoStabilizationMode = stabilizationModeOf(step.choice);
+            running.stabilization = {step.choice, step.state};
+            if (step.unsupported)
+                std::fprintf(stderr, "Camera: camera %zu: the active format supports no video stabilization; the picture stays unstabilized\n",
+                             camera);
+            if (step.note) note(camera, [&](CameraPresentation& held) { held.videoStabilization = step.state; });
+        } @catch (NSException* exception) {
+            std::fprintf(stderr, "Camera: camera %zu: the video stabilization was refused: %s\n", camera,
+                         exception.reason != nil ? exception.reason.UTF8String : "");
+        }
+    }
+#endif
+
     // Puts a camera's settings on its device: all of them again when `force`
     // (a format change reverts some), or what changed since the last time.
     void applyOnQueue(std::size_t camera, const CameraSettings& settings, bool force)
     {
         auto& running = cameras_[camera];
+#if TARGET_OS_IOS
+        // Before the exit for settings that are the ones applied: the cache of a new connection holds the defaults, which
+        // are what the guest asks for in video mode, and the connection holds no stabilization until one is written.
+        putStabilization(camera, entries_[camera].device, running, settings.stabilization);
+#endif
         if (running.mayLeaveSettings(force, running.settings == settings && running.focusSerial == settings.focusTriggerSerial)) return;
         // What the device holds is not known (a restore was refused): everything is written.
         force = force || running.unrestored;
@@ -1235,16 +1271,6 @@ public:
             }
         } @catch (NSException*) {
             // A value the device refuses in its current state leaves it as it was.
-        }
-        if (running.connection) {
-            // Never the automatic mode: the preview and the recording share this one output, and the system's choice
-            // for it is a cinematic mode that holds the viewfinder a second or more behind (video_stabilization.hpp).
-            AVCaptureDeviceFormat* format = device.activeFormat;
-            const AVCaptureVideoStabilizationMode mode = stabilizationModeOf(chooseVideoStabilization(
-                settings.stabilization,
-                {[format isVideoStabilizationModeSupported:AVCaptureVideoStabilizationModeStandard],
-                 [format isVideoStabilizationModeSupported:AVCaptureVideoStabilizationModeLowLatency]}));
-            if ([format isVideoStabilizationModeSupported:mode]) running.connection.preferredVideoStabilizationMode = mode;
         }
 #else
         (void)entry;
@@ -1843,18 +1869,20 @@ private:
     // What an admission set on the camera: the video connection (its angle and mirroring by default and now, the size the
     // output was asked for), the photo output's compensation and photo connection, the device's ratio.
     void noteAdmission(std::size_t camera, const std::optional<ConnectionFacts>& video, const std::optional<PhotoOutputFacts>& attached,
-                       const std::optional<CameraStillSize>& photoMaximum, const std::optional<RatioFacts>& ratio, CameraStillSize asked)
+                       const std::optional<CameraStillSize>& photoMaximum, const std::optional<RatioFacts>& ratio, CameraStillSize asked,
+                       AVCapturePhotoOutput* addedPhoto, bool admitted)
     {
-        // The photo output's compensation as it reads now that the admission committed the configuration; the reading
-        // taken as the output was attached stays where the output is gone again.
+        // The photo output's compensation as it reads now that the admission committed the configuration, of the output this
+        // admission added (the camera's entry does not hold it yet); the reading taken as the output was attached stays
+        // where the output is gone again (admissionCompensationReading).
         std::optional<PhotoOutputFacts> photo = attached;
-        if (photo)
-            if (const auto running = cameras_.find(camera); running != cameras_.end() && running->second.photoOutput != nil) {
-                const PhotoOutputFacts committed = readCompensation(running->second.photoOutput, CameraReading::afterCommit);
-                photo->compensationSupported = committed.compensationSupported;
-                photo->compensationEnabled = committed.compensationEnabled;
-                photo->reading = committed.reading;
-            }
+        if (photo && addedPhoto != nil &&
+            admissionCompensationReading(admitted, true) == CameraReading::afterCommit) {
+            const PhotoOutputFacts committed = readCompensation(addedPhoto, CameraReading::afterCommit);
+            photo->compensationSupported = committed.compensationSupported;
+            photo->compensationEnabled = committed.compensationEnabled;
+            photo->reading = committed.reading;
+        }
         AVCaptureDevice* device = entries_[camera].device;
         const CameraFact center = factOf(device.centerStageActive);
         const CameraFact distortion = factOf(device.geometricDistortionCorrectionEnabled);
@@ -1875,6 +1903,7 @@ private:
                 }
                 held.videoFirstWidth = 0;
                 held.videoFirstHeight = 0;
+                held.videoStabilization = VideoStabilizationState::unknown;
             }
             if (photo) {
                 held.photoKnown = true;
@@ -2378,7 +2407,8 @@ private:
         };
         const Admission result = admit(plan, steps);
 #if TARGET_OS_IOS
-        noteAdmission(camera, videoConnection, photoFacts, photoMaximumSet, ratioFacts, video ? CameraStillSize {width, height} : CameraStillSize {});
+        noteAdmission(camera, videoConnection, photoFacts, photoMaximumSet, ratioFacts, video ? CameraStillSize {width, height} : CameraStillSize {},
+                      newPhoto, result == Admission::admitted);
 #endif
         if (result != Admission::admitted) {
             // An admission that added the camera's input and was undone leaves no change under way; a camera that was in the
@@ -2398,6 +2428,7 @@ private:
             running.videoOutput = newVideo;
             running.delegate = newDelegate;
             running.connection = newConnection;
+            running.stabilization = {};
         }
         if (newPhoto != nil) {
             running.photoOutput = newPhoto;
@@ -2650,6 +2681,7 @@ private:
             running.videoOutput = nil;
             running.delegate = nil;
             running.connection = nil;
+            running.stabilization = {};
             running.video = false;
         }
         if (photo) running.photoOutput = nil;
