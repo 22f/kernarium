@@ -31,6 +31,7 @@ import time
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import automation_shards  # noqa: E402
 from automation_fakes import FakeDevice  # noqa: E402
 
 SCRIPT = Path(__file__).resolve().parents[3] / "Kernarium/scripts/ipad-automation.py"
@@ -604,4 +605,4 @@ class LaunchdJobTests(ProcessTestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    automation_shards.main()
