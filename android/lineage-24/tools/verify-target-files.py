@@ -3715,22 +3715,37 @@ def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
 # SensorPrivacyService topic of route p0007 withholds both for the camera (SERVICES_JAR_MARKERS) and
 # keeps the microphone's reminder. A product string for either activity would also name the camera's
 # and the microphone's, so the overlay defines neither, in any configuration and with any value (a
-# reference included): a name found among the overlay's string entries is the failure.
+# reference included): a name found among the overlay's string entries is the failure. An overlay's
+# resource map (android:resourcesMap) can point those two names at a string of another name, so the
+# generated overlay, which never has one, must not declare one.
 SENSOR_USE_ACTIVITY_STRINGS = (
     "config_sensorUseStartedActivity",
     "config_sensorUseStartedActivity_hwToggle",
 )
+RESOURCES_MAP_ATTRIBUTE = "resourcesMap"
 
 
 def check_camera_reminder(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
     """The framework overlay leaves the sensor privacy service's reminder activities at the platform's
-    defaults."""
+    defaults, by name and by resource map."""
+    info = infos.get(FRAMEWORK_OVERLAY)
+    if info is None or info.is_dir():
+        fail(f"{FRAMEWORK_OVERLAY} is missing")
     try:
-        table = camera_resources(archive, infos, FRAMEWORK_OVERLAY, FRAMEWORK_OVERLAY_LIMIT)
+        with zipfile.ZipFile(io.BytesIO(read_small(archive, info, FRAMEWORK_OVERLAY_LIMIT))) as overlay:
+            table = overlay.read("resources.arsc")
+            manifest = overlay.read("AndroidManifest.xml")
         entries = [(name, default) for name, _, _, default
                    in resource_entries(table, "string", configurations=True)]
-    except (ValueError, struct.error, IndexError) as error:
-        fail(f"{FRAMEWORK_OVERLAY} has no readable resource table: {error}")
+        declaration = manifest_element_attributes(manifest, "overlay")
+    except (KeyError, OSError, ValueError, struct.error, IndexError, zipfile.BadZipFile) as error:
+        fail(f"{FRAMEWORK_OVERLAY} has no readable resource table or manifest: {error}")
+    if declaration is not None and RESOURCES_MAP_ATTRIBUTE in declaration:
+        fail(
+            f"{FRAMEWORK_OVERLAY} declares a resource map (android:{RESOURCES_MAP_ATTRIBUTE}): it can point "
+            f"{' and '.join(SENSOR_USE_ACTIVITY_STRINGS)} at a string of another name, and the generated "
+            "overlay has none"
+        )
     for name, default in entries:
         if name in SENSOR_USE_ACTIVITY_STRINGS:
             fail(

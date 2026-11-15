@@ -6,6 +6,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import base64
 import contextlib
 import gzip
 import importlib.util
@@ -291,6 +292,33 @@ def synthetic_apk(debuggable: bool | str | None = None, permissions: tuple[str, 
         apk.writestr("AndroidManifest.xml", synthetic_compiled_manifest(
             None, debuggable=debuggable, permissions=permissions, declared=declared))
     return package.getvalue()
+
+
+# The compiled manifest of an overlay that aapt2 built with android:resourcesMap="@xml/map", whose map
+# names config_sensorUseStartedActivity and config_sensorUseStartedActivity_hwToggle as targets (the
+# overlay's own string table has only "different_name").
+RESOURCES_MAP_OVERLAY_MANIFEST = base64.b64decode(
+    "".join((
+        "AwAIADQFAAABABwA8AIAABQAAAAAAAAAAAAAAGwAAAAAAAAAAAAAABIAAAAmAAAARAAAAGIAAACGAAAAmgAAAMAAAAD2AAAAEgEA",
+        "ABoBAAAsAQAARgEAAHYBAADOAQAA4gEAAPQBAAAGAgAAOgIAAG4CAAAHAGgAYQBzAEMAbwBkAGUAAAAIAHAAcgBpAG8AcgBpAHQA",
+        "eQAAAA0AdABhAHIAZwBlAHQAUABhAGMAawBhAGcAZQAAAA0AbQBpAG4AUwBkAGsAVgBlAHIAcwBpAG8AbgAAABAAdABhAHIAZwBl",
+        "AHQAUwBkAGsAVgBlAHIAcwBpAG8AbgAAAAgAaQBzAFMAdABhAHQAaQBjAAAAEQBjAG8AbQBwAGkAbABlAFMAZABrAFYAZQByAHMA",
+        "aQBvAG4AAAAZAGMAbwBtAHAAaQBsAGUAUwBkAGsAVgBlAHIAcwBpAG8AbgBDAG8AZABlAG4AYQBtAGUAAAAMAHIAZQBzAG8AdQBy",
+        "AGMAZQBzAE0AYQBwAAAAAgAxADYAAAAHAGEAbgBkAHIAbwBpAGQAAAALAGEAcABwAGwAaQBjAGEAdABpAG8AbgAAABYAZQB4AGEA",
+        "bQBwAGwAZQAuAHIAZQB2AGkAZQB3AC4AbwB2AGUAcgBsAGEAeQAAACoAaAB0AHQAcAA6AC8ALwBzAGMAaABlAG0AYQBzAC4AYQBu",
+        "AGQAcgBvAGkAZAAuAGMAbwBtAC8AYQBwAGsALwByAGUAcwAvAGEAbgBkAHIAbwBpAGQAAAAIAG0AYQBuAGkAZgBlAHMAdAAAAAcA",
+        "bwB2AGUAcgBsAGEAeQAAAAcAcABhAGMAawBhAGcAZQAAABgAcABsAGEAdABmAG8AcgBtAEIAdQBpAGwAZABWAGUAcgBzAGkAbwBu",
+        "AEMAbwBkAGUAAAAYAHAAbABhAHQAZgBvAHIAbQBCAHUAaQBsAGQAVgBlAHIAcwBpAG8AbgBOAGEAbQBlAAAACAB1AHMAZQBzAC0A",
+        "cwBkAGsAAAAAAIABCAAsAAAADAABARwAAQEhAAEBDAIBAXACAQFaBQEBcgUBAXMFAQEJBgEBAAEQABgAAAABAAAA/////woAAAAN",
+        "AAAAAgEQAIgAAAABAAAA//////////8OAAAAFAAUAAUAAAAAAAAADQAAAAYAAAD/////CAAAECQAAAANAAAABwAAAAkAAAAIAAAD",
+        "CQAAAP////8QAAAADAAAAAgAAAMMAAAA/////xEAAAD/////CAAAECQAAAD/////EgAAAP////8IAAAQEAAAAAIBEABMAAAAAgAA",
+        "AP//////////EwAAABQAFAACAAAAAAAAAA0AAAADAAAA/////wgAABAeAAAADQAAAAQAAAD/////CAAAEB4AAAADARAAGAAAAAIA",
+        "AAD//////////xMAAAACARAAdAAAAAMAAAD//////////w8AAAAUABQABAAAAAAAAAANAAAAAQAAAP////8IAAAQ5wMAAA0AAAAC",
+        "AAAACgAAAAgAAAMKAAAADQAAAAUAAAD/////CAAAEv////8NAAAACAAAAP////8IAAABAAACfwMBEAAYAAAAAwAAAP//////////",
+        "DwAAAAIBEAA4AAAABAAAAP//////////CwAAABQAFAABAAAAAAAAAA0AAAAAAAAA/////wgAABIAAAAAAwEQABgAAAAEAAAA////",
+        "//////8LAAAAAwEQABgAAAABAAAA//////////8OAAAAAQEQABgAAAABAAAA/////woAAAANAAAA",
+    ))
+)
 
 
 def synthetic_overlay_manifest(target_package: str | None, static: bool | None, *, utf8: bool = False) -> bytes:
@@ -2716,7 +2744,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     )
                     framework_apk = io.BytesIO()
                     with zipfile.ZipFile(framework_apk, "w") as overlay:
-                        overlay.writestr("AndroidManifest.xml", release_manifest)
+                        # The generated overlay declares itself static and has no resource map; the variant
+                        # carries a real compiled manifest that does.
+                        overlay.writestr("AndroidManifest.xml",
+                                         RESOURCES_MAP_OVERLAY_MANIFEST if camera_variant == "reminder-resource-map"
+                                         else synthetic_overlay_manifest("android", True))
                         overlay.writestr("resources.arsc", network_table)
                         for name, payload in wallpapers.items():
                             overlay.writestr(name, payload)
@@ -5851,6 +5883,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "defines config_sensorUseStartedActivity_hwToggle in the default configuration"),
             ("camera-reminder-activity-defined-under-a-qualifier", {"camera_variant": "reminder-qualified"},
              "defines config_sensorUseStartedActivity under a resource configuration"),
+            ("camera-reminder-activities-mapped-by-a-resource-map", {"camera_variant": "reminder-resource-map"},
+             "declares a resource map"),
             ("services-jar-without-the-sensor-reminder-topic", {"services_jar_variant": "no-sensor-reminder-marker"},
              "lacks the SensorPrivacyService topic that withholds the reminder of a camera under the hardware toggle"),
         ):
