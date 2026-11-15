@@ -91,6 +91,9 @@ enum FeedbackPreview {
         switch screen {
         case "feedback", "feedback-home", "feedback-nomail", "feedback-boot":
             break
+        case "feedback-home-answer":
+            // The no-Google-apps line, opened as a tap on it does.
+            feedback.openNoGoogleAnswer()
         case "feedback-boot-removed":
             // The start log was taken out: the sheet does not make it again.
             if let log = feedback.form.attachments.items.first(where: { $0.kind == .startLog }) {

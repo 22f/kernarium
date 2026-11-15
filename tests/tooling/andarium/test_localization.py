@@ -196,6 +196,59 @@ class CheckTests(unittest.TestCase):
         self.tree.files["Localizable"]["strings"]["Open Google Play"] = entry(ja="開く", zh_Hans="打开", zh_Hant="開啟")
         self.assertFinds("names a Google product")
 
+    def put_notice(self, catalog_name: str, translations: dict[str, str] | None = None) -> str:
+        """The no-Google-apps notice's own title in a catalog, as the application carries it."""
+        key = "No Google apps" if catalog_name == "Localizable" else "Missing Google apps?"
+        self.assertIn(key, self.script.GOOGLE_NOTICE_KEYS[catalog_name])
+        values = {"ja": "Googleのアプリは意図的に非搭載", "zh_Hans": "有意不含Google应用", "zh_Hant": "刻意不內建Google應用程式"}
+        values.update(translations or {})
+        self.tree.files[catalog_name]["strings"][key] = entry(**values)
+        return key
+
+    def test_the_notice_may_name_google_in_every_language(self) -> None:
+        for catalog_name in ("Localizable", "Feedback"):
+            self.put_notice(catalog_name)
+        body = next(iter(sorted(self.script.GOOGLE_NOTICE_KEYS["Localizable"] - {"No Google apps"})))
+        self.tree.files["Localizable"]["strings"][body] = entry(
+            ja="Googleは、自社のアプリとGoogle Play開発者サービスを、認定済みデバイスのメーカーにのみライセンス供与しています。",
+            zh_Hans="Google仅向制造商授权其应用和Google Play服务。",
+            zh_Hant="Google只向製造商授權其應用程式和Google Play服務。")
+        self.assertEqual(self.problems(), [])
+
+    def test_the_notice_names_no_other_google_product(self) -> None:
+        self.put_notice("Localizable", {"zh_Hans": "有意不含Google应用"})
+        self.assertEqual(self.problems(), [])  # a name the notice may use, with Latin letters
+        for name in ("Gmail", "Play Store", "YouTube", "google", "Google Play Store", "Google Play商店",
+                     "Google Play Protect", "Google Maps", "Google One", "GoogleTV", "Google Play"):
+            with self.subTest(name=name):
+                self.put_notice("Localizable", {"ja": f"{name}は意図的に非搭載"})
+                self.assertFinds("names a Google product")
+
+    def test_the_notice_may_name_google_play_services_in_each_language(self) -> None:
+        for name in ("Google Play services", "Google Play服务", "Google Play服務", "Google Play開発者サービス", "Google"):
+            with self.subTest(name=name):
+                self.put_notice("Localizable", {"ja": f"{name}は意図的に非搭載"})
+                self.assertEqual(self.problems(), [])
+
+    def test_the_notice_keeps_google_in_latin_letters(self) -> None:
+        self.put_notice("Localizable", {"zh_Hans": "有意不含谷歌应用"})
+        self.assertFinds("names a Google product")
+        self.put_notice("Localizable", {"zh_Hans": "有意不含Google应用", "ja": "グーグルのアプリは意図的に非搭載"})
+        self.assertFinds("names a Google product")
+
+    def test_another_key_may_not_name_google_beside_the_notice(self) -> None:
+        self.put_notice("Feedback")
+        self.tree.files["Feedback"]["strings"]["Open Google Play"] = entry(ja="開く", zh_Hans="打开", zh_Hant="開啟")
+        self.assertFinds("names a Google product")
+
+    def test_the_notice_in_another_catalog_may_not_name_google(self) -> None:
+        # The Feedback table's key in the Localizable catalog, or the reverse, is not the notice.
+        feedback_key = self.put_notice("Feedback")
+        del self.tree.files["Feedback"]["strings"][feedback_key]
+        self.tree.files["Localizable"]["strings"][feedback_key] = entry(
+            ja="Googleのアプリが見つかりませんか？", zh_Hans="找不到Google应用？", zh_Hant="找不到Google應用程式？")
+        self.assertFinds("names a Google product")
+
     def test_english_left_untranslated(self) -> None:
         self.tree.files["Localizable"]["strings"]["Erase virtual machine"] = entry(
             ja="Erase virtual machine", zh_Hans="抹掉虚拟机", zh_Hant="清除虛擬機器")

@@ -3971,6 +3971,29 @@
         }
       }
     },
+    "Google licenses its apps and Google Play services only to makers of certified devices. Install apps from files you have; many work without them." : {
+      "comment" : "The text of that panel: why (Google licenses its apps and Google Play services only to makers of certified devices) and what to do (install apps from files; many work without these services). The first sentence is the owner's wording; Google stays in Latin letters in every language.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Googleは、自社のアプリとGoogle Play開発者サービスを、認定済みデバイスのメーカーにのみライセンス供与しています。お持ちのファイルからアプリを追加でき、多くはこれらなしで動作します。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Google仅向认证设备的制造商授权其应用和Google Play服务。你可以用已有的文件安装应用，许多应用不需要这些服务也能使用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Google只向認證裝置的製造商授權其應用程式和Google Play服務。你可以用手邊的檔案安裝應用程式，許多應用程式不需要這些服務也能使用。"
+          }
+        }
+      }
+    },
     "Graphics" : {
       "comment" : "Heading of the group of Acknowledgements with the graphics software.",
       "localizations" : {
@@ -5213,6 +5236,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "無法取用"
+          }
+        }
+      }
+    },
+    "No Google apps" : {
+      "comment" : "The title of the panel on the boot screen of a first start: Android in the virtual machine has no Google apps, on purpose. The only text of the application that names Google. Google stays in Latin letters in every language.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Googleのアプリは非搭載"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不含Google应用"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不內建Google應用程式"
           }
         }
       }

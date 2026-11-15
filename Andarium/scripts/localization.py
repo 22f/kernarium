@@ -23,8 +23,10 @@ text is the key. The strings live in:
 `check` fails on anything a person would see as a defect in a translation: a
 key with no value, or a value that is not marked translated, in a language; a
 stale key; a format specifier or plural category that does not fit the source
-or the language; an unescaped `%`; a Google name; a leaf (a plural form and an
-Info.plist value included) left as one of the English forms of its key, or
+or the language; an unescaped `%`; a Google name, but for the notice that
+Android has no Google apps, which names Google and Google Play services (below);
+a leaf (a plural form and an Info.plist value included) left as one of the
+English forms of its key, or
 different from one only in case, without the key being on the list in
 Localization/english-only.json; a word the glossary retired (the guest is
 虚拟机 and 虛擬機器, never 客户机 or 客體; Chinese says 你, never 您); a space
@@ -140,6 +142,37 @@ GOOGLE_NAMES = re.compile(
     re.IGNORECASE,
 )
 
+# The one exception to that rule: the notice that Android has no Google apps, on
+# purpose (the boot screen's panel and Send feedback's line,
+# Andarium/README.md#runtime) names Google and Google Play services. Only
+# these keys may, and only by these two names, in Latin letters in every
+# language: "Google" not followed by another name ("Google Maps", "GoogleTV")
+# and "Google Play" followed by the word for services in the language. The rule
+# runs on what is left, so a Play Store, a Gmail, a "Google Play Store", a
+# "Google Play商店" or a 谷歌 in them is still a problem.
+GOOGLE_NOTICE_KEYS = {
+    "Localizable": {
+        "No Google apps",
+        "Google licenses its apps and Google Play services only to makers of certified devices. "
+        "Install apps from files you have; many work without them.",
+    },
+    "Feedback": {
+        "Missing Google apps?",
+        "Dismiss Google apps note",
+        "Google licenses its apps and Google Play services only to makers of certified devices. "
+        "Install apps from files you have; many work without them.",
+    },
+}
+GOOGLE_NOTICE_NAMES = re.compile(r"Google Play(?: services|服务|服務|開発者サービス)|Google(?! ?[A-Z])")
+
+
+def names_google(text: str, notice: bool) -> bool:
+    """Whether `text` names a Google product; a key of the notice may name Google and Google Play services."""
+    if notice:
+        text = GOOGLE_NOTICE_NAMES.sub("", text)
+    return bool(GOOGLE_NAMES.search(text))
+
+
 # Words the glossary retired, by language, and the person's pronoun: the app says 你, as iOS does.
 RETIRED_TERMS = {
     "zh-Hans": ("客户机", "您"),
@@ -249,10 +282,11 @@ def has_words(text: str) -> bool:
 
 
 def check_value(tag: str, language: str, key: str, source: str, forms: list[str], category: str | None,
-                value: str, allowed_identical: set[str], used_identical: set[str], problems: Problems) -> None:
+                value: str, allowed_identical: set[str], used_identical: set[str], problems: Problems,
+                notice: bool = False) -> None:
     if category is not None and category not in PLURAL_CATEGORIES[language]:
         problems.add(tag, f"uses the plural category {category!r}, which {language} does not have")
-    if GOOGLE_NAMES.search(value):
+    if names_google(value, notice):
         problems.add(tag, "names a Google product; no string of Andarium does")
     problem = format_problem(source, value)
     if problem:
@@ -294,7 +328,8 @@ def check_catalog(name: str, path: pathlib.Path, english_only: dict, problems: P
     keys = set(catalog.get("strings", {}))
     for key, entry in catalog.get("strings", {}).items():
         label = f"{where}: {key!r}"
-        if GOOGLE_NAMES.search(key):
+        notice = key in GOOGLE_NOTICE_KEYS.get(name, ())
+        if names_google(key, notice):
             problems.add(label, "names a Google product; no string of Andarium does")
         if lone_percent(key):
             problems.add(label, "has a `%` that is not a format specifier; write `%%`")
@@ -334,7 +369,8 @@ def check_catalog(name: str, path: pathlib.Path, english_only: dict, problems: P
                 if not value.strip():
                     problems.add(tag, "is empty")
                     continue
-                check_value(tag, language, key, source, forms, category, value, allowed_identical, used_identical, problems)
+                check_value(tag, language, key, source, forms, category, value, allowed_identical, used_identical, problems,
+                            notice)
             cases = plural_cases(localization)
             if cases and "other" not in cases:
                 problems.add(f"{label} ({language})", "has plural variations without 'other'")
