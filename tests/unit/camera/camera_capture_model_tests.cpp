@@ -1152,6 +1152,19 @@ void aFormatThatSupportsNoModeLeavesTheConnectionAloneAndSaysSoOnce()
             "nothing is written and the record says the format supports none, once");
 }
 
+// The record's photo line states the compensation read after the admission committed the session's configuration. The
+// note is made as the admission returns, before the camera's entry holds the output it added, so it reads the added
+// output; reading the entry's left every camera's line at the reading taken as the output was attached.
+void theRecordStatesTheReadingTakenAfterTheAdmissionCommitted()
+{
+    require(admissionCompensationReading(true, true) == CameraReading::afterCommit,
+            "an admission that added the photo output records the reading taken after its commit");
+    require(admissionCompensationReading(false, true) == CameraReading::beforeCommit,
+            "one that was refused and undone keeps the reading taken as the output was attached");
+    require(admissionCompensationReading(true, false) == CameraReading::beforeCommit,
+            "one that added no output has no later reading to take");
+}
+
 void aRequestAfterARefusedRestoreFailsWhileTheDeviceCannotBeWritten()
 {
     FakeBackend backend;
@@ -2626,6 +2639,7 @@ int main()
     aRestoreThatIsRefusedLeavesNothingInTheCacheTrue();
     aRequestAfterARefusedRestoreFailsWhileTheDeviceCannotBeWritten();
     settingsAreWrittenAgainAfterARefusedRestoreEvenWhenUnchanged();
+    theRecordStatesTheReadingTakenAfterTheAdmissionCommitted();
     aNewConnectionIsStabilizedByAnApplyThatLeavesTheOtherSettingsAlone();
     aFormatThatSupportsNoModeLeavesTheConnectionAloneAndSaysSoOnce();
     aRefusedFirstJoinWithARefusedRestoreIsWrittenAgainByTheNextJoin();

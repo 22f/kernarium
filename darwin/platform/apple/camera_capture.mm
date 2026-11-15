@@ -1869,18 +1869,20 @@ private:
     // What an admission set on the camera: the video connection (its angle and mirroring by default and now, the size the
     // output was asked for), the photo output's compensation and photo connection, the device's ratio.
     void noteAdmission(std::size_t camera, const std::optional<ConnectionFacts>& video, const std::optional<PhotoOutputFacts>& attached,
-                       const std::optional<CameraStillSize>& photoMaximum, const std::optional<RatioFacts>& ratio, CameraStillSize asked)
+                       const std::optional<CameraStillSize>& photoMaximum, const std::optional<RatioFacts>& ratio, CameraStillSize asked,
+                       AVCapturePhotoOutput* addedPhoto, bool admitted)
     {
-        // The photo output's compensation as it reads now that the admission committed the configuration; the reading
-        // taken as the output was attached stays where the output is gone again.
+        // The photo output's compensation as it reads now that the admission committed the configuration, of the output this
+        // admission added (the camera's entry does not hold it yet); the reading taken as the output was attached stays
+        // where the output is gone again (admissionCompensationReading).
         std::optional<PhotoOutputFacts> photo = attached;
-        if (photo)
-            if (const auto running = cameras_.find(camera); running != cameras_.end() && running->second.photoOutput != nil) {
-                const PhotoOutputFacts committed = readCompensation(running->second.photoOutput, CameraReading::afterCommit);
-                photo->compensationSupported = committed.compensationSupported;
-                photo->compensationEnabled = committed.compensationEnabled;
-                photo->reading = committed.reading;
-            }
+        if (photo && addedPhoto != nil &&
+            admissionCompensationReading(admitted, true) == CameraReading::afterCommit) {
+            const PhotoOutputFacts committed = readCompensation(addedPhoto, CameraReading::afterCommit);
+            photo->compensationSupported = committed.compensationSupported;
+            photo->compensationEnabled = committed.compensationEnabled;
+            photo->reading = committed.reading;
+        }
         AVCaptureDevice* device = entries_[camera].device;
         const CameraFact center = factOf(device.centerStageActive);
         const CameraFact distortion = factOf(device.geometricDistortionCorrectionEnabled);
@@ -2405,7 +2407,8 @@ private:
         };
         const Admission result = admit(plan, steps);
 #if TARGET_OS_IOS
-        noteAdmission(camera, videoConnection, photoFacts, photoMaximumSet, ratioFacts, video ? CameraStillSize {width, height} : CameraStillSize {});
+        noteAdmission(camera, videoConnection, photoFacts, photoMaximumSet, ratioFacts, video ? CameraStillSize {width, height} : CameraStillSize {},
+                      newPhoto, result == Admission::admitted);
 #endif
         if (result != Admission::admitted) {
             // An admission that added the camera's input and was undone leaves no change under way; a camera that was in the

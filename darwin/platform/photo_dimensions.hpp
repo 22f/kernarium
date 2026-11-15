@@ -83,6 +83,16 @@ enum class CompensationStep : std::uint8_t { proceed, enable, refuse };
 [[nodiscard]] CompensationStep stillCompensationStep(bool imitatesEarlierFront, CameraFact supported, CameraFact enabled,
                                                      CameraReading reading) noexcept;
 
+// Which reading of the photo output's compensation an admission records (camera_presentation.hpp). The output is
+// attached inside the admission, before its configuration is committed, so the reading taken then decides nothing; the
+// record states the reading taken once the admission committed, which is of the output the admission added: the note is
+// made as the admission returns, when the camera's entry does not hold that output yet. An admission that was refused and
+// undone keeps the reading taken as the output was attached, as the output is gone.
+[[nodiscard]] constexpr CameraReading admissionCompensationReading(bool admitted, bool outputAdded) noexcept
+{
+    return admitted && outputAdded ? CameraReading::afterCommit : CameraReading::beforeCommit;
+}
+
 // What a still does about the dynamic aspect ratio its camera's anchor pins: nothing where it pins none or the device
 // holds it; waits where the change's completion has not arrived; refuses where the completion reported an error, or
 // arrived and the device holds another ratio.
