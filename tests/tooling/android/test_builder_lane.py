@@ -1188,7 +1188,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           reclaim_variant: str | None = None,
                           time_zone_variant: str | None = None,
                           keyboard_default_variant: str | None = None,
-                          oldapp_variant: str | None = None,
+                          oldswitch_variant: str | None = None,
                           wallpaper_variant: str | None = None,
                           cas_hal_variant: str | None = None,
                           adbd_variant: str | None = None,
@@ -1897,29 +1897,29 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     "wrapper-no-exec": ("exec app_process", "app_process"),
                     "wrapper-system-base": ("base=/system_ext", "base=/system"),
                 }.items():
-                    if oldapp_variant == variant:
+                    if oldswitch_variant == variant:
                         if old not in oldapp_wrapper:
                             fail(f"the Old app wrapper lacks '{old}' for the {variant} variant")
                         oldapp_wrapper = oldapp_wrapper.replace(old, new)
-                if oldapp_variant != "missing-wrapper":
+                if oldswitch_variant != "missing-wrapper":
                     archive.writestr("SYSTEM_EXT/bin/kernarium_oldapp", oldapp_wrapper)
                 oldapp_jar = io.BytesIO()
                 with zipfile.ZipFile(oldapp_jar, "w") as jar:
                     jar.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
-                    if oldapp_variant not in ("jar-stripped", "preopt-code", "preopt-half"):
+                    if oldswitch_variant not in ("jar-stripped", "preopt-code", "preopt-half"):
                         jar.writestr(
                             "classes.dex",
                             b"dex\n035\0"
-                            + (b"Lcom/kernarium/oldapp/Other;" if oldapp_variant == "jar-without-class"
+                            + (b"Lcom/kernarium/oldapp/Other;" if oldswitch_variant == "jar-without-class"
                                else b"Lcom/kernarium/oldapp/Main;"),
                         )
-                if oldapp_variant in ("preopt-code", "preopt-half"):
+                if oldswitch_variant in ("preopt-code", "preopt-half"):
                     # Dexpreopting strips the code from the jar into the files beside it.
-                    for suffix in ("odex", "vdex") if oldapp_variant == "preopt-code" else ("vdex",):
+                    for suffix in ("odex", "vdex") if oldswitch_variant == "preopt-code" else ("vdex",):
                         archive.writestr(f"SYSTEM_EXT/framework/oat/arm64/kernarium_oldapp.{suffix}", b"oat")
-                if oldapp_variant == "jar-not-zip":
+                if oldswitch_variant == "jar-not-zip":
                     archive.writestr("SYSTEM_EXT/framework/kernarium_oldapp.jar", b"not a jar")
-                elif oldapp_variant != "missing-jar":
+                elif oldswitch_variant != "missing-jar":
                     archive.writestr("SYSTEM_EXT/framework/kernarium_oldapp.jar", oldapp_jar.getvalue())
                 # The device configuration of the host's keyboard and mouse: the tracked files.
                 for name, destination in input_device_files.items():
@@ -2073,7 +2073,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         "u:object_r:kernarium_oldapp_prop:s0 exact string\n",
                         "wrong-type-context": "persist.sys.kernarium.oldapp.    "
                         "u:object_r:kernarium_time_zone_prop:s0\n",
-                    }.get(oldapp_variant or "",
+                    }.get(oldswitch_variant or "",
                           "persist.sys.kernarium.oldapp.    u:object_r:kernarium_oldapp_prop:s0\n"),
                 )
                 archive.writestr(
@@ -2128,18 +2128,18 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                        else "kernarium_time_zone_prop ")
                     + ("" if keyboard_default_variant == "marker-not-system"
                        else "kernarium_keyboard_default_prop ")
-                    + ("" if oldapp_variant == "not-system" else "kernarium_oldapp_prop ")
+                    + ("" if oldswitch_variant == "not-system" else "kernarium_oldapp_prop ")
                     + "))\n"
                     # The scope of the Old app switch's property: restricted, readable by every
                     # application domain, which an internal one is not for the non-core ones.
                     + (
                         "(typeattributeset system_internal_property_type (kernarium_oldapp_prop))\n"
-                        if oldapp_variant == "internal-scope"
+                        if oldswitch_variant == "internal-scope"
                         else ""
                     )
                     + (
                         ""
-                        if oldapp_variant in ("not-restricted", "internal-scope")
+                        if oldswitch_variant in ("not-restricted", "internal-scope")
                         else "(typeattributeset system_restricted_property_type (kernarium_oldapp_prop))\n"
                     )
                     + (
@@ -2254,28 +2254,28 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     )
                     + (
                         ""
-                        if oldapp_variant == "no-shell-set"
+                        if oldswitch_variant == "no-shell-set"
                         else "(allow shell kernarium_oldapp_prop (property_service (set)))\n"
                     )
                     + "(allow shell kernarium_oldapp_prop (file (read getattr map open)))\n"
                     # The command's lock file, in the shell user's own data directory.
                     + (
                         ""
-                        if oldapp_variant == "no-lock-file"
+                        if oldswitch_variant == "no-lock-file"
                         else "(allow shell shell_data_file (file (create open read write lock getattr)))\n"
-                        if oldapp_variant == "no-lock-setattr"
+                        if oldswitch_variant == "no-lock-setattr"
                         else "(allow shell shell_data_file (file (create open read write lock getattr setattr)))\n"
                     )
                     + (
                         ""
-                        if oldapp_variant == "no-lock-dir"
+                        if oldswitch_variant == "no-lock-dir"
                         else "(allow shell shell_data_file (dir (search add_name write)))\n"
                     )
                     + (
                         ""
-                        if oldapp_variant == "no-app-read"
+                        if oldswitch_variant == "no-app-read"
                         else "(allow appdomain kernarium_oldapp_prop (file (read)))\n"
-                        if oldapp_variant == "partial-app-read"
+                        if oldswitch_variant == "partial-app-read"
                         else "".join(
                             f"(allow {domain} kernarium_oldapp_prop (file (read getattr map open)))\n"
                             for domain in (
@@ -2286,7 +2286,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                                 "sdk_sandbox_next",
                             )
                         )
-                        if oldapp_variant == "per-domain-reads"
+                        if oldswitch_variant == "per-domain-reads"
                         else "(allow appdomain kernarium_oldapp_prop (file (read getattr map open)))\n"
                     )
                     + {
@@ -2295,25 +2295,25 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         "(property_service (set)))\n",
                         "appdomain-sets": "(allow appdomain kernarium_oldapp_prop (property_service (set)))\n",
                         "runas-app-sets": "(allow runas_app kernarium_oldapp_prop (property_service (set)))\n",
-                    }.get(oldapp_variant or "", "")
+                    }.get(oldswitch_variant or "", "")
                     # What the restricted macro emits for the type (the non-core domains may not
                     # set it), and the neverallow of the application domains.
                     + (
                         ""
-                        if oldapp_variant == "no-neverallow"
+                        if oldswitch_variant == "no-neverallow"
                         else "(typeattributeset base_typeattr_241 (and (domain ) (not (coredomain ))))\n"
                         "(neverallow base_typeattr_241 kernarium_oldapp_prop (property_service (set)))\n"
                     )
                     + (
                         ""
-                        if oldapp_variant in ("no-neverallow", "vendor-style-neverallow")
+                        if oldswitch_variant in ("no-neverallow", "vendor-style-neverallow")
                         else "(typeattributeset base_typeattr_955 (untrusted_app_all ))\n"
-                        if oldapp_variant == "partial-neverallow"
+                        if oldswitch_variant == "partial-neverallow"
                         else "(typeattributeset base_typeattr_955 (and (appdomain ) (not (shell ))))\n"
                     )
                     + (
                         ""
-                        if oldapp_variant in ("no-neverallow", "vendor-style-neverallow")
+                        if oldswitch_variant in ("no-neverallow", "vendor-style-neverallow")
                         else "(neverallow base_typeattr_955 kernarium_oldapp_prop (property_service (set)))\n"
                     )
                     + (
@@ -5628,68 +5628,68 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "lets the keyboard default domain set"),
             ("keyboard-default-missing-marker-context", {"keyboard_default_variant": "missing-marker-context"},
              "do not label persist.sys.kernarium.keyboard_default"),
-            ("oldapp-missing-wrapper", {"oldapp_variant": "missing-wrapper"},
+            ("oldapp-missing-wrapper", {"oldswitch_variant": "missing-wrapper"},
              "required entries are missing: .*SYSTEM_EXT/bin/kernarium_oldapp"),
-            ("oldapp-missing-jar", {"oldapp_variant": "missing-jar"},
+            ("oldapp-missing-jar", {"oldswitch_variant": "missing-jar"},
              "required entries are missing: .*SYSTEM_EXT/framework/kernarium_oldapp.jar"),
-            ("oldapp-wrapper-no-classpath", {"oldapp_variant": "wrapper-no-classpath"},
+            ("oldapp-wrapper-no-classpath", {"oldswitch_variant": "wrapper-no-classpath"},
              "kernarium_oldapp does not contain 'CLASSPATH=.base/framework/kernarium_oldapp.jar'"),
-            ("oldapp-wrapper-wrong-jar", {"oldapp_variant": "wrapper-wrong-jar"},
+            ("oldapp-wrapper-wrong-jar", {"oldswitch_variant": "wrapper-wrong-jar"},
              "kernarium_oldapp does not contain 'CLASSPATH=.base/framework/kernarium_oldapp.jar'"),
-            ("oldapp-wrapper-wrong-class", {"oldapp_variant": "wrapper-wrong-class"},
+            ("oldapp-wrapper-wrong-class", {"oldswitch_variant": "wrapper-wrong-class"},
              "kernarium_oldapp does not contain 'exec app_process .base/bin com.kernarium.oldapp.Main'"),
-            ("oldapp-wrapper-no-exec", {"oldapp_variant": "wrapper-no-exec"},
+            ("oldapp-wrapper-no-exec", {"oldswitch_variant": "wrapper-no-exec"},
              "kernarium_oldapp does not contain 'exec app_process"),
-            ("oldapp-wrapper-system-base", {"oldapp_variant": "wrapper-system-base"},
+            ("oldapp-wrapper-system-base", {"oldswitch_variant": "wrapper-system-base"},
              "kernarium_oldapp does not contain 'base=/system_ext'"),
-            ("oldapp-jar-not-zip", {"oldapp_variant": "jar-not-zip"},
+            ("oldapp-jar-not-zip", {"oldswitch_variant": "jar-not-zip"},
              "kernarium_oldapp.jar is not a readable jar"),
-            ("oldapp-jar-without-class", {"oldapp_variant": "jar-without-class"},
+            ("oldapp-jar-without-class", {"oldswitch_variant": "jar-without-class"},
              "holds code without the class com.kernarium.oldapp.Main"),
-            ("oldapp-missing-context", {"oldapp_variant": "missing-context"},
+            ("oldapp-missing-context", {"oldswitch_variant": "missing-context"},
              "is labelled default_prop, not kernarium_oldapp_prop"),
-            ("oldapp-exact-context", {"oldapp_variant": "exact-context"},
+            ("oldapp-exact-context", {"oldswitch_variant": "exact-context"},
              "is labelled default_prop, not kernarium_oldapp_prop"),
-            ("oldapp-wrong-type-context", {"oldapp_variant": "wrong-type-context"},
+            ("oldapp-wrong-type-context", {"oldswitch_variant": "wrong-type-context"},
              "is labelled kernarium_time_zone_prop, not kernarium_oldapp_prop"),
-            ("oldapp-not-system", {"oldapp_variant": "not-system"},
+            ("oldapp-not-system", {"oldswitch_variant": "not-system"},
              "does not define the system-owned kernarium_oldapp_prop"),
-            ("oldapp-no-shell-set", {"oldapp_variant": "no-shell-set"},
+            ("oldapp-no-shell-set", {"oldswitch_variant": "no-shell-set"},
              "the shell domain may not set persist.sys.kernarium.oldapp."),
-            ("oldapp-no-app-read", {"oldapp_variant": "no-app-read"},
+            ("oldapp-no-app-read", {"oldswitch_variant": "no-app-read"},
              "may not read persist.sys.kernarium.oldapp."),
-            ("oldapp-untrusted-app-sets", {"oldapp_variant": "untrusted-app-sets"},
+            ("oldapp-untrusted-app-sets", {"oldswitch_variant": "untrusted-app-sets"},
              "untrusted_app may set persist.sys.kernarium.oldapp."),
-            ("oldapp-platform-app-sets", {"oldapp_variant": "platform-app-sets"},
+            ("oldapp-platform-app-sets", {"oldswitch_variant": "platform-app-sets"},
              "platform_app_36 may set persist.sys.kernarium.oldapp."),
-            ("oldapp-appdomain-sets", {"oldapp_variant": "appdomain-sets"},
+            ("oldapp-appdomain-sets", {"oldswitch_variant": "appdomain-sets"},
              "may set persist.sys.kernarium.oldapp."),
-            ("oldapp-runas-app-sets", {"oldapp_variant": "runas-app-sets"},
+            ("oldapp-runas-app-sets", {"oldswitch_variant": "runas-app-sets"},
              "runas_app may set persist.sys.kernarium.oldapp."),
-            ("oldapp-no-neverallow", {"oldapp_variant": "no-neverallow"},
+            ("oldapp-no-neverallow", {"oldswitch_variant": "no-neverallow"},
              "no neverallow that keeps application domains from setting kernarium_oldapp_prop"),
             # The restricted macro's own rule is of the vendor kind (domain without the core
             # domains) and covers the two non-core application domains alone.
-            ("oldapp-vendor-style-neverallow", {"oldapp_variant": "vendor-style-neverallow"},
+            ("oldapp-vendor-style-neverallow", {"oldswitch_variant": "vendor-style-neverallow"},
              "no neverallow that keeps application domains from setting kernarium_oldapp_prop"),
-            ("oldapp-partial-neverallow", {"oldapp_variant": "partial-neverallow"},
+            ("oldapp-partial-neverallow", {"oldswitch_variant": "partial-neverallow"},
              "no neverallow that keeps application domains from setting kernarium_oldapp_prop: none covers"),
-            ("oldapp-internal-scope", {"oldapp_variant": "internal-scope"},
+            ("oldapp-internal-scope", {"oldswitch_variant": "internal-scope"},
              "kernarium_oldapp_prop is a system_internal_prop"),
-            ("oldapp-not-restricted", {"oldapp_variant": "not-restricted"},
+            ("oldapp-not-restricted", {"oldswitch_variant": "not-restricted"},
              "kernarium_oldapp_prop is not declared with system_restricted_prop"),
-            ("oldapp-partial-app-read", {"oldapp_variant": "partial-app-read"},
+            ("oldapp-partial-app-read", {"oldswitch_variant": "partial-app-read"},
              "may not read persist.sys.kernarium.oldapp.<package>, labelled kernarium_oldapp_prop "
              r"\(getattr, map, open, read on the file\)"),
-            ("oldapp-no-lock-file", {"oldapp_variant": "no-lock-file"},
+            ("oldapp-no-lock-file", {"oldswitch_variant": "no-lock-file"},
              "shell domain may not create and lock files of shell_data_file"),
-            ("oldapp-no-lock-setattr", {"oldapp_variant": "no-lock-setattr"},
+            ("oldapp-no-lock-setattr", {"oldswitch_variant": "no-lock-setattr"},
              "shell domain may not create and lock files of shell_data_file"),
-            ("oldapp-no-lock-dir", {"oldapp_variant": "no-lock-dir"},
+            ("oldapp-no-lock-dir", {"oldswitch_variant": "no-lock-dir"},
              "shell domain may not create and lock files of shell_data_file"),
-            ("oldapp-jar-stripped", {"oldapp_variant": "jar-stripped"},
+            ("oldapp-jar-stripped", {"oldswitch_variant": "jar-stripped"},
              "kernarium_oldapp.jar has no classes.dex and no preoptimized odex and vdex"),
-            ("oldapp-preopt-half", {"oldapp_variant": "preopt-half"},
+            ("oldapp-preopt-half", {"oldswitch_variant": "preopt-half"},
              "kernarium_oldapp.jar has no classes.dex and no preoptimized odex and vdex"),
             ("missing-side-key-layout", {"entries": {input_device_files["Vendor_1af4_Product_0002.kl"]: None}},
              "required entries are missing"),
@@ -6118,8 +6118,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         # own rule and not through the attribute, and the command's code preoptimized beside a jar
         # that holds none.
         for label, options in (
-            ("oldapp-per-domain-reads", {"oldapp_variant": "per-domain-reads"}),
-            ("oldapp-preoptimized-code", {"oldapp_variant": "preopt-code"}),
+            ("oldapp-per-domain-reads", {"oldswitch_variant": "per-domain-reads"}),
+            ("oldapp-preoptimized-code", {"oldswitch_variant": "preopt-code"}),
         ):
             fixture = root / f"good-{label}.zip"
             write_fixture(fixture, **options)
