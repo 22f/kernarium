@@ -403,15 +403,20 @@ class Library:
         """Leave by the branch exit of `target` unless its text page is
         known to equal the stored source: T0 is clobbered, flags are not."""
         page = (target - self.table_base) // PAGE
-        if page >= 4096:
-            raise A.AsmError("a library's text must be below 16 MiB")
+        if page >= 1 << 24:
+            raise A.AsmError("a library's text must be below 64 GiB")
         asm = self.asm
         before = len(asm._w)
         asm.word(A.ldr_x(T0, 31, SLOT_PSTATE))
+        if page >= 4096:
+            # The byte offset of the page's state does not fit the load's 12
+            # bits: the rest of it is added first.
+            asm.word(A.add_imm(T0, T0, page >> 12, shift12=True))
+            page &= 0xfff
         asm.word(A.ldrb_w(T0, T0, page))
         asm.cbz(T0, self.xb_ref(target), sf=0)
         self.tag("gate", before)
-        self.stats.words["gate"] += 3
+        self.stats.words["gate"] += len(asm._w) - before
 
     def xb_label(self, target: int) -> str:
         return f"L{self.index}XB{self.fn_start:x}_{target:x}"
@@ -1596,9 +1601,15 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
     asm.word(A.br(T2))
     asm.label("REFILL_FAIL")
     base_pages = library.table_base >> 12
-    if library.table_base & 0xfff or base_pages >= 4096:
-        raise A.AsmError("a library's code must start below 16 MiB")
-    asm.word(A.add_imm(T0, T1, base_pages, shift12=True))
+    if library.table_base & 0xfff or library.table_base >= 1 << 32:
+        raise A.AsmError("a library's code must start page-aligned below "
+                         "4 GiB")
+    if base_pages < 4096:
+        asm.word(A.add_imm(T0, T1, base_pages, shift12=True))
+    else:
+        asm.word(A.movz(T0, library.table_base & 0xffff))
+        asm.word(A.movk(T0, library.table_base >> 16, 1))
+        asm.word(A.add_reg(T0, T0, T1))
     asm.b("EXIT_STEP")
 
     # An indirect branch: T0 = the guest target, the budget already charged.
@@ -1607,8 +1618,12 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
     asm.word(A.ldr_x(T1, 31, SLOT_BIAS))
     asm.word(A.add_reg(T1, T0, T1, sub=True))  # vaddr
     base_pages = library.table_base >> 12
-    if base_pages:
+    if 0 < base_pages < 4096:
         asm.word(A.add_imm(T1, T1, base_pages, sub=True, shift12=True))
+    elif base_pages:
+        asm.word(A.movz(T2, library.table_base & 0xffff))
+        asm.word(A.movk(T2, library.table_base >> 16, 1))
+        asm.word(A.add_reg(T1, T1, T2, sub=True))
     asm.word(A.ror_imm(T2, T1, 2))
     asm.word(A.lsr_imm(T2, T2, library.log_span - 2))
     asm.cbz(T2, "XLIB", nz=True)

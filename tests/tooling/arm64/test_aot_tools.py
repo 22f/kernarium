@@ -439,6 +439,59 @@ class SimdStructureTests(unittest.TestCase):
                                 len(fixture.MOPS_ROWS))
 
 
+class LargeLibraryTests(unittest.TestCase):
+    """A library's text is not capped at 16 MiB: a page state beyond the 12
+    bits of a load's offset costs the gates that name it one more word."""
+
+    NOP_WORD = NOP
+
+    def gate_words(self, page: int) -> list[int]:
+        return [A.ldr_x(rewrite.T0, 31, rewrite.SLOT_PSTATE)] + (
+            [A.add_imm(rewrite.T0, rewrite.T0, page >> 12, shift12=True)]
+            if page >= 4096 else []) + [
+            A.ldrb_w(rewrite.T0, rewrite.T0, page & 0xfff)]
+
+    def contains(self, unit: list[int], words: list[int]) -> bool:
+        return any(unit[i:i + len(words)] == words
+                   for i in range(len(unit) - len(words) + 1))
+
+    def test_a_gate_to_a_page_beyond_the_load_offset_adds_a_word(self) -> None:
+        far = 17 * 1024 * 1024
+        words = [NOP] * (far // 4 + 4)
+        # A function at the start branches to one in the 4097th page.
+        target = 4097 * 4096
+        words[0] = 0x14000000 | (target >> 2)
+        words[target // 4] = NOP
+        words[target // 4 + 1] = RET
+        library = library_of(words, [(0, 4), (target, target + 8)])
+        unit = unit_words(library)
+        self.assertTrue(self.contains(unit, self.gate_words(4097)))
+        self.assertFalse(self.contains(unit, [
+            A.ldr_x(rewrite.T0, 31, rewrite.SLOT_PSTATE),
+            A.ldrb_w(rewrite.T0, rewrite.T0, 4097 & 0xfff)]))
+
+    def test_a_gate_below_the_offset_keeps_its_three_words(self) -> None:
+        target = 4095 * 4096
+        words = [NOP] * (target // 4 + 4)
+        words[0] = 0x14000000 | (target >> 2)
+        words[target // 4 + 1] = RET
+        library = library_of(words, [(0, 4), (target, target + 8)])
+        unit = unit_words(library)
+        self.assertTrue(self.contains(unit, self.gate_words(4095)))
+
+    def test_text_above_16_mib_in_the_address_space_builds(self) -> None:
+        library = rewrite.Library(
+            0, "/test/lib.so", FakeElf([RET, NOP], [(0, 4)], base=0x2000000),
+            a64decode.Decoder(), rewrite.read_layout(rewrite.LAYOUT_HEADER))
+        unit = unit_words(library)
+        # REFILL_FAIL and IND form the base of the code in a register.
+        self.assertTrue(self.contains(unit, [
+            A.movz(rewrite.T0, 0), A.movk(rewrite.T0, 0x200, 1)]))
+        self.assertTrue(self.contains(unit, [
+            A.movz(rewrite.T2, 0), A.movk(rewrite.T2, 0x200, 1),
+            A.add_reg(rewrite.T1, rewrite.T1, rewrite.T2, sub=True)]))
+
+
 class CensusTests(unittest.TestCase):
     """The byte census names the kind of every word of a unit."""
 
