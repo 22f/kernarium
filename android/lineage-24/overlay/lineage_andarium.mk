@@ -534,6 +534,14 @@ PRODUCT_PACKAGES += KernariumPinnerOverlay
 # its own.
 PRODUCT_PACKAGES += kernarium_wifi_network_script
 
+# Very old 32-bit games (applications that target an API level below 14) read a
+# Java byte[] through its object pointer, leak local references and assume a heap
+# below 2 GiB. ActivityThread loads this library into the process of such an
+# application and nothing else (overlay/oldapp; the hook is a frameworks/base
+# topic); the library gives that application what Dalvik gave it.
+PRODUCT_PACKAGES += libkernarium_oldapp
+PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += system/lib/libkernarium_oldapp.so
+
 # Cached apps the system starts at boot (privacy sandbox, backup, key
 # provisioning, domain verification, Health Connect) keep memory until the low
 # memory killer wants it. Once boot has settled this script kills the cached

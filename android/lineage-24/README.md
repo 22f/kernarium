@@ -593,6 +593,101 @@ AOSP's answer for a production build (route `p0011`). SELinux stays enforcing in
 both variants. `tests/integration/android/run_android_adb_debugging.py`
 qualifies this contract.
 
+### Old applications
+
+A 32-bit application that targets an API level below 14 is a game written for
+Dalvik, which gave native code direct object pointers and a heap below 2 GiB.
+The layer that gives ART's process those two things is a choice made per
+application, off by default: the native-return case below cannot be covered, so
+the person switches it on for the games that need it. The store is one
+persistent property per package, `persist.sys.kernarium.oldapp.<package>`; its
+value is the turn-on time and an empty or unset property means off.
+`ActivityThread.handleBindApplication` (a topic of route p0007) tests the
+target level, then the bitness, then that the application is not a system
+application (neither `FLAG_SYSTEM` nor `FLAG_UPDATED_SYSTEM_APP`), then reads
+that property, and only an application that is below API 14, 32-bit, not a
+system application and switched on gets `/system/lib/libkernarium_oldapp.so`
+(`overlay/oldapp`) in its process; an application that is not eligible never
+reads the property. Packages that share a user ID can share a process, so the
+hook also leaves the layer out when the user ID has more than one package. A
+failed load is logged and the application starts as before.
+Applications that target below API 23 get Android's permission review before
+their first component runs. The library, which includes no Android header,
+patches ART's one JNI function table in place and gives the application:
+
+- Dalvik's array layout for a Java `byte[]` that a call from the application's
+  own native code returns (a method registered with the return type `[B`, or a
+  field of that type): the value is a block with the length at offset 8 and the
+  bytes at offset 16 that stands for the real array and holds a global reference
+  to it. Every JNI function that takes an object turns a block back into that
+  array for any caller, so identity (`IsSameObject`, `NewGlobalRef`, monitors)
+  and writes (`SetByteArrayRegion`, `Release*Elements`,
+  `ReleasePrimitiveArrayCritical`) keep their meaning. The layer reads the
+  length from its own record, never from the length word, which the application
+  can overwrite. The block and its array behave as one memory at the points
+  where the application meets Java: before and after a call that is passed the
+  block (as an argument or as the receiver, so `clone()` and a method without
+  parameters see it), where the application asks for the bytes
+  (`Get...Elements`, `Get...Critical`, `GetByteArrayRegion`), around
+  `SetByteArrayRegion` and at a release. The block keeps a copy of its bytes as
+  of the last such point. At each point, in chunks of 4 KiB, a chunk whose block
+  differs from that copy was written through the raw pointer and goes to the
+  array, and any other chunk takes the array's bytes; where both sides changed
+  the same chunk, the application's bytes win for that chunk. A committing
+  release (mode 0 or `JNI_COMMIT`) is such a point and keeps Java's bytes in the
+  chunks the application did not write; `JNI_ABORT` discards the working copy,
+  and the block takes the array's bytes. `Get...Elements` and `Get...Critical`
+  of a block report a copy (`isCopy` is `JNI_TRUE`), so an application that
+  commits when told so makes its writes visible through any other reference to
+  the array; a real array keeps the runtime's own flag. Bytes Java writes
+  outside those points (another thread, a callback after the native method
+  returned) show at the next one, and a raw write from another thread while a
+  point is running can be lost. The same array returned again to the same thread is the same block
+  (among the thread's most recent ones), freed by the last of its
+  `DeleteLocalRef` calls. A thread holds at most 512 blocks over its life, not
+  per native method: a block lasts until its reference is deleted or its thread
+  ends, so a native method that takes a new array on every call and never
+  deletes it reaches the limit. The process holds 32 MiB of blocks, and each
+  block's copy takes as many bytes again in the ordinary heap. Beyond the
+  limits the result is ART's own reference. A block is never recycled. An array
+  the application creates itself (`NewByteArray`) stays ART's own;
+- an allocator below 2 GiB for the libraries the application ships: their
+  `malloc`, `calloc`, `strdup`, `strndup`, `operator new` and `operator
+  delete` imports are redirected as the library is first seen.
+  Every loaded library's `free`, `realloc`, `reallocarray` and
+  `malloc_usable_size` imports accept such a block, libc's own among them, so a
+  buffer the application allocated can be grown by `getline` or freed by the
+  framework. A library's `realloc` and `reallocarray` hand out arena blocks only
+  once every one of its consumer imports is rewritten.
+
+Only the application's own code gets blocks: a caller is told apart by the
+mapping its return address is in, so the platform's libraries in the same
+process see the real arrays. Page protection is restored after each write, and
+a library whose pages cannot all be opened is left untouched. The library logs
+under the tag `kernarium_oldapp` the first `byte[]` result that stayed ART's own
+reference (with the blocks and bytes its thread held), the first allocation
+that went to libc because the low arena had no room, and, at most every 30 s
+while it grows, the most blocks any one thread has held.
+
+The layer cannot cover: a native method that returns a block to Java (ART
+decodes the returned reference itself), which is why it is a per-application
+choice; a `byte[]` passed into a native method as an argument or the elements
+of a `byte[][]`; raw reads of other objects; bytes written through the pointer
+that Java reads without one of the points above (a block stored in a field and
+read after the native method returned); a release or a synchronization with an
+exception pending, which a debuggable application (CheckJNI) aborts on; a
+call that bypasses the platform library's PLT; packed relocations; `memalign`;
+constructors that ran before the library's first scan; a library loaded
+without a call into JNI (found by the next periodic scan), which until then
+keeps libc's `free` and can abort on a block another library allocated; a
+library with an allocator import in executable code (a text relocation) or
+whose relocation pages cannot be reopened, which keeps libc's allocator,
+`realloc` included, for its own blocks; a freed block's address reused while
+the application still holds the old pointer; and more than 512 loaded
+libraries.
+`tests/integration/android/run_android_oldapp.py` qualifies it
+([testing](../../docs/testing.md#android)).
+
 ### Framework and CTS behaviour
 
 Framework, policy and CTS fixes are patch topics under `patches/projects/`
