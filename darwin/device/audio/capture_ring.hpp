@@ -26,6 +26,13 @@ namespace uml::audio {
         ((boundaryNanoseconds - capturedNanoseconds) * rate + second - 1) / second);
 }
 
+/* What a test pauses at inside restart(); production has none (the calls compile to nothing). */
+struct NoRestartSeam {
+    static void afterPublish() noexcept {}
+    static void afterWait() noexcept {}
+    static void afterCursor() noexcept {}
+};
+
 /* A bounded single-producer, single-consumer ring of bytes, for a capture
  * source whose audio arrives on a thread of its own. Neither side allocates
  * or locks. The producer calls write() only; the consumer calls read(),
@@ -40,10 +47,15 @@ namespace uml::audio {
  * epoch() and boundaryNanoseconds() as a buffer reaches it and offers the
  * buffer with that epoch (write(data, epoch)): a restart in between drops it,
  * and a buffer that began before the boundary has its leading frames trimmed
- * by the producer (framesBeforeBoundary). */
-class CaptureRing final {
+ * by the producer (framesBeforeBoundary). Audio the producer writes under the
+ * new epoch while the restart is under way is kept: the producer notes where
+ * its first write of an epoch begins, and the restart drops what is before
+ * that note, or everything held where the note is not of the new epoch.
+ * The producer never waits for the consumer. */
+template <typename Seam>
+class BasicCaptureRing final {
 public:
-    explicit CaptureRing(std::size_t capacityBytes)
+    explicit BasicCaptureRing(std::size_t capacityBytes)
         : capacity_(std::bit_ceil(std::max<std::size_t>(capacityBytes, 2)))
         , bytes_(std::make_unique<std::uint8_t[]>(capacity_))
     {
@@ -67,8 +79,15 @@ public:
         // Sequentially consistent: either this sees the restart's epoch, or the restart sees this write under way.
         writing_.store(true, std::memory_order_seq_cst);
         std::size_t taken = data.size();
-        if (epoch_.load(std::memory_order_seq_cst) == epoch)
+        if (epoch_.load(std::memory_order_seq_cst) == epoch) {
+            // The first write of an epoch notes where it begins, before it moves the write cursor.
+            const std::uint64_t tag = tagOf(epoch);
+            if (firstTag_.load(std::memory_order_relaxed) != tag) {
+                firstPosition_.store(head_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                firstTag_.store(tag, std::memory_order_release);
+            }
             taken = write(data);
+        }
         writing_.store(false, std::memory_order_release);
         return taken;
     }
@@ -78,14 +97,21 @@ public:
     [[nodiscard]] std::uint64_t boundaryNanoseconds() const noexcept { return boundary_.load(std::memory_order_acquire); }
 
     /* Begins a recording at `boundaryNanoseconds` (the producer's clock): drops what is held and every buffer a producer
-     * received before this call, whenever it writes it. A write that is under way is waited for, a copy of one buffer. */
+     * received before this call, whenever it writes it, and keeps what the producer writes under the new epoch. A write
+     * that is under way is waited for, a copy of one buffer. */
     void restart(std::uint64_t boundaryNanoseconds) noexcept
     {
         boundary_.store(boundaryNanoseconds, std::memory_order_release);
-        epoch_.fetch_add(1, std::memory_order_seq_cst);
+        const std::uint32_t next = epoch_.fetch_add(1, std::memory_order_seq_cst) + 1;
+        Seam::afterPublish();
         while (writing_.load(std::memory_order_seq_cst))
             std::this_thread::yield();
-        clear();
+        Seam::afterWait();
+        const auto head = head_.load(std::memory_order_acquire);
+        Seam::afterCursor();
+        // The note is read after the cursor: a first write of the new epoch that begins in between begins at that cursor.
+        const bool noted = firstTag_.load(std::memory_order_acquire) == tagOf(next);
+        tail_.store(noted ? firstPosition_.load(std::memory_order_relaxed) : head, std::memory_order_release);
     }
 
     /* Moves up to out.size() of the oldest bytes into `out`. */
@@ -119,6 +145,9 @@ public:
     [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }
 
 private:
+    // An epoch with the bit that tells a note from none.
+    [[nodiscard]] static constexpr std::uint64_t tagOf(std::uint32_t epoch) noexcept { return (1ULL << 32) | epoch; }
+
     void copyIn(std::size_t position, std::span<const std::uint8_t> data) noexcept
     {
         const auto start = position & (capacity_ - 1U);
@@ -143,6 +172,11 @@ private:
     std::atomic<std::uint32_t> epoch_ {};
     std::atomic<std::uint64_t> boundary_ {};
     std::atomic<bool> writing_ {};
+    // The producer's note of where its first write of an epoch began (tagOf(epoch), zero for none) and the position.
+    std::atomic<std::uint64_t> firstTag_ {};
+    std::atomic<std::size_t> firstPosition_ {};
 };
+
+using CaptureRing = BasicCaptureRing<NoRestartSeam>;
 
 } // namespace uml::audio
