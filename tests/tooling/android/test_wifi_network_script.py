@@ -474,15 +474,23 @@ class Guest:
         self.stubs = directory / "stubs"
         self.stubs.mkdir()
         # A call of the Wi-Fi service is a request to the guest's Service and the print of its reply. The
-        # stubs read their files with builtins: no interpreter, `cat` or `sed` starts for a call.
+        # stubs read their files with builtins: no interpreter, `cat` or `sed` starts for a call. A step that
+        # fails (the request not written, no acknowledgement, a reply that cannot be read whole) ends the stub
+        # with status 69 and no reply: it never prints what an earlier call left in `reply`.
         service_call = (
-            'printf "%s\\n" "@NAME@" "$@" "@END@" > "@STATE@/request"\n'
-            'read -r _ < "@STATE@/answer"\n'
-            '{\n    read -r rc\n    read -r n\n'
-            '    while [ "$n" -gt 0 ]; do\n        IFS= read -r line\n        printf "%s\\n" "$line"\n'
-            '        n=$((n - 1))\n    done\n'
+            'unreachable() {\n    echo "the fake Wi-Fi service failed to $1" >&2\n    exit 69\n}\n'
+            'printf "%s\\n" "@NAME@" "$@" "@END@" > "@STATE@/request" || unreachable "take the request"\n'
+            'read -r _ < "@STATE@/answer" || unreachable "acknowledge the request"\n'
+            'finished=\n'
+            '{\n    read -r rc || unreachable "give a status"\n    read -r n || unreachable "give a line count"\n'
+            '    case "$rc" in "" | *[!0-9]*) unreachable "give a numeric status" ;; esac\n'
+            '    case "$n" in "" | *[!0-9]*) unreachable "give a numeric line count" ;; esac\n'
+            '    while [ "$n" -gt 0 ]; do\n        IFS= read -r line || unreachable "give all its lines"\n'
+            '        printf "%s\\n" "$line"\n        n=$((n - 1))\n    done\n'
             '    while IFS= read -r line; do\n        printf "%s\\n" "$line" >&2\n    done\n'
-            '} < "@STATE@/reply"\nexit "$rc"\n'
+            '    finished=yes\n} < "@STATE@/reply"\n'
+            '[ -n "$finished" ] || unreachable "give a reply"\n'
+            'exit "$rc"\n'
         ).replace("@STATE@", str(self.state)).replace("@END@", Service.END)
         state = self.state
         bodies = {
@@ -807,6 +815,42 @@ class WifiNetworkScript(unittest.TestCase):
 
     def test_the_script_does_what_the_cases_say(self) -> None:
         self.assertEqual(problems_of(SCRIPT.read_text()), [])
+
+    def test_a_stub_that_cannot_use_the_service_fails_and_prints_nothing_old(self) -> None:
+        """A stub ends non-zero when its request is not written, no acknowledgement comes, or the reply
+        cannot be read whole, and it never prints what an earlier call left in `reply`. The transport is
+        made of plain files and directories, so that each step fails by itself and no step waits."""
+        stale = "0\n1\nstale success\n"
+        file, directory, absent = "file", "directory", "absent"
+        # step -> (request, answer, reply), each a file, a directory, absent, or the text of a file
+        steps = {
+            "the request cannot be written": (directory, "\n", stale),
+            "the acknowledgement cannot be read": (file, directory, stale),
+            "the acknowledgement is at end of file": (file, "", stale),
+            "the reply is a directory": (file, "\n", directory),
+            "the reply is absent": (file, "\n", absent),
+            "the reply is empty": (file, "\n", ""),
+            "the reply has no line count": (file, "\n", "0\n"),
+            "the status is not a number": (file, "\n", "x\n0\n"),
+            "the line count is not a number": (file, "\n", "0\nmany\nstale success\n"),
+            "the reply ends before its lines": (file, "\n", "0\n3\nstale success\n"),
+        }
+        for step, (request, answer, reply) in steps.items():
+            with self.subTest(step), tempfile.TemporaryDirectory(prefix="wifi-stub-transport-") as scratch:
+                guest = Guest(Path(scratch), "", False, False, False)
+                for name, kind in (("request", request), ("answer", answer), ("reply", reply)):
+                    path = guest.state / name
+                    if kind == directory:
+                        path.mkdir()
+                    elif kind != absent:
+                        path.write_text("" if kind == file else kind)
+                done = subprocess.run(
+                    [str(guest.stubs / "cmd"), "wifi", "list-networks"], check=False, stdin=subprocess.DEVNULL,
+                    capture_output=True, text=True, timeout=30)
+                self.assertNotEqual(done.returncode, 0, done)
+                if reply != "0\n3\nstale success\n":    # a reply cut short may print the lines it has
+                    self.assertEqual(done.stdout, "", done)
+                self.assertNotIn("stale success", done.stderr, done)
 
     def test_the_test_bites(self) -> None:
         text = SCRIPT.read_text()
