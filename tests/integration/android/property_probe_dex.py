@@ -169,9 +169,12 @@ class Code:
         self.items.append((mnemonic, *operands))
 
 
-# mnemonic -> (opcode, format). Formats: 10x 11n 11x 21c 21t 20t 22c 23x 35c.
+# mnemonic -> (opcode, format). Formats: 10x 11n 11x 12x 21c 21t 20t 22c 23x 35c.
 OPCODES = {
     "return-void": (0x0E, "10x"),
+    "return": (0x0F, "11x"),
+    "return-object": (0x11, "11x"),
+    "array-length": (0x21, "12x"),
     "const/4": (0x12, "11n"),
     "const-string": (0x1A, "21c-string"),
     "new-instance": (0x22, "21c-type"),
@@ -188,7 +191,7 @@ OPCODES = {
     "invoke-static": (0x71, "35c"),
     "invoke-interface": (0x72, "35c"),
 }
-SIZES = {"10x": 1, "11n": 1, "11x": 1, "21c-string": 2, "21c-type": 2, "22c-type": 2, "21t": 2, "20t": 2, "23x": 2, "35c": 3}
+SIZES = {"10x": 1, "11n": 1, "11x": 1, "12x": 1, "21c-string": 2, "21c-type": 2, "22c-type": 2, "21t": 2, "20t": 2, "23x": 2, "35c": 3}
 
 
 def assemble(code: Code, pools: Pools) -> bytes:
@@ -214,6 +217,8 @@ def assemble(code: Code, pools: Pools) -> bytes:
             units.append((literal & 0xF) << 12 | register << 8 | opcode)
         elif form == "11x":
             units.append(operands[0] << 8 | opcode)
+        elif form == "12x":
+            units.append(operands[1] << 12 | operands[0] << 8 | opcode)
         elif form == "21c-string":
             units += [operands[0] << 8 | opcode, pools.string_id(operands[1])]
         elif form == "21c-type":

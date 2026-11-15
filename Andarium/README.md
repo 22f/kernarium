@@ -1143,7 +1143,7 @@ is on. `AndariumCore/Adb` speaks the protocol.
   colour, and a title of its own (`ApkInstallOutcome.words`).
 - **Old app compatibility** (Settings > Apps) makes Android run one app built
   for an Android before 4.0 more like the older versions did, for an app that
-  closes as soon as it opens. The image's `kernarium_oldapp` command lists the
+  crashes. The image's `kernarium_oldapp` command lists the
   installed apps it can apply to and writes the switch
   ([`android/lineage-24`](../android/lineage-24/README.md)); `OldAppCompatibility`
   in `AndariumCore` is the only code that knows its words and its output, and
