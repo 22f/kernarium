@@ -66,6 +66,12 @@ struct World {
     int critical = 0;                // open critical regions of the fake runtime
     int set_calls = 0;               // SetByteArrayRegion calls that reached the runtime
     std::vector<std::vector<uint8_t>> seen_arrays;  // the bytes of every array argument when the call ran
+    struct LogLine {
+        std::string message;
+        long a, b;
+    };
+    std::vector<LogLine> logs;  // what the layer logged
+    uint32_t clock_ms = 1000;   // the layer's clock
 };
 World world;
 
@@ -113,7 +119,8 @@ void* fake_thread_state(size_t size) {
     }
     return t_block;
 }
-void fake_log(const char*, long, long) {}
+void fake_log(const char* message, long a, long b) { world.logs.push_back({message, a, b}); }
+uint32_t fake_now() { return world.clock_ms; }
 bool g_writable_ok = true;
 bool g_read_only_ok = true;
 bool fake_make_writable(void*, size_t) { return g_writable_ok; }
@@ -143,7 +150,7 @@ bool fake_describe(Env*, void* const*, void* id, bool, jobject, char* kinds, uns
     return true;
 }
 const Platform kPlatform{fake_is_app, fake_thread_state, fake_log, fake_make_writable, fake_make_read_only,
-                         fake_describe};
+                         fake_describe, fake_now};
 
 jsize f_GetArrayLength(Env*, jarray a) { return static_cast<jsize>(object_of(a)->bytes.size()); }
 jobject f_NewByteArray(Env*, jsize n) { return byte_array(std::vector<uint8_t>(static_cast<size_t>(n), 0)); }
@@ -1211,6 +1218,65 @@ void check_limits_without_recycling() {
     require(static_cast<const uint8_t*>(big.shadow)[16] == 7, "and the first is untouched");
 }
 
+// The diagnosis lines: the first declined shadow (with what the thread holds) and the most blocks a thread has held,
+// at most once every 30 s while it grows.
+size_t log_count(const char* part) {
+    size_t n = 0;
+    for (const auto& line : world.logs) n += line.message.find(part) != std::string::npos;
+    return n;
+}
+void check_diagnosis_lines() {
+    Fixture f = make();
+    require(log_count("byte[] blocks") == 0 && log_count("stayed a real reference") == 0, "nothing logged before a shadow");
+    std::vector<Made> held;
+    held.push_back(make_shadow_of(f, sample(100)));
+    require(log_count("most live byte[] blocks") == 1 && world.logs.back().a == 1, "the first shadow logs the peak: 1");
+    for (int i = 0; i < 20; ++i) held.push_back(make_shadow_of(f, sample(100)));
+    require(log_count("most live byte[] blocks") == 1, "growing within 30 s logs nothing more");
+    world.clock_ms += 29999;
+    held.push_back(make_shadow_of(f, sample(100)));
+    require(log_count("most live byte[] blocks") == 1, "29.999 s later still nothing");
+    world.clock_ms += 1;
+    held.push_back(make_shadow_of(f, sample(100)));
+    require(log_count("most live byte[] blocks") == 2 && world.logs.back().a == 23 && world.logs.back().b == 23,
+            "after 30 s the peak is logged: 23 blocks, 23 live in the process");
+    world.clock_ms += 60000;
+    fn<void (*)(Env*, jobject)>(*f.table, slot::DeleteLocalRef)(f.env, held[3].shadow);
+    held.push_back(make_shadow_of(f, sample(100)));
+    require(log_count("most live byte[] blocks") == 2, "a thread's count that does not exceed the peak is not a change");
+    const size_t before_filling = log_count("most live byte[] blocks");
+    while (counters().shadows_live < 512) held.push_back(make_shadow_of(f, sample(100)));
+    require(log_count("stayed a real reference") == 0, "512 blocks are all shadows");
+    require(log_count("most live byte[] blocks") == before_filling + 1, "the first one above the logged peak logged it, the rest are within 30 s");
+    Made refused = make_shadow_of(f, sample(100));
+    require(!is_shadow_block(refused.shadow) && log_count("stayed a real reference") == 1, "the first declined shadow logs once");
+    for (const auto& line : world.logs) {
+        if (line.message.find("stayed a real reference") != std::string::npos) {
+            require(line.message.find("thread limit") != std::string::npos && line.a == 512 && line.b == 512 * 100,
+                    "with the reason and the thread's block count and bytes");
+        }
+    }
+    make_shadow_of(f, sample(100));
+    require(log_count("stayed a real reference") == 1, "a second declined shadow logs nothing");
+    world.clock_ms += 30000;
+    fn<void (*)(Env*, jobject)>(*f.table, slot::DeleteLocalRef)(f.env, held[4].shadow);
+    make_shadow_of(f, sample(100));
+    require(log_count("most live byte[] blocks") == before_filling + 2 && world.logs.back().a == 512,
+            "and the peak of 512 is logged after 30 s");
+    // The region is the other reason, and a new process logs again.
+    Fixture g = make();
+    world.clock_ms = 5;
+    Made big = make_shadow_of(g, std::vector<uint8_t>(1500000, 7));
+    Made too_big = make_shadow_of(g, std::vector<uint8_t>(1500000, 8));
+    require(is_shadow_block(big.shadow) && !is_shadow_block(too_big.shadow), "the region holds one");
+    require(log_count("no room in the region") == 1, "the region's refusal is named");
+    for (const auto& line : world.logs) {
+        if (line.message.find("no room in the region") != std::string::npos) {
+            require(line.a == 1 && line.b == 1500000, "with the thread's one block of 1500000 bytes");
+        }
+    }
+}
+
 // A thread ends: its blocks wait for an environment, then go with their global references.
 void check_thread_end() {
     Fixture f = make();
@@ -1320,6 +1386,7 @@ int main(int argc, char** argv) {
     check_critical_pair_inside_a_region();
     check_critical_entries_do_not_drain();
     check_limits_without_recycling();
+    check_diagnosis_lines();
     check_thread_end();
     check_pop_local_frame();
     check_install_rules();

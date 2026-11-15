@@ -40,6 +40,8 @@ struct Platform {
     // `hint` is a class the method can be asked about. Returns false when it cannot say.
     bool (*describe_method)(jni::Env* env, void* const* original_table, void* method_id, bool is_static,
                             jni::jobject hint, char* kinds, unsigned capacity, unsigned* count);
+    // A monotonic clock in milliseconds (it may wrap): the rate limit of the diagnosis lines. Null: no limit.
+    uint32_t (*now_ms)();
 };
 
 struct Counters {
@@ -48,6 +50,7 @@ struct Counters {
     uint32_t shadows_declined;   // a result that stayed the real reference: the thread's or the region's limit
     uint32_t conversions;        // shadows turned back into the real array for the runtime
     uint32_t shadows_released;   // blocks of ended threads that were freed later
+    uint32_t peak_thread_blocks; // the most live blocks any one thread has held
 };
 
 // `table` is the shared function table (kSlotCount entries), `shadow_region` the memory of the byte[]

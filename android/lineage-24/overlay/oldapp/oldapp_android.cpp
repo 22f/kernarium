@@ -45,6 +45,7 @@ int oldapp_pthread_key_create(int*, void (*)(void*)) __asm__("pthread_key_create
 void* oldapp_pthread_getspecific(int) __asm__("pthread_getspecific");
 int oldapp_pthread_setspecific(int, const void*) __asm__("pthread_setspecific");
 int oldapp_log_print(int, const char*, const char*, ...) __asm__("__android_log_print");
+int oldapp_clock_gettime(int, long*) __asm__("clock_gettime");  // struct timespec is two longs on bionic
 
 // bionic's struct dl_phdr_info, 32-bit layout.
 struct OldappPhdrInfo {
@@ -83,11 +84,30 @@ bool g_installed = false;
 
 void log_line(const char* message, long a, long b) { oldapp_log_print(kLogInfo, kTag, "%s %ld %ld", message, a, b); }
 
+uint32_t now_ms() {
+    long now[2] = {0, 0};
+    oldapp_clock_gettime(1, now);  // CLOCK_MONOTONIC
+    return static_cast<uint32_t>(now[0]) * 1000u + static_cast<uint32_t>(now[1] / 1000000);
+}
+
+// The first allocation the arena could not serve: one log line, for the sessions of real games.
+uint32_t g_fallback_logged = 0;
+void note_fallback(size_t requested) {
+    if (__atomic_exchange_n(&g_fallback_logged, 1u, __ATOMIC_RELAXED) == 0) {
+        log_line("the low arena has no room: an allocation went to libc; bytes requested and in use:",
+                 static_cast<long>(requested), static_cast<long>(g_arena.bytes_in_use()));
+    }
+}
+
 // ---- the allocator the old libraries are pointed at
 
 void* low_malloc(size_t size) {
     void* pointer = g_arena.allocate(size);
-    return pointer != nullptr ? pointer : oldapp_malloc(size);
+    if (pointer != nullptr) {
+        return pointer;
+    }
+    note_fallback(size);
+    return oldapp_malloc(size);
 }
 void low_free(void* pointer) {
     if (pointer == nullptr) {
@@ -107,6 +127,7 @@ void* low_calloc(size_t count, size_t size) {
     }
     void* pointer = g_arena.allocate(bytes);
     if (pointer == nullptr) {
+        note_fallback(bytes);
         return oldapp_calloc(count, size);
     }
     __builtin_memset(pointer, 0, bytes);
@@ -120,6 +141,7 @@ size_t low_usable_size(void* pointer) {
 }
 // A block of the arena that outgrows it moves out to libc; the caller owns the new block as it owned the old.
 void* grow_out_of_arena(void* pointer, size_t size) {
+    note_fallback(size);
     void* outside = oldapp_malloc(size);
     if (outside != nullptr) {
         const size_t old = g_arena.usable_size(pointer);
@@ -139,6 +161,7 @@ void* low_realloc(void* pointer, size_t size) {
     }
     void* inside = g_arena.allocate(size);
     if (inside == nullptr) {
+        note_fallback(size);
         return oldapp_realloc(pointer, size);
     }
     const size_t old = oldapp_usable_size(pointer);
@@ -793,7 +816,7 @@ extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void* vm_pointe
     } else {
         oldapp_log_print(kLogWarn, kTag, "no region below 2 GiB: allocator imports are left alone");
     }
-    const Platform platform{is_app_caller, thread_state, log_line, make_writable, make_read_only, describe_method};
+    const Platform platform{is_app_caller, thread_state, log_line, make_writable, make_read_only, describe_method, now_ms};
     refresh_modules(true);  // every library the application loaded before this one
     void** table = const_cast<void**>(env->functions);
     const bool jni_ok = install_jni_wrappers(table, platform, region != nullptr ? region + kArenaBytes : nullptr,

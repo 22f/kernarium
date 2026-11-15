@@ -74,6 +74,7 @@ struct MethodInfo {
 struct ThreadState {
     BlockHeader* blocks[kMaxBlocks];
     unsigned count;
+    uint32_t bytes;  // the capacity of the live blocks
 };
 
 struct Globals {
@@ -87,6 +88,9 @@ struct Globals {
     const uint8_t* shadow_lo;
     const uint8_t* shadow_hi;
     BlockHeader* pending;  // blocks of ended threads, waiting for an environment
+    uint32_t declined_logged;  // the first declined shadow of the process has been logged
+    uint32_t peak_logged;      // the highest block count that has been logged, and when
+    uint32_t peak_logged_ms;
     uint32_t lock;
     uint32_t kind_pool_used;
     char kind_pool[kKindPoolBytes];
@@ -372,13 +376,54 @@ R call_synced(Env* env, BlockHeader* const* touched, unsigned count, F&& call) {
     }
 }
 
+// The diagnosis lines of the log (the sessions of real games read them): the first result that stayed the real
+// reference, with the blocks and bytes the thread held, and the most blocks any thread has held, at most every
+// kPeakLogMs while it grows.
+constexpr uint32_t kPeakLogMs = 30000;
+
+void note_declined(const ThreadState* state, const char* why) {
+    ++g.counters.shadows_declined;
+    if (g.platform.log != nullptr && __atomic_exchange_n(&g.declined_logged, 1u, __ATOMIC_RELAXED) == 0) {
+        g.platform.log(why, state != nullptr ? static_cast<long>(state->count) : 0,
+                       state != nullptr ? static_cast<long>(state->bytes) : 0);
+    }
+}
+
+void note_peak(uint32_t blocks) {
+    uint32_t peak = __atomic_load_n(&g.counters.peak_thread_blocks, __ATOMIC_RELAXED);
+    while (blocks > peak && !__atomic_compare_exchange_n(&g.counters.peak_thread_blocks, &peak, blocks, true,
+                                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+    }
+    if (blocks > peak) {
+        peak = blocks;
+    }
+    uint32_t logged = __atomic_load_n(&g.peak_logged, __ATOMIC_RELAXED);
+    if (g.platform.log == nullptr || peak == logged) {
+        return;
+    }
+    const uint32_t now = g.platform.now_ms != nullptr ? g.platform.now_ms() : 0;
+    if (logged != 0 && g.platform.now_ms != nullptr &&
+        now - __atomic_load_n(&g.peak_logged_ms, __ATOMIC_RELAXED) < kPeakLogMs) {
+        return;
+    }
+    if (__atomic_compare_exchange_n(&g.peak_logged, &logged, peak, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+        __atomic_store_n(&g.peak_logged_ms, now, __ATOMIC_RELAXED);
+        g.platform.log("most live byte[] blocks one thread has held; blocks live in the process:", peak,
+                       static_cast<long>(live_shadows()));
+    }
+}
+
 // A shadow for the real local reference `local`, which it replaces: the block holds a global reference to the
 // array, the local reference is deleted. Null when the thread already has the limit or the region is full: the
 // caller keeps the real reference, as it would without the layer.
 jobject make_shadow(Env* env, jobject local) {
     ThreadState* state = thread();
-    if (state == nullptr || state->count >= kMaxBlocks) {
-        ++g.counters.shadows_declined;
+    if (state == nullptr) {
+        note_declined(state, "the first byte[] result stayed a real reference (no thread state); blocks and bytes held:");
+        return nullptr;
+    }
+    if (state->count >= kMaxBlocks) {
+        note_declined(state, "the first byte[] result stayed a real reference (thread limit); blocks and bytes held:");
         return nullptr;
     }
     const jsize length = original<jsize (*)(Env*, jarray)>(slot::GetArrayLength)(env, local);
@@ -390,13 +435,13 @@ jobject make_shadow(Env* env, jobject local) {
                         sizeof(uint32_t) * chunk_count(bytes);
     uint8_t* raw = static_cast<uint8_t*>(g.shadow_arena.allocate(need));
     if (raw == nullptr) {
-        ++g.counters.shadows_declined;
+        note_declined(state, "the first byte[] result stayed a real reference (no room in the region); blocks and bytes held:");
         return nullptr;
     }
     jobject global = original<jobject (*)(Env*, jobject)>(slot::NewGlobalRef)(env, local);
     if (global == nullptr) {
         g.shadow_arena.release(raw);
-        ++g.counters.shadows_declined;
+        note_declined(state, "the first byte[] result stayed a real reference (no global reference); blocks and bytes held:");
         return nullptr;
     }
     BlockHeader* header = reinterpret_cast<BlockHeader*>(raw);
@@ -416,9 +461,11 @@ jobject make_shadow(Env* env, jobject local) {
     __builtin_memset(block->data + bytes, 0, kBlockTail);
     stamp_all(header);
     state->blocks[state->count++] = header;
+    state->bytes += static_cast<uint32_t>(bytes);
     original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, local);
     __atomic_fetch_add(&g.counters.shadows_live, 1u, __ATOMIC_RELAXED);
     ++g.counters.shadows_created;
+    note_peak(state->count);
     return block;
 }
 
@@ -981,6 +1028,7 @@ void w_DeleteLocalRef(Env* e, jobject o) {
         for (unsigned i = state->count; i > 0; --i) {
             if (state->blocks[i - 1] == header) {
                 state->blocks[i - 1] = state->blocks[--state->count];
+                state->bytes -= header->capacity;
                 free_block(e, header);
                 return;
             }
@@ -1168,6 +1216,7 @@ void release_thread_state(void* state_pointer) {
         } while (!__atomic_compare_exchange_n(&g.pending, &head, header, true, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
     }
     state->count = 0;
+    state->bytes = 0;
 }
 
 Counters counters() { return g.counters; }

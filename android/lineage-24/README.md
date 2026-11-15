@@ -636,7 +636,11 @@ patches ART's one JNI function table in place and gives the application:
 Only the application's own code gets blocks: a caller is told apart by the
 mapping its return address is in, so the platform's libraries in the same
 process see the real arrays. Page protection is restored after each write, and
-a library whose pages cannot all be opened is left untouched.
+a library whose pages cannot all be opened is left untouched. The library logs
+under the tag `kernarium_oldapp` the first `byte[]` result that stayed ART's own
+reference (with the blocks and bytes its thread held), the first allocation
+that went to libc because the low arena had no room, and, at most every 30 s
+while it grows, the most blocks any one thread has held.
 
 The layer cannot cover: a native method that returns a block to Java (ART
 decodes the returned reference itself), which is why it is a per-application
