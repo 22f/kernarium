@@ -5,11 +5,13 @@
  * the whole run and the return when SP is aligned and every byte it reads
  * lies in one page the TLB holds, and otherwise runs the ordinary words
  * behind it. This test checks where the builder puts a head and what it
- * encodes; that the head does the run and the return itself,
- * through the site's cells and through the return ring; that a span across
- * two pages, a misaligned SP and a page the TLB does not hold each fall back
- * and end as the architecture says; that a fault inside the fallback resumes
- * at its instruction; and, over generated runs, that every block ends with
+ * encodes, up to the bounds of its operand fields; that the head does the
+ * run and the return itself, through the site's cells and through the return
+ * ring; that a span across two pages, a misaligned SP and a page the TLB does
+ * not hold each fall back and end as the architecture says; that a tagged SP
+ * falls back until the TLB holds its tagged page and then takes the head;
+ * that a fault inside the fallback resumes at its instruction; and, over
+ * generated runs, that every block ends with
  * the state an independent model of the instructions gives; in a counting
  * build, that execution histogram slot zero counts each instruction once on
  * either path. It also checks the builder's ring of group starts, which
@@ -41,6 +43,7 @@ extern "C" void uml_arm64_gadget_return_x30_cached();
 extern "C" void uml_arm64_gadget_return();
 extern "C" void uml_arm64_gadget_illegal();
 extern "C" void uml_arm64_gadget_nop();
+extern "C" void uml_arm64_gadget_yield();
 extern "C" void uml_arm64_gadget_run_epilogue_1_0();
 extern "C" void uml_arm64_gadget_run_epilogue_1_1();
 extern "C" void uml_arm64_gadget_run_epilogue_2_0();
@@ -90,6 +93,27 @@ constexpr std::uint32_t svc = 0xd400'0001U;
 /* A hint the virtual CPU, which has no pointer authentication, runs as a
  * NOP. */
 constexpr std::uint32_t autiasp = 0xd503'23bfU;
+/* The other hints of a function's frame code that it runs as a NOP, and one
+ * with an effect of its own. */
+constexpr std::uint32_t nop = 0xd503'201fU;
+constexpr std::uint32_t bti_c = 0xd503'245fU;
+constexpr std::uint32_t paciasp = 0xd503'233fU;
+[[maybe_unused]] constexpr std::uint32_t yield = 0xd503'203fU;
+constexpr std::array nop_hints{autiasp, nop, bti_c, paciasp};
+
+[[nodiscard]] bool is_nop_hint(std::uint32_t word) noexcept
+{
+	return std::ranges::find(nop_hints, word) != nop_hints.end();
+}
+
+/* Logical tag bits, which a guest that ignores the top byte of its data
+ * addresses may set in SP. */
+constexpr std::uint64_t tag = 0x5aULL << 56;
+
+[[nodiscard]] constexpr std::uint64_t untagged(std::uint64_t address) noexcept
+{
+	return address & 0x00ff'ffff'ffff'ffffULL;
+}
 
 enum class Mode : std::uint32_t {
 	offset = 0xa940'0000U,
@@ -139,6 +163,21 @@ enum class Mode : std::uint32_t {
 [[nodiscard]] constexpr std::uint32_t add_sp(unsigned immediate) noexcept
 {
 	return 0x9100'03ffU | (immediate << 10);
+}
+/* ADD SP, SP, #immediate, LSL #12. */
+[[nodiscard]] constexpr std::uint32_t add_sp_pages(unsigned immediate) noexcept
+{
+	return 0x9140'03ffU | (immediate << 10);
+}
+/* Near misses of the elements: LDTR, and LDR Xt, [SP, Xm]. */
+[[nodiscard, maybe_unused]] constexpr std::uint32_t ldtr(unsigned reg, int offset) noexcept
+{
+	return ldr9(reg, offset, 0x800U);
+}
+[[nodiscard, maybe_unused]] constexpr std::uint32_t ldr_register(unsigned reg,
+	unsigned index) noexcept
+{
+	return 0xf860'6800U | (index << 16) | (31U << 5) | reg;
 }
 
 /* Three host pages behind the guest pages low, high and beyond, with a
@@ -204,7 +243,8 @@ struct Expected final {
 	std::copy_n(start.registers.begin(), 31, out.registers.begin());
 	out.sp = start.sp;
 	const auto readable = [&](std::uint64_t address, std::uint64_t bytes) {
-		for (auto at = address; at < address + bytes; ++at) {
+		for (auto at = untagged(address); at < untagged(address) + bytes;
+		     ++at) {
 			if (at < low || at >= low + 3 * page_size ||
 			    !held[(at - low) / page_size])
 				return false;
@@ -213,7 +253,7 @@ struct Expected final {
 	};
 	for (std::size_t index = 0; index < run.size(); ++index) {
 		const auto word = run[index];
-		if (word == autiasp)
+		if (is_nop_hint(word))
 			continue;
 		if ((word & 0xff80'03ffU) == 0x9100'03ffU) {
 			out.sp += ((word >> 10) & 0xfffU) <<
@@ -264,6 +304,8 @@ struct Expected final {
 			out.fault = index;
 			return out;
 		}
+		/* The top byte of the address is a tag the guest ignores. */
+		address = untagged(address);
 		if (bytes == 8 && second != 31U) {
 			/* LDP of two W registers zero-extends each. */
 			const auto both = memory.get(address);
@@ -428,7 +470,7 @@ struct Placed final {
  * before the RET, which goes with the head. */
 [[nodiscard]] std::size_t groups_of(std::span<const std::uint32_t> run) noexcept
 {
-	return run.size() - (!run.empty() && run.back() == autiasp);
+	return run.size() - (!run.empty() && is_nop_hint(run.back()));
 }
 
 [[nodiscard]] gadgets::Program without_fallback(const gadgets::Program &program,
@@ -504,6 +546,19 @@ void group_starts()
 		require(starts[0] == 5 && starts[1] == words + 5);
 		require(starts.grouped(0, 2, words, 2 * words + 5));
 	}
+}
+
+/* Runs at the bounds of the operand fields, from SP 32 KiB below the run's
+ * stack: one a head takes whole, and the same with SP at exit, then the
+ * first byte read, one step past its field. */
+const std::vector<std::vector<std::uint32_t>> &bound_runs()
+{
+	static const std::vector<std::vector<std::uint32_t>> all{
+		{add_sp_pages(8), ldp(29, 30, -16, Mode::pre), ret},
+		{add_sp_pages(8), ldp(29, 30, -8), ret},
+		{add_sp_pages(8), ldp(29, 30, -16, Mode::post), ret},
+	};
+	return all;
 }
 
 /* Where the builder puts a head and the operand words it writes. */
@@ -610,6 +665,25 @@ void structure()
 		require(placed && placed->at == 3 && placed->loads == 1);
 		require(built.program.words()[2] == address(uml_arm64_gadget_nop));
 	}
+	/* So does each other hint of frame code that runs as a NOP; one with an
+	 * effect of its own ends the run there. */
+	for (const auto hint : nop_hints) {
+		const std::array code{ldp(29, 30, 16, Mode::post), hint, ret};
+		const auto built = build(code_pc, code, &site);
+		const auto words = built.program.words();
+		require(words.size() == 2 + 2 + 2);
+		require(words[0] == address(uml_arm64_gadget_run_epilogue_1_0));
+		require(std::ranges::find(words, address(uml_arm64_gadget_nop)) ==
+			words.end());
+	}
+	{
+		const std::array code{ldp(29, 30, 16, Mode::post), yield, ret};
+		const auto built = build(code_pc, code, &site);
+		require(!head_of(built.program));
+		require(std::ranges::find(built.program.words(),
+			address(uml_arm64_gadget_yield)) !=
+			built.program.words().end());
+	}
 	/* What gets no head: X30 from a single load or as a pair's first
 	 * register, no X30 at all, a RET through another register, a block
 	 * built without indirect sites, and no load before the RET. */
@@ -629,18 +703,42 @@ void structure()
 		require(built.program.words()[2] == address(uml_arm64_gadget_return));
 	}
 	/* A run the head cannot do whole gets a head for the longest suffix it
-	 * can: behind a 32-bit pair, a register loaded twice, an SP the ordinary
-	 * gadget would fault on, and a second ADD SP. */
+	 * can: behind a 32-bit pair, a load into XZR as either register of a
+	 * pair, a register loaded twice, LDTR and a load from SP plus a
+	 * register, which are no elements, an SP the ordinary gadget would fault
+	 * on, and a second ADD SP. */
 	for (const auto &[code, at] :
 	     std::vector<std::pair<std::vector<std::uint32_t>, std::size_t>>{
 		     {{ldp32(19, 20, 16), ldp(29, 30, 32, Mode::post), ret}, 2},
+		     {{ldp(31, 19, 16), ldp(29, 30, 32, Mode::post), ret}, 2},
+		     {{ldp(19, 31, 16), ldp(29, 30, 32, Mode::post), ret}, 2},
 		     {{ldr(19, 16), ldr(19, 24), ldp(29, 30, 32, Mode::post),
 		       ret}, 2},
+		     {{ldtr(19, 16), ldp(29, 30, 16), ret}, 2},
+		     {{ldr_register(19, 1), ldp(29, 30, 32, Mode::post), ret}, 2},
 		     {{add_sp(8), ldp(29, 30, 16, Mode::post), ret}, 2},
 		     {{add_sp(16), add_sp(16), ldp(29, 30, 16, Mode::post), ret},
 		      2}}) {
 		const auto placed = head_of(build(code_pc, code, &site).program);
 		require(placed && placed->at == at);
+	}
+	/* The bounds of the operand fields: SP 2047 units of 16 on at exit and
+	 * the first byte 4094 units of 8 above SP at entry are as far as a run
+	 * that keeps the one within its field reaches with the other; SP 2048
+	 * units on, or the first byte 4096 above, leaves the head the load
+	 * alone. */
+	{
+		const auto built = build(code_pc, bound_runs()[0], &site);
+		const auto placed = head_of(built.program);
+		require(placed && placed->at == 0 && placed->adds == 1);
+		require((built.program.words()[1] & ((std::uintptr_t{1} << 34) - 1)) ==
+			(std::uintptr_t{4094} | (std::uintptr_t{15} << 13) |
+			 (std::uintptr_t{2047} << 22)));
+	}
+	for (std::size_t index = 1; index < bound_runs().size(); ++index) {
+		const auto placed =
+			head_of(build(code_pc, bound_runs()[index], &site).program);
+		require(placed && placed->at == 2 && placed->adds == 0);
 	}
 #endif
 }
@@ -670,6 +768,12 @@ const std::vector<Case> &cases()
 		{"frame, then a hint", {ldp(28, 27, 0), ldp(26, 25, 16),
 			ldp(24, 23, 32), ldp(22, 21, 48), ldp(20, 19, 64),
 			ldp(29, 30, 80), add_sp(96), autiasp, ret}},
+		{"pair, then a NOP", {ldp(20, 19, 16),
+			ldp(29, 30, 32, Mode::post), nop, ret}},
+		{"pair, then BTI", {ldp(20, 19, 16),
+			ldp(29, 30, 32, Mode::post), bti_c, ret}},
+		{"pair, then PACIASP", {ldp(20, 19, 16),
+			ldp(29, 30, 32, Mode::post), paciasp, ret}},
 	};
 	return all;
 }
@@ -882,6 +986,71 @@ void head_returns(const Memory &memory)
 	memory.put(sp + 8, saved);
 }
 
+/* The runs at the bounds of the operand fields end as the model says, and
+ * the one a head takes whole does so with nothing behind its head. */
+void field_bounds(const Memory &memory)
+{
+	auto tlb = std::make_unique<::uml::memory::Tlb>();
+	hold(*tlb, memory, low);
+	hold(*tlb, memory, high);
+	for (const auto &code : bound_runs()) {
+		Site site;
+		const auto built = build(code_pc, code, &site);
+		const std::span run_words{code.data(), code.size() - 1};
+		const auto start = initial(low + 0x400 - 0x8000, code_pc);
+		const auto expected = model(run_words, start, memory,
+			{true, true, false});
+		require(!expected.fault);
+		check("a run at a field's bound", run(built.program, start, *tlb),
+			expected, code_pc, code.size(), &site);
+#if !UML_GADGET_EXECUTION_HISTOGRAM
+		if (head_of(built.program)->at == 0)
+			check("a run at a field's bound, without its fallback",
+				run(without_fallback(built.program,
+					groups_of(run_words)), start, *tlb),
+				expected, code_pc, code.size(), &site);
+#endif
+	}
+}
+
+/* A tagged SP, in an address space whose data addresses ignore their top
+ * byte: SP-based transfers key the TLB by the tagged address, and the head
+ * probes it as they do. The TLB first holds each page under its untagged
+ * key, which the head misses, so the first run falls back, and the
+ * ordinary words' miss keys the entry by the tagged page
+ * (memory::Tlb::translate_tagged); the next run finds it and the head does
+ * the run. Every run ends as the model says. */
+void tagged_sp(const Memory &memory)
+{
+	for (const auto &item : cases()) {
+		const auto start = initial(tag | (low + 0x200), code_pc);
+		const auto expected =
+			model(run_of(item), start, memory, {true, true, false});
+		require(!expected.fault && (expected.sp & ~untagged(~0ULL)) == tag);
+		Site site;
+		const auto built = build(code_pc, item.code, &site);
+		auto tlb = std::make_unique<::uml::memory::Tlb>();
+		tlb->tagged_addresses = true;
+		hold(*tlb, memory, low);
+		hold(*tlb, memory, high);
+#if !UML_GADGET_EXECUTION_HISTOGRAM
+		const auto bare =
+			without_fallback(built.program, groups_of(run_of(item)));
+		const auto cold = run(bare, start, *tlb);
+		require(cold.event == ::uml::cpu::EngineEvent::illegal_instruction &&
+			cold.cpu.pc == 0xdead'0000U);
+#endif
+		check(item.what, run(built.program, start, *tlb), expected,
+			code_pc, item.code.size(), &site);
+#if !UML_GADGET_EXECUTION_HISTOGRAM
+		check(item.what, run(bare, start, *tlb), expected, code_pc,
+			item.code.size(), &site);
+#endif
+		check(item.what, run(built.program, start, *tlb), expected,
+			code_pc, item.code.size(), &site);
+	}
+}
+
 /* Generated runs of every element form, broken by 32-bit pairs, some with a
  * hint before the RET, at SPs across, below and above the held pages and
  * misaligned ones, against the model. */
@@ -950,7 +1119,7 @@ void generated_runs(const Memory &memory)
 			}
 		}
 		if (next(3) == 0)
-			code.push_back(autiasp);
+			code.push_back(nop_hints[next(nop_hints.size())]);
 		code.push_back(ret);
 		std::uint64_t sp = low + 16 * next(3 * page_size / 16);
 		if (next(16) == 0)
@@ -991,6 +1160,8 @@ int main()
 	head_falls_back(memory);
 	fault_and_resume(memory);
 	head_returns(memory);
+	field_bounds(memory);
+	tagged_sp(memory);
 	generated_runs(memory);
 	std::puts("arm64-gadget-run-heads: ok");
 	return 0;

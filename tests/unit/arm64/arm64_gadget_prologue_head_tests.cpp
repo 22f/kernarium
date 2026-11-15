@@ -3,12 +3,14 @@
  * at most one SUB SP and one ADD X29, SP begins with a head, which does the
  * whole run when SP is aligned and every byte it writes lies in one page the
  * TLB holds for writing, and otherwise runs the ordinary words behind it.
- * This test checks where the builder puts a head and what it encodes; that
- * the head does the run itself and leaves nothing forwarded into the
- * instruction after it; that a span across two pages, a misaligned SP, a page
- * the TLB does not hold, a page it holds only for reading and a guard page
- * below the stack each fall back and end as the architecture says, with
- * every byte of memory; that a fault inside the fallback, in the ordinary
+ * This test checks where the builder puts a head and what it encodes, up to
+ * the bounds of its operand fields; that the head does the run itself and
+ * leaves nothing forwarded into the instruction after it; that a span across
+ * two pages, a misaligned SP, a page the TLB does not hold, a page it holds
+ * only for reading and a guard page below the stack each fall back and end as
+ * the architecture says, with every byte of memory; that a tagged SP falls
+ * back until the TLB holds its tagged page and then takes the head; that a
+ * fault inside the fallback, in the ordinary
  * path and in the slow path of a pair across two pages, resumes at its
  * instruction; that a block with a prologue head and an epilogue head runs
  * both; over generated runs, that every block ends with the state and
@@ -82,6 +84,15 @@ constexpr std::size_t pages = 3;
 constexpr std::uint32_t svc = 0xd400'0001U;
 constexpr std::uint32_t ret = 0xd65f'03c0U;
 
+/* Logical tag bits, which a guest that ignores the top byte of its data
+ * addresses may set in SP. */
+constexpr std::uint64_t tag = 0x5aULL << 56;
+
+[[nodiscard]] constexpr std::uint64_t untagged(std::uint64_t address) noexcept
+{
+	return address & 0x00ff'ffff'ffff'ffffULL;
+}
+
 enum class Mode : std::uint32_t {
 	offset = 0xa900'0000U,
 	pre = 0xa980'0000U,
@@ -118,6 +129,21 @@ enum class Mode : std::uint32_t {
 [[nodiscard]] constexpr std::uint32_t sub_sp(unsigned immediate) noexcept
 {
 	return 0xd100'03ffU | (immediate << 10);
+}
+/* SUB SP, SP, #immediate, LSL #12. */
+[[nodiscard]] constexpr std::uint32_t sub_sp_pages(unsigned immediate) noexcept
+{
+	return 0xd140'03ffU | (immediate << 10);
+}
+/* Near misses of the elements: STTR, and STR Xt, [SP, Xm]. */
+[[nodiscard, maybe_unused]] constexpr std::uint32_t sttr(unsigned reg, int offset) noexcept
+{
+	return str9(reg, offset, 0x800U);
+}
+[[nodiscard, maybe_unused]] constexpr std::uint32_t str_register(unsigned reg,
+	unsigned index) noexcept
+{
+	return 0xf820'6800U | (index << 16) | (31U << 5) | reg;
 }
 [[nodiscard]] constexpr std::uint32_t add_x29(unsigned immediate) noexcept
 {
@@ -234,7 +260,9 @@ struct Expected final {
 	std::copy_n(start.registers.begin(), 31, out.registers.begin());
 	out.sp = start.sp;
 	out.memory = pattern();
+	/* The top byte of an address is a tag the guest ignores. */
 	const auto writable = [&](std::uint64_t at, std::uint64_t bytes) {
+		at = untagged(at);
 		for (auto byte = at; byte < at + bytes; ++byte)
 			if (byte < low || byte >= low + pages * page_size ||
 			    holding[(byte - low) / page_size] != Held::write)
@@ -246,7 +274,7 @@ struct Expected final {
 	};
 	const auto put = [&](std::uint64_t at, std::uint64_t data,
 				 std::size_t bytes) {
-		std::memcpy(out.memory.data() + (at - low), &data, bytes);
+		std::memcpy(out.memory.data() + (untagged(at) - low), &data, bytes);
 	};
 	for (std::size_t index = 0; index + 1 < code.size(); ++index) {
 		const auto word = code[index];
@@ -498,6 +526,38 @@ struct Placed final {
 }
 #endif
 
+/* A run at a bound of the operand fields, the SP it runs from, where the
+ * head goes, if anywhere, and for a head at the run's start its first
+ * operand word up to the stores. */
+struct Bound final {
+	std::vector<std::uint32_t> code;
+	std::uint64_t sp;
+	std::optional<std::size_t> at;
+	std::uintptr_t first;
+};
+
+const std::vector<Bound> &bound_runs()
+{
+	/* Span 0 to 15, X29 at the first byte. */
+	constexpr auto span = std::uintptr_t{15} << 10;
+	static const std::vector<Bound> all{
+		/* The first byte -512 units, SP -256 at exit. */
+		{{sub_sp_pages(1), stp(29, 30, 0), add_x29(0), after, svc},
+		 beyond + 0x400, 0, (std::uintptr_t{0x200}) | span |
+			 (std::uintptr_t{0x300} << 19)},
+		/* -514 units: the head takes the pair and the ADD X29 alone. */
+		{{sub_sp_pages(1), stp(29, 30, -16, Mode::pre), add_x29(0), after,
+		  svc}, beyond + 0x400, 2, 0},
+		/* SP -512 units at exit. */
+		{{stp(29, 30, 0), add_x29(0), sub_sp_pages(2), after, svc},
+		 high + 0x400, 0, span | (std::uintptr_t{0x200} << 19)},
+		/* -513 units: no suffix has a pair and the ADD X29. */
+		{{stp(29, 30, -16, Mode::pre), add_x29(0), sub_sp_pages(2), after,
+		  svc}, high + 0x400, std::nullopt, 0},
+	};
+	return all;
+}
+
 /* Where the builder puts a head and the operand words it writes. */
 void structure()
 {
@@ -570,8 +630,9 @@ void structure()
 		require(!head_of(build(code_pc, code).program));
 	}
 	/* What gets no head: no ADD X29, no pair, a run of one element, X29
-	 * stored after it is set, XZR stored, two single stores, and a block
-	 * built without indirect sites. */
+	 * stored after it is set, XZR stored as either register of a pair or as
+	 * the single, two single stores, and a block built without indirect
+	 * sites. */
 	for (const auto &code : std::vector<std::vector<std::uint32_t>>{
 		     {stp(29, 30, -16, Mode::pre), stp(19, 20, -16, Mode::pre),
 		      after, svc},
@@ -579,6 +640,9 @@ void structure()
 		     {add_x29(0), after, svc},
 		     {add_x29(0), stp(29, 30, -16, Mode::pre), after, svc},
 		     {stp(31, 30, -16, Mode::pre), add_x29(0), after, svc},
+		     {stp(29, 31, -16, Mode::pre), add_x29(0), after, svc},
+		     {stp(29, 30, -32, Mode::pre), str(31, 16), add_x29(0), after,
+		      svc},
 		     {stp(29, 30, -32, Mode::pre), str(19, 16), str(20, 24),
 		      add_x29(0), after, svc}}) {
 		require(!head_of(build(code_pc, code).program));
@@ -590,12 +654,17 @@ void structure()
 		require(!head_of(build(code_pc, code, false).program));
 	}
 	/* A run the head cannot do whole gets a head for the longest suffix it
-	 * can: behind a 32-bit pair, a seventh pair, an SP the ordinary gadget
+	 * can: behind a 32-bit pair, STTR and a store to SP plus a register,
+	 * which are no elements, a seventh pair, an SP the ordinary gadget
 	 * would fault on, and a second SUB SP. */
 	for (const auto &[code, at] :
 	     std::vector<std::pair<std::vector<std::uint32_t>, std::size_t>>{
 		     {{stp32(1, 2, -8), stp(29, 30, -16, Mode::pre), add_x29(0),
 		       after, svc}, 2},
+		     {{sttr(19, 16), stp(29, 30, -16, Mode::pre), add_x29(0),
+		       after, svc}, 2},
+		     {{str_register(19, 1), stp(29, 30, -16, Mode::pre),
+		       add_x29(0), after, svc}, 2},
 		     {{stp(0, 1, -16, Mode::pre), stp(2, 3, -16, Mode::pre),
 		       stp(4, 5, -16, Mode::pre), stp(6, 7, -16, Mode::pre),
 		       stp(19, 20, -16, Mode::pre), stp(21, 22, -16, Mode::pre),
@@ -612,6 +681,22 @@ void structure()
 		const std::array code{stp(29, 30, -16, Mode::pre), add_x29(0)};
 		const auto placed = head_of(build(code_pc, code).program);
 		require(placed && placed->at == 0);
+	}
+	/* The bounds of the operand fields: the first byte 512 units of 8 below
+	 * SP at entry, or SP 512 units of 16 below it at exit, is as far as a
+	 * head takes; one unit further leaves the head a suffix of the run, or
+	 * nothing. */
+	for (const auto &item : bound_runs()) {
+		const auto built = build(code_pc, item.code);
+		const auto placed = head_of(built.program);
+		if (!item.at) {
+			require(!placed);
+			continue;
+		}
+		require(placed && placed->at == *item.at);
+		if (item.first != 0)
+			require((built.program.words()[1] &
+				 ((std::uintptr_t{1} << 34) - 1)) == item.first);
 	}
 #endif
 }
@@ -848,6 +933,67 @@ void both_heads(const Memory &memory)
 	require(saved == start.registers[30]);
 }
 
+/* The runs at the bounds of the operand fields end as the model says, and
+ * those a head takes whole do so with nothing behind the head. */
+void field_bounds(const Memory &memory)
+{
+	for (const auto &item : bound_runs()) {
+		const auto built = build(code_pc, item.code);
+		const auto start = initial(item.sp, code_pc);
+		const auto expected = model(item.code, start, all_written);
+		require(!expected.fault);
+		memory.reset();
+		auto tlb = tlb_for(memory, all_written);
+		check("a run at a field's bound", run(built.program, start, *tlb),
+			expected, memory, code_pc, item.code.size());
+#if !UML_GADGET_EXECUTION_HISTOGRAM
+		if (item.at == 0) {
+			memory.reset();
+			check("a run at a field's bound, without its fallback",
+				run(without_fallback(built.program), start, *tlb),
+				expected, memory, code_pc, item.code.size());
+		}
+#endif
+	}
+}
+
+/* A tagged SP, in an address space whose data addresses ignore their top
+ * byte: SP-based transfers key the TLB by the tagged address, and the head
+ * probes it as they do. The TLB first holds each page under its untagged
+ * key, which the head misses, so the first run falls back, and the
+ * ordinary words' miss keys the write entry by the tagged page
+ * (memory::Tlb::translate_tagged); the next run finds it and the head does
+ * the run. Every run ends as the model says, with every byte of memory. */
+void tagged_sp(const Memory &memory)
+{
+	for (const auto &item : cases()) {
+		const auto built = build(code_pc, item.code);
+		const auto start = initial(tag | (low + 0x400), code_pc);
+		const auto expected = model(item.code, start, all_written);
+		require(!expected.fault && (expected.sp & ~untagged(~0ULL)) == tag);
+		auto tlb = tlb_for(memory, all_written);
+		tlb->tagged_addresses = true;
+#if !UML_GADGET_EXECUTION_HISTOGRAM
+		const auto bare = without_fallback(built.program);
+		memory.reset();
+		const auto cold = run(bare, start, *tlb);
+		require(cold.event == ::uml::cpu::EngineEvent::illegal_instruction &&
+			cold.cpu.pc == 0xdead'0000U && memory.same(pattern()));
+#endif
+		memory.reset();
+		check(item.what, run(built.program, start, *tlb), expected, memory,
+			code_pc, item.code.size());
+#if !UML_GADGET_EXECUTION_HISTOGRAM
+		memory.reset();
+		check(item.what, run(bare, start, *tlb), expected, memory, code_pc,
+			item.code.size());
+#endif
+		memory.reset();
+		check(item.what, run(built.program, start, *tlb), expected, memory,
+			code_pc, item.code.size());
+	}
+}
+
 /* Generated runs of every element form, broken by 32-bit pairs and other
  * instructions, at SPs across, below and above the held pages and misaligned
  * ones, with pages held for writing, for reading only or not at all, against
@@ -946,6 +1092,8 @@ int main()
 	head_falls_back(memory);
 	fault_and_resume(memory);
 	both_heads(memory);
+	field_bounds(memory);
+	tagged_sp(memory);
 	generated_runs(memory);
 	std::puts("arm64-gadget-prologue-heads: ok");
 	return 0;
