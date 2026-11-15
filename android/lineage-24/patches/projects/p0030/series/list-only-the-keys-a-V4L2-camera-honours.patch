@@ -54,10 +54,10 @@ index 4b21c5ab4e8f1c8239b35d0f90dcd0891c3848af..8738c6dd5eb4b33864e42b1e3d419f4f
        ALOGE("%s: No available tonemap modes!", __FUNCTION__);
        return BAD_VALUE;
 diff --git a/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp b/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
-index 61dfe4a449cee286fab33d7b44907321ceb0af1a..1965f8abe24ed95b84a6e92f5a53bf30c0b7d92f 100644
+index f4237ca777f78b4078eb9de9c868072a84daafec..b3fd28a51febec81356c5d87a45fcdaec86e6e89 100644
 --- a/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
 +++ b/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
-@@ -42,6 +42,19 @@ namespace {
+@@ -44,6 +44,19 @@ namespace {
  namespace abi = andarium::camera::abi;
  namespace plan = andarium::camera;
  
@@ -77,7 +77,7 @@ index 61dfe4a449cee286fab33d7b44907321ceb0af1a..1965f8abe24ed95b84a6e92f5a53bf30
  constexpr char kTemplateFile[] = "emu_camera_v4l2.json";
  
  template <typename T>
-@@ -250,7 +263,18 @@ status_t Specialize(const v4l2cam::CameraNodes& nodes, HalCameraMetadata* m) {
+@@ -286,7 +299,18 @@ status_t Specialize(const v4l2cam::CameraNodes& nodes, HalCameraMetadata* m) {
    } else {
      Put<uint8_t>(m, ANDROID_CONTROL_AF_AVAILABLE_MODES, {ANDROID_CONTROL_AF_MODE_OFF});
    }
