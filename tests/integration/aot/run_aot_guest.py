@@ -19,7 +19,10 @@ Checked:
   others are compared for each fault;
 - with --diagnostics (a framework built with UML_AOT_DIAGNOSTICS, which writes
   the report named by DARWIN_UML_AOT_REPORT): the AOT arm entered rewritten
-  code, and the arm with the component off did not.
+  code, and the arm with the component off did not. With --manifest the
+  report is printed per library, and every library named by --expect-entered
+  was entered at all: a library the guest runs but the component never
+  enters is a result, not a quiet zero.
 
 The seconds each workload took in each arm are printed, not judged: speed is
 measured by the campaign that owns it, on a quiet host.
@@ -34,6 +37,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import json
 import os
 import pathlib
 import re
@@ -193,15 +197,35 @@ def compare_probe(first: str, second: str, aot: str) -> int:
 
 
 def read_report(path: pathlib.Path) -> dict[str, int]:
+    """The counters of the report, flat: `enters`, `find.hit`,
+    `cross_miss.unbound`, `library.3.enters`, ..."""
     values: dict[str, int] = {}
-    if path.is_file():
-        for line in path.read_text(errors="replace").splitlines():
-            fields = line.split()
-            if fields and fields[0] == "binds":
-                values = {fields[i]: int(fields[i + 1])
-                          for i in range(0, len(fields) - 1, 2)}
-                break
+    if not path.is_file():
+        return values
+    for line in path.read_text(errors="replace").splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        head, rest = fields[0], fields[1:]
+        prefix = ""
+        if head == "library" and rest:
+            prefix, rest = f"library.{rest[0]}.", rest[1:]
+        elif head in ("find", "cross_miss", "refused"):
+            prefix = head + "."
+        elif head in ("binds", "max_retired"):
+            rest = fields
+        else:
+            continue
+        for key, number in zip(rest[0::2], rest[1::2]):
+            if number.isdigit():
+                values[prefix + key] = int(number)
     return values
+
+
+def library_names(manifest: pathlib.Path) -> list[str]:
+    """The guest path of each library of the framework, by report index."""
+    return [library["path"] for library in
+            json.loads(manifest.read_text())["libraries"]]
 
 
 class Arm:
@@ -314,6 +338,36 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
         print("report: enters {enters}, steps {steps}, poisoned {poisoned}, "
               "refills {refills}".format(**{k: on.report.get(k, 0) for k in (
                   "enters", "steps", "poisoned", "refills")}))
+        report_libraries(on.report, options)
+
+
+def report_libraries(report: dict[str, int],
+                     options: argparse.Namespace) -> None:
+    """Print what happened to each library and require the expected ones to
+    have been entered."""
+    if options.manifest is None:
+        return
+    names = library_names(options.manifest)
+    print("find: " + ", ".join(f"{key[5:]} {value}" for key, value in
+                               sorted(report.items())
+                               if key.startswith("find.")))
+    print("cross-library misses: " + ", ".join(
+        f"{key[11:]} {value}" for key, value in sorted(report.items())
+        if key.startswith("cross_miss.")))
+    entered = {}
+    for index, name in enumerate(names):
+        row = {key.split(".", 2)[2]: value for key, value in report.items()
+               if key.startswith(f"library.{index}.")}
+        entered[pathlib.PurePosixPath(name).name] = row.get("enters", 0)
+        if row:
+            print(f"library {index} {name}: " + ", ".join(
+                f"{key} {value}" for key, value in row.items() if value))
+    for wanted in options.expect_entered:
+        if wanted not in entered:
+            raise Failure(f"--expect-entered names {wanted}, which the "
+                          "framework does not cover")
+        if entered[wanted] == 0:
+            raise Failure(f"the AOT arm never entered {wanted}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -331,6 +385,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="the built guest probe (libaotprobe.so)")
     parser.add_argument("--diagnostics", action="store_true",
                         help="the framework is a diagnostics build")
+    parser.add_argument("--manifest", type=pathlib.Path,
+                        help="the framework's manifest.json, to name the "
+                        "libraries of the report")
+    parser.add_argument("--expect-entered", default="",
+                        type=lambda text: [n for n in text.split(",") if n],
+                        help="comma-separated library file names the AOT arm "
+                        "must have entered (with --diagnostics --manifest)")
     return parser
 
 

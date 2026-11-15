@@ -118,6 +118,25 @@ struct Directory final {
 
 std::atomic<int> g_state{-1};
 
+/* What Binder::find answered: an entry, or why it found none. */
+enum class FindResult : unsigned {
+	hit,
+	/* The page is not a page of a covered library (any other code, or
+	 * data). */
+	uncovered,
+	/* The page could not be read. */
+	not_ready,
+	/* The library instance holds bytes other than the framework's. */
+	poisoned,
+	/* The instance is not verified (a page unreadable, a retry pending). */
+	unverified,
+	/* A verified instance, but not an instruction the framework has an
+	 * entry for. */
+	no_entry,
+	/* The instance the page was bound to was replaced. */
+	stale,
+};
+
 #if UML_AOT_DIAGNOSTICS
 std::atomic<bool> g_refill_stress{false};
 std::atomic<void (*)(void *)> g_run_hook{nullptr};
@@ -158,6 +177,13 @@ std::atomic<void *> g_run_hook_context{nullptr};
 		  "v29", "v30", "v31", "cc");
 }
 
+[[nodiscard]] const char *find_result_name(std::size_t kind) noexcept
+{
+	constexpr const char *names[] = {"hit", "uncovered", "not_ready",
+		"poisoned", "unverified", "no_entry", "stale"};
+	return names[kind];
+}
+
 namespace counters {
 std::atomic<std::uint64_t> binds{0}, verifications{0}, pages_hashed{0},
 	unreadable{0}, poisoned{0}, enters{0}, steps{0}, retired{0}, refills{0},
@@ -171,11 +197,59 @@ std::array<std::atomic<std::uint64_t>, step_slots> step_key{};
 std::array<std::atomic<std::uint64_t>, step_slots> step_count{};
 std::array<std::atomic<std::uint64_t>, 64> library_enters{};
 std::array<std::atomic<std::uint64_t>, 64> library_steps{};
+/* What find() answered: an entry, or why not (FindResult), in all and per
+ * library where the answer names one; and what a cross-library lookup that
+ * found no entry looked at (CrossMiss). */
+std::array<std::atomic<std::uint64_t>, 7> find_results{};
+std::array<std::array<std::atomic<std::uint64_t>, 7>, 64> library_finds{};
+std::array<std::atomic<std::uint64_t>, 3> cross_miss_kinds{};
+std::array<std::atomic<std::uint64_t>, 64> library_cross_misses{};
 std::atomic<bool> reporter_started{false};
 } // namespace counters
 
 #define UML_AOT_COUNT(name, amount) \
 	counters::name.fetch_add((amount), std::memory_order_relaxed)
+
+constexpr std::uint32_t no_library = 0xffffffffU;
+
+void note_find(FindResult result, std::uint32_t library) noexcept
+{
+	counters::find_results[static_cast<std::size_t>(result)].fetch_add(
+		1, std::memory_order_relaxed);
+	if (library < 64)
+		counters::library_finds[library][static_cast<std::size_t>(result)]
+			.fetch_add(1, std::memory_order_relaxed);
+}
+
+/* The binder whose table the running vCPU thread's rewritten code uses. */
+thread_local const Binder *g_cross_owner = nullptr;
+thread_local unsigned long g_cross_generation = 0;
+
+/* A cross-library lookup found no entry: inside a verified library but
+ * not at an instruction it has one for (2), in a library instance the
+ * table does not hold (1; unverified, or not verified at this sequence),
+ * or in no instance this thread knows (0). */
+void note_cross_miss(const CrossTable *table, std::uint64_t address) noexcept
+{
+	std::size_t kind = 0;
+	std::uint32_t library = no_library;
+	for (std::uint64_t index = 0; index < table->count; ++index) {
+		const auto &entry = table->entries[index];
+		if (address >= entry.low && address < entry.high) {
+			kind = 2;
+			library = entry.library;
+			break;
+		}
+	}
+	std::uint64_t offset = 0;
+	if (kind == 0 && g_cross_owner != nullptr &&
+	    g_cross_owner->locate(g_cross_generation, address, library, offset))
+		kind = 1;
+	counters::cross_miss_kinds[kind].fetch_add(1, std::memory_order_relaxed);
+	if (library < 64)
+		counters::library_cross_misses[library].fetch_add(
+			1, std::memory_order_relaxed);
+}
 
 void note_step(std::uint64_t key) noexcept
 {
@@ -224,11 +298,31 @@ void write_report() noexcept
 	std::fprintf(file, "refused tbi %llu sp %llu exclusive %llu fp %llu\n",
 		get(counters::refusals[0]), get(counters::refusals[1]),
 		get(counters::refusals[2]), get(counters::refusals[3]));
-	for (std::size_t library = 0; library < 64; ++library)
-		if (get(counters::library_enters[library]) != 0)
-			std::fprintf(file, "library %zu enters %llu steps %llu\n", library,
-				get(counters::library_enters[library]),
-				get(counters::library_steps[library]));
+	std::fprintf(file, "find");
+	for (std::size_t kind = 0; kind < counters::find_results.size(); ++kind)
+		std::fprintf(file, " %s %llu", find_result_name(kind),
+			get(counters::find_results[kind]));
+	std::fprintf(file, "\ncross_miss uncovered %llu unbound %llu no_entry "
+		"%llu\n", get(counters::cross_miss_kinds[0]),
+		get(counters::cross_miss_kinds[1]),
+		get(counters::cross_miss_kinds[2]));
+	for (std::size_t library = 0; library < 64; ++library) {
+		const auto enters = get(counters::library_enters[library]);
+		unsigned long long finds = 0;
+		for (const auto &counter : counters::library_finds[library])
+			finds += get(counter);
+		const auto cross = get(counters::library_cross_misses[library]);
+		if (enters == 0 && finds == 0 && cross == 0)
+			continue;
+		std::fprintf(file, "library %zu enters %llu steps %llu cross_misses "
+			"%llu", library, enters, get(counters::library_steps[library]),
+			cross);
+		for (std::size_t kind = 0;
+		     kind < counters::library_finds[library].size(); ++kind)
+			std::fprintf(file, " %s %llu", find_result_name(kind),
+				get(counters::library_finds[library][kind]));
+		std::fprintf(file, "\n");
+	}
 	for (std::size_t slot = 0; slot < counters::step_slots; ++slot) {
 		const auto count = get(counters::step_count[slot]);
 		if (count != 0) {
@@ -257,6 +351,8 @@ void start_reporter() noexcept
 }
 #else
 #define UML_AOT_COUNT(name, amount) ((void)0)
+inline void note_find(FindResult, std::uint32_t) noexcept {}
+constexpr std::uint32_t no_library = 0xffffffffU;
 #endif
 
 [[nodiscard]] bool environment_enabled() noexcept
@@ -326,6 +422,9 @@ Target lookup(const CrossTable *table, std::uint64_t address) noexcept
 		return {uml_aot_blob + library.unit_offset + native, entry.bias};
 	}
 	UML_AOT_COUNT(cross_misses, 1);
+#if UML_AOT_DIAGNOSTICS
+	note_cross_miss(table, address);
+#endif
 	return {};
 }
 
@@ -440,6 +539,15 @@ void reset_stats() noexcept
 		     &counters::history_queries})
 		counter->store(0, std::memory_order_relaxed);
 	for (auto &counter : counters::refusals)
+		counter.store(0, std::memory_order_relaxed);
+	for (auto &counter : counters::find_results)
+		counter.store(0, std::memory_order_relaxed);
+	for (auto &row : counters::library_finds)
+		for (auto &counter : row)
+			counter.store(0, std::memory_order_relaxed);
+	for (auto &counter : counters::cross_miss_kinds)
+		counter.store(0, std::memory_order_relaxed);
+	for (auto &counter : counters::library_cross_misses)
 		counter.store(0, std::memory_order_relaxed);
 }
 
@@ -624,24 +732,33 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 		UML_AOT_COUNT(binds, 1);
 		const auto answer =
 			resolve(memory, context, generation, code_changes, page_va);
-		if (answer == not_ready)
+		if (answer == not_ready) {
+			note_find(FindResult::not_ready, no_library);
 			return {};
+		}
 		slot.instance = answer;
 		slot.page = page_va;
 		slot.generation = generation;
 		slot.stamp = code_changes;
 	}
-	if (slot.instance < 0)
+	if (slot.instance < 0) {
+		note_find(FindResult::uncovered, no_library);
 		return {};
+	}
 	auto &instance = instances_[static_cast<std::size_t>(slot.instance)];
 	if (!instance.used || instance.poisoned ||
 	    instance.generation != generation) {
+		note_find(instance.poisoned ? FindResult::poisoned :
+			FindResult::stale, instance.poisoned ? instance.library :
+			no_library);
 		slot = PageSlot{};
 		return {};
 	}
 	if (!instance.verified || instance.verified_changes != code_changes) {
-		if (ticks_ < instance.retry_at)
+		if (ticks_ < instance.retry_at) {
+			note_find(FindResult::unverified, instance.library);
 			return {};
+		}
 #if UML_AOT_DIAGNOSTICS
 		const auto began = std::chrono::steady_clock::now();
 #endif
@@ -662,16 +779,22 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 				std::max<std::uint64_t>(instance.backoff * 2, 64), 65536);
 			instance.retry_at = ticks_ + instance.backoff;
 			instance.verified = false;
+			note_find(FindResult::unverified, instance.library);
 			return {};
 		case Verdict::mismatch:
 			instance.poisoned = true;
 			instance.verified = false;
 			UML_AOT_COUNT(poisoned, 1);
 			++epoch_;
+			note_find(FindResult::poisoned, instance.library);
 			return {};
 		}
 	}
-	return entry(static_cast<std::uint32_t>(slot.instance), pc);
+	const auto found =
+		entry(static_cast<std::uint32_t>(slot.instance), pc);
+	note_find(found.native != nullptr ? FindResult::hit :
+		FindResult::no_entry, instance.library);
+	return found;
 }
 
 Hit Binder::entry(std::uint32_t instance_index,
@@ -697,6 +820,10 @@ Hit Binder::entry(std::uint32_t instance_index,
 const CrossTable &Binder::cross(unsigned long generation,
 	std::uint64_t code_changes) noexcept
 {
+#if UML_AOT_DIAGNOSTICS
+	g_cross_owner = this;
+	g_cross_generation = generation;
+#endif
 	if (cross_generation_ == generation && cross_epoch_ == epoch_ &&
 	    cross_changes_ == code_changes)
 		return cross_;
