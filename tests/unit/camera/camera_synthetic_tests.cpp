@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "require.hpp"
+#include "scratch_directory.hpp"
 #include "synthetic_camera.hpp"
+
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
@@ -13,6 +17,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -125,6 +130,9 @@ void profiles()
             require(identifiers.insert(info.identifier).second);
             require(!info.videoFormats.empty() && !info.stillSizes.empty());
             require(info.pixelArrayWidth > 0 && info.sensorOrientation % 90 == 0);
+            // Every camera's zoom range holds 1.0, and a single lens's 1.0 is its own full field of view.
+            require(info.zoomMinimum <= 1.0f && info.zoomMaximum >= 1.0f, "a camera's zoom range holds 1.0");
+            if (info.lens != CameraLensKind::zoom) require(info.zoomMinimum == 1.0f, "a single lens's widest view is its ratio 1.0");
         }
         for (const auto& set : camera->concurrentSets()) {
             require(set.size() > 1);
@@ -142,9 +150,14 @@ void profiles()
     const auto dual = makeSyntheticCamera(manual(SyntheticCameraProfile::tabletDualFront))->cameras();
     require(dual.size() == 3 && dual[1].position == CameraPosition::front && dual[1].lens == CameraLensKind::wide &&
             dual[2].position == CameraPosition::front && dual[2].lens == CameraLensKind::ultraWide);
+    // The phone lists its three lenses and its front camera, and no zoom camera, with the zoom the system recommends for
+    // each lens of a phone of three lenses.
     const auto phone = makeSyntheticCamera(manual(SyntheticCameraProfile::phone))->cameras();
-    require(phone.size() == 5 && phone[0].lens == CameraLensKind::zoom && !phone[0].manualExposure);
-    require(phone[1].manualExposure && phone[1].rawStills && phone[1].stillSizes.front().width == 8064);
+    require(phone.size() == 4 && phone[0].lens == CameraLensKind::wide && phone[1].lens == CameraLensKind::ultraWide &&
+            phone[2].lens == CameraLensKind::telephoto && phone[3].position == CameraPosition::front);
+    for (const auto& info : phone) require(info.lens != CameraLensKind::zoom && info.zoomMinimum == 1.0f && info.constituents.empty());
+    require(phone[0].zoomMaximum == 6.0f && phone[1].zoomMaximum == 3.0f && phone[2].zoomMaximum == 3.0f);
+    require(phone[0].manualExposure && phone[0].rawStills && phone[0].stillSizes.front().width == 8064);
     require(makeSyntheticCamera(manual(SyntheticCameraProfile::laptop))->cameras().size() == 1);
 }
 
@@ -410,47 +423,23 @@ void everyProfileExposes()
     require(recorder.frames.back().second.exposure.exposureNanoseconds == 33'333'333 && recorder.frames.back().second.exposure.iso == 100);
 }
 
-void zoomCamera()
-{
-    const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::phone));
-    Recorder recorder;
-    auto session = camera->openSession(recorder);
-    require(session->startVideo(0, 640, 480, 30));
-    // A zoom camera takes automatic exposure only, and reports the lens in use.
-    CameraSettings settings;
-    settings.exposureMode = CameraExposureMode::manual;
-    settings.exposureNanoseconds = 1'000'000;
-    settings.iso = 800;
-    settings.zoomRatio = 0.5f;
-    session->apply(0, settings);
-    camera->pump(0, 1);
-    require(recorder.frames.back().second.exposure.activeCamera == 2);  // ultra wide
-    require(recorder.frames.back().second.exposure.ae == CameraControlState::converged);
-    settings.zoomRatio = 2.0f;
-    session->apply(0, settings);
-    camera->pump(0, 1);
-    require(recorder.frames.back().second.exposure.activeCamera == 1);  // wide
-    settings.zoomRatio = 5.0f;
-    session->apply(0, settings);
-    camera->pump(0, 1);
-    require(recorder.frames.back().second.exposure.activeCamera == 3);  // telephoto
-}
-
 void multiCamera()
 {
     const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::phone));
     Recorder recorder;
     auto session = camera->openSession(recorder);
-    require(session->startVideo(4, 1280, 720, 30));    // the front camera
-    require(session->startVideo(1, 1280, 720, 30));    // wide: in a set with the front
-    require(!session->startVideo(2, 1280, 720, 30));   // ultra wide would not share a set with both
-    require(!session->startVideo(3, 640, 480, 30));    // nor would the telephoto
-    session->stopVideo(1);
-    require(session->startVideo(2, 1280, 720, 30));    // front and ultra wide are a set
+    require(session->startVideo(3, 1280, 720, 30));    // the front camera
+    require(session->startVideo(0, 1280, 720, 30));    // wide: in a set with the front
+    require(!session->startVideo(1, 1280, 720, 30));   // ultra wide is in no set with both
+    require(!session->startVideo(2, 640, 480, 30));    // nor is the telephoto
+    session->stopVideo(0);
+    require(!session->startVideo(1, 1280, 720, 30));   // the ultra wide is in no set with the front camera
+    require(!session->startVideo(2, 1280, 720, 30));   // nor is the telephoto
+    require(session->startVideo(0, 1280, 720, 30));    // the wide lens is
     // A format a multi-camera session does not take is refused while two run.
-    require(!session->startVideo(2, 3840, 2160, 30));
-    session->stopVideo(4);
-    require(session->startVideo(2, 3840, 2160, 30));   // alone, it may use it
+    require(!session->startVideo(0, 3840, 2160, 30));
+    session->stopVideo(3);
+    require(session->startVideo(0, 3840, 2160, 30));   // alone, it may use it
 }
 
 // A camera alone runs any format; cameras that run together run formats a
@@ -685,6 +674,39 @@ void interruptionOutlivesSession()
     require(session->startVideo(0, 640, 480, 30));
     camera->pump(0, 1);
     require(third.frames.size() == 1);
+}
+
+// The colour data of every synthetic calibration, whatever the profile and lens: a DNG forward matrix maps equal camera
+// values (1, 1, 1) to the D50 white point (0.9642, 1, 0.8249), which the DNG validation of the Android CTS checks (its
+// tolerance is 0.01; the rule here is exact). A new profile, lens or matrix is covered by taking a Bayer still of each.
+void everyCalibrationMapsEqualValuesToD50()
+{
+    constexpr double white[3] = {0.9642, 1.0, 0.8249};
+    std::size_t calibrations = 0, phoneCalibrations = 0;
+    for (const auto profile : {SyntheticCameraProfile::phone, SyntheticCameraProfile::tablet, SyntheticCameraProfile::tabletDualFront,
+                               SyntheticCameraProfile::laptop}) {
+        const auto camera = makeSyntheticCamera(manual(profile));
+        Recorder recorder;
+        auto session = camera->openSession(recorder);
+        const auto cameras = camera->cameras();
+        for (std::size_t index = 0; index < cameras.size(); ++index) {
+            if (!cameras[index].rawStills) continue;
+            CameraStillRequest request;
+            request.token = std::uint32_t(100 + index);
+            request.raw = true;
+            require(session->takeStill(index, request));
+            camera->pump(index, 0);
+            const auto& color = recorder.stills.back().second.color;
+            require(recorder.stills.back().second.ok && recorder.stills.back().second.token == request.token);
+            for (const auto* matrix : {&color.forwardMatrix1, &color.forwardMatrix2})
+                for (std::size_t row = 0; row < 3; ++row)
+                    require(std::abs((*matrix)[row * 3] + (*matrix)[row * 3 + 1] + (*matrix)[row * 3 + 2] - white[row]) < 1e-9);
+            ++calibrations;
+            if (profile == SyntheticCameraProfile::phone) ++phoneCalibrations;
+        }
+    }
+    // The rule is not vacuous: the phone's three lenses and the tablets' back cameras each have one.
+    require(phoneCalibrations == 3 && calibrations >= 5);
 }
 
 void stills()
@@ -952,8 +974,80 @@ void timerSchedulesWholeDurations()
 
 } // namespace
 
+// The control pipe: a test that cannot reach the camera object (a guest in another process) interrupts and resumes it by
+// writing lines, and the camera answers as it does to interrupt() and resume().
+// A delegate whose events are read from another thread than the one that delivers them.
+class EventLog final : public CameraSessionDelegate {
+public:
+    void cameraFrame(std::size_t, CameraFrame) override {}
+    void cameraStill(std::size_t, CameraStillResult) override {}
+    void cameraEvent(CameraEvent event) override
+    {
+        std::lock_guard lock(mutex);
+        events.push_back(event);
+    }
+    std::vector<CameraEvent> snapshot() const
+    {
+        std::lock_guard lock(mutex);
+        return events;
+    }
+
+private:
+    mutable std::mutex mutex;
+    std::vector<CameraEvent> events;
+};
+
+void controlPipe()
+{
+    const auto line = [](std::string_view text) { return parseSyntheticControlLine(text); };
+    require(line("interrupt") && line("interrupt")->interrupt && line("interrupt")->kind == CameraEventKind::interrupted);
+    require(line(" Interrupt   Background \r") && line("interrupt background")->kind == CameraEventKind::interruptedInBackground);
+    require(line("interrupt multitasking")->kind == CameraEventKind::interruptedByMultitasking);
+    require(line("interrupt pressure")->kind == CameraEventKind::interruptedBySystemPressure);
+    require(line("interrupt other")->kind == CameraEventKind::interrupted);
+    require(line("resume") && !line("resume")->interrupt && line("resume")->kind == CameraEventKind::resumed);
+    require(!line("") && !line("interrupted") && !line("interrupt later") && !line("resume now") && !line("pause"));
+
+    // A named pipe is a socket-length path: the host temporary directory, not the build tree's.
+    uml::testing::ScratchSubdirectory directory("camera-control-XXXXXX", uml::testing::socket_scratch_parent());
+    const std::string path = (directory.path() / "control").string();
+    {
+        auto options = manual(SyntheticCameraProfile::tablet);
+        options.controlPath = path;
+        const auto camera = makeSyntheticCamera(options);
+        EventLog log;
+        auto session = camera->openSession(log);
+        const int writer = ::open(path.c_str(), O_WRONLY | O_NONBLOCK);
+        require(writer >= 0, "the pipe exists once the camera does");
+        const auto send = [&](std::string_view text) { require(::write(writer, text.data(), text.size()) == ssize_t(text.size())); };
+        const auto waitForEvents = [&](std::size_t count) {
+            for (int attempt = 0; attempt < 200 && log.snapshot().size() < count; ++attempt)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            return log.snapshot().size() >= count;
+        };
+        send("interrupt back");
+        send("ground\nnot a command\n");
+        require(waitForEvents(1) && log.snapshot()[0].kind == CameraEventKind::interruptedInBackground &&
+                    log.snapshot()[0].camera == allCameras,
+                "a line in two writes is one command, and an unknown line is ignored");
+        send("resume\n");
+        require(waitForEvents(2) && log.snapshot()[1].kind == CameraEventKind::resumed, "and resume ends it");
+        ::close(writer);
+        // A writer's close does not end the reading: the pipe has a reader of its own.
+        const int again = ::open(path.c_str(), O_WRONLY | O_NONBLOCK);
+        require(again >= 0);
+        const std::string_view last = "interrupt pressure\n";
+        require(::write(again, last.data(), last.size()) == ssize_t(last.size()));
+        require(waitForEvents(3) && log.snapshot()[2].kind == CameraEventKind::interruptedBySystemPressure);
+        ::close(again);
+        session->stop();
+    }
+    ::unlink(path.c_str());
+}
+
 int main()
 {
+    controlPipe();
     profiles();
     unauthorized();
     video();
@@ -961,13 +1055,13 @@ int main()
     controls();
     exposureReport();
     everyProfileExposes();
-    zoomCamera();
     multiCamera();
     multiCameraFormats();
     anchoredCamera();
     stillOnlyCamerasCount();
     hardwareBudget();
     rawFailures();
+    everyCalibrationMapsEqualValuesToD50();
     interruptionOutlivesSession();
     stills();
     interruptions();

@@ -17,3 +17,9 @@ persist.sys.kernarium.timezone_applied    u:object_r:kernarium_time_zone_prop:s0
 # Set once the product has looked at a guest's on-screen keyboard setting, so a person who
 # turns it on afterwards keeps it on.
 persist.sys.kernarium.keyboard_default    u:object_r:kernarium_keyboard_default_prop:s0 exact bool
+
+# One property per package, `persist.sys.kernarium.oldapp.<package>`: the time
+# (epoch seconds) the person turned Old app compatibility on for that
+# application; empty or unset means off. Every application domain reads it, the
+# shell domain sets it (kernarium_oldapp_prop.te).
+persist.sys.kernarium.oldapp.    u:object_r:kernarium_oldapp_prop:s0

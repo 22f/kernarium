@@ -4,16 +4,24 @@
 // whether Send feedback, Buy me tokens, Review on the App Store, Follow
 // developer on X and the ICP filing number are compiled in.
 //
-// Send feedback exists only in an AppStore build whose maker has the ignored
-// Feedback.local.xcconfig beside this file (Feedback.local.xcconfig.example)
-// with a receiver address, so a fork, or a Debug or Release build, carries
-// none of it and no address. FEEDBACK_ADDRESS is that address in AppStore and
-// empty elsewhere; a non-empty one adds the FEEDBACK_MAIL compilation
-// condition and puts the address in Info.plist. The tests and the screen
-// captures state `FEEDBACK_ADDRESS=feedback@example.com` on the xcodebuild
-// command line to build the views into a Debug build; the bundle check
-// refuses any other address outside AppStore, and the arranged one outside
-// Debug. AndariumPreview sets FEEDBACK_ADDRESS empty itself, so it takes that
+// AppStore and TestFlight are the two configurations that read the local
+// files. AppStore may carry all five features. TestFlight carries Send
+// feedback and Follow developer on X and none of the other three: Buy me
+// tokens, Review on the App Store and the ICP filing number have a value in
+// AppStore alone, and a TestFlight build empties them whatever the local files
+// hold (and so the pieces that ride with Buy me tokens).
+//
+// Send feedback exists only in an AppStore or TestFlight build whose maker has
+// the ignored Feedback.local.xcconfig beside this file
+// (Feedback.local.xcconfig.example) with a receiver address, so a fork, or a
+// Debug or Release build, carries none of it and no address. FEEDBACK_ADDRESS
+// is that address in AppStore and TestFlight and empty elsewhere; a non-empty
+// one adds the FEEDBACK_MAIL compilation condition and puts the address in
+// Info.plist. The tests and the screen captures state
+// `FEEDBACK_ADDRESS=feedback@example.com` on the xcodebuild command line to
+// build the views into a Debug build; the bundle check refuses any other
+// address outside AppStore and TestFlight, and the arranged one outside Debug.
+// AndariumPreview sets FEEDBACK_ADDRESS empty itself, so it takes that
 // arrangement alone and never the local file's receiver.
 
 #include "../../GuestHost/Config/Signing.xcconfig"
@@ -23,6 +31,7 @@ FEEDBACK_RECEIVER =
 
 FEEDBACK_ADDRESS =
 FEEDBACK_ADDRESS[config=AppStore] = $(FEEDBACK_RECEIVER)
+FEEDBACK_ADDRESS[config=TestFlight] = $(FEEDBACK_RECEIVER)
 
 // An empty address names the setting FEEDBACK_ARRANGED_ and gets NO_FEEDBACK_MAIL;
 // any other lands on an undefined name and gets FEEDBACK_MAIL.
@@ -37,16 +46,17 @@ FEEDBACK_PLIST_DEFINITION = $(FEEDBACK_PLIST_$(FEEDBACK_ADDRESS:identifier):defa
 
 // Buy me tokens exists only in an AppStore build whose maker has the ignored
 // TipJar.local.xcconfig beside this file (TipJar.local.xcconfig.example) with
-// the four product identifiers, so a fork, or a Debug or Release build,
-// carries none of it and no identifier. TIP_LITE, TIP_PRO, TIP_MAX and
+// the four product identifiers, so a fork, or a Debug, Release or TestFlight
+// build, carries none of it and no identifier. TIP_LITE, TIP_PRO, TIP_MAX and
 // TIP_ULTRA are the identifiers in AppStore and empty elsewhere; any non-empty
 // one adds the TIP_JAR compilation condition and puts the four in Info.plist
-// (the bundle check refuses a build that names fewer than four). The tests and
-// the screen captures state all four on the xcodebuild command line, with the
-// example identifiers, to build the views into a Debug build; the bundle check
-// refuses any other identifier outside AppStore, and the arranged ones outside
-// Debug. AndariumPreview sets them empty itself, so it takes that arrangement
-// alone and never the local file's identifiers.
+// (the bundle check refuses a build that names fewer than four, and any in
+// TestFlight). The tests and the screen captures state all four on the
+// xcodebuild command line, with the example identifiers, to build the views
+// into a Debug build; the bundle check refuses any other identifier outside
+// AppStore, and the arranged ones outside Debug. AndariumPreview sets them
+// empty itself, so it takes that arrangement alone and never the local file's
+// identifiers.
 TIP_PRODUCT_LITE =
 TIP_PRODUCT_PRO =
 TIP_PRODUCT_MAX =
@@ -75,15 +85,16 @@ TIP_JAR_PLIST_DEFINITION = $(TIP_JAR_PLIST_$(TIP_JAR_NAMED):default=TIP_JAR=1)
 
 // Review on the App Store exists only in an AppStore build whose maker has the
 // ignored Review.local.xcconfig beside this file (Review.local.xcconfig.example)
-// with the app's App Store identifier, so a fork, a sideload, or a Debug or
-// Release build, carries neither the item nor the address. REVIEW_ID is that
-// identifier in AppStore and empty elsewhere; a non-empty one adds the
-// APP_REVIEW compilation condition and puts the identifier in Info.plist. The
-// tests state REVIEW_ID=id0000000000 on the xcodebuild command line to build the
-// item into a Debug build; the bundle check refuses any other identifier
-// outside AppStore, and the arranged one outside Debug. AndariumPreview sets it
-// empty itself, so it takes that arrangement alone and never the local file's
-// identifier.
+// with the app's App Store identifier, so a fork, a sideload, or a Debug,
+// Release or TestFlight build, carries neither the item nor the address (nor
+// the rating prompt, which shares the switch). REVIEW_ID is that identifier in
+// AppStore and empty elsewhere; a non-empty one adds the APP_REVIEW compilation
+// condition and puts the identifier in Info.plist. The tests state
+// REVIEW_ID=id0000000000 on the xcodebuild command line to build the item into
+// a Debug build; the bundle check refuses any other identifier outside
+// AppStore, and the arranged one outside Debug, and any in TestFlight.
+// AndariumPreview sets it empty itself, so it takes that arrangement alone and
+// never the local file's identifier.
 REVIEW_APP_ID =
 #include? "Review.local.xcconfig"
 
@@ -103,8 +114,8 @@ REVIEW_PLIST_DEFINITION = $(REVIEW_PLIST_$(REVIEW_NAMED):default=APP_REVIEW=1)
 // The Feedback, TipJar and Review string tables are each compiled only where
 // their feature is. An empty value names the setting FEEDBACK_CATALOG_ (and so
 // on) and excludes the catalog; any other lands on an undefined name and
-// excludes nothing. The project's AppStore setting of this name lists the JIT
-// catalog and inherits this one.
+// excludes nothing. The project's AppStore and TestFlight setting of this name
+// lists the JIT catalog and inherits this one.
 FEEDBACK_CATALOG_ = Feedback.xcstrings
 TIP_JAR_CATALOG_ = TipJar.xcstrings
 REVIEW_CATALOG_ = Review.xcstrings
@@ -122,8 +133,9 @@ REVIEW_CATALOG_ = Review.xcstrings
 // the GitHub mark and the avatar as assets of their own and the same X logo.
 // Each piece exists only in an AppStore build that names its value (the header's
 // only where the sheet is compiled in) and has its file, so a fork, a sideload
-// or a Debug or Release build carries none of it; a build that names a value
-// and lacks its file fails its first build phase. A piece is one asset
+// or a Debug or Release build carries none of it, and a TestFlight build only
+// the row; a build that names a value and lacks its file fails its first build
+// phase. A piece is one asset
 // catalog: the maker's, linked to the file in Local, or the plain glyph the
 // tests draw, which no AppStore build has. The tests and the screen captures
 // state the values on the xcodebuild command line to build the pieces into a
@@ -143,6 +155,7 @@ DEVELOPER_ICP_NUMBER =
 
 FOLLOW_X_HANDLE =
 FOLLOW_X_HANDLE[config=AppStore] = $(DEVELOPER_X_HANDLE)
+FOLLOW_X_HANDLE[config=TestFlight] = $(DEVELOPER_X_HANDLE)
 
 // An empty handle names the setting FOLLOW_X_ARRANGED_ and gets NO_FOLLOW_X;
 // any other lands on an undefined name and gets FOLLOW_X.
@@ -156,7 +169,7 @@ FOLLOW_X_PLIST_DEFINITION = $(FOLLOW_X_PLIST_$(FOLLOW_X_HANDLE:identifier):defau
 // The header's values: the tip condition is NO_TIP_JAR without the identifiers
 // and TIP_JAR with them, and names the setting that holds the value, empty in
 // the first case and the local one in the second. (A `:default=` would also
-// take an empty value.)
+// take an empty value.) TestFlight has no identifiers, so none of them.
 SHEET_NAME_NO_TIP_JAR =
 SHEET_NAME_TIP_JAR = $(DEVELOPER_NAME)
 SHEET_GITHUB_NO_TIP_JAR =
@@ -189,6 +202,7 @@ DEVELOPER_PLIST_DEFINITIONS = $(SHEET_NAME_PLIST_DEFINITION) $(SHEET_GITHUB_PLIS
 // own setting, as the row's captures took it first.
 FOLLOW_X_LOGO_SOURCE =
 FOLLOW_X_LOGO_SOURCE[config=AppStore] = local
+FOLLOW_X_LOGO_SOURCE[config=TestFlight] = local
 SHEET_ARTWORK_SOURCE =
 SHEET_ARTWORK_SOURCE[config=AppStore] = local
 
@@ -211,13 +225,14 @@ EXCLUDED_SOURCE_FILE_NAMES = $(FEEDBACK_CATALOG_$(FEEDBACK_ADDRESS:identifier):d
 
 // The filing number at the bottom of Info (China's ICP filing) is the same
 // file's DEVELOPER_ICP_NUMBER, with a switch of its own: it needs no tip, review
-// or X value. ICP_NUMBER is the number in AppStore and empty elsewhere; a
-// non-empty one adds the ICP_FILING compilation condition and puts the number
-// in Info.plist, where the footnote reads it. Tests and captures state
-// ICP_NUMBER=示例ICP备00000000号-0A on the xcodebuild line to build it into a
-// Debug build; the bundle check refuses any other number outside AppStore, and
-// the arranged one outside Debug. AndariumPreview sets it empty itself, so it
-// takes the arrangement alone and never the local file's number.
+// or X value. ICP_NUMBER is the number in AppStore and empty elsewhere
+// (TestFlight included); a non-empty one adds the ICP_FILING compilation
+// condition and puts the number in Info.plist, where the footnote reads it.
+// Tests and captures state ICP_NUMBER=示例ICP备00000000号-0A on the xcodebuild
+// line to build it into a Debug build; the bundle check refuses any other number
+// outside AppStore, and the arranged one outside Debug, and any in TestFlight.
+// AndariumPreview sets it empty itself, so it takes the arrangement alone and
+// never the local file's number.
 ICP_NUMBER =
 ICP_NUMBER[config=AppStore] = $(DEVELOPER_ICP_NUMBER)
 

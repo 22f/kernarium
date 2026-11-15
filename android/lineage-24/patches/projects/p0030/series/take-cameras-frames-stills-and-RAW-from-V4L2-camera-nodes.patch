@@ -10,6 +10,13 @@ ENUM_FRAMESIZES and ENUM_FRAMEINTERVALS calls say what the camera is and which s
 runs; the HAL turns them into LIMITED static metadata on a template (emu_camera_v4l2.json, the
 emulated back camera without the features this device does not offer), with the capabilities the
 description earns: MANUAL_SENSOR and READ_SENSOR_SETTINGS for a single lens and RAW once calibrated.
+A camera that states RAW also states the lens shading map modes OFF and ON, as the device info
+requires of every RAW capable camera (the template's OFF alone made it reject a calibrated lens at
+boot, and the camera was gone from the list), the hot pixel map modes OFF and ON with the map among
+its result keys, and that its RAW data has no lens shading correction applied
+(android.sensor.info.lensShadingApplied FALSE: the host copies the platform's Bayer pixels and the
+HAL's shading map is all ones). A result for the hot pixel map mode ON carries an empty map, since
+the host hands over no list of defective pixels. A camera without RAW keeps the template's values.
 BURST_CAPTURE is never declared, because the host cannot meet its conditions, and the maximum latency
 is unknown.
 
@@ -32,11 +39,23 @@ sequence.
 
 Each video output of a request has its own host stream, so that one exposure fills a preview and a
 recording of one size (on one stream they took an exposure each, which halved the frame rate), and
-the stream of an output that left the configuration closes after half a second, so that the
-platform's restart for the largest open size comes at the mode switch. With auto-exposure on, the
-camera runs at the top of the requested frame rate range, not at its midpoint. A JPEG made here from
-a frame that the device made black (blocked, interrupted, resuming) fails, as a native still does.
-The Exif exposure time and aperture are written only for a positive, finite value.
+the stream of an output that stays configured but leaves the requests (a recording that stopped)
+closes after half a second and two requests that took no still, so that the platform's restart for
+the largest open size comes then; an output that leaves the configuration closes with the
+reconfiguration, which makes a new frame source. A request that takes a still counts for nothing:
+a still holds the pipeline for as long as the host takes to make the picture, and the requests of
+the preview wait behind it, behind one still or a queue of them, so that preview keeps its stream
+and the host its capture session; the absences that a video output earned before such a request
+start again from zero at it, so that a queue of mixed captures (two YUV, then two JPEG) does not
+close the preview that waits behind it; a stream that the request about to begin uses is never closed
+(camera_streams.hpp). With auto-exposure on, the camera runs at the top of the requested frame rate
+range, not at its midpoint. A JPEG made here from a frame that the device made black (blocked,
+interrupted, resuming) fails, as a native still does. The Exif exposure time and aperture are
+written only for a positive, finite value. The Exif focal length in 35 mm film follows from the
+camera's stated focal length and physical sensor size, which the host's description states as a
+pair (the field of view's own equivalent): the V4L2 frame source hands them to the Exif writer, a
+camera whose description states none gets no tag, and the template's default size does not pass for
+a stated one; the sensor characteristics take both from the static metadata for any other camera.
 
 Stills are encoded by the host with a gap for the Exif data: the HAL builds the Exif data and a
 thumbnail from the result and writes them into the gap in place, then the blob header at the end of
@@ -50,26 +69,28 @@ deadline: 3 seconds, or 15 with a still (the host gives a started still 10 and t
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 ---
- devices/EmulatedCamera/hwl/Android.bp         |   8 +
- devices/EmulatedCamera/hwl/ConfigUtils.cpp    |   6 +
- devices/EmulatedCamera/hwl/ConfigUtils.h      |   5 +
- devices/EmulatedCamera/hwl/EmulatedSensor.cpp |  10 +
- devices/EmulatedCamera/hwl/JpegCompressor.cpp |  22 +-
- devices/EmulatedCamera/hwl/JpegCompressor.h   |  30 +-
- .../hwl/V4l2Characteristics.cpp               | 403 ++++++++
- .../EmulatedCamera/hwl/V4l2Characteristics.h  |  37 +
- .../EmulatedCamera/hwl/V4l2FrameSource.cpp    | 960 ++++++++++++++++++
- devices/EmulatedCamera/hwl/V4l2FrameSource.h  | 169 +++
- devices/EmulatedCamera/hwl/V4l2Stream.cpp     | 468 +++++++++
- devices/EmulatedCamera/hwl/V4l2Stream.h       | 179 ++++
- devices/EmulatedCamera/hwl/V4l2Thumbnail.cpp  | 180 ++++
- devices/EmulatedCamera/hwl/V4l2Thumbnail.h    |  36 +
- devices/EmulatedCamera/hwl/V4l2Utils.cpp      | 479 +++++++++
- devices/EmulatedCamera/hwl/V4l2Utils.h        | 154 +++
- devices/EmulatedCamera/hwl/configs/Android.bp |   6 +
- .../hwl/configs/emu_camera_v4l2.json          | 592 +++++++++++
- .../EmulatedCamera/hwl/utils/ExifUtils.cpp    |   6 +-
- 19 files changed, 3735 insertions(+), 15 deletions(-)
+ devices/EmulatedCamera/hwl/Android.bp         |    8 +
+ devices/EmulatedCamera/hwl/ConfigUtils.cpp    |    6 +
+ devices/EmulatedCamera/hwl/ConfigUtils.h      |    5 +
+ devices/EmulatedCamera/hwl/EmulatedSensor.cpp |   24 +
+ devices/EmulatedCamera/hwl/JpegCompressor.cpp |   22 +-
+ devices/EmulatedCamera/hwl/JpegCompressor.h   |   30 +-
+ .../hwl/SensorCharacteristics.h               |    8 +-
+ .../hwl/V4l2Characteristics.cpp               |  445 ++++++++
+ .../EmulatedCamera/hwl/V4l2Characteristics.h  |   37 +
+ .../EmulatedCamera/hwl/V4l2FrameSource.cpp    | 1011 +++++++++++++++++
+ devices/EmulatedCamera/hwl/V4l2FrameSource.h  |  180 +++
+ devices/EmulatedCamera/hwl/V4l2Stream.cpp     |  468 ++++++++
+ devices/EmulatedCamera/hwl/V4l2Stream.h       |  179 +++
+ devices/EmulatedCamera/hwl/V4l2Thumbnail.cpp  |  180 +++
+ devices/EmulatedCamera/hwl/V4l2Thumbnail.h    |   36 +
+ devices/EmulatedCamera/hwl/V4l2Utils.cpp      |  479 ++++++++
+ devices/EmulatedCamera/hwl/V4l2Utils.h        |  154 +++
+ devices/EmulatedCamera/hwl/configs/Android.bp |    6 +
+ .../hwl/configs/emu_camera_v4l2.json          |  592 ++++++++++
+ .../EmulatedCamera/hwl/utils/ExifUtils.cpp    |   44 +-
+ devices/EmulatedCamera/hwl/utils/HWLUtils.cpp |   26 +
+ 21 files changed, 3907 insertions(+), 33 deletions(-)
  create mode 100644 devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
  create mode 100644 devices/EmulatedCamera/hwl/V4l2Characteristics.h
  create mode 100644 devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
@@ -156,7 +177,7 @@ index 751b8494c9212015282e821993dbd9a33ecd9e52..a0e21aa0a0c44de02230c3365c4b5a15
  
  #endif  // EMULATOR_CAMERA_HAL_HWL_CONFIG_UTILS_H
 diff --git a/devices/EmulatedCamera/hwl/EmulatedSensor.cpp b/devices/EmulatedCamera/hwl/EmulatedSensor.cpp
-index 2e4b787abd8180e8db0772dcb2811cd40055a16f..4672ae56bf78e3884ffc92a3101e268cc3cb7a42 100644
+index 2e4b787abd8180e8db0772dcb2811cd40055a16f..8ab54a26637656a9e9639734b7b8937a9decb426 100644
 --- a/devices/EmulatedCamera/hwl/EmulatedSensor.cpp
 +++ b/devices/EmulatedCamera/hwl/EmulatedSensor.cpp
 @@ -39,6 +39,7 @@
@@ -190,6 +211,27 @@ index 2e4b787abd8180e8db0772dcb2811cd40055a16f..4672ae56bf78e3884ffc92a3101e268c
    } else {
      frame_source_ =
          std::make_unique<EmulatedFrameSource>(*chars_, logical_camera_id);
+@@ -1129,6 +1139,20 @@ void EmulatedSensor::ReturnResults(
+                                      lens_shading_map.size());
+       }
+     }
++    if (device_chars->second.hot_pixel_map_supported) {
++      camera_metadata_ro_entry_t hot_pixel_map_mode;
++      if ((result->result_metadata->Get(ANDROID_STATISTICS_HOT_PIXEL_MAP_MODE,
++                                        &hot_pixel_map_mode) == OK) &&
++          (hot_pixel_map_mode.count == 1) &&
++          (hot_pixel_map_mode.data.u8[0] ==
++           ANDROID_STATISTICS_HOT_PIXEL_MAP_MODE_ON)) {
++        // The host's Bayer data comes with no list of defective pixels, so the
++        // map is empty: no hot pixel is known, which is a valid map.
++        const int32_t no_hot_pixels[2] = {0, 0};
++        result->result_metadata->Set(ANDROID_STATISTICS_HOT_PIXEL_MAP,
++                                     no_hot_pixels, 0);
++      }
++    }
+     if (logical_settings->second.report_video_stab) {
+       result->result_metadata->Set(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE,
+                                    &logical_settings->second.video_stab, 1);
 diff --git a/devices/EmulatedCamera/hwl/JpegCompressor.cpp b/devices/EmulatedCamera/hwl/JpegCompressor.cpp
 index b47228fea019810cb2803cf74c1eb5a148aa3838..5c33e8d1e64d9b9275f938a95fe6b4786b0a49d1 100644
 --- a/devices/EmulatedCamera/hwl/JpegCompressor.cpp
@@ -293,12 +335,33 @@ index e836ca6a27cbb96c662db51f6993a2866463416c..8d0eb5ecd5ab93acfbd31035563ff846
    size_t CompressYUV420Frame(YUV420Frame frame);
    size_t JpegRCompressYUV420Frame(YUV420Frame p010_frame);
    void ThreadLoop();
+diff --git a/devices/EmulatedCamera/hwl/SensorCharacteristics.h b/devices/EmulatedCamera/hwl/SensorCharacteristics.h
+index 355cee16c72667a672d317596d56e165bfb99a9a..85638d6bb5ef28e5db068a2520be2c42a954c95f 100644
+--- a/devices/EmulatedCamera/hwl/SensorCharacteristics.h
++++ b/devices/EmulatedCamera/hwl/SensorCharacteristics.h
+@@ -99,9 +99,15 @@ struct SensorCharacteristics {
+   uint32_t max_processed_streams = 0;
+   uint32_t max_stalling_streams = 0;
+   uint32_t max_input_streams = 0;
+-  uint32_t physical_size[2] = {0};
++  // The camera's physical sensor size and focal length, in millimetres: the
++  // stated pair that the field of view follows from (zero where none is
++  // stated). The Exif focal length in 35 mm film is computed from them.
++  float physical_size[2] = {0.f, 0.f};
++  float focal_length = 0.f;
+   bool is_flash_supported = false;
+   uint32_t lens_shading_map_size[2] = {0};
++  // The camera states the hot pixel map mode ON: a result of a request for the map carries one.
++  bool hot_pixel_map_supported = false;
+   uint32_t max_pipeline_depth = 0;
+   uint32_t orientation = 0;
+   bool is_front_facing = false;
 diff --git a/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp b/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..6cc1bb9ac5739abbacc164ad7abc4b68acaa7408
+index 0000000000000000000000000000000000000000..f4237ca777f78b4078eb9de9c868072a84daafec
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
-@@ -0,0 +1,403 @@
+@@ -0,0 +1,445 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -328,6 +391,8 @@ index 0000000000000000000000000000000000000000..6cc1bb9ac5739abbacc164ad7abc4b68
 +#include <map>
 +#include <memory>
 +#include <set>
++#include <span>
++#include <vector>
 +
 +#include "EmulatedSensor.h"
 +#include "SensorCharacteristics.h"
@@ -387,6 +452,40 @@ index 0000000000000000000000000000000000000000..6cc1bb9ac5739abbacc164ad7abc4b68
 +  EditKeyList(metadata, ANDROID_REQUEST_AVAILABLE_CHARACTERISTICS_KEYS, {},
 +              {static_cast<int32_t>(tag)});
 +}
++
++// Where camera_plan.hpp's state_raw_metadata writes: the camera's static metadata. The plan has no Android
++// headers and names the tags and values by number.
++class MetadataSink {
++ public:
++  explicit MetadataSink(HalCameraMetadata* metadata) : metadata_(metadata) {}
++
++  void put_bytes(int32_t tag, std::span<const uint8_t> values) {
++    Put(metadata_, static_cast<uint32_t>(tag), std::vector<uint8_t>(values.begin(), values.end()));
++  }
++  void list_characteristic(int32_t tag) { AddCharacteristic(metadata_, static_cast<uint32_t>(tag)); }
++  void list_result(int32_t tag) {
++    EditKeyList(metadata_, ANDROID_REQUEST_AVAILABLE_RESULT_KEYS, {}, {tag});
++  }
++
++ private:
++  HalCameraMetadata* metadata_;
++};
++
++static_assert(plan::tag::sensor_info_lens_shading_applied == ANDROID_SENSOR_INFO_LENS_SHADING_APPLIED);
++static_assert(plan::tag::statistics_hot_pixel_map == ANDROID_STATISTICS_HOT_PIXEL_MAP);
++static_assert(plan::tag::statistics_hot_pixel_map_mode == ANDROID_STATISTICS_HOT_PIXEL_MAP_MODE);
++static_assert(plan::tag::statistics_lens_shading_map == ANDROID_STATISTICS_LENS_SHADING_MAP);
++static_assert(plan::tag::statistics_lens_shading_map_mode == ANDROID_STATISTICS_LENS_SHADING_MAP_MODE);
++static_assert(plan::tag::statistics_info_available_hot_pixel_map_modes ==
++              ANDROID_STATISTICS_INFO_AVAILABLE_HOT_PIXEL_MAP_MODES);
++static_assert(plan::tag::statistics_info_available_lens_shading_map_modes ==
++              ANDROID_STATISTICS_INFO_AVAILABLE_LENS_SHADING_MAP_MODES);
++static_assert(plan::map_mode::off == static_cast<int>(ANDROID_STATISTICS_LENS_SHADING_MAP_MODE_OFF) &&
++              plan::map_mode::on == static_cast<int>(ANDROID_STATISTICS_LENS_SHADING_MAP_MODE_ON) &&
++              plan::map_mode::off == static_cast<int>(ANDROID_STATISTICS_HOT_PIXEL_MAP_MODE_OFF) &&
++              plan::map_mode::on == static_cast<int>(ANDROID_STATISTICS_HOT_PIXEL_MAP_MODE_ON));
++static_assert(plan::lens_shading_applied_false == static_cast<int>(ANDROID_SENSOR_INFO_LENS_SHADING_APPLIED_FALSE) &&
++              plan::lens_shading_applied_true == static_cast<int>(ANDROID_SENSOR_INFO_LENS_SHADING_APPLIED_TRUE));
 +
 +camera_metadata_rational_t Rational(int32_t q16) {
 +  return {q16, 65536};
@@ -587,6 +686,12 @@ index 0000000000000000000000000000000000000000..6cc1bb9ac5739abbacc164ad7abc4b68
 +        break;
 +    }
 +    PutOne<uint8_t>(m, ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT, arrangement);
++    // The template, made for a camera without RAW, states OFF alone for the lens shading map and the hot pixel
++    // map and lists neither the hot pixel map nor the shading state: the device info rejects a RAW capable
++    // camera like that at boot, and the camera is then gone from the list (camera_plan.hpp,
++    // state_raw_metadata).
++    MetadataSink sink(m);
++    plan::state_raw_metadata(sink);
 +    PutOne<int32_t>(m, ANDROID_SENSOR_INFO_WHITE_LEVEL, static_cast<int32_t>(desc.white_level));
 +    const int32_t black = static_cast<int32_t>(desc.black_level);
 +    Put<int32_t>(m, ANDROID_SENSOR_BLACK_LEVEL_PATTERN, {black, black, black, black});
@@ -747,10 +852,10 @@ index 0000000000000000000000000000000000000000..413d37e1691516ce3b8346be27a98014
 +#endif  // HW_EMULATOR_CAMERA_V4L2_CHARACTERISTICS_H
 diff --git a/devices/EmulatedCamera/hwl/V4l2FrameSource.cpp b/devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ae37c40c430db644ecb18c97091daf502bf93aa4
+index 0000000000000000000000000000000000000000..a8abb58cc4209beb6a2539b77019f402046b4831
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
-@@ -0,0 +1,960 @@
+@@ -0,0 +1,1011 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -787,6 +892,7 @@ index 0000000000000000000000000000000000000000..ae37c40c430db644ecb18c97091daf50
 +#include "JpegCompressor.h"
 +#include "V4l2Thumbnail.h"
 +#include "camera_exif.hpp"
++#include "camera_streams.hpp"
 +#include "utils/ExifUtils.h"
 +
 +namespace android {
@@ -840,12 +946,6 @@ index 0000000000000000000000000000000000000000..ae37c40c430db644ecb18c97091daf50
 +namespace {
 +
 +constexpr nsecs_t kMetaTimeout = 200000000LL;
-+constexpr nsecs_t kIdleStreamLimit = 5000000000LL;
-+// The platform runs at the largest size of the streams that are open, and a
-+// change restarts it with black frames. The stream of a video output that left
-+// the configuration is closed soon, so that the restart comes at the mode
-+// switch and not in the recording started a few seconds later.
-+constexpr nsecs_t kIdleOutputStreamLimit = 500000000LL;
 +// Frames and stills are queued two at a time at most: one in flight and one
 +// spare, since a request waits for its own buffers.
 +constexpr uint32_t kStreamSlots = 2;
@@ -1035,7 +1135,33 @@ index 0000000000000000000000000000000000000000..ae37c40c430db644ecb18c97091daf50
 +  return raw;
 +}
 +
-+void V4l2FrameSource::CloseIdleStreams(Camera* camera) {
++// The characteristics that the Exif data of a picture is made from. The Exif
++// focal length in 35 mm film is the field of view's own, which the camera's
++// stated focal length and physical size give together. A description that
++// states no such pair gives the Exif writer zeros, and the tag is left out: the
++// static metadata keeps the template's default size for a camera that states
++// none (the platform requires a size), and that default is no stated size.
++SensorCharacteristics V4l2FrameSource::ExifCharacteristics(const Camera& camera,
++                                                           SensorCharacteristics chars) {
++  const auto optics = andarium::camera::stated_optics(camera.nodes.desc);
++  chars.focal_length = optics.focal_length_mm;
++  chars.physical_size[0] = optics.sensor_width_mm;
++  chars.physical_size[1] = optics.sensor_height_mm;
++  return chars;
++}
++
++// The platform runs at the largest size of the streams that are open, and a
++// change restarts it with black frames. The stream of a video output that stays
++// configured but leaves the requests (a recording that stopped) is closed soon,
++// so that the restart comes then and not in a recording started a few seconds
++// later; an output that leaves the configuration needs no rule, as the
++// framework's reconfiguration makes a new frame source. A stream that the
++// request about to begin uses is never closed, and a request that takes a still
++// does not count towards an absence, because a still holds the pipeline and the
++// preview's requests wait behind it, and the absences that a video output earned
++// before such a request start again from zero at it: the rule is in
++// camera_streams.hpp.
++void V4l2FrameSource::CloseIdleStreams(Camera* camera, const std::set<StreamKey>& used) {
 +  const nsecs_t now = systemTime(SYSTEM_TIME_MONOTONIC);
 +  for (auto it = camera->streams.begin(); it != camera->streams.end();) {
 +    bool in_flight = false;
@@ -1044,8 +1170,14 @@ index 0000000000000000000000000000000000000000..ae37c40c430db644ecb18c97091daf50
 +        in_flight = true;
 +      }
 +    }
-+    const nsecs_t limit = it->first.output != 0 ? kIdleOutputStreamLimit : kIdleStreamLimit;
-+    if (!in_flight && now - it->second->last_used() > limit) {
++    const auto last = camera->stream_last_request.find(it->first);
++    const uint64_t since_use = last == camera->stream_last_request.end()
++                                   ? still_free_requests_begun_
++                                   : still_free_requests_begun_ - last->second;
++    if (!in_flight && used.count(it->first) == 0 &&
++        andarium::camera::closes_when_idle(it->first.output != 0, since_use,
++                                           now - it->second->last_used())) {
++      camera->stream_last_request.erase(it->first);
 +      it = camera->streams.erase(it);
 +    } else {
 +      ++it;
@@ -1156,6 +1288,8 @@ index 0000000000000000000000000000000000000000..ae37c40c430db644ecb18c97091daf50
 +  // here from a video frame is not one of them. The whole request has one
 +  // deadline.
 +  std::map<uint32_t, int> still_count;
++  // The streams that the request uses: none of them is idle.
++  std::map<uint32_t, std::set<StreamKey>> used;
 +  bool any_still = false;
 +  for (const auto& buffer : *buffers) {
 +    if (buffer->is_input || buffer->stream_buffer.status == google_camera_hal::BufferStatus::kError) {
@@ -1165,14 +1299,35 @@ index 0000000000000000000000000000000000000000..ae37c40c430db644ecb18c97091daf50
 +      any_still = true;
 +    }
 +    auto camera_entry = cameras_.find(buffer->camera_id);
-+    if (camera_entry != cameras_.end() && RouteOf(camera_entry->second, *buffer).group_still) {
-+      ++still_count[buffer->camera_id];
++    if (camera_entry != cameras_.end()) {
++      const Route route = RouteOf(camera_entry->second, *buffer);
++      if (route.ok) {
++        used[buffer->camera_id].insert(route.key);
++      }
++      if (route.group_still) {
++        ++still_count[buffer->camera_id];
++      }
 +    }
 +  }
 +  request_clock_.begin(systemTime(SYSTEM_TIME_MONOTONIC), any_still);
 +
 +  for (auto& entry : cameras_) {
-+    CloseIdleStreams(&entry.second);
++    CloseIdleStreams(&entry.second, used[entry.first]);
++  }
++  if (!any_still) {
++    ++still_free_requests_begun_;
++  } else {
++    // The absences a video output earned before this request do not carry over
++    // it: the requests that wait behind a still wait behind all of it, so the
++    // count of the requests without a still starts again for every open video
++    // output (the idle time is left as it is).
++    for (auto& entry : cameras_) {
++      for (const auto& stream : entry.second.streams) {
++        if (stream.first.output != 0) {
++          entry.second.stream_last_request[stream.first] = still_free_requests_begun_;
++        }
++      }
++    }
 +  }
 +
 +  std::map<uint32_t, bool> controls_written;
@@ -1234,6 +1389,7 @@ index 0000000000000000000000000000000000000000..ae37c40c430db644ecb18c97091daf50
 +      result = BAD_VALUE;
 +      continue;
 +    }
++    camera.stream_last_request[route.key] = still_free_requests_begun_;
 +    uint32_t cookie = 0;
 +    bool last_of_group = false;
 +    if (route.group_still && still_count[buffer->camera_id] > 1) {
@@ -1447,7 +1603,7 @@ index 0000000000000000000000000000000000000000..ae37c40c430db644ecb18c97091daf50
 +  FrameResult(camera_id, result_metadata, &unused);
 +
 +  if (meta.jpeg_gap_length != 0) {
-+    std::unique_ptr<ExifUtils> exif(ExifUtils::Create(chars));
++    std::unique_ptr<ExifUtils> exif(ExifUtils::Create(ExifCharacteristics(*camera, chars)));
 +    bool placed = false;
 +    if (exif != nullptr && exif->Initialize() &&
 +        exif->SetFromMetadata(*result_metadata, buffer->width, buffer->height)) {
@@ -1574,7 +1730,7 @@ index 0000000000000000000000000000000000000000..ae37c40c430db644ecb18c97091daf50
 +  }
 +
 +  // The Exif data, as the stock sensor makes it.
-+  std::unique_ptr<ExifUtils> exif(ExifUtils::Create(chars));
++  std::unique_ptr<ExifUtils> exif(ExifUtils::Create(ExifCharacteristics(*camera, chars)));
 +  const uint8_t* app1 = nullptr;
 +  size_t app1_size = 0;
 +  if (exif != nullptr && exif->Initialize() &&
@@ -1713,10 +1869,10 @@ index 0000000000000000000000000000000000000000..ae37c40c430db644ecb18c97091daf50
 +}  // namespace android
 diff --git a/devices/EmulatedCamera/hwl/V4l2FrameSource.h b/devices/EmulatedCamera/hwl/V4l2FrameSource.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..729ef50a5bb4f2cba45cc2d8635415473e87be70
+index 0000000000000000000000000000000000000000..715b9241d8e7a547a69ee3abf3e07391c448e75e
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/V4l2FrameSource.h
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,180 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -1739,6 +1895,7 @@ index 0000000000000000000000000000000000000000..729ef50a5bb4f2cba45cc2d863541547
 +#include <atomic>
 +#include <map>
 +#include <memory>
++#include <set>
 +#include <string>
 +#include <tuple>
 +#include <vector>
@@ -1835,6 +1992,10 @@ index 0000000000000000000000000000000000000000..729ef50a5bb4f2cba45cc2d863541547
 +    std::vector<uint32_t> unsupported_controls;
 +    std::unique_ptr<v4l2cam::V4l2MetaReader> meta;
 +    std::map<StreamKey, std::unique_ptr<v4l2cam::V4l2Stream>> streams;
++    // What still_free_requests_begun_ was when a request last used each stream
++    // (or, for a video output, when a request that takes a still began), for the
++    // rule that closes an idle stream.
++    std::map<StreamKey, uint64_t> stream_last_request;
 +    uint32_t buffers = 4;
 +    uint32_t fps = 0;
 +    andarium::camera::Request last_request;
@@ -1861,7 +2022,8 @@ index 0000000000000000000000000000000000000000..729ef50a5bb4f2cba45cc2d863541547
 +
 +  static Route RouteOf(const Camera& camera, const SensorBuffer& buffer);
 +  v4l2cam::V4l2Stream* StreamFor(Camera* camera, const StreamKey& key);
-+  void CloseIdleStreams(Camera* camera);
++  void CloseIdleStreams(Camera* camera, const std::set<StreamKey>& used);
++  static SensorCharacteristics ExifCharacteristics(const Camera& camera, SensorCharacteristics chars);
 +  bool QueueBuffer(Camera* camera, v4l2cam::V4l2Stream* stream, SensorBuffer* buffer,
 +                   const Route& route, uint32_t cookie, bool last_of_group);
 +  bool WaitFor(const SensorBuffer* buffer, v4l2cam::V4l2Stream::Completion* completion,
@@ -1875,6 +2037,11 @@ index 0000000000000000000000000000000000000000..729ef50a5bb4f2cba45cc2d863541547
 +
 +  std::map<uint32_t, Camera> cameras_;
 +  std::map<const SensorBuffer*, Pending> pending_;
++  // The requests that took no still and have begun so far. A request that takes
++  // a still does not count: it holds the pipeline for as long as the host takes
++  // to make the picture, and the requests of the preview wait behind it, and it
++  // starts the count of absences again for every open video output.
++  uint64_t still_free_requests_begun_ = 0;
 +  // A flush or a close is under way (Interrupt); the sensor clears it as it takes the next request.
 +  std::atomic<bool> interrupted_{false};
 +  // When the request being collected has to be complete, whatever its buffers
@@ -4035,10 +4202,73 @@ index 0000000000000000000000000000000000000000..6d356b8cc74536c97cfa1b4a2a7d4d5b
 +}
 \ No newline at end of file
 diff --git a/devices/EmulatedCamera/hwl/utils/ExifUtils.cpp b/devices/EmulatedCamera/hwl/utils/ExifUtils.cpp
-index 2f3ca4c85933547400d0963174cebf69ded3da70..a113d94a7224bc68f606c446f19967f6a72251ee 100644
+index 2f3ca4c85933547400d0963174cebf69ded3da70..ea839e861cc491069d7ca9ffbb10a3f3739b0d71 100644
 --- a/devices/EmulatedCamera/hwl/utils/ExifUtils.cpp
 +++ b/devices/EmulatedCamera/hwl/utils/ExifUtils.cpp
-@@ -1006,8 +1006,10 @@ bool ExifUtilsImpl::SetFromMetadata(const HalCameraMetadata& metadata,
+@@ -29,6 +29,7 @@
+ #include <vector>
+ 
+ #include "../EmulatedSensor.h"
++#include "camera_exif.hpp"
+ 
+ extern "C" {
+ #include <libexif/exif-data.h>
+@@ -466,17 +467,15 @@ bool ExifUtilsImpl::SetFocalLength(float focal_length) {
+ bool ExifUtilsImpl::SetFocalLengthIn35mmFilm(float focal_length,
+                                              float sensor_size_x,
+                                              float sensor_size_y) {
+-  static const float film_diagonal = 43.27;  // diagonal of 35mm film
+-  static const float min_sensor_diagonal = 0.01;
+-  float sensor_diagonal =
+-      std::sqrt(sensor_size_x * sensor_size_x + sensor_size_y * sensor_size_y);
+-  sensor_diagonal = std::max(sensor_diagonal, min_sensor_diagonal);
+-  float focal_length35mm_film =
+-      std::round(focal_length * film_diagonal / sensor_diagonal);
+-  focal_length35mm_film = std::min(1.0f * 65535, focal_length35mm_film);
+-
+-  SET_SHORT(EXIF_IFD_EXIF, EXIF_TAG_FOCAL_LENGTH_IN_35MM_FILM,
+-            static_cast<uint16_t>(focal_length35mm_film));
++  // A sensor of no known size has no such focal length: the tag is left out,
++  // not computed from a diagonal clamped to a hundredth of a millimetre.
++  const auto film = andarium::camera::focal_length_in_35mm_film(
++      focal_length, sensor_size_x, sensor_size_y);
++  if (!film) {
++    return true;
++  }
++
++  SET_SHORT(EXIF_IFD_EXIF, EXIF_TAG_FOCAL_LENGTH_IN_35MM_FILM, *film);
+   return true;
+ }
+ 
+@@ -935,16 +934,21 @@ bool ExifUtilsImpl::SetFromMetadata(const HalCameraMetadata& metadata,
+       ALOGE("%s: setting focal length failed.", __FUNCTION__);
+       return false;
+     }
+-
+-    if (!SetFocalLengthIn35mmFilm(focal_length, sensor_chars_.physical_size[0],
+-                                  sensor_chars_.physical_size[1])) {
+-      ALOGE("%s: setting focal length in 35mm failed.", __FUNCTION__);
+-      return false;
+-    }
+   } else {
+     ALOGV("%s: Cannot find focal length in metadata.", __FUNCTION__);
+   }
+ 
++  // The camera's stated focal length and sensor size give the field of view,
++  // and so the focal length in 35 mm film; the lens's focal length of this
++  // picture, above, does not go with a stated size once a calibration
++  // replaces it. The tag is left out where the camera states no pair.
++  if (!SetFocalLengthIn35mmFilm(sensor_chars_.focal_length,
++                                sensor_chars_.physical_size[0],
++                                sensor_chars_.physical_size[1])) {
++    ALOGE("%s: setting focal length in 35mm failed.", __FUNCTION__);
++    return false;
++  }
++
+   ret = metadata.Get(ANDROID_SCALER_CROP_REGION, &entry);
+   if (ret == OK) {
+     if (!SetDigitalZoomRatio(entry.data.i32[2], entry.data.i32[3],
+@@ -1006,8 +1010,10 @@ bool ExifUtilsImpl::SetFromMetadata(const HalCameraMetadata& metadata,
      }
    }
  
@@ -4050,7 +4280,7 @@ index 2f3ca4c85933547400d0963174cebf69ded3da70..a113d94a7224bc68f606c446f19967f6
      float exposure_time = 1.0f * entry.data.i64[0] / 1e9;
      if (!SetExposureTime(exposure_time)) {
        ALOGE("%s: setting exposure time failed.", __FUNCTION__);
-@@ -1045,7 +1047,7 @@ bool ExifUtilsImpl::SetFromMetadata(const HalCameraMetadata& metadata,
+@@ -1045,7 +1051,7 @@ bool ExifUtilsImpl::SetFromMetadata(const HalCameraMetadata& metadata,
    }
  
    ret = metadata.Get(ANDROID_LENS_APERTURE, &entry);
@@ -4059,3 +4289,47 @@ index 2f3ca4c85933547400d0963174cebf69ded3da70..a113d94a7224bc68f606c446f19967f6
      if (!SetFNumber(entry.data.f[0])) {
        ALOGE("%s: setting F number failed.", __FUNCTION__);
        return false;
+diff --git a/devices/EmulatedCamera/hwl/utils/HWLUtils.cpp b/devices/EmulatedCamera/hwl/utils/HWLUtils.cpp
+index 2d156ab877eba6084da1dfb2f2e865740409a1f0..62135a80c2b94947769f039ea73133202e1e8258 100644
+--- a/devices/EmulatedCamera/hwl/utils/HWLUtils.cpp
++++ b/devices/EmulatedCamera/hwl/utils/HWLUtils.cpp
+@@ -87,6 +87,22 @@ status_t GetSensorCharacteristics(const HalCameraMetadata* metadata,
+   sensor_chars->full_res_width = sensor_chars->width;
+   sensor_chars->full_res_height = sensor_chars->height;
+ 
++  // The Exif data needs the camera's focal length and sensor size, as the
++  // static metadata states them, for the focal length in 35 mm film. Whatever
++  // the static metadata holds is read here, a template's default included;
++  // a source that knows the camera states none (the V4L2 frame source) says so
++  // where it makes the Exif data.
++  ret = metadata->Get(ANDROID_SENSOR_INFO_PHYSICAL_SIZE, &entry);
++  if ((ret == OK) && (entry.count == 2) && (entry.data.f[0] > 0.f) &&
++      (entry.data.f[1] > 0.f)) {
++    sensor_chars->physical_size[0] = entry.data.f[0];
++    sensor_chars->physical_size[1] = entry.data.f[1];
++  }
++  ret = metadata->Get(ANDROID_LENS_INFO_AVAILABLE_FOCAL_LENGTHS, &entry);
++  if ((ret == OK) && (entry.count >= 1) && (entry.data.f[0] > 0.f)) {
++    sensor_chars->focal_length = entry.data.f[0];
++  }
++
+   ret = metadata->Get(ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE_MAXIMUM_RESOLUTION,
+                       &entry);
+   if ((ret == OK) && (entry.count == 2)) {
+@@ -294,6 +310,16 @@ status_t GetSensorCharacteristics(const HalCameraMetadata* metadata,
+       return BAD_VALUE;
+     }
+ 
++    // A RAW camera that states the hot pixel map mode ON returns the map for a request of it.
++    ret = metadata->Get(ANDROID_STATISTICS_INFO_AVAILABLE_HOT_PIXEL_MAP_MODES, &entry);
++    if (ret == OK) {
++      for (size_t i = 0; i < entry.count; i++) {
++        if (entry.data.u8[i] == ANDROID_STATISTICS_HOT_PIXEL_MAP_MODE_ON) {
++          sensor_chars->hot_pixel_map_supported = true;
++        }
++      }
++    }
++
+     ret = metadata->Get(ANDROID_SENSOR_COLOR_TRANSFORM1, &entry);
+     if ((ret != OK) || (entry.count != (3 * 3))) {  // 3x3 rational matrix
+       ALOGE("%s: Invalid ANDROID_SENSOR_COLOR_TRANSFORM1!", __FUNCTION__);

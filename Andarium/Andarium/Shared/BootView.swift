@@ -10,6 +10,11 @@ import SwiftUI
 /// update, recovery and restart are variants of the same screen. A launch
 /// has one run, so the boot has no Cancel; the notice's Stop asks first.
 ///
+/// A first start also carries a panel saying that Android has no Google apps,
+/// on purpose (`NoGoogleBootNote`), and so does the retry of a first start
+/// that ended before Android booted; no other start does, and nothing is kept
+/// for it (`NoGoogleNotice.showsOnBoot`).
+///
 /// A start that has run for three minutes (`SlowStart`; eight for a first
 /// start and the first after an update) without reaching Android puts a notice
 /// above the steps: what the screen is waiting for, the step and the time, Stop
@@ -49,7 +54,8 @@ struct BootView: View {
             // it scrolls from its top.
             GeometryReader { proxy in
                 ScrollView {
-                    content(guest: guest, system: model.system, steps: steps, current: current)
+                    content(
+                        guest: guest, system: model.system, steps: steps, current: current)
                         .frame(minHeight: proxy.size.height, alignment: .center)
                 }
                 .scrollBounceBehavior(.basedOnSize)
@@ -188,7 +194,9 @@ struct BootView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private func content(guest: Guest, system: SystemInfo, steps: [Step], current: Int) -> some View {
+    private func content(
+        guest: Guest, system: SystemInfo, steps: [Step], current: Int
+    ) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             Text(kind == .recovery ? "Recovery" : "Andarium")
                 .font(.largeTitle.weight(.bold))
@@ -238,6 +246,14 @@ struct BootView: View {
                 .modifier(BootPanel(dimmed: dimmed, radius: 22))
             }
             #endif
+
+            // Last, below every sentence the boot says of itself.
+            if NoGoogleNotice.showsOnBoot(kind, firstBootPending: model.bootStartedUnfinished) {
+                NoGoogleBootNote()
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .modifier(BootPanel(dimmed: dimmed, radius: 22))
+            }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 20)

@@ -26,13 +26,32 @@ application's statements (the sensor orientation, the rotation that
   metadata stream alone is not use) and `idle` once the guest has closed every
   camera, so each open is reported once and a live session never reports it. A
   host that has not granted access behaves as an interrupted live session.
-- **Cameras.** Wire order is the back zoom camera (else the primary back lens),
-  the front camera, the other back lenses, then external cameras, at most eight.
-  A zoom camera and its lenses conflict; cameras run together where the host
-  says they can. The zoom camera takes automatic controls only. A lens publishes
-  manual exposure, focus and white balance where the host allows them. Of the
-  front lenses (an iPad lists a wide and an ultra wide one over a single
-  sensor) the guest sees the wide one.
+- **Cameras.** Wire order is the primary back lens (the wide, else the ultra
+  wide, else the telephoto), the front camera, the other back lenses (wide,
+  ultra wide, telephoto), then external cameras, at most eight. The device
+  publishes no zoom camera (a virtual device that switches lenses): every back
+  lens is a camera of its own, so a guest switches lenses by switching
+  cameras, and each keeps its own formats, controls and Bayer stills. The
+  Android image numbers a phone's cameras 0 wide, 1 front, 3 ultra wide and 4
+  telephoto. Cameras run together where the platform's multi-camera sets say
+  they can, two at once (the device runs no more, which is the layout's
+  `CameraUse::streams`): the guest is told the primary back camera with the
+  front camera first, then the front camera with each other camera a set
+  names, then other pairs, and every other pair conflicts, so the guest never
+  takes a group of more than two as one it may run at once. The log names the
+  pairs and the platform's sets at start.
+  A lens publishes manual exposure, focus and white balance where the host
+  allows them. Of the front lenses (an iPad lists a wide and an ultra wide one
+  over a single sensor) the guest sees the wide one.
+- **Zoom.** Every camera's ratio range starts at 1.0, its own full field of view.
+  A camera that runs in an anchor ends at the zoom the system recommends for the
+  anchor's format, and where the system gives none at what the anchor's format
+  itself delivers, never above the device's largest.
+- **Sensor size and focal length.** A camera publishes them as a pair that
+  gives its field of view, which the guest takes its lens labels and 35 mm
+  equivalents from. A lens that has learned its colour data publishes the
+  physical focal length of its Bayer still, and the size then follows the field
+  of view in the pixel array's shape.
 - **Tiers.** The small tier limits a session to 1080p video, 12 MP stills and
   four buffers; the large tier is 4K, 48 MP and six, for a fixed GPU budget of
   1 GiB or more. Every host is given the small tier for now
@@ -99,6 +118,17 @@ application's statements (the sensor orientation, the rotation that
   scaler, see [`darwin/platform`](../../platform/README.md)), writes a picture
   that needs none of it straight into the guest's rows, and drops frames to a
   stream's rate. A frame with no queued buffer is dropped and its number spent.
+- **Stabilization.** The guest's request for it (Android's record template
+  makes it, so video mode asks and photo mode does not) is met with the host's
+  low-latency mode where the active format supports it, else the standard one,
+  else none, and never with the system's automatic choice, which on an iPhone
+  holds the viewfinder a second or more behind (the preview and the recording
+  share one output). The device applies the camera's settings before it starts
+  its video, and the platform programs the mode on the new video connection
+  before the capture can deliver, so the first frame is cropped as the rest are
+  and the view does not move when the guest first changes a setting. A format
+  that supports no mode leaves the picture unstabilized, and the session
+  record's video line for the camera says `stab unsupported`.
 - **Stills.** A JPEG buffer carries the platform's file behind a reserved Exif
   APP1 segment for the guest to fill in place (`jpeg_gap.hpp`); a RAW buffer
   carries 16-bit rows at the 16-byte pitch. Buffers of one non-zero cookie
@@ -137,6 +167,23 @@ application's statements (the sensor orientation, the rotation that
   once. A host that lists no formats has no anchors and offers what it states.
   A camera opened while another's still is in flight, which the two conflict
   over, is refused until that still is delivered or has run out its ten seconds.
+  A still that does not end in a picture is reported to the device's owner
+  (`CameraDeviceOptions::onStillFailure`) with the stage it stopped at, the
+  camera, the sizes asked for, resolved and encoded, and what the platform
+  said of the capture (`darwin/platform/camera_still_failure.hpp`); the runtime keeps
+  the last few in the session record's camera slot. A whole request that waited
+  for the host's budget until its time ran out is one of them. One that an
+  interruption or a blocked session ends, and one that delivered its JPEG
+  (whatever its RAW did), report nothing. How the platform presented each
+  camera (its mounting, what its connections and photo output were set to, its
+  aspect ratio: `darwin/platform/camera_presentation.hpp`) is reported under the
+  guest's number of the camera (`CameraDeviceOptions::onCameraPresentation`) and
+  kept in the same slot, with the orientation of the guest's own description
+  (the application may turn it for a tablet's boot layout) and the platform's
+  as a second number where they differ. A still the platform refuses carries the
+  photo output's last compensation reading and when it was taken. The platform
+  session opens at the first use of a camera, so a run that used none names
+  none.
 - **Metadata.** A meta stream completes one `virtio_video_camera_meta` per
   exposure, with the sequence the frames and stills carry; black frames get a
   record too. The exposure time, ISO, aperture, focal length, neutral point and
@@ -163,6 +210,33 @@ application's statements (the sensor orientation, the rotation that
   for it: a frame of a lower serial was captured before that boundary (it waited
   in the inbox or in the pump's batch while the event was handled) and is
   dropped, never delivered as a live picture after the repair.
+- **Lost video.** The platform reports that the application left the
+  foreground (`CameraEventKind::interruptedInBackground`, which the Apple
+  backend raises for the system's reason that a camera is not available to an
+  application in the background). If the guest has a video stream open on a
+  camera then (even one a suspend has stopped; nothing else decides it, as the
+  host cannot tell a recording from a viewfinder), the camera's video is lost:
+  the capture stops, and every buffer of every video stream of the camera
+  completes with the error and interrupted flags at the stream's rate, with a
+  black interrupted record, whatever the platform does afterwards and for a
+  stream the guest restarts after a suspend, until the guest has closed its
+  last video stream of the camera. A stream it opens next is an ordinary one, so
+  the camera opens again on demand. What the guest's client sees of it is for
+  the guest's camera HAL to decide (the wire's README has the rule). Every other
+  interruption (another application or a call, iPad multitasking, the system's
+  pressure, a restart after an error), and a camera with no video stream, only
+  get the dark gap above. A blocked session hears of none. The report line names
+  the camera and says the video ended.
+- **Video mode.** The device tells its owner (`onVideoMode`) whether the guest
+  is in video mode: a live camera's video runs, uninterrupted, and the guest
+  asks for the picture stabilized, which Android's record template does and its
+  preview template does not (the wire carries no other sign of the template).
+  The owner opens the microphone for it before the guest records
+  ([`darwin/device/audio`](../audio/README.md#microphone)). The device says it
+  at every change of the state, however it came: a stream, a start tried again
+  after a failure, a rate change that starts the video, an interruption and its
+  end. It is told false when the video stops, the camera is interrupted, the
+  session is blocked and when the device is reset or goes away.
 - **Events and reset.** The event queue never holds a buffer: with no event
   pending it returns retry, so the guest's buffer stays in its ring, and an
   event raised later signals the device's event descriptor so the server runs
@@ -256,7 +330,8 @@ a blocked session never opens a platform session and reports each open of a
 camera once, a hostile guest, a reset with
 streams and stills in flight, an event queue that retries and wakes the server,
 a ring disable that resets nothing, a still on one camera while another
-streams, a join over the hardware budget, and a capture that fails to start
-round after round. `camera-held-requests` runs the vhost-user server over the
+streams, a join over the hardware budget, a capture that fails to start
+round after round, and a video that the application's leaving the foreground
+ends, with the interruptions and the modes that it does not. `camera-held-requests` runs the vhost-user server over the
 device and holds a stream's buffer across a disable and an enable. The Apple
 backend's capture is not run by any test.

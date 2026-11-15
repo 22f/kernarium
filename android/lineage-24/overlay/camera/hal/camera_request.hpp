@@ -3,16 +3,20 @@
 // How a capture request of the camera HAL ends. The HAL collects the output
 // buffers of a request one after another, their waits sharing one budget, and the
 // framework learns of the end by the camera HAL's notify contract: a request
-// whose outputs all failed is an ERROR_REQUEST (the application gets
-// onCaptureFailed and may shoot again), while ERROR_BUFFER, which Camera2 hands
-// to the application as onCaptureBufferLost and CameraX ignores, belongs to a
-// request that lost only some of its outputs. The tests hold both rules where
-// no Android library is needed.
+// whose outputs all failed is an ERROR_REQUEST (a failed capture, after which the
+// application may shoot again), while ERROR_BUFFER belongs to a request that lost
+// only some of its outputs. A camera the host has ended is neither: when the
+// session has a video encoder stream the request fails as a whole and the
+// framework is told ERROR_DEVICE, once per session (camera_session.hpp); any other
+// session is told nothing of it. The tests hold the rules where no Android library
+// is needed.
 #pragma once
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+
+#include "camera_abi.hpp"
 
 namespace andarium::camera {
 
@@ -40,6 +44,21 @@ enum class RequestEnd {
 {
     if (outputs == 0 || failed == 0) return RequestEnd::complete;
     return failed >= outputs ? RequestEnd::request_error : RequestEnd::buffer_errors;
+}
+
+// Whether a buffer that completed with the error flag is the host's end of the
+// camera: it belongs to a video stream, and the camera's newest metadata record
+// says the camera is black and interrupted (the host fails the buffers of a video
+// it ended, and records them so, for as long as the guest keeps the stream; wire
+// README of kernel/common/video). A failed video buffer under any other record,
+// or with no record, and a failed still, are a failed buffer. The dequeue flags
+// of the wire do not reach the HAL, which is why the record is the second half
+// of the news.
+[[nodiscard]] constexpr bool camera_lost(bool video_stream, bool buffer_failed, bool has_record,
+                                         std::uint32_t record_flags) noexcept
+{
+    constexpr std::uint32_t ended = abi::frame_flag::black | abi::frame_flag::interrupted;
+    return video_stream && buffer_failed && has_record && (record_flags & ended) == ended;
 }
 
 // The one budget that the buffer waits of a request share. Every buffer waits

@@ -28,6 +28,8 @@ struct SessionPreset: Equatable {
     /// Settings scrolls to the section with this identifier ("stats" or
     /// "capabilities").
     var settingsScroll: String?
+    /// Settings opens on the Old app compatibility page (the preview).
+    var oldAppsPage = false
     var powerMenu = false
     var leftEdge = false
     var guestScreen: GuestScreen = .home
@@ -62,6 +64,8 @@ final class SessionState {
     /// has been. Android ends its boot some seconds before it, and the file
     /// browser waits for it.
     var storageReady: Bool?
+    /// What the session knows of Old app compatibility (`OldApps.swift`).
+    let oldApps = OldAppsState()
     var showStats = false
     var readout = Readout()
     /// The side keys are open. The session owns it because a touch on the
@@ -128,6 +132,10 @@ final class AppModel {
     var plan: StartPlan = .normal
     /// The release the running boot updates from, where it is known.
     var bootFrom: String?
+    /// Whether the guest's first Android boot had not been seen to complete
+    /// when the start under way began (`InstanceFiles.firstBootPending`): an
+    /// ordinary start of such a guest is its first Android boot still.
+    private(set) var bootStartedUnfinished = false
     /// The preview's plan after Restore; a device reads it from the files.
     var planAfterRestore: StartPlan?
 
@@ -227,6 +235,11 @@ final class AppModel {
     /// The release notes: Info's history and the ribbon above Start after an
     /// update.
     var whatsNew = WhatsNewModel()
+    /// What is kept of the notice that the virtual machine's Android has no
+    /// Google apps, on purpose (Send feedback's line; the boot screen's panel
+    /// keeps nothing). It keeps nothing until the person's own launch gives it
+    /// the defaults (`AppEntry.makeModel`).
+    @ObservationIgnored var noGoogleNotice = NoGoogleNotice()
     /// The launch decided whether the statistics show (automation, see
     /// `StatsPreference.launch`): the value belongs to that run and is not kept.
     var statsDecidedByLaunch = false
@@ -1053,6 +1066,7 @@ final class AppModel {
         session.usbDebugging = nil
         session.storageReady = nil
         session.adbProblem = nil
+        session.oldApps.reset()
     }
 
     /// The address a computer connects to, which changes with the network.
@@ -1089,6 +1103,8 @@ final class AppModel {
         let value = await driver.storageReady()
         guard session === current, case .running(.normal) = phase, let value else { return }
         if current.storageReady != value { current.storageReady = value }
+        // The file browser's check is the moment Android is up for the apps too.
+        await listOldAppsOnce()
     }
 
     /// While Settings is open: the address and the settings, read again every
@@ -1100,7 +1116,9 @@ final class AppModel {
             refreshAdbAddress()
             async let debugging: Void = refreshUsbDebugging()
             async let storage: Void = refreshStorage()
-            _ = await (debugging, storage)
+            // A listing that got no answer is asked again while Settings is open.
+            async let oldApps: Void = listOldAppsOnce()
+            _ = await (debugging, storage, oldApps)
             try? await Task.sleep(for: .seconds(3))
         }
     }
@@ -1389,13 +1407,13 @@ final class AppModel {
         runOperation(
             BusyState(title: String(localized: "Installing app"), detail: detail, progress: 0),
             failure: Self.installFailure,
-            ending: { (outcome: ApkInstallOutcome) in outcome.words(fileName: name) },
+            ending: { (result: ApkInstallResult) in result.outcome.words(fileName: name, oldAppHint: result.oldAppHint) },
             { [driver] update in
                 defer {
                     endAccess()
                     staged?.discard()
                 }
-                let outcome = try await self.installAskingAboutLegacyApps(detail: detail) { bypass, update in
+                let end = try await self.installAskingAboutLegacyApps(detail: detail) { bypass, update in
                     if let driver {
                         return try await driver.installApk(at: url, bypassLowTargetSdkBlock: bypass, update: update)
                     } else {
@@ -1403,11 +1421,20 @@ final class AppModel {
                         return self.previewInstallOutcome
                     }
                 }
+                // The app is in. Old app compatibility lists it if it applies; after an
+                // Install anyway of an app built for an Android before 4.0 the result
+                // says where the switch is, when the listing names the app the install added.
+                var hint = false
+                if let before = end.oldAppsBefore {
+                    hint = await self.installAddedOldApp(listedBefore: before)
+                } else {
+                    Task { await self.refreshOldApps() }
+                }
                 // 100% for a moment, then the result. Nothing is left to stop, so
                 // the Cancel that came back for an app's data goes.
                 update(BusyUpdate(progress: 1, cancellable: false))
                 try? await Task.sleep(for: .milliseconds(500))
-                return outcome
+                return ApkInstallResult(outcome: end.outcome, oldAppHint: hint)
             }
         )
     }
@@ -1422,10 +1449,11 @@ final class AppModel {
     private func installAskingAboutLegacyApps(
         detail: String,
         attempt: (_ bypassLowTargetSdkBlock: Bool, _ update: @escaping @Sendable (BusyUpdate) -> Void) async throws -> ApkInstallOutcome
-    ) async throws -> ApkInstallOutcome {
+    ) async throws -> LegacyInstallEnd {
         let epoch = operationEpoch
         var flow = LegacyInstallFlow()
         var outcome = ApkInstallOutcome.installed
+        var oldAppsBefore: [OldApp]?
         while true {
             switch flow.step {
             case let .attempt(bypass):
@@ -1457,11 +1485,17 @@ final class AppModel {
                     continue
                 }
                 flow.answered(installAnyway: installAnyway)
-                // The bar starts over for the second attempt.
-                if installAnyway { busy?.progress = 0 }
+                if installAnyway {
+                    // The bar starts over for the second attempt.
+                    busy?.progress = 0
+                    // An app built for an Android before 4.0 may be one Old app
+                    // compatibility lists: the listing as the file goes again is what
+                    // the listing after it is compared with.
+                    if OldAppInstallHint.isOldTarget(target) { oldAppsBefore = await oldAppsBeforeInstall() }
+                }
             case let .finished(ending):
                 switch ending {
-                case .installed: return outcome
+                case .installed: return LegacyInstallEnd(outcome: outcome, oldAppsBefore: oldAppsBefore)
                 case .cancelled: throw CancellationError()
                 // Today only a second too-old refusal ends this way, and
                 // `ApkInstall` words one of those as an ordinary failure
@@ -1527,6 +1561,11 @@ final class AppModel {
     /// this out, and its install always ends as installed.
     @ObservationIgnored
     var previewInstallOutcome = ApkInstallOutcome.installed
+    /// The list of old apps the preview and a UI test's probe session play,
+    /// in place of the runtime's (`ScriptedOldApps`). The App Store
+    /// configuration leaves this out.
+    @ObservationIgnored
+    var scriptedOldApps: (any OldAppsSource)?
     #else
     private var previewInstallOutcome: ApkInstallOutcome { .installed }
     #endif
@@ -1570,7 +1609,8 @@ final class AppModel {
             snapshots.cancelReads()
             frozenBootStage = nil
             bootTracker = BootTracker()
-            slowStart.begin(at: clock(), kind: kind, firstBootPending: driver?.firstBootPending() ?? false)
+            bootStartedUnfinished = driver?.firstBootPending() ?? false
+            slowStart.begin(at: clock(), kind: kind, firstBootPending: bootStartedUnfinished)
             // The record the file holds now is not the run's: the runtime rewrites it for the run, after this.
             bootRecord = BootRecordBinding(
                 processID: Int(ProcessInfo.processInfo.processIdentifier),
@@ -1610,6 +1650,8 @@ final class AppModel {
         lifecycle.finishBoot(kind)
         if driver != nil {
             persistNow()
+            // Android is up: the old apps are listed once, with Settings closed.
+            listOldAppsAtStart()
         } else if kind != .recovery {
             // The preview plays the instance too: the first start sets
             // Android up, and an update or a retry ends.

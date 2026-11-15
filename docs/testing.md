@@ -342,7 +342,8 @@ fake guests and players, the haptics wire against the golden frames in
 relay test against too; the game controllers' wire against that directory's
 gamepad frames, each family's reports read back through a test-only HID
 descriptor parser, and the stream and session on a fake relay; the session
-record's stall, network and storage slots against the golden slots there, which
+record's stall, network, storage and camera slots (a camera's mounting and
+connection lines and its failed stills) against the golden slots there, which
 `runtime-stall-record` and `runtime-session-record` check the runtime's writers
 against, and that the record quotes no identity value (`runtime-session-record`);
 and the notice that iOS denies the network, from the path's mapping to
@@ -449,7 +450,14 @@ menu) exist with any of Send feedback, Review and Buy me tokens, and
 `HomePlainInfoTests` (the plain Info button) only with none
 ([Home toolbar menu](../Andarium/README.md#home-toolbar-menu)).
 `AndariumCoreTests` holds the tip sheet's states and the rating rule, counter
-and record as pure logic.
+and record as pure logic, and the state of the no-Google-apps notice (the panel
+on a first start and on the retry of a first Android boot that did not finish,
+and nothing else; the Send feedback line until opened or closed).
+`NoGoogleNoticeScreenTests` host the real boot screen and Send feedback sheet
+for it (the panel reached on those starts and gone with the boot, the starts
+that show none, the line opening and closing in place, the words in each
+language), and `NoGoogleNoticeUITests` boot a real first start and reach the
+line (see the UI-test target below).
 The Mail composer, the picker and the guest's display are stand-ins. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
@@ -499,6 +507,19 @@ do nothing unless `TEST_RUNNER_ANDARIUM_CAPTURE_DIR` names a folder.
 `GuestRecoveryTests` check that a recovery the guest asked for is a recovery
 session and its reboot a normal one.
 
+`OldAppCompatibilityTests` (`andarium-core`) read the image's old-app command on
+canned output of its specification (the version line and the five fields, an
+unknown trailing field, a label with odd characters, a missing command, an
+unknown version, a usage error, a refusal) and send it nothing that is not a
+package name; `OldAppsModelTests` play the page's model against a stub runtime
+and a scripted list (the run's first listing with Settings never opened, when
+the virtual machine is asked, a listing older than a change, an alert for a
+page that was closed, what each switch asks first, what a refused change
+leaves, the hint after Install anyway), `OldAppsScreenTests` host
+Settings and the page, `OldAppsOperationTests` run the adapter through the
+application's adb channel against the fake adbd, and `OldAppsWordsTests` read the
+words in each language.
+
 `AndariumUITests` is the UI-test target of the same scheme
 (`xcodebuild test -scheme Andarium -only-testing:AndariumUITests`, with
 `-parallel-testing-enabled NO`), run on an iPad Simulator and an iPhone
@@ -517,7 +538,18 @@ a session: an iPad's interface follows, an iPhone's stays portrait. The
 results carry how many attempts each repeated step took. The Simulator produces
 no Escape, Delete, Caps Lock, F13, lone Shift or Globe key, and no raw mouse
 motion under the pointer lock. `SideKeysTipUITests` leaves the side keys' tip
-on and taps the keys once: they open.
+on and taps the keys once: they open. `OldAppsUITests` reach Settings > Apps > Old
+app compatibility in a probe session with a scripted list of old apps
+(`ANDARIUM_OLD_APPS_PROBE`) and flip the switches: the alert that asks before
+turning on, the one for an open app turned off, a change the virtual machine
+refuses, and no row without the command. `NoGoogleNoticeUITests` holds the one
+test of the target that is not a probe session, and boots a real guest: it
+creates a virtual machine in the Simulator and starts it for real, so it needs
+the Simulator Android runtime packaged and the system image staged
+([Build](../Andarium/README.md#build)), and it takes about a minute to reach
+Android (the test allows ten minutes to create the machine and 25 for the
+boot). Its other test, in a build with Send feedback, reaches the Send feedback
+line from a probe session's Settings.
 
 The folding iPhone's layout ([devices](../Andarium/README.md#devices)) is
 `andarium-core`'s `FoldLayoutTests`, one test per pose of the iPhone Duo.
@@ -561,8 +593,9 @@ instead.
 Tooling tests cover `scripts/check-privacy-manifests.py`
 (`ios-privacy-manifests`, which `package-ios-frameworks.sh` also runs on every
 device slice it packages), `Andarium/scripts/check-app-store-bundle.py`
-(`andarium-app-store-bundle`, the last build phase of the AppStore
-configuration, [configurations](../Andarium/README.md#configurations)), the
+(`andarium-app-store-bundle`, the last build phase of the AppStore and
+TestFlight configurations,
+[configurations](../Andarium/README.md#configurations)), the
 tip sheet's words (`andarium-tip-words`: `Andarium/scripts/check-tip-words.py`
 rejects the forbidden terms of each language and a token amount in the
 `TipJar` table, and requires the statement that a tip is voluntary, one-time
@@ -593,8 +626,11 @@ A host ends on its own now and then. A new one needs the owner at the device
 only when the system lost the last approval, however soon it starts: when
 xcodebuild's relaunch of the runner initialized (its log says so) nothing is
 asked and the watch replaces the host at once; when it failed to initialize, or
-the log does not say, the owner may be needed and the watch ends. `watch` keeps one
-device's host serving, and acts only on evidence: it adopts a serving host,
+the log does not say, the owner may be needed and the watch ends. A host's
+supervisor tries to end xcodebuild as soon as its log reports the connection to
+the device lost, before xcodebuild starts a runner that cannot initialize (best
+effort), so that death is then a plain one the watch replaces. `watch` keeps
+one device's host serving, and acts only on evidence: it adopts a serving host,
 starts the next only once the old one is shown to be dead (three reads in a row
 that all worked and all showed the same beat), and otherwise replaces nothing
 and ends with a status and state of its own that `status` reports (approval the
@@ -607,10 +643,12 @@ and its sender gets status 3. Run it in a terminal, detached with
 <label>` prints a launchd job that launchd never restarts, and creates nothing:
 make its log directory first; launchd must be able to open the job file and the
 log, so both belong on a volume with ownership enabled, and `--launchd-log`
-names the log); `stop --force` ends the watch before the host.
+names the log); `stop --force` ends the watch before the host. The printed job
+asks for interactive scheduling, and a running watch holds an idle-sleep
+assertion (never a display one) and logs any turn of its loop that starts late.
 The `kernarium-ipad-automation-watch` and
 `kernarium-ipad-automation-watch-process` tooling tests run the real script
-against fake `xcrun` and `xcodebuild` executables.
+against fake `xcrun`, `xcodebuild` and `caffeinate` executables.
 
 ### Edge gestures (device only)
 
@@ -771,16 +809,21 @@ on an M4 or newer Mac.
 Build-side contracts need no Android build: `lineage24-target-files-fixtures`,
 `lineage24-builder-lane`, `lineage24-release-contract`,
 `lineage24-first-boot-precompile` and the `lineage24-mesa-venus-*` tests run
-the producer's verifiers over fixtures, and `android-partition-boot-selection`,
-`android17-instance-rules` and `android17-macos-launcher-options` cover the host
-library and launcher over the storage layout (`android17-launcher-arguments`,
+the producer's verifiers over fixtures, and
+`android-partition-boot-selection`, `android17-instance-rules` and
+`android17-macos-launcher-options` cover the host library and launcher over the
+storage layout (`android17-launcher-arguments`,
 where the Android CLI is built, runs the executable's own argument checks)
 ([storage](../android/lineage-24/README.md#static-disk-and-boot-contract),
-[block device](../darwin/device/block/README.md)). `guest-android-disks`
-(integration) boots the Linux test guest on a release and a data disk the
-library created. `gnss-hal-nmea`, `gnss-hal-policy`, `gnss-hal-engine`,
-`gnss-hal-entry` and `gnss-hal-callbacks` (unit) compile the guest GNSS HAL's
-headers ([Location](../android/lineage-24/README.md#location)) against the host
+[block device](../darwin/device/block/README.md)).
+`lineage24-camera-app-contract` checks that the camera application's overlay,
+its patch series and the target-files verifier's constants name the same
+settings and values; what the application then does is the image's to show.
+`guest-android-disks` (integration) boots the Linux test guest on a release
+and a data disk the library created. `gnss-hal-nmea`, `gnss-hal-policy`,
+`gnss-hal-engine`, `gnss-hal-entry` and `gnss-hal-callbacks` (unit) compile the
+guest GNSS HAL's headers
+([Location](../android/lineage-24/README.md#location)) against the host
 writer's own epochs: the reading of the stream, the reporting rules, the
 session and the AIDL entry points, with a pipe for the receiver and a counting
 wakelock, and with a framework callback that does not answer, so that no entry
@@ -831,21 +874,33 @@ anywhere is a blocker. The candidate must show:
   ([Keyboard and mouse](../android/lineage-24/README.md#keyboard-and-mouse)).
 - **Cameras** (a guest started with `--camera=synthetic` and a camera layout on
   `androidboot.product.vendor.sku`). `android-camera` passes for the layouts
-  the synthetic profiles compose, live and blocked; the VTS camera provider
-  test (`VtsAidlHalCameraProvider_TargetTest`) passes against the lazy
-  provider; and these CTS modules pass sharded, with the failures rerun alone
-  and a result that differs from the accepted release's explained:
+  the synthetic profiles compose, live and blocked, a blocked session showing
+  no sensor privacy reminder for the camera, `android-camera-restart`
+  passes for the phone profile, and `android-camera-video-lost` passes on an
+  image that carries the HAL topic that handles the host's end of a camera's
+  video; the VTS camera provider test
+  (`VtsAidlHalCameraProvider_TargetTest`) passes against the lazy provider; and
+  these CTS modules pass sharded, with the failures rerun alone and a result
+  that differs from the accepted release's explained:
   `CtsCameraTestCases` (about 6 to 15 hours, as detached shards),
   `CtsCameraApi25TestCases`, `CtsMediaRecorderTestCases`, the camera parts of
   `CtsAppOpsTestCases` and `CtsPermissionTestCases`, and
-  `CtsSensorPrivacyTestCases` in a blocked session and in a live one. The
-  provider process runs from cameraserver's start until cameraserver holds no
-  camera, and again while an application holds one, no denial of
-  `hal_camera_default` appears in the log, and the verifier's check that
+  `CtsSensorPrivacyTestCases` in a blocked session and in a live one.
+  `CtsCameraTestCases` runs once more, for its RAW parts
+  (`ExtendedCameraCharacteristicsTest`, `CaptureResultTest`, `DngCreatorTest`,
+  `StillCaptureTest` and `CaptureRequestTest#testLensShadingMap`), on a guest
+  restarted over a saved calibration, since only then does the guest list a
+  RAW camera. The blocked CTS session runs without the side keys, so the
+  hardware toggle is not set there; with it set, the platform's camera reminder
+  tests would fail by design. The provider process runs from cameraserver's
+  start until cameraserver holds no camera, and again while an application
+  holds one, no denial of `hal_camera_default` appears in the log, and the
+  verifier's check that
   `libgooglecamerahwl_impl.so` holds the names of route `p0030` is not
   vacuous: it runs on the candidate's built library (a source tree has none)
-  and is shown to fail on the stock one
-  ([Camera](../android/lineage-24/README.md#camera)).
+  and is shown to fail on the stock one. The camera application shows a lens
+  button for each back lens and offers no pinch zoom, zoom slider or Zoom
+  action ([Camera](../android/lineage-24/README.md#camera)).
 
 `android-oobe`, `android-adb-debugging`, `android-guest-proc` and
 `android-installation-identity` (integration) each register only when
@@ -882,6 +937,34 @@ through Android's input dump and the probe's log, that the host's devices
 plug, are configured as the image says, deliver keys, the cursor, buttons and
 wheel, pass pointer capture both ways and unplug; `--instance` names the
 previous release's data disk to check the one-time on-screen keyboard change.
+`android-oldapp-switch` (integration) registers when
+`UML_ANDROID_OLDAPP_SWITCH_RELEASE` names a release built with the Old app
+compatibility command ([README](../android/lineage-24/README.md#old-application-switch)):
+as the adb shell user, `kernarium_oldapp` is in the image and lists an eligible
+probe application (installed past the block on old targets, with an armeabi-v7a
+stand-in library) with its label, off and last-update time, and none that fails
+one clause of the rule (a target level of 14 or more, no 32-bit native code, a
+shared user ID, a system application, an unknown package); `set on` refuses those
+with status 2, `set off` accepts them, a name that cannot be a property name is
+refused for both, and unknown arguments give status 64; `set on` stores the time
+and `list` shows it; an ordinary application (`untrusted_app_29`) reads the value
+and its attempt to set it is refused; `set off` clears it; and a choice is
+cleared by the next listing after a reinstall (at once, whatever the clock says),
+a replacement by a package that is no longer eligible, an uninstall, or a value
+that names no installation, and the command's lock is a file that only the shell user
+can open (a loosened one is tightened). `--hook` (an image that also carries the
+framework hook) adds an old application's own process (`untrusted_app_25`): it
+reads the property and cannot set it, switching on or off ends it, the layer's
+library is mapped into the next process exactly while the switch is on, and a
+stale choice loads nothing. The restart of a guest (the choice survives it, an
+Android update and a snapshot restore) is the image proof's own step.
+`--real-apk`, `--real-package` and `--real-label` also list an application you
+provide whose label is a resource. `android17-oldapp-switch-runner` (tooling)
+runs the packages, parsers and steps against a scripted image that keeps
+packages, install times and processes, and `android17-oldapp-switch-command`
+(tooling; skipped without a JDK) runs the command's rule, listing, cleanup,
+lock file (on real files), writes and exit statuses on a plain JVM; the Android
+calls need a built image.
 `android-video-suspend` (integration) registers when
 `UML_ANDROID_VIDEO_SUSPEND_RELEASE` names the release: the gallery's decoder and
 `screenrecord`'s encoder run across a suspend by the host's route (asked again
@@ -992,6 +1075,34 @@ Android sees (devices, keys, axes), what comes back (rumble, lights, the
 drivers' feature requests), hot plug, the relay's recovery, and reports the
 guest's cost per report and the relay's memory. `android17-gamepad-runner`
 (tooling) runs its wire, controllers and parsers without a guest.
+`android-oldapp` (integration) registers when `UML_ANDROID_OLDAPP_RELEASE`
+names a release built with the old-application layer
+([README](../android/lineage-24/README.md#old-applications)): a probe application
+of its own (`oldapp_probe_apk.py`, native code built for armeabi-v7a with the
+host's `clang++` and `ld.lld`) is installed as a package that targets API 10, past
+the block on old targets, and as one that targets API 29. The old package, once
+the runner switches it on (after a run without that, which must not load the
+layer), reads a Java `byte[]` through the Dalvik offsets, hands it back to Java
+and the array functions, from a second thread too, writes it through the array
+functions, compares it with a global reference and the original, locks it, keeps
+it while more results arrive, pops it out of a local frame, has Java fill it and
+reads it again, writes it through the raw pointer without a release and hands it
+to a Java method that reads it, opens it through its own critical pointer and the
+block's at once, clones it after a write through `GetByteArrayElements`, reads
+a committed write through a second reference to the array (pointers from
+`GetByteArrayElements` and `GetPrimitiveArrayCritical`), grows
+a malloc buffer with `getline`, asks `malloc_usable_size`, reallocates and
+frees a block libc allocated, finds the function tables
+read-only again and allocates below 2 GiB, and passes; the runner also asserts
+the library's SELinux label and that the log names the first declined shadow once. The modern package gets no layer, the raw read fails
+and the array operations give the runtime's own answers. `--host-shim` boots a
+release without the layer and loads a host-built copy from the old package after
+a control run without it, which qualifies the library and not the framework hook.
+`android17-oldapp-runner` (tooling) runs the package (manifest, DEX file, armv7
+build), the verdicts and the commands without a guest. The unit tests
+(`andarium-oldapp-*`) run the JNI interposer against a fake runtime that accepts
+live references only, the allocator arena, the ELF relocation scan and the page
+protection window.
 `android-camera` (integration) registers when `UML_ANDROID_CAMERA_RELEASE`
 names the release: the runner boots it with the launcher's synthetic camera
 (`--camera=synthetic|blocked`, `--camera-profile=`) and a layout on the vendor
@@ -1012,10 +1123,44 @@ and the input's log must say it made the time up; and one during which the
 emulator process is stopped, whose two tracks must show gaps of about the same
 length with no burst of made-up audio after them. The audio capture is seen to
 run before either is injected. In a blocked session the runner checks instead
-that the same cameras give black frames and no still.
-`android17-camera-runner` (tooling) runs its parsers and the expectations of
-every layout without a guest, and `android17-camera-layouts` (tooling) the
-layout set, its fallback order and the generated files.
+that the same cameras give black frames and no still. `android-camera-restart`
+(`--mode restart`) takes a preview and the still of the primary back camera and
+of a lens that learns colour data into a calibration directory of its own,
+boots the same instance again over it, expects the same camera IDs, one of them
+with RAW, because a camera the HAL refuses while it builds its list is not
+listed again, reads the static metadata those RAW cameras state (the lens
+shading map and hot pixel map modes, the lens shading state) and takes a RAW
+still of one, with its DNG.
+`android-camera-video-lost` (`--mode video-lost`) tells the synthetic camera,
+through its control pipe (`UML_SYNTHETIC_CAMERA_CONTROL`, test-only), that the
+application left the foreground while the video mode records, and expects the
+recording to end by itself with its clip (which holds encoded video samples)
+saved, the camera application to stay in front, and a recording to work again
+once the application is started again after the person returns (that step starts
+the activity again and shows only that the camera can be opened again). Two more
+cases leave a viewfinder with no recording, the video mode's (which binds an
+encoder surface) and the photo mode's, and expect each live again within 45 s of
+the return (one deadline for the camera, the picture and the frame counters), in
+the same process, with no activity start and no error window; the photo mode's
+viewfinder must not be told the device is gone, and the HAL's log must show that
+it closed and reopened its video streams. The release must carry the HAL topic
+that handles the host's end of a camera's video.
+`android17-camera-runner` (tooling) runs its
+parsers and the expectations of every layout without a guest,
+`android17-camera-layouts` (tooling) the layout set, its fallback order and the
+generated files, and `andarium-camera-plan` (unit) the metadata a RAW camera
+states, which the HAL writes from the same function (`state_raw_metadata`).
+The HAL's result path (the lens shading map and the empty hot pixel map for the
+mode ON) has no check of its own outside the camera CTS modules.
+`android17-camera-device-lost` (tooling) compiles the series' sensor source
+against stub headers and runs its callback path (a request that met the loss
+returns every buffer as an error and tells the framework once, the requests the
+session still holds drain without the frame source); the rest of the series'
+wiring it reads as text, which is a structural check.
+`android17-camera-crop-region` (tooling) is a structural check as well: it reads
+what the series does to the request state, and the rule it uses is the unit row
+`andarium-camera-crop`, which runs the request-to-result round trip through a
+model of the session layer's zoom ratio arithmetic.
 
 Every first-party script that reaches a guest over adb uses the one shared adb
 server, names the guest with `-s 127.0.0.1:<port>` and at the end only

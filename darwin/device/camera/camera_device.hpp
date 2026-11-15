@@ -95,8 +95,34 @@ struct CameraDeviceOptions {
     /* Told on the transport thread at each CameraCheckpoint, for a diagnostic
      * line; it changes nothing and must not block. */
     std::function<void(CameraCheckpoint)> onCheckpoint;
+    /* Told on the transport thread, once for each capture the guest asked for
+     * that did not end in a picture, why: the stage it stopped at, the camera,
+     * the sizes asked for, resolved and encoded and what the platform said of
+     * the capture (`uml::platform::CameraStillFailure`; numbers and fixed
+     * words, never a name or a message). The runtime keeps the last few in its
+     * session record. A capture that the camera's interruption or a blocked
+     * session ends is not one of them, and neither is one that delivered its
+     * JPEG, whatever happened to its RAW. It changes nothing. The worker waits
+     * for it, so it is brief: the runtime's writes the session record, a
+     * synchronous write, once for each. */
+    std::function<void(const uml::platform::CameraStillFailure&)> onStillFailure;
+    /* Told for a diagnostic record whenever the platform states or sets something about a camera it presents to the guest:
+     * the camera's mounting, its anchor, what an admission set on its connections, the photo output's compensation, the
+     * device's aspect ratio (`uml::platform::CameraPresentation`: numbers and fixed words, the camera as the guest numbers
+     * it; the camera's whole note each time, so the newest of a camera replaces the older). Only cameras the guest sees
+     * are told. It runs on a thread of the platform, in order for one camera, and returns quickly: the runtime's writes the
+     * session record. It changes nothing. */
+    std::function<void(const uml::platform::CameraPresentation&)> onCameraPresentation;
     /* Called on the transport thread when the state changes. */
     std::function<void(CameraState)> onState;
+    /* Called on the transport thread, with the value it has now, whenever whether a camera of the guest is in video
+     * mode changes. The guest is in video mode when a live camera's video runs, uninterrupted, and the guest asks for
+     * the picture stabilized: Android's record template asks and its preview template does not, so a camera
+     * application's video mode asks and its photo mode does not, and so does an application that records with no
+     * preview. An application that records without asking is not seen as in video mode. The application opens the
+     * microphone for it before the guest records, so the recording does not begin in silence. It is told false when
+     * the device is reset or goes away; it changes nothing and must not block. */
+    std::function<void(bool)> onVideoMode;
     /* The clock frame ages are measured on; the platform's where empty. */
     std::function<std::uint64_t()> clock;
 };

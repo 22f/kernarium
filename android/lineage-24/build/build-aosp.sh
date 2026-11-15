@@ -467,6 +467,8 @@ fi
 	fail "the script that applies the host's time zone is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_keyboard_default_script "* ]] ||
 	fail "the script that moves an older guest to the on-screen keyboard default is absent"
+[[ "$PRODUCT_PACKAGES" == *" kernarium_oldapp "* ]] ||
+	fail "the shell command that lists and switches Old app compatibility is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.android.hardware.wifi "* ]] ||
 	fail "the Wi-Fi HAL that the virtual Wi-Fi needs is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.google.cf.wpa_supplicant "* ]] ||

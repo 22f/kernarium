@@ -269,6 +269,8 @@ REQUIRED_ENTRIES = {
     "SYSTEM_EXT/etc/init/kernarium_time_zone.rc",
     "SYSTEM_EXT/bin/kernarium_keyboard_default.sh",
     "SYSTEM_EXT/etc/init/kernarium_keyboard_default.rc",
+    "SYSTEM_EXT/bin/kernarium_oldapp",
+    "SYSTEM_EXT/framework/kernarium_oldapp.jar",
     "VENDOR/usr/keylayout/Vendor_1af4_Product_0002.kl",
     "VENDOR/usr/idc/Vendor_1af4_Product_0003.idc",
     "VENDOR/usr/idc/Vendor_1af4_Product_0004.idc",
@@ -326,6 +328,7 @@ REQUIRED_ENTRIES = {
     "SYSTEM/bin/app_process32",
     "SYSTEM/bin/bootstrap/linker",
     "SYSTEM/bin/boringssl_self_test32",
+    "SYSTEM/lib/libkernarium_oldapp.so",
     "SYSTEM/framework/arm/boot.oat",
     "SYSTEM/framework/arm/boot-framework.oat",
     "SYSTEM/etc/init/hw/init.zygote64_32.rc",
@@ -733,6 +736,7 @@ PROPERTY_CONTEXT_FILES = (
 )
 CIL_DONTAUDIT_RULE = re.compile(rb"^\(dontaudit (\S+) (\S+) \((\w+) \(([^)]*)\)\)\)$", re.MULTILINE)
 CIL_ALLOW_RULE = re.compile(rb"^\(allow (\S+) (\S+) \((\w+) \(([^)]*)\)\)\)$", re.MULTILINE)
+CIL_NEVERALLOW_RULE = re.compile(rb"^\(neverallow (\S+) (\S+) \((\w+) \(([^)]*)\)\)\)$", re.MULTILINE)
 CIL_PERMISSIVE_TYPE = re.compile(rb"^\(typepermissive (\S+)\)$", re.MULTILINE)
 # The only domain that may be permissive, and only in the diagnostics build: the userdebug
 # root shell. A user build has none.
@@ -926,6 +930,38 @@ KEYBOARD_DEFAULT_TRANSITION = re.compile(
     rb"kernarium_keyboard_default\)$",
     re.MULTILINE,
 )
+# Old app compatibility is a choice per application, kept as one persistent property per package
+# (persist.sys.kernarium.oldapp.<package>: the turn-on time in epoch seconds, empty for off) and
+# written by the shell command kernarium_oldapp, which Andarium runs as the adb shell user
+# (overlay/oldapp_switch). The command is a Java tool started through app_process, so the image
+# carries its wrapper script and its jar on system_ext. The property has a type of its own under
+# the existing persist.sys.kernarium. policy: the shell domain sets it, every application domain
+# reads it (the framework hook reads it in the application's own process) and no other application
+# domain may set it. Two application domains are not core domains, which a system_internal_prop
+# keeps from reading, so the type is system_restricted_prop.
+OLDAPP_COMMAND = "kernarium_oldapp"
+OLDAPP_WRAPPER = "SYSTEM_EXT/bin/kernarium_oldapp"
+OLDAPP_JAR = "SYSTEM_EXT/framework/kernarium_oldapp.jar"
+OLDAPP_CLASS = "com.kernarium.oldapp.Main"
+OLDAPP_WRAPPER_REQUIRED = (
+    "#!/system/bin/sh",
+    "CLASSPATH=$base/framework/kernarium_oldapp.jar",
+    "base=/system_ext",
+    f"exec app_process $base/bin {OLDAPP_CLASS}",
+)
+OLDAPP_PROPERTY_PREFIX = "persist.sys.kernarium.oldapp."
+OLDAPP_PROPERTY_TYPE = "kernarium_oldapp_prop"
+OLDAPP_SETTER = "shell"
+# The command serialises its changes with an exclusive lock on a file in the shell user's own data
+# directory (/data/local/tmp, shell_data_file): the shell domain must create and lock files there, and
+# tighten (setattr) one that someone left open to other users.
+OLDAPP_LOCK_TYPE = "shell_data_file"
+OLDAPP_LOCK_PERMISSIONS = (
+    ("file", frozenset({"create", "open", "read", "write", "lock", "getattr", "setattr"})),
+    ("dir", frozenset({"search", "add_name", "write"})),
+)
+# What get_prop grants for a property type: a read of the property area needs all four.
+OLDAPP_READ_PERMISSIONS = frozenset({"read", "getattr", "map", "open"})
 # The partition the host grew is filled on every boot, once /data is mounted
 # (init.vendor.rc says why): the kernel's online resize needs neither a fsck nor
 # a recorded check. resize2fs runs as root with the group of /data's owner, so
@@ -1543,6 +1579,11 @@ def check_boot_policy(
             "utf-8", errors="strict"
         ),
         read_small(archive, infos["SYSTEM_EXT/bin/kernarium_keyboard_default.sh"]),
+    )
+    check_oldapp_switch(
+        read_small(archive, infos[OLDAPP_WRAPPER]),
+        read_small(archive, infos[OLDAPP_JAR]),
+        set(infos),
     )
     check_media_codecs_c2(read_small(archive, infos["VENDOR/etc/media_codecs_c2.xml"]))
 
@@ -2679,6 +2720,9 @@ def check_payload_regular_file(payload: bytes, path: str, apex_name: str, what: 
 # default configuration's; without it the thermal HAL's SEVERE status holds no frame rate back.
 # The SystemConfig topic reads the compass feature's directory when the launch says the host has a
 # magnetometer; without it a host that has one would run an image with a sensor and no feature.
+# The SensorPrivacyService topic withholds the reminder (dialog and notification) of a camera that the
+# hardware toggle blocks; without it a session started with Camera off would offer, in SystemUI's
+# "Unblock device camera?" dialog, an Unblock that cannot lift the hardware toggle.
 SERVICES_JAR = "SYSTEM/framework/services.jar"
 SERVICES_JAR_MARKERS = (
     (b"kernarium: USB debugging is now ", "the AdbService topics"),
@@ -2691,6 +2735,10 @@ SERVICES_JAR_MARKERS = (
         "the SystemConfig topic that reads the compass feature for a host with a magnetometer",
     ),
     (b"kernarium_compass", "the directory that SystemConfig topic reads"),
+    (
+        b"kernarium: no reminder for a camera that the hardware toggle blocks",
+        "the SensorPrivacyService topic that withholds the reminder of a camera under the hardware toggle",
+    ),
 )
 SERVICES_JAR_LIMIT = 48 << 20
 
@@ -2714,6 +2762,56 @@ def check_services_jar(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInf
                     )
     except (OSError, zipfile.BadZipFile) as problem:
         fail(f"cannot inspect {SERVICES_JAR}: {problem}")
+
+
+# The old-application layer (overlay/oldapp) is a 32-bit library that ActivityThread, in framework.jar,
+# loads into the process of a 32-bit application that targets below API 14 and that the person
+# switched it on for (a p0007 topic; the property of the store is the switch, so a framework that
+# loads the layer for every old application lacks it). A build
+# without the library, or with a framework that does not load it, leaves such a game with the ART
+# failures the layer exists to prevent; a library that is not a 32-bit ARM shared object with a
+# JNI_OnLoad would fail when the framework loads it. The jar stores its dex files uncompressed, so the
+# topic's strings are in the bytes.
+OLD_APP_LIBRARY = "SYSTEM/lib/libkernarium_oldapp.so"
+FRAMEWORK_JAR = "SYSTEM/framework/framework.jar"
+FRAMEWORK_JAR_MARKERS = (
+    (b"/system/lib/libkernarium_oldapp.so", "the ActivityThread topic that loads the old-application layer"),
+    (b"kernarium: old-application layer not loaded", "the log line of that topic"),
+    (b"persist.sys.kernarium.oldapp.", "the per-application switch (the store's property) of that topic"),
+)
+FRAMEWORK_JAR_LIMIT = 256 << 20
+OLD_APP_LIBRARY_LIMIT = 16 << 20
+ELF_CLASS_32, ELF_LITTLE_ENDIAN, ELF_TYPE_SHARED = 1, 1, 3
+
+
+def check_old_application_layer(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    info = infos.get(OLD_APP_LIBRARY)
+    if info is None:
+        fail(f"{OLD_APP_LIBRARY} is missing")
+    data = read_small(archive, info, OLD_APP_LIBRARY_LIMIT)
+    if len(data) < 20 or data[:4] != b"\x7fELF" or (data[4], data[5]) != (ELF_CLASS_32, ELF_LITTLE_ENDIAN):
+        fail(f"{OLD_APP_LIBRARY} is not a 32-bit little-endian ELF object")
+    elf_type, machine = struct.unpack_from("<HH", data, 16)
+    if elf_type != ELF_TYPE_SHARED or machine != android_image.EM_ARM:
+        fail(f"{OLD_APP_LIBRARY} is not a shared object for ARM (type {elf_type}, machine {machine})")
+    if b"\0JNI_OnLoad\0" not in data:
+        fail(f"{OLD_APP_LIBRARY} has no JNI_OnLoad, which the framework's System.load runs")
+    framework = infos.get(FRAMEWORK_JAR)
+    if framework is None:
+        fail(f"{FRAMEWORK_JAR} is missing")
+    try:
+        with zipfile.ZipFile(io.BytesIO(read_small(archive, framework, FRAMEWORK_JAR_LIMIT))) as jar:
+            dex = [name for name in jar.namelist() if re.fullmatch(r"classes[0-9]*\.dex", name)]
+            if not dex:
+                fail(f"{FRAMEWORK_JAR} holds no dex file")
+            for marker, topic in FRAMEWORK_JAR_MARKERS:
+                if not any(marker in jar.read(name) for name in dex):
+                    fail(
+                        f"{FRAMEWORK_JAR} lacks {topic} of route p0007 "
+                        f"({marker.decode()!r} is not in its dex files)"
+                    )
+    except (OSError, zipfile.BadZipFile) as problem:
+        fail(f"cannot inspect {FRAMEWORK_JAR}: {problem}")
 
 
 # The p0029 topic makes NetworkMonitor validate the virtual Wi-Fi before it checks it, so a blocked
@@ -3433,6 +3531,7 @@ CAMERA_APP_OVERLAY = "PRODUCT/overlay/Aperture__lineage_andarium__auto_generated
 CAMERA_AUX_CAMERAS = "config_enableAuxCameras"
 CAMERA_IGNORED_AUX_CAMERAS = "config_ignoredAuxCameraIds"
 CAMERA_IGNORED_AUX_IDS = ["2"]
+CAMERA_ZOOM = "config_enableZoom"
 CAMERA_HARDWARE_TOGGLE = "config_supportsHardwareCamToggle"
 CAMERA_LAZY_HAL_PROPERTY = ("PRODUCT/etc/build.prop", "ro.camera.enableLazyHal", "true")
 CAMERA_CONFIG_PROPERTY = ("VENDOR/build.prop", "ro.vendor.camera.config", "v4l2")
@@ -3619,8 +3718,8 @@ def check_camera_configuration(archive: zipfile.ZipFile, infos: dict[str, zipfil
 
 
 def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
-    """The camera application lists each lens the host has, and the sensor privacy service reads
-    the camera switch."""
+    """The camera application lists each lens the host has and offers no free zoom, and the sensor
+    privacy service reads the camera switch."""
     app_table = camera_resources(archive, infos, CAMERA_APP, CAMERA_APP_LIMIT)
     try:
         defines_overlayable = resource_table_defines_overlayable(app_table)
@@ -3635,7 +3734,7 @@ def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
         )
     # An overlay replaces resources its target defines; one for a name the application lost (an uprev
     # renamed it) applies to nothing, and the overlay's own values then look right.
-    for name, kind in ((CAMERA_AUX_CAMERAS, "bool"), (CAMERA_IGNORED_AUX_CAMERAS, "array")):
+    for name, kind in ((CAMERA_AUX_CAMERAS, "bool"), (CAMERA_IGNORED_AUX_CAMERAS, "array"), (CAMERA_ZOOM, "bool")):
         if name not in app_defaults[kind]:
             fail(
                 f"{CAMERA_APP} does not define the {kind} resource {name} in its default configuration: "
@@ -3645,7 +3744,7 @@ def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
     if info is None or info.is_dir():
         fail(
             f"{CAMERA_APP_OVERLAY} is missing: the application's own resources keep the defaults that "
-            "hide each lens of the host as a camera of its own"
+            "hide each lens of the host as a camera of its own and leave free zoom on"
         )
     try:
         with zipfile.ZipFile(io.BytesIO(read_small(archive, info, CAMERA_APP_LIMIT))) as overlay_apk:
@@ -3672,11 +3771,16 @@ def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
         fail(
             f"{CAMERA_APP_OVERLAY} must list the camera IDs {CAMERA_IGNORED_AUX_IDS} in "
             f"{CAMERA_IGNORED_AUX_CAMERAS}: {arrays.get(CAMERA_IGNORED_AUX_CAMERAS)}; "
-            "the wide lens is the zoom camera's 1x"
+            "a host that still publishes the wide lens as camera 2 beside camera 0 would show it twice"
+        )
+    if booleans.get(CAMERA_ZOOM) != [False]:
+        fail(
+            f"{CAMERA_APP_OVERLAY} must set {CAMERA_ZOOM} to false: {booleans.get(CAMERA_ZOOM)}; "
+            "the lens buttons are the camera's only zoom"
         )
     # The one definition of each name is the sole one, and it carries no qualifier: a value under a
     # resource configuration applies only on a device that matches it.
-    for name, kind in ((CAMERA_AUX_CAMERAS, "bool"), (CAMERA_IGNORED_AUX_CAMERAS, "array")):
+    for name, kind in ((CAMERA_AUX_CAMERAS, "bool"), (CAMERA_IGNORED_AUX_CAMERAS, "array"), (CAMERA_ZOOM, "bool")):
         if name not in overlay_defaults[kind]:
             fail(f"{CAMERA_APP_OVERLAY} defines {name} only under a resource configuration: "
                  "it must be in the default configuration")
@@ -3696,6 +3800,53 @@ def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
              "it must be in the default configuration")
 
 
+# A session started with Camera off holds the camera's hardware toggle. The sensor privacy service
+# would start the activity that config_sensorUseStartedActivity_hwToggle names (or post a notification)
+# to offer an Unblock that writes the software toggle, which a hardware toggle outranks; the
+# SensorPrivacyService topic of route p0007 withholds both for the camera (SERVICES_JAR_MARKERS) and
+# keeps the microphone's reminder. A product string for either activity would also name the camera's
+# and the microphone's, so the overlay defines neither, in any configuration and with any value (a
+# reference included): a name found among the overlay's string entries is the failure. An overlay's
+# resource map (android:resourcesMap) can point those two names at a string of another name, so the
+# generated overlay, which never has one, must not declare one.
+SENSOR_USE_ACTIVITY_STRINGS = (
+    "config_sensorUseStartedActivity",
+    "config_sensorUseStartedActivity_hwToggle",
+)
+RESOURCES_MAP_ATTRIBUTE = "resourcesMap"
+
+
+def check_camera_reminder(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    """The framework overlay leaves the sensor privacy service's reminder activities at the platform's
+    defaults, by name and by resource map."""
+    info = infos.get(FRAMEWORK_OVERLAY)
+    if info is None or info.is_dir():
+        fail(f"{FRAMEWORK_OVERLAY} is missing")
+    try:
+        with zipfile.ZipFile(io.BytesIO(read_small(archive, info, FRAMEWORK_OVERLAY_LIMIT))) as overlay:
+            table = overlay.read("resources.arsc")
+            manifest = overlay.read("AndroidManifest.xml")
+        entries = [(name, default) for name, _, _, default
+                   in resource_entries(table, "string", configurations=True)]
+        declaration = manifest_element_attributes(manifest, "overlay")
+    except (KeyError, OSError, ValueError, struct.error, IndexError, zipfile.BadZipFile) as error:
+        fail(f"{FRAMEWORK_OVERLAY} has no readable resource table or manifest: {error}")
+    if declaration is not None and RESOURCES_MAP_ATTRIBUTE in declaration:
+        fail(
+            f"{FRAMEWORK_OVERLAY} declares a resource map (android:{RESOURCES_MAP_ATTRIBUTE}): it can point "
+            f"{' and '.join(SENSOR_USE_ACTIVITY_STRINGS)} at a string of another name, and the generated "
+            "overlay has none"
+        )
+    for name, default in entries:
+        if name in SENSOR_USE_ACTIVITY_STRINGS:
+            fail(
+                f"{FRAMEWORK_OVERLAY} defines {name} "
+                f"{'in the default configuration' if default else 'under a resource configuration'}: "
+                "the reminder of a camera under the hardware toggle is withheld by the framework, "
+                "and the platform's activity is the microphone's"
+            )
+
+
 def check_camera(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
     # The provider's contract first: its message names what a changed init file broke, where the layout files'
     # byte comparison only says that they differ.
@@ -3703,6 +3854,7 @@ def check_camera(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) ->
     check_camera_layout_files(archive, infos)
     check_camera_configuration(archive, infos)
     check_camera_app(archive, infos)
+    check_camera_reminder(archive, infos)
 
 
 
@@ -4027,6 +4179,12 @@ def check_kernel_policy(
         contexts,
         (platform_policy, vendor_policy, system_ext_policy)
         + tuple(read_small(archive, infos[name]) for name in APP_POLICY_CIL if name in infos),
+    )
+    check_oldapp_switch_policy(
+        contexts,
+        (platform_policy, vendor_policy, system_ext_policy)
+        + tuple(read_small(archive, infos[name]) for name in APP_POLICY_CIL if name in infos),
+        system_ext_policy,
     )
     check_lmkd_gpu_policy(contexts, (platform_policy, vendor_policy, system_ext_policy), vendor_policy)
     check_venus_option_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
@@ -4574,6 +4732,122 @@ def check_keyboard_default_policy(
         if line.strip() and not line.lstrip().startswith("#")
     ):
         fail(f"system_ext property contexts do not label {KEYBOARD_DEFAULT_MARKER}")
+
+
+def check_oldapp_switch(wrapper: bytes, jar: bytes, packaged: set[str]) -> None:
+    """The shell command is a wrapper script that starts the Java tool's class from its jar, and
+    the image carries the tool's code: in the jar, or preoptimized beside it."""
+    text = "\n".join(
+        line
+        for line in wrapper.decode("utf-8", errors="strict").splitlines()
+        if not line.lstrip().startswith("#") or line.startswith("#!")
+    )
+    for token in OLDAPP_WRAPPER_REQUIRED:
+        if token not in text:
+            fail(f"/system_ext/bin/{OLDAPP_COMMAND} does not contain '{token}'")
+    try:
+        with zipfile.ZipFile(io.BytesIO(jar)) as archive:
+            names = archive.namelist()
+            dex = archive.read("classes.dex") if "classes.dex" in names else None
+    except (zipfile.BadZipFile, OSError, zlib.error) as problem:
+        fail(f"{OLDAPP_JAR} is not a readable jar: {problem}")
+    if dex is not None:
+        if b"L" + OLDAPP_CLASS.replace(".", "/").encode() + b";" not in dex:
+            fail(f"{OLDAPP_JAR} holds code without the class {OLDAPP_CLASS}")
+        return
+    # Dexpreopting may strip the code from the jar into the odex and vdex beside it: one such pair
+    # must be packaged, or there is no code to start.
+    stem = PurePosixPath(OLDAPP_JAR)
+    for isa in sorted(APP_ISAS):
+        pair = [f"{stem.parent}/oat/{isa}/{stem.stem}.{suffix}" for suffix in ("odex", "vdex")]
+        if all(name in packaged for name in pair):
+            return
+    fail(
+        f"{OLDAPP_JAR} has no classes.dex and no preoptimized odex and vdex of it is packaged "
+        f"(framework/oat/<isa>/{stem.stem}.odex and .vdex): the command {OLDAPP_COMMAND} has no code"
+    )
+
+
+def check_oldapp_switch_policy(
+    contexts: list[str], policies: tuple[bytes, ...], system_ext_policy: bytes
+) -> None:
+    """The choice's property has a type of its own: the shell domain sets it, every application
+    domain reads it, and no application domain but the shell may set it.
+
+    The type is declared system_restricted_prop: an internal type forbids the read to the
+    application domains that are not core domains (gceservice, vzwomatrigger_app), and the
+    restricted macro's own neverallow names only the non-core domains for the write, so a
+    neverallow of the application domains is checked here by what its source set covers."""
+    sample = OLDAPP_PROPERTY_PREFIX + "org.example.package"
+    label = property_label(sample, contexts) or "default_prop"
+    if label != OLDAPP_PROPERTY_TYPE:
+        fail(
+            f"{sample} is labelled {label}, not {OLDAPP_PROPERTY_TYPE} "
+            "(overlay/sepolicy/system_ext/private/property_contexts): the shell command could not "
+            "set it, or any application could set it"
+        )
+    if OLDAPP_PROPERTY_TYPE not in cil_attribute_members(system_ext_policy, "system_property_type"):
+        fail(f"system_ext policy does not define the system-owned {OLDAPP_PROPERTY_TYPE}")
+    if OLDAPP_PROPERTY_TYPE in cil_attribute_members(system_ext_policy, "system_internal_property_type"):
+        fail(
+            f"{OLDAPP_PROPERTY_TYPE} is a system_internal_prop: the platform forbids the application "
+            "domains that are not core domains to read it"
+        )
+    if OLDAPP_PROPERTY_TYPE not in cil_attribute_members(
+        system_ext_policy, "system_restricted_property_type"
+    ):
+        fail(f"{OLDAPP_PROPERTY_TYPE} is not declared with system_restricted_prop")
+    if not cil_allows_property_set(policies, OLDAPP_SETTER, label):
+        fail(
+            f"the {OLDAPP_SETTER} domain may not set {OLDAPP_PROPERTY_PREFIX}<package>, labelled "
+            f"{label}: Andarium's adb could not switch Old app compatibility"
+        )
+    for object_class, permissions in OLDAPP_LOCK_PERMISSIONS:
+        if not cil_allows(policies, OLDAPP_SETTER, OLDAPP_LOCK_TYPE, object_class, set(permissions)):
+            fail(
+                f"the {OLDAPP_SETTER} domain may not create and lock files of {OLDAPP_LOCK_TYPE} "
+                f"({object_class} {', '.join(sorted(permissions))}): {OLDAPP_COMMAND} could not take "
+                "its lock"
+            )
+    # The concrete types that run applications (the shell among them), not the attribute names: a
+    # grant that reaches each of them through the attribute or on its own is the same grant.
+    members = {
+        member
+        for policy in policies
+        for attribute in ADB_KEY_APP_ATTRIBUTES
+        for member in cil_attribute_members(policy, attribute)
+    }
+    if not any(cil_attribute_members(policy, "appdomain") for policy in policies):
+        fail("the policy lists no type for appdomain: the check could not tell who runs applications")
+    for domain in sorted(members | {OLDAPP_SETTER}):
+        if not cil_allows(policies, domain, label, "file", set(OLDAPP_READ_PERMISSIONS)):
+            fail(
+                f"{domain} may not read {OLDAPP_PROPERTY_PREFIX}<package>, labelled {label} "
+                f"({', '.join(sorted(OLDAPP_READ_PERMISSIONS))} on the file): the framework hook "
+                "(the shell command for the shell domain) could not read the choice"
+            )
+    applications = sorted(members - {OLDAPP_SETTER})
+    for domain in applications:
+        if cil_allows_property_set(policies, domain, label):
+            fail(
+                f"{domain} may set {OLDAPP_PROPERTY_PREFIX}<package>, labelled {label}: an "
+                "application could turn Old app compatibility on for itself"
+            )
+    targets = cil_types_and_attributes(policies, label)
+    for domain in applications:
+        sources = cil_types_and_attributes(policies, domain)
+        if not any(
+            CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode()) in sources
+            and CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(2).decode()) in targets
+            and match.group(3) == b"property_service"
+            and b"set" in match.group(4).split()
+            for policy in policies
+            for match in CIL_NEVERALLOW_RULE.finditer(policy)
+        ):
+            fail(
+                f"system_ext policy has no neverallow that keeps application domains from setting "
+                f"{label}: none covers {domain}"
+            )
 
 
 # The host's keyboard and mouse are virtio-input devices that Android finds by vendor and product
@@ -5779,6 +6053,7 @@ def main() -> None:
         check_adb_root_service(archive, infos)
         check_lmkd_gpu_reclaim(archive, infos)
         check_services_jar(archive, infos)
+        check_old_application_layer(archive, infos)
         check_input_flinger(archive, infos)
         check_network_stack(archive, infos)
         check_wifi_tracker_users(archive, infos)

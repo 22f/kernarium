@@ -563,7 +563,7 @@ void test_record_lifecycle()
 	const std::string path = temporary_record();
 	require(uml::runtime::begin_session_record(path, {}));
 	std::string record = read_file(path);
-	require(record.starts_with("uml-session 7\nmemory at ") &&
+	require(record.starts_with("uml-session 8\nmemory at ") &&
 		record.size() > state_offset && record[slot_bytes - 1] == '\n' &&
 		record.substr(state_offset).starts_with(
 			"state running\nend running\n"),
@@ -1835,7 +1835,7 @@ void test_size_bound_and_stall_slot()
 {
 	using uml::runtime::session_record_max_bytes;
 	using uml::runtime::session_stall_slot_bytes;
-	static_assert(session_record_max_bytes == 18176,
+	static_assert(session_record_max_bytes == 19200,
 		"the record's largest size is stated in the documentation");
 	uml::runtime::reset_session_record();
 	const std::string path = temporary_record();
@@ -2124,9 +2124,9 @@ void test_storage_slot()
 	using uml::runtime::session_storage_slot_bytes;
 	static_assert(session_storage_offset == 12800 &&
 			session_storage_slot_bytes == 256 &&
-			state_offset == session_storage_offset +
-				session_storage_slot_bytes,
-		"the storage slot sits between the network slot and the state");
+			uml::runtime::session_camera_offset ==
+				session_storage_offset + session_storage_slot_bytes,
+		"the storage slot sits between the network slot and the camera slot");
 	const auto slot_of = [](const std::string &record) {
 		return record.substr(session_storage_offset,
 			session_storage_slot_bytes);
@@ -2220,6 +2220,709 @@ void test_storage_slot()
 	unlink(path.c_str());
 }
 
+/* The camera slot sits between the storage slot and the state: blank until a
+ * still of the guest's cameras fails, then the count of the failures and the
+ * newest that fit, each with the camera, the stage and the numbers and words
+ * that say why. It touches no other part and holds words and numbers only. */
+std::string camera_slot_text(const std::string &slot)
+{
+	return slot.substr(0, slot.find_last_of('\n', slot.size() - 2) + 1);
+}
+
+/* Every failure line's time is the wall clock's: a golden file holds a fixed
+ * one. */
+std::string with_fixed_times(std::string text)
+{
+	for (std::size_t at = text.find("still at "); at != std::string::npos;
+	     at = text.find("still at ", at + 1)) {
+		const std::size_t begin = at + 9;
+		const std::size_t end = text.find(' ', begin);
+		require(end != std::string::npos,
+			"the camera slot has no time: " + text);
+		text.replace(begin, end - begin, "1794114290");
+	}
+	return text;
+}
+
+uml::platform::CameraStillFailure camera_failure(
+	uml::platform::CameraStillStage stage, std::uint32_t camera,
+	uml::platform::CameraPosition position)
+{
+	uml::platform::CameraStillFailure failure;
+	failure.stage = stage;
+	failure.camera = camera;
+	failure.position = position;
+	return failure;
+}
+
+/* The three failures the golden file holds, which AndariumCore parses too
+ * (tests/unit/andarium/fixtures/camera-slot-golden.txt). */
+void note_the_golden_failures()
+{
+	using namespace uml::platform;
+	auto refused = camera_failure(CameraStillStage::refused, 0,
+		CameraPosition::back);
+	refused.askedWidth = 4032;
+	refused.askedHeight = 3024;
+	uml::runtime::note_camera_still_failure(refused);
+	auto error = camera_failure(CameraStillStage::frameworkError, 1,
+		CameraPosition::front);
+	error.askedWidth = 2016;
+	error.askedHeight = 1512;
+	error.resolvedWidth = 2016;
+	error.resolvedHeight = 1512;
+	error.compensationSupported = CameraFact::yes;
+	error.compensationEnabled = CameraFact::no;
+	error.compensationReading = CameraReading::afterCommit;
+	error.errorDomain = CameraErrorDomain::avFoundation;
+	error.errorCode = -11800;
+	uml::runtime::note_camera_still_failure(error);
+	auto encoded = camera_failure(CameraStillStage::encodedSize, 1,
+		CameraPosition::front);
+	encoded.askedWidth = 2016;
+	encoded.askedHeight = 1512;
+	encoded.resolvedWidth = 2016;
+	encoded.resolvedHeight = 1512;
+	encoded.encodedWidth = 1512;
+	encoded.encodedHeight = 2016;
+	encoded.compensationSupported = CameraFact::yes;
+	encoded.compensationEnabled = CameraFact::no;
+	encoded.compensationReading = CameraReading::afterCommit;
+	encoded.hostExifOrientation = 6;
+	uml::runtime::note_camera_still_failure(encoded);
+}
+
+/* How a back camera and a front camera that imitates an earlier one were
+ * presented: the notes the golden file holds (the numbers are an example's).
+ * The front camera has a note of every kind. */
+uml::platform::CameraPresentation camera_back_note()
+{
+	using namespace uml::platform;
+	CameraPresentation note;
+	note.camera = 0;
+	note.position = CameraPosition::back;
+	note.deviceType = CameraDeviceType::wide;
+	note.coordinatorAngles = {90, 270, 0, 180};
+	note.stated = 90;
+	note.platformStated = 90;
+	note.turn = 0;
+	note.anchorWidth = 4032;
+	note.anchorHeight = 3024;
+	note.anchorFieldOfView = 63;
+	note.videoKnown = true;
+	note.videoDefaultAngle = 0;
+	note.videoAngle = 0;
+	note.videoAngleSupported = CameraFact::yes;
+	note.videoDefaultMirrored = 0;
+	note.videoMirrored = 0;
+	note.videoAskedWidth = 1920;
+	note.videoAskedHeight = 1440;
+	note.videoFirstWidth = 1920;
+	note.videoFirstHeight = 1440;
+	return note;
+}
+
+uml::platform::CameraPresentation camera_front_note()
+{
+	using namespace uml::platform;
+	CameraPresentation note;
+	note.camera = 1;
+	note.position = CameraPosition::front;
+	note.deviceType = CameraDeviceType::wide;
+	note.coordinatorAngles = {0, 180, 90, 270};
+	note.stated = 90;
+	note.platformStated = 90;
+	note.turn = 270;
+	note.earlier = true;
+	note.anchorWidth = 1920;
+	note.anchorHeight = 1440;
+	note.anchorRatios = aspectRatioBit(CameraAspectRatio::r4x3) |
+		aspectRatioBit(CameraAspectRatio::r3x4);
+	note.anchorFieldOfView = 85;
+	note.frontDevices = 2;
+	note.squareFormats = true;
+	note.dynamicRatios = true;
+	note.frontFormatsDropped = 3;
+	note.refusals = 1;
+	note.lastRefusal = 4;
+	note.ratioKnown = true;
+	note.ratioPinned = CameraAspectRatio::r3x4;
+	note.ratioNow = CameraAspectRatio::r3x4;
+	note.ratioWidth = 1512;
+	note.ratioHeight = 2016;
+	note.ratioError = 0;
+	note.videoKnown = true;
+	note.videoDefaultAngle = 0;
+	note.videoAngle = 270;
+	note.videoAngleSupported = CameraFact::yes;
+	note.videoDefaultMirrored = 0;
+	note.videoMirrored = 0;
+	note.videoAskedWidth = 1920;
+	note.videoAskedHeight = 1440;
+	note.videoFirstWidth = 1920;
+	note.videoFirstHeight = 1440;
+	note.videoStabilization = VideoStabilizationState::standard;
+	note.photoKnown = true;
+	note.compensationSupported = CameraFact::yes;
+	note.compensationEnabled = CameraFact::yes;
+	note.compensationReading = CameraReading::afterCommit;
+	note.photoDefaultAngle = 90;
+	note.photoAngle = 90;
+	note.photoDefaultMirrored = 0;
+	note.photoMirrored = 0;
+	note.photoMaximumWidth = 2016;
+	note.photoMaximumHeight = 1512;
+	note.exifOrientation = 6;
+	note.centerStageActive = CameraFact::no;
+	note.distortionCorrected = CameraFact::yes;
+	return note;
+}
+
+void note_the_golden_cameras()
+{
+	uml::runtime::note_camera_presentation(camera_back_note());
+	uml::runtime::note_camera_presentation(camera_front_note());
+}
+
+void the_camera_slot_matches_the_golden_file(const char *golden_path)
+{
+	uml::runtime::reset_session_record();
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, {}));
+	note_the_golden_cameras();
+	note_the_golden_failures();
+	const std::string text = with_fixed_times(camera_slot_text(
+		read_file(path).substr(uml::runtime::session_camera_offset,
+			uml::runtime::session_camera_slot_bytes)));
+	const std::string golden = read_file(golden_path);
+	require(!golden.empty(), "the golden camera slot opens");
+	if (golden != text) {
+		std::fprintf(stderr, "golden:\n%s\nslot:\n%s\n", golden.c_str(),
+			text.c_str());
+		require(false, "the camera slot differs from the golden file");
+	}
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
+void test_camera_slot()
+{
+	using namespace uml::platform;
+	using uml::runtime::session_camera_offset;
+	using uml::runtime::session_camera_slot_bytes;
+	static_assert(session_camera_offset == 13056 &&
+			session_camera_slot_bytes == 1024 &&
+			state_offset == session_camera_offset +
+				session_camera_slot_bytes,
+		"the camera slot sits between the storage slot and the state");
+	const auto slot_of = [](const std::string &record) {
+		return record.substr(session_camera_offset,
+			session_camera_slot_bytes);
+	};
+	uml::runtime::reset_session_record();
+	/* Without a session nothing is recorded, and nothing fails. */
+	uml::runtime::note_camera_still_failure(camera_failure(
+		CameraStillStage::timeout, 0, CameraPosition::back));
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, {}));
+	std::string record = read_file(path);
+	std::string slot = slot_of(record);
+	require(slot == std::string(session_camera_slot_bytes - 1, ' ') + "\n",
+		"a session does not begin with a blank camera slot: " + slot);
+
+	/* A failure writes the count and its line, in the slot alone: the
+	 * resolved size of a photo that came back transposed. */
+	auto transposed = camera_failure(CameraStillStage::resolvedSize, 1,
+		CameraPosition::front);
+	transposed.askedWidth = 2016;
+	transposed.askedHeight = 1512;
+	transposed.resolvedWidth = 1512;
+	transposed.resolvedHeight = 2016;
+	transposed.compensationSupported = CameraFact::yes;
+	transposed.compensationEnabled = CameraFact::no;
+	uml::runtime::note_camera_still_failure(transposed);
+	record = read_file(path);
+	slot = slot_of(record);
+	require(slot.starts_with("camera 1\nstills failed 1\nstill at ") &&
+		has(slot, " camera 1 front stage resolved-size asked 2016x1512 "
+			  "resolved 1512x2016 encoded - compensation supported "
+			  "yes enabled no read - exif - error none\n") &&
+		slot.back() == '\n' && slot.size() == session_camera_slot_bytes,
+		"a failure was recorded wrong: " + slot);
+	require(record.substr(state_offset).starts_with(
+			"state running\nend running\n") &&
+		record.substr(slot_bytes, 14) == "stalls 1 base " &&
+		record.substr(uml::runtime::session_network_offset, 9) ==
+			"network 1" &&
+		record.substr(uml::runtime::session_storage_offset,
+			uml::runtime::session_storage_slot_bytes) ==
+			std::string(uml::runtime::session_storage_slot_bytes - 1,
+				' ') + "\n",
+		"the camera slot touched another part");
+
+	/* A framework error names its domain and code; a code is signed. */
+	auto error = camera_failure(CameraStillStage::frameworkError, 1,
+		CameraPosition::front);
+	error.askedWidth = 2016;
+	error.askedHeight = 1512;
+	error.errorDomain = CameraErrorDomain::avFoundation;
+	error.errorCode = -11800;
+	uml::runtime::note_camera_still_failure(error);
+	slot = slot_of(read_file(path));
+	require(slot.starts_with("camera 1\nstills failed 2\n") &&
+		has(slot, "stage framework-error asked 2016x1512 resolved - "
+			  "encoded - compensation supported unknown enabled "
+			  "unknown read - exif - error avfoundation -11800\n") &&
+		has(slot, "stage resolved-size"),
+		"a framework error was recorded wrong: " + slot);
+
+	/* Every stage and position has its word, and nothing but words, digits,
+	 * blanks and hyphens is written: never a path, an address or a name. */
+	for (const auto stage : {CameraStillStage::unknown,
+		     CameraStillStage::refused, CameraStillStage::notStarted,
+		     CameraStillStage::missingData,
+		     CameraStillStage::encodedSize, CameraStillStage::fileSize,
+		     CameraStillStage::guestBuffer, CameraStillStage::timeout})
+		uml::runtime::note_camera_still_failure(camera_failure(stage, 2,
+			CameraPosition::external));
+	slot = slot_of(read_file(path));
+	for (const char c : camera_slot_text(slot))
+		require((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+				c == ' ' || c == '-' || c == '\n',
+			"the camera slot holds a character that is no word: " +
+				slot);
+
+	/* A long run of failures, with the largest numbers, leaves the file its
+	 * size, the slot whole lines, and the newest of them. */
+	CameraStillFailure largest = camera_failure(
+		CameraStillStage::frameworkError, 4294967295U,
+		CameraPosition::external);
+	largest.askedWidth = largest.askedHeight = 4294967295U;
+	largest.resolvedWidth = largest.resolvedHeight = 4294967295U;
+	largest.encodedWidth = largest.encodedHeight = 4294967295U;
+	largest.compensationSupported = CameraFact::unknown;
+	largest.compensationEnabled = CameraFact::unknown;
+	largest.errorDomain = CameraErrorDomain::other;
+	largest.errorCode = INT32_MIN;
+	for (unsigned round = 0; round < 40; ++round) {
+		largest.camera = 4294967295U - round;
+		uml::runtime::note_camera_still_failure(largest);
+		record = read_file(path);
+		require(record.size() == uml::runtime::session_record_max_bytes,
+			"the running record changed size");
+	}
+	slot = slot_of(record);
+	require(slot.size() == session_camera_slot_bytes &&
+		slot.back() == '\n' && slot.starts_with("camera 1\n"
+			"stills failed 50\nstill at ") &&
+		has(slot, " camera " + std::to_string(4294967295U - 39U) + " "),
+		"a run of large failures was recorded wrong: " + slot);
+	std::size_t lines = 0;
+	for (std::size_t at = slot.find("still at "); at != std::string::npos;
+	     at = slot.find("still at ", at + 1)) {
+		const std::size_t end = slot.find('\n', at);
+		require(end != std::string::npos &&
+				slot.find("error other -2147483648", at) < end,
+			"a failure line was cut: " + slot);
+		++lines;
+	}
+	require(lines >= 4 && lines <= uml::runtime::session_camera_failures_kept,
+		"the slot holds " + std::to_string(lines) + " lines: " + slot);
+	require(record.substr(state_offset).starts_with(
+			"state running\nend running\n") &&
+		record.substr(slot_bytes, 14) == "stalls 1 base ",
+		"a run of failures touched another part");
+
+	/* The end keeps what the session counted, and the file does not change
+	 * once the session has ended. */
+	uml::runtime::end_session_record(SessionEnd::powered_off, 0);
+	const std::string ended = read_file(path);
+	require(slot_of(ended).starts_with("camera 1\nstills failed 50\n"),
+		"the end lost the camera slot");
+	uml::runtime::note_camera_still_failure(error);
+	require(read_file(path) == ended, "a failure was written after the end");
+
+	/* The next session in the file starts blank and counts its own. */
+	require(uml::runtime::begin_session_record(path, {}));
+	slot = slot_of(read_file(path));
+	require(slot == std::string(session_camera_slot_bytes - 1, ' ') + "\n",
+		"a session inherited the last one's camera slot: " + slot);
+	uml::runtime::note_camera_still_failure(error);
+	slot = slot_of(read_file(path));
+	require(slot.starts_with("camera 1\nstills failed 1\nstill at "),
+		"the next session did not count its own: " + slot);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
+/* The camera slot also says how the platform presented each of the guest's
+ * cameras: a mount line, and a ratio, video, photo and refused line where the
+ * camera has something to say, the newest note of a camera replacing its older
+ * one. The slot stays one KiB of whole lines whatever the notes hold, and the
+ * lines that matter most (the front cameras', the two newest failures) are the
+ * ones that stay. */
+void test_camera_presentation()
+{
+	using namespace uml::platform;
+	using uml::runtime::session_camera_offset;
+	using uml::runtime::session_camera_slot_bytes;
+	const auto slot_of = [](const std::string &record) {
+		return record.substr(session_camera_offset,
+			session_camera_slot_bytes);
+	};
+	const auto count = [](const std::string &text, const std::string &part) {
+		std::size_t found = 0;
+		for (std::size_t at = text.find(part); at != std::string::npos;
+		     at = text.find(part, at + 1))
+			++found;
+		return found;
+	};
+	uml::runtime::reset_session_record();
+	/* Without a session nothing is recorded, and nothing fails. */
+	uml::runtime::note_camera_presentation(camera_front_note());
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, {}));
+	std::string record = read_file(path);
+	std::string slot = slot_of(record);
+	require(slot == std::string(session_camera_slot_bytes - 1, ' ') + "\n",
+		"a session does not begin with a blank camera slot: " + slot);
+
+	/* A note writes the format line, the count (none failed) and the camera's
+	 * lines, in the slot alone. */
+	uml::runtime::note_camera_presentation(camera_front_note());
+	record = read_file(path);
+	slot = slot_of(record);
+	require(slot.starts_with(
+			"camera 1\nstills failed 0\n"
+			"fronts 2 square yes dynamic yes dropped 3\n"
+			"mount camera 1 front type 1 angles 0 180 90 270 stated 90 "
+			"turn 270 earlier yes anchor 1920x1440 ratios 24 fov 85\n"
+			"ratio camera 1 pinned 3x4 now 3x4 dims 1512x2016 error 0\n"
+			"video camera 1 default 0 set 270 supported yes mirror 0 0 "
+			"asked 1920x1440 first 1920x1440 stab standard\n"
+			"photo camera 1 compensation supported yes enabled yes "
+			"read after-commit default 90 set 90 mirror 0 0 max 2016x1512 "
+			"exif 6 center no "
+			"distortion yes\n"
+			"refused camera 1 count 1 last 4\n") &&
+		slot.back() == '\n' && slot.size() == session_camera_slot_bytes &&
+		slot.find_first_not_of(' ', slot.find("last 4\n") + 7) ==
+			slot.size() - 1,
+		"a presentation was recorded wrong: " + slot);
+	require(record.size() == uml::runtime::session_record_max_bytes &&
+		record.substr(state_offset).starts_with(
+			"state running\nend running\n") &&
+		record.substr(slot_bytes, 14) == "stalls 1 base " &&
+		record.substr(uml::runtime::session_network_offset, 9) ==
+			"network 1" &&
+		record.substr(uml::runtime::session_storage_offset,
+			uml::runtime::session_storage_slot_bytes) ==
+			std::string(uml::runtime::session_storage_slot_bytes - 1,
+				' ') + "\n",
+		"a presentation touched another part");
+
+	/* The newest note of a camera replaces its older: the first frame of the
+	 * stream arrives, a ratio change completes, and the lines say so. */
+	auto front = camera_front_note();
+	front.videoFirstWidth = front.videoFirstHeight = 0;
+	front.ratioError = ratioPending;
+	front.exifOrientation = 0;
+	uml::runtime::note_camera_presentation(front);
+	slot = slot_of(read_file(path));
+	require(has(slot, " asked 1920x1440 first - stab standard\n") &&
+		has(slot, " now 3x4 dims 1512x2016 error pending\n") &&
+		has(slot, " max 2016x1512 exif - center ") &&
+		count(slot, "video camera 1 ") == 1 &&
+		count(slot, "mount camera 1 ") == 1,
+		"a camera's earlier note was not replaced: " + slot);
+	uml::runtime::note_camera_presentation(camera_front_note());
+	slot = slot_of(read_file(path));
+	require(has(slot, " first 1920x1440 stab standard\n") &&
+		has(slot, " error 0\n") && has(slot, " exif 6 "),
+		"the later note was not written: " + slot);
+
+	/* The video line says how the connection is stabilized: a format that
+	 * supports no mode leaves the picture unstabilized and the line says so,
+	 * and a connection nothing was written to has a hyphen. */
+	auto unsupported = camera_front_note();
+	unsupported.videoStabilization = VideoStabilizationState::unsupported;
+	uml::runtime::note_camera_presentation(unsupported);
+	slot = slot_of(read_file(path));
+	require(has(slot, " first 1920x1440 stab unsupported\n"),
+		"an unstabilized picture was not said: " + slot);
+	auto unknown = camera_front_note();
+	unknown.videoStabilization = VideoStabilizationState::unknown;
+	uml::runtime::note_camera_presentation(unknown);
+	slot = slot_of(read_file(path));
+	require(has(slot, " first 1920x1440 stab -\n"),
+		"a connection nothing was said of was not a hyphen: " + slot);
+	uml::runtime::note_camera_presentation(camera_front_note());
+
+	/* A camera that has nothing but its mounting has that line alone, and
+	 * what the platform did not state is a hyphen; the cameras are written in
+	 * the order the guest numbers them. */
+	CameraPresentation bare;
+	bare.camera = 0;
+	bare.frontDevices = 2;
+	bare.squareFormats = bare.dynamicRatios = true;
+	bare.frontFormatsDropped = 3;
+	uml::runtime::note_camera_presentation(bare);
+	slot = slot_of(read_file(path));
+	require(slot.starts_with("camera 1\nstills failed 0\n"
+			"fronts 2 square yes dynamic yes dropped 3\n"
+			"mount camera 0 back type 0 angles - - - - stated 0 turn 0 "
+			"earlier no anchor - ratios 0 fov -\n"
+			"mount camera 1 front ") &&
+		count(slot, " camera 0 ") == 1,
+		"a bare camera was recorded wrong: " + slot);
+
+	/* A tablet that boots turned tells the guest another orientation than the platform's: the line names both (the
+	 * measured values of a tablet: the guest is told 180 for the front camera and 0 for the back, the platform's own
+	 * being 90 for both), and a phone, which states what the platform does, names one. */
+	auto tablet_back = camera_back_note();
+	tablet_back.camera = 2;
+	tablet_back.stated = 0;
+	tablet_back.platformStated = 90;
+	uml::runtime::note_camera_presentation(tablet_back);
+	auto tablet_front = camera_front_note();
+	tablet_front.camera = 3;
+	tablet_front.stated = 180;
+	tablet_front.platformStated = 90;
+	tablet_front.earlier = false;
+	tablet_front.ratioKnown = tablet_front.videoKnown = tablet_front.photoKnown = false;
+	tablet_front.refusals = 0;
+	uml::runtime::note_camera_presentation(tablet_front);
+	slot = slot_of(read_file(path));
+	require(has(slot, "mount camera 2 back type 1 angles 90 270 0 180 stated 0 platform 90 turn 0 earlier no ") &&
+		has(slot, "mount camera 3 front type 1 angles 0 180 90 270 stated 180 platform 90 turn 270 earlier no ") &&
+		has(slot, "mount camera 1 front type 1 angles 0 180 90 270 stated 90 turn 270 earlier yes ") &&
+		!has(slot, "stated 90 platform"),
+		"a tablet's two orientations were recorded wrong: " + slot);
+
+	/* A camera number the slot has no room for is not recorded. */
+	CameraPresentation beyond = camera_front_note();
+	beyond.camera = uml::runtime::session_cameras_kept;
+	const std::string before = slot_of(read_file(path));
+	uml::runtime::note_camera_presentation(beyond);
+	require(slot_of(read_file(path)) == before,
+		"a camera beyond the slot's room was recorded");
+
+	/* Only words, digits, blanks and hyphens are written. */
+	for (const char c : camera_slot_text(slot))
+		require((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+				c == ' ' || c == '-' || c == '\n',
+			"the camera slot holds a character that is no word: " + slot);
+
+	/* The failures and the notes share the slot: both are written, the
+	 * failures after the cameras, the older of them dropped first. */
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+	require(uml::runtime::begin_session_record(path, {}));
+	uml::runtime::note_camera_presentation(camera_back_note());
+	uml::runtime::note_camera_presentation(camera_front_note());
+	note_the_golden_failures();
+	slot = slot_of(read_file(path));
+	const std::size_t last_mount = slot.rfind("refused camera 1 ");
+	const std::size_t first_still = slot.find("still at ");
+	require(slot.starts_with("camera 1\nstills failed 3\n"
+			"fronts 2 square yes dynamic yes dropped 3\n"
+			"mount camera 0 back ") &&
+		last_mount != std::string::npos && first_still != std::string::npos &&
+		last_mount < first_still &&
+		count(slot, "still at ") == 2 && !has(slot, "stage refused") &&
+		has(slot, "stage framework-error") && has(slot, "stage encoded-size"),
+		"the notes and the failures did not share the slot: " + slot);
+
+	/* Every camera with every line and the largest numbers, and a run of the
+	 * largest failures: the file keeps its size, the slot whole lines, the front
+	 * camera's lines and the newest failure stay, and the cameras that are not
+	 * the front's give way first. */
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+	require(uml::runtime::begin_session_record(path, {}));
+	for (std::uint32_t camera = 0; camera < uml::runtime::session_cameras_kept; ++camera) {
+		auto note = camera_front_note();
+		note.camera = camera;
+		note.position = camera == 3 ? CameraPosition::front : CameraPosition::back;
+		note.earlier = camera == 3;
+		note.anchorWidth = note.anchorHeight = 4294967295U;
+		note.ratioWidth = note.ratioHeight = 4294967295U;
+		note.videoAskedWidth = note.videoAskedHeight = 4294967295U;
+		note.videoFirstWidth = note.videoFirstHeight = 4294967295U;
+		note.photoMaximumWidth = note.photoMaximumHeight = 4294967295U;
+		note.refusals = 65535;
+		note.coordinatorAngles = {359, 359, 359, 359};
+		note.anchorFieldOfView = 359;
+		note.stated = note.platformStated = note.turn = 359;
+		note.ratioError = INT32_MIN + 1;
+		uml::runtime::note_camera_presentation(note);
+		record = read_file(path);
+		require(record.size() == uml::runtime::session_record_max_bytes,
+			"the running record changed size");
+	}
+	CameraStillFailure largest = camera_failure(
+		CameraStillStage::frameworkError, 4294967295U, CameraPosition::external);
+	largest.askedWidth = largest.askedHeight = 4294967295U;
+	largest.resolvedWidth = largest.resolvedHeight = 4294967295U;
+	largest.encodedWidth = largest.encodedHeight = 4294967295U;
+	largest.hostExifOrientation = 8;
+	largest.errorDomain = CameraErrorDomain::other;
+	largest.errorCode = INT32_MIN;
+	for (unsigned round = 0; round < 12; ++round) {
+		largest.camera = 4294967295U - round;
+		uml::runtime::note_camera_still_failure(largest);
+	}
+	record = read_file(path);
+	slot = slot_of(record);
+	require(record.size() == uml::runtime::session_record_max_bytes &&
+		slot.size() == session_camera_slot_bytes && slot.back() == '\n' &&
+		slot.starts_with("camera 1\nstills failed 12\n"),
+		"the slot of every camera and failure was recorded wrong: " + slot);
+	for (const char *kind : {"mount camera 3 front ", "ratio camera 3 ",
+		     "video camera 3 ", "photo camera 3 ", "refused camera 3 "})
+		require(has(slot, kind),
+			std::string("the front camera lost its line ") + kind + ": " + slot);
+	require(has(slot, " camera " + std::to_string(4294967295U - 11U) + " "),
+		"the newest failure was not kept: " + slot);
+	for (std::size_t at = 0; at < camera_slot_text(slot).size();) {
+		const std::size_t end = slot.find('\n', at);
+		const std::string line = slot.substr(at, end - at);
+		require(line.starts_with("camera 1") || line.starts_with("stills ") ||
+				line.starts_with("fronts ") ||
+				line.starts_with("mount camera ") ||
+				line.starts_with("ratio camera ") ||
+				line.starts_with("video camera ") ||
+				line.starts_with("photo camera ") ||
+				line.starts_with("refused camera ") ||
+				(line.starts_with("still at ") &&
+					line.find("error other -2147483648") != std::string::npos),
+			"a line was cut or unknown: " + line);
+		at = end + 1;
+	}
+
+	/* The largest of the front devices' facts keep the front camera's lines. */
+	for (std::uint32_t camera = 0; camera < uml::runtime::session_cameras_kept; ++camera) {
+		auto note = camera_front_note();
+		note.camera = camera;
+		note.position = camera == 3 ? CameraPosition::front : CameraPosition::back;
+		note.earlier = camera == 3;
+		note.frontDevices = 255;
+		note.frontFormatsDropped = 65535;
+		uml::runtime::note_camera_presentation(note);
+	}
+	slot = slot_of(read_file(path));
+	require(slot.starts_with("camera 1\nstills failed 12\n"
+			"fronts 255 square yes dynamic yes dropped 65535\n") &&
+		has(slot, "photo camera 3 ") &&
+		has(slot, " camera " + std::to_string(4294967295U - 11U) + " "),
+		"the largest front facts cost the slot its lines: " + slot);
+
+	/* The end keeps the notes, and the next session starts blank. */
+	uml::runtime::end_session_record(SessionEnd::powered_off, 0);
+	const std::string ended = read_file(path);
+	require(slot_of(ended).starts_with("camera 1\nstills failed 12\n"),
+		"the end lost the camera slot");
+	uml::runtime::note_camera_presentation(camera_front_note());
+	require(read_file(path) == ended, "a note was written after the end");
+	require(uml::runtime::begin_session_record(path, {}));
+	slot = slot_of(read_file(path));
+	require(slot == std::string(session_camera_slot_bytes - 1, ' ') + "\n",
+		"a session inherited the last one's notes: " + slot);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
+/* A front device whose formats were all dropped is no camera, and it leaves
+ * no line of its own: what the platform found of the front devices is a line
+ * of the slot, kept whichever camera the guest used, and the slot still holds
+ * the five guest cameras and the two newest failures a phone's bug report
+ * needs. */
+void test_front_device_facts()
+{
+	using namespace uml::platform;
+	using uml::runtime::session_camera_offset;
+	using uml::runtime::session_camera_slot_bytes;
+	const auto slot_of = [](const std::string &record) {
+		return record.substr(session_camera_offset,
+			session_camera_slot_bytes);
+	};
+	const auto count = [](const std::string &text, const std::string &part) {
+		std::size_t found = 0;
+		for (std::size_t at = text.find(part); at != std::string::npos;
+		     at = text.find(part, at + 1))
+			++found;
+		return found;
+	};
+	uml::runtime::reset_session_record();
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, {}));
+
+	/* Only a back camera was used, and the one front device had all four of
+	 * its formats dropped: the slot says so. */
+	auto back = camera_back_note();
+	back.frontDevices = 1;
+	back.squareFormats = false;
+	back.dynamicRatios = false;
+	back.frontFormatsDropped = 4;
+	uml::runtime::note_camera_presentation(back);
+	std::string slot = slot_of(read_file(path));
+	require(slot.starts_with("camera 1\nstills failed 0\n"
+			"fronts 1 square no dynamic no dropped 4\n"
+			"mount camera 0 back ") &&
+		count(slot, "fronts ") == 1 && !has(slot, " front type "),
+		"the front devices' facts were recorded wrong: " + slot);
+	/* A failed still is counted after the line, and the line stays. */
+	uml::runtime::note_camera_still_failure(camera_failure(
+		CameraStillStage::timeout, 0, CameraPosition::back));
+	slot = slot_of(read_file(path));
+	require(slot.starts_with("camera 1\nstills failed 1\n"
+			"fronts 1 square no dynamic no dropped 4\n") &&
+		has(slot, "stage timeout"),
+		"a failure lost the front devices' facts: " + slot);
+
+	/* Five guest cameras of an ordinary phone (only the front one used, with
+	 * a mounting, video and photo line) and the two newest failures: the
+	 * line, the front camera's lines and both failures stay, the other
+	 * cameras' mounting lines give way last, and every line is whole. */
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+	require(uml::runtime::begin_session_record(path, {}));
+	for (std::uint32_t camera = 0; camera < 5; ++camera) {
+		auto note = camera == 3 ? camera_front_note() : camera_back_note();
+		note.camera = camera;
+		note.frontDevices = 1;
+		note.squareFormats = note.dynamicRatios = false;
+		note.frontFormatsDropped = 2;
+		if (camera == 3) {
+			note.ratioKnown = false;
+			note.refusals = 0;
+		} else {
+			note.videoKnown = false;
+		}
+		uml::runtime::note_camera_presentation(note);
+	}
+	note_the_golden_failures();
+	slot = slot_of(read_file(path));
+	const std::size_t used = camera_slot_text(slot).size();
+	require(slot.starts_with("camera 1\nstills failed 3\n"
+			"fronts 1 square no dynamic no dropped 2\n") &&
+		count(slot, "mount camera ") >= 3 &&
+		count(slot, "still at ") == 2 && used <= session_camera_slot_bytes - 1,
+		"five cameras and two failures did not fit the slot: " + slot);
+	for (const char *kind : {"mount camera 3 front ", "video camera 3 ",
+		     "photo camera 3 "})
+		require(has(slot, kind),
+			std::string("the front camera lost its line ") + kind + ": " + slot);
+	for (std::size_t at = 0; at < used;) {
+		const std::size_t end = slot.find('\n', at);
+		require(end != std::string::npos && end < session_camera_slot_bytes,
+			"a line of the slot was cut: " + slot);
+		at = end + 1;
+	}
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
 void test_unopenable_record()
 {
 	uml::runtime::reset_session_record();
@@ -2261,11 +2964,15 @@ int main(int argc, char **argv)
 		test_memory_checkpoints();
 		test_network_slot();
 		test_storage_slot();
+		test_camera_slot();
+		test_camera_presentation();
+		test_front_device_facts();
 		/* The registration passes the golden files; a run without them
 		 * fails rather than skipping the check. */
-		require(argc == 3, "the golden slot files are not given");
+		require(argc == 4, "the golden slot files are not given");
 		the_network_slot_matches_the_golden_file(argv[1]);
 		the_storage_slot_matches_the_golden_file(argv[2]);
+		the_camera_slot_matches_the_golden_file(argv[3]);
 		test_memory_terms();
 		test_run_figures_in_a_row();
 		test_older_rows_sum_their_window();

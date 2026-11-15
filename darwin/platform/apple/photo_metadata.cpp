@@ -28,6 +28,8 @@ PhotoReadings photoReadingsOf(CFDictionaryRef metadata)
 {
     PhotoReadings readings;
     if (metadata == nullptr) return readings;
+    // The orientation is a property of the image, not of its Exif dictionary.
+    readings.orientation = integerOf(CFDictionaryGetValue(metadata, kCGImagePropertyOrientation));
     const auto* exifValue = CFDictionaryGetValue(metadata, kCGImagePropertyExifDictionary);
     if (exifValue == nullptr || CFGetTypeID(exifValue) != CFDictionaryGetTypeID()) return readings;
     const auto exif = static_cast<CFDictionaryRef>(exifValue);

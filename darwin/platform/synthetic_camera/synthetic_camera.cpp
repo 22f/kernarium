@@ -3,14 +3,21 @@
 
 #include "photo_dimensions.hpp"
 
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cctype>
+#include <cerrno>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -108,14 +115,10 @@ Profile profileOf(SyntheticCameraProfile which)
     switch (which) {
     case SyntheticCameraProfile::phone: {
         profile.model = "SyntheticPhone1,1";
-        CameraInfo zoom = lens("synthetic-back-zoom", CameraPosition::back, CameraLensKind::zoom);
-        zoom.zoomMinimum = 0.5f;
-        zoom.zoomMaximum = 15.0f;
-        zoom.switchOvers = {1.0f, 3.0f};
-        zoom.constituents = {"synthetic-back-ultrawide", "synthetic-back-wide", "synthetic-back-tele"};
-        zoom.manualExposure = zoom.manualFocus = zoom.manualWhiteBalance = false;
-        zoom.flash = zoom.torch = true;
+        // The three lenses and the front camera, each with the zoom the system recommends for it on a phone of
+        // three lenses. Only the wide lens runs with the front camera, as on that phone.
         CameraInfo wide = lens("synthetic-back-wide", CameraPosition::back, CameraLensKind::wide);
+        wide.zoomMaximum = 6.0f;
         wide.flash = wide.torch = true;
         wide.rawStills = true;
         wide.rawStillSize = {2016, 1512};
@@ -123,11 +126,11 @@ Profile profileOf(SyntheticCameraProfile which)
         wide.pixelArrayWidth = 8064;
         wide.pixelArrayHeight = 6048;
         CameraInfo ultra = lens("synthetic-back-ultrawide", CameraPosition::back, CameraLensKind::ultraWide);
-        ultra.zoomMinimum = 0.5f;
-        ultra.zoomMaximum = 4.0f;
+        ultra.zoomMaximum = 3.0f;
         ultra.rawStills = true;
         ultra.rawStillSize = {2016, 1512};
         CameraInfo tele = lens("synthetic-back-tele", CameraPosition::back, CameraLensKind::telephoto);
+        tele.zoomMaximum = 3.0f;
         tele.rawStills = true;
         tele.rawStillSize = {2016, 1512};
         CameraInfo front = lens("synthetic-front", CameraPosition::front, CameraLensKind::wide);
@@ -135,8 +138,8 @@ Profile profileOf(SyntheticCameraProfile which)
         front.flash = front.torch = false;
         front.manualExposure = front.manualWhiteBalance = true;
         front.stillSizes = {{4032, 3024}, {2016, 1512}, {1008, 756}};
-        profile.cameras = {zoom, wide, ultra, tele, front};
-        profile.sets = {{0, 4}, {1, 4}, {2, 4}, {3, 4}};
+        profile.cameras = {wide, ultra, tele, front};
+        profile.sets = {{0, 3}};
         break;
     }
     case SyntheticCameraProfile::tablet: {
@@ -186,7 +189,6 @@ Profile profileOf(SyntheticCameraProfile which)
         ultra.stillSizes = {{2016, 1512}, {1008, 756}};
         ultra.pixelArrayWidth = 2016;
         ultra.pixelArrayHeight = 1512;
-        ultra.zoomMinimum = 0.5f;
         ultra.zoomMaximum = 2.0f;
         profile.cameras = {back, front, ultra};
         profile.sets = {{0, 1}, {0, 2}};
@@ -402,6 +404,21 @@ std::vector<std::uint16_t> bayerStill(const Picture& chart, BayerOrder order, st
     return raw;
 }
 
+// A DNG forward matrix maps white-balanced camera values to XYZ with a D50 white, so equal camera values (1, 1, 1) must
+// land on the D50 white point; the DNG validation of the Android CTS rejects a matrix whose rows do not sum to it.
+// Every forward matrix of a synthetic calibration goes through here: each row of the shape given is scaled to the
+// white point's component, which keeps its zeros and the proportions of its entries.
+constexpr std::array<double, 3> d50White {0.9642, 1.0, 0.8249};
+
+std::array<double, 9> mapsEqualValuesToD50(std::array<double, 9> matrix)
+{
+    for (std::size_t row = 0; row < 3; ++row) {
+        const double sum = matrix[row * 3] + matrix[row * 3 + 1] + matrix[row * 3 + 2];
+        for (std::size_t column = 0; column < 3; ++column) matrix[row * 3 + column] *= d50White[row] / sum;
+    }
+    return matrix;
+}
+
 CameraColorData syntheticColor(const CameraInfo& info, BayerOrder order)
 {
     CameraColorData data;
@@ -414,8 +431,8 @@ CameraColorData syntheticColor(const CameraInfo& info, BayerOrder order)
     data.illuminant2 = 21;  // D65
     data.colorMatrix1 = {1.2, -0.3, -0.1, -0.4, 1.3, 0.1, -0.1, 0.2, 0.7};
     data.colorMatrix2 = {1.1, -0.2, -0.1, -0.3, 1.2, 0.1, -0.1, 0.2, 0.8};
-    data.forwardMatrix1 = {0.7, 0.2, 0.1, 0.3, 0.7, 0.0, 0.0, 0.1, 0.8};
-    data.forwardMatrix2 = {0.6, 0.3, 0.1, 0.3, 0.7, 0.0, 0.0, 0.0, 0.9};
+    data.forwardMatrix1 = mapsEqualValuesToD50({0.7, 0.2, 0.1, 0.3, 0.7, 0.0, 0.0, 0.1, 0.8});
+    data.forwardMatrix2 = mapsEqualValuesToD50({0.6, 0.3, 0.1, 0.3, 0.7, 0.0, 0.0, 0.0, 0.9});
     data.focalLengthMillimetres = info.lens == CameraLensKind::ultraWide ? 2.7 : info.lens == CameraLensKind::telephoto ? 9.0 : 6.9;
     data.intrinsics = {3000.0, 3000.0, info.pixelArrayWidth / 2.0, info.pixelArrayHeight / 2.0};
     return data;
@@ -918,18 +935,9 @@ private:
                                                              2000.0f, 10000.0f));
         result.scene.tintCb = int(std::lround((exposure.whiteBalanceGains[2] / exposure.whiteBalanceGains[1] - 1.6f) * 20.0f));
         result.scene.tintCr = int(std::lround((exposure.whiteBalanceGains[0] / exposure.whiteBalanceGains[1] - 1.8f) * 20.0f));
-        // Zoom, and the lens a zoom camera has switched to.
+        // Zoom.
         exposure.zoomRatio = std::clamp(settings.zoomRatio, info.zoomMinimum, info.zoomMaximum);
         result.scene.zoom = std::max(exposure.zoomRatio, 1.0f);
-        if (info.lens == CameraLensKind::zoom && !info.constituents.empty()) {
-            std::size_t lensIndex = 0;
-            for (const auto switchOver : info.switchOvers)
-                if (exposure.zoomRatio >= switchOver) ++lensIndex;
-            lensIndex = std::min(lensIndex, info.constituents.size() - 1);
-            for (std::size_t other = 0; other < core_.profile_.cameras.size(); ++other)
-                if (core_.profile_.cameras[other].identifier == info.constituents[lensIndex])
-                    exposure.activeCamera = std::uint32_t(other);
-        }
         result.scene.tag = chartTag(camera);
         return result;
     }
@@ -1115,11 +1123,71 @@ private:
 namespace uml::platform {
 namespace {
 
+// Reads the commands of a named pipe on a thread of its own, for as long as it lives. The pipe is opened for reading and
+// writing, so it has a reader whether or not a writer is there, and a writer's close ends no read.
+class ControlPipe {
+public:
+    ControlPipe(const std::string& path, std::function<void(const SyntheticControlCommand&)> apply) : apply_(std::move(apply))
+    {
+        if (::mkfifo(path.c_str(), 0600) != 0 && errno != EEXIST) {
+            std::fprintf(stderr, "synthetic camera: cannot make the control pipe: %s\n", std::strerror(errno));
+            return;
+        }
+        descriptor_ = ::open(path.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+        if (descriptor_ < 0) {
+            std::fprintf(stderr, "synthetic camera: cannot open the control pipe: %s\n", std::strerror(errno));
+            return;
+        }
+        thread_ = std::thread([this] { run(); });
+    }
+    ~ControlPipe()
+    {
+        stop_ = true;
+        if (thread_.joinable()) thread_.join();
+        if (descriptor_ >= 0) ::close(descriptor_);
+    }
+    ControlPipe(const ControlPipe&) = delete;
+    ControlPipe& operator=(const ControlPipe&) = delete;
+
+private:
+    void run()
+    {
+        std::string pending;
+        char chunk[256];
+        while (!stop_) {
+            pollfd waiting {descriptor_, POLLIN, 0};
+            if (::poll(&waiting, 1, 50) <= 0 || (waiting.revents & POLLIN) == 0) continue;
+            const auto count = ::read(descriptor_, chunk, sizeof(chunk));
+            if (count <= 0) continue;
+            pending.append(chunk, std::size_t(count));
+            for (auto end = pending.find('\n'); end != std::string::npos; end = pending.find('\n')) {
+                const std::string line = pending.substr(0, end);
+                pending.erase(0, end + 1);
+                if (const auto command = parseSyntheticControlLine(line)) apply_(*command);
+                else std::fprintf(stderr, "synthetic camera: unknown control line\n");
+            }
+            if (pending.size() > 4096) pending.clear();
+        }
+    }
+
+    std::function<void(const SyntheticControlCommand&)> apply_;
+    int descriptor_ {-1};
+    std::atomic<bool> stop_ {};
+    std::thread thread_;
+};
+
 class SyntheticCameraImpl final : public SyntheticCamera {
 public:
     explicit SyntheticCameraImpl(const SyntheticCameraOptions& options)
         : core_(options, profileOf(options.profile))
     {
+        if (!options.controlPath.empty()) {
+            control_ = std::make_unique<ControlPipe>(options.controlPath, [this](const SyntheticControlCommand& command) {
+                std::fprintf(stderr, "synthetic camera: %s\n", command.interrupt ? "interrupted" : "resumed");
+                if (command.interrupt) interrupt(command.kind);
+                else resume();
+            });
+        }
     }
 
     std::vector<CameraInfo> cameras() const override { return core_.profile_.cameras; }
@@ -1251,9 +1319,29 @@ private:
     }
 
     mutable Core core_;
+    // After the core: it applies commands to the camera, and stops before the camera does.
+    std::unique_ptr<ControlPipe> control_;
 };
 
 }  // namespace
+
+std::optional<SyntheticControlCommand> parseSyntheticControlLine(std::string_view line)
+{
+    const auto blank = [](char c) { return c == ' ' || c == '\t' || c == '\r'; };
+    while (!line.empty() && blank(line.front())) line.remove_prefix(1);
+    while (!line.empty() && blank(line.back())) line.remove_suffix(1);
+    std::string lower(line);
+    for (auto& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+    if (lower == "resume") return SyntheticControlCommand {false, CameraEventKind::resumed};
+    if (lower.rfind("interrupt", 0) != 0) return std::nullopt;
+    auto cause = std::string_view(lower).substr(9);
+    while (!cause.empty() && blank(cause.front())) cause.remove_prefix(1);
+    if (cause.empty() || cause == "other") return SyntheticControlCommand {true, CameraEventKind::interrupted};
+    if (cause == "background") return SyntheticControlCommand {true, CameraEventKind::interruptedInBackground};
+    if (cause == "multitasking") return SyntheticControlCommand {true, CameraEventKind::interruptedByMultitasking};
+    if (cause == "pressure") return SyntheticControlCommand {true, CameraEventKind::interruptedBySystemPressure};
+    return std::nullopt;
+}
 
 std::unique_ptr<SyntheticCamera> makeSyntheticCamera(const SyntheticCameraOptions& options)
 {

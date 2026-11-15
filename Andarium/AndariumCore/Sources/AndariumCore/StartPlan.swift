@@ -24,9 +24,9 @@ extension StartBlock {
         case .olderAndroid:
             String(localized: "This app version is older than the one the virtual machine last started with, and its data does not go back. Install a newer version of Andarium, or erase the virtual machine to start again with this one.", bundle: .module)
         case .newerDataLayout:
-            String(localized: "The virtual machine's data uses a newer layout than this app version can open. Erase the virtual machine to start again with this one.", bundle: .module)
+            String(localized: "The virtual machine’s data uses a newer layout than this app version can open. Erase the virtual machine to start again with this one.", bundle: .module)
         case .mismatch:
-            String(localized: "The virtual machine's files do not match this app version. Erase the virtual machine to start again.", bundle: .module)
+            String(localized: "The virtual machine’s files do not match this app version. Erase the virtual machine to start again.", bundle: .module)
         }
     }
 }

@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <map>
 #include <set>
+#include <span>
 #include <vector>
 
 #include "camera_concurrent_vectors.hpp"
@@ -33,6 +35,48 @@ std::uint32_t id_of(const std::vector<IdAssignment>& ids, std::uint32_t index)
     for (const auto& entry : ids)
         if (entry.index == index) return entry.id;
     return 99;
+}
+
+// A host of three lenses that publishes no zoom camera (the host's wire order is the primary back lens, the front
+// camera, then the other lenses): the wide lens is "0", the front camera "1", the ultra wide "3" and the telephoto "4",
+// and there is no "2". Only the wide lens streams with the front camera, so every other pair conflicts.
+void check_three_lens_host()
+{
+    const std::vector<CameraKey> keys = {{0, abi::facing::back, abi::lens::wide},
+                                         {1, abi::facing::front, abi::lens::wide},
+                                         {2, abi::facing::back, abi::lens::ultra_wide},
+                                         {3, abi::facing::back, abi::lens::telephoto}};
+    const auto ids = assign_ids(keys);
+    require(ids.size() == 4, "four cameras");
+    require(ids[0].id == 0 && ids[0].index == 0 && ids[1].id == 1 && ids[1].index == 1 && ids[2].id == 3 && ids[2].index == 2 &&
+                ids[3].id == 4 && ids[3].index == 3,
+            "wide 0, front 1, ultra wide 3, telephoto 4: no 2");
+    for (const auto& assignment : ids) require(assignment.id != wide_camera_id, "the wide lens is the primary camera, not a second one");
+
+    // Two lenses: the ultra wide keeps its ID, and a host whose only back lens is the ultra wide numbers it "0".
+    const std::vector<CameraKey> two = {keys[0], keys[1], keys[2]};
+    const auto pair = assign_ids(two);
+    require(pair.size() == 3 && pair[0].id == 0 && pair[1].id == 1 && pair[2].id == 3 && pair[2].index == 2, "wide, front, ultra wide");
+    const std::vector<CameraKey> ultra_only = {{0, abi::facing::back, abi::lens::ultra_wide}, keys[1]};
+    const auto alone = assign_ids(ultra_only);
+    require(alone.size() == 2 && alone[0].id == 0 && alone[0].index == 0 && alone[1].id == 1, "the primary back lens is 0 whichever it is");
+
+    // The host's masks (by its own numbers): the wide lens and the front camera name one another.
+    const std::uint32_t wide = 1u << 0, front = 1u << 1, ultra = 1u << 2, tele = 1u << 3;
+    const std::vector<Concurrency> cameras = {{0, 0, front, ultra | tele},
+                                              {1, 1, wide, ultra | tele},
+                                              {3, 2, 0, wide | front | tele},
+                                              {4, 3, 0, wide | front | ultra}};
+    const auto sets = concurrent_sets(cameras);
+    require(sets.size() == 1 && sets[0] == std::vector<std::uint32_t>({0, 1}), "one set: the wide lens and the front camera");
+    require(concurrent_feature(cameras, [](std::uint32_t) { return true; }), "the layout's concurrent feature holds");
+    require(!concurrent_feature(cameras, [](std::uint32_t id) { return id != 0; }),
+            "and does not when the wide lens misses the guaranteed sizes");
+    require(conflicting_ids(cameras, 0) == std::vector<std::uint32_t>({3, 4}), "the wide lens conflicts with the other lenses");
+    require(conflicting_ids(cameras, 1) == std::vector<std::uint32_t>({3, 4}), "so does the front camera");
+    require(conflicting_ids(cameras, 3) == std::vector<std::uint32_t>({0, 1, 4}), "the ultra wide conflicts with every other camera");
+    require(conflicting_ids(cameras, 4) == std::vector<std::uint32_t>({0, 1, 3}), "as does the telephoto");
+    require(conflicting_ids(cameras, 2).empty(), "no camera has the ID 2");
 }
 
 void check_ids()
@@ -740,9 +784,73 @@ void check_key_lists()
 
 } // namespace
 
+// What state_raw_metadata writes, as the HAL's sink for a camera's static metadata would take it.
+struct RecordingSink {
+    std::map<std::int32_t, std::vector<std::uint8_t>> bytes;
+    std::vector<std::int32_t> characteristics;
+    std::vector<std::int32_t> results;
+
+    void put_bytes(std::int32_t key, std::span<const std::uint8_t> values) { bytes[key].assign(values.begin(), values.end()); }
+    void list_characteristic(std::int32_t key) { characteristics.push_back(key); }
+    void list_result(std::int32_t key) { results.push_back(key); }
+};
+
+// The metadata that a camera with RAW states and lists (the HAL runs the same function): the lens shading map and the
+// hot pixel map with both modes, whether the shading is applied, and the keys of what a RAW camera returns.
+void check_raw_metadata()
+{
+    RecordingSink sink;
+    state_raw_metadata(sink);
+
+    const std::vector<std::uint8_t> off_and_on = {map_mode::off, map_mode::on};
+    require(sink.bytes.size() == 3, "a RAW camera states three entries");
+    require(sink.bytes.at(tag::statistics_info_available_lens_shading_map_modes) == off_and_on,
+            "its lens shading map modes are OFF and ON (the device info rejects a RAW camera without ON)");
+    require(sink.bytes.at(tag::statistics_info_available_hot_pixel_map_modes) == off_and_on,
+            "its hot pixel map modes are OFF and ON (Android requires ON of a RAW camera)");
+    require(sink.bytes.at(tag::sensor_info_lens_shading_applied) == std::vector<std::uint8_t>{lens_shading_applied},
+            "it states whether its lens shading is applied");
+    require(lens_shading_applied == lens_shading_applied_false,
+            "the host applies no shading correction to the Bayer data it copies, and its shading map is all ones");
+
+    // Everything stated is a characteristic of the camera, and the hot pixel map is a result it can return.
+    for (const auto& [key, values] : sink.bytes)
+        require(std::count(sink.characteristics.begin(), sink.characteristics.end(), key) == 1,
+                "every entry stated is listed once among the characteristics");
+    require(sink.characteristics.size() == sink.bytes.size(), "and nothing else is");
+    require(sink.results == std::vector<std::int32_t>{tag::statistics_hot_pixel_map},
+            "the hot pixel map is the one result key a RAW camera adds (the template lists the lens shading map already)");
+
+    // The tags are distinct and are not keys that the plan takes out of a camera's lists (unlisted_keys): a RAW camera
+    // lists the map modes and the maps of the lens shading and the hot pixels, and no camera has them unlisted.
+    const std::set<std::int32_t> raw_keys = {tag::sensor_info_lens_shading_applied,
+                                             tag::statistics_hot_pixel_map,
+                                             tag::statistics_hot_pixel_map_mode,
+                                             tag::statistics_info_available_hot_pixel_map_modes,
+                                             tag::statistics_info_available_lens_shading_map_modes,
+                                             tag::statistics_lens_shading_map,
+                                             tag::statistics_lens_shading_map_mode};
+    require(raw_keys.size() == 7, "the seven keys are distinct");
+    auto raw = lens_desc();
+    auto automatic = raw;
+    automatic.lens = abi::lens::zoom;
+    auto plain = raw;
+    plain.flags &= ~abi::feature::raw;
+    plain.bayer_order = abi::bayer::none;
+    auto front = raw;
+    front.facing = abi::facing::front;
+    front.flags &= ~abi::feature::autofocus;
+    for (const auto& desc : {raw, automatic, plain, front}) {
+        const auto unlisted = unlisted_keys(desc, capabilities_of(desc, phone_formats()));
+        for (const auto key : unlisted)
+            require(raw_keys.count(key) == 0, "the plan unlists none of the lens shading and hot pixel map keys");
+    }
+}
+
 int main()
 {
     check_ids();
+    check_three_lens_host();
     check_concurrency();
     check_capabilities();
     check_tables();
@@ -755,5 +863,6 @@ int main()
     check_record_jpeg();
     check_concurrent_feature();
     check_key_lists();
+    check_raw_metadata();
     return 0;
 }

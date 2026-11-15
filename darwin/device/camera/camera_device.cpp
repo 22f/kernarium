@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -207,6 +208,12 @@ public:
         bool resuming {};
         bool videoRunning {};
         bool failed {};
+        /* The host ended the camera's video: the application left the foreground while the guest had a video stream open on
+         * the camera (`endsVideoWhenAppLeaves`). Every video stream of the camera, those the guest restarts after a suspend
+         * too, completes its buffers with the error flag and the interrupted flag and never gets a picture, until the
+         * guest has closed its last video stream of the camera: the guest's camera layer decides what to do with that news.
+         * It is not a state the platform's recovery ends. */
+        bool lost {};
         /* The guest has been told the camera is interrupted (or gone) and not
          * yet that it is back; it is told once each way. */
         bool told {};
@@ -252,6 +259,17 @@ public:
     CameraTierLimits limits;
     std::vector<Runtime> runtimes;
     std::unordered_map<std::size_t, std::uint32_t> wireOfPlatform;
+    // The SENSOR_ORIENTATION of each platform camera's description, which is what the guest is told (fixed once the device
+    // is made, like wireOfPlatform).
+    std::unordered_map<std::size_t, std::uint32_t> guestOrientationOfPlatform;
+    // The newest reading of each platform camera's photo output compensation (cameraPresentation, on the platform's thread).
+    struct CompensationReading {
+        uml::platform::CameraFact supported {};
+        uml::platform::CameraFact enabled {};
+        uml::platform::CameraReading reading {};
+    };
+    std::mutex compensationMutex;
+    std::map<std::size_t, CompensationReading> compensationOf;
     GuestMapper mapper;
     std::shared_ptr<const uml::virtio::SharedMemoryRegions> regions;
     std::unordered_map<std::uint32_t, Stream> streams;
@@ -272,6 +290,8 @@ public:
     bool firingWaiting {};
     std::unique_ptr<uml::platform::Nv12Transformer> transformer;
     CameraState reported {CameraState::idle};
+    /* Whether the application was last told the guest is in video mode (`onVideoMode`). */
+    bool reportedVideoMode {};
     std::uint64_t lastRetry {};
     bool sessionFailed {};
     /* The format each platform camera runs in, which a session is told when it opens. */
@@ -310,9 +330,11 @@ public:
         anchors = anchorsByPlatformCamera(cameras, infos.size());
         const bool blocked = options.mode == CameraMode::blocked;
         runtimes.reserve(cameras.size());
+        if (!cameras.empty()) std::fprintf(stderr, "%s\n", concurrencySummary(cameras, sets).c_str());
         for (auto& camera : cameras) {
             if (const auto line = anchorSummary(camera); !line.empty()) std::fprintf(stderr, "%s\n", line.c_str());
             wireOfPlatform[camera.platformIndex] = camera.index;
+            guestOrientationOfPlatform[camera.platformIndex] = camera.sensorOrientation;
             const auto orientation = camera.sensorOrientation;
             runtimes.emplace_back(std::move(camera), blocked, orientation);
         }
@@ -321,7 +343,11 @@ public:
         if (::kevent(queue.get(), &change, 1, nullptr, 0, nullptr) < 0) throw std::runtime_error("Virtio camera wake-up failed");
     }
 
-    ~Implementation() override { closeSession(); }
+    ~Implementation() override
+    {
+        closeSession();
+        reportVideoMode(false);
+    }
 
     // ------------------------------------------------------------------------
     // Time and bookkeeping
@@ -372,13 +398,13 @@ public:
 
     [[nodiscard]] bool blackMode(const Runtime& runtime) const
     {
-        return blocked() || runtime.failed || runtime.interruption != Interruption::none || runtime.resuming ||
+        return blocked() || runtime.failed || runtime.lost || runtime.interruption != Interruption::none || runtime.resuming ||
             runtime.controls.testPattern(runtime.values);
     }
 
     [[nodiscard]] static bool down(const Runtime& runtime) noexcept
     {
-        return runtime.interruption != Interruption::none || runtime.failed;
+        return runtime.interruption != Interruption::none || runtime.failed || runtime.lost;
     }
 
     /* The dequeue flags of a black frame. A capture that is starting is
@@ -444,11 +470,41 @@ public:
 
     [[nodiscard]] bool wantsVideo(const Runtime& runtime) const
     {
+        // A lost camera's streams get no capture.
+        if (runtime.lost) return false;
         for (const auto& [id, stream] : streams) {
             (void)id;
             if (stream.camera == runtime.description.index && startedVideo(stream)) return true;
         }
         return false;
+    }
+
+    [[nodiscard]] bool hasVideoStream(const Runtime& runtime) const
+    {
+        return std::any_of(streams.begin(), streams.end(), [&](const auto& entry) {
+            return entry.second.camera == runtime.description.index && entry.second.kind == VIRTIO_VIDEO_CAMERA_STREAM_VIDEO;
+        });
+    }
+
+    /* Whether the application's leaving the foreground ends the guest's video on a camera: a live session and a video stream
+     * the guest has open (it may be stopped, as a guest suspend stops it). Nothing else decides it: the host cannot tell a
+     * recording from a viewfinder, and the guest's camera HAL decides what its client sees (a session with an encoder stream
+     * is told the device is gone; any other closes its video streams, which ends the loss, and opens them again). A camera
+     * with no video stream, a still or the torch alone, is not lost. */
+    [[nodiscard]] bool endsVideoWhenAppLeaves(const Runtime& runtime) const
+    {
+        return !blocked() && !runtime.lost && hasVideoStream(runtime);
+    }
+
+    /* The guest closed its last video stream of a camera: the loss ends with it, and the camera, if it was told it is down
+     * for the loss only, is told it is back. */
+    void endLossIfClosed(Runtime& runtime)
+    {
+        if (!runtime.lost || hasVideoStream(runtime)) return;
+        runtime.lost = false;
+        settle(runtime);
+        updateBlackTimers(runtime);
+        reportState();
     }
 
     // ------------------------------------------------------------------------
@@ -586,13 +642,22 @@ public:
     }
 
     /* Brings the platform's video for a camera in line with the streams that
-     * are running on it. */
+     * are running on it, and tells the application whether a camera is in video
+     * mode now: whatever the way in or out (the guest's stream, a timer's retry
+     * of a start that failed, a session that failed and came back). */
     void reconfigure(Runtime& runtime)
+    {
+        reconfigureVideo(runtime);
+        reportVideoMode(inVideoMode());
+    }
+
+    void reconfigureVideo(Runtime& runtime)
     {
         std::uint32_t width = 0, height = 0, rate = 0;
         for (const auto& [id, stream] : streams) {
             (void)id;
-            if (stream.camera != runtime.description.index || !startedVideo(stream)) continue;
+            // The streams of a lost camera want no capture.
+            if (stream.camera != runtime.description.index || !startedVideo(stream) || runtime.lost) continue;
             width = std::max(width, stream.width);
             height = std::max(height, stream.height);
             rate = std::max(rate, rateOf(stream));
@@ -621,6 +686,10 @@ public:
         bool ok = false;
         if (admitsCamera(runtime)) {
             openFramesOf(runtime.description.platformIndex);
+            // The settings first: the platform programs the stabilization the guest asks for on the new video connection
+            // before the capture can deliver a frame, so the first picture has the crop the rest will have. (Applied after
+            // the start, the picture would change its crop under a guest that already shows it.)
+            applySettings(runtime, true);
             ok = session->startVideo(runtime.description.platformIndex, width, height, rate);
         }
         if (ok) {
@@ -654,15 +723,39 @@ public:
         return std::max<std::uint32_t>(1, (stream.intervalDenominator + stream.intervalNumerator / 2) / stream.intervalNumerator);
     }
 
+    /* Whether the guest has a camera in video mode (`CameraDeviceOptions::onVideoMode`): its video runs, the camera is not
+     * interrupted or failing, and the guest's last applied settings ask for the picture stabilized. A blocked session
+     * runs no video. */
+    [[nodiscard]] bool inVideoMode() const noexcept
+    {
+        if (blocked()) return false;
+        return std::any_of(runtimes.begin(), runtimes.end(), [](const Runtime& runtime) {
+            return runtime.videoRunning && !runtime.failed && runtime.interruption == Interruption::none && runtime.appliedValid &&
+                runtime.applied.stabilization;
+        });
+    }
+
+    void reportVideoMode(bool inMode) noexcept
+    {
+        if (inMode == reportedVideoMode) return;
+        reportedVideoMode = inMode;
+        try {
+            if (options.onVideoMode) options.onVideoMode(inMode);
+        } catch (...) {
+            // The application's use of it must not stop the device.
+        }
+    }
+
     void reportState()
     {
+        reportVideoMode(inVideoMode());
         bool active = !groups.empty();
         bool interrupted = false, multitasking = false, pressure = false;
         for (const auto& runtime : runtimes) {
             active |= runtime.videoRunning;
             if (runtime.interruption == Interruption::multitasking) multitasking = true;
             if (runtime.interruption == Interruption::pressure) pressure = true;
-            if (runtime.interruption == Interruption::interrupted || runtime.failed) interrupted = true;
+            if (runtime.interruption == Interruption::interrupted || runtime.failed || runtime.lost) interrupted = true;
         }
         bool blockedUse = false;
         for (const auto& [id, stream] : streams) {
@@ -733,6 +826,32 @@ public:
             inboxEvents.push_back({platformEvent, ++inboxSerial});
         }
         wake();
+    }
+    /* What the platform says of how it presents a camera goes to the owner's record as it comes, under the guest's number
+     * of the camera, on the platform's thread: it never touches the device's state (`wireOfPlatform` is fixed once the
+     * device is made), and a camera the guest does not see is not told. */
+    void cameraPresentation(std::size_t camera, const uml::platform::CameraPresentation& presentation) override
+    {
+        if (!options.onCameraPresentation) return;
+        const auto wire = wireOfPlatform.find(camera);
+        if (wire == wireOfPlatform.end()) return;
+        uml::platform::CameraPresentation told = presentation;
+        told.camera = wire->second;
+        // What the guest is told is the description's orientation, which the application may have turned; the platform's own
+        // is kept as the second number.
+        told.platformStated = presentation.stated;
+        if (const auto guest = guestOrientationOfPlatform.find(camera); guest != guestOrientationOfPlatform.end())
+            told.stated = std::uint16_t(guest->second);
+        if (presentation.photoKnown) {
+            // The newest reading of the photo output's compensation, for a still the platform refuses before it has one.
+            std::lock_guard lock(compensationMutex);
+            compensationOf[camera] = {presentation.compensationSupported, presentation.compensationEnabled, presentation.compensationReading};
+        }
+        try {
+            options.onCameraPresentation(told);
+        } catch (...) {
+            // The owner's record must not fail the platform's capture.
+        }
     }
 
     // ------------------------------------------------------------------------
@@ -942,15 +1061,22 @@ public:
         stream.queued.pop_front();
         auto& resource = stream.resources.at(held.resource);
         const auto size = videoPlaneSize(stream);
+        // A lost camera's buffer fails, with the interrupted flag, and the camera's black record says why; the record
+        // comes first, so that the guest finds it when it sees the failure.
+        const bool lost = runtime->lost;
         bool ok = false;
-        if (!resource.planes.empty() && resource.capacity >= size) ok = writeBlack(stream, resource);
+        if (!lost && !resource.planes.empty() && resource.capacity >= size) ok = writeBlack(stream, resource);
         const auto sequence = ++runtime->sequence;
         const std::uint32_t metaFlags = blackMetaFlags(*runtime);
         ++stream.framesOut;
-        complete(id, held, 0, (ok ? blackFlags(*runtime) : VIRTIO_VIDEO_DEQUEUE_FLAG_ERR), ok ? size : 0, sequence);
         CameraExposure black;
         black.activeCamera = std::uint32_t(runtime->description.platformIndex);
-        pushMeta(*runtime, metaOf(*runtime, sequence, black, metaFlags), now());
+        if (lost) pushMeta(*runtime, metaOf(*runtime, sequence, black, metaFlags), now());
+        complete(id, held, 0,
+                 lost ? std::uint32_t(VIRTIO_VIDEO_DEQUEUE_FLAG_ERR) | std::uint32_t(VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED)
+                      : (ok ? blackFlags(*runtime) : VIRTIO_VIDEO_DEQUEUE_FLAG_ERR),
+                 ok ? size : 0, sequence);
+        if (!lost) pushMeta(*runtime, metaOf(*runtime, sequence, black, metaFlags), now());
     }
 
     /* Writes a black picture to a guest's buffer: the luma plane and then the
@@ -1020,6 +1146,53 @@ public:
     void failGroup(Group& group, std::uint32_t extra)
     {
         for (const auto& member : group.members) complete(member.stream, member.held, member.held.cookie, VIRTIO_VIDEO_DEQUEUE_FLAG_ERR | extra);
+    }
+
+    /* Tells the owner why a capture did not end in a picture
+     * (`CameraDeviceOptions::onStillFailure`): `failure` has the stage and what
+     * the platform or the device saw of the file, and gets the camera and the
+     * JPEG size the guest asked for here. Call it before the group's members
+     * are completed or dropped. */
+    void reportStillFailure(const Group& group, const Runtime& runtime, uml::platform::CameraStillFailure failure)
+    {
+        if (!options.onStillFailure) return;
+        failure.camera = runtime.description.index;
+        failure.position = runtime.description.info.position;
+        if (failure.compensationSupported == uml::platform::CameraFact::unknown) {
+            // A still refused before the platform had a photo to read it from says what the output last read.
+            std::lock_guard lock(compensationMutex);
+            if (const auto found = compensationOf.find(runtime.description.platformIndex); found != compensationOf.end()) {
+                failure.compensationSupported = found->second.supported;
+                failure.compensationEnabled = found->second.enabled;
+                failure.compensationReading = found->second.reading;
+            }
+        }
+        for (const auto& member : group.members) {
+            const auto found = streams.find(member.stream);
+            if (found == streams.end() || found->second.format != VIRTIO_VIDEO_FORMAT_CAMERA_JPEG) continue;
+            failure.askedWidth = found->second.width;
+            failure.askedHeight = found->second.height;
+        }
+        try {
+            options.onStillFailure(failure);
+        } catch (...) {
+            // The owner's record must not fail a capture.
+        }
+    }
+
+    [[nodiscard]] static uml::platform::CameraStillFailure failureAt(uml::platform::CameraStillStage stage) noexcept
+    {
+        uml::platform::CameraStillFailure failure;
+        failure.stage = stage;
+        return failure;
+    }
+
+    /* Whether an interruption or a recovery of its camera ended a capture: not a fault of the capture, so it is not
+     * reported (`reportStillFailure`), whether the platform ended it (`deliverStill`) or its time did (`expireGroups`).
+     * A capture that has not started has no serial to span a boundary with: only an interruption that is on counts. */
+    [[nodiscard]] static bool endedByInterruption(const Group& group, const Runtime& runtime) noexcept
+    {
+        return runtime.interruption != Interruption::none || (group.fired && group.fireSerial < runtime.boundary);
     }
 
     /* A capture that ends makes room for the captures that wait for it. */
@@ -1143,6 +1316,7 @@ public:
         group.whole = ++wholeCount;
         group.deadline = now() + captureTimeoutNanoseconds;
         if (group.cost > stillBudget) {
+            reportStillFailure(group, runtime, failureAt(uml::platform::CameraStillStage::refused));
             failGroup(group, 0);
             const auto order = group.whole;
             std::erase_if(groups, [order](const auto& other) { return other.whole == order; });
@@ -1186,6 +1360,7 @@ public:
             // A control changed while it waited (a zoom back to 1 adds the colour data of an uncalibrated lens): the capture
             // may now cost more than the device admits at all, which is refused as it is at the request.
             if (next->cost > stillBudget) {
+                reportStillFailure(*next, *runtime, failureAt(uml::platform::CameraStillStage::refused));
                 failGroup(*next, 0);
                 groups.erase(next);
                 refused = true;
@@ -1263,6 +1438,7 @@ public:
             if (!taken) refusal = 1;
         }
         if (refusal != 0) {
+            reportStillFailure(group, runtime, failureAt(uml::platform::CameraStillStage::refused));
             failGroup(group, sessionFailed ? std::uint32_t(VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED) : 0u);
             eraseGroup(group.token);
             releaseSessionIfIdle();
@@ -1304,6 +1480,12 @@ public:
         // went wrong does, for the guest to ask again.
         const bool spansBoundary = group->fireSerial < runtime.boundary;
         if (!result.ok || spansBoundary || runtime.interruption != Interruption::none) {
+            // An interruption or a recovery that ended the capture is not a fault of the capture.
+            if (!result.ok && !endedByInterruption(*group, runtime)) {
+                auto failure = result.failure;
+                if (failure.stage == uml::platform::CameraStillStage::none) failure.stage = uml::platform::CameraStillStage::unknown;
+                reportStillFailure(*group, runtime, failure);
+            }
             failGroup(*group, runtime.interruption != Interruption::none ? std::uint32_t(VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED) : 0u);
             freePayload(result);
             eraseGroup(result.token);
@@ -1328,25 +1510,49 @@ public:
         const auto sequence = ++runtime.sequence;
         auto meta = metaOf(runtime, sequence, result.exposure, VIRTIO_VIDEO_CAMERA_FRAME_F_STILL);
         runtime.latest = result.exposure;
+        // The first member that fails says why the capture did (`reportStillFailure`): what the platform said of it, and
+        // the stage the device found.
+        std::optional<uml::platform::CameraStillFailure> failure;
+        // A capture that delivered its JPEG did not fail, whatever its RAW did: that buffer has failed and the capture is
+        // not reported. One whose JPEG did not arrive is, whether its RAW did or not.
+        bool jpegAsked = false, jpegFailed = false;
+        const auto fails = [&](uml::platform::CameraStillStage stage, std::uint32_t encodedWidth = 0, std::uint32_t encodedHeight = 0) {
+            if (failure) return;
+            failure = result.failure;
+            failure->stage = stage;
+            failure->encodedWidth = encodedWidth;
+            failure->encodedHeight = encodedHeight;
+        };
         for (const auto& member : group->members) {
             auto& stream = streams.at(member.stream);
             auto& resource = stream.resources.at(member.held.resource);
             std::uint32_t size = 0;
             bool ok = false;
             if (stream.format == VIRTIO_VIDEO_FORMAT_CAMERA_JPEG) {
+                // The platform's own account of a JPEG that is not here stands when it gave one.
+                const auto platformStage = result.failure.stage != uml::platform::CameraStillStage::none
+                    ? result.failure.stage : uml::platform::CameraStillStage::missingData;
+                auto jpegStage = result.jpeg.empty() ? platformStage : uml::platform::CameraStillStage::none;
                 // A file larger than the host takes fails the capture, before anything of it is copied to the guest.
                 const auto largest = maximumJpegBytes(std::uint64_t(stream.width) * stream.height);
                 if (result.jpeg.size() > largest) {
                     std::fprintf(stderr, "Virtio camera stream %u: the still's file is %zu bytes, more than the %llu a %ux%u still may take\n",
                                  stream.id, result.jpeg.size(), static_cast<unsigned long long>(largest), stream.width, stream.height);
                     result.jpeg.clear();
+                    jpegStage = uml::platform::CameraStillStage::fileSize;
                 }
                 auto plan = reserveExifGap(result.jpeg);
+                // A file that has no frame header or scan states no size.
+                if (!plan && jpegStage == uml::platform::CameraStillStage::none) jpegStage = uml::platform::CameraStillStage::encodedSize;
+                std::uint32_t encodedWidth = 0, encodedHeight = 0;
                 // The guest asked for this size and gets this size or an error: a
                 // platform picture of another size is not the one it configured.
                 if (plan && (plan->frameWidth != stream.width || plan->frameHeight != stream.height)) {
                     std::fprintf(stderr, "Virtio camera stream %u: the still is %ux%u, not the %ux%u that was asked for\n", stream.id,
                                  unsigned(plan->frameWidth), unsigned(plan->frameHeight), stream.width, stream.height);
+                    jpegStage = uml::platform::CameraStillStage::encodedSize;
+                    encodedWidth = plan->frameWidth;
+                    encodedHeight = plan->frameHeight;
                     plan.reset();
                 }
                 if (plan && plan->size() <= resource.capacity && !resource.planes.empty()) {
@@ -1357,12 +1563,25 @@ public:
                     size = std::uint32_t(plan->size());
                     meta.jpeg_gap_offset = plan->gapOffset;
                     meta.jpeg_gap_length = plan->gapLength;
+                    if (!ok) jpegStage = uml::platform::CameraStillStage::guestBuffer;
+                } else if (plan) {
+                    jpegStage = uml::platform::CameraStillStage::guestBuffer;
+                }
+                jpegAsked = true;
+                if (!ok) {
+                    jpegFailed = true;
+                    fails(jpegStage, encodedWidth, encodedHeight);
                 }
             } else if (!result.raw.empty() && result.color.rawWidth != 0) {
                 ok = writeRaw(stream, resource, result, size);
+                if (!ok) fails(uml::platform::CameraStillStage::guestBuffer);
+            } else {
+                fails(result.failure.stage != uml::platform::CameraStillStage::none ? result.failure.stage
+                                                                                    : uml::platform::CameraStillStage::missingData);
             }
             complete(stream.id, member.held, member.held.cookie, ok ? 0 : VIRTIO_VIDEO_DEQUEUE_FLAG_ERR, ok ? size : 0, sequence);
         }
+        if (failure && (jpegFailed || !jpegAsked)) reportStillFailure(*group, runtime, *failure);
         pushMeta(runtime, meta, 0);
         freePayload(result);
         eraseGroup(result.token);
@@ -1410,6 +1629,13 @@ public:
                 lost = true;
                 ++index;
                 continue;
+            }
+            // A capture that was not ended in time, one the platform did not end or a whole one that waited for room, is
+            // reported, unless an interruption of its camera ended it; a group the guest did not complete is the guest's
+            // own.
+            if (group.fired || group.waiting) {
+                if (const auto* runtime = runtimeOf(group.camera); runtime != nullptr && !endedByInterruption(group, *runtime))
+                    reportStillFailure(group, *runtime, failureAt(uml::platform::CameraStillStage::timeout));
             }
             failGroup(group, 0);
             if (group.fired) {
@@ -1502,16 +1728,31 @@ public:
         case CameraEventKind::interrupted:
         case CameraEventKind::interruptedByMultitasking:
         case CameraEventKind::interruptedBySystemPressure:
-        case CameraEventKind::unavailable:
+        case CameraEventKind::interruptedInBackground:
+        case CameraEventKind::unavailable: {
+            bool ended = false;
             each([&](Runtime& runtime) {
+                // The application left the foreground with the guest's video open on this camera: that video ends here, and
+                // it is the guest, when it next runs, that finds out (the application suspends it behind this).
+                const bool ends = platformEvent.kind == CameraEventKind::interruptedInBackground && endsVideoWhenAppLeaves(runtime);
                 runtime.interruption = platformEvent.kind == CameraEventKind::interruptedByMultitasking ? Interruption::multitasking
                     : platformEvent.kind == CameraEventKind::interruptedBySystemPressure ? Interruption::pressure
                                                                                           : Interruption::interrupted;
+                if (ends) {
+                    runtime.lost = ended = true;
+                    std::fprintf(stderr, "camera %u: the video ended: the application left the foreground\n",
+                                 unsigned(runtime.description.index));
+                }
                 markDown(runtime, platformEvent.kind == CameraEventKind::unavailable ? VIRTIO_VIDEO_EVENT_CAMERA_UNAVAILABLE
                                                                                       : VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED);
+                // The capture of the camera's video stops: the streams it served get no picture.
+                if (ends) reconfigure(runtime);
                 updateBlackTimers(runtime);
             });
+            // The lost camera holds no capture: the session goes unless a still or the torch keeps it.
+            if (ended) releaseSessionIfIdle();
             break;
+        }
         case CameraEventKind::resumed:
         case CameraEventKind::available:
             each([&](Runtime& runtime) {
@@ -1911,6 +2152,7 @@ public:
         case VIRTIO_VIDEO_CMD_STREAM_DESTROY:
             stopStream(stream);
             streams.erase(found);
+            endLossIfClosed(runtime);
             return done(reply(id));
         case VIRTIO_VIDEO_CMD_GET_PARAMS: {
             const auto q = load<virtio_video_get_params>(request);
@@ -2061,6 +2303,7 @@ public:
             runtime.interruption = Interruption::none;
             runtime.resuming = false;
             runtime.failed = false;
+            runtime.lost = false;
             runtime.told = false;
             runtime.toldUnavailable = false;
             runtime.videoRetry = 0;
@@ -2071,6 +2314,7 @@ public:
             runtime.videoRunning = false;
             runtime.appliedValid = false;
         }
+        reportVideoMode(false);
         if (reported != CameraState::idle) {
             reported = CameraState::idle;
             try {

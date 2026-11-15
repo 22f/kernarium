@@ -1889,6 +1889,15 @@ private:
 		options.onState = [](uml::camera::CameraState state) {
 			std::fprintf(stderr, "Camera: %s\n", camera_state_name(state));
 		};
+		/* A camera of the guest in video mode opens the microphone before
+		 * the guest records, when the Microphone setting allows it. */
+		options.onVideoMode =
+			[microphone = services_.microphone](bool in_mode) {
+				std::fprintf(stderr, "Camera: video mode %s\n",
+					     in_mode ? "on" : "off");
+				if (microphone)
+					microphone->setStandby(in_mode);
+			};
 		/* A development run reads what reaches the host and what it costs. */
 		options.onRotateAndCrop = uml::camera::printRotateAndCrop;
 		options.onFlash = uml::camera::printFlash;

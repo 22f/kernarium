@@ -64,19 +64,24 @@ public struct SessionRecord: Equatable, Sendable {
     /// slot is blank (no settle yet) or when it is of a version this reader
     /// does not know.
     public var storage: StorageRecord?
+    /// How the platform presented each of the guest's cameras and the stills of
+    /// the guest's cameras that did not end in a picture and why, from layout 8
+    /// on; nil in an earlier layout, when the slot is blank (no camera presented
+    /// and no failure) or when it is of a version this reader does not know.
+    public var camera: CameraRecord?
 
     /// The layouts this reader knows: 1 to 3 keep the session's state right
     /// after the memory slot, 4 puts the stall slot between them, 5 the
     /// network slot after the stall slot, 6 the figures of the run in each
-    /// history row of an 8 KiB memory slot and 7 the storage slot after the
-    /// network slot. The rows are for the person reading the bug report; this
-    /// reader takes none of them.
+    /// history row of an 8 KiB memory slot, 7 the storage slot after the
+    /// network slot and 8 the camera slot after the storage slot. The rows are
+    /// for the person reading the bug report; this reader takes none of them.
     static let layouts = [
         "uml-session 1", "uml-session 2", "uml-session 3", "uml-session 4", "uml-session 5", "uml-session 6",
-        "uml-session 7",
+        "uml-session 7", "uml-session 8",
     ]
 
-    /// The read cap, 20 KiB: the runtime writes at most 18176 bytes
+    /// The read cap, 20 KiB: the runtime writes at most 19200 bytes
     /// (`session_record_max_bytes`), so a file longer than the cap is not one
     /// it wrote, and is neither read nor copied beyond it. The gap is slack for
     /// a later layout, not a limit the runtime reaches.
@@ -118,12 +123,15 @@ public struct SessionRecord: Equatable, Sendable {
         restarts = fields["restarts"].flatMap { Int($0) }
         terms = fields["terms"]
         peakTerms = fields["peak-terms"]
-        let hasStalls = ["uml-session 4", "uml-session 5", "uml-session 6", "uml-session 7"]
+        let hasStalls = ["uml-session 4", "uml-session 5", "uml-session 6", "uml-session 7", "uml-session 8"]
             .contains(String(format))
         stalls = hasStalls ? StallRecord(text: parts[0]) : nil
-        let hasNetwork = ["uml-session 5", "uml-session 6", "uml-session 7"].contains(String(format))
+        let hasNetwork = ["uml-session 5", "uml-session 6", "uml-session 7", "uml-session 8"]
+            .contains(String(format))
         network = hasNetwork ? NetworkRecord(text: parts[0]) : nil
-        storage = format == "uml-session 7" ? StorageRecord(text: parts[0]) : nil
+        storage = ["uml-session 7", "uml-session 8"].contains(String(format))
+            ? StorageRecord(text: parts[0]) : nil
+        camera = format == "uml-session 8" ? CameraRecord(text: parts[0]) : nil
     }
 
     /// "at T footprint F peak P [available A]".
@@ -217,7 +225,7 @@ public struct SessionRecord: Equatable, Sendable {
         case "guest-panic":
             return SessionEndNotice(
                 title: String(
-                    localized: "Android's kernel panicked", bundle: .module,
+                    localized: "Android’s kernel panicked", bundle: .module,
                     comment: "Title of Home's card after Android's kernel panicked, the Linux kernel's own fatal error."),
                 text: message.map {
                     String(
@@ -230,7 +238,7 @@ public struct SessionRecord: Equatable, Sendable {
         case "kernel-abort":
             return SessionEndNotice(
                 title: String(
-                    localized: "Android's kernel crashed", bundle: .module,
+                    localized: "Android’s kernel crashed", bundle: .module,
                     comment: "Title of Home's card after Android's kernel stopped on an error of its own."),
                 text: String(
                     localized: "Android stopped on a kernel error.", bundle: .module,
@@ -241,7 +249,7 @@ public struct SessionRecord: Equatable, Sendable {
                     localized: "Android stopped", bundle: .module,
                     comment: "Title of Home's card after Android's kernel ended the session by itself, or after a stop with no known cause."),
                 text: String(
-                    localized: "Android's kernel ended Andarium.", bundle: .module,
+                    localized: "Android’s kernel ended Andarium.", bundle: .module,
                     comment: "Home's card after Android's kernel ended the session by itself."))
         case "hibernation-restore-failed":
             return SessionEndNotice(
@@ -249,7 +257,7 @@ public struct SessionRecord: Equatable, Sendable {
                     localized: "Android could not resume", bundle: .module,
                     comment: "Title of Home's card after a start that could not bring back the memory Android saved when it was paused."),
                 text: String(
-                    localized: "Android's memory could not be restored, so it starts again from boot.", bundle: .module,
+                    localized: "Android’s memory could not be restored, so it starts again from boot.", bundle: .module,
                     comment: "Home's card after a start that could not bring back the memory Android saved when it was paused."))
         case "host-fault", "process-exit":
             return SessionEndNotice(

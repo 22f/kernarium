@@ -147,6 +147,189 @@ std::uint32_t sensorOrientationOf(CameraPosition position, double portraitAngle)
     return std::uint32_t(quarters < 0 ? quarters + 4 : quarters) * 90;
 }
 
+PresentedMounting presentedMountingOf(CameraPosition position, double portraitAngle) noexcept
+{
+    const std::uint32_t stated = sensorOrientationOf(position, portraitAngle);
+    if (position != CameraPosition::front || !std::isfinite(portraitAngle) || (stated != 0 && stated != 180))
+        return {stated, 0, false};
+    return {90, (stated + 270) % 360, true};
+}
+
+CompensationStep stillCompensationStep(bool imitatesEarlierFront, CameraFact supported, CameraFact enabled,
+                                       CameraReading reading) noexcept
+{
+    if (!imitatesEarlierFront || reading != CameraReading::afterCommit) return CompensationStep::proceed;
+    if (supported == CameraFact::yes && enabled == CameraFact::yes) return CompensationStep::proceed;
+    if (supported == CameraFact::yes && enabled == CameraFact::no) return CompensationStep::enable;
+    return CompensationStep::refuse;
+}
+
+RatioStillStep ratioStillStep(CameraAspectRatio pinned, CameraAspectRatio now, bool completionPending,
+                              std::int32_t completionError) noexcept
+{
+    if (pinned == CameraAspectRatio::none) return RatioStillStep::proceed;
+    if (completionPending) return RatioStillStep::wait;
+    if (completionError != 0) return RatioStillStep::refuseFailed;
+    return now == pinned ? RatioStillStep::proceed : RatioStillStep::refuseMoved;
+}
+
+void ratioPinAsked(RatioPin& pin, std::uint64_t operation) noexcept
+{
+    pin = {};
+    pin.asked = true;
+    pin.pending = true;
+    pin.operation = operation;
+}
+
+bool ratioPinCompleted(RatioPin& pin, std::uint64_t operation, std::int32_t error, RatioBoundary boundary,
+                       std::int64_t notBefore) noexcept
+{
+    if (!pin.asked || pin.operation != operation) return false;
+    pin.pending = false;
+    pin.error = error;
+    pin.boundary = boundary;
+    pin.notBefore = notBefore;
+    return true;
+}
+
+bool ratioPinArmed(RatioPin& pin, std::uint64_t now) noexcept
+{
+    if (!pin.asked || !pin.pending || pin.armedAt != 0) return false;
+    pin.armedAt = now == 0 ? 1 : now;
+    return true;
+}
+
+bool ratioPinTimedOut(RatioPin& pin, std::uint64_t now) noexcept
+{
+    if (!pin.asked || !pin.pending || pin.timedOut || pin.armedAt == 0) return false;
+    if (now < pin.armedAt || now - pin.armedAt < ratioCompletionBudgetNanoseconds) return false;
+    pin.timedOut = true;
+    return true;
+}
+
+RatioFrameStep ratioFrameStep(const RatioPin& pin) noexcept
+{
+    if (!pin.asked) return RatioFrameStep::deliver;
+    if (pin.timedOut) return RatioFrameStep::timedOut;
+    if (pin.pending) return RatioFrameStep::hold;
+    return pin.error != 0 ? RatioFrameStep::failed : RatioFrameStep::deliver;
+}
+
+std::int32_t ratioPinErrorForStill(const RatioPin& pin) noexcept
+{
+    return pin.timedOut ? ratioNoCompletion : pin.error;
+}
+
+bool ratioSampleDelivered(RatioPin& pin, std::optional<std::int64_t> captureNanoseconds, bool shapeIsAnchors) noexcept
+{
+    if (ratioFrameStep(pin) != RatioFrameStep::deliver) return false;
+    if (!pin.asked) return true;
+    const bool byShape = pin.boundary == RatioBoundary::shape || (pin.boundary == RatioBoundary::atTime && !captureNanoseconds);
+    if (pin.boundary == RatioBoundary::none) return true;
+    if (!byShape) return *captureNanoseconds >= pin.notBefore;
+    if (pin.shapeSeen) return true;
+    if (!shapeIsAnchors) return false;
+    pin.shapeSeen = true;
+    return true;
+}
+
+std::optional<std::int32_t> ratioNoteCode(const std::optional<RatioPin>& pin) noexcept
+{
+    if (!pin || !pin->asked) return std::nullopt;
+    return pin->pending || pin->timedOut ? ratioPending : pin->error;
+}
+
+void RatioPins::asked(std::size_t camera, std::uint64_t operation)
+{
+    ratioPinAsked(pins_[camera], operation);
+}
+
+RatioPins::Completion RatioPins::completed(std::size_t camera, std::uint64_t operation, std::int32_t error, RatioBoundary boundary,
+                                           std::int64_t notBefore)
+{
+    const auto found = pins_.find(camera);
+    if (found == pins_.end()) return Completion::ignored;
+    RatioPin& pin = found->second;
+    const bool wasTimedOut = pin.timedOut;
+    if (!ratioPinCompleted(pin, operation, error, boundary, notBefore)) return Completion::ignored;
+    if (wasTimedOut) return Completion::afterTimeout;
+    return error != 0 ? Completion::failed : Completion::succeeded;
+}
+
+std::optional<std::uint64_t> RatioPins::armed(std::size_t camera, std::uint64_t now)
+{
+    const auto found = pins_.find(camera);
+    if (found == pins_.end() || !ratioPinArmed(found->second, now)) return std::nullopt;
+    return found->second.operation;
+}
+
+bool RatioPins::timedOut(std::size_t camera, std::uint64_t operation, std::uint64_t now)
+{
+    const auto found = pins_.find(camera);
+    if (found == pins_.end() || found->second.operation != operation) return false;
+    return ratioPinTimedOut(found->second, now);
+}
+
+void RatioPins::invalidate(std::size_t camera)
+{
+    pins_.erase(camera);
+}
+
+std::optional<RatioPin> RatioPins::find(std::size_t camera) const
+{
+    const auto found = pins_.find(camera);
+    if (found == pins_.end()) return std::nullopt;
+    return found->second;
+}
+
+bool RatioPins::sampleDelivered(std::size_t camera, std::optional<std::int64_t> captureNanoseconds, bool shapeIsAnchors)
+{
+    const auto found = pins_.find(camera);
+    return found == pins_.end() || ratioSampleDelivered(found->second, captureNanoseconds, shapeIsAnchors);
+}
+
+bool RatioPins::holdsFrames(std::size_t camera) const
+{
+    const auto found = pins_.find(camera);
+    return found != pins_.end() && ratioFrameStep(found->second) != RatioFrameStep::deliver;
+}
+
+std::vector<std::string> heldNotesToDrop(const std::vector<HeldNoteUse>& held, const std::vector<std::string>& current,
+                                         std::size_t recent)
+{
+    std::vector<const HeldNoteUse*> others;
+    for (const auto& note : held)
+        if (std::find(current.begin(), current.end(), note.identifier) == current.end()) others.push_back(&note);
+    std::sort(others.begin(), others.end(), [](const HeldNoteUse* a, const HeldNoteUse* b) {
+        return a->used != b->used ? a->used > b->used : a->identifier < b->identifier;
+    });
+    std::vector<std::string> dropped;
+    for (std::size_t index = recent; index < others.size(); ++index) dropped.push_back(others[index]->identifier);
+    return dropped;
+}
+
+std::optional<VideoFormatFacts> presentedFormatOf(const VideoFormatFacts& listed, std::uint32_t connectionTurn)
+{
+    if (listed.aspectRatios == 0) return listed;
+    const CameraAspectRatio needed =
+        connectionTurn % 180 == 90 ? CameraAspectRatio::r3x4 : CameraAspectRatio::r4x3;
+    if ((listed.aspectRatios & aspectRatioBit(needed)) == 0) return std::nullopt;
+    if (listed.width == 0 || listed.width != listed.height || listed.width % 4 != 0) return std::nullopt;
+    VideoFormatFacts presented = listed;
+    presented.height = listed.width / 4 * 3;
+    presented.pinnedRatio = needed;
+    presented.photoSizes.clear();
+    for (const auto& size : listed.photoSizes)
+        if (size.width > size.height && std::uint64_t(size.width) * 3 == std::uint64_t(size.height) * 4)
+            presented.photoSizes.push_back(size);
+    return presented;
+}
+
+float pinnedFieldOfView(float portraitCrop, float landscapeCrop) noexcept
+{
+    return std::max(portraitCrop, landscapeCrop);
+}
+
 bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested) noexcept
 {
     return (resolved.width == 0 && resolved.height == 0) || resolved == requested;
@@ -172,8 +355,15 @@ std::uint64_t stillSettleNanoseconds(std::uint64_t committedAt, std::uint64_t no
 ScheduledStill scheduledStillStep(bool sessionEnded, bool requestKnown, std::uint64_t committedAt, std::uint64_t now,
                                   std::uint64_t waitedNanoseconds) noexcept
 {
+    return scheduledStillStep(sessionEnded, requestKnown, committedAt, now, waitedNanoseconds, false);
+}
+
+ScheduledStill scheduledStillStep(bool sessionEnded, bool requestKnown, std::uint64_t committedAt, std::uint64_t now,
+                                  std::uint64_t waitedNanoseconds, bool ratioPending) noexcept
+{
     if (sessionEnded || !requestKnown) return {ScheduledStillStep::drop, 0, waitedNanoseconds};
-    const std::uint64_t wait = stillSettleNanoseconds(committedAt, now);
+    std::uint64_t wait = stillSettleNanoseconds(committedAt, now);
+    if (ratioPending) wait = std::max(wait, ratioPinPollNanoseconds);
     if (wait == 0) return {ScheduledStillStep::fire, 0, waitedNanoseconds};
     if (waitedNanoseconds >= stillWaitBudgetNanoseconds || wait > stillWaitBudgetNanoseconds - waitedNanoseconds)
         return {ScheduledStillStep::fail, 0, waitedNanoseconds};
@@ -495,6 +685,7 @@ Admission admit(const AdmitPlan& plan, const AdmitSteps& steps)
     if (plan.addVideo) {
         videoTried = true;
         if (!steps.addVideo()) return refuse(Admission::videoRefused);
+        if (steps.programVideo) steps.programVideo();
     }
     if (plan.addPhoto) {
         photoTried = true;
@@ -630,6 +821,11 @@ std::string_view refusalName(Refusal reason) noexcept
     case Refusal::rawUnavailable: return "no Bayer RAW format";
     case Refusal::raised: return "the platform raised";
     case Refusal::notRestored: return "the device could not be put back as it was";
+    case Refusal::ratioMoved: return "the device's aspect ratio is not the one pinned";
+    case Refusal::turnNotHeld: return "the video connection does not hold the turn";
+    case Refusal::stillsNotTurned: return "the photo output does not turn its stills";
+    case Refusal::ratioFailed: return "the device's aspect ratio change failed";
+    case Refusal::ratioTimedOut: return "the device's aspect ratio change did not complete in time";
     }
     return "unknown";
 }

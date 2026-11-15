@@ -169,9 +169,12 @@ class Code:
         self.items.append((mnemonic, *operands))
 
 
-# mnemonic -> (opcode, format). Formats: 10x 11n 11x 21c 21t 20t 22c 23x 35c.
+# mnemonic -> (opcode, format). Formats: 10x 11n 11x 12x 21c 21t 20t 22c 23x 35c.
 OPCODES = {
     "return-void": (0x0E, "10x"),
+    "return": (0x0F, "11x"),
+    "return-object": (0x11, "11x"),
+    "array-length": (0x21, "12x"),
     "const/4": (0x12, "11n"),
     "const-string": (0x1A, "21c-string"),
     "new-instance": (0x22, "21c-type"),
@@ -188,7 +191,7 @@ OPCODES = {
     "invoke-static": (0x71, "35c"),
     "invoke-interface": (0x72, "35c"),
 }
-SIZES = {"10x": 1, "11n": 1, "11x": 1, "21c-string": 2, "21c-type": 2, "22c-type": 2, "21t": 2, "20t": 2, "23x": 2, "35c": 3}
+SIZES = {"10x": 1, "11n": 1, "11x": 1, "12x": 1, "21c-string": 2, "21c-type": 2, "22c-type": 2, "21t": 2, "20t": 2, "23x": 2, "35c": 3}
 
 
 def assemble(code: Code, pools: Pools) -> bytes:
@@ -214,6 +217,8 @@ def assemble(code: Code, pools: Pools) -> bytes:
             units.append((literal & 0xF) << 12 | register << 8 | opcode)
         elif form == "11x":
             units.append(operands[0] << 8 | opcode)
+        elif form == "12x":
+            units.append(operands[1] << 12 | operands[0] << 8 | opcode)
         elif form == "21c-string":
             units += [operands[0] << 8 | opcode, pools.string_id(operands[1])]
         elif form == "21c-type":
@@ -254,8 +259,10 @@ def script(package: str, control: str, key: str) -> str:
         "} > $d/result.tmp && mv $d/result.tmp $d/result")
 
 
-def build_dex(package: str, control: str, key: str) -> bytes:
-    """The DEX file of the probe class for an application of `package`."""
+def build_dex(package: str, control: str, key: str, shell_script: str | None = None) -> bytes:
+    """The DEX file of the probe class for an application of `package`. `shell_script` replaces the script
+    the receiver's shell runs (the default is `script`; $1 is the interface summary either way)."""
+    payload = shell_script if shell_script is not None else script(package, control, key)
     pools = Pools()
     owner = pools.type(descriptor(CLASS_NAME))
     pools.type(RECEIVER)
@@ -276,7 +283,7 @@ def build_dex(package: str, control: str, key: str) -> bytes:
     wait_for = pools.method(PROCESS, "waitFor", "I")
     for item in (INET6_ADDRESS, STRING_ARRAY, "V", "Z", "I"):
         pools.type(item)
-    for text in ("=yes ", "=no ", "/system/bin/sh", "-c", "sh", script(package, control, key)):
+    for text in ("=yes ", "=no ", "/system/bin/sh", "-c", "sh", payload):
         pools.string(text)
 
     constructor = Code(registers=1, ins=1, outs=1)
@@ -331,7 +338,7 @@ def build_dex(package: str, control: str, key: str) -> bytes:
     body.op("move-result-object", 6)
     body.op("const/4", 0, 5)
     body.op("new-array", 1, 0, STRING_ARRAY)
-    for number, text in enumerate(("/system/bin/sh", "-c", script(package, control, key), "sh")):
+    for number, text in enumerate(("/system/bin/sh", "-c", payload, "sh")):
         body.op("const/4", 0, number)
         body.op("const-string", 2, text)
         body.op("aput-object", 2, 1, 0)

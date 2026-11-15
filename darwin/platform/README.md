@@ -125,9 +125,48 @@ interface to the wire.
   platform's statement of its mounting, the rotation coordinator's angle for
   portrait (`sensorOrientationOf`; an external camera states 90), never a value
   per position, and every frame and still is delivered in that orientation,
-  unturned and unmirrored where its connection accepts the setting, whatever
-  turn, mirroring or still compensation the system would apply by default; a
-  Mac's cameras state 0 and take none of this.
+  unmirrored, whatever turn, mirroring or still compensation the system would
+  apply by default; a Mac's cameras state 0 and take none of this. A built-in
+  front camera mounted with its sensor's top at the device's top (portrait 0 or
+  180) is presented like an earlier front camera instead
+  (`presentedMountingOf`): the guest is told 90, the video connection is turned
+  by the difference before the output's size is set, and the photo output's
+  orientation compensation, which turns the stills, is on, read only after the
+  configuration is committed (before that its answer is not valid) and switched
+  on where it is supported and off; the photo connection keeps its default
+  angle, unmirrored. A connection that does not hold the turn refuses the
+  camera, a still whose photo output does not turn its stills is refused before
+  its capture, and a still of another shape than the one asked for (the
+  resolved size and the file's own are checked; a half turn has the same shape
+  and is not caught) is never delivered. A square format that
+  lists dynamic aspect ratios is described by the crop the device is pinned at
+  at each admission and repair (3x4 for a quarter turn, else 4x3, a landscape
+  frame of N x 3N/4), never changed while a stream or a still runs
+  (`presentedFormatOf`). The change is one numbered operation, asked before the
+  device is told: the camera's frames are held (the device's stand-in frames
+  bridge it) until its completion arrives without an error, and then only the
+  samples captured at or after the first buffer the change applies to pass (the
+  completion's timestamp, converted from the input port's clock to the
+  session's synchronization clock; without a conversion, the samples until the
+  first of the anchor's shape are held), a still waits for it inside its wait
+  budget, and an error, or no completion within that budget of a session running
+  with the camera in it, refuses the camera as a connection that does not hold
+  its turn does and fails the session, which the device answers by interrupting
+  the guest's cameras and opening another (`RatioPins`). The operation ends with
+  the camera's last input or output leaving the session, so a camera that left
+  cannot fail the session the others are in. The session reports each camera's mounting, the
+  settings of its connections and photo output and its aspect ratio as numbers
+  to its delegate (`camera_presentation.hpp`), and keeps the last of each camera
+  for the sessions that follow in the process (the current cameras and the
+  eight most recently used others). Every camera's zoom range holds
+  1.0 (Android's rule): a single lens states its own factors, so its 1.0 is its
+  own full field of view, and only a zoom camera is scaled by the host's display
+  multiplier (`zoomRatioScale`), as the triple camera's ultra wide lens at 0.5.
+  A format carries the zoom the system recommends for it
+  (`recommendedZoomMaximum`, zero where it states none), which the device
+  states as the maximum of a camera that runs in that format, and the zoom the
+  format itself delivers (`maximumZoom`), which it states instead where there is
+  no recommendation.
 - **Sessions.** `openSession()` is the one call that can light the system's
   capture indicator, and it returns null unless the system has granted access.
   One session is a single `AVCaptureMultiCamSession` on iOS (an
@@ -177,14 +216,27 @@ interface to the wire.
   30 (`videoRateCap`); an anchor with none that low offers its slowest.
 - **Controls** arrive as one `CameraSettings` per camera, and the session
   applies what differs. A zoom camera (a virtual device) takes automatic
-  exposure, focus and white balance only.
+  exposure, focus and white balance only. A stabilization request takes the
+  low-latency mode where the active format supports it, else the standard one,
+  else none (`video_stabilization.hpp`), and never the system's automatic choice.
+  The mode is written at a video connection's first apply, whatever the other
+  settings say, and a later apply of the same wish writes nothing. A new video
+  connection is programmed as it is admitted, inside the configuration and
+  before it commits (`AdmitSteps::programVideo`), with what the camera's
+  settings last said, which the device applies before it starts the video; so a
+  lens added to a running session delivers its first frame stabilized as well.
+  iOS only: macOS has no connection property for it.
 - **Stills** are a JPEG, a Bayer still, or both from one capture. A Bayer still
   carries its DNG's colour data (`dng_color.hpp`), the only place the host
   reveals it. A part that fails leaves the others: a capture fails only when
   nothing it asked for arrived. A JPEG is made at exactly the size asked for
   (`photo_dimensions.hpp`): the capture is refused when the active format does
   not list that size, and the photo is dropped when the platform resolved
-  another. A photo output gets its maximum size only after it is attached to the
+  another. A capture that ends without a picture says why in its result
+  (`CameraStillResult::failure`, `camera_still_failure.hpp`): the stage, the
+  resolved size, whether the photo output's orientation compensation is
+  supported and on, and the framework's error as a domain word and a code. A
+  photo output gets its maximum size only after it is attached to the
   session, as AVFoundation requires: the largest size the anchor lists within
   the guest's still cap, so no larger pipeline is prepared. The guest is offered
   the sizes the anchor makes (`stillsOf`), and a camera that only takes stills
@@ -235,8 +287,8 @@ interface to the wire.
   copy and a quarter turn are exact and a scale agrees with the portable one
   within the filters' difference (`camera-apple-transform`).
 - The synthetic camera is `synthetic_camera/` (`UML::SyntheticCamera`), a
-  platform camera with no hardware: profiles of a phone (a back zoom camera over
-  three lenses, and a front camera), a tablet (and one with both of an iPad's
+  platform camera with no hardware: profiles of a phone (three back lenses and a
+  front camera, no zoom camera), a tablet (and one with both of an iPad's
   front cameras) and a laptop; the multi-camera rule, which counts cameras that
   only take stills and refuses a join over a hardware budget (200 million
   pixels a second); a deterministic chart
@@ -245,8 +297,12 @@ interface to the wire.
   exposure that follows the compensation within the frame the rate allows (the
   sensitivity takes the rest), and a frame that lasts as long as its exposure
   when that is longer than its period; JPEG and Bayer stills;
-  simulated interruptions; and, with a manual clock, frames that a test pumps.
-  App Store runtimes do not build it. It is never a real camera.
+  simulated interruptions, which a named pipe also drives (a line each:
+  `interrupt`, `interrupt background|multitasking|pressure`, `resume`; its path
+  is the variable `UML_SYNTHETIC_CAMERA_CONTROL`, read when a launcher makes the
+  camera, and nothing else reads it) for a guest in a process of its own; and,
+  with a manual clock, frames that a test pumps. App Store runtimes do not build
+  it. It is never a real camera.
 
 Tests: `camera-frame-transform` and `camera-dng-color` need nothing;
 `camera-key-path-observer` runs the key-value observer on a stand-in object;

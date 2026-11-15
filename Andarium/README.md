@@ -184,10 +184,15 @@ destination rules).
 
 ### Configurations
 
-The project has Debug, Release and AppStore. Release is the development and
-harness build: it reads the automation environment and prints the console
-lines the iPad harness reads. AppStore builds as Release does and leaves out
-everything that exists for automation or only pretends:
+The project has Debug, Release, AppStore and TestFlight. Release is the
+development and harness build: it reads the automation environment and prints
+the console lines the iPad harness reads. AppStore builds as Release does and
+leaves out everything that exists for automation or only pretends. TestFlight
+is AppStore in every respect below (the same compilation condition, runtime,
+embedded-artifact check and bundle check) except in the last item, which
+names the optional features it carries. It also defines `TESTFLIGHT`, which
+only names the configuration in [Send feedback](#send-feedback)'s information
+block.
 
 - `APP_STORE` is a Swift compilation condition that compiles out the launch
   environment (`Live/LaunchEnvironment.swift`, so no `ANDARIUM_` or
@@ -213,8 +218,9 @@ everything that exists for automation or only pretends:
   `tmp/PickedFiles/` and removes it when the install or import that uses it is
   over (Install anyway and Try Again still find it) and at the next launch. A
   picker that fails shows an alert in every configuration.
-- Its Archive action uses it, and the archive is the build TestFlight and the
-  App Store offer to Macs.
+- The scheme's Archive action uses AppStore. The archive for the App Store is
+  made with `-configuration AppStore` and the archive for TestFlight with
+  `-configuration TestFlight`; both are the builds offered to Macs.
 - It refuses an embedded artifact that is behind the archived commit: a build
   phase runs [`scripts/check-embedded-artifacts.py`](../scripts/check-embedded-artifacts.py),
   which compares the accepted Android release and kernel descriptors with the
@@ -238,15 +244,19 @@ everything that exists for automation or only pretends:
   receiver's address is in the ignored `Config/Feedback.local.xcconfig`,
   [Buy me tokens](#buy-me-tokens), and only when the four product identifiers
   are in the ignored `Config/TipJar.local.xcconfig`,
-  [Review on the App Store](#review-on-the-app-store), and only when the
-  application's App Store identifier is in the ignored
-  `Config/Review.local.xcconfig`, and
+  [Review on the App Store](#review-on-the-app-store) (with the
+  [rating prompt](#rating-prompt)), and only when the application's App Store
+  identifier is in the ignored `Config/Review.local.xcconfig`, and
   [Follow developer on X](#follow-developer-on-x), and only when the handle is
   in the ignored `Config/Developer.local.xcconfig` and the logo in the ignored
   `Config/Local/`, and the [ICP filing number](#icp-filing-number), and only
   when the number is in the same file. The five switches are independent,
   except that the pieces of the Buy me tokens sheet's header (the developer's
   name, avatar and GitHub and X buttons) are carried only with Buy me tokens.
+  TestFlight carries Send feedback and Follow developer on X under the same
+  conditions, and Buy me tokens, Review on the App Store and the ICP filing
+  number never, whatever the local files hold; its bundle check requires
+  those three absent.
 
 ```sh
 cmake --preset kernarium-ios-device-android-app-store
@@ -257,18 +267,20 @@ xcodebuild -project Andarium/Andarium.xcodeproj -scheme Andarium \
     -configuration AppStore -destination 'generic/platform=iOS' build
 ```
 
+The same build with `-configuration TestFlight` is the TestFlight product.
+
 The privacy manifests of the application (`Config/PrivacyInfo.xcprivacy`) and
 of the frameworks (`Kernarium/PrivacyManifests`) declare exactly what the App
 Store build and the runtimes use. A release or harness build also reads the
 system uptime for its thermal report, which the application's manifest does
-not declare because only an App Store build is uploaded.
+not declare because only an AppStore or TestFlight build is uploaded.
 
 ### Send feedback
 
 Home's toolbar menu and a running session's Settings open a sheet that writes
 an email to the developer (`Shared/Feedback/`, the system's Mail composer sends
 it). It is compiled in, under the `FEEDBACK_MAIL` condition, only in an AppStore
-build whose ignored `Config/Feedback.local.xcconfig` (from
+or TestFlight build whose ignored `Config/Feedback.local.xcconfig` (from
 `Feedback.local.xcconfig.example`) names the receiver, so a fork, a sideload or
 a Debug or Release build holds none of it, and every configuration's bundle
 check says whether it does: it also fails on the local receiver's bytes in any
@@ -336,27 +348,27 @@ system (`openURL`: the X app when it is installed, the browser otherwise;
 remembered about a tap. The name X in its text is the service's logo, drawn
 inline at the text's size and colour as a template image, and the same logo is
 the row's leading icon; VoiceOver reads "Follow developer on X" with the link
-trait. The profile and the logo belong to the developer and are tracked
-nowhere: the row is compiled in, under the `FOLLOW_X` condition, only in an
-AppStore build whose ignored `Config/Developer.local.xcconfig` (from
+trait. The profile and the logo belong to the developer and are tracked nowhere:
+the row is compiled in, under the `FOLLOW_X` condition, only in an AppStore or
+TestFlight build whose ignored `Config/Developer.local.xcconfig` (from
 `Developer.local.xcconfig.example`) names the handle (`DEVELOPER_X_HANDLE`: a
 handle, never an address, as `//` starts an xcconfig comment; the code builds
 the address) and whose ignored `Config/Local/` directory holds `x-logo.svg`, a
 single-colour vector that `XLogoLocal.xcassets` links to. A build with the
-handle and without the logo fails its first build phase. A fork, a sideload
-or a Debug or Release build holds none of it (no row, handle, logo or
-`FollowX` strings table), and the bundle check asserts both directions as it
-does for Send feedback: it also fails on the local handle as a profile
-address, or as a whole string of a property list, in any file of a bundle that
-does not name it (never printing it), and on the arranged handle in any
-product that does not arrange it. Tests and captures turn the row on in a
-Debug build with `FOLLOW_X_HANDLE=example_handle` on the `xcodebuild` line,
-with a glyph drawn for them (`XLogoGlyph.xcassets`) in place of the logo;
-adding `FOLLOW_X_LOGO_SOURCE=local` takes the logo from `Config/Local/`.
+handle and without the logo fails its first build phase. A fork, a sideload or a
+Debug or Release build holds none of it (no row, handle, logo or `FollowX`
+strings table), and the bundle check asserts both directions as it does for Send
+feedback: it also fails on the local handle as a profile address, or as a whole
+string of a property list, in any file of a bundle that does not name it (never
+printing it), and on the arranged handle in any product that does not arrange
+it. Tests and captures turn the row on in a Debug build with
+`FOLLOW_X_HANDLE=example_handle` on the `xcodebuild` line, with a glyph drawn
+for them (`XLogoGlyph.xcassets`) in place of the logo; adding
+`FOLLOW_X_LOGO_SOURCE=local` takes the logo from `Config/Local/`.
 `AndariumPreview` takes the arrangement only, never the local handle. The
 handle's shape and the address are in `Shared/FollowX/Logic`, which
-AndariumCore's tests build through a symlinked target no product links, and
-the words are in the `FollowX` string table. The [Buy me tokens](#buy-me-tokens)
+AndariumCore's tests build through a symlinked target no product links, and the
+words are in the `FollowX` string table. The [Buy me tokens](#buy-me-tokens)
 header's X button shares the logo and `FollowXProfile` and is keyed on a handle
 of its own, so a build with the button and without the row holds the logo and
 the address's builder and nothing else of the row.
@@ -372,18 +384,18 @@ unknown storefront hides it, and nothing else decides (no locale, region,
 time zone or address).
 
 The number is the developer's and is tracked nowhere: the line is compiled in,
-under the `ICP_FILING` condition, only in an AppStore build whose ignored
-`Config/Developer.local.xcconfig` (from `Developer.local.xcconfig.example`)
-names `DEVELOPER_ICP_NUMBER`; it needs no tip, review or X value. The bundle
-check asserts both directions as for Follow developer on X: the number and its
-Info.plist key (`AndariumICPNumber`) are in no other product, the number is in
-no other file of one that names it, the local number is in no file of one that
-does not (as UTF-8 or UTF-16, never printed), and the
-arranged placeholder is in no product but Debug's. Tests and captures turn it
-on in a Debug build with `ICP_NUMBER=示例ICP备00000000号-0A`; the hosted tests
-inject the storefront. Whether `Storefront.updates` fires when the storefront
-first becomes known while Info is open only a device shows; otherwise the line
-appears at the next opening.
+under the `ICP_FILING` condition, only in an AppStore build (not TestFlight)
+whose ignored `Config/Developer.local.xcconfig` (from
+`Developer.local.xcconfig.example`) names `DEVELOPER_ICP_NUMBER`; it needs no
+tip, review or X value. The bundle check asserts both directions as for Follow
+developer on X: the number and its Info.plist key (`AndariumICPNumber`) are in
+no other product, the number is in no other file of one that names it, the local
+number is in no file of one that does not (as UTF-8 or UTF-16, never printed),
+and the arranged placeholder is in no product but Debug's. Tests and captures
+turn it on in a Debug build with `ICP_NUMBER=示例ICP备00000000号-0A`; the hosted
+tests inject the storefront. Whether `Storefront.updates` fires when the
+storefront first becomes known while Info is open only a device shows; otherwise
+the line appears at the next opening.
 
 ### Buy me tokens
 
@@ -403,16 +415,16 @@ Store Connect; no tracked text assumes they appear on the system's purchase
 sheet.
 
 The feature is compiled in, under the `TIP_JAR` condition, only in an AppStore
-build whose ignored `Config/TipJar.local.xcconfig` (from
-`TipJar.local.xcconfig.example`) names all four products, so a fork, a
-sideload or a Debug or Release build holds none of it: no entrance, StoreKit
-use, string table or identifier. The bundle check says for every configuration
-whether it does, fails on identifiers without the code or the code without
-identifiers, and fails on the local identifiers in any file of a bundle that
-does not name them (as UTF-8 or UTF-16, never printed).
-Tests and captures turn it on in a Debug build with
-`TIP_LITE=com.example.andarium.tip.lite` and the same for `TIP_PRO`,
-`TIP_MAX` and `TIP_ULTRA`, which the check accepts in Debug alone.
+build (not TestFlight) whose ignored `Config/TipJar.local.xcconfig` (from
+`TipJar.local.xcconfig.example`) names all four products, so a fork, a sideload
+or a Debug, Release or TestFlight build holds none of it: no entrance, StoreKit
+use, string table, header piece or identifier. The bundle check says for every
+configuration whether it does, fails on identifiers without the code or the code
+without identifiers, and fails on the local identifiers in any file of a bundle
+that does not name them (as UTF-8 or UTF-16, never printed). Tests and captures
+turn it on in a Debug build with `TIP_LITE=com.example.andarium.tip.lite` and
+the same for `TIP_PRO`, `TIP_MAX` and `TIP_ULTRA`, which the check accepts in
+Debug alone.
 
 The sheet's states live in `Shared/TipJar/Logic` behind a store seam, which
 AndariumCore's tests build through a symlinked target no product links; the
@@ -451,16 +463,16 @@ An item of [Home's toolbar menu](#home-toolbar-menu), offered once a virtual
 machine is set up, opens this application's App Store page at its write-review
 address through the system (`Shared/Review/`); it shows no prompt and no web
 view. It is compiled in, under the `APP_REVIEW` condition, only in an AppStore
-build whose ignored `Config/Review.local.xcconfig` (from
+build (not TestFlight) whose ignored `Config/Review.local.xcconfig` (from
 `Review.local.xcconfig.example`) names the application's App Store identifier
-(`id` and its digits), so a fork, a sideload or a Debug or Release build holds
-no item, address or text. The bundle check says for every configuration
-whether it is compiled in, fails on the code without the identifier or the
-identifier without the code, refuses the all-zero placeholder in an App Store
-build, and fails on the identifier's digits in any file of a bundle that does
-not name it (as UTF-8 or UTF-16, never printed). Tests turn it on in a Debug
-build with `REVIEW_ID=id0000000000`, which the check accepts in Debug alone.
-Its word is the `Review` string table. Opening it answers the
+(`id` and its digits), so a fork, a sideload or a Debug, Release or TestFlight
+build holds no item, address or text. The bundle check says for every
+configuration whether it is compiled in, fails on the code without the
+identifier or the identifier without the code, refuses the all-zero placeholder
+in an App Store build, and fails on the identifier's digits in any file of a
+bundle that does not name it (as UTF-8 or UTF-16, never printed). Tests turn it
+on in a Debug build with `REVIEW_ID=id0000000000`, which the check accepts in
+Debug alone. Its word is the `Review` string table. Opening it answers the
 [Rating prompt](#rating-prompt).
 
 ### Rating prompt
@@ -637,6 +649,13 @@ disk then holds and where Start boots again in the same process; an unclean
 shutdown, a host stop or a cleanup that fails keeps the failure screen and
 requires reopening Andarium.
 
+- **No Google apps, on purpose.** The boot screen of a new installation's
+  first Android boot (a first start, and the retry of one that ended before
+  Android booted) carries a panel saying that Android has no Google apps, and
+  Send feedback opens with a line that answers the same question in place
+  until it is opened or closed once (`NoGoogleNotice` keeps that one value);
+  their strings are the only ones that name Google, which
+  `scripts/localization.py` allows by key.
 - **Slow start.** A start still on the boot screen after three minutes
   (`SlowStart`; eight for a guest's first start and the first start after an
   update, which also get a title that does not say the start is slower than
@@ -1122,6 +1141,27 @@ is on. `AndariumCore/Adb` speaks the protocol.
   installed, with a result that says its data was not all copied. That
   result is a warning, not a success: the caution symbol in the caution
   colour, and a title of its own (`ApkInstallOutcome.words`).
+- **Old app compatibility** (Settings > Apps) makes Android run one app built
+  for an Android before 4.0 more like the older versions did, for an app that
+  crashes. The image's `kernarium_oldapp` command lists the
+  installed apps it can apply to and writes the switch
+  ([`android/lineage-24`](../android/lineage-24/README.md)); `OldAppCompatibility`
+  in `AndariumCore` is the only code that knows its words and its output, and
+  everything else sees `OldApp`, `OldAppListing` and `OldAppWrite`. The
+  Settings row exists only in a normal session, once a listing has found an
+  app. Andarium lists once at the start of every run, with Settings closed,
+  again after an install and each time the page opens; a listing that is
+  older than a change the page made is dropped. The page's switches are off
+  while the virtual machine cannot be asked (Recovery, paused for space). An image without the command, one
+  that answers `list` as a usage error, or one that speaks a version of its
+  listing this Andarium does not know, offers nothing. Turning the switch on is
+  always asked; turning it off only when the app is open (`pidof`; the command
+  does not say), and the image closes the app either way. A change the image
+  does not take is said, and the list is read again. After Install anyway of
+  an app that Android refused for a level below 14, the install card says where
+  the switch is when the listing taken as the file went again and the one after
+  the install differ by an app: the card's detail gains two sentences. The
+  switch is the person's choice per app; Andarium keeps nothing of it.
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB
@@ -1252,6 +1292,10 @@ registers each device it is plugged; `unregistered` makes it one that never
 does. The launch states "Use the pointer as touch" off, hides the tips (but for
 `ANDARIUM_INPUT_PROBE_TIP=1`, which shows the side keys' tip anew) and keeps
 nothing.
+`ANDARIUM_OLD_APPS_PROBE` (`apps`, `refuse` or `none`), with the probe, gives its
+session a scripted list of two made-up old apps in place of the image's command:
+`apps` lists them (one on and open), `refuse` also refuses every change, `none` is
+an image without the command.
 `ANDARIUM_GUEST_INSTANCE=<name>` runs an isolated guest under
 `Library/TestGuests/<name>`, for tests that need a fresh guest while the
 ordinary guest or its pending update must be preserved. A file `free-space-mib`

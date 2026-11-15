@@ -181,6 +181,7 @@ public enum BugReportAttachments {
     public static let metricKitDirectory = "metrickit"
     public static let stallReport = "andarium/stalls.txt"
     public static let networkReport = "andarium/network.txt"
+    public static let cameraReport = "andarium/camera.txt"
     /// The most of one MetricKit report that is kept, copied or read.
     public static let maximumMetricKitBytes = 1 << 20
 
@@ -203,6 +204,9 @@ public enum BugReportAttachments {
         }
         if let report = network(previous: records[0], current: records[1]) {
             entries.append(.init(name: networkReport, data: Data(DiagnosticRedaction.redact(report, containers: containers).utf8)))
+        }
+        if let report = cameraStills(previous: records[0], current: records[1]) {
+            entries.append(.init(name: cameraReport, data: Data(DiagnosticRedaction.redact(report, containers: containers).utf8)))
         }
         entries.append(contentsOf: guest)
         let metrics = diagnostics.appendingPathComponent(metricKitDirectory)
@@ -231,7 +235,7 @@ public enum BugReportAttachments {
         guard let data = BoundedFile.read(url, limit: SessionRecord.maximumBytes) else { return (nil, nil) }
         guard data.count <= SessionRecord.maximumBytes else {
             let note = "\(name) was not copied: \(url.lastPathComponent) is longer than \(SessionRecord.maximumBytes) "
-                + "bytes, and the runtime writes a record of at most 18176.\n"
+                + "bytes, and the runtime writes a record of at most 19200.\n"
             return (.init(name: name, data: Data(note.utf8)), nil)
         }
         let text = String(decoding: data, as: UTF8.self)
@@ -289,6 +293,49 @@ public enum BugReportAttachments {
                 lines.append(network.report())
             } else {
                 lines.append(record == nil ? "There is no record." : "The record has no network slot.")
+            }
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// How the platform presented each of the guest's cameras, and the stills of
+    /// the guest's cameras that did not end in a picture, and why, in the two
+    /// sessions the records describe, in words; nil when neither record has a
+    /// camera slot (a runtime before layout 8, or sessions that presented no
+    /// camera and had no failed still). Numbers and the runtime's fixed words only.
+    public static func cameraStills(previous: SessionRecord?, current: SessionRecord?) -> String? {
+        guard previous?.camera != nil || current?.camera != nil else { return nil }
+        var lines = [
+            "How the platform presented each of the guest's cameras, and the stills of the guest's cameras that did not end",
+            "in a picture, with where each one stopped.",
+            "Numbers and fixed words only: no name, path or message of the system's is recorded.",
+            "",
+            "mounting: the platform's fixed angle is the clockwise turn that makes the camera's unturned pictures upright for an",
+            "interface orientation. A front camera mounted with its sensor's top at the device's top (portrait 0 or 180)",
+            "imitates an earlier front camera: the guest is told 90, the platform turns the video connection, and the photo",
+            "output turns its stills (orientation compensation, which stays on).",
+            "",
+            "refused: the device did not start the capture (a limit, no capture session, or the platform's refusal).",
+            "not-started: the platform accepted the capture and could not start it.",
+            "framework-error: the system's photo output reported an error (its domain and code follow).",
+            "missing-data: the capture ended with no file.",
+            "resolved-size: the photo output made a size other than the one asked for, after a second try.",
+            "encoded-size: the file states a size other than the one asked for, or none.",
+            "file-size: the file is larger than the host takes.",
+            "guest-buffer: the file could not be put into the guest's buffer.",
+            "timeout: the platform did not end the capture in time.",
+            "Orientation compensation is the photo output turning its stills to an earlier model's sensor orientation. The system",
+            "answers it only once the capture session's configuration is committed: an answer read before that is not final.",
+            "Front devices: the front devices the platform listed, and how many of their formats it did not offer the guest.",
+            "andarium/session-previous.txt and andarium/session-current.txt hold the raw records.",
+        ]
+        for (title, record) in [("The previous session", previous), ("The current session", current)] {
+            lines.append("")
+            lines.append("== \(title)\(record.map { " (process \($0.processID))" } ?? "") ==")
+            if let camera = record?.camera {
+                lines.append(camera.report())
+            } else {
+                lines.append(record == nil ? "There is no record." : "The record names no camera and no failed still.")
             }
         }
         return lines.joined(separator: "\n") + "\n"

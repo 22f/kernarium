@@ -56,6 +56,27 @@ if(UML_ANDROID_INSTALLATION_IDENTITY_RELEASE AND TARGET uml-darwin-android17)
         RESOURCE_GROUPS cpus:4)
 endif()
 
+# The shell command of Old app compatibility (android/lineage-24/overlay/oldapp_switch) and
+# the type of its property, as the adb shell user and as an ordinary application: the
+# runner installs probe applications (oldswitch_probe_apk.py), lists, refuses, switches
+# one on and off, and has an application read and fail to set the property. It boots
+# Android with the macOS launcher, so it is opt-in: name a release built with the
+# command.
+set(UML_ANDROID_OLDAPP_SWITCH_RELEASE "" CACHE PATH
+    "Installed Android release directory, built with kernarium_oldapp, that the android-oldapp-switch test boots")
+if(UML_ANDROID_OLDAPP_SWITCH_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-oldapp-switch
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_oldapp_switch.py
+            --release ${UML_ANDROID_OLDAPP_SWITCH_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+        LABELS guest;boot;android
+        TIMEOUT 1800
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
 # The same runner with --image-inputs, for a release built from this
 # repository's overlay: wlan0's address derived from eth0's, the Wi-Fi joined,
 # no IPv6 link-local address on eth0 and the macvlan, and the adb key that no
@@ -258,16 +279,23 @@ add_dependencies(integration-test-binaries uml_audio_hold)
 # Android lists, one preview frame and one still of the camera application, and,
 # in a blocked session, the same cameras with black frames and no still; a live
 # session also records, and holds the sound of its recordings to real time through
-# a stalled sound device and a stood-still guest. It boots Android with the macOS
-# launcher, so it is opt-in: name the release under test.
+# a stalled sound device and a stood-still guest. Its restart mode boots the release
+# twice over the colour data that a lens's still taught and expects the same cameras
+# to be listed again. Its video-lost mode tells the synthetic camera, through its
+# test-only control pipe, that the application left the foreground while the video
+# mode records, and expects the recording to end by itself with the clip saved, the
+# application still in front and the camera to open again, and the video mode's
+# viewfinder with no recording to be live again after the return (the release
+# carries the last topics of route p0030). It boots Android with the macOS launcher, so it is
+# opt-in: name the release under test.
 set(UML_ANDROID_CAMERA_RELEASE "" CACHE PATH
     "Installed Android release directory that the android-camera tests boot")
 if(UML_ANDROID_CAMERA_RELEASE AND TARGET uml-darwin-android17)
-    foreach(mode live blocked)
+    foreach(mode live blocked restart video-lost)
         if(mode STREQUAL "live")
             set(camera_test_name android-camera)
         else()
-            set(camera_test_name android-camera-blocked)
+            set(camera_test_name android-camera-${mode})
         endif()
         uml_add_integration_test(
             NAME ${camera_test_name}
@@ -400,6 +428,30 @@ if(UML_ANDROID_SYNC_RELEASE AND TARGET uml-darwin-android17)
         COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/run_android_sync.py
             --release ${UML_ANDROID_SYNC_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+        LABELS guest;boot;android
+        TIMEOUT 3600
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
+# The old-application layer (android/lineage-24/overlay/oldapp): a probe
+# application of its own, installed as an old (targetSdkVersion 10) and a
+# modern (29) package, reads a Java byte[] the way a Dalvik-era game does,
+# leaks local references and allocates below 2 GiB; the old package passes, the
+# modern one is left alone. The release must carry the layer and its
+# ActivityThread hook, so it is a release built from this repository's overlay
+# (the accepted release predates them and fails it), and it boots Android with
+# the macOS launcher, so the test is opt-in. The probe's native code is built
+# with the host's clang++ and ld.lld (PATH).
+set(UML_ANDROID_OLDAPP_RELEASE "" CACHE PATH
+    "Installed Android release directory, built with the old-application layer, that the android-oldapp test boots")
+if(UML_ANDROID_OLDAPP_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-oldapp
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_oldapp.py
+            --release ${UML_ANDROID_OLDAPP_RELEASE}
             --emulator $<TARGET_FILE:uml-darwin-android17>
         LABELS guest;boot;android
         TIMEOUT 3600

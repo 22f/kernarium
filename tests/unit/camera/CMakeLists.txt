@@ -22,7 +22,7 @@ uml_add_unit_test(NAME camera-dng-color COMMAND uml_camera_dng_tests
 # Discovery of the host's own cameras: no session, no permission request, no
 # capture.
 add_executable(uml_camera_apple_discovery_tests camera_apple_discovery_tests.cpp)
-target_link_libraries(uml_camera_apple_discovery_tests PRIVATE UML::AppleCamera)
+target_link_libraries(uml_camera_apple_discovery_tests PRIVATE UML::AppleCamera UML::CameraDevice)
 uml_add_unit_test(NAME camera-apple-discovery COMMAND uml_camera_apple_discovery_tests
     LABELS "device;camera")
 
@@ -52,11 +52,18 @@ target_link_libraries(uml_camera_photo_dimensions_tests PRIVATE UML::PhotoDimens
 uml_add_unit_test(NAME camera-photo-dimensions COMMAND uml_camera_photo_dimensions_tests
     LABELS "device;camera")
 
+# Which video stabilization a camera is asked for, over what its format supports
+# (no camera is opened).
+add_executable(uml_camera_video_stabilization_tests camera_video_stabilization_tests.cpp)
+target_link_libraries(uml_camera_video_stabilization_tests PRIVATE UML::VideoStabilization)
+uml_add_unit_test(NAME camera-video-stabilization COMMAND uml_camera_video_stabilization_tests
+    LABELS "device;camera")
+
 # The anchor model: the one format a camera runs in, what it offers from it, the
 # session's admit and resize transactions on a fake session, and the invariants
 # over seeded generated format tables.
 add_executable(uml_camera_capture_model_tests camera_capture_model_tests.cpp)
-target_link_libraries(uml_camera_capture_model_tests PRIVATE UML::PhotoDimensions)
+target_link_libraries(uml_camera_capture_model_tests PRIVATE UML::PhotoDimensions UML::VideoStabilization)
 uml_add_unit_test(NAME camera-capture-model COMMAND uml_camera_capture_model_tests
     LABELS "device;camera")
 
@@ -116,6 +123,8 @@ if(TARGET UML::SyntheticCamera)
 
     add_executable(uml_camera_description_tests camera_description_tests.cpp)
     target_link_libraries(uml_camera_description_tests PRIVATE UML::CameraDevice UML::SyntheticCamera)
+    target_include_directories(uml_camera_description_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal)
     uml_add_unit_test(NAME camera-description COMMAND uml_camera_description_tests
         LABELS "device;camera")
 

@@ -2,6 +2,7 @@
 
 #include "microphone_capture_source.hpp"
 
+#include "apple_microphone_tap.hpp"
 #include "audio_session.hpp"
 #include "protocol.hpp"
 
@@ -11,7 +12,6 @@
 
 #include <memory>
 #include <mutex>
-#include <span>
 
 namespace uml::audio {
 namespace {
@@ -130,9 +130,8 @@ private:
                 return false;
             }
             const std::weak_ptr<Capture> weak = weak_from_this();
-            CaptureRing* destination = ring;
-            const std::uint32_t frameBytes =
-                channels * protocol::bytesPerSample;
+            const auto tap = std::make_shared<MicrophoneTap>(converter, converted, *ring, channels,
+                                                             protocol::sampleRate);
             NSError* tapError = nil;
             const BOOL tapped = [input
                 installTapOnBus:0
@@ -140,37 +139,9 @@ private:
                                     inputFormat.sampleRate * tapSeconds)
                          format:inputFormat
                           error:&tapError
-                          block:^(AVAudioPCMBuffer* buffer, AVAudioTime*) {
-                               __block BOOL supplied = NO;
-                               converted.frameLength = 0;
-                               NSError* error = nil;
-                               const auto status = [converter
-                                   convertToBuffer:converted
-                                             error:&error
-                                withInputFromBlock:^AVAudioBuffer*(
-                                    AVAudioPacketCount,
-                                    AVAudioConverterInputStatus* inputStatus) {
-                                  if (supplied) {
-                                      *inputStatus =
-                                          AVAudioConverterInputStatus_NoDataNow;
-                                      return nil;
-                                  }
-                                  supplied = YES;
-                                  *inputStatus =
-                                      AVAudioConverterInputStatus_HaveData;
-                                  return buffer;
-                                }];
-                               if (status == AVAudioConverterOutputStatus_Error)
-                                   return;
-                               const auto* data = static_cast<const std::uint8_t*>(
-                                   converted.audioBufferList->mBuffers[0].mData);
-                               if (data != nullptr) {
-                                   (void)destination->write(std::span(
-                                       data,
-                                       std::size_t {converted.frameLength} *
-                                           frameBytes));
-                               }
-                             }];
+                          block:^(AVAudioPCMBuffer* buffer, AVAudioTime* when) {
+                              tap->receive(buffer, when);
+                          }];
             if (!tapped) {
                 closeSession();
                 return false;

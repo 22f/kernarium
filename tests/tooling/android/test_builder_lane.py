@@ -6,6 +6,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import base64
 import contextlib
 import gzip
 import importlib.util
@@ -293,6 +294,33 @@ def synthetic_apk(debuggable: bool | str | None = None, permissions: tuple[str, 
     return package.getvalue()
 
 
+# The compiled manifest of an overlay that aapt2 built with android:resourcesMap="@xml/map", whose map
+# names config_sensorUseStartedActivity and config_sensorUseStartedActivity_hwToggle as targets (the
+# overlay's own string table has only "different_name").
+RESOURCES_MAP_OVERLAY_MANIFEST = base64.b64decode(
+    "".join((
+        "AwAIADQFAAABABwA8AIAABQAAAAAAAAAAAAAAGwAAAAAAAAAAAAAABIAAAAmAAAARAAAAGIAAACGAAAAmgAAAMAAAAD2AAAAEgEA",
+        "ABoBAAAsAQAARgEAAHYBAADOAQAA4gEAAPQBAAAGAgAAOgIAAG4CAAAHAGgAYQBzAEMAbwBkAGUAAAAIAHAAcgBpAG8AcgBpAHQA",
+        "eQAAAA0AdABhAHIAZwBlAHQAUABhAGMAawBhAGcAZQAAAA0AbQBpAG4AUwBkAGsAVgBlAHIAcwBpAG8AbgAAABAAdABhAHIAZwBl",
+        "AHQAUwBkAGsAVgBlAHIAcwBpAG8AbgAAAAgAaQBzAFMAdABhAHQAaQBjAAAAEQBjAG8AbQBwAGkAbABlAFMAZABrAFYAZQByAHMA",
+        "aQBvAG4AAAAZAGMAbwBtAHAAaQBsAGUAUwBkAGsAVgBlAHIAcwBpAG8AbgBDAG8AZABlAG4AYQBtAGUAAAAMAHIAZQBzAG8AdQBy",
+        "AGMAZQBzAE0AYQBwAAAAAgAxADYAAAAHAGEAbgBkAHIAbwBpAGQAAAALAGEAcABwAGwAaQBjAGEAdABpAG8AbgAAABYAZQB4AGEA",
+        "bQBwAGwAZQAuAHIAZQB2AGkAZQB3AC4AbwB2AGUAcgBsAGEAeQAAACoAaAB0AHQAcAA6AC8ALwBzAGMAaABlAG0AYQBzAC4AYQBu",
+        "AGQAcgBvAGkAZAAuAGMAbwBtAC8AYQBwAGsALwByAGUAcwAvAGEAbgBkAHIAbwBpAGQAAAAIAG0AYQBuAGkAZgBlAHMAdAAAAAcA",
+        "bwB2AGUAcgBsAGEAeQAAAAcAcABhAGMAawBhAGcAZQAAABgAcABsAGEAdABmAG8AcgBtAEIAdQBpAGwAZABWAGUAcgBzAGkAbwBu",
+        "AEMAbwBkAGUAAAAYAHAAbABhAHQAZgBvAHIAbQBCAHUAaQBsAGQAVgBlAHIAcwBpAG8AbgBOAGEAbQBlAAAACAB1AHMAZQBzAC0A",
+        "cwBkAGsAAAAAAIABCAAsAAAADAABARwAAQEhAAEBDAIBAXACAQFaBQEBcgUBAXMFAQEJBgEBAAEQABgAAAABAAAA/////woAAAAN",
+        "AAAAAgEQAIgAAAABAAAA//////////8OAAAAFAAUAAUAAAAAAAAADQAAAAYAAAD/////CAAAECQAAAANAAAABwAAAAkAAAAIAAAD",
+        "CQAAAP////8QAAAADAAAAAgAAAMMAAAA/////xEAAAD/////CAAAECQAAAD/////EgAAAP////8IAAAQEAAAAAIBEABMAAAAAgAA",
+        "AP//////////EwAAABQAFAACAAAAAAAAAA0AAAADAAAA/////wgAABAeAAAADQAAAAQAAAD/////CAAAEB4AAAADARAAGAAAAAIA",
+        "AAD//////////xMAAAACARAAdAAAAAMAAAD//////////w8AAAAUABQABAAAAAAAAAANAAAAAQAAAP////8IAAAQ5wMAAA0AAAAC",
+        "AAAACgAAAAgAAAMKAAAADQAAAAUAAAD/////CAAAEv////8NAAAACAAAAP////8IAAABAAACfwMBEAAYAAAAAwAAAP//////////",
+        "DwAAAAIBEAA4AAAABAAAAP//////////CwAAABQAFAABAAAAAAAAAA0AAAAAAAAA/////wgAABIAAAAAAwEQABgAAAAEAAAA////",
+        "//////8LAAAAAwEQABgAAAABAAAA//////////8OAAAAAQEQABgAAAABAAAA/////woAAAANAAAA",
+    ))
+)
+
+
 def synthetic_overlay_manifest(target_package: str | None, static: bool | None, *, utf8: bool = False) -> bytes:
     """A compiled manifest of a runtime resource overlay: an <overlay> element that carries
     android:targetPackage (a string) when given and android:isStatic (a literal boolean) when given,
@@ -409,11 +437,14 @@ def synthetic_resource_table(
     arrays: list[tuple[str, list[str]]], *, utf8: bool = True,
     booleans: list[tuple[str, bool]] = (), compact: bool = False,
     integers: list[tuple[str, int]] = (), overlayable: bool = False, qualified: frozenset[str] = frozenset(),
+    strings: list[tuple[str, str | None]] = (),
 ) -> bytes:
     """A compiled resource table whose one package holds the given string-array resources, bool
-    resources and integer resources (the latter two as compact entries when `compact` is set, as a
-    recent aapt2 writes them), and an <overlayable> section when `overlayable` is set. The resources
-    named in `qualified` are defined under a resource configuration (portrait), not by default."""
+    resources, integer resources and plain string resources (the bools and integers as compact entries
+    when `compact` is set, as a recent aapt2 writes them), and an <overlayable> section when
+    `overlayable` is set. A plain string whose text is None has a reference to another resource as its
+    value, as `<string name=...>@string/other</string>` compiles. The resources named in `qualified`
+    are defined under a resource configuration (portrait), not by default."""
 
     def pool(strings: list[str]) -> bytes:
         data, offsets = b"", []
@@ -430,8 +461,9 @@ def synthetic_resource_table(
                             0x100 if utf8 else 0, start, 0)
                 + struct.pack(f"<{len(strings)}I", *offsets) + data)
 
-    values = sorted({item for _, items in arrays for item in items})
-    names = [name for name, _ in arrays] + [name for name, _ in booleans] + [name for name, _ in integers]
+    values = sorted({item for _, items in arrays for item in items} | {text for _, text in strings if text})
+    names = ([name for name, _ in arrays] + [name for name, _ in booleans] + [name for name, _ in integers]
+             + [name for name, _ in strings])
     configuration = struct.pack("<I", 64) + b"\x00" * 60
     portrait = struct.pack("<I", 64) + b"\x00" * 8 + b"\x01" + b"\x00" * 51  # the orientation qualifier
     type_header = 20 + len(configuration)
@@ -467,6 +499,12 @@ def synthetic_resource_table(
         else:
             integer_entries.append(struct.pack("<HHI", 8, 0, index) + struct.pack("<HBBI", 8, 0, 0x10, data))
 
+    string_entries = []
+    for index, (_, text) in enumerate(strings, start=len(arrays) + len(booleans) + len(integers)):
+        value = (struct.pack("<HBBI", 8, 0, 0x03, values.index(text)) if text is not None
+                 else struct.pack("<HBBI", 8, 0, 0x01, 0x7F0A0001))  # TYPE_STRING, or TYPE_REFERENCE
+        string_entries.append(struct.pack("<HHI", 8, 0, index) + value)
+
     def configured(type_id: int, entries: list[bytes], entry_names: list[str], *, always: bool) -> bytes:
         """The type's chunk of default definitions and, when some are qualified, a chunk of those."""
         plain = [entry for entry, name in zip(entries, entry_names) if name not in qualified]
@@ -479,7 +517,8 @@ def synthetic_resource_table(
         chunks += struct.pack("<HHI", 0x0204, 1032, 1032) + b"\x00" * 1024
     type_names = ["array"]
     for type_name, typed, typed_names in (("bool", bool_entries, [name for name, _ in booleans]),
-                                          ("integer", integer_entries, [name for name, _ in integers])):
+                                          ("integer", integer_entries, [name for name, _ in integers]),
+                                          ("string", string_entries, [name for name, _ in strings])):
         if typed:
             type_names.append(type_name)
             chunks += configured(len(type_names), typed, typed_names, always=False)
@@ -1149,10 +1188,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           reclaim_variant: str | None = None,
                           time_zone_variant: str | None = None,
                           keyboard_default_variant: str | None = None,
+                          oldswitch_variant: str | None = None,
                           wallpaper_variant: str | None = None,
                           cas_hal_variant: str | None = None,
                           adbd_variant: str | None = None,
                           services_jar_variant: str | None = None,
+                          oldapp_variant: str | None = None,
                           input_flinger_variant: str | None = None,
                           network_stack_variant: str | None = None,
                           wifi_tracker_variant: str | None = None,
@@ -1843,6 +1884,43 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         keyboard_rc = keyboard_rc.replace(old, new)
                 if keyboard_default_variant != "missing-rc":
                     archive.writestr("SYSTEM_EXT/etc/init/kernarium_keyboard_default.rc", keyboard_rc)
+                # The shell command of Old app compatibility: the tracked wrapper script, and a jar whose
+                # code holds the command's class (a build may strip the code into the odex instead).
+                oldapp_wrapper = (
+                    verifier.parents[1] / "overlay/oldapp_switch/kernarium_oldapp"
+                ).read_text()
+                for variant, (old, new) in {
+                    "wrapper-no-classpath": ("export CLASSPATH=$base/framework/kernarium_oldapp.jar\n", ""),
+                    "wrapper-wrong-jar": ("framework/kernarium_oldapp.jar", "framework/other.jar"),
+                    "wrapper-wrong-class": ("com.kernarium.oldapp.Main",
+                                            "com.kernarium.oldapp.Other"),
+                    "wrapper-no-exec": ("exec app_process", "app_process"),
+                    "wrapper-system-base": ("base=/system_ext", "base=/system"),
+                }.items():
+                    if oldswitch_variant == variant:
+                        if old not in oldapp_wrapper:
+                            fail(f"the Old app wrapper lacks '{old}' for the {variant} variant")
+                        oldapp_wrapper = oldapp_wrapper.replace(old, new)
+                if oldswitch_variant != "missing-wrapper":
+                    archive.writestr("SYSTEM_EXT/bin/kernarium_oldapp", oldapp_wrapper)
+                oldapp_jar = io.BytesIO()
+                with zipfile.ZipFile(oldapp_jar, "w") as jar:
+                    jar.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+                    if oldswitch_variant not in ("jar-stripped", "preopt-code", "preopt-half"):
+                        jar.writestr(
+                            "classes.dex",
+                            b"dex\n035\0"
+                            + (b"Lcom/kernarium/oldapp/Other;" if oldswitch_variant == "jar-without-class"
+                               else b"Lcom/kernarium/oldapp/Main;"),
+                        )
+                if oldswitch_variant in ("preopt-code", "preopt-half"):
+                    # Dexpreopting strips the code from the jar into the files beside it.
+                    for suffix in ("odex", "vdex") if oldswitch_variant == "preopt-code" else ("vdex",):
+                        archive.writestr(f"SYSTEM_EXT/framework/oat/arm64/kernarium_oldapp.{suffix}", b"oat")
+                if oldswitch_variant == "jar-not-zip":
+                    archive.writestr("SYSTEM_EXT/framework/kernarium_oldapp.jar", b"not a jar")
+                elif oldswitch_variant != "missing-jar":
+                    archive.writestr("SYSTEM_EXT/framework/kernarium_oldapp.jar", oldapp_jar.getvalue())
                 # The device configuration of the host's keyboard and mouse: the tracked files.
                 for name, destination in input_device_files.items():
                     archive.writestr(destination, (verifier.parents[1] / "overlay/input" / name).read_text())
@@ -1988,7 +2066,15 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         if keyboard_default_variant == "missing-marker-context"
                         else "persist.sys.kernarium.keyboard_default    "
                         "u:object_r:kernarium_keyboard_default_prop:s0 exact bool\n"
-                    ),
+                    )
+                    + {
+                        "missing-context": "",
+                        "exact-context": "persist.sys.kernarium.oldapp.    "
+                        "u:object_r:kernarium_oldapp_prop:s0 exact string\n",
+                        "wrong-type-context": "persist.sys.kernarium.oldapp.    "
+                        "u:object_r:kernarium_time_zone_prop:s0\n",
+                    }.get(oldswitch_variant or "",
+                          "persist.sys.kernarium.oldapp.    u:object_r:kernarium_oldapp_prop:s0\n"),
                 )
                 archive.writestr(
                     "SYSTEM_EXT/etc/selinux/system_ext_sepolicy.cil",
@@ -2042,7 +2128,20 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                        else "kernarium_time_zone_prop ")
                     + ("" if keyboard_default_variant == "marker-not-system"
                        else "kernarium_keyboard_default_prop ")
+                    + ("" if oldswitch_variant == "not-system" else "kernarium_oldapp_prop ")
                     + "))\n"
+                    # The scope of the Old app switch's property: restricted, readable by every
+                    # application domain, which an internal one is not for the non-core ones.
+                    + (
+                        "(typeattributeset system_internal_property_type (kernarium_oldapp_prop))\n"
+                        if oldswitch_variant == "internal-scope"
+                        else ""
+                    )
+                    + (
+                        ""
+                        if oldswitch_variant in ("not-restricted", "internal-scope")
+                        else "(typeattributeset system_restricted_property_type (kernarium_oldapp_prop))\n"
+                    )
                     + (
                         ""
                         if wifi_network_variant == "missing-transition"
@@ -2152,6 +2251,70 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         "(allow kernarium_keyboard_default timezone_prop (property_service (set)))\n"
                         if keyboard_default_variant == "sets-another-property"
                         else ""
+                    )
+                    + (
+                        ""
+                        if oldswitch_variant == "no-shell-set"
+                        else "(allow shell kernarium_oldapp_prop (property_service (set)))\n"
+                    )
+                    + "(allow shell kernarium_oldapp_prop (file (read getattr map open)))\n"
+                    # The command's lock file, in the shell user's own data directory.
+                    + (
+                        ""
+                        if oldswitch_variant == "no-lock-file"
+                        else "(allow shell shell_data_file (file (create open read write lock getattr)))\n"
+                        if oldswitch_variant == "no-lock-setattr"
+                        else "(allow shell shell_data_file (file (create open read write lock getattr setattr)))\n"
+                    )
+                    + (
+                        ""
+                        if oldswitch_variant == "no-lock-dir"
+                        else "(allow shell shell_data_file (dir (search add_name write)))\n"
+                    )
+                    + (
+                        ""
+                        if oldswitch_variant == "no-app-read"
+                        else "(allow appdomain kernarium_oldapp_prop (file (read)))\n"
+                        if oldswitch_variant == "partial-app-read"
+                        else "".join(
+                            f"(allow {domain} kernarium_oldapp_prop (file (read getattr map open)))\n"
+                            for domain in (
+                                "runas_app", "untrusted_app", "untrusted_app_34", "untrusted_app_30",
+                                "untrusted_app_29", "untrusted_app_25", "gmscore_app", "mediaprovider_app",
+                                "platform_app", "platform_app_36", "priv_app", "priv_app_36", "isolated_app",
+                                "ephemeral_app", "system_app", "sdk_sandbox_34", "sdk_sandbox_audit",
+                                "sdk_sandbox_next",
+                            )
+                        )
+                        if oldswitch_variant == "per-domain-reads"
+                        else "(allow appdomain kernarium_oldapp_prop (file (read getattr map open)))\n"
+                    )
+                    + {
+                        "untrusted-app-sets": "(allow untrusted_app kernarium_oldapp_prop (property_service (set)))\n",
+                        "platform-app-sets": "(allow platform_app_36_202604 kernarium_oldapp_prop_202604 "
+                        "(property_service (set)))\n",
+                        "appdomain-sets": "(allow appdomain kernarium_oldapp_prop (property_service (set)))\n",
+                        "runas-app-sets": "(allow runas_app kernarium_oldapp_prop (property_service (set)))\n",
+                    }.get(oldswitch_variant or "", "")
+                    # What the restricted macro emits for the type (the non-core domains may not
+                    # set it), and the neverallow of the application domains.
+                    + (
+                        ""
+                        if oldswitch_variant == "no-neverallow"
+                        else "(typeattributeset base_typeattr_241 (and (domain ) (not (coredomain ))))\n"
+                        "(neverallow base_typeattr_241 kernarium_oldapp_prop (property_service (set)))\n"
+                    )
+                    + (
+                        ""
+                        if oldswitch_variant in ("no-neverallow", "vendor-style-neverallow")
+                        else "(typeattributeset base_typeattr_955 (untrusted_app_all ))\n"
+                        if oldswitch_variant == "partial-neverallow"
+                        else "(typeattributeset base_typeattr_955 (and (appdomain ) (not (shell ))))\n"
+                    )
+                    + (
+                        ""
+                        if oldswitch_variant in ("no-neverallow", "vendor-style-neverallow")
+                        else "(neverallow base_typeattr_955 kernarium_oldapp_prop (property_service (set)))\n"
                     )
                     + (
                         ""
@@ -2683,17 +2846,33 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         "toggle-missing": [],
                         "toggle-duplicate": [True, False],
                     }.get(camera_variant, [True])
+                    # The reminder activities of the sensor privacy service stay at the platform's defaults:
+                    # a variant defines one, as a literal or a reference, by default or under a qualifier.
+                    # Another sensor privacy string is present in every fixture: only these names count.
+                    reminder_strings = [("config_sensorStateChangedActivity", "com.example/.State")] + {
+                        "reminder-string": [("config_sensorUseStartedActivity", "com.example/.Quiet")],
+                        "reminder-hardware-string": [("config_sensorUseStartedActivity_hwToggle", "com.example/.Quiet")],
+                        "reminder-reference": [("config_sensorUseStartedActivity_hwToggle", None)],
+                        "reminder-qualified": [("config_sensorUseStartedActivity", "com.example/.Quiet")],
+                    }.get(camera_variant, [])
                     network_table = synthetic_resource_table(
                         [*network_time.items(), *extra_definitions], utf8=network_time_variant != "utf16-pool",
                         booleans=[("config_flipToScreenOffEnabled", value) for value in flip_values]
                         + [("config_supportsHardwareCamToggle", value) for value in toggle_values],
                         compact=flip_variant == "compact",
                         qualified=frozenset({"config_supportsHardwareCamToggle"})
-                        if camera_variant == "toggle-only-qualified" else frozenset(),
+                        if camera_variant == "toggle-only-qualified"
+                        else frozenset({"config_sensorUseStartedActivity"})
+                        if camera_variant == "reminder-qualified" else frozenset(),
+                        strings=reminder_strings,
                     )
                     framework_apk = io.BytesIO()
                     with zipfile.ZipFile(framework_apk, "w") as overlay:
-                        overlay.writestr("AndroidManifest.xml", release_manifest)
+                        # The generated overlay declares itself static and has no resource map; the variant
+                        # carries a real compiled manifest that does.
+                        overlay.writestr("AndroidManifest.xml",
+                                         RESOURCES_MAP_OVERLAY_MANIFEST if camera_variant == "reminder-resource-map"
+                                         else synthetic_overlay_manifest("android", True))
                         overlay.writestr("resources.arsc", network_table)
                         for name, payload in wallpapers.items():
                             overlay.writestr(name, payload)
@@ -2736,9 +2915,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 archive.writestr(camera_library_path, camera_library(*good_camera_markers))
                 archive.writestr(camera_template_path, good_camera_template)
                 # Aperture as the build leaves it: its own resources keep the defaults (the lens settings
-                # off, no ignored ID) and declare no overlayable section; the product's values are in the
-                # static overlay beside the other auto-generated ones. With the values on, each lens of the
-                # host is its own camera device, and the wide lens is the zoom camera's 1x.
+                # off, no ignored ID, free zoom on) and declare no overlayable section; the product's values
+                # are in the static overlay beside the other auto-generated ones. With the values on, each
+                # lens of the host is its own camera device, a host's camera 2 stays out of the list, and
+                # the lens buttons are the only zoom.
                 aux_booleans = {
                     None: [("config_enableAuxCameras", True)],
                     "aux-off": [("config_enableAuxCameras", False)],
@@ -2750,26 +2930,36 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     "ignored-none": [[]],
                     "ignored-missing": [],
                 }.get(camera_variant, [["2"]])
+                zoom_booleans = {
+                    "zoom-on": [("config_enableZoom", True)],
+                    "zoom-missing": [],
+                    "zoom-duplicate": [("config_enableZoom", False), ("config_enableZoom", True)],
+                }.get(camera_variant, [("config_enableZoom", False)])
                 # "...-only-qualified": the one definition sits under a resource configuration (portrait), so
                 # it applies on a device in that orientation alone, whatever its value says.
                 overlay_qualified = {
                     "aux-only-qualified": frozenset({"config_enableAuxCameras"}),
                     "ignored-only-qualified": frozenset({"config_ignoredAuxCameraIds"}),
+                    "zoom-only-qualified": frozenset({"config_enableZoom"}),
                 }.get(camera_variant, frozenset())
                 overlay_table = synthetic_resource_table(
                     [("config_ignoredAuxCameraIds", items) for items in ignored_ids],
-                    booleans=aux_booleans, compact=camera_variant == "compact", qualified=overlay_qualified,
+                    booleans=aux_booleans + zoom_booleans, compact=camera_variant == "compact",
+                    qualified=overlay_qualified,
                 )
                 # "app-values": the old assumption, the values in the application's own table and no overlay
-                # "app-no-aux", "app-no-ignored": the application lost a name the overlay replaces (an uprev renamed
-                # it), so the overlay applies to nothing; "app-aux-qualified": it keeps one under a qualifier only.
+                # "app-no-aux", "app-no-ignored", "app-no-zoom": the application lost a name the overlay replaces (an
+                # uprev renamed it), so the overlay applies to nothing; "app-aux-qualified", "app-zoom-qualified": it
+                # keeps one under a qualifier only.
                 aperture_table = synthetic_resource_table(
                     [] if camera_variant == "app-no-ignored" else
                     [("config_ignoredAuxCameraIds", ["2"] if camera_variant == "app-values" else [])],
-                    booleans=[] if camera_variant == "app-no-aux" else
-                    [("config_enableAuxCameras", camera_variant == "app-values")],
+                    booleans=([] if camera_variant == "app-no-aux" else
+                              [("config_enableAuxCameras", camera_variant == "app-values")])
+                    + ([] if camera_variant == "app-no-zoom" else [("config_enableZoom", True)]),
                     compact=camera_variant == "compact", overlayable=camera_variant == "app-overlayable",
                     qualified=frozenset({"config_enableAuxCameras"}) if camera_variant == "app-aux-qualified"
+                    else frozenset({"config_enableZoom"}) if camera_variant == "app-zoom-qualified"
                     else frozenset(),
                 )
                 # ... and a file that is no resource table, or one cut short, must not read as a table
@@ -3103,8 +3293,33 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                                else b"ro.boot.kernarium.compass\x00")
                             + (b"" if services_jar_variant == "no-compass-directory-marker"
                                else b"kernarium_compass\x00")
+                            + (b"" if services_jar_variant == "no-sensor-reminder-marker"
+                               else b"kernarium: no reminder for a camera that the hardware toggle blocks (\x00")
                         )
                     archive.writestr("SYSTEM/framework/services.jar", services_jar.getvalue())
+                # The old-application layer: a 32-bit ARM shared object with a JNI_OnLoad, and the
+                # framework's ActivityThread topic that loads it (framework.jar stores its dex files
+                # uncompressed, so the topic's strings are in the bytes).
+                if oldapp_variant != "missing-library":
+                    archive.writestr(
+                        "SYSTEM/lib/libkernarium_oldapp.so",
+                        (synthetic_aarch64_elf() if oldapp_variant == "not-arm" else synthetic_arm_elf())
+                        + (b"" if oldapp_variant == "no-entry" else b"\x00JNI_OnLoad\x00"),
+                    )
+                if oldapp_variant != "missing-framework":
+                    framework_jar = io.BytesIO()
+                    with zipfile.ZipFile(framework_jar, "w", zipfile.ZIP_STORED) as jar:
+                        jar.writestr(
+                            "classes.dex",
+                            b"dex\n039\x00"
+                            + (b"" if oldapp_variant == "no-load-marker"
+                               else b"/system/lib/libkernarium_oldapp.so\x00")
+                            + (b"" if oldapp_variant == "no-log-marker"
+                               else b"kernarium: old-application layer not loaded\x00")
+                            + (b"" if oldapp_variant == "no-switch-marker"
+                               else b"persist.sys.kernarium.oldapp.\x00"),
+                        )
+                    archive.writestr("SYSTEM/framework/framework.jar", framework_jar.getvalue())
                 # libinputflinger.so holds the p0022 pointer capture LED topic's dump line.
                 if input_flinger_variant != "missing":
                     archive.writestr(
@@ -4469,6 +4684,20 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "of route p0007"),
             ("missing-services-jar-cause", {"services_jar_variant": "missing"},
              "SYSTEM/framework/services.jar is missing"),
+            ("missing-old-application-library", {"oldapp_variant": "missing-library"},
+             "required entries are missing: .*SYSTEM/lib/libkernarium_oldapp.so"),
+            ("old-application-library-is-64-bit", {"oldapp_variant": "not-arm"},
+             "64-bit ELF in a 32-bit library directory: SYSTEM/lib/libkernarium_oldapp.so"),
+            ("old-application-library-without-jni-onload", {"oldapp_variant": "no-entry"},
+             "libkernarium_oldapp.so has no JNI_OnLoad"),
+            ("missing-framework-jar", {"oldapp_variant": "missing-framework"},
+             "SYSTEM/framework/framework.jar is missing"),
+            ("framework-jar-without-the-old-application-hook", {"oldapp_variant": "no-load-marker"},
+             "lacks the ActivityThread topic that loads the old-application layer of route p0007"),
+            ("framework-jar-without-the-old-application-log-line", {"oldapp_variant": "no-log-marker"},
+             "lacks the log line of that topic of route p0007"),
+            ("framework-jar-loads-the-old-application-layer-for-every-app", {"oldapp_variant": "no-switch-marker"},
+             "lacks the per-application switch .* of that topic of route p0007"),
             ("input-flinger-without-the-pointer-capture-led-cause", {"input_flinger_variant": "no-marker"},
              "lacks the pointer capture LED topic of route p0022"),
             ("missing-input-flinger-cause", {"input_flinger_variant": "missing"},
@@ -5399,6 +5628,69 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "lets the keyboard default domain set"),
             ("keyboard-default-missing-marker-context", {"keyboard_default_variant": "missing-marker-context"},
              "do not label persist.sys.kernarium.keyboard_default"),
+            ("oldapp-missing-wrapper", {"oldswitch_variant": "missing-wrapper"},
+             "required entries are missing: .*SYSTEM_EXT/bin/kernarium_oldapp"),
+            ("oldapp-missing-jar", {"oldswitch_variant": "missing-jar"},
+             "required entries are missing: .*SYSTEM_EXT/framework/kernarium_oldapp.jar"),
+            ("oldapp-wrapper-no-classpath", {"oldswitch_variant": "wrapper-no-classpath"},
+             "kernarium_oldapp does not contain 'CLASSPATH=.base/framework/kernarium_oldapp.jar'"),
+            ("oldapp-wrapper-wrong-jar", {"oldswitch_variant": "wrapper-wrong-jar"},
+             "kernarium_oldapp does not contain 'CLASSPATH=.base/framework/kernarium_oldapp.jar'"),
+            ("oldapp-wrapper-wrong-class", {"oldswitch_variant": "wrapper-wrong-class"},
+             "kernarium_oldapp does not contain 'exec app_process .base/bin com.kernarium.oldapp.Main'"),
+            ("oldapp-wrapper-no-exec", {"oldswitch_variant": "wrapper-no-exec"},
+             "kernarium_oldapp does not contain 'exec app_process"),
+            ("oldapp-wrapper-system-base", {"oldswitch_variant": "wrapper-system-base"},
+             "kernarium_oldapp does not contain 'base=/system_ext'"),
+            ("oldapp-jar-not-zip", {"oldswitch_variant": "jar-not-zip"},
+             "kernarium_oldapp.jar is not a readable jar"),
+            ("oldapp-jar-without-class", {"oldswitch_variant": "jar-without-class"},
+             "holds code without the class com.kernarium.oldapp.Main"),
+            ("oldapp-missing-context", {"oldswitch_variant": "missing-context"},
+             "is labelled default_prop, not kernarium_oldapp_prop"),
+            ("oldapp-exact-context", {"oldswitch_variant": "exact-context"},
+             "is labelled default_prop, not kernarium_oldapp_prop"),
+            ("oldapp-wrong-type-context", {"oldswitch_variant": "wrong-type-context"},
+             "is labelled kernarium_time_zone_prop, not kernarium_oldapp_prop"),
+            ("oldapp-not-system", {"oldswitch_variant": "not-system"},
+             "does not define the system-owned kernarium_oldapp_prop"),
+            ("oldapp-no-shell-set", {"oldswitch_variant": "no-shell-set"},
+             "the shell domain may not set persist.sys.kernarium.oldapp."),
+            ("oldapp-no-app-read", {"oldswitch_variant": "no-app-read"},
+             "may not read persist.sys.kernarium.oldapp."),
+            ("oldapp-untrusted-app-sets", {"oldswitch_variant": "untrusted-app-sets"},
+             "untrusted_app may set persist.sys.kernarium.oldapp."),
+            ("oldapp-platform-app-sets", {"oldswitch_variant": "platform-app-sets"},
+             "platform_app_36 may set persist.sys.kernarium.oldapp."),
+            ("oldapp-appdomain-sets", {"oldswitch_variant": "appdomain-sets"},
+             "may set persist.sys.kernarium.oldapp."),
+            ("oldapp-runas-app-sets", {"oldswitch_variant": "runas-app-sets"},
+             "runas_app may set persist.sys.kernarium.oldapp."),
+            ("oldapp-no-neverallow", {"oldswitch_variant": "no-neverallow"},
+             "no neverallow that keeps application domains from setting kernarium_oldapp_prop"),
+            # The restricted macro's own rule is of the vendor kind (domain without the core
+            # domains) and covers the two non-core application domains alone.
+            ("oldapp-vendor-style-neverallow", {"oldswitch_variant": "vendor-style-neverallow"},
+             "no neverallow that keeps application domains from setting kernarium_oldapp_prop"),
+            ("oldapp-partial-neverallow", {"oldswitch_variant": "partial-neverallow"},
+             "no neverallow that keeps application domains from setting kernarium_oldapp_prop: none covers"),
+            ("oldapp-internal-scope", {"oldswitch_variant": "internal-scope"},
+             "kernarium_oldapp_prop is a system_internal_prop"),
+            ("oldapp-not-restricted", {"oldswitch_variant": "not-restricted"},
+             "kernarium_oldapp_prop is not declared with system_restricted_prop"),
+            ("oldapp-partial-app-read", {"oldswitch_variant": "partial-app-read"},
+             "may not read persist.sys.kernarium.oldapp.<package>, labelled kernarium_oldapp_prop "
+             r"\(getattr, map, open, read on the file\)"),
+            ("oldapp-no-lock-file", {"oldswitch_variant": "no-lock-file"},
+             "shell domain may not create and lock files of shell_data_file"),
+            ("oldapp-no-lock-setattr", {"oldswitch_variant": "no-lock-setattr"},
+             "shell domain may not create and lock files of shell_data_file"),
+            ("oldapp-no-lock-dir", {"oldswitch_variant": "no-lock-dir"},
+             "shell domain may not create and lock files of shell_data_file"),
+            ("oldapp-jar-stripped", {"oldswitch_variant": "jar-stripped"},
+             "kernarium_oldapp.jar has no classes.dex and no preoptimized odex and vdex"),
+            ("oldapp-preopt-half", {"oldswitch_variant": "preopt-half"},
+             "kernarium_oldapp.jar has no classes.dex and no preoptimized odex and vdex"),
             ("missing-side-key-layout", {"entries": {input_device_files["Vendor_1af4_Product_0002.kl"]: None}},
              "required entries are missing"),
             ("missing-keyboard-configuration", {"entries": {input_device_files["Vendor_1af4_Product_0003.idc"]: None}},
@@ -5789,6 +6081,16 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "must list the camera IDs"),
             ("camera-ignored-ids-empty", {"camera_variant": "ignored-none"}, "must list the camera IDs"),
             ("camera-ignored-ids-missing", {"camera_variant": "ignored-missing"}, "must list the camera IDs"),
+            ("camera-zoom-on", {"camera_variant": "zoom-on"}, "must set config_enableZoom to false"),
+            ("camera-zoom-missing", {"camera_variant": "zoom-missing"}, "must set config_enableZoom to false"),
+            ("camera-zoom-defined-twice", {"camera_variant": "zoom-duplicate"},
+             "must set config_enableZoom to false"),
+            ("camera-zoom-only-qualified", {"camera_variant": "zoom-only-qualified"},
+             "defines config_enableZoom only under a resource configuration"),
+            ("camera-application-lost-zoom", {"camera_variant": "app-no-zoom"},
+             "does not define the bool resource config_enableZoom in its default configuration"),
+            ("camera-application-zoom-only-qualified", {"camera_variant": "app-zoom-qualified"},
+             "does not define the bool resource config_enableZoom in its default configuration"),
             ("camera-toggle-off", {"camera_variant": "toggle-off"},
              "must set config_supportsHardwareCamToggle to true"),
             ("camera-toggle-missing", {"camera_variant": "toggle-missing"},
@@ -5797,8 +6099,33 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "must set config_supportsHardwareCamToggle to true"),
             ("camera-toggle-only-qualified", {"camera_variant": "toggle-only-qualified"},
              "defines config_supportsHardwareCamToggle only under a resource configuration"),
+            ("camera-reminder-activity-defined", {"camera_variant": "reminder-string"},
+             "defines config_sensorUseStartedActivity in the default configuration"),
+            ("camera-reminder-hardware-activity-defined", {"camera_variant": "reminder-hardware-string"},
+             "defines config_sensorUseStartedActivity_hwToggle in the default configuration"),
+            ("camera-reminder-activity-defined-by-reference", {"camera_variant": "reminder-reference"},
+             "defines config_sensorUseStartedActivity_hwToggle in the default configuration"),
+            ("camera-reminder-activity-defined-under-a-qualifier", {"camera_variant": "reminder-qualified"},
+             "defines config_sensorUseStartedActivity under a resource configuration"),
+            ("camera-reminder-activities-mapped-by-a-resource-map", {"camera_variant": "reminder-resource-map"},
+             "declares a resource map"),
+            ("services-jar-without-the-sensor-reminder-topic", {"services_jar_variant": "no-sensor-reminder-marker"},
+             "lacks the SensorPrivacyService topic that withholds the reminder of a camera under the hardware toggle"),
         ):
             reject(label, options, reason)
+
+        # What the checks accept besides the baseline: the grant to every application domain by its
+        # own rule and not through the attribute, and the command's code preoptimized beside a jar
+        # that holds none.
+        for label, options in (
+            ("oldapp-per-domain-reads", {"oldswitch_variant": "per-domain-reads"}),
+            ("oldapp-preoptimized-code", {"oldswitch_variant": "preopt-code"}),
+        ):
+            fixture = root / f"good-{label}.zip"
+            write_fixture(fixture, **options)
+            result = run_in_process(tool, "--target-files", fixture, *kernel_options)
+            if result.returncode != 0:
+                fail(f"target-files verifier rejected the {label} fixture: {result.stdout}")
 
         for index, case in enumerate(rejections.values()):
             label = "/".join(case["labels"])

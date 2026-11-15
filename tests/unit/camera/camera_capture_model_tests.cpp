@@ -7,11 +7,13 @@
 #include "front_tables.hpp"
 #include "photo_dimensions.hpp"
 #include "require.hpp"
+#include "video_stabilization.hpp"
 
 #include <Block.h>
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -540,6 +542,8 @@ struct FakeSession {
     std::vector<std::string> log;
     int begins {}, commits {};
     bool refuseInput {}, refuseActivate {}, refuseVideo {}, refusePhoto {}, overBudget {};
+    // The glue programs the new video connection (the stabilization) inside the configuration.
+    bool programsVideo {};
     // The device whose timing a refused change must not lose.
     FakeDevice device;
     DeviceTiming saved;
@@ -576,6 +580,7 @@ struct FakeSession {
             video = true;
             return true;
         };
+        if (programsVideo) s.programVideo = [this] { log.push_back("programVideo"); };
         s.addPhoto = [this] {
             log.push_back("addPhoto");
             if (refusePhoto) return false;
@@ -631,6 +636,31 @@ void aRefusedStreamBeforeItsInputLeavesTheSessionAsItWas()
     require(session.log == std::vector<std::string> {"begin", "snapshot", "addInput", "activate", "addVideo", "removeVideo", "removeInput",
                                                       "restoreTiming", "commit"},
             "the timing is taken before the input is added, and put back after it has left");
+}
+
+// The new video connection is programmed (the stabilization the guest asks for) inside the admission's configuration, after
+// the output is added and before the commit: a session that runs already, to which a lens is added, starts the output at
+// the commit, and a session that starts later delivers from its first frame. A video output that is refused, or that was in
+// the session already, is not programmed.
+void aNewVideoConnectionIsProgrammedBeforeTheConfigurationCommits()
+{
+    FakeSession fresh;
+    fresh.programsVideo = true;
+    const AdmitPlan plan {.addInput = true, .activate = true, .addVideo = true, .addPhoto = false};
+    require(admit(plan, fresh.steps(plan)) == Admission::admitted, "admitted");
+    require(fresh.log == std::vector<std::string> {"begin", "snapshot", "addInput", "activate", "addVideo", "programVideo", "commit"},
+            "programmed after the output is added and before the commit");
+    FakeSession refused;
+    refused.programsVideo = true;
+    refused.refuseVideo = true;
+    require(admit(plan, refused.steps(plan)) == Admission::videoRefused, "refused");
+    require(std::count(refused.log.begin(), refused.log.end(), "programVideo") == 0, "an output that was refused is not programmed");
+    FakeSession present;
+    present.programsVideo = true;
+    present.input = present.video = true;
+    const AdmitPlan still {.addInput = false, .activate = false, .addVideo = false, .addPhoto = true};
+    require(admit(still, present.steps(still)) == Admission::admitted, "a still joins");
+    require(std::count(present.log.begin(), present.log.end(), "programVideo") == 0, "a video connection already in the session is left");
 }
 
 void aRefusedInputOrFormatAddsNothingElse()
@@ -979,10 +1009,42 @@ struct FakeBackend {
         cache.frameRate = 15;
         applied = true;
     }
+    // What the connection holds of the stabilization and what was written to it, through the production apply
+    // (applyVideoStabilization) and the production order of an apply (applyCameraSettings), as the glue calls them.
+    VideoStabilizationHeld stabilization;
+    StabilizationWish wish;
+    std::vector<VideoStabilization> stabilizationWrites;
+    std::vector<VideoStabilizationState> stabilizationNotes;
+    struct Port final : VideoStabilizationPort {
+        Port(VideoStabilizationSupport supported, std::vector<VideoStabilization>& written) : supported_(supported), written_(written) {}
+        VideoStabilizationSupport support() override { return supported_; }
+        void write(VideoStabilization mode) override { written_.push_back(mode); }
+        VideoStabilizationSupport supported_;
+        std::vector<VideoStabilization>& written_;
+    };
+    void putStabilization(bool wanted, VideoStabilizationSupport support)
+    {
+        Port port(support, stabilizationWrites);
+        const VideoStabilizationStep step = applyVideoStabilization(port, wanted, stabilization);
+        if (step.note) stabilizationNotes.push_back(step.state);
+    }
+    // A fresh settings cache holds the defaults, which are the settings the guest asks for in video mode (stabilization on).
+    void applyAll(bool wanted, VideoStabilizationSupport support, CameraTime exposure, bool force)
+    {
+        asked = exposure;
+        (void)applyCameraSettings(
+            cache, wish, wanted, force, applied && appliedExposure == exposure, [&] { putStabilization(wanted, support); },
+            [&] { write(exposure); });
+    }
     void apply(CameraTime exposure, bool force)
     {
         asked = exposure;
-        if (cache.mayLeaveSettings(force, applied && appliedExposure == exposure)) return;
+        StabilizationWish ignored;
+        (void)applyCameraSettings(
+            cache, ignored, false, force, applied && appliedExposure == exposure, [] {}, [&] { write(exposure); });
+    }
+    void write(CameraTime exposure)
+    {
         auto steps = device.steps();
         if (!steps.lock()) return;
         (void)steps.setCustomExposure(exposure, 100.0f);
@@ -1101,6 +1163,98 @@ void aRestoreThatIsRefusedLeavesNothingInTheCacheTrue()
             "after it, the cache stands for what the device holds");
     backend.device.writes.clear();
     require(backend.start(640, 480, 15) && backend.device.writes.empty(), "and an identical request writes nothing");
+}
+
+// The guest's request for stabilization in video mode equals the settings a new connection's cache holds, so an apply
+// skipped for unchanged settings left the picture unstabilized until the first setting changed (a tap), when it was
+// stabilized at once and the view jumped. The stabilization is decided before that exit.
+void aNewConnectionIsStabilizedByAnApplyThatLeavesTheOtherSettingsAlone()
+{
+    FakeBackend backend;
+    const VideoStabilizationSupport standard {true, false};
+    backend.applyAll(true, standard, backend.appliedExposure, false);
+    require(backend.stabilizationWrites == std::vector<VideoStabilization> {VideoStabilization::standard},
+            "the first apply stabilizes the connection although its settings are the ones applied");
+    require(backend.written("exposure") == 0, "and writes none of the other settings");
+    require(backend.stabilizationNotes == std::vector<VideoStabilizationState> {VideoStabilizationState::standard},
+            "the record is told once");
+    // The first tap changes a setting: the apply that follows carries the same wish.
+    backend.applyAll(true, standard, CameraTime {1, 20}, false);
+    require(backend.stabilizationWrites.size() == 1 && backend.written("exposure") == 1,
+            "a later apply writes the changed setting and leaves the stabilization alone: the view does not jump");
+    require(backend.stabilizationNotes.size() == 1, "and says nothing");
+}
+
+// The apply that leaves the other settings alone is also what tells the platform that the guest wants the stabilization:
+// the admission of a connection that follows programs it from that wish, before the connection can deliver. (A camera
+// whose guest asks for the defaults, as video mode does, never writes a setting.)
+void anApplyThatLeavesTheSettingsAloneStillStatesTheWish()
+{
+    FakeBackend backend;
+    require(!backend.wish.atAdmission(), "before any apply the admission asks nothing");
+    backend.applyAll(true, {}, backend.appliedExposure, false);
+    require(backend.written("exposure") == 0, "the apply wrote none of the settings");
+    require(backend.wish.atAdmission(), "and the admission now programs the stabilization the guest asked for");
+    backend.applyAll(false, {}, backend.appliedExposure, false);
+    require(!backend.wish.atAdmission(), "a guest that stops asking is no longer programmed");
+}
+
+void aFormatThatSupportsNoModeLeavesTheConnectionAloneAndSaysSoOnce()
+{
+    FakeBackend backend;
+    backend.applyAll(true, {}, backend.appliedExposure, false);
+    backend.applyAll(true, {}, CameraTime {1, 20}, false);
+    require(backend.stabilizationWrites.empty() && backend.stabilizationNotes == std::vector<VideoStabilizationState> {VideoStabilizationState::unsupported},
+            "nothing is written and the record says the format supports none, once");
+}
+
+// The record's photo line states the compensation read after the admission committed the session's configuration, of the
+// output the admission added: the note is made as the admission returns, before the camera's entry holds that output, so
+// the reading is taken from the added output and not from the entry's. The facts keep the reading taken as the output was
+// attached where the admission was undone or added no output.
+struct FakePhotoFacts {
+    CameraFact compensationSupported {};
+    CameraFact compensationEnabled {};
+    CameraReading reading {};
+    int connection {};
+};
+struct FakePhotoOutput {
+    CameraFact supported;
+    CameraFact enabled;
+};
+
+void theRecordStatesTheReadingTakenAfterTheAdmissionCommitted()
+{
+    FakePhotoFacts attached;
+    attached.compensationSupported = CameraFact::no;
+    attached.compensationEnabled = CameraFact::no;
+    attached.reading = CameraReading::beforeCommit;
+    attached.connection = 7;
+    FakePhotoOutput added {CameraFact::yes, CameraFact::yes};
+    FakePhotoOutput other {CameraFact::no, CameraFact::unknown};
+    std::vector<const FakePhotoOutput*> read;
+    const auto reader = [&](const FakePhotoOutput* output) {
+        read.push_back(output);
+        FakePhotoFacts facts;
+        facts.compensationSupported = output->supported;
+        facts.compensationEnabled = output->enabled;
+        facts.reading = CameraReading::afterCommit;
+        return facts;
+    };
+    auto committed = committedPhotoFacts<FakePhotoFacts>(attached, &added, true, reader);
+    require(committed && committed->reading == CameraReading::afterCommit && committed->compensationSupported == CameraFact::yes &&
+                committed->compensationEnabled == CameraFact::yes && committed->connection == 7,
+            "an admission that added the photo output records what the added output reads after its commit, and keeps the rest");
+    require(read == std::vector<const FakePhotoOutput*> {&added}, "the output it reads is the one the admission added, no other");
+    read.clear();
+    committed = committedPhotoFacts<FakePhotoFacts>(attached, &added, false, reader);
+    require(read.empty() && committed && committed->reading == CameraReading::beforeCommit && committed->compensationSupported == CameraFact::no,
+            "one that was refused and undone keeps the reading taken as the output was attached");
+    committed = committedPhotoFacts<FakePhotoFacts>(attached, static_cast<const FakePhotoOutput*>(nullptr), true, reader);
+    require(read.empty() && committed && committed->reading == CameraReading::beforeCommit,
+            "one that added no output has no later reading to take");
+    committed = committedPhotoFacts<FakePhotoFacts>(std::nullopt, &other, true, reader);
+    require(read.empty() && !committed, "and none attached records nothing");
 }
 
 void aRequestAfterARefusedRestoreFailsWhileTheDeviceCannotBeWritten()
@@ -1544,8 +1698,10 @@ void aRefusalIsLoggedOncePerCameraAndReasonUntilTheCameraChanges()
     require(log.first(0, Refusal::stillNotMade) && log.first(0, Refusal::overBudget), "a reset camera logs again");
     require(!log.first(1, Refusal::stillNotMade), "and another camera is not reset with it");
     for (const auto reason : {Refusal::noAnchor, Refusal::formatChanged, Refusal::notJoinable, Refusal::inputRefused, Refusal::outputRefused,
-                              Refusal::overBudget, Refusal::stillNotMade, Refusal::rawUnavailable, Refusal::raised})
-        require(!refusalName(reason).empty(), "every reason has a name");
+                              Refusal::overBudget, Refusal::stillNotMade, Refusal::rawUnavailable, Refusal::raised, Refusal::notRestored,
+                              Refusal::ratioMoved, Refusal::turnNotHeld, Refusal::stillsNotTurned, Refusal::ratioFailed,
+                              Refusal::ratioTimedOut})
+        require(!refusalName(reason).empty() && refusalName(reason) != "unknown", "every reason has a name");
 }
 
 // ---------------------------------------------------------------------------
@@ -1986,6 +2142,128 @@ void aCameraStatesThePlatformsOwnMounting()
     require(sensorOrientationOf(CameraPosition::front, std::numeric_limits<double>::quiet_NaN()) == 0, "no angle states none");
 }
 
+// A front camera whose coordinator states portrait 0 or 180 is mounted with its sensor's top at the device's top, where an
+// earlier front camera's is at the side (90). It is presented as one of those: the guest is told 90 and the platform
+// turns the video connection by the difference, so that the buffers are upright where the earlier cameras' are. Nothing
+// else changes: not a front camera at 90 or 270, not a back camera at any angle, not an external camera, not an angle
+// that is not a number.
+void aFrontCameraMountedAtTheTopIsPresentedLikeAnEarlierOne()
+{
+    const auto of = [](CameraPosition position, double angle) { return presentedMountingOf(position, angle); };
+    require(of(CameraPosition::front, 90) == PresentedMounting({90, 0, false}), "a front camera at 90 is as it states");
+    require(of(CameraPosition::front, 0) == PresentedMounting({90, 270, true}), "a front camera at 0 states 90 and is turned 270");
+    require(of(CameraPosition::front, 180) == PresentedMounting({90, 90, true}), "a front camera at 180 states 90 and is turned 90");
+    require(of(CameraPosition::front, 270) == PresentedMounting({270, 0, false}), "a front camera at 270 is as it states");
+    require(of(CameraPosition::back, 90) == PresentedMounting({90, 0, false}), "a back camera at 90 is as it states");
+    require(of(CameraPosition::back, 0) == PresentedMounting({0, 0, false}), "a back camera at 0 is not imitated");
+    require(of(CameraPosition::back, 180) == PresentedMounting({180, 0, false}) && of(CameraPosition::back, 270) == PresentedMounting({270, 0, false}),
+            "nor at 180 or 270");
+    require(of(CameraPosition::external, 0) == PresentedMounting({90, 0, false}) && of(CameraPosition::external, 180) == PresentedMounting({90, 0, false}),
+            "an external camera states 90 and is not turned");
+    require(of(CameraPosition::front, std::numeric_limits<double>::quiet_NaN()) == PresentedMounting({0, 0, false}), "no angle is not imitated");
+    require(of(CameraPosition::front, std::numeric_limits<double>::infinity()) == PresentedMounting({0, 0, false}), "nor an infinite one");
+    require(of(CameraPosition::front, 0.4) == of(CameraPosition::front, 0) && of(CameraPosition::front, 359.7) == of(CameraPosition::front, 0),
+            "an angle is rounded to a quarter turn first");
+    require(of(CameraPosition::front, 89.6) == PresentedMounting({90, 0, false}), "so a front camera at 89.6 is at 90");
+    require(of(CameraPosition::front, -180) == of(CameraPosition::front, 180), "and taken within one turn");
+    // Whatever the angle: an imitated camera states 90 and its turn brings its own angle to that, a camera that is not
+    // imitated states what sensorOrientationOf does and is not turned.
+    for (const auto position : {CameraPosition::back, CameraPosition::front, CameraPosition::external})
+        for (double angle = -720; angle <= 720; angle += 22.5) {
+            const auto mounting = presentedMountingOf(position, angle);
+            if (mounting.emulatesEarlierFront) {
+                require(position == CameraPosition::front && mounting.stated == 90 && mounting.connectionTurn % 90 == 0,
+                        "an imitated camera is a front camera and states 90");
+                require((mounting.connectionTurn + 90) % 360 == sensorOrientationOf(position, angle),
+                        "its turn takes its own angle to 90");
+            } else {
+                require(mounting.stated == sensorOrientationOf(position, angle) && mounting.connectionTurn == 0,
+                        "a camera that is not imitated states the platform's angle and is not turned");
+            }
+        }
+}
+
+// A square format that lists dynamic aspect ratios is described by the crop the device is pinned at: 3x4 where the video
+// connection is turned a quarter turn, else 4x3, a landscape frame of N x 3N/4 either way, with the landscape 4:3 photo
+// sizes it lists. A format that lists none is as listed. One that cannot be described is dropped, never offered in
+// another shape.
+void aSquareFormatThatListsRatiosIsDescribedByItsPinnedCrop()
+{
+    constexpr std::uint8_t all = 0x1f;
+    const std::uint8_t tallAndWide = aspectRatioBit(CameraAspectRatio::r3x4) | aspectRatioBit(CameraAspectRatio::r4x3);
+    const auto square = [](std::uint32_t side, std::uint8_t ratios, Sizes photos) {
+        auto facts = fmt(side, side, std::move(photos), {{1, 30}, {1, 60}}, false, true);
+        facts.aspectRatios = ratios;
+        return facts;
+    };
+    const Sizes photos {{4032, 4032}, {3024, 4032}, {4032, 3024}, {2016, 1512}, {1512, 2016}, {4032, 2268}};
+    for (const std::uint8_t ratios : {all, tallAndWide}) {
+        const auto presented = presentedFormatOf(square(4032, ratios, photos), 270);
+        require(presented && presented->width == 4032 && presented->height == 3024, "a 4032 square is 4032x3024");
+        require(presented->pinnedRatio == CameraAspectRatio::r3x4, "pinned at 3x4");
+        require(presented->photoSizes == Sizes({{4032, 3024}, {2016, 1512}}), "only the landscape 4:3 photos stay, in order");
+        require(presented->aspectRatios == ratios && presented->fullRange == false && presented->multiCamera &&
+                    presented->frameRates == Spans({{1, 30}, {1, 60}}),
+                "the rest is as listed");
+        const auto quarter = presentedFormatOf(square(4032, ratios, photos), 90);
+        require(quarter && *quarter == *presented, "a quarter turn the other way pins the same");
+    }
+    for (const std::uint32_t turn : {0u, 180u}) {
+        const auto presented = presentedFormatOf(square(1280, all, photos), turn);
+        require(presented && presented->width == 1280 && presented->height == 960 && presented->pinnedRatio == CameraAspectRatio::r4x3,
+                "a turn that is no quarter pins 4x3, still N x 3N/4");
+    }
+    // A format that lists none is as listed, whatever its turn.
+    const auto plain = fmt(1920, 1440, photos, {{1, 30}}, true, true);
+    for (const std::uint32_t turn : {0u, 90u, 180u, 270u}) {
+        const auto presented = presentedFormatOf(plain, turn);
+        require(presented && *presented == plain && presented->pinnedRatio == CameraAspectRatio::none, "a format without ratios is unchanged");
+    }
+    // The ratio the turn needs is not listed: dropped, but the other turn's format is not.
+    const std::uint8_t noTall = aspectRatioBit(CameraAspectRatio::r1x1) | aspectRatioBit(CameraAspectRatio::r16x9) | aspectRatioBit(CameraAspectRatio::r4x3);
+    require(!presentedFormatOf(square(2016, noTall, photos), 270).has_value(), "a format without 3x4 is dropped for a quarter turn");
+    require(presentedFormatOf(square(2016, noTall, photos), 0).has_value(), "and kept for none");
+    require(!presentedFormatOf(square(2016, aspectRatioBit(CameraAspectRatio::r1x1), photos), 0).has_value() &&
+                !presentedFormatOf(square(2016, aspectRatioBit(CameraAspectRatio::r1x1), photos), 270).has_value(),
+            "a format that lists only 1x1 is dropped for any turn");
+    // One that is not square, or whose side is not divisible by four, cannot be described.
+    auto wide = fmt(1920, 1440, photos, {{1, 30}});
+    wide.aspectRatios = all;
+    require(!presentedFormatOf(wide, 270).has_value() && !presentedFormatOf(wide, 0).has_value(), "a format that lists ratios and is not square is dropped");
+    require(!presentedFormatOf(square(1282, all, photos), 270).has_value() && !presentedFormatOf(square(0, all, photos), 270).has_value(),
+            "so is one whose side does not divide by four, or has none");
+    // No landscape 4:3 photo listed: a format with no photo.
+    const auto none = presentedFormatOf(square(1280, all, {{1280, 1280}, {960, 1280}}), 270);
+    require(none && none->photoSizes.empty() && none->width == 1280 && none->height == 960, "a format with no such photo lists none");
+    // A pinned crop's width is the side and its frame is exactly 4:3 for every side divisible by four.
+    for (std::uint32_t side = 4; side <= 4032; side += 4) {
+        const auto presented = presentedFormatOf(square(side, all, {}), 270);
+        require(presented && presented->width == side && std::uint64_t(presented->height) * 4 == std::uint64_t(side) * 3, "exactly 4:3");
+    }
+}
+
+// The field of view of a pinned crop is the larger of the two crops', so a view cropped from the square is never stated
+// narrower than it is; the order of the arguments does not matter.
+void thePinnedCropsFieldOfViewIsTheLargerOfTheTwo()
+{
+    require(pinnedFieldOfView(80.0f, 90.0f) == 90.0f && pinnedFieldOfView(90.0f, 80.0f) == 90.0f, "the larger");
+    require(pinnedFieldOfView(85.5f, 85.5f) == 85.5f, "equal");
+    require(pinnedFieldOfView(0.0f, 72.0f) == 72.0f, "a crop that states none does not narrow it");
+}
+
+// The ratios a format lists are a mask of one bit each, and none has no bit.
+void theRatioBitsAreDistinctAndNoneHasNone()
+{
+    std::uint32_t seen = 0;
+    for (const auto ratio : {CameraAspectRatio::r1x1, CameraAspectRatio::r16x9, CameraAspectRatio::r9x16, CameraAspectRatio::r4x3,
+                             CameraAspectRatio::r3x4}) {
+        require(std::popcount(unsigned(aspectRatioBit(ratio))) == 1 && (seen & aspectRatioBit(ratio)) == 0, "one bit each");
+        seen |= aspectRatioBit(ratio);
+        require(aspectRatioName(ratio) != "-", "and a name");
+    }
+    require(seen == 0x1f && aspectRatioBit(CameraAspectRatio::none) == 0 && aspectRatioName(CameraAspectRatio::none) == "-", "five bits, none has none");
+}
+
 // The same rule over generated tables: nothing above the limit survives on a front camera, ever; every kept size was
 // listed, and every listed size within the limit is kept, in its order; the formats are otherwise as listed; limiting
 // twice is limiting once; and a back camera is not limited.
@@ -2066,12 +2344,397 @@ void theFrontStillLimitOnTheSecondRealFrontTable()
     require(photoMaximum(limited[*after], 12'700'000) == std::optional<CameraStillSize>(CameraStillSize {2016, 1512}), "the output's maximum");
 }
 
+void aCamerasLastUseSurvivesTheNextSessionsDiscovery()
+{
+    // A platform session that closes when the cameras are idle states the mounting again when it opens: the record keeps
+    // what the last admissions of the camera set (the video connection, the photo output, the ratio, the refusals and
+    // the Exif orientation of the last photo) beside the new discovery.
+    CameraPresentation kept;
+    kept.position = CameraPosition::front;
+    kept.stated = 90;
+    kept.turn = 0;
+    kept.anchorWidth = 1920;
+    kept.anchorHeight = 1440;
+    kept.ratioKnown = true;
+    kept.ratioPinned = CameraAspectRatio::r3x4;
+    kept.ratioNow = CameraAspectRatio::r3x4;
+    kept.ratioWidth = 1512;
+    kept.ratioHeight = 2016;
+    kept.ratioError = 0;
+    kept.videoKnown = true;
+    kept.videoDefaultAngle = 0;
+    kept.videoAngle = 270;
+    kept.videoAngleSupported = CameraFact::yes;
+    kept.videoAskedWidth = 1920;
+    kept.videoAskedHeight = 1440;
+    kept.videoFirstWidth = 1920;
+    kept.videoFirstHeight = 1440;
+    kept.photoKnown = true;
+    kept.compensationSupported = CameraFact::yes;
+    kept.compensationEnabled = CameraFact::yes;
+    kept.photoAngle = 0;
+    kept.photoMaximumWidth = 2016;
+    kept.photoMaximumHeight = 1512;
+    kept.exifOrientation = 6;
+    kept.refusals = 2;
+    kept.lastRefusal = 4;
+    CameraPresentation discovered;
+    discovered.position = CameraPosition::front;
+    discovered.deviceType = CameraDeviceType::wide;
+    discovered.coordinatorAngles = {0, 180, 90, 270};
+    discovered.stated = 90;
+    discovered.turn = 270;
+    discovered.earlier = true;
+    discovered.anchorWidth = 1920;
+    discovered.anchorHeight = 1440;
+    discovered.anchorRatios = std::uint8_t(aspectRatioBit(CameraAspectRatio::r4x3) | aspectRatioBit(CameraAspectRatio::r3x4));
+    discovered.anchorFieldOfView = 85;
+    discovered.frontDevices = 2;
+    discovered.squareFormats = true;
+    discovered.dynamicRatios = true;
+    const CameraPresentation merged = withDiscovery(kept, discovered);
+    require(merged.deviceType == CameraDeviceType::wide && merged.coordinatorAngles == discovered.coordinatorAngles && merged.turn == 270 &&
+                merged.earlier && merged.anchorRatios == discovered.anchorRatios && merged.anchorFieldOfView == 85 &&
+                merged.frontDevices == 2 && merged.squareFormats && merged.dynamicRatios,
+            "the discovery is the new session's");
+    require(merged.ratioKnown && merged.ratioPinned == CameraAspectRatio::r3x4 && merged.ratioWidth == 1512 && merged.videoKnown &&
+                merged.videoAngle == 270 && merged.videoAskedWidth == 1920 && merged.videoFirstWidth == 1920 && merged.photoKnown &&
+                merged.compensationSupported == CameraFact::yes && merged.compensationEnabled == CameraFact::yes &&
+                merged.photoMaximumWidth == 2016 && merged.exifOrientation == 6 && merged.refusals == 2 && merged.lastRefusal == 4,
+            "the last use of the camera stays");
+    require(withDiscovery(CameraPresentation {}, discovered) == discovered, "a camera that was not used is its discovery");
+}
+
+void aCameraThatImitatesAnEarlierOneKeepsItsPhotoConnectionAngle()
+{
+    // The photo connection's angle changes the Exif alone, and the host drops the platform's Exif: a camera that imitates
+    // an earlier front camera leaves its connection at its default, as the setup proven on that camera did. Every other
+    // camera is set to 0, as before.
+    require(photoConnectionTurnOf(presentedMountingOf(CameraPosition::front, 0)) == std::nullopt, "a front camera at 0 leaves it");
+    require(photoConnectionTurnOf(presentedMountingOf(CameraPosition::front, 180)) == std::nullopt, "a front camera at 180 leaves it");
+    require(photoConnectionTurnOf(presentedMountingOf(CameraPosition::front, 90)) == std::optional<std::uint32_t>(0), "a front camera at 90 is set to 0");
+    require(photoConnectionTurnOf(presentedMountingOf(CameraPosition::front, 270)) == std::optional<std::uint32_t>(0), "a front camera at 270 is set to 0");
+    require(photoConnectionTurnOf(presentedMountingOf(CameraPosition::back, 90)) == std::optional<std::uint32_t>(0), "a back camera at 90 is set to 0");
+    require(photoConnectionTurnOf(presentedMountingOf(CameraPosition::back, 0)) == std::optional<std::uint32_t>(0), "a back camera at 0 is set to 0");
+    require(photoConnectionTurnOf(presentedMountingOf(CameraPosition::external, 0)) == std::optional<std::uint32_t>(0), "an external camera is set to 0");
+    require(photoConnectionTurnOf(presentedMountingOf(CameraPosition::front, std::nan(""))) == std::optional<std::uint32_t>(0),
+            "a front camera with no angle is not imitated and is set to 0");
+}
+
+void aStillReadsTheCompensationAfterTheCommit()
+{
+    const auto step = [](bool imitates, CameraFact supported, CameraFact enabled, CameraReading reading) {
+        return stillCompensationStep(imitates, supported, enabled, reading);
+    };
+    using Step = CompensationStep;
+    const CameraFact yes = CameraFact::yes, no = CameraFact::no, unknown = CameraFact::unknown;
+    const CameraReading before = CameraReading::beforeCommit, after = CameraReading::afterCommit;
+    // A reading taken before the commit decides nothing, whatever it says.
+    for (const auto supported : {yes, no, unknown})
+        for (const auto enabled : {yes, no, unknown})
+            require(step(true, supported, enabled, before) == Step::proceed && step(true, supported, enabled, CameraReading::unknown) == Step::proceed,
+                    "a reading before the commit never refuses a still");
+    // After it: on is accepted, supported and off is turned on, everything else refuses.
+    require(step(true, yes, yes, after) == Step::proceed, "supported and on is accepted");
+    require(step(true, yes, no, after) == Step::enable, "supported and off is turned on");
+    require(step(true, no, no, after) == Step::refuse && step(true, no, yes, after) == Step::refuse, "unsupported refuses");
+    require(step(true, unknown, unknown, after) == Step::refuse && step(true, yes, unknown, after) == Step::refuse && step(true, unknown, yes, after) == Step::refuse,
+            "a reading that failed refuses");
+    // A camera that imitates nothing is never asked.
+    for (const auto supported : {yes, no, unknown})
+        for (const auto enabled : {yes, no, unknown})
+            for (const auto reading : {before, after, CameraReading::unknown})
+                require(step(false, supported, enabled, reading) == Step::proceed, "a camera that imitates nothing is not asked");
+    require(readingName(CameraReading::beforeCommit) == "before-commit" && readingName(CameraReading::afterCommit) == "after-commit" &&
+                readingName(CameraReading::unknown) == "-",
+            "the readings have their words");
+}
+
+void aStillWaitsForAPendingRatioPinInsideTheStillBudget()
+{
+    using R = CameraAspectRatio;
+    using Step = RatioStillStep;
+    require(ratioStillStep(R::none, R::r4x3, false, 0) == Step::proceed && ratioStillStep(R::none, R::none, true, 7) == Step::proceed,
+            "no pin asks nothing");
+    require(ratioStillStep(R::r3x4, R::r3x4, false, 0) == Step::proceed, "a ratio held after the completion proceeds");
+    require(ratioStillStep(R::r3x4, R::r4x3, true, 0) == Step::wait && ratioStillStep(R::r3x4, R::r3x4, true, 0) == Step::wait,
+            "a completion that has not arrived is waited for, whatever the device holds meanwhile");
+    require(ratioStillStep(R::r3x4, R::r4x3, false, 0) == Step::refuseMoved, "a ratio that differs after the completion refuses");
+    require(ratioStillStep(R::r3x4, R::r3x4, false, -11800) == Step::refuseFailed && ratioStillStep(R::r3x4, R::r4x3, false, 5) == Step::refuseFailed,
+            "a completion error refuses");
+    // The wait is the settle wait's, inside the same budget.
+    const std::uint64_t settled = 1'000'000, now = 10'000'000'000;
+    const auto idle = scheduledStillStep(false, true, settled, now, 0, false);
+    require(idle.step == ScheduledStillStep::fire, "a settled camera with no pending pin fires");
+    const auto pending = scheduledStillStep(false, true, settled, now, 0, true);
+    require(pending.step == ScheduledStillStep::wait && pending.waitNanoseconds == ratioPinPollNanoseconds &&
+                pending.waitedNanoseconds == ratioPinPollNanoseconds,
+            "a pending pin waits one poll, which counts against the budget");
+    require(scheduledStillStep(false, true, now - 100'000'000, now, 0, true).waitNanoseconds == photoOutputSettleNanoseconds - 100'000'000,
+            "the settle time left outlasts a poll");
+    require(scheduledStillStep(false, true, settled, now, stillWaitBudgetNanoseconds - ratioPinPollNanoseconds, true).step == ScheduledStillStep::wait,
+            "the last poll the budget allows is waited");
+    require(scheduledStillStep(false, true, settled, now, stillWaitBudgetNanoseconds - ratioPinPollNanoseconds + 1, true).step == ScheduledStillStep::fail,
+            "a poll past the budget fails the still");
+    require(scheduledStillStep(false, true, settled, now, stillWaitBudgetNanoseconds, true).step == ScheduledStillStep::fail,
+            "a spent budget fails it");
+    require(scheduledStillStep(true, true, settled, now, 0, true).step == ScheduledStillStep::drop &&
+                scheduledStillStep(false, false, settled, now, 0, true).step == ScheduledStillStep::drop,
+            "an ended session or a gone request drops it");
+    // The five-argument form is the one without a pin.
+    require(scheduledStillStep(false, true, settled, now, 0).step == ScheduledStillStep::fire, "no pin is the old rule");
+    // A wait of polls cannot outlast the budget.
+    std::uint64_t waited = 0;
+    int polls = 0;
+    for (;; ++polls) {
+        const auto next = scheduledStillStep(false, true, settled, now, waited, true);
+        if (next.step != ScheduledStillStep::wait) {
+            require(next.step == ScheduledStillStep::fail, "the polls end in a failure");
+            break;
+        }
+        waited = next.waitedNanoseconds;
+        require(polls < 1000, "the polls end");
+    }
+    require(waited <= stillWaitBudgetNanoseconds && waited + ratioPinPollNanoseconds > stillWaitBudgetNanoseconds, "and what they waited is within the budget");
+}
+
+// A ratio change is one operation at a time: asked before the device is told, so that a completion that comes at once, or
+// never, or an earlier operation's, is never taken for the one under way; frames are held until the completion arrives
+// without an error; a completion that does not come within the budget of a running session ends the camera's frames.
+void aRatioChangeIsOneOperationAtATime()
+{
+    constexpr std::uint64_t budget = ratioCompletionBudgetNanoseconds;
+    constexpr std::uint64_t start = 5'000'000'000;
+    using Step = RatioFrameStep;
+    require(budget == stillWaitBudgetNanoseconds, "a ratio change waits no longer than a still");
+    require(ratioFrameStep(RatioPin {}) == Step::deliver, "a camera that pinned nothing delivers");
+    // A deferred success: held while it is under way, delivered once it came.
+    {
+        RatioPin pin;
+        ratioPinAsked(pin, 1);
+        require(pin.pending && ratioFrameStep(pin) == Step::hold, "frames are held while the change is under way");
+        require(ratioPinArmed(pin, start) && !ratioPinArmed(pin, start + 1), "the budget begins once");
+        require(!ratioPinTimedOut(pin, start + budget - 1), "inside the budget it waits");
+        require(ratioPinCompleted(pin, 1, 0) && !pin.pending && pin.error == 0, "the completion arrives");
+        require(ratioFrameStep(pin) == Step::deliver && ratioPinErrorForStill(pin) == 0, "frames are delivered once it did, without error");
+        require(!ratioPinTimedOut(pin, start + 10 * budget), "a completed change never times out");
+    }
+    // A completion error: held, and the camera fails, with the error for the still.
+    {
+        RatioPin pin;
+        ratioPinAsked(pin, 1);
+        (void)ratioPinArmed(pin, start);
+        require(ratioPinCompleted(pin, 1, 42) && ratioFrameStep(pin) == Step::failed && ratioPinErrorForStill(pin) == 42,
+                "an error ends it, and the still is told the code");
+        require(ratioPinCompleted(pin, 1, -11800) && ratioPinErrorForStill(pin) == -11800, "the newest completion of the operation stands");
+    }
+    // A completion at once (the setter calls it before it returns, or the device already holds the ratio): never pending.
+    {
+        RatioPin pin;
+        ratioPinAsked(pin, 1);
+        require(ratioPinCompleted(pin, 1, 0), "the completion comes before the session runs");
+        require(!pin.pending && ratioFrameStep(pin) == Step::deliver && !ratioPinArmed(pin, start), "it is not pending, and never armed");
+    }
+    // A later change while the earlier one's result is kept: pending again, and the earlier operation's completion is ignored.
+    {
+        RatioPin pin;
+        ratioPinAsked(pin, 1);
+        require(ratioPinCompleted(pin, 1, 0) && ratioFrameStep(pin) == Step::deliver, "the first change completed");
+        ratioPinAsked(pin, 2);
+        require(pin.pending && pin.error == 0 && ratioFrameStep(pin) == Step::hold,
+                "a later change is under way, whatever the earlier one's result was");
+        require(!ratioPinCompleted(pin, 1, 7) && pin.pending && pin.error == 0, "the earlier operation's late completion is ignored");
+        ratioPinAsked(pin, 3);
+        require(!ratioPinCompleted(pin, 2, 0) && pin.pending, "and so is a later one's of an operation that was replaced");
+        require(ratioPinCompleted(pin, 3, 0) && ratioFrameStep(pin) == Step::deliver, "the current operation's completes it");
+    }
+    // A completion that never comes: held while the budget runs, then timed out once, and the guest's camera ends.
+    {
+        RatioPin pin;
+        ratioPinAsked(pin, 1);
+        require(!ratioPinTimedOut(pin, start + 100 * budget), "a change of a session that does not run yet cannot time out");
+        (void)ratioPinArmed(pin, start);
+        require(!ratioPinTimedOut(pin, start - 1), "a clock that went back does not time it out");
+        require(ratioFrameStep(pin) == Step::hold && !ratioPinTimedOut(pin, start + budget - 1), "it holds until the budget is spent");
+        require(ratioPinTimedOut(pin, start + budget) && !ratioPinTimedOut(pin, start + budget + 1), "it times out once");
+        require(ratioFrameStep(pin) == Step::timedOut && ratioPinErrorForStill(pin) == ratioNoCompletion, "frames stay held, the still is told");
+        require(ratioPinCompleted(pin, 1, 0) && ratioFrameStep(pin) == Step::timedOut,
+                "a completion after the time ran out is kept but does not undo it");
+        // A zero clock still arms.
+        RatioPin other;
+        ratioPinAsked(other, 9);
+        require(ratioPinArmed(other, 0) && other.armedAt != 0, "a clock at zero arms too");
+    }
+    // Without a change asked for, a completion belongs to nothing.
+    RatioPin none;
+    require(!ratioPinCompleted(none, 0, 5) && !ratioPinArmed(none, start) && ratioFrameStep(none) == Step::deliver, "no change, nothing to complete");
+}
+
+// The notes the platform keeps across its sessions are bounded: the current cameras' and the most recently used others'.
+void theHeldNotesAreBoundedToTheCurrentCamerasAndRecentOnes()
+{
+    std::vector<HeldNoteUse> held;
+    for (std::uint64_t index = 0; index < 20; ++index) held.push_back({"device-" + std::to_string(index), index + 1});
+    const std::vector<std::string> current {"device-0", "device-1"};
+    const auto dropped = heldNotesToDrop(held, current, 8);
+    require(dropped.size() == 20 - 2 - 8, "everything but the current cameras and eight others is let go");
+    for (const auto& name : dropped) require(name != "device-0" && name != "device-1", "a current camera is never let go");
+    std::set<std::string> gone(dropped.begin(), dropped.end());
+    for (std::uint64_t index = 12; index < 20; ++index) require(gone.count("device-" + std::to_string(index)) == 0, "the newest are kept");
+    require(gone.count("device-2") == 1 && gone.count("device-11") == 1, "the oldest are dropped");
+    require(heldNotesToDrop(held, {}, 20).empty() && heldNotesToDrop(held, current, 18).empty(), "nothing is dropped within the bound");
+    require(heldNotesToDrop({}, current, 8).empty(), "an empty cache drops nothing");
+    // Equal uses fall in a fixed order.
+    const std::vector<HeldNoteUse> equal {{"b", 1}, {"a", 1}, {"c", 1}};
+    require(heldNotesToDrop(equal, {}, 2) == std::vector<std::string> {"c"}, "ties are broken by the identifier");
+    // A growing cache that is trimmed at each insertion never holds more than the current cameras and eight others.
+    std::vector<HeldNoteUse> growing;
+    std::uint64_t used = 0;
+    for (std::uint64_t round = 0; round < 200; ++round) {
+        growing.push_back({"external-" + std::to_string(round), ++used});
+        for (const auto& name : heldNotesToDrop(growing, current, heldNotesRecent))
+            std::erase_if(growing, [&](const HeldNoteUse& note) { return note.identifier == name; });
+        require(growing.size() <= heldNotesRecent + 1, "the cache stays small");
+    }
+}
+
+// The completion of a ratio change does not make the frames already made right: the device delivers buffers of the ratio it
+// had until the first buffer the change applies to, and a callback that was entered before the completion came must not
+// pass because the completion has. The samples before that buffer's timestamp (on the capture's clock) are held; where the
+// timestamp could not be converted, the samples until the first of the anchor's shape.
+void aSampleMadeBeforeTheChangeTookEffectNeverPasses()
+{
+    using B = RatioBoundary;
+    const std::optional<std::int64_t> none;
+    // The reviewer's interleaving: a sample of timestamp 100 is held while the change is pending, and is still held once the
+    // completion has arrived and named 200 as the first buffer the change applies to.
+    {
+        RatioPin pin;
+        ratioPinAsked(pin, 1);
+        require(!ratioSampleDelivered(pin, 100, true), "a sample is held while the change is under way");
+        require(ratioPinCompleted(pin, 1, 0, B::atTime, 200), "the completion arrives");
+        require(!ratioSampleDelivered(pin, 100, true), "a sample made before the first buffer is not delivered after it");
+        require(!ratioSampleDelivered(pin, 199, true) && ratioSampleDelivered(pin, 200, true) && ratioSampleDelivered(pin, 201, false),
+                "the first buffer and every later one are, whatever the shape");
+        require(!ratioSampleDelivered(pin, none, false), "a sample with no timestamp falls to the shape");
+        require(ratioSampleDelivered(pin, none, true) && ratioSampleDelivered(pin, 100, true) == false, "and the timestamp still decides where it has one");
+    }
+    // Where the timestamp could not be converted: held until a sample of the anchor's shape, then every sample.
+    {
+        RatioPin pin;
+        ratioPinAsked(pin, 1);
+        require(ratioPinCompleted(pin, 1, 0, B::shape, 0), "the completion arrives");
+        require(!ratioSampleDelivered(pin, 50, false) && !ratioSampleDelivered(pin, 60, false), "samples of another shape are held");
+        require(ratioSampleDelivered(pin, 70, true), "the first of the anchor's shape passes");
+        require(ratioSampleDelivered(pin, 80, false), "and the rule is over");
+    }
+    // A device that already held the ratio had nothing before the change.
+    {
+        RatioPin pin;
+        ratioPinAsked(pin, 1);
+        require(ratioPinCompleted(pin, 1, 0, B::none, 0) && ratioSampleDelivered(pin, 1, false) && ratioSampleDelivered(pin, none, false),
+                "nothing precedes a change that was not made");
+    }
+    // An error, a time-out and a camera that asked for nothing.
+    {
+        RatioPin failed;
+        ratioPinAsked(failed, 1);
+        require(ratioPinCompleted(failed, 1, 42, B::atTime, 0) && !ratioSampleDelivered(failed, 1'000, true), "an error delivers nothing");
+        RatioPin late;
+        ratioPinAsked(late, 1);
+        (void)ratioPinArmed(late, 5);
+        require(ratioPinTimedOut(late, 5 + ratioCompletionBudgetNanoseconds), "the time runs out");
+        require(ratioPinCompleted(late, 1, 0, B::atTime, 0) && !ratioSampleDelivered(late, 1'000, true), "a late completion delivers nothing");
+        RatioPin idle;
+        require(ratioSampleDelivered(idle, 1, false), "a camera with no change delivers");
+    }
+    // The same through the session's map; a camera with no change delivers.
+    RatioPins pins;
+    require(pins.sampleDelivered(7, 5, false), "a camera that asked nothing delivers");
+    pins.asked(0, 3);
+    require(!pins.sampleDelivered(0, 100, true) && pins.holdsFrames(0), "held while under way");
+    require(pins.completed(0, 3, 0, B::atTime, 200) == RatioPins::Completion::succeeded, "the change took effect");
+    require(!pins.sampleDelivered(0, 100, true) && pins.sampleDelivered(0, 200, true) && !pins.holdsFrames(0),
+            "the old sample is held and the first buffer passes");
+}
+
+// A camera that left the session has no change: a watch or a completion of its operation does nothing, so it cannot fail the
+// session a healthy other camera is in, and the pin of a camera that stays (an output or a still in flight needs it) is kept.
+void aCameraThatLeftCannotFailTheSessionTheOthersAreIn()
+{
+    using B = RatioBoundary;
+    using C = RatioPins::Completion;
+    RatioPins pins;
+    constexpr std::size_t front = 0, back = 1;
+    pins.asked(front, 5);
+    require(pins.armed(front, 1'000) == std::optional<std::uint64_t>(5), "the front camera's change is armed");
+    pins.asked(back, 6);
+    require(pins.completed(back, 6, 0, B::none, 0) == C::succeeded, "the back camera's change took effect");
+    // The camera's last output goes while its change is pending.
+    require(!cameraLeavesSession(true, true, false) && !cameraLeavesSession(true, false, true) && !cameraLeavesSession(false, false, false),
+            "a camera stays while an output, or a still in flight, needs it, and has to have an input to leave");
+    require(cameraLeavesSession(true, false, false), "and leaves with its last output");
+    pins.invalidate(front);
+    require(!pins.find(front) && !pins.holdsFrames(front), "its change is gone");
+    require(!pins.timedOut(front, 5, 1'000 + ratioCompletionBudgetNanoseconds * 100), "its watch does nothing");
+    require(pins.completed(front, 5, 42, B::none, 0) == C::ignored, "its late error does not fail the session");
+    require(pins.completed(front, 5, 0, B::atTime, 1) == C::ignored, "nor does its late success revive it");
+    require(!pins.armed(front, 9'000), "and nothing is armed for it");
+    // The back camera is as it was.
+    require(pins.find(back) && pins.find(back)->operation == 6 && !pins.holdsFrames(back) && pins.sampleDelivered(back, 1, false),
+            "the other camera is untouched");
+    // The camera comes back with another change: only that one counts.
+    pins.asked(front, 7);
+    require(pins.completed(front, 5, 42, B::none, 0) == C::ignored && pins.holdsFrames(front), "the old operation's error is still ignored");
+    require(pins.armed(front, 2'000) == std::optional<std::uint64_t>(7), "the new change is armed");
+    require(pins.timedOut(front, 7, 2'000 + ratioCompletionBudgetNanoseconds) && !pins.timedOut(front, 7, 2'000 + ratioCompletionBudgetNanoseconds + 1),
+            "it times out once");
+    // Invalidating a camera that has no change, or twice, is harmless.
+    pins.invalidate(9);
+    pins.invalidate(front);
+    pins.invalidate(front);
+    require(!pins.find(front), "a change is gone once");
+    // A completion that arrives for a camera that never asked does nothing.
+    require(pins.completed(9, 1, 42, B::none, 0) == C::ignored, "no change, nothing to fail");
+    // An error of the current operation fails once; a late completion after the time ran out does not fail again.
+    pins.asked(back, 8);
+    require(pins.completed(back, 8, -11800, B::none, 0) == C::failed, "an error fails the camera");
+    pins.asked(back, 9);
+    (void)pins.armed(back, 3'000);
+    require(pins.timedOut(back, 9, 3'000 + ratioCompletionBudgetNanoseconds), "the other time-out");
+    require(pins.completed(back, 9, 42, B::none, 0) == C::afterTimeout, "a completion after it is kept and fails nothing more");
+}
+
+// What a note says of a camera's change is read where the note is published: pending while under way or never completed, else
+// the code; a camera with no change keeps what its note has; a later change is pending again, whatever the earlier one said.
+void theNoteTakesTheChangesStateAsItIsPublished()
+{
+    require(!ratioNoteCode(std::nullopt), "a camera with no change says nothing");
+    require(!ratioNoteCode(RatioPin {}), "and so does a pin that asked nothing");
+    RatioPin pin;
+    ratioPinAsked(pin, 1);
+    require(ratioNoteCode(pin) == std::optional<std::int32_t>(ratioPending), "under way is pending");
+    require(ratioPinCompleted(pin, 1, 0, RatioBoundary::atTime, 5) && ratioNoteCode(pin) == std::optional<std::int32_t>(0),
+            "a completion that came before the note is published says success, never pending");
+    ratioPinAsked(pin, 2);
+    require(ratioNoteCode(pin) == std::optional<std::int32_t>(ratioPending), "a later change is pending, whatever the earlier one said");
+    require(ratioPinCompleted(pin, 2, 42, RatioBoundary::none, 0) && ratioNoteCode(pin) == std::optional<std::int32_t>(42), "an error is the code");
+    ratioPinAsked(pin, 3);
+    (void)ratioPinArmed(pin, 1);
+    require(ratioPinTimedOut(pin, 1 + ratioCompletionBudgetNanoseconds) && ratioNoteCode(pin) == std::optional<std::int32_t>(ratioPending),
+            "no completion in time stays pending");
+}
+
 int main()
 {
     theDurationThatMovesOutOfTheOthersWayIsWrittenFirst();
     aRestoreThatIsRefusedLeavesNothingInTheCacheTrue();
     aRequestAfterARefusedRestoreFailsWhileTheDeviceCannotBeWritten();
     settingsAreWrittenAgainAfterARefusedRestoreEvenWhenUnchanged();
+    theRecordStatesTheReadingTakenAfterTheAdmissionCommitted();
+    aNewConnectionIsStabilizedByAnApplyThatLeavesTheOtherSettingsAlone();
+    anApplyThatLeavesTheSettingsAloneStillStatesTheWish();
+    aFormatThatSupportsNoModeLeavesTheConnectionAloneAndSaysSoOnce();
     aRefusedFirstJoinWithARefusedRestoreIsWrittenAgainByTheNextJoin();
     theStreamCacheSaysWhatIsKnown();
     aSpansWholeRatesSnapToTheNearWholeNumber();
@@ -2101,6 +2764,7 @@ int main()
     aCameraJoinsAMultiCameraSessionOnlyWhenEveryAnchorIsAFormatItTakes();
     aRefusedStreamRemovesOnlyTheOutputItAdded();
     aRefusedStreamBeforeItsInputLeavesTheSessionAsItWas();
+    aNewVideoConnectionIsProgrammedBeforeTheConfigurationCommits();
     aRefusedInputOrFormatAddsNothingElse();
     aRefusedPhotoOutputRemovesTheVideoAndInputItAdded();
     aSessionOverItsBudgetRemovesWhatTheJoinAdded();
@@ -2130,5 +2794,18 @@ int main()
     theFrontStillLimitOnTheSecondRealFrontTable();
     everyGeneratedFrontTableKeepsNothingAboveTheLimit();
     aCameraStatesThePlatformsOwnMounting();
+    aFrontCameraMountedAtTheTopIsPresentedLikeAnEarlierOne();
+    aSquareFormatThatListsRatiosIsDescribedByItsPinnedCrop();
+    aCamerasLastUseSurvivesTheNextSessionsDiscovery();
+    aCameraThatImitatesAnEarlierOneKeepsItsPhotoConnectionAngle();
+    aStillReadsTheCompensationAfterTheCommit();
+    aStillWaitsForAPendingRatioPinInsideTheStillBudget();
+    aRatioChangeIsOneOperationAtATime();
+    theHeldNotesAreBoundedToTheCurrentCamerasAndRecentOnes();
+    aSampleMadeBeforeTheChangeTookEffectNeverPasses();
+    aCameraThatLeftCannotFailTheSessionTheOthersAreIn();
+    theNoteTakesTheChangesStateAsItIsPublished();
+    thePinnedCropsFieldOfViewIsTheLargerOfTheTwo();
+    theRatioBitsAreDistinctAndNoneHasNone();
     return 0;
 }
