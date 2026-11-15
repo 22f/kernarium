@@ -16,8 +16,10 @@ import pathlib
 import re
 import shlex
 import struct
+import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 import unittest.mock
@@ -75,7 +77,9 @@ class ScriptedGuest:
         self.result_file: str | None = None
         self.version_line = runner.VERSION_LINE
         self.on_time_offset = 0
-        self.skip_cleanup: set[str] = set()      # causes `list` does not clear: absent, ineligible, reinstalled, foreign
+        # Rules of the cleanup that the image lacks: absent, ineligible (the rule of the installation still runs),
+        # reinstalled, foreign.
+        self.skip_cleanup: set[str] = set()
         self.lock_type = "shell_data_file"
         self.lock_mode = "-rw-------"
         self.tightens_lock = True
@@ -86,7 +90,13 @@ class ScriptedGuest:
         self.keep_process = False                 # set does not end the application's process
         self.running_can_set = False
         self.avc_form = "socket"                  # socket, property, none: what the application's refused set leaves
+        self.logcat_reads = 0
+        self.logcat_fails = lambda read: False    # whether the nth read of the log (1-based) fails
         self.denials: list[str] = [NOISE, SOCKET_DENIAL.format(second=1, pid=3999, serial=2, domain=HOOK_DOMAIN)]
+        self.updated: dict[str, int] = {}         # package -> last-update epoch seconds
+        self.in_place = True                      # `install -r` over an installed package of the same key updates it
+        self.review_row = 7                       # the permission row that carries the review flag, after this many
+        self.flag_outside_block = False           # a REVIEW_REQUIRED outside the runtime permissions block
         self.review_required = True               # an application that targets below API 23 gets the permission review
         self.review: set[str] = set()
         self.review_open: str | None = None
@@ -103,6 +113,7 @@ class ScriptedGuest:
 
     def install_variant(self, variant: str, package: str | None = None) -> None:
         self.packages[package or probe.package_of(variant)] = (variant, self.first_install())
+        self.updated[package or probe.package_of(variant)] = self.clock
         self.processes.pop(package or probe.package_of(variant), None)
         if self.review_required and probe.target_of(variant) < 23:
             self.review.add(package or probe.package_of(variant))
@@ -141,7 +152,7 @@ class ScriptedGuest:
         for package, value in self.stored().items():
             if package not in self.packages:
                 cause = "absent"
-            elif not self.eligible(package):
+            elif not self.eligible(package) and "ineligible" not in self.skip_cleanup:
                 cause = "ineligible"
             elif not self.names_installation(package, value):
                 cause = "reinstalled" if re.fullmatch(r"[0-9]+ [0-9]+", value) else "foreign"
@@ -175,6 +186,23 @@ class ScriptedGuest:
                     refused = ("Failure [INSTALL_FAILED_SHARED_USER_INCOMPATIBLE: Reconciliation failed...: "
                                f"Package {probe.package_of(variant)} has no signatures that match those in shared "
                                f"user {shared}; ignoring!]")
+                elif (package := probe.package_of(variant)) in self.packages:
+                    held = self.packages[package][0]
+                    if "-r" not in arguments:
+                        refused = (f"Failure [INSTALL_FAILED_ALREADY_EXISTS: Attempt to re-install {package} without "
+                                   "first uninstalling.]")
+                    elif not probe.same_key(held, variant):
+                        refused = (f"Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Package {package} signatures do "
+                                   "not match previously installed version; ignoring!]")
+                    elif self.in_place:
+                        # An update: the package manager keeps the installation and its first-install time.
+                        self.packages[package] = (variant, self.packages[package][1])
+                        self.updated[package] = self.clock
+                        self.processes.pop(package, None)
+                        if probe.target_of(variant) >= 23:
+                            self.review.discard(package)
+                    else:
+                        self.install_variant(variant)
                 else:
                     self.install_variant(variant)
         elif arguments[:1] == ("uninstall",):
@@ -218,9 +246,12 @@ class ScriptedGuest:
             pid = self.processes.get(words[1])
             return runner.Run(0 if pid else 1, f"{pid}\n" if pid else "", "")
         if words[:1] == ["logcat"]:
+            self.logcat_reads += 1
+            if self.logcat_fails(self.logcat_reads):
+                return runner.Run(1, "", "logcat: read failed\n")
             return runner.Run(0, "\n".join(self.denials) + "\n", "")
         if words[:2] == ["dumpsys", "package"]:
-            return runner.Run(0, "runtime permissions:\n  REVIEW_REQUIRED\n" if words[2] in self.review else "", "")
+            return runner.Run(0, self.package_dump(words[2]), "")
         if words[:4] == ["am", "start", "-W", "-a"]:
             self.review_open = words[-1] if words[-1] in self.review else None
             return runner.Run(0, "Status: ok\n", "")
@@ -249,6 +280,26 @@ class ScriptedGuest:
             return self.command(words[1:])
         raise AssertionError(f"unscripted command: {command}")
 
+    def package_dump(self, package: str) -> str:
+        """`dumpsys package PACKAGE`: the times, and the user's runtime permissions block, where the review flag is
+        on one row of several (after `review_row` others) while the review is pending."""
+        if package not in self.packages:
+            return "Packages:\n"
+        stamp = lambda seconds: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(seconds))  # noqa: E731
+        rows = [f"        android.permission.LEGACY_{index}: granted=true, flags=[ ]"
+                for index in range(self.review_row)]
+        if package in self.review:
+            rows.append("        android.permission.POST_NOTIFICATIONS: granted=true, flags=[ REVIEW_REQUIRED]")
+        rows.append("        android.permission.ACCESS_LOCAL_NETWORK: granted=true, flags=[ ]")
+        lines = ["Packages:", f"  Package [{package}] (abc123):", "    userId=10200",
+                 f"    lastUpdateTime={stamp(self.updated.get(package, self.clock))}",
+                 f"    User 0: ceDataInode=1 installed=true hidden=false",
+                 f"      firstInstallTime={stamp(self.packages[package][1] // 1000)}", "      gids=[3003]",
+                 "      runtime permissions:", *rows, "", "Queries:", "  system apps queryable: false"]
+        if self.flag_outside_block:
+            lines.append("  flags=[ REVIEW_REQUIRED] (not a permission of the package)")
+        return "\n".join(lines) + "\n"
+
     def broadcast(self, component: str) -> runner.Run:
         package = component.split("/")[0]
         variant = self.packages[package][0]
@@ -264,19 +315,23 @@ class ScriptedGuest:
         if variant == "running":
             mapped = {"when-on": bool(value), "never": False, "always": True}[self.layer]
             after = "7" if self.running_can_set else value
+            self.next_pid += 1
+            setpid = self.next_pid
             self.results[package] = (f"context={self.hook_domain}\npid={self.processes[package]}\n"
                                      f"layer={1 if mapped else 0}\nget={value}\n"
-                                     f"set={'allowed' if self.running_can_set else 'denied'}\nafter={after}\ndone\n")
+                                     f"set={'allowed' if self.running_can_set else 'denied'}\nsetpid={setpid}\n"
+                                     f"after={after}\ndone\n")
             domain, can_set = self.hook_domain, self.running_can_set
         else:
             after = "7" if self.app_can_set else value
             self.results[package] = (f"context={self.domain}\nget={value if self.app_view_value is None else self.app_view_value}\n"
                                      f"set={'allowed' if self.app_can_set else 'denied'}\nafter={after}\ndone\n")
             domain, can_set = self.domain, self.app_can_set
-        if not can_set and self.avc_form != "none":
             self.next_pid += 1
+            setpid = self.next_pid
+        if not can_set and self.avc_form != "none":
             template = SOCKET_DENIAL if self.avc_form == "socket" else PROPERTY_DENIAL
-            self.denials.append(template.format(second=len(self.denials) % 60, pid=self.next_pid,
+            self.denials.append(template.format(second=len(self.denials) % 60, pid=setpid,
                                                 serial=len(self.denials) + 1, domain=domain, name=name))
         return runner.Run(0, "Broadcast completed: result=0\n", "")
 
@@ -410,6 +465,40 @@ class ProbePackages(unittest.TestCase):
         self.assertLess(script.index("setprop"), script.index("after="))
         self.assertTrue(script.rstrip().endswith("mv $d/result.tmp $d/result"))
 
+    def test_running_script_reports_the_process_of_the_set(self) -> None:
+        """The log's denial names the `setprop` process, which is not the application's: the script starts the set in
+        the background to know its id, waits for it, and reports the id with the outcome."""
+        script = probe.running_script(probe.package_of("running"), probe.property_of("running"))
+        self.assertIn("& p=$!", script)
+        self.assertIn("wait $p", script)
+        self.assertIn('echo "setpid=$p"', script)
+        self.assertLess(script.index("setprop"), script.index("wait $p"))
+        self.assertLess(script.index("wait $p"), script.index("setpid="))
+        self.assertLess(script.index("setpid="), script.index("after="))
+
+    def test_old_and_its_update_share_one_key_and_no_other_fixture_does(self) -> None:
+        self.assertTrue(probe.same_key("old", "raised") and probe.same_key("raised", "old"))
+        self.assertTrue(probe.same_key("old", "old"))
+        for other in set(probe.SPECS) - {"old", "raised"}:
+            self.assertFalse(probe.same_key("old", other), other)
+            self.assertFalse(probe.same_key(other, "raised"), other)
+        try:
+            with tempfile.TemporaryDirectory(prefix="uml-oldswitch-test-") as scratch:
+                directory = pathlib.Path(scratch)
+                keystore = directory / "family.p12"
+                certificates = {}
+                for variant in ("old", "raised", "modern"):
+                    built = probe.build_apk(directory / f"{variant}.apk", variant, keystore=keystore)
+                    printed = subprocess.run(["keytool", "-printcert", "-jarfile", str(built)], text=True,
+                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                             stderr=subprocess.STDOUT, timeout=120, check=True).stdout
+                    certificates[variant] = re.search(r"SHA256:\s*(\S+)", printed).group(1)
+        except FileNotFoundError:
+            self.skipTest("keytool and jarsigner are not on PATH")
+        self.assertEqual(certificates["old"], certificates["raised"])
+        self.assertNotEqual(certificates["old"], certificates["modern"],
+                            "a fixture outside the family keeps its own key")
+
     def test_signed_packages_hold_the_files_the_manifest_needs(self) -> None:
         """Android 17 refuses a package that declares code and has no classes.dex ("code is missing"): each fixture
         either declares no code or carries a DEX file, and the ones that start a process carry the receiver."""
@@ -475,6 +564,62 @@ class PermissionReview(unittest.TestCase):
                 review.complete_review(guest, package)
 
 
+    def test_the_whole_runtime_permissions_block_is_read(self) -> None:
+        """The flag may be on any row of the package's block, however many rows precede it; it counts nowhere
+        else, and a block ends at the first line that is not deeper than its header."""
+        def dump(*, rows: int, flagged: int | None, header: str = "      runtime permissions:",
+                 after: tuple[str, ...] = ()) -> str:
+            lines = ["  Package [org.example.old] (abc):", "    User 0: installed=true", header]
+            for index in range(rows):
+                flag = " REVIEW_REQUIRED" if index == flagged else ""
+                lines.append(f"        android.permission.P{index}: granted=true, flags=[{flag} ]")
+            return "\n".join([*lines, *after, "    other: x"]) + "\n"
+
+        class Dumping:
+            def __init__(self, text: str) -> None:
+                self.text, self.commands = text, []
+
+            def shell(self, command: str, timeout: float = 30) -> str:
+                self.commands.append(command)
+                return self.text
+
+        for rows, flagged in ((1, 0), (5, 4), (12, 11), (60, 59), (60, 0)):
+            guest = Dumping(dump(rows=rows, flagged=flagged))
+            self.assertTrue(review.review_pending(guest, "org.example.old"), (rows, flagged))
+            self.assertEqual(guest.commands, ["dumpsys package org.example.old"])
+        self.assertFalse(review.review_pending(Dumping(dump(rows=60, flagged=None)), "org.example.old"))
+        # Two users: the flag in the second user's block counts.
+        self.assertTrue(review.review_pending(Dumping(
+            dump(rows=3, flagged=None) + dump(rows=9, flagged=8, header="      runtime permissions:")),
+            "org.example.old"))
+        # Outside a runtime permissions block the flag is another line's.
+        self.assertFalse(review.review_pending(Dumping(
+            dump(rows=3, flagged=None, after=("      flags=[ REVIEW_REQUIRED]",))), "org.example.old"))
+        self.assertFalse(review.review_pending(Dumping(
+            "    install permissions:\n      android.permission.INTERNET: granted=true REVIEW_REQUIRED\n"),
+            "org.example.old"))
+        # A blank line inside the block does not end it; an equally indented line does.
+        self.assertTrue(review.review_pending(Dumping(
+            "    runtime permissions:\n      a: granted=true, flags=[ ]\n\n      b: flags=[ REVIEW_REQUIRED]\n"),
+            "org.example.old"))
+        self.assertFalse(review.review_pending(Dumping(
+            "    runtime permissions:\n      a: flags=[ ]\n    next:\n      b: flags=[ REVIEW_REQUIRED]\n"),
+            "org.example.old"))
+        self.assertEqual(review.runtime_permission_blocks("nothing\n"), [])
+
+    def test_a_flag_after_many_rows_still_gets_the_review_completed(self) -> None:
+        with unittest.mock.patch("time.sleep"), unittest.mock.patch.object(review, "REVIEW_SECONDS", 1):
+            guest = ScriptedGuest()
+            guest.review_row = 40
+            package = probe.package_of("old")
+            self.assertEqual(review.complete_review(guest, package, Failure), "permission review completed")
+            self.assertNotIn(package, guest.review)
+            guest.install_variant("old")
+            guest.flag_outside_block = True
+            guest.review.discard(package)
+            self.assertEqual(review.complete_review(guest, package, Failure), "no review pending")
+
+
 class Parsers(unittest.TestCase):
     def test_listing(self) -> None:
         rows = runner.parse_listing("kernarium_oldapp 1\na.b\tA B\toff\t0\t5\nc.d\tC\ton\t17\t9\textra\n")
@@ -498,16 +643,18 @@ class Parsers(unittest.TestCase):
             runner.evaluate_probe({k: v for k, v in good.items() if k != "done"}, "5")
 
     def test_process_result(self) -> None:
-        good = {"context": HOOK_DOMAIN, "pid": "4001", "layer": "1", "get": "5", "set": "denied", "after": "5",
-                "done": ""}
+        good = {"context": HOOK_DOMAIN, "pid": "4001", "layer": "1", "get": "5", "set": "denied", "setpid": "4002",
+                "after": "5", "done": ""}
         self.assertEqual(runner.evaluate_process(good, "5", mapped=True), 4001)
         self.assertEqual(runner.evaluate_process({**good, "layer": "0", "get": "", "after": ""}, "", mapped=False), 4001)
         for key, value in (("context", "u:r:untrusted_app_29:s0"), ("get", "6"), ("set", "allowed"), ("after", "7"),
-                           ("pid", ""), ("layer", ""), ("layer", "0")):
+                           ("pid", ""), ("layer", ""), ("layer", "0"), ("setpid", ""), ("setpid", "x1")):
             with self.assertRaises(Failure, msg=f"{key}={value}"):
                 runner.evaluate_process({**good, key: value}, "5", mapped=True)
         with self.assertRaises(Failure):
             runner.evaluate_process(good, "5", mapped=False)
+        with self.assertRaises(Failure):
+            runner.evaluate_process({k: v for k, v in good.items() if k != "setpid"}, "5", mapped=True)
 
 
 class Steps(unittest.TestCase):
@@ -676,7 +823,8 @@ class Steps(unittest.TestCase):
     def test_lifecycle(self) -> None:
         guest = self.guest()
         note = runner.check_lifecycle(guest, self.apks())
-        for what in ("reinstalled: cleared", "a raised target level: cleared", "a shared user ID: cleared",
+        for what in ("reinstalled: cleared", "a raised target level, updated in place: cleared",
+                     "a shared user ID: cleared",
                      "uninstalled: cleared", "the earlier one-number form: cleared", "another installation: cleared",
                      "a value that is no time: cleared"):
             self.assertIn(what, note)
@@ -727,6 +875,58 @@ class Steps(unittest.TestCase):
                 runner.check_lifecycle(guest, self.apks())
             self.assertRegex(str(problem.exception), "holds|listing shows|is listed", cause)
 
+    def test_the_raised_target_is_an_update_in_place_that_only_the_eligibility_rule_clears(self) -> None:
+        """The update keeps the installation, so the rule of the installation does not clear the choice: an image
+        without the eligibility rule keeps it, and the row must fail there. A reinstall would have been cleared by
+        the other rule whatever the eligibility rule did."""
+        guest = self.guest()
+        guest.skip_cleanup = {"ineligible"}
+        with self.assertRaises(Failure) as problem:
+            runner.check_lifecycle(guest, self.apks())
+        self.assertIn("still holds a value after the listing, a raised target level", str(problem.exception))
+        self.assertIn("the installation is the same", str(problem.exception))
+        # The same image, with the update done as a reinstall: the installation rule clears it, and the row
+        # notices that the update was not in place.
+        guest = self.guest()
+        guest.skip_cleanup = {"ineligible"}
+        guest.in_place = False
+        with self.assertRaises(Failure) as problem:
+            runner.check_lifecycle(guest, self.apks())
+        self.assertIn("did not update the installation in place", str(problem.exception))
+
+    def test_the_raised_target_is_installed_over_the_installed_package(self) -> None:
+        guest = self.guest()
+        note = runner.check_lifecycle(guest, self.apks())
+        self.assertIn("updated in place", note)
+        commands = guest.commands
+        update = commands.index("adb install -r --bypass-low-target-sdk-block raised.apk")
+        self.assertTrue(commands[update - 1].startswith("dumpsys package "),
+                        "no uninstall between the times and the update")
+        self.assertTrue(commands[update + 1].startswith("dumpsys package "), "the times are read again")
+
+    def test_the_raised_target_needs_the_installation_to_be_unchanged(self) -> None:
+        guest = self.guest()
+        guest.in_place = False
+        with self.assertRaises(Failure) as problem:
+            runner.check_lifecycle(guest, self.apks())
+        self.assertIn("did not update the installation in place", str(problem.exception))
+        # An image whose times do not tell the installations apart (or print no times) is not evidence.
+        guest = self.guest()
+        original = guest.package_dump
+        guest.package_dump = (  # type: ignore[method-assign]
+            lambda package: original(package).replace("firstInstallTime", "firstInstall"))
+        with self.assertRaises(Failure) as problem:
+            runner.check_lifecycle(guest, self.apks())
+        self.assertIn("prints no firstInstallTime and lastUpdateTime", str(problem.exception))
+
+    def test_the_update_needs_one_key(self) -> None:
+        """A package of another key is refused by the package manager; the step reports that as it is."""
+        guest = self.guest()
+        with unittest.mock.patch.object(probe, "same_key", return_value=False):
+            with self.assertRaises(Failure) as problem:
+                runner.check_lifecycle(guest, self.apks())
+        self.assertIn("INSTALL_FAILED_UPDATE_INCOMPATIBLE", str(problem.exception))
+
     def test_lifecycle_needs_off_for_an_ineligible_package(self) -> None:
         guest = self.guest()
         guest.off_needs_eligible = True
@@ -756,7 +956,7 @@ class Steps(unittest.TestCase):
     def test_hook_steps_pass_on_an_image_that_follows_the_contract(self) -> None:
         guest = self.guest()
         report = self.hook(guest)
-        self.assertEqual([status for _, status, _ in report.rows], ["PASS"] * 8, report.rows)
+        self.assertEqual([status for _, status, _ in report.rows], ["PASS"] * 9, report.rows)
         self.assertNotIn(probe.package_of("running"), guest.packages, "the probe is uninstalled again")
 
     def test_hook_steps_notice_each_difference(self) -> None:
@@ -810,7 +1010,7 @@ class Steps(unittest.TestCase):
         report = self.hook(guest)
         status, detail = self.avc_row(report)
         self.assertEqual(status, "FAIL")
-        self.assertIn("no avc line for the application's refused set", detail)
+        self.assertIn("no avc line for the probe's refused set", detail)
         self.assertIn("0 new denial(s) to u:r:untrusted_app_25:*", detail)
         self.assertEqual([name for name, state, _ in report.rows if state == "FAIL"],
                          ["hook: the denied set leaves an avc line"])
@@ -830,7 +1030,142 @@ class Steps(unittest.TestCase):
         guest.broadcast = broadcasting  # type: ignore[method-assign]
         status, detail = self.avc_row(self.hook(guest))
         self.assertEqual(status, "FAIL")
-        self.assertRegex(detail, r"[1-9][0-9]* new denial\(s\) to u:r:untrusted_app_25:\* \(\{ read \} comm=\"sh\" shell_data_file file\)")
+        self.assertRegex(detail, r"[1-9][0-9]* new denial\(s\) to u:r:untrusted_app_25:\*, none of that process "
+                                 r"\(\{ read \} comm=\"sh\" shell_data_file file\)")
+
+    def decoy_run(self, guest: ScriptedGuest, make) -> runner.Report:
+        """Runs the hook steps on an image whose probe leaves no denial of its own, and whose log gains the line
+        `make(setpid, pid, name)` when the probe's process has run: a denial that is not the probe's evidence."""
+        guest.avc_form = "none"
+        original = guest.broadcast
+
+        def broadcasting(component: str) -> runner.Run:
+            result = original(component)
+            package = component.split("/")[0]
+            values = dict(line.split("=", 1) for line in guest.results[package].splitlines() if "=" in line)
+            guest.denials.append(make(int(values["setpid"]), int(values["pid"]), probe.property_of("running")))
+            return result
+
+        guest.broadcast = broadcasting  # type: ignore[method-assign]
+        return self.hook(guest)
+
+    def test_hook_avc_line_must_be_of_the_probes_process(self) -> None:
+        """A denial of the same domain is not the probe's unless it is of the `setprop` process the probe reported,
+        with that domain's categories, and, where the line names a property, of the probe's property."""
+        other = probe.STORE_PROPERTY_PREFIX + "org.example.other"
+
+        def socket(setpid: int, pid: int, name: str, *, process: int | None = None, domain: str = HOOK_DOMAIN,
+                   comm: str = "setprop", permission: str = "write") -> str:
+            line = SOCKET_DENIAL.format(second=5, pid=setpid if process is None else process, serial=70, domain=domain)
+            return line.replace('comm="setprop"', f'comm="{comm}"').replace("{ write }", "{ %s }" % permission)
+
+        def prop(setpid: int, pid: int, name: str, *, process: int | None = None, named: str | None = None,
+                 domain: str = HOOK_DOMAIN) -> str:
+            return PROPERTY_DENIAL.format(second=5, pid=setpid if process is None else process,
+                                          name=named or name, domain=domain)
+
+        passing = (
+            ("socket form, the setprop process", lambda s, a, n: socket(s, a, n)),
+            ("property form, the setprop process and property", lambda s, a, n: prop(s, a, n)),
+        )
+        failing = (
+            ("socket form, another process of the domain", lambda s, a, n: socket(s, a, n, process=s + 100)),
+            ("socket form, the application's own process", lambda s, a, n: socket(s, a, n, process=a)),
+            ("property form, another process of the domain", lambda s, a, n: prop(s, a, n, process=s + 100)),
+            ("property form, the application's own process", lambda s, a, n: prop(s, a, n, process=a)),
+            ("property form, another property", lambda s, a, n: prop(s, a, n, named=other)),
+            ("property form, a prefix of the property", lambda s, a, n: prop(s, a, n, named=n[:-1])),
+            ("socket form, other categories of the domain",
+             lambda s, a, n: socket(s, a, n, domain="u:r:untrusted_app_25:s0:c1,c2")),
+            ("socket form, another process name", lambda s, a, n: socket(s, a, n, comm="sh")),
+            ("socket form, another permission", lambda s, a, n: socket(s, a, n, permission="read")),
+        )
+        for label, make in passing:
+            report = self.decoy_run(self.guest(), make)
+            self.assertEqual(self.avc_row(report)[0], "PASS", f"{label}: {report.rows}")
+        for label, make in failing:
+            report = self.decoy_run(self.guest(), make)
+            status, detail = self.avc_row(report)
+            self.assertEqual(status, "FAIL", f"{label}: {report.rows}")
+            self.assertIn("no avc line for the probe's refused set", detail, label)
+            self.assertIn("1 new denial(s)", detail, label)
+
+    def test_hook_avc_row_names_the_process_it_tied_the_line_to(self) -> None:
+        guest = self.guest()
+        original = guest.broadcast
+        setpids: list[str] = []
+
+        def broadcasting(component: str) -> runner.Run:
+            result = original(component)
+            setpids.append(re.search(r"^setpid=(\d+)$", guest.results[component.split("/")[0]], re.MULTILINE).group(1))
+            return result
+
+        guest.broadcast = broadcasting  # type: ignore[method-assign]
+        report = self.hook(guest)
+        self.assertEqual(len(set(setpids)), len(setpids), "each run of the set is a process of its own")
+        # The broadcasts are the off process, the on process (whose set is checked), the off process, the stale one.
+        self.assertRegex(self.avc_row(report)[1], rf"^setprop process {setpids[1]} refused ")
+
+    def test_denial_parsing_takes_the_process_from_the_text_or_the_logs_prefix(self) -> None:
+        socket = SOCKET_DENIAL.format(second=1, pid=4321, serial=1, domain=HOOK_DOMAIN)
+        self.assertEqual(runner.denied_process(socket), 4321)
+        named = PROPERTY_DENIAL.format(second=1, pid=777, name="x", domain=HOOK_DOMAIN)
+        self.assertEqual(runner.denied_process(named), 777, "the text names the process; the prefix (500) is the log's")
+        self.assertIsNone(runner.denied_process("avc: denied { write } scontext=u:r:x:s0"))
+
+    def test_a_log_that_cannot_be_read_is_a_failure_and_not_an_empty_log(self) -> None:
+        guest = self.guest()
+        self.assertEqual(len(runner.denials(guest)), 1)
+        guest.logcat_fails = lambda read: True
+        with self.assertRaises(Failure) as problem:
+            runner.denials(guest)
+        self.assertIn("the log could not be read: logcat -d -b all exited 1", str(problem.exception))
+
+    def test_hook_avc_row_needs_a_baseline_that_was_read(self) -> None:
+        """With the baseline unread an earlier denial cannot be told from a new one: the baseline row fails, and the
+        avc row says it is not established even though the log holds a matching line."""
+        guest = self.guest()
+        guest.logcat_fails = lambda read: read == 1
+        report = self.hook(guest)
+        rows = {name: (status, detail) for name, status, detail in report.rows}
+        status, detail = rows["hook: the log is read before the probe's set"]
+        self.assertEqual(status, "FAIL")
+        self.assertIn("the log could not be read", detail)
+        status, detail = rows["hook: the denied set leaves an avc line"]
+        self.assertEqual(status, "FAIL")
+        self.assertIn("not established", detail)
+        self.assertEqual(sorted(name for name, state, _ in report.rows if state == "FAIL"),
+                         ["hook: the denied set leaves an avc line", "hook: the log is read before the probe's set"])
+        # The same with the probe leaving no denial of its own and an earlier line of the right shape in the log.
+        guest = self.guest()
+        guest.avc_form = "none"
+        guest.logcat_fails = lambda read: read == 1
+        report = self.hook(guest)
+        self.assertEqual(self.avc_row(report)[0], "FAIL")
+        self.assertTrue(report.failed)
+
+    def test_hook_avc_row_fails_when_the_log_cannot_be_read_afterwards(self) -> None:
+        guest = self.guest()
+        guest.logcat_fails = lambda read: read >= 2
+        report = self.hook(guest)
+        rows = {name: status for name, status, _ in report.rows}
+        self.assertEqual(rows["hook: the log is read before the probe's set"], "PASS")
+        status, detail = self.avc_row(report)
+        self.assertEqual(status, "FAIL")
+        self.assertIn("the log could not be read: logcat -d -b all exited 1", detail)
+
+    def test_hook_avc_row_tries_again_after_a_read_that_failed(self) -> None:
+        guest = self.guest()
+        guest.logcat_fails = lambda read: read == 2
+        with unittest.mock.patch.object(runner, "AVC_SECONDS", 5):
+            report = self.hook(guest)
+        self.assertEqual(self.avc_row(report)[0], "PASS", report.rows)
+        self.assertFalse(report.failed, report.rows)
+
+    def test_hook_avc_row_without_a_result_is_not_a_pass(self) -> None:
+        with self.assertRaises(Failure) as problem:
+            runner.denial_note(self.guest(), set(), None, probe.property_of("running"))
+        self.assertIn("no process to find a denial of", str(problem.exception))
 
     def test_hook_presses_continue_on_the_permission_review_after_each_install(self) -> None:
         """The probe targets API 10: its broadcast is skipped until the review is done, after the install and after the

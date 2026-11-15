@@ -27,10 +27,12 @@ three that each fail one clause of the rule) and, as the adb shell user, checks 
   property with that value and its attempt to set it is refused, with the value unchanged;
 - ``set old off`` exits 0 with ``<package><TAB>off``, the property reads empty and ``list`` shows ``off``;
 - a choice does not outlive its installation: after the application is uninstalled and installed again (at once,
-  with no regard to the clock), or replaced by a package of the same name that is not eligible (a raised target
-  level, a shared user ID; the ``shared`` probe is uninstalled first, because two packages of one shared user ID
-  need one signing key and each probe has a key of its own), or only uninstalled, or the property holds the
-  earlier one-number form or another installation's value, the next ``list`` clears the property and shows the
+  with no regard to the clock), or updated in place by a package that is not eligible any more (the ``raised``
+  probe, signed with the key of ``old``, installed over it without uninstalling: the first-install time is
+  unchanged, so only the eligibility rule can clear the choice), or replaced by a package of the same name with
+  a shared user ID (the ``shared`` probe is uninstalled first, because two packages of one shared user ID need
+  one signing key and it has a key of its own), or only uninstalled, or the property holds the earlier
+  one-number form or another installation's value, the next ``list`` clears the property and shows the
   application ``off`` or not at all;
 - the command's lock is a file of the shell user in its own data directory (type ``shell_data_file``) that only
   its owner can read and write (mode 600), and one that was loosened (mode 666) is tightened by the next command
@@ -40,11 +42,13 @@ three that each fail one clause of the rule) and, as the adb shell user, checks 
 ``--hook`` (an image that also carries the framework hook and the compatibility library) adds the steps that
 need an old application's own process: the process of the ``running`` probe, started by `am broadcast` in the
 hook's domain (``untrusted_app_25``), reads the property and cannot set it (its refused `setprop` leaves an avc
-line in the log, which the step requires and prints: on a user build the refusal is at the property service's
-socket, before the property's own rule; the runner presses Continue on the permission review that an application
-targeting below API 23 gets before its first component runs, after each install of that probe); switching on
-or off ends that process; the process that starts afterwards has the
-layer's library mapped exactly while the switch is on; and a stale choice is gone from the next process. Not
+line in the log, which the step requires and prints: the line of the `setprop` process the probe reports, in the
+probe's domain, naming the probe's property where the audit form does, newer than a baseline read that must
+itself succeed; on a user build the refusal is at the property service's socket, before the property's own rule;
+the runner presses Continue on the permission review that an application targeting below API 23 gets before
+its first component runs, after each install of that probe); switching on or off ends that process; the process
+that starts afterwards has the layer's library mapped exactly while the switch is on; and a stale choice is gone
+from the next process. Not
 automated here: that the choice survives a restart or an Android update of the guest (the image proof's own
 recipe restarts the guest), that a snapshot restore brings it back, that an in-place update of an eligible
 application keeps it (the probe packages are signed with a key of their own per build, so none can update
@@ -101,6 +105,8 @@ EXIT_USAGE = 64
 INSTALL_SECONDS = 180
 COMMAND_SECONDS = 120
 PROBE_SECONDS = 60
+#: Seconds between an install and the update over it, so that the two are told apart to the second.
+UPDATE_GAP_SECONDS = 2
 #: The system application the command must refuse.
 SYSTEM_PACKAGE = "com.android.settings"
 UNKNOWN_PACKAGE = "org.example.andarium.oldswitchprobe.notinstalled"
@@ -185,6 +191,8 @@ def evaluate_process(result: dict[str, str], value: str, mapped: bool) -> int:
         raise Failure("the old application's view of its property differs: " + ", ".join(wrong))
     if not result.get("pid", "").isdigit():
         raise Failure(f"the process reported no process id: {result.get('pid')!r}")
+    if not result.get("setpid", "").isdigit():
+        raise Failure(f"the process reported no process id for its setprop: setpid={result.get('setpid')!r}")
     layer = result.get("layer", "")
     if not layer.isdigit():
         raise Failure(f"the process could not read its own memory map: layer={layer!r}")
@@ -240,9 +248,30 @@ def install(guest, apk: pathlib.Path, package: str) -> None:
     """Installs past the block on old targets (what Andarium's installer does for an old application). Each run
     signs with a key of its own, so an earlier copy goes first."""
     guest.adb_run("uninstall", package, timeout=60)
+    update(guest, apk, package)
+
+
+def update(guest, apk: pathlib.Path, package: str) -> None:
+    """Installs over the installed package, which must be signed with the same key: an update in place, which keeps
+    the installation (and its first-install time)."""
     result = guest.adb_run("install", "-r", "--bypass-low-target-sdk-block", str(apk), timeout=INSTALL_SECONDS)
     if result.returncode != 0 or "Success" not in result.stdout:
         raise Failure(f"installing {package}: {(result.stdout + result.stderr).strip()[-400:]}")
+
+
+class Times(NamedTuple):
+    first_install: str
+    last_update: str
+
+
+def installation_times(guest, package: str) -> Times:
+    """What the package manager prints of the installation (`dumpsys package`: the first-install and last-update times
+    to the second). An update in place moves the second and keeps the first; a reinstall moves both."""
+    dump = guest.shell(f"dumpsys package {package}", timeout=60)
+    found = [re.search(rf"^\s*{name}=(.+?)\s*$", dump, re.MULTILINE) for name in ("firstInstallTime", "lastUpdateTime")]
+    if not all(found):
+        raise Failure(f"`dumpsys package {package}` prints no firstInstallTime and lastUpdateTime")
+    return Times(found[0].group(1), found[1].group(1))
 
 
 def command_present(guest) -> str:
@@ -441,6 +470,13 @@ def switch_off(guest) -> str:
     return f"{name} is empty; listed off"
 
 
+def cleared_off(guest, package: str, what: str) -> None:
+    result = guest.run(f"{COMMAND} set {package} off")
+    if result.status != 0 or result.out != f"{package}\toff\n" or result.err.strip():
+        raise Failure(f"set {package} off with {what}: status {result.status}, out {result.out!r}, "
+                      f"err {result.err.strip()!r}")
+
+
 def check_lifecycle(guest, apks: dict[str, pathlib.Path]) -> str:
     """A choice does not outlive the installation it was made for: the next listing clears it. The property
     survives the uninstall (it is on /data under its own name), so each case first looks for it still there."""
@@ -471,23 +507,41 @@ def check_lifecycle(guest, apks: dict[str, pathlib.Path]) -> str:
         raise Failure(f"{name} still holds a value after the listing of a reinstalled application")
     notes.append("reinstalled: cleared")
 
-    # Replaced by the same package name that is no longer eligible. The shared probe goes first: two packages of
-    # one shared user ID need one signing key, each probe has a key of its own, and its rows are done.
+    # Updated in place by a package that raises the target level: signed with the same key, installed over the
+    # installed package without uninstalling it. The package manager keeps the installation, so the choice still
+    # names it, and only the rule that a package that is not eligible any more keeps no choice can clear it
+    # (after a reinstall the rule of the installation would clear it whatever the eligibility rule says).
+    install(guest, apks["old"], package)
+    value = switched_on()
+    before = installation_times(guest, package)
+    time.sleep(UPDATE_GAP_SECONDS)
+    update(guest, apks["raised"], package)
+    after = installation_times(guest, package)
+    if after.first_install != before.first_install or after.last_update == after.first_install:
+        raise Failure(f"the raised package did not update the installation in place: first install "
+                      f"{before.first_install} then {after.first_install}, last update {after.last_update}")
+    still_stored(value, "the update in place")
+    if row_of(listing_of(guest), "old") is not None:
+        raise Failure("the package is listed after the update that raised its target level")
+    if property_value(guest, name):
+        raise Failure(f"{name} still holds a value after the listing, a raised target level (the installation is "
+                      f"the same, first installed {after.first_install})")
+    cleared_off(guest, package, "a raised target level")
+    notes.append("a raised target level, updated in place: cleared")
+
+    # Replaced by the same package name with a shared user ID. The shared probe goes first: two packages of one
+    # shared user ID need one signing key, the shared probe has a key of its own, and its rows are done.
     guest.adb_run("uninstall", probe.package_of("shared"), timeout=60)
-    for successor, what in (("raised", "a raised target level"), ("oldshared", "a shared user ID")):
-        install(guest, apks["old"], package)
-        value = switched_on()
-        install(guest, apks[successor], package)
-        still_stored(value, f"the replacement with {what}")
-        if row_of(listing_of(guest), "old") is not None:
-            raise Failure(f"the package is listed after the replacement with {what}")
-        if property_value(guest, name):
-            raise Failure(f"{name} still holds a value after the listing, {what}")
-        result = guest.run(f"{COMMAND} set {package} off")
-        if result.status != 0 or result.out != f"{package}\toff\n" or result.err.strip():
-            raise Failure(f"set {package} off with {what}: status {result.status}, out {result.out!r}, "
-                          f"err {result.err.strip()!r}")
-        notes.append(f"{what}: cleared")
+    install(guest, apks["old"], package)
+    value = switched_on()
+    install(guest, apks["oldshared"], package)
+    still_stored(value, "the replacement with a shared user ID")
+    if row_of(listing_of(guest), "old") is not None:
+        raise Failure("the package is listed after the replacement with a shared user ID")
+    if property_value(guest, name):
+        raise Failure(f"{name} still holds a value after the listing, a shared user ID")
+    cleared_off(guest, package, "a shared user ID")
+    notes.append("a shared user ID: cleared")
 
     # Only uninstalled.
     install(guest, apks["old"], package)
@@ -523,53 +577,83 @@ def process_ids(guest, package: str) -> list[int]:
 
 
 def denials(guest) -> list[str]:
-    """The auditd lines of denials to an old application's domain in the whole log."""
-    out = guest.run("logcat -d -b all", timeout=60).out
-    return [line.strip() for line in out.splitlines()
+    """The auditd lines of denials to an old application's domain in the whole log. A log that cannot be read is
+    a failure, never an empty log."""
+    read = guest.run("logcat -d -b all", timeout=60)
+    if read.status != 0:
+        raise Failure(f"the log could not be read: logcat -d -b all exited {read.status}: "
+                      f"{(read.out + read.err).strip()[-200:]}")
+    return [line.strip() for line in read.out.splitlines()
             if "avc" in line and "denied" in line and f"scontext={HOOK_DOMAIN}" in line]
 
 
-def denial_kind(line: str) -> str | None:
-    """Which refusal of an application's `setprop` the line records, or None when it is another denial."""
+def denied_process(line: str) -> int | None:
+    """The process a denial is about: the `pid=` the audit text carries, or else the process id that logcat prints
+    for the line (logd takes the denied process's from the audit record)."""
+    match = re.search(r"\bpid=(\d+)", line) or re.match(r"\s*\d\d-\d\d\s+[\d:.]+\s+(\d+)\s+\d+\s+\w\s", line)
+    return int(match.group(1)) if match else None
+
+
+def denial_kind(line: str, context: str, process: int, name: str) -> str | None:
+    """Which refusal of the probe's `setprop` the line records, or None when it is another denial: one of the
+    process `process` (the `setprop` the probe started, in the domain `context`), and for the property's own rule,
+    of the property `name`."""
+    source = re.search(r"\bscontext=(\S+)", line)
+    if denied_process(line) != process or source is None or source.group(1) != context:
+        return None
     if ('comm="setprop"' in line and "{ write }" in line and "tcontext=u:object_r:property_socket:" in line
             and "tclass=sock_file" in line):
         return "at the property service's socket"
-    if ("{ set }" in line and "tcontext=u:object_r:kernarium_oldapp_prop:" in line
-            and "tclass=property_service" in line):
+    named = re.search(r"\bproperty=(\S+)", line)
+    if ("{ set }" in line and named is not None and named.group(1) == name
+            and "tcontext=u:object_r:kernarium_oldapp_prop:" in line and "tclass=property_service" in line):
         return "by the rule of the property's type"
     return None
 
 
 def denial_summary(line: str) -> str:
-    """The permission, the process name, the target type and class of a denial line, for a failure message."""
-    parts = [re.search(pattern, line) for pattern in (r"denied\s+(\{[^}]*\})", r'(comm="[^"]*")',
-                                                     r"tcontext=u:object_r:([^:\s]+)", r"tclass=(\S+)")]
+    """The process, the permission, the process name, the target type and class of a denial line, for a message."""
+    parts = [re.search(pattern, line) for pattern in (r"(pid=\d+)", r"denied\s+(\{[^}]*\})", r'(comm="[^"]*")',
+                                                     r"(property=\S+)", r"tcontext=u:object_r:([^:\s]+)",
+                                                     r"tclass=(\S+)")]
     return " ".join(part.group(1) for part in parts if part)
 
 
-def denial_note(guest, before: set[str]) -> str:
-    """The refusal that the probe's set left in the log since `before`, or a failure that says what the log held."""
+def denial_note(guest, before: set[str], result: dict[str, str] | None, name: str) -> str:
+    """The refusal of the probe's set that the log gained since `before`: the denial of the `setprop` process the
+    probe reported, in the probe's domain, naming the probe's property where the audit form does. A denial of
+    another process or property is not this probe's evidence, and a log that cannot be read is no evidence."""
+    if result is None:
+        raise Failure("the probe reported no result of its set, so there is no process to find a denial of")
+    context, process = result["context"], int(result["setpid"])
     deadline = time.monotonic() + AVC_SECONDS
+    unreadable = ""
     while True:
-        new = [line for line in denials(guest) if line not in before]
+        new: list[str] = []
+        try:
+            new = [line for line in denials(guest) if line not in before]
+            unreadable = ""
+        except Failure as problem:
+            unreadable = str(problem)
         for line in new:
-            kind = denial_kind(line)
+            kind = denial_kind(line, context, process, name)
             if kind:
-                return f"refused {kind}: {line[line.index('avc'):][:300]}"
+                return f"setprop process {process} refused {kind}: {line[line.index('avc'):][:300]}"
         if time.monotonic() >= deadline:
             seen = sorted({denial_summary(line) for line in new})
-            raise Failure(f"the log shows no avc line for the application's refused set within {AVC_SECONDS} s: "
-                          f"{len(new)} new denial(s) to {HOOK_DOMAIN}*"
-                          + (f" ({'; '.join(seen[:4])})" if seen else "")
+            raise Failure(f"no avc line for the probe's refused set (setprop process {process} in {context}, "
+                          f"property {name}) within {AVC_SECONDS} s: "
+                          + (unreadable if unreadable else f"{len(new)} new denial(s) to {HOOK_DOMAIN}*"
+                             + (f", none of that process ({'; '.join(seen[:4])})" if seen else ""))
                           + "; a refused setprop at the property service's socket, or a refused set of the "
-                          "property, is what the step requires")
+                          "property, of that process is what the step requires")
         time.sleep(1)
 
 
 def check_hook(guest, apks: dict[str, pathlib.Path], report: Report) -> None:
     """The steps that need the framework hook: an old application's own process and the layer in it."""
     package, name = probe.package_of("running"), probe.property_of("running")
-    state: dict[str, int] = {}
+    state: dict = {}
 
     def installed() -> str:
         install(guest, apks["running"], package)
@@ -598,11 +682,17 @@ def check_hook(guest, apks: dict[str, pathlib.Path], report: Report) -> None:
     def on_process() -> str:
         value = property_value(guest, name)
         choice_seconds(value, name)
-        pid = evaluate_process(probe_result(guest, "running"), value, mapped=True)
+        result = probe_result(guest, "running")
+        pid = evaluate_process(result, value, mapped=True)
         if pid == state.get("pid"):
             raise Failure(f"the process after set on is the earlier process {pid}")
         state["pid"] = pid
+        state["result"] = result
         return f"new process {pid}: layer mapped, read {value}, set refused"
+
+    def read_baseline() -> str:
+        state["earlier"] = set(denials(guest))
+        return f"{len(state['earlier'])} earlier denial(s) of {HOOK_DOMAIN}* in the log"
 
     def off_again() -> str:
         pid = evaluate_process(probe_result(guest, "running"), "", mapped=False)
@@ -626,9 +716,15 @@ def check_hook(guest, apks: dict[str, pathlib.Path], report: Report) -> None:
             return
         report.run("hook: off, the old application's process has no layer", off_process)
         report.run("hook: set on ends the application's process", lambda: switch("on"))
-        earlier = set(denials(guest))
+        read = report.run("hook: the log is read before the probe's set", read_baseline)
         report.run("hook: on, the new process maps the layer and reads the property", on_process)
-        report.run("hook: the denied set leaves an avc line", lambda: denial_note(guest, earlier))
+        if read:
+            report.run("hook: the denied set leaves an avc line",
+                       lambda: denial_note(guest, state["earlier"], state.get("result"), name))
+        else:
+            report.add("hook: the denied set leaves an avc line", "FAIL",
+                       "not established: the log could not be read before the probe's set, so an earlier denial "
+                       "cannot be told from a new one")
         report.run("hook: set off ends the process", lambda: switch("off"))
         report.run("hook: off again, the next process has no layer", off_again)
         report.run("hook: a stale choice is gone before the next process", stale)
@@ -653,7 +749,9 @@ def check_real(guest, apk: pathlib.Path, package: str, label: str) -> str:
 def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report) -> None:
     private.mkdir(parents=True, exist_ok=True)
     built = [*probe.VARIANTS, *probe.SUCCESSORS, *(probe.RUNNING if options.hook else ())]
-    apks = {variant: probe.build_apk(private / f"{variant}.apk", variant) for variant in built}
+    # "old" and its update "raised" are signed with one key, so that the second installs over the first in place.
+    keystore = private / "old-family.p12"
+    apks = {variant: probe.build_apk(private / f"{variant}.apk", variant, keystore=keystore) for variant in built}
     if options.serial:
         guest = Serial(adb, options.serial)
         stop = lambda: None  # noqa: E731

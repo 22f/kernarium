@@ -41,8 +41,29 @@ def continue_button(ui: str) -> tuple[int, int] | None:
     return None
 
 
+def runtime_permission_blocks(dump: str) -> list[list[str]]:
+    """The lines of every `runtime permissions:` block of a `dumpsys package` output: the lines after the header
+    that are indented deeper than it, up to the first that is not (the next section of the user's entry)."""
+    blocks: list[list[str]] = []
+    lines = dump.splitlines()
+    for index, line in enumerate(lines):
+        header = re.fullmatch(r"(\s*)runtime permissions:\s*", line)
+        if header is None:
+            continue
+        block = []
+        for following in lines[index + 1:]:
+            if following.strip() and len(following) - len(following.lstrip()) <= len(header.group(1)):
+                break
+            block.append(following)
+        blocks.append(block)
+    return blocks
+
+
 def review_pending(guest, package: str) -> bool:
-    return REVIEW_FLAG in guest.shell(f"dumpsys package {package} | grep -A4 'runtime permissions'")
+    """Whether any permission of the package is flagged for review, read from the whole of its blocks (a package
+    may list many runtime permissions, and the flag may be on any of them)."""
+    dump = guest.shell(f"dumpsys package {package}", timeout=60)
+    return any(REVIEW_FLAG in line for block in runtime_permission_blocks(dump) for line in block)
 
 
 def complete_review(guest, package: str, failure: type[Exception] = RuntimeError) -> str:

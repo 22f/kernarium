@@ -951,15 +951,17 @@ refused for both, and unknown arguments give status 64; `set on` stores the time
 and `list` shows it; an ordinary application (`untrusted_app_29`) reads the value
 and its attempt to set it is refused; `set off` clears it; and a choice is
 cleared by the next listing after a reinstall (at once, whatever the clock says),
-a replacement by a package that is no longer eligible, an uninstall, or a value
+an update in place (same key, installation unchanged) by a package that is no
+longer eligible, a replacement by a shared user ID, an uninstall, or a value
 that names no installation, and the command's lock is a file that only the shell user
 can open (a loosened one is tightened by the next `set`, or by a `list` that
 clears a stale choice, the only listing that uses the lock). `--hook` (an image
 that also carries the framework hook) adds an old application's own process
 (`untrusted_app_25`, started after its permission review is completed): it
-reads the property and cannot set it (the refused `setprop` leaves an avc line,
-at the property service's socket on a user build, which the runner requires and
-prints), switching on or off ends it, the layer's
+reads the property and cannot set it (the refused `setprop` leaves an avc line of
+that `setprop` process in the application's domain, at the property service's
+socket on a user build, which the runner requires and prints; a log that cannot
+be read fails the rows), switching on or off ends it, the layer's
 library is mapped into the next process exactly while the switch is on, and a
 stale choice loads nothing. The restart of a guest (the choice survives it, an
 Android update and a snapshot restore) is the image proof's own step.
