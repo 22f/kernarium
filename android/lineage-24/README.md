@@ -592,13 +592,14 @@ the person switches it on for the games that need it. The store is one
 persistent property per package, `persist.sys.kernarium.oldapp.<package>`; its
 value is the turn-on time and an empty or unset property means off.
 `ActivityThread.handleBindApplication` (a topic of route p0007) tests the
-target level, then the bitness, then reads that property, and only an
-application that is below API 14, 32-bit and switched on gets
-`/system/lib/libkernarium_oldapp.so` (`overlay/oldapp`) in its process; an
-application that is not eligible never reads the property. Packages that share
-a user ID share the process, so the hook also leaves the layer out when the
-user ID has more than one package. A failed load is logged and the application
-starts as before.
+target level, then the bitness, then that the application is not a system
+application (neither `FLAG_SYSTEM` nor `FLAG_UPDATED_SYSTEM_APP`), then reads
+that property, and only an application that is below API 14, 32-bit, not a
+system application and switched on gets `/system/lib/libkernarium_oldapp.so`
+(`overlay/oldapp`) in its process; an application that is not eligible never
+reads the property. Packages that share a user ID share the process, so the
+hook also leaves the layer out when the user ID has more than one package. A
+failed load is logged and the application starts as before.
 Applications that target below API 23 get Android's permission review before
 their first component runs. The library, which includes no Android header,
 patches ART's one JNI function table in place and gives the application:
