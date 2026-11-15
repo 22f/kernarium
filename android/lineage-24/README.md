@@ -407,9 +407,11 @@ it still holds drain as `ERROR_REQUEST` without the frame source, and the opened
 session answers every later request, flush and configuration with the internal
 error; a close succeeds. Any other session is told nothing: the HAL closes the
 camera's video streams between requests, which ends the host's loss, and opens
-them again with the next request. The rules have limits: a configuration after
-`ERROR_DEVICE` is refused by the HAL, which reaches a client as an illegal-argument
-answer and leaves no capture session behind, so a flush after it returns OK; and a
+them again with the next request. The rules have limits: the camera service
+refuses further work on a device in its error state, so a client that reaches the
+HAL after `ERROR_DEVICE` talks to the provider directly, and there a configuration
+is refused by the HAL, which reaches the client as an illegal-argument answer and
+leaves no capture session behind, so a flush after it returns OK; and a
 session closed while it still holds requests returns their buffers as errors
 without a request error for each, and a flush notifies the errors of the requests
 it holds in the order it reaches them, which can precede the request in the
