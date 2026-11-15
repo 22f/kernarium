@@ -56,8 +56,8 @@ uml_add_tooling_test(
 # is shown to be dead, and where it cannot tell (a heartbeat it cannot read, an
 # approval the device may have asked for, what is left of the old host) it
 # replaces nothing and ends with a status of its own. The tests run the real
-# script and its supervisor against fake `xcrun` and `xcodebuild` executables
-# in a scratch folder.
+# script and its supervisor against fake `xcrun`, `xcodebuild` and
+# `caffeinate` executables in a scratch folder.
 uml_add_tooling_test(
     NAME kernarium-ipad-automation-watch
     COMMAND ${Python3_EXECUTABLE}
