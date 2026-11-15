@@ -252,6 +252,18 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 60)
 
+# What the camera HAL does when the host ends the video of a camera (the
+# application left the foreground): the callback path of the sensor is run, the
+# series' own source compiled against stub headers, and the wiring of the rest
+# of the series is read as text; nothing boots.
+uml_add_tooling_test(
+    NAME android17-camera-device-lost
+    COMMAND ${CMAKE_COMMAND} -E env UML_CXX=${CMAKE_CXX_COMPILER}
+        ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_camera_device_lost.py
+    LABELS android
+    TIMEOUT 180)
+
 # The microG spoofing probe's sources agree with each other and with the
 # certificate LineageOS compares with, and its runner reads `am instrument`.
 uml_add_tooling_test(
