@@ -53,9 +53,12 @@ The runner checks, in this order:
   holds the camera's hardware toggle (``dumpsys sensor_privacy``) and a live one does not. Opening the camera
   application shows no sensor privacy dialog in either (SystemUI's "Unblock device camera?" cannot lift a
   hardware toggle): no window of SystemUI with that dialog's title or Unblock button in the interface dump,
-  and SystemUI's SensorUseStartedActivity never started, judged again at the end of the scenario. In a
-  blocked session the sensor privacy service says, within a bounded wait, that it withheld the reminder of
-  the camera application (its log line, which the framework patch adds); in a live one that line is absent;
+  and SystemUI's SensorUseStartedActivity never started. The guest's main and events logs are captured
+  continuously to a file (``--output-dir``, else the run's temporary directory) from before the camera
+  application opens until the last check, so those two judgements cover the whole session and not what a
+  finite buffer still holds. In a blocked session the sensor privacy service says, within a deadline, that it
+  withheld the reminder of the camera application (its log line, which the framework patch adds); in a live
+  one that line is absent;
 - none: no camera feature and no camera at all.
 
 Every wait has a deadline. The guest's launcher is stopped through its own process on any exit, and the
@@ -168,6 +171,12 @@ SENSOR_DIALOG_TEXTS = ("Unblock", "Unblock device camera?")
 # withholds the reminder of a camera that the hardware toggle blocks, with the package in parentheses.
 SENSOR_REMINDER_LINE = "kernarium: no reminder for a camera that the hardware toggle blocks"
 SENSOR_REMINDER_SECONDS = 90
+# The continuous capture of the guest's main and events logs: its first lines come within this long of its start.
+CAPTURE_START_SECONDS = 30
+CAPTURE_STOP_SECONDS = 10
+CAPTURE_BUFFERS = ("main", "events")
+SENSOR_CAPTURE_PATTERN = "SensorPrivacy|SensorUseStartedActivity|kernarium: no reminder"
+SENSOR_CAPTURE_LINES = 30
 UI_DUMP_PATH = "/data/local/tmp/camera-runner-ui.xml"
 UI_DUMP_ATTEMPTS = 4
 UI_DUMP_GAP_SECONDS = 4
@@ -1012,6 +1021,62 @@ def parse_jpeg(data: bytes) -> Jpeg:
 
 # ---- The guest.
 
+class SessionCapture:
+    """The guest's main and events logs, captured continuously to a file by one `adb logcat` process that the
+    runner starts and stops (its pid is recorded beside the file). The platform's buffers are finite and a read
+    at the end of a scenario sees only what has not rolled out, so the checks that need the whole session read
+    this file; a capture that ends before it is stopped is a Failure of its own."""
+
+    def __init__(self, adb: str, serial: str, path: pathlib.Path) -> None:
+        self.adb, self.serial, self.path = adb, serial, path
+        self.pid_path = path.with_name(path.name + ".pid")
+        self.process: subprocess.Popen | None = None
+
+    def start(self) -> None:
+        arguments = [self.adb, "-s", self.serial, "logcat",
+                     *(item for buffer in CAPTURE_BUFFERS for item in ("-b", buffer)), "-v", "threadtime"]
+        stream = self.path.open("wb")
+        try:
+            self.process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=stream,
+                                            stderr=subprocess.STDOUT, start_new_session=True)
+        finally:
+            stream.close()
+        self.pid_path.write_text(f"{self.process.pid}\n", encoding="utf-8")
+        deadline = time.monotonic() + CAPTURE_START_SECONDS
+        while self.path.stat().st_size == 0:
+            self.check()
+            if time.monotonic() >= deadline:
+                self.stop()
+                raise Failure(f"the log capture (pid {self.process.pid}) wrote nothing in {CAPTURE_START_SECONDS} s")
+            time.sleep(0.5)
+
+    def check(self) -> None:
+        """Raises when the capture is not running: it ended on its own (the device went away, adb died)."""
+        if self.process is None:
+            raise Failure("the log capture was never started")
+        status = self.process.poll()
+        if status is not None:
+            tail = self.path.read_text(errors="replace")[-300:] if self.path.is_file() else ""
+            raise Failure(f"the log capture (pid {self.process.pid}) ended early with status {status}; "
+                          f"its last output: {tail!r}")
+
+    def text(self) -> str:
+        self.check()
+        return self.path.read_text(errors="replace")
+
+    def stop(self) -> None:
+        """Stops the process this object started, and only it."""
+        process = self.process
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(CAPTURE_STOP_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(CAPTURE_STOP_SECONDS)
+
+
 class Guest:
     def __init__(self, adb: str, serial: str, process: subprocess.Popen, log: pathlib.Path,
                  private: pathlib.Path, hold_directory: pathlib.Path | None = None,
@@ -1025,6 +1090,8 @@ class Guest:
         self.hold_directory = hold_directory
         # Whether the launcher gave the guest the side keys (--hardware-input): the device that reports the lens cover.
         self.hardware_input = hardware_input
+        # The continuous capture of the guest's main and events logs, once the runner has started it.
+        self.capture: SessionCapture | None = None
 
     def adb_run(self, *arguments: str, timeout: float = COMMAND_SECONDS,
                 binary: bool = False) -> subprocess.CompletedProcess:
@@ -1056,11 +1123,12 @@ class Guest:
     def sensor_privacy(self) -> str:
         return self.shell("dumpsys sensor_privacy")
 
-    def activity_events(self) -> str:
-        return self.shell("logcat -d -b events 2>&1 | grep -a wm_create_activity || true")
-
-    def sensor_reminder_log(self) -> str:
-        return self.shell(f"logcat -d -b main 2>&1 | grep -a -F '{SENSOR_REMINDER_LINE}' || true")
+    def session_log(self) -> str:
+        """The main and events logs since the capture began (all of them, however long ago); a capture that is
+        absent or has ended is a Failure, never an empty log."""
+        if self.capture is None:
+            raise Failure("the session's logs are not being captured")
+        return self.capture.text()
 
     def interface_dump(self) -> str:
         """The XML of `uiautomator dump`, retried while the platform answers that it has no idle state."""
@@ -1320,10 +1388,10 @@ def sensor_dialog_nodes(dump: str) -> list[str]:
     return found
 
 
-def sensor_dialog_starts(events: str) -> int:
-    """How many times the event log created SystemUI's sensor privacy dialog, from the wm_create_activity
-    lines of `logcat -b events`."""
-    return sum(SENSOR_DIALOG_ACTIVITY in line for line in events.splitlines() if "wm_create_activity" in line)
+def sensor_dialog_starts(log: str) -> int:
+    """How many times the captured log created SystemUI's sensor privacy dialog, from its wm_create_activity
+    lines (the events buffer)."""
+    return sum(SENSOR_DIALOG_ACTIVITY in line for line in log.splitlines() if "wm_create_activity" in line)
 
 
 def withheld_reminders(log: str) -> int:
@@ -1371,11 +1439,19 @@ def start_camera_application(guest: Guest, action: str = "android.media.action.S
 
 
 def wait_for_withheld_reminder(guest: Guest) -> None:
-    """The camera application has been started in a blocked session: the sensor privacy service says, within
-    SENSOR_REMINDER_SECONDS, that it withheld the application's reminder."""
-    wait_for("the sensor privacy service withholding the reminder of the blocked camera", SENSOR_REMINDER_SECONDS,
-             lambda: None if withheld_reminders(guest.sensor_reminder_log())
-             else f"no log line {SENSOR_REMINDER_LINE!r} for {CAMERA_PACKAGE}", guest)
+    """The camera application has been started in a blocked session: the sensor privacy service says, before
+    SENSOR_REMINDER_SECONDS have passed since this call began, that it withheld the application's reminder. The
+    wait reads the capture file, never a guest command; a look that completes after the deadline does not count,
+    and a capture that has ended is a Failure, not a wait that went on."""
+    deadline = time.monotonic() + SENSOR_REMINDER_SECONDS
+    while time.monotonic() < deadline:
+        guest.alive()
+        seen = withheld_reminders(guest.session_log())
+        if seen and time.monotonic() <= deadline:
+            return
+        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+    raise Failure(f"the sensor privacy service did not withhold the reminder of the blocked camera: no log line "
+                  f"{SENSOR_REMINDER_LINE!r} for {CAMERA_PACKAGE} (after {SENSOR_REMINDER_SECONDS} s)")
 
 
 def check_preview(guest: Guest, plan: Plan) -> None:
@@ -1435,8 +1511,8 @@ def check_sensor_dialog(guest: Guest, plan: Plan) -> None:
     """The camera application is open (the caller started it and, in a blocked session, waited for the service's
     log line). The camera switch reaches Android as the camera's hardware toggle exactly when the session is
     blocked, and SystemUI's "Unblock" dialog, which cannot lift a hardware toggle, is not on the screen and was
-    never started; the sensor privacy service withheld the camera's reminder in a blocked session and logged
-    nothing in a live one."""
+    never started; the sensor privacy service has logged that it withheld the camera's reminder in a blocked
+    session, and nothing in a live one."""
     if not guest.hardware_input:
         print("  sensor privacy: not run, the guest has no side keys (start it with --hardware-input)")
         return
@@ -1447,25 +1523,26 @@ def check_sensor_dialog(guest: Guest, plan: Plan) -> None:
     nodes = sensor_dialog_nodes(guest.interface_dump())
     if nodes:
         raise Failure(f"SystemUI's sensor privacy dialog is on the screen of the {plan.mode} session: {nodes}")
-    check_sensor_history(guest, plan)
-    print(f"  sensor privacy: hardware toggle {'set' if blocked else 'not set'}; no dialog on the screen, "
-          f"SystemUI's dialog never started; reminder withheld "
-          f"{withheld_reminders(guest.sensor_reminder_log())} time(s)")
-
-
-def check_sensor_history(guest: Guest, plan: Plan) -> None:
-    """What the guest's logs say about the whole session so far: SystemUI's dialog was never created, and the
-    sensor privacy service withheld the camera's reminder (blocked) or did not (live)."""
-    if not guest.hardware_input:
-        return
-    dialogs = sensor_dialog_starts(guest.activity_events())
-    if dialogs:
-        raise Failure(f"SystemUI's {SENSOR_DIALOG_ACTIVITY} was started {dialogs} time(s) in the {plan.mode} "
-                      "session: the platform offered to unblock a camera that no guest setting can unblock")
-    withheld = withheld_reminders(guest.sensor_reminder_log())
+    withheld = withheld_reminders(guest.session_log())
     if plan.mode == "blocked" and not withheld:
         raise Failure(f"the sensor privacy service did not log {SENSOR_REMINDER_LINE!r} for {CAMERA_PACKAGE} in "
                       "the blocked session: the framework patch is absent, or the reminder was not withheld")
+    check_sensor_history(guest, plan)
+    print(f"  sensor privacy: hardware toggle {'set' if blocked else 'not set'}; no dialog on the screen, "
+          f"SystemUI's dialog never started; reminder withheld {withheld} time(s)")
+
+
+def check_sensor_history(guest: Guest, plan: Plan) -> None:
+    """The absence checks over the whole captured session so far: SystemUI's dialog was never created, and a
+    live session never had the camera's reminder withheld."""
+    if not guest.hardware_input:
+        return
+    log = guest.session_log()
+    dialogs = sensor_dialog_starts(log)
+    if dialogs:
+        raise Failure(f"SystemUI's {SENSOR_DIALOG_ACTIVITY} was started {dialogs} time(s) in the {plan.mode} "
+                      "session: the platform offered to unblock a camera that no guest setting can unblock")
+    withheld = withheld_reminders(log)
     if plan.mode != "blocked" and withheld:
         raise Failure(f"the sensor privacy service withheld the camera's reminder {withheld} time(s) in a {plan.mode} "
                       "session: the camera is not under the hardware toggle there")
@@ -2166,6 +2243,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="start the guest on a loopback VNC display with the launcher's --hardware-input, as "
                         "the host's application does, so that it has the side-key device (the camera lens cover "
                         "switch); a blocked session always does, a live one by this option")
+    parser.add_argument("--output-dir", type=pathlib.Path,
+                        help="where the captured session log (and its pid file) is kept; without it the log is in the "
+                        "run's temporary directory and goes with it")
     parser.add_argument("--vnc-port", type=int, default=slot_ports.slot_port(VNC_OFFSET, DEFAULT_VNC_PORT),
                         help="loopback port of the guest's VNC display with --hardware-input (default: the guest "
                         f"slot's second port when GUEST_SLOT_PORT_BASE is set, else {DEFAULT_VNC_PORT})")
@@ -2207,6 +2287,22 @@ def print_camera_log(guest: Guest) -> None:
     except Exception as problem:
         print(f"(no foreground state: {problem})", file=sys.stderr)
     print_application_events(guest, sys.stderr)
+
+
+def print_sensor_capture(guest: Guest) -> None:
+    """At a failure, where the session's captured log is and what it says about the sensor privacy service."""
+    capture = guest.capture
+    if capture is None:
+        return
+    try:
+        lines = [line for line in capture.path.read_text(errors="replace").splitlines()
+                 if re.search(SENSOR_CAPTURE_PATTERN, line)]
+        pid = capture.pid_path.read_text().strip()
+    except OSError as problem:
+        print(f"(no captured session log: {problem})", file=sys.stderr)
+        return
+    print(f"sensor privacy lines of the captured session ({capture.path}, capture pid {pid}):\n"
+          + ("\n".join(lines[-SENSOR_CAPTURE_LINES:]) or "(none)"), file=sys.stderr)
 
 
 def print_application_events(guest: Guest, stream) -> None:
@@ -2255,6 +2351,12 @@ def main() -> int:
     guest: Guest | None = None
     try:
         guest = start_guest(options, plan, adb, private)
+        if guest.hardware_input:
+            # The sensor privacy checks judge the whole session: capture its logs from before the camera opens.
+            output = options.output_dir or private
+            output.mkdir(parents=True, exist_ok=True)
+            guest.capture = SessionCapture(adb, guest.serial, output / f"camera-session-{plan.mode}.log")
+            guest.capture.start()
         run_checks(guest, plan)
         print("PASS")
         return 0
@@ -2262,6 +2364,7 @@ def main() -> int:
         print(f"FAIL: {problem}", file=sys.stderr)
         if guest is not None and not isinstance(problem, boot_android.LauncherError):
             print_camera_log(guest)
+            print_sensor_capture(guest)
         log = private / "emulator.log"
         if log.is_file():
             print("launcher log tail:\n" + "\n".join(log.read_text(errors="replace").splitlines()[-30:]),
@@ -2269,6 +2372,8 @@ def main() -> int:
         return 1
     finally:
         if guest is not None:
+            if guest.capture is not None:
+                guest.capture.stop()
             boot_android.disconnect_adb(adb, guest.serial)
             boot_android.stop_guest(guest.process)
         shutil.rmtree(private, ignore_errors=True)
