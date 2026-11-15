@@ -27,11 +27,11 @@ A session with a stream whose usage carries the video encoder bit
   open the camera again.
 - Each request the session still holds drains in order as ERROR_REQUEST
   with error buffers, and the frame source is not asked again.
-- processCaptureRequest and configureStreams answer INTERNAL_ERROR from
-  then on, flush ends what the session holds as failed requests and
-  answers OK, a close succeeds, and a session opened afterwards is a
-  new one. The state belongs to the opened session, not to a frame
-  source or a sensor that a reconfiguration replaces.
+- processCaptureRequest, flush and configureStreams answer INTERNAL_ERROR
+  from then on (a flush ends what the session holds as failed requests
+  first), a close succeeds, and a session opened afterwards is a new
+  one. The state belongs to the opened session, not to a frame source or
+  a sensor that a reconfiguration replaces.
 
 Any other session is told nothing:
 
@@ -46,7 +46,7 @@ A failed buffer without that record keeps its old meaning.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- .../EmulatedCameraDeviceSessionHWLImpl.cpp    | 51 +++++++++++-
+ .../EmulatedCameraDeviceSessionHWLImpl.cpp    | 49 +++++++++++-
  .../hwl/EmulatedCameraDeviceSessionHWLImpl.h  |  5 ++
  devices/EmulatedCamera/hwl/EmulatedSensor.cpp |  5 ++
  devices/EmulatedCamera/hwl/EmulatedSensor.h   | 10 +++
@@ -54,10 +54,10 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  devices/EmulatedCamera/hwl/IFrameSource.h     | 17 ++++
  .../EmulatedCamera/hwl/V4l2FrameSource.cpp    | 53 +++++++++++++
  devices/EmulatedCamera/hwl/V4l2FrameSource.h  | 15 ++++
- 8 files changed, 216 insertions(+), 18 deletions(-)
+ 8 files changed, 214 insertions(+), 18 deletions(-)
 
 diff --git a/devices/EmulatedCamera/hwl/EmulatedCameraDeviceSessionHWLImpl.cpp b/devices/EmulatedCamera/hwl/EmulatedCameraDeviceSessionHWLImpl.cpp
-index 337677a5ad2544e1220f538a062609ffd7613c8a..e015fb80dd1a24153233aa7e2b097e9a4163205b 100644
+index 337677a5ad2544e1220f538a062609ffd7613c8a..bbc7c6449c1fbc1c8bf3b4854f2ee4728ca88538 100644
 --- a/devices/EmulatedCamera/hwl/EmulatedCameraDeviceSessionHWLImpl.cpp
 +++ b/devices/EmulatedCamera/hwl/EmulatedCameraDeviceSessionHWLImpl.cpp
 @@ -34,6 +34,23 @@
@@ -151,18 +151,16 @@ index 337677a5ad2544e1220f538a062609ffd7613c8a..e015fb80dd1a24153233aa7e2b097e9a
    // Check whether reprocess request has valid/supported outputs.
    if (!request.input_buffers.empty()) {
      for (const auto& input_buffer : request.input_buffers) {
-@@ -504,6 +544,15 @@ status_t EmulatedCameraDeviceSessionHwlImpl::SubmitBatchRequest(
+@@ -504,6 +544,13 @@ status_t EmulatedCameraDeviceSessionHwlImpl::SubmitBatchRequest(
  status_t EmulatedCameraDeviceSessionHwlImpl::Flush() {
    ATRACE_CALL();
    std::lock_guard<std::mutex> lock(api_mutex_);
 +  if (health_->lost()) {
-+    // What the session still holds ends as failed requests, and the flush answers OK once it has: the
-+    // framework flushes a device it was told is gone before it closes it, and an error answer is for a
-+    // flush that malfunctioned, not for a device that is already reported.
++    // What the session still holds ends as failed requests; the flush itself answers that the device is gone.
 +    if (request_processor_ != nullptr) {
 +      request_processor_->Flush();
 +    }
-+    return OK;
++    return UNKNOWN_ERROR;
 +  }
    return request_processor_->Flush();
  }

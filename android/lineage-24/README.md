@@ -406,10 +406,11 @@ buffer returned as an error and an `ERROR_REQUEST` (the camera service returns a
 request's buffers only for a request it was told failed), the HAL reports
 `ERROR_DEVICE` once besides, the requests it still holds drain as
 `ERROR_REQUEST` without the frame source, and the opened session answers every
-later request and configuration with the internal error and a flush with OK once
-it has drained; a close succeeds. Any other session is told nothing: the HAL
-closes the camera's video streams between requests, which ends the host's loss,
-and opens them again with the next request. The rules have limits: the camera service
+later request, flush and configuration with the internal error (a flush first
+ends what the session holds as failed requests); a close succeeds. Any other
+session is told nothing: the HAL closes the camera's video streams between
+requests, which ends the host's loss, and opens them again with the next
+request. The rules have limits: the camera service
 refuses further work on a device in its error state, so a client that reaches the
 HAL after `ERROR_DEVICE` talks to the provider directly, and there a configuration
 is refused by the HAL, which reaches the client as an illegal-argument answer and

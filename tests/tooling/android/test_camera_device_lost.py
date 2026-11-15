@@ -7,8 +7,8 @@ fail under a black, interrupted metadata record for as long as the guest keeps t
 The HAL (route p0030) decides by the session's streams. A session with a stream whose usage carries the video encoder bit is over:
 the request that met the loss fails as a whole with every output buffer returned as an error, the framework is told that the
 request failed (ERROR_REQUEST) and, once per session, ERROR_DEVICE besides, later requests drain as ERROR_REQUEST, and the session
-answers every later request and configuration with the internal error and a flush with OK once what it holds has drained. Any other
-session is told nothing: the frame source closes the camera's video streams between requests and opens them again.
+answers every later request, flush and configuration with the internal error (a flush first ends what the session holds as failed
+requests). Any other session is told nothing: the frame source closes the camera's video streams between requests and opens them again.
 
 What this row holds. The callback path of the sensor is executed: the series' own EmulatedSensorHost.cpp is compiled unchanged
 against stub headers (camera_hal_probe/stub) and run with a scripted frame source, so the notifications and the buffers that come
@@ -284,18 +284,18 @@ class WiringTests(unittest.TestCase):
         self.assertRegex(self.session, r"emulated_sensor->SetSessionHealth\(health_\);")
         # processCaptureRequest (SubmitRequestLocked), flush, configureStreams (ConfigurePipeline) and BuildPipelines.
         self.assertGreaterEqual(self.session.count("if (health_->lost()) {"), 4)
-        self.assertEqual(self.session.count("return UNKNOWN_ERROR;"), 3, "all but the flush answer the internal error")
+        self.assertEqual(self.session.count("return UNKNOWN_ERROR;"), 4, "each answers the internal error")
         self.assertRegex(self.session, r"health_->set_encoder_stream\(HasEncoderStream\(request_config\) \|\|\s*HasEncoderStream\(overall_config\)\);")
         self.assertIn("static_assert(GRALLOC_USAGE_HW_VIDEO_ENCODER == andarium::camera::usage_video_encoder", self.session)
         self.assertIn("std::shared_ptr<andarium::camera::SessionHealth> health_ =", added_lines(f"{HWL}/EmulatedCameraDeviceSessionHWLImpl.h"))
         self.assertIn("SetSessionHealth(std::shared_ptr<andarium::camera::SessionHealth> health)", self.sensor_header)
         self.assertIn("frame_source_->SetSessionHealth(session_health_);", self.sensor_setup)
 
-    def test_a_flush_of_a_session_that_is_over_drains_and_answers_ok(self) -> None:
-        # The framework flushes a device it was told is gone before it closes it; the interface wants OK once the requests
-        # drained, and the framework logs an error answer.
+    def test_a_flush_of_a_session_that_is_over_ends_its_requests_and_answers_the_internal_error(self) -> None:
+        # The interface answers an error for a device that met a serious error (only close may follow), and a successful flush
+        # promises that no request or buffer is outstanding, which a sensor that holds a frame between its stages cannot promise.
         self.assertRegex(self.session, r"if \(health_->lost\(\)\) \{\n(?:\s*//[^\n]*\n)+\s*if \(request_processor_ != nullptr\) \{\n"
-                                       r"\s*request_processor_->Flush\(\);\n\s*\}\n\s*return OK;\n\s*\}")
+                                       r"\s*request_processor_->Flush\(\);\n\s*\}\n\s*return UNKNOWN_ERROR;\n\s*\}")
 
     def test_nothing_else_reports_the_device_gone(self) -> None:
         # ERROR_DEVICE ends the session for the framework; an ordinary hiccup must never take that path.
