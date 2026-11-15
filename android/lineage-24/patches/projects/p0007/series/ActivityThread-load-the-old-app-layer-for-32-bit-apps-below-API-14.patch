@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yi Xie <imxieyi@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 05:13:47 +0000
+Subject: [PATCH] ActivityThread: load the old-app layer for 32-bit apps below
+ API 14
+
+Games written for Dalvik, which kept direct object pointers for a
+32-bit application with targetSdkVersion below 14, do not start on ART:
+they read a Java byte[] through its object pointer, leak local
+references and assume a heap below 2 GiB. The product ships a library
+that gives such an application's native code those behaviours
+(device/kernarium/andarium/oldapp). Load it into the process of a
+32-bit application that targets below API 14, in handleBindApplication
+next to the other legacy-application handling and before any code of
+the application can run, and into no other process. A failed load is
+logged and the application starts as before.
+---
+ core/java/android/app/ActivityThread.java | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/core/java/android/app/ActivityThread.java b/core/java/android/app/ActivityThread.java
+index b7d9f653023e91bc8c9145f0f6bf3014f921503c..d798332ffbc817da39797790ffc18150947bbc36 100644
+--- a/core/java/android/app/ActivityThread.java
++++ b/core/java/android/app/ActivityThread.java
+@@ -8048,6 +8048,20 @@ public final class ActivityThread extends ClientTransactionHandler
+             AsyncTask.setDefaultExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
+         }
+ 
++        // An application written for Dalvik (a 32-bit one that targets below API 14) reads a
++        // Java byte[] through its object pointer, leaks local references and assumes a heap
++        // below 2 GiB. This library gives its native code what Dalvik gave it; nothing else
++        // in the process changes, and no other application maps it. It is loaded before any
++        // code of the application can run.
++        if (!Process.is64Bit()
++                && data.appInfo.targetSdkVersion < Build.VERSION_CODES.ICE_CREAM_SANDWICH) {
++            try {
++                System.load("/system/lib/libkernarium_oldapp.so");
++            } catch (Throwable t) {
++                Slog.w(TAG, "kernarium: old-application layer not loaded", t);
++            }
++        }
++
+         // Let the util.*Array classes maintain "undefined" for apps targeting Pie or earlier.
+         UtilConfig.setThrowExceptionForUpperArrayOutOfBounds(
+                 data.appInfo.targetSdkVersion >= Build.VERSION_CODES.Q);
