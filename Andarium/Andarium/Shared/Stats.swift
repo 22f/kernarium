@@ -175,7 +175,7 @@ struct StatsPill: View {
                     .frame(width: 30, height: 16)
                 metric("CPU", readout.cpuText)
             }
-            meter("Memory", readout.memoryUsedText, share: readout.memoryFraction(of: memoryMiB))
+            meter("RAM", readout.memoryUsedText, share: readout.memoryFraction(of: memoryMiB))
             meter("VRAM", readout.vramUsedText, share: readout.vramFraction)
             if !recovery {
                 metric("FPS", readout.fpsNumber)
@@ -189,7 +189,9 @@ struct StatsPill: View {
         .accessibilityLabel(readout.spoken(memoryMiB: memoryMiB, recovery: recovery))
     }
 
-    private func metric(_ title: LocalizedStringKey, _ value: String) -> some View {
+    /// The titles are plain strings: the capsule says CPU, RAM, VRAM and FPS
+    /// in every language.
+    private func metric(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(title)
                 .font(.system(size: 9, weight: .semibold))
@@ -203,7 +205,7 @@ struct StatsPill: View {
     }
 
     /// A figure over a bar as wide as the figure's column.
-    private func meter(_ title: LocalizedStringKey, _ value: String, share: Double?) -> some View {
+    private func meter(_ title: String, _ value: String, share: Double?) -> some View {
         metric(title, value)
             .frame(minWidth: 40, alignment: .leading)
             .padding(.bottom, 5)

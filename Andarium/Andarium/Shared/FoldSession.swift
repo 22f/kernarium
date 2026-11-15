@@ -110,7 +110,7 @@ struct RailStats: View {
                 Sparkline(values: readout.history)
                     .frame(width: 52, height: 12)
             }
-            meter("Memory", readout.memoryUsedText, share: readout.memoryFraction(of: memoryMiB))
+            meter("RAM", readout.memoryUsedText, share: readout.memoryFraction(of: memoryMiB))
             meter("VRAM", readout.vramUsedText, share: readout.vramFraction)
             if !recovery {
                 metric("FPS", readout.fpsNumber)
@@ -127,7 +127,9 @@ struct RailStats: View {
         .onDisappear { model.statistics(.pill, visible: false) }
     }
 
-    private func metric(_ title: LocalizedStringKey, _ value: String) -> some View {
+    /// The titles are plain strings: the capsule says CPU, RAM, VRAM and FPS
+    /// in every language.
+    private func metric(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(title)
                 .font(.system(size: 9, weight: .semibold))
@@ -142,7 +144,7 @@ struct RailStats: View {
         .frame(width: 52, alignment: .leading)
     }
 
-    private func meter(_ title: LocalizedStringKey, _ value: String, share: Double?) -> some View {
+    private func meter(_ title: String, _ value: String, share: Double?) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             metric(title, value)
             ShareBar(share: share)
