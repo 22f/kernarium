@@ -121,3 +121,27 @@ uml_add_unit_test(NAME andarium-wifi-mac
     COMMAND uml_andarium_wifi_mac_tests
         ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/wifi-mac-golden-vectors.txt
     LABELS andarium)
+
+# The old-application layer (android/lineage-24/overlay/oldapp), which lets a
+# 32-bit application written for Android before 4.0 start on ART: the
+# allocator that keeps its heap below 2 GiB, the scan of an application
+# library's relocations for the allocator imports to redirect (synthetic
+# ELF32 images), and the JNI interposer against a fake function table. The
+# interposer's table indices are checked against the JDK's jni.h member order
+# (the fixture's path is the test's argument).
+set(UML_OLDAPP_DIR ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/oldapp)
+add_executable(uml_andarium_oldapp_arena_tests oldapp_arena_tests.cpp)
+target_include_directories(uml_andarium_oldapp_arena_tests PRIVATE ${UML_OLDAPP_DIR})
+uml_add_unit_test(NAME andarium-oldapp-arena
+    COMMAND uml_andarium_oldapp_arena_tests LABELS andarium)
+
+add_executable(uml_andarium_oldapp_elf_scan_tests oldapp_elf_scan_tests.cpp)
+target_include_directories(uml_andarium_oldapp_elf_scan_tests PRIVATE ${UML_OLDAPP_DIR})
+uml_add_unit_test(NAME andarium-oldapp-elf-scan
+    COMMAND uml_andarium_oldapp_elf_scan_tests LABELS andarium)
+
+add_executable(uml_andarium_oldapp_jni_tests oldapp_jni_tests.cpp ${UML_OLDAPP_DIR}/jni_shim.cpp)
+target_include_directories(uml_andarium_oldapp_jni_tests PRIVATE ${UML_OLDAPP_DIR})
+uml_add_unit_test(NAME andarium-oldapp-jni
+    COMMAND uml_andarium_oldapp_jni_tests ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/jni-slots.tsv
+    LABELS andarium)
