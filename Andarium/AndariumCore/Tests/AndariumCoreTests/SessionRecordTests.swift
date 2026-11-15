@@ -44,7 +44,7 @@ struct SessionRecordTests {
         #expect(record.memory?.footprintBytes == 2 << 30 && record.memory?.availableBytes == nil)
         #expect(record.summary == "The previous session ended in a guest kernel panic: sysrq triggered crash.")
         #expect(record.notice(endedOutOfForeground: false) == SessionEndNotice(
-            title: "Android's kernel panicked", text: "Android stopped with a kernel panic: sysrq triggered crash."))
+            title: "Android’s kernel panicked", text: "Android stopped with a kernel panic: sysrq triggered crash."))
     }
 
     @Test func readsWhereAnUnfinishedBootHadGot() throws {
@@ -138,7 +138,7 @@ struct SessionRecordTests {
 
     @Test func eachBadEndHasItsNotice() throws {
         let titles = [
-            "kernel-abort": "Android's kernel crashed",
+            "kernel-abort": "Android’s kernel crashed",
             "kernel-exit": "Android stopped",
             "hibernation-restore-failed": "Android could not resume",
             "host-fault": "Andarium crashed",
@@ -279,19 +279,53 @@ struct SessionRecordTests {
 
     @Test func theGoldenCameraSlotParses() throws {
         let slot = try #require(CameraRecord(text: try Self.cameraGolden()))
-        #expect(slot.failed == 3 && slot.recent.count == 3)
-        let refused = slot.recent[0]
-        #expect(refused.stage == "refused" && refused.camera == 0 && refused.position == "back")
-        #expect(refused.asked == .init(width: 4032, height: 3024) && refused.resolved == nil && refused.encoded == nil)
-        #expect(refused.compensationSupported == "unknown" && refused.errorDomain == "none" && refused.errorCode == nil)
-        let error = slot.recent[1]
+        // Three stills failed; the slot has room for the newest two beside the cameras' lines.
+        #expect(slot.failed == 3 && slot.recent.count == 2)
+        let error = slot.recent[0]
         #expect(error.stage == "framework-error" && error.camera == 1 && error.position == "front")
         #expect(error.errorDomain == "avfoundation" && error.errorCode == -11800)
         #expect(error.compensationSupported == "yes" && error.compensationEnabled == "no")
+        #expect(error.compensationReading == "after-commit")
         #expect(error.at == Date(timeIntervalSince1970: 1_794_114_290))
-        let encoded = slot.recent[2]
+        #expect(error.asked == .init(width: 2016, height: 1512) && error.resolved == .init(width: 2016, height: 1512))
+        #expect(error.encoded == nil && error.exifOrientation == nil)
+        let encoded = slot.recent[1]
         #expect(encoded.stage == "encoded-size" && encoded.encoded == .init(width: 1512, height: 2016))
         #expect(encoded.asked == .init(width: 2016, height: 1512) && encoded.resolved == .init(width: 2016, height: 1512))
+        #expect(encoded.exifOrientation == 6 && encoded.errorDomain == "none" && encoded.errorCode == nil)
+    }
+
+    /// The golden file's cameras, as the runtime wrote them: a back camera with a mount line (the slot had no room for the
+    /// video line its note also holds), and a front camera that imitates an earlier one, with a line of every kind, and
+    /// the front devices' line of the slot.
+    @Test func theGoldenCameraSlotsCamerasParse() throws {
+        let slot = try #require(CameraRecord(text: try Self.cameraGolden()))
+        #expect(slot.cameras.map(\.index) == [0, 1])
+        let back = slot.cameras[0]
+        let backMount = try #require(back.mount)
+        #expect(backMount.position == "back" && backMount.type == 1 && backMount.angles == [90, 270, 0, 180])
+        #expect(backMount.stated == 90 && backMount.platformStated == 90 && backMount.turn == 0 && !backMount.earlier)
+        #expect(backMount.anchor == .init(width: 4032, height: 3024) && backMount.ratios == 0 && backMount.fieldOfView == 63)
+        #expect(back.video == nil && back.ratio == nil && back.photo == nil && back.refusals == nil)
+        #expect(slot.fronts == .init(devices: 2, square: true, dynamicRatios: true, formatsDropped: 3))
+        let front = slot.cameras[1]
+        let mount = try #require(front.mount)
+        #expect(mount.position == "front" && mount.angles == [0, 180, 90, 270] && mount.stated == 90 && mount.turn == 270 && mount.earlier)
+        #expect(mount.anchor == .init(width: 1920, height: 1440) && mount.ratios == 24 && mount.fieldOfView == 85)
+        let ratio = try #require(front.ratio)
+        #expect(ratio.pinned == "3x4" && ratio.now == "3x4" && ratio.dimensions == .init(width: 1512, height: 2016))
+        #expect(ratio.error == 0 && !ratio.pending)
+        let video = try #require(front.video)
+        #expect(video.defaultAngle == 0 && video.angle == 270 && video.angleSupported == "yes")
+        #expect(video.defaultMirrored == 0 && video.mirrored == 0)
+        #expect(video.asked == .init(width: 1920, height: 1440) && video.first == .init(width: 1920, height: 1440))
+        let photo = try #require(front.photo)
+        #expect(photo.compensationSupported == "yes" && photo.compensationEnabled == "yes")
+        #expect(photo.compensationReading == "after-commit")
+        #expect(photo.defaultAngle == 90 && photo.angle == 90 && photo.defaultMirrored == 0 && photo.mirrored == 0)
+        #expect(photo.maximum == .init(width: 2016, height: 1512) && photo.exifOrientation == 6)
+        #expect(photo.centerStage == "no" && photo.distortionCorrected == "yes")
+        #expect(front.refusals?.count == 1 && front.refusals?.last == 4)
     }
 
     @Test func aLayout8RecordCarriesTheCameraSlot() throws {
@@ -299,6 +333,7 @@ struct SessionRecordTests {
             SessionRecord(text: try Self.layout8(camera: try Self.cameraGolden().trimmingCharacters(in: .newlines))))
         #expect(session.processID == 78 && session.running)
         #expect(session.camera?.failed == 3 && session.camera?.recent.last?.stage == "encoded-size")
+        #expect(session.camera?.cameras.count == 2)
         // The other slots are read as they are in layout 7.
         #expect(session.storage?.settles == 4 && session.stalls?.total == 37 && session.network?.tcp?.attempts == 12)
     }
@@ -327,20 +362,117 @@ struct SessionRecordTests {
         // A later runtime may add lines and fields; a field is read by its name.
         let later = CameraRecord(
             text: "camera 1\nstills failed 1\nstill at 7 camera 1 front stage timeout asked 2016x1512 resolved - "
-                + "encoded - compensation supported no enabled no error none extra 1\nnew line\n")
+                + "encoded - compensation supported no enabled no exif 8 error none extra 1\nnew line\n"
+                + "mount camera 2 external type 7 angles - - - - stated 90 turn 0 earlier no anchor - ratios 0 fov - extra 3\n")
         #expect(later?.recent.first?.stage == "timeout" && later?.recent.first?.compensationSupported == "no")
+        #expect(later?.recent.first?.exifOrientation == 8)
+        #expect(later?.cameras.first?.mount?.angles == [nil, nil, nil, nil] && later?.cameras.first?.mount?.anchor == nil)
+        #expect(later?.cameras.first?.mount?.fieldOfView == nil && later?.fronts == nil)
+        // A failure without the reading's field (an earlier runtime's) reads as unknown, and so does a hyphen.
+        #expect(later?.recent.first?.compensationReading == "unknown")
+        let hyphen = CameraRecord(
+            text: "camera 1\nstills failed 1\nstill at 7 camera 1 front stage timeout asked - resolved - encoded - "
+                + "compensation supported no enabled no read - exif - error none\n")
+        #expect(hyphen?.recent.first?.compensationReading == "unknown")
+        // A camera line without its camera, or with a mount it cannot read, is skipped.
+        let broken = CameraRecord(text: "camera 1\nstills failed 0\nvideo default 0\nmount camera x back\nrefused camera 1 last 3\n")
+        #expect(broken?.cameras.isEmpty == true && broken?.failed == 0)
+    }
+
+    /// A slot with notes and no failure is a record: the cameras are in it, and the count is nil of stills.
+    @Test func aCameraSlotOfNotesAloneIsARecordOfNoFailure() throws {
+        let slot = try #require(
+            CameraRecord(
+                text: "camera 1\nstills failed 0\nfronts 1 square no dynamic no dropped 4\n"
+                    + "mount camera 0 front type 1 angles 0 180 90 270 stated 90 turn 270 earlier yes "
+                    + "anchor 1920x1440 ratios 0 fov 85\n"
+                    + "ratio camera 0 pinned 3x4 now 4x3 dims 1920x1440 error pending\n"
+                    + "video camera 0 default 0 set - supported no mirror - - asked 1920x1440 first -\n"
+                    + "refused camera 0 count 2 last 10\n"))
+        #expect(slot.failed == 0 && slot.recent.isEmpty && slot.cameras.count == 1)
+        let camera = slot.cameras[0]
+        #expect(camera.ratio?.pending == true && camera.ratio?.error == nil && camera.ratio?.now == "4x3")
+        #expect(camera.video?.angle == nil && camera.video?.angleSupported == "no" && camera.video?.defaultMirrored == nil)
+        #expect(camera.video?.first == nil && camera.photo == nil && camera.refusals?.last == 10)
+        let report = slot.report()
+        #expect(report.contains("Camera 0 (front):"))
+        #expect(report.contains("the guest is told 90; the video connection is turned 270; imitates an earlier front camera: yes."))
+        #expect(report.contains("aspect ratios listed: none, field of view 85 degrees."))
+        #expect(report.contains("Front devices listed: 1; any with a square format: no; any that lists aspect ratios: no; formats not offered to the guest: 4."))
+        #expect(report.contains("the change's completion error pending."))
+        #expect(report.contains("angle 0 by default and unknown now (the angle asked for is supported: no)"))
+        #expect(report.contains("the first frame was not seen."))
+        #expect(report.contains("refused admissions: 2, the last for the reason: the device's aspect ratio was not the one pinned."))
+        #expect(report.contains("No still of the guest's cameras failed to end in a picture."))
+    }
+
+    /// A front device whose formats were all dropped is no camera: the slot's line says what the platform found of it.
+    @Test func aFrontDeviceWithAllItsFormatsDroppedLeavesItsFacts() throws {
+        let slot = try #require(
+            CameraRecord(
+                text: "camera 1\nstills failed 0\nfronts 1 square no dynamic no dropped 4\n"
+                    + "mount camera 0 back type 1 angles 90 270 0 180 stated 90 turn 0 earlier no anchor 4032x3024 ratios 0 fov 63\n"))
+        #expect(slot.fronts == .init(devices: 1, square: false, dynamicRatios: false, formatsDropped: 4))
+        #expect(slot.cameras.map(\.index) == [0] && slot.cameras[0].mount?.position == "back")
+        let report = slot.report()
+        #expect(report.contains("Front devices listed: 1; any with a square format: no; any that lists aspect ratios: no; formats not offered to the guest: 4."))
+        // A line it cannot read is no claim.
+        #expect(CameraRecord(text: "camera 1\nstills failed 0\nfronts x\n")?.fronts == nil)
+        #expect(CameraRecord(text: "camera 1\nstills failed 0\nfronts 1 square no\n")?.fronts == nil)
+    }
+
+    /// A tablet boots turned: the guest is told another orientation than the platform states, and the report says which is
+    /// which. The measured values of a tablet: 180 for the front camera and 0 for the back, the platform's own 90 for both.
+    @Test func theTwoOrientationsOfATabletReadApart() throws {
+        let slot = try #require(
+            CameraRecord(
+                text: "camera 1\nstills failed 0\n"
+                    + "mount camera 0 back type 1 angles 90 270 0 180 stated 0 platform 90 turn 0 earlier no anchor 4032x3024 ratios 0 fov 63\n"
+                    + "mount camera 1 front type 1 angles 90 270 180 0 stated 180 platform 90 turn 0 earlier no anchor 1920x1440 ratios 0 fov 85\n"))
+        let back = try #require(slot.cameras[0].mount)
+        #expect(back.stated == 0 && back.platformStated == 90)
+        let front = try #require(slot.cameras[1].mount)
+        #expect(front.stated == 180 && front.platformStated == 90)
+        let report = slot.report()
+        #expect(report.contains("the guest is told 0 (the platform states 90 for it); the video connection is turned 0"))
+        #expect(report.contains("the guest is told 180 (the platform states 90 for it); the video connection is turned 0"))
+        // A phone, whose line has no second number, states one: the guest is told what the platform states.
+        let phone = try #require(CameraRecord(text: try Self.cameraGolden()))
+        #expect(phone.cameras.allSatisfy { $0.mount?.platformStated == $0.mount?.stated })
+        #expect(!phone.report().contains("the platform states"))
+    }
+
+    /// The reasons the platform refuses an admission, by the runtime's code.
+    @Test func theRefusalReasonsOfTheStillChecksReadInWords() throws {
+        for (code, reason) in [
+            (11, "the video connection does not hold the turn"), (12, "the photo output does not turn its stills"),
+            (13, "the device's aspect ratio change failed"),
+            (14, "the device's aspect ratio change did not complete in time"),
+        ] {
+            let slot = try #require(CameraRecord(text: "camera 1\nstills failed 0\nrefused camera 0 count 1 last \(code)\n"
+                + "mount camera 0 front type 1 angles 0 180 90 270 stated 90 turn 270 earlier yes anchor - ratios 0 fov -\n"))
+            #expect(slot.report().contains("the last for the reason: \(reason)."))
+        }
     }
 
     @Test func theCameraFailuresReadInWords() throws {
         let slot = try #require(CameraRecord(text: try Self.cameraGolden()))
         let report = slot.report()
         #expect(report.contains("3 stills of the guest's cameras did not end in a picture."))
+        #expect(report.contains("Camera 1 (front):"))
+        #expect(report.contains("mounting: device type wide-angle; the platform's fixed angles for portrait, portrait upside down, landscape right and landscape left are 0, 180, 90, 270; the guest is told 90; the video connection is turned 270; imitates an earlier front camera: yes."))
+        #expect(report.contains("anchor: 1920x1440, aspect ratios listed: 4x3 3x4, field of view 85 degrees."))
+        #expect(report.contains("aspect ratio: pinned 3x4, the device holds 3x4, output dimensions 1512x2016, the change's completion error 0."))
+        #expect(report.contains("video connection: angle 0 by default and 270 now (the angle asked for is supported: yes)"))
+        #expect(report.contains("photo output: orientation compensation supported yes and enabled yes (read after the session's configuration was committed); photo connection angle 90 by default and 90 now"))
+        #expect(report.contains("Front devices listed: 2; any with a square format: yes; any that lists aspect ratios: yes; formats not offered to the guest: 3."))
+        #expect(report.contains("largest photo 2016x1512; Exif orientation of the last photo 6; Center Stage active no; distortion correction yes."))
         #expect(report.contains("camera 1 (front), stopped at framework-error, asked 2016x1512, resolved 2016x1512"))
         #expect(report.contains("the framework's error avfoundation -11800"))
-        #expect(report.contains("file states 1512x2016, orientation compensation supported yes and enabled no"))
+        #expect(report.contains("file states 1512x2016, orientation compensation supported yes and enabled no (read after the session's configuration was committed), the host photo's Exif orientation 6"))
         // Only the failures the slot holds are listed, and the report says so.
         let more = try #require(CameraRecord(text: "camera 1\nstills failed 50\n" + (try Self.cameraGolden()).split(separator: "\n").dropFirst(2).joined(separator: "\n")))
-        #expect(more.report().contains("The last 3 that the record holds, oldest first:"))
+        #expect(more.report().contains("The last 2 that the record holds, oldest first:"))
     }
 
     @Test func theCameraSlotIsAnEntryOfTheBugReportOnlyWhenARecordHasOne() throws {
@@ -361,7 +493,15 @@ struct SessionRecordTests {
         let text = String(decoding: report.data, as: UTF8.self)
         #expect(text.contains("== The current session (process 78) =="))
         #expect(text.contains("stopped at encoded-size"))
+        #expect(text.contains("Camera 1 (front):") && text.contains("imitates an earlier front camera: yes."))
         #expect(text.contains("== The previous session ==") && text.contains("There is no record."))
+        // A record whose slot holds notes and no failure is an entry too, and says so.
+        try Self.layout8(camera: "camera 1\nstills failed 0\nmount camera 0 back type 1 angles 90 270 0 180 stated 90 turn 0 "
+            + "earlier no anchor 4032x3024 ratios 0 fov 63\n").write(
+            to: directory.appendingPathComponent(BugReportAttachments.sessionRecord), atomically: true, encoding: .utf8)
+        let notes = BugReportAttachments.entries(from: directory, containers: [])
+        let noted = String(decoding: try #require(notes.first { $0.name == BugReportAttachments.cameraReport }).data, as: UTF8.self)
+        #expect(noted.contains("Camera 0 (back):") && noted.contains("No still of the guest's cameras failed to end in a picture."))
     }
 
     @Test func theGoldenStorageSlotParses() throws {

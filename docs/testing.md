@@ -342,7 +342,8 @@ fake guests and players, the haptics wire against the golden frames in
 relay test against too; the game controllers' wire against that directory's
 gamepad frames, each family's reports read back through a test-only HID
 descriptor parser, and the stream and session on a fake relay; the session
-record's stall, network, storage and camera slots against the golden slots there, which
+record's stall, network, storage and camera slots (a camera's mounting and
+connection lines and its failed stills) against the golden slots there, which
 `runtime-stall-record` and `runtime-session-record` check the runtime's writers
 against, and that the record quotes no identity value (`runtime-session-record`);
 and the notice that iOS denies the network, from the path's mapping to
@@ -771,16 +772,21 @@ on an M4 or newer Mac.
 Build-side contracts need no Android build: `lineage24-target-files-fixtures`,
 `lineage24-builder-lane`, `lineage24-release-contract`,
 `lineage24-first-boot-precompile` and the `lineage24-mesa-venus-*` tests run
-the producer's verifiers over fixtures, and `android-partition-boot-selection`,
-`android17-instance-rules` and `android17-macos-launcher-options` cover the host
-library and launcher over the storage layout (`android17-launcher-arguments`,
+the producer's verifiers over fixtures, and
+`android-partition-boot-selection`, `android17-instance-rules` and
+`android17-macos-launcher-options` cover the host library and launcher over the
+storage layout (`android17-launcher-arguments`,
 where the Android CLI is built, runs the executable's own argument checks)
 ([storage](../android/lineage-24/README.md#static-disk-and-boot-contract),
-[block device](../darwin/device/block/README.md)). `guest-android-disks`
-(integration) boots the Linux test guest on a release and a data disk the
-library created. `gnss-hal-nmea`, `gnss-hal-policy`, `gnss-hal-engine`,
-`gnss-hal-entry` and `gnss-hal-callbacks` (unit) compile the guest GNSS HAL's
-headers ([Location](../android/lineage-24/README.md#location)) against the host
+[block device](../darwin/device/block/README.md)).
+`lineage24-camera-app-contract` checks that the camera application's overlay,
+its patch series and the target-files verifier's constants name the same
+settings and values; what the application then does is the image's to show.
+`guest-android-disks` (integration) boots the Linux test guest on a release
+and a data disk the library created. `gnss-hal-nmea`, `gnss-hal-policy`,
+`gnss-hal-engine`, `gnss-hal-entry` and `gnss-hal-callbacks` (unit) compile the
+guest GNSS HAL's headers
+([Location](../android/lineage-24/README.md#location)) against the host
 writer's own epochs: the reading of the stream, the reporting rules, the
 session and the AIDL entry points, with a pipe for the receiver and a counting
 wakelock, and with a framework callback that does not answer, so that no entry
@@ -850,8 +856,9 @@ anywhere is a blocker. The candidate must show:
   `hal_camera_default` appears in the log, and the verifier's check that
   `libgooglecamerahwl_impl.so` holds the names of route `p0030` is not
   vacuous: it runs on the candidate's built library (a source tree has none)
-  and is shown to fail on the stock one
-  ([Camera](../android/lineage-24/README.md#camera)).
+  and is shown to fail on the stock one. The camera application shows a lens
+  button for each back lens and offers no pinch zoom, zoom slider or Zoom
+  action ([Camera](../android/lineage-24/README.md#camera)).
 
 `android-oobe`, `android-adb-debugging`, `android-guest-proc` and
 `android-installation-identity` (integration) each register only when
