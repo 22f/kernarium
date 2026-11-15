@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "arm64_gadget_test_support.hpp"
+#include "cpu/arm64/aarch32/guest_key.hpp"
+#include "cpu/arm64/gadgets/a32/a32_builder.hpp"
 #include "cpu/arm64/gadgets/program.hpp"
 #include "cpu/gadget_shared_space.hpp"
 #include "require.hpp"
@@ -11,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory_resource>
+#include <span>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -315,6 +318,111 @@ void retargeted_record_follow()
 	require(torn.load() == 0);
 	require(wrong.load() == 0);
 	require(runs < most);
+}
+
+/* An AArch32 or T32 block at `key`, whose direct branch, if any, names
+ * `link`. */
+gadgets::BuildResult build_aarch32(std::uint64_t key,
+	std::span<const std::byte> code, const gadgets::BlockLink *link)
+{
+	gadgets::Builder::LinkResolver resolve;
+	if (link != nullptr)
+		resolve = [link](std::uint64_t pc) -> const gadgets::BlockLink * {
+			require(pc == link->guest_pc);
+			return link;
+		};
+	const gadgets::BuildOptions options{};
+	auto output = gadgets::a32::build({.key = key, .code = code}, resolve,
+		std::pmr::get_default_resource(), {}, options,
+		gadgets::a32::decode_profile(options), gadgets::a32::block_limit);
+	require(output.units != 0);
+	return std::move(output.result);
+}
+
+/* `program` with a count past the chain limit, as a caller that precharges
+ * it enters it: it leaves at its first linked edge. */
+gadgets::Program precharged(const gadgets::Program &program)
+{
+	gadgets::ProgramWords words{std::pmr::get_default_resource()};
+	for (const auto word : program.words())
+		words.push_back(word);
+	return gadgets::Program{program.guest_address(), 8192, std::move(words),
+		false};
+}
+
+/* A chain-limit exit leaves at the body a link names without running it:
+ * it stores the PC in that body's header, an AArch32 or T32 key whole, and
+ * charges the body's count, and behind an FP/SIMD body's entry word it
+ * reads them as behind any other's and leaves the FP/SIMD state alone. */
+void chain_limit_exits()
+{
+	namespace aarch32 = arm64::aarch32;
+	const auto leave = [](const gadgets::Program &source,
+				   arm64::CpuState &cpu) {
+		::uml::memory::Tlb tlb;
+		std::size_t executed = 0;
+		require(gadgets::execute(precharged(source), cpu, tlb, executed) ==
+			::uml::cpu::EngineEvent::continued);
+		return executed;
+	};
+	{
+		/* B to MOV R0, #1; SVC #0. */
+		const std::array<std::uint32_t, 2> body{0xe3a0'0001U, 0xef00'0000U};
+		const std::array<std::uint32_t, 1> branch{0xea00'000eU};
+		LinkTarget target{aarch32::a32_key(0x1040)};
+		const auto built = build_aarch32(target.link.guest_pc,
+			std::as_bytes(std::span{body}), nullptr);
+		require(built.program.instruction_count() == 2);
+		target.resolve(built);
+		const auto source = build_aarch32(aarch32::a32_key(0x1000),
+			std::as_bytes(std::span{branch}), &target.link);
+		arm64::CpuState cpu{};
+		cpu.a32 = 1;
+		cpu.a32_cp15ben = 1;
+		cpu.pc = aarch32::a32_key(0x1000);
+		require(leave(source.program, cpu) == 8192 + 2);
+		require(cpu.pc == aarch32::a32_key(0x1040));
+		require(cpu.registers[0] == 0);
+	}
+	{
+		/* B to MOVS R0, #1; SVC #0. */
+		const std::array<std::uint16_t, 2> body{0x2001U, 0xdf00U};
+		const std::array<std::uint16_t, 1> branch{0xe01eU};
+		LinkTarget target{aarch32::t32_key(0x2040)};
+		const auto built = build_aarch32(target.link.guest_pc,
+			std::as_bytes(std::span{body}), nullptr);
+		require(built.program.instruction_count() == 2);
+		target.resolve(built);
+		const auto source = build_aarch32(aarch32::t32_key(0x2000),
+			std::as_bytes(std::span{branch}), &target.link);
+		arm64::CpuState cpu{};
+		cpu.a32 = 1;
+		cpu.a32_cp15ben = 1;
+		cpu.pc = aarch32::t32_key(0x2000);
+		require(leave(source.program, cpu) == 8192 + 2);
+		require(cpu.pc == aarch32::t32_key(0x2040));
+		require(cpu.registers[0] == 0);
+	}
+	{
+		/* B to FMOV X0, D0; SVC #0, with the FP/SIMD state loaded or
+		 * not. */
+		const std::array body{0x9e66'0000U, 0xd400'0001U};
+		LinkTarget target{0x4040};
+		const auto built = gadgets::Builder{}.build(0x4040, body);
+		require(built.program.instruction_count() == 2);
+		target.resolve_fp(built);
+		const std::array branch{direct_branch(0x4000, 0x4040)};
+		const auto source = gadgets::Builder{}.build(0x4000, branch,
+			[&](std::uint64_t) { return &target.link; });
+		for (const bool loaded : {true, false}) {
+			arm64::CpuState cpu{};
+			cpu.fp_loaded = loaded;
+			require(leave(source.program, cpu) == 8192 + 2);
+			require(cpu.pc == 0x4040);
+			require(cpu.fp_loaded == loaded && !cpu.fp_dirty);
+			require(cpu.registers[0] == 0);
+		}
+	}
 }
 
 } // namespace
@@ -686,6 +794,7 @@ int main()
 		require(executed == 8193);
 	}
 
+	chain_limit_exits();
 	retargeted_record_follow();
 
 	return 0;
