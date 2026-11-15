@@ -34,7 +34,12 @@ import android.util.DisplayMetrics;
 import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.LinkOption;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -53,6 +58,9 @@ import java.util.regex.Pattern;
 final class AndroidPlatform implements OldAppCommand.Platform {
     private static final int FORCE_STOP_SECONDS = 30;
     private static final int GETPROP_SECONDS = 30;
+    /** The shell user's own data directory (shell_data_file); the command's lock lives in it. */
+    private static final String LOCK_FILE = "/data/local/tmp/kernarium_oldapp.lock";
+    private static final long LOCK_POLL_MILLIS = 50;
     private static final Pattern PROPERTY_LINE = Pattern.compile("\\[([^\\]]+)\\]: \\[(.*)\\]");
     private static final int OUTPUT_LIMIT = 400;
 
@@ -93,7 +101,7 @@ final class AndroidPlatform implements OldAppCommand.Platform {
         }
         return new Candidate(info.packageName, (application.flags & ApplicationInfo.FLAG_SYSTEM) != 0,
                 application.primaryCpuAbi, application.targetSdkVersion, info.sharedUserId,
-                info.firstInstallTime / 1000, info.lastUpdateTime / 1000, info);
+                info.firstInstallTime, info.lastUpdateTime / 1000, info);
     }
 
     @Override
@@ -181,6 +189,44 @@ final class AndroidPlatform implements OldAppCommand.Platform {
             throw new IllegalStateException("getprop did not finish cleanly");
         }
         return choices;
+    }
+
+    /**
+     * An exclusive lock on a file in the shell user's own data directory, polled until the time
+     * is up. The file stays in place (it is only ever locked); the shell domain creates and locks
+     * files of /data/local/tmp's type, and nothing else may write in that directory. A symbolic
+     * link in its place is refused.
+     */
+    @Override
+    public OldAppCommand.Lock lock(long timeoutMillis) throws Exception {
+        final FileChannel channel = FileChannel.open(Paths.get(LOCK_FILE), StandardOpenOption.CREATE,
+                StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+        try {
+            long deadline = System.nanoTime() + timeoutMillis * 1_000_000L;
+            while (true) {
+                final FileLock held = channel.tryLock();
+                if (held != null) {
+                    return new OldAppCommand.Lock() {
+                        @Override
+                        public void release() throws Exception {
+                            try {
+                                held.release();
+                            } finally {
+                                channel.close();
+                            }
+                        }
+                    };
+                }
+                if (System.nanoTime() - deadline >= 0) {
+                    channel.close();
+                    return null;
+                }
+                Thread.sleep(LOCK_POLL_MILLIS);
+            }
+        } catch (Exception | Error problem) {
+            channel.close();
+            throw problem;
+        }
     }
 
     @Override

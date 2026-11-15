@@ -684,23 +684,26 @@ process (route `p0007`), so an application that is not switched on never loads
 the compatibility layer.
 
 - **Store.** One persistent property per package,
-  `persist.sys.kernarium.oldapp.<package>`: the value is the turn-on time in
-  epoch seconds, and an empty or unset property means off. It lives in the data
-  partition, so an Android update keeps it, Erase resets it and a snapshot
-  restore brings it back. Its type, `kernarium_oldapp_prop`
+  `persist.sys.kernarium.oldapp.<package>`: the value holds the turn-on time and
+  the installation it was made for, and an empty or unset property means off.
+  It lives in the data partition, so an Android update keeps it, Erase resets it
+  and a snapshot restore brings it back. Its type, `kernarium_oldapp_prop`
   (`overlay/sepolicy/system_ext/private`), is a system-owned restricted
   property: the shell domain sets it, every application domain reads it (the
   shell domain is itself an application domain in this policy) and a neverallow
   keeps every other application domain from setting it.
 - **Eligibility.** Not a system application, a 32-bit primary ABI, a target API
   level below 14, no shared user ID, and a package name that can end a property
-  name as it is. `OldAppEligibility` is the one place that says so.
-- **Persistence.** A choice does not outlive the installation it was made for:
+  name as it is (the whole key at most 255 bytes). `OldAppEligibility` is the
+  one place that says so.
+- **Persistence.** A choice belongs to the installation it was made for (an
+  update keeps the installation, an uninstall and a new install make another):
   the listing clears the property of a package that is absent, is not eligible
-  any more or was first installed after the turn-on time. So a choice lasts at
-  most until the next listing, which Andarium makes whenever it starts, after
-  each install and when its page opens; turning off is accepted for any name
-  that can be a property name.
+  any more or is another installation, so a choice lasts at most until the next
+  listing, which Andarium makes whenever it starts, after each install and when
+  its page opens. The command's changes and that cleanup are serialised by a lock
+  of the shell user; turning off is accepted for any name that can be a property
+  name.
 - **Command.** `kernarium_oldapp` (`overlay/oldapp_switch`, a Java tool that
   `app_process` starts, installed on system_ext) runs as the adb shell user, with
   no root on a `user` build. It lists the eligible applications of the owner

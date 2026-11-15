@@ -39,7 +39,11 @@ import java.util.Map;
  * The listing covers the owner user's applications. It also clears every stored choice that
  * {@link OldAppEligibility#outlived} says is no longer its application's, so a choice does not
  * outlive the installation it was made for by more than the time to the next listing. Turning
- * off is accepted for any name that can be a property name, installed or not.
+ * off is accepted for any name that can be a property name, installed or not. {@code set} and
+ * that cleanup are serialised across processes by {@link Platform#lock}: inside it the cleanup
+ * reads the value again and clears only the value it examined, so it never erases a choice made
+ * after its snapshot; a {@code set} that cannot take the lock in time fails and changes nothing,
+ * and a listing that cannot lists the same lines without cleaning.
  *
  * <p>Exit status: 0 done, 1 any other failure, 2 refused (not eligible), 64 usage. The format grows
  * by trailing fields; {@link #FORMAT_VERSION} changes when a field's meaning does.
@@ -51,6 +55,8 @@ final class OldAppCommand {
     static final int EXIT_FAILURE = 1;
     static final int EXIT_REFUSED = 2;
     static final int EXIT_USAGE = 64;
+    /** How long a command waits for the lock before it gives up. */
+    static final long LOCK_WAIT_MILLIS = 5000;
 
     /** The platform the commands stand on; the Android one is {@link AndroidPlatform}. */
     interface Platform {
@@ -75,11 +81,22 @@ final class OldAppCommand {
         /** Every stored turn-on with a value: package name (the end of the property name) to value. */
         Map<String, String> storedChoices() throws Exception;
 
+        /**
+         * Takes the exclusive lock that serialises the commands' changes across processes, waiting
+         * at most the given time. Returns null when it could not be had in time.
+         */
+        Lock lock(long timeoutMillis) throws Exception;
+
         /** Stops the application's processes, as {@code am force-stop} does. */
         void forceStop(String packageName) throws Exception;
 
         /** The system's clock in epoch seconds. */
         long nowSeconds();
+    }
+
+    /** A held lock. */
+    interface Lock {
+        void release() throws Exception;
     }
 
     /** Makes the platform once the arguments are known to be right. */
@@ -123,12 +140,7 @@ final class OldAppCommand {
                 installed.put(candidate.packageName, candidate);
             }
             Map<String, String> choices = new HashMap<>(platform.storedChoices());
-            for (Map.Entry<String, String> choice : new ArrayList<>(choices.entrySet())) {
-                if (OldAppEligibility.outlived(installed.get(choice.getKey()), abis32, choice.getValue())) {
-                    clear(platform, choice.getKey());
-                    choices.remove(choice.getKey());
-                }
-            }
+            clearStale(platform, abis32, installed, choices);
             List<Candidate> eligible = new ArrayList<>();
             for (Candidate candidate : installed.values()) {
                 if (OldAppEligibility.isEligible(candidate, abis32)) {
@@ -144,12 +156,15 @@ final class OldAppCommand {
             StringBuilder text = new StringBuilder();
             text.append(NAME).append(' ').append(FORMAT_VERSION).append('\n');
             for (Candidate candidate : eligible) {
-                String turnedOn = choices.get(candidate.packageName);
-                boolean on = turnedOn != null;
+                OldAppEligibility.Choice choice = null;
+                String value = choices.get(candidate.packageName);
+                if (value != null) {
+                    choice = OldAppEligibility.parseChoice(value);
+                }
                 text.append(candidate.packageName).append('\t')
                         .append(oneLine(label(platform, candidate))).append('\t')
-                        .append(on ? "on" : "off").append('\t')
-                        .append(on ? oneLine(turnedOn) : "0").append('\t')
+                        .append(choice != null ? "on" : "off").append('\t')
+                        .append(choice != null ? choice.turnedOnSeconds : 0).append('\t')
                         .append(candidate.lastUpdateSeconds).append('\n');
             }
             out.print(text);
@@ -157,6 +172,57 @@ final class OldAppCommand {
         } catch (Exception problem) {
             err.print(NAME + ": list failed: " + problem + "\n");
             return EXIT_FAILURE;
+        }
+    }
+
+    /**
+     * Clears the choices that are not their application's and takes them out of {@code choices},
+     * which is what the listing then shows. The snapshot says which look stale; inside the lock
+     * each one is read again and cleared only when it is still the value that was examined. A
+     * value that changed meanwhile (a {@code set} slipped in before the lock) is judged again as
+     * it now is and left in place. Without the lock nothing is cleared and the listing is the
+     * same.
+     */
+    private static void clearStale(Platform platform, List<String> abis32, Map<String, Candidate> installed,
+            Map<String, String> choices) throws Exception {
+        List<String> stale = new ArrayList<>();
+        for (Map.Entry<String, String> choice : choices.entrySet()) {
+            if (OldAppEligibility.outlived(installed.get(choice.getKey()), abis32, choice.getValue())) {
+                stale.add(choice.getKey());
+            }
+        }
+        if (stale.isEmpty()) {
+            return;
+        }
+        Lock lock = null;
+        try {
+            lock = platform.lock(LOCK_WAIT_MILLIS);
+        } catch (Exception problem) {
+            // No lock, no cleaning: the listing below is the same.
+        }
+        try {
+            for (String packageName : stale) {
+                String examined = choices.get(packageName);
+                if (lock == null) {
+                    choices.remove(packageName);
+                    continue;
+                }
+                String name = OldAppEligibility.propertyName(packageName);
+                String current = platform.getProperty(name);
+                if (current.equals(examined)) {
+                    write(platform, name, "");
+                    choices.remove(packageName);
+                } else if (current.isEmpty()
+                        || OldAppEligibility.outlived(installed.get(packageName), abis32, current)) {
+                    choices.remove(packageName);
+                } else {
+                    choices.put(packageName, current);
+                }
+            }
+        } finally {
+            if (lock != null) {
+                lock.release();
+            }
         }
     }
 
@@ -168,14 +234,25 @@ final class OldAppCommand {
             if (!OldAppEligibility.isPropertyKeyPart(packageName)) {
                 return refuse(err, packageName);
             }
-            Candidate candidate = platform.find(packageName);
-            if (on && (candidate == null || !OldAppEligibility.isEligible(candidate, platform.abis32()))) {
-                return refuse(err, packageName);
+            Candidate candidate;
+            Lock lock = platform.lock(LOCK_WAIT_MILLIS);
+            if (lock == null) {
+                err.print(NAME + ": could not take the lock in " + LOCK_WAIT_MILLIS + " ms; nothing was changed\n");
+                return EXIT_FAILURE;
             }
-            if (on) {
-                write(platform, OldAppEligibility.propertyName(packageName), Long.toString(platform.nowSeconds()));
-            } else {
-                clear(platform, packageName);
+            try {
+                candidate = platform.find(packageName);
+                if (on && (candidate == null || !OldAppEligibility.isEligible(candidate, platform.abis32()))) {
+                    return refuse(err, packageName);
+                }
+                if (on) {
+                    write(platform, OldAppEligibility.propertyName(packageName),
+                            OldAppEligibility.choiceValue(platform.nowSeconds(), candidate));
+                } else {
+                    clear(platform, packageName);
+                }
+            } finally {
+                lock.release();
             }
             // After the write: an application that starts again after it is stopped finds the new value.
             if (candidate != null) {
