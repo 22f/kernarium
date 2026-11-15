@@ -856,25 +856,20 @@ anywhere is a blocker. The candidate must show:
   ([Keyboard and mouse](../android/lineage-24/README.md#keyboard-and-mouse)).
 - **Cameras** (a guest started with `--camera=synthetic` and a camera layout on
   `androidboot.product.vendor.sku`). `android-camera` passes for the layouts
-  the synthetic profiles compose, live and blocked, a blocked session started
-  with the side keys as the application starts it (the runner adds them itself
-  in `main`; an importer that builds its own options passes `hardware_input`,
-  or its blocked session runs without them): Android holds the camera's
-  hardware toggle, opening the camera application shows no sensor privacy
-  dialog, and the sensor privacy service logs, within a bounded wait, that it
-  withheld the reminder (a live session logs nothing). The blocked CTS session
-  runs without the side keys, so the hardware toggle is not set there and the
-  three `CtsSensorPrivacyTestCases` dialog tests are unaffected; the VTS camera
-  provider test (`VtsAidlHalCameraProvider_TargetTest`) passes against the lazy
-  provider; and these CTS modules pass sharded, with the failures rerun alone
-  and a result that differs from the accepted release's explained:
+  the synthetic profiles compose, live and blocked, a blocked session showing
+  no sensor privacy reminder for the camera; the VTS camera provider test
+  (`VtsAidlHalCameraProvider_TargetTest`) passes against the lazy provider; and
+  these CTS modules pass sharded, with the failures rerun alone and a result
+  that differs from the accepted release's explained:
   `CtsCameraTestCases` (about 6 to 15 hours, as detached shards),
   `CtsCameraApi25TestCases`, `CtsMediaRecorderTestCases`, the camera parts of
   `CtsAppOpsTestCases` and `CtsPermissionTestCases`, and
   `CtsSensorPrivacyTestCases` in a blocked session and in a live one. The
-  provider process runs from cameraserver's start until cameraserver holds no
-  camera, and again while an application holds one, no denial of
-  `hal_camera_default` appears in the log, and the verifier's check that
+  blocked CTS session runs without the side keys, so the hardware toggle is not
+  set there; with it set, the platform's camera reminder tests would fail by
+  design. The provider process runs from cameraserver's start until
+  cameraserver holds no camera, and again while an application holds one, no
+  denial of `hal_camera_default` appears in the log, and the verifier's check that
   `libgooglecamerahwl_impl.so` holds the names of route `p0030` is not
   vacuous: it runs on the candidate's built library (a source tree has none)
   and is shown to fail on the stock one. The camera application shows a lens
