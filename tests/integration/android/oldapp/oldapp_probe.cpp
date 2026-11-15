@@ -23,6 +23,9 @@
 //   java_fill    Java fills an array the native side passed it (System.arraycopy), and the native side reads the
 //                new bytes through GetByteArrayRegion and GetByteArrayElements
 //   java_fill_raw  and through the object pointer at the Dalvik offsets
+//   raw_write_java the native side fills an array through the object pointer, never releases it, and a Java
+//                method (Arrays.hashCode) that is passed the array returns the checksum of those bytes ("skipped"
+//                where the layer is not mapped: a reference is no pointer)
 //   monitor      MonitorEnter and MonitorExit accept it
 //   pop          PopLocalFrame hands it out of the frame
 //   getline      getline grows a buffer the application allocated with malloc
@@ -219,6 +222,19 @@ bool low_heap() {
     return ok;
 }
 
+// Copies `count` bytes to an address that may be unmapped: a pipe read into it fails with EFAULT.
+bool safe_store(void* destination, const void* source, size_t count) {
+    int fds[2];
+    if (probe_pipe(fds) != 0) {
+        return false;
+    }
+    const long wrote = probe_write(fds[1], source, count);
+    bool ok = wrote == static_cast<long>(count) && probe_read(fds[0], destination, count) == static_cast<long>(count);
+    probe_close(fds[0]);
+    probe_close(fds[1]);
+    return ok;
+}
+
 // Whether the mapping that holds `pointer` is not writable, from /proc/self/maps.
 bool mapped_read_only(const void* pointer) {
     void* file = probe_fopen("/proc/self/maps", "r");
@@ -375,6 +391,32 @@ void array_cases(Report& report, Env* env) {
         report.verdict("java_fill_raw", raw_ok);
         delete_local(env, target);
         delete_local(env, source);
+    }
+
+    // The native side writes through the object pointer and never releases; Java reads the array.
+    {
+        jobject target = result_of(make_original(9));
+        if (!shim_mapped()) {
+            report.line("raw_write_java", "skipped");
+        } else {
+            jclass arrays_class = find_class(env, "java/util/Arrays");
+            jmethodID hash_code = static_method(env, arrays_class, "hashCode", "([B)I");
+            const char fill[4] = {0x21, 0x22, 0x23, 0x24};
+            uint32_t expected = 1;
+            for (char byte : fill) {
+                expected = 31u * expected + static_cast<uint32_t>(static_cast<int32_t>(byte));
+            }
+            const bool stored = target != nullptr && safe_store(static_cast<char*>(target) + 0x10, fill, 4);
+            jint got = 0;
+            if (stored && arrays_class != nullptr && hash_code != nullptr) {
+                got = entry<jint (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kInt, kVarargs))(
+                    env, arrays_class, hash_code, target);
+            }
+            char after[4] = {};
+            const bool kept = stored && safe_copy(after, static_cast<const char*>(target) + 0x10, 4) && same(after, fill, 4);
+            report.verdict("raw_write_java", stored && static_cast<uint32_t>(got) == expected && kept && !exception_check(env));
+        }
+        delete_local(env, target);
     }
 
     // PopLocalFrame.
