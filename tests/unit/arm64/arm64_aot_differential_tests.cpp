@@ -34,12 +34,14 @@
 #include <functional>
 #include <iterator>
 #include <signal.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <memory>
 #include <optional>
 #include <span>
 #include <sstream>
 #include <string>
+#include <pthread.h>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -2937,6 +2939,65 @@ void short_entries_are_left_to_the_engine(const LibraryImage &image)
 	require(st.refusals[4] > 100);
 }
 
+/* The guest kernel's threads run the executor on a 64 KiB stack: nothing on
+ * the way into rewritten code may need much of it (a 64 KiB temporary in the
+ * executor killed the first boot of a guest). The stack is the last 64 KiB
+ * of a mapping whose first megabyte is inaccessible, so an overflow always
+ * faults instead of landing in a neighbouring mapping. */
+void rewritten_code_is_entered_on_the_kernels_stack(const LibraryImage &image)
+{
+	const auto bias = Fixture::bias;
+	Fixture got{4801, image};
+	SplitMix rng{41};
+	auto c = make_case_from_seed(rng.next(), bias,
+		mops_at + row_cpyf * mops_step, true, true, arena_base(bias));
+	enterable(c);
+	c.kinds.assign(arena_pages + stack_pages, 2);
+	for (std::size_t i = 0; i < got.arena.total(); ++i)
+		got.arena.set_kind(i, c.kinds[i]);
+	SplitMix fill{c.seed};
+	got.arena.fill(fill);
+	auto cpu = std::make_unique<arm64::CpuState>(c.cpu);
+	cpu->pc = bias + c.pc_offset;
+	struct Job final {
+		Fixture *fixture;
+		arm64::CpuState *cpu;
+		std::size_t ran{};
+	} job{&got, cpu.get()};
+	aot::set_enabled(true);
+	aot::reset_stats();
+	constexpr std::size_t stack_bytes = 64 * 1024;
+	constexpr std::size_t moat_bytes = 1024 * 1024;
+	void *const mapping = mmap(nullptr, moat_bytes + stack_bytes,
+		PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	require(mapping != MAP_FAILED);
+	require(mprotect(mapping, moat_bytes, PROT_NONE) == 0);
+	pthread_attr_t attributes;
+	require(pthread_attr_init(&attributes) == 0);
+	require(pthread_attr_setstack(&attributes,
+		static_cast<char *>(mapping) + moat_bytes, stack_bytes) == 0);
+	pthread_t thread;
+	require(pthread_create(&thread, &attributes, [](void *argument) -> void * {
+		auto *work = static_cast<Job *>(argument);
+		while (work->ran < 8) {
+			++work->ran;
+			const auto out = run_selected(work->fixture->env.executor,
+				work->fixture->env.memory, work->fixture->env.generation,
+				*work->cpu);
+			if (out.event != EngineEvent::continued &&
+			    out.event != EngineEvent::interrupt)
+				break;
+		}
+		return nullptr;
+	}, &job) == 0);
+	require(pthread_join(thread, nullptr) == 0);
+	pthread_attr_destroy(&attributes);
+	require(munmap(mapping, moat_bytes + stack_bytes) == 0);
+	aot::set_enabled(false);
+	require(job.ran > 0);
+	require(aot::stats().enters > 0);
+}
+
 } // namespace
 
 /* A host fault inside rewritten code is a bug; say where before dying. */
@@ -3081,6 +3142,7 @@ int main(int argc, char **argv)
 			a_shootdown_reaches_a_native_loop(image);
 			memory_copy_and_set_match_the_engine(image);
 			short_entries_are_left_to_the_engine(image);
+			rewritten_code_is_entered_on_the_kernels_stack(image);
 		}
 		/* The scenarios use the first library: they are about the
 		 * mechanism, not about the code. */

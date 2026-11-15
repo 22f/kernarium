@@ -3471,7 +3471,7 @@ std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 	if (aot_->learning_epoch != arm64::aot::learning_epoch()) {
 		aot_->learning_epoch = arm64::aot::learning_epoch();
 		aot_->retry_pc = 1;
-		aot_->shorts = {};
+		aot_->shorts.fill(AotState::ShortSlot{});
 	}
 	if (cpu.pc == aot_->retry_pc)
 		return std::nullopt;
