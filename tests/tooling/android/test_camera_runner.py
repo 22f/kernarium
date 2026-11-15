@@ -16,11 +16,13 @@ __import__("sys").dont_write_bytecode = True
 
 import contextlib
 import importlib.util
+import inspect
 import io
 import itertools
 from pathlib import Path
 import re
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -902,6 +904,8 @@ class FakeGuest:
     def __init__(self, plan, front_holds: bool = True, movies=None) -> None:
         self.plan = plan
         self.commands: list[str] = []
+        # The scripted guest has no side keys: the sensor privacy step says so and asks it nothing.
+        self.hardware_input = False
         self.held = {"0"}
         self.front_holds = front_holds
         self.rows: dict[str, dict[str, str]] = {"1": {"_id": "1", "_data": "/sdcard/old.mp4"}}
@@ -2283,6 +2287,358 @@ class ModeSwitchTests(unittest.TestCase):
         self.assertIn("the animation scale window_animation_scale was not restored", self.printed.getvalue())
         self.assertEqual(guest.settings["transition_animation_scale"], "1")
         self.assertEqual(guest.settings["animator_duration_scale"], "1")
+
+
+# `dumpsys sensor_privacy` of a guest started with Camera off and the side keys: the camera (sensor 2) is
+# blocked by the hardware toggle (type 2); a software toggle is type 1.
+SENSOR_PRIVACY_BLOCKED = """SENSOR PRIVACY MANAGER STATE (dumpsys sensor_privacy)
+{
+  storage_implementation=com.android.server.sensorprivacy.SensorPrivacyStateControllerImpl
+  users={
+    user_id=0
+    sensors={
+      sensor=2
+      toggles={
+        toggle_type=2
+        state_type=1
+        last_change=20299
+      }
+    }
+  }
+}
+"""
+SENSOR_PRIVACY_LIVE = """SENSOR PRIVACY MANAGER STATE (dumpsys sensor_privacy)
+{
+  storage_implementation=com.android.server.sensorprivacy.SensorPrivacyStateControllerImpl
+}
+"""
+
+# The interface dump of the platform's dialog over the camera application, trimmed to the nodes that matter, and
+# the dump of the camera application alone.
+SENSOR_DIALOG_DUMP = (
+    "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation=\"0\">"
+    '<node index="0" text="" resource-id="android:id/content" class="android.widget.FrameLayout" '
+    'package="com.android.systemui" bounds="[0,0][720,1280]">'
+    '<node index="1" text="Unblock device camera?" '
+    'resource-id="com.android.systemui:id/sensor_use_started_title_message" '
+    'class="android.widget.TextView" package="com.android.systemui" bounds="[0,0][1,1]" />'
+    '<node index="0" text="This unblocks access for all apps and services allowed to use your camera." '
+    'resource-id="android:id/message" class="android.widget.TextView" package="com.android.systemui" />'
+    '<node index="1" text="Unblock" resource-id="android:id/button1" class="android.widget.Button" '
+    'package="com.android.systemui" /></node></hierarchy>')
+CAMERA_APPLICATION_DUMP = (
+    "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation=\"0\">"
+    '<node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="org.lineageos.aperture">'
+    '<node index="0" text="PHOTO" resource-id="org.lineageos.aperture:id/photoModeButton" '
+    'class="android.widget.Button" package="org.lineageos.aperture" />'
+    '<node index="1" text="Unblock" resource-id="" class="android.widget.Button" '
+    'package="org.example.other" /></node></hierarchy>')
+DIALOG_EVENT = ("11-15 03:41:29.579   602   622 I wm_create_activity: [0,132003343,10,"
+                "com.android.systemui/.sensorprivacy.SensorUseStartedActivity,NULL,NULL,NULL,277086208]")
+CAMERA_EVENT = ("11-15 03:41:20.100   602   617 I wm_create_activity: [0,5,10,"
+                "org.lineageos.aperture/.CameraActivity,NULL,NULL,NULL,0]")
+# The line the patched sensor privacy service logs when it withholds the reminder of a blocked camera.
+REMINDER_LOG = ("11-15 03:53:57.190   602   617 I SensorPrivacyService: kernarium: no reminder for a camera that "
+                "the hardware toggle blocks (org.lineageos.aperture)")
+OTHER_REMINDER_LOG = REMINDER_LOG.replace("org.lineageos.aperture", "org.example.other")
+
+
+class SensorDialogTests(unittest.TestCase):
+    """The camera switch as Android holds it, and the platform's Unblock dialog that must not appear."""
+
+    def test_the_toggles_of_the_sensor_privacy_service_are_read_from_its_dump(self) -> None:
+        self.assertEqual(runner.parse_sensor_privacy(SENSOR_PRIVACY_BLOCKED), [(0, 2, 2, 1)])
+        self.assertEqual(runner.parse_sensor_privacy(SENSOR_PRIVACY_LIVE), [])
+        self.assertEqual(runner.parse_sensor_privacy(""), [])
+        both = SENSOR_PRIVACY_BLOCKED.replace("toggle_type=2", "toggle_type=1\n        state_type=1\n"
+                                              "        toggle_type=2", 1)
+        self.assertEqual(runner.parse_sensor_privacy(both), [(0, 2, 1, 1), (0, 2, 2, 1)])
+
+    def test_only_the_hardware_toggle_of_the_camera_is_the_lens_cover(self) -> None:
+        self.assertTrue(runner.camera_hardware_blocked([(0, 2, 2, 1)]))
+        self.assertFalse(runner.camera_hardware_blocked([]))
+        self.assertFalse(runner.camera_hardware_blocked([(0, 2, 1, 1)]), "the software toggle")
+        self.assertFalse(runner.camera_hardware_blocked([(0, 1, 2, 1)]), "the microphone")
+        self.assertFalse(runner.camera_hardware_blocked([(0, 2, 2, 2)]), "a toggle that is not enabled")
+
+    def test_the_dialog_is_found_by_its_title_and_button_in_systemui_alone(self) -> None:
+        found = runner.sensor_dialog_nodes(SENSOR_DIALOG_DUMP)
+        self.assertEqual(len(found), 2)
+        self.assertIn("com.android.systemui:id/sensor_use_started_title_message 'Unblock device camera?'", found)
+        self.assertIn("android:id/button1 'Unblock'", found)
+        self.assertEqual(runner.sensor_dialog_nodes(CAMERA_APPLICATION_DUMP), [])
+        with self.assertRaisesRegex(ValueError, "not XML"):
+            runner.sensor_dialog_nodes("<hierarchy><node")
+
+    def test_the_dialog_the_platform_created_is_counted_by_name(self) -> None:
+        self.assertEqual(runner.sensor_dialog_starts(""), 0)
+        self.assertEqual(runner.sensor_dialog_starts("\n".join((CAMERA_EVENT, DIALOG_EVENT))), 1)
+        self.assertEqual(runner.sensor_dialog_starts("\n".join((DIALOG_EVENT, DIALOG_EVENT))), 2)
+        self.assertEqual(runner.sensor_dialog_starts(
+            "I wm_restart_activity: [0,1,10,com.android.systemui/.sensorprivacy.SensorUseStartedActivity]"), 0)
+
+    def test_the_services_log_line_counts_for_the_camera_application_only(self) -> None:
+        self.assertEqual(runner.withheld_reminders(""), 0)
+        self.assertEqual(runner.withheld_reminders(REMINDER_LOG), 1)
+        self.assertEqual(runner.withheld_reminders("\n".join((REMINDER_LOG, REMINDER_LOG))), 2)
+        self.assertEqual(runner.withheld_reminders(OTHER_REMINDER_LOG), 0, "another application")
+        self.assertEqual(runner.withheld_reminders(REMINDER_LOG.replace("no reminder", "a reminder")), 0)
+
+    def test_the_line_the_runner_waits_for_is_the_line_the_framework_patch_adds_and_the_verifier_requires(self) -> None:
+        verifier = (REPOSITORY / "android/lineage-24/tools/verify-target-files.py").read_text(encoding="utf-8")
+        self.assertIn(f'b"{runner.SENSOR_REMINDER_LINE}"', verifier)
+
+    def test_a_blocked_session_always_has_the_side_keys(self) -> None:
+        parser = runner.build_parser()
+        self.assertTrue(runner.wants_hardware_input(parser.parse_args(["--mode", "blocked"])))
+        self.assertFalse(runner.wants_hardware_input(parser.parse_args(["--mode", "live"])))
+        self.assertTrue(runner.wants_hardware_input(parser.parse_args(["--mode", "live", "--hardware-input"])))
+        self.assertFalse(runner.wants_hardware_input(parser.parse_args(["--mode", "none"])))
+        options = parser.parse_args([])
+        self.assertEqual(options.vnc_port, runner.slot_ports.slot_port(runner.VNC_OFFSET, runner.DEFAULT_VNC_PORT))
+
+    def test_an_importer_that_builds_its_own_options_starts_the_guest_without_the_side_keys(self) -> None:
+        # start_guest reads the side keys from the options main() prepared; options of an importer without them
+        # (the blocked session of a CTS tool) give the offscreen guest of before, not an AttributeError.
+        source = inspect.getsource(runner.start_guest)
+        self.assertIn('getattr(options, "hardware_input", False)', source)
+        self.assertIn('getattr(options, "vnc_port"', source)
+        self.assertNotIn("options.hardware_input", source)
+
+    def test_the_launcher_has_the_option_the_runner_adds(self) -> None:
+        source = (REPOSITORY / "darwin/app/macos/main.cpp").read_text(encoding="utf-8")
+        self.assertIn(f'"{runner.HARDWARE_INPUT_OPTION}"', source)
+
+    class Guest:
+        """A guest whose captured session log is one text (main and events lines together)."""
+
+        def __init__(self, privacy: str, dump: str, log: str = "", hardware_input: bool = True) -> None:
+            self.privacy, self.dump, self.log = privacy, dump, log
+            self.hardware_input = hardware_input
+            self.asked: list[str] = []
+
+        def alive(self) -> None:
+            pass
+
+        def sensor_privacy(self) -> str:
+            self.asked.append("privacy")
+            return self.privacy
+
+        def interface_dump(self) -> str:
+            self.asked.append("dump")
+            return self.dump
+
+        def session_log(self) -> str:
+            self.asked.append("log")
+            return self.log
+
+    @staticmethod
+    def lines(*parts: str) -> str:
+        return "\n".join(parts)
+
+    def run_step(self, mode: str, guest, step=None) -> str:
+        plan = runner.make_plan("bf-small-flash", "phone", mode)
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            (step or runner.check_sensor_dialog)(guest, plan)
+        return printed.getvalue()
+
+    def test_a_blocked_session_holds_the_toggle_and_the_service_withholds_the_reminder(self) -> None:
+        guest = self.Guest(SENSOR_PRIVACY_BLOCKED, CAMERA_APPLICATION_DUMP, self.lines(CAMERA_EVENT, REMINDER_LOG))
+        printed = self.run_step("blocked", guest)
+        self.assertIn("hardware toggle set; no dialog on the screen", printed)
+        self.assertIn("reminder withheld 1 time(s)", printed)
+        self.assertEqual(guest.asked[:2], ["privacy", "dump"])
+
+    def test_a_live_session_holds_no_toggle_and_the_service_withholds_nothing(self) -> None:
+        guest = self.Guest(SENSOR_PRIVACY_LIVE, CAMERA_APPLICATION_DUMP, CAMERA_EVENT)
+        printed = self.run_step("live", guest)
+        self.assertIn("hardware toggle not set", printed)
+        self.assertIn("reminder withheld 0 time(s)", printed)
+
+    def test_the_dialog_of_the_image_before_the_patch_fails_a_blocked_session(self) -> None:
+        # What the accepted release shows: the toggle is set, the dialog is on the screen and was started, and the
+        # service never says it withheld anything.
+        guest = self.Guest(SENSOR_PRIVACY_BLOCKED, SENSOR_DIALOG_DUMP, self.lines(CAMERA_EVENT, DIALOG_EVENT))
+        with self.assertRaisesRegex(runner.Failure, "sensor privacy dialog is on the screen of the blocked"):
+            self.run_step("blocked", guest)
+
+    def test_a_dialog_that_was_started_and_left_still_fails(self) -> None:
+        guest = self.Guest(SENSOR_PRIVACY_BLOCKED, CAMERA_APPLICATION_DUMP, self.lines(DIALOG_EVENT, REMINDER_LOG))
+        with self.assertRaisesRegex(runner.Failure, "SensorUseStartedActivity was started 1 time"):
+            self.run_step("blocked", guest)
+
+    def test_no_dialog_and_no_log_line_is_not_a_pass_for_a_blocked_session(self) -> None:
+        guest = self.Guest(SENSOR_PRIVACY_BLOCKED, CAMERA_APPLICATION_DUMP, CAMERA_EVENT)
+        with self.assertRaisesRegex(runner.Failure, "did not log 'kernarium: no reminder for a camera"):
+            self.run_step("blocked", guest)
+        guest = self.Guest(SENSOR_PRIVACY_BLOCKED, CAMERA_APPLICATION_DUMP, self.lines(CAMERA_EVENT, OTHER_REMINDER_LOG))
+        with self.assertRaisesRegex(runner.Failure, "did not log"):
+            self.run_step("blocked", guest)
+
+    def test_the_toggle_must_follow_the_mode(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "toggle is not set in a blocked session"):
+            self.run_step("blocked", self.Guest(SENSOR_PRIVACY_LIVE, CAMERA_APPLICATION_DUMP,
+                                                self.lines(CAMERA_EVENT, REMINDER_LOG)))
+        with self.assertRaisesRegex(runner.Failure, "toggle is set in a live session"):
+            self.run_step("live", self.Guest(SENSOR_PRIVACY_BLOCKED, CAMERA_APPLICATION_DUMP, CAMERA_EVENT))
+
+    def test_a_live_session_that_shows_the_dialog_or_withholds_a_reminder_fails(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "dialog is on the screen of the live"):
+            self.run_step("live", self.Guest(SENSOR_PRIVACY_LIVE, SENSOR_DIALOG_DUMP, CAMERA_EVENT))
+        with self.assertRaisesRegex(runner.Failure, "withheld the camera's reminder 1 time"):
+            self.run_step("live", self.Guest(SENSOR_PRIVACY_LIVE, CAMERA_APPLICATION_DUMP,
+                                             self.lines(CAMERA_EVENT, REMINDER_LOG)))
+
+    def test_the_end_checks_are_absence_checks_over_the_whole_capture(self) -> None:
+        # The dialog that came after the first look is in the capture and fails the end check; the positive line is
+        # not asked for again (it counts once seen), and the screen is not asked at all.
+        blocked = self.Guest(SENSOR_PRIVACY_BLOCKED, "", self.lines(CAMERA_EVENT, REMINDER_LOG, DIALOG_EVENT))
+        with self.assertRaisesRegex(runner.Failure, "SensorUseStartedActivity was started 1 time"):
+            self.run_step("blocked", blocked, runner.check_sensor_history)
+        self.assertEqual(blocked.asked, ["log"])
+        # A blocked session whose capture holds no line passes the end check: only the wait and the first look need it.
+        self.run_step("blocked", self.Guest(SENSOR_PRIVACY_BLOCKED, "", CAMERA_EVENT), runner.check_sensor_history)
+        with self.assertRaisesRegex(runner.Failure, "withheld the camera's reminder 1 time"):
+            self.run_step("live", self.Guest(SENSOR_PRIVACY_LIVE, "", self.lines(CAMERA_EVENT, REMINDER_LOG)),
+                          runner.check_sensor_history)
+
+    def test_a_guest_without_the_side_keys_says_so_and_asks_nothing(self) -> None:
+        guest = self.Guest(SENSOR_PRIVACY_LIVE, "", hardware_input=False)
+        self.assertIn("not run, the guest has no side keys", self.run_step("blocked", guest))
+        self.run_step("blocked", guest, runner.check_sensor_history)
+        self.assertEqual(guest.asked, [])
+
+    def waiting(self, guest, ticks):
+        """Runs the wait on a clock that advances `ticks` seconds at every reading."""
+        clock = itertools.count(step=ticks)
+        with mock.patch.object(runner.time, "sleep", lambda seconds: None), \
+                mock.patch.object(runner.time, "monotonic", lambda: float(next(clock))):
+            runner.wait_for_withheld_reminder(guest)
+
+    def test_the_wait_ends_when_the_line_comes_and_has_a_deadline(self) -> None:
+        guest = self.Guest("", "")
+        guest.session_log = lambda: (guest.asked.append("log"), REMINDER_LOG if len(guest.asked) >= 4 else "")[1]
+        self.waiting(guest, 1)
+        self.assertEqual(len(guest.asked), 4)
+        silent = self.Guest("", "", OTHER_REMINDER_LOG)
+        with self.assertRaisesRegex(runner.Failure, f"did not withhold.*after {runner.SENSOR_REMINDER_SECONDS} s"):
+            self.waiting(silent, 1)
+        self.assertGreater(len(silent.asked), 10)
+
+    def test_a_look_that_completes_after_the_deadline_does_not_count(self) -> None:
+        # The line is there at the last look, but the look began before the deadline and ended after it.
+        late = self.Guest("", "")
+        calls = []
+        clock = itertools.count()
+
+        def session_log() -> str:
+            calls.append(1)
+            for _ in range(runner.SENSOR_REMINDER_SECONDS + 5):
+                next(clock)
+            return REMINDER_LOG
+
+        late.session_log = session_log
+        with mock.patch.object(runner.time, "sleep", lambda seconds: None), \
+                mock.patch.object(runner.time, "monotonic", lambda: float(next(clock))):
+            with self.assertRaisesRegex(runner.Failure, "did not withhold"):
+                runner.wait_for_withheld_reminder(late)
+        self.assertEqual(len(calls), 1)
+
+    def test_a_capture_that_has_ended_is_a_failure_and_not_a_missing_line(self) -> None:
+        guest = self.Guest("", "")
+
+        def session_log() -> str:
+            raise runner.Failure("the log capture (pid 123) ended early with status 1")
+
+        guest.session_log = session_log
+        with self.assertRaisesRegex(runner.Failure, "the log capture .* ended early"):
+            self.waiting(guest, 1)
+        with self.assertRaisesRegex(runner.Failure, "the log capture .* ended early"):
+            self.run_step("blocked", guest, runner.check_sensor_history)
+
+    def test_the_options_name_the_directory_the_capture_is_kept_in(self) -> None:
+        options = runner.build_parser().parse_args(["--output-dir", "/tmp/example"])
+        self.assertEqual(options.output_dir, Path("/tmp/example"))
+        self.assertIsNone(runner.build_parser().parse_args([]).output_dir)
+
+
+class SessionCaptureTests(unittest.TestCase):
+    """The continuous capture of the guest's logs: a process the runner starts, records and stops."""
+
+    def script(self, directory: Path, body: str) -> str:
+        path = directory / "fake-adb"
+        path.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+        path.chmod(0o755)
+        return str(path)
+
+    def test_the_log_is_kept_in_a_file_with_the_pid_recorded_and_the_process_stopped_by_the_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            adb = self.script(directory, "echo \"$@\"; echo first; exec sleep 60")
+            capture = runner.SessionCapture(adb, "serial-1", directory / "capture.log")
+            capture.start()
+            try:
+                pid = int(capture.pid_path.read_text())
+                self.assertEqual(pid, capture.process.pid)
+                self.assertIn("-s serial-1 logcat -b main -b events -v threadtime", capture.text())
+                self.assertIn("first", capture.text())
+                capture.check()
+            finally:
+                capture.stop()
+            self.assertIsNotNone(capture.process.poll())
+            with self.assertRaisesRegex(runner.Failure, f"the log capture \\(pid {pid}\\) ended early"):
+                capture.text()
+
+    def test_a_capture_that_ends_early_is_a_failure_of_its_own(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            adb = self.script(directory, "echo one line; exit 3")
+            capture = runner.SessionCapture(adb, "serial-1", directory / "capture.log")
+            capture.start()
+            capture.process.wait(10)
+            with self.assertRaisesRegex(runner.Failure, r"ended early with status 3; its last output: 'one line"):
+                capture.text()
+
+    def test_a_capture_that_writes_nothing_is_a_failure_and_is_stopped(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            adb = self.script(directory, "exec sleep 60")
+            capture = runner.SessionCapture(adb, "serial-1", directory / "capture.log")
+            with mock.patch.object(runner, "CAPTURE_START_SECONDS", 1):
+                with self.assertRaisesRegex(runner.Failure, "wrote nothing in 1 s"):
+                    capture.start()
+            self.assertIsNotNone(capture.process.poll())
+
+    def test_the_stop_ends_only_the_process_it_started(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            adb = self.script(directory, "echo line; exec sleep 60")
+            other = subprocess.Popen(["sleep", "60"])
+            try:
+                capture = runner.SessionCapture(adb, "serial-1", directory / "capture.log")
+                capture.start()
+                capture.stop()
+                self.assertIsNone(other.poll())
+            finally:
+                other.kill()
+                other.wait()
+
+    def test_the_failure_print_names_the_capture_and_its_sensor_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            capture = runner.SessionCapture("adb", "serial-1", directory / "capture.log")
+            capture.path.write_text("\n".join((CAMERA_EVENT, REMINDER_LOG, DIALOG_EVENT)), encoding="utf-8")
+            capture.pid_path.write_text("123\n", encoding="utf-8")
+            guest = SensorDialogTests.Guest("", "")
+            guest.capture = capture
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                runner.print_sensor_capture(guest)
+            self.assertIn("capture pid 123", err.getvalue())
+            self.assertIn("kernarium: no reminder", err.getvalue())
+            self.assertIn("SensorUseStartedActivity", err.getvalue())
+            self.assertNotIn(".CameraActivity", err.getvalue())
 
 
 if __name__ == "__main__":
