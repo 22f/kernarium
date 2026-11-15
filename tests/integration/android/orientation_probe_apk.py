@@ -32,6 +32,7 @@ MIN_SDK = 29
 ATTRIBUTES = {
     "label": 0x01010001,
     "name": 0x01010003,
+    "sharedUserId": 0x0101000B,
     "hasCode": 0x0101000C,
     "debuggable": 0x0101000F,
     "exported": 0x01010010,

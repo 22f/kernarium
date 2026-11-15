@@ -935,6 +935,34 @@ through Android's input dump and the probe's log, that the host's devices
 plug, are configured as the image says, deliver keys, the cursor, buttons and
 wheel, pass pointer capture both ways and unplug; `--instance` names the
 previous release's data disk to check the one-time on-screen keyboard change.
+`android-oldapp-switch` (integration) registers when
+`UML_ANDROID_OLDAPP_SWITCH_RELEASE` names a release built with the Old app
+compatibility command ([README](../android/lineage-24/README.md#old-application-switch)):
+as the adb shell user, `kernarium_oldapp` is in the image and lists an eligible
+probe application (installed past the block on old targets, with an armeabi-v7a
+stand-in library) with its label, off and last-update time, and none that fails
+one clause of the rule (a target level of 14 or more, no 32-bit native code, a
+shared user ID, a system application, an unknown package); `set on` refuses those
+with status 2, `set off` accepts them, a name that cannot be a property name is
+refused for both, and unknown arguments give status 64; `set on` stores the time
+and `list` shows it; an ordinary application (`untrusted_app_29`) reads the value
+and its attempt to set it is refused; `set off` clears it; and a choice is
+cleared by the next listing after a reinstall (at once, whatever the clock says),
+a replacement by a package that is no longer eligible, an uninstall, or a value
+that names no installation, and the command's lock is a file that only the shell user
+can open (a loosened one is tightened). `--hook` (an image that also carries the
+framework hook) adds an old application's own process (`untrusted_app_25`): it
+reads the property and cannot set it, switching on or off ends it, the layer's
+library is mapped into the next process exactly while the switch is on, and a
+stale choice loads nothing. The restart of a guest (the choice survives it, an
+Android update and a snapshot restore) is the image proof's own step.
+`--real-apk`, `--real-package` and `--real-label` also list an application you
+provide whose label is a resource. `android17-oldapp-switch-runner` (tooling)
+runs the packages, parsers and steps against a scripted image that keeps
+packages, install times and processes, and `android17-oldapp-switch-command`
+(tooling; skipped without a JDK) runs the command's rule, listing, cleanup,
+lock file (on real files), writes and exit statuses on a plain JVM; the Android
+calls need a built image.
 `android-video-suspend` (integration) registers when
 `UML_ANDROID_VIDEO_SUSPEND_RELEASE` names the release: the gallery's decoder and
 `screenrecord`'s encoder run across a suspend by the host's route (asked again
