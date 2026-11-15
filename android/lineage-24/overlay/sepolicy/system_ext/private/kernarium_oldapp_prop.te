@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Old app compatibility is a choice per application. The person makes it in
+# Andarium, which runs `kernarium_oldapp set <package> on|off` as the adb shell
+# user (tools in overlay/oldapp_switch); the choice is the persistent property
+# persist.sys.kernarium.oldapp.<package>, whose value is the turn-on time and
+# whose emptiness means off. The framework reads it in the application's own
+# process (route p0007), so every application domain reads the type, and the
+# shell domain alone sets it. In this policy the shell domain is itself an
+# appdomain member, so the read rule below also lets the command list the
+# choices, and the neverallow names the exception.
+#
+# The type is system-owned and internal: no vendor domain has a use for it
+# (system_internal_prop is closed to them by neverallow), and init may set it
+# like any property type, which keeps the value across an Android update (it
+# lives in /data) and lets a snapshot restore bring it back.
+system_internal_prop(kernarium_oldapp_prop)
+
+set_prop(shell, kernarium_oldapp_prop)
+get_prop(shell, kernarium_oldapp_prop)
+get_prop(appdomain, kernarium_oldapp_prop)
+
+# An application must never turn the layer on or off for itself or another.
+neverallow { appdomain -shell } kernarium_oldapp_prop:property_service set;

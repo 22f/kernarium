@@ -554,6 +554,12 @@ PRODUCT_PACKAGES += kernarium_time_zone_script
 # an older release created with it on. It runs from system_ext in a core domain of its own.
 PRODUCT_PACKAGES += kernarium_keyboard_default_script
 
+# Old app compatibility is a choice per application (persist.sys.kernarium.oldapp.<package>,
+# typed by sepolicy/system_ext/private/kernarium_oldapp_prop.te). The adb shell user lists the
+# applications it can apply to and sets the choice with this command, which Andarium runs; it is
+# a Java tool, so the package manager can give the labels in the guest's language.
+PRODUCT_PACKAGES += kernarium_oldapp
+
 # A Vulkan hardware-buffer import check: it fills gralloc buffers of several
 # formats and widths through the CPU, imports each into Vulkan and reads it
 # back, so a row pitch the driver cannot import or the renderer misreads fails

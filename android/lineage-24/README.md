@@ -659,6 +659,43 @@ has chosen a zone: it replaces a zone only if that is the one it applied last
 (marker `persist.sys.kernarium.timezone_applied`), so a zone picked in Android
 stays.
 
+### Old application switch
+
+Old app compatibility is a choice the person makes for one application at a time
+(Andarium's Settings); the image keeps the choice and offers the command that
+makes and reads it. The framework reads the choice in the application's own
+process (route `p0007`), so an application that is not switched on never loads
+the compatibility layer.
+
+- **Store.** One persistent property per package,
+  `persist.sys.kernarium.oldapp.<package>`: the value is the turn-on time in
+  epoch seconds, and an empty or unset property means off. It lives in the data
+  partition, so an Android update keeps it, Erase resets it and a snapshot
+  restore brings it back; uninstalling a package does not clear it. Its type,
+  `kernarium_oldapp_prop` (`overlay/sepolicy/system_ext/private`), is
+  system-owned: the shell domain sets it, every application domain reads it (the
+  shell domain is itself an application domain in this policy) and a neverallow
+  keeps every other application domain from setting it.
+- **Command.** `kernarium_oldapp` (`overlay/oldapp_switch`, a Java tool that
+  `app_process` starts, installed on system_ext) runs as the adb shell user, with
+  no root on a `user` build. `list` prints `kernarium_oldapp 1` and then a line
+  of five TAB-separated fields for each eligible installed application, by
+  package name: the package, its label in the guest's current language (a TAB or
+  line break becomes a space), `on` or `off`, the turn-on time (0 when off) and
+  the last-update time in epoch seconds. Eligible means not a system
+  application, a 32-bit primary ABI, a target API level below 14 and no shared
+  user ID; `OldAppEligibility` is the one place that says so. `set <package>
+  on|off` refuses an application that is not eligible (status 2, one line on
+  standard error), writes or clears the property, stops the application, and
+  prints `<package>`, a TAB and `on` or `off`; unknown arguments give the usage
+  and status 64, any other failure status 1. The listing grows by trailing fields
+  only, and its version number changes when a field's meaning does; a guest
+  without the command is an older image, and the host hides the feature.
+- **Kept by a later release.** The property's name prefix, type and meaning, and
+  the command's name, arguments, listing and statuses.
+  `tests/integration/android/run_android_oldapp_switch.py` qualifies it
+  ([testing](../../docs/testing.md#android)).
+
 ### Branding and diagnostics
 
 The Setup Wizard names the system Andarium through its runtime resource
