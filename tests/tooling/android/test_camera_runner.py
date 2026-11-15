@@ -2984,7 +2984,8 @@ class RestartTests(unittest.TestCase):
         arguments = ["run_android_camera.py", "--mode", "restart", "--emulator", "/emulator", "--release", "/release"]
         with mock.patch.object(sys, "argv", arguments), mock.patch.object(runner.boot_android, "resolve_executable", return_value="adb"), \
                 mock.patch.object(runner.boot_android, "disconnect_adb"), mock.patch.object(runner.boot_android, "stop_guest"), \
-                mock.patch.object(runner, "start_guest", return_value=mock.Mock(serial="s", process=mock.Mock(), log=Path("/none"))), \
+                mock.patch.object(runner, "start_guest", return_value=mock.Mock(serial="s", process=mock.Mock(), log=Path("/none"),
+                                                                hardware_input=False, capture=None)), \
                 mock.patch.object(runner, "run_restart_checks", side_effect=first), mock.patch.object(runner, "restart_guest", side_effect=restart), \
                 mock.patch.object(runner, "check_restart_keeps_cameras", side_effect=keep), \
                 mock.patch.object(runner, "check_raw_still", side_effect=raw_still), contextlib.redirect_stdout(io.StringIO()) as printed:
