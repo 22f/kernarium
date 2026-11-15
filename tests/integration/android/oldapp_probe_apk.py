@@ -4,11 +4,11 @@
 android/lineage-24/overlay/oldapp makes a very old 32-bit game start on ART. A test of it needs an application
 that does what such a game does and that is no one's game: the receiver here (oldapp_probe_dex.py) loads
 `libkoldprobe.so` (oldapp/oldapp_probe.cpp), which reads a Java `byte[]` through the object pointer the way
-Dalvik allowed, leaks local references, and allocates from a heap that must lie below 2 GiB.
+Dalvik allowed, uses it through the array functions, and allocates from a heap that must lie below 2 GiB.
 
 The two variants have the same code and differ in the package and the target level:
 
-- ``old``: targetSdkVersion 10. The framework loads the layer for it, and the probe passes;
+- ``old``: targetSdkVersion 10. The framework loads the layer for it once it is switched on, and the probe passes;
 - ``modern``: targetSdkVersion 29, the highest a host can sign without Android's tools (the JAR signature of
   orientation_probe_apk.py is scheme v1). The rule the layer follows is "below 14", so any level from 14 up
   is the same witness; this one never gets the layer.
@@ -45,6 +45,10 @@ PROBE_LIBRARY = "koldprobe"
 SHIM_LIBRARY = "kernarium_oldapp"
 #: The path on an image, where the framework loads the layer from.
 SHIM_IMAGE_PATH = "/system/lib/libkernarium_oldapp.so"
+#: The label an application may map and execute that library with.
+SHIM_IMAGE_LABEL = "u:object_r:system_lib_file:s0"
+#: Where the framework reads the applications the person switched the layer on for (comma-separated packages).
+LIST_PROPERTY = "persist.sys.kernarium.oldapp"
 RECEIVER = oldapp_probe_dex.CLASS_NAME
 ABI_DIRECTORY = "lib/armeabi-v7a"
 

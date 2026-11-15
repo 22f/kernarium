@@ -1,32 +1,33 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Qualify the old-application layer: a very old 32-bit application starts on ART, a modern one is left alone.
+"""Qualify the old-application layer: an old 32-bit application the person switched it on for starts on ART, any other is left alone.
 
 android/lineage-24/overlay/oldapp is a library the framework loads into an application process when the
-application is 32-bit and targets an API level below 14 (Android before 4.0). It gives such an application
-what Dalvik gave it: a Java `byte[]` that reads through the object pointer at the Dalvik offsets, local
-references that need no cleanup, and a heap below 2 GiB. This runner installs the probe application of
-oldapp_probe_apk.py in its two variants and reads what each one reports:
+application is 32-bit, targets an API level below 14 (Android before 4.0) and is on the list of applications the
+person switched the layer on for. It gives such an application what Dalvik gave it: a Java `byte[]` that reads
+through the object pointer at the Dalvik offsets (a block that stands for the array: a write through it reaches
+the array, it is the same object for every JNI function), and a heap below 2 GiB. This runner installs the probe
+application of oldapp_probe_apk.py in its two variants and reads what each one reports:
 
 - ``old`` (targetSdkVersion 10, installed past the package manager's block on old targets, as Andarium
   installs such an application): the layer is mapped in its process, the raw read of the `byte[]` returns the
   bytes (also from a thread of its own), the array still works as a JNI reference (handed back to Java, read
-  through the array functions, as a global reference), every allocation lies below 2 GiB, and 4000 local
-  references from one native call do not end the process;
+  and written through the array functions, one object with a global reference to it, locked, kept while more
+  results arrive, popped out of a local frame), getline and malloc_usable_size accept a block the application
+  allocated, the JNI and invoke tables are read-only again, and every allocation lies below 2 GiB;
 - ``modern`` (targetSdkVersion 29): the layer is not mapped, and the raw read does not find the bytes (the
   reference is ART's own). The array handed back works, which shows that the probe itself runs.
 
 On an image that carries the layer the framework loads it and the logcat tag ``kernarium_oldapp`` shows the
-old process installing it and the modern one not. ``--host-shim`` is for an image that does not carry it (the
+old process installing it and the modern one not; the old application is first run without being switched on
+(the layer is left out) and then switched on. ``--host-shim`` is for an image that does not carry it (the
 accepted release before this change): the runner builds the layer with the host's clang and lld, bundles it in
 the packages and has the old probe load it, after a control run of the old probe without it (the raw read
 fails), which proves the library's mechanism but not the framework's rule. The libraries need `--clang` and
 `--lld` (default: those on PATH).
 
 An application that targets below API 23 gets the permission review before its first component runs, and a
-broadcast is skipped until then; the runner presses Continue, as the user does on the first launch. The local
-reference table of Android 17 has no limit a probe reaches, so the layer's reference relief is off there (it
-probes the runtime when it installs) and the probe's leak loop only has to complete.
+broadcast is skipped until then; the runner presses Continue, as the user does on the first launch.
 
 Every wait has a deadline. The guest's launcher is stopped through its own process on any exit, and the guest
 is reached through the shared adb server, always named with `-s`.
@@ -67,14 +68,18 @@ INSTALLED = "installed:"
 INSTALL_SECONDS = 180
 BROADCAST_SECONDS = 60
 #: What each variant must report: the lines that must read exactly so (the others are recorded).
+#: What an application does with an array and an allocation the runtime's own way: the layer must not change the verdicts.
+SEMANTICS = {"write_through": "pass", "identity": "pass", "retained": "pass", "monitor": "pass", "pop": "pass",
+             "getline": "pass", "usable_size": "pass", "table_read_only": "pass"}
 EXPECTED = {
     "old": {"shim_mapped": "yes", "raw_read": "pass", "passback": "pass", "elements": "pass", "global": "pass",
-            "thread_raw": "pass", "low_heap": "pass", "leak": "pass", "done": "1"},
+            "thread_raw": "pass", **SEMANTICS, "low_heap": "pass", "done": "1"},
     "modern": {"shim_mapped": "no", "raw_read": "fail", "passback": "pass", "elements": "pass", "global": "pass",
-               "done": "1"},
-    # The old application on a host-shim run before the layer is loaded: what the layer changes.
+               **SEMANTICS, "done": "1"},
+    # The old application before the layer is loaded (a host-shim run's control, or an image's application that is not
+    # switched on): what the layer changes.
     "control": {"shim_mapped": "no", "raw_read": "fail", "passback": "pass", "elements": "pass", "global": "pass",
-                "done": "1"},
+                **SEMANTICS, "done": "1"},
 }
 DATA = re.compile(r'data="(.*)"', re.DOTALL)
 
@@ -185,9 +190,22 @@ def complete_review(guest, package: str) -> str:
 
 
 def layer_in_image(guest) -> str:
-    """The library the framework loads is in the image, with a label the application may execute from."""
+    """The library the framework loads is in the image, with the label an application may execute from."""
     listing = guest.shell(f"ls -lZ {probe.SHIM_IMAGE_PATH}").strip()
+    if probe.SHIM_IMAGE_LABEL not in listing:
+        raise Failure(f"{probe.SHIM_IMAGE_PATH} does not carry {probe.SHIM_IMAGE_LABEL}: {listing[-200:]}")
     return listing
+
+
+def switch(guest, package: str, on: bool) -> str:
+    """Puts the application on the list of those the layer is loaded for (or takes it off), the way the framework
+    reads that list at present, and checks the guest holds what was set."""
+    value = package if on else ""
+    guest.shell(f"su 0 setprop {probe.LIST_PROPERTY} '{value}'")
+    held = guest.shell(f"getprop {probe.LIST_PROPERTY}").strip()
+    if held != value:
+        raise Failure(f"{probe.LIST_PROPERTY} holds '{held}', not '{value}'")
+    return f"{package} {'switched on' if on else 'switched off'}"
 
 
 def installed_count(guest) -> int:
@@ -207,7 +225,7 @@ def diagnosis(guest, package: str) -> str:
     return " | ".join(line.split(": ", 1)[-1][:200] for line in lines[-8:])
 
 
-def run_variant(guest, variant: str, *, shim: bool, leak: bool) -> tuple[dict[str, str], int]:
+def run_variant(guest, variant: str, *, shim: bool) -> tuple[dict[str, str], int]:
     """Starts the probe with `am broadcast` (the zygote forks an ordinary application process) and reads the probe's
     report from the result data the broadcast prints, and how many installs the log gained meanwhile. A probe that
     did not finish leaves "log" among the entries, with what the guest's log says."""
@@ -215,7 +233,7 @@ def run_variant(guest, variant: str, *, shim: bool, leak: bool) -> tuple[dict[st
     # A process of an earlier run would take the broadcast with whatever it loaded then.
     guest.adb_run("shell", f"am force-stop {package}", timeout=30)
     before = installed_count(guest)
-    extras = (f" --es shim {probe.SHIM_LIBRARY}" if shim else "") + (" --es opts leak" if leak else "")
+    extras = f" --es shim {probe.SHIM_LIBRARY}" if shim else ""
     output = guest.shell(f"am broadcast -n {probe.component_of(variant)}{extras}", timeout=BROADCAST_SECONDS)
     if "Broadcast completed" not in output:
         raise Failure(f"the broadcast to {package} was not delivered: {output.strip()[-300:]}")
@@ -261,26 +279,36 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
                        lambda variant=variant: complete_review(guest, probe.package_of(variant)))
 
         def old() -> str:
-            result, installs = run_variant(guest, "old", shim=options.host_shim, leak=True)
+            result, installs = run_variant(guest, "old", shim=options.host_shim)
             note = evaluate("old", result)
             if not options.host_shim and installs < 1:
                 raise Failure(f"the log shows no install of the layer in the old process; {note}")
             return f"{note}; installs logged: {installs}"
 
         def modern() -> str:
-            result, installs = run_variant(guest, "modern", shim=False, leak=False)
+            result, installs = run_variant(guest, "modern", shim=False)
             note = evaluate("modern", result)
             if installs != 0:
                 raise Failure(f"the layer installed itself in the modern process {installs} times; {note}")
             return note
 
         def control() -> str:
-            result, installs = run_variant(guest, "old", shim=False, leak=False)
-            return evaluate("control", result)
+            result, installs = run_variant(guest, "old", shim=False)
+            note = evaluate("control", result)
+            if installs != 0:
+                raise Failure(f"the layer installed itself in an old process that is not switched on {installs} times; {note}")
+            return note
 
         if options.host_shim:
             report.run("old without the layer: the reads fail (control)", control)
-        report.run("old: the application's reads, references and allocations", old)
+            report.run("old: the application's reads, references and allocations", old)
+        else:
+            report.run("old, not switched on: the layer is left out", control)
+            report.run("old: switched on", lambda: switch(guest, probe.package_of("old"), True))
+            try:
+                report.run("old: the application's reads, references and allocations", old)
+            finally:
+                switch(guest, probe.package_of("old"), False)
         report.run("modern: the layer is left out", modern)
     finally:
         stop()

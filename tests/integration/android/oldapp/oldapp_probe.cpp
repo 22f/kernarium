@@ -15,8 +15,16 @@
 //   global       a global reference made from it is a usable array
 //   thread_raw   the raw read from a second, attached thread
 //   low_heap     64 blocks of 256 KiB from malloc/calloc/realloc/strdup all lie below 2 GiB
-//   leak         (only when asked) local references from one native call, never deleted:
-//                "leak" makes 4000, "leak=<count>" that many
+//   write_through  a write through SetByteArrayRegion, GetByteArrayElements or
+//                GetPrimitiveArrayCritical reaches the Java array
+//   identity     the array, a global reference made from it and the array a Java call returned
+//                are one object (IsSameObject)
+//   retained     a reference kept while 520 more results arrive still reads its own bytes
+//   monitor      MonitorEnter and MonitorExit accept it
+//   pop          PopLocalFrame hands it out of the frame
+//   getline      getline grows a buffer the application allocated with malloc
+//   usable_size  malloc_usable_size accepts a block the application allocated
+//   table_read_only  the JNI and invoke function tables are not writable once the layer is installed
 //   done         the last entry: its absence means the process did not get this far
 //
 // A pass is "=pass", anything else "=fail" (or "=skipped"). Reads of an address that may
@@ -41,6 +49,12 @@ void* probe_calloc(size_t, size_t) __asm__("calloc");
 void* probe_realloc(void*, size_t) __asm__("realloc");
 void probe_free(void*) __asm__("free");
 char* probe_strdup(const char*) __asm__("strdup");
+void* probe_fopen(const char*, const char*) __asm__("fopen");
+char* probe_fgets(char*, int, void*) __asm__("fgets");
+int probe_sscanf(const char*, const char*, ...) __asm__("sscanf");
+int probe_fclose(void*) __asm__("fclose");
+long probe_getline(char**, size_t*, void*) __asm__("getline");
+size_t probe_usable_size(void*) __asm__("malloc_usable_size");
 int probe_pthread_create(unsigned long*, const void*, void* (*)(void*), void*) __asm__("pthread_create");
 int probe_pthread_join(unsigned long, void**) __asm__("pthread_join");
 }
@@ -54,7 +68,7 @@ constexpr const char kPayload[] = "OLD-APP-PAYLOAD-0123456789abcdef";
 constexpr jint kPayloadLength = sizeof(kPayload) - 1;
 constexpr int kBlocks = 64;
 constexpr size_t kBlockBytes = 256u << 10;
-constexpr int kLeaks = 4000;  // the default of "leak"; "leak=<count>" asks for another number
+constexpr int kRetainedResults = 520;  // more than Dalvik's 512 local references
 
 size_t length_of(const char* text) {
     size_t n = 0;
@@ -81,21 +95,6 @@ bool contains(const char* haystack, size_t length, const char* needle) {
         }
     }
     return false;
-}
-
-// The number after "leak=" in the options, or the default.
-int leak_count(const char* options) {
-    const size_t n = length_of(options);
-    for (size_t i = 0; i + 5 <= n; ++i) {
-        if (same(options + i, "leak=", 5)) {
-            int value = 0;
-            for (size_t k = i + 5; k < n && options[k] >= '0' && options[k] <= '9'; ++k) {
-                value = value * 10 + (options[k] - '0');
-            }
-            return value > 0 ? value : kLeaks;
-        }
-    }
-    return kLeaks;
 }
 
 // Copies `count` bytes (at most one pipe buffer) from an address that may be unmapped.
@@ -190,16 +189,19 @@ bool low_heap() {
     void* blocks[kBlocks];
     bool ok = true;
     for (int i = 0; i < kBlocks; ++i) {
+        // Each block is written only up to the size it was asked for.
+        size_t size = (i % 3 == 0) ? kBlockBytes : kBlockBytes / 2;
         void* block = (i % 3 == 0) ? probe_calloc(1, kBlockBytes) : probe_malloc(kBlockBytes / 2);
         if (i % 3 == 1) {
             block = probe_realloc(block, kBlockBytes);
+            size = kBlockBytes;
         }
         blocks[i] = block;
-        if (block == nullptr || reinterpret_cast<uintptr_t>(block) + kBlockBytes > 0x80000000u) {
+        if (block == nullptr || reinterpret_cast<uintptr_t>(block) + size > 0x80000000u) {
             ok = false;
             continue;
         }
-        for (size_t at = 0; at < kBlockBytes; at += 4096) {
+        for (size_t at = 0; at < size; at += 4096) {
             static_cast<volatile char*>(block)[at] = static_cast<char>(i);
         }
     }
@@ -211,6 +213,160 @@ bool low_heap() {
         probe_free(blocks[i]);
     }
     return ok;
+}
+
+// Whether the mapping that holds `pointer` is not writable, from /proc/self/maps.
+bool mapped_read_only(const void* pointer) {
+    void* file = probe_fopen("/proc/self/maps", "r");
+    if (file == nullptr) {
+        return false;
+    }
+    char line[512];
+    bool found = false, read_only = false;
+    while (!found && probe_fgets(line, sizeof(line), file) != nullptr) {
+        unsigned low = 0, high = 0;
+        char perms[5] = {};
+        if (probe_sscanf(line, "%x-%x %4s", &low, &high, perms) == 3 &&
+            reinterpret_cast<uintptr_t>(pointer) >= low && reinterpret_cast<uintptr_t>(pointer) < high) {
+            found = true;
+            read_only = perms[1] != 'w';
+        }
+    }
+    probe_fclose(file);
+    return found && read_only;
+}
+
+// What an application does with a byte[] the way a Dalvik-era application does it, each reported as one verdict.
+// The array comes back from Java as a call result: ByteBuffer.wrap(original).array(), which is `original` itself.
+void array_cases(Report& report, Env* env) {
+    const auto find_class = entry<jclass (*)(Env*, const char*)>(env, slot::FindClass);
+    const auto static_method = entry<jmethodID (*)(Env*, jclass, const char*, const char*)>(env, slot::GetStaticMethodID);
+    const auto method = entry<jmethodID (*)(Env*, jclass, const char*, const char*)>(env, slot::GetMethodID);
+    const auto call_static = entry<jobject (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kObject, kVarargs));
+    const auto call_instance = entry<jobject (*)(Env*, jobject, jmethodID, ...)>(env, call_slot(kObject, kVarargs));
+    const auto new_array = entry<jobject (*)(Env*, jsize)>(env, slot::NewByteArray);
+    const auto set_region = entry<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(env, slot::SetByteArrayRegion);
+    const auto get_region = entry<void (*)(Env*, jarray, jsize, jsize, jbyte*)>(env, slot::GetByteArrayRegion);
+    const auto array_length = entry<jsize (*)(Env*, jarray)>(env, slot::GetArrayLength);
+    const auto delete_local = entry<void (*)(Env*, jobject)>(env, slot::DeleteLocalRef);
+    const auto exception_check = entry<jboolean (*)(Env*)>(env, slot::ExceptionCheck);
+
+    jclass buffer_class = find_class(env, "java/nio/ByteBuffer");
+    jmethodID wrap = static_method(env, buffer_class, "wrap", "([B)Ljava/nio/ByteBuffer;");
+    jmethodID array_method = method(env, buffer_class, "array", "()[B");
+    if (buffer_class == nullptr || wrap == nullptr || array_method == nullptr) {
+        report.line("write_through", "fail");
+        report.line("identity", "fail");
+        report.line("retained", "fail");
+        report.line("monitor", "fail");
+        report.line("pop", "fail");
+        return;
+    }
+    const auto result_of = [&](jobject original) {
+        jobject buffer = call_static(env, buffer_class, wrap, original);
+        jobject result = call_instance(env, buffer, array_method);
+        delete_local(env, buffer);
+        return result;
+    };
+    const auto make_original = [&](jbyte first) {
+        jobject original = new_array(env, 4);
+        const jbyte initial[4] = {first, 18, 19, 20};
+        set_region(env, original, 0, 4, initial);
+        return original;
+    };
+
+    jobject original = make_original(17);
+    jobject shadow = result_of(original);
+    const auto original_byte = [&](jsize index) {
+        jbyte value = 0;
+        get_region(env, original, index, 1, &value);
+        return value;
+    };
+
+    // Writes reach the Java array.
+    jbyte patch = 77;
+    set_region(env, shadow, 0, 1, &patch);
+    bool writes = original_byte(0) == 77;
+    const auto get_elements = entry<jbyte* (*)(Env*, jarray, jboolean*)>(env, slot::GetByteArrayElements);
+    const auto release_elements = entry<void (*)(Env*, jarray, jbyte*, jint)>(env, slot::ReleaseByteArrayElements);
+    jbyte* elements = get_elements(env, shadow, nullptr);
+    if (elements != nullptr) {
+        elements[1] = 55;
+        release_elements(env, shadow, elements, 0);
+    }
+    writes = writes && elements != nullptr && original_byte(1) == 55;
+    const auto critical = entry<void* (*)(Env*, jarray, jboolean*)>(env, slot::GetPrimitiveArrayCritical);
+    const auto release_critical = entry<void (*)(Env*, jarray, void*, jint)>(env, slot::ReleasePrimitiveArrayCritical);
+    jbyte* bytes = static_cast<jbyte*>(critical(env, shadow, nullptr));
+    if (bytes != nullptr) {
+        bytes[2] = 88;
+        release_critical(env, shadow, bytes, 0);
+    }
+    writes = writes && bytes != nullptr && original_byte(2) == 88;
+    report.verdict("write_through", writes && !exception_check(env));
+
+    // One object.
+    const auto same_object = entry<jboolean (*)(Env*, jobject, jobject)>(env, slot::IsSameObject);
+    const auto new_global = entry<jobject (*)(Env*, jobject)>(env, slot::NewGlobalRef);
+    jobject global = new_global(env, shadow);
+    report.verdict("identity", global != nullptr && same_object(env, shadow, original) && same_object(env, global, original) &&
+                                   same_object(env, shadow, global));
+    if (global != nullptr) {
+        entry<void (*)(Env*, jobject)>(env, slot::DeleteGlobalRef)(env, global);
+    }
+
+    // The monitor.
+    const auto monitor_enter = entry<jint (*)(Env*, jobject)>(env, slot::MonitorEnter);
+    const auto monitor_exit = entry<jint (*)(Env*, jobject)>(env, slot::MonitorExit);
+    const bool entered = monitor_enter(env, shadow) == 0;
+    report.verdict("monitor", entered && monitor_exit(env, shadow) == 0 && !exception_check(env));
+
+    // The local reference table never recycles what the application still holds.
+    jobject held[kRetainedResults];
+    int kept = 0;
+    bool retained = true;
+    for (int i = 0; i < kRetainedResults; ++i) {
+        jobject next = make_original(static_cast<jbyte>(i));
+        held[kept] = result_of(next);
+        retained = retained && held[kept] != nullptr;
+        ++kept;
+        delete_local(env, next);
+    }
+    jbyte first_byte = 0;
+    get_region(env, shadow, 0, 1, &first_byte);
+    retained = retained && first_byte == 77 && array_length(env, shadow) == 4;
+    for (int i = 0; i < kept; ++i) {
+        jbyte value = 0;
+        get_region(env, held[i], 0, 1, &value);
+        retained = retained && array_length(env, held[i]) == 4 && value == static_cast<jbyte>(i);
+        delete_local(env, held[i]);
+    }
+    report.verdict("retained", retained && !exception_check(env));
+
+    // PopLocalFrame.
+    entry<jint (*)(Env*, jint)>(env, slot::PushLocalFrame)(env, 32);
+    jobject in_frame = result_of(original);
+    jobject outside = entry<jobject (*)(Env*, jobject)>(env, slot::PopLocalFrame)(env, in_frame);
+    report.verdict("pop", outside != nullptr && array_length(env, outside) == 4 && !exception_check(env));
+    delete_local(env, outside);
+    delete_local(env, shadow);
+    delete_local(env, original);
+}
+
+// getline and malloc_usable_size on blocks the application allocated.
+void allocator_cases(Report& report) {
+    size_t size = 16;
+    char* buffer = static_cast<char*>(probe_malloc(size));
+    void* file = probe_fopen("/proc/self/maps", "r");
+    const long got = file != nullptr ? probe_getline(&buffer, &size, file) : -1;
+    report.verdict("getline", got > 16);
+    if (file != nullptr) {
+        probe_fclose(file);
+    }
+    probe_free(buffer);
+    void* block = probe_malloc(32);
+    report.verdict("usable_size", probe_usable_size(block) >= 32);
+    probe_free(block);
 }
 
 struct ThreadWork {
@@ -317,22 +473,15 @@ extern "C" __attribute__((visibility("default"))) jstring Java_org_example_andar
         report.verdict("thread_raw", thread_raw_read(env, probe, payload));
     }
 
+    array_cases(report, env);
+    allocator_cases(report);
+    {
+        Vm* vm = nullptr;
+        entry<jint (*)(Env*, Vm**)>(env, 219)(env, &vm);  // GetJavaVM
+        report.verdict("table_read_only", vm != nullptr && mapped_read_only(env->functions) && mapped_read_only(vm->functions));
+    }
     report.verdict("low_heap", low_heap());
 
-    if (contains(opts, length_of(opts), "leak")) {
-        const auto new_utf = entry<jstring (*)(Env*, const char*)>(env, slot::NewStringUTF);
-        const auto utf_length = entry<jsize (*)(Env*, jstring)>(env, 168);  // GetStringUTFLength
-        bool ok = true;
-        const int leaks = leak_count(opts);
-        for (int i = 0; i < leaks && ok; ++i) {
-            ok = new_utf(env, "leaked") != nullptr && !exception_check(env);
-        }
-        jstring last = ok ? new_utf(env, "last") : nullptr;
-        ok = ok && last != nullptr && utf_length(env, last) == 4 && !exception_check(env);
-        report.verdict("leak", ok);
-    } else {
-        report.line("leak", "skipped");
-    }
     report.line("done", "1");
     if (options != nullptr) {
         entry<ReleaseUtf>(env, 170)(env, options, opts);  // ReleaseStringUTFChars

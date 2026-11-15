@@ -205,10 +205,12 @@ class ProbePackageTests(unittest.TestCase):
 
 
 class VerdictTests(unittest.TestCase):
+    SEMANTICS = {"write_through": "pass", "identity": "pass", "retained": "pass", "monitor": "pass", "pop": "pass",
+                 "getline": "pass", "usable_size": "pass", "table_read_only": "pass"}
     OLD = {"shim_mapped": "yes", "raw_read": "pass", "passback": "pass", "elements": "pass", "global": "pass",
-           "thread_raw": "pass", "low_heap": "pass", "leak": "pass", "done": "1"}
+           "thread_raw": "pass", **SEMANTICS, "low_heap": "pass", "done": "1"}
     MODERN = {"shim_mapped": "no", "raw_read": "fail", "passback": "pass", "elements": "pass", "global": "pass",
-              "thread_raw": "fail", "low_heap": "pass", "leak": "skipped", "done": "1"}
+              "thread_raw": "fail", **SEMANTICS, "low_heap": "pass", "done": "1"}
 
     def test_a_probe_that_reports_what_the_variant_must_passes(self) -> None:
         self.assertIn("raw_read=pass", runner.evaluate("old", self.OLD))
@@ -219,7 +221,9 @@ class VerdictTests(unittest.TestCase):
 
     def test_every_difference_is_named(self) -> None:
         for key, value in (("shim_mapped", "no"), ("raw_read", "fail"), ("passback", "fail"), ("elements", "fail"),
-                           ("global", "fail"), ("thread_raw", "fail"), ("low_heap", "fail"), ("leak", "fail"),
+                           ("global", "fail"), ("thread_raw", "fail"), ("low_heap", "fail"),
+                           ("write_through", "fail"), ("identity", "fail"), ("retained", "fail"), ("monitor", "fail"),
+                           ("pop", "fail"), ("getline", "fail"), ("usable_size", "fail"), ("table_read_only", "fail"),
                            ("done", "")):
             with self.assertRaises(runner.Failure) as raised:
                 runner.evaluate("old", {**self.OLD, key: value})
@@ -236,6 +240,12 @@ class VerdictTests(unittest.TestCase):
             runner.evaluate("modern", {**self.MODERN, "shim_mapped": "yes"})
         with self.assertRaises(runner.Failure):
             runner.evaluate("modern", {**self.MODERN, "raw_read": "pass"})
+
+    def test_what_the_runtime_does_with_an_array_holds_with_and_without_the_layer(self) -> None:
+        for variant, result in (("modern", self.MODERN), ("control", {**self.MODERN, "thread_raw": "fail"})):
+            for key in self.SEMANTICS:
+                with self.assertRaises(runner.Failure, msg=f"{variant} {key}"):
+                    runner.evaluate(variant, {**result, key: "fail"})
 
     def test_a_probe_that_did_not_finish_carries_the_guests_log(self) -> None:
         with self.assertRaises(runner.Failure) as raised:
@@ -298,14 +308,14 @@ class StepTests(unittest.TestCase):
 
     def test_the_broadcast_names_the_component_and_the_extras(self) -> None:
         guest = FakeGuest("shim_mapped=yes;done=1;", ["", "k kernarium_oldapp: installed: jni=1 arena=1\n"])
-        result, installs = runner.run_variant(guest, "old", shim=True, leak=True)
+        result, installs = runner.run_variant(guest, "old", shim=True)
         self.assertEqual(result, {"shim_mapped": "yes", "done": "1"})
         self.assertEqual(installs, 1)
         broadcasts = [c for c in guest.commands if "am broadcast" in c]
         self.assertEqual(len(broadcasts), 1)
         self.assertIn(f"-n {probe.component_of('old')}", broadcasts[0])
         self.assertIn("--es shim kernarium_oldapp", broadcasts[0])
-        self.assertIn("--es opts leak", broadcasts[0])
+        self.assertNotIn("--es opts", broadcasts[0])
         stop = next(i for i, c in enumerate(guest.commands) if "am force-stop" in c)
         self.assertLess(stop, next(i for i, c in enumerate(guest.commands) if "am broadcast" in c),
                         "a process of an earlier run is gone before the new one starts")
@@ -352,9 +362,54 @@ class StepTests(unittest.TestCase):
         with mock.patch.object(runner.time, "sleep"):
             self.assertEqual(runner.complete_review(guest, "org.example.andarium.oldappprobe"), "no review pending")
 
+    def test_the_library_in_the_image_carries_the_label_an_application_may_execute(self) -> None:
+        class Listing(FakeGuest):
+            text = ""
+
+            def shell(self, command: str, timeout: float = 30) -> str:
+                self.commands.append("shell " + command)
+                return self.text
+
+        guest = Listing("")
+        guest.text = f"-rw-r--r-- 1 root root {probe.SHIM_IMAGE_LABEL} 95816 2026-11-15 {probe.SHIM_IMAGE_PATH}\n"
+        self.assertIn(probe.SHIM_IMAGE_LABEL, runner.layer_in_image(guest))
+        guest.text = f"-rw-r--r-- 1 root root u:object_r:system_file:s0 95816 2026-11-15 {probe.SHIM_IMAGE_PATH}\n"
+        with self.assertRaises(runner.Failure) as raised:
+            runner.layer_in_image(guest)
+        self.assertIn(probe.SHIM_IMAGE_LABEL, str(raised.exception))
+
+    def test_an_application_is_switched_on_and_off_and_the_guest_must_hold_it(self) -> None:
+        class Properties(FakeGuest):
+            def __init__(self) -> None:
+                super().__init__("")
+                self.value = ""
+
+            def shell(self, command: str, timeout: float = 30) -> str:
+                self.commands.append("shell " + command)
+                if command.startswith("su 0 setprop"):
+                    self.value = command.split("'")[1]
+                    return ""
+                return self.value + "\n"
+
+        guest = Properties()
+        package = probe.package_of("old")
+        self.assertIn("switched on", runner.switch(guest, package, True))
+        self.assertEqual(guest.value, package)
+        self.assertIn(f"shell su 0 setprop {probe.LIST_PROPERTY} '{package}'", guest.commands)
+        self.assertIn("switched off", runner.switch(guest, package, False))
+        self.assertEqual(guest.value, "")
+
+        class Refusing(Properties):
+            def shell(self, command: str, timeout: float = 30) -> str:
+                self.commands.append("shell " + command)
+                return ""
+
+        with self.assertRaises(runner.Failure):
+            runner.switch(Refusing(), package, True)
+
     def test_a_modern_run_asks_for_nothing_extra(self) -> None:
         guest = FakeGuest("done=1;")
-        runner.run_variant(guest, "modern", shim=False, leak=False)
+        runner.run_variant(guest, "modern", shim=False)
         broadcast = next(c for c in guest.commands if "am broadcast" in c)
         self.assertNotIn("--es", broadcast)
         self.assertIn(probe.package_of("modern"), broadcast)
