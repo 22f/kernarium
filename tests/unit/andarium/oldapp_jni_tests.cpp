@@ -3317,6 +3317,81 @@ void check_an_end_is_serialized_with_a_second_threads_access() {
     require(raw_of(a)[0] == 0x31 && raw_of(a)[1] == 0x42, "and so does the block");
 }
 
+// ---- the runtime's own pointers released through a block's reference
+
+// A pointer from GetPrimitiveArrayCritical on a real reference (a global the application made of a block), released
+// through the block's own reference: the runtime's Release runs, so its critical region closes and the layer's count
+// goes down with it. (Fails on 27123b5b: the Release was swallowed; the region stayed open and the kept reference
+// of an ended block could no longer be given a critical pointer.)
+void check_a_critical_pointer_of_the_runtime_released_through_a_block_reaches_the_runtime() {
+    Fixture f = make();
+    Made made = make_held(f, sample(64));
+    jobject global = fn<jobject (*)(Env*, jobject)>(*f.table, slot::NewGlobalRef)(f.env, made.shadow);
+    require(!is_shadow_block(global), "a real global");
+    void* pointer = get_critical(f, global);
+    require(pointer != nullptr && pointer == made.object->bytes.data() && world.critical == 1, "the runtime's region is open");
+    const int before = world.release_calls;
+    release_critical(f, made.shadow, pointer, 0);
+    require(world.critical == 0 && world.release_calls == before + 1 && world.released.back() == pointer,
+            "the runtime's own Release ran with its own pointer");
+    end_ref(f, made.shadow);  // the block ends: a kept reference with only a weak reference behind it
+    void* mine = get_critical(f, made.shadow);
+    require(mine == static_cast<void*>(raw_of(made)), "the layer's count is zero: the kept reference is given its pointer");
+    release_critical(f, made.shadow, mine, 0);
+    // The same through an ended block, whose array only a weak reference holds, inside the region the pointer opened.
+    void* again = get_critical(f, global);
+    const int second = world.release_calls;
+    release_critical(f, made.shadow, again, 0);
+    require(world.critical == 0 && world.release_calls == second + 1, "also through an ended block");
+}
+
+// The elements twin: the runtime's copy is released (not leaked), and the layer unpins nothing: a pin of its own on the
+// block stays, so the ended block keeps its strong reference until its own pointer is released.
+void check_an_elements_pointer_of_the_runtime_released_through_a_block_reaches_the_runtime() {
+    Fixture f = make();
+    Made made = make_held(f, sample(64));
+    jobject global = fn<jobject (*)(Env*, jobject)>(*f.table, slot::NewGlobalRef)(f.env, made.shadow);
+    jbyte* mine = get_elements(f, made.shadow);  // the layer's own pin
+    jbyte* theirs = get_elements(f, global);
+    require(theirs == reinterpret_cast<jbyte*>(made.object->bytes.data()) && mine == reinterpret_cast<jbyte*>(raw_of(made)),
+            "two different pointers");
+    const size_t released = world.released.size();
+    release_elements(f, made.shadow, theirs, 0);
+    require(world.released.size() == released + 1 && world.released.back() == theirs,
+            "the runtime's Release ran with its own pointer");
+    end_ref(f, made.shadow);
+    require(is_ended_block(made.shadow) && world.globals.size() == 2, "the block's pin is still held: it stays strong");
+    release_elements(f, made.shadow, mine, 0);
+    require(block_weaks() == 1 && world.globals.size() == 1, "its own release gives the strong reference up");
+}
+
+// JNI_COMMIT keeps the record (the pointer stays valid); mode 0 removes it, and then the address is nobody's again; a
+// release through the real reference removes it too.
+void check_the_record_of_a_runtime_pointer_ends_with_its_release() {
+    Fixture f = make();
+    Made made = make_held(f, sample(64));
+    jobject global = fn<jobject (*)(Env*, jobject)>(*f.table, slot::NewGlobalRef)(f.env, made.shadow);
+    const size_t start = world.released.size();  // (the layer's own synchronizations release too: count from here)
+    jbyte* theirs = get_elements(f, global);
+    release_elements(f, made.shadow, theirs, 1 /* JNI_COMMIT */);
+    release_elements(f, made.shadow, theirs, 0);
+    require(world.released.size() == start + 2, "the commit kept the pointer's record; the release after it reached the runtime too");
+    release_elements(f, made.shadow, theirs, 0);
+    require(world.released.size() == start + 2, "the record is gone: the address is a buffer of the application's now");
+    jbyte* second = get_elements(f, global);
+    release_elements(f, global, second, 0);
+    require(world.released.size() == start + 3, "a release through the real reference");
+    release_elements(f, made.shadow, second, 0);
+    require(world.released.size() == start + 3, "and it removed the record");
+    // Two Gets of the same address (a runtime that gives the array's own memory): one record each.
+    jbyte* one = get_elements(f, global);
+    jbyte* two = get_elements(f, global);
+    require(one == two, "the same address");
+    release_elements(f, made.shadow, one, 0);
+    release_elements(f, made.shadow, two, 0);
+    require(world.released.size() == start + 5, "each release reached the runtime");
+}
+
 // A full sweep follows every collection that no full sweep has seen, also one that the step sweep (a few blocks at a
 // creation) found first: a result that fits after one full pass is not declined.
 void check_a_collection_the_step_sweep_saw_is_swept_in_full() {
@@ -3569,6 +3644,9 @@ int main(int argc, char** argv) {
     check_the_owners_merge_is_not_undone_by_another_threads_write();
     check_another_threads_synchronization_does_not_undo_the_owners_pull();
     check_an_end_is_serialized_with_a_second_threads_access();
+    check_a_critical_pointer_of_the_runtime_released_through_a_block_reaches_the_runtime();
+    check_an_elements_pointer_of_the_runtime_released_through_a_block_reaches_the_runtime();
+    check_the_record_of_a_runtime_pointer_ends_with_its_release();
     check_a_collection_the_step_sweep_saw_is_swept_in_full();
     check_a_kept_reference_gives_a_critical_pointer();
     check_a_release_of_a_pointer_inside_a_block_is_harmless();

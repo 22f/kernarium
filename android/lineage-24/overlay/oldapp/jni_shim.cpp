@@ -32,6 +32,7 @@ constexpr uint32_t kIdsRetryMs = 1000;          // between two looks for the cla
 constexpr unsigned kSweepStep = 32;             // ended blocks tested at a creation after a collection
 constexpr uint32_t kCollectIntervalMs = 10000;  // between two Runtime.gc() calls made for room
 constexpr uint32_t kFullSweepIntervalMs = 1000;  // between two full sweeps that no collection asked for
+constexpr unsigned kRecordSlots = 2048;         // the runtime's own pointers that are out (Get...Elements / Critical on a real reference)
 constexpr size_t kBlockTail = 16;  // zeroes behind the data: raw readers overrun by a few bytes
 constexpr uint32_t kChunk = 4096;  // the unit of the block's synchronization with its array
 
@@ -113,6 +114,15 @@ struct ThreadState {
     unsigned critical_depth;  // the runtime's critical regions this thread has open (GetPrimitiveArrayCritical, GetStringCritical)
 };
 
+// A pointer the runtime itself handed out for a real reference (and a block's reference may release): what it is, and how
+// many Gets of it are out.
+enum RecordKind : uint32_t { kRecordFree = 0, kRecordElements = 1, kRecordCritical = 2 };
+struct PointerRecord {
+    const void* pointer;
+    uint32_t kind;
+    uint32_t count;
+};
+
 struct Globals {
     Platform platform;
     void* orig[kSlotCount];
@@ -161,6 +171,8 @@ struct Globals {
     uint32_t collect_ms;       // when Runtime.gc() was last asked for
     uint32_t collect_asked;    // it has been asked for
     uint32_t collect_logged;
+    PointerRecord records[kRecordSlots];  // open addressing by pointer; under the ended lock
+    unsigned records_in_use;
     uint32_t kind_pool_used;
     char kind_pool[kKindPoolBytes];
     MethodInfo methods[kMethodSlots];
@@ -2073,6 +2085,93 @@ jsize w_GetArrayLength(Env* e, jarray a) {
     }
     return original<jsize (*)(Env*, jarray)>(slot::GetArrayLength)(e, a);
 }
+// ---- the runtime's own pointers
+//
+// An application may take a pointer from the runtime for a real reference to an array (a global it made of a block with
+// NewGlobalRef, say) and release it through another reference to the same array, a block's among them. JNI accepts any
+// reference to the array, so such a Release has to reach the runtime, which owns the copy or the critical region the
+// pointer stands for. The layer therefore records the pointers the runtime hands out from Get...Elements and
+// Get...Critical on real references, once the process has had a block, and a Release of a recorded pointer through a
+// block's reference goes to the runtime's own Release with the block's array. Any other pointer that comes with a block's
+// reference is the application's own buffer (a copy it made of the block), and is copied back as a write into the block.
+// The record is removed at a release with mode 0 or JNI_ABORT; JNI_COMMIT keeps it, as the pointer stays valid. Under the
+// ended lock.
+unsigned record_slot(const void* pointer) {
+    return static_cast<unsigned>((static_cast<uint32_t>(reinterpret_cast<uintptr_t>(pointer) >> 2) * 2654435761u) % kRecordSlots);
+}
+PointerRecord* find_record(const void* pointer, uint32_t kind) {
+    for (unsigned i = record_slot(pointer), n = 0; n < kRecordSlots; i = (i + 1) % kRecordSlots, ++n) {
+        PointerRecord* record = &g.records[i];
+        if (record->kind == kRecordFree) {
+            return nullptr;
+        }
+        if (record->pointer == pointer && record->kind == kind) {
+            return record;
+        }
+    }
+    return nullptr;
+}
+// Removes the record in slot i and closes the gap, so that no later lookup stops short of an entry (linear probing).
+void erase_record(unsigned i) {
+    unsigned j = i;
+    for (;;) {
+        j = (j + 1) % kRecordSlots;
+        if (g.records[j].kind == kRecordFree) {
+            break;
+        }
+        const unsigned home = record_slot(g.records[j].pointer);
+        const bool stays = i <= j ? (i < home && home <= j) : (i < home || home <= j);
+        if (!stays) {
+            g.records[i] = g.records[j];
+            i = j;
+        }
+    }
+    g.records[i] = PointerRecord{nullptr, kRecordFree, 0};
+    --g.records_in_use;
+}
+void record_runtime_pointer(const void* pointer, uint32_t kind) {
+    if (pointer == nullptr || __atomic_load_n(&g.counters.shadows_created, __ATOMIC_RELAXED) == 0) {
+        return;  // no block has been made yet: no block's reference can release it
+    }
+    EndedLock lock;
+    if (PointerRecord* record = find_record(pointer, kind)) {
+        ++record->count;
+        return;
+    }
+    if (g.records_in_use >= kRecordSlots / 2) {
+        return;  // not recorded: a Release of it through a block's reference is treated as a buffer of the application's
+    }
+    unsigned i = record_slot(pointer);
+    while (g.records[i].kind != kRecordFree) {
+        i = (i + 1) % kRecordSlots;
+    }
+    g.records[i] = PointerRecord{pointer, kind, 1};
+    ++g.records_in_use;
+}
+bool is_recorded_pointer(const void* pointer, uint32_t kind) {
+    if (pointer == nullptr || __atomic_load_n(&g.records_in_use, __ATOMIC_RELAXED) == 0) {
+        return false;
+    }
+    EndedLock lock;
+    return find_record(pointer, kind) != nullptr;
+}
+// A release of the pointer (any reference): the record goes with the last Get unless the mode is JNI_COMMIT.
+void forget_runtime_pointer(const void* pointer, uint32_t kind, jint mode) {
+    if (mode == kReleaseCommit || pointer == nullptr || __atomic_load_n(&g.records_in_use, __ATOMIC_RELAXED) == 0) {
+        return;
+    }
+    EndedLock lock;
+    PointerRecord* record = find_record(pointer, kind);
+    if (record == nullptr) {
+        return;
+    }
+    if (record->count > 1) {
+        --record->count;
+        return;
+    }
+    erase_record(static_cast<unsigned>(record - g.records));
+}
+
 // The pointer of a shadow is a copy, and says so (JNI_TRUE): the block is separate storage that is kept alike at the
 // synchronization points, so code that commits before it lets Java read the array through another reference (a global
 // reference, a pinned pointer) must be told to. A real reference keeps the runtime's own flag.
@@ -2094,7 +2193,9 @@ jbyte* w_GetByteArrayElements(Env* e, jarray a, jboolean* is_copy) {
         close_access(e, access);
         return elements;
     }
-    return original<jbyte* (*)(Env*, jarray, jboolean*)>(slot::GetByteArrayElements)(e, a, is_copy);
+    jbyte* elements = original<jbyte* (*)(Env*, jarray, jboolean*)>(slot::GetByteArrayElements)(e, a, is_copy);
+    record_runtime_pointer(elements, kRecordElements);
+    return elements;
 }
 // The block is the working copy. A committing release (mode 0 or COMMIT) synchronizes like any other point: the
 // chunks the application wrote are merged into the array, byte by byte; JNI_ABORT discards the working copy (the block
@@ -2140,8 +2241,40 @@ void release_block(Env* e, BlockHeader* header, const void* elements, jint mode,
     close_access(e, access);
 }
 
+void close_critical_region();
+
+// The runtime's pointer released through a block's reference: the runtime's own Release runs, with the block's array. The
+// layer unpins nothing (the pointer was never one of its own) and closes the critical region it counted. The reference is a
+// local one of this release's, or, where none can be made (an exception pending, or the region this very pointer opened),
+// the block's strong or weak one, with the mutex held: the array is alive, since the real reference the pointer came from
+// keeps it.
+void release_runtime_pointer(Env* e, BlockHeader* header, void* elements, jint mode, bool critical) {
+    Access access = open_header(e, header, !critical);
+    {
+        SyncScope scope;
+        jobject array = access.array;
+        if (array == nullptr && (header->magic == kBlockLive || header->magic == kBlockEnded)) {
+            array = header->global != nullptr ? header->global : header->weak;
+        }
+        if (array != nullptr) {
+            if (critical) {
+                original<void (*)(Env*, jarray, void*, jint)>(slot::ReleasePrimitiveArrayCritical)(e, array, elements, mode);
+            } else {
+                original<void (*)(Env*, jarray, jbyte*, jint)>(slot::ReleaseByteArrayElements)(e, array, static_cast<jbyte*>(elements),
+                                                                                                mode);
+            }
+        }
+    }
+    close_access(e, access);
+    if (critical) {
+        close_critical_region();
+    }
+    forget_runtime_pointer(elements, critical ? kRecordCritical : kRecordElements, mode);
+}
+
 // A Release goes to the block its pointer lies in, whichever reference it arrives through (another reference to the array,
-// a global, or the block's own); the block, not the runtime, owns that memory. True when it was handled: a pointer or a
+// a global, or the block's own); the block, not the runtime, owns that memory. A pointer the runtime handed out and the
+// layer recorded goes to the runtime instead, whichever reference comes with it. True when it was handled: a pointer or a
 // reference of the layer's is never the runtime's to release. A pointer inside a block but not at its start, arriving with
 // a real reference, finds no block and is dropped.
 bool route_release(Env* e, jarray a, const void* elements, jint mode, bool critical) {
@@ -2149,6 +2282,10 @@ bool route_release(Env* e, jarray a, const void* elements, jint mode, bool criti
     const bool shadow_ref = is_shadow(a);
     if (header == nullptr && shadow_ref) {
         header = block_of(a);
+        if (header != nullptr && is_recorded_pointer(elements, critical ? kRecordCritical : kRecordElements)) {
+            release_runtime_pointer(e, header, const_cast<void*>(elements), mode, critical);
+            return true;
+        }
     }
     if (header != nullptr) {
         release_block(e, header, elements, mode, critical);
@@ -2162,6 +2299,7 @@ void w_ReleaseByteArrayElements(Env* e, jarray a, jbyte* elements, jint mode) {
         return;
     }
     original<void (*)(Env*, jarray, jbyte*, jint)>(slot::ReleaseByteArrayElements)(e, a, elements, mode);
+    forget_runtime_pointer(elements, kRecordElements, mode);
 }
 // The critical entries make no other JNI call than the real array's critical pair, and do not drain the blocks of
 // ended threads (that deletes global references, which a critical region forbids). The runtime's critical regions that the
@@ -2206,6 +2344,7 @@ void* w_GetPrimitiveArrayCritical(Env* e, jarray a, jboolean* is_copy) {
         if (state != nullptr) {
             ++state->critical_depth;
         }
+        record_runtime_pointer(elements, kRecordCritical);
     }
     return elements;
 }
@@ -2221,6 +2360,7 @@ void w_ReleasePrimitiveArrayCritical(Env* e, jarray a, void* elements, jint mode
     }
     original<void (*)(Env*, jarray, void*, jint)>(slot::ReleasePrimitiveArrayCritical)(e, a, elements, mode);
     close_critical_region();
+    forget_runtime_pointer(elements, kRecordCritical, mode);
 }
 const jchar* w_GetStringCritical(Env* e, jstring string, jboolean* is_copy) {
     const jchar* chars = original<const jchar* (*)(Env*, jstring, jboolean*)>(slot::GetStringCritical)(e, string, is_copy);
