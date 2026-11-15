@@ -486,6 +486,26 @@ class CensusTests(unittest.TestCase):
         self.assertEqual(sum(census.values()), len(unit))
         self.assertEqual(census["other"], 0)
 
+    def test_functions_that_leave_for_one_target_share_its_stub(self) -> None:
+        # Three functions, each ending in a branch to the same uncovered
+        # address (and a fourth to another one): one stub per target.
+        def b(from_word: int, to_offset: int) -> int:
+            return 0x14000000 | (((to_offset - 4 * from_word) >> 2) & 0x3ffffff)
+        words = [b(0, 0x100), b(1, 0x100), b(2, 0x100), b(3, 0x104)]
+        library = library_of(words, [(0, 4), (4, 4), (8, 4), (12, 4)])
+        unit_words(library)
+        # movz + b, per distinct target.
+        self.assertEqual(library.stats.census["stub.xb"], 2 * 2 * 4)
+
+    def test_a_second_build_starts_with_no_shared_stubs(self) -> None:
+        def b(from_word: int, to_offset: int) -> int:
+            return 0x14000000 | (((to_offset - 4 * from_word) >> 2) & 0x3ffffff)
+        words = [b(0, 0x100), b(1, 0x100)]
+        library = library_of(words, [(0, 4), (4, 4)])
+        first = unit_words(library)
+        second = unit_words(library)
+        self.assertEqual(first, second)
+
     def test_the_stored_source_is_counted_once(self) -> None:
         library = library_of([self.ADD, RET], [(0, 8)])
         digests = [1] * ((library.table_end - library.table_base) // 4096)

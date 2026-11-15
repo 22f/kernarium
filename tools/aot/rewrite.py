@@ -177,6 +177,11 @@ MEM_FEATURES = {"baseline", "FEAT_FP"}
 SIMD_STRUCT_CLASSES = {"asisdlse", "asisdlsep", "asisdlso", "asisdlsop"}
 # The sizes of an access that the refill thunks name.
 REFILL_TOTALS = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64)
+# A function branches to an exit stub that an earlier function emitted when
+# the stub is no further back than this many words: a conditional branch
+# reaches 1 MiB, and a quarter of that stays for the code that relaxation
+# adds after the reference.
+XB_SHARE_WORDS = 192 * 1024
 # HINT #imm7. The engine runs YIELD (1), DGH (6), CSDB (20) and CLRBHB (22)
 # as gadgets with an effect and every other hint, allocated or not, as a
 # no-op (pointer authentication, branch targets, GCS and the rest are not
@@ -275,6 +280,10 @@ class Library:
         self.fn_mm: list[tuple[int, str, int]] = []
         self.fn_xu: set[int] = set()
         self.fn_xb: set[int] = set()
+        # The exit-by-branch stubs already emitted, by target: (label, the
+        # word the stub starts at). A later function branches to one within
+        # reach instead of emitting its own.
+        self.xb_emitted: dict[int, tuple[str, int]] = {}
         self.fn_pg: set[int] = set()
         self.fn_ma: list[int] = []
         self.fn_st: list[int] = []
@@ -375,8 +384,7 @@ class Library:
                 self.fn_pg.add(target)
                 return self.pg_label(target)
             return self.direct_label(target)
-        self.fn_xb.add(target)
-        return self.xb_label(target)
+        return self.xb_ref(target)
 
     def direct_label(self, target: int) -> str:
         # The branch charges the budget where the target is a charge point.
@@ -392,16 +400,27 @@ class Library:
         if page >= 4096:
             raise A.AsmError("a library's text must be below 16 MiB")
         asm = self.asm
-        self.fn_xb.add(target)
         before = len(asm._w)
         asm.word(A.ldr_x(T0, 31, SLOT_PSTATE))
         asm.word(A.ldrb_w(T0, T0, page))
-        asm.cbz(T0, self.xb_label(target), sf=0)
+        asm.cbz(T0, self.xb_ref(target), sf=0)
         self.tag("gate", before)
         self.stats.words["gate"] += 3
 
     def xb_label(self, target: int) -> str:
         return f"L{self.index}XB{self.fn_start:x}_{target:x}"
+
+    def xb_ref(self, target: int) -> str:
+        """The label to branch to for leaving by the branch exit of `target`:
+        the stub an earlier function emitted when it is behind this word
+        within the reach of a conditional branch, else this function's own
+        (emitted after its code)."""
+        emitted = self.xb_emitted.get(target)
+        if emitted is not None and \
+                len(self.asm._w) - emitted[1] < XB_SHARE_WORDS:
+            return emitted[0]
+        self.fn_xb.add(target)
+        return self.xb_label(target)
 
     # emission -------------------------------------------------------------
     def build(self, digests: list[int], source: bytes = b"") -> dict:
@@ -413,6 +432,7 @@ class Library:
         the library in the blob's hash.
         """
         asm = self.asm = A.Assembler()
+        self.xb_emitted = {}
         asm.label("UNIT")
         emit_exits(asm, self)
         self.tag("exits", 0)
@@ -1368,6 +1388,7 @@ class Library:
         before = len(asm._w)
         for target in sorted(self.fn_xb):
             asm.label(self.xb_label(target))
+            self.xb_emitted[target] = (self.xb_label(target), len(asm._w))
             self._exit_to(target, "EXIT_BRANCH")
         self.tag("stub.xb", before)
 
