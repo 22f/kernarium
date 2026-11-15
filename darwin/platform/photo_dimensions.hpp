@@ -95,6 +95,14 @@ enum class RatioStillStep : std::uint8_t { proceed, wait, refuseFailed, refuseMo
 // completion that comes at once, or never, is not mistaken for another operation's; a completion that belongs to an
 // earlier operation of the camera is ignored. `armedAt` is when the session was running with the camera in it, which is
 // when the time the completion may take begins (zero: not begun).
+//
+// The completion does not make the frames already made right: the device delivers buffers of the ratio it had until the
+// first buffer the change applies to, which the completion's timestamp names (on the device's clock, converted to the
+// capture's, the timeline of every sample's timestamp). `boundary` says which rule keeps the older samples from the guest:
+// `atTime`, the samples captured before `notBefore`; `shape`, where the timestamp could not be converted, the samples
+// until the first of the shape the anchor presents (a weaker rule: the output's size is set, so it only sees a buffer of
+// another aspect); `none`, where the device already held the ratio and nothing precedes the change.
+enum class RatioBoundary : std::uint8_t { none, atTime, shape };
 struct RatioPin {
     bool asked {};
     bool pending {};
@@ -104,6 +112,10 @@ struct RatioPin {
     bool timedOut {};
     std::uint64_t operation {};
     std::uint64_t armedAt {};
+    RatioBoundary boundary {};
+    std::int64_t notBefore {};
+    // A sample of the anchor's shape arrived (the `shape` rule is over).
+    bool shapeSeen {};
 };
 // How long the completion of a ratio change may take once the session runs with the camera in it: the budget a still
 // waits in (stillWaitBudgetNanoseconds), so that no wait of the capture is longer than that.
@@ -116,7 +128,8 @@ void ratioPinAsked(RatioPin& pin, std::uint64_t operation) noexcept;
 // The change `operation` completed with `error`. False, and nothing changed, for a completion of another operation than
 // the camera's current one (or of none asked); a completion after the time ran out is kept (the record names it) but
 // leaves the pin timed out.
-bool ratioPinCompleted(RatioPin& pin, std::uint64_t operation, std::int32_t error) noexcept;
+bool ratioPinCompleted(RatioPin& pin, std::uint64_t operation, std::int32_t error, RatioBoundary boundary = RatioBoundary::none,
+                       std::int64_t notBefore = 0) noexcept;
 // The session runs with the camera in it: the budget begins, once for an operation that is still pending. True when it
 // began now.
 bool ratioPinArmed(RatioPin& pin, std::uint64_t now) noexcept;
@@ -129,6 +142,49 @@ enum class RatioFrameStep : std::uint8_t { deliver, hold, failed, timedOut };
 [[nodiscard]] RatioFrameStep ratioFrameStep(const RatioPin& pin) noexcept;
 // The completion's error code a still is told for the pin (ratioStillStep).
 [[nodiscard]] std::int32_t ratioPinErrorForStill(const RatioPin& pin) noexcept;
+// Whether a camera's sample goes to the guest: the frames must be delivering (ratioFrameStep), and a sample made before the
+// change took effect does not pass (RatioBoundary). `captureNanoseconds` is the sample's timestamp on the capture's clock,
+// where it has one; `shapeIsAnchors` whether its dimensions have the anchor's aspect ratio.
+[[nodiscard]] bool ratioSampleDelivered(RatioPin& pin, std::optional<std::int64_t> captureNanoseconds, bool shapeIsAnchors) noexcept;
+
+// What a camera's note says of its ratio change: pending while the change is under way or never completed, else the
+// completion's error code (zero for none); nothing for a camera with no change (it left the session), whose note keeps
+// what it has. Read where the note is published, in the notes' critical section, never before it.
+[[nodiscard]] std::optional<std::int32_t> ratioNoteCode(const std::optional<RatioPin>& pin) noexcept;
+// Whether a camera's input leaves the session after a removal that left it `videoOutputRemains` and `photoOutputRemains`
+// (a photo output stays for a still in flight): with its last output, and its ratio change with it.
+[[nodiscard]] constexpr bool cameraLeavesSession(bool hasInput, bool videoOutputRemains, bool photoOutputRemains) noexcept
+{
+    return hasInput && !videoOutputRemains && !photoOutputRemains;
+}
+
+// The ratio changes of a session's cameras, by camera (the caller holds one lock for it): each camera's operation lives
+// from its asking until the camera's last input or output leaves the session (`invalidate`); a watch or a completion of
+// an operation that is gone does nothing, so a camera that left cannot fail the session the others are in, and its
+// diagnostic history stays in the notes.
+class RatioPins {
+public:
+    // A change is asked for the camera, replacing its earlier operation.
+    void asked(std::size_t camera, std::uint64_t operation);
+    // What a completion did: nothing (another operation's, or none is asked), the change took effect, it ended in an error
+    // that fails the camera, or it came after the time had run out (kept, never reviving or failing it a second time).
+    enum class Completion : std::uint8_t { ignored, succeeded, failed, afterTimeout };
+    Completion completed(std::size_t camera, std::uint64_t operation, std::int32_t error, RatioBoundary boundary,
+                         std::int64_t notBefore);
+    // The session runs with the camera in it: the operation the budget began for now, if it did.
+    [[nodiscard]] std::optional<std::uint64_t> armed(std::size_t camera, std::uint64_t now);
+    // The operation's budget ran out: true once, for a pending operation that is still the camera's.
+    [[nodiscard]] bool timedOut(std::size_t camera, std::uint64_t operation, std::uint64_t now);
+    // The camera's last input or output left the session, or its admission was undone with nothing of it left.
+    void invalidate(std::size_t camera);
+    [[nodiscard]] std::optional<RatioPin> find(std::size_t camera) const;
+    [[nodiscard]] bool sampleDelivered(std::size_t camera, std::optional<std::int64_t> captureNanoseconds, bool shapeIsAnchors);
+    // Whether the camera's frames are held (ratioFrameStep is not `deliver`); a camera with no operation is not held.
+    [[nodiscard]] bool holdsFrames(std::size_t camera) const;
+
+private:
+    std::map<std::size_t, RatioPin> pins_;
+};
 
 // The notes the platform keeps across its sessions by device identifier (the last admission of each camera): which to
 // let go. The current session's cameras are kept, and of the rest the `recent` most recently used; `used` is a counter

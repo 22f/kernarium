@@ -878,9 +878,16 @@ RatioFacts ratioFactsOf(AVCaptureDevice* device, CameraAspectRatio pinned)
 }
 #endif
 
-// What the completion of a dynamic aspect ratio change says: zero, or the error's code, and `ratioPending` when the change
-// is asked for, before the device is told. It may run on any queue.
-using RatioDone = std::function<void(std::int32_t)>;
+// What a dynamic aspect ratio change says: `ratioPending` as the code when it is asked for, before the device is told;
+// else the completion's code, zero or the error's. `changed` is false where the device already held the ratio (nothing was
+// asked of it, and no buffer precedes the change); else `syncTime` is the first buffer the change applies to, on the
+// device's own clock. It may run on any queue.
+struct RatioCompletion {
+    std::int32_t code {};
+    bool changed {};
+    CMTime syncTime {kCMTimeInvalid};
+};
+using RatioDone = std::function<void(const RatioCompletion&)>;
 
 // Puts a device in its anchor: the format only when it is not the active one
 // (setting it again would revert the device's focus and exposure points), the
@@ -902,14 +909,16 @@ bool activate(AVCaptureDevice* device, const Anchor& anchor, const std::optional
             // The change is asked for before the device is told, so that it is under way for whatever reads it, and a completion
             // that comes at once is the change's own; a device that already holds the ratio completes it explicitly.
             RatioDone done = ratioDone;
-            if (done) done(ratioPending);
+            if (done) done({ratioPending, true, kCMTimeInvalid});
             if (ratioOfAV(device.dynamicAspectRatio) != anchor.facts.pinnedRatio) {
                 [device setDynamicAspectRatio:avRatioOf(anchor.facts.pinnedRatio)
-                            completionHandler:^(CMTime, NSError* completion) {
-                    if (done) done(completion == nil ? 0 : std::int32_t(std::clamp<NSInteger>(completion.code, INT32_MIN + 1, INT32_MAX)));
+                            completionHandler:^(CMTime syncTime, NSError* completion) {
+                    if (done)
+                        done({completion == nil ? 0 : std::int32_t(std::clamp<NSInteger>(completion.code, INT32_MIN + 1, INT32_MAX)), true,
+                              syncTime});
                 }];
             } else if (done) {
-                done(0);
+                done({0, false, kCMTimeInvalid});
             }
         }
 #else
@@ -1120,7 +1129,7 @@ public:
             // A camera that no longer streams leaves the session, and so does the
             // photo output made for it unless a still is still on its way; the
             // camera's indicator and its share of a multi-camera budget go with it.
-            removeFromSession(running, true, !stillsInFlight(camera));
+            removeFromSession(camera, running, true, !stillsInFlight(camera));
             endPressureWatch(running);
             refusals_.reset(camera);
         });
@@ -1532,15 +1541,16 @@ public:
     void deliverFrame(std::size_t camera, CMSampleBufferRef sample)
     {
         if (camera >= entries_.size()) return;
-        // The camera's pinned ratio is not the one it delivers until the change has completed: nothing of it is passed on,
-        // and the device's own stand-in frames bridge the gap as they do at a session's start.
-        if (ratioHoldsFrames(camera)) return;
         // What the capture made before the cameras were put back in their anchors does not get here
         // (RepairBoundary, applied by the output delegate before it calls this).
         const CMTime presentation = CMSampleBufferGetPresentationTimeStamp(sample);
         const std::uint64_t capturedAt = CMTIME_IS_VALID(presentation) ? std::uint64_t(CMTimeGetSeconds(presentation) * 1e9) : hostNow();
         CVPixelBufferRef pixels = CMSampleBufferGetImageBuffer(sample);
         if (pixels == nullptr || CVPixelBufferGetPlaneCount(pixels) != 2) return;
+        // The camera's pinned ratio is not the one it delivers until the change has taken effect: nothing of it is passed on
+        // while it is under way or failed, and nothing made before it took effect afterwards (ratioAdmitsSample); the device's
+        // own stand-in frames bridge the gap as they do at a session's start.
+        if (!ratioAdmitsSample(camera, nanosecondsOf(presentation), CVPixelBufferGetWidth(pixels), CVPixelBufferGetHeight(pixels))) return;
         if (CVPixelBufferLockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return;
         CFRetain(sample);
         CameraFrame frame;
@@ -1735,40 +1745,51 @@ public:
     }
 
     // The completion of a dynamic aspect ratio change arrives (the device's own queue), under the state's mutex: `operation`
-    // is the change it belongs to, or `ratioPending` as the code when the change is asked for, before the device is told.
-    // The camera's frames are held until the change has completed without an error; an error ends the camera for the
-    // guest (failRatio), as a refused admission does.
-    void ratioCompleted(std::size_t camera, std::uint64_t operation, std::int32_t code)
+    // is the change it belongs to, and `completion.code` is `ratioPending` when the change is asked for, before the device
+    // is told. The camera's frames are held until the change has completed without an error, and the samples made before
+    // the first buffer it applies to never pass: that buffer's timestamp, on the device's clock `from` (the camera's input
+    // port's), is converted to the capture's, the one every sample's timestamp is on; where that cannot be done the
+    // samples are held until one of the anchor's shape arrives (RatioBoundary). An error ends the camera for the guest
+    // (failRatio), as a refused admission does. A change of a camera that has left the session is gone, and its completion
+    // does nothing.
+    void ratioCompleted(std::size_t camera, std::uint64_t operation, const RatioCompletion& completion, const void* from)
     {
 #if TARGET_OS_IOS
         if (camera >= entries_.size()) return;
+        const std::int32_t code = completion.code;
         bool failedNow = false;
         {
+            RatioBoundary boundary = RatioBoundary::none;
+            std::int64_t notBefore = 0;
+            if (code == 0 && completion.changed) {
+                boundary = RatioBoundary::shape;
+                CMClockRef to = session_.synchronizationClock;
+                if (from != nullptr && to != nullptr && CMTIME_IS_NUMERIC(completion.syncTime))
+                    if (const auto converted = nanosecondsOf(CMSyncConvertTime(completion.syncTime, static_cast<CMClockRef>(const_cast<void*>(from)), to))) {
+                        boundary = RatioBoundary::atTime;
+                        notBefore = *converted;
+                    }
+            }
             std::lock_guard lock(notesMutex_);
-            RatioPin& pin = ratioPins_[camera];
             if (code == ratioPending) {
-                ratioPinAsked(pin, operation);
+                ratioPins_.asked(camera, operation);
             } else {
-                const bool wasTimedOut = pin.timedOut;
-                if (!ratioPinCompleted(pin, operation, code)) return;
-                failedNow = code != 0 && !wasTimedOut;
+                const auto outcome = ratioPins_.completed(camera, operation, code, boundary, notBefore);
+                if (outcome == RatioPins::Completion::ignored) return;
+                failedNow = outcome == RatioPins::Completion::failed;
             }
         }
         // The ratio the camera's anchor pins, which the notes do not hold until the admission that asked for it is noted.
         CameraAspectRatio pinned = CameraAspectRatio::none;
         if (const Anchor* anchor = anchorOf(camera); anchor != nullptr) pinned = anchor->facts.pinnedRatio;
-        std::optional<RatioFacts> facts;
-        if (pinned != CameraAspectRatio::none) facts = ratioFactsOf(entries_[camera].device, pinned);
-        note(camera, [&](CameraPresentation& held) {
-            if (facts) applyRatio(held, *facts);
-            held.ratioError = code;
-        });
+        note(camera, [&](CameraPresentation& held) { noteRatio(held, camera, pinned); });
         if (failedNow)
             failRatio(camera, Refusal::ratioFailed, "the change to " + std::string(aspectRatioName(pinned)) + " ended with error " + std::to_string(code));
 #else
         (void)camera;
         (void)operation;
-        (void)code;
+        (void)completion;
+        (void)from;
 #endif
     }
 
@@ -1786,14 +1807,15 @@ private:
 #if TARGET_OS_IOS
     static CameraFact factOf(bool value) { return value ? CameraFact::yes : CameraFact::no; }
 
-    // What the camera's pinned ratio change says in a note: pending while it is under way or never completed, else its
-    // completion's error code; nothing where none was asked for.
-    std::optional<std::int32_t> ratioCodeOf(std::size_t camera)
+    // The camera's pinned ratio into its note, in the one critical section that holds the notes' lock (note()): the device's
+    // ratio as it reads now, and the change's own state as the camera has it now, pending while it is under way or never
+    // completed, else its completion's error code. Read and written together, a completion that comes between an admission's
+    // reading and its note cannot be overwritten by the older state, and a camera that has no change (it left the session)
+    // keeps what its note says.
+    void noteRatio(CameraPresentation& held, std::size_t camera, CameraAspectRatio pinned)
     {
-        std::lock_guard lock(notesMutex_);
-        const auto found = ratioPins_.find(camera);
-        if (found == ratioPins_.end() || !found->second.asked) return std::nullopt;
-        return found->second.pending || found->second.timedOut ? ratioPending : found->second.error;
+        if (pinned != CameraAspectRatio::none) applyRatio(held, ratioFactsOf(entries_[camera].device, pinned));
+        if (const auto code = ratioNoteCode(ratioPins_.find(camera))) held.ratioError = *code;
     }
 
     // The ratio facts into a note; a change whose completion has not come yet is pending.
@@ -1837,13 +1859,8 @@ private:
         const CameraFact center = factOf(device.centerStageActive);
         const CameraFact distortion = factOf(device.geometricDistortionCorrectionEnabled);
         const Anchor* anchor = anchorOf(camera);
-        const std::optional<std::int32_t> ratioCode = ratioCodeOf(camera);
         note(camera, [&](CameraPresentation& held) {
-            if (ratio) {
-                applyRatio(held, *ratio);
-                // The change's own state, which a completion that came before this note may already have ended.
-                if (ratioCode) held.ratioError = *ratioCode;
-            }
+            if (ratio) noteRatio(held, camera, ratio->pinned);
             if (video) {
                 held.videoKnown = true;
                 held.videoDefaultAngle = video->defaultAngle;
@@ -1901,12 +1918,8 @@ private:
                 }
         }
         const CMVideoDimensions maximum = running.photoOutput != nil ? running.photoOutput.maxPhotoDimensions : CMVideoDimensions {};
-        const std::optional<std::int32_t> ratioCode = ratioCodeOf(camera);
         note(camera, [&](CameraPresentation& held) {
-            if (ratio) {
-                applyRatio(held, *ratio);
-                if (ratioCode) held.ratioError = *ratioCode;
-            }
+            if (ratio) noteRatio(held, camera, ratio->pinned);
             if (video && held.videoKnown) {
                 held.videoAngle = video->first;
                 held.videoMirrored = video->second;
@@ -1939,7 +1952,7 @@ private:
         RatioPin pin;
         {
             std::lock_guard lock(notesMutex_);
-            if (const auto found = ratioPins_.find(camera); found != ratioPins_.end()) pin = found->second;
+            if (const auto found = ratioPins_.find(camera)) pin = *found;
         }
         const RatioStillStep step = ratioStillStep(facts.pinned, facts.now, pin.pending && !pin.timedOut, ratioPinErrorForStill(pin));
         if (step == RatioStillStep::refuseMoved || step == RatioStillStep::refuseFailed) {
@@ -2001,13 +2014,18 @@ private:
 #endif
 
 #if TARGET_OS_IOS
-    // Whether the camera's frames are held: a pinned ratio's change is under way, or ended in an error or no completion
-    // (ratioFrameStep). What the device delivers until the change completed is of the ratio it had before.
-    bool ratioHoldsFrames(std::size_t camera)
+    // Whether a sample of the camera goes to the guest (ratioSampleDelivered): not while a pinned ratio's change is under way
+    // or ended in an error or no completion, and never one made before the first buffer the change applies to (the device
+    // delivers buffers of the ratio it had until then, and a callback that was already entered when the completion came
+    // must not pass because the completion has). `captureNanoseconds` is the sample's timestamp on the capture's clock; its
+    // size is compared with the anchor's aspect ratio where the rule is the shape's.
+    bool ratioAdmitsSample(std::size_t camera, std::optional<std::int64_t> captureNanoseconds, std::size_t width, std::size_t height)
     {
+        const Anchor* anchor = anchorOf(camera);
+        const bool shape = anchor == nullptr || anchor->facts.width == 0 || anchor->facts.height == 0 ||
+            std::uint64_t(width) * anchor->facts.height == std::uint64_t(height) * anchor->facts.width;
         std::lock_guard lock(notesMutex_);
-        const auto found = ratioPins_.find(camera);
-        return found != ratioPins_.end() && ratioFrameStep(found->second) != RatioFrameStep::deliver;
+        return ratioPins_.sampleDelivered(camera, captureNanoseconds, shape);
     }
 
     // The session runs with the camera in it (after an admission or a repair): the time the pinned ratio's change may
@@ -2017,9 +2035,9 @@ private:
         std::uint64_t operation = 0;
         {
             std::lock_guard lock(notesMutex_);
-            const auto found = ratioPins_.find(camera);
-            if (found == ratioPins_.end() || !ratioPinArmed(found->second, hostNow())) return;
-            operation = found->second.operation;
+            const auto armed = ratioPins_.armed(camera, hostNow());
+            if (!armed) return;
+            operation = *armed;
         }
         std::shared_ptr<SessionState> state = state_;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, std::int64_t(ratioCompletionBudgetNanoseconds)), queue_, ^{
@@ -2038,23 +2056,25 @@ private:
     {
         if (stopped_) return;
         {
+            // An operation that is gone (the camera left the session, or another change replaced it) does nothing.
             std::lock_guard lock(notesMutex_);
-            const auto found = ratioPins_.find(camera);
-            if (found == ratioPins_.end() || found->second.operation != operation) return;
-            if (!ratioPinTimedOut(found->second, std::max(hostNow(), found->second.armedAt + ratioCompletionBudgetNanoseconds))) return;
+            const auto pin = ratioPins_.find(camera);
+            if (!pin || pin->operation != operation) return;
+            if (!ratioPins_.timedOut(camera, operation, std::max(hostNow(), pin->armedAt + ratioCompletionBudgetNanoseconds))) return;
         }
         std::lock_guard lock(state_->mutex);
         if (state_->session) failRatio(camera, Refusal::ratioTimedOut, "the change did not complete within " + std::to_string(ratioCompletionBudgetNanoseconds / 1000000) + " ms");
     }
 
-    // An admission that did not hold leaves no change under way.
+    // The camera's last input or output left the session (or an admission that added its input was undone): its change is
+    // over, and no watch or completion of it fails the session the other cameras are in. What the notes say of it stays.
     void forgetRatio(std::size_t camera)
     {
         std::lock_guard lock(notesMutex_);
-        ratioPins_.erase(camera);
+        ratioPins_.invalidate(camera);
     }
 #else
-    bool ratioHoldsFrames(std::size_t) { return false; }
+    bool ratioAdmitsSample(std::size_t, std::optional<std::int64_t>, std::size_t, std::size_t) { return true; }
     void armRatioWatch(std::size_t) {}
     void forgetRatio(std::size_t) {}
 #endif
@@ -2062,13 +2082,24 @@ private:
     // The completion handler of a ratio change the device is asked for (activate): it reaches the session only while
     // the session lives, under the state's mutex like every callback of the platform's.
     // Each call is one operation (a change asked for, or found made), numbered so that a completion belongs to it alone.
+    // The completion's timestamp is on the camera's input port's clock, which the callback keeps (the call is made on the
+    // session's queue, where the input is, and the completion arrives on the device's).
     RatioDone ratioDone(std::size_t camera)
     {
         std::shared_ptr<SessionState> state = state_;
         const std::uint64_t operation = ++ratioOperation_;
-        return [state, camera, operation](std::int32_t code) {
+        std::shared_ptr<const void> from;
+#if TARGET_OS_IOS
+        if (const auto running = cameras_.find(camera); running != cameras_.end() && running->second.input != nil)
+            for (AVCaptureInputPort* port in running->second.input.ports)
+                if ([port.mediaType isEqualToString:AVMediaTypeVideo] && port.clock != nullptr) {
+                    from = std::shared_ptr<const void>(CFRetain(port.clock), [](const void* clock) { CFRelease(clock); });
+                    break;
+                }
+#endif
+        return [state, camera, operation, from](const RatioCompletion& completion) {
             std::lock_guard lock(state->mutex);
-            if (state->session) static_cast<AppleSession*>(state->session)->ratioCompleted(camera, operation, code);
+            if (state->session) static_cast<AppleSession*>(state->session)->ratioCompleted(camera, operation, completion, from.get());
         };
     }
 
@@ -2350,7 +2381,9 @@ private:
         noteAdmission(camera, videoConnection, photoFacts, photoMaximumSet, ratioFacts, video ? CameraStillSize {width, height} : CameraStillSize {});
 #endif
         if (result != Admission::admitted) {
-            if (plan.activate) forgetRatio(camera);
+            // An admission that added the camera's input and was undone leaves no change under way; a camera that was in the
+            // session before keeps the change its anchor's admission asked for.
+            if (running.input == nil) forgetRatio(camera);
             switch (result) {
             case Admission::inputRefused: refuse(camera, Refusal::inputRefused); break;
             case Admission::formatRefused: refuse(camera, Refusal::raised, "the device refused its anchor"); break;
@@ -2603,8 +2636,9 @@ private:
     }
 
     // Takes a camera's outputs, and its input once it has none left, out of
-    // the session.
-    void removeFromSession(RunningCamera& running, bool video, bool photo)
+    // the session. The camera's ratio change goes with its last input (forgetRatio): while an output or a still in flight
+    // needs the camera, its change stays.
+    void removeFromSession(std::size_t camera, RunningCamera& running, bool video, bool photo)
     {
         [session_ beginConfiguration];
         @try {
@@ -2619,13 +2653,14 @@ private:
             running.video = false;
         }
         if (photo) running.photoOutput = nil;
-        if (running.input != nil && running.videoOutput == nil && running.photoOutput == nil) {
+        if (cameraLeavesSession(running.input != nil, running.videoOutput != nil, running.photoOutput != nil)) {
             @try {
                 [session_ removeInput:running.input];
             } @catch (NSException*) {
             }
             running.input = nil;
             running.format = nil;
+            forgetRatio(camera);
         }
         [session_ commitConfiguration];
         photoPipelinesSettle();
@@ -2652,7 +2687,7 @@ private:
         if (stopped_ || camera >= entries_.size()) return;
         auto& running = cameras_[camera];
         if (running.video || running.photoOutput == nil || stillsInFlight(camera)) return;
-        removeFromSession(running, false, true);
+        removeFromSession(camera, running, false, true);
     }
 
     // The system's pressure on a camera lowers the rate it runs at, as Apple
@@ -2755,7 +2790,7 @@ private:
     std::vector<CameraPresentation> notes_;
     // The state of each camera's pinned aspect ratio change, by index of cameras() (guarded by notesMutex_): the
     // operation, whether it is under way, its completion's error code, and whether its time ran out (RatioPin).
-    std::map<std::size_t, RatioPin> ratioPins_;
+    RatioPins ratioPins_;
     // The number of the last ratio change asked for (on the session's queue).
     std::uint64_t ratioOperation_ {};
     std::set<std::size_t> joinsLogged_;

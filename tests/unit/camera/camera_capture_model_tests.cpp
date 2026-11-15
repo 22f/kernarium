@@ -2445,6 +2445,133 @@ void theHeldNotesAreBoundedToTheCurrentCamerasAndRecentOnes()
     }
 }
 
+// The completion of a ratio change does not make the frames already made right: the device delivers buffers of the ratio it
+// had until the first buffer the change applies to, and a callback that was entered before the completion came must not
+// pass because the completion has. The samples before that buffer's timestamp (on the capture's clock) are held; where the
+// timestamp could not be converted, the samples until the first of the anchor's shape.
+void aSampleMadeBeforeTheChangeTookEffectNeverPasses()
+{
+    using B = RatioBoundary;
+    const std::optional<std::int64_t> none;
+    // The reviewer's interleaving: a sample of timestamp 100 is held while the change is pending, and is still held once the
+    // completion has arrived and named 200 as the first buffer the change applies to.
+    {
+        RatioPin pin;
+        ratioPinAsked(pin, 1);
+        require(!ratioSampleDelivered(pin, 100, true), "a sample is held while the change is under way");
+        require(ratioPinCompleted(pin, 1, 0, B::atTime, 200), "the completion arrives");
+        require(!ratioSampleDelivered(pin, 100, true), "a sample made before the first buffer is not delivered after it");
+        require(!ratioSampleDelivered(pin, 199, true) && ratioSampleDelivered(pin, 200, true) && ratioSampleDelivered(pin, 201, false),
+                "the first buffer and every later one are, whatever the shape");
+        require(!ratioSampleDelivered(pin, none, false), "a sample with no timestamp falls to the shape");
+        require(ratioSampleDelivered(pin, none, true) && ratioSampleDelivered(pin, 100, true) == false, "and the timestamp still decides where it has one");
+    }
+    // Where the timestamp could not be converted: held until a sample of the anchor's shape, then every sample.
+    {
+        RatioPin pin;
+        ratioPinAsked(pin, 1);
+        require(ratioPinCompleted(pin, 1, 0, B::shape, 0), "the completion arrives");
+        require(!ratioSampleDelivered(pin, 50, false) && !ratioSampleDelivered(pin, 60, false), "samples of another shape are held");
+        require(ratioSampleDelivered(pin, 70, true), "the first of the anchor's shape passes");
+        require(ratioSampleDelivered(pin, 80, false), "and the rule is over");
+    }
+    // A device that already held the ratio had nothing before the change.
+    {
+        RatioPin pin;
+        ratioPinAsked(pin, 1);
+        require(ratioPinCompleted(pin, 1, 0, B::none, 0) && ratioSampleDelivered(pin, 1, false) && ratioSampleDelivered(pin, none, false),
+                "nothing precedes a change that was not made");
+    }
+    // An error, a time-out and a camera that asked for nothing.
+    {
+        RatioPin failed;
+        ratioPinAsked(failed, 1);
+        require(ratioPinCompleted(failed, 1, 42, B::atTime, 0) && !ratioSampleDelivered(failed, 1'000, true), "an error delivers nothing");
+        RatioPin late;
+        ratioPinAsked(late, 1);
+        (void)ratioPinArmed(late, 5);
+        require(ratioPinTimedOut(late, 5 + ratioCompletionBudgetNanoseconds), "the time runs out");
+        require(ratioPinCompleted(late, 1, 0, B::atTime, 0) && !ratioSampleDelivered(late, 1'000, true), "a late completion delivers nothing");
+        RatioPin idle;
+        require(ratioSampleDelivered(idle, 1, false), "a camera with no change delivers");
+    }
+    // The same through the session's map; a camera with no change delivers.
+    RatioPins pins;
+    require(pins.sampleDelivered(7, 5, false), "a camera that asked nothing delivers");
+    pins.asked(0, 3);
+    require(!pins.sampleDelivered(0, 100, true) && pins.holdsFrames(0), "held while under way");
+    require(pins.completed(0, 3, 0, B::atTime, 200) == RatioPins::Completion::succeeded, "the change took effect");
+    require(!pins.sampleDelivered(0, 100, true) && pins.sampleDelivered(0, 200, true) && !pins.holdsFrames(0),
+            "the old sample is held and the first buffer passes");
+}
+
+// A camera that left the session has no change: a watch or a completion of its operation does nothing, so it cannot fail the
+// session a healthy other camera is in, and the pin of a camera that stays (an output or a still in flight needs it) is kept.
+void aCameraThatLeftCannotFailTheSessionTheOthersAreIn()
+{
+    using B = RatioBoundary;
+    using C = RatioPins::Completion;
+    RatioPins pins;
+    constexpr std::size_t front = 0, back = 1;
+    pins.asked(front, 5);
+    require(pins.armed(front, 1'000) == std::optional<std::uint64_t>(5), "the front camera's change is armed");
+    pins.asked(back, 6);
+    require(pins.completed(back, 6, 0, B::none, 0) == C::succeeded, "the back camera's change took effect");
+    // The camera's last output goes while its change is pending.
+    require(!cameraLeavesSession(true, true, false) && !cameraLeavesSession(true, false, true) && !cameraLeavesSession(false, false, false),
+            "a camera stays while an output, or a still in flight, needs it, and has to have an input to leave");
+    require(cameraLeavesSession(true, false, false), "and leaves with its last output");
+    pins.invalidate(front);
+    require(!pins.find(front) && !pins.holdsFrames(front), "its change is gone");
+    require(!pins.timedOut(front, 5, 1'000 + ratioCompletionBudgetNanoseconds * 100), "its watch does nothing");
+    require(pins.completed(front, 5, 42, B::none, 0) == C::ignored, "its late error does not fail the session");
+    require(pins.completed(front, 5, 0, B::atTime, 1) == C::ignored, "nor does its late success revive it");
+    require(!pins.armed(front, 9'000), "and nothing is armed for it");
+    // The back camera is as it was.
+    require(pins.find(back) && pins.find(back)->operation == 6 && !pins.holdsFrames(back) && pins.sampleDelivered(back, 1, false),
+            "the other camera is untouched");
+    // The camera comes back with another change: only that one counts.
+    pins.asked(front, 7);
+    require(pins.completed(front, 5, 42, B::none, 0) == C::ignored && pins.holdsFrames(front), "the old operation's error is still ignored");
+    require(pins.armed(front, 2'000) == std::optional<std::uint64_t>(7), "the new change is armed");
+    require(pins.timedOut(front, 7, 2'000 + ratioCompletionBudgetNanoseconds) && !pins.timedOut(front, 7, 2'000 + ratioCompletionBudgetNanoseconds + 1),
+            "it times out once");
+    // Invalidating a camera that has no change, or twice, is harmless.
+    pins.invalidate(9);
+    pins.invalidate(front);
+    pins.invalidate(front);
+    require(!pins.find(front), "a change is gone once");
+    // A completion that arrives for a camera that never asked does nothing.
+    require(pins.completed(9, 1, 42, B::none, 0) == C::ignored, "no change, nothing to fail");
+    // An error of the current operation fails once; a late completion after the time ran out does not fail again.
+    pins.asked(back, 8);
+    require(pins.completed(back, 8, -11800, B::none, 0) == C::failed, "an error fails the camera");
+    pins.asked(back, 9);
+    (void)pins.armed(back, 3'000);
+    require(pins.timedOut(back, 9, 3'000 + ratioCompletionBudgetNanoseconds), "the other time-out");
+    require(pins.completed(back, 9, 42, B::none, 0) == C::afterTimeout, "a completion after it is kept and fails nothing more");
+}
+
+// What a note says of a camera's change is read where the note is published: pending while under way or never completed, else
+// the code; a camera with no change keeps what its note has; a later change is pending again, whatever the earlier one said.
+void theNoteTakesTheChangesStateAsItIsPublished()
+{
+    require(!ratioNoteCode(std::nullopt), "a camera with no change says nothing");
+    require(!ratioNoteCode(RatioPin {}), "and so does a pin that asked nothing");
+    RatioPin pin;
+    ratioPinAsked(pin, 1);
+    require(ratioNoteCode(pin) == std::optional<std::int32_t>(ratioPending), "under way is pending");
+    require(ratioPinCompleted(pin, 1, 0, RatioBoundary::atTime, 5) && ratioNoteCode(pin) == std::optional<std::int32_t>(0),
+            "a completion that came before the note is published says success, never pending");
+    ratioPinAsked(pin, 2);
+    require(ratioNoteCode(pin) == std::optional<std::int32_t>(ratioPending), "a later change is pending, whatever the earlier one said");
+    require(ratioPinCompleted(pin, 2, 42, RatioBoundary::none, 0) && ratioNoteCode(pin) == std::optional<std::int32_t>(42), "an error is the code");
+    ratioPinAsked(pin, 3);
+    (void)ratioPinArmed(pin, 1);
+    require(ratioPinTimedOut(pin, 1 + ratioCompletionBudgetNanoseconds) && ratioNoteCode(pin) == std::optional<std::int32_t>(ratioPending),
+            "no completion in time stays pending");
+}
+
 int main()
 {
     theDurationThatMovesOutOfTheOthersWayIsWrittenFirst();
@@ -2517,6 +2644,9 @@ int main()
     aStillWaitsForAPendingRatioPinInsideTheStillBudget();
     aRatioChangeIsOneOperationAtATime();
     theHeldNotesAreBoundedToTheCurrentCamerasAndRecentOnes();
+    aSampleMadeBeforeTheChangeTookEffectNeverPasses();
+    aCameraThatLeftCannotFailTheSessionTheOthersAreIn();
+    theNoteTakesTheChangesStateAsItIsPublished();
     thePinnedCropsFieldOfViewIsTheLargerOfTheTwo();
     theRatioBitsAreDistinctAndNoneHasNone();
     return 0;

@@ -144,12 +144,17 @@ interface to the wire.
   frame of N x 3N/4), never changed while a stream or a still runs
   (`presentedFormatOf`). The change is one numbered operation, asked before the
   device is told: the camera's frames are held (the device's stand-in frames
-  bridge it) until its completion arrives without an error, a still waits for
-  it inside its wait budget, and an error, or no completion within that budget
-  of a session running with the camera in it, refuses the camera as a
-  connection that does not hold its turn does and fails the session, which the
-  device answers by interrupting the guest's cameras and opening another
-  (`RatioPin`). The session reports each camera's mounting, the
+  bridge it) until its completion arrives without an error, and then only the
+  samples captured at or after the first buffer the change applies to pass (the
+  completion's timestamp, converted from the input port's clock to the
+  session's synchronization clock; without a conversion, the samples until the
+  first of the anchor's shape are held), a still waits for it inside its wait
+  budget, and an error, or no completion within that budget of a session running
+  with the camera in it, refuses the camera as a connection that does not hold
+  its turn does and fails the session, which the device answers by interrupting
+  the guest's cameras and opening another (`RatioPins`). The operation ends with
+  the camera's last input or output leaving the session, so a camera that left
+  cannot fail the session the others are in. The session reports each camera's mounting, the
   settings of its connections and photo output and its aspect ratio as numbers
   to its delegate (`camera_presentation.hpp`), and keeps the last of each camera
   for the sessions that follow in the process (the current cameras and the
