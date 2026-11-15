@@ -501,6 +501,22 @@ public:
             std::chrono::steady_clock::now() - begun);
     }
 
+    // How long until the output has consumed a period the guest wrote, or
+    // `limit`. Scheduling does not count: a period the mute clock completes
+    // reports no latency, and the silence the sink plays to wait for the
+    // engine's first cycle is not the guest's.
+    [[nodiscard]] std::chrono::milliseconds untilOutputPlayed(
+        std::chrono::milliseconds limit)
+    {
+        const auto begun = std::chrono::steady_clock::now();
+        const auto played = playedByOutput_;
+        while (playedByOutput_ == played &&
+            std::chrono::steady_clock::now() - begun < limit)
+            pump(20ms);
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - begun);
+    }
+
     // Whether the sink wakes the device thread within `span`: a muted sink
     // does, on its timer, until the stream stops.
     [[nodiscard]] bool wakes(std::chrono::milliseconds span)
@@ -570,6 +586,9 @@ private:
             const bool dropped = completion.outcome == PlaybackOutcome::failed ||
                 (completion.outcome == PlaybackOutcome::discarded && !released);
             rejected_ += dropped ? 1 : 0;
+            if (completion.outcome == PlaybackOutcome::played &&
+                completion.latencyBytes > 0)
+                ++playedByOutput_;
             latencyLow_ = std::min(latencyLow_, completion.latencyBytes);
             latencyHigh_ = std::max(latencyHigh_, completion.latencyBytes);
         }
@@ -582,6 +601,8 @@ private:
     std::uint64_t nextRequest_ {1};
     std::uint64_t completed_ {};
     std::uint64_t rejected_ {};
+    // Periods the output consumed, which report the output's latency.
+    std::uint64_t playedByOutput_ {};
     bool failed_ {};
     std::chrono::steady_clock::time_point lastCompletion_ {};
     std::chrono::steady_clock::duration longestWait_ {};
@@ -1544,11 +1565,13 @@ void routeLostDuringTheHandback()
             postNotificationName:AVAudioEngineConfigurationChangeNotification
                           object:engine];
     };
+    const auto made = enginesMade.load();
     postInterruptionEnded(true);
-    const auto taken = stream.untilPlayed(5000ms);
-    check(taken < 5000ms,
-        "the stream plays again with an engine made after the loss",
-        std::to_string(taken.count()) + " ms");
+    const auto taken = stream.untilOutputPlayed(5000ms);
+    check(taken < 5000ms && enginesMade.load() > made,
+        "a period the guest wrote is consumed by an engine made after the loss",
+        std::to_string(taken.count()) + " ms, " +
+            std::to_string(enginesMade.load() - made) + " engine(s) made");
     seen = stream.window(300ms, 1000ms);
     check(seen.playing(), "and plays on", seen.text());
     stream.close();
