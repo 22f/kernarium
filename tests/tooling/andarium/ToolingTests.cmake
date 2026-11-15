@@ -52,10 +52,12 @@ uml_add_tooling_test(
 # the value, in either direction; and that a TestFlight product carries none of
 # Buy me tokens, Review on the App Store and the ICP filing number, whatever the
 # local values are, and that an AppStore bundle holds the App Store track of the
-# What's New notes and not the beta track, a TestFlight bundle the reverse. A
-# supplied value is searched in every file in UTF-8 and both
-# UTF-16 byte orders, a feature's resources in nested bundles, property lists and
-# asset catalogs too, and no line of the report spells a value, even in a path.
+# What's New notes and not the beta track, a TestFlight bundle the reverse, and
+# that each has its configuration's app icon and an AppStore bundle holds
+# nothing of the TestFlight one. A supplied value is searched in every file in
+# UTF-8 and both UTF-16 byte orders, a feature's resources in nested bundles,
+# property lists and asset catalogs too, and no line of the report spells a
+# value, even in a path.
 uml_add_tooling_test(
     NAME andarium-app-store-bundle
     COMMAND ${Python3_EXECUTABLE} -B
@@ -91,6 +93,20 @@ uml_add_tooling_test(
         --root ${PROJECT_SOURCE_DIR}
     LABELS andarium
     TIMEOUT 60)
+
+# Each configuration reads its own track of What's New notes: the target's resolved
+# build settings give the compilation conditions, the loader's own source is compiled
+# with them and run against a bundle that holds a different list in each track's file,
+# and a track value that names neither track stops the compile. The same settings
+# give each configuration's app icon, the exclusion of the other icon's document and
+# no other app icon asset.
+uml_add_tooling_test(
+    NAME andarium-whats-new-track
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_whats_new_track.py
+        --root ${PROJECT_SOURCE_DIR}
+    LABELS andarium
+    TIMEOUT 180)
 
 # The release build refuses an embedded artifact that is behind the commit it
 # archives; the fixtures build a repository, a staged system and an application

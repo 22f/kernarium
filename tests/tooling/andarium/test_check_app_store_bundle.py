@@ -451,7 +451,14 @@ def strip_debug_map(library: Path) -> Path:
     return stripped
 
 
+def icon_info(name: str) -> dict:
+    """The icon blocks of an Info.plist whose primary icon, for the iPhone and the iPad, is `name`."""
+    return {key: {"CFBundlePrimaryIcon": {"CFBundleIconFiles": [f"{name}60x60"], "CFBundleIconName": name}}
+            for key in ("CFBundleIcons", "CFBundleIcons~ipad")}
+
+
 def app_info(**overrides: object) -> dict:
+    """An Info.plist as the AppStore configuration builds one, with its icon (DuskJade)."""
     keys: dict[str, object] = {
         "CFBundleIdentifier": "org.example.Fixture",
         "CFBundleExecutable": "Fixture",
@@ -466,6 +473,7 @@ def app_info(**overrides: object) -> dict:
         "NSCameraUsageDescription": "Uses the camera only while Camera is on.",
         "NSMicrophoneUsageDescription": "Records only while Microphone is on.",
         "NSLocationWhenInUseUsageDescription": "Shares the location only while Location is on.",
+        **icon_info("DuskJade"),
     }
     keys.update(overrides)
     return {key: value for key, value in keys.items() if value is not None}
@@ -518,7 +526,8 @@ def write_notes(app: Path, entries: list[dict] | None, strings: dict[str, str],
     and the compiled table of their translations in each language, which both tracks share."""
     if entries is not None:
         (app / track).write_text(
-            json.dumps([{"build": 11, "version": "1.0 (11)", "entries": entries}]), encoding="utf-8")
+            json.dumps([{"build": 11, "version": "1.0 (11)", "entries": entries}] if entries else []),
+            encoding="utf-8")
     for language in languages:
         lproj = app / f"{language}.lproj"
         lproj.mkdir(exist_ok=True)
@@ -541,6 +550,60 @@ CATALOG_ASSETS = {
     "AndariumFollowXHandle": "XLogo", "AndariumDeveloperX": "XLogo",
     "AndariumDeveloperName": "DeveloperAvatar", "AndariumDeveloperGitHub": "GitHubLogo",
 }
+
+
+# The compiled asset catalogs the fixtures hold, by what they hold: an app icon (DuskJade or
+# DuskEmber, alone), both of them, one of them with a second icon group (`aliased-<icon>`),
+# and none ("plain"). They are compiled once per run with actool from the application's own icon
+# documents, as the platform's reader (`assetutil`) the checker uses needs real catalogs.
+CATALOGS: dict[str, Path] = {}
+
+PLAIN_COLOR = {"colors": [{"color": {"color-space": "srgb", "components": {
+    "alpha": "1.000", "blue": "0.500", "green": "0.500", "red": "0.500"}}, "idiom": "universal"}],
+    "info": {"author": "xcode", "version": 1}}
+
+
+def compile_catalogs(work: Path, icons: Path) -> None:
+    """Compiles the fixtures' catalogs into `work` from the icon documents in `icons` (Shared)."""
+    work.mkdir()
+    jade, ember = icons / "DuskJade.icon", icons / "DuskEmber.icon"
+    alias = work / "ArchiveArtwork.icon"
+    shutil.copytree(ember, alias)
+    plain = work / "Plain.xcassets"
+    (plain / "AccentColor.colorset").mkdir(parents=True)
+    (plain / "Contents.json").write_text(json.dumps({"info": {"author": "xcode", "version": 1}}), encoding="utf-8")
+    (plain / "AccentColor.colorset" / "Contents.json").write_text(json.dumps(PLAIN_COLOR), encoding="utf-8")
+    cases = {
+        "DuskJade": ([jade], "DuskJade", False), "DuskEmber": ([ember], "DuskEmber", False),
+        "plain": ([plain], None, False), "both": ([jade, ember], "DuskJade", True),
+        "aliased-DuskJade": ([jade, alias], "DuskJade", True), "aliased-DuskEmber": ([ember, alias], "DuskEmber", True),
+    }
+    running = []
+    for label, (sources, icon, everything) in cases.items():
+        out = work / label
+        out.mkdir()
+        command = ["xcrun", "actool", *map(str, sources), "--compile", str(out), "--output-format",
+                   "human-readable-text", "--output-partial-info-plist", str(out / "partial.plist"),
+                   "--minimum-deployment-target", "27.0", "--platform", "iphoneos", "--target-device", "iphone",
+                   "--target-device", "ipad", "--development-region", "en"]
+        if icon:
+            command += ["--app-icon", icon]
+        if everything:
+            command += ["--include-all-app-icons"]
+        running.append((label, out, subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                                     stderr=subprocess.STDOUT, text=True)))
+    for label, out, process in running:
+        said = process.communicate(timeout=240)[0]
+        if process.returncode != 0 or not (out / "Assets.car").is_file():
+            raise SystemExit(f"actool could not compile the {label} catalog:\n{said}")
+        CATALOGS[label] = out / "Assets.car"
+
+
+def clone(source: Path, destination: Path) -> None:
+    """A copy of a (large) catalog that shares its blocks where the volume can."""
+    if subprocess.run(["cp", "-c", str(source), str(destination)], stdin=subprocess.DEVNULL,
+                      capture_output=True).returncode != 0:
+        shutil.copyfile(source, destination)
 
 
 def make_app(
@@ -568,10 +631,16 @@ def make_app(
     if follow_x_tables:
         write_follow_x_tables(app)
     wanted = {asset for key, asset in CATALOG_ASSETS.items() if key in info}
+    primary = info.get("CFBundleIcons", {}).get("CFBundlePrimaryIcon", {}).get("CFBundleIconName")
     for asset, present in {**(assets or {}), **({} if follow_x_logo is None else {"XLogo": follow_x_logo})}.items():
         (wanted.add if present else wanted.discard)(asset)
-    if wanted:
-        (app / "Assets.car").write_bytes(b"\0BOMStore\0" + b"".join(item.encode() + b"\0" for item in sorted(wanted)))
+    # The catalog is a compiled one with the application's icon in it (`assets` can leave it out), and
+    # the names of the other assets after its end, where the checker's byte search finds them.
+    icon = primary in CATALOGS and (assets or {}).get(primary, True)
+    if wanted or icon:
+        clone(CATALOGS[primary] if icon else CATALOGS["plain"], app / "Assets.car")
+        with (app / "Assets.car").open("ab") as handle:
+            handle.write(b"".join(b"\0" + item.encode() for item in sorted(wanted)) + b"\0")
     if manifest:
         (app / "PrivacyInfo.xcprivacy").write_bytes(plistlib.dumps(MANIFEST))
     if framework is not None:
@@ -1725,12 +1794,40 @@ def main() -> int:
     modes = {"--feedback", "--follow-x", "--icp", "--pickers", "--tip-jar", "--review", "--runtime",
              "--host-traces"}
     injected: dict[Path, str] = {}
+    # The icon a fixture names where the harness set it: DuskJade, as `app_info` writes, until a run
+    # under TestFlight makes it DuskEmber.
+    iconic: dict[Path, str] = {}
+
+    def retarget_icon(app: Path, configuration: str) -> None:
+        """A fixture that names the AppStore's icon gets TestFlight's (and back) in its Info.plist and
+        its asset catalog, as the configuration's build compiles its own."""
+        want = "DuskEmber" if configuration == "TestFlight" else "DuskJade"
+        have = iconic.get(app, "DuskJade")
+        if have == want:
+            return
+        iconic[app] = want
+        try:
+            with (app / "Info.plist").open("rb") as handle:
+                info = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            return
+        info.update(icon_info(want))
+        (app / "Info.plist").write_bytes(plistlib.dumps(info))
+        catalog = app / "Assets.car"
+        if catalog.exists():
+            data, old = catalog.read_bytes(), CATALOGS[have].read_bytes()
+            if data.startswith(old):
+                catalog.write_bytes(CATALOGS[want].read_bytes() + data[len(old):])
 
     def check(app: Path, *, passes: bool, expect: str = "", args: list[str] | None = None,
-              never: str = "", notes: bool = True) -> None:
+              never: str = "", notes: bool = True, icon: bool = True) -> None:
         """Runs the checker on `app`. A fixture of the full check that carries no What's New notes
-        gets its configuration's track, an empty list, as every build has one, unless `notes` is false."""
+        gets its configuration's track, an empty list, as every build has one, unless `notes` is false;
+        and one that has the AppStore's icon has the configuration's, unless `icon` is false."""
         arguments = args or []
+        if icon and not modes.intersection(arguments):
+            retarget_icon(app, arguments[arguments.index("--configuration") + 1]
+                          if "--configuration" in arguments else "AppStore")
         if notes and not modes.intersection(arguments):
             configuration = arguments[arguments.index("--configuration") + 1] if "--configuration" in arguments \
                 else "AppStore"
@@ -1753,6 +1850,7 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="andarium-app-store-") as directory:
         root = Path(directory)
+        compile_catalogs(root / "catalogs", options.checker.parent.parent / "Andarium" / "Shared")
         clean = build(root, "clean", CLEAN)
         knob = build(root, "knob", KNOB)
         launch = build(root, "launch", LAUNCH_KNOB)
@@ -2097,6 +2195,44 @@ def main() -> int:
             empty = make_app(root, f"notes-track-empty-{label}", clean, app_info())
             (empty / file).write_text("[]", encoding="utf-8")
             check(empty, passes=True, expect=says, args=flags, notes=False)
+            # A list the application would not accept is no notes file: it shows no notes.
+            entry = {"id": "a", "title": "A", "text": "B", "symbol": "s"}
+            for name, releases, expect in (
+                    ("empty-release", [{}], "a release has no build number or version"),
+                    ("extra-release-key", [{"build": 11, "version": "v", "entries": [entry], "x": 1}],
+                     "a release is not an object with only"),
+                    ("no-entries", [{"build": 11, "version": "v", "entries": []}], "has no entry"),
+                    ("empty-entry", [{"build": 11, "version": "v", "entries": [{}]}], "an entry lacks its id"),
+                    ("extra-entry-key", [{"build": 11, "version": "v", "entries": [{**entry, "x": 1}]}],
+                     "an entry is not an object with only the keys"),
+                    ("no-text", [{"build": 11, "version": "v", "entries": [{**entry, "text": None}]}],
+                     "has an empty text"),
+                    ("neither", [{"build": 11, "version": "v",
+                                  "entries": [{key: value for key, value in entry.items() if key != "text"}]}],
+                     "has neither text nor points"),
+                    ("empty-points", [{"build": 11, "version": "v", "entries": [{**entry, "points": [""]}]}],
+                     "has an empty list of points or an empty point"),
+                    ("twice", [{"build": 11, "version": "v", "entries": [entry, entry]}], "appears twice"),
+                    ("two-builds", [{"build": 11, "version": "v", "entries": [entry]},
+                                    {"build": 11, "version": "w", "entries": [{**entry, "id": "b"}]}],
+                     "build 11 has two releases")):
+                refused = make_app(root, f"notes-track-{name}-{label}", clean, app_info())
+                (refused / file).write_text(json.dumps(releases), encoding="utf-8")
+                check(refused, passes=False, expect=expect, args=flags, notes=False)
+            good = make_app(root, f"notes-track-good-{label}", clean, app_info())
+            (good / file).write_text(json.dumps([{"build": 11, "version": "v", "date": "2026-11-15",
+                                                  "entries": [{**entry, "points": ["C"], "place": "sessionSettings",
+                                                               "requirement": {"device": "pad"}}]}]),
+                                     encoding="utf-8")
+            check(good, passes=True, expect=says, args=flags, notes=False)
+            # The application reads the file at the bundle root alone: a copy elsewhere is a stray.
+            for place in ("Resources/WhatsNew.json", "ja.lproj/WhatsNewAppStore.json", "Frameworks/X.framework/WhatsNew.json"):
+                copied = make_app(root, f"notes-track-copy-{label}-{place.replace('/', '-')}", clean, app_info())
+                write_notes(copied, hidden, NOTES_STRINGS, track=file)
+                (copied / place).parent.mkdir(parents=True, exist_ok=True)
+                (copied / place).write_text("[]", encoding="utf-8")
+                check(copied, passes=False, expect=f"{place}: is a copy of a What's New notes file",
+                      args=flags, notes=False)
         # The notes' table is one for both tracks, so an AppStore bundle whose own track has
         # no entry about Send feedback still holds the beta track's strings of it. The beta
         # track's source file (--beta-notes) says which they are; without it, or for a string
@@ -2120,6 +2256,25 @@ def main() -> int:
         write_notes(stray, [], {**NOTES_STRINGS, "Fixed Send feedback not opening": "x"}, track=APP_STORE_NOTES)
         check(stray, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings",
               args=["--beta-notes", str(beta_source)])
+        # The exemption never hides what a bundled entry shows: the beta track's entry about
+        # Send feedback copied into the App Store file without its requirement is shown by a
+        # product that has no feedback, and so is a string that a bundled entry without the mark
+        # shares with a marked one, whichever track marks it.
+        copied_entry = {**FEEDBACK_ENTRY, "requirement": None}
+        for name, entries in (
+                ("copied-unmarked", [copied_entry, PLAIN_ENTRY]),
+                ("copied-other-requirement", [{**FEEDBACK_ENTRY, "requirement": {"device": "pad"}}, PLAIN_ENTRY]),
+                ("shared-title", [FEEDBACK_ENTRY, {**PLAIN_ENTRY, "id": "same-title", "title": FEEDBACK_ENTRY["title"]}])):
+            overlap = make_app(root, f"notes-beta-{name}", clean, app_info())
+            write_notes(overlap, entries, NOTES_STRINGS, track=APP_STORE_NOTES)
+            check(overlap, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings",
+                  args=["--beta-notes", str(beta_source)])
+            check(overlap, passes=False, expect="ja.lproj/WhatsNew.strings: has Send feedback strings")
+        # An entry that keeps the mark is hidden, with the beta source or without it.
+        marked = make_app(root, "notes-beta-copied-marked", clean, app_info())
+        write_notes(marked, [FEEDBACK_ENTRY, PLAIN_ENTRY], NOTES_STRINGS, track=APP_STORE_NOTES)
+        check(marked, passes=True, expect="Send feedback is not compiled in",
+              args=["--beta-notes", str(beta_source)])
         # Only an AppStore bundle takes the exemption from there: a bundle of the beta track
         # has the notes it carries.
         flagged = make_app(root, "notes-beta-testflight", clean, app_info())
@@ -2136,6 +2291,88 @@ def main() -> int:
         write_notes(shipped, [], strings, track=APP_STORE_NOTES)
         check(shipped, passes=True, expect="What's New notes are the App Store track",
               args=["--beta-notes", str(real_notes)])
+
+        # The app icon is the configuration's own and no other: the AppStore bundle has DuskJade and
+        # nothing of DuskEmber, the TestFlight bundle the reverse. The icon is the primary icon of the
+        # iPhone's and the iPad's Info.plist block, which name no other icon, and the one app icon of
+        # Assets.car, a catalog compiled in this run and read by its typed renditions; no catalog of a
+        # nested bundle holds the other icon, and no icon file or document is of its name. Text that
+        # only mentions an icon's name is no icon.
+        for label, flags, own, other in (("appstore", [], "DuskJade", "DuskEmber"),
+                                         ("testflight", testflight, "DuskEmber", "DuskJade")):
+            ready = make_app(root, f"icon-{label}", clean, app_info())
+            check(ready, passes=True, expect=f"app icon is {own}", args=flags)
+            # Both configurations run on one fixture in turn, each with its own icon.
+            check(ready, passes=True, expect=f"app icon is {'DuskEmber' if own == 'DuskJade' else 'DuskJade'}",
+                  args=testflight if not flags else [])
+            for name, info in (
+                    ("other-primary", app_info(**icon_info(other))),
+                    ("no-icon", app_info(CFBundleIcons=None, **{"CFBundleIcons~ipad": None})),
+                    ("iphone-other", app_info(CFBundleIcons=icon_info(other)["CFBundleIcons"],
+                                              **{"CFBundleIcons~ipad": icon_info(own)["CFBundleIcons~ipad"]})),
+                    ("ipad-other", app_info(**{"CFBundleIcons~ipad": icon_info(other)["CFBundleIcons~ipad"],
+                                               "CFBundleIcons": icon_info(own)["CFBundleIcons"]})),
+                    ("no-icon-name", app_info(CFBundleIcons={"CFBundlePrimaryIcon": {"CFBundleIconFiles": ["x"]}}))):
+                wrong = make_app(root, f"icon-{name}-{label}", clean, info)
+                check(wrong, passes=False, expect="Info.plist: CFBundleIcons", args=flags, icon=False)
+            # The icon metadata names no other icon: not in the files of the primary icon, nor in an
+            # alternate icon.
+            for name, key, extra in (
+                    ("files", "CFBundleIcons", {"CFBundlePrimaryIcon": {"CFBundleIconName": own, "CFBundleIconFiles": [f"{other}60x60"]}}),
+                    ("alternate", "CFBundleIcons~ipad", {**icon_info(own)["CFBundleIcons~ipad"],
+                                                         "CFBundleAlternateIcons": {"Other": {"CFBundleIconName": other}}})):
+                names = make_app(root, f"icon-metadata-{name}-{label}", clean, app_info(**{**icon_info(own), key: extra}))
+                check(names, passes=False, expect=f"Info.plist: {key} names the {other} icon", args=flags,
+                      icon=False)
+            # The compiled catalog is the application's icon alone, as the platform's reader lists it: the
+            # Info.plist alone is not enough, and neither is a catalog of another icon, of both, or with a
+            # second icon group under any name, or one that cannot be read. (A catalog compiled from the
+            # other icon's artwork under this icon's name is not told from it; the name is what a
+            # catalog states.)
+            for name, kind, said in (
+                    ("no-catalog", None, f"Assets.car: lacks the {own} icon"),
+                    ("plain-catalog", "plain", f"Assets.car: lacks the {own} icon"),
+                    ("other-catalog", other, f"Assets.car: lacks the {own} icon"),
+                    ("other-catalog-holds", other, f"Assets.car: holds the {other} icon"),
+                    ("both-catalog", "both", f"Assets.car: holds the {other} icon"),
+                    ("aliased-catalog", f"aliased-{own}", "Assets.car: holds the ArchiveArtwork icon"),
+                    ("unreadable-catalog", "unreadable", "Assets.car: cannot be read for its app icons")):
+                bare = make_app(root, f"icon-{name}-{label}", clean, app_info(**icon_info(own)), assets={own: False})
+                if kind == "unreadable":
+                    (bare / "Assets.car").write_bytes(b"not a catalog")
+                elif kind:
+                    clone(CATALOGS[kind], bare / "Assets.car")
+                check(bare, passes=False, expect=said, args=flags, icon=False)
+            # The other icon in the catalog of a nested bundle, in a file or a document of its name.
+            nested = make_app(root, f"icon-nested-catalog-{label}", clean, app_info(**icon_info(own)))
+            (nested / "Feature.bundle").mkdir()
+            clone(CATALOGS[other], nested / "Feature.bundle" / "Assets.car")
+            check(nested, passes=False, expect=f"Feature.bundle/Assets.car: holds the {other} icon", args=flags,
+                  icon=False)
+            for name, path, said in (
+                    ("png", f"{other}60x60@2x.png", f"{other}60x60@2x.png: is a file of the {other} icon"),
+                    ("png-nested", f"Feature.bundle/{other}76x76@2x~ipad.png",
+                     f"Feature.bundle/{other}76x76@2x~ipad.png: is a file of the {other} icon"),
+                    ("document", f"{other}.icon", f"{other}.icon: is a file of the {other} icon")):
+                stray = make_app(root, f"icon-{name}-{label}", clean, app_info(**icon_info(own)))
+                (stray / path).parent.mkdir(parents=True, exist_ok=True)
+                (stray / path).write_bytes(b"\x89PNG")
+                check(stray, passes=False, expect=said, args=flags, icon=False)
+            # Text that only mentions an icon's name is no icon: a text file, a property list, UTF-16, a
+            # lower-case spelling, a file named for the icon that is no icon file, and a binary with the
+            # name in its code. The name of the icon the bundle has is in its files without harm too.
+            inside = build(root, f"icon-code-{label}", f'const char *fixture(void) {{ return "{other}"; }}\n')
+            for name, path, data in (
+                    ("text", "History.txt", f"{other} is the TestFlight icon; this build uses {own}.".encode()),
+                    ("plist", "Extra.plist", plistlib.dumps({"icon": other})),
+                    ("utf-16", "Extra.dat", other.encode("utf-16-le")),
+                    ("case", "Extra.txt", other.lower().encode()),
+                    ("named-text", f"{other}-history.txt", b"the history of the icon"),
+                    ("own", f"{own}60x60@2x.png", b"\x89PNG")):
+                fine = make_app(root, f"icon-mention-{name}-{label}", inside if name == "text" else clean,
+                                app_info(**icon_info(own)))
+                (fine / path).write_bytes(data)
+                check(fine, passes=True, expect=f"app icon is {own}", args=flags, icon=False)
         # The feature's own strings table (Feedback.strings, and the stringsdict of
         # its plurals) is the feature's: a product without the receiver holds none,
         # found by the file name though the table says nothing of the feature.
