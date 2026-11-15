@@ -554,6 +554,39 @@ AOSP's answer for a production build (route `p0011`). SELinux stays enforcing in
 both variants. `tests/integration/android/run_android_adb_debugging.py`
 qualifies this contract.
 
+### Old applications
+
+A 32-bit application that targets an API level below 14 is a game written for
+Dalvik, which gave native code direct object pointers and a heap below 2 GiB.
+`ActivityThread.handleBindApplication` (a topic of route p0007) loads
+`/system/lib/libkernarium_oldapp.so` (`overlay/oldapp`) into the process of such
+an application and no other; a failed load is logged and the application starts
+as before. Applications that target below API 23 get Android's permission review
+before their first component runs. The library, which includes no Android
+header, patches ART's one JNI function table in place and gives the application:
+
+- Dalvik's array layout for a Java `byte[]` that a call from the application's
+  own native code returns (a method or field of declared type `[B`): the value is
+  a block with the length at offset 8 and the bytes at offset 16, a snapshot that
+  a write does not change. Every JNI function and every object argument of a
+  `Call*`/`NewObject` converts a block back, so it stays a valid reference;
+- local references that need no cleanup: when the runtime refuses another one,
+  the oldest are released. The library probes the runtime when it installs, and
+  Android 17's table has no limit an application reaches, so nothing is released
+  there;
+- an allocator below 2 GiB for the libraries the application ships: their
+  `malloc`, `free`, `calloc`, `realloc`, `strdup`, `strndup` and `operator
+  new`/`delete` imports are redirected when the library is first seen.
+
+Only the application's own code gets this: a caller is told apart by the mapping
+its return address is in, so the platform's libraries in the same process keep
+every original behaviour. Not covered: a `byte[]` passed into a native method as
+an argument, raw reads of other objects, writes through a block, packed
+relocations, `memalign`, constructors that ran before the library's first scan,
+and a pointer freed inside a platform library.
+`tests/integration/android/run_android_oldapp.py` qualifies it
+([testing](../../docs/testing.md#android)).
+
 ### Framework and CTS behaviour
 
 Framework, policy and CTS fixes are patch topics under `patches/projects/`

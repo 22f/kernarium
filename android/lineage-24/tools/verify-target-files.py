@@ -326,6 +326,7 @@ REQUIRED_ENTRIES = {
     "SYSTEM/bin/app_process32",
     "SYSTEM/bin/bootstrap/linker",
     "SYSTEM/bin/boringssl_self_test32",
+    "SYSTEM/lib/libkernarium_oldapp.so",
     "SYSTEM/framework/arm/boot.oat",
     "SYSTEM/framework/arm/boot-framework.oat",
     "SYSTEM/etc/init/hw/init.zygote64_32.rc",
@@ -2714,6 +2715,53 @@ def check_services_jar(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInf
                     )
     except (OSError, zipfile.BadZipFile) as problem:
         fail(f"cannot inspect {SERVICES_JAR}: {problem}")
+
+
+# The old-application layer (overlay/oldapp) is a 32-bit library that ActivityThread, in framework.jar,
+# loads into the process of a 32-bit application that targets below API 14 (a p0007 topic). A build
+# without the library, or with a framework that does not load it, leaves such a game with the ART
+# failures the layer exists to prevent; a library that is not a 32-bit ARM shared object with a
+# JNI_OnLoad would fail when the framework loads it. The jar stores its dex files uncompressed, so the
+# topic's strings are in the bytes.
+OLD_APP_LIBRARY = "SYSTEM/lib/libkernarium_oldapp.so"
+FRAMEWORK_JAR = "SYSTEM/framework/framework.jar"
+FRAMEWORK_JAR_MARKERS = (
+    (b"/system/lib/libkernarium_oldapp.so", "the ActivityThread topic that loads the old-application layer"),
+    (b"kernarium: old-application layer not loaded", "the log line of that topic"),
+)
+FRAMEWORK_JAR_LIMIT = 256 << 20
+OLD_APP_LIBRARY_LIMIT = 16 << 20
+ELF_CLASS_32, ELF_LITTLE_ENDIAN, ELF_TYPE_SHARED = 1, 1, 3
+
+
+def check_old_application_layer(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    info = infos.get(OLD_APP_LIBRARY)
+    if info is None:
+        fail(f"{OLD_APP_LIBRARY} is missing")
+    data = read_small(archive, info, OLD_APP_LIBRARY_LIMIT)
+    if len(data) < 20 or data[:4] != b"\x7fELF" or (data[4], data[5]) != (ELF_CLASS_32, ELF_LITTLE_ENDIAN):
+        fail(f"{OLD_APP_LIBRARY} is not a 32-bit little-endian ELF object")
+    elf_type, machine = struct.unpack_from("<HH", data, 16)
+    if elf_type != ELF_TYPE_SHARED or machine != android_image.EM_ARM:
+        fail(f"{OLD_APP_LIBRARY} is not a shared object for ARM (type {elf_type}, machine {machine})")
+    if b"\0JNI_OnLoad\0" not in data:
+        fail(f"{OLD_APP_LIBRARY} has no JNI_OnLoad, which the framework's System.load runs")
+    framework = infos.get(FRAMEWORK_JAR)
+    if framework is None:
+        fail(f"{FRAMEWORK_JAR} is missing")
+    try:
+        with zipfile.ZipFile(io.BytesIO(read_small(archive, framework, FRAMEWORK_JAR_LIMIT))) as jar:
+            dex = [name for name in jar.namelist() if re.fullmatch(r"classes[0-9]*\.dex", name)]
+            if not dex:
+                fail(f"{FRAMEWORK_JAR} holds no dex file")
+            for marker, topic in FRAMEWORK_JAR_MARKERS:
+                if not any(marker in jar.read(name) for name in dex):
+                    fail(
+                        f"{FRAMEWORK_JAR} lacks {topic} of route p0007 "
+                        f"({marker.decode()!r} is not in its dex files)"
+                    )
+    except (OSError, zipfile.BadZipFile) as problem:
+        fail(f"cannot inspect {FRAMEWORK_JAR}: {problem}")
 
 
 # The p0029 topic makes NetworkMonitor validate the virtual Wi-Fi before it checks it, so a blocked
@@ -5779,6 +5827,7 @@ def main() -> None:
         check_adb_root_service(archive, infos)
         check_lmkd_gpu_reclaim(archive, infos)
         check_services_jar(archive, infos)
+        check_old_application_layer(archive, infos)
         check_input_flinger(archive, infos)
         check_network_stack(archive, infos)
         check_wifi_tracker_users(archive, infos)
