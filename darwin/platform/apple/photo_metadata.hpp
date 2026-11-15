@@ -12,7 +12,7 @@ namespace uml::platform {
 
 // The exposure readings of a CGImageProperties dictionary, the shape of an
 // image file's properties: the {Exif} dictionary's ExposureTime, ISOSpeedRatings (the first
-// of them), FNumber, FocalLength and Flash. A key that is missing, or holds
+// of them), FNumber, FocalLength and Flash, and the image's Orientation. A key that is missing, or holds
 // something that is not a number, is absent; a number is passed on as it is.
 // A null dictionary has none.
 [[nodiscard]] PhotoReadings photoReadingsOf(CFDictionaryRef metadata);

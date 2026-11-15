@@ -56,38 +56,154 @@ std::string stringOf(NSString* value)
 }
 
 #if TARGET_OS_IOS
-// Keeps a connection's pictures in the camera's own orientation, unturned and unmirrored, which its stated
-// SENSOR_ORIENTATION describes (sensorOrientationOf): a device may turn or mirror a camera's pictures by default (some
-// iPads turn their front camera's video by 180 degrees). A connection that refuses keeps what it has.
-void keepSensorOrientation(AVCaptureConnection* connection)
+// What a connection says of its angle and mirroring (camera_presentation.hpp): its own by default, and as it is now.
+struct ConnectionFacts {
+    std::int16_t defaultAngle {-1};
+    std::int16_t angle {-1};
+    std::int8_t defaultMirrored {-1};
+    std::int8_t mirrored {-1};
+    // Whether the connection takes the angle that was asked of it.
+    bool angleSupported {};
+};
+
+std::int16_t angleNumber(CGFloat angle)
 {
-    if (connection == nil) return;
+    return std::isfinite(angle) ? std::int16_t(std::clamp<long>(std::lround(angle), -32768, 32767)) : std::int16_t(-1);
+}
+
+std::int8_t mirroringNumber(AVCaptureConnection* connection)
+{
+    return connection.supportsVideoMirroring ? std::int8_t(connection.videoMirrored ? 1 : 0) : std::int8_t(-1);
+}
+
+// Sets a connection's pictures to the camera's own orientation turned by `turn`, unmirrored, which its stated
+// SENSOR_ORIENTATION describes (presentedMountingOf): a device may turn or mirror a camera's pictures by default (some
+// iPads turn their front camera's video by 180 degrees). A connection that refuses keeps what it has, which the facts
+// say. A video data output physically turns its buffers by the angle, so the angle is set before the output's size.
+// Without `setAngle` the angle stays what the connection has, and only the mirroring is turned off.
+ConnectionFacts keepSensorOrientation(AVCaptureConnection* connection, std::uint32_t turn, bool setAngle = true)
+{
+    ConnectionFacts facts;
+    if (connection == nil) return facts;
     @try {
+        facts.defaultAngle = angleNumber(connection.videoRotationAngle);
+        facts.defaultMirrored = mirroringNumber(connection);
         if (connection.supportsVideoMirroring) {
             connection.automaticallyAdjustsVideoMirroring = NO;
             connection.videoMirrored = NO;
         }
-        if (connection.videoRotationAngle != 0 && [connection isVideoRotationAngleSupported:0]) connection.videoRotationAngle = 0;
+        if (setAngle) {
+            facts.angleSupported = [connection isVideoRotationAngleSupported:CGFloat(turn)];
+            if (connection.videoRotationAngle != CGFloat(turn) && facts.angleSupported) connection.videoRotationAngle = CGFloat(turn);
+        } else {
+            facts.angleSupported = [connection isVideoRotationAngleSupported:connection.videoRotationAngle];
+        }
+        facts.angle = angleNumber(connection.videoRotationAngle);
+        facts.mirrored = mirroringNumber(connection);
     } @catch (NSException* exception) {
         std::fprintf(stderr, "Camera: a connection kept its own orientation: %s\n",
                      exception.reason != nil ? exception.reason.UTF8String : "");
     }
+    return facts;
 }
 
-// The same for a photo output: its stills stay in the camera's own orientation, without the turn to an earlier
-// model's sensor orientation that the output otherwise applies where it supports one. The host's Exif, which
-// would state a turn, is not passed on (jpeg_gap.hpp).
-void keepStillOrientation(AVCapturePhotoOutput* output)
+// What a photo output says of its stills' orientation: the compensation (the output turning its processed stills to an
+// earlier model's sensor orientation) and the photo connection.
+struct PhotoOutputFacts {
+    CameraFact compensationSupported {};
+    CameraFact compensationEnabled {};
+    // Whether the compensation was read before or after the capture session's configuration was committed.
+    CameraReading reading {};
+    ConnectionFacts connection;
+};
+
+PhotoOutputFacts readCompensation(AVCapturePhotoOutput* output, CameraReading reading)
 {
-    // A front camera that states orientation 0 and supports the compensation has its stills rejected here (the session
-    // record's camera slot says how); the fix for it waits for a bug report that shows what the photo output delivers.
+    PhotoOutputFacts facts;
+    facts.reading = reading;
     @try {
-        if (output.cameraSensorOrientationCompensationSupported) output.cameraSensorOrientationCompensationEnabled = NO;
+        const bool supported = output.cameraSensorOrientationCompensationSupported;
+        facts.compensationSupported = supported ? CameraFact::yes : CameraFact::no;
+        facts.compensationEnabled = supported && output.cameraSensorOrientationCompensationEnabled ? CameraFact::yes : CameraFact::no;
+    } @catch (NSException*) {
+        // The facts stay unknown.
+    }
+    return facts;
+}
+
+// The same for a photo output: where the camera does not imitate an earlier front camera its stills stay in the camera's
+// own orientation, without the turn to an earlier model's sensor orientation that the output otherwise applies where it
+// supports one. A camera that does imitate one (presentedMountingOf) needs that turn: its compensation is asked on where
+// the output says it is supported, which is a reading that is only known to hold once the configuration is committed,
+// so a still reads it again then and refuses on that reading alone (startStill). The host's Exif, which would state a
+// turn, is not passed on (jpeg_gap.hpp): the photo connection is set to angle 0, unmirrored, where an angle changes the
+// Exif alone, and a camera that imitates one keeps its connection's own angle (photoConnectionTurnOf).
+PhotoOutputFacts keepStillOrientation(AVCapturePhotoOutput* output, const PresentedMounting& mounting)
+{
+    @try {
+        if (output.cameraSensorOrientationCompensationSupported) {
+            if (mounting.emulatesEarlierFront) output.cameraSensorOrientationCompensationEnabled = YES;
+            else output.cameraSensorOrientationCompensationEnabled = NO;
+        }
     } @catch (NSException* exception) {
         std::fprintf(stderr, "Camera: a photo output kept its orientation compensation: %s\n",
                      exception.reason != nil ? exception.reason.UTF8String : "");
     }
-    keepSensorOrientation([output connectionWithMediaType:AVMediaTypeVideo]);
+    PhotoOutputFacts facts = readCompensation(output, CameraReading::beforeCommit);
+    const std::optional<std::uint32_t> turn = photoConnectionTurnOf(mounting);
+    facts.connection = keepSensorOrientation([output connectionWithMediaType:AVMediaTypeVideo], turn.value_or(0), turn.has_value());
+    return facts;
+}
+
+// The dynamic aspect ratios a device format lists (iOS 26), as the mask of aspectRatioBit.
+std::uint8_t aspectRatiosOf(AVCaptureDeviceFormat* format)
+{
+    std::uint8_t mask = 0;
+    for (AVCaptureAspectRatio ratio in format.supportedDynamicAspectRatios) {
+        if ([ratio isEqualToString:AVCaptureAspectRatio1x1]) mask |= aspectRatioBit(CameraAspectRatio::r1x1);
+        else if ([ratio isEqualToString:AVCaptureAspectRatio16x9]) mask |= aspectRatioBit(CameraAspectRatio::r16x9);
+        else if ([ratio isEqualToString:AVCaptureAspectRatio9x16]) mask |= aspectRatioBit(CameraAspectRatio::r9x16);
+        else if ([ratio isEqualToString:AVCaptureAspectRatio4x3]) mask |= aspectRatioBit(CameraAspectRatio::r4x3);
+        else if ([ratio isEqualToString:AVCaptureAspectRatio3x4]) mask |= aspectRatioBit(CameraAspectRatio::r3x4);
+    }
+    return mask;
+}
+
+AVCaptureAspectRatio avRatioOf(CameraAspectRatio ratio)
+{
+    switch (ratio) {
+    case CameraAspectRatio::r1x1: return AVCaptureAspectRatio1x1;
+    case CameraAspectRatio::r16x9: return AVCaptureAspectRatio16x9;
+    case CameraAspectRatio::r9x16: return AVCaptureAspectRatio9x16;
+    case CameraAspectRatio::r4x3: return AVCaptureAspectRatio4x3;
+    case CameraAspectRatio::r3x4: return AVCaptureAspectRatio3x4;
+    case CameraAspectRatio::none: break;
+    }
+    return nil;
+}
+
+CameraAspectRatio ratioOfAV(AVCaptureAspectRatio ratio)
+{
+    for (const auto candidate : {CameraAspectRatio::r1x1, CameraAspectRatio::r16x9, CameraAspectRatio::r9x16, CameraAspectRatio::r4x3,
+                                 CameraAspectRatio::r3x4})
+        if (ratio != nil && [ratio isEqualToString:avRatioOf(candidate)]) return candidate;
+    return CameraAspectRatio::none;
+}
+
+CameraDeviceType deviceTypeOf(AVCaptureDeviceType type)
+{
+    if ([type isEqualToString:AVCaptureDeviceTypeBuiltInWideAngleCamera]) return CameraDeviceType::wide;
+    if ([type isEqualToString:AVCaptureDeviceTypeBuiltInUltraWideCamera]) return CameraDeviceType::ultraWide;
+    if ([type isEqualToString:AVCaptureDeviceTypeBuiltInTelephotoCamera]) return CameraDeviceType::telephoto;
+    if ([type isEqualToString:AVCaptureDeviceTypeBuiltInDualCamera]) return CameraDeviceType::dual;
+    if ([type isEqualToString:AVCaptureDeviceTypeBuiltInDualWideCamera]) return CameraDeviceType::dualWide;
+    if ([type isEqualToString:AVCaptureDeviceTypeBuiltInTripleCamera]) return CameraDeviceType::triple;
+    if ([type isEqualToString:AVCaptureDeviceTypeExternal]) return CameraDeviceType::external;
+    if (@available(iOS 27.1, *)) {
+        if ([type isEqualToString:AVCaptureDeviceTypeBuiltInOuterUltraWideCamera]) return CameraDeviceType::outerUltraWide;
+        if ([type isEqualToString:AVCaptureDeviceTypeBuiltInInnerUltraWideCamera]) return CameraDeviceType::innerUltraWide;
+    }
+    return CameraDeviceType::other;
 }
 
 // The capture connection's mode for a stabilization choice (video_stabilization.hpp).
@@ -130,6 +246,12 @@ struct Entry {
     CameraInfo info;
     // AVFoundation's zoom factor times this is the ratio Android sees.
     float zoomMultiplier {1.0f};
+    // How the camera is presented (presentedMountingOf): the orientation stated, the turn of its video connection and
+    // whether it imitates an earlier front camera. A Mac's camera states 0 and takes no turn.
+    PresentedMounting mounting;
+    // What discovery noted of the camera, for the session record (camera_presentation.hpp); the camera's anchor joins it
+    // when the session is given one.
+    CameraPresentation discovered;
 };
 
 [[maybe_unused]] BayerOrder bayerOrderOf(OSType format)
@@ -179,8 +301,9 @@ struct FormatSet {
     std::vector<AVCaptureDeviceFormat*> formats;
 };
 
-// A 4:2:0 device format as data; nothing for any other.
-std::optional<VideoFormatFacts> factsOf(AVCaptureDeviceFormat* format)
+// A 4:2:0 device format as data; nothing for any other. `zoomScale` turns the device's zoom factors into
+// Android's ratios (zoomRatioScale).
+std::optional<VideoFormatFacts> factsOf(AVCaptureDeviceFormat* format, float zoomScale)
 {
     const FourCharCode subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription);
     if (subtype != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange && subtype != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
@@ -195,16 +318,40 @@ std::optional<VideoFormatFacts> factsOf(AVCaptureDeviceFormat* format)
     facts.photoSizes = listedPhotoSizes(format);
     facts.fullRange = subtype == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
     facts.multiCamera = formatTakenByMultiCameraSession(format);
+    // The zoom the system recommends for the format, where it gives one: the camera's stated maximum
+    // (arrangeCameras).
+    if (AVZoomRange* recommended = format.systemRecommendedVideoZoomRange)
+        facts.recommendedZoomMaximum = float(recommended.maxZoomFactor) * zoomScale;
+    // The zoom the format itself delivers: a camera with no recommendation is stated up to it, not to the device's
+    // largest over all its formats.
+#if TARGET_OS_IOS
+    facts.maximumZoom = float(format.videoMaxZoomFactor) * zoomScale;
+    facts.aspectRatios = aspectRatiosOf(format);
+#endif
     return facts;
 }
 
-FormatSet formatSetOf(AVCaptureDevice* device)
+// The 4:2:0 formats of a device as the guest is offered them (presentedFormatOf): a format that lists dynamic aspect
+// ratios is described by the crop the device is pinned at, for a video connection turned by `connectionTurn`, or left
+// out when it cannot be described (the line says which, once). The zoom is in the terms of `zoomScale`.
+FormatSet formatSetOf(AVCaptureDevice* device, float zoomScale, std::uint32_t connectionTurn)
 {
     FormatSet set;
     for (AVCaptureDeviceFormat* format in device.formats) {
-        auto facts = factsOf(format);
+        auto facts = factsOf(format, zoomScale);
         if (!facts) continue;
-        set.facts.push_back(std::move(*facts));
+        auto presented = presentedFormatOf(*facts, connectionTurn);
+        if (!presented) {
+            char line[192];
+            std::snprintf(line, sizeof(line), "Camera: a %ux%u format that lists aspect ratios (mask %u) cannot be described for a turn of %u: not offered",
+                          facts->width, facts->height, unsigned(facts->aspectRatios), connectionTurn);
+            static std::mutex mutex;
+            static std::set<std::string> logged;
+            std::lock_guard lock(mutex);
+            if (logged.insert(line).second) std::fprintf(stderr, "%s\n", line);
+            continue;
+        }
+        set.facts.push_back(std::move(*presented));
         set.formats.push_back(format);
     }
     return set;
@@ -245,8 +392,9 @@ NSDictionary* videoSettingsOf(const VideoFormatFacts& facts, std::uint32_t width
 
 // One line per camera, once for the life of the process: the device facts the
 // anchor is chosen from (a format's size, its rate spans, `m` when a
-// multi-camera session takes it, `f` when it is full range and the photo sizes
-// it lists in braces). No identifier and no frame data.
+// multi-camera session takes it, `f` when it is full range, `z` and the zoom
+// the system recommends for it, and the photo sizes it lists in braces). No
+// identifier and no frame data.
 void logFormatTables(const std::vector<Entry>& entries)
 {
     static std::mutex mutex;
@@ -264,6 +412,10 @@ void logFormatTables(const std::vector<Entry>& entries)
             }
             if (format.multiCamera) line += " m";
             if (format.fullRange) line += " f";
+            if (format.recommendedZoomMaximum > 0) {
+                std::snprintf(text, sizeof(text), " z%g", format.recommendedZoomMaximum);
+                line += text;
+            }
             line += " {";
             for (std::size_t index = 0; index < format.photoSizes.size(); ++index)
                 line += (index != 0 ? " " : "") + std::to_string(format.photoSizes[index].width) + "x" +
@@ -271,6 +423,13 @@ void logFormatTables(const std::vector<Entry>& entries)
             line += "};";
         }
         std::fprintf(stderr, "%s\n", line.c_str());
+        // How the camera is presented (presentedMountingOf): the rotation coordinator's angles for portrait, portrait upside
+        // down, landscape right and landscape left, the orientation stated, and the turn set on the video connection.
+        const CameraPresentation& mounted = entries[camera].discovered;
+        std::fprintf(stderr, "Camera: camera %zu mounting: angles %d %d %d %d, stated %u, video turn %u%s\n", camera,
+                     int(mounted.coordinatorAngles[0]), int(mounted.coordinatorAngles[1]), int(mounted.coordinatorAngles[2]),
+                     int(mounted.coordinatorAngles[3]), unsigned(mounted.stated), unsigned(mounted.turn),
+                     mounted.earlier ? " (presented like an earlier front camera)" : "");
     }
 }
 
@@ -298,6 +457,24 @@ std::vector<Entry> discover()
         [AVCaptureDeviceDiscoverySession discoverySessionWithDeviceTypes:types
                                                                mediaType:AVMediaTypeVideo
                                                                 position:AVCaptureDevicePositionUnspecified];
+    // The front devices the platform lists, whether the guest uses them or not, and whether any has a square format or a
+    // format that lists dynamic aspect ratios: what the record says of how a front camera is built.
+    std::uint8_t frontDevices = 0;
+    bool squareFormats = false, dynamicRatios = false;
+    for (AVCaptureDevice* device in session.devices) {
+        if (device.position != AVCaptureDevicePositionFront) continue;
+        frontDevices = std::uint8_t(std::min(255, frontDevices + 1));
+        for (AVCaptureDeviceFormat* format in device.formats) {
+            const CMVideoDimensions dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription);
+            squareFormats = squareFormats || (dimensions.width > 0 && dimensions.width == dimensions.height);
+#if TARGET_OS_IOS
+            dynamicRatios = dynamicRatios || format.supportedDynamicAspectRatios.count != 0;
+#endif
+        }
+    }
+    // The formats of the front devices that are not offered because they list ratios and cannot be described: what is left
+    // of a front device whose formats are all dropped, which is then no camera.
+    std::uint16_t frontFormatsDropped = 0;
     std::vector<Entry> entries;
     for (AVCaptureDevice* device in session.devices) {
         Entry entry;
@@ -327,6 +504,35 @@ std::vector<Entry> discover()
         info.flash = device.hasFlash && info.position != CameraPosition::front;
         info.torch = device.hasTorch;
         const bool zoomCamera = info.lens == CameraLensKind::zoom;
+        entry.mounting = {info.sensorOrientation, 0, false};
+        entry.discovered.position = info.position;
+        entry.discovered.frontDevices = frontDevices;
+        entry.discovered.squareFormats = squareFormats;
+        entry.discovered.dynamicRatios = dynamicRatios;
+#if TARGET_OS_IOS
+        entry.discovered.deviceType = deviceTypeOf(type);
+        // The platform states each camera's mounting, which is what the guest is told (presentedMountingOf); the
+        // connections present the pictures in it (keepSensorOrientation). Its fixed angle for each interface
+        // orientation is noted for the record.
+        AVCaptureDeviceRotationCoordinator* rotation = [[AVCaptureDeviceRotationCoordinator alloc] initWithDevice:device previewLayer:nil];
+        const AVCaptureVideoOrientation orientations[4] = {AVCaptureVideoOrientationPortrait, AVCaptureVideoOrientationPortraitUpsideDown,
+                                                           AVCaptureVideoOrientationLandscapeRight, AVCaptureVideoOrientationLandscapeLeft};
+        double portraitAngle = 0;
+        for (int index = 0; index < 4; ++index) {
+            const double angle = [rotation videoRotationAngleRelativeToDeviceOrientation:orientations[index]];
+            if (index == 0) portraitAngle = angle;
+            entry.discovered.coordinatorAngles[std::size_t(index)] = angleNumber(angle);
+        }
+        entry.mounting = presentedMountingOf(info.position, portraitAngle);
+        info.sensorOrientation = entry.mounting.stated;
+#endif
+        entry.discovered.stated = std::uint16_t(entry.mounting.stated);
+        entry.discovered.turn = std::uint16_t(entry.mounting.connectionTurn);
+        entry.discovered.earlier = entry.mounting.emulatesEarlierFront;
+#if TARGET_OS_IOS
+        // Only a zoom camera's factor is scaled (see zoomRatioScale): every range holds 1.0.
+        entry.zoomMultiplier = zoomRatioScale(info.lens, device.displayVideoZoomFactorMultiplier);
+#endif
 
         // Formats: distinct size and frame-rate range pairs of the 4:2:0 formats.
         std::uint32_t pixelWidth = 0, pixelHeight = 0;
@@ -341,12 +547,27 @@ std::vector<Entry> discover()
             if (subtype != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange &&
                 subtype != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
                 continue;
-            const CMVideoDimensions dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription);
+            CMVideoDimensions dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription);
             if (dimensions.width <= 0 || dimensions.height <= 0) continue;
             bool multiCamera = false;
 #if TARGET_OS_IOS
+            // A format that lists dynamic aspect ratios is the crop the device is pinned at (presentedFormatOf), with the
+            // photos that crop makes and the larger view of its two orientations; one that cannot be described is not
+            // listed (formatSetOf does the same).
+            std::optional<VideoFormatFacts> pinned;
+            if (aspectRatiosOf(format) != 0) {
+                const auto listed = factsOf(format, entry.zoomMultiplier);
+                pinned = listed ? presentedFormatOf(*listed, entry.mounting.connectionTurn) : std::nullopt;
+                if (!pinned) {
+                    if (info.position == CameraPosition::front) frontFormatsDropped = std::uint16_t(std::min(65535, frontFormatsDropped + 1));
+                    continue;
+                }
+                dimensions = {std::int32_t(pinned->width), std::int32_t(pinned->height)};
+            }
             multiCamera = format.multiCamSupported;
-            fieldOfView = std::max(fieldOfView, format.videoFieldOfView);
+            fieldOfView = std::max(fieldOfView, pinned ? pinnedFieldOfView([format videoFieldOfViewForAspectRatio:AVCaptureAspectRatio3x4 geometricDistortionCorrected:NO],
+                                                                         [format videoFieldOfViewForAspectRatio:AVCaptureAspectRatio4x3 geometricDistortionCorrected:NO])
+                                                       : format.videoFieldOfView);
             isoMinimum = std::min<std::uint32_t>(isoMinimum, std::uint32_t(std::ceil(format.minISO)));
             isoMaximum = std::max<std::uint32_t>(isoMaximum, std::uint32_t(std::floor(format.maxISO)));
             exposureMinimum = std::min(exposureMinimum, CMTimeGetSeconds(format.minExposureDuration));
@@ -357,6 +578,9 @@ std::vector<Entry> discover()
                 [value getValue:&photo];
                 if (photo.width <= 0 || photo.height <= 0) continue;
                 const CameraStillSize size {std::uint32_t(photo.width), std::uint32_t(photo.height)};
+#if TARGET_OS_IOS
+                if (pinned && std::find(pinned->photoSizes.begin(), pinned->photoSizes.end(), size) == pinned->photoSizes.end()) continue;
+#endif
                 if (std::uint64_t(size.width) * size.height > std::uint64_t(largestPhoto.width) * largestPhoto.height)
                     largestPhoto = size;
             }
@@ -383,7 +607,7 @@ std::vector<Entry> discover()
         // The formats go to the device as data: it picks each camera's anchor and
         // offers what the anchor does (photo_dimensions.hpp).
         {
-            const FormatSet set = formatSetOf(device);
+            const FormatSet set = formatSetOf(device, entry.zoomMultiplier, entry.mounting.connectionTurn);
             info.captureFormats = set.facts;
             // Every size some format makes: what the host can do at all.
             const auto made = stillsMadeByAnyFormat(set.facts, 0);
@@ -401,18 +625,12 @@ std::vector<Entry> discover()
         info.aperture = device.lensAperture;
         info.minimumFocusDistanceMillimetres = device.minimumFocusDistance > 0 ? float(device.minimumFocusDistance) : 0.0f;
         info.maximumWhiteBalanceGain = device.maxWhiteBalanceGain;
-        // The platform states each camera's mounting; the connections keep the pictures in it (keepSensorOrientation).
-        AVCaptureDeviceRotationCoordinator* rotation = [[AVCaptureDeviceRotationCoordinator alloc] initWithDevice:device previewLayer:nil];
-        info.sensorOrientation = sensorOrientationOf(
-            info.position, [rotation videoRotationAngleRelativeToDeviceOrientation:AVCaptureVideoOrientationPortrait]);
         // A virtual device refuses manual exposure, focus and white balance.
         if (!zoomCamera) {
             info.manualExposure = [device isExposureModeSupported:AVCaptureExposureModeCustom];
             info.manualFocus = info.autofocus && device.lockingFocusWithCustomLensPositionSupported;
             info.manualWhiteBalance = device.lockingWhiteBalanceWithCustomDeviceGainsSupported;
         }
-        // Only a zoom camera's factor is scaled (see zoomRatioScale): every range holds 1.0.
-        entry.zoomMultiplier = zoomRatioScale(info.lens, device.displayVideoZoomFactorMultiplier);
         info.zoomMinimum = float(device.minAvailableVideoZoomFactor) * entry.zoomMultiplier;
         info.zoomMaximum = float(device.maxAvailableVideoZoomFactor) * entry.zoomMultiplier;
         for (NSNumber* factor in device.virtualDeviceSwitchOverVideoZoomFactors)
@@ -433,6 +651,7 @@ std::vector<Entry> discover()
 #endif
         entries.push_back(std::move(entry));
     }
+    for (auto& entry : entries) entry.discovered.frontFormatsDropped = frontFormatsDropped;
     // Back cameras first (the zoom camera, then the lenses), then front, then
     // the rest, each group in a fixed lens order.
     const auto rank = [](const CameraInfo& info) {
@@ -446,6 +665,26 @@ std::vector<Entry> discover()
 }
 
 class AppleSession;
+
+// The last note of each camera across the platform sessions of the process, by the device's identifier: a session that
+// closes when the cameras are idle and opens again states the mounting again, and the record keeps what the cameras'
+// last admissions set (withDiscovery). Its lock is the innermost of the notes' (AppleSession::note).
+// It is bounded: the current session's cameras and the most recently used others (heldNotesToDrop).
+struct HeldNotes {
+    struct Held {
+        CameraPresentation note;
+        std::uint64_t used {};
+    };
+    std::mutex mutex;
+    std::map<std::string, Held> notes;
+    std::uint64_t clock {};
+};
+
+HeldNotes& heldNotes()
+{
+    static HeldNotes held;
+    return held;
+}
 
 // One camera's output delegate. It forwards to the session through a state
 // that outlives it, so a callback that races the session's end finds it gone.
@@ -615,11 +854,49 @@ TimingSteps timingStepsOf(AVCaptureDevice* device)
     return steps;
 }
 
+#if TARGET_OS_IOS
+// What activating a device did about its dynamic aspect ratio, for the record: the one pinned, the one the device
+// reports afterwards and the output dimensions it reports.
+struct RatioFacts {
+    bool known {};
+    CameraAspectRatio pinned {};
+    CameraAspectRatio now {};
+    std::uint32_t width {};
+    std::uint32_t height {};
+};
+
+RatioFacts ratioFactsOf(AVCaptureDevice* device, CameraAspectRatio pinned)
+{
+    RatioFacts facts;
+    facts.known = true;
+    facts.pinned = pinned;
+    facts.now = ratioOfAV(device.dynamicAspectRatio);
+    const CMVideoDimensions dimensions = device.dynamicDimensions;
+    facts.width = std::uint32_t(std::max(0, int(dimensions.width)));
+    facts.height = std::uint32_t(std::max(0, int(dimensions.height)));
+    return facts;
+}
+#endif
+
+// What a dynamic aspect ratio change says: `ratioPending` as the code when it is asked for, before the device is told;
+// else the completion's code, zero or the error's. `changed` is false where the device already held the ratio (nothing was
+// asked of it, and no buffer precedes the change); else `syncTime` is the first buffer the change applies to, on the
+// device's own clock. It may run on any queue.
+struct RatioCompletion {
+    std::int32_t code {};
+    bool changed {};
+    CMTime syncTime {kCMTimeInvalid};
+};
+using RatioDone = std::function<void(const RatioCompletion&)>;
+
 // Puts a device in its anchor: the format only when it is not the active one
-// (setting it again would revert the device's focus and exposure points), and,
-// for a stream, the frame durations the rate programs. False when the device
-// refuses.
-bool activate(AVCaptureDevice* device, const Anchor& anchor, const std::optional<ProgrammedRate>& rate)
+// (setting it again would revert the device's focus and exposure points), the
+// dynamic aspect ratio the anchor pins when `pinRatio` (an admission or a repair,
+// never a stream that runs: its crop must not change under it) and the device's
+// ratio is another, and, for a stream, the frame durations the rate programs.
+// False when the device refuses.
+bool activate(AVCaptureDevice* device, const Anchor& anchor, const std::optional<ProgrammedRate>& rate, bool pinRatio = false,
+              const RatioDone& ratioDone = {})
 {
     NSError* error = nil;
     if (![device lockForConfiguration:&error]) return false;
@@ -627,6 +904,27 @@ bool activate(AVCaptureDevice* device, const Anchor& anchor, const std::optional
     @try {
         // A format the session does not take raises instead of failing.
         if (device.activeFormat != anchor.format) device.activeFormat = anchor.format;
+#if TARGET_OS_IOS
+        if (pinRatio && anchor.facts.pinnedRatio != CameraAspectRatio::none) {
+            // The change is asked for before the device is told, so that it is under way for whatever reads it, and a completion
+            // that comes at once is the change's own; a device that already holds the ratio completes it explicitly.
+            RatioDone done = ratioDone;
+            if (done) done({ratioPending, true, kCMTimeInvalid});
+            if (ratioOfAV(device.dynamicAspectRatio) != anchor.facts.pinnedRatio) {
+                [device setDynamicAspectRatio:avRatioOf(anchor.facts.pinnedRatio)
+                            completionHandler:^(CMTime syncTime, NSError* completion) {
+                    if (done)
+                        done({completion == nil ? 0 : std::int32_t(std::clamp<NSInteger>(completion.code, INT32_MIN + 1, INT32_MAX)), true,
+                              syncTime});
+                }];
+            } else if (done) {
+                done({0, false, kCMTimeInvalid});
+            }
+        }
+#else
+        (void)pinRatio;
+        (void)ratioDone;
+#endif
         if (rate) {
             CMTime duration = CMTimeMake(1, std::int32_t(rate->rate));
             if (rate->setting.duration != FrameDuration::reciprocal) {
@@ -765,12 +1063,25 @@ public:
             limits_ = limits;
             anchors_.assign(entries_.size(), nullptr);
             refusals_ = RefusalLog {};
+            {
+                std::lock_guard lock(notesMutex_);
+                notes_.assign(entries_.size(), CameraPresentation {});
+            }
             for (std::size_t camera = 0; camera < entries_.size() && camera < formatOfCamera.size(); ++camera) {
                 if (!formatOfCamera[camera]) continue;
                 const std::size_t index = *formatOfCamera[camera];
-                const FormatSet set = formatSetOf(entries_[camera].device);
+                const FormatSet set = formatSetOf(entries_[camera].device, entries_[camera].zoomMultiplier,
+                                                  entries_[camera].mounting.connectionTurn);
                 const auto& listed = entries_[camera].info.captureFormats;
-                if (index >= set.facts.size() || index >= listed.size() || !(set.facts[index] == listed[index])) {
+                // The zoom the system advises and the format's own maximum are no part of the format: a change of them leaves the anchor.
+                const auto sameFormat = [&] {
+                    if (index >= set.facts.size() || index >= listed.size()) return false;
+                    auto now = set.facts[index];
+                    now.recommendedZoomMaximum = listed[index].recommendedZoomMaximum;
+                    now.maximumZoom = listed[index].maximumZoom;
+                    return now == listed[index];
+                };
+                if (!sameFormat()) {
                     refuse(camera, Refusal::formatChanged, "the anchor is not the format discovery listed");
                     continue;
                 }
@@ -781,6 +1092,18 @@ public:
                 anchor->facts = limitedStillFormats(entries_[camera].info.position, set.facts)[index];
                 anchor->rates = offeredRatesOf(anchor->facts, videoRateCap);
                 anchors_[camera] = std::move(anchor);
+            }
+            // What the session states of each camera it offers (the record's mounting line).
+            for (std::size_t camera = 0; camera < entries_.size(); ++camera) {
+                if (anchors_[camera] == nullptr) continue;
+                CameraPresentation facts = entries_[camera].discovered;
+                const Anchor& anchor = *anchors_[camera];
+                facts.anchorWidth = anchor.facts.width;
+                facts.anchorHeight = anchor.facts.height;
+                facts.anchorRatios = anchor.facts.aspectRatios;
+                facts.anchorFieldOfView = fieldOfViewOf(anchor);
+                // What an earlier session of the process left of the camera's last use stays beside the new discovery.
+                note(camera, [&](CameraPresentation& held) { held = withDiscovery(heldNoteOf(camera), facts); });
             }
         });
     }
@@ -806,7 +1129,7 @@ public:
             // A camera that no longer streams leaves the session, and so does the
             // photo output made for it unless a still is still on its way; the
             // camera's indicator and its share of a multi-camera budget go with it.
-            removeFromSession(running, true, !stillsInFlight(camera));
+            removeFromSession(camera, running, true, !stillsInFlight(camera));
             endPressureWatch(running);
             refusals_.reset(camera);
         });
@@ -968,6 +1291,15 @@ public:
         const Entry& entry = entries_[camera];
         auto& running = cameras_[camera];
         if (!prepareStill(camera)) return false;
+        // A crop is never changed under a still: the ratio the anchor pins is read. A change whose completion has not arrived
+        // is waited for with the settle time, inside the same budget; a completion error or a ratio that differs after the
+        // completion refuses the still, with the facts in the record.
+        const RatioStillStep ratioStep = ratioStepOf(camera);
+        if (ratioStep == RatioStillStep::refuseMoved || ratioStep == RatioStillStep::refuseFailed) return false;
+        const bool ratioIsPending = ratioStep == RatioStillStep::wait;
+        // A camera that imitates an earlier front camera takes a still only when its photo output turns it, on the
+        // reading taken after the configuration was committed.
+        if (!stillsAreTurned(camera, running.photoOutput)) return false;
         AVCapturePhotoOutput* output = running.photoOutput;
         AVCapturePhotoSettings* settings = nil;
         // The quality belongs inside the compression properties: iOS raises
@@ -1044,17 +1376,17 @@ public:
         // has passed (the first after the admission, and one after a stream started, resized or stopped, or after a
         // repair), scheduled on the session's queue, which stays free for the other cameras and the stop meanwhile. The waits of
         // a request are bounded (stillWaitBudgetNanoseconds): commits that keep coming fail it instead of postponing it.
-        const auto step = uml::platform::scheduledStillStep(false, true, running.photoMaximumCommittedAt, hostNow(), waited);
+        const auto step = uml::platform::scheduledStillStep(false, true, running.photoMaximumCommittedAt, hostNow(), waited, ratioIsPending);
         if (step.step == ScheduledStillStep::fail) {
             // Commits kept postponing it past its budget: the guest is told at once (the caller's failure).
-            std::fprintf(stderr, "Camera: camera %zu: the still failed: the photo output's full-resolution maximum did not settle within %llu ms\n",
+            std::fprintf(stderr, "Camera: camera %zu: the still failed: the photo output's full-resolution maximum or the aspect ratio did not settle within %llu ms\n",
                          camera, static_cast<unsigned long long>(stillWaitBudgetNanoseconds / 1000000));
             std::lock_guard lock(photoMutex_);
             photos_.erase(request.token);
             return false;
         }
         if (step.step == ScheduledStillStep::wait) {
-            std::fprintf(stderr, "Camera: camera %zu: the still starts in %llu ms, when the photo output's full-resolution maximum has taken effect\n",
+            std::fprintf(stderr, "Camera: camera %zu: the still starts in %llu ms, when the photo output's full-resolution maximum and the aspect ratio have taken effect\n",
                          camera, static_cast<unsigned long long>(step.waitNanoseconds / 1000000));
             {
                 std::lock_guard lock(photoMutex_);
@@ -1108,7 +1440,17 @@ public:
         }
         const auto running = cameras_.find(camera);
         const std::uint64_t committedAt = running == cameras_.end() ? 0 : running->second.photoMaximumCommittedAt;
-        const auto step = uml::platform::scheduledStillStep(stopped_, known && running != cameras_.end(), committedAt, hostNow(), waited);
+        // The pinned ratio's change that was under way when the still was accepted has completed or not: read again.
+        bool ratioIsPending = false;
+        if (known && !stopped_) {
+            const RatioStillStep ratioStep = ratioStepOf(camera);
+            if (ratioStep == RatioStillStep::refuseMoved || ratioStep == RatioStillStep::refuseFailed) {
+                failStill(camera, token);
+                return;
+            }
+            ratioIsPending = ratioStep == RatioStillStep::wait;
+        }
+        const auto step = uml::platform::scheduledStillStep(stopped_, known && running != cameras_.end(), committedAt, hostNow(), waited, ratioIsPending);
         switch (step.step) {
         case ScheduledStillStep::drop:
             std::fprintf(stderr, "Camera: a scheduled still was dropped: the session ended or the request is gone\n");
@@ -1124,7 +1466,7 @@ public:
         }
         case ScheduledStillStep::fail:
             // Commits kept postponing it past its budget: failed once, here, and nothing is scheduled again.
-            std::fprintf(stderr, "Camera: camera %zu: the still failed: the photo output's full-resolution maximum did not settle within %llu ms\n",
+            std::fprintf(stderr, "Camera: camera %zu: the still failed: the photo output's full-resolution maximum or the aspect ratio did not settle within %llu ms\n",
                          camera, static_cast<unsigned long long>(stillWaitBudgetNanoseconds / 1000000));
             failStill(camera, token);
             return;
@@ -1205,6 +1547,10 @@ public:
         const std::uint64_t capturedAt = CMTIME_IS_VALID(presentation) ? std::uint64_t(CMTimeGetSeconds(presentation) * 1e9) : hostNow();
         CVPixelBufferRef pixels = CMSampleBufferGetImageBuffer(sample);
         if (pixels == nullptr || CVPixelBufferGetPlaneCount(pixels) != 2) return;
+        // The camera's pinned ratio is not the one it delivers until the change has taken effect: nothing of it is passed on
+        // while it is under way or failed, and nothing made before it took effect afterwards (ratioAdmitsSample); the device's
+        // own stand-in frames bridge the gap as they do at a session's start.
+        if (!ratioAdmitsSample(camera, nanosecondsOf(presentation), CVPixelBufferGetWidth(pixels), CVPixelBufferGetHeight(pixels))) return;
         if (CVPixelBufferLockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return;
         CFRetain(sample);
         CameraFrame frame;
@@ -1223,6 +1569,7 @@ public:
         });
         frame.timestampNanoseconds = capturedAt;
         frame.exposure = exposureOf(camera, sample);
+        noteFirstFrame(camera, frame.width, frame.height);
         delegate_.cameraFrame(camera, std::move(frame));
     }
 
@@ -1337,7 +1684,425 @@ public:
 
     const Entry& entry(std::size_t camera) const { return entries_[camera]; }
 
+    // ------------------------------------------------------------------------
+    // What the session says of how it presents its cameras (camera_presentation.hpp)
+    // ------------------------------------------------------------------------
+
+    // Edits a camera's note and hands the delegate the result, one note at a time so that a camera's arrive in order. A
+    // camera the session was given no anchor for is not the guest's and has none. Called from the session's queue, from
+    // the capture's frame callback and from the device's completion handlers; it takes only the notes' own lock, which
+    // is below the state's (the callers that hold the state's mutex take it first).
+    void note(std::size_t camera, const std::function<void(CameraPresentation&)>& edit)
+    {
+        std::lock_guard lock(notesMutex_);
+        if (camera >= notes_.size()) return;
+        CameraPresentation next = notes_[camera];
+        edit(next);
+        if (next.anchorWidth == 0) return;
+        notes_[camera] = next;
+        keepNote(camera);
+        delegate_.cameraPresentation(camera, next);
+    }
+
+    // The camera's note as an earlier session of the process left it (the notes' lock is held).
+    CameraPresentation heldNoteOf(std::size_t camera)
+    {
+        HeldNotes& held = heldNotes();
+        std::lock_guard lock(held.mutex);
+        const auto found = held.notes.find(entries_[camera].info.identifier);
+        return found != held.notes.end() ? found->second.note : CameraPresentation {};
+    }
+
+    // Keeps the camera's note for the sessions that follow this one (the notes' lock is held).
+    void keepNote(std::size_t camera)
+    {
+        HeldNotes& held = heldNotes();
+        std::lock_guard lock(held.mutex);
+        held.notes[entries_[camera].info.identifier] = {notes_[camera], ++held.clock};
+        if (held.notes.size() <= entries_.size() + heldNotesRecent) return;
+        std::vector<HeldNoteUse> uses;
+        for (const auto& [identifier, kept] : held.notes) uses.push_back({identifier, kept.used});
+        std::vector<std::string> current;
+        for (const auto& entry : entries_) current.push_back(entry.info.identifier);
+        for (const auto& identifier : heldNotesToDrop(uses, current, heldNotesRecent)) held.notes.erase(identifier);
+    }
+
+    // The first frame of an admission states the size the output delivers, once.
+    void noteFirstFrame(std::size_t camera, std::uint32_t width, std::uint32_t height)
+    {
+        std::lock_guard lock(notesMutex_);
+        if (camera >= notes_.size() || !notes_[camera].videoKnown || notes_[camera].videoFirstWidth != 0) return;
+        notes_[camera].videoFirstWidth = width;
+        notes_[camera].videoFirstHeight = height;
+        keepNote(camera);
+        delegate_.cameraPresentation(camera, notes_[camera]);
+    }
+
+    // The Exif orientation of the photo the host's output gave for a capture, as the last of its camera.
+    void noteStillExif(std::size_t camera, std::uint8_t orientation)
+    {
+        note(camera, [&](CameraPresentation& held) { held.exifOrientation = orientation; });
+    }
+
+    // The completion of a dynamic aspect ratio change arrives (the device's own queue), under the state's mutex: `operation`
+    // is the change it belongs to, and `completion.code` is `ratioPending` when the change is asked for, before the device
+    // is told. The camera's frames are held until the change has completed without an error, and the samples made before
+    // the first buffer it applies to never pass: that buffer's timestamp, on the device's clock `from` (the camera's input
+    // port's), is converted to the capture's, the one every sample's timestamp is on; where that cannot be done the
+    // samples are held until one of the anchor's shape arrives (RatioBoundary). An error ends the camera for the guest
+    // (failRatio), as a refused admission does. A change of a camera that has left the session is gone, and its completion
+    // does nothing.
+    void ratioCompleted(std::size_t camera, std::uint64_t operation, const RatioCompletion& completion, const void* from)
+    {
+#if TARGET_OS_IOS
+        if (camera >= entries_.size()) return;
+        const std::int32_t code = completion.code;
+        bool failedNow = false;
+        {
+            RatioBoundary boundary = RatioBoundary::none;
+            std::int64_t notBefore = 0;
+            if (code == 0 && completion.changed) {
+                boundary = RatioBoundary::shape;
+                CMClockRef to = session_.synchronizationClock;
+                if (from != nullptr && to != nullptr && CMTIME_IS_NUMERIC(completion.syncTime))
+                    if (const auto converted = nanosecondsOf(CMSyncConvertTime(completion.syncTime, static_cast<CMClockRef>(const_cast<void*>(from)), to))) {
+                        boundary = RatioBoundary::atTime;
+                        notBefore = *converted;
+                    }
+            }
+            std::lock_guard lock(notesMutex_);
+            if (code == ratioPending) {
+                ratioPins_.asked(camera, operation);
+            } else {
+                const auto outcome = ratioPins_.completed(camera, operation, code, boundary, notBefore);
+                if (outcome == RatioPins::Completion::ignored) return;
+                failedNow = outcome == RatioPins::Completion::failed;
+            }
+        }
+        // The ratio the camera's anchor pins, which the notes do not hold until the admission that asked for it is noted.
+        CameraAspectRatio pinned = CameraAspectRatio::none;
+        if (const Anchor* anchor = anchorOf(camera); anchor != nullptr) pinned = anchor->facts.pinnedRatio;
+        note(camera, [&](CameraPresentation& held) { noteRatio(held, camera, pinned); });
+        if (failedNow)
+            failRatio(camera, Refusal::ratioFailed, "the change to " + std::string(aspectRatioName(pinned)) + " ended with error " + std::to_string(code));
+#else
+        (void)camera;
+        (void)operation;
+        (void)completion;
+        (void)from;
+#endif
+    }
+
+    // The camera's pinned ratio did not come to be, by an error or by no completion in time: it is refused as an admission
+    // whose connection does not hold its turn is, with the reason in the record, and the session is said to have failed,
+    // which the device answers by telling the guest its cameras are interrupted and opening another session whose
+    // admissions pin the ratio again. Called with the state's mutex held.
+    void failRatio(std::size_t camera, Refusal reason, const std::string& detail)
+    {
+        refuse(camera, reason, detail);
+        deliver({allCameras, CameraEventKind::failed});
+    }
+
 private:
+#if TARGET_OS_IOS
+    static CameraFact factOf(bool value) { return value ? CameraFact::yes : CameraFact::no; }
+
+    // The camera's pinned ratio into its note, in the one critical section that holds the notes' lock (note()): the device's
+    // ratio as it reads now, and the change's own state as the camera has it now, pending while it is under way or never
+    // completed, else its completion's error code. Read and written together, a completion that comes between an admission's
+    // reading and its note cannot be overwritten by the older state, and a camera that has no change (it left the session)
+    // keeps what its note says.
+    void noteRatio(CameraPresentation& held, std::size_t camera, CameraAspectRatio pinned)
+    {
+        if (pinned != CameraAspectRatio::none) applyRatio(held, ratioFactsOf(entries_[camera].device, pinned));
+        if (const auto code = ratioNoteCode(ratioPins_.find(camera))) held.ratioError = *code;
+    }
+
+    // The ratio facts into a note; a change whose completion has not come yet is pending.
+    static void applyRatio(CameraPresentation& held, const RatioFacts& facts)
+    {
+        if (!held.ratioKnown) held.ratioError = ratioPending;
+        held.ratioKnown = true;
+        held.ratioPinned = facts.pinned;
+        held.ratioNow = facts.now;
+        held.ratioWidth = facts.width;
+        held.ratioHeight = facts.height;
+    }
+
+    // An anchor's field of view in degrees, rounded: a format that lists ratios states the larger of the two crops it is
+    // held at, uncorrected for distortion; -1 where the host has none.
+    static std::int16_t fieldOfViewOf(const Anchor& anchor)
+    {
+        const float degrees = anchor.facts.pinnedRatio != CameraAspectRatio::none
+            ? pinnedFieldOfView([anchor.format videoFieldOfViewForAspectRatio:AVCaptureAspectRatio3x4 geometricDistortionCorrected:NO],
+                                [anchor.format videoFieldOfViewForAspectRatio:AVCaptureAspectRatio4x3 geometricDistortionCorrected:NO])
+            : anchor.format.videoFieldOfView;
+        return degrees > 0 ? std::int16_t(std::lround(degrees)) : std::int16_t(-1);
+    }
+
+    // What an admission set on the camera: the video connection (its angle and mirroring by default and now, the size the
+    // output was asked for), the photo output's compensation and photo connection, the device's ratio.
+    void noteAdmission(std::size_t camera, const std::optional<ConnectionFacts>& video, const std::optional<PhotoOutputFacts>& attached,
+                       const std::optional<CameraStillSize>& photoMaximum, const std::optional<RatioFacts>& ratio, CameraStillSize asked)
+    {
+        // The photo output's compensation as it reads now that the admission committed the configuration; the reading
+        // taken as the output was attached stays where the output is gone again.
+        std::optional<PhotoOutputFacts> photo = attached;
+        if (photo)
+            if (const auto running = cameras_.find(camera); running != cameras_.end() && running->second.photoOutput != nil) {
+                const PhotoOutputFacts committed = readCompensation(running->second.photoOutput, CameraReading::afterCommit);
+                photo->compensationSupported = committed.compensationSupported;
+                photo->compensationEnabled = committed.compensationEnabled;
+                photo->reading = committed.reading;
+            }
+        AVCaptureDevice* device = entries_[camera].device;
+        const CameraFact center = factOf(device.centerStageActive);
+        const CameraFact distortion = factOf(device.geometricDistortionCorrectionEnabled);
+        const Anchor* anchor = anchorOf(camera);
+        note(camera, [&](CameraPresentation& held) {
+            if (ratio) noteRatio(held, camera, ratio->pinned);
+            if (video) {
+                held.videoKnown = true;
+                held.videoDefaultAngle = video->defaultAngle;
+                held.videoAngle = video->angle;
+                held.videoAngleSupported = factOf(video->angleSupported);
+                held.videoDefaultMirrored = video->defaultMirrored;
+                held.videoMirrored = video->mirrored;
+                if (anchor != nullptr) {
+                    const auto frame = outputSizesFor(anchor->facts, asked.width, asked.height, 0).frame;
+                    held.videoAskedWidth = frame ? frame->width : anchor->facts.width;
+                    held.videoAskedHeight = frame ? frame->height : anchor->facts.height;
+                }
+                held.videoFirstWidth = 0;
+                held.videoFirstHeight = 0;
+            }
+            if (photo) {
+                held.photoKnown = true;
+                held.compensationSupported = photo->compensationSupported;
+                held.compensationEnabled = photo->compensationEnabled;
+                held.compensationReading = photo->reading;
+                held.photoDefaultAngle = photo->connection.defaultAngle;
+                held.photoAngle = photo->connection.angle;
+                held.photoDefaultMirrored = photo->connection.defaultMirrored;
+                held.photoMirrored = photo->connection.mirrored;
+                if (photoMaximum) {
+                    held.photoMaximumWidth = photoMaximum->width;
+                    held.photoMaximumHeight = photoMaximum->height;
+                }
+            }
+            if (video || photo) {
+                held.centerStageActive = center;
+                held.distortionCorrected = distortion;
+            }
+        });
+    }
+
+    // A repair put a camera back in its anchor: the ratio it pinned again, the connections as they are now, and a new first
+    // frame to wait for.
+    void noteRepair(std::size_t camera, const RunningCamera& running, const std::optional<RatioFacts>& ratio)
+    {
+        std::optional<std::pair<std::int16_t, std::int8_t>> video;
+        if (running.connection != nil)
+            @try {
+                video = std::make_pair(angleNumber(running.connection.videoRotationAngle), mirroringNumber(running.connection));
+            } @catch (NSException*) {
+            }
+        std::optional<PhotoOutputFacts> photo;
+        if (running.photoOutput != nil) {
+            photo = readCompensation(running.photoOutput, CameraReading::afterCommit);
+            if (AVCaptureConnection* connection = [running.photoOutput connectionWithMediaType:AVMediaTypeVideo]; connection != nil)
+                @try {
+                    photo->connection.angle = angleNumber(connection.videoRotationAngle);
+                    photo->connection.mirrored = mirroringNumber(connection);
+                } @catch (NSException*) {
+                }
+        }
+        const CMVideoDimensions maximum = running.photoOutput != nil ? running.photoOutput.maxPhotoDimensions : CMVideoDimensions {};
+        note(camera, [&](CameraPresentation& held) {
+            if (ratio) noteRatio(held, camera, ratio->pinned);
+            if (video && held.videoKnown) {
+                held.videoAngle = video->first;
+                held.videoMirrored = video->second;
+                held.videoFirstWidth = 0;
+                held.videoFirstHeight = 0;
+            }
+            if (photo && held.photoKnown) {
+                held.compensationSupported = photo->compensationSupported;
+                held.compensationEnabled = photo->compensationEnabled;
+                held.compensationReading = photo->reading;
+                held.photoAngle = photo->connection.angle;
+                held.photoMirrored = photo->connection.mirrored;
+                held.photoMaximumWidth = std::uint32_t(std::max(0, int(maximum.width)));
+                held.photoMaximumHeight = std::uint32_t(std::max(0, int(maximum.height)));
+            }
+        });
+    }
+#else
+    static std::int16_t fieldOfViewOf(const Anchor&) { return -1; }
+#endif
+
+#if TARGET_OS_IOS
+    // What a still does about the ratio its camera's anchor pins (ratioStillStep), on the device's reading now and the
+    // state of the change the session asked for. A refusal is logged and recorded here.
+    RatioStillStep ratioStepOf(std::size_t camera)
+    {
+        const Anchor* anchor = anchorOf(camera);
+        if (anchor == nullptr || anchor->facts.pinnedRatio == CameraAspectRatio::none) return RatioStillStep::proceed;
+        const RatioFacts facts = ratioFactsOf(entries_[camera].device, anchor->facts.pinnedRatio);
+        RatioPin pin;
+        {
+            std::lock_guard lock(notesMutex_);
+            if (const auto found = ratioPins_.find(camera)) pin = *found;
+        }
+        const RatioStillStep step = ratioStillStep(facts.pinned, facts.now, pin.pending && !pin.timedOut, ratioPinErrorForStill(pin));
+        if (step == RatioStillStep::refuseMoved || step == RatioStillStep::refuseFailed) {
+            note(camera, [&](CameraPresentation& held) {
+                applyRatio(held, facts);
+                if (step == RatioStillStep::refuseFailed && !pin.timedOut) held.ratioError = pin.error;
+            });
+            if (step == RatioStillStep::refuseFailed && pin.timedOut)
+                refuse(camera, Refusal::ratioTimedOut, "the change to " + std::string(aspectRatioName(facts.pinned)) + " did not complete");
+            else if (step == RatioStillStep::refuseFailed)
+                refuse(camera, Refusal::ratioFailed, "the change to " + std::string(aspectRatioName(facts.pinned)) + " ended with error " +
+                                                         std::to_string(pin.error));
+            else
+                refuse(camera, Refusal::ratioMoved,
+                       "the device holds " + std::string(aspectRatioName(facts.now)) + ", not " + std::string(aspectRatioName(facts.pinned)));
+        }
+        return step;
+    }
+
+    // What a still does about the photo output's orientation compensation of a camera that imitates an earlier front
+    // camera (stillCompensationStep), on the reading taken now, after the configuration was committed: supported and off is
+    // turned on once, in a configuration of its own. The reading goes into the camera's photo line, and a refusal says
+    // which reading refused it. Nothing is asked of any other camera.
+    bool stillsAreTurned(std::size_t camera, AVCapturePhotoOutput* output)
+    {
+        const Entry& entry = entries_[camera];
+        if (!entry.mounting.emulatesEarlierFront) return true;
+        PhotoOutputFacts facts = readCompensation(output, CameraReading::afterCommit);
+        CompensationStep step = stillCompensationStep(true, facts.compensationSupported, facts.compensationEnabled, facts.reading);
+        if (step == CompensationStep::enable) {
+            [session_ beginConfiguration];
+            @try {
+                output.cameraSensorOrientationCompensationEnabled = YES;
+            } @catch (NSException* exception) {
+                std::fprintf(stderr, "Camera: camera %zu: the photo output kept its orientation compensation: %s\n", camera,
+                             exception.reason != nil ? exception.reason.UTF8String : "");
+            }
+            [session_ commitConfiguration];
+            photoPipelinesSettle();
+            facts = readCompensation(output, CameraReading::afterCommit);
+            step = stillCompensationStep(true, facts.compensationSupported, facts.compensationEnabled, facts.reading);
+            if (step == CompensationStep::enable) step = CompensationStep::refuse;
+        }
+        note(camera, [&](CameraPresentation& held) {
+            held.photoKnown = true;
+            held.compensationSupported = facts.compensationSupported;
+            held.compensationEnabled = facts.compensationEnabled;
+            held.compensationReading = facts.reading;
+        });
+        if (step != CompensationStep::refuse) return true;
+        refuse(camera, Refusal::stillsNotTurned,
+               "the photo output does not turn its stills (compensation supported " + std::string(factName(facts.compensationSupported)) +
+                   ", on " + std::string(factName(facts.compensationEnabled)) + ", read after the configuration was committed): the camera takes no still");
+        return false;
+    }
+#else
+    RatioStillStep ratioStepOf(std::size_t) { return RatioStillStep::proceed; }
+    bool stillsAreTurned(std::size_t, AVCapturePhotoOutput*) { return true; }
+#endif
+
+#if TARGET_OS_IOS
+    // Whether a sample of the camera goes to the guest (ratioSampleDelivered): not while a pinned ratio's change is under way
+    // or ended in an error or no completion, and never one made before the first buffer the change applies to (the device
+    // delivers buffers of the ratio it had until then, and a callback that was already entered when the completion came
+    // must not pass because the completion has). `captureNanoseconds` is the sample's timestamp on the capture's clock; its
+    // size is compared with the anchor's aspect ratio where the rule is the shape's.
+    bool ratioAdmitsSample(std::size_t camera, std::optional<std::int64_t> captureNanoseconds, std::size_t width, std::size_t height)
+    {
+        const Anchor* anchor = anchorOf(camera);
+        const bool shape = anchor == nullptr || anchor->facts.width == 0 || anchor->facts.height == 0 ||
+            std::uint64_t(width) * anchor->facts.height == std::uint64_t(height) * anchor->facts.width;
+        std::lock_guard lock(notesMutex_);
+        return ratioPins_.sampleDelivered(camera, captureNanoseconds, shape);
+    }
+
+    // The session runs with the camera in it (after an admission or a repair): the time the pinned ratio's change may
+    // take begins, once for the change that is pending, and is watched on the session's queue.
+    void armRatioWatch(std::size_t camera)
+    {
+        std::uint64_t operation = 0;
+        {
+            std::lock_guard lock(notesMutex_);
+            const auto armed = ratioPins_.armed(camera, hostNow());
+            if (!armed) return;
+            operation = *armed;
+        }
+        std::shared_ptr<SessionState> state = state_;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, std::int64_t(ratioCompletionBudgetNanoseconds)), queue_, ^{
+            AppleSession* session = nullptr;
+            {
+                std::lock_guard lock(state->mutex);
+                session = static_cast<AppleSession*>(state->session);
+            }
+            if (session != nullptr) session->ratioWatchFired(camera, operation);
+        });
+    }
+
+    // The time of a pinned ratio's change ran out (on the session's queue): a change that has not completed ends the
+    // camera for the guest (failRatio). The watch fires after the budget, whatever the clocks read.
+    void ratioWatchFired(std::size_t camera, std::uint64_t operation)
+    {
+        if (stopped_) return;
+        {
+            // An operation that is gone (the camera left the session, or another change replaced it) does nothing.
+            std::lock_guard lock(notesMutex_);
+            const auto pin = ratioPins_.find(camera);
+            if (!pin || pin->operation != operation) return;
+            if (!ratioPins_.timedOut(camera, operation, std::max(hostNow(), pin->armedAt + ratioCompletionBudgetNanoseconds))) return;
+        }
+        std::lock_guard lock(state_->mutex);
+        if (state_->session) failRatio(camera, Refusal::ratioTimedOut, "the change did not complete within " + std::to_string(ratioCompletionBudgetNanoseconds / 1000000) + " ms");
+    }
+
+    // The camera's last input or output left the session (or an admission that added its input was undone): its change is
+    // over, and no watch or completion of it fails the session the other cameras are in. What the notes say of it stays.
+    void forgetRatio(std::size_t camera)
+    {
+        std::lock_guard lock(notesMutex_);
+        ratioPins_.invalidate(camera);
+    }
+#else
+    bool ratioAdmitsSample(std::size_t, std::optional<std::int64_t>, std::size_t, std::size_t) { return true; }
+    void armRatioWatch(std::size_t) {}
+    void forgetRatio(std::size_t) {}
+#endif
+
+    // The completion handler of a ratio change the device is asked for (activate): it reaches the session only while
+    // the session lives, under the state's mutex like every callback of the platform's.
+    // Each call is one operation (a change asked for, or found made), numbered so that a completion belongs to it alone.
+    // The completion's timestamp is on the camera's input port's clock, which the callback keeps (the call is made on the
+    // session's queue, where the input is, and the completion arrives on the device's).
+    RatioDone ratioDone(std::size_t camera)
+    {
+        std::shared_ptr<SessionState> state = state_;
+        const std::uint64_t operation = ++ratioOperation_;
+        std::shared_ptr<const void> from;
+#if TARGET_OS_IOS
+        if (const auto running = cameras_.find(camera); running != cameras_.end() && running->second.input != nil)
+            for (AVCaptureInputPort* port in running->second.input.ports)
+                if ([port.mediaType isEqualToString:AVMediaTypeVideo] && port.clock != nullptr) {
+                    from = std::shared_ptr<const void>(CFRetain(port.clock), [](const void* clock) { CFRelease(clock); });
+                    break;
+                }
+#endif
+        return [state, camera, operation, from](const RatioCompletion& completion) {
+            std::lock_guard lock(state->mutex);
+            if (state->session) static_cast<AppleSession*>(state->session)->ratioCompleted(camera, operation, completion, from.get());
+        };
+    }
+
     // Logs a refusal once per camera and reason until the camera's configuration
     // changes (RefusalLog), whoever asks again and however often.
     void refuse(std::size_t camera, Refusal reason, const std::string& detail = {})
@@ -1345,6 +2110,11 @@ private:
         if (!refusals_.first(camera, reason)) return;
         std::fprintf(stderr, "Camera: camera %zu is refused (%s)%s%s\n", camera, std::string(refusalName(reason)).c_str(),
                      detail.empty() ? "" : ": ", detail.c_str());
+        // The record counts the refusals that were logged and names the last one's reason.
+        note(camera, [&](CameraPresentation& held) {
+            held.refusals = std::uint16_t(std::min<unsigned>(held.refusals + 1u, 65535u));
+            held.lastRefusal = std::int8_t(reason);
+        });
     }
 
     // Runs one platform call; an exception it raises is a refusal.
@@ -1432,6 +2202,13 @@ private:
         plan.activate = plan.addInput || video;
         plan.addVideo = video && running.videoOutput == nil;
         plan.addPhoto = photo && running.photoOutput == nil;
+#if TARGET_OS_IOS
+        // What this admission set on the device and its connections, for the record.
+        std::optional<ConnectionFacts> videoConnection;
+        std::optional<PhotoOutputFacts> photoFacts;
+        std::optional<CameraStillSize> photoMaximumSet;
+        std::optional<RatioFacts> ratioFacts;
+#endif
         AdmitSteps steps;
         steps.begin = [&] { [session_ beginConfiguration]; };
         steps.commit = [&] {
@@ -1441,7 +2218,15 @@ private:
         steps.addInput = [&] { return guarded(camera, [&] { return addInput(entry, running); }); };
         steps.snapshotTiming = [&] { held = timingOf(entry.device); };
         steps.restoreTiming = [&] { restoreTiming(camera, entry.device, held); };
-        steps.activate = [&] { return guarded(camera, [&] { return activate(entry.device, *anchor, rate); }); };
+        steps.activate = [&] {
+            return guarded(camera, [&] {
+                const bool activated = activate(entry.device, *anchor, rate, true, ratioDone(camera));
+#if TARGET_OS_IOS
+                if (anchor->facts.pinnedRatio != CameraAspectRatio::none) ratioFacts = ratioFactsOf(entry.device, anchor->facts.pinnedRatio);
+#endif
+                return activated;
+            });
+        };
         steps.addVideo = [&] {
             return guarded(camera, [&] {
                 AVCaptureVideoDataOutput* output = [[AVCaptureVideoDataOutput alloc] init];
@@ -1472,12 +2257,23 @@ private:
                     newVideo = output;
                     newConnection = [output connectionWithMediaType:AVMediaTypeVideo];
                 }
+#if TARGET_OS_IOS
+                // The connection's angle comes first and the output's size after it: the output delivers buffers turned by
+                // the angle, and the size must match them (AVCaptureVideoDataOutput.h). A camera that imitates an earlier
+                // front camera is refused when its connection will not hold the turn it needs, never left to deliver
+                // frames of another shape or upright the other way.
+                const ConnectionFacts connection = keepSensorOrientation(newConnection, entry.mounting.connectionTurn);
+                videoConnection = connection;
+                if (entry.mounting.emulatesEarlierFront && (!connection.angleSupported || connection.angle != std::int16_t(entry.mounting.connectionTurn))) {
+                    refuse(camera, Refusal::turnNotHeld,
+                           "the video connection does not hold a turn of " + std::to_string(entry.mounting.connectionTurn) + " (it has " +
+                               std::to_string(connection.angle) + ", by default " + std::to_string(connection.defaultAngle) + ")");
+                    return false;
+                }
+#endif
                 // The stream's size, scaled by the platform from the anchor's at
                 // the anchor's aspect ratio: set once the output has its source.
                 setVideoOutputSettings(output, videoSettingsOf(anchor->facts, width, height));
-#if TARGET_OS_IOS
-                keepSensorOrientation(newConnection);
-#endif
                 return true;
             });
         };
@@ -1486,6 +2282,15 @@ private:
                 AVCapturePhotoOutput* output = [[AVCapturePhotoOutput alloc] init];
 #if TARGET_OS_IOS
                 output.maxPhotoQualityPrioritization = AVCapturePhotoQualityPrioritizationQuality;
+#endif
+#if TARGET_OS_IOS
+                // The orientation of the output's stills; a camera that imitates an earlier front camera needs the output
+                // to turn them (its compensation, supported and on). What the output says of it is only known to hold
+                // once the configuration is committed, so nothing is refused here: a still reads it then (startStill).
+                const auto keepOrientation = [&](AVCapturePhotoOutput* attached) -> bool {
+                    photoFacts = keepStillOrientation(attached, entry.mounting);
+                    return true;
+                };
 #endif
                 const auto attach = [&]() -> bool {
                     if (multiCamera_) {
@@ -1499,8 +2304,7 @@ private:
                         AVCaptureConnection* connection = [[AVCaptureConnection alloc] initWithInputPorts:@[port] output:output];
                         if (![session_ canAddConnection:connection]) return false;
                         [session_ addConnection:connection];
-                        keepStillOrientation(output);
-                        return true;
+                        return keepOrientation(output);
 #else
                         return false;
 #endif
@@ -1509,9 +2313,10 @@ private:
                     [session_ addOutput:output];
                     newPhoto = output;
 #if TARGET_OS_IOS
-                    keepStillOrientation(output);
-#endif
+                    return keepOrientation(output);
+#else
                     return true;
+#endif
                 };
                 // The output makes photos up to the anchor's photoMaximum, which
                 // AVFoundation requires to be one of the active format's sizes
@@ -1519,6 +2324,9 @@ private:
                 const auto setMaximum = [&](CameraStillSize size) -> bool {
                     @try {
                         output.maxPhotoDimensions = CMVideoDimensions {std::int32_t(size.width), std::int32_t(size.height)};
+#if TARGET_OS_IOS
+                        photoMaximumSet = size;
+#endif
                         return true;
                     } @catch (NSException* exception) {
                         // The first refusal's detail is the one logged; the admission's own
@@ -1569,7 +2377,13 @@ private:
             running.format = nil;
         };
         const Admission result = admit(plan, steps);
+#if TARGET_OS_IOS
+        noteAdmission(camera, videoConnection, photoFacts, photoMaximumSet, ratioFacts, video ? CameraStillSize {width, height} : CameraStillSize {});
+#endif
         if (result != Admission::admitted) {
+            // An admission that added the camera's input and was undone leaves no change under way; a camera that was in the
+            // session before keeps the change its anchor's admission asked for.
+            if (running.input == nil) forgetRatio(camera);
             switch (result) {
             case Admission::inputRefused: refuse(camera, Refusal::inputRefused); break;
             case Admission::formatRefused: refuse(camera, Refusal::raised, "the device refused its anchor"); break;
@@ -1604,6 +2418,7 @@ private:
         if ((activeBefore != anchor->format || settingsStale) && running.applied) applyOnQueue(camera, running.settings, true);
         logJoin(camera);
         startSession();
+        armRatioWatch(camera);
         return true;
     }
 
@@ -1727,9 +2542,29 @@ private:
         const Entry& entry = entries_[camera];
         std::fprintf(stderr, "Camera: camera %zu's device was moved out of its anchor: put back\n", camera);
         [session_ beginConfiguration];
+#if TARGET_OS_IOS
+        std::optional<RatioFacts> ratioFacts;
+#endif
         const bool ok = guarded(camera, [&] {
-            if (!activate(entry.device, *anchor, running.video ? programmedFor(*anchor, running.frameRate, pressureCapOf(running)) : std::nullopt))
+            if (!activate(entry.device, *anchor, running.video ? programmedFor(*anchor, running.frameRate, pressureCapOf(running)) : std::nullopt,
+                          true, ratioDone(camera)))
                 return false;
+#if TARGET_OS_IOS
+            if (anchor->facts.pinnedRatio != CameraAspectRatio::none) ratioFacts = ratioFactsOf(entry.device, anchor->facts.pinnedRatio);
+#endif
+#if TARGET_OS_IOS
+            // A camera that imitates an earlier front camera is held at its turn before the output's size is set again
+            // (admitCamera); a connection that does not hold it fails the repair.
+            if (entry.mounting.emulatesEarlierFront && running.connection != nil) {
+                const ConnectionFacts connection = keepSensorOrientation(running.connection, entry.mounting.connectionTurn);
+                if (!connection.angleSupported || connection.angle != std::int16_t(entry.mounting.connectionTurn)) {
+                    refuse(camera, Refusal::turnNotHeld,
+                           "the video connection does not hold a turn of " + std::to_string(entry.mounting.connectionTurn) + " (it has " +
+                               std::to_string(connection.angle) + ")");
+                    return false;
+                }
+            }
+#endif
             if (running.videoOutput != nil)
                 setVideoOutputSettings(running.videoOutput, videoSettingsOf(anchor->facts, running.width, running.height));
             if (running.photoOutput != nil)
@@ -1739,9 +2574,14 @@ private:
         });
         [session_ commitConfiguration];
         photoPipelinesSettle();
+#if TARGET_OS_IOS
+        noteRepair(camera, running, ratioFacts);
+#endif
         // A stream's durations are written with its anchor; a still-only camera's are written when it streams.
         if (ok && running.video) running.timingWritten();
         if (ok && running.applied) applyOnQueue(camera, running.settings, true);
+        // The ratio pinned again is under way until its completion: the time it may take begins now.
+        armRatioWatch(camera);
         return ok;
     }
 
@@ -1796,8 +2636,9 @@ private:
     }
 
     // Takes a camera's outputs, and its input once it has none left, out of
-    // the session.
-    void removeFromSession(RunningCamera& running, bool video, bool photo)
+    // the session. The camera's ratio change goes with its last input (forgetRatio): while an output or a still in flight
+    // needs the camera, its change stays.
+    void removeFromSession(std::size_t camera, RunningCamera& running, bool video, bool photo)
     {
         [session_ beginConfiguration];
         @try {
@@ -1812,13 +2653,14 @@ private:
             running.video = false;
         }
         if (photo) running.photoOutput = nil;
-        if (running.input != nil && running.videoOutput == nil && running.photoOutput == nil) {
+        if (cameraLeavesSession(running.input != nil, running.videoOutput != nil, running.photoOutput != nil)) {
             @try {
                 [session_ removeInput:running.input];
             } @catch (NSException*) {
             }
             running.input = nil;
             running.format = nil;
+            forgetRatio(camera);
         }
         [session_ commitConfiguration];
         photoPipelinesSettle();
@@ -1845,7 +2687,7 @@ private:
         if (stopped_ || camera >= entries_.size()) return;
         auto& running = cameras_[camera];
         if (running.video || running.photoOutput == nil || stillsInFlight(camera)) return;
-        removeFromSession(running, false, true);
+        removeFromSession(camera, running, false, true);
     }
 
     // The system's pressure on a camera lowers the rate it runs at, as Apple
@@ -1943,6 +2785,14 @@ private:
     // does not offer.
     std::vector<std::shared_ptr<const Anchor>> anchors_;
     RefusalLog refusals_;
+    // How each camera is presented, by index of cameras() (note()); the notes' own lock is taken after the state's.
+    std::mutex notesMutex_;
+    std::vector<CameraPresentation> notes_;
+    // The state of each camera's pinned aspect ratio change, by index of cameras() (guarded by notesMutex_): the
+    // operation, whether it is under way, its completion's error code, and whether its time ran out (RatioPin).
+    RatioPins ratioPins_;
+    // The number of the last ratio change asked for (on the session's queue).
+    std::uint64_t ratioOperation_ {};
     std::set<std::size_t> joinsLogged_;
     std::atomic_bool stopped_ {};
     // The recoveries of this session: a failure stays until the session is torn
@@ -2087,6 +2937,7 @@ void noteCompensation(uml::platform::CameraStillFailure& failure, AVCapturePhoto
         failure.compensationSupported = supported ? uml::platform::CameraFact::yes : uml::platform::CameraFact::no;
         failure.compensationEnabled = supported && output.cameraSensorOrientationCompensationEnabled
             ? uml::platform::CameraFact::yes : uml::platform::CameraFact::no;
+        failure.compensationReading = uml::platform::CameraReading::afterCommit;
     } @catch (NSException*) {
         // The facts stay unknown.
     }
@@ -2116,6 +2967,8 @@ void noteCompensation(uml::platform::CameraStillFailure& failure, AVCapturePhoto
     // is one; the Bayer still's otherwise.
     uml::platform::PhotoReadings _jpegReadings;
     uml::platform::PhotoReadings _rawReadings;
+    // The Exif orientation (1 to 8) of the processed photo the output gave; zero for none.
+    uint8_t _exifOrientation;
     uml::platform::DngExposureData _dng;
 }
 
@@ -2163,7 +3016,16 @@ void noteCompensation(uml::platform::CameraStillFailure& failure, AVCapturePhoto
         : uml::platform::photoReadingsOfImage(
               std::span<const std::uint8_t>(static_cast<const std::uint8_t*>(data.bytes), data.length));
 #if TARGET_OS_IOS
-    if (photo.isRawPhoto) {
+    const bool rawPhoto = photo.isRawPhoto;
+#else
+    const bool rawPhoto = false;
+#endif
+    // How the output tagged its processed photo: the host drops the tag, but it shows whether the output turned the photo
+    // for the orientation the camera states (the session record).
+    if (!rawPhoto && readings.orientation && *readings.orientation >= 1 && *readings.orientation <= 8)
+        _exifOrientation = uint8_t(*readings.orientation);
+#if TARGET_OS_IOS
+    if (rawPhoto) {
         _rawReadings = readings;
         CVPixelBufferRef pixels = photo.pixelBuffer;
         if (pixels == nullptr || data == nil) return;
@@ -2266,6 +3128,8 @@ void noteCompensation(uml::platform::CameraStillFailure& failure, AVCapturePhoto
     std::lock_guard lock(_state->mutex);
     if (!_state->session) return;
     auto* session = static_cast<uml::platform::AppleSession*>(_state->session);
+    _result.failure.hostExifOrientation = _exifOrientation;
+    if (_wantJpeg && _exifOrientation != 0) session->noteStillExif(_camera, _exifOrientation);
     const bool haveJpegReadings = _jpegReadings.exposureSeconds || _jpegReadings.iso || _jpegReadings.fNumber ||
         _jpegReadings.focalLengthMillimetres || _jpegReadings.flash;
     // The photo's own readings come from its Exif. The 3A states, white balance,

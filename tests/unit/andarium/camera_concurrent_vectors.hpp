@@ -66,6 +66,12 @@ inline std::vector<ConcurrentVector> concurrent_vectors()
     vectors.push_back({"the phone's zoom and front cameras stream together",
                        {{0, 0, phone_lens_formats(), with1}, {1, 1, phone_lens_formats(), with0}},
                        true});
+    vectors.push_back({"a phone of three lenses: the wide lens and the front camera stream together, the other lenses do not",
+                       {{0, 0, phone_lens_formats(), with1},
+                        {1, 1, phone_lens_formats(), with0},
+                        {3, 2, phone_lens_formats(), 0},
+                        {4, 3, phone_lens_formats(), 0}},
+                       true});
     vectors.push_back({"a pad's front camera cannot make the guaranteed 1920x1440 JPEG (its video stops at 1080p)",
                        {{0, 0, phone_lens_formats(), with1}, {1, 1, pad_front_formats(), with0}},
                        false});

@@ -35,6 +35,48 @@ std::uint32_t id_of(const std::vector<IdAssignment>& ids, std::uint32_t index)
     return 99;
 }
 
+// A host of three lenses that publishes no zoom camera (the host's wire order is the primary back lens, the front
+// camera, then the other lenses): the wide lens is "0", the front camera "1", the ultra wide "3" and the telephoto "4",
+// and there is no "2". Only the wide lens streams with the front camera, so every other pair conflicts.
+void check_three_lens_host()
+{
+    const std::vector<CameraKey> keys = {{0, abi::facing::back, abi::lens::wide},
+                                         {1, abi::facing::front, abi::lens::wide},
+                                         {2, abi::facing::back, abi::lens::ultra_wide},
+                                         {3, abi::facing::back, abi::lens::telephoto}};
+    const auto ids = assign_ids(keys);
+    require(ids.size() == 4, "four cameras");
+    require(ids[0].id == 0 && ids[0].index == 0 && ids[1].id == 1 && ids[1].index == 1 && ids[2].id == 3 && ids[2].index == 2 &&
+                ids[3].id == 4 && ids[3].index == 3,
+            "wide 0, front 1, ultra wide 3, telephoto 4: no 2");
+    for (const auto& assignment : ids) require(assignment.id != wide_camera_id, "the wide lens is the primary camera, not a second one");
+
+    // Two lenses: the ultra wide keeps its ID, and a host whose only back lens is the ultra wide numbers it "0".
+    const std::vector<CameraKey> two = {keys[0], keys[1], keys[2]};
+    const auto pair = assign_ids(two);
+    require(pair.size() == 3 && pair[0].id == 0 && pair[1].id == 1 && pair[2].id == 3 && pair[2].index == 2, "wide, front, ultra wide");
+    const std::vector<CameraKey> ultra_only = {{0, abi::facing::back, abi::lens::ultra_wide}, keys[1]};
+    const auto alone = assign_ids(ultra_only);
+    require(alone.size() == 2 && alone[0].id == 0 && alone[0].index == 0 && alone[1].id == 1, "the primary back lens is 0 whichever it is");
+
+    // The host's masks (by its own numbers): the wide lens and the front camera name one another.
+    const std::uint32_t wide = 1u << 0, front = 1u << 1, ultra = 1u << 2, tele = 1u << 3;
+    const std::vector<Concurrency> cameras = {{0, 0, front, ultra | tele},
+                                              {1, 1, wide, ultra | tele},
+                                              {3, 2, 0, wide | front | tele},
+                                              {4, 3, 0, wide | front | ultra}};
+    const auto sets = concurrent_sets(cameras);
+    require(sets.size() == 1 && sets[0] == std::vector<std::uint32_t>({0, 1}), "one set: the wide lens and the front camera");
+    require(concurrent_feature(cameras, [](std::uint32_t) { return true; }), "the layout's concurrent feature holds");
+    require(!concurrent_feature(cameras, [](std::uint32_t id) { return id != 0; }),
+            "and does not when the wide lens misses the guaranteed sizes");
+    require(conflicting_ids(cameras, 0) == std::vector<std::uint32_t>({3, 4}), "the wide lens conflicts with the other lenses");
+    require(conflicting_ids(cameras, 1) == std::vector<std::uint32_t>({3, 4}), "so does the front camera");
+    require(conflicting_ids(cameras, 3) == std::vector<std::uint32_t>({0, 1, 4}), "the ultra wide conflicts with every other camera");
+    require(conflicting_ids(cameras, 4) == std::vector<std::uint32_t>({0, 1, 3}), "as does the telephoto");
+    require(conflicting_ids(cameras, 2).empty(), "no camera has the ID 2");
+}
+
 void check_ids()
 {
     auto keys = triple_host();
@@ -743,6 +785,7 @@ void check_key_lists()
 int main()
 {
     check_ids();
+    check_three_lens_host();
     check_concurrency();
     check_capabilities();
     check_tables();

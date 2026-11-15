@@ -5,6 +5,7 @@
 #include "vhost_user_device.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <numbers>
@@ -135,20 +136,31 @@ void fillWire(CameraDescription& camera)
     wire.sensor_orientation = camera.sensorOrientation;
     wire.pixel_array_width = info.pixelArrayWidth;
     wire.pixel_array_height = info.pixelArrayHeight;
-    const double sensorWidth = info.pixelArrayWidth * nominalPitchMicrometres;
-    const double sensorHeight = info.pixelArrayHeight * nominalPitchMicrometres;
-    wire.sensor_width_um = std::uint32_t(std::lround(sensorWidth));
-    wire.sensor_height_um = std::uint32_t(std::lround(sensorHeight));
-    // The focal length is the one that gives the field of view the host states
-    // for this sensor size; a Bayer still's own figure replaces it.
+    double sensorWidth = info.pixelArrayWidth * nominalPitchMicrometres;
+    double sensorHeight = info.pixelArrayHeight * nominalPitchMicrometres;
+    // The sensor size and the focal length are a pair that describes the field of view the host states: the guest takes
+    // its lens labels (focal length over the sensor's diagonal) and 35 mm equivalents from it. The focal length is the
+    // one that gives the field of view for the nominal size; a Bayer still's own figure (the lens's physical focal
+    // length) replaces it, and the size then follows the field of view, in the pixel array's shape, so that the pair is
+    // the same ratio before and after the lens has learned its colour data and the physical figure sits beside a
+    // size that agrees with it (the Exif of a still and the DNG state the same focal length). A host that states no
+    // field of view leaves the nominal size.
+    const bool fieldOfViewStated = info.horizontalFieldOfView > 1.0f && info.horizontalFieldOfView < 179.0f;
+    const double halfTangent = fieldOfViewStated ? std::tan(double(info.horizontalFieldOfView) * std::numbers::pi / 360.0) : 0.0;
     double focal = 0;
     if (camera.calibration && camera.calibration->focalLengthMillimetres > 0) {
         focal = camera.calibration->focalLengthMillimetres * 1000.0;
-    } else if (info.horizontalFieldOfView > 1.0f && info.horizontalFieldOfView < 179.0f) {
-        focal = (sensorWidth / 2.0) / std::tan(double(info.horizontalFieldOfView) * std::numbers::pi / 360.0);
+        if (fieldOfViewStated && info.pixelArrayWidth > 0 && info.pixelArrayHeight > 0) {
+            sensorWidth = 2.0 * focal * halfTangent;
+            sensorHeight = sensorWidth * info.pixelArrayHeight / info.pixelArrayWidth;
+        }
+    } else if (fieldOfViewStated) {
+        focal = (sensorWidth / 2.0) / halfTangent;
     } else {
         focal = sensorWidth;
     }
+    wire.sensor_width_um = std::uint32_t(std::lround(sensorWidth));
+    wire.sensor_height_um = std::uint32_t(std::lround(sensorHeight));
     wire.focal_length_um = std::uint32_t(std::lround(focal));
     wire.aperture_x100 = std::uint32_t(std::lround(info.aperture * 100.0f));
     wire.min_focus_distance_mm = std::uint32_t(std::lround(info.minimumFocusDistanceMillimetres));
@@ -209,17 +221,26 @@ BayerOrder bayerOrderOf(std::uint32_t wireFormat) noexcept
 
 namespace {
 
+// The most cameras of a group in which every two are told to run together, `size` cameras already chosen, `pool` the
+// cameras that run with all of them and are above the last one chosen (bit i: camera i). `adjacent[i]` has bit j when
+// cameras i and j are told to run together.
+std::size_t largestGroup(std::span<const std::uint32_t> adjacent, std::uint32_t pool, std::size_t size)
+{
+    std::size_t best = size;
+    for (std::uint32_t rest = pool; rest != 0; rest &= rest - 1) {
+        const auto camera = std::uint32_t(std::countr_zero(rest));
+        const std::uint32_t above = camera + 1 >= 32 ? 0u : ~0u << (camera + 1);
+        best = std::max(best, largestGroup(adjacent, pool & adjacent[camera] & above, size + 1));
+    }
+    return best;
+}
+
 std::vector<VideoMode> modesOf(const uml::platform::CaptureOffer& offer)
 {
     std::vector<VideoMode> modes;
     for (const auto& size : offer.videoSizes)
         for (const auto& range : offer.rates) modes.push_back({size.width, size.height, range.minimum, range.maximum});
     return modes;
-}
-
-[[nodiscard]] bool listsIdentifier(const std::vector<std::string>& names, const std::string& identifier)
-{
-    return std::find(names.begin(), names.end(), identifier) != names.end();
 }
 
 } // namespace
@@ -240,12 +261,14 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
                                               std::string_view hostModel, const CalibrationStore& calibration,
                                               const ArrangementOptions& options)
 {
-    // Wire order.
+    // Wire order. A zoom camera, which switches between lenses, is never published: each lens is a camera of its own,
+    // so that a guest switches lenses by switching cameras and every lens keeps its own controls, formats and Bayer
+    // stills.
     std::vector<std::size_t> order;
     const auto contains = [&](std::size_t index) { return std::find(order.begin(), order.end(), index) != order.end(); };
     const auto take = [&](auto&& wanted) {
         for (std::size_t index = 0; index < infos.size(); ++index)
-            if (!contains(index) && wanted(infos[index])) {
+            if (!contains(index) && infos[index].lens != CameraLensKind::zoom && wanted(infos[index])) {
                 order.push_back(index);
                 return true;
             }
@@ -254,10 +277,9 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
     const auto lens = [](CameraPosition position, CameraLensKind kind) {
         return [position, kind](const CameraInfo& info) { return info.position == position && info.lens == kind; };
     };
-    // The primary back camera.
-    if (!take(lens(CameraPosition::back, CameraLensKind::zoom)))
-        for (const auto kind : {CameraLensKind::wide, CameraLensKind::ultraWide, CameraLensKind::telephoto})
-            if (take(lens(CameraPosition::back, kind))) break;
+    // The primary back camera is the wide lens, or else the ultra wide, or else the telephoto.
+    for (const auto kind : {CameraLensKind::wide, CameraLensKind::ultraWide, CameraLensKind::telephoto})
+        if (take(lens(CameraPosition::back, kind))) break;
     // The front camera.
     if (!take(lens(CameraPosition::front, CameraLensKind::wide)))
         take([](const CameraInfo& info) { return info.position == CameraPosition::front; });
@@ -269,17 +291,13 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
     }
     order.resize(std::min<std::size_t>(order.size(), maximumCameras));
 
-    // Which cameras run together: those a platform set names, except a zoom
-    // camera and its lenses, which share the sensors.
+    // Which cameras run together: those a platform set names.
     const auto together = [&](std::size_t a, std::size_t b) {
         return std::any_of(concurrentSets.begin(), concurrentSets.end(), [&](const auto& set) {
             return std::find(set.begin(), set.end(), a) != set.end() && std::find(set.begin(), set.end(), b) != set.end();
         });
     };
-    const auto sharesSensors = [&](std::size_t a, std::size_t b) {
-        return listsIdentifier(infos[a].constituents, infos[b].identifier) || listsIdentifier(infos[b].constituents, infos[a].identifier);
-    };
-    const auto runsWith = [&](std::size_t a, std::size_t b) { return a != b && together(a, b) && !sharesSensors(a, b); };
+    const auto runsWith = [&](std::size_t a, std::size_t b) { return a != b && together(a, b); };
 
     // Each camera that lists its formats is arranged once, here: its anchor is
     // the format it runs in whatever it is asked, and everything the guest is
@@ -336,6 +354,14 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
             camera.video = modesOf(entry.offer);
             camera.jpegSizes = entry.offer.stills;
             camera.info.stillSizes = entry.offer.stills;
+            // The camera zooms up to the system's recommendation for the format it runs in, where the system gives
+            // one; where it does not, up to what the format itself delivers, and never beyond the device's largest
+            // (a front camera's other formats zoom further than the one it runs in); its range always holds 1.0.
+            const auto& anchorFormat = info.captureFormats[*entry.anchor];
+            if (anchorFormat.recommendedZoomMaximum > 0)
+                camera.info.zoomMaximum = std::max({anchorFormat.recommendedZoomMaximum, 1.0f, info.zoomMinimum});
+            else if (anchorFormat.maximumZoom > 0)
+                camera.info.zoomMaximum = std::min(info.zoomMaximum, std::max({anchorFormat.maximumZoom, 1.0f, info.zoomMinimum}));
         } else {
             camera.video = videoModes(info, limits);
             // Every size works with every format, within the tier's cap and the limit of the camera's position.
@@ -362,19 +388,43 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
     }
 
     for (auto& camera : cameras) fillWire(camera);
+
+    // Which cameras the guest is told run together. The wire names pairs, and the guest takes every group of cameras
+    // in which each two are paired as one it may run at once, so the pairs are chosen such that no such group holds
+    // more cameras than the device runs at once (concurrentCameras: a third camera is refused, whatever the platform
+    // lists). A pair is a platform set's two cameras that kept their concurrency. The primary back camera with the
+    // front camera comes first (it is the concurrent feature), then the other pairs with a front camera, then the rest,
+    // each in wire order; a pair that would make a larger group conflicts instead.
+    const std::size_t count = cameras.size();
+    const auto isFront = [&](std::size_t camera) { return cameras[camera].info.position == CameraPosition::front; };
+    std::vector<std::pair<std::size_t, std::size_t>> pairs;
+    for (std::size_t a = 0; a < count; ++a)
+        for (std::size_t b = a + 1; b < count; ++b)
+            if (runsWith(cameras[a].platformIndex, cameras[b].platformIndex) && arranged[a].concurrent && arranged[b].concurrent)
+                pairs.emplace_back(a, b);
+    const auto rankOf = [&](const std::pair<std::size_t, std::size_t>& pair) {
+        const bool primaryWithFront = pair.first == 0 && cameras[0].info.position == CameraPosition::back && isFront(pair.second);
+        if (primaryWithFront) return 0;
+        return isFront(pair.first) || isFront(pair.second) ? 1 : 2;
+    };
+    std::stable_sort(pairs.begin(), pairs.end(), [&](const auto& x, const auto& y) { return rankOf(x) < rankOf(y); });
+    std::vector<std::uint32_t> adjacent(count, 0);
+    for (const auto& [a, b] : pairs) {
+        adjacent[a] |= 1u << b;
+        adjacent[b] |= 1u << a;
+        if (largestGroup(adjacent, (1u << count) - 1, 0) > concurrentCameras) {
+            adjacent[a] &= ~(1u << b);
+            adjacent[b] &= ~(1u << a);
+        }
+    }
     for (auto& camera : cameras) {
         for (const auto& other : cameras) {
             if (other.index == camera.index) continue;
-            // A camera that dropped its concurrency runs with none.
-            if (runsWith(camera.platformIndex, other.platformIndex) && arranged[camera.index].concurrent &&
-                arranged[other.index].concurrent)
+            if (adjacent[camera.index] >> other.index & 1u)
                 camera.wire.concurrent_mask |= 1u << other.index;
             else
                 camera.wire.conflict_mask |= 1u << other.index;
         }
-        for (const auto& name : camera.info.constituents)
-            for (const auto& other : cameras)
-                if (other.info.identifier == name) camera.wire.constituent_mask |= 1u << other.index;
     }
     return cameras;
 }
@@ -467,6 +517,27 @@ std::vector<std::optional<std::size_t>> anchorsByPlatformCamera(std::span<const 
     for (const auto& camera : cameras)
         if (camera.anchor && camera.platformIndex < anchors.size()) anchors[camera.platformIndex] = camera.anchor;
     return anchors;
+}
+
+std::string concurrencySummary(std::span<const CameraDescription> cameras, std::span<const std::vector<std::size_t>> platformSets)
+{
+    std::string line = "Camera: runs together:";
+    bool any = false;
+    for (const auto& camera : cameras)
+        for (const auto& other : cameras)
+            if (camera.index < other.index && (camera.wire.concurrent_mask >> other.index & 1u) != 0) {
+                line += (any ? "," : "") + std::string(" ") + std::to_string(camera.index) + "+" + std::to_string(other.index);
+                any = true;
+            }
+    if (!any) line += " none";
+    line += " (the device runs " + std::to_string(concurrentCameras) + " cameras at once); the platform's multi-camera sets:";
+    if (platformSets.empty()) line += " none";
+    for (const auto& set : platformSets) {
+        line += " {";
+        for (std::size_t member = 0; member < set.size(); ++member) line += (member != 0 ? " " : "") + std::to_string(set[member]);
+        line += "}";
+    }
+    return line;
 }
 
 std::string anchorSummary(const CameraDescription& camera)

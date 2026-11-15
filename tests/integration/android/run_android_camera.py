@@ -12,9 +12,9 @@ The runner checks, in this order:
   exactly the camera features the layout earns (and none beside them), which are also the features the
   characteristics of the cameras Android lists earn (so that a layout that disagrees with the cameras
   is caught, not only a guest that disagrees with the layout);
-- the cameras Android lists (``dumpsys media.camera``) are the profile's: "0" the back zoom camera (the
-  primary back lens of a host without one, the front camera of a host without a back camera), "1" the
-  front camera, and "2", "3" and "4" the wide, ultra wide and telephoto lenses a phone has;
+- the cameras Android lists (``dumpsys media.camera``) are the profile's: "0" the primary back camera (the
+  wide lens; the front camera of a host without a back camera), "1" the front camera, and "3" and "4" the
+  ultra wide and telephoto lenses a phone has (the host publishes no zoom camera);
 - the provider's life (live and blocked): it is a lazy service that init starts with cameraserver, so it
   exits once cameraserver has listed the cameras and holds none, an open of the camera starts it again
   through its interface, and it exits again when the application is stopped, with the cameras still listed
@@ -30,6 +30,12 @@ The runner checks, in this order:
   capture request" and the camera HAL's domain no denial of the composer's file descriptors in the whole
   interval), and the camera HAL has logged no failed buffer ("every buffer of the stream is in flight", a
   request "not queued completely", a buffer "never collected");
+- a still while the preview runs leaves the preview's stream open: the guest is stopped for a second inside the
+  request of the still (three rounds that count, at a delay after the key that the step finds from the camera HAL's
+  own report of what it waits for: the synthetic still makes its request in a tenth of a second or so, and a host
+  that is slow with the picture holds the camera HAL's request pipeline as long), and the launcher's log shows
+  no capture session that closed (the HAL closed no stream, so the host did not close the session and open it again),
+  while the preview resumes within the stop and half a second, as the frames SurfaceFlinger presented show;
 - recordings keep their sound to real time: the audio track of a recording holds as much audio as its time
   line spans (its stretch, the time line over the coded audio, stays within a bound either way), because a
   player that follows the audio clock skips ahead at every gap in a track that holds less. The check runs on the
@@ -180,6 +186,34 @@ AUDIO_END_SKEW_MAXIMUM_SECONDS = 0.25
 # or between two); the model of the input covers the phases, and the step reports when each disturbance began.
 STALL_SECONDS = 1.5
 FREEZE_SECONDS = 1.5
+# A still that holds the camera HAL's request pipeline: the emulator process is stopped HELD_STILL_SECONDS inside
+# the request of the camera key (a host that is slow with the picture holds the pipeline as long). The HAL used to close
+# the stream of an output that its request pipeline had left unused for half a second, which a pipeline held by a
+# still does at the next request, and the host then closed its capture session and opened it again. The stop has to
+# land inside the still's own request, which the synthetic still makes in a tenth of a second or so, reached some
+# 0.15 to 0.3 s after the key command returns and by an amount that varies by 0.03 s from key to key and with the
+# size of the still: no fixed delay lands there often enough. So a round counts only when the stop demonstrably
+# overlapped a still's request, and the delay after the key is found as the rounds go. The camera HAL's result
+# dispatcher reports the buffers it waits for once they are half a second late (the stop makes them late): when the
+# oldest of them is the still's, the stop was inside the request; when a still's buffer waits behind older ones of the
+# preview, it came too early (the delay grows); when no still's buffer is pending, too late (it shrinks). The step runs
+# rounds until HELD_STILL_ROUNDS of them counted, at most HELD_STILL_ATTEMPTS. In every round the preview must come
+# back within the stop as it lasted (measured, not as requested) and HELD_STILL_RESUME_SECONDS (the host's restart of
+# its capture session, which a closed stream costs, is not in that on the synthetic camera: the launcher's lines tell).
+HELD_STILL_DELAY_START = 0.20
+HELD_STILL_DELAY_STEP = 0.04
+HELD_STILL_DELAY_SMALLEST_STEP = 0.01
+HELD_STILL_DELAY_RANGE = (0.06, 0.60)
+HELD_STILL_ROUNDS = 3
+HELD_STILL_ATTEMPTS = 16
+HELD_STILL_SECONDS = 1.0
+HELD_STILL_RESUME_SECONDS = 0.5
+HELD_STILL_OBSERVE_SECONDS = 4.0
+# SurfaceFlinger keeps the last 128 presented frames of a layer (about 4 seconds of a 30 fps preview), so the times are
+# read every HELD_STILL_POLL_SECONDS from the moment the emulator is resumed, and put together.
+HELD_STILL_POLL_SECONDS = 0.5
+# A report of the dispatcher belongs to a round when it comes within this much of the end of its stop.
+HELD_STILL_REPORT_SECONDS = 1.0
 DISTURB_COUNT = 3
 DISTURB_LEAD_SECONDS = 1.0
 DISTURB_GAP_SECONDS = 1.5
@@ -219,17 +253,18 @@ SWITCH_SETTLE_SECONDS = 8
 SWITCH_OBSERVE_SECONDS = 30
 SWITCH_DRAIN_SECONDS = 5
 SWITCH_MARKER_TAG = "CamSwitch"
+HELD_STILL_MARKER_TAG = "CamHeldStill"
 ANIMATION_SCALES = ("window_animation_scale", "transition_animation_scale", "animator_duration_scale")
 
 # The cameras each synthetic profile presents, and the camera IDs Android gives them
 # (android/lineage-24/overlay/camera/hal/camera_ids.hpp).
 PROFILE_CAMERAS = {
-    "phone": ("back+front", ("0", "1", "2", "3", "4")),
+    "phone": ("back+front", ("0", "1", "3", "4")),
     "tablet": ("back+front", ("0", "1")),
     "laptop": ("front", ("0",)),
 }
 # The layout each synthetic profile earns on a host that has not learnt its lenses' colour data: the phone's
-# back lenses have flash and manual control, its zoom and front cameras stream together, and its front camera
+# back lenses have flash and manual control, its wide and front cameras stream together, and its front camera
 # records 2160p; the tablet's back camera has flash and manual control, and its front camera cannot make the
 # guaranteed concurrent stream sizes; the laptop has one front camera (darwin/platform/synthetic_camera). The
 # host offers RAW only for a lens whose colour data an earlier still has kept (darwin/device/camera/README.md,
@@ -603,6 +638,113 @@ def frames_produced(dump: str) -> int:
     return sum(int(count) for count in re.findall(r"Frames produced: (\d+)", dump))
 
 
+SESSION_LINE = re.compile(r"^Camera: memory: capture session (closed|opened)\b", re.MULTILINE)
+PREVIEW_LAYER = re.compile(r"((?:[0-9a-f]+ )?SurfaceView\[[^\n{}]*\(BLAST\)#(\d+))")
+PENDING_PRESENT = 9 * 10 ** 18
+
+
+def session_events(text: str) -> list[str]:
+    """The launcher's lines about the host's capture session, in order: "closed" or "opened" for each
+    `Camera: memory: capture session closed|opened, footprint N MiB` line (a development launcher prints them)."""
+    return SESSION_LINE.findall(text)
+
+
+def parse_preview_layer(text: str) -> str | None:
+    """The newest SurfaceView layer of the camera application in `dumpsys SurfaceFlinger --list` (the highest
+    layer number), which is the preview's. The name is the layer's own, with the window's hash in front of it where
+    the list gives one (`RequestedLayerState{7c01cb3 SurfaceView[...](BLAST)#136 ...}`): `--latency` finds a layer by
+    that name and answers a name without the hash with the refresh period alone."""
+    found = PREVIEW_LAYER.findall(text)
+    return max(found, key=lambda item: int(item[1]))[0].strip() if found else None
+
+
+def parse_present_times(text: str) -> list[int]:
+    """The times in nanoseconds at which SurfaceFlinger presented the frames of a layer
+    (`dumpsys SurfaceFlinger --latency LAYER`: a line of the refresh period, then three times per frame, the second
+    the present time; a frame not yet presented has a time at the end of the range, or zero)."""
+    times = []
+    for line in text.strip().splitlines()[1:]:
+        part = line.split()
+        if len(part) == 3 and part[1].isdigit() and 0 < int(part[1]) < PENDING_PRESENT:
+            times.append(int(part[1]))
+    return sorted(set(times))
+
+
+def longest_gap_seconds(times: list[int]) -> float:
+    """The longest time between two consecutive times (nanoseconds), in seconds; zero for fewer than two."""
+    return max(((b - a) / 1e9 for a, b in zip(times, times[1:])), default=0.0)
+
+
+STILL_STREAM = re.compile(r"Stream\[(\d+)\]: Output\n(?:(?!\s*Stream\[\d+\]: Output).*\n)*?\s+Dims: \d+ x \d+, format (0x[0-9a-f]+)")
+STILL_FORMATS = ("0x20", "0x21")  # RAW16 and BLOB (the JPEG)
+PENDING_BUFFER = re.compile(r"pending buffer of stream (\d+) for frames? \[?(\d+)")
+LOGCAT_LINE = re.compile(r"^\s*(\d+\.\d+)\s+\d+\s+\d+\s+[A-Z]\s+(\S+)\s*:\s?(.*)$")
+REPORT_SPREAD_SECONDS = 0.1
+
+
+def parse_still_streams(text: str) -> set[int]:
+    """The ids of the still output streams (a JPEG or a RAW) that `dumpsys media.camera` lists for the open camera."""
+    return {int(found[0]) for found in STILL_STREAM.findall(text) if found[1] in STILL_FORMATS}
+
+
+def pending_phase(log: str, marker: str, still_streams: set[int],
+                  interval: float | None = None) -> tuple[str | None, str]:
+    """Where the stop that followed `marker` in the log came, by the first report of the camera HAL's result dispatcher
+    after it, which lists the buffers the dispatcher still waits for (`pending buffer of stream S for frames [A - B]`):
+    "inside" a still's request when the oldest frame among them has a still's buffer (the buffers of one frame are one
+    request: a request that has the preview and the JPEG holds the pipeline as the JPEG alone does), "before" it when a
+    still's buffer waits behind older ones (a stop that caught the preview's frames ahead of the still), "after" it
+    when no still's buffer is pending. `interval` is how long after the marker (the guest's clock stands still in a
+    stop, and the report comes as it resumes) a report may be: a report later than the round's stop is another
+    event's. None, and the reason, when the log has no marker or no report of the round: nothing is shown then."""
+    lines = log.splitlines()
+    start = next((index for index, line in enumerate(lines) if marker in line), None)
+    if start is None:
+        return None, "the log has no marker of the round"
+    marked = LOGCAT_LINE.match(lines[start])
+    marker_time = float(marked[1]) if marked else None
+    first: float | None = None
+    pending: list[tuple[int, int]] = []
+    late = False
+    for line in lines[start + 1:]:
+        found = LOGCAT_LINE.match(line)
+        buffer = PENDING_BUFFER.search(found[3]) if found else None
+        if found is None or buffer is None:
+            continue
+        when = float(found[1])
+        if interval is not None and marker_time is not None and when - marker_time > interval:
+            late = True
+            break
+        if first is None:
+            first = when
+        elif when - first > REPORT_SPREAD_SECONDS:
+            break
+        pending.append((int(buffer[2]), int(buffer[1])))
+    if not pending:
+        return None, ("the result dispatcher reported no pending buffer inside the round's interval "
+                      f"({interval:.1f} s after the marker)" if late else
+                      "the result dispatcher reported no pending buffer after the marker")
+    oldest = min(frame for frame, _ in pending)
+    streams = sorted({stream for frame, stream in pending if frame == oldest})
+    names = " and ".join(str(stream) for stream in streams)
+    head = (f"the oldest pending buffer is stream {names}'s frame {oldest}" if len(streams) == 1 else
+            f"the oldest pending buffers are of frame {oldest} (streams {names})")
+    if any(stream in still_streams for stream in streams):
+        return "inside", head
+    behind = [(frame, stream) for frame, stream in pending if stream in still_streams]
+    if behind:
+        frame, stream = min(behind)
+        return "before", f"{head}; the still's buffer (stream {stream}, frame {frame}) waits behind it"
+    return "after", f"{head}; no buffer of a still is pending"
+
+
+def pipeline_head(log: str, marker: str, still_streams: set[int],
+                  interval: float | None = None) -> tuple[bool | None, str]:
+    """Whether the stop that followed `marker` overlapped a still's request (see `pending_phase`)."""
+    phase, evidence = pending_phase(log, marker, still_streams, interval)
+    return (None if phase is None else phase == "inside"), evidence
+
+
 def camera_connected(text: str, package: str) -> bool:
     """Whether `dumpsys media.camera` shows the package holding a camera: among the active clients, or
     in the service's event log with a connect as the last event of some device (the log is most recent
@@ -892,6 +1034,17 @@ class Guest:
                           "2>&1 || true")
         return {row["_id"]: row for row in parse_content_rows(text) if "_id" in row}, text
 
+    def launcher_log(self) -> str:
+        """What the launcher has printed so far (its own lines about the host's camera among them)."""
+        return self.log.read_text(errors="replace")
+
+    def preview_layer(self) -> str | None:
+        return parse_preview_layer(self.shell(
+            f"dumpsys SurfaceFlinger --list | grep 'SurfaceView\\[{CAMERA_PACKAGE}' | grep BLAST || true"))
+
+    def present_times(self, layer: str) -> list[int]:
+        return parse_present_times(self.shell(f"dumpsys SurfaceFlinger --latency '{layer}'"))
+
     def hal_log(self) -> str:
         return self.shell("logcat -d -b all " + " ".join(f"{tag}:W" for tag in HAL_TAGS) + " '*:S' 2>&1 || true")
 
@@ -904,15 +1057,21 @@ class Guest:
         except (ValueError, zlib.error) as problem:
             raise Failure(f"the screenshot is unreadable: {problem}") from problem
 
-    def freeze(self, seconds: float) -> None:
+    def freeze(self, seconds: float) -> float:
         """Stops the emulator process for `seconds` and continues it: the whole guest, its sound device and its
         camera with it, stands still, as when the host holds the application up. The process goes on whatever
-        happens in between."""
+        happens in between. Returns how long it stood still, as measured."""
+        stopped = time.monotonic()
         os.kill(self.process.pid, signal.SIGSTOP)
         try:
             time.sleep(seconds)
         finally:
             os.kill(self.process.pid, signal.SIGCONT)
+        return time.monotonic() - stopped
+
+    def dispatcher_log(self) -> str:
+        """The camera HAL's result dispatcher's warnings and the runner's own markers, with the guest's monotonic time."""
+        return self.shell(f"logcat -d -v monotonic -b all GCH_ResultDispatcher:W {HELD_STILL_MARKER_TAG}:I '*:S' 2>&1 || true")
 
     def audio_flinger(self) -> str:
         return self.shell("dumpsys media.audio_flinger")
@@ -1183,6 +1342,122 @@ def check_still(guest: Guest, plan: Plan, before: set[str]) -> None:
         raise Failure(f"{remote} is {jpeg.width}x{jpeg.height}, outside the {plan.layout.tier or 'small'} "
                       f"tier's stills ({STILL_MINIMUM_SIDE} pixels a side to {plan.still_maximum_pixels} pixels)")
     print(f"  still: {found[-1]} {jpeg.width}x{jpeg.height}")
+
+
+@dataclass
+class HeldStill:
+    phase: str | None  # "inside", "before" or "after" the still's request (see pending_phase); None: no evidence
+    evidence: str
+    stop: float
+    gap: float
+    frames: int
+
+    @property
+    def overlapped(self) -> bool | None:
+        return None if self.phase is None else self.phase == "inside"
+
+
+def next_held_still_delay(delay: float, phase: str | None, step: float, direction: int) -> tuple[float, float, int]:
+    """The delay after the key for the next round, its step and the direction of the last move. A stop that came before
+    the still's request moves the delay up, one that came after it moves it down, and a change of direction halves the
+    step (to HELD_STILL_DELAY_SMALLEST_STEP at least): the window is narrower than the first step. A stop inside the
+    request, or without a report, leaves the delay where it is."""
+    move = {"before": 1, "after": -1}.get(phase or "", 0)
+    if move == 0:
+        return delay, step, direction
+    if direction and move != direction:
+        step = max(step / 2, HELD_STILL_DELAY_SMALLEST_STEP)
+    low, high = HELD_STILL_DELAY_RANGE
+    return min(max(delay + move * step, low), high), step, move
+
+
+def held_still_round(guest: Guest, layer: str, still_streams: set[int], number: int, delay: float) -> HeldStill:
+    """One camera key, the emulator stopped HELD_STILL_SECONDS `delay` after it. The preview's frame times are read
+    from the moment the emulator is resumed. Raises where the host closed its capture session behind the still or the
+    preview stayed away longer than the stop (as measured) and HELD_STILL_RESUME_SECONDS."""
+    label = f"held still {number}"
+    before = guest.stills()
+    log_start = len(guest.launcher_log())
+    known = guest.present_times(layer)
+    if not known:
+        raise Failure(f"{label}: the preview layer has presented no frame")
+    started = time.monotonic()
+    marker = f"{label.replace(' ', '-')}-{time.monotonic_ns()}"
+    guest.shell(f"log -t {HELD_STILL_MARKER_TAG} '{marker}'")
+    guest.shell(f"input keyevent {CAMERA_KEYCODE}")
+    time.sleep(delay)
+    lead = time.monotonic() - started
+    stop = guest.freeze(HELD_STILL_SECONDS)
+    seen: set[int] = set()
+    observed = round(HELD_STILL_OBSERVE_SECONDS / HELD_STILL_POLL_SECONDS)
+    for poll in range(max(observed, round(STILL_SECONDS / HELD_STILL_POLL_SECONDS))):
+        frames = guest.present_times(layer)
+        if poll == 0 and frames and frames[0] > known[-1]:
+            # SurfaceFlinger remembers the last 128 frames: a marker or key command that returned late (an adb that
+            # took seconds) left the sample taken before it out of that history, and the stretch between the two
+            # is unseen, not a freeze.
+            raise Failure(f"{label}: inconclusive: the observation does not cover the round: the frame history no "
+                          f"longer reaches back to the sample taken before the key (its oldest frame is "
+                          f"{(frames[0] - known[-1]) / 1e9:.1f} s after it; the marker and the key took "
+                          f"{lead - delay:.1f} s), so a frame that is missing cannot be told from a freeze")
+        seen.update(frames)
+        if poll + 1 >= observed and guest.stills() - before:
+            break
+        time.sleep(HELD_STILL_POLL_SECONDS)
+    else:
+        raise Failure(f"{label}: a still in the camera folder: no new still")
+    closed = session_events(guest.launcher_log()[log_start:]).count("closed")
+    if closed:
+        raise Failure(f"{label}: the host closed its capture session ({closed} so far) behind a still that held the "
+                      "request pipeline: the camera HAL closed the preview's stream")
+    newer = sorted(t for t in seen if t > known[-1])
+    if not newer:
+        raise Failure(f"{label}: the preview presented no frame after the still")
+    gap = longest_gap_seconds([known[-1], *newer])
+    limit = stop + HELD_STILL_RESUME_SECONDS
+    if gap > limit:
+        raise Failure(f"{label}: the preview was away {gap:.2f} s, more than the stop ({stop:.2f} s) and "
+                      f"{HELD_STILL_RESUME_SECONDS:g} s")
+    phase, evidence = pending_phase(guest.dispatcher_log(), marker, still_streams,
+                                    lead + stop + HELD_STILL_REPORT_SECONDS)
+    return HeldStill(phase, evidence, stop, gap, len(newer))
+
+
+def check_still_keeps_preview(guest: Guest, plan: Plan) -> None:
+    """A still while the preview runs leaves the preview's stream open. The camera HAL's request pipeline is held by
+    stopping the emulator process inside the request of the camera key (a host that is slow with the picture does the
+    same for as long): a stream that the HAL closed, because it had been unused longer than its limit when the next
+    request began, shows as a capture session that the host closed and opened again (the launcher's log). Only
+    rounds whose stop demonstrably overlapped a still's request count, HELD_STILL_ROUNDS of them, and the delay after
+    the key is found from the evidence of the rounds before (the still's request is a tenth of a second long)."""
+    if "opened" not in session_events(guest.launcher_log()):
+        raise Failure("the launcher has printed no capture session line, so a check that none closed proves nothing "
+                      "(a development launcher prints `Camera: memory: capture session opened|closed`)")
+    layer = guest.preview_layer()
+    if layer is None:
+        raise Failure("the camera application has no preview layer in SurfaceFlinger")
+    still_streams = parse_still_streams(guest.media_camera())
+    if not still_streams:
+        raise Failure("the camera service lists no still output stream (JPEG or RAW) of the open camera")
+    counted = 0
+    delay, step, direction = HELD_STILL_DELAY_START, HELD_STILL_DELAY_STEP, 0
+    for number in range(1, HELD_STILL_ATTEMPTS + 1):
+        result = held_still_round(guest, layer, still_streams, number, delay)
+        verdict = {"inside": "its stop overlapped a still's request: counted",
+                   "before": "its stop came before the still's request began: not counted",
+                   "after": "its stop came after the still's request ended: not counted"}.get(
+            result.phase or "", "no evidence that its stop overlapped a still's request: not counted")
+        print(f"  held still {number} (stop {result.stop:.2f} s, {delay:.2f} s after the key): the preview was away "
+              f"{result.gap:.2f} s, {result.frames} frames after it; {result.evidence}; {verdict}")
+        counted += result.phase == "inside"
+        if counted >= HELD_STILL_ROUNDS:
+            break
+        delay, step, direction = next_held_still_delay(delay, result.phase, step, direction)
+    if counted < HELD_STILL_ROUNDS:
+        raise Failure(f"only {counted} of {HELD_STILL_ATTEMPTS} stops overlapped a still's request "
+                      f"({HELD_STILL_ROUNDS} are needed): the step cannot show that a still leaves the stream open")
+    print(f"  {counted} stops of {HELD_STILL_SECONDS:g} s inside a still's request: the preview's stream stayed open "
+          "(no capture session closed)")
 
 
 def wait_for_chart(guest: Guest, camera_id: str, what: str) -> None:
@@ -1534,6 +1809,7 @@ def run_checks(guest: Guest, plan: Plan) -> None:
     print(f"  provider: started again by the open, pid {running}")
     check_still(guest, plan, before)
     if plan.mode == "live":
+        check_still_keeps_preview(guest, plan)
         check_video(guest, plan)
         check_audio_stall(guest, plan)
         check_video_freeze(guest, plan)

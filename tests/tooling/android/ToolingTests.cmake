@@ -72,6 +72,16 @@ uml_add_tooling_test(
     LABELS android;audit
     TIMEOUT 30)
 
+# The camera application's overlay, its patch series and the verifier name the same
+# settings and values.
+uml_add_tooling_test(
+    NAME lineage24-camera-app-contract
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_camera_app_contract.py
+        --source-root ${PROJECT_SOURCE_DIR}
+    LABELS android;audit
+    TIMEOUT 60)
+
 # The list of paths that decide a release names every producer, and the object
 # IDs it yields do not depend on history.
 uml_add_tooling_test(

@@ -2737,9 +2737,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 archive.writestr(camera_library_path, camera_library(*good_camera_markers))
                 archive.writestr(camera_template_path, good_camera_template)
                 # Aperture as the build leaves it: its own resources keep the defaults (the lens settings
-                # off, no ignored ID) and declare no overlayable section; the product's values are in the
-                # static overlay beside the other auto-generated ones. With the values on, each lens of the
-                # host is its own camera device, and the wide lens is the zoom camera's 1x.
+                # off, no ignored ID, free zoom on) and declare no overlayable section; the product's values
+                # are in the static overlay beside the other auto-generated ones. With the values on, each
+                # lens of the host is its own camera device, a host's camera 2 stays out of the list, and
+                # the lens buttons are the only zoom.
                 aux_booleans = {
                     None: [("config_enableAuxCameras", True)],
                     "aux-off": [("config_enableAuxCameras", False)],
@@ -2751,26 +2752,36 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     "ignored-none": [[]],
                     "ignored-missing": [],
                 }.get(camera_variant, [["2"]])
+                zoom_booleans = {
+                    "zoom-on": [("config_enableZoom", True)],
+                    "zoom-missing": [],
+                    "zoom-duplicate": [("config_enableZoom", False), ("config_enableZoom", True)],
+                }.get(camera_variant, [("config_enableZoom", False)])
                 # "...-only-qualified": the one definition sits under a resource configuration (portrait), so
                 # it applies on a device in that orientation alone, whatever its value says.
                 overlay_qualified = {
                     "aux-only-qualified": frozenset({"config_enableAuxCameras"}),
                     "ignored-only-qualified": frozenset({"config_ignoredAuxCameraIds"}),
+                    "zoom-only-qualified": frozenset({"config_enableZoom"}),
                 }.get(camera_variant, frozenset())
                 overlay_table = synthetic_resource_table(
                     [("config_ignoredAuxCameraIds", items) for items in ignored_ids],
-                    booleans=aux_booleans, compact=camera_variant == "compact", qualified=overlay_qualified,
+                    booleans=aux_booleans + zoom_booleans, compact=camera_variant == "compact",
+                    qualified=overlay_qualified,
                 )
                 # "app-values": the old assumption, the values in the application's own table and no overlay
-                # "app-no-aux", "app-no-ignored": the application lost a name the overlay replaces (an uprev renamed
-                # it), so the overlay applies to nothing; "app-aux-qualified": it keeps one under a qualifier only.
+                # "app-no-aux", "app-no-ignored", "app-no-zoom": the application lost a name the overlay replaces (an
+                # uprev renamed it), so the overlay applies to nothing; "app-aux-qualified", "app-zoom-qualified": it
+                # keeps one under a qualifier only.
                 aperture_table = synthetic_resource_table(
                     [] if camera_variant == "app-no-ignored" else
                     [("config_ignoredAuxCameraIds", ["2"] if camera_variant == "app-values" else [])],
-                    booleans=[] if camera_variant == "app-no-aux" else
-                    [("config_enableAuxCameras", camera_variant == "app-values")],
+                    booleans=([] if camera_variant == "app-no-aux" else
+                              [("config_enableAuxCameras", camera_variant == "app-values")])
+                    + ([] if camera_variant == "app-no-zoom" else [("config_enableZoom", True)]),
                     compact=camera_variant == "compact", overlayable=camera_variant == "app-overlayable",
                     qualified=frozenset({"config_enableAuxCameras"}) if camera_variant == "app-aux-qualified"
+                    else frozenset({"config_enableZoom"}) if camera_variant == "app-zoom-qualified"
                     else frozenset(),
                 )
                 # ... and a file that is no resource table, or one cut short, must not read as a table
@@ -5823,6 +5834,16 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "must list the camera IDs"),
             ("camera-ignored-ids-empty", {"camera_variant": "ignored-none"}, "must list the camera IDs"),
             ("camera-ignored-ids-missing", {"camera_variant": "ignored-missing"}, "must list the camera IDs"),
+            ("camera-zoom-on", {"camera_variant": "zoom-on"}, "must set config_enableZoom to false"),
+            ("camera-zoom-missing", {"camera_variant": "zoom-missing"}, "must set config_enableZoom to false"),
+            ("camera-zoom-defined-twice", {"camera_variant": "zoom-duplicate"},
+             "must set config_enableZoom to false"),
+            ("camera-zoom-only-qualified", {"camera_variant": "zoom-only-qualified"},
+             "defines config_enableZoom only under a resource configuration"),
+            ("camera-application-lost-zoom", {"camera_variant": "app-no-zoom"},
+             "does not define the bool resource config_enableZoom in its default configuration"),
+            ("camera-application-zoom-only-qualified", {"camera_variant": "app-zoom-qualified"},
+             "does not define the bool resource config_enableZoom in its default configuration"),
             ("camera-toggle-off", {"camera_variant": "toggle-off"},
              "must set config_supportsHardwareCamToggle to true"),
             ("camera-toggle-missing", {"camera_variant": "toggle-missing"},

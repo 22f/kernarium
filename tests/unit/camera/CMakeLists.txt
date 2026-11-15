@@ -22,7 +22,7 @@ uml_add_unit_test(NAME camera-dng-color COMMAND uml_camera_dng_tests
 # Discovery of the host's own cameras: no session, no permission request, no
 # capture.
 add_executable(uml_camera_apple_discovery_tests camera_apple_discovery_tests.cpp)
-target_link_libraries(uml_camera_apple_discovery_tests PRIVATE UML::AppleCamera)
+target_link_libraries(uml_camera_apple_discovery_tests PRIVATE UML::AppleCamera UML::CameraDevice)
 uml_add_unit_test(NAME camera-apple-discovery COMMAND uml_camera_apple_discovery_tests
     LABELS "device;camera")
 
@@ -123,6 +123,8 @@ if(TARGET UML::SyntheticCamera)
 
     add_executable(uml_camera_description_tests camera_description_tests.cpp)
     target_link_libraries(uml_camera_description_tests PRIVATE UML::CameraDevice UML::SyntheticCamera)
+    target_include_directories(uml_camera_description_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal)
     uml_add_unit_test(NAME camera-description COMMAND uml_camera_description_tests
         LABELS "device;camera")
 

@@ -5,6 +5,7 @@
 
 #include "calibration_store.hpp"
 #include "camera_description.hpp"
+#include "camera_ids.hpp"
 #include "camera_layout.hpp"
 #include "camera_plan.hpp"
 #include "require.hpp"
@@ -507,6 +508,52 @@ void testALaterBootIsHeldToTheReservation()
     require(!layoutHasCameras(grown.layout), "and its RAW-capable back cameras are not told");
 }
 
+// The cameras the image's HAL numbers (camera_ids.hpp) from a phone of three lenses, which the host publishes with no zoom
+// camera: "0" the wide lens, "1" the front camera, "3" the ultra wide and "4" the telephoto. Concurrency comes from the wide
+// lens: it and the front camera are the one set, the layout's `concurrent` feature is the HAL's own, and the other lenses
+// conflict with the front camera.
+void testTheHalNumbersAThreeLensPhone()
+{
+    const Host phone(SyntheticCameraProfile::phone);
+    for (const auto tier : {CameraTier::small, CameraTier::large}) {
+        const auto cameras = phone.arrange(tier, false);
+        std::vector<andarium::camera::CameraKey> keys;
+        for (const auto& camera : cameras) keys.push_back({camera.wire.index, camera.wire.facing, camera.wire.lens});
+        const auto ids = andarium::camera::assign_ids(keys);
+        require(ids.size() == 4, "the HAL lists four cameras");
+        const auto indexOf = [&](std::uint32_t id) {
+            for (const auto& assignment : ids)
+                if (assignment.id == id) return int(assignment.index);
+            return -1;
+        };
+        require(indexOf(0) == 0 && cameras[0].info.lens == uml::platform::CameraLensKind::wide, "\"0\" is the wide lens");
+        require(indexOf(1) == 1 && cameras[1].info.position == CameraPosition::front, "\"1\" is the front camera");
+        require(indexOf(2) == -1, "there is no \"2\"");
+        require(indexOf(3) == 2 && cameras[2].info.lens == uml::platform::CameraLensKind::ultraWide, "\"3\" is the ultra wide lens");
+        require(indexOf(4) == 3 && cameras[3].info.lens == uml::platform::CameraLensKind::telephoto, "\"4\" is the telephoto");
+
+        std::vector<andarium::camera::Concurrency> concurrency;
+        for (const auto& assignment : ids)
+            concurrency.push_back({assignment.id, assignment.index, cameras[assignment.index].wire.concurrent_mask,
+                                   cameras[assignment.index].wire.conflict_mask});
+        const auto meets = [&](std::uint32_t id) { return halMeets(cameras[indexOf(id)]); };
+        require(andarium::camera::concurrent_feature(concurrency, meets) == layoutDimensionsOf(cameras, tier).concurrent,
+                "the layout's concurrent feature is the HAL's");
+        // Android is told the one combination, [0, 1], where the pair makes the guaranteed sizes (the large tier's).
+        const auto reported = andarium::camera::reported_concurrent_sets(concurrency, meets);
+        require(reported.empty() != layoutDimensionsOf(cameras, tier).concurrent &&
+                    (reported.empty() || reported == std::vector<std::vector<std::uint32_t>>({{0, 1}})),
+                "the combinations Android is told follow the layout's concurrent feature");
+        const auto sets = andarium::camera::concurrent_sets(concurrency);
+        require(sets.size() == 1 && sets[0] == std::vector<std::uint32_t>({0, 1}), "the wide lens and the front camera are the one set");
+        require(andarium::camera::conflicting_ids(concurrency, 0) == std::vector<std::uint32_t>({3, 4}) &&
+                    andarium::camera::conflicting_ids(concurrency, 1) == std::vector<std::uint32_t>({3, 4}) &&
+                    andarium::camera::conflicting_ids(concurrency, 3) == std::vector<std::uint32_t>({0, 1, 4}) &&
+                    andarium::camera::conflicting_ids(concurrency, 4) == std::vector<std::uint32_t>({0, 1, 3}),
+                "the other lenses conflict with the front camera and with each other");
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -518,6 +565,7 @@ int main(int argc, char** argv)
     testHostsEarnTheirLayouts();
     testComposeLayoutOfAHost();
     testConcurrentRuleIsTheHals();
+    testTheHalNumbersAThreeLensPhone();
     testTheReserveFollowsTheUse();
     testComposedCamerasAreGivenTheirUse();
     testALaterBootIsHeldToTheReservation();
