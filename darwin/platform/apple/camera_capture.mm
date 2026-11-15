@@ -996,7 +996,8 @@ public:
         // The system interrupts a session that starts while the application is in the background with the same reason
         // as one that was running when the application left, and keeps its start request for the return. Only the
         // second has video to lose: the session reports the departure when frames have reached it since it started
-        // or since its last interruption ended (deliverFrame), and an ordinary interruption otherwise.
+        // or since its last reported departure (deliverFrame sets the flag, the report clears it), and an ordinary
+        // interruption otherwise.
         auto ranInForeground = ranInForeground_;
 #endif
         interrupted_ = [center addObserverForName:AVCaptureSessionWasInterruptedNotification
