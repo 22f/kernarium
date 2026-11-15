@@ -2679,6 +2679,9 @@ def check_payload_regular_file(payload: bytes, path: str, apex_name: str, what: 
 # default configuration's; without it the thermal HAL's SEVERE status holds no frame rate back.
 # The SystemConfig topic reads the compass feature's directory when the launch says the host has a
 # magnetometer; without it a host that has one would run an image with a sensor and no feature.
+# The SensorPrivacyService topic withholds the reminder (dialog and notification) of a camera that the
+# hardware toggle blocks; without it a session started with Camera off would offer, in SystemUI's
+# "Unblock device camera?" dialog, an Unblock that cannot lift the hardware toggle.
 SERVICES_JAR = "SYSTEM/framework/services.jar"
 SERVICES_JAR_MARKERS = (
     (b"kernarium: USB debugging is now ", "the AdbService topics"),
@@ -2691,6 +2694,10 @@ SERVICES_JAR_MARKERS = (
         "the SystemConfig topic that reads the compass feature for a host with a magnetometer",
     ),
     (b"kernarium_compass", "the directory that SystemConfig topic reads"),
+    (
+        b"kernarium: no reminder for a camera that the hardware toggle blocks",
+        "the SensorPrivacyService topic that withholds the reminder of a camera under the hardware toggle",
+    ),
 )
 SERVICES_JAR_LIMIT = 48 << 20
 
@@ -3702,6 +3709,53 @@ def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
              "it must be in the default configuration")
 
 
+# A session started with Camera off holds the camera's hardware toggle. The sensor privacy service
+# would start the activity that config_sensorUseStartedActivity_hwToggle names (or post a notification)
+# to offer an Unblock that writes the software toggle, which a hardware toggle outranks; the
+# SensorPrivacyService topic of route p0007 withholds both for the camera (SERVICES_JAR_MARKERS) and
+# keeps the microphone's reminder. A product string for either activity would also name the camera's
+# and the microphone's, so the overlay defines neither, in any configuration and with any value (a
+# reference included): a name found among the overlay's string entries is the failure. An overlay's
+# resource map (android:resourcesMap) can point those two names at a string of another name, so the
+# generated overlay, which never has one, must not declare one.
+SENSOR_USE_ACTIVITY_STRINGS = (
+    "config_sensorUseStartedActivity",
+    "config_sensorUseStartedActivity_hwToggle",
+)
+RESOURCES_MAP_ATTRIBUTE = "resourcesMap"
+
+
+def check_camera_reminder(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    """The framework overlay leaves the sensor privacy service's reminder activities at the platform's
+    defaults, by name and by resource map."""
+    info = infos.get(FRAMEWORK_OVERLAY)
+    if info is None or info.is_dir():
+        fail(f"{FRAMEWORK_OVERLAY} is missing")
+    try:
+        with zipfile.ZipFile(io.BytesIO(read_small(archive, info, FRAMEWORK_OVERLAY_LIMIT))) as overlay:
+            table = overlay.read("resources.arsc")
+            manifest = overlay.read("AndroidManifest.xml")
+        entries = [(name, default) for name, _, _, default
+                   in resource_entries(table, "string", configurations=True)]
+        declaration = manifest_element_attributes(manifest, "overlay")
+    except (KeyError, OSError, ValueError, struct.error, IndexError, zipfile.BadZipFile) as error:
+        fail(f"{FRAMEWORK_OVERLAY} has no readable resource table or manifest: {error}")
+    if declaration is not None and RESOURCES_MAP_ATTRIBUTE in declaration:
+        fail(
+            f"{FRAMEWORK_OVERLAY} declares a resource map (android:{RESOURCES_MAP_ATTRIBUTE}): it can point "
+            f"{' and '.join(SENSOR_USE_ACTIVITY_STRINGS)} at a string of another name, and the generated "
+            "overlay has none"
+        )
+    for name, default in entries:
+        if name in SENSOR_USE_ACTIVITY_STRINGS:
+            fail(
+                f"{FRAMEWORK_OVERLAY} defines {name} "
+                f"{'in the default configuration' if default else 'under a resource configuration'}: "
+                "the reminder of a camera under the hardware toggle is withheld by the framework, "
+                "and the platform's activity is the microphone's"
+            )
+
+
 def check_camera(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
     # The provider's contract first: its message names what a changed init file broke, where the layout files'
     # byte comparison only says that they differ.
@@ -3709,6 +3763,7 @@ def check_camera(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) ->
     check_camera_layout_files(archive, infos)
     check_camera_configuration(archive, infos)
     check_camera_app(archive, infos)
+    check_camera_reminder(archive, infos)
 
 
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import base64
 import contextlib
 import gzip
 import importlib.util
@@ -293,6 +294,33 @@ def synthetic_apk(debuggable: bool | str | None = None, permissions: tuple[str, 
     return package.getvalue()
 
 
+# The compiled manifest of an overlay that aapt2 built with android:resourcesMap="@xml/map", whose map
+# names config_sensorUseStartedActivity and config_sensorUseStartedActivity_hwToggle as targets (the
+# overlay's own string table has only "different_name").
+RESOURCES_MAP_OVERLAY_MANIFEST = base64.b64decode(
+    "".join((
+        "AwAIADQFAAABABwA8AIAABQAAAAAAAAAAAAAAGwAAAAAAAAAAAAAABIAAAAmAAAARAAAAGIAAACGAAAAmgAAAMAAAAD2AAAAEgEA",
+        "ABoBAAAsAQAARgEAAHYBAADOAQAA4gEAAPQBAAAGAgAAOgIAAG4CAAAHAGgAYQBzAEMAbwBkAGUAAAAIAHAAcgBpAG8AcgBpAHQA",
+        "eQAAAA0AdABhAHIAZwBlAHQAUABhAGMAawBhAGcAZQAAAA0AbQBpAG4AUwBkAGsAVgBlAHIAcwBpAG8AbgAAABAAdABhAHIAZwBl",
+        "AHQAUwBkAGsAVgBlAHIAcwBpAG8AbgAAAAgAaQBzAFMAdABhAHQAaQBjAAAAEQBjAG8AbQBwAGkAbABlAFMAZABrAFYAZQByAHMA",
+        "aQBvAG4AAAAZAGMAbwBtAHAAaQBsAGUAUwBkAGsAVgBlAHIAcwBpAG8AbgBDAG8AZABlAG4AYQBtAGUAAAAMAHIAZQBzAG8AdQBy",
+        "AGMAZQBzAE0AYQBwAAAAAgAxADYAAAAHAGEAbgBkAHIAbwBpAGQAAAALAGEAcABwAGwAaQBjAGEAdABpAG8AbgAAABYAZQB4AGEA",
+        "bQBwAGwAZQAuAHIAZQB2AGkAZQB3AC4AbwB2AGUAcgBsAGEAeQAAACoAaAB0AHQAcAA6AC8ALwBzAGMAaABlAG0AYQBzAC4AYQBu",
+        "AGQAcgBvAGkAZAAuAGMAbwBtAC8AYQBwAGsALwByAGUAcwAvAGEAbgBkAHIAbwBpAGQAAAAIAG0AYQBuAGkAZgBlAHMAdAAAAAcA",
+        "bwB2AGUAcgBsAGEAeQAAAAcAcABhAGMAawBhAGcAZQAAABgAcABsAGEAdABmAG8AcgBtAEIAdQBpAGwAZABWAGUAcgBzAGkAbwBu",
+        "AEMAbwBkAGUAAAAYAHAAbABhAHQAZgBvAHIAbQBCAHUAaQBsAGQAVgBlAHIAcwBpAG8AbgBOAGEAbQBlAAAACAB1AHMAZQBzAC0A",
+        "cwBkAGsAAAAAAIABCAAsAAAADAABARwAAQEhAAEBDAIBAXACAQFaBQEBcgUBAXMFAQEJBgEBAAEQABgAAAABAAAA/////woAAAAN",
+        "AAAAAgEQAIgAAAABAAAA//////////8OAAAAFAAUAAUAAAAAAAAADQAAAAYAAAD/////CAAAECQAAAANAAAABwAAAAkAAAAIAAAD",
+        "CQAAAP////8QAAAADAAAAAgAAAMMAAAA/////xEAAAD/////CAAAECQAAAD/////EgAAAP////8IAAAQEAAAAAIBEABMAAAAAgAA",
+        "AP//////////EwAAABQAFAACAAAAAAAAAA0AAAADAAAA/////wgAABAeAAAADQAAAAQAAAD/////CAAAEB4AAAADARAAGAAAAAIA",
+        "AAD//////////xMAAAACARAAdAAAAAMAAAD//////////w8AAAAUABQABAAAAAAAAAANAAAAAQAAAP////8IAAAQ5wMAAA0AAAAC",
+        "AAAACgAAAAgAAAMKAAAADQAAAAUAAAD/////CAAAEv////8NAAAACAAAAP////8IAAABAAACfwMBEAAYAAAAAwAAAP//////////",
+        "DwAAAAIBEAA4AAAABAAAAP//////////CwAAABQAFAABAAAAAAAAAA0AAAAAAAAA/////wgAABIAAAAAAwEQABgAAAAEAAAA////",
+        "//////8LAAAAAwEQABgAAAABAAAA//////////8OAAAAAQEQABgAAAABAAAA/////woAAAANAAAA",
+    ))
+)
+
+
 def synthetic_overlay_manifest(target_package: str | None, static: bool | None, *, utf8: bool = False) -> bytes:
     """A compiled manifest of a runtime resource overlay: an <overlay> element that carries
     android:targetPackage (a string) when given and android:isStatic (a literal boolean) when given,
@@ -409,11 +437,14 @@ def synthetic_resource_table(
     arrays: list[tuple[str, list[str]]], *, utf8: bool = True,
     booleans: list[tuple[str, bool]] = (), compact: bool = False,
     integers: list[tuple[str, int]] = (), overlayable: bool = False, qualified: frozenset[str] = frozenset(),
+    strings: list[tuple[str, str | None]] = (),
 ) -> bytes:
     """A compiled resource table whose one package holds the given string-array resources, bool
-    resources and integer resources (the latter two as compact entries when `compact` is set, as a
-    recent aapt2 writes them), and an <overlayable> section when `overlayable` is set. The resources
-    named in `qualified` are defined under a resource configuration (portrait), not by default."""
+    resources, integer resources and plain string resources (the bools and integers as compact entries
+    when `compact` is set, as a recent aapt2 writes them), and an <overlayable> section when
+    `overlayable` is set. A plain string whose text is None has a reference to another resource as its
+    value, as `<string name=...>@string/other</string>` compiles. The resources named in `qualified`
+    are defined under a resource configuration (portrait), not by default."""
 
     def pool(strings: list[str]) -> bytes:
         data, offsets = b"", []
@@ -430,8 +461,9 @@ def synthetic_resource_table(
                             0x100 if utf8 else 0, start, 0)
                 + struct.pack(f"<{len(strings)}I", *offsets) + data)
 
-    values = sorted({item for _, items in arrays for item in items})
-    names = [name for name, _ in arrays] + [name for name, _ in booleans] + [name for name, _ in integers]
+    values = sorted({item for _, items in arrays for item in items} | {text for _, text in strings if text})
+    names = ([name for name, _ in arrays] + [name for name, _ in booleans] + [name for name, _ in integers]
+             + [name for name, _ in strings])
     configuration = struct.pack("<I", 64) + b"\x00" * 60
     portrait = struct.pack("<I", 64) + b"\x00" * 8 + b"\x01" + b"\x00" * 51  # the orientation qualifier
     type_header = 20 + len(configuration)
@@ -467,6 +499,12 @@ def synthetic_resource_table(
         else:
             integer_entries.append(struct.pack("<HHI", 8, 0, index) + struct.pack("<HBBI", 8, 0, 0x10, data))
 
+    string_entries = []
+    for index, (_, text) in enumerate(strings, start=len(arrays) + len(booleans) + len(integers)):
+        value = (struct.pack("<HBBI", 8, 0, 0x03, values.index(text)) if text is not None
+                 else struct.pack("<HBBI", 8, 0, 0x01, 0x7F0A0001))  # TYPE_STRING, or TYPE_REFERENCE
+        string_entries.append(struct.pack("<HHI", 8, 0, index) + value)
+
     def configured(type_id: int, entries: list[bytes], entry_names: list[str], *, always: bool) -> bytes:
         """The type's chunk of default definitions and, when some are qualified, a chunk of those."""
         plain = [entry for entry, name in zip(entries, entry_names) if name not in qualified]
@@ -479,7 +517,8 @@ def synthetic_resource_table(
         chunks += struct.pack("<HHI", 0x0204, 1032, 1032) + b"\x00" * 1024
     type_names = ["array"]
     for type_name, typed, typed_names in (("bool", bool_entries, [name for name, _ in booleans]),
-                                          ("integer", integer_entries, [name for name, _ in integers])):
+                                          ("integer", integer_entries, [name for name, _ in integers]),
+                                          ("string", string_entries, [name for name, _ in strings])):
         if typed:
             type_names.append(type_name)
             chunks += configured(len(type_names), typed, typed_names, always=False)
@@ -2683,17 +2722,33 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         "toggle-missing": [],
                         "toggle-duplicate": [True, False],
                     }.get(camera_variant, [True])
+                    # The reminder activities of the sensor privacy service stay at the platform's defaults:
+                    # a variant defines one, as a literal or a reference, by default or under a qualifier.
+                    # Another sensor privacy string is present in every fixture: only these names count.
+                    reminder_strings = [("config_sensorStateChangedActivity", "com.example/.State")] + {
+                        "reminder-string": [("config_sensorUseStartedActivity", "com.example/.Quiet")],
+                        "reminder-hardware-string": [("config_sensorUseStartedActivity_hwToggle", "com.example/.Quiet")],
+                        "reminder-reference": [("config_sensorUseStartedActivity_hwToggle", None)],
+                        "reminder-qualified": [("config_sensorUseStartedActivity", "com.example/.Quiet")],
+                    }.get(camera_variant, [])
                     network_table = synthetic_resource_table(
                         [*network_time.items(), *extra_definitions], utf8=network_time_variant != "utf16-pool",
                         booleans=[("config_flipToScreenOffEnabled", value) for value in flip_values]
                         + [("config_supportsHardwareCamToggle", value) for value in toggle_values],
                         compact=flip_variant == "compact",
                         qualified=frozenset({"config_supportsHardwareCamToggle"})
-                        if camera_variant == "toggle-only-qualified" else frozenset(),
+                        if camera_variant == "toggle-only-qualified"
+                        else frozenset({"config_sensorUseStartedActivity"})
+                        if camera_variant == "reminder-qualified" else frozenset(),
+                        strings=reminder_strings,
                     )
                     framework_apk = io.BytesIO()
                     with zipfile.ZipFile(framework_apk, "w") as overlay:
-                        overlay.writestr("AndroidManifest.xml", release_manifest)
+                        # The generated overlay declares itself static and has no resource map; the variant
+                        # carries a real compiled manifest that does.
+                        overlay.writestr("AndroidManifest.xml",
+                                         RESOURCES_MAP_OVERLAY_MANIFEST if camera_variant == "reminder-resource-map"
+                                         else synthetic_overlay_manifest("android", True))
                         overlay.writestr("resources.arsc", network_table)
                         for name, payload in wallpapers.items():
                             overlay.writestr(name, payload)
@@ -3114,6 +3169,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                                else b"ro.boot.kernarium.compass\x00")
                             + (b"" if services_jar_variant == "no-compass-directory-marker"
                                else b"kernarium_compass\x00")
+                            + (b"" if services_jar_variant == "no-sensor-reminder-marker"
+                               else b"kernarium: no reminder for a camera that the hardware toggle blocks (\x00")
                         )
                     archive.writestr("SYSTEM/framework/services.jar", services_jar.getvalue())
                 # libinputflinger.so holds the p0022 pointer capture LED topic's dump line.
@@ -5818,6 +5875,18 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "must set config_supportsHardwareCamToggle to true"),
             ("camera-toggle-only-qualified", {"camera_variant": "toggle-only-qualified"},
              "defines config_supportsHardwareCamToggle only under a resource configuration"),
+            ("camera-reminder-activity-defined", {"camera_variant": "reminder-string"},
+             "defines config_sensorUseStartedActivity in the default configuration"),
+            ("camera-reminder-hardware-activity-defined", {"camera_variant": "reminder-hardware-string"},
+             "defines config_sensorUseStartedActivity_hwToggle in the default configuration"),
+            ("camera-reminder-activity-defined-by-reference", {"camera_variant": "reminder-reference"},
+             "defines config_sensorUseStartedActivity_hwToggle in the default configuration"),
+            ("camera-reminder-activity-defined-under-a-qualifier", {"camera_variant": "reminder-qualified"},
+             "defines config_sensorUseStartedActivity under a resource configuration"),
+            ("camera-reminder-activities-mapped-by-a-resource-map", {"camera_variant": "reminder-resource-map"},
+             "declares a resource map"),
+            ("services-jar-without-the-sensor-reminder-topic", {"services_jar_variant": "no-sensor-reminder-marker"},
+             "lacks the SensorPrivacyService topic that withholds the reminder of a camera under the hardware toggle"),
         ):
             reject(label, options, reason)
 

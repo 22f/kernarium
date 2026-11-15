@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <map>
 #include <set>
+#include <span>
 #include <vector>
 
 #include "camera_concurrent_vectors.hpp"
@@ -782,6 +784,69 @@ void check_key_lists()
 
 } // namespace
 
+// What state_raw_metadata writes, as the HAL's sink for a camera's static metadata would take it.
+struct RecordingSink {
+    std::map<std::int32_t, std::vector<std::uint8_t>> bytes;
+    std::vector<std::int32_t> characteristics;
+    std::vector<std::int32_t> results;
+
+    void put_bytes(std::int32_t key, std::span<const std::uint8_t> values) { bytes[key].assign(values.begin(), values.end()); }
+    void list_characteristic(std::int32_t key) { characteristics.push_back(key); }
+    void list_result(std::int32_t key) { results.push_back(key); }
+};
+
+// The metadata that a camera with RAW states and lists (the HAL runs the same function): the lens shading map and the
+// hot pixel map with both modes, whether the shading is applied, and the keys of what a RAW camera returns.
+void check_raw_metadata()
+{
+    RecordingSink sink;
+    state_raw_metadata(sink);
+
+    const std::vector<std::uint8_t> off_and_on = {map_mode::off, map_mode::on};
+    require(sink.bytes.size() == 3, "a RAW camera states three entries");
+    require(sink.bytes.at(tag::statistics_info_available_lens_shading_map_modes) == off_and_on,
+            "its lens shading map modes are OFF and ON (the device info rejects a RAW camera without ON)");
+    require(sink.bytes.at(tag::statistics_info_available_hot_pixel_map_modes) == off_and_on,
+            "its hot pixel map modes are OFF and ON (Android requires ON of a RAW camera)");
+    require(sink.bytes.at(tag::sensor_info_lens_shading_applied) == std::vector<std::uint8_t>{lens_shading_applied},
+            "it states whether its lens shading is applied");
+    require(lens_shading_applied == lens_shading_applied_false,
+            "the host applies no shading correction to the Bayer data it copies, and its shading map is all ones");
+
+    // Everything stated is a characteristic of the camera, and the hot pixel map is a result it can return.
+    for (const auto& [key, values] : sink.bytes)
+        require(std::count(sink.characteristics.begin(), sink.characteristics.end(), key) == 1,
+                "every entry stated is listed once among the characteristics");
+    require(sink.characteristics.size() == sink.bytes.size(), "and nothing else is");
+    require(sink.results == std::vector<std::int32_t>{tag::statistics_hot_pixel_map},
+            "the hot pixel map is the one result key a RAW camera adds (the template lists the lens shading map already)");
+
+    // The tags are distinct and are not keys that the plan takes out of a camera's lists (unlisted_keys): a RAW camera
+    // lists the map modes and the maps of the lens shading and the hot pixels, and no camera has them unlisted.
+    const std::set<std::int32_t> raw_keys = {tag::sensor_info_lens_shading_applied,
+                                             tag::statistics_hot_pixel_map,
+                                             tag::statistics_hot_pixel_map_mode,
+                                             tag::statistics_info_available_hot_pixel_map_modes,
+                                             tag::statistics_info_available_lens_shading_map_modes,
+                                             tag::statistics_lens_shading_map,
+                                             tag::statistics_lens_shading_map_mode};
+    require(raw_keys.size() == 7, "the seven keys are distinct");
+    auto raw = lens_desc();
+    auto automatic = raw;
+    automatic.lens = abi::lens::zoom;
+    auto plain = raw;
+    plain.flags &= ~abi::feature::raw;
+    plain.bayer_order = abi::bayer::none;
+    auto front = raw;
+    front.facing = abi::facing::front;
+    front.flags &= ~abi::feature::autofocus;
+    for (const auto& desc : {raw, automatic, plain, front}) {
+        const auto unlisted = unlisted_keys(desc, capabilities_of(desc, phone_formats()));
+        for (const auto key : unlisted)
+            require(raw_keys.count(key) == 0, "the plan unlists none of the lens shading and hot pixel map keys");
+    }
+}
+
 int main()
 {
     check_ids();
@@ -798,5 +863,6 @@ int main()
     check_record_jpeg();
     check_concurrent_feature();
     check_key_lists();
+    check_raw_metadata();
     return 0;
 }
