@@ -226,6 +226,13 @@ ICP_FEATURE = (
     "}\n"
 )
 ICP_PARTIAL = 'const char *fixture(void) { return "AndariumICPNumber"; }\n'
+# One detection of the two features at a time: the rating prompt (its counter's type and the StoreKit
+# request) without the review link or key, and the storefront watch without the number or the key.
+RATING_PROMPT_ONLY = (
+    'const char *fixture(void) { return "_$s8Andarium16ReviewAskTrackerV'
+    '_$s8StoreKit8AppStoreO13requestReview2inySo13UIWindowSceneC_tFZ"; }\n'
+)
+ICP_STOREFRONT_ONLY = 'const char *fixture(void) { return "_$s8Andarium18ICPStorefrontStateC"; }\n'
 # Config/Info.plist as a fixture: the optional blocks are conditional, and a value
 # names a build setting inside nested containers.
 INFO_SOURCE = """<?xml version="1.0" encoding="UTF-8"?>
@@ -772,8 +779,8 @@ def check_tip_jar(root: Path, check, clean: Path, feedback_feature: Path, feedba
     (named_leak / "Data.bin").write_bytes(secret.encode())
     check(named_leak, passes=True, expect="Buy me tokens is compiled in", args=named_args)
 
-    # The identifiers as a binary stores a string besides UTF-8, in every file but the staged system
-    # image, which is searched as UTF-8 alone: a large file elsewhere keeps its UTF-16 search.
+    # The identifiers as a binary stores a string besides UTF-8, in every file, the staged system image
+    # included.
     for form, content in encoded_forms(secret):
         stray = tip_app(root, f"tip-leak-{form}", clean, app_info(), table=False)
         (stray / "Data.bin").write_bytes(content)
@@ -788,12 +795,14 @@ def check_tip_jar(root: Path, check, clean: Path, feedback_feature: Path, feedba
           never=secret, args=local_args)
     image = tip_app(root, "tip-leak-image", clean, app_info(), table=False)
     (image / "andarium-system" / "guest").mkdir(parents=True)
-    (image / "andarium-system" / "guest" / "system.img").write_bytes(b"\0" + secret.encode("utf-16-le") + b"\0")
+    for encoding in ("utf-8", "utf-16-le", "utf-16-be"):
+        (image / "andarium-system" / "guest" / "system.img").write_bytes(b"\0" + secret.encode(encoding) + b"\0")
+        check(image, passes=False,
+              expect="andarium-system/guest/system.img: holds a product identifier of the local configuration",
+              never=secret, args=local_args)
+    (image / "andarium-system" / "guest" / "system.img").write_bytes(b"\0" + b"unrelated" + b"\0")
     check(image, passes=True, expect="ready for the App Store", args=local_args)
-    (image / "andarium-system" / "guest" / "system.img").write_bytes(b"\0" + secret.encode() + b"\0")
-    check(image, passes=False, expect="andarium-system/guest/system.img: holds a product identifier of the local configuration",
-          never=secret, args=local_args)
-    # Only that directory is spared: a neighbour of the same name prefix is searched.
+    # A neighbour of the same name prefix is searched as well.
     neighbour = tip_app(root, "tip-leak-neighbour", clean, app_info(), table=False)
     (neighbour / "andarium-system-copy").mkdir()
     (neighbour / "andarium-system-copy" / "system.img").write_bytes(b"\0" + secret.encode("utf-16-le") + b"\0")
@@ -1417,6 +1426,17 @@ def check_testflight(root: Path, check, clean: Path, feedback_feature: Path, rec
               "Review on the App Store", never="1234567890",
               args=[*flag, "--review-id", identifier, "--review-local-id", identifier])
 
+    # The rating prompt and the storefront watch are each a detection of their own: a product with
+    # only one of them, none of the feature's link, key or number, is rejected.
+    prompt_only = build(root, "tf-rating-prompt-only", RATING_PROMPT_ONLY)
+    check(make_app(root, "tf-rating-prompt-only", prompt_only, app_info()), passes=False,
+          expect="carries Review on the App Store (ReviewAsk, ReviewAskTracker, requestReview) though TestFlight has no Review",
+          args=flag)
+    storefront_only = build(root, "tf-icp-storefront-only", ICP_STOREFRONT_ONLY)
+    check(make_app(root, "tf-icp-storefront-only", storefront_only, app_info()), passes=False,
+          expect="carries the ICP filing number (ICPStorefront) though TestFlight has no ICP filing number",
+          args=flag)
+
     # The ICP filing number: not the code, the key, and no number the build names.
     check(make_app(root, "tf-icp-code", icp_code, app_info()), passes=False,
           expect="carries the ICP filing number (", args=flag)
@@ -1469,6 +1489,109 @@ def check_testflight(root: Path, check, clean: Path, feedback_feature: Path, rec
               expect="not compiled in (TestFlight)", args=[mode, *flag])
         check(make_app(root, f"tf-mode-{mode[2:]}-code", source, app_info()), passes=False, expect=said,
               args=[mode, *flag])
+
+
+def check_whole_bundle(root: Path, check, clean: Path) -> None:
+    """What a feature must not leave is looked for in the whole bundle: the supplied values in every
+    file in either UTF-16 byte order, the staged system image included; the strings tables, property
+    list keys and asset names in nested bundles, any property list and any asset catalog; and no
+    line of the report spells a supplied value, not even a path. TestFlight is the strictest, the
+    App Store holds the same for what it does not carry. Every value here is made up."""
+    flag = ["--configuration", "TestFlight"]
+    ids = {tier: f"com.fixture.product.{tier}" for tier in ("lite", "pro", "max", "ultra")}
+    tip_list = ",".join(ids.values())
+    identifier = "id1234567890"
+    number = "示例ICP备12345678号-1"
+    local = ["--tip-local-products", tip_list, "--review-local-id", identifier, "--icp-local-number", number,
+             "--developer-local-github", "fixturehub"]
+    values = (("tip", ids["pro"], "a product identifier of the local configuration"),
+              ("review", identifier[2:], "the App Store identifier of the local configuration"),
+              ("icp", number, "the filing number of the local configuration"))
+
+    # The supplied values in both UTF-16 byte orders (and UTF-8), under the staged system image and
+    # outside it, for TestFlight and the App Store (which carries none of them here).
+    for configuration_args in (flag, []):
+        label = "tf" if configuration_args else "as"
+        for kind, value, said in values:
+            for encoding in ("utf-8", "utf-16-le", "utf-16-be"):
+                for place in ("andarium-system/guest/system.img", "andarium-system/metadata.bin", "Data.bin"):
+                    app = make_app(root, f"whole-{label}-{kind}-{encoding}-{place.replace('/', '-')}", clean, app_info())
+                    (app / place).parent.mkdir(parents=True, exist_ok=True)
+                    (app / place).write_bytes(b"\0" + value.encode(encoding) + b"\0")
+                    check(app, passes=False, expect=f"{place}: holds {said}", never=value,
+                          args=[*configuration_args, *local])
+    unrelated = make_app(root, "whole-image-unrelated", clean, app_info())
+    (unrelated / "andarium-system").mkdir()
+    (unrelated / "andarium-system" / "metadata.bin").write_bytes(b"\0" + "unrelated".encode("utf-16-le") + b"\0")
+    check(unrelated, passes=True, expect="ready for TestFlight", args=[*flag, *local])
+
+    # Resources of the three features in nested bundles, in any property list and in any asset
+    # catalog, are as much a leak as the same at the root. The tables and keys are the features' own.
+    for name, path, data, said in (
+            ("tip-table", "Feature.bundle/ja.lproj/TipJar.strings", plistlib.dumps({"Done": "x"}),
+             "Feature.bundle/ja.lproj/TipJar.strings: is the TipJar strings table though TestFlight has no Buy me tokens"),
+            ("tip-words", "Feature.bundle/en.lproj/Localizable.strings",
+             plistlib.dumps({"Buy me tokens": "Buy me tokens"}, fmt=plistlib.FMT_BINARY),
+             "Feature.bundle/en.lproj/Localizable.strings: has Buy me tokens strings though TestFlight has no Buy me tokens"),
+            ("review-table", "Feature.bundle/ja.lproj/Review.strings", plistlib.dumps({"Done": "x"}),
+             "Feature.bundle/ja.lproj/Review.strings: is the Review strings table though TestFlight has no Review"),
+            ("review-words", "Feature.bundle/en.lproj/Localizable.strings",
+             plistlib.dumps({"Review on the App Store": "x"}, fmt=plistlib.FMT_BINARY),
+             "Feature.bundle/en.lproj/Localizable.strings: has Review on the App Store strings though TestFlight has no Review"),
+            ("tip-key", "Extra.plist", plistlib.dumps({"AndariumTipProducts": ids}),
+             "Extra.plist: has AndariumTipProducts though TestFlight has no Buy me tokens"),
+            ("review-key", "Feature.bundle/Info.plist", plistlib.dumps({"AndariumReviewID": identifier}),
+             "Feature.bundle/Info.plist: has AndariumReviewID though TestFlight has no Review"),
+            ("icp-key", "Plug.appex/Info.plist", plistlib.dumps({"AndariumICPNumber": number}),
+             "Plug.appex/Info.plist: has AndariumICPNumber though TestFlight has no ICP filing number"),
+            ("header-name-key", "Extra.plist", plistlib.dumps({"AndariumDeveloperName": "Fixture Name"}),
+             "Extra.plist: has AndariumDeveloperName though TestFlight has no Buy me tokens"),
+            ("header-github-key", "Feature.bundle/Extra.plist", plistlib.dumps({"AndariumDeveloperGitHub": "x"}),
+             "Feature.bundle/Extra.plist: has AndariumDeveloperGitHub though TestFlight has no Buy me tokens"),
+            ("header-x-key", "Extra.plist", plistlib.dumps({"AndariumDeveloperX": "x"}),
+             "Extra.plist: has AndariumDeveloperX though TestFlight has no Buy me tokens"),
+            ("avatar", "Feature.bundle/Assets.car", b"\0BOMStore\0DeveloperAvatar\0",
+             "Feature.bundle/Assets.car: holds DeveloperAvatar though TestFlight has no Buy me tokens"),
+            ("mark", "Frameworks/Resources.framework/Assets.car", b"\0BOMStore\0GitHubLogo\0",
+             "Frameworks/Resources.framework/Assets.car: holds GitHubLogo though TestFlight has no Buy me tokens"),
+    ):
+        app = make_app(root, f"whole-nested-{name}", clean, app_info())
+        (app / path).parent.mkdir(parents=True, exist_ok=True)
+        (app / path).write_bytes(data)
+        check(app, passes=False, expect=said, args=flag)
+        # A build of the App Store that names none of the feature has the same leak.
+        check(app, passes=False, expect=said.split(" though ")[0])
+    # The logo of Follow developer on X in a nested catalog, where the build names no handle.
+    logo = make_app(root, "whole-nested-x-logo", clean, app_info())
+    (logo / "Feature.bundle").mkdir()
+    (logo / "Feature.bundle" / "Assets.car").write_bytes(b"\0BOMStore\0XLogo\0")
+    check(logo, passes=False,
+          expect="Feature.bundle/Assets.car: holds the logo of Follow developer on X though the build names no handle",
+          args=flag)
+    # A nested bundle with resources of its own, that none of the features owns, passes.
+    quiet = make_app(root, "whole-nested-clean", clean, app_info())
+    (quiet / "Feature.bundle" / "en.lproj").mkdir(parents=True)
+    (quiet / "Feature.bundle" / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "org.example.Feature"}))
+    (quiet / "Feature.bundle" / "Assets.car").write_bytes(b"\0BOMStore\0AppIcon\0")
+    (quiet / "Feature.bundle" / "en.lproj" / "Localizable.strings").write_bytes(
+        plistlib.dumps({"Done": "Done"}, fmt=plistlib.FMT_BINARY))
+    (quiet / "Feature.bundle" / "en.lproj" / "Other.strings").write_bytes(
+        plistlib.dumps({"Review": "Review"}, fmt=plistlib.FMT_BINARY))
+    check(quiet, passes=True, expect="ready for TestFlight", args=[*flag, *local])
+    check(quiet, passes=True, expect="ready for the App Store", args=local)
+
+    # A file whose name spells a supplied value is rejected, and neither output holds the value. The
+    # files are named for the identifier, the digits of the App Store identifier and the number.
+    for kind, value, said in values:
+        for configuration_args in (flag, []):
+            named = make_app(root, f"whole-name-{kind}-{'tf' if configuration_args else 'as'}", clean, app_info())
+            (named / f"{value}.txt").write_bytes(b"\0" + value.encode() + b"\0")
+            (named / "Folder").mkdir()
+            (named / "Folder" / f"{value.upper()}.bin").write_bytes(b"\0" + value.encode("utf-16-le") + b"\0")
+            check(named, passes=False, expect=f"<value>.txt: holds {said}", never=value,
+                  args=[*configuration_args, *local])
+            check(named, passes=False, expect=f"Folder/<value>.bin: holds {said}", never=value.upper(),
+                  args=[*configuration_args, *local])
 
 
 def check_one_walk(checker: Path, root: Path, clean: Path, failures: list[str]) -> None:
@@ -2060,6 +2183,7 @@ def main() -> int:
         check_developer(root, check, clean)
         check_icp(root, check, clean)
         check_testflight(root, check, clean, feature, receiver)
+        check_whole_bundle(root, check, clean)
         check_one_walk(options.checker, root, clean, failures)
         check_examples(root, check, clean, options.checker.parent.parent / "Config", failures)
         # Follow developer on X is compiled in only where the build names a handle,

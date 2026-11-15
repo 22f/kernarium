@@ -51,7 +51,9 @@ uml_add_tooling_test(
 # header's developer only where the product has Buy me tokens and the build names
 # the value, in either direction; and that a TestFlight product carries none of
 # Buy me tokens, Review on the App Store and the ICP filing number, whatever the
-# local values are.
+# local values are. A supplied value is searched in every file in UTF-8 and both
+# UTF-16 byte orders, a feature's resources in nested bundles, property lists and
+# asset catalogs too, and no line of the report spells a value, even in a path.
 uml_add_tooling_test(
     NAME andarium-app-store-bundle
     COMMAND ${Python3_EXECUTABLE} -B
