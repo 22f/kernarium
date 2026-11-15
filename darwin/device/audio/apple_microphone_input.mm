@@ -81,7 +81,8 @@ struct Capture final : std::enable_shared_from_this<Capture> {
      * playing or recording, such as a call: the system's advice to resume
      * settles that, and without the advice another app that plays keeps it. A
      * microphone left closed then starts again with the next recommendation
-     * or the guest's next recording. */
+     * or the guest's next recording, and one whose reopen failed after the
+     * advice is opened again by revive(). */
     void resume(bool recommended) noexcept
     {
         const std::lock_guard guard(lock);
@@ -89,8 +90,10 @@ struct Capture final : std::enable_shared_from_this<Capture> {
             return;
         if (!recommended && session::otherAudioPlaying())
             return;
-        if (open())
-            interrupted = false;
+        // The interruption is over whether or not the engine opens now: if it
+        // does not (the route is not back yet), revive() asks again.
+        interrupted = false;
+        (void)open();
     }
 
     /* A rebuild that could not take the session back (the system had not

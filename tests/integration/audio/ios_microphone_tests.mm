@@ -944,6 +944,30 @@ void aRebuildThatCannotTakeTheSessionIsTriedAgain()
         since(before).text());
 }
 
+// The system's advice to resume arrives while the route is not back yet, so
+// the reopen fails. The interruption is over all the same: the microphone
+// opens again, at most once a second, without waiting for another advice.
+void aRefusedReopenAfterTheAdviceIsTriedAgain()
+{
+    otherAudioPlaying = false;
+    Recording recording;
+    check(recording.start(), "the microphone starts before the interruption");
+    postInterruptionBegan();
+    auto before = Counts::now();
+    activationsToFail = 1;
+    postInterruptionEnded(true);
+    auto seen = since(before);
+    check(seen.starts == 0 && seen.activations == 0,
+        "a reopen the system refuses leaves no engine", seen.text());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    recording.input->revive();
+    seen = since(before);
+    check(seen.starts == 1 && seen.activations == 1,
+        "the microphone opens again once the system allows it", seen.text());
+    recording.stop();
+}
+
 // The notification iOS 27 deprecates is no longer observed.
 void deprecatedNotificationIsIgnored()
 {
@@ -984,6 +1008,7 @@ int main()
         refusedBluetoothOptionsFallBack();
         routeChangeRebuildsTheEngineOnTheSameSession();
         aRebuildThatCannotTakeTheSessionIsTriedAgain();
+        aRefusedReopenAfterTheAdviceIsTriedAgain();
         sessionCategoryIsSetOnlyWhenItChanges();
         aSessionChangedBehindItsBackIsSetAgain();
         refusedBluetoothOptionsAreAskedAgainWhenTheMicrophoneIsBuiltAgain();
