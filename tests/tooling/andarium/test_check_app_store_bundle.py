@@ -78,6 +78,10 @@ DEBUG_SUPPORT = (
     ("network notice preview", "int _s8Andarium8AppModelC20previewNetworkNoticeyyAA0C6DenialOF(void) { return 1; }\n"),
     # The Simulator preview's play of the legacy install.
     ("legacy install preview", "int _s8Andarium8AppModelC21previewInstallAttemptySb_yAA10BusyUpdateVXEtYaKcSgvg(void) { return 1; }\n"),
+    # The old apps the Simulator preview and a UI test's probe session play.
+    ("old apps preview", "int _s8Andarium15ScriptedOldAppsC10listOldAppsAA0cD7ListingOyYaF(void) { return 1; }\n"),
+    ("old apps preview", "int _s8Andarium8AppModelC15scriptedOldAppsAA0D4AppsSource_pSgvg(void) { return 1; }\n"),
+    ("old apps preview", "int _s8Andarium18OldAppsProbeLaunchO6script2inAC6ScriptOSgSDyS2SG_tFZ(void) { return 1; }\n"),
     # The Simulator preview's hooks into the Send feedback sheet.
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV20previewOpensAtLaunchSbvg(void) { return 1; }\n"),
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV14previewPrepareyyAA0aD5ModelCYaYbcvg(void) { return 1; }\n"),
