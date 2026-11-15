@@ -1067,6 +1067,8 @@ generated files, and `andarium-camera-plan` (unit) the metadata a RAW camera
 states, which the HAL writes from the same function (`state_raw_metadata`).
 The HAL's result path (the lens shading map and the empty hot pixel map for the
 mode ON) has no check of its own outside the camera CTS modules.
+`android17-camera-device-lost` (tooling) holds that the HAL reports `ERROR_DEVICE`
+for a camera the host ended, from the series' own files.
 
 Every first-party script that reaches a guest over adb uses the one shared adb
 server, names the guest with `-s 127.0.0.1:<port>` and at the end only

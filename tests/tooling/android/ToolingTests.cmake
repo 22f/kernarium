@@ -252,6 +252,17 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 60)
 
+# The camera HAL tells the framework that the device is gone when the host has
+# ended a camera (the application left the foreground while the guest recorded),
+# so that the application closes the camera and a recording it holds is saved;
+# the wiring is checked in the series' own sources without a guest.
+uml_add_tooling_test(
+    NAME android17-camera-device-lost
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_camera_device_lost.py
+    LABELS android
+    TIMEOUT 120)
+
 # The microG spoofing probe's sources agree with each other and with the
 # certificate LineageOS compares with, and its runner reads `am instrument`.
 uml_add_tooling_test(
