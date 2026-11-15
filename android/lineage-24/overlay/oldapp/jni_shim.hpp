@@ -55,6 +55,10 @@ struct Platform {
     // application's own native libraries, as opposed to a platform library or another package's: only those get a
     // thunk. Null: any function of application code.
     bool (*is_own_library)(const void* function);
+    // The process-wide lock of the ended blocks (a pthread mutex in the platform). JNI calls are made while it is held,
+    // and none of them re-enters the layer. Null: a spin lock.
+    void (*mutex_lock)();
+    void (*mutex_unlock)();
 };
 
 struct Counters {
@@ -70,6 +74,12 @@ struct Counters {
     uint32_t ended_by_detach;    // ... by DetachCurrentThread
     uint32_t natives_wrapped;    // distinct native functions that got a thunk
     uint32_t natives_unwrapped;  // application natives that got none (the thunks were all in use)
+    uint32_t shadows_ended;      // blocks whose references all ended and whose arrays are not collected yet (a gauge)
+    uint32_t ended_bytes;        // the capacity of those blocks (a gauge)
+    uint32_t blocks_ended;       // blocks that ended
+    uint32_t blocks_collected;   // ended blocks freed after their arrays were collected
+    uint32_t blocks_revived;     // ended blocks that the same array was obtained again for
+    uint32_t collections_asked;  // Runtime.gc() calls made to make room
 };
 
 // `table` is the shared function table (kSlotCount entries), `shadow_region` the memory of the byte[]
@@ -99,7 +109,8 @@ struct ThunkEntry {
 ThunkEntry thunk_enter(unsigned index, void* return_address, void* sp);
 void* thunk_leave(void* sp);  // the return address thunk_enter was given
 
-bool is_shadow_block(const void* object);
+bool is_shadow_block(const void* object);  // a block with references (live)
+bool is_ended_block(const void* object);   // a block whose references have all ended and whose array is not collected
 Counters counters();
 
 // A thread is ending: its shadow blocks are queued, and freed (their global references deleted) by the

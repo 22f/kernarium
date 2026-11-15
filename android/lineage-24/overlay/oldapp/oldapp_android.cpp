@@ -45,6 +45,8 @@ int oldapp_close(int) __asm__("close");
 int oldapp_pthread_key_create(int*, void (*)(void*)) __asm__("pthread_key_create");
 void* oldapp_pthread_getspecific(int) __asm__("pthread_getspecific");
 int oldapp_pthread_setspecific(int, const void*) __asm__("pthread_setspecific");
+int oldapp_pthread_mutex_lock(void*) __asm__("pthread_mutex_lock");
+int oldapp_pthread_mutex_unlock(void*) __asm__("pthread_mutex_unlock");
 int oldapp_log_print(int, const char*, const char*, ...) __asm__("__android_log_print");
 int oldapp_clock_gettime(int, long*) __asm__("clock_gettime");  // struct timespec is two longs on bionic
 void* oldapp_dlsym(void*, const char*) __asm__("dlsym");
@@ -88,6 +90,12 @@ int g_thread_key = 0;
 bool g_have_thread_key = false;  // a key is any int: bionic sets its top bit
 bool g_installed = false;
 char g_package[256];  // the package this process runs (its process name up to ':'); empty: unknown
+
+// The lock of the ended byte[] blocks (jni_shim.cpp): bionic's PTHREAD_MUTEX_INITIALIZER is all zeroes, and the
+// buffer is larger than any version's pthread_mutex_t.
+alignas(8) uint32_t g_ended_mutex[16];
+void ended_lock() { oldapp_pthread_mutex_lock(g_ended_mutex); }
+void ended_unlock() { oldapp_pthread_mutex_unlock(g_ended_mutex); }
 
 void log_line(const char* message, long a, long b) { oldapp_log_print(kLogInfo, kTag, "%s %ld %ld", message, a, b); }
 
@@ -926,7 +934,7 @@ extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void* vm_pointe
     read_package();
     const Platform platform{is_app_caller, thread_state, log_line, make_writable, make_read_only, describe_method, now_ms,
                             alloc_baseline, free_baseline, region != nullptr ? thunk_address : nullptr,
-                            region != nullptr ? thunk_count() : 0, is_own_library};
+                            region != nullptr ? thunk_count() : 0, is_own_library, ended_lock, ended_unlock};
     refresh_modules(true);  // every library the application loaded before this one
     void** table = const_cast<void**>(env->functions);
     const bool jni_ok = install_jni_wrappers(table, platform, region != nullptr ? region + kArenaBytes : nullptr,

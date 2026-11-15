@@ -115,7 +115,7 @@ class ProbePackageTests(unittest.TestCase):
         dex = Dex(probe.oldapp_probe_dex.build_dex())
         methods = dex.class_methods()
         natives = {"run"} | {name for name, _, _ in probe.oldapp_probe_dex.NATIVES}
-        java = {"payload", "echo", "spin", "asset", "peek", "scene"}
+        java = {"payload", "echo", "spin", "asset", "peek", "scene", "poke", "same", "collect"}
         self.assertEqual(set(methods), {"<init>", "onReceive"} | java | natives)
         for name in natives:
             self.assertEqual(methods[name][0], ACC_PUBLIC | ACC_STATIC | ACC_NATIVE, name)
@@ -244,7 +244,7 @@ class VerdictTests(unittest.TestCase):
                  "java_fill": "pass", "commit_chunks": "pass", "clone": "pass", "alias_elements": "pass",
                  "alias_critical": "pass", "abi_args": "pass", "abi_returns": "pass", "ends_exception": "pass"}
     ENDS = ("ends_lazy_thumb", "ends_lazy_arm", "ends_reg_thumb", "ends_reg_arm", "ends_recursion", "ends_onload",
-            "ends_outside")
+            "ends_outside", "ended_keep", "ended_arrays")
     OLD = {"shim_mapped": "yes", "raw_read": "pass", "passback": "pass", "elements": "pass", "global": "pass",
            "thread_raw": "pass", **SEMANTICS, "java_fill_raw": "pass", "raw_write_java": "pass",
            "low_heap": "pass", **dict.fromkeys(ENDS, "pass"), "empty_us": "123456", "done": "1"}
@@ -269,7 +269,7 @@ class VerdictTests(unittest.TestCase):
                            ("abi_args", "fail"), ("abi_returns", "fail"), ("ends_exception", "fail"),
                            ("ends_lazy_thumb", "fail"), ("ends_lazy_arm", "fail"), ("ends_reg_thumb", "fail"),
                            ("ends_reg_arm", "fail"), ("ends_recursion", "fail"), ("ends_onload", "fail"),
-                           ("ends_outside", "fail"),
+                           ("ends_outside", "fail"), ("ended_keep", "fail"), ("ended_arrays", "fail"),
                            ("done", "")):
             with self.assertRaises(runner.Failure) as raised:
                 runner.evaluate("old", {**self.OLD, key: value})

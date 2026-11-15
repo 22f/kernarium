@@ -189,6 +189,7 @@ OPCODES = {
     "and-int/2addr": (0xB5, "12x"),
     "int-to-byte": (0x8D, "12x"),
     "aget-byte": (0x48, "23x"),
+    "aput-byte": (0x4F, "23x"),
     "goto/16": (0x29, "20t"),
     "aput-object": (0x4D, "23x"),
     "invoke-virtual": (0x6E, "35c"),

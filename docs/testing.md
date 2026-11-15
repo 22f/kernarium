@@ -1058,7 +1058,9 @@ functions, compares it with a global reference and the original, locks it, keeps
 it while more results arrive, pops it out of a local frame, has Java fill it and
 reads it again, writes it through the raw pointer without a release and hands it
 to a Java method that reads it, opens it through its own critical pointer and the
-block's at once, clones it after a write through `GetByteArrayElements`, reads
+block's at once, keeps a pointer to an array Java holds through a thousand later
+blocks and collections and gets the same block back when the array is obtained
+again (64 such arrays, 100 times each), clones it after a write through `GetByteArrayElements`, reads
 a committed write through a second reference to the array (pointers from
 `GetByteArrayElements` and `GetPrimitiveArrayCritical`), grows
 a malloc buffer with `getline`, asks `malloc_usable_size`, reallocates and

@@ -58,6 +58,16 @@
 //                object pointer where the layer is mapped); every eighth gets four bytes written (through the
 //                pointer where the layer is mapped) and Java reads them back. The runner reads the layer's
 //                log lines for the process: no declined result, no allocation that left the arena
+//   ended_keep   an array Java holds is obtained as a block and its pointer kept; the block's reference ends, a
+//                thousand temporaries of 64 KiB come and go with Runtime.gc() between batches, and the kept pointer
+//                still reads the array's bytes as of the end. Java then changes a byte, the application writes another
+//                through the kept pointer (in another 4 KiB chunk), and the array obtained again is the block at the
+//                same address, with both bytes visible on both sides
+//   ended_arrays 64 arrays that Java holds, each obtained 100 times in turn: always its own block, at the same address
+//   ended_reuse, ended_limit, sentinel_pressure, sentinel_gc, create_ns  recorded: a temporary took the address of an
+//                earlier one after a collection; a raw write after the block ended does not reach Java (the stated
+//                limit); whether a weak reference to an array nothing holds is cleared by allocation pressure and by an
+//                explicit collection (the layer's sentinel); nanoseconds for a byte[] result and its deletion
 //   empty_us     microseconds for 10^6 calls of an empty native method from a Java loop (recorded, not judged)
 //   monitor      MonitorEnter and MonitorExit accept it
 //   pop          PopLocalFrame hands it out of the frame
@@ -159,7 +169,7 @@ F entry(Env* env, int slot) {
 }
 
 struct Report {
-    char text[2048];
+    char text[3072];
     size_t length = 0;
     void append(const char* piece) {
         for (size_t i = 0; piece[i] != '\0' && length + 1 < sizeof(text); ++i) {
@@ -805,6 +815,11 @@ void outside_case(Report& report, Env* env, jclass probe, const char* path) {
     const jmethodID tick = static_method(env, probe, "tickReg", "()I");
     int stopped_at = -1;
     bool registered = false;
+    // The blocks the calls pile up in this frame end with a local frame of their own, so the cases after this one start
+    // from a thread with no live references.
+    const auto push_frame = entry<jint (*)(Env*, jint)>(env, slot::PushLocalFrame);
+    const auto pop_frame = entry<jobject (*)(Env*, jobject)>(env, slot::PopLocalFrame);
+    const bool framed = push_frame(env, 1024) == 0;
     if (function != nullptr && tick != nullptr) {
         const NativeMethod method{"tickReg", "()I", function};
         registered = register_natives(env, probe, &method, 1) == 0;
@@ -816,6 +831,9 @@ void outside_case(Report& report, Env* env, jclass probe, const char* path) {
         }
     }
     exception_clear(env);
+    if (framed) {
+        pop_frame(env, nullptr);
+    }
     char text[12] = "none";
     if (stopped_at >= 0) {
         decimal(text, static_cast<uint32_t>(stopped_at));
@@ -1011,6 +1029,7 @@ void scene_cases(Report& report, Env* env, jclass probe) {
     g_scene.layer = shim_mapped();
     SceneWork work{nullptr, nullptr, static_method(env, probe, "scene", "(I)I"), 0};
     bool started = false;
+    const uint64_t scene_start = now_us();
     if (g_scene.asset != nullptr && g_scene.peek != nullptr && work.scene != nullptr &&
         entry<jint (*)(Env*, Vm**)>(env, 219)(env, &work.vm) == 0) {  // GetJavaVM
         work.probe = static_cast<jclass>(entry<jobject (*)(Env*, jobject)>(env, slot::NewGlobalRef)(env, probe));
@@ -1022,6 +1041,8 @@ void scene_cases(Report& report, Env* env, jclass probe) {
         entry<void (*)(Env*, jobject)>(env, slot::DeleteGlobalRef)(env, work.probe);
     }
     char text[12];
+    decimal(text, static_cast<uint32_t>((now_us() - scene_start) / 1000));
+    report.line("scene_ms", text);
     decimal(text, g_scene.results);
     report.line("scene_results", text);
     decimal(text, g_scene.bursts);
@@ -1038,6 +1059,262 @@ void scene_cases(Report& report, Env* env, jclass probe) {
                                          g_scene.bursts >= kSceneMinimumBursts);
     report.verdict("scene_data", started && g_scene.failed_at == 0);
     report.verdict("scene_write", started && g_scene.write_failed_at == 0);
+}
+
+// ---- ended blocks (the rows ended_*)
+
+struct EndedIds {
+    jmethodID asset, same, poke, peek, collect, payload;
+};
+
+// Whether the object pointer reads as a block of `n` bytes that all hold `value`: the length word, and samples.
+bool block_holds(const void* block, uint32_t n, uint8_t value) {
+    const char* raw = static_cast<const char*>(block);
+    uint8_t head[32], seen[16];
+    int32_t length = 0;
+    if (!safe_copy(head, raw, sizeof(head))) {
+        return false;
+    }
+    __builtin_memcpy(&length, head + 8, sizeof(length));
+    if (static_cast<uint32_t>(length) != n || !all_equal(head + 16, 16, value)) {
+        return false;
+    }
+    const uint32_t samples[2] = {n / 2 - 8, n - 16};
+    for (uint32_t at : samples) {
+        if (!safe_copy(seen, raw + 16 + at, 16) || !all_equal(seen, 16, value)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+uint8_t byte_at(const void* block, uint32_t at) {
+    uint8_t value = 0;
+    safe_copy(&value, static_cast<const char*>(block) + 16 + at, 1);
+    return value;
+}
+
+void ended_cases(Report& report, Env* env, jclass probe) {
+    const auto static_method = entry<jmethodID (*)(Env*, jclass, const char*, const char*)>(env, slot::GetStaticMethodID);
+    const auto call_object = entry<jobject (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kObject, kVarargs));
+    const auto call_int = entry<jint (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kInt, kVarargs));
+    const auto call_void = entry<void (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kVoid, kVarargs));
+    const auto delete_local = entry<void (*)(Env*, jobject)>(env, slot::DeleteLocalRef);
+    const auto new_global = entry<jobject (*)(Env*, jobject)>(env, slot::NewGlobalRef);
+    const auto delete_global = entry<void (*)(Env*, jobject)>(env, slot::DeleteGlobalRef);
+    const auto exception_clear = entry<void (*)(Env*)>(env, slot::ExceptionClear);
+    const EndedIds ids{static_method(env, probe, "asset", "(II)[B"), static_method(env, probe, "same", "([B)[B"),
+                       static_method(env, probe, "poke", "([BII)V"), static_method(env, probe, "peek", "([BI)I"),
+                       static_method(env, probe, "collect", "()V"), static_method(env, probe, "payload", "()[B")};
+    if (!ids.asset || !ids.same || !ids.poke || !ids.peek || !ids.collect || !ids.payload) {
+        report.line("ended_keep", "fail");
+        report.line("ended_arrays", "fail");
+        return;
+    }
+
+    // An array Java holds, its pointer kept; a thousand temporaries; the pointer still reads the array.
+    {
+        constexpr uint32_t n = 65536;
+        unsigned failed = 0;  // the first check that did not hold (recorded)
+        const auto check = [&](unsigned code, bool condition) {
+            if (!condition && failed == 0) {
+                failed = code;
+            }
+        };
+        jobject block = call_object(env, probe, ids.asset, static_cast<jint>(n), 0x11);
+        const void* kept = block;
+        check(1, block != nullptr && block_holds(block, n, 0x11));
+        jobject held = block != nullptr ? new_global(env, block) : nullptr;  // the array, held: Java's reference
+        if (block != nullptr) {
+            delete_local(env, block);  // the block's last reference ends
+        }
+        const void* early[8] = {};
+        bool reused = false;
+        for (int i = 0; i < 1000; ++i) {
+            jobject temporary = call_object(env, probe, ids.asset, static_cast<jint>(n), 0x20 + (i & 31));
+            check(2, temporary != nullptr && temporary != kept);
+            for (const void* before : early) {
+                reused = reused || (before != nullptr && before == temporary);
+            }
+            if (i < 8) {
+                early[i] = temporary;
+            }
+            if (temporary != nullptr) {
+                delete_local(env, temporary);
+            }
+            if (i % 100 == 99) {
+                call_void(env, probe, ids.collect);
+            }
+        }
+        check(3, block_holds(kept, n, 0x11));  // the kept pointer still reads the array's bytes as of the end
+        call_void(env, probe, ids.poke, held, 100, 0x22);  // Java changes a byte
+        const uint8_t written = 0x33;
+        check(4, safe_store(const_cast<char*>(static_cast<const char*>(kept)) + 16 + 5000, &written, 1));  // another 4 KiB chunk
+        jobject again = call_object(env, probe, ids.same, held);  // the array obtained again
+        check(5, again == kept);
+        check(6, byte_at(again, 100) == 0x22 && byte_at(again, 5000) == 0x33);
+        check(7, call_int(env, probe, ids.peek, held, 5000) == 0x33 && call_int(env, probe, ids.peek, held, 100) == 0x22);
+        if (again != nullptr) {
+            delete_local(env, again);
+        }
+        if (held != nullptr) {
+            delete_global(env, held);
+        }
+        check(8, !entry<jboolean (*)(Env*)>(env, slot::ExceptionCheck)(env));
+        exception_clear(env);
+        report.verdict("ended_keep", failed == 0);
+        char code[12];
+        decimal(code, failed);
+        report.line("ended_keep_failed_check", code);
+        report.line("ended_reuse", reused ? "yes" : "no");
+    }
+
+    // 64 arrays Java holds, each obtained again and again: its own block, always.
+    {
+        constexpr int kArrays = 64;
+        constexpr int kRounds = 100;
+        constexpr uint32_t n = 300;
+        const void* at[kArrays] = {};
+        jobject blocks[kArrays] = {};
+        jobject held[kArrays] = {};
+        bool ok = true;
+        for (int i = 0; i < kArrays; ++i) {  // all live at once: 64 addresses
+            blocks[i] = call_object(env, probe, ids.asset, static_cast<jint>(n), 1 + i);
+            at[i] = blocks[i];
+            ok = ok && blocks[i] != nullptr && block_holds(blocks[i], n, static_cast<uint8_t>(1 + i));
+            held[i] = blocks[i] != nullptr ? new_global(env, blocks[i]) : nullptr;
+        }
+        for (int i = 0; i < kArrays; ++i) {
+            for (int j = i + 1; j < kArrays; ++j) {
+                ok = ok && at[i] != at[j];
+            }
+            if (blocks[i] != nullptr) {
+                delete_local(env, blocks[i]);
+            }
+        }
+        const uint64_t start = now_us();
+        for (int round = 0; ok && round < kRounds; ++round) {
+            for (int i = 0; ok && i < kArrays; ++i) {
+                jobject again = call_object(env, probe, ids.same, held[i]);
+                ok = again == at[i] && block_holds(again, n, static_cast<uint8_t>(1 + i));
+                if (again != nullptr) {
+                    delete_local(env, again);
+                }
+            }
+        }
+        char text[12];
+        decimal(text, static_cast<uint32_t>((now_us() - start) * 1000 / (kRounds * kArrays)));
+        report.line("arrays_ns", text);
+        for (jobject reference : held) {
+            if (reference != nullptr) {
+                delete_global(env, reference);
+            }
+        }
+        report.verdict("ended_arrays", ok && !entry<jboolean (*)(Env*)>(env, slot::ExceptionCheck)(env));
+        exception_clear(env);
+    }
+
+    // The stated limit: a raw write after the block ended reaches Java only when the array is obtained again.
+    {
+        jobject block = call_object(env, probe, ids.asset, 100, 0x51);
+        jobject held = block != nullptr ? new_global(env, block) : nullptr;
+        const uint8_t written = 0x44;
+        const bool wrote = block != nullptr && held != nullptr &&
+                           (delete_local(env, block), safe_store(const_cast<char*>(static_cast<const char*>(block)) + 16 + 5, &written, 1));
+        report.line("ended_limit", !wrote ? "skipped" : call_int(env, probe, ids.peek, held, 5) == 0x44 ? "seen" : "unseen");
+        if (held != nullptr) {
+            delete_global(env, held);
+        }
+        exception_clear(env);
+    }
+
+    // What the layer's sentinel relies on: a weak reference to an array nothing holds is cleared by a collection, also
+    // one the runtime starts itself after allocation pressure.
+    {
+        const auto new_array = entry<jobject (*)(Env*, jsize)>(env, slot::NewByteArray);
+        const auto new_weak = entry<jobject (*)(Env*, jobject)>(env, slot::NewWeakGlobalRef);
+        const auto delete_weak = entry<void (*)(Env*, jobject)>(env, slot::DeleteWeakGlobalRef);
+        const auto same_object = entry<jboolean (*)(Env*, jobject, jobject)>(env, slot::IsSameObject);
+        jobject array = new_array(env, 0);
+        jobject weak = array != nullptr ? new_weak(env, array) : nullptr;
+        if (array != nullptr) {
+            delete_local(env, array);
+        }
+        bool pressure = false;
+        for (int i = 0; weak != nullptr && !pressure && i < 2000; ++i) {
+            jobject garbage = new_array(env, 1 << 20);
+            if (garbage != nullptr) {
+                delete_local(env, garbage);
+            }
+            pressure = same_object(env, weak, nullptr) != 0;
+        }
+        report.line("sentinel_pressure", weak == nullptr ? "skipped" : pressure ? "cleared" : "kept");
+        if (weak != nullptr) {
+            delete_weak(env, weak);
+        }
+        array = new_array(env, 0);
+        weak = array != nullptr ? new_weak(env, array) : nullptr;
+        if (array != nullptr) {
+            delete_local(env, array);
+        }
+        call_void(env, probe, ids.collect);
+        report.line("sentinel_gc", weak == nullptr ? "skipped" : same_object(env, weak, nullptr) != 0 ? "cleared" : "kept");
+        if (weak != nullptr) {
+            delete_weak(env, weak);
+        }
+        // What one IsSameObject costs, for the numbers of the layer's tests (nanoseconds).
+        jobject strong = new_array(env, 8);
+        weak = strong != nullptr ? new_weak(env, strong) : nullptr;
+        if (weak != nullptr) {
+            const uint64_t start = now_us();
+            for (int i = 0; i < 20000; ++i) {
+                same_object(env, weak, nullptr);
+            }
+            char text[12];
+            decimal(text, static_cast<uint32_t>((now_us() - start) * 1000 / 20000));
+            report.line("is_same_ns", text);
+            delete_weak(env, weak);
+        }
+        if (strong != nullptr) {
+            delete_local(env, strong);
+        }
+        exception_clear(env);
+    }
+
+    // The cost of a byte[] result and its deletion, in nanoseconds: the least of three rounds of 5000.
+    {
+        uint64_t best = ~uint64_t{0};
+        for (int round = 0; round < 3; ++round) {
+            const uint64_t start = now_us();
+            for (int i = 0; i < 5000; ++i) {
+                jobject array = call_object(env, probe, ids.payload);
+                if (array != nullptr) {
+                    delete_local(env, array);
+                }
+            }
+            const uint64_t elapsed = now_us() - start;
+            best = elapsed < best ? elapsed : best;
+            call_void(env, probe, ids.collect);
+        }
+        char text[12];
+        decimal(text, static_cast<uint32_t>(best * 1000 / 5000));
+        report.line("create_ns", text);
+        // What System.identityHashCode costs from native code.
+        const auto find_class = entry<jclass (*)(Env*, const char*)>(env, slot::FindClass);
+        const auto new_array = entry<jobject (*)(Env*, jsize)>(env, slot::NewByteArray);
+        jclass system = find_class(env, "java/lang/System");
+        jmethodID hash = system != nullptr ? static_method(env, system, "identityHashCode", "(Ljava/lang/Object;)I") : nullptr;
+        jobject subject = new_array(env, 8);
+        if (hash != nullptr && subject != nullptr) {
+            const uint64_t start = now_us();
+            for (int i = 0; i < 5000; ++i) {
+                call_int(env, system, hash, subject);
+            }
+            decimal(text, static_cast<uint32_t>((now_us() - start) * 1000 / 5000));
+            report.line("hash_call_ns", text);
+        }
+        exception_clear(env);
+    }
 }
 
 // The cases of the end of a native method (see the list at the top).
@@ -1277,6 +1554,7 @@ extern "C" __attribute__((visibility("default"))) jstring Java_org_example_andar
     }
     report.verdict("low_heap", low_heap());
     ends_cases(report, env, probe, opts);
+    ended_cases(report, env, probe);
 
     report.line("done", "1");
     if (options != nullptr) {

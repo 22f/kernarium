@@ -642,15 +642,22 @@ patches ART's one JNI function table in place and gives the application:
   the array; a real array keeps the runtime's own flag. Bytes Java writes
   outside those points (another thread, a callback after the native method
   returned) show at the next one, and a raw write from another thread while a
-  point is running can be lost. The same array returned again to the same thread is the same block
-  (among the thread's most recent ones), freed by the last of its
-  `DeleteLocalRef` calls. A thread holds at most 512 blocks over its life, not
-  per native method: a block lasts until its reference is deleted or its thread
-  ends, so a native method that takes a new array on every call and never
-  deletes it reaches the limit. The process holds 32 MiB of blocks, and each
-  block's copy takes as many bytes again in the ordinary heap. Beyond the
-  limits the result is ART's own reference. A block is never recycled. An array
-  the application creates itself (`NewByteArray`) stays ART's own;
+  point is running can be lost. A reference to a block ends where a Dalvik local
+  reference did: at `DeleteLocalRef`, at `PopLocalFrame`, at the return of a native
+  method of the application's own libraries (found by name or registered; another
+  package's library keeps the runtime's binding) and when its thread detaches. A
+  thread holds at most 512 live references; a result beyond the limit stays ART's
+  own reference. The same array returned again to the thread is the same block
+  (among its eight most recent). A block whose references have all ended stays at
+  its address with its bytes as of that end (what the application wrote through
+  the pointer reaches the array then) until the runtime collects the array; the
+  same array obtained again, on any thread, is that block again, so Java's later
+  writes and the application's later raw writes meet in it, and until then they
+  reach neither side. Ended blocks do not count toward the 512; when the region
+  or 16384 of them are used up, those whose arrays are gone are freed and, once
+  in ten seconds, the runtime is asked to collect. The process holds 32 MiB of
+  blocks, and each block's copy takes as many bytes again in the ordinary heap.
+  An array the application creates itself (`NewByteArray`) stays ART's own;
 - an allocator below 2 GiB for the libraries the application ships: their
   `malloc`, `calloc`, `strdup`, `strndup`, `operator new` and `operator
   delete` imports are redirected as the library is first seen.
@@ -665,7 +672,8 @@ mapping its return address is in, so the platform's libraries in the same
 process see the real arrays. Page protection is restored after each write, and
 a library whose pages cannot all be opened is left untouched. The library logs
 under the tag `kernarium_oldapp` the first `byte[]` result that stayed ART's own
-reference (with the blocks and bytes its thread held), the first allocation
+reference (with the blocks and bytes its thread held, and the ended blocks that
+waited), the first time it asked the runtime to collect, the first allocation
 that went to libc because the low arena had no room, and, at most every 30 s
 while it grows, the most blocks any one thread has held.
 
@@ -682,8 +690,8 @@ without a call into JNI (found by the next periodic scan), which until then
 keeps libc's `free` and can abort on a block another library allocated; a
 library with an allocator import in executable code (a text relocation) or
 whose relocation pages cannot be reopened, which keeps libc's allocator,
-`realloc` included, for its own blocks; a freed block's address reused while
-the application still holds the old pointer; and more than 512 loaded
+`realloc` included, for its own blocks; a block's address reused after its array was
+collected, while the application still holds the old pointer; and more than 512 loaded
 libraries.
 `tests/integration/android/run_android_oldapp.py` qualifies it
 ([testing](../../docs/testing.md#android)).

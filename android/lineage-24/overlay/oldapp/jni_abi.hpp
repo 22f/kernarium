@@ -128,6 +128,7 @@ enum : int {
     MonitorEnter = 217,
     MonitorExit = 218,
     NewWeakGlobalRef = 226,
+    DeleteWeakGlobalRef = 227,
     ExceptionCheck = 228,
     GetObjectRefType = 232,
 };

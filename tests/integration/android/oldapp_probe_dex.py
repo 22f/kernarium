@@ -18,6 +18,9 @@ the work and this module only lays out a class with several methods. The Java it
         public static int spin(int n) { int i = 0; while (i < n) { empty(); i++; } return i; }
         public static byte[] asset(int n, int v) { byte[] a = new byte[n]; Arrays.fill(a, (byte) v); return a; }
         public static int peek(byte[] a, int i) { return a[i]; }
+        public static void poke(byte[] a, int i, int v) { a[i] = (byte) v; }
+        public static byte[] same(byte[] a) { return a; }
+        public static void collect() { Runtime.getRuntime().gc(); }
         public static int scene(int frames) {
             int ok = sceneInit();
             for (int i = 0; i < frames; i++) ok &= sceneFrame(i);
@@ -33,7 +36,8 @@ the work and this module only lays out a class with several methods. The Java it
 passes the array back to. The other native methods are what the native code calls to see the end of a native
 method (blocks that end when it returns) and that the thunks pass every argument and result through; `spin` is the
 loop that times a native call. `asset` is what an application's asset reader does (a fresh array of a given length
-for every call), `scene` the loop of its render thread: one native init method, then one native method per frame.
+for every call), `scene` the loop of its render thread: one native init method, then one native method per frame;
+`same` returns its argument (an array Java holds, obtained again), `poke` writes a byte, `collect` is Runtime.gc().
 """
 
 from __future__ import annotations
@@ -50,6 +54,7 @@ CLASS_NAME = "org.example.andarium.oldappprobe.Probe"
 PAYLOAD = "OLD-APP-PAYLOAD-0123456789abcdef"
 SYSTEM = "Ljava/lang/System;"
 ARRAYS = "Ljava/util/Arrays;"
+RUNTIME = "Ljava/lang/Runtime;"
 BYTES = "[B"
 ACC_STATIC = 0x8
 ACC_NATIVE = 0x100
@@ -88,6 +93,11 @@ def build_dex() -> bytes:
     peek = pools.method(owner, "peek", "I", (BYTES, "I"))
     scene = pools.method(owner, "scene", "I", ("I",))
     fill = pools.method(ARRAYS, "fill", "V", (BYTES, "B"))
+    poke = pools.method(owner, "poke", "V", (BYTES, "I", "I"))
+    same = pools.method(owner, "same", BYTES, (BYTES,))
+    collect = pools.method(owner, "collect", "V")
+    get_runtime = pools.method(RUNTIME, "getRuntime", RUNTIME)
+    gc = pools.method(RUNTIME, "gc", "V")
     for item in ("V", "I", BYTES, "Z", "B", "C", "S", "J", "F", "D"):
         pools.type(item)
     for text in ("shim", "koldprobe", "opts", PAYLOAD):
@@ -147,6 +157,20 @@ def build_dex() -> bytes:
     peek_body.op("aget-byte", 0, 1, 2)
     peek_body.op("return", 0)
 
+    poke_body = base.Code(registers=4, ins=3, outs=0)  # v1 the array, v2 the index, v3 the value
+    poke_body.op("int-to-byte", 3, 3)
+    poke_body.op("aput-byte", 3, 1, 2)
+    poke_body.op("return-void")
+
+    same_body = base.Code(registers=2, ins=1, outs=0)  # v1 the array
+    same_body.op("return-object", 1)
+
+    collect_body = base.Code(registers=1, ins=0, outs=1)
+    collect_body.op("invoke-static", get_runtime)
+    collect_body.op("move-result-object", 0)
+    collect_body.op("invoke-virtual", gc, 0)
+    collect_body.op("return-void")
+
     # v0 the status, v1 the frame, v2 a temporary, v3 the number of frames: the render thread's loop.
     scene_body = base.Code(registers=4, ins=1, outs=1)
     scene_body.op("invoke-static", natives["sceneInit"])
@@ -194,7 +218,8 @@ def build_dex() -> bytes:
         sections.append((base.TYPE_TYPE_LIST, len(list_offsets), first))
 
     bodies = {init: constructor, on_receive: receive, payload: payload_body, echo: echo_body, spin: spin_body,
-              asset: asset_body, peek: peek_body, scene: scene_body}
+              asset: asset_body, peek: peek_body, scene: scene_body, poke: poke_body, same: same_body,
+              collect: collect_body}
     code_offsets: dict[object, int] = {}
     first_code = None
     for method, body in bodies.items():
@@ -222,6 +247,9 @@ def build_dex() -> bytes:
          (pools.method_id(asset), base.ACC_PUBLIC | ACC_STATIC, code_offsets[asset]),
          (pools.method_id(peek), base.ACC_PUBLIC | ACC_STATIC, code_offsets[peek]),
          (pools.method_id(scene), base.ACC_PUBLIC | ACC_STATIC, code_offsets[scene]),
+         (pools.method_id(poke), base.ACC_PUBLIC | ACC_STATIC, code_offsets[poke]),
+         (pools.method_id(same), base.ACC_PUBLIC | ACC_STATIC, code_offsets[same]),
+         (pools.method_id(collect), base.ACC_PUBLIC | ACC_STATIC, code_offsets[collect]),
          *((pools.method_id(method), base.ACC_PUBLIC | ACC_STATIC | ACC_NATIVE, 0) for method in natives.values())))
     virtual = [(pools.method_id(on_receive), base.ACC_PUBLIC, code_offsets[on_receive])]
     class_data_offset = data_off + len(data)

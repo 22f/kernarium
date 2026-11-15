@@ -23,7 +23,12 @@ constexpr unsigned kMaxThunks = 1024; // native functions that can get a thunk
 constexpr unsigned kRegisterChunk = 32;  // RegisterNatives methods copied at a time
 constexpr uint32_t kDalvikArrayClass = 0x5a324241u;
 constexpr uint32_t kBlockLive = 0xb10c11feu;
+constexpr uint32_t kBlockEnded = 0xe4ded10cu;  // the references ended, the array is not collected yet
 constexpr uint32_t kBlockDead = 0xdeadb10cu;
+constexpr unsigned kEndedBuckets = 4096;        // the ended index, by the array's identity hash
+constexpr unsigned kMaxEnded = 16384;           // ended blocks: well below ART's 51200 weak global references
+constexpr unsigned kSweepStep = 32;             // ended blocks tested at a creation after a collection
+constexpr uint32_t kCollectIntervalMs = 10000;  // between two Runtime.gc() calls made for room
 constexpr size_t kBlockTail = 16;  // zeroes behind the data: raw readers overrun by a few bytes
 constexpr uint32_t kChunk = 4096;  // the unit of the block's synchronization with its array
 
@@ -60,10 +65,15 @@ static_assert(offsetof(DalvikArray, data) == 16, "Dalvik ArrayObject contents of
 struct BlockHeader {
     uint32_t magic;
     uint32_t capacity;   // the length of the real array: the only length the layer trusts
-    jobject global;      // a global reference to the real array
-    BlockHeader* next;   // the queue of an ended thread's blocks
+    jobject global;      // a global reference to the real array (a live block; null once it has ended)
+    BlockHeader* next;   // the queue of blocks that wait for an environment
     uint8_t* baseline;   // the bytes as of the last synchronization (outside the low arena)
     uint32_t refs;       // the references the application holds to this block
+    jobject weak;        // an ended block: a weak global reference to the array
+    uint32_t hash;       // the identity hash of the array, for the index of the ended blocks
+    BlockHeader* bucket_next;  // the ended index: the chain of the hash's bucket, the newest first
+    BlockHeader* list_next;    // the ended list, in the order the blocks ended (the collection sweeps)
+    BlockHeader* list_prev;
 };
 constexpr size_t kBlockHead = (sizeof(BlockHeader) + 15) & ~size_t{15};
 
@@ -120,6 +130,24 @@ struct Globals {
     uint32_t ended_logged;        // the first block that ended at a return has been logged
     uint32_t ended_max_logged;    // the highest number of references one return has ended that has been logged, and when
     uint32_t ended_max_logged_ms;
+    // The ended blocks (see "ended blocks" below); everything here is under the ended lock.
+    uint32_t ended_lock;       // the spin lock, where the platform gives no mutex
+    BlockHeader* ended_bucket[kEndedBuckets];
+    BlockHeader ended_head;    // the anchor of the circular list of the ended blocks
+    BlockHeader* sweep_cursor; // the next ended block a sweep tests
+    bool sweeping;             // a collection was seen: the list is being tested, kSweepStep blocks at a creation
+    jobject sentinel;          // a weak reference to an array nothing holds: a collection clears it
+    unsigned ended_count;
+    uint64_t ended_bytes;
+    uint32_t ids_state;        // 0 not looked up, 1 found, 2 not found
+    jclass system_class;       // global references to the classes of the calls below
+    jmethodID hash_method;     // System.identityHashCode(Object)
+    jclass runtime_class;
+    jmethodID runtime_get;     // Runtime.getRuntime()
+    jmethodID runtime_gc;      // Runtime.gc()
+    uint32_t collect_ms;       // when Runtime.gc() was last asked for
+    uint32_t collect_asked;    // it has been asked for
+    uint32_t collect_logged;
     uint32_t kind_pool_used;
     char kind_pool[kKindPoolBytes];
     MethodInfo methods[kMethodSlots];
@@ -181,7 +209,14 @@ jobject conv(jobject object) {
     return header != nullptr ? header->global : nullptr;
 }
 
-void free_block(Env* env, BlockHeader* header) {
+// A block with no reference left is not freed: see end_block (ended blocks, below).
+void end_block(Env* env, BlockHeader* header);
+
+// Whether a JNI call may follow: not with an exception pending (almost no function may run then).
+bool jni_usable(Env* env) { return !original<jboolean (*)(Env*)>(slot::ExceptionCheck)(env); }
+
+// A live block that cannot become an ended one (no weak reference to give): its global reference and its memory go.
+void destroy_block(Env* env, BlockHeader* header) {
     header->magic = kBlockDead;
     original<void (*)(Env*, jobject)>(slot::DeleteGlobalRef)(env, header->global);
     if (header->baseline != nullptr) {
@@ -191,7 +226,16 @@ void free_block(Env* env, BlockHeader* header) {
     __atomic_fetch_sub(&g.counters.shadows_live, 1u, __ATOMIC_RELAXED);
 }
 
-// A reference of the thread ended: the block goes with its last reference. A thread that has made entries has an
+// Blocks that wait for an environment without a pending exception: a thread that ended, or an end with an exception
+// pending.
+void queue_pending(BlockHeader* header) {
+    BlockHeader* head = __atomic_load_n(&g.pending, __ATOMIC_RELAXED);
+    do {
+        header->next = head;
+    } while (!__atomic_compare_exchange_n(&g.pending, &head, header, true, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+}
+
+// A reference of the thread ended: the block ends with its last reference. A thread that has made entries has an
 // environment; without one (it cannot be), the block waits for the next wrapped call that has one.
 void release_entry(Env* env, ThreadState* state, BlockHeader* header) {
     if (--header->refs > 0) {
@@ -199,13 +243,10 @@ void release_entry(Env* env, ThreadState* state, BlockHeader* header) {
     }
     state->bytes -= header->capacity;
     if (env != nullptr) {
-        free_block(env, header);
+        end_block(env, header);
         return;
     }
-    BlockHeader* head = __atomic_load_n(&g.pending, __ATOMIC_RELAXED);
-    do {
-        header->next = head;
-    } while (!__atomic_compare_exchange_n(&g.pending, &head, header, true, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+    queue_pending(header);
 }
 
 // Ends the entries above `height`, the newest first; returns how many.
@@ -218,12 +259,15 @@ unsigned end_entries(ThreadState* state, unsigned height) {
     return ended;
 }
 
-// The blocks of ended threads: their global references need an environment to be deleted.
+// The blocks that wait for an environment: with one, and no exception pending, their ends are finished.
 void drain_pending(Env* env) {
+    if (!jni_usable(env)) {
+        return;  // the next call without an exception finishes them
+    }
     BlockHeader* list = __atomic_exchange_n(&g.pending, static_cast<BlockHeader*>(nullptr), __ATOMIC_ACQ_REL);
     while (list != nullptr) {
         BlockHeader* next = list->next;
-        free_block(env, list);
+        end_block(env, list);
         __atomic_fetch_add(&g.counters.shadows_released, 1u, __ATOMIC_RELAXED);
         list = next;
     }
@@ -385,9 +429,6 @@ void abort_critical(Env* env, BlockHeader* header) {
                                                                                       kReleaseAbort);
 }
 
-// Whether a call that took the blocks may be followed by JNI calls: not with an exception pending.
-bool jni_usable(Env* env) { return !original<jboolean (*)(Env*)>(slot::ExceptionCheck)(env); }
-
 template <class R, class F>
 R call_synced(Env* env, BlockHeader* const* touched, unsigned count, F&& call) {
     if (count != 0 && jni_usable(env)) {
@@ -416,6 +457,293 @@ R call_synced(Env* env, BlockHeader* const* touched, unsigned count, F&& call) {
     }
 }
 
+// ---- ended blocks
+//
+// A block whose references have all ended (a native method returned, a frame was popped, DeleteLocalRef) is not freed.
+// Its array may be held by Java still, and the application may keep the pointer: on Dalvik the object stayed where it
+// was for as long as it was reachable. So the block stays at its address with its bytes and its baseline until the array
+// is collected. At the end, what the application wrote through the pointer goes to the array, and the block's strong
+// reference gives way to a weak one. The ended blocks are in one list, in the order they ended, and in an index by the
+// array's identity hash. The same array obtained again gets its block back, wherever the pointer was kept, so Java's
+// later writes and the application's later raw writes meet in it (point 3: the merge of the synchronization).
+//
+// How the layer learns of a collection: IsSameObject(weak, NULL), the JNI specification's test for a cleared
+// reference. A sentinel, a weak reference to an array nothing holds, says when to look: every collection clears it, since
+// it is younger than the last one; the first creation of a block after that starts testing the ended blocks, kSweepStep
+// at each creation. The tests run only at the creation of a block, never at a native return, so a call that makes no
+// block pays nothing. Room is made on demand: a full sweep, then a Runtime.gc() (at most every kCollectIntervalMs), then
+// a full sweep again. The sentinel is a hint: that full sweep never reads it.
+//
+// The index, the list, the cursor and the frees are under one process-wide lock. The JNI calls made under it
+// (IsSameObject, New/DeleteWeakGlobalRef, NewGlobalRef) go to the runtime's own functions and never re-enter the layer;
+// Runtime.gc() runs outside the lock. Nothing here runs with an exception pending, and the critical wrappers never
+// start it, so no call here is made inside a critical region.
+
+void lock_ended() {
+    if (g.platform.mutex_lock != nullptr) {
+        g.platform.mutex_lock();
+        return;
+    }
+    while (__atomic_exchange_n(&g.ended_lock, 1u, __ATOMIC_ACQUIRE) != 0) {
+    }
+}
+void unlock_ended() {
+    if (g.platform.mutex_unlock != nullptr) {
+        g.platform.mutex_unlock();
+        return;
+    }
+    __atomic_store_n(&g.ended_lock, 0u, __ATOMIC_RELEASE);
+}
+struct EndedLock {
+    EndedLock() { lock_ended(); }
+    ~EndedLock() { unlock_ended(); }
+    EndedLock(const EndedLock&) = delete;
+    EndedLock& operator=(const EndedLock&) = delete;
+};
+
+void publish_ended() {
+    __atomic_store_n(&g.counters.shadows_ended, g.ended_count, __ATOMIC_RELAXED);
+    __atomic_store_n(&g.counters.ended_bytes, static_cast<uint32_t>(g.ended_bytes), __ATOMIC_RELAXED);
+}
+
+// Under the lock.
+void ended_add(BlockHeader* block) {
+    block->list_prev = g.ended_head.list_prev;
+    block->list_next = &g.ended_head;
+    g.ended_head.list_prev->list_next = block;
+    g.ended_head.list_prev = block;
+    BlockHeader** chain = &g.ended_bucket[block->hash % kEndedBuckets];
+    block->bucket_next = *chain;  // the newest first
+    *chain = block;
+    ++g.ended_count;
+    g.ended_bytes += block->capacity;
+    publish_ended();
+}
+void ended_remove(BlockHeader* block) {
+    if (g.sweep_cursor == block) {
+        g.sweep_cursor = block->list_next;
+    }
+    block->list_prev->list_next = block->list_next;
+    block->list_next->list_prev = block->list_prev;
+    BlockHeader** chain = &g.ended_bucket[block->hash % kEndedBuckets];
+    while (*chain != block) {
+        chain = &(*chain)->bucket_next;
+    }
+    *chain = block->bucket_next;
+    --g.ended_count;
+    g.ended_bytes -= block->capacity;
+    publish_ended();
+}
+
+// The array of an ended block is gone: the block, its baseline and its weak reference go.
+void reclaim_ended(Env* env, BlockHeader* block) {
+    ended_remove(block);
+    block->magic = kBlockDead;
+    original<void (*)(Env*, jobject)>(slot::DeleteWeakGlobalRef)(env, block->weak);
+    if (block->baseline != nullptr) {
+        g.platform.free_baseline(block->baseline);
+    }
+    g.shadow_arena.release(block);
+    __atomic_fetch_add(&g.counters.blocks_collected, 1u, __ATOMIC_RELAXED);
+}
+
+bool cleared(Env* env, jobject weak) {
+    return original<jboolean (*)(Env*, jobject, jobject)>(slot::IsSameObject)(env, weak, nullptr) != 0;
+}
+
+// Tests the ended blocks from the cursor, `limit` of them (0: all, from the first); reclaims the ones whose arrays are
+// gone. The sweep ends where the list does.
+void sweep(Env* env, unsigned limit) {
+    BlockHeader* node = limit == 0 ? g.ended_head.list_next : g.sweep_cursor;
+    unsigned tested = 0;
+    while (node != &g.ended_head && (limit == 0 || tested < limit)) {
+        BlockHeader* next = node->list_next;
+        ++tested;
+        if (cleared(env, node->weak)) {
+            reclaim_ended(env, node);
+        }
+        node = next;
+    }
+    g.sweep_cursor = node;
+    if (node == &g.ended_head) {
+        g.sweeping = false;
+        g.sweep_cursor = g.ended_head.list_next;
+    }
+}
+
+void renew_sentinel(Env* env) {
+    if (g.sentinel != nullptr) {
+        original<void (*)(Env*, jobject)>(slot::DeleteWeakGlobalRef)(env, g.sentinel);
+        g.sentinel = nullptr;
+    }
+    jobject array = original<jobject (*)(Env*, jsize)>(slot::NewByteArray)(env, 0);
+    if (array == nullptr) {
+        original<void (*)(Env*)>(slot::ExceptionClear)(env);
+        return;
+    }
+    g.sentinel = original<jobject (*)(Env*, jobject)>(slot::NewWeakGlobalRef)(env, array);
+    original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, array);
+}
+
+// At the creation of a block, under the lock: whether a collection ran since the last look, and then the next
+// kSweepStep ended blocks.
+void collection_step(Env* env) {
+    if (g.ended_count == 0) {
+        return;
+    }
+    if (!g.sweeping) {
+        if (g.sentinel != nullptr && !cleared(env, g.sentinel)) {
+            return;
+        }
+        renew_sentinel(env);
+        g.sweeping = true;
+        g.sweep_cursor = g.ended_head.list_next;
+    }
+    sweep(env, kSweepStep);
+}
+
+// System.identityHashCode and Runtime.gc(), looked up once (through the runtime's own table).
+bool find_ids(Env* env) {
+    const auto find_class = original<jclass (*)(Env*, const char*)>(slot::FindClass);
+    const auto global = original<jobject (*)(Env*, jobject)>(slot::NewGlobalRef);
+    const auto delete_local = original<void (*)(Env*, jobject)>(slot::DeleteLocalRef);
+    const auto static_method = original<jmethodID (*)(Env*, jclass, const char*, const char*)>(slot::GetStaticMethodID);
+    const auto method = original<jmethodID (*)(Env*, jclass, const char*, const char*)>(slot::GetMethodID);
+    jclass system = find_class(env, "java/lang/System");
+    jclass runtime = system != nullptr ? find_class(env, "java/lang/Runtime") : nullptr;
+    if (system != nullptr && runtime != nullptr) {
+        g.system_class = static_cast<jclass>(global(env, system));
+        g.runtime_class = static_cast<jclass>(global(env, runtime));
+        g.hash_method = static_method(env, g.system_class, "identityHashCode", "(Ljava/lang/Object;)I");
+        g.runtime_get = static_method(env, g.runtime_class, "getRuntime", "()Ljava/lang/Runtime;");
+        g.runtime_gc = method(env, g.runtime_class, "gc", "()V");
+    }
+    if (system != nullptr) delete_local(env, system);
+    if (runtime != nullptr) delete_local(env, runtime);
+    const bool ok = g.system_class != nullptr && g.runtime_class != nullptr && g.hash_method != nullptr &&
+                    g.runtime_get != nullptr && g.runtime_gc != nullptr;
+    if (!ok) {
+        original<void (*)(Env*)>(slot::ExceptionClear)(env);
+    }
+    return ok;
+}
+bool ensure_ids(Env* env) {
+    uint32_t state = __atomic_load_n(&g.ids_state, __ATOMIC_ACQUIRE);
+    if (state == 0) {
+        EndedLock lock;
+        if (g.ids_state == 0) {
+            __atomic_store_n(&g.ids_state, find_ids(env) ? 1u : 2u, __ATOMIC_RELEASE);
+        }
+        state = g.ids_state;
+    }
+    return state == 1;
+}
+
+// The identity hash of the array `local` (a real reference). False where it cannot be had: the array is then no
+// ended block's again.
+bool identity_hash(Env* env, jobject local, uint32_t* hash) {
+    if (!ensure_ids(env)) {
+        return false;
+    }
+    jvalue argument;
+    argument.j = 0;
+    argument.l = local;
+    const jint value = original<jint (*)(Env*, jclass, jmethodID, const jvalue*)>(static_call_slot(kInt, kArray))(
+        env, g.system_class, g.hash_method, &argument);
+    if (!jni_usable(env)) {
+        original<void (*)(Env*)>(slot::ExceptionClear)(env);
+        return false;
+    }
+    *hash = static_cast<uint32_t>(value);
+    return true;
+}
+
+// The end of a block's last reference. What the application wrote through the pointer goes to the array, the strong
+// reference gives way to a weak one, and the block waits in the index. With an exception pending none of that may run
+// (NewWeakGlobalRef and SetByteArrayRegion are outside the functions CheckJNI allows then): the block waits for the next
+// call without one, still strong.
+void end_block(Env* env, BlockHeader* header) {
+    if (!jni_usable(env)) {
+        queue_pending(header);
+        return;
+    }
+    push_dirty(env, header);
+    jobject weak = original<jobject (*)(Env*, jobject)>(slot::NewWeakGlobalRef)(env, header->global);
+    if (weak == nullptr) {
+        original<void (*)(Env*)>(slot::ExceptionClear)(env);
+        destroy_block(env, header);  // no weak reference to give: the block goes, as with no layer to keep it
+        return;
+    }
+    original<void (*)(Env*, jobject)>(slot::DeleteGlobalRef)(env, header->global);
+    header->global = nullptr;
+    header->weak = weak;
+    {
+        EndedLock lock;
+        header->magic = kBlockEnded;
+        ended_add(header);
+        if (g.sentinel == nullptr) {
+            renew_sentinel(env);
+        }
+    }
+    __atomic_fetch_sub(&g.counters.shadows_live, 1u, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g.counters.blocks_ended, 1u, __ATOMIC_RELAXED);
+}
+
+// The ended block for the array `local` (identity hash `hash`), turned live again with a new global reference; null if
+// there is none. Two ended blocks can exist for one array (it was live on two threads): the newest is found first.
+// `no_global` is set when the global reference could not be had.
+BlockHeader* take_ended(Env* env, jobject local, uint32_t hash, size_t bytes, bool* no_global) {
+    for (BlockHeader* block = g.ended_bucket[hash % kEndedBuckets]; block != nullptr; block = block->bucket_next) {
+        if (block->hash != hash || block->capacity != bytes ||
+            original<jboolean (*)(Env*, jobject, jobject)>(slot::IsSameObject)(env, local, block->weak) == 0) {
+            continue;
+        }
+        jobject global = original<jobject (*)(Env*, jobject)>(slot::NewGlobalRef)(env, local);
+        if (global == nullptr) {
+            *no_global = true;
+            return nullptr;
+        }
+        ended_remove(block);
+        original<void (*)(Env*, jobject)>(slot::DeleteWeakGlobalRef)(env, block->weak);
+        block->weak = nullptr;
+        block->global = global;
+        block->magic = kBlockLive;
+        return block;
+    }
+    return nullptr;
+}
+
+// Asks the runtime to collect, at most every kCollectIntervalMs: true if it did. The ended blocks only wait for a
+// collection, and a pause once in a while is better than a result that stays the real reference.
+bool ask_for_collection(Env* env) {
+    const uint32_t now = g.platform.now_ms != nullptr ? g.platform.now_ms() : 0;
+    if (g.platform.now_ms != nullptr && __atomic_load_n(&g.collect_asked, __ATOMIC_RELAXED) != 0 &&
+        now - __atomic_load_n(&g.collect_ms, __ATOMIC_RELAXED) < kCollectIntervalMs) {
+        return false;
+    }
+    if (!ensure_ids(env)) {
+        return false;
+    }
+    __atomic_store_n(&g.collect_ms, now, __ATOMIC_RELAXED);
+    __atomic_store_n(&g.collect_asked, 1u, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g.counters.collections_asked, 1u, __ATOMIC_RELAXED);
+    if (g.platform.log != nullptr && __atomic_exchange_n(&g.collect_logged, 1u, __ATOMIC_RELAXED) == 0) {
+        g.platform.log("a byte[] block did not fit: the runtime was asked to collect; ended blocks and bytes waiting:",
+                       static_cast<long>(g.counters.shadows_ended), static_cast<long>(g.counters.ended_bytes));
+    }
+    jobject runtime = original<jobject (*)(Env*, jclass, jmethodID, const jvalue*)>(static_call_slot(kObject, kArray))(
+        env, g.runtime_class, g.runtime_get, nullptr);
+    if (runtime != nullptr) {
+        original<void (*)(Env*, jobject, jmethodID, const jvalue*)>(call_slot(kVoid, kArray))(env, runtime, g.runtime_gc,
+                                                                                               nullptr);
+        original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, runtime);
+    }
+    if (!jni_usable(env)) {
+        original<void (*)(Env*)>(slot::ExceptionClear)(env);
+    }
+    return true;
+}
+
 // The diagnosis lines of the log (the sessions of real games read them): the first result that stayed the real
 // reference, with the blocks and bytes the thread held, and the most blocks any thread has held, at most every
 // kPeakLogMs while it grows.
@@ -426,6 +754,10 @@ void note_declined(const ThreadState* state, const char* why) {
     if (g.platform.log != nullptr && __atomic_exchange_n(&g.declined_logged, 1u, __ATOMIC_RELAXED) == 0) {
         g.platform.log(why, state != nullptr ? static_cast<long>(state->count) : 0,
                        state != nullptr ? static_cast<long>(state->bytes) : 0);
+        // The ended blocks that still wait for a collection are a reason a result may not fit.
+        g.platform.log("ended byte[] blocks waiting for their arrays' collection when the first result was not made a "
+                       "block; blocks and bytes:",
+                       static_cast<long>(g.counters.shadows_ended), static_cast<long>(g.counters.ended_bytes));
     }
 }
 
@@ -456,10 +788,39 @@ void note_peak(uint32_t blocks) {
 // The most recent blocks of a thread that are looked at for the same array before a new block is made.
 constexpr unsigned kReuseWindow = 8;
 
+// The memory of one block: the arena and the baseline, unless the ended blocks are at their cap. Null with a reason.
+struct Room {
+    uint8_t* raw;
+    uint8_t* baseline;
+    const char* why;
+};
+Room allocate_block(size_t need, size_t bytes) {
+    Room room{nullptr, nullptr, nullptr};
+    if (__atomic_load_n(&g.counters.shadows_ended, __ATOMIC_RELAXED) >= kMaxEnded) {
+        room.why = "the first byte[] result stayed a real reference (too many ended blocks); blocks and bytes held:";
+        return room;
+    }
+    room.raw = static_cast<uint8_t*>(g.shadow_arena.allocate(need));
+    if (room.raw == nullptr) {
+        room.why = "the first byte[] result stayed a real reference (no room in the region); blocks and bytes held:";
+        return room;
+    }
+    if (bytes > 0) {
+        room.baseline = static_cast<uint8_t*>(g.platform.alloc_baseline(bytes));
+        if (room.baseline == nullptr) {
+            g.shadow_arena.release(room.raw);
+            room.raw = nullptr;
+            room.why = "the first byte[] result stayed a real reference (no memory for the baseline); blocks and bytes held:";
+        }
+    }
+    return room;
+}
+
 // A shadow for the real local reference `local`, which it replaces: the block holds a global reference to the
 // array, the local reference is deleted. An array the thread got a block for among its most recent ones is the same
-// block again (counted once more, one DeleteLocalRef for each). Null when the thread already has the limit or the
-// region is full: the caller keeps the real reference, as it would without the layer.
+// block again (counted once more, one DeleteLocalRef for each); so is an array whose block has ended and is not
+// collected: the application gets the block it may still hold the pointer of. Null when the thread already has the
+// limit or the region is full: the caller keeps the real reference, as it would without the layer.
 jobject make_shadow(Env* env, jobject local) {
     ThreadState* state = thread();
     if (state == nullptr) {
@@ -487,37 +848,83 @@ jobject make_shadow(Env* env, jobject local) {
             return array_of(known);
         }
     }
-    const size_t need = kBlockHead + offsetof(DalvikArray, data) + bytes + kBlockTail;
-    uint8_t* raw = static_cast<uint8_t*>(g.shadow_arena.allocate(need));
-    if (raw == nullptr) {
-        note_declined(state, "the first byte[] result stayed a real reference (no room in the region); blocks and bytes held:");
-        return nullptr;
+    if (__atomic_load_n(&g.pending, __ATOMIC_RELAXED) != nullptr) {
+        drain_pending(env);  // blocks that waited for an environment: their ends come before this lookup
     }
-    uint8_t* baseline = nullptr;
-    if (bytes > 0) {
-        baseline = static_cast<uint8_t*>(g.platform.alloc_baseline(bytes));
-        if (baseline == nullptr) {
-            g.shadow_arena.release(raw);
-            note_declined(state, "the first byte[] result stayed a real reference (no memory for the baseline); blocks and bytes held:");
+    // The ended blocks: a sweep step if a collection ran, then the array's own block if it ended and is not collected.
+    // Where the identity hash cannot be had, the array is made a new block.
+    uint32_t hash = 0;
+    const bool hashed = identity_hash(env, local, &hash);
+    if (__atomic_load_n(&g.counters.shadows_ended, __ATOMIC_RELAXED) != 0) {
+        BlockHeader* again = nullptr;
+        bool no_global = false;
+        {
+            EndedLock lock;
+            collection_step(env);
+            if (hashed && g.ended_count != 0) {
+                again = take_ended(env, local, hash, bytes, &no_global);
+            }
+        }
+        if (no_global) {
+            note_declined(state, "the first byte[] result stayed a real reference (no global reference); blocks and bytes held:");
             return nullptr;
         }
+        if (again != nullptr) {
+            again->refs = 1;
+            state->blocks[state->count++] = again;
+            state->env = env;
+            state->bytes += static_cast<uint32_t>(bytes);
+            original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, local);
+            __atomic_fetch_add(&g.counters.shadows_live, 1u, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g.counters.blocks_revived, 1u, __ATOMIC_RELAXED);
+            sync_all(env, again);  // Java's writes since it ended and the application's raw writes since meet here
+            note_peak(state->count);
+            return array_of(again);
+        }
+    }
+    const size_t need = kBlockHead + offsetof(DalvikArray, data) + bytes + kBlockTail;
+    Room room = allocate_block(need, bytes);
+    if (room.raw == nullptr && __atomic_load_n(&g.counters.shadows_ended, __ATOMIC_RELAXED) != 0) {
+        // Ended blocks hold the room: those whose arrays are gone are freed; if that is not enough, the runtime is
+        // asked to collect (at most every kCollectIntervalMs), outside the lock, and they are looked at again.
+        {
+            EndedLock lock;
+            sweep(env, 0);
+        }
+        room = allocate_block(need, bytes);
+        if (room.raw == nullptr && ask_for_collection(env)) {
+            {
+                EndedLock lock;
+                sweep(env, 0);
+            }
+            room = allocate_block(need, bytes);
+        }
+    }
+    if (room.raw == nullptr) {
+        note_declined(state, room.why);
+        return nullptr;
     }
     jobject global = original<jobject (*)(Env*, jobject)>(slot::NewGlobalRef)(env, local);
     if (global == nullptr) {
-        if (baseline != nullptr) {
-            g.platform.free_baseline(baseline);
+        if (room.baseline != nullptr) {
+            g.platform.free_baseline(room.baseline);
         }
-        g.shadow_arena.release(raw);
+        g.shadow_arena.release(room.raw);
         note_declined(state, "the first byte[] result stayed a real reference (no global reference); blocks and bytes held:");
         return nullptr;
     }
-    BlockHeader* header = reinterpret_cast<BlockHeader*>(raw);
+    BlockHeader* header = reinterpret_cast<BlockHeader*>(room.raw);
     header->magic = kBlockLive;
     header->capacity = static_cast<uint32_t>(bytes);
     header->global = global;
     header->next = nullptr;
-    header->baseline = baseline;
+    header->baseline = room.baseline;
     header->refs = 1;
+    header->weak = nullptr;
+    header->hash = hash;
+    header->bucket_next = nullptr;
+    header->list_next = nullptr;
+    header->list_prev = nullptr;
     DalvikArray* block = array_of(header);
     block->clazz = kDalvikArrayClass;
     block->lock = 0;
@@ -526,7 +933,7 @@ jobject make_shadow(Env* env, jobject local) {
     if (bytes > 0) {
         original<void (*)(Env*, jarray, jsize, jsize, jbyte*)>(slot::GetByteArrayRegion)(
             env, local, 0, length, reinterpret_cast<jbyte*>(block->data));
-        __builtin_memcpy(baseline, block->data, bytes);
+        __builtin_memcpy(room.baseline, block->data, bytes);
     }
     __builtin_memset(block->data + bytes, 0, kBlockTail);
     state->blocks[state->count++] = header;
@@ -1391,6 +1798,13 @@ jint vm_DetachCurrentThread(Vm* vm) {
 
 bool is_shadow_block(const void* object) { return live_header(object) != nullptr; }
 
+bool is_ended_block(const void* object) {
+    if (!is_shadow(object)) {
+        return false;
+    }
+    return header_of(object)->magic == kBlockEnded;
+}
+
 void release_thread_state(void* state_pointer) {
     ThreadState* state = static_cast<ThreadState*>(state_pointer);
     if (state == nullptr || !g.shadows_on) {
@@ -1401,10 +1815,7 @@ void release_thread_state(void* state_pointer) {
         if (--header->refs > 0) {
             continue;  // the block has more entries: it is queued with its last
         }
-        BlockHeader* head = __atomic_load_n(&g.pending, __ATOMIC_RELAXED);
-        do {
-            header->next = head;
-        } while (!__atomic_compare_exchange_n(&g.pending, &head, header, true, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+        queue_pending(header);
     }
     state->count = 0;
     state->bytes = 0;
@@ -1546,6 +1957,9 @@ bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_r
     if (!g.shadows_on) {
         return true;  // nothing to intercept
     }
+    g.ended_head.list_next = &g.ended_head;
+    g.ended_head.list_prev = &g.ended_head;
+    g.sweep_cursor = &g.ended_head;
     g.shadow_lo = static_cast<const uint8_t*>(shadow_region) + kBlockHead;
     g.shadow_hi = static_cast<const uint8_t*>(shadow_region) + shadow_size;
     if (!platform.make_writable(table, kSlotCount * sizeof(void*))) {

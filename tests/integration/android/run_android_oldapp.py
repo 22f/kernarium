@@ -76,10 +76,11 @@ SEMANTICS = {"write_through": "pass", "identity": "pass", "retained": "pass", "m
              "getline": "pass", "usable_size": "pass", "libc_block": "pass", "table_read_only": "pass",
              "java_fill": "pass", "commit_chunks": "pass", "clone": "pass", "alias_elements": "pass",
              "alias_critical": "pass", "abi_args": "pass", "abi_returns": "pass", "ends_exception": "pass"}
-#: What the layer adds: the blocks of a native method end when it returns (every row reads the block through the Dalvik
-#: offsets, so it is "fail" where the layer is not loaded, as java_fill_raw is).
+#: What the layer adds: the blocks of a native method end when it returns, and an ended block stays where it was until
+#: its array is collected (every row reads the block through the Dalvik offsets, so it is "fail" where the layer is not
+#: loaded, as java_fill_raw is).
 ENDS = ("ends_lazy_thumb", "ends_lazy_arm", "ends_reg_thumb", "ends_reg_arm", "ends_recursion", "ends_onload",
-        "ends_outside")
+        "ends_outside", "ended_keep", "ended_arrays")
 #: The render-thread scene of an application (a run of its own, with the options "scene"): the same in every variant,
 #: since a thread that gets a few hundred results at a time works on ART too.
 SCENE_ROWS = ("scene_complete", "scene_data", "scene_write")
