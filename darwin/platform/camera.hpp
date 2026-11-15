@@ -10,6 +10,7 @@
 // openSession() fails when the system has not granted access, and nothing in
 // this interface asks for it (camera_authorization.hpp does, at a user's act).
 
+#include "camera_presentation.hpp"
 #include "camera_still_failure.hpp"
 #include "nv12_transform.hpp"
 
@@ -28,7 +29,8 @@ namespace uml::platform {
 // zoom is a virtual device that switches between lenses by zoom ratio and
 // accepts automatic exposure, focus and white balance only; every other kind is
 // one sensor behind one lens, and lets a guest set them by hand where the
-// device can.
+// device can. A host lists its zoom cameras, but the Virtio camera device
+// publishes none of them: a guest switches lenses by switching cameras.
 enum class CameraLensKind : std::uint8_t { zoom, wide, ultraWide, telephoto, external };
 
 enum class BayerOrder : std::uint8_t { none, rggb, grbg, gbrg, bggr };
@@ -67,6 +69,19 @@ struct CameraCaptureFormat {
     std::vector<CameraStillSize> photoSizes;
     bool fullRange {};
     bool multiCamera {};  // a session that runs several cameras takes it
+    // The zoom ratio up to which the system recommends zooming a camera that runs in this format, in the terms of
+    // CameraInfo::zoomMaximum; zero where the system states none. It is advice, not part of the format's identity.
+    float recommendedZoomMaximum {};
+    // The largest zoom ratio the format itself delivers (the platform's own limit for it), in the terms of
+    // CameraInfo::zoomMaximum, which is the device's largest over all its formats; zero where the host states none.
+    // Advice as well: a camera whose format has no recommendation is stated up to it.
+    float maximumZoom {};
+    // The dynamic aspect ratios the device lists for the format (a mask of
+    // aspectRatioBit; zero for a format with none) and, once the format is
+    // described as the guest is offered it (presentedFormatOf), the one the
+    // device is held at.
+    std::uint8_t aspectRatios {};
+    CameraAspectRatio pinnedRatio {};
     friend bool operator==(const CameraCaptureFormat&, const CameraCaptureFormat&) = default;
 };
 
@@ -132,11 +147,14 @@ struct CameraInfo {
     // The zoom ratio as Android states it: 0.5 is the ultra wide lens of a zoom
     // camera, 1.0 its main lens. switchOvers are the ratios where it changes lens.
     // Every camera's range holds 1.0, and a single lens's 1.0 is its own full
-    // field of view (zoomRatioScale).
+    // field of view (zoomRatioScale). zoomMaximum is the platform's own limit;
+    // a camera that runs in an anchor is stated up to the system's recommended
+    // maximum for that format where it gives one (CameraCaptureFormat).
     float zoomMinimum {1.0f};
     float zoomMaximum {1.0f};
     std::vector<float> switchOvers;
-    // A zoom camera: the identifiers of the lenses it switches between.
+    // A zoom camera: the identifiers of the lenses it switches between. The
+    // device publishes no zoom camera, only its lenses.
     std::vector<std::string> constituents;
 
     // The full field of view, in pixels, and its horizontal angle in degrees.
@@ -342,6 +360,16 @@ public:
     virtual void cameraFrame(std::size_t camera, CameraFrame frame) = 0;
     virtual void cameraStill(std::size_t camera, CameraStillResult result) = 0;
     virtual void cameraEvent(CameraEvent event) = 0;
+    // What the session stated of a camera and set on its connections, once from
+    // discovery on and again whenever one of them changes (camera_presentation.hpp):
+    // for a diagnostic record; it changes nothing. A session calls it on its own
+    // threads, in order for one camera, and the delegate returns quickly. The
+    // default ignores it.
+    virtual void cameraPresentation(std::size_t camera, const CameraPresentation& presentation)
+    {
+        (void)camera;
+        (void)presentation;
+    }
 };
 
 // One capture session over the cameras of a host. The Apple backend runs a

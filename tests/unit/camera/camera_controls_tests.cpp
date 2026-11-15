@@ -47,11 +47,16 @@ void set(const CameraControls& controls, ControlValues& values, std::uint32_t id
 
 void testWhatEachCameraHas()
 {
-    const auto zoomInfo = infoOf(SyntheticCameraProfile::phone, 0);
+    // A host's zoom camera (a virtual device the device does not publish) takes no manual control and zooms below 1.0.
+    auto zoomInfo = infoOf(SyntheticCameraProfile::phone, 0);
+    zoomInfo.lens = CameraLensKind::zoom;
+    zoomInfo.manualExposure = zoomInfo.manualFocus = zoomInfo.manualWhiteBalance = false;
+    zoomInfo.zoomMinimum = 0.5f;
+    zoomInfo.zoomMaximum = 15.0f;
     const CameraControls zoom(zoomInfo, 90, false);
-    const auto wideInfo = infoOf(SyntheticCameraProfile::phone, 1);
+    const auto wideInfo = infoOf(SyntheticCameraProfile::phone, 0);
     const CameraControls wide(wideInfo, 90, false);
-    const auto frontInfo = infoOf(SyntheticCameraProfile::phone, 4);
+    const auto frontInfo = infoOf(SyntheticCameraProfile::phone, 3);
     const CameraControls front(frontInfo, 270, true);
 
     // The zoom camera takes automatic exposure, focus and white balance only.
@@ -99,7 +104,7 @@ void testWhatEachCameraHas()
 
 void testRanges()
 {
-    const auto info = infoOf(SyntheticCameraProfile::phone, 1);
+    const auto info = infoOf(SyntheticCameraProfile::phone, 0);
     const CameraControls controls(info, 90, false);
     require(controls.check(UML_V4L2_CID_AUTO_EXPOSURE_BIAS, 3000, 0) == ControlCheck::ok &&
                 controls.check(UML_V4L2_CID_AUTO_EXPOSURE_BIAS, 3001, 0) == ControlCheck::invalid &&
@@ -138,7 +143,7 @@ void testRanges()
 
 void testAliases()
 {
-    const auto info = infoOf(SyntheticCameraProfile::phone, 1);
+    const auto info = infoOf(SyntheticCameraProfile::phone, 0);
     const CameraControls controls(info, 90, false);
     auto values = controls.defaults();
 
@@ -201,7 +206,7 @@ void testAliases()
 
 void testReadsAndSettings()
 {
-    const auto info = infoOf(SyntheticCameraProfile::phone, 1);
+    const auto info = infoOf(SyntheticCameraProfile::phone, 0);
     const CameraControls controls(info, 90, false);
     auto values = controls.defaults();
     auto settings = controls.settings(values);

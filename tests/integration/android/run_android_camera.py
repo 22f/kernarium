@@ -12,9 +12,9 @@ The runner checks, in this order:
   exactly the camera features the layout earns (and none beside them), which are also the features the
   characteristics of the cameras Android lists earn (so that a layout that disagrees with the cameras
   is caught, not only a guest that disagrees with the layout);
-- the cameras Android lists (``dumpsys media.camera``) are the profile's: "0" the back zoom camera (the
-  primary back lens of a host without one, the front camera of a host without a back camera), "1" the
-  front camera, and "2", "3" and "4" the wide, ultra wide and telephoto lenses a phone has;
+- the cameras Android lists (``dumpsys media.camera``) are the profile's: "0" the primary back camera (the
+  wide lens; the front camera of a host without a back camera), "1" the front camera, and "3" and "4" the
+  ultra wide and telephoto lenses a phone has (the host publishes no zoom camera);
 - the provider's life (live and blocked): it is a lazy service that init starts with cameraserver, so it
   exits once cameraserver has listed the cameras and holds none, an open of the camera starts it again
   through its interface, and it exits again when the application is stopped, with the cameras still listed
@@ -259,12 +259,12 @@ ANIMATION_SCALES = ("window_animation_scale", "transition_animation_scale", "ani
 # The cameras each synthetic profile presents, and the camera IDs Android gives them
 # (android/lineage-24/overlay/camera/hal/camera_ids.hpp).
 PROFILE_CAMERAS = {
-    "phone": ("back+front", ("0", "1", "2", "3", "4")),
+    "phone": ("back+front", ("0", "1", "3", "4")),
     "tablet": ("back+front", ("0", "1")),
     "laptop": ("front", ("0",)),
 }
 # The layout each synthetic profile earns on a host that has not learnt its lenses' colour data: the phone's
-# back lenses have flash and manual control, its zoom and front cameras stream together, and its front camera
+# back lenses have flash and manual control, its wide and front cameras stream together, and its front camera
 # records 2160p; the tablet's back camera has flash and manual control, and its front camera cannot make the
 # guaranteed concurrent stream sizes; the laptop has one front camera (darwin/platform/synthetic_camera). The
 # host offers RAW only for a lens whose colour data an earlier still has kept (darwin/device/camera/README.md,

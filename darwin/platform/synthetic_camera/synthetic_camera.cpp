@@ -108,14 +108,10 @@ Profile profileOf(SyntheticCameraProfile which)
     switch (which) {
     case SyntheticCameraProfile::phone: {
         profile.model = "SyntheticPhone1,1";
-        CameraInfo zoom = lens("synthetic-back-zoom", CameraPosition::back, CameraLensKind::zoom);
-        zoom.zoomMinimum = 0.5f;
-        zoom.zoomMaximum = 15.0f;
-        zoom.switchOvers = {1.0f, 3.0f};
-        zoom.constituents = {"synthetic-back-ultrawide", "synthetic-back-wide", "synthetic-back-tele"};
-        zoom.manualExposure = zoom.manualFocus = zoom.manualWhiteBalance = false;
-        zoom.flash = zoom.torch = true;
+        // The three lenses and the front camera, each with the zoom the system recommends for it on a phone of
+        // three lenses. Only the wide lens runs with the front camera, as on that phone.
         CameraInfo wide = lens("synthetic-back-wide", CameraPosition::back, CameraLensKind::wide);
+        wide.zoomMaximum = 6.0f;
         wide.flash = wide.torch = true;
         wide.rawStills = true;
         wide.rawStillSize = {2016, 1512};
@@ -123,10 +119,11 @@ Profile profileOf(SyntheticCameraProfile which)
         wide.pixelArrayWidth = 8064;
         wide.pixelArrayHeight = 6048;
         CameraInfo ultra = lens("synthetic-back-ultrawide", CameraPosition::back, CameraLensKind::ultraWide);
-        ultra.zoomMaximum = 4.0f;
+        ultra.zoomMaximum = 3.0f;
         ultra.rawStills = true;
         ultra.rawStillSize = {2016, 1512};
         CameraInfo tele = lens("synthetic-back-tele", CameraPosition::back, CameraLensKind::telephoto);
+        tele.zoomMaximum = 3.0f;
         tele.rawStills = true;
         tele.rawStillSize = {2016, 1512};
         CameraInfo front = lens("synthetic-front", CameraPosition::front, CameraLensKind::wide);
@@ -134,8 +131,8 @@ Profile profileOf(SyntheticCameraProfile which)
         front.flash = front.torch = false;
         front.manualExposure = front.manualWhiteBalance = true;
         front.stillSizes = {{4032, 3024}, {2016, 1512}, {1008, 756}};
-        profile.cameras = {zoom, wide, ultra, tele, front};
-        profile.sets = {{0, 4}, {1, 4}, {2, 4}, {3, 4}};
+        profile.cameras = {wide, ultra, tele, front};
+        profile.sets = {{0, 3}};
         break;
     }
     case SyntheticCameraProfile::tablet: {
@@ -916,18 +913,9 @@ private:
                                                              2000.0f, 10000.0f));
         result.scene.tintCb = int(std::lround((exposure.whiteBalanceGains[2] / exposure.whiteBalanceGains[1] - 1.6f) * 20.0f));
         result.scene.tintCr = int(std::lround((exposure.whiteBalanceGains[0] / exposure.whiteBalanceGains[1] - 1.8f) * 20.0f));
-        // Zoom, and the lens a zoom camera has switched to.
+        // Zoom.
         exposure.zoomRatio = std::clamp(settings.zoomRatio, info.zoomMinimum, info.zoomMaximum);
         result.scene.zoom = std::max(exposure.zoomRatio, 1.0f);
-        if (info.lens == CameraLensKind::zoom && !info.constituents.empty()) {
-            std::size_t lensIndex = 0;
-            for (const auto switchOver : info.switchOvers)
-                if (exposure.zoomRatio >= switchOver) ++lensIndex;
-            lensIndex = std::min(lensIndex, info.constituents.size() - 1);
-            for (std::size_t other = 0; other < core_.profile_.cameras.size(); ++other)
-                if (core_.profile_.cameras[other].identifier == info.constituents[lensIndex])
-                    exposure.activeCamera = std::uint32_t(other);
-        }
         result.scene.tag = chartTag(camera);
         return result;
     }

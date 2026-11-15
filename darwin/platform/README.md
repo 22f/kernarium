@@ -125,12 +125,48 @@ interface to the wire.
   platform's statement of its mounting, the rotation coordinator's angle for
   portrait (`sensorOrientationOf`; an external camera states 90), never a value
   per position, and every frame and still is delivered in that orientation,
-  unturned and unmirrored where its connection accepts the setting, whatever
-  turn, mirroring or still compensation the system would apply by default; a
-  Mac's cameras state 0 and take none of this. Every camera's zoom range holds
+  unmirrored, whatever turn, mirroring or still compensation the system would
+  apply by default; a Mac's cameras state 0 and take none of this. A built-in
+  front camera mounted with its sensor's top at the device's top (portrait 0 or
+  180) is presented like an earlier front camera instead
+  (`presentedMountingOf`): the guest is told 90, the video connection is turned
+  by the difference before the output's size is set, and the photo output's
+  orientation compensation, which turns the stills, is on, read only after the
+  configuration is committed (before that its answer is not valid) and switched
+  on where it is supported and off; the photo connection keeps its default
+  angle, unmirrored. A connection that does not hold the turn refuses the
+  camera, a still whose photo output does not turn its stills is refused before
+  its capture, and a still of another shape than the one asked for (the
+  resolved size and the file's own are checked; a half turn has the same shape
+  and is not caught) is never delivered. A square format that
+  lists dynamic aspect ratios is described by the crop the device is pinned at
+  at each admission and repair (3x4 for a quarter turn, else 4x3, a landscape
+  frame of N x 3N/4), never changed while a stream or a still runs
+  (`presentedFormatOf`). The change is one numbered operation, asked before the
+  device is told: the camera's frames are held (the device's stand-in frames
+  bridge it) until its completion arrives without an error, and then only the
+  samples captured at or after the first buffer the change applies to pass (the
+  completion's timestamp, converted from the input port's clock to the
+  session's synchronization clock; without a conversion, the samples until the
+  first of the anchor's shape are held), a still waits for it inside its wait
+  budget, and an error, or no completion within that budget of a session running
+  with the camera in it, refuses the camera as a connection that does not hold
+  its turn does and fails the session, which the device answers by interrupting
+  the guest's cameras and opening another (`RatioPins`). The operation ends with
+  the camera's last input or output leaving the session, so a camera that left
+  cannot fail the session the others are in. The session reports each camera's mounting, the
+  settings of its connections and photo output and its aspect ratio as numbers
+  to its delegate (`camera_presentation.hpp`), and keeps the last of each camera
+  for the sessions that follow in the process (the current cameras and the
+  eight most recently used others). Every camera's zoom range holds
   1.0 (Android's rule): a single lens states its own factors, so its 1.0 is its
   own full field of view, and only a zoom camera is scaled by the host's display
   multiplier (`zoomRatioScale`), as the triple camera's ultra wide lens at 0.5.
+  A format carries the zoom the system recommends for it
+  (`recommendedZoomMaximum`, zero where it states none), which the device
+  states as the maximum of a camera that runs in that format, and the zoom the
+  format itself delivers (`maximumZoom`), which it states instead where there is
+  no recommendation.
 - **Sessions.** `openSession()` is the one call that can light the system's
   capture indicator, and it returns null unless the system has granted access.
   One session is a single `AVCaptureMultiCamSession` on iOS (an
@@ -244,8 +280,8 @@ interface to the wire.
   copy and a quarter turn are exact and a scale agrees with the portable one
   within the filters' difference (`camera-apple-transform`).
 - The synthetic camera is `synthetic_camera/` (`UML::SyntheticCamera`), a
-  platform camera with no hardware: profiles of a phone (a back zoom camera over
-  three lenses, and a front camera), a tablet (and one with both of an iPad's
+  platform camera with no hardware: profiles of a phone (three back lenses and a
+  front camera, no zoom camera), a tablet (and one with both of an iPad's
   front cameras) and a laptop; the multi-camera rule, which counts cameras that
   only take stills and refuses a join over a hardware budget (200 million
   pixels a second); a deterministic chart

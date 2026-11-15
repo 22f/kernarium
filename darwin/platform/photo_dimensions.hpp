@@ -21,10 +21,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -44,6 +46,168 @@ using VideoFormatFacts = CameraCaptureFormat;
 // quarter turn, and an angle that is not finite states 0. An external camera, whose mounting the platform does not
 // know, states 90 whatever the angle.
 [[nodiscard]] std::uint32_t sensorOrientationOf(CameraPosition position, double portraitAngle) noexcept;
+
+// How a camera is presented to the guest: the orientation stated for it, the clockwise turn the backend sets on its
+// video connection (the platform turns the buffers itself) and whether the camera imitates an earlier front camera.
+//
+// A built-in front camera whose rotation coordinator states portrait 0 or 180 is mounted with its sensor's top at the
+// device's top, where earlier front cameras were mounted with it at the side (their portrait angle is 90). The
+// platform lets such a camera behave like those: its video connection turns buffers by a fixed angle and its photo
+// output turns its processed stills (the output's compensation, left on). The guest is told 90, the value of the
+// earlier front cameras, which Android's size convention (a landscape size for a portrait sensor mounted at the side)
+// takes; the video connection is turned by `portraitAngle - 90`, so that the buffers are upright where the earlier
+// cameras' are. Every other camera states sensorOrientationOf, is turned by 0 and imitates nothing; so does a camera
+// whose angle is not finite.
+struct PresentedMounting {
+    std::uint32_t stated {};
+    std::uint32_t connectionTurn {};
+    bool emulatesEarlierFront {};
+    friend bool operator==(const PresentedMounting&, const PresentedMounting&) = default;
+};
+[[nodiscard]] PresentedMounting presentedMountingOf(CameraPosition position, double portraitAngle) noexcept;
+
+// The angle set on the photo output's connection: 0 for every camera, as before; none for a camera that imitates an
+// earlier front camera, whose connection keeps its default (only its mirroring is turned off). The angle changes the
+// Exif tag alone and the host drops the platform's Exif.
+[[nodiscard]] constexpr std::optional<std::uint32_t> photoConnectionTurnOf(const PresentedMounting& mounting) noexcept
+{
+    if (mounting.emulatesEarlierFront) return std::nullopt;
+    return std::uint32_t {0};
+}
+
+// What a still of a camera does about the photo output's orientation compensation, read when it starts. A camera that
+// imitates an earlier front camera needs the output to turn its stills: compensation supported and on, which is read
+// after the configuration is committed (a reading before it decides nothing). Supported and off is turned on, once;
+// anything else refuses the still. Every other camera is not asked.
+enum class CompensationStep : std::uint8_t { proceed, enable, refuse };
+[[nodiscard]] CompensationStep stillCompensationStep(bool imitatesEarlierFront, CameraFact supported, CameraFact enabled,
+                                                     CameraReading reading) noexcept;
+
+// What a still does about the dynamic aspect ratio its camera's anchor pins: nothing where it pins none or the device
+// holds it; waits where the change's completion has not arrived; refuses where the completion reported an error, or
+// arrived and the device holds another ratio.
+enum class RatioStillStep : std::uint8_t { proceed, wait, refuseFailed, refuseMoved };
+[[nodiscard]] RatioStillStep ratioStillStep(CameraAspectRatio pinned, CameraAspectRatio now, bool completionPending,
+                                            std::int32_t completionError) noexcept;
+
+// A camera's dynamic aspect ratio change, one operation at a time, as the session keeps it from the moment the device is
+// asked until the camera leaves the session. The change is under way (`pending`) from before the device is told, so a
+// completion that comes at once, or never, is not mistaken for another operation's; a completion that belongs to an
+// earlier operation of the camera is ignored. `armedAt` is when the session was running with the camera in it, which is
+// when the time the completion may take begins (zero: not begun).
+//
+// The completion does not make the frames already made right: the device delivers buffers of the ratio it had until the
+// first buffer the change applies to, which the completion's timestamp names (on the device's clock, converted to the
+// capture's, the timeline of every sample's timestamp). `boundary` says which rule keeps the older samples from the guest:
+// `atTime`, the samples captured before `notBefore`; `shape`, where the timestamp could not be converted, the samples
+// until the first of the shape the anchor presents (a weaker rule: the output's size is set, so it only sees a buffer of
+// another aspect); `none`, where the device already held the ratio and nothing precedes the change.
+enum class RatioBoundary : std::uint8_t { none, atTime, shape };
+struct RatioPin {
+    bool asked {};
+    bool pending {};
+    // The completion's error code (zero for none).
+    std::int32_t error {};
+    // No completion arrived within `ratioCompletionBudgetNanoseconds` of being armed.
+    bool timedOut {};
+    std::uint64_t operation {};
+    std::uint64_t armedAt {};
+    RatioBoundary boundary {};
+    std::int64_t notBefore {};
+    // A sample of the anchor's shape arrived (the `shape` rule is over).
+    bool shapeSeen {};
+};
+// How long the completion of a ratio change may take once the session runs with the camera in it: the budget a still
+// waits in (stillWaitBudgetNanoseconds), so that no wait of the capture is longer than that.
+inline constexpr std::uint64_t ratioCompletionBudgetNanoseconds = 2'000'000'000;
+// What a still is told for a change whose completion never came (ratioStillStep's `completionError`).
+inline constexpr std::int32_t ratioNoCompletion = std::numeric_limits<std::int32_t>::max();
+
+// The change `operation` is asked for.
+void ratioPinAsked(RatioPin& pin, std::uint64_t operation) noexcept;
+// The change `operation` completed with `error`. False, and nothing changed, for a completion of another operation than
+// the camera's current one (or of none asked); a completion after the time ran out is kept (the record names it) but
+// leaves the pin timed out.
+bool ratioPinCompleted(RatioPin& pin, std::uint64_t operation, std::int32_t error, RatioBoundary boundary = RatioBoundary::none,
+                       std::int64_t notBefore = 0) noexcept;
+// The session runs with the camera in it: the budget begins, once for an operation that is still pending. True when it
+// began now.
+bool ratioPinArmed(RatioPin& pin, std::uint64_t now) noexcept;
+// A pending operation whose budget ran out: it is timed out, once. True when it is now.
+bool ratioPinTimedOut(RatioPin& pin, std::uint64_t now) noexcept;
+// What the camera's frames do: are delivered, are held (the change is under way: the device still delivers frames of the
+// ratio it had), or the camera's presentation is not the one the guest was told because the change failed or never
+// completed (frames stay held and the camera is interrupted for the guest).
+enum class RatioFrameStep : std::uint8_t { deliver, hold, failed, timedOut };
+[[nodiscard]] RatioFrameStep ratioFrameStep(const RatioPin& pin) noexcept;
+// The completion's error code a still is told for the pin (ratioStillStep).
+[[nodiscard]] std::int32_t ratioPinErrorForStill(const RatioPin& pin) noexcept;
+// Whether a camera's sample goes to the guest: the frames must be delivering (ratioFrameStep), and a sample made before the
+// change took effect does not pass (RatioBoundary). `captureNanoseconds` is the sample's timestamp on the capture's clock,
+// where it has one; `shapeIsAnchors` whether its dimensions have the anchor's aspect ratio.
+[[nodiscard]] bool ratioSampleDelivered(RatioPin& pin, std::optional<std::int64_t> captureNanoseconds, bool shapeIsAnchors) noexcept;
+
+// What a camera's note says of its ratio change: pending while the change is under way or never completed, else the
+// completion's error code (zero for none); nothing for a camera with no change (it left the session), whose note keeps
+// what it has. Read where the note is published, in the notes' critical section, never before it.
+[[nodiscard]] std::optional<std::int32_t> ratioNoteCode(const std::optional<RatioPin>& pin) noexcept;
+// Whether a camera's input leaves the session after a removal that left it `videoOutputRemains` and `photoOutputRemains`
+// (a photo output stays for a still in flight): with its last output, and its ratio change with it.
+[[nodiscard]] constexpr bool cameraLeavesSession(bool hasInput, bool videoOutputRemains, bool photoOutputRemains) noexcept
+{
+    return hasInput && !videoOutputRemains && !photoOutputRemains;
+}
+
+// The ratio changes of a session's cameras, by camera (the caller holds one lock for it): each camera's operation lives
+// from its asking until the camera's last input or output leaves the session (`invalidate`); a watch or a completion of
+// an operation that is gone does nothing, so a camera that left cannot fail the session the others are in, and its
+// diagnostic history stays in the notes.
+class RatioPins {
+public:
+    // A change is asked for the camera, replacing its earlier operation.
+    void asked(std::size_t camera, std::uint64_t operation);
+    // What a completion did: nothing (another operation's, or none is asked), the change took effect, it ended in an error
+    // that fails the camera, or it came after the time had run out (kept, never reviving or failing it a second time).
+    enum class Completion : std::uint8_t { ignored, succeeded, failed, afterTimeout };
+    Completion completed(std::size_t camera, std::uint64_t operation, std::int32_t error, RatioBoundary boundary,
+                         std::int64_t notBefore);
+    // The session runs with the camera in it: the operation the budget began for now, if it did.
+    [[nodiscard]] std::optional<std::uint64_t> armed(std::size_t camera, std::uint64_t now);
+    // The operation's budget ran out: true once, for a pending operation that is still the camera's.
+    [[nodiscard]] bool timedOut(std::size_t camera, std::uint64_t operation, std::uint64_t now);
+    // The camera's last input or output left the session, or its admission was undone with nothing of it left.
+    void invalidate(std::size_t camera);
+    [[nodiscard]] std::optional<RatioPin> find(std::size_t camera) const;
+    [[nodiscard]] bool sampleDelivered(std::size_t camera, std::optional<std::int64_t> captureNanoseconds, bool shapeIsAnchors);
+    // Whether the camera's frames are held (ratioFrameStep is not `deliver`); a camera with no operation is not held.
+    [[nodiscard]] bool holdsFrames(std::size_t camera) const;
+
+private:
+    std::map<std::size_t, RatioPin> pins_;
+};
+
+// The notes the platform keeps across its sessions by device identifier (the last admission of each camera): which to
+// let go. The current session's cameras are kept, and of the rest the `recent` most recently used; `used` is a counter
+// that grows with each use.
+struct HeldNoteUse {
+    std::string identifier;
+    std::uint64_t used {};
+};
+[[nodiscard]] std::vector<std::string> heldNotesToDrop(const std::vector<HeldNoteUse>& held,
+                                                       const std::vector<std::string>& current, std::size_t recent);
+inline constexpr std::size_t heldNotesRecent = 8;
+
+// A device format as the guest is offered it. A format that lists no dynamic aspect ratio is as listed. A square
+// format that lists them is described by the crop the device is held at (pinned, never changed while a stream or a
+// still runs): 3x4 where the video connection is turned a quarter turn, 4x3 where it is not, which both give a
+// landscape frame after the turn, N x 3N/4 for the N x N format, and its photo sizes are the listed ones that are
+// landscape 4:3. A format that lists ratios and cannot be described, because it is not square, its side is not
+// divisible by four or it lacks the ratio needed, is dropped (nothing): a picture of another shape is never offered.
+[[nodiscard]] std::optional<VideoFormatFacts> presentedFormatOf(const VideoFormatFacts& listed, std::uint32_t connectionTurn);
+
+// The field of view of a pinned crop, in degrees: the larger of the 3x4 and the 4x3 crop's, uncorrected for
+// geometric distortion, so that the cropped view is never stated narrower than it is.
+[[nodiscard]] float pinnedFieldOfView(float portraitCrop, float landscapeCrop) noexcept;
 
 // ---------------------------------------------------------------------------
 // Photo sizes
@@ -164,6 +328,7 @@ inline constexpr std::uint64_t photoOutputSettleNanoseconds = 300'000'000;
 // (admission, a stream start, a resize, a repair) costs a few settle times; two seconds is a fifth of the device's
 // capture timeout, which starts when the still is handed over, and leaves it room for two 48 MP captures after the wait.
 inline constexpr std::uint64_t stillWaitBudgetNanoseconds = 2'000'000'000;
+static_assert(ratioCompletionBudgetNanoseconds == stillWaitBudgetNanoseconds, "one budget for a still and for a ratio change");
 
 // What a capture does when its turn comes (when it is accepted, and again when each wait ends): it starts; waits the
 // rest of the settle time of a later commit; fails, because that wait would take it past the budget (the guest is told
@@ -185,6 +350,13 @@ struct ScheduledStill {
 };
 [[nodiscard]] ScheduledStill scheduledStillStep(bool sessionEnded, bool requestKnown, std::uint64_t committedAt, std::uint64_t now,
                                                 std::uint64_t waitedNanoseconds) noexcept;
+
+// The same for a camera whose pinned aspect ratio's change has not completed (ratioStillStep): it waits at least
+// `ratioPinPollNanoseconds` more, inside the same budget, so that it never waits longer than a still that waits for the
+// settle time.
+inline constexpr std::uint64_t ratioPinPollNanoseconds = 50'000'000;
+[[nodiscard]] ScheduledStill scheduledStillStep(bool sessionEnded, bool requestKnown, std::uint64_t committedAt, std::uint64_t now,
+                                                std::uint64_t waitedNanoseconds, bool ratioPending) noexcept;
 
 // What a finished capture whose photo is not the size asked for leads to. A
 // capture that starts before the settle time has passed can still be served at
@@ -652,6 +824,11 @@ enum class Refusal : std::uint8_t {
     rawUnavailable,
     raised,
     notRestored,
+    ratioMoved,
+    turnNotHeld,
+    stillsNotTurned,
+    ratioFailed,
+    ratioTimedOut,
 };
 [[nodiscard]] std::string_view refusalName(Refusal reason) noexcept;
 
