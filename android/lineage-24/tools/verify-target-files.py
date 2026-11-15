@@ -2719,7 +2719,8 @@ def check_services_jar(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInf
 
 # The old-application layer (overlay/oldapp) is a 32-bit library that ActivityThread, in framework.jar,
 # loads into the process of a 32-bit application that targets below API 14 and that the person
-# switched it on for (a p0007 topic). A build
+# switched it on for (a p0007 topic; the property of the store is the switch, so a framework that
+# loads the layer for every old application lacks it). A build
 # without the library, or with a framework that does not load it, leaves such a game with the ART
 # failures the layer exists to prevent; a library that is not a 32-bit ARM shared object with a
 # JNI_OnLoad would fail when the framework loads it. The jar stores its dex files uncompressed, so the
@@ -2729,6 +2730,7 @@ FRAMEWORK_JAR = "SYSTEM/framework/framework.jar"
 FRAMEWORK_JAR_MARKERS = (
     (b"/system/lib/libkernarium_oldapp.so", "the ActivityThread topic that loads the old-application layer"),
     (b"kernarium: old-application layer not loaded", "the log line of that topic"),
+    (b"persist.sys.kernarium.oldapp.", "the per-application switch (the store's property) of that topic"),
 )
 FRAMEWORK_JAR_LIMIT = 256 << 20
 OLD_APP_LIBRARY_LIMIT = 16 << 20

@@ -3135,7 +3135,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                             + (b"" if oldapp_variant == "no-load-marker"
                                else b"/system/lib/libkernarium_oldapp.so\x00")
                             + (b"" if oldapp_variant == "no-log-marker"
-                               else b"kernarium: old-application layer not loaded\x00"),
+                               else b"kernarium: old-application layer not loaded\x00")
+                            + (b"" if oldapp_variant == "no-switch-marker"
+                               else b"persist.sys.kernarium.oldapp.\x00"),
                         )
                     archive.writestr("SYSTEM/framework/framework.jar", framework_jar.getvalue())
                 # libinputflinger.so holds the p0022 pointer capture LED topic's dump line.
@@ -4514,6 +4516,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "lacks the ActivityThread topic that loads the old-application layer of route p0007"),
             ("framework-jar-without-the-old-application-log-line", {"oldapp_variant": "no-log-marker"},
              "lacks the log line of that topic of route p0007"),
+            ("framework-jar-loads-the-old-application-layer-for-every-app", {"oldapp_variant": "no-switch-marker"},
+             "lacks the per-application switch .* of that topic of route p0007"),
             ("input-flinger-without-the-pointer-capture-led-cause", {"input_flinger_variant": "no-marker"},
              "lacks the pointer capture LED topic of route p0022"),
             ("missing-input-flinger-cause", {"input_flinger_variant": "missing"},
