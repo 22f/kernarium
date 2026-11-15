@@ -450,7 +450,14 @@ menu) exist with any of Send feedback, Review and Buy me tokens, and
 `HomePlainInfoTests` (the plain Info button) only with none
 ([Home toolbar menu](../Andarium/README.md#home-toolbar-menu)).
 `AndariumCoreTests` holds the tip sheet's states and the rating rule, counter
-and record as pure logic.
+and record as pure logic, and the state of the no-Google-apps notice (the panel
+on a first start and on the retry of a first Android boot that did not finish,
+and nothing else; the Send feedback line until opened or closed).
+`NoGoogleNoticeScreenTests` host the real boot screen and Send feedback sheet
+for it (the panel reached on those starts and gone with the boot, the starts
+that show none, the line opening and closing in place, the words in each
+language), and `NoGoogleNoticeUITests` boot a real first start and reach the
+line (see the UI-test target below).
 The Mail composer, the picker and the guest's display are stand-ins. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
@@ -518,7 +525,14 @@ a session: an iPad's interface follows, an iPhone's stays portrait. The
 results carry how many attempts each repeated step took. The Simulator produces
 no Escape, Delete, Caps Lock, F13, lone Shift or Globe key, and no raw mouse
 motion under the pointer lock. `SideKeysTipUITests` leaves the side keys' tip
-on and taps the keys once: they open.
+on and taps the keys once: they open. `NoGoogleNoticeUITests` holds the one
+test of the target that is not a probe session, and boots a real guest: it
+creates a virtual machine in the Simulator and starts it for real, so it needs
+the Simulator Android runtime packaged and the system image staged
+([Build](../Andarium/README.md#build)), and it takes about a minute to reach
+Android (the test allows ten minutes to create the machine and 25 for the
+boot). Its other test, in a build with Send feedback, reaches the Send feedback
+line from a probe session's Settings.
 
 The folding iPhone's layout ([devices](../Andarium/README.md#devices)) is
 `andarium-core`'s `FoldLayoutTests`, one test per pose of the iPhone Duo.
@@ -594,8 +608,11 @@ A host ends on its own now and then. A new one needs the owner at the device
 only when the system lost the last approval, however soon it starts: when
 xcodebuild's relaunch of the runner initialized (its log says so) nothing is
 asked and the watch replaces the host at once; when it failed to initialize, or
-the log does not say, the owner may be needed and the watch ends. `watch` keeps one
-device's host serving, and acts only on evidence: it adopts a serving host,
+the log does not say, the owner may be needed and the watch ends. A host's
+supervisor tries to end xcodebuild as soon as its log reports the connection to
+the device lost, before xcodebuild starts a runner that cannot initialize (best
+effort), so that death is then a plain one the watch replaces. `watch` keeps
+one device's host serving, and acts only on evidence: it adopts a serving host,
 starts the next only once the old one is shown to be dead (three reads in a row
 that all worked and all showed the same beat), and otherwise replaces nothing
 and ends with a status and state of its own that `status` reports (approval the
@@ -608,10 +625,12 @@ and its sender gets status 3. Run it in a terminal, detached with
 <label>` prints a launchd job that launchd never restarts, and creates nothing:
 make its log directory first; launchd must be able to open the job file and the
 log, so both belong on a volume with ownership enabled, and `--launchd-log`
-names the log); `stop --force` ends the watch before the host.
+names the log); `stop --force` ends the watch before the host. The printed job
+asks for interactive scheduling, and a running watch holds an idle-sleep
+assertion (never a display one) and logs any turn of its loop that starts late.
 The `kernarium-ipad-automation-watch` and
 `kernarium-ipad-automation-watch-process` tooling tests run the real script
-against fake `xcrun` and `xcodebuild` executables.
+against fake `xcrun`, `xcodebuild` and `caffeinate` executables.
 
 ### Edge gestures (device only)
 
