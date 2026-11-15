@@ -324,6 +324,14 @@ void place(ProgramWords &words, InlineSuffixes &suffixes,
 		const auto [gadget, loads] = encode(window, start, end, operands);
 		if (gadget == nullptr)
 			continue;
+#if UML_GADGET_EXECUTION_HISTOGRAM
+		/* The head's group counts the instructions it stands for, a
+		 * dropped hint and the RET among them, and their own groups
+		 * count none: slot zero counts each once on either path. */
+		for (auto index = start; index < end; ++index)
+			words[starts[index] + 2] = 0;
+		words[ret_start + 2] = 0;
+#endif
 		if (end != ret) {
 			const auto dropped = starts[end];
 			words.erase(dropped, count_words + 1);
@@ -345,15 +353,14 @@ void place(ProgramWords &words, InlineSuffixes &suffixes,
 		words.insert(at, inserted);
 		auto cursor = at;
 #if UML_GADGET_EXECUTION_HISTOGRAM
-		/* The head is counted as a group of no guest words, and the
-		 * run's first word names it as its predecessor, so a counting
-		 * build tells the head's fallbacks from its runs. */
+		/* The run's first word names the head as its predecessor, so a
+		 * counting build tells the head's fallbacks from its runs. */
 		words[cursor++] = reinterpret_cast<std::uintptr_t>(
 			diagnostics::uml_arm64_gadget_execution_count);
 		words[cursor++] = diagnostics::execution_histogram_slot(
 			predecessors[start % ring],
 			reinterpret_cast<const void *>(head));
-		words[cursor++] = 0;
+		words[cursor++] = ret + 1 - start;
 #endif
 		words[cursor++] = head;
 		for (std::size_t index = 0; index < operand_words(loads); ++index)
@@ -621,6 +628,11 @@ bool place(ProgramWords &words, InlineSuffixes &suffixes,
 		const auto [gadget, stores] = encode(window, start, end, operands);
 		if (gadget == nullptr)
 			continue;
+#if UML_GADGET_EXECUTION_HISTOGRAM
+		/* As the epilogue head's: the head's group counts the run. */
+		for (auto index = start; index < end; ++index)
+			words[starts[index] + 2] = 0;
+#endif
 		const auto head = reinterpret_cast<std::uintptr_t>(gadget);
 		const std::size_t at = starts[start];
 		const auto inserted = epilogue::count_words + 1 +
@@ -628,14 +640,14 @@ bool place(ProgramWords &words, InlineSuffixes &suffixes,
 		words.insert(at, inserted);
 		auto cursor = at;
 #if UML_GADGET_EXECUTION_HISTOGRAM
-		/* As the epilogue head's: a group of no guest words, which the
-		 * run's first word names as its predecessor. */
+		/* As the epilogue head's: the run's first word names the head
+		 * as its predecessor. */
 		words[cursor++] = reinterpret_cast<std::uintptr_t>(
 			diagnostics::uml_arm64_gadget_execution_count);
 		words[cursor++] = diagnostics::execution_histogram_slot(
 			predecessors[start % epilogue::ring],
 			reinterpret_cast<const void *>(head));
-		words[cursor++] = 0;
+		words[cursor++] = end - start;
 #endif
 		words[cursor++] = head;
 		for (std::size_t index = 0; index < operand_words(stores); ++index)

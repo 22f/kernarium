@@ -10,15 +10,19 @@
  * two pages, a misaligned SP and a page the TLB does not hold each fall back
  * and end as the architecture says; that a fault inside the fallback resumes
  * at its instruction; and, over generated runs, that every block ends with
- * the state an independent model of the instructions gives. It also checks
- * the builder's ring of group starts, which decides where a head may go. */
+ * the state an independent model of the instructions gives; in a counting
+ * build, that execution histogram slot zero counts each instruction once on
+ * either path. It also checks the builder's ring of group starts, which
+ * decides where a head may go. */
 #include "arm64_gadget_test_support.hpp"
+#include "cpu/arm64/gadgets/execution_histogram.hpp"
 #include "cpu/arm64/gadgets/group_starts.hpp"
 #include "cpu/arm64/gadgets/program.hpp"
 #include "require.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -321,16 +325,34 @@ struct Outcome final {
 	::uml::cpu::EngineEvent event{};
 	arm64::CpuState cpu{};
 	std::size_t executed{};
+	/* The guest words execution histogram slot zero counted, in a
+	 * counting build. */
+	std::uint64_t counted{};
 };
+
+/* Execution histogram slot zero of this thread, or 0 in a build without the
+ * histogram. */
+[[nodiscard]] std::uint64_t slot_zero() noexcept
+{
+#if UML_GADGET_EXECUTION_HISTOGRAM
+	return static_cast<const std::atomic_uint64_t *>(
+		gadgets::diagnostics::execution_counters())->load(
+		std::memory_order_relaxed);
+#else
+	return 0;
+#endif
+}
 
 [[nodiscard]] Outcome run(const gadgets::Program &program,
 	arm64::CpuState cpu, ::uml::memory::Tlb &tlb)
 {
 	std::size_t executed = 0;
 	tlb.fault_alignment = 0;
+	const auto before = slot_zero();
 	const auto event = gadgets::execute(program, cpu, tlb, executed);
+	const auto counted = slot_zero() - before;
 	gadgets::resolve_fault_position(program, cpu.pc);
-	return {event, cpu, executed};
+	return {event, cpu, executed, counted};
 }
 
 /* The block's outcome against the model: a fault at its instruction, or the
@@ -367,6 +389,11 @@ void check(const char *what, const Outcome &outcome, const Expected &expected,
 			fail("wrong retired count");
 		if (site != nullptr && outcome.cpu.gadget_indirect_miss != &site->site)
 			fail("the miss did not name its site");
+#if UML_GADGET_EXECUTION_HISTOGRAM
+		/* Each instruction once, on the head's path or the run's. */
+		if (outcome.counted != instructions)
+			fail("histogram slot zero counted another number");
+#endif
 	}
 	for (unsigned index = 0; index < 31; ++index)
 		if (outcome.cpu.registers[index] != expected.registers[index])
@@ -837,6 +864,9 @@ void head_returns(const Memory &memory)
 			require(outcome.cpu.registers[0] == 77);
 			require(outcome.cpu.pc == return_pc + 8);
 			require(outcome.executed == item.code.size() + 2);
+#if UML_GADGET_EXECUTION_HISTOGRAM
+			require(outcome.counted == outcome.executed);
+#endif
 			require(outcome.cpu.sp == expected.sp);
 			for (unsigned index = 1; index < 31; ++index)
 				require(outcome.cpu.registers[index] ==
