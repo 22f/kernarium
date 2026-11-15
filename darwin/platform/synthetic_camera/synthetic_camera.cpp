@@ -3,14 +3,21 @@
 
 #include "photo_dimensions.hpp"
 
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cctype>
+#include <cerrno>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -1101,11 +1108,71 @@ private:
 namespace uml::platform {
 namespace {
 
+// Reads the commands of a named pipe on a thread of its own, for as long as it lives. The pipe is opened for reading and
+// writing, so it has a reader whether or not a writer is there, and a writer's close ends no read.
+class ControlPipe {
+public:
+    ControlPipe(const std::string& path, std::function<void(const SyntheticControlCommand&)> apply) : apply_(std::move(apply))
+    {
+        if (::mkfifo(path.c_str(), 0600) != 0 && errno != EEXIST) {
+            std::fprintf(stderr, "synthetic camera: cannot make the control pipe: %s\n", std::strerror(errno));
+            return;
+        }
+        descriptor_ = ::open(path.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+        if (descriptor_ < 0) {
+            std::fprintf(stderr, "synthetic camera: cannot open the control pipe: %s\n", std::strerror(errno));
+            return;
+        }
+        thread_ = std::thread([this] { run(); });
+    }
+    ~ControlPipe()
+    {
+        stop_ = true;
+        if (thread_.joinable()) thread_.join();
+        if (descriptor_ >= 0) ::close(descriptor_);
+    }
+    ControlPipe(const ControlPipe&) = delete;
+    ControlPipe& operator=(const ControlPipe&) = delete;
+
+private:
+    void run()
+    {
+        std::string pending;
+        char chunk[256];
+        while (!stop_) {
+            pollfd waiting {descriptor_, POLLIN, 0};
+            if (::poll(&waiting, 1, 50) <= 0 || (waiting.revents & POLLIN) == 0) continue;
+            const auto count = ::read(descriptor_, chunk, sizeof(chunk));
+            if (count <= 0) continue;
+            pending.append(chunk, std::size_t(count));
+            for (auto end = pending.find('\n'); end != std::string::npos; end = pending.find('\n')) {
+                const std::string line = pending.substr(0, end);
+                pending.erase(0, end + 1);
+                if (const auto command = parseSyntheticControlLine(line)) apply_(*command);
+                else std::fprintf(stderr, "synthetic camera: unknown control line\n");
+            }
+            if (pending.size() > 4096) pending.clear();
+        }
+    }
+
+    std::function<void(const SyntheticControlCommand&)> apply_;
+    int descriptor_ {-1};
+    std::atomic<bool> stop_ {};
+    std::thread thread_;
+};
+
 class SyntheticCameraImpl final : public SyntheticCamera {
 public:
     explicit SyntheticCameraImpl(const SyntheticCameraOptions& options)
         : core_(options, profileOf(options.profile))
     {
+        if (!options.controlPath.empty()) {
+            control_ = std::make_unique<ControlPipe>(options.controlPath, [this](const SyntheticControlCommand& command) {
+                std::fprintf(stderr, "synthetic camera: %s\n", command.interrupt ? "interrupted" : "resumed");
+                if (command.interrupt) interrupt(command.kind);
+                else resume();
+            });
+        }
     }
 
     std::vector<CameraInfo> cameras() const override { return core_.profile_.cameras; }
@@ -1237,9 +1304,29 @@ private:
     }
 
     mutable Core core_;
+    // After the core: it applies commands to the camera, and stops before the camera does.
+    std::unique_ptr<ControlPipe> control_;
 };
 
 }  // namespace
+
+std::optional<SyntheticControlCommand> parseSyntheticControlLine(std::string_view line)
+{
+    const auto blank = [](char c) { return c == ' ' || c == '\t' || c == '\r'; };
+    while (!line.empty() && blank(line.front())) line.remove_prefix(1);
+    while (!line.empty() && blank(line.back())) line.remove_suffix(1);
+    std::string lower(line);
+    for (auto& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+    if (lower == "resume") return SyntheticControlCommand {false, CameraEventKind::resumed};
+    if (lower.rfind("interrupt", 0) != 0) return std::nullopt;
+    auto cause = std::string_view(lower).substr(9);
+    while (!cause.empty() && blank(cause.front())) cause.remove_prefix(1);
+    if (cause.empty() || cause == "other") return SyntheticControlCommand {true, CameraEventKind::interrupted};
+    if (cause == "background") return SyntheticControlCommand {true, CameraEventKind::interruptedInBackground};
+    if (cause == "multitasking") return SyntheticControlCommand {true, CameraEventKind::interruptedByMultitasking};
+    if (cause == "pressure") return SyntheticControlCommand {true, CameraEventKind::interruptedBySystemPressure};
+    return std::nullopt;
+}
 
 std::unique_ptr<SyntheticCamera> makeSyntheticCamera(const SyntheticCameraOptions& options)
 {

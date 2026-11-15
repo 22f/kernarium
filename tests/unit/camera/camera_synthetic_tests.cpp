@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "require.hpp"
+#include "scratch_directory.hpp"
 #include "synthetic_camera.hpp"
+
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
@@ -13,6 +17,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -936,8 +941,80 @@ void timerSchedulesWholeDurations()
 
 } // namespace
 
+// The control pipe: a test that cannot reach the camera object (a guest in another process) interrupts and resumes it by
+// writing lines, and the camera answers as it does to interrupt() and resume().
+// A delegate whose events are read from another thread than the one that delivers them.
+class EventLog final : public CameraSessionDelegate {
+public:
+    void cameraFrame(std::size_t, CameraFrame) override {}
+    void cameraStill(std::size_t, CameraStillResult) override {}
+    void cameraEvent(CameraEvent event) override
+    {
+        std::lock_guard lock(mutex);
+        events.push_back(event);
+    }
+    std::vector<CameraEvent> snapshot() const
+    {
+        std::lock_guard lock(mutex);
+        return events;
+    }
+
+private:
+    mutable std::mutex mutex;
+    std::vector<CameraEvent> events;
+};
+
+void controlPipe()
+{
+    const auto line = [](std::string_view text) { return parseSyntheticControlLine(text); };
+    require(line("interrupt") && line("interrupt")->interrupt && line("interrupt")->kind == CameraEventKind::interrupted);
+    require(line(" Interrupt   Background \r") && line("interrupt background")->kind == CameraEventKind::interruptedInBackground);
+    require(line("interrupt multitasking")->kind == CameraEventKind::interruptedByMultitasking);
+    require(line("interrupt pressure")->kind == CameraEventKind::interruptedBySystemPressure);
+    require(line("interrupt other")->kind == CameraEventKind::interrupted);
+    require(line("resume") && !line("resume")->interrupt && line("resume")->kind == CameraEventKind::resumed);
+    require(!line("") && !line("interrupted") && !line("interrupt later") && !line("resume now") && !line("pause"));
+
+    // A named pipe is a socket-length path: the host temporary directory, not the build tree's.
+    uml::testing::ScratchSubdirectory directory("camera-control-XXXXXX", uml::testing::socket_scratch_parent());
+    const std::string path = (directory.path() / "control").string();
+    {
+        auto options = manual(SyntheticCameraProfile::tablet);
+        options.controlPath = path;
+        const auto camera = makeSyntheticCamera(options);
+        EventLog log;
+        auto session = camera->openSession(log);
+        const int writer = ::open(path.c_str(), O_WRONLY | O_NONBLOCK);
+        require(writer >= 0, "the pipe exists once the camera does");
+        const auto send = [&](std::string_view text) { require(::write(writer, text.data(), text.size()) == ssize_t(text.size())); };
+        const auto waitForEvents = [&](std::size_t count) {
+            for (int attempt = 0; attempt < 200 && log.snapshot().size() < count; ++attempt)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            return log.snapshot().size() >= count;
+        };
+        send("interrupt back");
+        send("ground\nnot a command\n");
+        require(waitForEvents(1) && log.snapshot()[0].kind == CameraEventKind::interruptedInBackground &&
+                    log.snapshot()[0].camera == allCameras,
+                "a line in two writes is one command, and an unknown line is ignored");
+        send("resume\n");
+        require(waitForEvents(2) && log.snapshot()[1].kind == CameraEventKind::resumed, "and resume ends it");
+        ::close(writer);
+        // A writer's close does not end the reading: the pipe has a reader of its own.
+        const int again = ::open(path.c_str(), O_WRONLY | O_NONBLOCK);
+        require(again >= 0);
+        const std::string_view last = "interrupt pressure\n";
+        require(::write(again, last.data(), last.size()) == ssize_t(last.size()));
+        require(waitForEvents(3) && log.snapshot()[2].kind == CameraEventKind::interruptedBySystemPressure);
+        ::close(again);
+        session->stop();
+    }
+    ::unlink(path.c_str());
+}
+
 int main()
 {
+    controlPipe();
     profiles();
     unauthorized();
     video();

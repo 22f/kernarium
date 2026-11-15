@@ -19,6 +19,11 @@ namespace uml::camera {
 /* A platform camera, ready for makeInProcessCameraService(). */
 using CameraSourceHandle = std::shared_ptr<uml::platform::Camera>;
 
+/* The synthetic camera takes commands from a named pipe whose path this variable names (`interrupt`, `interrupt
+ * background|multitasking|pressure`, `resume`, a line each): the only way a test reaches the camera of a guest that runs in
+ * a process of its own, and the only way to interrupt a Mac session. Unset, the camera is deaf. */
+inline constexpr const char* syntheticControlVariable = "UML_SYNTHETIC_CAMERA_CONTROL";
+
 /* The cameras the synthetic camera presents. */
 enum class SyntheticProfile : std::uint8_t { phone, tablet, laptop };
 

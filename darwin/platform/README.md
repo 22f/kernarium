@@ -293,8 +293,12 @@ interface to the wire.
   exposure that follows the compensation within the frame the rate allows (the
   sensitivity takes the rest), and a frame that lasts as long as its exposure
   when that is longer than its period; JPEG and Bayer stills;
-  simulated interruptions; and, with a manual clock, frames that a test pumps.
-  App Store runtimes do not build it. It is never a real camera.
+  simulated interruptions, which a named pipe also drives (a line each:
+  `interrupt`, `interrupt background|multitasking|pressure`, `resume`; its path
+  is the variable `UML_SYNTHETIC_CAMERA_CONTROL`, read when a launcher makes the
+  camera, and nothing else reads it) for a guest in a process of its own; and,
+  with a manual clock, frames that a test pumps. App Store runtimes do not build
+  it. It is never a real camera.
 
 Tests: `camera-frame-transform` and `camera-dng-color` need nothing;
 `camera-key-path-observer` runs the key-value observer on a stand-in object;

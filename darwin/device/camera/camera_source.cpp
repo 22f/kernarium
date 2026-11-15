@@ -7,6 +7,7 @@
 #include "synthetic_camera/synthetic_camera.hpp"
 #endif
 
+#include <cstdlib>
 #include <stdexcept>
 
 namespace uml::camera {
@@ -37,6 +38,7 @@ CameraSourceHandle makeSyntheticCameraSource([[maybe_unused]] SyntheticProfile p
         options.profile = uml::platform::SyntheticCameraProfile::laptop;
         break;
     }
+    if (const char* control = std::getenv(syntheticControlVariable); control != nullptr) options.controlPath = control;
     return uml::platform::makeSyntheticCamera(options);
 #else
     throw std::runtime_error("the synthetic camera is not part of this build");
