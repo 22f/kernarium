@@ -172,6 +172,11 @@ MEM_CLASSES = {
 PAIR_CLASSES = {"ldstpair_off", "ldstpair_pre", "ldstpair_post",
                 "ldstnapair_offs"}
 MEM_FEATURES = {"baseline", "FEAT_FP"}
+# Advanced SIMD load/store structures: multiple structures and single
+# structures, without an offset and with a post-index.
+SIMD_STRUCT_CLASSES = {"asisdlse", "asisdlsep", "asisdlso", "asisdlsop"}
+# The sizes of an access that the refill thunks name.
+REFILL_TOTALS = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64)
 # HINT #imm7. The engine runs YIELD (1), DGH (6), CSDB (20) and CLRBHB (22)
 # as gadgets with an effect and every other hint, allocated or not, as a
 # no-op (pointer authentication, branch targets, GCS and the rest are not
@@ -526,6 +531,8 @@ class Library:
             return self._pc_relative(offset, word, mnemonic == "ADRP")
         if cls in MEM_CLASSES and feature in MEM_FEATURES:
             return self._memory(offset, word, encoding)
+        if cls in SIMD_STRUCT_CLASSES and feature == "FEAT_AdvSIMD":
+            return self._simd_struct(offset, word, cls)
         if cls == "systemmove" and (word & TPIDR_MASK) in (
                 TPIDR_EL0, TPIDR_EL0 ^ 0x00200000):
             return self._tpidr(offset, word)
@@ -1014,6 +1021,100 @@ class Library:
         self.stats.kinds["pair" if pair else "mem"] += 1
         return True
 
+    def _simd_struct(self, offset: int, word: int, cls: str) -> bool:
+        """LDn, STn, LDnR and the lane forms: the host executes the same
+        instruction on the host address of the guest bytes, which the engine
+        moves with one transfer of at most 64 bytes (it translates every page
+        before it changes a register), so a probe of the last byte covers the
+        whole access and a miss restarts the instruction untouched."""
+        asm = self.asm
+        load = bool((word >> 22) & 1)
+        q = (word >> 30) & 1
+        size = (word >> 10) & 3
+        post = cls in ("asisdlsep", "asisdlsop")
+        if cls in ("asisdlse", "asisdlsep"):
+            opcode = (word >> 12) & 15
+            registers = {0: 4, 2: 4, 4: 3, 6: 3, 7: 1, 8: 2, 10: 2
+                         }.get(opcode)
+            if registers is None or (opcode in (0, 4, 8) and size == 3 and
+                                     not q):
+                return self._step(offset, "simd-struct-reserved")
+            total = registers * (16 if q else 8)
+        else:
+            opcode, replicate = (word >> 13) & 7, False
+            scale = opcode >> 1
+            selem = (((opcode & 1) << 1) | ((word >> 21) & 1)) + 1
+            s_bit = (word >> 12) & 1
+            if scale == 3:
+                if not load or s_bit:
+                    return self._step(offset, "simd-struct-reserved")
+                scale = size
+            elif scale == 1 and (size & 1):
+                return self._step(offset, "simd-struct-reserved")
+            elif scale == 2:
+                if size & 2:
+                    return self._step(offset, "simd-struct-reserved")
+                if size & 1:
+                    if s_bit:
+                        return self._step(offset, "simd-struct-reserved")
+                    scale = 3
+            total = selem * (1 << scale)
+        base = (word >> 5) & 31
+        rm = (word >> 16) & 31
+        if base == 31:
+            return self._step(offset, "simd-struct-sp")
+        index_g = self._resolve(rm, False) if post and rm != 31 else None
+        base_virtual = base in VIRTUAL
+        # The effective address is the base register.
+        census_start = len(asm._w)
+        if base_virtual:
+            self._load_guest(T0, base)
+            host_base = T0
+        else:
+            host_base = base
+        self.tag("mem.ea", census_start)
+        census_start = len(asm._w)
+        asm.word(A.ubfx(T0, host_base, 0, 56))
+        entry = 0 if load else 16
+        self.fn_mm.append((offset, "LOAD" if load else "STORE", total))
+        asm.word(A.ubfx(T2, T0, 12, 14))
+        asm.word(A.add_reg(T2, TLB, T2, shift=0, amount=5))
+        asm.word(A.ldp_x(T1, T2, T2, entry))
+        asm.word(A.add_reg(T2, T2, T0))
+        if total > 1:
+            asm.word(A.add_imm(T0, T0, total - 1))
+        asm.word(A.eor_reg(T1, T1, T0, shift=1, amount=12))
+        asm.cbz(T1, self.lab("MM", offset), sf=1, nz=True)
+        self.tag("mem.probe", census_start)
+        census_start = len(asm._w)
+        # The same instruction without its post-index, on the host address.
+        asm.word((word & ~((1 << 23) | (31 << 16) | (31 << 5))) | (T2 << 5))
+        self.tag("mem.access", census_start)
+        census_start = len(asm._w)
+        if post:
+            if index_g is None:
+                amount = None
+            elif index_g in VIRTUAL:
+                self._load_guest(T1, index_g)
+                amount = T1
+            else:
+                amount = rm
+            if base_virtual:
+                self._load_guest(T0, base)
+                if amount is None:
+                    self._add_immediate(T0, T0, total)
+                else:
+                    asm.word(A.add_reg(T0, T0, amount))
+                self._store_guest(T0, base)
+            elif amount is None:
+                self._add_immediate(base, base, total)
+            else:
+                asm.word(A.add_reg(base, base, amount))
+        self.tag("mem.wb", census_start)
+        self.stats.inlined += 1
+        self.stats.kinds["simd-struct"] += 1
+        return True
+
     # --- ordered accesses, atomics and FEAT_MOPS -------------------------------
     def _atomic_probe(self, offset: int, base_g, base_field: int, n: int,
                       write: bool) -> None:
@@ -1451,7 +1552,7 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
     # changed before the probe), and when it cannot, or the access crosses a
     # page, the instruction steps.
     for kind, access in (("LOAD", 0), ("STORE", 1)):
-        for total in (1, 2, 4, 8, 16, 32):
+        for total in REFILL_TOTALS:
             asm.label(f"REFILL_{kind}_{total}")
             asm.word(A.movz(T2, access | (total << 8)))
             asm.b("REFILL")

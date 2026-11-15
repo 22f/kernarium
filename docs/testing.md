@@ -756,6 +756,9 @@ blocker in every one of them.
   states (the first, a middle and the last byte faulting, both directions,
   overlap, zero length, a copy across an unmapped page), and the registers,
   flags and memory at every fault must equal the engine's.
+  One row per Advanced SIMD structure form (loads and stores, lanes and
+  replicating loads, post-index by immediate and register, virtual base and
+  index registers) is started the same way.
   `arm64-aot-tools` checks the generator's encoders and classifier,
   including which forms are left to the engine.
 - `arm64-aot-runtime-product` checks that the product compilation of the AOT

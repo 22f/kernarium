@@ -352,6 +352,123 @@ def mops_functions() -> tuple[tuple[int, int], ...]:
                  for index in range(len(MOPS_ROWS)))
 
 
+# ---- Advanced SIMD structure loads and stores -----------------------------
+# One instruction per row (and a RET), the differential test starts cases at
+# every row: multiple and single structures, replicating loads, post-index
+# by immediate and by register, virtual base and index registers, an SP base
+# (which steps) and the reserved words.
+SIMD_AT = TEXT + 0x1c00
+SIMD_STEP = 0x10
+
+
+def simd_multi(load: bool, q: int, opcode: int, size: int, rn: int, rt: int,
+               post: int | None = None) -> int:
+    """post: None for no offset, 31 for the immediate, else the register."""
+    word = 0x0c000000 | (q << 30) | (int(load) << 22) | (opcode << 12) | \
+        (size << 10) | (rn << 5) | rt
+    if post is not None:
+        word |= (1 << 23) | (post << 16)
+    return word
+
+
+def simd_single(load: bool, q: int, r: int, opcode: int, s: int, size: int,
+                rn: int, rt: int, post: int | None = None) -> int:
+    word = 0x0d000000 | (q << 30) | (int(load) << 22) | (r << 21) | \
+        (opcode << 13) | (s << 12) | (size << 10) | (rn << 5) | rt
+    if post is not None:
+        word |= (1 << 23) | (post << 16)
+    return word
+
+
+def simd_rows() -> list[tuple[str, int]]:
+    rows: list[tuple[str, int]] = []
+    # Multiple structures: LD1 of one to four registers, LD2 to LD4, by
+    # arrangement.
+    for name, load, q, opcode, size, post in (
+            ("ld1_16b", 1, 1, 7, 0, None), ("ld1_8b_i", 1, 0, 7, 0, 31),
+            ("ld1_2x16b_i", 1, 1, 10, 1, 31), ("ld1_3x4h_i", 1, 0, 6, 1, 31),
+            ("ld1_3x8h_r", 1, 1, 6, 1, 2), ("ld1_4x16b_i", 1, 1, 2, 0, 31),
+            ("ld1_4x8b", 1, 0, 2, 0, None), ("ld1_1d_i", 1, 0, 7, 3, 31),
+            ("ld2_4s_i", 1, 1, 8, 2, 31), ("ld2_8b", 1, 0, 8, 0, None),
+            ("ld3_8h_i", 1, 1, 4, 1, 31), ("ld3_2s_r", 1, 0, 4, 2, 2),
+            ("ld4_16b_r", 1, 1, 0, 0, 2), ("ld4_2d_i", 1, 1, 0, 3, 31),
+            ("ld4_1d_reserved", 1, 0, 0, 3, 31),
+            ("st1_16b", 0, 1, 7, 0, None), ("st1_2x4s_i", 0, 1, 10, 2, 31),
+            ("st1_4x16b_i", 0, 1, 2, 0, 31), ("st1_3x8b_r", 0, 0, 6, 0, 2),
+            ("st2_4s_i", 0, 1, 8, 2, 31), ("st3_8h", 0, 1, 4, 1, None),
+            ("st4_4h_i", 0, 0, 0, 1, 31), ("st4_2d_r", 0, 1, 0, 3, 2)):
+        rows.append((name, simd_multi(bool(load), q, opcode, size, 1, 0,
+                                      post)))
+    # Virtual base and index registers, an index equal to the base, the
+    # stack pointer.
+    rows += [
+        ("ld1_vb", simd_multi(True, 1, 7, 0, 25, 0)),
+        ("ld1_vb_i", simd_multi(True, 1, 10, 0, 25, 0, 31)),
+        ("ld1_vi_r", simd_multi(True, 1, 7, 0, 1, 0, 24)),
+        ("ld1_vbvi_r", simd_multi(True, 1, 7, 0, 25, 0, 24)),
+        ("ld1_vb_same_r", simd_multi(True, 1, 7, 0, 25, 0, 25)),
+        ("ld1_same_r", simd_multi(True, 1, 7, 0, 1, 0, 1)),
+        ("st1_vb_i", simd_multi(False, 1, 7, 0, 18, 0, 31)),
+        ("ld1_sp", simd_multi(True, 1, 7, 0, 31, 0)),
+        ("ld1_sp_i", simd_multi(True, 1, 7, 0, 31, 0, 31)),
+    ]
+    # Single structures: one lane of each element size, then LD2 to LD4 and
+    # ST1 to ST4 lanes.
+    for name, load, q, r, opcode, s, size, post in (
+            ("ld1_b0", 1, 0, 0, 0, 0, 0, None),
+            ("ld1_b15_i", 1, 1, 0, 0, 1, 3, 31),
+            ("ld1_h3_i", 1, 0, 0, 2, 1, 2, 31),
+            ("ld1_s1_i", 1, 0, 0, 4, 1, 0, 31),
+            ("ld1_d1", 1, 1, 0, 4, 0, 1, None),
+            ("ld2_s", 1, 0, 1, 4, 0, 0, None),
+            ("ld2_h_r", 1, 1, 1, 2, 1, 0, 2),
+            ("ld3_h_i", 1, 0, 0, 3, 0, 2, 31),
+            ("ld3_d_i", 1, 1, 0, 5, 0, 1, 31),
+            ("ld4_b_r", 1, 0, 1, 1, 0, 0, 2),
+            ("ld4_d_i", 1, 0, 1, 5, 0, 1, 31),
+            ("st1_b_i", 0, 1, 0, 0, 1, 1, 31),
+            ("st1_s", 0, 0, 0, 4, 1, 0, None),
+            ("st2_h_i", 0, 0, 1, 2, 0, 0, 31),
+            ("st3_d", 0, 1, 0, 5, 0, 1, None),
+            ("st4_s_r", 0, 1, 1, 5, 0, 0, 2),
+            ("ld1_reserved_h", 1, 0, 0, 2, 0, 1, None),
+            ("ld1_reserved_d", 1, 0, 0, 4, 1, 1, None)):
+        rows.append((name, simd_single(bool(load), q, r, opcode, s, size, 1,
+                                       0, post)))
+    # Replicating loads, by arrangement and count.
+    for name, q, r, opcode, size, post in (
+            ("ld1r_8b", 0, 0, 6, 0, None), ("ld1r_16b_i", 1, 0, 6, 0, 31),
+            ("ld1r_4h_i", 0, 0, 6, 1, 31), ("ld1r_4s_i", 1, 0, 6, 2, 31),
+            ("ld1r_1d", 0, 0, 6, 3, None), ("ld1r_2d_r", 1, 0, 6, 3, 2),
+            ("ld2r_2s_i", 0, 1, 6, 2, 31), ("ld3r_4s_i", 1, 0, 7, 2, 31),
+            ("ld4r_2d_i", 1, 1, 7, 3, 31), ("ld4r_8b", 0, 1, 7, 0, None)):
+        rows.append((name, simd_single(True, q, r, opcode, 0, size, 1, 0,
+                                       post)))
+    rows += [
+        ("ld1r_vb_vi", simd_single(True, 1, 0, 6, 0, 2, 25, 0, 24)),
+        ("ld1_s_vb_i", simd_single(True, 0, 0, 4, 1, 0, 25, 0, 31)),
+        ("ld1r_sp", simd_single(True, 1, 0, 6, 0, 2, 31, 0)),
+        ("st1r_reserved", simd_single(False, 1, 0, 6, 0, 2, 1, 0)),
+    ]
+    if SIMD_AT + SIMD_STEP * len(rows) > TEXT + 2 * PAGE:
+        raise ValueError("the SIMD rows run into the edge functions")
+    return rows
+
+
+def simd_code() -> dict[int, int]:
+    code: dict[int, int] = {}
+    for index, (_, word) in enumerate(simd_rows()):
+        base = SIMD_AT + index * SIMD_STEP
+        code[base] = word
+        code[base + 4] = RET
+    return code
+
+
+def simd_functions() -> tuple[tuple[int, int], ...]:
+    return tuple((SIMD_AT + index * SIMD_STEP, 8)
+                 for index in range(len(simd_rows())))
+
+
 def eh_frame() -> bytes:
     # CIE: version 1, "zR", code alignment 4, data alignment -8, return
     # address x30, pointers are pc-relative signed 32-bit.
@@ -360,7 +477,8 @@ def eh_frame() -> bytes:
     cie_body += bytes(-(len(cie_body) + 4) % 8)
     out = bytearray(struct.pack("<I", len(cie_body)) + cie_body)
     for start, size in (FUNCTIONS + form_functions() + edge_functions() +
-                        hammer_functions() + mops_functions()):
+                        hammer_functions() + mops_functions() +
+                        simd_functions()):
         position = len(out)
         field = EH_FRAME + position + 8
         body = struct.pack("<Iii", position + 4, start - field, size)
@@ -386,6 +504,8 @@ def build() -> bytes:
     for address, word in hammer_code().items():
         struct.pack_into("<I", text, address - TEXT, word)
     for address, word in mops_code().items():
+        struct.pack_into("<I", text, address - TEXT, word)
+    for address, word in simd_code().items():
         struct.pack_into("<I", text, address - TEXT, word)
     for index, word in enumerate(PLT_CODE):
         struct.pack_into("<I", text, PLT - TEXT + 4 * index, word)

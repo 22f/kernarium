@@ -396,6 +396,35 @@ class StackAlignmentTests(unittest.TestCase):
         self.assertNotIn(self.GUARD, unit)
 
 
+class SimdStructureTests(unittest.TestCase):
+    """Advanced SIMD structure loads and stores are rewritten unless the
+    base is SP or the word is reserved."""
+
+    def test_only_sp_and_reserved_rows_step(self) -> None:
+        elf = elf64.Elf(fixture.build())
+        library = rewrite.Library(
+            0, "/aot-test/libaotfixture.so", elf,
+            a64decode.Decoder(a64decode.DEFAULT_TABLE),
+            rewrite.read_layout(rewrite.LAYOUT_HEADER))
+        library.build([1] * ((library.table_end - library.table_base) // 4096))
+        causes = dict(library.step_list)
+        for index, (name, _) in enumerate(fixture.simd_rows()):
+            cause = causes.get(fixture.SIMD_AT + index * fixture.SIMD_STEP)
+            if "_sp" in name:
+                self.assertEqual(cause, "simd-struct-sp", name)
+            elif "reserved" in name:
+                self.assertIsNotNone(cause, name)
+            else:
+                self.assertIsNone(cause, name)
+
+    def test_the_rows_fit_between_the_mops_rows_and_the_edges(self) -> None:
+        end = fixture.SIMD_AT + fixture.SIMD_STEP * len(fixture.simd_rows())
+        self.assertLessEqual(end, min(fixture.EDGES.values()))
+        self.assertGreaterEqual(fixture.SIMD_AT,
+                                fixture.MOPS_AT + fixture.MOPS_STEP *
+                                len(fixture.MOPS_ROWS))
+
+
 class CensusTests(unittest.TestCase):
     """The byte census names the kind of every word of a unit."""
 
@@ -455,6 +484,25 @@ class WideningTests(unittest.TestCase):
         "casa x26, x27, [x28]": (fixture.cas(3, 1, 0, 26, 28, 27), 0xc8fa7f9b),
         "casah w26, w27, [x28]":
             (fixture.cas(1, 1, 0, 26, 28, 27), 0x48fa7f9b),
+        "ld1 {v0.16b}, [x1]": (fixture.simd_multi(True, 1, 7, 0, 1, 0),
+                               0x4c407020),
+        "ld1 {v0.16b}, [x1], #16": (fixture.simd_multi(True, 1, 7, 0, 1, 0,
+                                                       31), 0x4cdf7020),
+        "ld1 {v0.16b, v1.16b}, [x1], x2":
+            (fixture.simd_multi(True, 1, 10, 0, 1, 0, 2), 0x4cc2a020),
+        "ld4 {v0.4s-v3.4s}, [x1], #64":
+            (fixture.simd_multi(True, 1, 0, 2, 1, 0, 31), 0x4cdf0820),
+        "st3 {v0.8h-v2.8h}, [x1]": (fixture.simd_multi(False, 1, 4, 1, 1, 0),
+                                    0x4c004420),
+        "ld1 {v0.s}[1], [x1], #4":
+            (fixture.simd_single(True, 0, 0, 4, 1, 0, 1, 0, 31),
+             0x0ddf9020),
+        "ld1r {v0.16b}, [x1], #1":
+            (fixture.simd_single(True, 1, 0, 6, 0, 0, 1, 0, 31), 0x4ddfc020),
+        "ld1r {v0.2d}, [x1], x2":
+            (fixture.simd_single(True, 1, 0, 6, 0, 3, 1, 0, 2), 0x4dc2cc20),
+        "ld2 {v0.h, v1.h}[3], [x1]":
+            (fixture.simd_single(True, 0, 1, 2, 1, 2, 1, 0), 0x0d605820),
         "cpyfp [x0]!, [x1]!, x2!": (fixture.mops("cpyf", 0, 0, 0, 2, 1),
                                     0x19010440),
         "cpym [x0]!, [x1]!, x2!": (fixture.mops("cpy", 1, 0, 0, 2, 1),
