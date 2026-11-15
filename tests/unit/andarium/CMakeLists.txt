@@ -110,6 +110,15 @@ target_include_directories(uml_andarium_camera_request_tests PRIVATE
 uml_add_unit_test(NAME andarium-camera-request
     COMMAND uml_andarium_camera_request_tests LABELS andarium)
 
+# When the HAL closes the host stream of an output: a preview that waits behind
+# a still keeps it (and the host its capture session), a dropped output's stream
+# still goes soon.
+add_executable(uml_andarium_camera_streams_tests camera_streams_tests.cpp)
+target_include_directories(uml_andarium_camera_streams_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal)
+uml_add_unit_test(NAME andarium-camera-streams
+    COMMAND uml_andarium_camera_streams_tests LABELS andarium)
+
 # The guest's Wi-Fi address as a function of eth0's
 # (android/lineage-24/overlay/tools/kernarium_wifi_mac.h): the golden vectors
 # (the guest runner reads the same file), the properties of every result and the
