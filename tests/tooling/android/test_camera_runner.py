@@ -3184,6 +3184,44 @@ class VideoLostTests(unittest.TestCase):
         with self.assertRaisesRegex(runner.Failure, "no encoded video samples"):
             self.run_check(guest)
 
+    def clip_fails(self, clip: bytes, pattern: str) -> None:
+        guest = self.Guest(self.plan(), movies=clip)
+        with self.assertRaisesRegex(runner.Failure, pattern):
+            self.run_check(guest)
+
+    def test_the_clip_of_the_loss_is_measured_and_printed(self) -> None:
+        text = self.run_check(self.Guest(self.plan()))
+        self.assertIn("clip: 105 frames over 3.50 s = 30.0 fps average, longest step of its video sample times 0.033 s", text)
+        self.assertIn("audio: 164 AAC frames", text)
+
+    def test_a_clip_that_goes_on_after_the_loss_fails(self) -> None:
+        # The recording went on over the camera's reopening: more than the video before the loss and the time to end it.
+        limit = runner.LOST_HOLD_SECONDS + runner.LOST_END_SECONDS
+        self.clip_fails(movie(limit + 0.5, audio=sound(limit + 0.5)), r"lasts 6\.50 s.*between 2 s and 6 s")
+        guest = self.Guest(self.plan(), movies=movie(limit, audio=sound(limit)))
+        self.assertIn("the recording ended by itself", self.run_check(guest))
+
+    def test_a_clip_shorter_than_the_hold_fails(self) -> None:
+        self.clip_fails(movie(1.5, audio=sound(1.5)), r"lasts 1\.50 s.*between 2 s and 6 s")
+
+    def test_a_clip_with_too_few_frames_for_its_duration_fails(self) -> None:
+        # A stall: 12 frames a second over the clip. A camera that was away for a part of the clip leaves this.
+        self.clip_fails(movie(3.5, fps=12.0, audio=sound(3.5)), r"averages 12\.0 fps \(42 frames over 3\.50 s\), below 20")
+
+    def test_a_clip_with_a_gap_in_its_video_fails(self) -> None:
+        # One sample lasts 0.6 s longer than the others: the camera was away for that long and the recording went on.
+        self.clip_fails(movie(3.5, audio=sound(3.5), video_jump=(60, 0.6)), r"steps 0\.63 s between two samples")
+
+    def test_a_clip_with_no_audio_track_fails(self) -> None:
+        self.clip_fails(movie(3.5), "has no audio track")
+
+    def test_a_clip_whose_audio_outlasts_its_video_fails(self) -> None:
+        # The microphone went on over the reopening and the video did not: the tracks end 1.5 s apart (to the AAC frame).
+        self.clip_fails(movie(3.5, audio=sound(5.0)), r"the audio ends \+1\.4\d s after the video")
+
+    def test_a_clip_whose_audio_time_line_is_stretched_fails(self) -> None:
+        self.clip_fails(movie(3.5, audio=sound(3.5, 1.3)), "stretch 1.300")
+
     def test_a_recording_after_the_return_without_samples_fails(self) -> None:
         guest = self.Guest(self.plan())
         guest.again_movie = movie(3.5, samples=False)
@@ -3603,7 +3641,8 @@ class VideoLostTests(unittest.TestCase):
                     self.run_check(guest)
         # The smallest payload that passes: MINIMUM_SAMPLE_BYTES for each declared sample.
         needed = 105 * runner.MINIMUM_SAMPLE_BYTES
-        self.assertIn("the recording ended by itself", self.run_check(self.Guest(self.plan(), movies=movie(3.5, payload=needed))))
+        self.assertIn("the recording ended by itself",
+                      self.run_check(self.Guest(self.plan(), movies=movie(3.5, audio=sound(3.5), payload=needed))))
         with self.assertRaisesRegex(runner.Failure, "media data holds"):
             self.run_check(self.Guest(self.plan(), movies=movie(3.5, payload=needed - 1)))
 

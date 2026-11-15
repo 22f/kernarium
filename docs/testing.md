@@ -880,7 +880,8 @@ anywhere is a blocker. The candidate must show:
   no sensor privacy reminder for the camera, `android-camera-restart`
   passes for the phone profile, and `android-camera-video-lost` passes on an
   image that carries the HAL topic that handles the host's end of a camera's
-  video; the VTS camera provider test
+  video and the camera application topic that ends a recording on the camera's
+  recoverable error; the VTS camera provider test
   (`VtsAidlHalCameraProvider_TargetTest`) passes against the lazy provider; and
   these CTS modules pass sharded, with the failures rerun alone and a result
   that differs from the accepted release's explained:
@@ -1175,10 +1176,15 @@ still of one, with its DNG.
 `android-camera-video-lost` (`--mode video-lost`) tells the synthetic camera,
 through its control pipe (`UML_SYNTHETIC_CAMERA_CONTROL`, test-only), that the
 application left the foreground while the video mode records, and expects the
-recording to end by itself with its clip (which holds encoded video samples)
-saved, the camera application to stay in front, and a recording to work again
+recording to end by itself with its clip saved, the camera application to stay
+in front, and a recording to work again
 once the application is started again after the person returns (that step starts
-the activity again and shows only that the camera can be opened again). Two more
+the activity again and shows only that the camera can be opened again). The clip
+holds encoded video samples, lasts at most 2 s more than the video before the
+loss, has the frame rate of a recording and no step of 0.5 s between two video
+samples, and its audio holds what its time stamps span and ends with its video:
+CameraX keeps a recording over the reopening of a camera, so a clip with a gap
+and a dark tail means the camera application did not end it. Two more
 cases leave a viewfinder with no recording, the video mode's (which binds an
 encoder surface) and the photo mode's, and expect each live again within 45 s of
 the return (one deadline for the camera, the picture and the frame counters), in
@@ -1188,7 +1194,7 @@ it closed and reopened its video streams once for the loss. After each loss
 the camera service's log must hold no leaked stream, the line it prints at the
 close of a device whose requests the HAL ended without a request error. The
 release must carry the HAL topic that handles the host's end of a camera's
-video.
+video and the camera application topic that ends the recording.
 `android17-camera-runner` (tooling) runs its
 parsers and the expectations of every layout without a guest,
 `android17-camera-layouts` (tooling) the layout set, its fallback order and the

@@ -330,11 +330,19 @@ MODES = ("live", "blocked", "none", "restart", "video-lost")
 # left the foreground (the host ends the video of a camera that has a video stream open; docs/testing.md). The recording
 # ends by itself and the clip, with encoded video samples, is saved, the application stays the resumed activity, and the
 # camera opens again when the application is started again after the person returns: LOST_HOLD_SECONDS of video before
-# the loss, a clip of at least LOST_MINIMUM_SECONDS, and LOST_WAIT_SECONDS for the clip to appear.
+# the loss, a clip of at least LOST_MINIMUM_SECONDS, and LOST_WAIT_SECONDS for the clip to appear. The clip ends with the
+# camera: it lasts at most LOST_END_SECONDS more than the video before the loss (the camera application ends the recording
+# when the camera reports its recoverable error, and CameraX opens the camera again about a second after the loss; what the
+# camera delivers after that must not reach the clip), its video has no step of VIDEO_JUMP_MAXIMUM_SECONDS (a gap where the
+# camera was away) and the frame rate of a recording, and its audio holds what its time stamps span and ends with its video.
 CONTROL_VARIABLE = "UML_SYNTHETIC_CAMERA_CONTROL"
 LOST_HOLD_SECONDS = 4
 LOST_MINIMUM_SECONDS = 2.0
+LOST_END_SECONDS = 2.0
 LOST_WAIT_SECONDS = 60
+# The longest time between two samples of a video track that a recording may have: a camera that stalls or is away leaves a
+# step of its length, where the encoder's own steps are a frame (a few hundredths of a second).
+VIDEO_JUMP_MAXIMUM_SECONDS = 0.5
 # The viewfinder cases. The person is away LOST_AWAY_SECONDS, and when they return the viewfinder is live again within
 # VIEWFINDER_RECOVERY_SECONDS of the return (one deadline for the camera, the picture and the frame counters), in the same
 # process and with no error window. The video mode's viewfinder (no recording) binds an encoder surface, so the HAL ends the
@@ -2373,11 +2381,13 @@ def require_no_stream_leak(guest: Guest, known: list[str], case: str) -> None:
 
 def check_video_lost(guest: Guest, plan: Plan) -> None:
     """The host ends the video of a camera that records when the application leaves the foreground: the recording ends
-    and its clip, which must hold encoded video samples, is saved without a second key press, the application stays in
+    and its clip, which must hold encoded video samples and has no gap or dark tail and an audio track in step with
+    its video (check_clip_of_the_loss), is saved without a second key press, the application stays in
     front, and a recording works again. That last step STARTS THE APPLICATION AGAIN (a new activity start after the
     return): it shows that the camera can be opened again, not that the viewfinder recovered by itself; the viewfinder
     cases that follow show that. After the loss the camera service's log holds no leaked stream (require_no_stream_leak).
-    Needs an image whose HAL reports the loss (route p0030)."""
+    Needs an image whose HAL reports the loss (route p0030) and whose camera application ends a recording on the camera's
+    recoverable error (route p0031): CameraX alone keeps the recording over the camera's reopening."""
     before, _ = guest.videos()
     leaks = guest.stream_leaks()
     start_recording(guest, plan, restart_application=True)
@@ -2392,10 +2402,13 @@ def check_video_lost(guest: Guest, plan: Plan) -> None:
     if not movie.video:
         raise Failure(f"{path} has no video track")
     require_media_payload(path, movie)
-    if not LOST_MINIMUM_SECONDS <= movie.seconds <= LOST_HOLD_SECONDS + VIDEO_MAXIMUM_SECONDS:
+    if not LOST_MINIMUM_SECONDS <= movie.seconds <= LOST_HOLD_SECONDS + LOST_END_SECONDS:
         raise Failure(f"{path} lasts {movie.seconds:.2f} s; the recording ran {LOST_HOLD_SECONDS} s before the loss "
-                      f"and must last between {LOST_MINIMUM_SECONDS:g} s and the time the loss took to be noticed")
+                      f"and must last between {LOST_MINIMUM_SECONDS:g} s and {LOST_HOLD_SECONDS + LOST_END_SECONDS:g} s: "
+                      "the clip ends with the camera, and a recording that goes on over the camera's reopening keeps "
+                      "what the new session delivers")
     print(f"  the recording ended by itself: {row.get('_display_name', path)} {movie.seconds:.2f} s, {movie.frames} frames")
+    check_clip_of_the_loss(path, movie)
     foreground = parse_foreground(guest.shell(FOREGROUND_COMMAND))
     if not foreground.resumed.startswith(CAMERA_PACKAGE):
         raise Failure(f"the camera application is not in front after the recording ended: {foreground.describe()}")
@@ -2425,6 +2438,22 @@ def check_video_lost(guest: Guest, plan: Plan) -> None:
     print("  the HAL reported the end of the camera (ERROR_DEVICE besides the request errors)")
     check_viewfinder_returns(guest, plan, "video")
     check_viewfinder_returns(guest, plan, "photo")
+
+
+def check_clip_of_the_loss(path: str, movie: Movie) -> None:
+    """The clip a loss ends has no gap and no dark tail: its frames over its duration reach VIDEO_MINIMUM_FPS and no two
+    video samples are more than VIDEO_JUMP_MAXIMUM_SECONDS apart (a recording that goes on over the camera's reopening has
+    the camera's absence as a step and then the frames of the session the host holds, dark), and its audio holds what its
+    time stamps span and ends with its video (check_audio). The track's numbers are printed before the checks."""
+    print(f"  clip: {movie.frames} frames over {movie.video_seconds:.2f} s = {movie.fps:.1f} fps average, longest step of "
+          f"its video sample times {movie.video_gap:.3f} s")
+    if movie.fps < VIDEO_MINIMUM_FPS:
+        raise Failure(f"{path} averages {movie.fps:.1f} fps ({movie.frames} frames over {movie.video_seconds:.2f} s), below "
+                      f"{VIDEO_MINIMUM_FPS:.0f}: the camera was away for a part of the clip")
+    if movie.video_gap > VIDEO_JUMP_MAXIMUM_SECONDS:
+        raise Failure(f"{path}: the video's sample table steps {movie.video_gap:.2f} s between two samples (above "
+                      f"{VIDEO_JUMP_MAXIMUM_SECONDS} s): a gap where the camera was away, which the recording went on over")
+    check_audio(path, movie)
 
 
 def require_media_payload(path: str, movie: Movie) -> None:
