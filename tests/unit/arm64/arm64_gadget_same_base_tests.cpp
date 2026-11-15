@@ -947,6 +947,18 @@ void check(Memory &memory, const Case &item)
 		{"a store leader on a page held for reading",
 			C{op(str_x, 1, 2, 0), op(str_x, 3, 2, 8)}, {}, high_read,
 			1, 1, Ends::fault, 0},
+		/* The all-ones address is what the engine's caches hold in an
+		 * empty entry; a base there must miss like any unmapped one. */
+		{"a leader at the all-ones address", C{op(ldr_x, 1, 2, 0),
+			op(ldr_x, 3, 2, 8)}, {{2, ~std::uint64_t{}}}, all_written,
+			1, 1, Ends::fault, 0, 0, 0, all_written, {{2, low}}},
+		{"a store leader at the all-ones address", C{op(str_x, 1, 2, 0),
+			op(str_x, 3, 2, 8)}, {{2, ~std::uint64_t{}}}, all_written,
+			1, 1, Ends::fault, 0, 0, 0, all_written, {{2, low}}},
+		{"a leader ending at the top of the address space",
+			C{op(ldr_x, 1, 2, 0), op(ldr_x, 3, 2, 8)},
+			{{2, ~std::uint64_t{} - 7}}, all_written, 1, 1,
+			Ends::fault, 0, 0, 0, all_written, {{2, low}}},
 	};
 }
 

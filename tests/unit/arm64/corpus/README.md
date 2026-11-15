@@ -305,6 +305,21 @@ base register tagged. The `arm64-tlb` unit test and the `guest_tagged_*_loop.S`
 probes ([performance tools](../../../perf/README.md#focused-assembly-probes))
 own which TLB key an engine fills.
 
+## Indirect-branch target cases
+
+BR, BLR, RET and the fused epilogue (LDP X29, X30, [SP], #16 ; RET) take their
+target from a register in any state, and a guest can branch to the all-ones
+address, one word below it, or an address nothing maps. The branch retires and
+the next fetch faults: a PC alignment fault when a low bit of the target is set
+and an instruction fetch fault otherwise, both at the target with execute
+access.
+[`control-target-corpus.py`](../../../../tools/arm64-tests/control-target-corpus.py)
+authors the `arm64-control-target` record, and
+`arm64-instruction-corpus-control-target` re-derives it. The cases run through
+a cold site; the cached sites of the gadget engine, which hold the same exit
+to the guest, are the unit tests' work (`arm64-pc-alignment-contract` and
+`arm64-gadget-indirect-links`).
+
 ## 16 KiB retirement
 
 The guest has 4 KiB pages only, but the producer export ran both page

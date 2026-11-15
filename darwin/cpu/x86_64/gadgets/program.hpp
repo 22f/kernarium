@@ -94,6 +94,12 @@ static_assert(static_cast<std::ptrdiff_t>(
 static_assert(offsetof(UnlinkedBlockLink, link) % 16 == 0,
 	"the link's entry and stream are one aligned pair");
 
+/* A target and the link a hit on it follows. The default value, a zero
+ * target with no link, is not a followable entry: a translated site that
+ * matched it would load through the null link. The space that owns a site
+ * stores every cell's vacant target and its leave-to-dispatcher link before
+ * translated code reads it, and a test that builds a cell by hand does the
+ * same. */
 struct IndirectLinkEntry final {
 	std::uint64_t guest_rip{};
 	const BlockLink *link{};

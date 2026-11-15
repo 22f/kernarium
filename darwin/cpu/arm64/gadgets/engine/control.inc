@@ -176,7 +176,9 @@ gadget return
 	b.eq 98f
 	.if \ras
 	/* The newest return record is popped only when it names the live link
-	 * register; anything else leaves the ring alone and exits as before. */
+	 * register; anything else leaves the ring alone and exits as before.
+	 * An empty record holds the all-ones PC with no link, and the guest can
+	 * return to that address too, so a match also needs a link to follow. */
 	ldrb w13, [_vcpu, #UML_GADGET_CPU_RETURN_TOP]
 	sub w13, w13, #1
 	and w13, w13, #UML_GADGET_CPU_RETURN_MASK
@@ -185,6 +187,7 @@ gadget return
 	ldp x11, x12, [x14]
 	cmp x10, x11
 	b.ne 97f
+	cbz x12, 97f
 	strb w13, [_vcpu, #UML_GADGET_CPU_RETURN_TOP]
 	/* Train the site's next cell as the cold helper would, so the ordinary
 	 * cell path hits this target from now on and the ring is consulted
