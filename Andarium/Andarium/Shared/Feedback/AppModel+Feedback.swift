@@ -75,7 +75,9 @@ extension AppModel {
     }
 
     private static var buildConfiguration: String {
-        #if APP_STORE
+        #if TESTFLIGHT
+        "TestFlight"
+        #elseif APP_STORE
         "AppStore"
         #elseif DEBUG
         "Debug"
