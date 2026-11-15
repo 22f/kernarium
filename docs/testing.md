@@ -450,7 +450,14 @@ menu) exist with any of Send feedback, Review and Buy me tokens, and
 `HomePlainInfoTests` (the plain Info button) only with none
 ([Home toolbar menu](../Andarium/README.md#home-toolbar-menu)).
 `AndariumCoreTests` holds the tip sheet's states and the rating rule, counter
-and record as pure logic.
+and record as pure logic, and the state of the no-Google-apps notice (the panel
+on a first start and on the retry of a first Android boot that did not finish,
+and nothing else; the Send feedback line until opened or closed).
+`NoGoogleNoticeScreenTests` host the real boot screen and Send feedback sheet
+for it (the panel reached on those starts and gone with the boot, the starts
+that show none, the line opening and closing in place, the words in each
+language), and `NoGoogleNoticeUITests` boot a real first start and reach the
+line (see the UI-test target below).
 The Mail composer, the picker and the guest's display are stand-ins. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
@@ -518,7 +525,14 @@ a session: an iPad's interface follows, an iPhone's stays portrait. The
 results carry how many attempts each repeated step took. The Simulator produces
 no Escape, Delete, Caps Lock, F13, lone Shift or Globe key, and no raw mouse
 motion under the pointer lock. `SideKeysTipUITests` leaves the side keys' tip
-on and taps the keys once: they open.
+on and taps the keys once: they open. `NoGoogleNoticeUITests` holds the one
+test of the target that is not a probe session, and boots a real guest: it
+creates a virtual machine in the Simulator and starts it for real, so it needs
+the Simulator Android runtime packaged and the system image staged
+([Build](../Andarium/README.md#build)), and it takes about a minute to reach
+Android (the test allows ten minutes to create the machine and 25 for the
+boot). Its other test, in a build with Send feedback, reaches the Send feedback
+line from a probe session's Settings.
 
 The folding iPhone's layout ([devices](../Andarium/README.md#devices)) is
 `andarium-core`'s `FoldLayoutTests`, one test per pose of the iPhone Duo.

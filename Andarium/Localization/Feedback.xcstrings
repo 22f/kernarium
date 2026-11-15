@@ -760,6 +760,29 @@
         }
       }
     },
+    "Dismiss Google apps note" : {
+      "comment" : "VoiceOver name of the close button of the box at the top of Send feedback's mail (\"Missing Google apps?\"). It differs from \"Dismiss\", the card that asks for a bug report, so the two are told apart. Google stays in Latin letters in every language.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Googleアプリの案内を閉じる"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关闭Google应用说明"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "關閉Google應用程式說明"
+          }
+        }
+      }
+    },
     "Feedback is sent with the Mail app. Add a mail account in Settings › Apps › Mail › Mail Accounts, then come back." : {
       "comment" : "The text of that notice. The path is iOS's: Settings, Apps, Mail, Mail Accounts, each in iOS's own words for the language.",
       "localizations" : {
@@ -894,6 +917,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "遇到任何錯誤時，請附上錯誤報告。它會告訴我們虛擬機器和App當時在做什麼。"
+          }
+        }
+      }
+    },
+    "Google licenses its apps and Google Play services only to makers of certified devices. Install apps from files you have; many work without them." : {
+      "comment" : "The opened answer under \"Missing Google apps?\": why (Google licenses its apps and Google Play services only to makers of certified devices) and what to do. The same text as the boot screen's panel; Google stays in Latin letters in every language.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Googleは、自社のアプリとGoogle Play開発者サービスを、認定済みデバイスのメーカーにのみライセンス供与しています。お持ちのファイルからアプリを追加でき、多くはこれらなしで動作します。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Google仅向认证设备的制造商授权其应用和Google Play服务。你可以用已有的文件安装应用，许多应用不需要这些服务也能使用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Google只向認證裝置的製造商授權其應用程式和Google Play服務。你可以用手邊的檔案安裝應用程式，許多應用程式不需要這些服務也能使用。"
           }
         }
       }
@@ -1124,6 +1170,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "讓問題再次發生。"
+          }
+        }
+      }
+    },
+    "Missing Google apps?" : {
+      "comment" : "The question at the top of Send feedback's mail, in a tinted box: the one a person asks when the virtual machine's Android has no Google apps. Tapping it opens the answer in place.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Googleのアプリが見つかりませんか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "找不到Google应用？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "找不到Google應用程式？"
           }
         }
       }
@@ -1611,6 +1680,29 @@
         }
       }
     },
+    "Shows the answer" : {
+      "comment" : "VoiceOver's hint on the collapsed line \"Missing Google apps? That’s on purpose. Why\": a tap opens the answer in place.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "回答を表示します"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "显示答案"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "顯示答案"
+          }
+        }
+      }
+    },
     "Start log" : {
       "comment" : "The name of the attached text file that holds what the virtual machine printed while starting, as a row of the mail and a name for VoiceOver.",
       "localizations" : {
@@ -1699,6 +1791,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "感謝你協助改善Andarium。"
+          }
+        }
+      }
+    },
+    "That’s on purpose." : {
+      "comment" : "The first words of the answer to the question above, as the headline of the opened answer: Android has no Google apps on purpose.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "意図的に搭載していません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这是有意的。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "這是刻意的。"
+          }
+        }
+      }
+    },
+    "That’s on purpose. Why" : {
+      "comment" : "The collapsed form of the answer under the question above: the first words and the word that opens the rest. The last word is the string \"Why\" of this table, which is shown in the accent colour; Chinese and Japanese write no space between the two.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "意図的に搭載していません。理由"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这是有意的。原因"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "這是刻意的。原因"
           }
         }
       }
@@ -1837,6 +1975,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "哪裡出了問題？"
+          }
+        }
+      }
+    },
+    "Why" : {
+      "comment" : "The word that opens the answer to \"Missing Google apps?\"; it ends the string \"That’s on purpose. Why\".",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "理由"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "原因"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "原因"
           }
         }
       }

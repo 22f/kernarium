@@ -60,6 +60,11 @@ struct SendFeedbackSheet: View {
             ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    if model.showsNoGoogleLine {
+                        NoGoogleFeedbackLine(model: model)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 12)
+                    }
                     if !state.mailAvailable {
                         mailUnavailable
                             .padding(.horizontal, 16)
