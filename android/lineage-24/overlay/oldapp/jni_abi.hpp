@@ -124,6 +124,8 @@ enum : int {
     SetByteArrayRegion = 208,
     GetPrimitiveArrayCritical = 222,
     ReleasePrimitiveArrayCritical = 223,
+    GetStringCritical = 224,
+    ReleaseStringCritical = 225,
     RegisterNatives = 215,
     MonitorEnter = 217,
     MonitorExit = 218,

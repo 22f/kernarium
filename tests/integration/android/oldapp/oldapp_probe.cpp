@@ -73,6 +73,11 @@
 //   ended_kept_ref  the reference of a block that ended, kept in a variable across 100 "frames": each frame asks it
 //                the length, the elements, a Java call and a region, with Java and the application both writing the
 //                array (bytes of one 4 KiB chunk), and both writes show on both sides
+//   bind_swap    (the options "swap|<foreign library>|<own library>": a run of its own) a library of another package is
+//                loaded at a reserved address, enters the layer and is closed; a library of the application's own is
+//                loaded at the same address and its native method registered. It gets its thunk: 600 calls from one
+//                native frame all return a block (a binding decided from the address's earlier owner would leave the
+//                method without a thunk, and the 513th result would be the runtime's own reference)
 //   ended_reuse, ended_limit, sentinel_pressure, sentinel_gc, create_ns  recorded: a temporary took the address of an
 //                earlier one after a collection; a raw write after the block ended does not reach Java (the stated
 //                limit); whether a weak reference to an array nothing holds is cleared by allocation pressure and by an
@@ -121,6 +126,18 @@ int probe_pthread_create(unsigned long*, const void*, void* (*)(void*), void*) _
 int probe_pthread_join(unsigned long, void**) __asm__("pthread_join");
 int probe_clock_gettime(int, long*) __asm__("clock_gettime");  // struct timespec is two longs on bionic
 void* probe_dlopen(const char*, int) __asm__("dlopen");
+struct DlExtInfo {  // android_dlextinfo
+    uint64_t flags;
+    void* reserved_address;
+    size_t reserved_size;
+    int relro_fd;
+    int library_fd;
+    int64_t library_fd_offset;
+    void* library_namespace;
+};
+void* probe_dlopen_ext(const char*, int, const DlExtInfo*) __asm__("android_dlopen_ext");
+int probe_dlclose(void*) __asm__("dlclose");
+void* probe_mmap(void*, size_t, int, int, int, long) __asm__("mmap");
 void* probe_dlsym(void*, const char*) __asm__("dlsym");
 }
 
@@ -852,6 +869,94 @@ void outside_case(Report& report, Env* env, jclass probe, const char* path) {
     }
     report.line("outside_stopped_at", text);
     report.verdict("ends_outside", stopped_at > 0);
+}
+
+// bind_swap: the loader's list changes under an address. A library of another package is opened in a reserved range, makes
+// a JNI call (the layer learns the range as another package's) and is closed; the application's own library is opened in
+// the same range and its native method tickReg registered. The binding is decided from the loader's list as it is.
+bool split_paths(const char* options, char* foreign, size_t capacity, char* own) {
+    size_t n = 0;
+    while (options[n] != '\0' && options[n] != '|' && n + 1 < capacity) {
+        foreign[n] = options[n];
+        ++n;
+    }
+    foreign[n] = '\0';
+    if (options[n] != '|') {
+        return false;
+    }
+    size_t k = 0;
+    ++n;
+    while (options[n] != '\0' && k + 1 < capacity) {
+        own[k++] = options[n++];
+    }
+    own[k] = '\0';
+    return foreign[0] == '/' && own[0] == '/';
+}
+
+void swap_case(Report& report, Env* env, jclass probe, const char* paths) {
+    constexpr size_t kReserve = 1u << 20;
+    constexpr int kCalls = 600;
+    char foreign[512], own[512];
+    if (!split_paths(paths, foreign, sizeof(foreign), own)) {
+        report.line("bind_swap", "skipped");
+        return;
+    }
+    const auto static_method = entry<jmethodID (*)(Env*, jclass, const char*, const char*)>(env, slot::GetStaticMethodID);
+    const auto call_int = entry<jint (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kInt, kVarargs));
+    const auto register_natives = entry<jint (*)(Env*, jclass, const NativeMethod*, jint)>(env, slot::RegisterNatives);
+    const auto exception_clear = entry<void (*)(Env*)>(env, slot::ExceptionClear);
+    const auto push_frame = entry<jint (*)(Env*, jint)>(env, slot::PushLocalFrame);
+    const auto pop_frame = entry<jobject (*)(Env*, jobject)>(env, slot::PopLocalFrame);
+    const char* stage = "reserve";
+    int good = 0;
+    bool same_place = false;
+    void* reserved = probe_mmap(nullptr, kReserve, 0, 0x22, -1, 0);  // PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS
+    const DlExtInfo ext{1, reserved, kReserve, -1, -1, 0, nullptr};  // ANDROID_DLEXT_RESERVED_ADDRESS
+    if (reserved != nullptr && reserved != reinterpret_cast<void*>(-1)) {
+        stage = "foreign";
+        void* first = probe_dlopen_ext(foreign, 2, &ext);
+        void* first_tick = first != nullptr ? probe_dlsym(first, "Java_org_example_andarium_oldappprobe_Probe_tick") : nullptr;
+        if (first_tick != nullptr) {
+            stage = "call";
+            const jint called = reinterpret_cast<jint (*)(Env*, jclass)>(first_tick)(env, probe);
+            exception_clear(env);
+            if (called == 1) {
+                stage = "close";
+                if (probe_dlclose(first) == 0 &&
+                    probe_mmap(reserved, kReserve, 0, 0x32, -1, 0) == reserved) {  // MAP_FIXED: the range is ours again
+                    stage = "own";
+                    void* second = probe_dlopen_ext(own, 2, &ext);
+                    void* second_tick = second != nullptr ? probe_dlsym(second, "Java_org_example_andarium_oldappprobe_Probe_tick")
+                                                          : nullptr;
+                    same_place = second_tick == first_tick;
+                    const jmethodID tick = static_method(env, probe, "tickReg", "()I");
+                    if (second_tick != nullptr && same_place && tick != nullptr) {
+                        stage = "register";
+                        const NativeMethod method{"tickReg", "()I", second_tick};
+                        const bool framed = push_frame(env, 1024) == 0;
+                        if (register_natives(env, probe, &method, 1) == 0) {
+                            stage = "calls";
+                            for (; good < kCalls; ++good) {
+                                if (call_int(env, probe, tick) != 1) {
+                                    break;
+                                }
+                            }
+                        }
+                        exception_clear(env);
+                        if (framed) {
+                            pop_frame(env, nullptr);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    char text[12];
+    decimal(text, static_cast<uint32_t>(good));
+    report.line("bind_swap_good", text);
+    report.line("bind_swap_same_address", same_place ? "yes" : "no");
+    report.line("bind_swap_stage", stage);
+    report.verdict("bind_swap", good == kCalls && same_place);
 }
 
 // ---- the application scene (the options "scene")
@@ -1696,6 +1801,12 @@ extern "C" __attribute__((visibility("default"))) jstring Java_org_example_andar
     // result from this process, after the layer's 30 s between two diagnosis lines, so that the peaks it kept appear in
     // the log (a result and a return are what log them).
     const bool scene_only = same(opts, "scene", 6), peak_only = same(opts, "peak", 5);
+    if (same(opts, "swap|", 5)) {
+        swap_case(report, env, probe, opts + 5);
+        report.line("done", "1");
+        entry<ReleaseUtf>(env, 170)(env, options, opts);
+        return entry<jstring (*)(Env*, const char*)>(env, slot::NewStringUTF)(env, report.text);
+    }
     if (scene_only || peak_only) {
         if (scene_only) {
             scene_cases(report, env, probe);

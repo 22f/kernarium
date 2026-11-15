@@ -588,6 +588,47 @@ class StepTests(unittest.TestCase):
         with self.assertRaises(runner.Failure):
             runner.switch(Refusing(), package, True)
 
+    def test_an_image_with_the_switch_command_is_switched_with_it_and_without_root(self) -> None:
+        class Image(FakeGuest):
+            def __init__(self, command: bool) -> None:
+                super().__init__("")
+                self.value = ""
+                self.command = command
+
+            def shell(self, command: str, timeout: float = 30) -> str:
+                self.commands.append("shell " + command)
+                if command.startswith("command -v"):
+                    return "/system/bin/kernarium_oldapp\n" if self.command else ""
+                if command.startswith("kernarium_oldapp set"):
+                    self.value = "1700000000" if " on;" in command else ""
+                    return "rc=0\n"
+                if command.startswith("su 0"):
+                    self.value = command.split("'")[1]
+                    return ""
+                return self.value + "\n"
+
+        package = probe.package_of("old")
+        with mock.patch.object(runner.time, "sleep"):
+            with_command = Image(True)
+            self.assertIn("with kernarium_oldapp", runner.switch(with_command, package, True))
+            self.assertIn(f"shell kernarium_oldapp set {package} on; echo rc=$?", with_command.commands)
+            self.assertEqual(with_command.value, "1700000000")
+            self.assertIn("switched off", runner.switch(with_command, package, False))
+            self.assertFalse(any(c.startswith("shell su ") for c in with_command.commands), "a user build has no su")
+            without = Image(False)
+            runner.switch(without, package, True)
+            self.assertTrue(any(c.startswith("shell su 0 setprop") for c in without.commands))
+
+            class Failing(Image):
+                def shell(self, command: str, timeout: float = 30) -> str:
+                    if command.startswith("kernarium_oldapp set"):
+                        self.commands.append("shell " + command)
+                        return "not eligible\nrc=1\n"
+                    return super().shell(command, timeout)
+
+            with self.assertRaises(runner.Failure):
+                runner.switch(Failing(True), package, True)
+
     def test_the_old_probe_is_told_where_another_packages_copy_of_the_library_is(self) -> None:
         class Listing(FakeGuest):
             def shell(self, command: str, timeout: float = 30) -> str:

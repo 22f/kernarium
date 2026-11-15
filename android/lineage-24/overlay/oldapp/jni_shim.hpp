@@ -84,8 +84,10 @@ struct Counters {
 
 // `table` is the shared function table (kSlotCount entries), `shadow_region` the memory of the byte[]
 // blocks (null: nothing to intercept). Returns false, changing nothing, when the table cannot be
-// written.
-bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_region, size_t shadow_size);
+// written. `env` (the environment of the loading thread, when there is one) resolves the classes and methods the layer calls
+// itself (System.identityHashCode, Runtime.gc) before the table is patched, so that no block can exist without them.
+bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_region, size_t shadow_size,
+                          jni::Env* env = nullptr);
 
 // The invoke interface: the "a library may have loaded" notification (is_app_caller is asked for the caller) on
 // GetEnv and the attach calls, and the end of a thread's references at DetachCurrentThread.

@@ -87,6 +87,9 @@ ENDS = ("ends_lazy_thumb", "ends_lazy_arm", "ends_reg_thumb", "ends_reg_arm", "e
 SCENE_ROWS = ("scene_complete", "scene_data", "scene_write", "scene_attached")
 EXPECTED = {
     "scene": {**dict.fromkeys(SCENE_ROWS, "pass"), "done": "1"},
+    # A library of another package is closed and the application's own opened at its address: the layer's binding is decided
+    # from the loader's list as it is (a run of its own, with the options "swap|<foreign>|<own>").
+    "swap": {"bind_swap": "pass", "bind_swap_good": "600", "bind_swap_same_address": "yes", "done": "1"},
     "old": {"shim_mapped": "yes", "raw_read": "pass", "passback": "pass", "elements": "pass", "global": "pass",
             "thread_raw": "pass", **SEMANTICS, "java_fill_raw": "pass", "raw_write_java": "pass", "low_heap": "pass",
             **dict.fromkeys(ENDS, "pass"), "done": "1"},
@@ -225,9 +228,19 @@ def layer_in_image(guest) -> str:
 
 
 def switch(guest, package: str, on: bool) -> str:
-    """Switches the layer on for the application (or off) by writing its property of the store, as the image's
-    own command does, and checks the guest holds what was set."""
+    """Switches the layer on for the application (or off) as the person does, with the image's own command,
+    `kernarium_oldapp set PACKAGE on|off` as the adb shell user (a user build has no root shell), and checks the
+    guest holds what was set. Where the image has no such command (a release from before it) the property of the
+    store is written as root, which the command does for the person."""
     name = probe.STORE_PROPERTY_PREFIX + package
+    if guest.shell("command -v kernarium_oldapp", timeout=30).strip().startswith("/"):
+        verb = "on" if on else "off"
+        result = guest.shell(f"kernarium_oldapp set {package} {verb}; echo rc=$?", timeout=60).strip()
+        held = guest.shell(f"getprop {name}").strip()
+        if not result.endswith("rc=0") or bool(held) != on:
+            raise Failure(f"kernarium_oldapp set {package} {verb}: {result[-200:]!r}; {name} holds '{held}'")
+        time.sleep(1)
+        return f"{package} {'switched on' if on else 'switched off'} with kernarium_oldapp"
     value = str(int(time.time())) if on else ""
     guest.shell(f"su 0 setprop {name} '{value}'")
     held = guest.shell(f"getprop {name}").strip()
@@ -257,18 +270,23 @@ def diagnosis(guest, package: str) -> str:
     return " | ".join(line.split(": ", 1)[-1][:200] for line in lines[-8:])
 
 
-def outside_library(guest) -> str:
-    """The probe library as the modern probe package installed it: a library of another package than the old probe's,
-    which the old process can load (the row ends_outside registers a native method from it)."""
-    output = guest.shell(f"pm path {probe.package_of('modern')}", timeout=30)
+def package_library(guest, variant: str, library: str) -> str:
+    """The path of a library of the variant's package as the package manager installed it."""
+    output = guest.shell(f"pm path {probe.package_of(variant)}", timeout=30)
     paths = [line[len("package:"):].strip() for line in output.splitlines() if line.startswith("package:")]
     if not paths:
-        raise Failure(f"{probe.package_of('modern')} is not installed: {output.strip()[-200:]}")
+        raise Failure(f"{probe.package_of(variant)} is not installed: {output.strip()[-200:]}")
     directory = paths[0].rsplit("/", 1)[0] + "/lib"
     abis = guest.shell(f"ls {shlex.quote(directory)}", timeout=30).split()
     if not abis:
         raise Failure(f"{directory} holds no native libraries: {abis}")
-    return f"{directory}/{abis[0]}/lib{probe.PROBE_LIBRARY}.so"
+    return f"{directory}/{abis[0]}/lib{library}.so"
+
+
+def outside_library(guest) -> str:
+    """The probe library as the modern probe package installed it: a library of another package than the old probe's,
+    which the old process can load (the row ends_outside registers a native method from it)."""
+    return package_library(guest, "modern", probe.PROBE_LIBRARY)
 
 
 def run_variant(guest, variant: str, *, shim: bool, options: str | None = None,
@@ -366,6 +384,23 @@ def scene(guest, variant: str, *, shim: bool, layer: bool, checked: bool = False
     return note + (f"; most live blocks of a thread {thread_peak(layer_lines(text))}" if layer else "")
 
 
+def swap(guest, *, shim: bool) -> str:
+    """The row bind_swap in a process of its own: the modern package's copy of the probe library is opened in a reserved
+    range, enters the layer and is closed, and the old package's second file of the library is opened at the same address
+    and bound to a native method; every one of 600 calls must return a block."""
+    guest.adb_run("logcat", "-c", timeout=30)
+    paths = f"swap|{outside_library(guest)}|{package_library(guest, 'old', probe.PROBE_LIBRARY_COPY)}"
+    result, installs = run_variant(guest, "old", shim=shim, options=paths)
+    note = evaluate("swap", result)
+    if installs < 1:
+        raise Failure(f"the log shows no install of the layer in the process of bind_swap; {note}")
+    text = guest.adb_run("logcat", "-d", "-b", "all", "-v", "brief", timeout=90).stdout
+    problems = [f"the log has '{word}'" for word in CRASH_WORDS if word in text]
+    if problems:
+        raise Failure("old: " + "; ".join(problems) + f"; {note}")
+    return note
+
+
 def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report) -> None:
     clang = options.clang or shutil.which("clang++")
     lld = options.lld or shutil.which("ld.lld")
@@ -446,6 +481,8 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
             report.run("old: the application's reads, references and allocations", old)
             old_scene()
             named_scene()
+            report.run("old: a native method bound where another package's library was closed gets its thunk",
+                       lambda: swap(guest, shim=True))
         else:
             report.run("old, not switched on: the layer is left out", control)
             report.run("old, not switched on: the render thread's scene", lambda: scene(guest, "old", shim=False, layer=False))
@@ -453,6 +490,8 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
             try:
                 report.run("old: the application's reads, references and allocations", old)
                 old_scene()
+                report.run("old: a native method bound where another package's library was closed gets its thunk",
+                           lambda: swap(guest, shim=False))
             finally:
                 switch(guest, package, False)
             named_package = probe.package_of("named")

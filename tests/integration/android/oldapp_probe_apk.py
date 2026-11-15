@@ -45,6 +45,7 @@ SHIM_SOURCES = (OVERLAY / "oldapp_android.cpp", OVERLAY / "jni_shim.cpp", OVERLA
 PROBE_NEEDED = ("libc.so", "libdl.so")
 SHIM_NEEDED = ("libc.so", "libdl.so", "liblog.so")
 PROBE_LIBRARY = "koldprobe"
+PROBE_LIBRARY_COPY = "koldprobe2"  # the same bytes under another name: a second file for the row bind_swap
 SHIM_LIBRARY = "kernarium_oldapp"
 #: The path on an image, where the framework loads the layer from.
 SHIM_IMAGE_PATH = "/system/lib/libkernarium_oldapp.so"
@@ -145,6 +146,8 @@ def build_apk(destination: pathlib.Path, variant: str, probe_library: pathlib.Pa
     files = {
         "classes.dex": oldapp_probe_dex.build_dex(),
         f"{ABI_DIRECTORY}/lib{PROBE_LIBRARY}.so": probe_library.read_bytes(),
+        # A second file of the same library: the row bind_swap opens it where another package's copy was closed.
+        f"{ABI_DIRECTORY}/lib{PROBE_LIBRARY_COPY}.so": probe_library.read_bytes(),
     }
     if shim_library is not None:
         files[f"{ABI_DIRECTORY}/lib{SHIM_LIBRARY}.so"] = shim_library.read_bytes()

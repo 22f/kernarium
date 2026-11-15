@@ -280,7 +280,6 @@ struct Module {
     unsigned phnum;
     uint32_t name_hash;
     uint8_t app;    // application code (classification)
-    uint8_t own;    // the application's own library (its install or data directories): the native-method thunks' domain
     uint8_t libc;
     uint8_t skip;   // never touched: this library, the dynamic linker
     uint8_t consumers_done;
@@ -493,7 +492,6 @@ int collect_module(OldappPhdrInfo* info, size_t size, void* user) {
     module.phnum = info->phnum;
     module.name_hash = hash_text(info->name);
     module.app = !platform_path(info->name) && !is_self;
-    module.own = module.app && in_application_directories(info->name, g_package);
     module.libc = platform_path(info->name) && same_text(base, "libc.so");
     module.skip = is_self || is_linker || (info->name != nullptr && info->name[0] != '/');
     inherit_state(module);
@@ -589,9 +587,8 @@ void refresh_modules(bool force) {
 
 void refresh_if_changed() { refresh_modules(false); }
 
-// 1: application code (own: the application's own library), 0: platform code (or, for own, another package's), -1: no
-// mapping known for the address.
-int classify(uintptr_t address, bool own) {
+// 1: application code, 0: platform code, -1: no mapping known for the address.
+int classify(uintptr_t address) {
     for (;;) {
         const uint32_t before = __atomic_load_n(&g_module_seq, __ATOMIC_ACQUIRE);
         if ((before & 1u) != 0) {
@@ -607,7 +604,7 @@ int classify(uintptr_t address, bool own) {
             } else if (address >= __atomic_load_n(&g_modules[middle].hi, __ATOMIC_RELAXED)) {
                 low = middle + 1;
             } else {
-                verdict = __atomic_load_n(own ? &g_modules[middle].own : &g_modules[middle].app, __ATOMIC_RELAXED) != 0 ? 1 : 0;
+                verdict = __atomic_load_n(&g_modules[middle].app, __ATOMIC_RELAXED) != 0 ? 1 : 0;
                 break;
             }
         }
@@ -623,7 +620,7 @@ bool is_app_caller(const void* return_address) {
     if ((__atomic_add_fetch(&g_calls, 1u, __ATOMIC_RELAXED) % kCheckEvery) == 0) {
         refresh_if_changed();  // a library may have been opened with no JNI call from it
     }
-    int verdict = classify(address, false);
+    int verdict = classify(address);
     if (verdict >= 0) {
         return verdict == 1;
     }
@@ -635,7 +632,7 @@ bool is_app_caller(const void* return_address) {
         return false;
     }
     refresh_if_changed();
-    verdict = classify(address, false);
+    verdict = classify(address);
     if (verdict >= 0) {
         return verdict == 1;
     }
@@ -646,15 +643,39 @@ bool is_app_caller(const void* return_address) {
 }
 
 // Whether the function is in one of the application's own libraries (the thunks' domain): asked once for each native
-// method the runtime binds, never per call. A library the list does not know yet is looked for after a refresh.
-bool is_own_library(const void* function) {
-    const uintptr_t address = reinterpret_cast<uintptr_t>(function) & ~uintptr_t{1};  // the Thumb bit
-    int verdict = classify(address, true);
-    if (verdict < 0) {
-        refresh_if_changed();
-        verdict = classify(address, true);
+// method the runtime binds, never per call. The answer comes from the loader's list as it is at this moment, never from the
+// classification cache: a library that was closed and another opened at its address would keep the old verdict there, and
+// a refresh that another thread is making would leave none. Bindings are rare, and the loader's lock is held for the
+// length of the question, so the library cannot be closed under it. The loader's list can still name a library that was
+// closed (its entry outlives the unload) beside the one now mapped over its range: the later entry is the current one.
+struct OwnQuery {
+    uintptr_t address;
+    int verdict;  // -1: no mapping covers the address
+};
+int own_module_at(OldappPhdrInfo* info, size_t, void* user) {
+    OwnQuery* query = static_cast<OwnQuery*>(user);
+    uintptr_t lo = ~uintptr_t{0};
+    uintptr_t hi = 0;
+    for (unsigned i = 0; i < info->phnum; ++i) {
+        if (info->phdr[i].p_type == kPtLoad) {
+            const uintptr_t start = info->addr + info->phdr[i].p_vaddr;
+            const uintptr_t end = start + info->phdr[i].p_memsz;
+            lo = start < lo ? start : lo;
+            hi = end > hi ? end : hi;
+        }
     }
-    return verdict == 1;
+    if (hi == 0 || query->address < lo || query->address >= hi) {
+        return 0;
+    }
+    const uintptr_t self = reinterpret_cast<uintptr_t>(&own_module_at);
+    const bool is_self = self >= lo && self < hi;
+    query->verdict = !is_self && !platform_path(info->name) && in_application_directories(info->name, g_package) ? 1 : 0;
+    return 0;  // the list goes on: a later entry over the same range replaces this verdict
+}
+bool is_own_library(const void* function) {
+    OwnQuery query{reinterpret_cast<uintptr_t>(function) & ~uintptr_t{1}, -1};  // the Thumb bit
+    oldapp_dl_iterate_phdr(own_module_at, &query);
+    return query.verdict == 1;
 }
 
 // The package of this process, from its name (/proc/self/cmdline): left empty when it cannot be read, and every
@@ -763,9 +784,13 @@ __attribute__((noinline)) void* layer_dlsym_found(void* handle, const char* name
     return thunk_for(function);
 }
 void* layer_dlsym(void* handle, const char* name) {
-    // RTLD_DEFAULT (0) and RTLD_NEXT (-1) look up from the caller's namespace: they go to the loader as libart's own
-    // call (a tail call, so the caller is still libart).
-    if (handle == nullptr || handle == reinterpret_cast<void*>(-1)) {
+    // RTLD_DEFAULT and RTLD_NEXT look up from the caller's namespace: they go to the loader as libart's own call (a tail
+    // call, so the caller is still libart). This library is 32-bit: Bionic's LP32 values are 0xffffffff and 0xfffffffe
+    // (the LP64 ones, 0 and -1, are not those).
+    constexpr uintptr_t kRtldDefault = 0xffffffffu;
+    constexpr uintptr_t kRtldNext = 0xfffffffeu;
+    const uintptr_t value = reinterpret_cast<uintptr_t>(handle);
+    if (handle == nullptr || value == kRtldDefault || value == kRtldNext) {
         return oldapp_dlsym(handle, name);
     }
     return layer_dlsym_found(handle, name);
@@ -1003,7 +1028,7 @@ extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void* vm_pointe
     refresh_modules(true);  // every library the application loaded before this one
     void** table = const_cast<void**>(env->functions);
     const bool jni_ok = install_jni_wrappers(table, platform, region != nullptr ? region + kArenaBytes : nullptr,
-                                             region != nullptr ? kShadowBytes : 0);
+                                             region != nullptr ? kShadowBytes : 0, env);
     install_vm_wrappers(const_cast<void**>(vm->functions), platform);
     oldapp_log_print(kLogInfo, kTag, "installed: jni=%ld arena=%ld", static_cast<long>(jni_ok),
                      static_cast<long>(g_arena_ready));

@@ -1099,7 +1099,12 @@ a committed write through a second reference to the array (pointers from
 a malloc buffer with `getline`, asks `malloc_usable_size`, reallocates and
 frees a block libc allocated, finds the function tables
 read-only again and allocates below 2 GiB, and passes; the runner also asserts
-the library's SELinux label and that the log names the first declined shadow once. The modern package gets no layer, the raw read fails
+the library's SELinux label and that the log names the first declined shadow once. It switches the package on
+with the image's own `kernarium_oldapp set` as the adb shell user (a user build has no root shell) and writes
+the store's property as root only on a release without that command. A swap row loads the probe's library from
+another path over the range a closed library of the modern package left, registers its native method and calls
+it 600 times: the layer classifies a binding from the loader's current state, so these calls end their
+references. The modern package gets no layer, the raw read fails
 and the array operations give the runtime's own answers. `--host-shim` boots a
 release without the layer and loads a host-built copy from the old package after
 a control run without it, which qualifies the library and not the framework hook.

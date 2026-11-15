@@ -645,10 +645,12 @@ patches ART's one JNI function table in place and gives the application:
   own native code returns (a method registered with the return type `[B`, or a
   field of that type): the value is a block with the length at offset 8 and the
   bytes at offset 16 that stands for the real array and holds a global reference
-  to it. Every JNI function that takes an object turns a block back into that
-  array for any caller, so identity (`IsSameObject`, `NewGlobalRef`, monitors)
-  and writes (`SetByteArrayRegion`, `Release*Elements`,
-  `ReleasePrimitiveArrayCritical`) keep their meaning. The layer reads the
+  to it. The JNI functions that take an object accept a reference to a block, from
+  any caller, as a reference to that array: the wrapper makes a local reference of
+  its own to the array (under the layer's lock when the block is not its thread's)
+  and gives the runtime only that, never the block's own reference, so identity
+  (`IsSameObject`, `NewGlobalRef`, monitors) and writes (`SetByteArrayRegion`,
+  `Release*Elements`, `ReleasePrimitiveArrayCritical`) keep their meaning. The layer reads the
   length from its own record, never from the length word, which the application
   can overwrite. The block and its array behave as one memory at the points
   where the application meets Java: before and after a call that is passed the
@@ -679,22 +681,44 @@ patches ART's one JNI function table in place and gives the application:
   (among its eight most recent). A block whose references have all ended stays at
   its address with its bytes as of that end (what the application wrote through
   the pointer reaches the array then) until the runtime collects the array; the
-  same array obtained again, on any thread, is that block again, so Java's later
-  writes and the application's later raw writes meet in it, and until then they
-  reach neither side. The reference of an ended block still means the array in
-  every JNI function (the application may keep it in a variable across native
-  methods): a function that uses it makes it a reference of the calling thread
-  again, and `DeleteLocalRef` and the releases do not. A pointer from
-  `Get...Elements` or `Get...Critical` pins its block as Dalvik pinned the array:
-  the block keeps its place, and a strong reference to the array, until the
-  pointer is released (mode 0 or `JNI_ABORT`; `JNI_COMMIT` keeps it). A release is
-  routed by the pointer to its block, whichever reference comes with it, and never
-  reaches the runtime for a pointer the runtime did not hand out. Ended and pinned
-  blocks do not count toward the 512; when the region or 16384 of them are used
-  up, those whose arrays are gone are freed (a full pass runs only after the
-  runtime has collected since the last one, or once a second) and, once in ten
-  seconds, the runtime is asked to collect. The process holds 32 MiB of
-  blocks, and each block's copy takes as many bytes again in the ordinary heap.
+  same array obtained again as a result, on any thread, is that block again, so
+  Java's later writes and the application's later raw writes meet in it, and until
+  then they reach neither side. A reference to a block that ended, or that another
+  thread holds, still means the array wherever the application kept it (a native
+  variable, from any thread): a function that is handed it works on the array for
+  the length of the call, and the use makes no reference of the calling thread and
+  moves no block, so a thread outside any native method, or one at the limit, can
+  use it. Only an array that arrives as a result makes a reference again, and
+  `DeleteLocalRef` and the releases do not. A reference whose array was collected
+  means nothing, as a reference to a freed block did (a length of 0, no elements).
+  A pointer from `Get...Elements` or `Get...Critical` pins its block as Dalvik
+  pinned the array: the block keeps its place, and a strong reference to the
+  array, until the pointer is released (mode 0 or `JNI_ABORT`; `JNI_COMMIT`
+  keeps it). `GetPrimitiveArrayCritical` of a kept reference works like
+  `Get...Elements` unless the thread already has a runtime critical region open
+  (`GetPrimitiveArrayCritical`, `GetStringCritical`), where no call that makes a
+  reference may be made: it then returns the block as it is when a pin or a live
+  reference keeps its array, and NULL otherwise. Two threads that use one block
+  at once share its memory as on Dalvik; their synchronizations with the array
+  run one at a time, and a raw write racing one can be lost. A release goes to
+  the block whose data starts at its pointer, whichever reference comes with it,
+  and never reaches the runtime for a pointer in the region; a pointer inside
+  the region that is not at a block's start is not read as a header, copies
+  nothing, and counts as the release of the block of the reference that comes
+  with it. At most 16384 blocks exist at once, live, ended or pinned, since each
+  ends with a weak global reference and an end never frees a block whose pointer
+  the application may hold. Ended and pinned blocks do not count toward the 512
+  of a thread. When the region or the 16384 are used up, a result first makes
+  room: the blocks whose arrays are gone are freed (a full pass is made whenever
+  the runtime has collected since a full pass last ran, and otherwise once a
+  second) and, once in ten seconds, the runtime is asked to collect; a result
+  that still finds none stays ART's own reference. Where no weak global
+  reference can be had for an ended block it stays strong and is tried again;
+  where the array's identity cannot be had (`System.identityHashCode` and
+  `Runtime.gc()` are looked up when the layer installs, before any block exists,
+  and again once a second after a failure) the result stays ART's own reference.
+  The process holds 32 MiB of blocks, and each block's copy takes as many bytes
+  again in the ordinary heap.
   An array the application creates itself (`NewByteArray`) stays ART's own;
 - an allocator below 2 GiB for the libraries the application ships: their
   `malloc`, `calloc`, `strdup`, `strndup`, `operator new` and `operator
@@ -731,8 +755,9 @@ keeps libc's `free` and can abort on a block another library allocated; a
 library with an allocator import in executable code (a text relocation) or
 whose relocation pages cannot be reopened, which keeps libc's allocator,
 `realloc` included, for its own blocks; a block's address reused after its array was
-collected, while the application still holds the old pointer; and more than 512 loaded
-libraries.
+collected, while the application still holds the old pointer or reference (a stale
+reference reaches the array of the block now at its address, as a dangling pointer
+could); and more than 512 loaded libraries.
 `tests/integration/android/run_android_oldapp.py` qualifies it
 ([testing](../../docs/testing.md#android)).
 
