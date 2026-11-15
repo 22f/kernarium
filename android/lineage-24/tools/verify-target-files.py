@@ -2718,7 +2718,8 @@ def check_services_jar(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInf
 
 
 # The old-application layer (overlay/oldapp) is a 32-bit library that ActivityThread, in framework.jar,
-# loads into the process of a 32-bit application that targets below API 14 (a p0007 topic). A build
+# loads into the process of a 32-bit application that targets below API 14 and that the person
+# switched it on for (a p0007 topic). A build
 # without the library, or with a framework that does not load it, leaves such a game with the ART
 # failures the layer exists to prevent; a library that is not a 32-bit ARM shared object with a
 # JNI_OnLoad would fail when the framework loads it. The jar stores its dex files uncompressed, so the
