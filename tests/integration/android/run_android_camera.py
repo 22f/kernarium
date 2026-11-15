@@ -288,19 +288,24 @@ DEFAULT_LAYOUTS = {
 }
 MODES = ("live", "blocked", "none", "restart", "video-lost")
 # The video-lost mode: the synthetic camera reads its test-only control pipe, and the runner tells it that the application
-# left the foreground (the host ends the video of a camera that records; docs/testing.md). The recording ends by itself
-# and the clip is saved, the application stays the resumed activity, and the camera opens again when the person returns
-# and uses it: LOST_HOLD_SECONDS of video before the loss, a clip of at least LOST_MINIMUM_SECONDS, and LOST_WAIT_SECONDS
-# for the clip to appear.
+# left the foreground (the host ends the video of a camera that has a video stream open; docs/testing.md). The recording
+# ends by itself and the clip, with encoded video samples, is saved, the application stays the resumed activity, and the
+# camera opens again when the application is started again after the person returns: LOST_HOLD_SECONDS of video before
+# the loss, a clip of at least LOST_MINIMUM_SECONDS, and LOST_WAIT_SECONDS for the clip to appear.
 CONTROL_VARIABLE = "UML_SYNTHETIC_CAMERA_CONTROL"
 LOST_HOLD_SECONDS = 4
 LOST_MINIMUM_SECONDS = 2.0
 LOST_WAIT_SECONDS = 60
-# The second case: the video mode's viewfinder with no recording. The person is away LOST_AWAY_SECONDS, and when they
-# return the viewfinder is live again within VIEWFINDER_RECOVERY_SECONDS, in the same process and with no error window.
+# The viewfinder cases. The person is away LOST_AWAY_SECONDS, and when they return the viewfinder is live again within
+# VIEWFINDER_RECOVERY_SECONDS of the return (one deadline for the camera, the picture and the frame counters), in the same
+# process and with no error window. The video mode's viewfinder (no recording) binds an encoder surface, so the HAL ends the
+# camera for it as for a recording; the photo mode's viewfinder has no encoder stream, so the HAL must not: it closes the
+# camera's video streams and opens them again, which its log says.
 LOST_AWAY_SECONDS = 8
 VIEWFINDER_RECOVERY_SECONDS = 45
-HAL_END_LINE = "the host ended the camera"
+HAL_END_LINE = "the host ended the camera: its video buffers fail"
+HAL_REOPEN_LINE = "the host ended the camera's video: its video streams are closed and opened again"
+STILL_ACTION = "android.media.action.STILL_IMAGE_CAMERA"
 ERROR_WINDOW = re.compile(r"Application (Error|Not Responding)|isn't responding|has stopped|keeps stopping")
 # The cameras Android lists again after the restart: the lazy provider starts when cameraserver first asks.
 RESTART_LIST_SECONDS = 60
@@ -1823,10 +1828,16 @@ def check_still_keeps_preview(guest: Guest, plan: Plan) -> None:
           "(no capture session closed)")
 
 
-def wait_for_chart(guest: Guest, camera_id: str, what: str, seconds: float | None = None) -> None:
-    """The application holds camera `camera_id` and its preview is the chart, within `seconds` (PREVIEW_SECONDS)."""
+def wait_for_chart(guest: Guest, camera_id: str, what: str, seconds: float | None = None,
+                   deadline: float | None = None) -> None:
+    """The application holds camera `camera_id` and its preview is the chart, within `seconds` (PREVIEW_SECONDS) for each
+    of the two; with `deadline` (an absolute time.monotonic() value) both share what is left of it."""
     seconds = PREVIEW_SECONDS if seconds is None else seconds
-    wait_for(f"the camera application holding camera {camera_id} ({what})", seconds,
+
+    def left() -> float:
+        return seconds if deadline is None else max(0.0, deadline - time.monotonic())
+
+    wait_for(f"the camera application holding camera {camera_id} ({what})", left(),
              lambda: None if camera_id in active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE)
              else f"it holds {sorted(active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE))}", guest)
     seen: list[tuple[float, float]] = []
@@ -1837,7 +1848,7 @@ def wait_for_chart(guest: Guest, camera_id: str, what: str, seconds: float | Non
         return None if deviation >= CHART_MINIMUM_DEVIATION else \
             f"the preview is flat (mean {mean:.1f}, deviation {deviation:.1f})"
 
-    wait_for(f"the {what} preview showing the chart", seconds, previewing, guest)
+    wait_for(f"the {what} preview showing the chart", left(), previewing, guest)
     print(f"  {what} preview: mean {seen[-1][0]:.1f}, deviation {seen[-1][1]:.1f}")
 
 
@@ -1999,8 +2010,10 @@ def new_movie(guest: Guest, before: dict[str, dict[str, str]], seconds: float) -
 
 def check_video_lost(guest: Guest, plan: Plan) -> None:
     """The host ends the video of a camera that records when the application leaves the foreground: the recording ends
-    and its clip is saved without a second key press, the application stays in front, and when the person returns the
-    camera opens again and a recording works. Needs an image whose HAL reports the loss (route p0030, last topic)."""
+    and its clip, which must hold encoded video samples, is saved without a second key press, the application stays in
+    front, and a recording works again. That last step STARTS THE APPLICATION AGAIN (a new activity start after the
+    return): it shows that the camera can be opened again, not that the viewfinder recovered by itself; the viewfinder
+    cases that follow show that. Needs an image whose HAL reports the loss (route p0030)."""
     before, _ = guest.videos()
     start_recording(guest, plan, restart_application=True)
     time.sleep(LOST_HOLD_SECONDS)
@@ -2013,6 +2026,8 @@ def check_video_lost(guest: Guest, plan: Plan) -> None:
         raise Failure(f"{path} is not a finished movie: {problem}") from problem
     if not movie.video:
         raise Failure(f"{path} has no video track")
+    if movie.frames <= 0:
+        raise Failure(f"{path} has a video track but no encoded video samples")
     if not LOST_MINIMUM_SECONDS <= movie.seconds <= LOST_HOLD_SECONDS + VIDEO_MAXIMUM_SECONDS:
         raise Failure(f"{path} lasts {movie.seconds:.2f} s; the recording ran {LOST_HOLD_SECONDS} s before the loss "
                       f"and must last between {LOST_MINIMUM_SECONDS:g} s and the time the loss took to be noticed")
@@ -2026,43 +2041,62 @@ def check_video_lost(guest: Guest, plan: Plan) -> None:
     print(f"  cameras the application holds after the loss: {held or 'none'}")
     guest.camera_control("resume")
     after, _ = guest.videos()
-    start_recording(guest, plan, restart_application=False)
+    start_recording(guest, plan, restart_application=False)  # a new activity start: see the docstring
     time.sleep(VIDEO_HOLD_SECONDS)
     guest.shell(f"input keyevent {CAMERA_KEYCODE}")
     again = new_movie(guest, after, VIDEO_SECONDS)
     reopened = parse_mp4(guest.pull(again.get("_data", "")))
-    if not reopened.video or reopened.seconds < VIDEO_MINIMUM_SECONDS:
-        raise Failure(f"the recording after the person returned is not a movie of at least {VIDEO_MINIMUM_SECONDS:g} s: "
-                      f"{reopened.seconds:.2f} s, video track {'yes' if reopened.video else 'no'}")
-    print(f"  the camera opened again: {again.get('_display_name', '')} {reopened.seconds:.2f} s, {reopened.frames} frames")
+    if not reopened.video or reopened.frames <= 0 or reopened.seconds < VIDEO_MINIMUM_SECONDS:
+        raise Failure(f"the recording after the person returned is not a movie of at least {VIDEO_MINIMUM_SECONDS:g} s "
+                      f"with encoded video samples: {reopened.seconds:.2f} s, video track {'yes' if reopened.video else 'no'}, "
+                      f"{reopened.frames} frames")
+    print(f"  the camera opened again for a new start of the application: {again.get('_display_name', '')} "
+          f"{reopened.seconds:.2f} s, {reopened.frames} frames")
     if HAL_END_LINE not in guest.hal_log():
         raise Failure("the camera HAL logged no end of the camera: the image lacks the HAL topic of route p0030")
     print("  the HAL reported the end of the camera (ERROR_DEVICE)")
-    check_viewfinder_returns(guest, plan)
+    check_viewfinder_returns(guest, plan, "video")
+    check_viewfinder_returns(guest, plan, "photo")
 
 
 def application_pids(guest: Guest) -> str:
     return guest.shell(f"pidof {CAMERA_PACKAGE} || true").strip()
 
 
-def check_viewfinder_returns(guest: Guest, plan: Plan) -> None:
-    """The second case: the video mode with its viewfinder and NO recording. The application leaves the foreground and
-    comes back; the viewfinder is live again within VIEWFINDER_RECOVERY_SECONDS without anything restarting the
-    application (the same process, the same window) and with no error window. Whether the host ended the camera for it
-    is printed: a viewfinder that was never lost passes, and says so."""
+def check_viewfinder_returns(guest: Guest, plan: Plan, mode: str) -> None:
+    """A viewfinder with NO recording. The application leaves the foreground and comes back; the viewfinder is live
+    again within VIEWFINDER_RECOVERY_SECONDS of the return (one deadline for the camera, the picture and the frame
+    counters) without anything restarting the application (the same process, the same window, no new activity start)
+    and with no error window. `mode` is "video" (the video mode's viewfinder, which binds an encoder surface: the HAL
+    ends the camera for it as for a recording, printed, not required) or "photo" (the photo mode's viewfinder has no
+    encoder stream: the HAL must not tell it the device is gone, it closes the camera's video streams and opens them
+    again, and the log says so)."""
     camera = plan.camera_ids[0]
-    wait_for_chart(guest, camera, "video viewfinder, not recording")
+    photo = mode == "photo"
+    label = "photo viewfinder" if photo else "video viewfinder"
+    if photo:
+        start_camera_application(guest, STILL_ACTION, front=PROFILE_CAMERAS[plan.profile][0] == "front")
+    wait_for_chart(guest, camera, label)
     process = application_pids(guest)
     crashes = guest.shell("logcat -d -b events | grep -a -E 'am_crash|am_anr|am_proc_died' || true")
-    ended = guest.hal_log().count(HAL_END_LINE)
+    log = guest.hal_log()
+    ended, reopened = log.count(HAL_END_LINE), log.count(HAL_REOPEN_LINE)
     guest.camera_control("interrupt background")
     time.sleep(LOST_AWAY_SECONDS)
-    lost = guest.hal_log().count(HAL_END_LINE) > ended
+    log = guest.hal_log()
+    lost, reopening = log.count(HAL_END_LINE) > ended, log.count(HAL_REOPEN_LINE) > reopened
     held = sorted(active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE))
-    print(f"  viewfinder: the host {'ended' if lost else 'did not end'} the camera; the application holds {held or 'none'} while away")
+    print(f"  {label}: the HAL {'ended' if lost else 'did not end'} the camera and "
+          f"{'reopened' if reopening else 'did not reopen'} its video streams; the application holds {held or 'none'} while away")
+    if photo and lost:
+        raise Failure("the HAL told the photo viewfinder that the device is gone (ERROR_DEVICE): only a session with an encoder "
+                      "stream may be ended")
     guest.camera_control("resume")
-    wait_for_chart(guest, camera, "video viewfinder after the return", VIEWFINDER_RECOVERY_SECONDS)
-    wait_for_capture(guest, "the viewfinder after the return")
+    returned = time.monotonic()
+    deadline = returned + VIEWFINDER_RECOVERY_SECONDS
+    wait_for_chart(guest, camera, f"{label} after the return", deadline=deadline)
+    wait_for_capture(guest, f"the {label} after the return", deadline)
+    print(f"  {label}: live again {time.monotonic() - returned:.1f} s after the return (limit {VIEWFINDER_RECOVERY_SECONDS} s)")
     if application_pids(guest) != process:
         raise Failure(f"the application was restarted (process {process!r}, then {application_pids(guest)!r}) "
                       "instead of showing its viewfinder again")
@@ -2072,7 +2106,10 @@ def check_viewfinder_returns(guest: Guest, plan: Plan) -> None:
     after = guest.shell("logcat -d -b events | grep -a -E 'am_crash|am_anr|am_proc_died' || true")
     if after != crashes:
         raise Failure(f"the application crashed or stopped responding around the loss: {after[len(crashes):][-300:]!r}")
-    print(f"  viewfinder: live again after the return, same process {process}, no error window")
+    if photo and guest.hal_log().count(HAL_REOPEN_LINE) <= reopened:
+        raise Failure("the HAL logged no reopening of its video streams: the host did not end the camera's video, or the image "
+                      "lacks the HAL topic of route p0030")
+    print(f"  {label}: live again after the return, same process {process}, no error window")
 
 
 def check_audio_stall(guest: Guest, plan: Plan) -> None:
@@ -2133,8 +2170,9 @@ def check_video_freeze(guest: Guest, plan: Plan) -> None:
     check_audio_end(path, movie)
 
 
-def wait_for_capture(guest: Guest, what: str) -> None:
-    """The camera service's frame counters rise between two reads: capture is running now, not only once was."""
+def wait_for_capture(guest: Guest, what: str, deadline: float | None = None) -> None:
+    """The camera service's frame counters rise between two reads: capture is running now, not only once was. With
+    `deadline` (an absolute time.monotonic() value) the wait ends there, not SWITCH_OBSERVE_SECONDS after it began."""
     seen: list[int] = []
 
     def producing() -> str | None:
@@ -2143,7 +2181,8 @@ def wait_for_capture(guest: Guest, what: str) -> None:
         seen.append(count)
         return None if previous is not None and count > previous else f"the frame counters stand at {count}"
 
-    wait_for(f"live capture ({what})", SWITCH_OBSERVE_SECONDS, producing, guest)
+    seconds = SWITCH_OBSERVE_SECONDS if deadline is None else max(0.0, deadline - time.monotonic())
+    wait_for(f"live capture ({what})", seconds, producing, guest)
 
 
 def read_switch_log(guest: Guest, marker: str) -> str:
