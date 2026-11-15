@@ -423,7 +423,7 @@
         }
       }
     },
-    "Android's kernel crashed" : {
+    "Android’s kernel crashed" : {
       "comment" : "Title of Home's card after Android's kernel stopped on an error of its own.",
       "localizations" : {
         "ja" : {
@@ -446,7 +446,7 @@
         }
       }
     },
-    "Android's kernel ended Andarium." : {
+    "Android’s kernel ended Andarium." : {
       "comment" : "Home's card after Android's kernel ended the session by itself.",
       "localizations" : {
         "ja" : {
@@ -469,7 +469,7 @@
         }
       }
     },
-    "Android's kernel panicked" : {
+    "Android’s kernel panicked" : {
       "comment" : "Title of Home's card after Android's kernel panicked, the Linux kernel's own fatal error.",
       "localizations" : {
         "ja" : {
@@ -492,7 +492,7 @@
         }
       }
     },
-    "Android's memory could not be restored, so it starts again from boot." : {
+    "Android’s memory could not be restored, so it starts again from boot." : {
       "comment" : "Home's card after a start that could not bring back the memory Android saved when it was paused.",
       "localizations" : {
         "ja" : {
@@ -912,7 +912,7 @@
         }
       }
     },
-    "The virtual machine's data uses a newer layout than this app version can open. Erase the virtual machine to start again with this one." : {
+    "The virtual machine’s data uses a newer layout than this app version can open. Erase the virtual machine to start again with this one." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -934,7 +934,7 @@
         }
       }
     },
-    "The virtual machine's files do not match this app version. Erase the virtual machine to start again." : {
+    "The virtual machine’s files do not match this app version. Erase the virtual machine to start again." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {

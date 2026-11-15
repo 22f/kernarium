@@ -195,7 +195,7 @@ struct SessionDiagnosticsTests {
         let (launched, _) = model()
         launched.adoptDiagnostics(in: directory, containers: [], endedOutOfForeground: false)
         #expect(launched.notice == .sessionEnded(SessionEndNotice(
-            title: "Android's kernel panicked",
+            title: "Android’s kernel panicked",
             text: "Android stopped with a kernel panic: Attempted to kill init! exitcode=0x0000000b.")))
         #expect(launched.diagnosticsDirectory == directory)
         // The record is kept for the bug report, and the next boot writes its own.
