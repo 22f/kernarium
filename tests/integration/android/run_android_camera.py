@@ -2344,8 +2344,9 @@ def start_recording(guest: Guest, plan: Plan, restart_application: bool) -> None
     guest.shell(f"input keyevent {CAMERA_KEYCODE}")
 
 
-def new_movie(guest: Guest, before: dict[str, dict[str, str]], seconds: float) -> dict[str, str]:
-    """MediaStore's row of the movie that appeared since `before` was read, waiting at most `seconds`."""
+def new_movie(guest: Guest, before: dict[str, dict[str, str]], seconds: float, settle: float = 3.0) -> dict[str, str]:
+    """MediaStore's row of the movie that appeared since `before` was read, waiting at most `seconds`, then `settle` seconds
+    for the application to close the file (a caller that waits for the file itself passes 0: finished_movie)."""
     found: list[dict[str, str]] = []
 
     def recorded() -> str | None:
@@ -2357,8 +2358,25 @@ def new_movie(guest: Guest, before: dict[str, dict[str, str]], seconds: float) -
         return None
 
     wait_for("a movie in MediaStore", seconds, recorded, guest)
-    time.sleep(3)  # the file is finished when the application has closed it
+    if settle > 0:
+        time.sleep(settle)  # the file is finished when the application has closed it
     return found[-1]
+
+
+def finished_movie(guest: Guest, path: str, seconds: float) -> Movie:
+    """The movie at `path` once it is a finished one, looked at every half second for at most `seconds` (and at least once). The
+    muxer writes the `moov` box when it closes the file, so a file that is still being written does not parse; one that
+    never does is the failure at the bound ("is not a finished movie"), as for a clip the application never closed."""
+    deadline = time.monotonic() + seconds
+    while True:
+        guest.alive()
+        try:
+            return parse_mp4(guest.pull(path))
+        except ValueError as problem:
+            message = f"{path} is not a finished movie: {problem}"
+        if time.monotonic() >= deadline:
+            raise Failure(f"{message} (after {seconds:.0f} s)")
+        time.sleep(0.5)
 
 
 def parse_stream_leaks(log: str) -> list[str]:
@@ -2393,12 +2411,12 @@ def check_video_lost(guest: Guest, plan: Plan) -> None:
     start_recording(guest, plan, restart_application=True)
     time.sleep(LOST_HOLD_SECONDS)
     guest.camera_control("interrupt background")
-    row = new_movie(guest, before, LOST_WAIT_SECONDS)
+    limit = time.monotonic() + LOST_WAIT_SECONDS
+    row = new_movie(guest, before, LOST_WAIT_SECONDS, settle=0)
     path = row.get("_data", "")
-    try:
-        movie = parse_mp4(guest.pull(path))
-    except ValueError as problem:
-        raise Failure(f"{path} is not a finished movie: {problem}") from problem
+    # The clip is finished a second or so after the loss and the runner has no better signal than the file itself: it is
+    # pulled until it parses, within what is left of LOST_WAIT_SECONDS, not a fixed time after the row appeared.
+    movie = finished_movie(guest, path, max(0.0, limit - time.monotonic()))
     if not movie.video:
         raise Failure(f"{path} has no video track")
     require_media_payload(path, movie)

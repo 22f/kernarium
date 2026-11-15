@@ -3076,6 +3076,10 @@ class VideoLostTests(unittest.TestCase):
             self.photo_returns = True
             # The movie the second recording saved, when it is not the first one.
             self.again_movie: bytes | None = None
+            # The clip the loss saved is still being written for this many of the runner's first looks at it (a file the
+            # muxer has not closed has no `moov` box yet); the file's pulls are counted.
+            self.unfinished_pulls = 0
+            self.lost_pulls = 0
             # The camera service logs a leaked stream at the nth time (counted from 1) the runner sends a control line:
             # {("interrupt background", 2)} is the loss of the video viewfinder, {("resume", 3)} the return of the photo one.
             self.leaks_at: set[tuple[str, int]] = set()
@@ -3083,6 +3087,11 @@ class VideoLostTests(unittest.TestCase):
         def pull(self, remote: str) -> bytes:
             if remote == "/sdcard/again.mp4" and self.again_movie is not None:
                 return self.again_movie
+            if remote == "/sdcard/lost.mp4":
+                self.lost_pulls += 1
+                if self.lost_pulls <= self.unfinished_pulls:
+                    whole = super().pull(remote)
+                    return whole[:whole.index(b"moov") - 4]
             return super().pull(remote)
 
         def camera_control(self, line: str) -> None:
@@ -3130,9 +3139,10 @@ class VideoLostTests(unittest.TestCase):
                 return ""
             return super().shell(command, timeout)
 
-    def run_check(self, guest) -> str:
+    def run_check(self, guest, sleeps: list[float] | None = None) -> str:
         out = io.StringIO()
-        with contextlib.redirect_stdout(out), mock.patch.object(runner.time, "sleep", lambda seconds: None):
+        with contextlib.redirect_stdout(out), \
+                mock.patch.object(runner.time, "sleep", lambda seconds: sleeps is None or sleeps.append(seconds)):
             runner.check_video_lost(guest, guest.plan)
         return out.getvalue()
 
@@ -3183,6 +3193,27 @@ class VideoLostTests(unittest.TestCase):
         guest = self.Guest(self.plan(), movies=movie(3.5, samples=False))
         with self.assertRaisesRegex(runner.Failure, "no encoded video samples"):
             self.run_check(guest)
+
+    def test_a_clip_is_pulled_when_it_is_finished_not_a_fixed_time_after_the_loss(self) -> None:
+        # The clip finishes a second or so after the loss: the runner looks every half second until it parses, and waits
+        # no fixed time after the row appeared (the recordings that follow still settle for the application to close the file).
+        guest = self.Guest(self.plan())
+        guest.unfinished_pulls = 2
+        sleeps: list[float] = []
+        text = self.run_check(guest, sleeps)
+        self.assertIn("the recording ended by itself: lost.mp4", text)
+        self.assertEqual(guest.lost_pulls, 3)
+        after_hold = sleeps[sleeps.index(runner.LOST_HOLD_SECONDS) + 1:]
+        self.assertEqual(after_hold[:2], [0.5, 0.5])
+        self.assertNotEqual(after_hold[2], 3, "no fixed wait follows the two looks")
+
+    def test_a_clip_that_is_never_finished_fails_at_the_bound(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.unfinished_pulls = 10 ** 6
+        with self.assertRaisesRegex(runner.Failure, r"/sdcard/lost\.mp4 is not a finished movie: no ftyp and moov.*\(after 0 s\)"), \
+                mock.patch.object(runner, "LOST_WAIT_SECONDS", 0.05):
+            self.run_check(guest)
+        self.assertGreaterEqual(guest.lost_pulls, 1)
 
     def clip_fails(self, clip: bytes, pattern: str) -> None:
         guest = self.Guest(self.plan(), movies=clip)

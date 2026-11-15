@@ -1179,12 +1179,13 @@ application left the foreground while the video mode records, and expects the
 recording to end by itself with its clip saved, the camera application to stay
 in front, and a recording to work again
 once the application is started again after the person returns (that step starts
-the activity again and shows only that the camera can be opened again). The clip
-holds encoded video samples, lasts at most 2 s more than the video before the
-loss, has the frame rate of a recording and no step of 0.5 s between two video
-samples, and its audio holds what its time stamps span and ends with its video:
-CameraX keeps a recording over the reopening of a camera, so a clip with a gap
-and a dark tail means the camera application did not end it. Two more
+the activity again and shows only that the camera can be opened again). The clip,
+which the runner pulls once it is a finished movie, holds encoded video samples,
+ends soon after the video before the loss, has the frame rate of a recording and
+no gap between two video samples, and its audio holds what its time stamps span
+and ends with its video: CameraX keeps a recording over the reopening of a
+camera, so a clip with a gap and a dark tail means the camera application did
+not end it. Two more
 cases leave a viewfinder with no recording, the video mode's (which binds an
 encoder surface) and the photo mode's, and expect each live again within 45 s of
 the return (one deadline for the camera, the picture and the frame counters), in
