@@ -72,7 +72,8 @@ UML implementation. `Build.SOC_MANUFACTURER` and `SOC_MODEL` are `Kernarium` and
   are 4 KiB aligned. ABI support does not lower the minimum installable target
   SDK; test an older APK with `adb install --bypass-low-target-sdk-block`.
 - **Applications.** Settings, Trebuchet, Files, Package Installer, the LineageOS
-  WebView, LatinIME, ThemePicker and a curated set (gallery, music, calendar,
+  WebView, LatinIME, ThemePicker, Messaging for the host's
+  [text messages](#text-messages) and a curated set (gallery, music, calendar,
   calculator, PDF viewer, backup). There is no browser, app store, install
   restriction, Google or microG. Applications that need absent hardware or
   LineageOS cloud services are excluded by name in the product makefile, and the
@@ -89,7 +90,7 @@ UML implementation. `Build.SOC_MANUFACTURER` and `SOC_MODEL` are `Kernarium` and
   entry, the Bluetooth developer option, the media output switcher, and the
   hearing, Bluetooth pairing, telephony, biometric and USB pages) and hides the
   Wi-Fi hotspot, wireless display and System update pages.
-- **Hardware not advertised.** Telephony, GNSS, NFC, UWB, Thread, camera,
+- **Hardware not advertised.** Telephony (apart from receiving text messages), GNSS, NFC, UWB, Thread, camera,
   biometric, vibrator, secure element, USB, Bluetooth and Trusty. SecureElement
   is kept but not persistent (route `p0024`): nothing starts it at boot, and the
   first `SEService` client that binds it starts it.
@@ -157,6 +158,22 @@ format. Axes match the mounted virtual display, Core Motion acceleration is
 multiplied by -9.80665, and events carry the guest's `CLOCK_BOOTTIME` at receipt:
 a live input path, not a synchronized recording. Andarium's
 [scene policy](../../Andarium/README.md#devices) describes windowed operation.
+
+### Text messages
+
+The guest receives text messages from the host and sends none. `KernariumSms`
+(`overlay/sms/`) runs as the system user and serves one provider call,
+`content call --uri content://android.kernarium.sms --method deliver`, to the
+adb shell's uid alone. It encodes the message as 3GPP SMS-DELIVER PDUs (UCS-2,
+up to ten concatenated parts) and broadcasts `SMS_DELIVER` to the SMS role
+holder and `SMS_RECEIVED` as the radio stack does, so Messaging stores and
+notifies and applications holding `RECEIVE_SMS` get it. The product carries
+Messaging and TelephonyProvider and declares
+`android.hardware.telephony.messaging` and `config_sms_capable` (the SMS role
+needs both), but not `android.hardware.telephony`: there is no radio, SIM or
+SMS sending. `Message.java` and
+`Andarium/AndariumCore/Sources/AndariumCore/Adb/GuestSms.swift` own the
+argument's format and limits.
 
 ### Networking
 

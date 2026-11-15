@@ -302,6 +302,10 @@ requires reopening Andarium.
   from the process's one Core Motion manager, which is never released (a
   released manager crashes inside Core Motion); the system image must include
   the [motion sub-HAL](../android/lineage-24/README.md#motion-sensors).
+- **Text messages.** Settings' Text message section sends a sender and a text
+  over the adb channel, and Android receives it as an SMS from that sender
+  (`GuestSms`); the system image must include the
+  [SMS service](../android/lineage-24/README.md#text-messages).
 - **Free space.** Once Android has booted a normal start, the application
   reads the device's free space (`RunSpace.nextCheck`: every 2 s near the
   limit, every 30 s on a roomy device) and pauses the guest below 1 GiB

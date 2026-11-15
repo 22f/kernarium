@@ -2152,7 +2152,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                                  '<fqname>ISensors/default</fqname></hal></manifest>')
                 advertised_features = ["android.hardware.touchscreen",
                                        "android.hardware.sensor.accelerometer",
-                                       "android.hardware.sensor.gyroscope"]
+                                       "android.hardware.sensor.gyroscope",
+                                       "android.hardware.telephony.messaging"]
                 advertised_features.extend(
                     feature for feature in (
                         "android.hardware.touchscreen.multitouch",
@@ -5855,6 +5856,9 @@ def verify_package_assertions(android_root: Path) -> None:
         "com.google.cf.wpa_supplicant",
         "KernariumWifiOverlay",
         "KernariumPinnerOverlay",
+        "KernariumSms",
+        "messaging",
+        "TelephonyProvider",
         "SecureElement",
         "EasterEgg",
         "kernarium_net_setup",

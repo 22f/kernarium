@@ -287,6 +287,8 @@ REQUIRED_ENTRIES = {
     "VENDOR/overlay/KernariumWifiOverlay.apk",
     # The overlay that releases PinnerService's home app pin.
     "VENDOR/overlay/KernariumPinnerOverlay.apk",
+    # The service that delivers the host's text messages (overlay/sms).
+    "SYSTEM_EXT/app/KernariumSms/KernariumSms.apk",
     *ABI_LIST_PROPERTY_FILES,
     *MESA_ELF_ENTRIES,
     *MESA_HAL_ENTRIES,
@@ -480,9 +482,7 @@ FORBIDDEN_APP_DIRECTORIES = {
     "Recorder",
     "TeleService",
     "Telecom",
-    "TelephonyProvider",
     "Updater",
-    "messaging",
 }
 FORBIDDEN_FEATURE_DECLARATIONS = {
     "android.hardware.bluetooth.xml",
@@ -528,6 +528,7 @@ REQUIRED_FEATURE_NAMES = {
     "android.hardware.sensor.gyroscope",
     "android.hardware.microphone",
     "android.hardware.wifi",
+    "android.hardware.telephony.messaging",
     "android.software.companion_device_setup",
     "android.software.midi",
     "android.hardware.opengles.aep",

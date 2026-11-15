@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="android.kernarium.sms"
+    android:sharedUserId="android.uid.system">
+
+    <application
+        android:label="Andarium SMS"
+        android:allowBackup="false">
+        <!-- Any caller reaches call(), which refuses every uid but the shell's. -->
+        <provider
+            android:name=".InjectProvider"
+            android:authorities="android.kernarium.sms"
+            android:exported="true" />
+    </application>
+</manifest>

@@ -7,14 +7,14 @@ import Testing
 struct CapabilitiesTests {
     @Test func theDeviceOffersWhatTheRuntimeDoes() {
         let device = Capabilities.device
-        #expect(device.bugReport && device.apkInstall && device.adbOverNetwork && device.guestFiles)
+        #expect(device.bugReport && device.apkInstall && device.adbOverNetwork && device.guestFiles && device.textMessages)
         // The statistics are the runtime's own readings.
         #expect(device.statistics)
     }
 
     @Test func thePreviewPretendsToDoEverything() {
         let preview = Capabilities.preview
-        #expect(preview.bugReport && preview.apkInstall && preview.adbOverNetwork && preview.guestFiles)
+        #expect(preview.bugReport && preview.apkInstall && preview.adbOverNetwork && preview.guestFiles && preview.textMessages)
         #expect(preview.statistics)
     }
 }

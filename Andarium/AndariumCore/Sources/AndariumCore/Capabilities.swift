@@ -18,29 +18,38 @@ public struct Capabilities: Equatable, Sendable {
     /// The guest's internal storage can be browsed, and files imported into it
     /// and exported from it.
     public var guestFiles: Bool
+    /// A text message can be sent to the guest as if from the network
+    /// (`GuestSms`).
+    public var textMessages: Bool
 
-    public init(adbOverNetwork: Bool, apkInstall: Bool, bugReport: Bool, statistics: Bool, guestFiles: Bool) {
+    public init(
+        adbOverNetwork: Bool, apkInstall: Bool, bugReport: Bool, statistics: Bool, guestFiles: Bool,
+        textMessages: Bool
+    ) {
         self.adbOverNetwork = adbOverNetwork
         self.apkInstall = apkInstall
         self.bugReport = bugReport
         self.statistics = statistics
         self.guestFiles = guestFiles
+        self.textMessages = textMessages
     }
 
     /// Everything the mock runtime pretends to do.
     public static let preview = Capabilities(
-        adbOverNetwork: true, apkInstall: true, bugReport: true, statistics: true, guestFiles: true
+        adbOverNetwork: true, apkInstall: true, bugReport: true, statistics: true, guestFiles: true,
+        textMessages: true
     )
 
     /// The device application: the session offers an app install, ADB over
-    /// the network, a bug report and the guest's files, all through the
-    /// runtime's adb channel, and the statistics from the runtime's own
-    /// readings.
+    /// the network, a bug report, the guest's files and text messages, all
+    /// through the runtime's adb channel, and the statistics from the
+    /// runtime's own readings.
     public static let device = Capabilities(
         adbOverNetwork: true,
         apkInstall: true,
         bugReport: true,
         statistics: true,
-        guestFiles: true
+        guestFiles: true,
+        textMessages: true
     )
 }

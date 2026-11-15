@@ -422,6 +422,10 @@ final class LiveRuntime: RuntimeDriver {
         await operations.storageReady()
     }
 
+    func sendSms(sender: String, text: String) async -> GuestSms.Outcome {
+        await operations.sendSms(sender: sender, text: text)
+    }
+
     // MARK: ADB over network
 
     /// The listener on the network addresses, whose every connection is

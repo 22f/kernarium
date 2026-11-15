@@ -280,7 +280,6 @@ KERNARIUM_REMOVED_PACKAGES := \
     TeleService \
     Telecom \
     TelecomShim \
-    TelephonyProvider \
     android.hardware.biometrics.face-service.default \
     android.hardware.biometrics.fingerprint-service.default \
     android.hardware.motioncontext-service.default \
@@ -318,7 +317,6 @@ KERNARIUM_REMOVED_PACKAGES := \
     gsi_tool \
     gsid \
     android.hardware.health-service.cuttlefish_recovery \
-    messaging \
     pmg_daemon \
     sample_camera_extensions.xml \
     snapshotctl \
@@ -464,6 +462,14 @@ PRODUCT_PACKAGES += KernariumWifiOverlay
 # about 54 MiB at idle. KernariumPinnerOverlay (rro/KernariumPinnerOverlay)
 # sets the home pin size to zero and leaves the WebView pin as it was.
 PRODUCT_PACKAGES += KernariumPinnerOverlay
+
+# Text messages come from the host only: the Andarium application sends one
+# over its adb channel to KernariumSms (sms/), which delivers it as the radio
+# stack delivers one from the network. Messaging is the SMS application and
+# TelephonyProvider stores the messages. The product declares
+# android.hardware.telephony.messaging and config_sms_capable, which the SMS
+# role needs, and no telephony: nothing in the guest can send a message.
+PRODUCT_PACKAGES += KernariumSms messaging TelephonyProvider
 
 # Once boot completes, a script saves the virtual Wi-Fi network (VirtWifi, open)
 # the first time only. It does not turn Wi-Fi on, and a network the user forgets
