@@ -169,7 +169,8 @@ enum class Mode : std::uint32_t {
 {
 	return 0x9140'03ffU | (immediate << 10);
 }
-/* Near misses of the elements: LDTR, and LDR Xt, [SP, Xm]. */
+/* Near misses of the elements: LDTR, LDR Xt, [SP, Xm], and LDADDL Xs, Xt,
+ * [SP], which only bit 21 tells from an LDUR. */
 [[nodiscard, maybe_unused]] constexpr std::uint32_t ldtr(unsigned reg, int offset) noexcept
 {
 	return ldr9(reg, offset, 0x800U);
@@ -179,6 +180,12 @@ enum class Mode : std::uint32_t {
 {
 	return 0xf860'6800U | (index << 16) | (31U << 5) | reg;
 }
+[[nodiscard, maybe_unused]] constexpr std::uint32_t ldaddl(unsigned source,
+	unsigned reg) noexcept
+{
+	return 0xf860'03e0U | (source << 16) | reg;
+}
+static_assert(ldaddl(1, 19) == 0xf861'03f3U);
 
 /* Three host pages behind the guest pages low, high and beyond, with a
  * pattern no two 8-byte words share. */
@@ -721,6 +728,17 @@ void structure()
 		      2}}) {
 		const auto placed = head_of(build(code_pc, code, &site).program);
 		require(placed && placed->at == at);
+	}
+	/* Nor is an LSE atomic on SP, which only bit 21 tells from an LDUR:
+	 * read as one (X19 from SP + 16), it would give the whole run a head.
+	 * The head takes the pair alone, behind the atomic's own group,
+	 * whatever words that group has. */
+	{
+		const std::array code{ldaddl(1, 19), ldp(29, 30, 32, Mode::post),
+			ret};
+		const auto placed = head_of(build(code_pc, code, &site).program);
+		require(placed && placed->at != 0 && placed->loads == 1 &&
+			placed->adds == 0);
 	}
 	/* The bounds of the operand fields: SP 2047 units of 16 on at exit and
 	 * the first byte 4094 units of 8 above SP at entry are as far as a run

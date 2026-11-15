@@ -135,7 +135,8 @@ enum class Mode : std::uint32_t {
 {
 	return 0xd140'03ffU | (immediate << 10);
 }
-/* Near misses of the elements: STTR, and STR Xt, [SP, Xm]. */
+/* Near misses of the elements: STTR, STR Xt, [SP, Xm], and LDADD Xs, Xt,
+ * [SP], which only bit 21 tells from a STUR. */
 [[nodiscard, maybe_unused]] constexpr std::uint32_t sttr(unsigned reg, int offset) noexcept
 {
 	return str9(reg, offset, 0x800U);
@@ -145,6 +146,12 @@ enum class Mode : std::uint32_t {
 {
 	return 0xf820'6800U | (index << 16) | (31U << 5) | reg;
 }
+[[nodiscard, maybe_unused]] constexpr std::uint32_t ldadd(unsigned source,
+	unsigned reg) noexcept
+{
+	return 0xf820'03e0U | (source << 16) | reg;
+}
+static_assert(ldadd(1, 19) == 0xf821'03f3U);
 [[nodiscard]] constexpr std::uint32_t add_x29(unsigned immediate) noexcept
 {
 	return 0x9100'03fdU | (immediate << 10);
@@ -675,6 +682,17 @@ void structure()
 		       svc}, 2}}) {
 		const auto placed = head_of(build(code_pc, code).program);
 		require(placed && placed->at == at);
+	}
+	/* Nor is an LSE atomic on SP, which only bit 21 tells from a STUR:
+	 * read as one (X19 to SP + 16), it would give the whole run a head. The
+	 * head takes the pair and the ADD X29 alone, behind the atomic's own
+	 * group, whatever words that group has. */
+	{
+		const std::array code{ldadd(1, 19), stp(29, 30, -16, Mode::pre),
+			add_x29(0), after, svc};
+		const auto placed = head_of(build(code_pc, code).program);
+		require(placed && placed->at != 0 && placed->pairs == 1 &&
+			placed->single == 0 && placed->subs == 0);
 	}
 	/* A run that ends the block's window ends at its fallthrough. */
 	{
