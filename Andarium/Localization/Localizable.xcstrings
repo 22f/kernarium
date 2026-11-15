@@ -3771,6 +3771,29 @@
         }
       }
     },
+    "FPS" : {
+      "comment" : "The frame rate's unit as a title of the statistics capsule. It is a unit's name, so every language keeps FPS.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "FPS"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "FPS"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "FPS"
+          }
+        }
+      }
+    },
     "Frame rate" : {
       "localizations" : {
         "ja" : {
