@@ -665,8 +665,10 @@ patches ART's one JNI function table in place and gives the application:
   other byte takes the array's if Java changed it, and a byte both sides wrote
   takes the application's. Any other chunk takes the bytes Java changed. The
   block never takes a byte Java did not change, and the array never takes one
-  the application did not write (one region write for each run of the bytes it
-  wrote), so a write by either side to such a byte that races a
+  the application did not write (the merge stores those bytes, one byte store
+  each, into the array's own memory through the real array's critical pair, and
+  a block the application did not write is read through region calls and makes no
+  critical get), so a write by either side to such a byte that races a
   synchronization survives it. A committing
   release (mode 0 or `JNI_COMMIT`) is such a point and keeps Java's bytes
   wherever the application did not write; `JNI_ABORT` discards the working copy,
@@ -718,7 +720,8 @@ patches ART's one JNI function table in place and gives the application:
   synchronizations of all threads run one at a time. Nothing under it waits for
   the runtime's collector (a critical get that opens a region, an allocation in
   the Java heap): those are made before it is taken, so a thread that waits for
-  it inside a critical region never holds up a collection. A release goes to the block whose data
+  it inside a critical region never holds up a collection. Between a critical get
+  and its release the layer makes no runtime call except that release. A release goes to the block whose data
   starts at its pointer, whichever reference comes with it, and never reaches
   the runtime for a pointer in the region; a pointer inside the region that is
   not at a block's start is not read as a header, copies nothing, and counts as

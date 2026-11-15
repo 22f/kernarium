@@ -1132,10 +1132,13 @@ build), the verdicts and the commands without a guest. The unit tests
 (`andarium-oldapp-*`) run the JNI interposer against a fake runtime that accepts
 live references only (rows revoke the block's own references at a wrapper's first
 runtime call, end a block from a callback during a call, and run a second thread
-inside a synchronization through hooks in the fake's region functions, and
-model the collector's thread-flip rule; the fake fails a runtime call that
-arrives with the layer's mutex held unless the mutex rule in the code lists
-it), the allocator arena, the ELF relocation scan and the page protection window.
+inside a synchronization through hooks in the fake's region and release
+functions, place a Java or application write at the layer's first store into a
+page with a page-protection handler, and model the collector's thread-flip rule;
+the fake fails a runtime call that arrives with the layer's mutex held unless the
+mutex rule in the code lists it, and any runtime call inside a critical region
+the layer opened except that region's release), the allocator arena, the ELF
+relocation scan and the page protection window.
 `android-camera` (integration) registers when `UML_ANDROID_CAMERA_RELEASE`
 names the release: the runner boots it with the launcher's synthetic camera
 (`--camera=synthetic|blocked`, `--camera-profile=`) and a layout on the vendor

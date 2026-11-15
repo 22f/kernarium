@@ -87,7 +87,7 @@
 //                block clean
 //   push_scatter4_us, push_scatter2_us  recorded: microseconds for a Java call that is passed a 1 MiB block of which every
 //                4th (every other) byte is written through the pointer, new values each round: the worst case of the exact
-//                write-back, one region write for each run of written bytes (262144 and 524288 runs)
+//                merge, which stores each written byte into the live array (262144 and 524288 runs of bytes)
 //   real_pair_ns, real_critical_ns  recorded: nanoseconds for a Get...Elements / Release pair (JNI_ABORT) and for a critical
 //                pair on an array the application made, which stays the runtime's own (the layer records the runtime's
 //                pointers once it has made a block, so that a block's reference can release them)
@@ -1540,10 +1540,10 @@ void ended_cases(Report& report, Env* env, jclass probe) {
         exception_clear(env);
     }
 
-    // The worst cases of the exact write-back (recorded): the same call with a block of which every 4th byte, and every other
-    // byte, is written through the pointer. The merge writes each run of written bytes to the array on its own, so these
-    // are the most region writes a 1 MiB block can cost. The chunks are written 4 KiB at a time (the other bytes of the
-    // pattern are the ones already there).
+    // The worst cases of the exact merge (recorded): the same call with a block of which every 4th byte, and every other
+    // byte, is written through the pointer. The merge stores each written byte into the live array on its own and no byte
+    // between two runs, so these are the most stores a 1 MiB block can cost. The chunks are written 4 KiB at a time (the
+    // other bytes of the pattern are the ones already there).
     for (int scatter = 0; scatter < 2; ++scatter) {
         const uint32_t step = scatter == 0 ? 4u : 2u;
         const jmethodID echo = static_method(env, probe, "echo", "([B)I");

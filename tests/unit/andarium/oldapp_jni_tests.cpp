@@ -96,6 +96,7 @@ struct World {
     std::vector<std::vector<uint8_t>> seen_arrays;  // the bytes of every array argument when the call ran
     std::vector<uint8_t> seen_receiver;             // the bytes of an array receiver when the call ran
     int new_array_calls = 0;                        // NewByteArray calls that reached the runtime
+    int critical_gets = 0;                          // GetPrimitiveArrayCritical calls that reached the runtime
     bool new_array_fails = false;                   // NewByteArray fails (an exception)
     int get_calls = 0;                              // GetByteArrayRegion calls that reached the runtime
     int release_calls = 0;                          // Release...Elements / ReleasePrimitiveArrayCritical calls that reached the runtime
@@ -115,6 +116,7 @@ World world;
 
 thread_local int t_ended_depth = 0;  // how deep this thread is in the ended lock (a wrapper is never entered under it)
 thread_local int t_regions = 0;      // the runtime critical regions this thread has open (the nesting the runtime's flip rule sees)
+thread_local int t_app_regions = 0;  // the ones the application holds: the count after each of its own critical calls returned
 
 // CheckJNI's rules: nothing but the critical pair runs inside a critical region (a thread's own), and almost nothing with
 // an exception pending.
@@ -130,6 +132,13 @@ void jni_allowed(const char* what) {
 // this first, so a call that is not on the list fails in every row, whichever thread makes it.
 void not_under_mutex(const char* function) {
     require(t_ended_depth == 0, function);
+    require(t_regions == t_app_regions, "a runtime call inside a region the layer opened (only its release is allowed)");
+}
+// A call on the list of the mutex rule (the region and reference functions, the exception checks): not inside a region the
+// layer itself opened. The layer opens one only to merge in place, and between the get and the release it makes no runtime
+// call but the release (CheckJNI aborts on any other JNI call inside a critical region).
+void on_the_list(const char*) {
+    require(t_regions == t_app_regions, "a runtime call inside a region the layer opened (only its release is allowed)");
 }
 
 // The runtime's thread-flip rule (art/runtime/gc/heap.cc): ThreadFlipBegin sets the flag, then waits until no thread has a
@@ -307,6 +316,7 @@ jobject f_NewByteArray(Env*, jsize n) {
 }
 std::function<void()> g_after_set;  // runs inside a SetByteArrayRegion, after it copied
 void f_SetByteArrayRegion(Env*, jarray a, jsize start, jsize len, const jbyte* buf) {
+    on_the_list("SetByteArrayRegion");
     revoke_if_asked();
     jni_allowed("SetByteArrayRegion where JNI is not allowed (a critical region, or an exception pending)");
     ++world.set_calls;
@@ -324,6 +334,7 @@ void f_SetByteArrayRegion(Env*, jarray a, jsize start, jsize len, const jbyte* b
 }
 std::function<void()> g_after_get;  // runs inside a GetByteArrayRegion, after it copied: another thread acts meanwhile
 void f_GetByteArrayRegion(Env*, jarray a, jsize start, jsize len, jbyte* buf) {
+    on_the_list("GetByteArrayRegion");
     revoke_if_asked();
     jni_allowed("GetByteArrayRegion where JNI is not allowed (a critical region, or an exception pending)");
     ++world.get_calls;
@@ -347,12 +358,15 @@ jbyte* f_GetByteArrayElements(Env*, jarray a, jboolean* is_copy) {
     return reinterpret_cast<jbyte*>(object_of(a)->bytes.data());
 }
 void f_ReleaseByteArrayElements(Env*, jarray a, jbyte* p, jint) {
+    on_the_list("ReleaseByteArrayElements");
     revoke_if_asked();
     (void)object_of(a);
     ++world.release_calls;
     world.released.push_back(p);
 }
 void* f_GetPrimitiveArrayCritical(Env*, jarray a, jboolean* is_copy) {
+    on_the_list("GetPrimitiveArrayCritical");
+    ++world.critical_gets;
     const bool nested = t_regions > 0;
     if (!nested) {
         // The first get of a thread waits for a pending flip: not while this thread holds the mutex.
@@ -370,6 +384,7 @@ void* f_GetPrimitiveArrayCritical(Env*, jarray a, jboolean* is_copy) {
     ++world.critical;
     return object_of(a)->bytes.data();
 }
+std::function<void()> g_in_release_critical;  // runs inside a ReleasePrimitiveArrayCritical, after it closed the region
 void f_ReleasePrimitiveArrayCritical(Env*, jarray a, void* p, jint) {
     revoke_if_asked();
     (void)object_of(a);
@@ -378,8 +393,14 @@ void f_ReleasePrimitiveArrayCritical(Env*, jarray a, void* p, jint) {
     require(world.critical > 0 && t_regions > 0, "a critical region was open");
     --world.critical;
     if (--t_regions == 0) flip_leave_region();
+    if (g_in_release_critical) {
+        auto hook = g_in_release_critical;
+        g_in_release_critical = nullptr;
+        hook();
+    }
 }
 void f_DeleteLocalRef(Env*, jobject o) {
+    on_the_list("DeleteLocalRef");
     Ref* ref = static_cast<Ref*>(o);
     require(world.locals.erase(ref) == 1, "a local reference is deleted once, and only while it is live");
     for (auto& frame : world.frames) {
@@ -388,6 +409,7 @@ void f_DeleteLocalRef(Env*, jobject o) {
     delete ref;
 }
 jobject f_NewGlobalRef(Env*, jobject o) {
+    on_the_list("NewGlobalRef");
     jni_allowed("NewGlobalRef where JNI is not allowed");
     require(live(o), "NewGlobalRef is handed a live reference, never a shadow");
     if (static_cast<Ref*>(o)->object == nullptr) return nullptr;  // a weak reference whose object was collected
@@ -396,6 +418,7 @@ jobject f_NewGlobalRef(Env*, jobject o) {
     return ref;
 }
 jobject f_NewWeakGlobalRef(Env*, jobject o) {
+    on_the_list("NewWeakGlobalRef");
     jni_allowed("NewWeakGlobalRef where JNI is not allowed");
     ++world.weak_new_calls;
     if (world.weak_fails) return nullptr;
@@ -404,12 +427,16 @@ jobject f_NewWeakGlobalRef(Env*, jobject o) {
     return ref;
 }
 void f_DeleteWeakGlobalRef(Env*, jobject o) {
+    on_the_list("DeleteWeakGlobalRef");
     require(t_regions == 0, "DeleteWeakGlobalRef inside a critical region");
     Ref* ref = static_cast<Ref*>(o);
     require(world.weaks.erase(ref) == 1, "a weak reference is deleted once, and only while it is live");
     delete ref;
 }
-void f_ExceptionClear(Env*) { world.exception_pending = false; }
+void f_ExceptionClear(Env*) {
+    on_the_list("ExceptionClear");
+    world.exception_pending = false;
+}
 jobject f_ExceptionOccurred(Env*) {
     not_under_mutex("ExceptionOccurred is not on the list of calls under the mutex");
     if (!world.exception_pending) return nullptr;
@@ -427,9 +454,12 @@ jint f_Throw(Env*, jobject throwable) {
 // A collection: a weak reference to an object nothing holds is cleared. Held: a strong reference, or Java.
 // The weak references the ended blocks hold (the layer's sentinel, once a block has ended, is one more).
 size_t block_weaks() { return world.weaks.size() - (counters().blocks_ended != 0 ? 1 : 0); }
+bool g_collect_ignores_locals = false;  // a row that models a collector that clears a weak reference under a local one
 void collect() {
     std::set<Obj*> reachable;
-    for (Ref* r : world.locals) reachable.insert(r->object);
+    if (!g_collect_ignores_locals) {
+        for (Ref* r : world.locals) reachable.insert(r->object);
+    }
     for (Ref* r : world.globals) reachable.insert(r->object);
     for (Ref* r : world.weaks) {
         if (r->object != nullptr && !r->object->held && reachable.count(r->object) == 0) r->object = nullptr;
@@ -439,6 +469,7 @@ std::function<void(Obj*)> g_on_global_deleted;  // runs inside DeleteGlobalRef, 
 std::function<void()> g_on_find_class;           // runs inside FindClass: Java code that enters the layer again
 bool g_ids_at_install = true;                    // the install gives the layer its environment, which resolves the ids
 void f_DeleteGlobalRef(Env*, jobject o) {
+    on_the_list("DeleteGlobalRef");
     require(t_regions == 0, "DeleteGlobalRef inside a critical region");  // allowed with an exception pending
     Ref* ref = static_cast<Ref*>(o);
     if (g_on_global_deleted) {
@@ -450,12 +481,14 @@ void f_DeleteGlobalRef(Env*, jobject o) {
     delete ref;
 }
 jobject f_NewLocalRef(Env*, jobject o) {
+    on_the_list("NewLocalRef");
     jni_allowed("NewLocalRef where JNI is not allowed");
     require(live(o), "NewLocalRef is handed a live reference, never a shadow");
     if (static_cast<Ref*>(o)->object == nullptr) return nullptr;  // a weak reference whose object was collected
     return new_local(object_of(o));
 }
 jboolean f_IsSameObject(Env*, jobject a, jobject b) {
+    on_the_list("IsSameObject");
     revoke_if_asked();
     require(t_regions == 0, "IsSameObject inside a critical region");
     ++world.same_calls;
@@ -515,7 +548,10 @@ jint f_RegisterNatives(Env*, jclass, const NativeMethod* methods, jint count) {
     g_registered.emplace_back(methods, methods + count);
     return int(g_registered.size()) - 1 == g_register_fail_at ? JNI_ERR : JNI_OK;
 }
-jboolean f_ExceptionCheck(Env*) { return world.exception_pending; }
+jboolean f_ExceptionCheck(Env*) {
+    on_the_list("ExceptionCheck");
+    return world.exception_pending;
+}
 jobject f_FindClass(Env*, const char*) {
     jni_allowed("FindClass where JNI is not allowed");
     require(t_ended_depth == 0, "FindClass runs Java: not under the ended lock");
@@ -853,6 +889,8 @@ void reset_world() {
     g_after_get = nullptr;
     g_after_set = nullptr;
     g_before_first_critical = nullptr;
+    g_in_release_critical = nullptr;
+    g_collect_ignores_locals = false;
     {
         std::lock_guard<std::mutex> l(g_flip_mutex);
         g_flip_running = false;
@@ -860,10 +898,23 @@ void reset_world() {
         g_gets_that_waited = 0;
     }
     t_regions = 0;
+    t_app_regions = 0;
     g_flip_timeouts = 0;
     g_thunk_capacity = 1024;
     g_register_fail_at = -1;
     g_registered.clear();
+}
+
+void* (*g_wrapped_get_critical)(Env*, jarray, jboolean*) = nullptr;
+void (*g_wrapped_release_critical)(Env*, jarray, void*, jint) = nullptr;
+void* app_get_critical(Env* env, jarray a, jboolean* is_copy) {
+    void* pointer = g_wrapped_get_critical(env, a, is_copy);
+    t_app_regions = t_regions;
+    return pointer;
+}
+void app_release_critical(Env* env, jarray a, void* p, jint mode) {
+    g_wrapped_release_critical(env, a, p, mode);
+    t_app_regions = t_regions;
 }
 
 // Installs over a fresh fake table.
@@ -878,6 +929,12 @@ Table* install(bool shadows = true, unsigned thunks = 1024) {
     require(install_jni_wrappers(table->slots, platform, shadows ? g_region : nullptr, shadows ? g_region_size : 0,
                                  g_ids_at_install ? &table->env : nullptr),
             "the wrappers install");
+    // The application's critical calls go through trampolines that count the regions it holds afterwards: whatever else is
+    // open while the layer runs is the layer's own.
+    g_wrapped_get_critical = reinterpret_cast<void* (*)(Env*, jarray, jboolean*)>(table->slots[slot::GetPrimitiveArrayCritical]);
+    g_wrapped_release_critical = reinterpret_cast<void (*)(Env*, jarray, void*, jint)>(table->slots[slot::ReleasePrimitiveArrayCritical]);
+    table->slots[slot::GetPrimitiveArrayCritical] = reinterpret_cast<void*>(&app_get_critical);
+    table->slots[slot::ReleasePrimitiveArrayCritical] = reinterpret_cast<void*>(&app_release_critical);
     return table;
 }
 
@@ -1481,13 +1538,14 @@ void check_raw_write_reaches_a_call() {
     raw[0] = 0xAA;
     raw[1] = 0xAB;
     world.set_calls = 0;
+    world.critical_gets = 0;
     require(call_static_int_v(f, f.consume, made.shadow) == 7, "consume");
     require(world.seen_arrays.size() == 1 && world.seen_arrays[0][0] == 0xAA && world.seen_arrays[0][1] == 0xAB,
             "Java read what the application wrote through the pointer");
     require(raw[0] == 0xAA && raw[1] == 0xAB && made.object->bytes[0] == 0xAA, "and the bytes are still in both copies");
-    require(world.set_calls == 1, "one chunk went to the array");
+    require(world.critical_gets == 1 && world.set_calls == 0, "one chunk went to the array, in place: one critical pair, no region write");
     call_static_int_v(f, f.consume, made.shadow);
-    require(world.set_calls == 1, "a second call with nothing written changes nothing in the array");
+    require(world.critical_gets == 1, "a second call with nothing written makes no critical get");
 }
 
 // Java writes during the call and the application reads the pointer afterwards (the case MR1 fixed), while an earlier
@@ -1574,12 +1632,14 @@ void check_synchronization_is_per_chunk() {
     raw[9000] = 0x77;                // chunk 2, the application
     made.object->bytes[10] = 0x55;   // chunk 0, Java
     world.set_calls = 0;
+    world.critical_gets = 0;
     jbyte buffer[20] = {};
     fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, made.shadow, 0, 20, buffer);
     require(static_cast<uint8_t>(buffer[10]) == 0x55 && raw[10] == 0x55, "a read of chunk 0 shows Java's write");
-    require(world.set_calls == 0 && made.object->bytes[9000] == 0, "and does not touch chunk 2");
+    require(world.set_calls == 0 && world.critical_gets == 0 && made.object->bytes[9000] == 0, "and does not touch chunk 2");
     fn<GetElems>(*f.table, slot::GetByteArrayElements)(f.env, made.shadow, nullptr);
-    require(made.object->bytes[9000] == 0x77 && world.set_calls == 1, "the whole array's turn pushes chunk 2, and only it");
+    require(made.object->bytes[9000] == 0x77 && world.critical_gets == 1 && world.set_calls == 0,
+            "the whole array's turn pushes chunk 2, and only it, in place");
 }
 
 // A block that neither side touched makes no write to the array at any synchronization point.
@@ -1741,9 +1801,9 @@ void check_an_exact_comparison_keeps_every_write() {
     require(std::memcmp(buffer, written.data(), 8) == 0 && made.object->bytes == written, "the write reached the array and the reader");
 }
 
-// A run of chunks the application wrote is one read of the run and one write for each maximal run of the bytes it wrote
-// (never a byte between two runs); a clean run is read in pieces of 16 KiB; and a clean chunk is never written.
-void check_a_run_of_chunks_is_one_region_call() {
+// A block the application wrote goes to the array in place, through one critical pair and no region call; a clean block's
+// call reads the array through region calls in pieces of 16 KiB and makes no critical get; and a clean chunk is never written.
+void check_a_dirty_block_is_pushed_in_place_and_a_clean_one_read_through_regions() {
     Fixture f = make();
     Made made = make_shadow_of(f, sample(6 * 4096));
     raw_of(made)[2 * 4096] ^= 0x55;
@@ -1751,26 +1811,24 @@ void check_a_run_of_chunks_is_one_region_call() {
     raw_of(made)[4 * 4096 + 5] ^= 0x55;
     world.set_calls = 0;
     world.get_calls = 0;
+    world.critical_gets = 0;
     call_static_int_v(f, f.consume, made.shadow);
-    require(world.set_calls == 3, "the three bytes the application wrote went to the array, one call for each");
-    require(world.get_calls == 3, "one read of that run (it is merged with Java's bytes), and the six chunks came back in two pieces");
+    require(world.critical_gets == 1 && world.set_calls == 0, "the bytes the application wrote went to the array in one pair, in place");
+    require(world.get_calls == 2, "and the block, clean after the push, came back through regions in two pieces");
     require(world.seen_arrays[0][2 * 4096] == raw_of(made)[2 * 4096] && world.seen_arrays[0][4 * 4096 + 5] == raw_of(made)[4 * 4096 + 5],
             "Java saw the writes");
-    Made dense = make_shadow_of(f, sample(6 * 4096));
-    for (size_t i = 2 * 4096; i < 5 * 4096; ++i) raw_of(dense)[i] ^= 0x55;  // every byte of chunks 2 to 4
-    world.set_calls = 0;
-    call_static_int_v(f, f.consume, dense.shadow);
-    require(world.set_calls == 1, "bytes the application wrote all along three chunks are one write");
     Made big = make_shadow_of(f, sample(256 * 4096));
     world.set_calls = 0;
     world.get_calls = 0;
+    world.critical_gets = 0;
     call_static_int_v(f, f.consume, big.shadow);
-    require(world.set_calls == 0 && world.get_calls == 64, "a clean 1 MiB block: 64 region reads of 16 KiB, no write");
+    require(world.set_calls == 0 && world.get_calls == 64 && world.critical_gets == 0,
+            "a clean 1 MiB block: 64 region reads of 16 KiB, no write, no critical get");
     // The range of a small read is one chunk's turn, and only the bytes asked for come over.
     world.get_calls = 0;
     jbyte sixteen[16];
     fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, big.shadow, 100000, 16, sixteen);
-    require(world.get_calls == 1 && world.set_calls == 0, "16 bytes: one small call");
+    require(world.get_calls == 1 && world.set_calls == 0 && world.critical_gets == 0, "16 bytes: one small call");
 }
 
 // A committing release applies the chunk rule: the chunk the application wrote goes to the array, Java's other chunks stay.
@@ -2981,21 +3039,24 @@ void check_a_release_goes_to_the_block_its_pointer_lies_in() {
     jbyte* p = get_elements(f, m.shadow);
     Ref* real = new_local(m.object);  // another reference to the same array
     p[0] = 0x44;
-    world.release_calls = 0;
+    world.released.clear();
     release_elements(f, real, p, kReleaseCommit);
-    require(world.release_calls == 0, "a release by a real reference with the block's pointer is not the runtime's");
+    require(std::count(world.released.begin(), world.released.end(), static_cast<const void*>(p)) == 0,
+            "a release by a real reference with the block's pointer is not the runtime's");
     require(m.object->bytes[0] == 0x44, "it synchronized the block");
     end_ref(f, m.shadow);
     require(is_ended_block(object_at(p)) && world.globals.size() == 1, "COMMIT did not end the pin: the ended block is held strongly");
     release_elements(f, real, p, 0);
-    require(world.release_calls == 0 && world.globals.empty() && block_weaks() == 1,
+    require(std::count(world.released.begin(), world.released.end(), static_cast<const void*>(p)) == 0 && world.globals.empty() &&
+                block_weaks() == 1,
             "mode 0 through the real reference ended the pin of the ended block: it waits weakly now");
     // ABORT, a stale reference of the ended block, and a pointer that is a freed block's
     Made n = make_held(f, sample(100));
     jbyte* q = get_elements(f, n.shadow);
     end_ref(f, n.shadow);
     release_elements(f, n.shadow, q, kReleaseAbort);
-    require(world.release_calls == 0 && block_weaks() == 2, "ABORT through the ended block's own reference ended the pin too");
+    require(std::count(world.released.begin(), world.released.end(), static_cast<const void*>(q)) == 0 && block_weaks() == 2,
+            "ABORT through the ended block's own reference ended the pin too");
     n.object->held = false;
     m.object->held = false;
     end_ref(f, real);  // the plain reference to the array goes too
@@ -3005,7 +3066,8 @@ void check_a_release_goes_to_the_block_its_pointer_lies_in() {
     require(counters().blocks_collected >= freed + 2, "the blocks were freed");
     Ref* plain = new_local(m.object);
     release_elements(f, plain, q, 0);
-    require(world.release_calls == 0, "a freed block's pointer is not the runtime's either");
+    require(std::count(world.released.begin(), world.released.end(), static_cast<const void*>(q)) == 0,
+            "a freed block's pointer is not the runtime's either");
     // the critical pair: the last pin of an ended block waits for a sweep
     Made c = make_shadow_of(f, sample(100));
     void* r = get_critical(f, c.shadow);
@@ -3384,9 +3446,10 @@ void check_a_callback_that_ends_the_block_leaves_the_call_a_live_reference() {
 }
 
 // The owner's synchronization is serialized with another thread's access to the block: a write that completes while the
-// owner is merging is not undone by it. The hook runs in the runtime's GetByteArrayRegion, after it copied Java's old
-// bytes (the other thread's SetByteArrayRegion starts then and waits for the mutex). (Fails on c3b1ffc7: the owner's
-// merge wrote its stale snapshot over block and baseline; Java=31,42 and block=00,00 afterwards.)
+// owner is merging is not undone by it. The hook runs in the runtime's ReleasePrimitiveArrayCritical that closes the
+// merge's pair, which the layer makes inside its second hold (the other thread's SetByteArrayRegion starts then and
+// waits for the mutex). (Fails on c3b1ffc7: the owner's merge wrote its stale snapshot over block and baseline;
+// Java=31,42 and block=00,00 afterwards.)
 void check_the_owners_merge_is_not_undone_by_another_threads_write() {
     Fixture f = make();
     Made a = make_held(f, std::vector<uint8_t>(32, 0));
@@ -3394,7 +3457,7 @@ void check_the_owners_merge_is_not_undone_by_another_threads_write() {
     raw_of(a)[0] = 0x31;
     std::thread worker;
     std::atomic<bool> finished{false};
-    g_after_get = [&] {
+    g_in_release_critical = [&] {
         worker = std::thread([&] {
             const jbyte value = 0x42;
             fn<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(*f.table, slot::SetByteArrayRegion)(other.f.env, a.shadow, 1, 1, &value);
@@ -3402,6 +3465,7 @@ void check_the_owners_merge_is_not_undone_by_another_threads_write() {
         });
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(60);
         while (!finished && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        require(!finished, "the other thread's write waits for the owner's merge: the mutex is held");
     };
     jbyte result[32] = {};
     fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 32, result);
@@ -3440,8 +3504,9 @@ void check_another_threads_synchronization_does_not_undo_the_owners_pull() {
 }
 
 // The end of a block is a synchronization point too, and runs under the mutex: a second thread's access to the kept
-// reference meets a synchronized block. The hook runs in the runtime's region call of the end's push, where the second
-// thread starts its own SetByteArrayRegion. (Fails on c3b1ffc7: the end pushed before it took the mutex.)
+// reference meets a synchronized block. The hook runs in the Release that closes the end's merge pair, which the layer
+// makes inside its second hold, where the second thread starts its own SetByteArrayRegion. (Fails on c3b1ffc7: the end
+// pushed before it took the mutex.)
 void check_an_end_is_serialized_with_a_second_threads_access() {
     Fixture f = make();
     Made a = make_held(f, std::vector<uint8_t>(32, 0));
@@ -3449,7 +3514,7 @@ void check_an_end_is_serialized_with_a_second_threads_access() {
     raw_of(a)[0] = 0x31;
     std::thread worker;
     std::atomic<bool> finished{false};
-    g_after_get = [&] {  // (the merge's read: the end's push is a merge of the dirty chunk)
+    g_in_release_critical = [&] {  // (the end's push is a merge of the dirty chunk, in place)
         worker = std::thread([&] {
             const jbyte value = 0x42;
             fn<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(*f.table, slot::SetByteArrayRegion)(other.f.env, a.shadow, 1, 1, &value);
@@ -3457,6 +3522,7 @@ void check_an_end_is_serialized_with_a_second_threads_access() {
         });
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(60);
         while (!finished && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        require(!finished, "the other thread's access waits for the end: the mutex is held");
     };
     end_ref(f, a.shadow);
     worker.join();
@@ -3623,6 +3689,70 @@ void check_monitor_exit_with_an_exception_pending() {
     }
 }
 
+// ---- stores that land where a test wants another thread's write to land
+
+// A store that lands exactly where a test wants another thread's write to land. The page is made read-only; the first
+// store into it faults; the handler writes the other thread's byte, opens the page and lets the store go on. That is the
+// interleaving a few instructions wide between the layer's comparison and its store, which no call into the fake runtime
+// falls into: a word store there would carry the old value of the neighbouring byte over the other thread's.
+struct Watch {
+    uint8_t* page = nullptr;
+    size_t size = 0;
+    volatile uint8_t* racing = nullptr;  // where the other thread's write goes
+    uint8_t value = 0;
+    uint8_t* const* more = nullptr;      // and more of them, all written at the same fault
+    size_t more_count = 0;
+    volatile int hits = 0;
+};
+Watch g_watch;
+struct sigaction g_watch_old_bus, g_watch_old_segv;
+void watch_handler(int signal_number, siginfo_t* info, void*) {
+    uint8_t* at = static_cast<uint8_t*>(info->si_addr);
+    if (g_watch.page != nullptr && at >= g_watch.page && at < g_watch.page + g_watch.size) {
+        mprotect(g_watch.page, g_watch.size, PROT_READ | PROT_WRITE);
+        g_watch.hits = g_watch.hits + 1;
+        *g_watch.racing = g_watch.value;
+        for (size_t i = 0; i < g_watch.more_count; ++i) *g_watch.more[i] = g_watch.value;
+        return;
+    }
+    struct sigaction default_action;
+    std::memset(&default_action, 0, sizeof(default_action));
+    default_action.sa_handler = SIG_DFL;
+    sigaction(signal_number, &default_action, nullptr);  // a fault of anything else: the default, on its return
+}
+// The first whole page inside [memory, memory + length).
+uint8_t* page_inside(uint8_t* memory, size_t length) {
+    const size_t page = size_t(getpagesize());
+    uint8_t* first = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(memory) + page - 1) & ~(page - 1));
+    require(first + page <= memory + length, "a whole page lies inside the memory");
+    return first;
+}
+void arm_watch(uint8_t* page, uint8_t* racing, uint8_t value, uint8_t* const* more = nullptr, size_t more_count = 0) {
+    g_watch.page = page;
+    g_watch.size = size_t(getpagesize());
+    g_watch.racing = racing;
+    g_watch.value = value;
+    g_watch.more = more;
+    g_watch.more_count = more_count;
+    g_watch.hits = 0;
+    struct sigaction action;
+    std::memset(&action, 0, sizeof(action));
+    action.sa_sigaction = watch_handler;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGBUS, &action, &g_watch_old_bus);
+    sigaction(SIGSEGV, &action, &g_watch_old_segv);
+    require(mprotect(page, g_watch.size, PROT_READ) == 0, "the page is made read-only");
+}
+int disarm_watch() {
+    const int hits = g_watch.hits;
+    mprotect(g_watch.page, g_watch.size, PROT_READ | PROT_WRITE);
+    sigaction(SIGBUS, &g_watch_old_bus, nullptr);
+    sigaction(SIGSEGV, &g_watch_old_segv, nullptr);
+    g_watch.page = nullptr;
+    return hits;
+}
+
 // ---- a synchronization writes only the bytes Java changed into the block
 
 // A raw write to a byte of a clean chunk, made while the synchronization is pulling Java's bytes in (the hook runs in the
@@ -3644,24 +3774,30 @@ void check_a_pull_does_not_overwrite_a_raw_write_to_another_byte() {
             "and the next synchronization pushes it");
 }
 
-// The same for a chunk the application had written: the merge writes the block only where Java changed a byte, so a raw
-// write to a third byte that races the merge survives it. (Fails on ecb411ce: the merged run was copied over the block.)
+// The same for a chunk the application had written: the merge stores into the block only the byte Java changed, so a raw
+// write to a third byte that races the merge survives it. The write is placed at the layer's store of Java's byte into the
+// block (the watch below, defined further down). (Fails on ecb411ce: the merged run was copied over the block.)
 void check_a_merge_does_not_overwrite_a_raw_write_to_a_third_byte() {
     Fixture f = make();
-    Made a = make_held(f, std::vector<uint8_t>(64, 0x3a));
-    a.object->bytes[10] = 0xA1;  // Java wrote one byte
-    raw_of(a)[0] = 0x31;         // the application wrote another: the chunk is dirty
-    g_after_set = [&] { raw_of(a)[40] = 0x99; };  // and a third byte, after the merge decided and wrote Java's bytes
+    const size_t size = 65536;
+    Made a = make_held(f, std::vector<uint8_t>(size, 0x3a));
+    uint8_t* data = raw_of(a);
+    uint8_t* page = page_inside(data, size);
+    const size_t at = size_t(page - data);
+    a.object->bytes[at + 10] = 0xA1;  // Java wrote one byte
+    data[at + 0] = 0x31;              // the application wrote another: the chunk is dirty
+    arm_watch(page, page + 40, 0x99);  // and a third, at the merge's store of Java's byte into the block
     jbyte result[64] = {};
-    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 64, result);
-    require(a.object->bytes[0] == 0x31 && a.object->bytes[10] == 0xA1, "Java has both of the earlier writes");
-    require(raw_of(a)[0] == 0x31 && raw_of(a)[10] == 0xA1 && raw_of(a)[40] == 0x99, "the block has all three");
-    require(a.object->bytes[40] == 0x3a, "the raw write is not in the array yet");
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, jsize(at), 64, result);
+    const int hits = disarm_watch();
+    require(hits == 1, "the store of Java's byte was where the raw write landed");
+    require(a.object->bytes[at + 0] == 0x31 && a.object->bytes[at + 10] == 0xA1, "Java has both of the earlier writes");
+    require(data[at + 0] == 0x31 && data[at + 10] == 0xA1 && data[at + 40] == 0x99, "the block has all three");
+    require(a.object->bytes[at + 40] == 0x3a, "the raw write is not in the array yet");
     jbyte again[64] = {};
-    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 64, again);
-    require(a.object->bytes[40] == 0x99, "and the next synchronization pushes it");
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, jsize(at), 64, again);
+    require(a.object->bytes[at + 40] == 0x99, "and the next synchronization pushes it");
 }
-
 // Where both sides wrote the same byte at the pull, the application's byte stays and goes to the array next time.
 void check_a_byte_both_sides_wrote_keeps_the_applications_at_a_racing_pull() {
     Fixture f = make();
@@ -3995,28 +4131,44 @@ void check_a_failed_sentinel_allocation_is_survived() {
             "the next creation made the sentinel and swept");
 }
 
-// ---- a merge writes back exactly the bytes the application wrote
+// ---- which calls make a critical get, and which write through regions
 
-// A Java thread's write to a byte the application did not write, landing after the merge read the dirty run and before it
-// wrote it back, is neither undone in the array nor lost to the block.
-void check_a_java_write_during_a_merge_is_kept() {
+// A clean block's call never makes a critical get and never writes the array: it reads Java's bytes through region calls,
+// in a call to Java, the elements and the regions, and at the end of the block.
+void check_a_clean_blocks_calls_make_no_critical_get() {
     Fixture f = make();
-    Made a = make_held(f, sample(100));
-    raw_of(a)[0] = 0x55;  // the application wrote byte 0: the chunk is dirty
-    g_after_get = [&] { a.object->bytes[20] = 0xB2; };  // Java writes byte 20 meanwhile
-    jbyte* elements = get_elements(f, a.shadow);        // a synchronization point: the dirty chunk is merged
-    require(a.object->bytes[0] == 0x55, "the application's byte reached the array");
-    require(a.object->bytes[20] == 0xB2, "and Java's byte, which the merge's read did not see, is still there");
+    Made a = make_held(f, sample(3 * 4096));
+    a.object->bytes[100] = 0x77;  // Java wrote a byte; the application wrote none
+    world.critical_gets = 0;
+    world.set_calls = 0;
+    world.get_calls = 0;
+    call_static_int_v(f, f.consume, a.shadow);
+    require(raw_of(a)[100] == 0x77, "the call gave the block Java's byte");
+    require(world.critical_gets == 0 && world.set_calls == 0 && world.get_calls > 0, "by region reads: no critical get, no write");
+    a.object->bytes[200] = 0x78;
+    jbyte* elements = get_elements(f, a.shadow);
     release_elements(f, a.shadow, elements, 0);
-    require(a.object->bytes[20] == 0xB2 && raw_of(a)[20] == 0xB2 && raw_of(a)[0] == 0x55,
-            "the next point gave the block Java's byte, and the application's stayed");
+    require(raw_of(a)[200] == 0x78 && world.critical_gets == 0 && world.set_calls == 0, "the elements: no critical get");
+    a.object->bytes[300] = 0x79;
+    jbyte buffer[400] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 400, buffer);
+    const jbyte value = 0x42;
+    fn<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(*f.table, slot::SetByteArrayRegion)(f.env, a.shadow, 5000, 1, &value);
+    require(static_cast<uint8_t>(buffer[300]) == 0x79 && a.object->bytes[5000] == 0x42, "the regions work");
+    require(world.critical_gets == 0, "and make no critical get either");
+    end_ref(f, a.shadow);
+    require(is_ended_block(a.shadow) && world.critical_gets == 0, "the end of a clean block makes no critical get");
 }
 
-// Scattered bytes of the application, in runs of one byte and across the edges of a scan block (256) and of a chunk, and a
-// Java write into the first byte of every gap while the merge runs (from the hook of the run's read): one region write for
-// each run, every gap byte keeps Java's value, and the block has them at the next point.
-void check_scattered_application_bytes_keep_a_java_write_in_every_gap() {
+// An exception pending synchronizes nothing: a native call that returns with one is not followed by a pull, an ended block
+// waits with the application's writes where they are and no runtime call is made for it; the next call without an
+// exception makes the end through the one path that writes through regions (exact runs of the bytes the application
+// wrote, never a gap byte), and makes no critical get for it.
+void check_an_exception_pending_synchronizes_nothing_and_a_deferred_end_writes_exact_runs() {
     Fixture f = make();
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    require(push(f.env, 16) == 0, "a frame");
     const size_t size = 3 * 4096;
     Made a = make_held(f, sample(size));
     const std::vector<uint8_t> before = a.object->bytes;
@@ -4038,12 +4190,135 @@ void check_scattered_application_bytes_keep_a_java_write_in_every_gap() {
         require(end < runs[k + 1].first, "the runs are apart");
         gaps.push_back(end);
     }
-    g_after_get = [&] {
+    world.exception_pending = true;
+    world.critical_gets = 0;
+    world.set_calls = 0;
+    world.get_calls = 0;
+    call_static_int_v(f, f.consume, a.shadow);
+    require(world.critical_gets == 0 && world.set_calls == 0 && world.get_calls == 0, "a call with an exception pending synchronizes nothing");
+    pop(f.env, nullptr);
+    require(is_shadow_block(a.shadow) && world.critical_gets == 0 && world.set_calls == 0 && world.get_calls == 0 &&
+                a.object->bytes == before,
+            "the end waits: no runtime call, the array untouched");
+    world.exception_pending = false;
+    g_after_get = [&] {  // Java writes the first byte of every gap while the deferred end reads the dirty run
         for (size_t gap : gaps) a.object->bytes[gap] = 0xB2;
     };
-    world.set_calls = 0;
-    call_static_int_v(f, f.consume, a.shadow);
+    jobject plain = byte_array(sample(4));
+    fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, plain);
+    require(is_ended_block(a.shadow), "the next call without an exception finished the end");
+    require(world.critical_gets == 0, "the deferred end made no critical get");
     require(world.set_calls == int(runs.size()), "one region write for each run of the application's bytes");
+    for (const auto& run : runs) {
+        for (size_t i = run.first; i < run.first + run.second; ++i) {
+            require(a.object->bytes[i] == uint8_t(before[i] ^ 0x55), "the application's byte is in the array");
+        }
+    }
+    for (size_t gap : gaps) {
+        require(a.object->bytes[gap] == 0xB2, "Java's write into the gap is in the array");
+    }
+    size_t others = 0;
+    for (size_t i = 0; i < size; ++i) {
+        bool in_run = false;
+        for (const auto& run : runs) in_run = in_run || (i >= run.first && i < run.first + run.second);
+        if (!in_run && std::find(gaps.begin(), gaps.end(), i) == gaps.end()) {
+            require(a.object->bytes[i] == before[i], "no other byte of the array changed");
+            ++others;
+        }
+    }
+    require(others > 0, "the rows' bytes include untouched ones");
+}
+
+// The array of a block is collected between the two holds of a dirty synchronization: the first hold decided "dirty", the
+// first critical get runs with no lock held (the hook acts there), and the block is freed before the second hold. The
+// second hold revalidates: it writes nothing into a freed block's array, closes the pair, and the layer's state is whole.
+// (In the runtime a local reference keeps the array alive, so the row has the fake's collector clear the weak reference
+// under it: the layer must not depend on that.)
+void check_a_block_freed_between_the_two_holds_is_not_merged() {
+    Fixture f = make();
+    Made gone = make_shadow_of(f, sample(100));
+    end_ref(f, gone.shadow);  // ended: the weak reference is all that holds the block's array
+    require(is_ended_block(gone.shadow), "the block ended");
+    raw_of(gone)[3] ^= 0x55;  // the application writes through the pointer it kept: the chunk is dirty
+    const std::vector<uint8_t> array_before = gone.object->bytes;
+    Other other(f);
+    g_before_first_critical = [&] {  // in the runtime's first critical get: no lock held
+        g_collect_ignores_locals = true;
+        collect();
+        g_collect_ignores_locals = false;
+        std::thread([&] { (void)make_shadow_of(other.f, sample(10)); }).join();  // a creation sweeps: the block is freed
+    };
+    world.critical_gets = 0;
+    jbyte buffer[16] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, gone.shadow, 0, 16, buffer);
+    require(world.critical_gets == 1 && counters().blocks_collected == 1, "the get was made, and the block was freed meanwhile");
+    require(gone.object->bytes == array_before, "nothing was written into the array of the freed block");
+    require(world.critical == 0 && t_regions == 0 && !world.exception_pending, "the pair was closed");
+}
+
+// ---- a merge writes back exactly the bytes the application wrote
+
+// A Java thread's write to a byte the application did not write, landing while the merge stores the application's byte into
+// the live array, is neither undone in the array nor lost to the block: the merge stores that one byte and no other. The
+// write is placed by the page-protection handler at the layer's first store into the array.
+void check_a_java_write_during_a_merge_is_kept() {
+    Fixture f = make();
+    const size_t size = 65536;
+    Made a = make_held(f, sample(size));
+    uint8_t* array = a.object->bytes.data();
+    uint8_t* page = page_inside(array, size);
+    const size_t at = size_t(page + 20 - array);
+    raw_of(a)[at] = uint8_t(array[at] ^ 0x55);  // the application wrote this byte: the chunk is dirty
+    const uint8_t written = raw_of(a)[at];
+    arm_watch(page, page + 21, 0xB2);           // Java writes the next byte meanwhile
+    jbyte* elements = get_elements(f, a.shadow);  // a synchronization point: the dirty chunk is merged
+    const int hits = disarm_watch();
+    require(hits == 1, "the merge stored into the array where Java's write landed");
+    require(array[at] == written, "the application's byte reached the array");
+    require(array[at + 1] == 0xB2, "and Java's byte, which the merge did not read as the application's, is still there");
+    release_elements(f, a.shadow, elements, 0);
+    require(array[at + 1] == 0xB2 && raw_of(a)[at + 1] == 0xB2 && raw_of(a)[at] == written,
+            "the next point gave the block Java's byte, and the application's stayed");
+}
+
+// Scattered bytes of the application, in runs of one byte and across the edges of a scan block (256) and of a chunk, and a
+// Java write into the first byte of every gap, all placed by the page-protection handler at the merge's first store into
+// the array: one critical pair and no region write, every gap byte keeps Java's value, and the block has them at the next
+// point.
+void check_scattered_application_bytes_keep_a_java_write_in_every_gap() {
+    Fixture f = make();
+    const size_t size = 65536;
+    Made a = make_held(f, sample(size));
+    uint8_t* array = a.object->bytes.data();
+    const std::vector<uint8_t> before = a.object->bytes;
+    std::vector<std::pair<size_t, size_t>> runs;  // start, length
+    for (size_t at = 3; at < size; at += 97) {
+        if (at + 1 >= 250 && at < 262) continue;  // the run across 256 is below
+        if (at + 1 >= 4090 && at < 4102) continue;
+        runs.push_back({at, 1});
+    }
+    runs.push_back({250, 12});
+    runs.push_back({4090, 12});
+    std::sort(runs.begin(), runs.end());
+    for (const auto& run : runs) {
+        for (size_t i = run.first; i < run.first + run.second; ++i) raw_of(a)[i] ^= 0x55;
+    }
+    std::vector<size_t> gaps;  // the first byte of every gap between two runs
+    for (size_t k = 0; k + 1 < runs.size(); ++k) {
+        const size_t end = runs[k].first + runs[k].second;
+        require(end < runs[k + 1].first, "the runs are apart");
+        gaps.push_back(end);
+    }
+    std::vector<uint8_t*> targets;
+    for (size_t gap : gaps) targets.push_back(array + gap);
+    uint8_t* page = page_inside(array, size);
+    arm_watch(page, targets[0], 0xB2, targets.data() + 1, targets.size() - 1);
+    world.set_calls = 0;
+    world.critical_gets = 0;
+    call_static_int_v(f, f.consume, a.shadow);
+    const int hits = disarm_watch();
+    require(hits == 1, "Java wrote the gaps at the merge's first store into the array");
+    require(world.critical_gets == 1 && world.set_calls == 0, "one critical pair and no region write");
     for (const auto& run : runs) {
         for (size_t i = run.first; i < run.first + run.second; ++i) {
             require(a.object->bytes[i] == uint8_t(before[i] ^ 0x55), "the application's byte is in the array");
@@ -4142,63 +4417,6 @@ void check_the_synchronizations_need_little_stack() {
 }
 
 // ---- stores that touch only the bytes the rule chose
-
-// A store that lands exactly where a test wants another thread's write to land. The page is made read-only; the first
-// store into it faults; the handler writes the other thread's byte, opens the page and lets the store go on. That is the
-// interleaving a few instructions wide between the layer's comparison and its store, which no call into the fake runtime
-// falls into: a word store there would carry the old value of the neighbouring byte over the other thread's.
-struct Watch {
-    uint8_t* page = nullptr;
-    size_t size = 0;
-    volatile uint8_t* racing = nullptr;  // where the other thread's write goes
-    uint8_t value = 0;
-    volatile int hits = 0;
-};
-Watch g_watch;
-struct sigaction g_watch_old_bus, g_watch_old_segv;
-void watch_handler(int signal_number, siginfo_t* info, void*) {
-    uint8_t* at = static_cast<uint8_t*>(info->si_addr);
-    if (g_watch.page != nullptr && at >= g_watch.page && at < g_watch.page + g_watch.size) {
-        mprotect(g_watch.page, g_watch.size, PROT_READ | PROT_WRITE);
-        g_watch.hits = g_watch.hits + 1;
-        *g_watch.racing = g_watch.value;
-        return;
-    }
-    struct sigaction default_action;
-    std::memset(&default_action, 0, sizeof(default_action));
-    default_action.sa_handler = SIG_DFL;
-    sigaction(signal_number, &default_action, nullptr);  // a fault of anything else: the default, on its return
-}
-// The first whole page inside [memory, memory + length).
-uint8_t* page_inside(uint8_t* memory, size_t length) {
-    const size_t page = size_t(getpagesize());
-    uint8_t* first = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(memory) + page - 1) & ~(page - 1));
-    require(first + page <= memory + length, "a whole page lies inside the memory");
-    return first;
-}
-void arm_watch(uint8_t* page, uint8_t* racing, uint8_t value) {
-    g_watch.page = page;
-    g_watch.size = size_t(getpagesize());
-    g_watch.racing = racing;
-    g_watch.value = value;
-    g_watch.hits = 0;
-    struct sigaction action;
-    std::memset(&action, 0, sizeof(action));
-    action.sa_sigaction = watch_handler;
-    action.sa_flags = SA_SIGINFO;
-    sigemptyset(&action.sa_mask);
-    sigaction(SIGBUS, &action, &g_watch_old_bus);
-    sigaction(SIGSEGV, &action, &g_watch_old_segv);
-    require(mprotect(page, g_watch.size, PROT_READ) == 0, "the page is made read-only");
-}
-int disarm_watch() {
-    const int hits = g_watch.hits;
-    mprotect(g_watch.page, g_watch.size, PROT_READ | PROT_WRITE);
-    sigaction(SIGBUS, &g_watch_old_bus, nullptr);
-    sigaction(SIGSEGV, &g_watch_old_segv, nullptr);
-    g_watch.page = nullptr;
-    return hits;
-}
 
 // A pull stores the byte Java changed and no other byte of its word: another thread's raw write to the next byte, landing
 // at that store, survives, and reaches the array at the next point.
@@ -4307,7 +4525,7 @@ int main(int argc, char** argv) {
     check_a_clean_block_makes_no_array_write();
     check_set_region_keeps_other_raw_writes();
     check_an_exact_comparison_keeps_every_write();
-    check_a_run_of_chunks_is_one_region_call();
+    check_a_dirty_block_is_pushed_in_place_and_a_clean_one_read_through_regions();
     check_committing_release_keeps_java_bytes_in_clean_chunks();
     check_nested_critical_release_keeps_the_other_pointers_bytes();
     check_a_receiver_is_synchronized();
@@ -4394,6 +4612,9 @@ int main(int argc, char** argv) {
     check_a_failed_sentinel_allocation_is_survived();
     check_a_full_table_of_the_runtimes_pointers_logs_one_line();
     check_the_synchronizations_need_little_stack();
+    check_a_clean_blocks_calls_make_no_critical_get();
+    check_an_exception_pending_synchronizes_nothing_and_a_deferred_end_writes_exact_runs();
+    check_a_block_freed_between_the_two_holds_is_not_merged();
     check_a_java_write_during_a_merge_is_kept();
     check_scattered_application_bytes_keep_a_java_write_in_every_gap();
     check_a_pull_stores_only_the_byte_java_changed();

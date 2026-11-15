@@ -299,9 +299,13 @@ inline void enter_any(Env* env) {
 // The block never takes a byte Java did not change, so a raw write by another thread to such a byte, racing the
 // synchronization, survives it and goes to the array at the next one; the stores are byte stores, so not even the
 // bytes next to a changed one are stored to. A chunk neither side touched costs two
-// comparisons and a read, and writes nothing to the array or the block. A run of adjacent chunks that are alike is read
-// in pieces of kPullPiece bytes; a run the application wrote costs one region read of the run and one region write for each
-// maximal run of the bytes it wrote (no byte between two runs is written).
+// comparisons and a read, and writes nothing to the array or the block.
+// A synchronization of a range with a chunk the application wrote merges in the array's own memory, through the critical
+// pair of the real array (sync_in_place): the stores are made into the live array, where a Java thread's write to any other
+// byte is never touched, and no region copy is made. A range with no such chunk takes Java's bytes through region reads, in
+// pieces of kPullPiece bytes, and makes no critical get. The one merge through region writes is a deferred end
+// (drain_pending), which cannot wait for a critical get: one region write for each maximal run of the bytes the application
+// wrote (no byte between two runs is written).
 // The synchronization points: before a call that is passed the block, as an argument or as the receiver (the
 // application's chunks go to the array), after that call, at the start of Get...Elements, Get...Critical and
 // GetByteArrayRegion (the chunks of the range), before and after SetByteArrayRegion, and at a Release. A
@@ -322,6 +326,19 @@ inline uint32_t chunk_end(const BlockHeader* header, unsigned chunk) {
 bool chunk_dirty(BlockHeader* header, unsigned chunk) {
     const uint32_t offset = chunk_offset(chunk);
     return __builtin_memcmp(data_of(header) + offset, header->baseline + offset, chunk_end(header, chunk) - offset) != 0;
+}
+
+// Whether the application wrote any chunk that overlaps [start, end) through the raw pointer since the last synchronization.
+bool range_dirty(BlockHeader* header, uint32_t start, uint32_t end) {
+    if (end <= start || header->capacity == 0) {
+        return false;
+    }
+    for (unsigned chunk = start / kChunk, last = (end - 1) / kChunk; chunk <= last; ++chunk) {
+        if (chunk_dirty(header, chunk)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // The array's bytes (already in the baseline over [from, to)) reach the block where they differ from it.
@@ -540,47 +557,26 @@ void pull_range(Env* env, BlockHeader* header, jobject array, uint32_t from, uin
     }
 }
 
-// The chunks that overlap [start, end) (inside the block): the application's chunks are merged into the array and,
-// when `pull` is set, the others take the array's bytes over the range. `pull` clear is the part a call needs before
-// it runs.
-void sync_bytes(Env* env, BlockHeader* header, jobject array, uint32_t start, uint32_t end, bool pull) {
-    if (end <= start || header->capacity == 0 || array == nullptr) {
+// The chunks the application wrote, merged into the array through region calls (merge_run: one write for each run of the
+// bytes it wrote). This is the push of the one path that cannot go through the critical pair (drain_pending, below); every
+// other synchronization uses sync_range. Nothing is read back.
+void push_dirty_regions(Env* env, BlockHeader* header, jobject array) {
+    if (header->capacity == 0 || array == nullptr) {
         return;
     }
-    const unsigned last = (end - 1) / kChunk;
-    unsigned chunk = start / kChunk;
-    bool dirty = chunk_dirty(header, chunk);
-    while (chunk <= last) {
-        const unsigned first = chunk;
-        const bool run_dirty = dirty;
-        bool next_dirty = false;
-        while (chunk < last) {  // the run of chunks that are alike; the first chunk that is not is compared once
-            next_dirty = chunk_dirty(header, chunk + 1);
-            if (next_dirty != run_dirty) {
-                break;
-            }
-            ++chunk;
+    const unsigned last = chunk_count(header->capacity) - 1;
+    for (unsigned chunk = 0; chunk <= last; ++chunk) {
+        if (!chunk_dirty(header, chunk)) {
+            continue;
         }
-        if (run_dirty) {
-            merge_run(env, header, array, first, chunk);
-        } else if (pull) {
-            uint32_t from = chunk_offset(first), to = chunk_end(header, chunk);
-            from = from < start ? start : from;
-            to = to > end ? end : to;
-            pull_range(env, header, array, from, to);
+        unsigned run_end = chunk;
+        while (run_end < last && chunk_dirty(header, run_end + 1)) {
+            ++run_end;
         }
-        if (chunk == last) {
-            break;
-        }
-        ++chunk;
-        dirty = next_dirty;
+        merge_run(env, header, array, chunk, run_end);
+        chunk = run_end;
     }
 }
-void sync_all(Env* env, BlockHeader* header, jobject array) { sync_bytes(env, header, array, 0, header->capacity, true); }
-
-// Before a call that is passed the block: what the application wrote through the pointer reaches the array. Nothing
-// is read back, and a clean chunk costs no array write.
-void push_dirty(Env* env, BlockHeader* header, jobject array) { sync_bytes(env, header, array, 0, header->capacity, false); }
 
 // A JNI_ABORT: the block is given the array's bytes back, whatever the application wrote.
 void abort_block(Env* env, BlockHeader* header, jobject array) {
@@ -613,8 +609,14 @@ bool block_is_valid(const BlockHeader* header) {
     const uint32_t magic = __atomic_load_n(&header->magic, __ATOMIC_ACQUIRE);
     return magic == kBlockLive || magic == kBlockEnded;
 }
-void sync_critical(Env* env, BlockHeader* header, jobject array, void* pinned, bool nested) {
-    if (header->capacity == 0 || array == nullptr) {
+// [start, end) of the block synchronized with its array in place, through the critical pair: a chunk the application wrote
+// is merged into the array's own bytes, byte stores of exactly the bytes it wrote (a Java write to any other byte is never
+// touched, and no region copy is made); every other chunk in the range takes the array's bytes when `pull` is set. The
+// caller holds the mutex and has made the first get (`pinned`), or has a region open (`nested`) and the get is made here.
+// Between the get and the release the layer makes no runtime call: the release is the only one.
+void sync_in_place(Env* env, BlockHeader* header, jobject array, void* pinned, bool nested, uint32_t start, uint32_t end,
+                   bool pull) {
+    if (header->capacity == 0 || array == nullptr || end <= start) {
         return;
     }
     if (nested) {
@@ -628,7 +630,7 @@ void sync_critical(Env* env, BlockHeader* header, jobject array, void* pinned, b
         return;
     }
     bool wrote = false;
-    for (unsigned c = 0, n = chunk_count(header->capacity); c < n; ++c) {
+    for (unsigned c = start / kChunk, last = (end - 1) / kChunk; c <= last; ++c) {
         const uint32_t offset = chunk_offset(c), length = chunk_end(header, c) - offset;
         if (chunk_dirty(header, c)) {
             uint8_t* java = static_cast<uint8_t*>(pinned) + offset;  // the array's bytes: the application's replace them
@@ -638,8 +640,10 @@ void sync_critical(Env* env, BlockHeader* header, jobject array, void* pinned, b
             merge_bytes(java, block, baseline, length, change);
             wrote = change.any || wrote;
             take_java(data_of(header) + offset, header->baseline + offset, java, length);
-        } else {
-            take_java(data_of(header) + offset, header->baseline + offset, static_cast<const uint8_t*>(pinned) + offset, length);
+        } else if (pull) {
+            const uint32_t from = offset < start ? start : offset;
+            const uint32_t to = offset + length > end ? end : offset + length;
+            take_java(data_of(header) + from, header->baseline + from, static_cast<const uint8_t*>(pinned) + from, to - from);
         }
     }
     release_critical_pair(env, array, pinned, wrote ? 0 : kReleaseAbort);
@@ -703,6 +707,39 @@ struct EndedLock {
     EndedLock(const EndedLock&) = delete;
     EndedLock& operator=(const EndedLock&) = delete;
 };
+
+// Synchronizes [start, end) of the block with its array, for the calling thread, which must not hold the mutex; `array` is a
+// reference of the caller's own to the real array. `pull` also takes Java's bytes into the chunks the application did not
+// write (the part a call needs before it runs is the push alone).
+//   - First hold: if no chunk in the range was written through the pointer, the range is read through region calls (with
+//     `pull`) in this hold, and that is all. A clean block's call never makes a critical get.
+//   - Otherwise the first critical get of the array is made with no lock held (see first_critical), and the second hold
+//     merges the chunks in place (sync_in_place) and releases the pair. A chunk the first hold saw dirty that another
+//     thread has synchronized meanwhile is clean in the second, and costs a pair and nothing more.
+// Where the get returns nothing, the chunks stay as they are in the block for the next synchronization point. A thread that
+// has a region open already makes the nested get in the second hold.
+void sync_range(Env* env, BlockHeader* header, jobject array, uint32_t start, uint32_t end, bool pull) {
+    if (end <= start || header->capacity == 0 || array == nullptr) {
+        return;
+    }
+    {
+        EndedLock first_hold;
+        if (!range_dirty(header, start, end)) {
+            if (pull) {
+                pull_range(env, header, array, start, end);
+            }
+            return;
+        }
+    }
+    ThreadState* state = thread();
+    const bool nested = state != nullptr && state->critical_depth != 0;
+    void* pinned = nested ? nullptr : first_critical(env, header, array);
+    if (pinned == nullptr && !nested) {
+        return;
+    }
+    EndedLock second_hold;
+    sync_in_place(env, header, array, pinned, nested, start, end, pull);
+}
 
 void publish_ended() {
     __atomic_store_n(&g.counters.shadows_ended, g.ended_count, __ATOMIC_RELAXED);
@@ -983,7 +1020,7 @@ bool identity_hash(Env* env, jobject local, uint32_t* hash) {
 
 // The end of a block's last reference, under the lock: the strong reference gives way to a weak one (unless a pin keeps
 // it) and the block waits in the index, so that no other thread can make a second block for the array in between. What
-// the application wrote through the pointer has gone to the array (push_dirty) in the same hold of the mutex.
+// the application wrote through the pointer has gone to the array (sync_in_place) in the same hold of the mutex.
 void end_locked(Env* env, BlockHeader* header, Spare& spare) {
     if (__atomic_load_n(&header->pins, __ATOMIC_RELAXED) == 0) {
         jobject weak = original<jobject (*)(Env*, jobject)>(slot::NewWeakGlobalRef)(env, header->global);
@@ -1032,13 +1069,37 @@ void end_block(Env* env, BlockHeader* header) {
         spare.make();
     }
     Ending ending;
-    EndedLock lock;
-    push_dirty(env, header, header->global);  // under the mutex like every synchronization: another thread may be in one
-    end_locked(env, header, spare);
+    // A block the application did not write ends in one hold. One it wrote is pushed in place first: the first hold makes a
+    // reference of its own, the first critical get is made with no lock held, and the second hold pushes, closes the pair and
+    // ends the block (the end's weak reference and index entry come in one step with the push).
+    jobject own = nullptr;
+    {
+        EndedLock first_hold;
+        if (!range_dirty(header, 0, header->capacity)) {
+            end_locked(env, header, spare);
+            return;
+        }
+        own = original<jobject (*)(Env*, jobject)>(slot::NewLocalRef)(env, header->global);
+    }
+    ThreadState* state = thread();
+    const bool nested = state != nullptr && state->critical_depth != 0;
+    void* pinned = own != nullptr && !nested ? first_critical(env, header, own) : nullptr;
+    {
+        EndedLock second_hold;
+        if (own != nullptr && (nested || pinned != nullptr)) {
+            sync_in_place(env, header, own, pinned, nested, 0, header->capacity, false);
+        }  // else the chunks stay in the block, which ends as it is (the next synchronization of the array pushes them)
+        end_locked(env, header, spare);
+    }
+    if (own != nullptr) {
+        original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, own);
+    }
 }
 
 // The blocks that wait for an environment: with one, and no exception pending, their ends are finished. The exchange and
-// the ends are one step for the other threads.
+// the ends are one step for the other threads (a block taken from the list and not yet in the index would let a second
+// thread make a second block for its array), so the pushes of the application's writes cannot wait for a critical get
+// made before the hold: this is the one path that merges through region calls, with the exact per-run writes.
 void drain_pending(Env* env) {
     if (!jni_usable(env)) {
         return;  // the next call without an exception finishes them
@@ -1052,7 +1113,7 @@ void drain_pending(Env* env) {
     BlockHeader* list = __atomic_exchange_n(&g.pending, static_cast<BlockHeader*>(nullptr), __ATOMIC_ACQ_REL);
     while (list != nullptr) {
         BlockHeader* next = list->next;
-        push_dirty(env, list, list->global);
+        push_dirty_regions(env, list, list->global);
         end_locked(env, list, spare);
         __atomic_fetch_add(&g.counters.shadows_released, 1u, __ATOMIC_RELAXED);
         list = next;
@@ -1225,10 +1286,7 @@ jobject make_shadow(Env* env, jobject local) {
             ++known->refs;
             state->blocks[state->count++] = known;
             state->env = env;
-            {
-                EndedLock lock;
-                sync_all(env, known, local);  // what Java wrote meanwhile shows, and what the application wrote reaches the array
-            }
+            sync_range(env, known, local, 0, known->capacity, true);  // what Java wrote meanwhile shows, and what the application wrote reaches the array
             original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, local);
             return array_of(known);
         }
@@ -1257,9 +1315,6 @@ jobject make_shadow(Env* env, jobject local) {
                     if (again != nullptr) {
                         again->refs = 1;
                         again->owner = env;
-                        // Java's writes since it ended and the application's raw writes since meet here, before another
-                        // thread can use the block: a kept reference on another thread synchronizes under this mutex too.
-                        sync_all(env, again, local);
                     }
                 }
             }
@@ -1272,6 +1327,9 @@ jobject make_shadow(Env* env, jobject local) {
             return nullptr;
         }
         if (again != nullptr) {
+            // Java's writes since it ended and the application's raw writes since meet here. Any other thread that uses a
+            // kept reference to the block synchronizes it on its own, so neither needs the other to have gone first.
+            sync_range(env, again, local, 0, again->capacity, true);
             state->blocks[state->count++] = again;
             state->env = env;
             state->bytes += static_cast<uint32_t>(bytes);
@@ -1398,7 +1456,9 @@ jobject make_shadow(Env* env, jobject local) {
 //       GetPrimitiveArrayCritical nested in a region the calling thread holds.
 // A path that needs the first critical get of an array (a block's critical pointer, its release) makes it before it takes
 // the mutex, on a local reference of its own made in an earlier hold, and revalidates the block in the next (first_critical,
-// sync_critical). The sentinel's array is made the same way (Spare). The table of the runtime's own pointers has a lock of
+// sync_in_place). Between a critical get and its release the layer makes no runtime call except that release (and the
+// nested critical get of a thread that holds a region already): CheckJNI allows nothing else inside a region, and the merge
+// is stores into the pinned memory. The sentinel's array is made the same way (Spare). The table of the runtime's own pointers has a lock of
 // its own, so that the thread that has just opened a region records it without the mutex. A thread inside a region may take
 // the mutex where a block must be synchronized: that is safe exactly because of the list above. The unit tests' fake runtime
 // fails any other call that arrives with the mutex held.
@@ -1586,8 +1646,7 @@ R call_synced(Env* env, const HoldSet& receiver, const HoldSet& arguments, F&& c
             const Access& access = set.items[i];
             const uint32_t magic = access.block != nullptr ? __atomic_load_n(&access.block->magic, __ATOMIC_ACQUIRE) : 0;
             if (access.array != nullptr && (magic == kBlockLive || magic == kBlockEnded)) {
-                SyncScope scope;
-                step(access);
+                step(access);  // sync_range takes the mutex itself
             }
         }
     };
@@ -1596,11 +1655,11 @@ R call_synced(Env* env, const HoldSet& receiver, const HoldSet& arguments, F&& c
         each_in(arguments, step);
     };
     if (any && jni_usable(env)) {
-        each([&](const Access& access) { push_dirty(env, access.block, access.array); });
+        each([&](const Access& access) { sync_range(env, access.block, access.array, 0, access.block->capacity, false); });
     }
     const auto after = [&] {
         if (any && jni_usable(env)) {
-            each([&](const Access& access) { sync_all(env, access.block, access.array); });
+            each([&](const Access& access) { sync_range(env, access.block, access.array, 0, access.block->capacity, true); });
         }
     };
     if constexpr (IsVoid<R>::value) {
@@ -2470,10 +2529,7 @@ jbyte* w_GetByteArrayElements(Env* e, jarray a, jboolean* is_copy) {
         if (access.block == nullptr) {
             return nullptr;
         }
-        {
-            SyncScope scope;
-            sync_all(e, access.block, access.array);
-        }
+        sync_range(e, access.block, access.array, 0, access.block->capacity, true);
         jbyte* elements = pin_block(e, access) ? reinterpret_cast<jbyte*>(array_of(access.block)->data) : nullptr;
         close_access(e, access);
         return elements;
@@ -2495,28 +2551,33 @@ void release_block(Env* e, BlockHeader* header, const void* elements, jint mode,
     ThreadState* state = thread();
     const bool in_region = critical && state != nullptr && state->critical_depth != 0;
     Access access = open_header(e, header, !in_region);
-    if (access.block != nullptr && jni_usable(e)) {
-        // The critical pair's first get, when the thread has no region open, is made before the mutex is taken.
-        void* pinned = critical && !in_region ? first_critical(e, header, access.array) : nullptr;
-        SyncScope scope;
-        const jobject array = access.array;
-        if (array != nullptr) {
+    const jobject array = access.array;
+    if (access.block != nullptr && jni_usable(e) && array != nullptr) {
+        // A buffer other than the block (a copy the application made of it) is its write into the block first.
+        const bool foreign = mode != kReleaseAbort && elements != nullptr && elements != data_of(header) && !is_shadow(elements) &&
+                             header->capacity > 0;
+        if (critical) {
+            // The critical pair, as the release of a pointer that the application may hold inside a region of its own: the
+            // first get, when the thread has no region open, is made before the mutex is taken, the rest in one hold.
+            void* pinned = in_region ? nullptr : first_critical(e, header, array);
+            SyncScope scope;
             if (mode == kReleaseAbort) {
-                if (critical) {
-                    abort_critical(e, header, array, pinned, in_region);
-                } else {
-                    abort_block(e, header, array);
-                }
+                abort_critical(e, header, array, pinned, in_region);
             } else {
-                if (elements != nullptr && elements != data_of(header) && !is_shadow(elements) && header->capacity > 0) {
+                if (foreign) {
                     __builtin_memcpy(data_of(header), elements, header->capacity);
                 }
-                if (critical) {
-                    sync_critical(e, header, array, pinned, in_region);
-                } else {
-                    sync_all(e, header, array);
-                }
+                sync_in_place(e, header, array, pinned, in_region, 0, header->capacity, true);
             }
+        } else if (mode == kReleaseAbort) {
+            SyncScope scope;
+            abort_block(e, header, array);
+        } else {
+            if (foreign) {
+                SyncScope scope;
+                __builtin_memcpy(data_of(header), elements, header->capacity);
+            }
+            sync_range(e, header, array, 0, header->capacity, true);
         }
     }
     if (mode != kReleaseCommit && unpin(header) && !critical && jni_usable(e)) {
@@ -2617,7 +2678,7 @@ void* w_GetPrimitiveArrayCritical(Env* e, jarray a, jboolean* is_copy) {
         void* pinned = in_region ? nullptr : first_critical(e, header, access.array);
         {
             SyncScope scope;
-            sync_critical(e, header, access.array, pinned, in_region);
+            sync_in_place(e, header, access.array, pinned, in_region, 0, header->capacity, true);
         }
         if (access.pinned) {
             access.pinned = false;  // the wrapper's pin becomes the pointer's
@@ -2675,11 +2736,8 @@ void w_GetByteArrayRegion(Env* e, jarray a, jsize start, jsize length, jbyte* bu
         }
         BlockHeader* header = access.block;
         if (start >= 0 && length >= 0 && static_cast<uint64_t>(start) + static_cast<uint64_t>(length) <= header->capacity) {
-            {
-                SyncScope scope;
-                sync_bytes(e, header, access.array, static_cast<uint32_t>(start),
-                           static_cast<uint32_t>(start) + static_cast<uint32_t>(length), true);
-            }
+            sync_range(e, header, access.array, static_cast<uint32_t>(start),
+                       static_cast<uint32_t>(start) + static_cast<uint32_t>(length), true);
             __builtin_memcpy(buffer, data_of(header) + start, static_cast<size_t>(length));
         } else if (access.array != nullptr) {
             // A range the block does not have: the runtime raises its exception for the real array.
@@ -2703,9 +2761,9 @@ void w_SetByteArrayRegion(Env* e, jarray a, jsize start, jsize length, const jby
             if (length > 0 && access.array != nullptr) {
                 // What the application wrote through the pointer in these chunks reaches the array first; the range
                 // itself is about to be replaced, so nothing is read back.
-                SyncScope scope;
-                sync_bytes(e, header, access.array, static_cast<uint32_t>(start),
+                sync_range(e, header, access.array, static_cast<uint32_t>(start),
                            static_cast<uint32_t>(start) + static_cast<uint32_t>(length), false);
+                SyncScope scope;
                 __builtin_memcpy(data_of(header) + start, buffer, static_cast<size_t>(length));
                 original<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(slot::SetByteArrayRegion)(
                     e, access.array, start, length, buffer);
