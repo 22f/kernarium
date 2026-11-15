@@ -31,9 +31,20 @@ public final class OldAppCommandTest {
 
     private static final List<String> ABIS32 = Arrays.asList("armeabi-v7a", "armeabi");
 
+    /** The first install is before every turn-on of the fixtures unless a test says otherwise. */
+    private static final long FIRST_INSTALL = 50L;
+
     private static Candidate app(String name, boolean system, String abi, int target, String sharedUser,
             long updated) {
-        return new Candidate(name, system, abi, target, sharedUser, updated, name);
+        return new Candidate(name, system, abi, target, sharedUser, FIRST_INSTALL, updated, name);
+    }
+
+    private static Candidate installedAt(String name, long firstInstall) {
+        return new Candidate(name, false, "armeabi-v7a", 10, null, firstInstall, firstInstall, name);
+    }
+
+    private static String key(String packageName) {
+        return OldAppEligibility.propertyName(packageName);
     }
 
     private static final class Fake implements OldAppCommand.Platform {
@@ -81,6 +92,17 @@ public final class OldAppCommandTest {
         @Override
         public String getProperty(String name) {
             return properties.getOrDefault(name, "");
+        }
+
+        @Override
+        public Map<String, String> storedChoices() {
+            Map<String, String> choices = new HashMap<>();
+            for (Map.Entry<String, String> property : properties.entrySet()) {
+                if (property.getKey().startsWith(OldAppEligibility.STORE_PREFIX) && !property.getValue().isEmpty()) {
+                    choices.put(property.getKey().substring(OldAppEligibility.STORE_PREFIX.length()), property.getValue());
+                }
+            }
+            return choices;
         }
 
         @Override
@@ -153,12 +175,26 @@ public final class OldAppCommandTest {
         same(false, OldAppEligibility.isEligible(app("a.b", false, null, 10, null, 0), ABIS32), "no native code");
         same(false, OldAppEligibility.isEligible(app("a.b", false, "x86", 10, null, 0), ABIS32), "x86 on an arm device");
         same("persist.sys.kernarium.oldapp.a.b", OldAppEligibility.propertyName("a.b"), "property name");
-        for (String good : new String[] {"a.b", "org.example.Foo_1", "com.a1.b2", "single"}) {
-            check(OldAppEligibility.isPackageName(good), "package name accepted: " + good);
+        // A name the property service cannot take as it is makes the package not eligible.
+        for (String good : new String[] {"a.b", "org.example.Foo_1", "com.a1.b2", "single", "1a.b", "a-b.c", "a@b:c"}) {
+            check(OldAppEligibility.isPropertyKeyPart(good), "property key part accepted: " + good);
+            check(OldAppEligibility.isEligible(app(good, false, "armeabi-v7a", 10, null, 0), ABIS32),
+                    "eligible by its name: " + good);
         }
-        for (String bad : new String[] {"", ".a", "a.", "a..b", "1a.b", "a b", "a-b.c", "a.b/c", "a.b\n", "../x", "a.b;c"}) {
-            check(!OldAppEligibility.isPackageName(bad), "package name refused: <" + bad + ">");
+        for (String bad : new String[] {"", ".a", "a.", "a..b", "a b", "a.b/c", "a.b\n", "../x", "a.b;c",
+                "org.example..oldapp", "org.example.oldapp."}) {
+            check(!OldAppEligibility.isPropertyKeyPart(bad), "property key part refused: <" + bad + ">");
+            check(!OldAppEligibility.isEligible(app(bad, false, "armeabi-v7a", 10, null, 0), ABIS32),
+                    "not eligible by its name: <" + bad + ">");
         }
+        // outlived: the rule for a stored turn-on.
+        Candidate current = installedAt("a.b", 100L);
+        same(false, OldAppEligibility.outlived(current, ABIS32, "100"), "installed in the second of the turn-on");
+        same(false, OldAppEligibility.outlived(current, ABIS32, "101"), "installed before the turn-on");
+        same(true, OldAppEligibility.outlived(current, ABIS32, "99"), "installed after the turn-on");
+        same(false, OldAppEligibility.outlived(current, ABIS32, "yesterday"), "a value that is not a time stays");
+        same(true, OldAppEligibility.outlived(null, ABIS32, "101"), "not installed");
+        same(true, OldAppEligibility.outlived(app("a.b", false, "armeabi-v7a", 14, null, 0), ABIS32, "101"), "target raised");
     }
 
     private static void listing() {
@@ -215,6 +251,7 @@ public final class OldAppCommandTest {
                 "off clears then stops");
         check(run(fake, "list").out.contains("org.example.zed\tZed\toff\t0\t300\n"), "listing after set off");
 
+        // On is refused for an application that is not eligible or not installed.
         for (String refused : new String[] {"org.example.modern", "org.example.sixty_four", "org.example.javaonly",
                 "org.example.system", "org.example.shared", "org.example.unknown"}) {
             fake.events.clear();
@@ -224,8 +261,6 @@ public final class OldAppCommandTest {
             same(1, result.err.split("\n").length, "one line on stderr for " + refused);
             check(result.err.contains(refused), "the refusal names " + refused + ": " + result.err);
             same(0, fake.events.size(), "a refusal writes and stops nothing: " + refused);
-            Result off2 = run(fake, "set", refused, "off");
-            same(2, off2.status, "refused off status for " + refused);
         }
 
         Fake dropped = fixture();
@@ -247,8 +282,8 @@ public final class OldAppCommandTest {
     private static void usage() {
         String[][] bad = {
             {}, {"help"}, {"list", "extra"}, {"set"}, {"set", "org.example.alpha"}, {"set", "org.example.alpha", "maybe"},
-            {"set", "org.example.alpha", "ON"}, {"set", "bad..name", "on"}, {"set", "--help", "on"},
-            {"set", "org.example.alpha", "on", "extra"}, {"LIST"}, {"set", "a b", "on"}, {"get", "org.example.alpha"},
+            {"set", "org.example.alpha", "ON"}, {"set", "--help"},
+            {"set", "org.example.alpha", "on", "extra"}, {"LIST"}, {"get", "org.example.alpha"},
         };
         for (String[] args : bad) {
             Fake fake = fixture();
@@ -259,6 +294,141 @@ public final class OldAppCommandTest {
             same("", result.out, "usage stdout for <" + shown + ">");
             same(0, fake.events.size(), "usage writes nothing for <" + shown + ">");
         }
+    }
+
+    /** A name that cannot be a property name is not usage but a refusal, for on and for off. */
+    private static void names() {
+        for (String name : new String[] {"", ".a", "a.", "a..b", "a b", "../x", "a.b\n", "a.b;c",
+                "org.example..oldapp", "org.example.oldapp."}) {
+            for (String state : new String[] {"on", "off"}) {
+                Fake fake = fixture();
+                Result result = run(fake, "set", name, state);
+                same(2, result.status, "refused status for <" + name + "> " + state);
+                same("", result.out, "refused stdout for <" + name + "> " + state);
+                same(0, fake.events.size(), "nothing is written for <" + name + "> " + state);
+            }
+        }
+        // The reviewer's two installed names are not listed either.
+        Fake fake = fixture();
+        fake.installed.add(app("org.example..oldapp", false, "armeabi-v7a", 10, null, 9L));
+        fake.installed.add(app("org.example.oldapp.", false, "armeabi-v7a", 10, null, 9L));
+        String listing = run(fake, "list").out;
+        check(!listing.contains("org.example..oldapp") && !listing.contains("org.example.oldapp."),
+                "unrepresentable names are not listed: " + listing);
+    }
+
+    /** The cases of the amendment: a choice does not outlive the installation it was made for. */
+    private static void lifecycle() {
+        // Uninstalled and installed again: first installed after the turn-on time.
+        Fake fake = new Fake();
+        fake.installed.add(installedAt("org.example.again", 1700000500L));
+        fake.properties.put(key("org.example.again"), "1700000000");
+        Result result = run(fake, "list");
+        same("kernarium_oldapp 1\norg.example.again\torg.example.again\toff\t0\t1700000500\n", result.out,
+                "a reinstalled application is listed off");
+        same(Arrays.asList("set " + key("org.example.again") + "="), fake.events, "and its choice is cleared");
+        same("", fake.getProperty(key("org.example.again")), "the property is empty");
+        fake.events.clear();
+        run(fake, "list");
+        same(0, fake.events.size(), "a second listing writes nothing");
+
+        // An update that raised the target level, a reinstall with a shared user ID, a system
+        // application, an application that is gone, a name that cannot be a property name: each
+        // choice is cleared and none is listed.
+        Fake gone = new Fake();
+        gone.installed.add(new Candidate("org.example.raised", false, "armeabi-v7a", 14, null, 10L, 10L, "x"));
+        gone.installed.add(new Candidate("org.example.shared", false, "armeabi-v7a", 10, "org.example.uid", 10L, 10L, "x"));
+        gone.installed.add(new Candidate("org.example.system", true, "armeabi-v7a", 10, null, 10L, 10L, "x"));
+        gone.installed.add(new Candidate("org.example.sixtyfour", false, "arm64-v8a", 10, null, 10L, 10L, "x"));
+        gone.installed.add(new Candidate("org.example.keeps", false, "armeabi-v7a", 10, null, 10L, 10L, "x"));
+        for (String name : new String[] {"org.example.raised", "org.example.shared", "org.example.system",
+                "org.example.sixtyfour", "org.example.absent", "org.example..odd", "org.example.keeps"}) {
+            gone.properties.put(key(name), "1700000000");
+        }
+        Result cleaned = run(gone, "list");
+        same(0, cleaned.status, "cleanup status");
+        same("kernarium_oldapp 1\norg.example.keeps\torg.example.keeps\ton\t1700000000\t10\n", cleaned.out,
+                "only the choice that still belongs to its application stays");
+        same(6, gone.events.size(), "six choices are cleared");
+        for (String event : gone.events) {
+            check(event.startsWith("set ") && event.endsWith("="), "a clearing write: " + event);
+        }
+        same("1700000000", gone.getProperty(key("org.example.keeps")), "the other choice is not touched");
+        for (String name : new String[] {"org.example.raised", "org.example.absent", "org.example..odd"}) {
+            same("", gone.getProperty(key(name)), "cleared: " + name);
+        }
+
+        // A choice that cannot be cleared is not hidden: the listing fails and prints nothing.
+        Fake stuck = new Fake();
+        stuck.installed.add(installedAt("org.example.again", 1700000500L));
+        stuck.properties.put(key("org.example.again"), "1700000000");
+        stuck.keepWrites = false;
+        Result failed = run(stuck, "list");
+        same(1, failed.status, "a choice that stays fails the listing");
+        same("", failed.out, "and prints no listing");
+        check(failed.err.contains("did not keep"), "and says why: " + failed.err);
+
+        // A value that is not a time is kept and listed on.
+        Fake odd = new Fake();
+        odd.installed.add(installedAt("org.example.odd", 1700000500L));
+        odd.properties.put(key("org.example.odd"), "on");
+        check(run(odd, "list").out.contains("org.example.odd\torg.example.odd\ton\ton\t1700000500\n"),
+                "a value that is not a time stays on");
+        same(0, odd.events.size(), "and is not cleared");
+    }
+
+    /** Turning off is accepted for any name that can be a property name. */
+    private static void turningOff() {
+        // Not installed, nothing stored: done, and no property is made for it.
+        Fake fake = fixture();
+        Result absent = run(fake, "set", "org.example.never", "off");
+        same(0, absent.status, "off for a package that is not installed");
+        same("org.example.never\toff\n", absent.out, "its line");
+        same(0, fake.events.size(), "nothing is written or stopped");
+
+        // Not installed, a choice stored: cleared, nothing to stop.
+        fake.properties.put(key("org.example.gone"), "1700000000");
+        Result gone = run(fake, "set", "org.example.gone", "off");
+        same(0, gone.status, "off for a package that is gone");
+        same(Arrays.asList("set " + key("org.example.gone") + "="), fake.events, "only the property is cleared");
+
+        // Installed and not eligible any more: cleared and stopped.
+        fake.events.clear();
+        fake.properties.put(key("org.example.modern"), "1700000000");
+        Result modern = run(fake, "set", "org.example.modern", "off");
+        same(0, modern.status, "off for an application that is not eligible");
+        same("org.example.modern\toff\n", modern.out, "its line");
+        same(Arrays.asList("set " + key("org.example.modern") + "=", "stop org.example.modern"), fake.events,
+                "cleared, then stopped");
+
+        // Installed and never switched on: stopped only.
+        fake.events.clear();
+        Result idle = run(fake, "set", "org.example.alpha", "off");
+        same(0, idle.status, "off for an application that is off");
+        same(Arrays.asList("stop org.example.alpha"), fake.events, "nothing to clear, so it is only stopped");
+
+        // A write the system does not keep is a failure.
+        Fake dropped = fixture();
+        dropped.keepWrites = false;
+        same(1, run(dropped, "set", "org.example.zed", "off").status, "a clearing the system did not keep");
+    }
+
+    /** The platform is made after the arguments are judged. */
+    private static void factory() {
+        final int[] made = {0};
+        OldAppCommand.PlatformFactory broken = () -> {
+            made[0]++;
+            throw new IllegalStateException("the package manager is not running");
+        };
+        StringWriter err = new StringWriter();
+        StringWriter out = new StringWriter();
+        int status = OldAppCommand.run(new String[] {"set", "x"}, broken, new PrintWriter(out), new PrintWriter(err));
+        same(64, status, "a usage error is 64 although there is no package manager");
+        same(0, made[0], "and the platform was not made");
+        status = OldAppCommand.run(new String[] {"list"}, broken, new PrintWriter(out), new PrintWriter(err));
+        same(1, status, "a good command fails with 1 without the package manager");
+        same(1, made[0], "the platform was asked for once");
+        check(err.toString().contains("the package manager is not running"), "and the reason is said: " + err);
     }
 
     private static void oneLine() {
@@ -273,6 +443,10 @@ public final class OldAppCommandTest {
         listing();
         switching();
         usage();
+        names();
+        lifecycle();
+        turningOff();
+        factory();
         oneLine();
         if (failures != 0) {
             System.out.println(failures + " failure(s)");

@@ -29,7 +29,7 @@ public final class Main {
         PrintWriter err = new PrintWriter(new OutputStreamWriter(System.err, StandardCharsets.UTF_8));
         int status;
         try {
-            status = OldAppCommand.run(args, new AndroidPlatform(), out, err);
+            status = OldAppCommand.run(args, AndroidPlatform::new, out, err);
         } catch (Throwable problem) {
             err.print(OldAppCommand.NAME + ": " + problem + "\n");
             status = OldAppCommand.EXIT_FAILURE;

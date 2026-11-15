@@ -29,18 +29,21 @@ final class Candidate {
     final int targetSdkVersion;
     /** The android:sharedUserId, or null. */
     final String sharedUserId;
+    /** The first install, in epoch seconds: a reinstall after an uninstall starts it again. */
+    final long firstInstallSeconds;
     /** The last install or update, in epoch seconds. */
     final long lastUpdateSeconds;
     /** The platform's own record of the application, for the platform to resolve the label from. */
     final Object source;
 
     Candidate(String packageName, boolean system, String primaryCpuAbi, int targetSdkVersion,
-            String sharedUserId, long lastUpdateSeconds, Object source) {
+            String sharedUserId, long firstInstallSeconds, long lastUpdateSeconds, Object source) {
         this.packageName = packageName;
         this.system = system;
         this.primaryCpuAbi = primaryCpuAbi;
         this.targetSdkVersion = targetSdkVersion;
         this.sharedUserId = sharedUserId;
+        this.firstInstallSeconds = firstInstallSeconds;
         this.lastUpdateSeconds = lastUpdateSeconds;
         this.source = source;
     }

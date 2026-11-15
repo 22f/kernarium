@@ -31,20 +31,29 @@ import android.os.SystemProperties;
 import android.os.UserHandle;
 import android.util.DisplayMetrics;
 
+import java.io.BufferedReader;
 import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * {@link OldAppCommand.Platform} on Android, for a process that runs as the adb shell user: the
- * package manager through its binder interface, the label from the application's own resources
- * (the shell user may read any application's package), the property through the system
- * properties, and {@code cmd activity force-stop} for the stop.
+ * package manager through its binder interface (the owner user's applications), the label from
+ * the application's own resources (the shell user may read any application's package), the
+ * property through the system properties, and {@code cmd activity force-stop} for the stop.
  */
 final class AndroidPlatform implements OldAppCommand.Platform {
     private static final int FORCE_STOP_SECONDS = 30;
+    private static final int GETPROP_SECONDS = 30;
+    private static final Pattern PROPERTY_LINE = Pattern.compile("\\[([^\\]]+)\\]: \\[(.*)\\]");
     private static final int OUTPUT_LIMIT = 400;
 
     private final IPackageManager mPackageManager;
@@ -84,7 +93,7 @@ final class AndroidPlatform implements OldAppCommand.Platform {
         }
         return new Candidate(info.packageName, (application.flags & ApplicationInfo.FLAG_SYSTEM) != 0,
                 application.primaryCpuAbi, application.targetSdkVersion, info.sharedUserId,
-                info.lastUpdateTime / 1000, info);
+                info.firstInstallTime / 1000, info.lastUpdateTime / 1000, info);
     }
 
     @Override
@@ -144,6 +153,34 @@ final class AndroidPlatform implements OldAppCommand.Platform {
     @Override
     public void setProperty(String name, String value) {
         SystemProperties.set(name, value);
+    }
+
+    /**
+     * The stored turn-ons, read from the output of {@code getprop} (the system properties have no
+     * list call): lines of the form {@code [name]: [value]}, kept for the store's prefix and a value.
+     */
+    @Override
+    public Map<String, String> storedChoices() throws Exception {
+        Process process = new ProcessBuilder("/system/bin/getprop").redirectErrorStream(true).start();
+        process.getOutputStream().close();
+        Map<String, String> choices = new HashMap<>();
+        try (BufferedReader lines = new BufferedReader(
+                new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = lines.readLine()) != null) {
+                Matcher match = PROPERTY_LINE.matcher(line);
+                if (match.matches() && match.group(1).startsWith(OldAppEligibility.STORE_PREFIX)
+                        && !match.group(2).isEmpty()) {
+                    choices.put(match.group(1).substring(OldAppEligibility.STORE_PREFIX.length()),
+                            match.group(2));
+                }
+            }
+        }
+        if (!process.waitFor(GETPROP_SECONDS, TimeUnit.SECONDS) || process.exitValue() != 0) {
+            process.destroy();
+            throw new IllegalStateException("getprop did not finish cleanly");
+        }
+        return choices;
     }
 
     @Override
