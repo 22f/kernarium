@@ -391,7 +391,12 @@ report `SW_CAMERA_LENS_COVER` as 1 for the whole boot of such a session and 0
 otherwise; the framework overlay reads that switch
 (`config_supportsHardwareCamToggle`) and Android shows its own blocked-camera
 state. The host also sends black frames while it interrupts a camera, and the
-HAL passes them on as frames of the camera. Output sizes the host lacks that
+HAL passes them on as frames of the camera. When the host ends the video of a
+camera (the application left the foreground while the guest recorded), the
+camera's video buffers fail under a black, interrupted record for as long as the
+guest keeps the stream, and the HAL reports `ERROR_DEVICE`: Camera2 hands that to
+the application as `onError(ERROR_CAMERA_DEVICE)`, and CameraX closes the camera,
+which ends a recording it holds with the clip saved. Output sizes the host lacks that
 CTS and the camera API require (standard JPEG sizes, 3840x2160 where that is the
 largest video mode, which is the recording size of the large tier, the YUV sizes
 of every smaller JPEG, 1920x1440 and 1280x720 for a concurrent camera) are cut

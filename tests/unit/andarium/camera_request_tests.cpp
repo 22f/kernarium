@@ -237,10 +237,31 @@ void check_what_the_application_sees()
             "a refused RAW leg with a JPEG that is made: started, the RAW buffer lost, completed");
 }
 
+// The host ends a camera (the application left the foreground while the guest
+// recorded, wire README): the buffers of its video streams fail and its newest
+// record says black and interrupted. That is the camera's loss, told to the
+// framework as ERROR_DEVICE; a failed video buffer under any other record, and
+// a failed still, are not.
+void check_the_hosts_end_of_a_camera()
+{
+    namespace flag = abi::frame_flag;
+    const std::uint32_t both = flag::black | flag::interrupted;
+    require(camera_lost(true, true, true, both), "a failed video buffer under a black, interrupted record is the end");
+    require(camera_lost(true, true, true, both | flag::resuming), "whatever else the record says");
+    require(!camera_lost(true, false, true, both), "a buffer that did not fail is a frame, black or not");
+    require(!camera_lost(false, true, true, both), "a failed still is a failed still");
+    require(!camera_lost(true, true, false, both), "with no record, a failed buffer is a failed buffer");
+    require(!camera_lost(true, true, true, 0), "under a live record, too");
+    require(!camera_lost(true, true, true, flag::black | flag::blocked), "and a blocked session's black is no loss");
+    require(!camera_lost(true, true, true, flag::interrupted), "an interruption alone is a dark gap");
+    require(!camera_lost(true, true, true, flag::black | flag::resuming), "and so is a restart");
+}
+
 } // namespace
 
 int main()
 {
+    check_the_hosts_end_of_a_camera();
     check_rule();
     check_refused_still();
     check_deadline();
