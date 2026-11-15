@@ -1889,19 +1889,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Androidがこのアプリを以前のバージョンに近い方法で実行します。クラッシュするアプリの助けになることがありますが、アプリの動作が変わることもあります。ここでいつでもオフに戻せます。"
+            "value" : "Androidがこのアプリを以前のバージョンに近い方法で実行します。クラッシュの解消に役立つことがありますが、アプリの動作が変わることもあります。ここでいつでもオフに戻せます。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android会以更接近旧版本的方式运行此应用。这可能有助于解决闪退问题，但也可能让此应用表现不同。你可以随时在此处重新关闭。"
+            "value" : "Android会以更接近旧版本的方式运行此应用。这可能有助于解决闪退问题，但也可能让此应用表现不同。你可以随时在此处将其关闭。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android會以更接近舊版本的方式執行此應用程式。這可能有助於解決閃退問題，但也可能讓此應用程式表現不同。你可以隨時在這裡再次關閉。"
+            "value" : "Android會以更接近舊版本的方式執行此應用程式。這可能有助於解決閃退問題，但也可能讓此應用程式表現不同。你可以隨時在這裡將其關閉。"
           }
         }
       }
@@ -2255,13 +2255,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "为Android 4.0之前的版本构建"
+            "value" : "为Android 4.0之前的版本开发"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "為Android 4.0之前的版本建置"
+            "value" : "為Android 4.0之前的版本開發"
           }
         }
       }
@@ -4685,7 +4685,30 @@
         }
       }
     },
-    "It opens without old app compatibility next time." : {
+    "It was built for an Android version before 4.0. If it crashes, open Settings from the side keys and choose Old app compatibility." : {
+      "comment" : "Two sentences added to the install card after Install anyway installed an app built for an Android before 4.0 that Old app compatibility lists. They follow the sentence that the app is installed and send the reader to Andarium's Settings through the side keys; it is not Android's Settings app.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリはAndroid 4.0より前のバージョン向けに作られています。クラッシュする場合は、サイドキーから“設定”を開き、“古いアプリの互換性”を選択してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "它是为Android 4.0之前的版本开发的。如果它闪退，请从侧边按键打开“设置”，然后选择“旧版应用兼容”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "它是為Android 4.0之前的版本開發的。若它閃退，請從側邊按鍵打開「設定」，然後選擇「舊版應用程式相容性」。"
+          }
+        }
+      }
+    },
+    "It will open without Old app compatibility next time." : {
       "comment" : "The last sentence of the alert that asks before Old app compatibility is turned off for an app that is open.",
       "localizations" : {
         "ja" : {
@@ -4703,30 +4726,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "下次開啟時將不使用舊版應用程式相容性。"
-          }
-        }
-      }
-    },
-    "It was built for an Android version before 4.0. If it crashes, open Settings here and choose Old app compatibility." : {
-      "comment" : "Two sentences added to the install card after Install anyway installed an app built for an Android before 4.0 that Old app compatibility lists. They follow the sentence that the app is installed; \"open Settings here\" is the side keys' tip's wording.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "このアプリはAndroid 4.0より前のバージョン向けに作られています。クラッシュする場合は、ここで“設定”を開き、“古いアプリの互換性”を選択します。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "它是为Android 4.0之前的版本构建的。如果它闪退，请在此打开“设置”，然后选择“旧版应用兼容”。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "它是為Android 4.0之前的版本建置的。若它閃退，請在此打開「設定」，然後選擇「舊版應用程式相容性」。"
+            "value" : "下次打開時將不使用舊版應用程式相容性。"
           }
         }
       }
@@ -5390,13 +5390,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "未安装为Android 4.0之前的版本构建的应用。"
+            "value" : "未安装为Android 4.0之前的版本开发的应用。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "未安裝為Android 4.0之前的版本建置的應用程式。"
+            "value" : "未安裝為Android 4.0之前的版本開發的應用程式。"
           }
         }
       }
@@ -7340,25 +7340,25 @@
         }
       }
     },
-    "Some apps this old crash because they rely on how Android used to work. Old app compatibility makes Android run one app more like older versions did." : {
+    "Some apps this old crash because they rely on how Android used to work. Old app compatibility makes Android run an app more like older versions did." : {
       "comment" : "The first paragraph of the Old app compatibility page's footer: what the feature is for.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "古いアプリの中には、Androidの以前の動作に依存しているため、クラッシュするものがあります。古いアプリの互換性を使うと、Androidが1つのアプリを以前のバージョンに近い方法で実行します。"
+            "value" : "古いアプリの中には、Androidの以前の動作に依存しているため、クラッシュするものがあります。古いアプリの互換性をオンにすると、Androidがそのアプリを以前のバージョンに近い方法で実行します。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "一些这么旧的应用会闪退，因为它们依赖Android以前的运作方式。旧版应用兼容会让Android以更接近旧版本的方式运行某一个应用。"
+            "value" : "一些这么旧的应用会闪退，因为它们依赖Android以前的运作方式。旧版应用兼容会让Android以更接近旧版本的方式运行所选应用。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "有些這麼舊的應用程式會閃退，因為它們依賴Android以前的運作方式。舊版應用程式相容性會讓Android以更接近舊版本的方式執行某一個應用程式。"
+            "value" : "有些這麼舊的應用程式會閃退，因為它們依賴Android以前的運作方式。舊版應用程式相容性會讓Android以更接近舊版本的方式執行所選應用程式。"
           }
         }
       }
@@ -10182,7 +10182,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "クラッシュするアプリにだけオンにしてください。現在問題なく動作しているアプリの動作が変わることがあります。オンまたはオフにすると、そのアプリが開いている場合は終了します。ここには、適用できるアプリだけが表示されます。"
+            "value" : "クラッシュするアプリでのみオンにしてください。現在問題なく動いているアプリの動作が変わることがあります。オンまたはオフにすると、そのアプリが開いている場合は終了します。ここには、適用できるアプリだけが表示されます。"
           }
         },
         "zh-Hans" : {
@@ -10228,7 +10228,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "「%@」で古いアプリの互換性をオフにしますか？"
+            "value" : "“%@”で古いアプリの互換性をオフにしますか？"
           }
         },
         "zh-Hans" : {
@@ -10274,7 +10274,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "「%@」で古いアプリの互換性をオンにしますか？"
+            "value" : "“%@”で古いアプリの互換性をオンにしますか？"
           }
         },
         "zh-Hans" : {
@@ -10743,13 +10743,13 @@
         }
       }
     },
-    "“%@” is open and closes now." : {
+    "“%@” is open and will close now." : {
       "comment" : "A sentence of the alerts that ask before Old app compatibility is turned on or off for an app that is open: Android closes the app when the switch changes. The app's own name is quoted.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "「%@」は開いているため、今すぐ終了します。"
+            "value" : "“%@”は開いているため、今すぐ終了します。"
           }
         },
         "zh-Hans" : {

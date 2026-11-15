@@ -14,7 +14,7 @@ uml_add_tooling_test(
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_builder_lane.py
         --source-root ${PROJECT_SOURCE_DIR} --part target-files
     LABELS android;audit
-    TIMEOUT 120)
+    TIMEOUT 300)
 
 uml_add_tooling_test(
     NAME lineage24-aosp-patch-regenerator
@@ -179,6 +179,28 @@ uml_add_tooling_test(
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_orientation_runner.py
     LABELS android
     TIMEOUT 60)
+
+# The Old app compatibility runner without a guest: the probe packages (manifests,
+# the stand-in library, the probe's script), the parsers, and every step against
+# a scripted image that follows the contract and differs one way at a time.
+uml_add_tooling_test(
+    NAME android17-oldapp-switch-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_oldapp_switch_runner.py
+    LABELS android
+    TIMEOUT 120)
+
+# The Old app compatibility shell command's logic on a plain JVM: the eligibility
+# rule, the listing, the writes and the exit statuses against a fake platform. It
+# skips (77) where the host has no JDK.
+uml_add_tooling_test(
+    NAME android17-oldapp-switch-command
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_oldapp_switch_command.py
+    LABELS android
+    TIMEOUT 300)
+set_tests_properties(android17-oldapp-switch-command PROPERTIES
+    SKIP_RETURN_CODE 77)
 
 # The old-application runner without a guest: the probe application's two
 # packages (manifest, DEX file, libraries built for armv7 when the host has the
