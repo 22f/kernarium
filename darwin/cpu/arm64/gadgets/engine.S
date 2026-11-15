@@ -28,8 +28,10 @@
  * veneer at the end of its own, and its code reaches the base part's veneers
  * for the helpers the base parts already call. It holds no SVE or SME
  * instruction, and so runs outside streaming mode only.
- * The run heads come last: they branch into the bank and call no helper, so
- * where they sit moves no entry of any other part.
+ * The run part comes last: the run heads branch into the bank and call no
+ * helper, and the same-base entries call only helpers the bank already calls,
+ * through its veneers, so where the part sits moves no entry of any other
+ * part.
  * The names are the arm64 engine's own, so the x86-64 engine's sections never
  * interleave with them in an image that carries both. */
 #define GADGET_SECTION_BANK __TEXT,__a64_bank,regular,pure_instructions
@@ -201,5 +203,8 @@ Lveneer_\symbol:
 #include "engine/sme.inc"
 /* Only into the AArch32 part's sections, after every part before it. */
 #include "engine/a32.inc"
+/* Only into the run part, behind the run heads, so no established gadget
+ * moves. */
+#include "engine/same_base.inc"
 	afp_twin_table_end
 	gadget_bank_bounds end

@@ -585,6 +585,14 @@
         NAME arm64-gadget-prologue-heads WITHOUT_HARNESS)
     uml_add_arm64_unit_test(gadget_move_head
         NAME arm64-gadget-move-heads WITHOUT_HARNESS)
+    uml_add_arm64_unit_test(gadget_same_base
+        NAME arm64-gadget-same-base WITHOUT_HARNESS)
+    # The builder's list of what each instruction writes, against what
+    # every word of the architecture's decode table that the engine
+    # accepts changes.
+    uml_add_arm64_unit_test(gadget_same_base_writes
+        NAME arm64-gadget-same-base-writes WITHOUT_HARNESS
+        ARGS ${CMAKE_CURRENT_SOURCE_DIR}/a64_instruction_decode_partitions.tsv)
 
     add_executable(uml_gadget_record_table_tests
 		${PROJECT_SOURCE_DIR}/tests/unit/arm64/gadget_record_table_tests.cpp)
