@@ -42,6 +42,13 @@ The runner checks, in this order:
 - blocked: the same cameras are listed, the preview is not the chart on two samples, each taken only while
   the camera application is the resumed activity and the device is awake (the application is brought back
   once; a second absence fails the step), and the camera key takes nothing;
+- the camera switch and the platform's dialog: a blocked session is started with the launcher's hardware input,
+  as the host's application starts it, so that the side-key device reports the camera lens cover; Android then
+  holds the camera's hardware toggle (``dumpsys sensor_privacy``) and a live one does not. Opening the camera
+  application shows no sensor privacy dialog in either (SystemUI's "Unblock device camera?" cannot lift a
+  hardware toggle): no window of SystemUI with that dialog's title or Unblock button in the interface dump,
+  SystemUI's SensorUseStartedActivity never started, and, in a blocked session, the activity the framework
+  overlay names instead (android.kernarium.sensoruse) started by the sensor privacy service;
 - none: no camera feature and no camera at all.
 
 Every wait has a deadline. The guest's launcher is stopped through its own process on any exit, and the
@@ -69,6 +76,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -92,6 +100,10 @@ boot_android = load("boot_android", REPOSITORY / "tools" / "boot_android.py")
 camera_layouts = load("camera_layouts", REPOSITORY / "android/lineage-24/tools/camera_layouts.py")
 
 DEFAULT_ADB_PORT = 5580
+DEFAULT_VNC_PORT = 5993
+# The guest's VNC display (only with --hardware-input) takes the slot's second port.
+VNC_OFFSET = 1
+HARDWARE_INPUT_OPTION = "--hardware-input"
 CAMERA_PACKAGE = "org.lineageos.aperture"
 CAMERA_PERMISSIONS = ("android.permission.CAMERA", "android.permission.RECORD_AUDIO")
 CAMERA_KEYCODE = 27  # KEYCODE_CAMERA: the camera application's default shutter key
@@ -136,6 +148,20 @@ FOREGROUND_COMMAND = ("dumpsys activity activities | grep -a -E 'ResumedActivity
 APP_EVENTS_PATTERN = (f"{CAMERA_PACKAGE}|FATAL EXCEPTION|ANR in|am_crash|am_anr|am_proc_died|am_kill|"
                       "ActivityTaskManager|WindowManager: (Resumed|Destroying|Changing focus)")
 APP_EVENTS_LINES = 80
+# The sensor privacy service's state (dumpsys sensor_privacy lists, for each user and sensor, each toggle that
+# is set) and the activities it starts over an application that uses a blocked sensor.
+SENSOR_CAMERA = 2
+TOGGLE_HARDWARE = 2
+STATE_ENABLED = 1
+SENSOR_DIALOG_ACTIVITY = "com.android.systemui/.sensorprivacy.SensorUseStartedActivity"
+SENSOR_DIALOG_TITLE_ID = "sensor_use_started_title_message"
+SENSOR_DIALOG_PACKAGE = "com.android.systemui"
+SENSOR_DIALOG_TEXTS = ("Unblock", "Unblock device camera?")
+SENSOR_STAND_IN_ACTIVITY = "android.kernarium.sensoruse/.QuietActivity"
+SENSOR_STAND_IN_CLASS = "android.kernarium.sensoruse.QuietActivity"
+UI_DUMP_PATH = "/data/local/tmp/camera-runner-ui.xml"
+UI_DUMP_ATTEMPTS = 4
+UI_DUMP_GAP_SECONDS = 4
 # The application's own log lines (its errors, what it logged before it left) come by process id: they do not name the package.
 APP_OWN_LOG_LINES = 80
 CONCURRENT_FEATURE = "android.hardware.camera.concurrent"
@@ -843,7 +869,8 @@ def parse_jpeg(data: bytes) -> Jpeg:
 
 class Guest:
     def __init__(self, adb: str, serial: str, process: subprocess.Popen, log: pathlib.Path,
-                 private: pathlib.Path, hold_directory: pathlib.Path | None = None) -> None:
+                 private: pathlib.Path, hold_directory: pathlib.Path | None = None,
+                 hardware_input: bool = False) -> None:
         self.adb = adb
         self.serial = serial
         self.process = process
@@ -851,6 +878,8 @@ class Guest:
         self.private = private
         # Where the launcher's audio hold library (--audio-hold-library) takes its requests; None without one.
         self.hold_directory = hold_directory
+        # Whether the launcher gave the guest the side keys (--hardware-input): the device that reports the lens cover.
+        self.hardware_input = hardware_input
 
     def adb_run(self, *arguments: str, timeout: float = COMMAND_SECONDS,
                 binary: bool = False) -> subprocess.CompletedProcess:
@@ -878,6 +907,26 @@ class Guest:
 
     def media_camera(self) -> str:
         return self.shell("dumpsys media.camera")
+
+    def sensor_privacy(self) -> str:
+        return self.shell("dumpsys sensor_privacy")
+
+    def activity_events(self) -> str:
+        return self.shell("logcat -d -b events 2>&1 | grep -a wm_create_activity || true")
+
+    def interface_dump(self) -> str:
+        """The XML of `uiautomator dump`, retried while the platform answers that it has no idle state."""
+        problem = ""
+        for attempt in range(UI_DUMP_ATTEMPTS):
+            if attempt:
+                time.sleep(UI_DUMP_GAP_SECONDS)
+            result = self.shell(f"rm -f {UI_DUMP_PATH}; uiautomator dump {UI_DUMP_PATH} 2>&1; "
+                                f"cat {UI_DUMP_PATH} 2>/dev/null; rm -f {UI_DUMP_PATH}")
+            start = result.find("<?xml")
+            if start >= 0:
+                return result[start:]
+            problem = result.strip()[-300:]
+        raise Failure(f"uiautomator produced no interface dump in {UI_DUMP_ATTEMPTS} attempts: {problem}")
 
     def provider_pids(self) -> list[int]:
         return parse_provider_pids(self.shell("ps -A -o PID,NAME"))
@@ -1063,6 +1112,57 @@ def parse_foreground(text: str) -> Foreground:
     return Foreground(resumed, focus.group(1) if focus else "", wakefulness.group(1) if wakefulness else "")
 
 
+def parse_sensor_privacy(text: str) -> list[tuple[int, int, int, int]]:
+    """The (user, sensor, toggle type, state) of every toggle `dumpsys sensor_privacy` lists, in order."""
+    entries: list[tuple[int, int, int, int]] = []
+    user = sensor = toggle = -1
+    for raw in text.splitlines():
+        match = re.fullmatch(r"\s*(user_id|sensor|toggle_type|state_type)=(-?\d+)\s*", raw)
+        if not match:
+            continue
+        key, value = match.group(1), int(match.group(2))
+        if key == "user_id":
+            user = value
+        elif key == "sensor":
+            sensor = value
+        elif key == "toggle_type":
+            toggle = value
+        else:
+            entries.append((user, sensor, toggle, value))
+    return entries
+
+
+def camera_hardware_blocked(entries: list[tuple[int, int, int, int]]) -> bool:
+    """Whether the camera's hardware toggle is enabled for any user: what the lens cover becomes in Android."""
+    return any(sensor == SENSOR_CAMERA and toggle == TOGGLE_HARDWARE and state == STATE_ENABLED
+               for _, sensor, toggle, state in entries)
+
+
+def sensor_dialog_nodes(dump: str) -> list[str]:
+    """The nodes of an interface dump that belong to SystemUI's sensor privacy dialog: its title view, its
+    Unblock button and its title and button texts. An unreadable dump raises ValueError."""
+    try:
+        root = ET.fromstring(dump)
+    except ET.ParseError as problem:
+        raise ValueError(f"the interface dump is not XML: {problem}") from problem
+    found = []
+    for node in root.iter("node"):
+        if node.get("package") != SENSOR_DIALOG_PACKAGE:
+            continue
+        identifier, text = node.get("resource-id", ""), node.get("text", "")
+        if identifier.endswith(SENSOR_DIALOG_TITLE_ID) or text in SENSOR_DIALOG_TEXTS:
+            found.append(f"{identifier or '(no id)'} {text!r}")
+    return found
+
+
+def sensor_activity_starts(events: str) -> tuple[int, int]:
+    """How many times the event log created SystemUI's sensor privacy dialog and the product's stand-in
+    activity: (dialog, stand-in), from `logcat -b events` lines of wm_create_activity."""
+    created = [line for line in events.splitlines() if "wm_create_activity" in line]
+    return (sum(SENSOR_DIALOG_ACTIVITY in line for line in created),
+            sum(SENSOR_STAND_IN_ACTIVITY in line or SENSOR_STAND_IN_CLASS in line for line in created))
+
+
 class BlockedSampler:
     """One blocked-preview sample: taken only while the camera application is the resumed activity and the
     device is awake, checked before and after the screenshot. When it is not, the application is brought
@@ -1110,6 +1210,7 @@ def check_preview(guest: Guest, plan: Plan) -> None:
                  else "no client of the camera service", guest)
     else:
         time.sleep(15)  # the application opens the camera or is told it cannot; either is judged below
+        check_sensor_dialog(guest, plan)
     statistics: list[tuple[float, float]] = []
 
     def previewing() -> str | None:
@@ -1126,6 +1227,7 @@ def check_preview(guest: Guest, plan: Plan) -> None:
     if plan.mode == "live":
         wait_for("the preview showing the chart", PREVIEW_SECONDS, previewing, guest)
         print(f"  preview: mean {statistics[-1][0]:.1f}, deviation {statistics[-1][1]:.1f}")
+        check_sensor_dialog(guest, plan)
     else:
         def take() -> tuple[float, float]:
             guest.alive()
@@ -1145,6 +1247,34 @@ def check_preview(guest: Guest, plan: Plan) -> None:
             raise Failure(f"a blocked session {message}")
         print(f"  blocked preview ({BLOCKED_SAMPLES} samples): mean {statistics[-1][0]:.1f}, "
               f"deviation {statistics[-1][1]:.1f}")
+
+
+def check_sensor_dialog(guest: Guest, plan: Plan) -> None:
+    """The camera application is open (the caller started it and gave it time). The camera switch reaches
+    Android as the camera's hardware toggle exactly when the session is blocked, and SystemUI's "Unblock"
+    dialog, which cannot lift a hardware toggle, is not on the screen and was never started; in a blocked
+    session the sensor privacy service started the product's stand-in instead."""
+    if not guest.hardware_input:
+        print("  sensor privacy: not run, the guest has no side keys (start it with --hardware-input)")
+        return
+    blocked = camera_hardware_blocked(parse_sensor_privacy(guest.sensor_privacy()))
+    if blocked != (plan.mode == "blocked"):
+        raise Failure(f"the camera's hardware toggle is {'set' if blocked else 'not set'} in a {plan.mode} "
+                      "session: the lens cover did not reach Android as the session says")
+    nodes = sensor_dialog_nodes(guest.interface_dump())
+    if nodes:
+        raise Failure(f"SystemUI's sensor privacy dialog is on the screen of the {plan.mode} session: {nodes}")
+    dialogs, stand_ins = sensor_activity_starts(guest.activity_events())
+    if dialogs:
+        raise Failure(f"SystemUI's {SENSOR_DIALOG_ACTIVITY} was started {dialogs} time(s) in the {plan.mode} "
+                      "session: the platform offered to unblock a camera that no guest setting can unblock")
+    if plan.mode == "blocked" and not stand_ins:
+        raise Failure(f"the sensor privacy service did not start {SENSOR_STAND_IN_ACTIVITY} for the blocked "
+                      "camera: the dialog is gone for another reason, or the framework overlay names nothing")
+    if plan.mode != "blocked" and stand_ins:
+        raise Failure(f"the stand-in activity {SENSOR_STAND_IN_ACTIVITY} was started in a live session")
+    print(f"  sensor privacy: hardware toggle {'set' if blocked else 'not set'}; no dialog on the screen, "
+          f"SystemUI's dialog never started; stand-in started {stand_ins} time(s)")
 
 
 def check_still(guest: Guest, plan: Plan, before: set[str]) -> None:
@@ -1594,6 +1724,12 @@ AUTO_LAYOUTS = {
 }
 
 
+def wants_hardware_input(options: argparse.Namespace) -> bool:
+    """Whether the guest gets the launcher's hardware input (the side keys with the lens cover switch): a blocked
+    session always, as the host's application starts it, and any other when the option says so."""
+    return bool(options.hardware_input) or options.mode == "blocked"
+
+
 def auto_layout(profile: str, taught: bool) -> str:
     """The layout the launcher composes for the profile's cameras at the tier every host is given, without
     RAW until a Bayer still has taught the colour data (the first session of a calibration directory)."""
@@ -1631,7 +1767,8 @@ def start_guest(options: argparse.Namespace, plan: Plan, adb: str, private: path
         "--adb-port", str(options.adb_port),
         "--cpus", str(options.cpus),
         "--memory", options.memory,
-        "--display", "offscreen",
+        *(["--display", "vnc", "--vnc-port", str(options.vnc_port)] if options.hardware_input else
+          ["--display", "offscreen"]),
         "--width", str(DISPLAY_WIDTH),
         "--height", str(DISPLAY_HEIGHT),
         "--audio-output", "null",
@@ -1647,6 +1784,7 @@ def start_guest(options: argparse.Namespace, plan: Plan, adb: str, private: path
             boot_options, release, instance / boot_android.android_instance.DATA_DISK, emulator,
             boot_android.data_capacity(boot_options, identity)),
         *launcher_arguments(plan, options.layout == AUTO_LAYOUT, options.calibration_dir),
+        *([HARDWARE_INPUT_OPTION] if options.hardware_input else []),
     ]
     log = private / "emulator.log"
     stream = log.open("wb")
@@ -1662,7 +1800,7 @@ def start_guest(options: argparse.Namespace, plan: Plan, adb: str, private: path
                                start_new_session=True, env=environment)
     stream.close()
     serial = f"127.0.0.1:{options.adb_port}"
-    guest = Guest(adb, serial, process, log, private, hold_directory)
+    guest = Guest(adb, serial, process, log, private, hold_directory, hardware_input=options.hardware_input)
     boot_android.wait_for_adb(adb, serial, process, options.boot_timeout)
     if not boot_android.wait_for_boot_completed(adb, serial, process, options.boot_timeout):
         raise Failure("Android did not reach sys.boot_completed")
@@ -1708,6 +1846,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--adb-port", type=int, default=slot_ports.slot_port(slot_ports.ADB_OFFSET, DEFAULT_ADB_PORT),
                         help="loopback port the launcher forwards adbd to (default: the guest slot's first port "
                         f"when GUEST_SLOT_PORT_BASE is set, else {DEFAULT_ADB_PORT})")
+    parser.add_argument("--hardware-input", action="store_true",
+                        help="start the guest on a loopback VNC display with the launcher's --hardware-input, as "
+                        "the host's application does, so that it has the side-key device (the camera lens cover "
+                        "switch); a blocked session always does, a live one by this option")
+    parser.add_argument("--vnc-port", type=int, default=slot_ports.slot_port(VNC_OFFSET, DEFAULT_VNC_PORT),
+                        help="loopback port of the guest's VNC display with --hardware-input (default: the guest "
+                        f"slot's second port when GUEST_SLOT_PORT_BASE is set, else {DEFAULT_VNC_PORT})")
     parser.add_argument("--switch-rounds", type=positive_integer, default=SWITCH_ROUNDS,
                         help="how many photo to video switches the live mode makes (each can miss a race that "
                         f"an image without the policy rule loses only some of the time; default {SWITCH_ROUNDS})")
@@ -1768,6 +1913,9 @@ def main() -> int:
     if options.cpus <= 0 or options.boot_timeout <= 0:
         print("counts and timeouts must be positive", file=sys.stderr)
         return 2
+    # A session started with Camera off has the side keys, whose device reports the camera lens cover, as the
+    # host's application starts it; without them nothing of the camera switch would reach Android.
+    options.hardware_input = wants_hardware_input(options)
     layout = options.layout or ("none" if options.mode == "none" else DEFAULT_LAYOUTS[options.camera_profile])
     if layout == AUTO_LAYOUT:
         if options.mode == "none":

@@ -900,6 +900,8 @@ class FakeGuest:
     def __init__(self, plan, front_holds: bool = True, movies=None) -> None:
         self.plan = plan
         self.commands: list[str] = []
+        # The scripted guest has no side keys: the sensor privacy step says so and asks it nothing.
+        self.hardware_input = False
         self.held = {"0"}
         self.front_holds = front_holds
         self.rows: dict[str, dict[str, str]] = {"1": {"_id": "1", "_data": "/sdcard/old.mp4"}}
@@ -1819,6 +1821,174 @@ class ModeSwitchTests(unittest.TestCase):
         self.assertIn("the animation scale window_animation_scale was not restored", self.printed.getvalue())
         self.assertEqual(guest.settings["transition_animation_scale"], "1")
         self.assertEqual(guest.settings["animator_duration_scale"], "1")
+
+
+# `dumpsys sensor_privacy` of a guest started with Camera off and the side keys: the camera (sensor 2) is
+# blocked by the hardware toggle (type 2); a software toggle is type 1.
+SENSOR_PRIVACY_BLOCKED = """SENSOR PRIVACY MANAGER STATE (dumpsys sensor_privacy)
+{
+  storage_implementation=com.android.server.sensorprivacy.SensorPrivacyStateControllerImpl
+  users={
+    user_id=0
+    sensors={
+      sensor=2
+      toggles={
+        toggle_type=2
+        state_type=1
+        last_change=20299
+      }
+    }
+  }
+}
+"""
+SENSOR_PRIVACY_LIVE = """SENSOR PRIVACY MANAGER STATE (dumpsys sensor_privacy)
+{
+  storage_implementation=com.android.server.sensorprivacy.SensorPrivacyStateControllerImpl
+}
+"""
+
+# The interface dump of the platform's dialog over the camera application, trimmed to the nodes that matter, and
+# the dump of the camera application alone.
+SENSOR_DIALOG_DUMP = (
+    "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation=\"0\">"
+    '<node index="0" text="" resource-id="android:id/content" class="android.widget.FrameLayout" '
+    'package="com.android.systemui" bounds="[0,0][720,1280]">'
+    '<node index="1" text="Unblock device camera?" '
+    'resource-id="com.android.systemui:id/sensor_use_started_title_message" '
+    'class="android.widget.TextView" package="com.android.systemui" bounds="[0,0][1,1]" />'
+    '<node index="0" text="This unblocks access for all apps and services allowed to use your camera." '
+    'resource-id="android:id/message" class="android.widget.TextView" package="com.android.systemui" />'
+    '<node index="1" text="Unblock" resource-id="android:id/button1" class="android.widget.Button" '
+    'package="com.android.systemui" /></node></hierarchy>')
+CAMERA_APPLICATION_DUMP = (
+    "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation=\"0\">"
+    '<node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="org.lineageos.aperture">'
+    '<node index="0" text="PHOTO" resource-id="org.lineageos.aperture:id/photoModeButton" '
+    'class="android.widget.Button" package="org.lineageos.aperture" />'
+    '<node index="1" text="Unblock" resource-id="" class="android.widget.Button" '
+    'package="org.example.other" /></node></hierarchy>')
+DIALOG_EVENT = ("11-15 03:41:29.579   602   622 I wm_create_activity: [0,132003343,10,"
+                "com.android.systemui/.sensorprivacy.SensorUseStartedActivity,NULL,NULL,NULL,277086208]")
+STAND_IN_EVENT = ("11-15 03:53:57.190   602   617 I wm_create_activity: [0,226133289,11,"
+                  "android.kernarium.sensoruse/.QuietActivity,NULL,NULL,NULL,277086208]")
+CAMERA_EVENT = ("11-15 03:41:20.100   602   617 I wm_create_activity: [0,5,10,"
+                "org.lineageos.aperture/.CameraActivity,NULL,NULL,NULL,0]")
+
+
+class SensorDialogTests(unittest.TestCase):
+    """The camera switch as Android holds it, and the platform's Unblock dialog that must not appear."""
+
+    def test_the_toggles_of_the_sensor_privacy_service_are_read_from_its_dump(self) -> None:
+        self.assertEqual(runner.parse_sensor_privacy(SENSOR_PRIVACY_BLOCKED), [(0, 2, 2, 1)])
+        self.assertEqual(runner.parse_sensor_privacy(SENSOR_PRIVACY_LIVE), [])
+        self.assertEqual(runner.parse_sensor_privacy(""), [])
+        both = SENSOR_PRIVACY_BLOCKED.replace("toggle_type=2", "toggle_type=1\n        state_type=1\n"
+                                              "        toggle_type=2", 1)
+        self.assertEqual(runner.parse_sensor_privacy(both), [(0, 2, 1, 1), (0, 2, 2, 1)])
+
+    def test_only_the_hardware_toggle_of_the_camera_is_the_lens_cover(self) -> None:
+        self.assertTrue(runner.camera_hardware_blocked([(0, 2, 2, 1)]))
+        self.assertFalse(runner.camera_hardware_blocked([]))
+        self.assertFalse(runner.camera_hardware_blocked([(0, 2, 1, 1)]), "the software toggle")
+        self.assertFalse(runner.camera_hardware_blocked([(0, 1, 2, 1)]), "the microphone")
+        self.assertFalse(runner.camera_hardware_blocked([(0, 2, 2, 2)]), "a toggle that is not enabled")
+
+    def test_the_dialog_is_found_by_its_title_and_button_in_systemui_alone(self) -> None:
+        found = runner.sensor_dialog_nodes(SENSOR_DIALOG_DUMP)
+        self.assertEqual(len(found), 2)
+        self.assertIn("com.android.systemui:id/sensor_use_started_title_message 'Unblock device camera?'", found)
+        self.assertIn("android:id/button1 'Unblock'", found)
+        self.assertEqual(runner.sensor_dialog_nodes(CAMERA_APPLICATION_DUMP), [])
+        with self.assertRaisesRegex(ValueError, "not XML"):
+            runner.sensor_dialog_nodes("<hierarchy><node")
+
+    def test_the_activities_the_platform_created_are_counted_by_name(self) -> None:
+        self.assertEqual(runner.sensor_activity_starts(""), (0, 0))
+        self.assertEqual(runner.sensor_activity_starts("\n".join((CAMERA_EVENT, DIALOG_EVENT))), (1, 0))
+        self.assertEqual(runner.sensor_activity_starts("\n".join((CAMERA_EVENT, STAND_IN_EVENT, STAND_IN_EVENT))),
+                         (0, 2))
+        self.assertEqual(runner.sensor_activity_starts(
+            "I wm_restart_activity: [0,1,10,com.android.systemui/.sensorprivacy.SensorUseStartedActivity]"), (0, 0))
+
+    def test_a_blocked_session_always_has_the_side_keys(self) -> None:
+        parser = runner.build_parser()
+        self.assertTrue(runner.wants_hardware_input(parser.parse_args(["--mode", "blocked"])))
+        self.assertFalse(runner.wants_hardware_input(parser.parse_args(["--mode", "live"])))
+        self.assertTrue(runner.wants_hardware_input(parser.parse_args(["--mode", "live", "--hardware-input"])))
+        self.assertFalse(runner.wants_hardware_input(parser.parse_args(["--mode", "none"])))
+        options = parser.parse_args([])
+        self.assertEqual(options.vnc_port, runner.slot_ports.slot_port(runner.VNC_OFFSET, runner.DEFAULT_VNC_PORT))
+
+    def test_the_launcher_has_the_option_the_runner_adds(self) -> None:
+        source = (REPOSITORY / "darwin/app/macos/main.cpp").read_text(encoding="utf-8")
+        self.assertIn(f'"{runner.HARDWARE_INPUT_OPTION}"', source)
+
+    class Guest:
+        def __init__(self, privacy: str, dump: str, events: str, hardware_input: bool = True) -> None:
+            self.privacy, self.dump, self.events, self.hardware_input = privacy, dump, events, hardware_input
+            self.asked: list[str] = []
+
+        def sensor_privacy(self) -> str:
+            self.asked.append("privacy")
+            return self.privacy
+
+        def interface_dump(self) -> str:
+            self.asked.append("dump")
+            return self.dump
+
+        def activity_events(self) -> str:
+            self.asked.append("events")
+            return self.events
+
+    def run_step(self, mode: str, guest) -> str:
+        plan = runner.make_plan("bf-small-flash", "phone", mode)
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            runner.check_sensor_dialog(guest, plan)
+        return printed.getvalue()
+
+    def test_a_blocked_session_holds_the_toggle_and_shows_the_stand_in_instead_of_the_dialog(self) -> None:
+        guest = self.Guest(SENSOR_PRIVACY_BLOCKED, CAMERA_APPLICATION_DUMP, "\n".join((CAMERA_EVENT, STAND_IN_EVENT)))
+        self.assertIn("hardware toggle set; no dialog on the screen", self.run_step("blocked", guest))
+        self.assertEqual(guest.asked, ["privacy", "dump", "events"])
+
+    def test_a_live_session_holds_no_toggle_and_starts_no_stand_in(self) -> None:
+        guest = self.Guest(SENSOR_PRIVACY_LIVE, CAMERA_APPLICATION_DUMP, CAMERA_EVENT)
+        self.assertIn("hardware toggle not set", self.run_step("live", guest))
+
+    def test_the_dialog_of_the_image_before_the_stand_in_fails_a_blocked_session(self) -> None:
+        # What the accepted release shows: the toggle is set, the dialog is on the screen and was started.
+        guest = self.Guest(SENSOR_PRIVACY_BLOCKED, SENSOR_DIALOG_DUMP, "\n".join((CAMERA_EVENT, DIALOG_EVENT)))
+        with self.assertRaisesRegex(runner.Failure, "sensor privacy dialog is on the screen of the blocked"):
+            self.run_step("blocked", guest)
+
+    def test_a_dialog_that_was_started_and_left_still_fails(self) -> None:
+        guest = self.Guest(SENSOR_PRIVACY_BLOCKED, CAMERA_APPLICATION_DUMP,
+                           "\n".join((DIALOG_EVENT, STAND_IN_EVENT)))
+        with self.assertRaisesRegex(runner.Failure, "SensorUseStartedActivity was started 1 time"):
+            self.run_step("blocked", guest)
+
+    def test_no_dialog_and_no_stand_in_is_not_a_pass_for_a_blocked_session(self) -> None:
+        guest = self.Guest(SENSOR_PRIVACY_BLOCKED, CAMERA_APPLICATION_DUMP, CAMERA_EVENT)
+        with self.assertRaisesRegex(runner.Failure, "did not start android.kernarium.sensoruse"):
+            self.run_step("blocked", guest)
+
+    def test_the_toggle_must_follow_the_mode(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "toggle is not set in a blocked session"):
+            self.run_step("blocked", self.Guest(SENSOR_PRIVACY_LIVE, CAMERA_APPLICATION_DUMP, STAND_IN_EVENT))
+        with self.assertRaisesRegex(runner.Failure, "toggle is set in a live session"):
+            self.run_step("live", self.Guest(SENSOR_PRIVACY_BLOCKED, CAMERA_APPLICATION_DUMP, CAMERA_EVENT))
+
+    def test_a_live_session_that_shows_the_dialog_or_the_stand_in_fails(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "dialog is on the screen of the live"):
+            self.run_step("live", self.Guest(SENSOR_PRIVACY_LIVE, SENSOR_DIALOG_DUMP, CAMERA_EVENT))
+        with self.assertRaisesRegex(runner.Failure, "stand-in activity .* was started in a live session"):
+            self.run_step("live", self.Guest(SENSOR_PRIVACY_LIVE, CAMERA_APPLICATION_DUMP, STAND_IN_EVENT))
+
+    def test_a_guest_without_the_side_keys_says_so_and_asks_nothing(self) -> None:
+        guest = self.Guest(SENSOR_PRIVACY_LIVE, "", "", hardware_input=False)
+        self.assertIn("not run, the guest has no side keys", self.run_step("blocked", guest))
+        self.assertEqual(guest.asked, [])
 
 
 if __name__ == "__main__":
