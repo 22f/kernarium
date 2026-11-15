@@ -1024,8 +1024,8 @@ layer), reads a Java `byte[]` through the Dalvik offsets, hands it back to Java
 and the array functions, from a second thread too, writes it through the array
 functions, compares it with a global reference and the original, locks it, keeps it
 while more results arrive, pops it out of a local frame, grows a malloc buffer with
-`getline`, asks `malloc_usable_size`, finds the function tables read-only again and
-allocates below 2 GiB, and passes; the runner also asserts the library's SELinux
+`getline`, asks `malloc_usable_size`, reallocates and frees a block libc allocated,
+finds the function tables read-only again and allocates below 2 GiB, and passes; the runner also asserts the library's SELinux
 label. The modern package gets no layer, the raw read fails and the array
 operations give the runtime's own answers. `--host-shim` boots a release without
 the layer and loads a host-built copy from the old package after a control run

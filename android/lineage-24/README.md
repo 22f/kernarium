@@ -609,11 +609,12 @@ patches ART's one JNI function table in place and gives the application:
   reference is deleted or its thread ends, and is never recycled. An array the
   application creates itself (`NewByteArray`) stays ART's own;
 - an allocator below 2 GiB for the libraries the application ships: their
-  `malloc`, `calloc`, `strdup`, `strndup` and `operator new` imports are
-  redirected as the library is first seen. Every loaded library's `free`,
-  `realloc`, `reallocarray`, `malloc_usable_size` and `operator delete` accepts
-  such a block, the platform's own included, so a buffer the application
-  allocated can be grown by `getline` or freed by the framework.
+  `malloc`, `calloc`, `strdup`, `strndup`, `operator new` and `operator
+  delete` imports are redirected as the library is first seen.
+  Every loaded library's `free`, `realloc`, `reallocarray` and
+  `malloc_usable_size` imports accept such a block, libc's own among them, so a
+  buffer the application allocated can be grown by `getline` or freed by the
+  framework.
 
 Only the application's own code gets blocks: a caller is told apart by the
 mapping its return address is in, so the platform's libraries in the same

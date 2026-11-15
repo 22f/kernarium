@@ -206,7 +206,7 @@ class ProbePackageTests(unittest.TestCase):
 
 class VerdictTests(unittest.TestCase):
     SEMANTICS = {"write_through": "pass", "identity": "pass", "retained": "pass", "monitor": "pass", "pop": "pass",
-                 "getline": "pass", "usable_size": "pass", "table_read_only": "pass"}
+                 "getline": "pass", "usable_size": "pass", "libc_block": "pass", "table_read_only": "pass"}
     OLD = {"shim_mapped": "yes", "raw_read": "pass", "passback": "pass", "elements": "pass", "global": "pass",
            "thread_raw": "pass", **SEMANTICS, "low_heap": "pass", "done": "1"}
     MODERN = {"shim_mapped": "no", "raw_read": "fail", "passback": "pass", "elements": "pass", "global": "pass",
@@ -223,7 +223,8 @@ class VerdictTests(unittest.TestCase):
         for key, value in (("shim_mapped", "no"), ("raw_read", "fail"), ("passback", "fail"), ("elements", "fail"),
                            ("global", "fail"), ("thread_raw", "fail"), ("low_heap", "fail"),
                            ("write_through", "fail"), ("identity", "fail"), ("retained", "fail"), ("monitor", "fail"),
-                           ("pop", "fail"), ("getline", "fail"), ("usable_size", "fail"), ("table_read_only", "fail"),
+                           ("pop", "fail"), ("getline", "fail"), ("usable_size", "fail"), ("libc_block", "fail"),
+                           ("table_read_only", "fail"),
                            ("done", "")):
             with self.assertRaises(runner.Failure) as raised:
                 runner.evaluate("old", {**self.OLD, key: value})

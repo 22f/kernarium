@@ -24,6 +24,7 @@
 //   pop          PopLocalFrame hands it out of the frame
 //   getline      getline grows a buffer the application allocated with malloc
 //   usable_size  malloc_usable_size accepts a block the application allocated
+//   libc_block   the application reallocates and frees a block libc allocated
 //   table_read_only  the JNI and invoke function tables are not writable once the layer is installed
 //   done         the last entry: its absence means the process did not get this far
 //
@@ -367,6 +368,21 @@ void allocator_cases(Report& report) {
     void* block = probe_malloc(32);
     report.verdict("usable_size", probe_usable_size(block) >= 32);
     probe_free(block);
+
+    // The other direction: getline allocates the line, the application grows and frees it.
+    char* line = nullptr;
+    size_t line_size = 0;
+    void* maps = probe_fopen("/proc/self/maps", "r");
+    const long read = maps != nullptr ? probe_getline(&line, &line_size, maps) : -1;
+    bool ok = read > 0 && line != nullptr;
+    const char first = ok ? line[0] : 0;
+    char* bigger = ok ? static_cast<char*>(probe_realloc(line, 4096)) : nullptr;
+    ok = ok && bigger != nullptr && bigger[0] == first;
+    probe_free(bigger != nullptr ? bigger : line);
+    if (maps != nullptr) {
+        probe_fclose(maps);
+    }
+    report.verdict("libc_block", ok);
 }
 
 struct ThreadWork {

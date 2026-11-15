@@ -14,7 +14,8 @@ application of oldapp_probe_apk.py in its two variants and reads what each one r
   bytes (also from a thread of its own), the array still works as a JNI reference (handed back to Java, read
   and written through the array functions, one object with a global reference to it, locked, kept while more
   results arrive, popped out of a local frame), getline and malloc_usable_size accept a block the application
-  allocated, the JNI and invoke tables are read-only again, and every allocation lies below 2 GiB;
+  allocated and the application reallocates and frees a block libc allocated, the JNI and invoke tables are
+  read-only again, and every allocation lies below 2 GiB;
 - ``modern`` (targetSdkVersion 29): the layer is not mapped, and the raw read does not find the bytes (the
   reference is ART's own). The array handed back works, which shows that the probe itself runs.
 
@@ -70,7 +71,7 @@ BROADCAST_SECONDS = 60
 #: What each variant must report: the lines that must read exactly so (the others are recorded).
 #: What an application does with an array and an allocation the runtime's own way: the layer must not change the verdicts.
 SEMANTICS = {"write_through": "pass", "identity": "pass", "retained": "pass", "monitor": "pass", "pop": "pass",
-             "getline": "pass", "usable_size": "pass", "table_read_only": "pass"}
+             "getline": "pass", "usable_size": "pass", "libc_block": "pass", "table_read_only": "pass"}
 EXPECTED = {
     "old": {"shim_mapped": "yes", "raw_read": "pass", "passback": "pass", "elements": "pass", "global": "pass",
             "thread_raw": "pass", **SEMANTICS, "low_heap": "pass", "done": "1"},
