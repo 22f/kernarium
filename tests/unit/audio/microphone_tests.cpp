@@ -293,7 +293,9 @@ void switchWakesItsSourceOnEveryChange()
 }
 
 struct Source final {
-    Source()
+    /* A guest that has not opened its capture stream yet (`configured` false)
+     * has said nothing about its channels. */
+    explicit Source(bool configured = true)
         : authorization(std::make_shared<FakeAuthorization>())
         , microphone(std::make_shared<MicrophoneSwitch>(authorization))
         , waker(std::make_shared<CountingWaker>())
@@ -302,6 +304,8 @@ struct Source final {
         input = owned.get();
         source = uml::audio::makeMicrophoneCaptureSource(
             microphone, std::move(owned), waker);
+        if (!configured)
+            return;
         source->configure({.periodBytes = 960, .sampleRate = 48000,
                            .channels = 2, .bytesPerSample = 2});
         source->prepare();
@@ -439,13 +443,16 @@ void sourceDropsTheOldestAudioItCannotCatchUpWith()
  * opening it. */
 void standbyOpensTheMicrophoneBeforeTheGuestRecords()
 {
-    Source fixture;
+    Source fixture(false);
     fixture.allow();
     require(fixture.input->starts == 0, "on and permitted, but no camera is in video mode: the microphone stays off");
     fixture.microphone->setStandby(true);
     fixture.source->handleEvents();
-    require(fixture.input->starts == 1 && fixture.input->running && fixture.input->channels == 2,
-            "a camera in video mode opens it, stereo before any recording has said otherwise");
+    require(fixture.input->starts == 1 && fixture.input->running && fixture.input->channels == 1,
+            "a camera in video mode opens it, mono before any recording has said otherwise");
+    // The image's camera app records mono: its first recording finds the microphone as it needs it.
+    fixture.source->configure({.periodBytes = 480, .sampleRate = 48000, .channels = 1, .bytesPerSample = 2});
+    fixture.source->prepare();
     // Audio captured while the guest does not record is not the guest's: nothing is read, and the start drops it.
     fixture.input->deliver(0x44, 1920);
     std::vector<std::uint8_t> pcm(960, 0x55);
@@ -501,22 +508,22 @@ void standbyDoesNotOverrideTheSettingOrAGuestThatRecords()
 
 void aRecordingThatAsksForOtherChannelsOpensTheMicrophoneAgain()
 {
-    Source fixture;
+    Source fixture(false);
     fixture.allow();
     fixture.microphone->setStandby(true);
     fixture.source->handleEvents();
-    require(fixture.input->starts == 1 && fixture.input->channels == 2, "stereo under standby");
-    fixture.source->configure({.periodBytes = 480, .sampleRate = 48000, .channels = 1, .bytesPerSample = 2});
+    require(fixture.input->starts == 1 && fixture.input->channels == 1, "mono under standby");
+    fixture.source->configure({.periodBytes = 960, .sampleRate = 48000, .channels = 2, .bytesPerSample = 2});
     fixture.source->prepare();
     fixture.source->start();
-    require(fixture.input->starts == 2 && fixture.input->stops == 1 && fixture.input->channels == 1 && fixture.input->running,
-            "a mono recording opens it again as mono");
+    require(fixture.input->starts == 2 && fixture.input->stops == 1 && fixture.input->channels == 2 && fixture.input->running,
+            "a stereo recording opens it again as stereo");
     fixture.source->stop();
     fixture.microphone->setStandby(false);
     fixture.source->handleEvents();
     fixture.microphone->setStandby(true);
     fixture.source->handleEvents();
-    require(fixture.input->channels == 1, "and the next video mode opens it as the last recording was");
+    require(fixture.input->channels == 2, "and the next video mode opens it as the last recording was");
 }
 
 void sourceStopsTheMicrophoneWhenTheDeviceGoesAway()

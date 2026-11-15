@@ -89,7 +89,7 @@ reads or opens the microphone, and no permission prompt can appear.
   the guest is in video mode (`CameraDeviceOptions::onVideoMode`), which is
   when the guest is about to record and the system takes a quarter of a second
   or more to open the microphone. Standby opens the input before the guest
-  starts (stereo until a recording has said otherwise, opened again if the
+  starts (mono until a recording has said otherwise, opened again if the
   recording asks for other channels), and the guest's start drops what it held,
   so the recording begins with the next audio, not with sound from before it. It
   changes neither the setting nor the permission, and it closes with video mode

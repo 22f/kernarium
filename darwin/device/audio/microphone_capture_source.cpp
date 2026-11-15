@@ -15,9 +15,11 @@ constexpr std::size_t ringBytes = 64U * 1024U;
 // half, at the stream's rate.
 constexpr std::uint32_t backlogMilliseconds = 250;
 // The channels a microphone opened for a guest that is not recording yet is
-// opened with, until a recording has said otherwise (the image offers stereo
-// and mono; a camcorder records stereo).
-constexpr std::uint8_t standbyChannels = 2;
+// opened with, until a recording has said otherwise (the image offers mono and
+// stereo; its camera app records mono). A recording that asks for other
+// channels than the open microphone has opens it again, and that costs the
+// recording the system's opening time of silence.
+constexpr std::uint8_t standbyChannels = 1;
 
 class MicrophoneCaptureSource final : public CaptureSource {
 public:
@@ -87,7 +89,7 @@ private:
      * guest is in video mode and the guest is about to (the switch's
      * standby), and the user's setting allows it; a start that fails is tried
      * again on the next change. A microphone opened for a guest that is not
-     * recording yet has the channels of its last recording, else stereo, and
+     * recording yet has the channels of its last recording, else mono, and
      * is opened again if the recording asks for others. */
     void reconcile() noexcept
     {
