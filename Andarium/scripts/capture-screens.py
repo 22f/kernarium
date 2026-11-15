@@ -294,7 +294,7 @@ SHOTS: list[Shot] = [
     # Boot
     *boot_stages("boot", "boot", ["System image", "Linux kernel", "Storage", "Startup"], "Normal boot over the dimmed guest display, no progress bar"),
     s("boot-single-vcpu", "Boot", "boot-single-vcpu", "Normal boot of a guest with a single vCPU: the Linux kernel line says \"1 vCPU\"."),
-    s("boot-first-start", "Boot", "boot-first", "First start: Storage prepares the disk and Startup sets up for the first time."),
+    s("boot-first-start", "Boot", "boot-first", "First start: Storage prepares the disk and Startup sets up for the first time; the panel under the note says Android has no Google apps, on purpose."),
     s("boot-update", "Boot", "boot-upgrade", "The first start after an update: Startup updates the apps."),
     s("boot-restart", "Boot", "boot-restart", "The guest restarting."),
     s("boot-slow", "Boot", "boot-slow", "A start that has run 3 minutes 17 seconds, still at Startup: the notice above the steps says it is taking longer than usual, that it can be waited out or stopped, and that stopping needs Andarium closed in the App Switcher and opened again to start again; a red Stop and, in a build with Send feedback, Send feedback, both of one width. The steps stay in view below it.", dark=True),
@@ -411,7 +411,8 @@ SHOTS: list[Shot] = [
     feedback("feedback-missing-details", "feedback-missing-details", "Send tapped with the problem written and the details empty: the alert asks for what was done and what happened."),
     feedback("feedback-discard", "feedback-discard", "Cancel after something is typed or attached: Discard or Keep editing."),
     feedback("feedback-nomail", "feedback-nomail", "Send feedback where Mail cannot send (no account): the error and the way to fix it, and every control disabled."),
-    feedback("feedback-home", "feedback-home", "Send feedback opened from Home's toolbar menu, where no virtual machine runs: the card says a bug report and a screenshot need the virtual machine running and gives three steps; the rest of the form works.", dark=True),
+    feedback("feedback-home", "feedback-home", "Send feedback opened from Home's toolbar menu, where no virtual machine runs: the no-Google-apps line is at the top, collapsed; the card says a bug report and a screenshot need the virtual machine running and gives three steps; the rest of the form works.", dark=True),
+    feedback("feedback-home-answer", "feedback-home-answer", "Send feedback from Home with the no-Google-apps line opened in place: the question, That's on purpose, and the reason."),
     feedback("feedback-home-filled", "feedback-home-filled", "Feedback that is not a bug, from Home: a suggestion with a photo; Send is ready."),
     # Buy me tokens: needs a Preview built with the four TIP_ settings (see --help)
     tipjar("tipjar-entrance-home", "tipjar-home", "Home's toolbar after a virtual machine is set up: the one menu button where Info was, which holds Info, Send feedback, Review on the App Store and Buy me tokens (the menu itself is not captured).", dark=True, wait=3.0),

@@ -449,7 +449,13 @@ menu) exist with any of Send feedback, Review and Buy me tokens, and
 `HomePlainInfoTests` (the plain Info button) only with none
 ([Home toolbar menu](../Andarium/README.md#home-toolbar-menu)).
 `AndariumCoreTests` holds the tip sheet's states and the rating rule, counter
-and record as pure logic.
+and record as pure logic, and the state of the no-Google-apps notice (shown on
+every first start and once on an existing installation's next start, never
+again; the Send feedback line until opened or closed). `NoGoogleNoticeScreenTests`
+host the real boot screen and Send feedback sheet for it (the panel reached on a
+first start and gone with the boot, the starts that show none, the line opening
+and closing in place, the words in each language), and `NoGoogleNoticeUITests`
+reach the line from a session's Settings in a build with Send feedback.
 The Mail composer, the picker and the guest's display are stand-ins. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
