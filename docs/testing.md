@@ -838,13 +838,15 @@ anywhere is a blocker. The candidate must show:
 - **Cameras** (a guest started with `--camera=synthetic` and a camera layout on
   `androidboot.product.vendor.sku`). `android-camera` passes for the layouts
   the synthetic profiles compose, live and blocked, a blocked session started
-  with the side keys as the application starts it: Android holds the camera's
+  with the side keys as the application starts it (the runner adds them itself
+  in `main`; an importer that builds its own options passes `hardware_input`,
+  or its blocked session runs without them): Android holds the camera's
   hardware toggle, opening the camera application shows no sensor privacy
-  dialog, and the sensor privacy service starts the product's stand-in
-  activity instead (`lineage24-sensor-use-contract` checks that the overlay,
-  the stand-in application and the target-files verifier name the same
-  component); the VTS camera provider
-  test (`VtsAidlHalCameraProvider_TargetTest`) passes against the lazy
+  dialog, and the sensor privacy service logs, within a bounded wait, that it
+  withheld the reminder (a live session logs nothing). The blocked CTS session
+  runs without the side keys, so the hardware toggle is not set there and the
+  three `CtsSensorPrivacyTestCases` dialog tests are unaffected; the VTS camera
+  provider test (`VtsAidlHalCameraProvider_TargetTest`) passes against the lazy
   provider; and these CTS modules pass sharded, with the failures rerun alone
   and a result that differs from the accepted release's explained:
   `CtsCameraTestCases` (about 6 to 15 hours, as detached shards),

@@ -386,10 +386,21 @@ and none declares `android.hardware.camera.level.full`.
 A session started with Camera off lists the same cameras and delivers black
 frames. The image expects the always-registered side-key device (1af4:0002) to
 report `SW_CAMERA_LENS_COVER` as 1 for the whole boot of such a session and 0
-otherwise; the framework overlay reads that switch
-(`config_supportsHardwareCamToggle`) and Android shows its own blocked-camera
-state. The host also sends black frames while it interrupts a camera, and the
-HAL passes them on as frames of the camera. Output sizes the host lacks that
+otherwise. Android's input manager hands that switch to the sensor privacy
+service as the camera's hardware toggle (`config_supportsHardwareCamToggle`
+says the product has one), and the camera service mutes every camera. The
+service would also tell an application that opens the camera, with SystemUI's
+"Unblock device camera?" dialog or a notification, that it can unblock it, but
+the button writes the software toggle and cannot lift a hardware one. A
+SensorPrivacyService topic of route p0007 shows neither for a camera under the
+hardware toggle and logs `kernarium: no reminder for a camera that the hardware
+toggle blocks`; a combined camera and microphone reminder becomes the
+microphone's, whose Unblock works, and a session with the camera on never takes
+that branch. The `config_sensorUseStartedActivity*` strings stay at the
+platform's defaults (the target-files verifier requires the topic's log line in
+`services.jar` and refuses an overlay that defines them). The host also sends
+black frames while it interrupts a camera, and the HAL passes them on as frames
+of the camera. Output sizes the host lacks that
 CTS and the camera API require (standard JPEG sizes, 3840x2160 where that is the
 largest video mode, which is the recording size of the large tier, the YUV sizes
 of every smaller JPEG, 1920x1440 and 1280x720 for a concurrent camera) are cut
