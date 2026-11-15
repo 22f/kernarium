@@ -1025,8 +1025,10 @@ data into a calibration directory of its own, boots the same instance again
 over it, and expects the same camera IDs, one of them with RAW, because a
 camera the HAL refuses while it builds its list is not listed again.
 `android17-camera-runner` (tooling) runs its parsers and the expectations of
-every layout without a guest, and `android17-camera-layouts` (tooling) the
-layout set, its fallback order and the generated files.
+every layout without a guest, `android17-camera-layouts` (tooling) the layout
+set, its fallback order and the generated files, and
+`android17-camera-raw-metadata` (tooling) the static metadata a RAW camera must
+state for the HAL's device info to keep it, from the HAL series' own files.
 
 Every first-party script that reaches a guest over adb uses the one shared adb
 server, names the guest with `-s 127.0.0.1:<port>` and at the end only

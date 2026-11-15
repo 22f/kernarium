@@ -10,6 +10,9 @@ ENUM_FRAMESIZES and ENUM_FRAMEINTERVALS calls say what the camera is and which s
 runs; the HAL turns them into LIMITED static metadata on a template (emu_camera_v4l2.json, the
 emulated back camera without the features this device does not offer), with the capabilities the
 description earns: MANUAL_SENSOR and READ_SENSOR_SETTINGS for a single lens and RAW once calibrated.
+A camera that states RAW also states the lens shading map modes OFF and ON, as the device info
+requires of every RAW capable camera (the template's OFF alone made it reject a calibrated lens at
+boot, and the camera was gone from the list); a camera without RAW keeps the template's OFF.
 BURST_CAPTURE is never declared, because the host cannot meet its conditions, and the maximum latency
 is unknown.
 
@@ -69,7 +72,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
  devices/EmulatedCamera/hwl/JpegCompressor.cpp |   22 +-
  devices/EmulatedCamera/hwl/JpegCompressor.h   |   30 +-
  .../hwl/SensorCharacteristics.h               |    6 +-
- .../hwl/V4l2Characteristics.cpp               |  403 +++++++
+ .../hwl/V4l2Characteristics.cpp               |  407 +++++++
  .../EmulatedCamera/hwl/V4l2Characteristics.h  |   37 +
  .../EmulatedCamera/hwl/V4l2FrameSource.cpp    | 1011 +++++++++++++++++
  devices/EmulatedCamera/hwl/V4l2FrameSource.h  |  180 +++
@@ -83,7 +86,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
  .../hwl/configs/emu_camera_v4l2.json          |  592 ++++++++++
  .../EmulatedCamera/hwl/utils/ExifUtils.cpp    |   44 +-
  devices/EmulatedCamera/hwl/utils/HWLUtils.cpp |   16 +
- 21 files changed, 3839 insertions(+), 33 deletions(-)
+ 21 files changed, 3843 insertions(+), 33 deletions(-)
  create mode 100644 devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
  create mode 100644 devices/EmulatedCamera/hwl/V4l2Characteristics.h
  create mode 100644 devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
@@ -326,10 +329,10 @@ index 355cee16c72667a672d317596d56e165bfb99a9a..ff85ba6d16c138d9453f4daaa396a0f1
    uint32_t max_pipeline_depth = 0;
 diff --git a/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp b/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..6cc1bb9ac5739abbacc164ad7abc4b68acaa7408
+index 0000000000000000000000000000000000000000..61dfe4a449cee286fab33d7b44907321ceb0af1a
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
-@@ -0,0 +1,403 @@
+@@ -0,0 +1,407 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -618,6 +621,10 @@ index 0000000000000000000000000000000000000000..6cc1bb9ac5739abbacc164ad7abc4b68
 +        break;
 +    }
 +    PutOne<uint8_t>(m, ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT, arrangement);
++    // The device info rejects a RAW capable camera that cannot report its lens shading map, and the
++    // camera is then gone from the list: the template, made for a camera without RAW, states OFF only.
++    Put<uint8_t>(m, ANDROID_STATISTICS_INFO_AVAILABLE_LENS_SHADING_MAP_MODES,
++                 {ANDROID_STATISTICS_LENS_SHADING_MAP_MODE_OFF, ANDROID_STATISTICS_LENS_SHADING_MAP_MODE_ON});
 +    PutOne<int32_t>(m, ANDROID_SENSOR_INFO_WHITE_LEVEL, static_cast<int32_t>(desc.white_level));
 +    const int32_t black = static_cast<int32_t>(desc.black_level);
 +    Put<int32_t>(m, ANDROID_SENSOR_BLACK_LEVEL_PATTERN, {black, black, black, black});
