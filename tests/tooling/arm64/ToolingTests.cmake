@@ -7,6 +7,14 @@ uml_add_tooling_test(
     LABELS cpu
     TIMEOUT 60)
 
+# The AOT rewriter's encoders, decoder and assembler against known words.
+uml_add_tooling_test(
+    NAME arm64-aot-tools
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/arm64/test_aot_tools.py
+    LABELS cpu
+    TIMEOUT 60)
+
 # The SME image scan and idiom corpus classify the words SME code executes
 # at PSTATE.SM = 0 against the SM=0 family, on synthetic ELF fixtures.
 uml_add_tooling_test(
