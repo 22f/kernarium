@@ -2361,6 +2361,7 @@ uml::platform::CameraPresentation camera_front_note()
 	note.videoAskedHeight = 1440;
 	note.videoFirstWidth = 1920;
 	note.videoFirstHeight = 1440;
+	note.videoStabilization = VideoStabilizationState::standard;
 	note.photoKnown = true;
 	note.compensationSupported = CameraFact::yes;
 	note.compensationEnabled = CameraFact::yes;
@@ -2598,7 +2599,7 @@ void test_camera_presentation()
 			"turn 270 earlier yes anchor 1920x1440 ratios 24 fov 85\n"
 			"ratio camera 1 pinned 3x4 now 3x4 dims 1512x2016 error 0\n"
 			"video camera 1 default 0 set 270 supported yes mirror 0 0 "
-			"asked 1920x1440 first 1920x1440\n"
+			"asked 1920x1440 first 1920x1440 stab standard\n"
 			"photo camera 1 compensation supported yes enabled yes "
 			"read after-commit default 90 set 90 mirror 0 0 max 2016x1512 "
 			"exif 6 center no "
@@ -2628,7 +2629,7 @@ void test_camera_presentation()
 	front.exifOrientation = 0;
 	uml::runtime::note_camera_presentation(front);
 	slot = slot_of(read_file(path));
-	require(has(slot, " asked 1920x1440 first -\n") &&
+	require(has(slot, " asked 1920x1440 first - stab standard\n") &&
 		has(slot, " now 3x4 dims 1512x2016 error pending\n") &&
 		has(slot, " max 2016x1512 exif - center ") &&
 		count(slot, "video camera 1 ") == 1 &&
@@ -2636,9 +2637,26 @@ void test_camera_presentation()
 		"a camera's earlier note was not replaced: " + slot);
 	uml::runtime::note_camera_presentation(camera_front_note());
 	slot = slot_of(read_file(path));
-	require(has(slot, " first 1920x1440\n") &&
+	require(has(slot, " first 1920x1440 stab standard\n") &&
 		has(slot, " error 0\n") && has(slot, " exif 6 "),
 		"the later note was not written: " + slot);
+
+	/* The video line says how the connection is stabilized: a format that
+	 * supports no mode leaves the picture unstabilized and the line says so,
+	 * and a connection nothing was written to has a hyphen. */
+	auto unsupported = camera_front_note();
+	unsupported.videoStabilization = VideoStabilizationState::unsupported;
+	uml::runtime::note_camera_presentation(unsupported);
+	slot = slot_of(read_file(path));
+	require(has(slot, " first 1920x1440 stab unsupported\n"),
+		"an unstabilized picture was not said: " + slot);
+	auto unknown = camera_front_note();
+	unknown.videoStabilization = VideoStabilizationState::unknown;
+	uml::runtime::note_camera_presentation(unknown);
+	slot = slot_of(read_file(path));
+	require(has(slot, " first 1920x1440 stab -\n"),
+		"a connection nothing was said of was not a hyphen: " + slot);
+	uml::runtime::note_camera_presentation(camera_front_note());
 
 	/* A camera that has nothing but its mounting has that line alone, and
 	 * what the platform did not state is a hyphen; the cameras are written in

@@ -7,6 +7,7 @@
 #include "front_tables.hpp"
 #include "photo_dimensions.hpp"
 #include "require.hpp"
+#include "video_stabilization.hpp"
 
 #include <Block.h>
 
@@ -541,6 +542,8 @@ struct FakeSession {
     std::vector<std::string> log;
     int begins {}, commits {};
     bool refuseInput {}, refuseActivate {}, refuseVideo {}, refusePhoto {}, overBudget {};
+    // The glue programs the new video connection (the stabilization) inside the configuration.
+    bool programsVideo {};
     // The device whose timing a refused change must not lose.
     FakeDevice device;
     DeviceTiming saved;
@@ -577,6 +580,7 @@ struct FakeSession {
             video = true;
             return true;
         };
+        if (programsVideo) s.programVideo = [this] { log.push_back("programVideo"); };
         s.addPhoto = [this] {
             log.push_back("addPhoto");
             if (refusePhoto) return false;
@@ -632,6 +636,31 @@ void aRefusedStreamBeforeItsInputLeavesTheSessionAsItWas()
     require(session.log == std::vector<std::string> {"begin", "snapshot", "addInput", "activate", "addVideo", "removeVideo", "removeInput",
                                                       "restoreTiming", "commit"},
             "the timing is taken before the input is added, and put back after it has left");
+}
+
+// The new video connection is programmed (the stabilization the guest asks for) inside the admission's configuration, after
+// the output is added and before the commit: a session that runs already, to which a lens is added, starts the output at
+// the commit, and a session that starts later delivers from its first frame. A video output that is refused, or that was in
+// the session already, is not programmed.
+void aNewVideoConnectionIsProgrammedBeforeTheConfigurationCommits()
+{
+    FakeSession fresh;
+    fresh.programsVideo = true;
+    const AdmitPlan plan {.addInput = true, .activate = true, .addVideo = true, .addPhoto = false};
+    require(admit(plan, fresh.steps(plan)) == Admission::admitted, "admitted");
+    require(fresh.log == std::vector<std::string> {"begin", "snapshot", "addInput", "activate", "addVideo", "programVideo", "commit"},
+            "programmed after the output is added and before the commit");
+    FakeSession refused;
+    refused.programsVideo = true;
+    refused.refuseVideo = true;
+    require(admit(plan, refused.steps(plan)) == Admission::videoRefused, "refused");
+    require(std::count(refused.log.begin(), refused.log.end(), "programVideo") == 0, "an output that was refused is not programmed");
+    FakeSession present;
+    present.programsVideo = true;
+    present.input = present.video = true;
+    const AdmitPlan still {.addInput = false, .activate = false, .addVideo = false, .addPhoto = true};
+    require(admit(still, present.steps(still)) == Admission::admitted, "a still joins");
+    require(std::count(present.log.begin(), present.log.end(), "programVideo") == 0, "a video connection already in the session is left");
 }
 
 void aRefusedInputOrFormatAddsNothingElse()
@@ -980,10 +1009,42 @@ struct FakeBackend {
         cache.frameRate = 15;
         applied = true;
     }
+    // What the connection holds of the stabilization and what was written to it, through the production apply
+    // (applyVideoStabilization) and the production order of an apply (applyCameraSettings), as the glue calls them.
+    VideoStabilizationHeld stabilization;
+    StabilizationWish wish;
+    std::vector<VideoStabilization> stabilizationWrites;
+    std::vector<VideoStabilizationState> stabilizationNotes;
+    struct Port final : VideoStabilizationPort {
+        Port(VideoStabilizationSupport supported, std::vector<VideoStabilization>& written) : supported_(supported), written_(written) {}
+        VideoStabilizationSupport support() override { return supported_; }
+        void write(VideoStabilization mode) override { written_.push_back(mode); }
+        VideoStabilizationSupport supported_;
+        std::vector<VideoStabilization>& written_;
+    };
+    void putStabilization(bool wanted, VideoStabilizationSupport support)
+    {
+        Port port(support, stabilizationWrites);
+        const VideoStabilizationStep step = applyVideoStabilization(port, wanted, stabilization);
+        if (step.note) stabilizationNotes.push_back(step.state);
+    }
+    // A fresh settings cache holds the defaults, which are the settings the guest asks for in video mode (stabilization on).
+    void applyAll(bool wanted, VideoStabilizationSupport support, CameraTime exposure, bool force)
+    {
+        asked = exposure;
+        (void)applyCameraSettings(
+            cache, wish, wanted, force, applied && appliedExposure == exposure, [&] { putStabilization(wanted, support); },
+            [&] { write(exposure); });
+    }
     void apply(CameraTime exposure, bool force)
     {
         asked = exposure;
-        if (cache.mayLeaveSettings(force, applied && appliedExposure == exposure)) return;
+        StabilizationWish ignored;
+        (void)applyCameraSettings(
+            cache, ignored, false, force, applied && appliedExposure == exposure, [] {}, [&] { write(exposure); });
+    }
+    void write(CameraTime exposure)
+    {
         auto steps = device.steps();
         if (!steps.lock()) return;
         (void)steps.setCustomExposure(exposure, 100.0f);
@@ -1102,6 +1163,98 @@ void aRestoreThatIsRefusedLeavesNothingInTheCacheTrue()
             "after it, the cache stands for what the device holds");
     backend.device.writes.clear();
     require(backend.start(640, 480, 15) && backend.device.writes.empty(), "and an identical request writes nothing");
+}
+
+// The guest's request for stabilization in video mode equals the settings a new connection's cache holds, so an apply
+// skipped for unchanged settings left the picture unstabilized until the first setting changed (a tap), when it was
+// stabilized at once and the view jumped. The stabilization is decided before that exit.
+void aNewConnectionIsStabilizedByAnApplyThatLeavesTheOtherSettingsAlone()
+{
+    FakeBackend backend;
+    const VideoStabilizationSupport standard {true, false};
+    backend.applyAll(true, standard, backend.appliedExposure, false);
+    require(backend.stabilizationWrites == std::vector<VideoStabilization> {VideoStabilization::standard},
+            "the first apply stabilizes the connection although its settings are the ones applied");
+    require(backend.written("exposure") == 0, "and writes none of the other settings");
+    require(backend.stabilizationNotes == std::vector<VideoStabilizationState> {VideoStabilizationState::standard},
+            "the record is told once");
+    // The first tap changes a setting: the apply that follows carries the same wish.
+    backend.applyAll(true, standard, CameraTime {1, 20}, false);
+    require(backend.stabilizationWrites.size() == 1 && backend.written("exposure") == 1,
+            "a later apply writes the changed setting and leaves the stabilization alone: the view does not jump");
+    require(backend.stabilizationNotes.size() == 1, "and says nothing");
+}
+
+// The apply that leaves the other settings alone is also what tells the platform that the guest wants the stabilization:
+// the admission of a connection that follows programs it from that wish, before the connection can deliver. (A camera
+// whose guest asks for the defaults, as video mode does, never writes a setting.)
+void anApplyThatLeavesTheSettingsAloneStillStatesTheWish()
+{
+    FakeBackend backend;
+    require(!backend.wish.atAdmission(), "before any apply the admission asks nothing");
+    backend.applyAll(true, {}, backend.appliedExposure, false);
+    require(backend.written("exposure") == 0, "the apply wrote none of the settings");
+    require(backend.wish.atAdmission(), "and the admission now programs the stabilization the guest asked for");
+    backend.applyAll(false, {}, backend.appliedExposure, false);
+    require(!backend.wish.atAdmission(), "a guest that stops asking is no longer programmed");
+}
+
+void aFormatThatSupportsNoModeLeavesTheConnectionAloneAndSaysSoOnce()
+{
+    FakeBackend backend;
+    backend.applyAll(true, {}, backend.appliedExposure, false);
+    backend.applyAll(true, {}, CameraTime {1, 20}, false);
+    require(backend.stabilizationWrites.empty() && backend.stabilizationNotes == std::vector<VideoStabilizationState> {VideoStabilizationState::unsupported},
+            "nothing is written and the record says the format supports none, once");
+}
+
+// The record's photo line states the compensation read after the admission committed the session's configuration, of the
+// output the admission added: the note is made as the admission returns, before the camera's entry holds that output, so
+// the reading is taken from the added output and not from the entry's. The facts keep the reading taken as the output was
+// attached where the admission was undone or added no output.
+struct FakePhotoFacts {
+    CameraFact compensationSupported {};
+    CameraFact compensationEnabled {};
+    CameraReading reading {};
+    int connection {};
+};
+struct FakePhotoOutput {
+    CameraFact supported;
+    CameraFact enabled;
+};
+
+void theRecordStatesTheReadingTakenAfterTheAdmissionCommitted()
+{
+    FakePhotoFacts attached;
+    attached.compensationSupported = CameraFact::no;
+    attached.compensationEnabled = CameraFact::no;
+    attached.reading = CameraReading::beforeCommit;
+    attached.connection = 7;
+    FakePhotoOutput added {CameraFact::yes, CameraFact::yes};
+    FakePhotoOutput other {CameraFact::no, CameraFact::unknown};
+    std::vector<const FakePhotoOutput*> read;
+    const auto reader = [&](const FakePhotoOutput* output) {
+        read.push_back(output);
+        FakePhotoFacts facts;
+        facts.compensationSupported = output->supported;
+        facts.compensationEnabled = output->enabled;
+        facts.reading = CameraReading::afterCommit;
+        return facts;
+    };
+    auto committed = committedPhotoFacts<FakePhotoFacts>(attached, &added, true, reader);
+    require(committed && committed->reading == CameraReading::afterCommit && committed->compensationSupported == CameraFact::yes &&
+                committed->compensationEnabled == CameraFact::yes && committed->connection == 7,
+            "an admission that added the photo output records what the added output reads after its commit, and keeps the rest");
+    require(read == std::vector<const FakePhotoOutput*> {&added}, "the output it reads is the one the admission added, no other");
+    read.clear();
+    committed = committedPhotoFacts<FakePhotoFacts>(attached, &added, false, reader);
+    require(read.empty() && committed && committed->reading == CameraReading::beforeCommit && committed->compensationSupported == CameraFact::no,
+            "one that was refused and undone keeps the reading taken as the output was attached");
+    committed = committedPhotoFacts<FakePhotoFacts>(attached, static_cast<const FakePhotoOutput*>(nullptr), true, reader);
+    require(read.empty() && committed && committed->reading == CameraReading::beforeCommit,
+            "one that added no output has no later reading to take");
+    committed = committedPhotoFacts<FakePhotoFacts>(std::nullopt, &other, true, reader);
+    require(read.empty() && !committed, "and none attached records nothing");
 }
 
 void aRequestAfterARefusedRestoreFailsWhileTheDeviceCannotBeWritten()
@@ -2578,6 +2731,10 @@ int main()
     aRestoreThatIsRefusedLeavesNothingInTheCacheTrue();
     aRequestAfterARefusedRestoreFailsWhileTheDeviceCannotBeWritten();
     settingsAreWrittenAgainAfterARefusedRestoreEvenWhenUnchanged();
+    theRecordStatesTheReadingTakenAfterTheAdmissionCommitted();
+    aNewConnectionIsStabilizedByAnApplyThatLeavesTheOtherSettingsAlone();
+    anApplyThatLeavesTheSettingsAloneStillStatesTheWish();
+    aFormatThatSupportsNoModeLeavesTheConnectionAloneAndSaysSoOnce();
     aRefusedFirstJoinWithARefusedRestoreIsWrittenAgainByTheNextJoin();
     theStreamCacheSaysWhatIsKnown();
     aSpansWholeRatesSnapToTheNearWholeNumber();
@@ -2607,6 +2764,7 @@ int main()
     aCameraJoinsAMultiCameraSessionOnlyWhenEveryAnchorIsAFormatItTakes();
     aRefusedStreamRemovesOnlyTheOutputItAdded();
     aRefusedStreamBeforeItsInputLeavesTheSessionAsItWas();
+    aNewVideoConnectionIsProgrammedBeforeTheConfigurationCommits();
     aRefusedInputOrFormatAddsNothingElse();
     aRefusedPhotoOutputRemovesTheVideoAndInputItAdded();
     aSessionOverItsBudgetRemovesWhatTheJoinAdded();

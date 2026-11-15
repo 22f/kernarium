@@ -118,11 +118,17 @@ application's statements (the sensor orientation, the rotation that
   scaler, see [`darwin/platform`](../../platform/README.md)), writes a picture
   that needs none of it straight into the guest's rows, and drops frames to a
   stream's rate. A frame with no queued buffer is dropped and its number spent.
-- **Stabilization.** The guest's request for it is met with the host's
+- **Stabilization.** The guest's request for it (Android's record template
+  makes it, so video mode asks and photo mode does not) is met with the host's
   low-latency mode where the active format supports it, else the standard one,
   else none, and never with the system's automatic choice, which on an iPhone
   holds the viewfinder a second or more behind (the preview and the recording
-  share one output).
+  share one output). The device applies the camera's settings before it starts
+  its video, and the platform programs the mode on the new video connection
+  before the capture can deliver, so the first frame is cropped as the rest are
+  and the view does not move when the guest first changes a setting. A format
+  that supports no mode leaves the picture unstabilized, and the session
+  record's video line for the camera says `stab unsupported`.
 - **Stills.** A JPEG buffer carries the platform's file behind a reserved Exif
   APP1 segment for the guest to fill in place (`jpeg_gap.hpp`); a RAW buffer
   carries 16-bit rows at the 16-byte pitch. Buffers of one non-zero cookie
@@ -204,6 +210,16 @@ application's statements (the sensor orientation, the rotation that
   for it: a frame of a lower serial was captured before that boundary (it waited
   in the inbox or in the pump's batch while the event was handled) and is
   dropped, never delivered as a live picture after the repair.
+- **Video mode.** The device tells its owner (`onVideoMode`) whether the guest
+  is in video mode: a live camera's video runs, uninterrupted, and the guest
+  asks for the picture stabilized, which Android's record template does and its
+  preview template does not (the wire carries no other sign of the template).
+  The owner opens the microphone for it before the guest records
+  ([`darwin/device/audio`](../audio/README.md#microphone)). The device says it
+  at every change of the state, however it came: a stream, a start tried again
+  after a failure, a rate change that starts the video, an interruption and its
+  end. It is told false when the video stops, the camera is interrupted, the
+  session is blocked and when the device is reset or goes away.
 - **Events and reset.** The event queue never holds a buffer: with no event
   pending it returns retry, so the guest's buffer stays in its ring, and an
   event raised later signals the device's event descriptor so the server runs

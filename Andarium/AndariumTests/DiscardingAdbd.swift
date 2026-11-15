@@ -41,6 +41,13 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
     private var syncHook: (@Sendable (_ seen: UInt64) -> Void)?
     private var syncError: String?
     private var hashing = false
+    private var shellScript: [String: ShellAnswer] = [:]
+
+    /// What a shell command prints and exits with.
+    struct ShellAnswer: Equatable {
+        var text: String
+        var status: UInt8
+    }
 
     /// A file a `SEND` wrote: where, how long, and (with `hashesSyncData`)
     /// the SHA-256 of what it carried.
@@ -140,6 +147,12 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
     var servicesOpened: [String] { lock.withLock { opened } }
     /// The shell commands run.
     var shellCommands: [String] { lock.withLock { commands } }
+    /// What the shell prints and exits with for a command, by its words; a
+    /// command that is not here keeps the answers above (nothing, status 0).
+    var shellAnswers: [String: ShellAnswer] {
+        get { lock.withLock { shellScript } }
+        set { lock.withLock { shellScript = newValue } }
+    }
     /// The bytes the install stream took, and the bytes `SEND` frames carried.
     var installBytes: UInt64 { lock.withLock { installedBytes } }
     /// The SHA-256 of what each install stream took, in order (hex).
@@ -320,7 +333,11 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
     private func serveShell(_ stream: Channel, command: String) throws {
         lock.withLock { commands.append(command) }
         var out = Data()
-        if command == "getprop ro.product.cpu.abilist" || command == "getprop ro.build.version.sdk" {
+        var status: UInt8 = 0
+        if let answer = lock.withLock({ shellScript[command] }) {
+            if !answer.text.isEmpty { out = Data([1]) + Self.bytes(UInt32(answer.text.utf8.count)) + Data(answer.text.utf8) }
+            status = answer.status
+        } else if command == "getprop ro.product.cpu.abilist" || command == "getprop ro.build.version.sdk" {
             let text = (command.hasSuffix("abilist") ? abiList : sdkLevel) + "\n"
             out = Data([1]) + Self.bytes(UInt32(text.utf8.count)) + Data(text.utf8)
         } else if command.hasPrefix("df -Pk") {
@@ -328,7 +345,7 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
                 + "/dev/block/dm-7 67108864 1048576 \(guestFreeKiB) 2% /data\n"
             out = Data([1]) + Self.bytes(UInt32(text.utf8.count)) + Data(text.utf8)
         }
-        let exit = Data([3]) + Self.bytes(UInt32(1)) + Data([0])
+        let exit = Data([3]) + Self.bytes(UInt32(1)) + Data([status])
         try stream.send(out + exit)
     }
 

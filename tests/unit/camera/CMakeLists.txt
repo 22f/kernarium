@@ -63,7 +63,7 @@ uml_add_unit_test(NAME camera-video-stabilization COMMAND uml_camera_video_stabi
 # session's admit and resize transactions on a fake session, and the invariants
 # over seeded generated format tables.
 add_executable(uml_camera_capture_model_tests camera_capture_model_tests.cpp)
-target_link_libraries(uml_camera_capture_model_tests PRIVATE UML::PhotoDimensions)
+target_link_libraries(uml_camera_capture_model_tests PRIVATE UML::PhotoDimensions UML::VideoStabilization)
 uml_add_unit_test(NAME camera-capture-model COMMAND uml_camera_capture_model_tests
     LABELS "device;camera")
 
