@@ -13,15 +13,17 @@
 
 namespace uml::audio {
 
-/* The frames at the start of a buffer, captured from `capturedNanoseconds`, that were captured before the boundary: zero
- * where either time is not known (zero). Times are on one clock. */
+/* The frames at the start of a buffer, captured from `capturedNanoseconds`, that were captured before the boundary: a
+ * first sample captured any time before it counts, so the count is rounded up. Zero where either time is not known
+ * (zero). Times are on one clock. */
 [[nodiscard]] constexpr std::size_t framesBeforeBoundary(
     std::uint64_t capturedNanoseconds, std::uint64_t boundaryNanoseconds, std::uint32_t rate) noexcept
 {
     if (capturedNanoseconds == 0 || boundaryNanoseconds <= capturedNanoseconds)
         return 0;
+    constexpr std::uint64_t second = 1'000'000'000ULL;
     return static_cast<std::size_t>(
-        (boundaryNanoseconds - capturedNanoseconds) * rate / 1'000'000'000ULL);
+        ((boundaryNanoseconds - capturedNanoseconds) * rate + second - 1) / second);
 }
 
 /* A bounded single-producer, single-consumer ring of bytes, for a capture

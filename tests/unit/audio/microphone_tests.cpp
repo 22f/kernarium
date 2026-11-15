@@ -532,6 +532,11 @@ void aBufferThatSpansTheBoundaryLosesItsLeadingFrames()
     require(uml::audio::framesBeforeBoundary(1'200'000'000, 1'100'000'000, 48000) == 0, "nor one that begins after it");
     require(uml::audio::framesBeforeBoundary(0, 1'100'000'000, 48000) == 0, "a buffer with no capture time is kept whole");
     require(uml::audio::framesBeforeBoundary(1'000'000'000, 0, 48000) == 0, "and so is one before any recording");
+    // A first sample captured any time before the boundary is left out, so the count is rounded up.
+    require(uml::audio::framesBeforeBoundary(1'000'000'000, 1'000'000'001, 48000) == 1, "a nanosecond before the boundary is a frame");
+    require(uml::audio::framesBeforeBoundary(1'000'000'000, 1'000'020'833, 48000) == 1, "just under a frame period is a frame");
+    require(uml::audio::framesBeforeBoundary(1'000'000'000, 1'000'020'834, 48000) == 2, "just over one is two");
+    require(uml::audio::framesBeforeBoundary(1'000'000'000, 1'100'000'001, 48000) == 4801, "and a whole count is not exceeded by more than a nanosecond");
 }
 
 /* A write that is under way when the recording begins is finished before the restart returns, and a buffer received
