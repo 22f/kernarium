@@ -561,7 +561,7 @@ struct OldAppsWordsTests {
             "Old app compatibility wasn\u{2019}t changed",
             "The virtual machine didn\u{2019}t accept the change. Try again.",
             "It opens without old app compatibility next time.",
-            "It was built for an Android version before 4.0. If it closes as soon as it opens, open Settings here and choose Old app compatibility.",
+            "It was built for an Android version before 4.0. If it crashes, open Settings here and choose Old app compatibility.",
         ]
         for key in keys {
             let english = text(key, in: "en")
@@ -582,9 +582,9 @@ struct OldAppsWordsTests {
         for language in ["en"] + Self.languages {
             let words = [
                 text("Old app compatibility", in: language),
-                text("Some apps this old close as soon as they open, because they rely on how Android used to work. Old app compatibility makes Android run one app more like older versions did.", in: language),
-                text("Turn it on only for an app that closes as soon as it opens: it can make an app that works today behave differently. Turning it on or off closes the app if it\u{2019}s open. Only apps it can apply to are listed.", in: language),
-                text("Android will run this app more like older versions did. This may help an app that closes as soon as it opens, but it can also make the app behave differently or close later on. You can turn it off again here.", in: language),
+                text("Some apps this old crash because they rely on how Android used to work. Old app compatibility makes Android run one app more like older versions did.", in: language),
+                text("Turn it on only for an app that crashes: it can make an app that works today behave differently. Turning it on or off closes the app if it\u{2019}s open. Only apps it can apply to are listed.", in: language),
+                text("Android will run this app more like older versions did. This may help an app that crashes, but it can also make the app behave differently. You can turn it off again here.", in: language),
             ].joined(separator: " ")
             for forbidden in ["Google", "Apple", "VM ", "guest", "Guest"] {
                 #expect(!words.contains(forbidden), "\(language) says \(forbidden)")
