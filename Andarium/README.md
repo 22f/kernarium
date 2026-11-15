@@ -1137,10 +1137,17 @@ is on. `AndariumCore/Adb` speaks the protocol.
   in `AndariumCore` is the only code that knows its words and its output, and
   everything else sees `OldApp`, `OldAppListing` and `OldAppWrite`. The
   Settings row exists only in a normal session, once a listing has found an
-  app: Andarium lists once a run after Android's storage is up (the moment the
-  file browser checks, and again while Settings is open for as long as the
-  virtual machine did not answer), after an install, and each time the page
-  opens. An image without the command, or one that speaks a version of its
+  app. Andarium lists once at the start of every run, with Settings closed:
+  when the boot screen ends it reads Android's storage as the file browser does
+  and lists once that is up, and a listing that got no answer is asked again
+  up to five more times, each after twice the wait of the one before, after
+  which nothing more is scheduled (Settings asks again while it is open, for as
+  long as there was no answer). It lists again after an install and each time
+  the page opens; a listing that is older than a change the page made is
+  dropped, and the two listings around Install anyway wait at most five
+  seconds each. The page's switches are off while the virtual machine cannot
+  be asked (Recovery, paused for space). An image without the command, one
+  that answers `list` as a usage error, or one that speaks a version of its
   listing this Andarium does not know, offers nothing. Turning the switch on is
   always asked; turning it off only when the app is open (`pidof`; the command
   does not say), and the image closes the app either way. A change the image

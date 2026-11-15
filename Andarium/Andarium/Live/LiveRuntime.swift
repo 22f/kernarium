@@ -885,8 +885,8 @@ final class LiveRuntime: RuntimeDriver {
     /// The image's `kernarium_oldapp` command, over the application's own adb channel.
     private var oldApps: OldAppCompatibility { OldAppCompatibility(shell: AdbGuestShell(operations: operations)) }
 
-    func listOldApps() async -> OldAppListing {
-        await oldApps.list()
+    func listOldApps(limit: Duration?) async -> OldAppListing {
+        await oldApps.list(limit: limit ?? OldAppCompatibility.listLimit)
     }
 
     func setOldApp(_ package: String, on: Bool) async -> OldAppWrite {

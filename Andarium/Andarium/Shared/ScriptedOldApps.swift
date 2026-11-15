@@ -20,8 +20,12 @@ final class ScriptedOldApps: OldAppsSource {
     var open: Set<String>
     /// How long each answer takes.
     var delay = Duration.milliseconds(120)
+    /// How long a listing takes, when it differs from the other answers.
+    var listDelay: Duration?
     private(set) var apps: [OldApp]
     private(set) var listings = 0
+    /// The limit each listing was asked with.
+    private(set) var limits: [Duration?] = []
     private(set) var writes: [(package: String, on: Bool)] = []
 
     init(apps: [OldApp] = ScriptedOldApps.sampleApps, open: Set<String> = []) {
@@ -46,11 +50,13 @@ final class ScriptedOldApps: OldAppsSource {
         apps.removeAll { $0.package == package }
     }
 
-    func listOldApps() async -> OldAppListing {
+    func listOldApps(limit: Duration?) async -> OldAppListing {
         listings += 1
-        try? await Task.sleep(for: delay)
-        if let listingAnswer { return listingAnswer }
-        return .apps(apps.sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending })
+        limits.append(limit)
+        // The image answers with the apps as they are when it is asked.
+        let answer = listingAnswer ?? .apps(apps.sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending })
+        try? await Task.sleep(for: listDelay ?? delay)
+        return answer
     }
 
     func setOldApp(_ package: String, on: Bool) async -> OldAppWrite {

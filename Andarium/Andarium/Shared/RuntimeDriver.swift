@@ -258,7 +258,7 @@ protocol RuntimeDriver: AnyObject, OldAppsSource {
 
 extension RuntimeDriver {
     /// A driver with no image to ask lists no old app: the feature is not offered.
-    func listOldApps() async -> OldAppListing { .unavailable }
+    func listOldApps(limit: Duration?) async -> OldAppListing { .unavailable }
     func setOldApp(_ package: String, on: Bool) async -> OldAppWrite { .failed }
     func isOldAppOpen(_ package: String) async -> Bool? { nil }
     /// A driver with no guest to read adds nothing.

@@ -10,8 +10,9 @@ import Observation
 /// `AndariumCore`'s `OldApp`, `OldAppListing` and `OldAppWrite`.
 @MainActor
 protocol OldAppsSource: AnyObject {
-    /// The installed apps Old app compatibility can apply to.
-    func listOldApps() async -> OldAppListing
+    /// The installed apps Old app compatibility can apply to, within `limit`
+    /// (the command's own when nil).
+    func listOldApps(limit: Duration?) async -> OldAppListing
     /// Switches it on or off for one app, which the image force-stops.
     func setOldApp(_ package: String, on: Bool) async -> OldAppWrite
     /// Whether the app has a process now; nil when that cannot be told.
@@ -57,6 +58,21 @@ final class OldAppsState {
     var prompt: OldAppsPrompt?
     /// The listing under way, which a second asker joins.
     @ObservationIgnored var inFlight: Task<OldAppListing, Never>?
+    /// Counts what changes the apps from outside a listing: each listing that
+    /// was applied and each change that finished. A listing asked before
+    /// either is older than the state and is not applied over it.
+    @ObservationIgnored private(set) var generation = 0
+    /// Which showing of the page asks. An answer that comes after the page was
+    /// closed raises no alert for a page that is gone.
+    @ObservationIgnored private(set) var showing = 0
+    /// The run's first listing, which waits for Android's storage and is asked
+    /// again a few times if it got no answer, then ends.
+    @ObservationIgnored var first: Task<Void, Never>?
+    /// The spacing of the first listing's attempts: each waits twice as long as the one before.
+    @ObservationIgnored var retryInterval = Duration.seconds(5)
+    /// How many times the run's first listing is asked: at the start, then
+    /// after 5, 10, 20 and 40 s, and last after 80 s.
+    static let startAttempts = 6
 
     /// The Settings row is offered: the last listing found an app.
     var offered: Bool { !unavailable && !apps.isEmpty }
@@ -76,14 +92,33 @@ final class OldAppsState {
             listed = true
             unavailable = false
             failed = false
+            answered()
         case .unavailable:
             apps = []
             listed = true
             unavailable = true
             failed = false
+            answered()
         case .failed:
             failed = true
         }
+    }
+
+    /// The first listing has its answer: nothing more is asked at the start.
+    private func answered() {
+        generation &+= 1
+        first?.cancel()
+        first = nil
+    }
+
+    /// A listing's answer is older than the state and is not applied.
+    func dropped() {
+        listing = false
+    }
+
+    /// A change finished: a listing asked before it may not have it.
+    func changeFinished() {
+        generation &+= 1
     }
 
     /// The app's switch, as the image last answered or the person last changed it.
@@ -93,9 +128,25 @@ final class OldAppsState {
         apps[index].turnedOn = on ? time : 0
     }
 
+    /// The page opens: an alert left over from before is gone, and the switches
+    /// answer to this showing.
+    func pageOpened() {
+        prompt = nil
+        showing &+= 1
+    }
+
+    /// The page closes: it asks nothing, and nothing that was asked of it
+    /// raises an alert later.
+    func pageClosed() {
+        prompt = nil
+        showing &+= 1
+    }
+
     func reset() {
         inFlight?.cancel()
         inFlight = nil
+        first?.cancel()
+        first = nil
         apps = []
         listed = false
         unavailable = false
@@ -117,27 +168,52 @@ extension AppModel {
     }
 
     /// A listing can be asked now: a normal session whose runtime installs
-    /// apps (Recovery runs no adb), not paused for space.
-    private var canAskOldApps: Bool {
+    /// apps (Recovery runs no adb), not paused for space. The page's switches
+    /// are disabled while it is not so.
+    var canAskOldApps: Bool {
         guard capabilities.apkInstall, case .running(.normal) = phase, spacePause == nil else { return false }
         return oldAppsSource != nil
     }
 
     /// Lists the apps. A listing already under way is joined, one that found no
     /// command is not asked again, and nil says the run does not allow one.
+    /// A change that finishes while a listing is asked makes its answer older
+    /// than the page: it is dropped and the virtual machine is asked again.
     @discardableResult
     func refreshOldApps() async -> OldAppListing? {
         let state = session.oldApps
         guard canAskOldApps, let source = oldAppsSource else { return nil }
         if state.unavailable { return .unavailable }
         if let running = state.inFlight { return await running.value }
-        let task = Task { await source.listOldApps() }
-        state.inFlight = task
-        state.begin()
-        let answer = await task.value
-        // The run ended meanwhile: its session, and its apps, are gone.
-        guard session.oldApps === state, !task.isCancelled else { return nil }
-        state.inFlight = nil
+        for _ in 0..<3 {
+            let mark = state.generation
+            let task = Task { await source.listOldApps(limit: nil) }
+            state.inFlight = task
+            state.begin()
+            let answer = await task.value
+            // The run ended meanwhile: its session, and its apps, are gone.
+            guard session.oldApps === state, !task.isCancelled else { return nil }
+            state.inFlight = nil
+            if state.generation == mark {
+                state.apply(answer)
+                return answer
+            }
+            state.dropped()
+        }
+        return nil
+    }
+
+    /// A listing for the install's result, which waits for it: within a short
+    /// limit, so that a virtual machine that is slow costs a few seconds and a
+    /// hint, nothing else. An answer that did not come in time, or that is older
+    /// than the page, is nil and leaves the page as it was.
+    private func listOldAppsBriefly() async -> OldAppListing? {
+        let state = session.oldApps
+        guard canAskOldApps, let source = oldAppsSource else { return nil }
+        if state.unavailable { return .unavailable }
+        let mark = state.generation
+        let answer = await source.listOldApps(limit: OldAppCompatibility.installListLimit)
+        guard session.oldApps === state, state.generation == mark, answer != .failed else { return nil }
         state.apply(answer)
         return answer
     }
@@ -150,17 +226,51 @@ extension AppModel {
         await refreshOldApps()
     }
 
+    /// Android is up (the boot screen ends): the run lists the old apps once,
+    /// with no need for Settings to be open, because the image clears a switch
+    /// whose app is gone or was installed again at its next listing. The
+    /// storage is read as the file browser reads it (Android reports its boot
+    /// done before it is mounted), and a listing that got no answer is asked
+    /// again a few times, each after twice the wait of the one before; then the
+    /// task ends, as it does at the first answer, so that nothing keeps waking
+    /// an idle run. Recovery and an image without adb are not asked
+    /// (`canAskOldApps`).
+    func listOldAppsAtStart() {
+        let state = session.oldApps
+        guard state.first == nil, !state.listed, canAskOldApps else { return }
+        state.first = Task { [weak self, weak state] in
+            for attempt in 0..<OldAppsState.startAttempts {
+                if attempt > 0, let wait = state?.retryInterval {
+                    try? await Task.sleep(for: wait * (1 << (attempt - 1)))
+                }
+                guard let self, let state, !Task.isCancelled, self.session.oldApps === state else { return }
+                if let driver = self.driver, await driver.storageReady() == true {
+                    await self.refreshOldApps()
+                }
+                if state.listed { break }
+            }
+            state?.first = nil
+        }
+    }
+
     /// The person moved an app's switch. The switch itself stays where the
     /// image has it until the change is written. Turning it on is always
-    /// asked; turning it off only when the app is open.
+    /// asked; turning it off only when the app is open. Nothing is asked of a
+    /// virtual machine that cannot be asked, and nothing is raised for a page
+    /// that was closed meanwhile.
     func requestOldApp(_ package: String, on: Bool) async {
         let state = session.oldApps
-        guard state.busy == nil, state.prompt == nil, let source = oldAppsSource,
+        guard canAskOldApps, state.busy == nil, state.prompt == nil, let source = oldAppsSource,
               let app = state.apps.first(where: { $0.package == package }), app.isOn != on
         else { return }
+        let showing = state.showing
         state.busy = package
         let open = await source.isOldAppOpen(package) == true
         guard session.oldApps === state, state.busy == package else { return }
+        guard state.showing == showing else {
+            state.busy = nil
+            return
+        }
         if on {
             state.prompt = .turnOn(app, open: open)
             state.busy = nil
@@ -168,7 +278,7 @@ extension AppModel {
             state.prompt = .turnOff(app)
             state.busy = nil
         } else {
-            await writeOldApp(app, on: false)
+            await writeOldApp(app, on: false, showing: showing)
         }
     }
 
@@ -177,9 +287,10 @@ extension AppModel {
         let state = session.oldApps
         state.prompt = nil
         guard confirmed else { return }
+        let showing = state.showing
         switch prompt {
-        case let .turnOn(app, _): await writeOldApp(app, on: true)
-        case let .turnOff(app): await writeOldApp(app, on: false)
+        case let .turnOn(app, _): await writeOldApp(app, on: true, showing: showing)
+        case let .turnOff(app): await writeOldApp(app, on: false, showing: showing)
         case .notChanged: break
         }
     }
@@ -187,18 +298,21 @@ extension AppModel {
     /// Writes one switch. The image's answer decides what the page shows: a
     /// change it took is recorded, and any other answer is said and the list
     /// is read again, since the app may be gone or no longer eligible.
-    private func writeOldApp(_ app: OldApp, on: Bool) async {
+    private func writeOldApp(_ app: OldApp, on: Bool, showing: Int) async {
         let state = session.oldApps
         guard let source = oldAppsSource else { return }
         state.busy = app.package
         let answer = await source.setOldApp(app.package, on: on)
         guard session.oldApps === state else { return }
         state.busy = nil
+        // A listing asked before this is older than what the image now has.
+        state.changeFinished()
         switch answer {
         case .applied:
             state.record(app.package, on: on, at: Int(Date().timeIntervalSince1970))
         case .notEligible, .failed:
-            state.prompt = .notChanged
+            // The page that asked may be gone by now: it is not told of it.
+            if state.showing == showing { state.prompt = .notChanged }
             await refreshOldApps()
         }
     }
@@ -208,14 +322,15 @@ extension AppModel {
     /// updated, which is the one Old app compatibility can help. `before` is
     /// the listing taken as the file was sent again.
     func installAddedOldApp(listedBefore before: [OldApp]) async -> Bool {
-        guard case let .apps(after)? = await refreshOldApps() else { return false }
+        guard case let .apps(after)? = await listOldAppsBriefly() else { return false }
         return OldAppInstallHint.installedApp(listedBefore: before, listedAfter: after) != nil
     }
 
-    /// The apps as the listing has them now, taken afresh: the baseline of
-    /// an install that may add one. Nil when the virtual machine cannot say.
+    /// The apps as the listing has them now, taken afresh within the install's
+    /// short limit: the baseline of an install that may add one. Nil when the
+    /// virtual machine cannot say in time.
     func oldAppsBeforeInstall() async -> [OldApp]? {
-        guard case let .apps(apps)? = await refreshOldApps() else { return nil }
+        guard case let .apps(apps)? = await listOldAppsBriefly() else { return nil }
         return apps
     }
 }

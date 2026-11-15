@@ -31,7 +31,6 @@ struct OldAppsRow: View {
             }
         }
         .accessibilityIdentifier("settings-old-apps")
-        .accessibilityAddTraits(.isLink)
     }
 }
 
@@ -56,9 +55,10 @@ struct OldAppsPage: View {
         .listSectionSpacing(.compact)
         .navigationTitle(OldAppsWords.title)
         .navigationBarTitleDisplayMode(.inline)
-        // The page lists afresh each time it opens.
+        // The page lists afresh each time it opens, and an alert left over is gone.
+        .onAppear { state.pageOpened() }
         .task { await model.refreshOldApps() }
-        .onDisappear { state.prompt = nil }
+        .onDisappear { state.pageClosed() }
         .background {
             Color.clear
                 .accessibilityHidden(true)
@@ -122,7 +122,7 @@ struct OldAppsPage: View {
     private func appsSection(_ state: OldAppsState) -> some View {
         Section {
             ForEach(state.apps) { app in
-                OldAppRow(app: app, busy: state.busy != nil)
+                OldAppRow(app: app, busy: state.busy != nil || !model.canAskOldApps)
             }
         } header: {
             Text(OldAppsWords.sectionHeader)
@@ -136,7 +136,8 @@ struct OldAppsPage: View {
 private struct OldAppRow: View {
     @Environment(AppModel.self) private var model
     let app: OldApp
-    /// A change is being asked about or written: no other switch moves.
+    /// A change is being asked about or written, or the virtual machine cannot
+    /// be asked: no switch moves.
     let busy: Bool
 
     var body: some View {

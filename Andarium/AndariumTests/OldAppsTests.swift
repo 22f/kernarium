@@ -18,14 +18,14 @@ struct OldAppsModelTests {
     private let host = HostDevice(
         name: "iPhone", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [4096]), freeStorageBytes: 40_000_000_000
     )
+    private let system = SystemInfo(
+        version: "17", release: "r2", kernel: "Linux 6.18", architecture: "arm64, 4 KiB pages", appVersion: "1")
     private let pixel = ScriptedOldApps.sampleApps[0]
     private let rally = ScriptedOldApps.sampleApps[1]
 
     /// A running session, Android's storage up, and an image whose list is
     /// scripted. Rally 2011 is open.
     private func running(storageReady: Bool? = true, mode: StartMode = .normal) -> (AppModel, StubDriver, ScriptedOldApps) {
-        let system = SystemInfo(
-            version: "17", release: "r2", kernel: "Linux 6.18", architecture: "arm64, 4 KiB pages", appVersion: "1")
         let model = AppModel(
             guest: Guest.fresh(on: host), host: host, system: system, capabilities: .device, createRequirementBytes: 1)
         let driver = StubDriver(plan: .normal)
@@ -237,6 +237,177 @@ struct OldAppsModelTests {
         #expect(state.prompt == .turnOn(pixel, open: false) && scripted.writes.isEmpty)
     }
 
+    // MARK: The run's first listing
+
+    /// A session whose boot screen has not ended: the run's own start, then the image's list scripted.
+    private func booting(
+        storage: Bool? = true, capabilities: Capabilities = .device
+    ) -> (AppModel, StubDriver, ScriptedOldApps) {
+        let model = AppModel(
+            guest: Guest.fresh(on: host), host: host, system: system, capabilities: capabilities, createRequirementBytes: 1)
+        let driver = StubDriver(plan: .normal)
+        driver.storage = storage
+        model.driver = driver
+        model.refreshPlan()
+        let scripted = ScriptedOldApps(open: [])
+        scripted.delay = .milliseconds(1)
+        model.scriptedOldApps = scripted
+        // The attempts at the first listing wait 20, 40, 80, 160 and 320 ms here.
+        model.session.oldApps.retryInterval = .milliseconds(20)
+        return (model, driver, scripted)
+    }
+
+    @Test func aRunListsOnceWhenAndroidIsUpAndSettingsIsNeverOpened() async {
+        let (model, _, scripted) = booting()
+        let state = model.session.oldApps
+        model.start(.normal)
+        model.finishBoot(.normal)
+        #expect(await eventually { state.offered })
+        // One listing, and nothing is left running to ask again.
+        try? await Task.sleep(for: .milliseconds(150))
+        #expect(scripted.listings == 1 && state.first == nil && state.listed)
+        #expect(scripted.limits == [nil])
+    }
+
+    @Test func theFirstListingWaitsForAndroidsStorageThenAsksOnce() async {
+        let (model, driver, scripted) = booting(storage: false)
+        let state = model.session.oldApps
+        model.start(.normal)
+        model.finishBoot(.normal)
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(scripted.listings == 0 && state.first != nil && !state.offered)
+        driver.storage = true
+        #expect(await eventually { state.offered })
+        try? await Task.sleep(for: .milliseconds(100))
+        #expect(scripted.listings == 1 && state.first == nil)
+    }
+
+    @Test func aFirstListingWithNoAnswerIsAskedAFewTimesAndThenStops() async {
+        let (model, _, scripted) = booting()
+        let state = model.session.oldApps
+        scripted.listingAnswer = .failed
+        model.start(.normal)
+        model.finishBoot(.normal)
+        #expect(await eventually { state.first == nil })
+        #expect(scripted.listings == OldAppsState.startAttempts && !state.listed && state.failed)
+        // Nothing wakes afterwards: a run with an unanswered listing asks nothing more by itself.
+        try? await Task.sleep(for: .milliseconds(150))
+        #expect(scripted.listings == OldAppsState.startAttempts)
+    }
+
+    @Test func theFirstListingEndsAtTheFirstAnswerFromAnywhere() async {
+        let (model, _, scripted) = booting(storage: false)
+        let state = model.session.oldApps
+        state.retryInterval = .seconds(30)
+        model.start(.normal)
+        model.finishBoot(.normal)
+        #expect(await eventually { state.first != nil })
+        // Settings, opened meanwhile, listed: the waiting task is gone, not left to wake.
+        model.session.storageReady = true
+        await model.listOldAppsOnce()
+        #expect(state.listed && state.first == nil && scripted.listings == 1)
+    }
+
+    @Test func recoveryAndAnImageWithoutAdbListNothingAtTheStart() async {
+        let (model, _, scripted) = booting()
+        model.start(.recovery)
+        model.finishBoot(.recovery)
+        let (bare, _, bareScripted) = booting(
+            capabilities: Capabilities(adbOverNetwork: false, apkInstall: false, bugReport: false, statistics: false, guestFiles: false))
+        bare.start(.normal)
+        bare.finishBoot(.normal)
+        try? await Task.sleep(for: .milliseconds(150))
+        #expect(scripted.listings == 0 && model.session.oldApps.first == nil && !model.session.oldApps.offered)
+        #expect(bareScripted.listings == 0 && bare.session.oldApps.first == nil)
+    }
+
+    // MARK: A listing is not older than a change
+
+    @Test func aListingAskedBeforeAChangeFinishedDoesNotOverwriteIt() async throws {
+        let (model, _, scripted) = running()
+        let state = model.session.oldApps
+        await model.refreshOldApps()
+        // The image answers with Pixel Knights off, as it was when it was asked, but only after a while.
+        scripted.listDelay = .milliseconds(250)
+        let slow = Task { await model.refreshOldApps() }
+        #expect(await eventually { scripted.listings == 2 })
+        await model.requestOldApp(pixel.package, on: true)
+        await model.answerOldApps(try #require(state.prompt), confirmed: true)
+        #expect(state.apps.first { $0.package == pixel.package }?.isOn == true)
+        scripted.listDelay = nil
+        _ = await slow.value
+        // The older answer was dropped and the image asked again, which has the change.
+        #expect(state.apps.first { $0.package == pixel.package }?.isOn == true)
+        #expect(scripted.listings == 3 && !state.listing)
+    }
+
+    // MARK: A page that is gone
+
+    @Test func nothingIsAskedOfAPageThatWasClosedMeanwhile() async throws {
+        let (model, _, scripted) = running()
+        let state = model.session.oldApps
+        await model.refreshOldApps()
+        state.pageOpened()
+        scripted.delay = .milliseconds(120)
+        let ask = Task { await model.requestOldApp(pixel.package, on: true) }
+        #expect(await eventually { state.busy == pixel.package })
+        state.pageClosed()
+        await ask.value
+        // No alert for a page nobody sees, and the switches are not left dead.
+        #expect(state.prompt == nil && state.busy == nil && scripted.writes.isEmpty)
+        scripted.delay = .milliseconds(1)
+        state.pageOpened()
+        await model.requestOldApp(pixel.package, on: true)
+        #expect(state.prompt == .turnOn(pixel, open: false))
+    }
+
+    @Test func aRefusalThatComesAfterThePageWasClosedRaisesNoAlert() async throws {
+        let (model, _, scripted) = running()
+        let state = model.session.oldApps
+        await model.refreshOldApps()
+        state.pageOpened()
+        await model.requestOldApp(pixel.package, on: true)
+        let prompt = try #require(state.prompt)
+        scripted.writeAnswer = .failed
+        scripted.delay = .milliseconds(120)
+        let answer = Task { await model.answerOldApps(prompt, confirmed: true) }
+        #expect(await eventually { state.busy == pixel.package })
+        state.pageClosed()
+        await answer.value
+        #expect(state.prompt == nil && state.busy == nil && scripted.writes.count == 1)
+        // The list was read again all the same.
+        #expect(scripted.listings == 2)
+    }
+
+    @Test func anAlertLeftOverIsGoneWhenThePageOpens() async {
+        let (model, _, _) = running()
+        let state = model.session.oldApps
+        await model.refreshOldApps()
+        state.prompt = .notChanged
+        state.pageOpened()
+        #expect(state.prompt == nil)
+        await model.requestOldApp(pixel.package, on: true)
+        #expect(state.prompt == .turnOn(pixel, open: false))
+    }
+
+    // MARK: A virtual machine that cannot be asked
+
+    @Test func aSwitchIsRefusedAtOnceWhileTheVirtualMachineCannotBeAsked() async {
+        let (model, _, scripted) = running()
+        let state = model.session.oldApps
+        await model.refreshOldApps()
+        #expect(model.canAskOldApps)
+        model.phase = .running(.recovery)
+        #expect(!model.canAskOldApps)
+        await model.requestOldApp(pixel.package, on: true)
+        #expect(state.prompt == nil && state.busy == nil && scripted.writes.isEmpty)
+        // Paused for space is the same.
+        model.phase = .running(.normal)
+        model.spacePause = SpacePause(freeBytes: 820 * Limits.bytesPerMiB, stage: .pausing)
+        await model.requestOldApp(pixel.package, on: true)
+        #expect(!model.canAskOldApps && state.prompt == nil && state.busy == nil)
+    }
+
     // MARK: After Install anyway
 
     private let refused = LegacyTarget(appLevel: 7, requiredLevel: 24)
@@ -285,6 +456,8 @@ struct OldAppsModelTests {
         #expect(card?.detail.hasSuffix("open Settings here and choose Old app compatibility.") == true)
         #expect(card?.result?.failed == false)
         #expect(seen.value == 1 && scripted.listings == 2)
+        // The two listings around the install wait only a few seconds: the install's result waits for them.
+        #expect(scripted.limits == [.seconds(5), .seconds(5)])
         // The listing that named the app is the row's: it is offered now.
         #expect(model.session.oldApps.apps.map(\.package).contains("com.example.gears"))
     }
@@ -331,6 +504,13 @@ struct OldAppsModelTests {
         muteScripted.listingAnswer = .failed
         refusing(muteDriver, target: refused)
         #expect(try await installAnyway(mute)?.detail == installed)
+        // A listing around the install that timed out is no hint and nothing else: the page does not
+        // say the virtual machine did not answer, and no listing is left in doubt.
+        let (quiet, _, quietScripted) = running()
+        quietScripted.listingAnswer = .failed
+        #expect(await quiet.oldAppsBeforeInstall() == nil)
+        #expect(await quiet.installAddedOldApp(listedBefore: []) == false)
+        #expect(!quiet.session.oldApps.failed && !quiet.session.oldApps.listing && quietScripted.limits == [.seconds(5), .seconds(5)])
     }
 
     @Test func anOrdinaryInstallListsAgainAndSaysNothingMore() async throws {

@@ -1650,6 +1650,8 @@ final class AppModel {
         lifecycle.finishBoot(kind)
         if driver != nil {
             persistNow()
+            // Android is up: the old apps are listed once, with Settings closed.
+            listOldAppsAtStart()
         } else if kind != .recovery {
             // The preview plays the instance too: the first start sets
             // Android up, and an update or a retry ends.

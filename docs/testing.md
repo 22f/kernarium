@@ -510,10 +510,12 @@ session and its reboot a normal one.
 `OldAppCompatibilityTests` (`andarium-core`) read the image's old-app command on
 canned output of its specification (the version line and the five fields, an
 unknown trailing field, a label with odd characters, a missing command, an
-unknown version, a refusal) and send it nothing that is not a package name;
-`OldAppsModelTests` play the page's model against a stub runtime and a scripted
-list (when the virtual machine is asked, what each switch asks first, what a
-refused change leaves, the hint after Install anyway), `OldAppsScreenTests` host
+unknown version, a usage error, a refusal) and send it nothing that is not a
+package name; `OldAppsModelTests` play the page's model against a stub runtime
+and a scripted list (the run's first listing with Settings never opened, when
+the virtual machine is asked, a listing older than a change, an alert for a
+page that was closed, what each switch asks first, what a refused change
+leaves, the hint after Install anyway), `OldAppsScreenTests` host
 Settings and the page, `OldAppsOperationTests` run the adapter through the
 application's adb channel against the fake adbd, and `OldAppsWordsTests` read the
 words in each language.
