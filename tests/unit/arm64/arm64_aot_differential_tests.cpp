@@ -1565,8 +1565,10 @@ void loop_through_another_range(const LibraryImage &image,
 	require(have.max_block <= 4096 + 64);
 }
 
-/* The instructions between two polls are the instructions that ran: the
- * framework of a diagnostics build counts each one it starts. */
+/* The instructions between two polls are the instructions that ran. A
+ * framework made with UML_AOT_COUNT_RETIRED counts each one it starts; the
+ * product's layout reports the budget the entry spent, which the same bound
+ * covers. */
 constexpr std::uint64_t entry_bound = 4096 + 32 + 2; /* RUN_LIMIT, rewrite.py */
 
 /* A state rewritten code may be entered with: SP aligned and none of the
@@ -2206,8 +2208,8 @@ int main(int argc, char **argv)
 		require(t.compared > t.cases / 2);
 		require(st.enters > t.compared / 2);
 		require(st.poisoned == 0);
-		/* No entry ran longer than the budget allows, counted one
-		 * instruction at a time. */
+		/* No entry ran longer than the budget allows (counted one
+		 * instruction at a time with UML_AOT_COUNT_RETIRED). */
 		require(st.max_retired <= entry_bound);
 		/* Both entry refusals are exercised by every library's cases. */
 		require(st.refusals[1] > 0);

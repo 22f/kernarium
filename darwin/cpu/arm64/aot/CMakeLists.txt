@@ -140,7 +140,10 @@ set(_uml_aot_generated_args)
 set(_uml_aot_generated_files)
 if(UML_AOT_DIAGNOSTICS)
     # Count the instructions each entry starts, to measure the budget's bound.
-    list(APPEND _uml_aot_generated_args --count-retired)
+    # The default layout is the product's.
+    if(UML_AOT_COUNT_RETIRED)
+        list(APPEND _uml_aot_generated_args --count-retired)
+    endif()
     set(_uml_aot_fixture ${_uml_aot_dir}/fixture/libaotfixture.so)
     add_custom_command(
         OUTPUT ${_uml_aot_fixture}

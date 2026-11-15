@@ -742,7 +742,10 @@ blocker in every one of them.
   (thread pointer, misaligned stack pointer, faulting stack pages and floating-
   point modes included), then the unhappy paths (single step, preemption
   bound, two load biases, other or changed bytes, tagged pointers, page
-  crossings, forced refills). A generated library holds one function per
+  crossings, forced refills) in the product's code layout; with
+  `UML_AOT_COUNT_RETIRED=ON` the libraries are rewritten to count each
+  instruction an entry runs, which checks the budget's bound exactly. A
+  generated library holds one function per
   instruction form of the ordered, atomic and MOPS classes, so each form runs
   from random states. `arm64-aot-tools` checks the generator's encoders and
   classifier, including which forms are left to the engine.
