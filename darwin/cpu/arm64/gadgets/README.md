@@ -66,8 +66,9 @@ MOV Wd, Wm) is one group: a head that replaces the row's words and needs no
 fallback, since a move cannot fault. The builder hands it the row as a
 parallel copy of two to four destinations with the same result, so the head
 loads every source before it stores; it takes a register forwarded into the
-row from x0 and forwards the row's last destination. Programs built without
-indirect sites, as single-step builds them, get no head.
+row from x0 and forwards the row's last destination. Streaming programs, and
+programs built without indirect sites, as single-step builds them, get no
+head.
 `arm64-gadget-run-heads`, `arm64-gadget-prologue-heads` and
 `arm64-gadget-move-heads` check where heads go, each fallback, a fault inside
 or behind one and its resume, and generated runs against a model of the
