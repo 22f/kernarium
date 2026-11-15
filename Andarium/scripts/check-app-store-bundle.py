@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Check a built Andarium application against the AppStore configuration.
+"""Check a built Andarium application against the AppStore or TestFlight configuration.
 
 The App Store configuration (Andarium/README.md#configurations) builds an
 application that must:
@@ -134,8 +134,16 @@ UTF-8 alone).
 The console lines are long enough to be text in the binary, so a build whose
 code still holds one fails, whether or not anything calls it.
 
-The Xcode project runs it as the last build phase of the App Store
-configuration, so a build that breaks one of these rules fails. In every other
+The TestFlight configuration (`--configuration TestFlight`) is held to every
+rule above, and in addition to carry none of Buy me tokens, Review on the App
+Store (with its rating prompt) and the ICP filing number, whatever the ignored
+local configuration holds: the build names no value for them, and the product
+holds no type, text, strings table, Info.plist key, tip header piece or
+artwork of them and no value of the local configuration, which the check finds
+by its bytes and never prints.
+
+The Xcode project runs it as the last build phase of the AppStore and TestFlight
+configurations, so a build that breaks one of these rules fails. In every other
 configuration a phase runs `--feedback`, which checks Send feedback alone,
 another `--tip-jar`, which checks Buy me tokens alone, a third `--review`,
 which checks Review on the App Store alone, a fourth `--follow-x`, which
@@ -206,6 +214,23 @@ N_SOL = 0x84
 # file, the object file, and an included file. The others name symbols.
 PATH_STABS = frozenset({N_SO, N_OSO, N_SOL})
 CHECKER = Path(__file__).resolve().parents[2] / "scripts" / "check-privacy-manifests.py"
+
+# The configurations that read the ignored local configuration. TestFlight is
+# the AppStore product without Buy me tokens, Review on the App Store and the
+# ICP filing number: it carries none of the three, whatever its build names.
+TESTFLIGHT = "TestFlight"
+STORE_CONFIGURATIONS = ("AppStore", TESTFLIGHT)
+
+
+def is_store(configuration: str) -> bool:
+    return configuration in STORE_CONFIGURATIONS
+
+
+def absence_reason(configuration: str, feature: str, default: str) -> str:
+    """Why a product is to hold nothing of `feature`: TestFlight has none, and
+    another configuration holds it only where its build names the value
+    (`default` says so)."""
+    return f"{configuration} has no {feature}" if configuration == TESTFLIGHT else default
 
 # Send feedback. The build writes the receiver to Info.plist under this key
 # only where the feature is compiled in (Andarium/Config/Andarium.xcconfig).
@@ -779,10 +804,10 @@ def feedback_address_problems(configuration: str, address: str) -> list[str]:
     sideloads and forks make, never takes one."""
     if not address:
         return []
-    if configuration != "AppStore":
+    if not is_store(configuration):
         if address != FEEDBACK_ARRANGED:
             return [f"Send feedback: {configuration} names a receiver that is not the arranged example address; "
-                    "only the App Store configuration reads the local configuration"]
+                    "only the AppStore and TestFlight configurations read the local configuration"]
         if configuration != "Debug":
             return [f"Send feedback: {configuration} names the arranged example address; "
                     "only Debug takes the arrangement"]
@@ -1131,10 +1156,13 @@ def tip_identifier_problems(configuration: str, products: dict[str, str]) -> lis
     named = {tier: value for tier, value in products.items() if value}
     if not named:
         return []
+    if configuration == TESTFLIGHT:
+        return [f"Buy me tokens: {configuration} names product identifiers; "
+                "only the AppStore configuration has Buy me tokens"]
     if configuration != "AppStore":
         if named != TIP_ARRANGED:
             return [f"Buy me tokens: {configuration} names product identifiers that are not the arranged "
-                    "example ones; only the App Store configuration reads the local configuration"]
+                    "example ones; only the AppStore configuration reads the local configuration"]
         if configuration != "Debug":
             return [f"Buy me tokens: {configuration} names the arranged example identifiers; "
                     "only Debug takes the arrangement"]
@@ -1222,18 +1250,18 @@ def tip_problems(
     own = {name: present - TIP_SHARED for name, present in fragments.items() if present - TIP_SHARED}
     compiled = bool(own) or keyed is not None or bool(tables) or bool(words)
     if not expected:
+        why = absence_reason(configuration, "Buy me tokens", "the build names no product identifiers")
         if named:
             problems.append("Buy me tokens: the build names product identifiers that cannot be used")
         for name, present in own.items():
             problems.append(
                 f"{name}: carries Buy me tokens ({', '.join(sorted(item.decode() for item in present))}) "
-                "though the build names no product identifiers")
+                f"though {why}")
         if keyed is not None:
-            problems.append(f"Info.plist: has {TIP_KEY} though the build names no product identifiers")
-        problems.extend(f"{path.relative_to(app)}: is the TipJar strings table though the build names no "
-                        "product identifiers" for path in tables)
-        problems.extend(f"{name}: has Buy me tokens strings though the build names no product identifiers"
-                        for name in words)
+            problems.append(f"Info.plist: has {TIP_KEY} though {why}")
+        problems.extend(f"{path.relative_to(app)}: is the TipJar strings table though {why}"
+                        for path in tables)
+        problems.extend(f"{name}: has Buy me tokens strings though {why}" for name in words)
         return problems, compiled
     if keyed != named:
         problems.append(f"Info.plist: {TIP_KEY} must be the four product identifiers the build names")
@@ -1257,10 +1285,13 @@ def review_identifier_problems(configuration: str, identifier: str) -> list[str]
     sideloads and forks make, never takes it."""
     if not identifier:
         return []
+    if configuration == TESTFLIGHT:
+        return [f"Review on the App Store: {configuration} names an identifier; "
+                "only the AppStore configuration has Review on the App Store"]
     if configuration != "AppStore":
         if identifier != REVIEW_ARRANGED:
             return [f"Review on the App Store: {configuration} names an identifier that is not the arranged "
-                    "placeholder; only the App Store configuration reads the local configuration"]
+                    "placeholder; only the AppStore configuration reads the local configuration"]
         if configuration != "Debug":
             return [f"Review on the App Store: {configuration} names the arranged placeholder; "
                     "only Debug takes the arrangement"]
@@ -1328,18 +1359,18 @@ def review_problems(
     words = review_strings(app)
     compiled = bool(fragments) or keyed is not None or bool(tables) or bool(words)
     if not expected:
+        why = absence_reason(configuration, "Review on the App Store", "the build names no App Store identifier")
         if identifier:
             problems.append("Review on the App Store: the build names an identifier that cannot be used")
         for name, present in fragments.items():
             problems.append(
                 f"{name}: carries Review on the App Store ({', '.join(sorted(item.decode() for item in present))}) "
-                "though the build names no App Store identifier")
+                f"though {why}")
         if keyed is not None:
-            problems.append(f"Info.plist: has {REVIEW_KEY} though the build names no App Store identifier")
-        problems.extend(f"{path.relative_to(app)}: is the Review strings table though the build names no "
-                        "App Store identifier" for path in tables)
-        problems.extend(f"{name}: has Review on the App Store strings though the build names no App Store "
-                        "identifier" for name in words)
+            problems.append(f"Info.plist: has {REVIEW_KEY} though {why}")
+        problems.extend(f"{path.relative_to(app)}: is the Review strings table though {why}"
+                        for path in tables)
+        problems.extend(f"{name}: has Review on the App Store strings though {why}" for name in words)
         return problems, compiled
     if keyed != identifier:
         problems.append(f"Info.plist: {REVIEW_KEY} must be the App Store identifier the build names")
@@ -1364,10 +1395,13 @@ def icp_number_problems(configuration: str, number: str) -> list[str]:
     sideloads and forks make, never takes one."""
     if not number:
         return []
+    if configuration == TESTFLIGHT:
+        return [f"ICP filing number: {configuration} names a number; "
+                "only the AppStore configuration has the ICP filing number"]
     if configuration != "AppStore":
         if number != ICP_ARRANGED:
             return [f"ICP filing number: {configuration} names a number that is not the arranged placeholder; "
-                    "only the App Store configuration reads the local configuration"]
+                    "only the AppStore configuration reads the local configuration"]
         if configuration != "Debug":
             return [f"ICP filing number: {configuration} names the arranged placeholder; "
                     "only Debug takes the arrangement"]
@@ -1421,14 +1455,15 @@ def icp_problems(
         keyed = None
     compiled = bool(fragments) or keyed is not None
     if not expected:
+        why = absence_reason(configuration, "ICP filing number", "the build names no number")
         if number:
             problems.append("ICP filing number: the build names a number that cannot be used")
         for name, present in fragments.items():
             problems.append(
                 f"{name}: carries the ICP filing number ({', '.join(sorted(item.decode() for item in present))}) "
-                "though the build names no number")
+                f"though {why}")
         if keyed is not None:
-            problems.append(f"Info.plist: has {ICP_KEY} though the build names no number")
+            problems.append(f"Info.plist: has {ICP_KEY} though {why}")
         return problems, compiled
     if keyed != number:
         problems.append(f"Info.plist: {ICP_KEY} must be the number the build names")
@@ -1464,7 +1499,8 @@ def developer_problems(
     named = {piece: value for piece, value in values.items() if value}
     usable = tip_expected
     if named and not tip_expected:
-        problems.append("Buy me tokens: the build names developer values though it names no product identifiers")
+        problems.append("Buy me tokens: the build names developer values though "
+                        + absence_reason(configuration, "Buy me tokens", "it names no product identifiers"))
     elif named and configuration != "AppStore":
         if any(value != DEVELOPER_ARRANGED[piece] for piece, value in named.items()):
             problems.append(f"Buy me tokens: {configuration} names developer values that are not the arranged "
@@ -1494,7 +1530,8 @@ def developer_problems(
     for piece, key in DEVELOPER_KEYS.items():
         wanted = named.get(piece) if usable else None
         if key in info and wanted is None:
-            problems.append(f"Info.plist: has {key} though the build names no such developer value")
+            problems.append(f"Info.plist: has {key} though "
+                            + absence_reason(configuration, "Buy me tokens", "the build names no such developer value"))
         elif wanted is not None and info.get(key) != wanted:
             problems.append(f"Info.plist: {key} must be the developer value the build names")
 
@@ -1508,7 +1545,8 @@ def developer_problems(
         if wanted and asset not in catalog:
             problems.append(f"Assets.car: lacks {asset.decode()} though the build names the developer's {piece}")
         elif not wanted and asset in catalog:
-            problems.append(f"Assets.car: holds {asset.decode()} though the build names no developer {piece}")
+            problems.append(f"Assets.car: holds {asset.decode()} though "
+                            + absence_reason(configuration, "Buy me tokens", f"the build names no developer {piece}"))
     problems.extend(f"{name}: is artwork of the tip header, which belongs in the asset catalog"
                     for name in loose_files(app, DEVELOPER_FILES))
 
@@ -1532,10 +1570,10 @@ def follow_x_handle_problems(configuration: str, handle: str) -> list[str]:
     sideloads and forks make, never takes one."""
     if not handle:
         return []
-    if configuration != "AppStore":
+    if not is_store(configuration):
         if handle != FOLLOW_X_ARRANGED:
             return [f"Follow developer on X: {configuration} names a handle that is not the arranged placeholder; "
-                    "only the App Store configuration reads the local configuration"]
+                    "only the AppStore and TestFlight configurations read the local configuration"]
         if configuration != "Debug":
             return [f"Follow developer on X: {configuration} names the arranged placeholder handle; "
                     "only Debug takes the arrangement"]
@@ -1732,7 +1770,7 @@ def picker_problems(app: Path, configuration: str) -> list[str]:
         data = without_debug_map(*code, PATH_STABS)
         copy.update(fragment for fragment in PICKER_COPY if fragment in data)
         in_place.update(name for name, fragment in PICKER_IN_PLACE.items() if fragment in data)
-    if configuration != "AppStore":
+    if not is_store(configuration):
         if copy:
             return []
         return [f"the application lacks the copy-mode document picker ({configuration} copies the files "
@@ -1741,9 +1779,9 @@ def picker_problems(app: Path, configuration: str) -> list[str]:
     if copy:
         problems.append(
             "the application carries the copy-mode document picker "
-            f"({', '.join(sorted(item.decode() for item in copy))}); the App Store configuration opens files in place")
+            f"({', '.join(sorted(item.decode() for item in copy))}); the {configuration} configuration opens files in place")
     problems.extend(
-        f"the application lacks {name}: the App Store configuration opens files in place"
+        f"the application lacks {name}: the {configuration} configuration opens files in place"
         for name in PICKER_IN_PLACE if name not in in_place)
     return problems
 
@@ -1754,7 +1792,8 @@ def main() -> int:
     parser.add_argument("--privacy-checker", type=Path, default=CHECKER)
     parser.add_argument(
         "--configuration", default="AppStore",
-        help="the build configuration; Send feedback is checked against it")
+        help="the build configuration: AppStore, TestFlight (which has none of Buy me tokens, Review on the "
+             "App Store and the ICP filing number), or another, whose features the options below check")
     parser.add_argument(
         "--feedback-address", default="",
         help="the build setting FEEDBACK_ADDRESS: the receiver the build names, "
@@ -1992,7 +2031,7 @@ def check(options: argparse.Namespace) -> int:
         print(problem, file=sys.stderr)
     if problems:
         return 1
-    print(f"{app.name}: ready for the App Store")
+    print(f"{app.name}: ready for {'TestFlight' if options.configuration == TESTFLIGHT else 'the App Store'}")
     return 0
 
 

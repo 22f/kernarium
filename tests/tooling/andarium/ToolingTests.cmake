@@ -41,15 +41,17 @@ uml_add_tooling_test(
     LABELS andarium;android
     TIMEOUT 30)
 
-# The App Store configuration builds an application that passes this check as
-# its last build phase; the fixtures show it finds each problem the script's
-# header lists, and leaves the guest kernel image alone. They also show Send
-# feedback present only where the build names a receiver, Buy me tokens only
+# The AppStore and TestFlight configurations build an application that passes
+# this check as its last build phase; the fixtures show it finds each problem the
+# script's header lists, and leaves the guest kernel image alone. They also show
+# Send feedback present only where the build names a receiver, Buy me tokens only
 # where it names its four product identifiers, Review on the App Store only where
 # it names the application's identifier, Follow developer on X only where it names
 # a handle, the ICP filing number only where it names the number, and the tip
 # header's developer only where the product has Buy me tokens and the build names
-# the value, in either direction.
+# the value, in either direction; and that a TestFlight product carries none of
+# Buy me tokens, Review on the App Store and the ICP filing number, whatever the
+# local values are.
 uml_add_tooling_test(
     NAME andarium-app-store-bundle
     COMMAND ${Python3_EXECUTABLE} -B

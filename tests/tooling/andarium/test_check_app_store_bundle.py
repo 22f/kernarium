@@ -1292,6 +1292,185 @@ def check_icp(root: Path, check, clean: Path) -> None:
           args=[*other, "Release", "--info-source", str(source)])
 
 
+def check_testflight(root: Path, check, clean: Path, feedback_feature: Path, receiver: str) -> None:
+    """The TestFlight configuration is held to the App Store's rules, and carries none of Buy me
+    tokens, Review on the App Store (with its rating prompt) and the ICP filing number, in code,
+    texts, keys, header pieces and artwork, whatever the local configuration holds; it has Send
+    feedback and Follow developer on X as the App Store does. Every value here is made up."""
+    flag = ["--configuration", "TestFlight"]
+    ids = {tier: f"com.fixture.product.{tier}" for tier in ("lite", "pro", "max", "ultra")}
+    tip_list = ",".join(ids.values())
+    identifier = "id1234567890"
+    number = "示例ICP备12345678号-1"
+    handle = "someone_real"
+    secret = ids["pro"]
+    # What the phases pass for the local configuration's own values, which a build of the App Store
+    # would name and a build of TestFlight leaves out.
+    local = ["--tip-local-products", tip_list, "--review-local-id", identifier, "--icp-local-number", number,
+             "--developer-local-github", "fixturehub"]
+    tip_code = build(root, "tf-tip", TIP_FEATURE, ["-framework", "StoreKit"])
+    review_code = build(root, "tf-review", REVIEW_FEATURE)
+    icp_code = build(root, "tf-icp", ICP_FEATURE)
+    profile = build(root, "tf-profile", FOLLOW_X_PROFILE_ONLY, ["-framework", "StoreKit"])
+    both = build(root, "tf-both", FEEDBACK_FEATURE + FOLLOW_X_FEATURE.replace("fixture", "x_fixture"),
+                 ["-framework", "MessageUI"])
+    no_tip = "Buy me tokens"
+    named = {"feedback": ["--feedback-address", receiver, "--feedback-receiver", receiver],
+             "follow-x": ["--follow-x-handle", handle, "--developer-x-handle", handle]}
+
+    # A product with none of the three passes, with the local values passed in or not; with Send
+    # feedback and Follow developer on X it passes too, and says so.
+    check(make_app(root, "tf-clean", clean, app_info()), passes=True, expect="ready for TestFlight", args=flag)
+    check(make_app(root, "tf-clean-local", clean, app_info()), passes=True, expect="ready for TestFlight",
+          args=[*flag, *local])
+    for line in ("Buy me tokens is not compiled in", "Review on the App Store is not compiled in",
+                 "ICP filing number is not compiled in", "document pickers open the files in place"):
+        check(make_app(root, f"tf-clean-{line.split()[0]}", clean, app_info()), passes=True, expect=line,
+              args=[*flag, *local])
+    both_info = app_info(AndariumFeedbackAddress=receiver, AndariumFollowXHandle=handle)
+    check(make_app(root, "tf-both-features", both, both_info), passes=True,
+          expect="Send feedback is compiled in", args=[*flag, *named["feedback"], *named["follow-x"], *local])
+    check(make_app(root, "tf-both-features-ready", both, both_info), passes=True,
+          expect="Follow developer on X is compiled in",
+          args=[*flag, *named["feedback"], *named["follow-x"], *local])
+    # The receiver and the handle follow the App Store's rules: no placeholder, no other value.
+    check(make_app(root, "tf-placeholder-receiver", feedback_feature, app_info(AndariumFeedbackAddress="a@example.com")),
+          passes=False, expect="placeholder address", args=[*flag, "--feedback-address", "a@example.com"])
+    check(make_app(root, "tf-placeholder-handle", both, app_info(AndariumFollowXHandle="example_handle")),
+          passes=False, expect="the placeholder handle", args=[*flag, "--follow-x-handle", "example_handle"])
+    # The rest of the App Store's rules apply as they do there.
+    knob = build(root, "tf-knob", KNOB)
+    check(make_app(root, "tf-knob", knob, app_info()), passes=False, expect="automation knob", args=flag)
+    jit = make_app(root, "tf-jit", clean, app_info())
+    (jit / "ja.lproj").mkdir()
+    (jit / "ja.lproj" / "JIT.strings").write_bytes(plistlib.dumps({"Preparing JIT": "x"}, fmt=plistlib.FMT_BINARY))
+    check(jit, passes=False, expect="the JIT strings table", args=flag)
+    copying = build(root, "tf-copying", CLEAN, pickers="".join(source for _what, source in COPY_PICKERS))
+    check(make_app(root, "tf-copy-pickers", copying, app_info()), passes=False,
+          expect="the TestFlight configuration opens files in place", args=flag)
+    check(make_app(root, "tf-no-manifest", clean, app_info(), manifest=False), passes=False,
+          expect="PrivacyInfo.xcprivacy", args=flag)
+
+    # Buy me tokens: not the code, the key, the strings table, a word of it, a header piece or its
+    # artwork, and no identifier the build names.
+    check(tip_app(root, "tf-tip-code", tip_code, app_info(), table=False), passes=False,
+          expect=f"carries {no_tip} (", args=flag)
+    check(tip_app(root, "tf-tip-code-reason", tip_code, app_info(), table=False), passes=False,
+          expect=f"though TestFlight has no {no_tip}", args=flag)
+    check(tip_app(root, "tf-tip-framework", clean, app_info(), table=False, framework=tip_code), passes=False,
+          expect=f"Runtime.framework/Runtime: carries {no_tip}", args=flag)
+    check(tip_app(root, "tf-tip-key", clean, app_info(AndariumTipProducts=ids), table=False), passes=False,
+          expect=f"Info.plist: has AndariumTipProducts though TestFlight has no {no_tip}", never=secret, args=flag)
+    check(tip_app(root, "tf-tip-table", clean, app_info()), passes=False,
+          expect=f"is the TipJar strings table though TestFlight has no {no_tip}", args=flag)
+    words = make_app(root, "tf-tip-words", clean, app_info())
+    (words / "en.lproj").mkdir()
+    (words / "en.lproj" / "Localizable.strings").write_bytes(
+        plistlib.dumps({no_tip: no_tip}, fmt=plistlib.FMT_BINARY))
+    check(words, passes=False, expect=f"has {no_tip} strings though TestFlight has no {no_tip}", args=flag)
+    # The identifiers named for the build, with or without the product that goes with them.
+    for name, app in (("complete", tip_app(root, "tf-tip-named-complete", tip_code, app_info(AndariumTipProducts=ids))),
+                      ("empty", make_app(root, "tf-tip-named-empty", clean, app_info()))):
+        check(app, passes=False, expect="TestFlight names product identifiers; only the AppStore configuration has "
+              f"{no_tip}", never=secret, args=[*flag, "--tip-products", tip_list, "--tip-local-products", tip_list])
+    # The header's developer: a value the build names, its Info.plist key, its assets, its artwork.
+    check(make_app(root, "tf-header-named", clean, app_info()), passes=False,
+          expect=f"names developer values though TestFlight has no {no_tip}",
+          args=[*flag, "--developer-name", "Fixture Name"])
+    for key, value, asset in (("AndariumDeveloperName", "Fixture Name", "DeveloperAvatar"),
+                              ("AndariumDeveloperGitHub", "fixturehub", "GitHubLogo")):
+        check(make_app(root, f"tf-header-key-{key}", clean, app_info(**{key: value}), assets={asset: False}),
+              passes=False, expect=f"Info.plist: has {key} though TestFlight has no {no_tip}", args=flag)
+        check(make_app(root, f"tf-header-asset-{asset}", clean, app_info(), assets={asset: True}), passes=False,
+              expect=f"Assets.car: holds {asset} though TestFlight has no {no_tip}", args=flag)
+    check(make_app(root, "tf-header-x", clean, app_info(AndariumDeveloperX="fixturex"), follow_x_logo=False),
+          passes=False, expect=f"Info.plist: has AndariumDeveloperX though TestFlight has no {no_tip}", args=flag)
+    # The header's X button without the row: the profile address's builder is the sheet's, not the row's.
+    check(tip_app(root, "tf-header-profile", profile, app_info(), table=False), passes=False,
+          expect="carries", args=flag)
+    for artwork in ("github-logo.svg", "developer-avatar.jpeg"):
+        loose = make_app(root, f"tf-header-file-{artwork}", clean, app_info())
+        (loose / artwork).write_bytes(b"artwork")
+        check(loose, passes=False, expect=f"{artwork}: is artwork of the tip header", args=flag)
+
+    # Review on the App Store, with the rating prompt: not the code, the key, the table, its words,
+    # and no identifier the build names.
+    check(review_app(root, "tf-review-code", review_code, app_info(), table=False), passes=False,
+          expect="carries Review on the App Store (", args=flag)
+    check(review_app(root, "tf-review-code-reason", review_code, app_info(), table=False), passes=False,
+          expect="though TestFlight has no Review on the App Store", args=flag)
+    check(review_app(root, "tf-review-key", clean, app_info(AndariumReviewID=identifier), table=False), passes=False,
+          expect="Info.plist: has AndariumReviewID though TestFlight has no Review on the App Store",
+          never="1234567890", args=flag)
+    check(review_app(root, "tf-review-table", clean, app_info()), passes=False,
+          expect="is the Review strings table though TestFlight has no Review on the App Store", args=flag)
+    words = make_app(root, "tf-review-words", clean, app_info())
+    (words / "en.lproj").mkdir()
+    (words / "en.lproj" / "Localizable.strings").write_bytes(
+        plistlib.dumps({"Review on the App Store": "x"}, fmt=plistlib.FMT_BINARY))
+    check(words, passes=False,
+          expect="has Review on the App Store strings though TestFlight has no Review on the App Store", args=flag)
+    for name, app in (("complete", review_app(root, "tf-review-named-complete", review_code,
+                                              app_info(AndariumReviewID=identifier))),
+                      ("empty", make_app(root, "tf-review-named-empty", clean, app_info()))):
+        check(app, passes=False, expect="TestFlight names an identifier; only the AppStore configuration has "
+              "Review on the App Store", never="1234567890",
+              args=[*flag, "--review-id", identifier, "--review-local-id", identifier])
+
+    # The ICP filing number: not the code, the key, and no number the build names.
+    check(make_app(root, "tf-icp-code", icp_code, app_info()), passes=False,
+          expect="carries the ICP filing number (", args=flag)
+    check(make_app(root, "tf-icp-code-reason", icp_code, app_info()), passes=False,
+          expect="though TestFlight has no ICP filing number", args=flag)
+    check(make_app(root, "tf-icp-key", clean, app_info(AndariumICPNumber=number)), passes=False,
+          expect="Info.plist: has AndariumICPNumber though TestFlight has no ICP filing number",
+          never="12345678", args=flag)
+    for name, app in (("complete", make_app(root, "tf-icp-named-complete", icp_code, app_info(AndariumICPNumber=number))),
+                      ("empty", make_app(root, "tf-icp-named-empty", clean, app_info()))):
+        check(app, passes=False, expect="TestFlight names a number; only the AppStore configuration has the "
+              "ICP filing number", never="12345678", args=[*flag, "--icp-number", number, "--icp-local-number", number])
+
+    # The local configuration's values are in no file of a TestFlight bundle, however stored, and
+    # the check never prints one.
+    leaky = build(root, "tf-leaky", f'const char *fixture(void) {{ return "{secret}"; }}\n')
+    check(make_app(root, "tf-leak-tip-executable", leaky, app_info()), passes=False,
+          expect="Fixture: holds a product identifier of the local configuration", never=secret, args=[*flag, *local])
+    for form, content in encoded_forms(secret):
+        stray = make_app(root, f"tf-leak-tip-{form}", clean, app_info())
+        (stray / "Data.bin").write_bytes(content)
+        check(stray, passes=False, expect="Data.bin: holds a product identifier of the local configuration",
+              never=secret, args=[*flag, *local])
+    in_plist = make_app(root, "tf-leak-tip-info", clean, app_info(Note=secret))
+    check(in_plist, passes=False, expect="Info.plist: holds a product identifier of the local configuration",
+          never=secret, args=[*flag, *local])
+    one = make_app(root, "tf-leak-tip-last", clean, app_info())
+    (one / "Data.bin").write_bytes(ids["ultra"].encode())
+    check(one, passes=False, expect="Data.bin: holds a product identifier of the local configuration",
+          never=ids["ultra"], args=[*flag, *local])
+    for kind, content, phrase, never in (
+            ("review", identifier[2:].encode(), "Data.bin: holds the App Store identifier of the local configuration",
+             identifier[2:]),
+            ("icp", number.encode(), "Data.bin: holds the filing number of the local configuration", "12345678"),
+            ("icp-plist", plistlib.dumps({"Note": number}, fmt=plistlib.FMT_BINARY),
+             "Data.bin: holds the filing number of the local configuration", "12345678"),
+            ("github", b"https://github.com/fixturehub", "Data.bin: holds a profile address of the local configuration",
+             "fixturehub")):
+        stray = make_app(root, f"tf-leak-{kind}", clean, app_info())
+        (stray / "Data.bin").write_bytes(b"\0" + content + b"\0")
+        check(stray, passes=False, expect=phrase, never=never, args=[*flag, *local])
+        # The same product without the value to look for is clean.
+        check(stray, passes=True, expect="ready for TestFlight", args=flag)
+
+    # The phases of the other configurations, run for TestFlight, judge the same.
+    for mode, source, said in (("--tip-jar", tip_code, f"carries {no_tip}"),
+                               ("--review", review_code, "carries Review on the App Store"),
+                               ("--icp", icp_code, "carries the ICP filing number")):
+        check(make_app(root, f"tf-mode-{mode[2:]}-clean", clean, app_info()), passes=True,
+              expect="not compiled in (TestFlight)", args=[mode, *flag])
+        check(make_app(root, f"tf-mode-{mode[2:]}-code", source, app_info()), passes=False, expect=said,
+              args=[mode, *flag])
+
+
 def check_one_walk(checker: Path, root: Path, clean: Path, failures: list[str]) -> None:
     """A run asks every leak question in one walk over the bundle (a gigabyte with the staged system
     image), whichever phase of the build it is: the run of the App Store, and the phases of the other
@@ -1310,6 +1489,7 @@ def check_one_walk(checker: Path, root: Path, clean: Path, failures: list[str]) 
               "--icp-number", "示例ICP备87654321号-1"]
     runs = (
         ("the App Store run", values),
+        ("the TestFlight run", ["--configuration", "TestFlight", *values[:-2]]),
         ("the feedback, X and ICP phase", ["--configuration", "Debug", "--feedback", "--follow-x", "--icp", *values]),
         ("the tip phase", ["--configuration", "Debug", "--tip-jar", *values]),
         ("the review phase", ["--configuration", "Debug", "--review", *values]),
@@ -1879,6 +2059,7 @@ def main() -> int:
                      ["--tip-products", tip_list, "--tip-local-products", tip_list])
         check_developer(root, check, clean)
         check_icp(root, check, clean)
+        check_testflight(root, check, clean, feature, receiver)
         check_one_walk(options.checker, root, clean, failures)
         check_examples(root, check, clean, options.checker.parent.parent / "Config", failures)
         # Follow developer on X is compiled in only where the build names a handle,

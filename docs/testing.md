@@ -576,8 +576,9 @@ instead.
 Tooling tests cover `scripts/check-privacy-manifests.py`
 (`ios-privacy-manifests`, which `package-ios-frameworks.sh` also runs on every
 device slice it packages), `Andarium/scripts/check-app-store-bundle.py`
-(`andarium-app-store-bundle`, the last build phase of the AppStore
-configuration, [configurations](../Andarium/README.md#configurations)), the
+(`andarium-app-store-bundle`, the last build phase of the AppStore and
+TestFlight configurations,
+[configurations](../Andarium/README.md#configurations)), the
 tip sheet's words (`andarium-tip-words`: `Andarium/scripts/check-tip-words.py`
 rejects the forbidden terms of each language and a token amount in the
 `TipJar` table, and requires the statement that a tip is voluntary, one-time
