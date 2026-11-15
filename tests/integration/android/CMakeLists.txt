@@ -165,7 +165,9 @@ endif()
 # imported and read back, and the driver's guest memory file descriptors beside
 # them (VK_KHR_external_memory_fd and VK_EXT_external_memory_dma_buf offered and
 # enabled, host-visible memory exported, mapped by the Vulkan mapping, by the fd
-# and by another process, read by the GPU and imported again). It boots Android
+# and by another process, read by the GPU and imported again, by another
+# instance started with exec as well, including after the exporter freed it and
+# with the fd outliving the devices). It boots Android
 # with the macOS launcher, so it is opt-in: name the release under test.
 set(UML_ANDROID_VULKAN_SMOKE_RELEASE "" CACHE PATH
     "Installed Android release directory that the android-vulkan-smoke test boots")

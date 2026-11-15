@@ -978,7 +978,9 @@ calls need a built image.
 names a release and runs the image's `kernarium_vk_ahb_import` in a guest: hardware
 buffers imported and read back, and the guest memory file descriptors
 (`VK_KHR_external_memory_fd`, the opaque-fd and dma-buf types) offered, exported,
-mapped, written by another process, read by the GPU and imported. Its reading of
+mapped, written by another process, read by the GPU and imported, also by another
+instance started with exec (while the exporter lives, after it freed the memory,
+and with the fd and its mapping outliving both devices). Its reading of
 the tool's lines is the tooling test `android17-vulkan-smoke-runner`.
 `android-video-suspend` (integration) registers when
 `UML_ANDROID_VIDEO_SUSPEND_RELEASE` names the release: the gallery's decoder and

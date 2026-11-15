@@ -9,7 +9,11 @@ HAL and reads them back, and it checks the driver's guest memory file
 descriptors beside them: both fd extensions are offered and enabled on the same
 device, and for each fd handle type host-visible memory is exported, mapped by
 the Vulkan mapping, by the fd and by another process, read back by the GPU, and
-imported again from a second fd.
+imported again from a second fd. Three more cases per type and size hand the fd
+to another instance of the tool, started with exec so that it holds nothing of
+the exporting process but the fd: it imports, maps, reads and writes it while
+the exporter is alive; it does so after the exporter freed its memory and
+closed its fd; and a fd and its mapping outlive two destroyed devices.
 
 The runner reads the tool's lines and fails when:
 
@@ -17,9 +21,13 @@ The runner reads the tool's lines and fails when:
   have the layout the tool documents (the tool's output and this parser change
   together; tests/tooling/android/test_vulkan_smoke_runner.py pins both);
 - an fd extension is not offered, or an fd handle type has no passing
-  properties case or no passing sharing case;
+  properties case or lacks a passing case of any of the four sharing kinds
+  (one process, another instance with a live exporter, another instance after
+  the exporter was freed, a fd outliving both devices);
 - no hardware-buffer case imported (the fd cases are checked beside them,
-  not instead of them).
+  not instead of them), or the lines do not put the hardware-buffer verdict
+  line before the fd cases (a crash in the fd cases must leave the hardware
+  verdict printed).
 
 The guest is the release on a fresh data disk, started with the macOS launcher
 (tools/boot_android.py), or any running guest named by --serial. Every wait has
@@ -57,9 +65,20 @@ EXIT_MARKER = "kernarium-exit="
 TOOL_SECONDS = 1200
 FD_EXTENSIONS = ("VK_KHR_external_memory_fd", "VK_EXT_external_memory_dma_buf")
 FD_TYPES = ("opaque-fd", "dma-buf")
+# The sharing cases of one type: what the end of the case's line says, and the name the problems use.
+FD_SHARING = (
+    ("bytes", "sharing"),
+    ("bytes, imported by another instance", "another-instance"),
+    ("bytes, imported after the exporter was freed", "freed-exporter"),
+    ("bytes, kept past both devices", "outliving-devices"),
+)
 
 EXTENSION_LINE = re.compile(r"^memory-fd extension (VK_[A-Za-z0-9_]+): (offered|not offered)$")
-FD_CASE_LINE = re.compile(r"^memory-fd (opaque-fd|dma-buf) (properties|(\d+) bytes)$")
+FD_CASE_LINE = re.compile(
+    r"^memory-fd (opaque-fd|dma-buf) (properties|\d+ bytes(?:, imported by another instance|"
+    r", imported after the exporter was freed|, kept past both devices)?)$")
+HARDWARE_VERDICT_LINE = re.compile(
+    r"^hardware-buffer verdict: (PASS|FAIL): (\d+) cases imported, (\d+) failed, (\d+) not allocated$")
 HARDWARE_LINE = re.compile(r"^(\S+) +(\d+)x(\d+) +stride (\d+) \((\d+) bytes\)$")
 SKIP_LINE = re.compile(r"^(\S+) +(\d+)x(\d+) +SKIP: ")
 VERDICT_LINE = re.compile(r"^  (PASS|FAIL)$")
@@ -82,6 +101,7 @@ class Report:
     extensions: dict[str, bool] = dataclasses.field(default_factory=dict)
     cases: list[Case] = dataclasses.field(default_factory=list)
     skipped: int = 0
+    hardware_verdict: tuple[str, int, int, int] | None = None
     final: tuple[str, int, int, int, int, int] | None = None
     exit_status: int | None = None
 
@@ -93,6 +113,7 @@ def parse(output: str) -> Report:
     """The tool's lines as a report. A line that is none of the documented ones is a failure."""
     report = Report()
     pending: Case | None = None
+    fd_started = False
     for number, line in enumerate(output.splitlines(), 1):
         if not line.strip():
             continue
@@ -120,6 +141,7 @@ def parse(output: str) -> Report:
             raise Failure(f"line {number}: {pending.label!r} has no verdict before {line!r}")
         extension = EXTENSION_LINE.match(line)
         if extension:
+            fd_started = True
             if pending is None:
                 pending = Case("extensions", "extensions")
                 report.cases.append(pending)
@@ -127,14 +149,27 @@ def parse(output: str) -> Report:
             continue
         fd_case = FD_CASE_LINE.match(line)
         if fd_case:
+            fd_started = True
             pending = Case("fd", f"{fd_case.group(1)} {fd_case.group(2)}")
             report.cases.append(pending)
             continue
+        hardware_verdict = HARDWARE_VERDICT_LINE.match(line)
+        if hardware_verdict:
+            if fd_started:
+                raise Failure(f"line {number}: the hardware-buffer verdict follows the fd cases: {line!r}")
+            if report.hardware_verdict is not None:
+                raise Failure(f"line {number}: a second hardware-buffer verdict: {line!r}")
+            report.hardware_verdict = (hardware_verdict.group(1), *(int(hardware_verdict.group(i)) for i in (2, 3, 4)))
+            continue
         if SKIP_LINE.match(line):
+            if fd_started or report.hardware_verdict is not None:
+                raise Failure(f"line {number}: a hardware-buffer line after the hardware-buffer verdict: {line!r}")
             report.skipped += 1
             continue
         hardware = HARDWARE_LINE.match(line)
         if hardware:
+            if fd_started or report.hardware_verdict is not None:
+                raise Failure(f"line {number}: a hardware-buffer line after the hardware-buffer verdict: {line!r}")
             pending = Case("hardware", f"{hardware.group(1)} {hardware.group(2)}x{hardware.group(3)}")
             report.cases.append(pending)
             continue
@@ -181,11 +216,17 @@ def evaluate(report: Report) -> list[str]:
                  case.verdict == "PASS"]
         if "properties" not in cases:
             problems.append(f"{fd_type} has no passing properties case")
-        if not any(label.endswith("bytes") for label in cases):
-            problems.append(f"{fd_type} has no passing sharing case")
+        for ending, name in FD_SHARING:
+            # A plain sharing case ends in "bytes" and no variant does; the others end in their own text.
+            if not any(label.endswith(ending) and (name != "sharing" or "," not in label) for label in cases):
+                problems.append(f"{fd_type} has no passing {name} case")
     hardware = report.of_kind("hardware")
     if len(hardware) != imported or sum(1 for case in hardware if case.verdict != "PASS") != failed:
         problems.append("the hardware-buffer cases do not match the last line")
+    if report.hardware_verdict is None:
+        problems.append("the tool printed no hardware-buffer verdict line before the fd cases")
+    elif report.hardware_verdict != (("PASS" if not failed else "FAIL"), imported, failed, _not_allocated):
+        problems.append("the hardware-buffer verdict line does not match the last line")
     if imported < 1:
         problems.append("no hardware-buffer case imported")
     return problems
@@ -197,6 +238,9 @@ def summary(report: Report) -> str:
         if case.kind == "fd":
             lines.append(f"memory-fd {case.label}: {case.verdict}")
     hardware = report.of_kind("hardware")
+    if report.hardware_verdict is not None:
+        lines.insert(0, "hardware-buffer verdict line: {}: {} imported, {} failed, {} not allocated".format(
+            *report.hardware_verdict))
     lines.append(f"hardware buffers: {sum(1 for case in hardware if case.verdict == 'PASS')} of "
                  f"{len(hardware)} cases passed, {report.skipped} not allocated")
     return "\n".join(lines)
