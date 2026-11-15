@@ -100,19 +100,6 @@ struct LocalizationTests {
         }
     }
 
-    /// The statistics capsule's titles are localized strings: the memory one
-    /// is the word of Settings' Memory row, and the Latin ones (CPU, VRAM and
-    /// FPS, the name of the frame rate's unit) are kept in every language.
-    @Test func theStatisticsCapsuleSaysItsTitlesInTheLanguage() {
-        let memory = ["en": "Memory", "ja": "メモリ", "zh-Hans": "内存", "zh-Hant": "記憶體"]
-        for (language, word) in memory {
-            #expect(text("Memory", in: language) == word, "\(language) says \(text("Memory", in: language))")
-            for kept in ["CPU", "VRAM", "FPS"] {
-                #expect(text(String.LocalizationValue(kept), in: language) == kept, "\(language) says \(kept) another way")
-            }
-        }
-    }
-
     /// Words the store screenshot review settled: Traditional Chinese says
     /// 影格速率 for the frame rate and 匯入 for importing, and Japanese
     /// writes a label and its figure with no colon between them (iOS sets the

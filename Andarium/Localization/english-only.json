@@ -4,7 +4,6 @@
     { "catalog": "Localizable", "key": "CPU", "reason": "A name every language keeps, as iOS does." },
     { "catalog": "Localizable", "key": "CPU %@", "reason": "A name every language keeps, as iOS does." },
     { "catalog": "Localizable", "key": "VRAM", "reason": "A technical name every language keeps." },
-    { "catalog": "Localizable", "key": "FPS", "reason": "The name of the frame rate's unit, kept by every language." },
     { "catalog": "Localizable", "key": "%lld dpi", "reason": "The unit of a pixel density, kept by every language as Android writes it." },
     { "catalog": "AndariumCore", "key": "VRAM", "reason": "A technical name every language keeps." },
     { "catalog": "AndariumCore", "key": "%lld vCPUs", "reason": "Japanese counts vCPUs as a number and the unit name, as it counts GiB." }
