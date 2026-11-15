@@ -7,9 +7,10 @@ import SwiftUI
 /// Google apps, on purpose, and why: one panel last in the boot's column,
 /// below its own notes, while the person waits for Android's first screen. It
 /// has no control and goes with the boot screen. Which start shows it is
-/// `NoGoogleNotice.showsOnBoot`'s (a new installation's first Android boot); this one's words are the only place in the application
-/// that names Google (`scripts/localization.py` holds the exception to its
-/// rule). VoiceOver reads the title and then the text as one element.
+/// `NoGoogleNotice.showsOnBoot`'s (a new installation's first Android boot);
+/// this one's words are the only place in the application that names Google
+/// (`scripts/localization.py` holds the exception to its rule). VoiceOver
+/// reads the title and then the text as one element.
 struct NoGoogleBootNote: View {
     static let title = String(localized: "No Google apps, on purpose")
     static let text = String(
