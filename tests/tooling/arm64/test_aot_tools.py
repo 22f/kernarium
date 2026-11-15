@@ -468,6 +468,11 @@ class CensusTests(unittest.TestCase):
         self.assertEqual(census["insn"], 4)
         self.assertEqual(census["table"], 4096)  # one text page of entries
 
+    def test_only_the_refill_routines_a_site_enters_exist(self) -> None:
+        census, _ = self.census()
+        # A load and a store of eight bytes: a movz and a branch each.
+        self.assertEqual(census["stub.refill"], 2 * 2 * 4)
+
     def test_a_function_that_falls_off_its_end_tags_the_branch(self) -> None:
         library = library_of([self.ADD, self.ADD], [(0, 8)])
         unit = unit_words(library)

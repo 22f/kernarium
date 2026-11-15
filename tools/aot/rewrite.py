@@ -209,7 +209,8 @@ TPIDR_MASK = 0xffffffe0
 CENSUS = ("other", "insn", "spill", "branch", "pcrel", "step", "hint",
           "atomic", "mops.site", "mem.ea", "mem.probe", "mem.access",
           "mem.wb", "charge", "gate", "stub.mm", "stub.st", "stub.xu",
-          "stub.ma", "stub.xb", "exits", "mops.thunk", "table", "src")
+          "stub.ma", "stub.xb", "exits", "mops.thunk", "table", "src",
+          "stub.refill")
 CENSUS_CODE = {name: code for code, name in enumerate(CENSUS)}
 CENSUS_OUTER = {"branch_imm": "branch", "condbranch": "branch",
                 "compbranch": "branch", "testbranch": "branch",
@@ -284,6 +285,9 @@ class Library:
         # word the stub starts at). A later function branches to one within
         # reach instead of emitting its own.
         self.xb_emitted: dict[int, tuple[str, int]] = {}
+        # The refill routines the cold miss stubs enter: (kind, bytes,
+        # chunk of the entry table).
+        self.refill_used: set[tuple[str, int, int]] = set()
         self.fn_pg: set[int] = set()
         self.fn_ma: list[int] = []
         self.fn_st: list[int] = []
@@ -433,6 +437,7 @@ class Library:
         """
         asm = self.asm = A.Assembler()
         self.xb_emitted = {}
+        self.refill_used = set()
         asm.label("UNIT")
         emit_exits(asm, self)
         self.tag("exits", 0)
@@ -443,6 +448,9 @@ class Library:
         emit_mops_thunks(asm, self)
         self.stats.words["mops_thunks"] += len(asm._w) - before
         self.tag("mops.thunk", before)
+        before = len(asm._w)
+        emit_refill_stubs(asm, self)
+        self.tag("stub.refill", before)
         asm.label("TAB")
         before = len(asm._w)
         asm.data(bytes(4 * self.table_words))
@@ -1368,6 +1376,7 @@ class Library:
             slot = offset - self.table_base
             asm.word(A.movz(T1, slot & 0xffff))
             chunk = slot >> 16
+            self.refill_used.add((kind, total, chunk))
             asm.b(f"REFILL_{kind}_{total}" + (f"_{chunk}" if chunk else ""))
         self.tag("stub.mm", before)
         before = len(asm._w)
@@ -1567,24 +1576,6 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
     def restore() -> None:
         emit_restore_state(asm)
 
-    # A cold miss stub enters REFILL_<kind>_<bytes> with T0 = the address the
-    # probe formed (an access of more than one byte leaves the address of its
-    # last byte) and T1 = the instruction's slot in this library's entry
-    # table. The thunk asks the host to fill the TLB entry; when that succeeds
-    # the instruction restarts from its entry (no state of the instruction was
-    # changed before the probe), and when it cannot, or the access crosses a
-    # page, the instruction steps.
-    for kind, access in (("LOAD", 0), ("STORE", 1)):
-        for total in REFILL_TOTALS:
-            asm.label(f"REFILL_{kind}_{total}")
-            asm.word(A.movz(T2, access | (total << 8)))
-            asm.b("REFILL")
-            # A site names its slot in 16 bits; the thunk of a later 64 KiB
-            # of the table supplies the rest.
-            for chunk in range(1, (library.table_words * 4 + 0xffff) >> 16):
-                asm.label(f"REFILL_{kind}_{total}_{chunk}")
-                asm.word(A.movk(T1, chunk, 1))
-                asm.b(f"REFILL_{kind}_{total}")
     asm.label("REFILL")
     save()
     asm.word(A.ldr_x(9, 31, rf + SLOT_XTAB))
@@ -1661,6 +1652,36 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
     asm.word(A.ldr_x(T0, T1, CROSS_PAGES))
     asm.word(A.str_x(T0, 31, SLOT_PSTATE))
     asm.word(A.br(T2))
+
+
+def emit_refill_stubs(asm: A.Assembler, library: "Library") -> None:
+    """The routines a cold miss stub enters, after the functions that name
+    them: REFILL_<kind>_<bytes> with T0 = the address the probe formed (an
+    access of more than one byte leaves the address of its last byte) and
+    T1 = the instruction's slot in this library's entry table. The thunk asks
+    the host to fill the TLB entry; when that succeeds the instruction
+    restarts from its entry (no state of the instruction was changed before
+    the probe), and when it cannot, or the access crosses a page, the
+    instruction steps. Only the routines a stub of this library enters
+    exist."""
+    for kind, access in (("LOAD", 0), ("STORE", 1)):
+        for total in REFILL_TOTALS:
+            chunks = sorted(chunk for used_kind, used_total, chunk
+                            in library.refill_used
+                            if (used_kind, used_total) == (kind, total))
+            if not chunks:
+                continue
+            asm.label(f"REFILL_{kind}_{total}")
+            asm.word(A.movz(T2, access | (total << 8)))
+            asm.b("REFILL")
+            # A site names its slot in 16 bits; the thunk of a later 64 KiB
+            # of the table supplies the rest.
+            for chunk in chunks:
+                if chunk == 0:
+                    continue
+                asm.label(f"REFILL_{kind}_{total}_{chunk}")
+                asm.word(A.movk(T1, chunk, 1))
+                asm.b(f"REFILL_{kind}_{total}")
 
 
 def emit_mops_thunks(asm: A.Assembler, library: "Library") -> None:
