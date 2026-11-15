@@ -1104,11 +1104,14 @@ jsize w_GetArrayLength(Env* e, jarray a) {
     }
     return original<jsize (*)(Env*, jarray)>(slot::GetArrayLength)(e, a);
 }
+// The pointer of a shadow is a copy, and says so (JNI_TRUE): the block is separate storage that is kept alike at the
+// synchronization points, so code that commits before it lets Java read the array through another reference (a global
+// reference, a pinned pointer) must be told to. A real reference keeps the runtime's own flag.
 jbyte* w_GetByteArrayElements(Env* e, jarray a, jboolean* is_copy) {
     enter_any(e);
     if (is_shadow(a)) {
         if (is_copy != nullptr) {
-            *is_copy = 0;
+            *is_copy = 1;
         }
         BlockHeader* header = live_header(a);
         if (header == nullptr) {
@@ -1159,7 +1162,7 @@ void w_ReleaseByteArrayElements(Env* e, jarray a, jbyte* elements, jint mode) {
 void* w_GetPrimitiveArrayCritical(Env* e, jarray a, jboolean* is_copy) {
     if (is_shadow(a)) {
         if (is_copy != nullptr) {
-            *is_copy = 0;
+            *is_copy = 1;  // a copy, as for Get...Elements
         }
         BlockHeader* header = live_header(a);
         if (header == nullptr) {

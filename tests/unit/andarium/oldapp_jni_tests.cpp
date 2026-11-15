@@ -721,7 +721,8 @@ void check_shadow_layout_and_use() {
     require(fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, shadow) == 100, "GetArrayLength");
     jboolean copy = 1;
     jbyte* elements = fn<jbyte* (*)(Env*, jarray, jboolean*)>(*f.table, slot::GetByteArrayElements)(f.env, shadow, &copy);
-    require(elements == reinterpret_cast<const jbyte*>(raw + 0x10) && copy == 0, "elements are the block itself, no copy");
+    require(elements == reinterpret_cast<const jbyte*>(raw + 0x10) && copy == 1,
+            "the elements are the block, which is separate storage, and the flag says so");
     auto release = fn<void (*)(Env*, jarray, jbyte*, jint)>(*f.table, slot::ReleaseByteArrayElements);
     elements[0] = 99;
     release(f.env, shadow, elements, kReleaseAbort);
@@ -1449,6 +1450,51 @@ void check_one_block_per_array() {
     require(!is_shadow_block(first) && is_shadow_block(call_static_object_v(f, f.get_bytes)), "it is a new block once the old one is gone");
 }
 
+// A real reference to the same array (a global reference, or a pinned pointer) is a second way to reach the bytes, so the
+// getters of a shadow must say that their pointer is a copy: conformant code commits when it is told so.
+void check_the_flag_of_the_elements_is_truthful() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, std::vector<uint8_t>(8, 0));
+    Ref* alias = new_local(made.object);  // a real reference to the same array
+    auto get_method = fn<jmethodID (*)(Env*, jclass, const char*, const char*)>(*f.table, slot::GetMethodID);
+    jmethodID clone = get_method(f.env, f.cls, "clone", "()Ljava/lang/Object;");
+    jboolean copy = 0;
+    jbyte* elements = fn<GetElems>(*f.table, slot::GetByteArrayElements)(f.env, made.shadow, &copy);
+    elements[0] = 0x77;
+    if (copy != 0) {
+        fn<void (*)(Env*, jarray, jbyte*, jint)>(*f.table, slot::ReleaseByteArrayElements)(f.env, made.shadow, elements, kReleaseCommit);
+    }
+    const jvalue none[1] = {};
+    fn<jobject (*)(Env*, jobject, jmethodID, const jvalue*)>(*f.table, call_slot(kObject, kArray))(f.env, alias, clone, none);
+    require(world.seen_receiver.size() == 8 && world.seen_receiver[0] == 0x77,
+            "Java, through the real reference, sees the byte of a code that commits when told to");
+    require(copy == 1, "the flag of a shadow's elements is true");
+    // A real reference keeps the runtime's own flag.
+    jboolean real_copy = 1;
+    fn<GetElems>(*f.table, slot::GetByteArrayElements)(f.env, alias, &real_copy);
+    require(real_copy == 0, "a real reference gets the runtime's flag");
+}
+void check_the_flag_of_the_critical_pointer_is_truthful() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, std::vector<uint8_t>(8192, 0));
+    Ref* alias = new_local(made.object);
+    auto critical = fn<void* (*)(Env*, jarray, jboolean*)>(*f.table, slot::GetPrimitiveArrayCritical);
+    auto release = fn<void (*)(Env*, jarray, void*, jint)>(*f.table, slot::ReleasePrimitiveArrayCritical);
+    uint8_t* real = static_cast<uint8_t*>(critical(f.env, alias, nullptr));  // the real array, pinned
+    jboolean copy = 0;
+    uint8_t* block = static_cast<uint8_t*>(critical(f.env, made.shadow, &copy));
+    block[0] = 0x77;
+    if (copy != 0) release(f.env, made.shadow, block, 0);
+    require(real[0] == 0x77, "the real pinned pointer sees the byte of a code that commits when told to");
+    require(copy == 1, "the flag of a shadow's critical pointer is true");
+    if (copy == 0) release(f.env, made.shadow, block, 0);
+    release(f.env, alias, real, 0);
+    jboolean real_copy = 1;
+    void* again = critical(f.env, alias, &real_copy);
+    require(real_copy == 0, "a real reference gets the runtime's flag");
+    release(f.env, alias, again, 0);
+}
+
 // The length word of the Dalvik object is the application's to write: the layer trusts only its own capacity.
 void check_a_stray_length_write_is_harmless() {
     Fixture f = make();
@@ -1597,6 +1643,8 @@ int main(int argc, char** argv) {
     check_a_receiver_is_synchronized();
     check_one_block_per_array();
     check_a_stray_length_write_is_harmless();
+    check_the_flag_of_the_elements_is_truthful();
+    check_the_flag_of_the_critical_pointer_is_truthful();
     check_no_synchronization_with_an_exception_pending();
     check_critical_pair_inside_a_region();
     check_critical_entries_do_not_drain();

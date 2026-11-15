@@ -636,10 +636,13 @@ patches ART's one JNI function table in place and gives the application:
   the same chunk, the application's bytes win for that chunk. A committing
   release (mode 0 or `JNI_COMMIT`) is such a point and keeps Java's bytes in the
   chunks the application did not write; `JNI_ABORT` discards the working copy,
-  and the block takes the array's bytes. Bytes Java writes outside those points
-  (another thread, a callback after the native method returned) show at the
-  next one, and a raw write from another thread while a point is running can be
-  lost. The same array returned again to the same thread is the same block
+  and the block takes the array's bytes. `Get...Elements` and `Get...Critical`
+  of a block report a copy (`isCopy` is `JNI_TRUE`), so an application that
+  commits when told so makes its writes visible through any other reference to
+  the array; a real array keeps the runtime's own flag. Bytes Java writes
+  outside those points (another thread, a callback after the native method
+  returned) show at the next one, and a raw write from another thread while a
+  point is running can be lost. The same array returned again to the same thread is the same block
   (among the thread's most recent ones), freed by the last of its
   `DeleteLocalRef` calls. A thread holds at most 512 blocks over its life, not
   per native method: a block lasts until its reference is deleted or its thread

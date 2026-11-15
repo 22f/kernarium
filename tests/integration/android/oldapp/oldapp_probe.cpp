@@ -30,6 +30,9 @@
 //                each, in different 4 KiB chunks, both reach the array when both are released
 //   clone        the array's clone() sees a write made through the pointer GetByteArrayElements returned
 //                (released before the call when that pointer is a copy)
+//   alias_elements  a write through the pointer GetByteArrayElements returned, committed when the pointer says it is a
+//                copy, shows through a second (real) reference to the array
+//   alias_critical  the same through GetPrimitiveArrayCritical, against the array's own pinned pointer
 //   monitor      MonitorEnter and MonitorExit accept it
 //   pop          PopLocalFrame hands it out of the frame
 //   getline      getline grows a buffer the application allocated with malloc
@@ -482,6 +485,66 @@ void array_cases(Report& report, Env* env) {
             delete_local(env, target);
         }
         delete_local(env, small);
+    }
+
+    // A second, real reference to the same array, and the flag the pointers carry: an application that commits when
+    // the pointer says it is a copy has to see the write through the other reference.
+    {
+        jobject small = new_array(env, 8);
+        jobject target = small != nullptr ? result_of(small) : nullptr;
+        bool aliased = false;
+        if (target != nullptr) {
+            jboolean copy = 1;
+            jbyte* bytes = get_elements(env, target, &copy);
+            if (bytes != nullptr) {
+                bytes[0] = 0x77;
+                if (copy != 0) {
+                    release_elements(env, target, bytes, 0);
+                }
+                jbyte seen = 0;
+                get_region(env, small, 0, 1, &seen);
+                aliased = seen == 0x77;
+                if (copy == 0) {
+                    release_elements(env, target, bytes, 0);
+                }
+            }
+        }
+        report.verdict("alias_elements", aliased && !exception_check(env));
+        if (target != nullptr) {
+            delete_local(env, target);
+        }
+        delete_local(env, small);
+    }
+    {
+        jobject big = new_array(env, 8192);
+        jobject target = big != nullptr ? result_of(big) : nullptr;
+        bool aliased = false;
+        if (target != nullptr) {
+            jboolean pinned_copy = 0;
+            jbyte* real = static_cast<jbyte*>(critical(env, big, &pinned_copy));
+            jboolean copy = 1;
+            jbyte* block = static_cast<jbyte*>(critical(env, target, &copy));
+            if (real != nullptr && block != nullptr) {
+                block[0] = 0x77;
+                if (copy != 0) {
+                    release_critical(env, target, block, 0);
+                }
+                // A pinned pointer that is itself a copy (a debuggable application) only shows the write after its release.
+                const bool direct_sees = pinned_copy != 0 || real[0] == 0x77;
+                release_critical(env, big, real, 2);  // JNI_ABORT: the pinned pointer made no write
+                jbyte seen = 0;
+                if (copy == 0) {
+                    release_critical(env, target, block, 0);
+                }
+                get_region(env, big, 0, 1, &seen);
+                aliased = direct_sees && seen == 0x77;
+            }
+        }
+        report.verdict("alias_critical", aliased && !exception_check(env));
+        if (target != nullptr) {
+            delete_local(env, target);
+        }
+        delete_local(env, big);
     }
 
     // PopLocalFrame.
