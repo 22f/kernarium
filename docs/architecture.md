@@ -566,7 +566,8 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   address (an unaligned one steps, so the engine decides between the LSE2
   completion and the alignment fault) and run as the host's own instruction.
   The prologue and main stages of CPY, CPYF and SET are inlined as the
-  engine's option B defines them (`detail/memory_copy_set.hpp`); the
+  engine's option B defines them
+  (`darwin/cpu/arm64/detail/memory_copy_set.hpp`); the
   epilogue moves the data and is the engine's. An SP base, pairs, exclusives
   and the other members of these groups step.
 - Floating point and SIMD run under the guest FPCR/FPSR in the host registers
