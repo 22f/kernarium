@@ -40,7 +40,7 @@ uml_add_tooling_test(
     COMMAND ${Python3_EXECUTABLE}
         ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_ipad_automation_supervisor.py
     LABELS kernarium
-    TIMEOUT 60)
+    TIMEOUT 120)
 
 # The host's test run records no screen video and keeps no attachments: the
 # scheme says so, `start` refuses a run file that does not, and the result
@@ -56,14 +56,14 @@ uml_add_tooling_test(
 # is shown to be dead, and where it cannot tell (a heartbeat it cannot read, an
 # approval the device may have asked for, what is left of the old host) it
 # replaces nothing and ends with a status of its own. The tests run the real
-# script and its supervisor against fake `xcrun` and `xcodebuild` executables
-# in a scratch folder.
+# script and its supervisor against fake `xcrun`, `xcodebuild` and
+# `caffeinate` executables in a scratch folder.
 uml_add_tooling_test(
     NAME kernarium-ipad-automation-watch
     COMMAND ${Python3_EXECUTABLE}
         ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_ipad_automation_watch.py
     LABELS kernarium
-    TIMEOUT 600)
+    TIMEOUT 900)
 
 uml_add_tooling_test(
     NAME kernarium-ipad-automation-watch-process
