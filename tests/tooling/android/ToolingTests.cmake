@@ -260,3 +260,15 @@ uml_add_tooling_test(
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_camera_layouts.py
     LABELS android
     TIMEOUT 30)
+
+# The activity that replaces the sensor privacy dialog of a camera that the
+# host's switch blocks: the framework overlay's string, the application's
+# manifest, class and build rule, the product makefile and the verifier's
+# constants name the same component.
+uml_add_tooling_test(
+    NAME lineage24-sensor-use-contract
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_sensor_use_contract.py
+        --source-root ${PROJECT_SOURCE_DIR}
+    LABELS android;audit
+    TIMEOUT 60)

@@ -650,6 +650,13 @@ PRODUCT_VENDOR_PROPERTIES += \
 PRODUCT_VENDOR_PROPERTY_BLACKLIST += ro.camerax.extensions.enabled
 include device/kernarium/andarium/camera/generated/camera_layouts.mk
 
+# A session started with Camera off reports the camera lens cover, which the platform
+# takes for a hardware privacy switch, and SystemUI's "Unblock device camera?" dialog
+# would offer to lift it by the software toggle, which a hardware one outranks. The
+# framework overlay (config_sensorUseStartedActivity_hwToggle) names this activity
+# instead; it shows nothing, and the host's application explains the block.
+PRODUCT_PACKAGES += KernariumSensorUseQuiet
+
 # The virtio-gpu device paces the display with a vblank timer, so a present
 # fence signals when the frame is shown. The inherited Cuttlefish graphics
 # configuration marks the fences unreliable for a host that sends frames as fast

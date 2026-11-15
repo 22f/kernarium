@@ -485,6 +485,8 @@ for package in \
 	[[ "$PRODUCT_PACKAGES" == *" $package "* ]] ||
 		fail "the camera application or the lazy camera provider and its HAL are absent: $package"
 done
+[[ "$PRODUCT_PACKAGES" == *" KernariumSensorUseQuiet "* ]] ||
+	fail "the activity that stands in for the sensor privacy dialog of a blocked camera is absent"
 [[ "$PRODUCT_PACKAGES" == *" EasterEgg "* ]] ||
 	fail "the easter egg that the platform logo screen opens is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.android.hardware.cas "* ]] ||
