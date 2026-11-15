@@ -84,6 +84,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import contextlib
 import importlib.util
 import math
 import os
@@ -339,6 +340,9 @@ LOST_WAIT_SECONDS = 60
 # process and with no error window. The video mode's viewfinder (no recording) binds an encoder surface, so the HAL ends the
 # camera for it as for a recording; the photo mode's viewfinder has no encoder stream, so the HAL must not: it closes the
 # camera's video streams and opens them again, which its log says.
+# A coded video sample is at least this many bytes on average: a file whose `mdat` boxes hold less than its declared samples need
+# has a sample table and no encoded video.
+MINIMUM_SAMPLE_BYTES = 16
 LOST_AWAY_SECONDS = 8
 VIEWFINDER_RECOVERY_SECONDS = 45
 HAL_END_LINE = "the host ended the camera: its video buffers fail"
@@ -475,6 +479,7 @@ class Movie:
     audio_end: float = 0.0
     video_gap: float = 0.0       # the longest time between two samples of each track
     audio_gap: float = 0.0
+    media_bytes: int = 0         # the bytes of the file's `mdat` boxes: the encoded samples themselves
 
     @property
     def fps(self) -> float:
@@ -620,8 +625,9 @@ def parse_mp4(data: bytes) -> Movie:
     moov = data[start:end]
     video = track_samples(data, start, end, b"vide", scale)
     audio = track_samples(data, start, end, b"soun", scale)
+    media = sum(stop - payload for kind, payload, stop in mp4_boxes(data, 0, len(data)) if kind == b"mdat")
     return Movie(duration / scale, b"vide" in moov, b"soun" in moov, video.samples, video.seconds,
-                 audio.samples, audio.seconds, audio.rate, video.end, audio.end, video.gap, audio.gap)
+                 audio.samples, audio.seconds, audio.rate, video.end, audio.end, video.gap, audio.gap, media)
 
 
 def active_capture_frames(text: str) -> int | None:
@@ -726,6 +732,29 @@ def log_after(text: str, marker: str) -> str | None:
 def frames_produced(dump: str) -> int:
     """`dumpsys media.camera`: the frames the camera service counts for all the streams it lists."""
     return sum(int(count) for count in re.findall(r"Frames produced: (\d+)", dump))
+
+
+STREAM_HEADER = re.compile(r"^\s*Stream\[(\d+)\]:")
+
+
+def preview_stream_frames(dump: str, package: str = CAMERA_PACKAGE) -> dict[int, int]:
+    """`dumpsys media.camera`: the frames produced by each output stream whose consumer is the application's own preview
+    surface (a `SurfaceView[<package>/...]`), by stream id. Only that stream shows that the viewfinder is live: another
+    stream (a still, an encoder's surface) may run while the preview stands still."""
+    consumers: dict[int, str] = {}
+    counts: dict[int, int] = {}
+    current: int | None = None
+    for line in dump.splitlines():
+        if (header := STREAM_HEADER.match(line)):
+            current = int(header[1])
+        if current is None:
+            continue
+        if (consumer := re.search(r"Consumer name: (.*)$", line)):
+            consumers[current] = consumer[1]
+        if (produced := re.search(r"Frames produced: (\d+)", line)):
+            counts[current] = int(produced[1])
+    return {stream: counts[stream] for stream, consumer in consumers.items()
+            if f"SurfaceView[{package}" in consumer and stream in counts}
 
 
 SESSION_LINE = re.compile(r"^Camera: memory: capture session (closed|opened)\b", re.MULTILINE)
@@ -1173,6 +1202,8 @@ class Guest:
         self.private = private
         # Where the launcher's audio hold library (--audio-hold-library) takes its requests; None without one.
         self.hold_directory = hold_directory
+        # The time (a time.monotonic() value) by which every command must have finished, while a step holds one (`bounded`).
+        self.limit: float | None = None
         # The synthetic camera's control pipe (the video-lost mode); None without one.
         self.control = control
         # Whether the launcher gave the guest the side keys (--hardware-input): the device that reports the lens cover.
@@ -1194,10 +1225,21 @@ class Guest:
 
     def adb_run(self, *arguments: str, timeout: float = COMMAND_SECONDS,
                 binary: bool = False) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [self.adb, "-s", self.serial, *arguments], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE if binary else subprocess.STDOUT, text=not binary, timeout=timeout,
-            check=False)
+        if self.limit is not None:
+            # A step with a deadline: no command starts after it, and none runs past it.
+            left = self.limit - time.monotonic()
+            if left <= 0:
+                raise Failure(f"the deadline passed before 'adb {' '.join(arguments)[:80]}' ran")
+            timeout = min(timeout, left)
+        try:
+            return subprocess.run(
+                [self.adb, "-s", self.serial, *arguments], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE if binary else subprocess.STDOUT, text=not binary, timeout=timeout,
+                check=False)
+        except subprocess.TimeoutExpired as problem:
+            if self.limit is None:
+                raise
+            raise Failure(f"'adb {' '.join(arguments)[:80]}' did not finish by the step's deadline") from problem
 
     def shell(self, command: str, timeout: float = COMMAND_SECONDS) -> str:
         result = self.adb_run("shell", command, timeout=timeout)
@@ -1339,8 +1381,9 @@ class Guest:
 
 
 def wait_for(description: str, seconds: float, check: Callable[[], str | None],
-             guest: Guest | None = None) -> None:
-    """Calls `check` until it returns None (done); its last message is the failure."""
+             guest: Guest | None = None, strict: bool = False) -> None:
+    """Calls `check` until it returns None (done); its last message is the failure. With `strict` the limit holds
+    through the end of each check: one that returns after it does not pass."""
     deadline = time.monotonic() + seconds
     message: str | None = "not checked"
     while time.monotonic() < deadline:
@@ -1348,9 +1391,23 @@ def wait_for(description: str, seconds: float, check: Callable[[], str | None],
             guest.alive()
         message = check()
         if message is None:
+            if strict and time.monotonic() > deadline:
+                raise Failure(f"{description}: the check finished {time.monotonic() - deadline:.1f} s after the limit "
+                              f"of {seconds:.0f} s")
             return
         time.sleep(1.0)
     raise Failure(f"{description}: {message} (after {seconds:.0f} s)")
+
+
+@contextlib.contextmanager
+def bounded(guest, deadline: float):
+    """While the block runs, no command of the guest starts after `deadline` (a time.monotonic() value) or runs past it."""
+    previous = getattr(guest, "limit", None)
+    guest.limit = deadline if previous is None else min(previous, deadline)
+    try:
+        yield
+    finally:
+        guest.limit = previous
 
 
 # ---- The checks.
@@ -2069,6 +2126,27 @@ def check_still_keeps_preview(guest: Guest, plan: Plan) -> None:
           "(no capture session closed)")
 
 
+def wait_for_camera_held(guest: Guest, camera_id: str, what: str, seconds: float, strict: bool = False) -> None:
+    """The application holds camera `camera_id`, within `seconds`."""
+    wait_for(f"the camera application holding camera {camera_id} ({what})", seconds,
+             lambda: None if camera_id in active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE)
+             else f"it holds {sorted(active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE))}", guest, strict)
+
+
+def wait_for_picture(guest: Guest, what: str, seconds: float, strict: bool = False) -> None:
+    """The screen shows the chart (a picture taken now), within `seconds`."""
+    seen: list[tuple[float, float]] = []
+
+    def previewing() -> str | None:
+        seen.append(luma_statistics(guest.screenshot()))
+        mean, deviation = seen[-1]
+        return None if deviation >= CHART_MINIMUM_DEVIATION else \
+            f"the preview is flat (mean {mean:.1f}, deviation {deviation:.1f})"
+
+    wait_for(f"the {what} preview showing the chart", seconds, previewing, guest, strict)
+    print(f"  {what} preview: mean {seen[-1][0]:.1f}, deviation {seen[-1][1]:.1f}")
+
+
 def wait_for_chart(guest: Guest, camera_id: str, what: str, seconds: float | None = None,
                    deadline: float | None = None) -> None:
     """The application holds camera `camera_id` and its preview is the chart, within `seconds` (PREVIEW_SECONDS) for each
@@ -2078,19 +2156,35 @@ def wait_for_chart(guest: Guest, camera_id: str, what: str, seconds: float | Non
     def left() -> float:
         return seconds if deadline is None else max(0.0, deadline - time.monotonic())
 
-    wait_for(f"the camera application holding camera {camera_id} ({what})", left(),
-             lambda: None if camera_id in active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE)
-             else f"it holds {sorted(active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE))}", guest)
-    seen: list[tuple[float, float]] = []
+    wait_for_camera_held(guest, camera_id, what, left())
+    wait_for_picture(guest, what, left())
 
-    def previewing() -> str | None:
-        seen.append(luma_statistics(guest.screenshot()))
-        mean, deviation = seen[-1]
-        return None if deviation >= CHART_MINIMUM_DEVIATION else \
-            f"the preview is flat (mean {mean:.1f}, deviation {deviation:.1f})"
 
-    wait_for(f"the {what} preview showing the chart", left(), previewing, guest)
-    print(f"  {what} preview: mean {seen[-1][0]:.1f}, deviation {seen[-1][1]:.1f}")
+def wait_for_fresh_preview(guest: Guest, camera_id: str, what: str, deadline: float) -> None:
+    """The viewfinder is live again by `deadline` (an absolute time.monotonic() value), in three stages that share it: the
+    application holds the camera; the stream of ITS preview surface produces a new frame (that stream's own counter rises
+    between two reads taken after the return: another stream running proves nothing, and the old picture stays on the
+    screen when the preview stops); then a picture taken now shows the chart. Every command is bounded by the time left,
+    and a check that ends after the deadline does not pass."""
+    def left() -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    with bounded(guest, deadline):
+        wait_for_camera_held(guest, camera_id, what, left(), strict=True)
+        seen: list[dict[int, int]] = []
+
+        def producing() -> str | None:
+            counts = preview_stream_frames(guest.media_camera())
+            previous = seen[-1] if seen else {}
+            seen.append(counts)
+            if not counts:
+                return "the camera service lists no stream of the application's preview surface"
+            if any(stream in previous and count > previous[stream] for stream, count in counts.items()):
+                return None
+            return f"the preview stream's frame counters stand at {counts}"
+
+        wait_for(f"live capture: a new frame of the {what} preview stream", left(), producing, guest, strict=True)
+        wait_for_picture(guest, what, left(), strict=True)
 
 
 def record_video(guest: Guest, plan: Plan, hold_seconds: float, disturb: Callable[[Guest], None] | None = None,
@@ -2267,8 +2361,7 @@ def check_video_lost(guest: Guest, plan: Plan) -> None:
         raise Failure(f"{path} is not a finished movie: {problem}") from problem
     if not movie.video:
         raise Failure(f"{path} has no video track")
-    if movie.frames <= 0:
-        raise Failure(f"{path} has a video track but no encoded video samples")
+    require_media_payload(path, movie)
     if not LOST_MINIMUM_SECONDS <= movie.seconds <= LOST_HOLD_SECONDS + VIDEO_MAXIMUM_SECONDS:
         raise Failure(f"{path} lasts {movie.seconds:.2f} s; the recording ran {LOST_HOLD_SECONDS} s before the loss "
                       f"and must last between {LOST_MINIMUM_SECONDS:g} s and the time the loss took to be noticed")
@@ -2291,6 +2384,7 @@ def check_video_lost(guest: Guest, plan: Plan) -> None:
         raise Failure(f"the recording after the person returned is not a movie of at least {VIDEO_MINIMUM_SECONDS:g} s "
                       f"with encoded video samples: {reopened.seconds:.2f} s, video track {'yes' if reopened.video else 'no'}, "
                       f"{reopened.frames} frames")
+    require_media_payload(again.get("_data", ""), reopened)
     print(f"  the camera opened again for a new start of the application: {again.get('_display_name', '')} "
           f"{reopened.seconds:.2f} s, {reopened.frames} frames")
     if HAL_END_LINE not in guest.hal_log():
@@ -2298,6 +2392,17 @@ def check_video_lost(guest: Guest, plan: Plan) -> None:
     print("  the HAL reported the end of the camera (ERROR_DEVICE)")
     check_viewfinder_returns(guest, plan, "video")
     check_viewfinder_returns(guest, plan, "photo")
+
+
+def require_media_payload(path: str, movie: Movie) -> None:
+    """A clip passes only with encoded video in it: its video track declares samples (the sample table) and its `mdat` boxes
+    hold the bytes they need, MINIMUM_SAMPLE_BYTES for each, not a table of counts over an empty file."""
+    if movie.frames <= 0:
+        raise Failure(f"{path} has a video track but no encoded video samples")
+    needed = movie.frames * MINIMUM_SAMPLE_BYTES
+    if movie.media_bytes < needed:
+        raise Failure(f"{path} declares {movie.frames} video samples but its media data holds {movie.media_bytes} bytes "
+                      f"(at least {needed} needed): the clip has no encoded video")
 
 
 def application_pids(guest: Guest) -> str:
@@ -2335,8 +2440,7 @@ def check_viewfinder_returns(guest: Guest, plan: Plan, mode: str) -> None:
     guest.camera_control("resume")
     returned = time.monotonic()
     deadline = returned + VIEWFINDER_RECOVERY_SECONDS
-    wait_for_chart(guest, camera, f"{label} after the return", deadline=deadline)
-    wait_for_capture(guest, f"the {label} after the return", deadline)
+    wait_for_fresh_preview(guest, camera, f"{label} after the return", deadline)
     print(f"  {label}: live again {time.monotonic() - returned:.1f} s after the return (limit {VIEWFINDER_RECOVERY_SECONDS} s)")
     if application_pids(guest) != process:
         raise Failure(f"the application was restarted (process {process!r}, then {application_pids(guest)!r}) "
@@ -2411,9 +2515,8 @@ def check_video_freeze(guest: Guest, plan: Plan) -> None:
     check_audio_end(path, movie)
 
 
-def wait_for_capture(guest: Guest, what: str, deadline: float | None = None) -> None:
-    """The camera service's frame counters rise between two reads: capture is running now, not only once was. With
-    `deadline` (an absolute time.monotonic() value) the wait ends there, not SWITCH_OBSERVE_SECONDS after it began."""
+def wait_for_capture(guest: Guest, what: str) -> None:
+    """The camera service's frame counters rise between two reads: capture is running now, not only once was."""
     seen: list[int] = []
 
     def producing() -> str | None:
@@ -2422,8 +2525,7 @@ def wait_for_capture(guest: Guest, what: str, deadline: float | None = None) -> 
         seen.append(count)
         return None if previous is not None and count > previous else f"the frame counters stand at {count}"
 
-    seconds = SWITCH_OBSERVE_SECONDS if deadline is None else max(0.0, deadline - time.monotonic())
-    wait_for(f"live capture ({what})", seconds, producing, guest)
+    wait_for(f"live capture ({what})", SWITCH_OBSERVE_SECONDS, producing, guest)
 
 
 def read_switch_log(guest: Guest, marker: str) -> str:

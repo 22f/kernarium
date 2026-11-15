@@ -875,8 +875,10 @@ anywhere is a blocker. The candidate must show:
 - **Cameras** (a guest started with `--camera=synthetic` and a camera layout on
   `androidboot.product.vendor.sku`). `android-camera` passes for the layouts
   the synthetic profiles compose, live and blocked, a blocked session showing
-  no sensor privacy reminder for the camera, and `android-camera-restart`
-  passes for the phone profile; the VTS camera provider test
+  no sensor privacy reminder for the camera, `android-camera-restart`
+  passes for the phone profile, and `android-camera-video-lost` passes on an
+  image that carries the HAL topic that handles the host's end of a camera's
+  video; the VTS camera provider test
   (`VtsAidlHalCameraProvider_TargetTest`) passes against the lazy provider; and
   these CTS modules pass sharded, with the failures rerun alone and a result
   that differs from the accepted release's explained:

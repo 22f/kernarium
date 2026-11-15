@@ -634,11 +634,17 @@ def audio_track(aac_frames: int, stretch: float = 1.0, rate: int = 48000, entry:
     return box(b"trak", edts + box(b"mdia", box(b"mdhd", mdhd) + handler + (box(b"minf", stbl) if samples else b"")))
 
 
+# The bytes of encoded video a frame of the scripted movies holds (the runner wants MINIMUM_SAMPLE_BYTES for each).
+PAYLOAD_PER_FRAME = 64
+
+
 def movie(seconds: float, scale: int = 1000, video: bool = True, version: int = 0, fps: float = 30.0,
-          samples: bool = True, audio: bytes = b"", video_jump: tuple[int, float] | None = None) -> bytes:
+          samples: bool = True, audio: bytes = b"", video_jump: tuple[int, float] | None = None,
+          payload: int | None = None) -> bytes:
     """A finished movie: `mvhd`, and one track whose `mdhd` has MEDIA_SCALE ticks a second and, for a video
     track with `samples`, an `stts` of one entry of seconds * fps frames (`video_jump` = (index, seconds): the frame
-    at `index` lasts that many seconds longer, a freeze); with `audio` (an `audio_track`) a second track follows."""
+    at `index` lasts that many seconds longer, a freeze); with `audio` (an `audio_track`) a second track follows. The `mdat`
+    holds `payload` bytes (a video track with samples: PAYLOAD_PER_FRAME for each frame; otherwise 40)."""
     if version == 1:
         mvhd = struct.pack(">B3xQQIQ", 1, 0, 0, scale, int(seconds * scale)) + b"\x00" * 80
     else:
@@ -655,7 +661,9 @@ def movie(seconds: float, scale: int = 1000, video: bool = True, version: int = 
         entries = [(index, delta), (1, delta + round(extra * MEDIA_SCALE)), (frames - index - 1, delta)]
     stts = box(b"stts", struct.pack(">BxxxI", 0, len(entries)) + b"".join(struct.pack(">II", c, d) for c, d in entries))
     track = box(b"mdia", box(b"mdhd", mdhd) + handler + (box(b"minf", box(b"stbl", stts)) if video and samples else b""))
-    return (box(b"ftyp", b"isom\x00\x00\x02\x00isom") + box(b"mdat", b"\x00" * 40)
+    if payload is None:
+        payload = frames * PAYLOAD_PER_FRAME if video and samples else 40
+    return (box(b"ftyp", b"isom\x00\x00\x02\x00isom") + box(b"mdat", b"\x00" * payload)
             + box(b"moov", box(b"mvhd", mvhd) + box(b"trak", track) + audio))
 
 
@@ -908,6 +916,10 @@ class AudioHoldTests(unittest.TestCase):
         self.assertIn("env=environment", start)
 
 
+# The consumer the camera service lists for the application's preview stream.
+PREVIEW_CONSUMER = "f279c8e SurfaceView[org.lineageos.aperture/org.lineageos.aperture.CameraActivity]#1"
+
+
 class FakeGuest:
     """A guest that answers the runner's commands from a script and records them."""
 
@@ -1039,10 +1051,12 @@ class FakeGuest:
             "Client Package Name: org.lineageos.aperture, Conflicting Client Devices: {})\n" for camera in sorted(self.held))
         if ("video" if self.in_video else "photo") not in self.stalled:
             self.frames += 25
-        still = ("    Stream[1]: Output\n      Dims: 4032 x 3024, format 0x21, dataspace 0x8c20000\n"
+        still = ("    Stream[1]: Output\n      Consumer name: ImageReader-4032x3024f21m4-2209-0\n"
+                 "      Dims: 4032 x 3024, format 0x21, dataspace 0x8c20000\n"
                  "      Frames produced: 9, last timestamp: 1 ns\n") if self.has_still_stream else ""
         return ("Active Camera Clients:\n" + clients + "Active Client listener PIDs: 1\n"
-                f"    Stream[3]: Output\n      Dims: 1008 x 756, format 0x23, dataspace 0x0\n"
+                f"    Stream[3]: Output\n      Consumer name: {PREVIEW_CONSUMER}\n"
+                f"      Dims: 1008 x 756, format 0x23, dataspace 0x0\n"
                 f"      Frames produced: {self.frames}, last timestamp: 1 ns\n" + still)
 
     def screenshot(self):
@@ -3286,6 +3300,185 @@ class VideoLostTests(unittest.TestCase):
         self.assertIsNotNone(failure)
         self.assertRegex(str(failure), "live capture")
         self.assertLessEqual(clock.now - guest.returned, runner.VIEWFINDER_RECOVERY_SECONDS + 1.0)
+
+    def on_clock(self, guest, mode: str = "video"):
+        """Runs the viewfinder case for `guest` on a virtual clock; returns the clock and the failure (None when it passed)."""
+        clock = self.Clock()
+        guest.clock = clock
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), mock.patch.object(runner.time, "monotonic", clock.monotonic), \
+                    mock.patch.object(runner.time, "sleep", clock.sleep):
+                runner.check_viewfinder_returns(guest, guest.plan, mode)
+            failure = None
+        except runner.Failure as problem:
+            failure = problem
+        return clock, failure
+
+    def test_a_query_that_returns_after_the_deadline_does_not_pass(self) -> None:
+        # The last counter query takes 46 s and answers well: it is 47 s after the return, past the 45 s limit. It used to pass
+        # (the limit was looked at before a query, never after it).
+        class Slow(self.Guest):
+            returned = None
+            reads = 0
+
+            def camera_control(self, line: str) -> None:
+                super().camera_control(line)
+                if line == "resume":
+                    self.returned = self.clock.now
+
+            def media_camera(self) -> str:
+                if self.returned is not None:
+                    self.reads += 1
+                    if self.reads == 3:
+                        self.clock.sleep(46)
+                return super().media_camera()
+
+        guest = Slow(self.plan())
+        clock, failure = self.on_clock(guest)
+        self.assertIsNotNone(failure)
+        self.assertRegex(str(failure), r"live capture: .*the check finished .* s after the limit of")
+        # A query that answers in time passes, with the same guest.
+        guest = self.Guest(self.plan())
+        _, failure = self.on_clock(guest)
+        self.assertIsNone(failure)
+
+    def test_a_command_runs_no_longer_than_the_time_left(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            process = mock.Mock(pid=4242)
+            process.poll.return_value = None
+            log = Path(directory) / "emulator.log"
+            log.write_text("")
+            guest = runner.Guest("adb", "127.0.0.1:1", process, log, Path(directory))
+            clock = self.Clock()
+            clock.now = 100.0
+            timeouts: list[float] = []
+
+            def run(*arguments, **options):
+                timeouts.append(options["timeout"])
+                return subprocess.CompletedProcess(arguments, 0, stdout="ok")
+
+            with mock.patch.object(runner.time, "monotonic", clock.monotonic), mock.patch.object(runner.subprocess, "run", run):
+                guest.adb_run("shell", "true")
+                with runner.bounded(guest, 112.5):
+                    guest.adb_run("shell", "true")
+                    clock.now = 110.0
+                    guest.adb_run("shell", "true", timeout=1.0)
+                    clock.now = 112.5
+                    with self.assertRaisesRegex(runner.Failure, "the deadline passed before"):
+                        guest.adb_run("shell", "true")
+                self.assertIsNone(guest.limit)
+                guest.adb_run("shell", "true")
+            # No limit: the usual bound. A limit: what is left, and 1.0 where the command asked for less.
+            self.assertEqual(timeouts, [runner.COMMAND_SECONDS, 12.5, 1.0, runner.COMMAND_SECONDS])
+
+            def expire(*arguments, **options):
+                raise subprocess.TimeoutExpired(arguments, options["timeout"])
+
+            with mock.patch.object(runner.subprocess, "run", expire):
+                self.assertRaises(subprocess.TimeoutExpired, guest.adb_run, "shell", "true")
+                with mock.patch.object(runner.time, "monotonic", clock.monotonic):
+                    clock.now = 0.0
+                    with runner.bounded(guest, 5.0), self.assertRaisesRegex(runner.Failure, "did not finish by the step's deadline"):
+                        guest.adb_run("shell", "true")
+
+    FROZEN = ("Active Camera Clients:\n(Camera ID: 0, Cost: 100, PID: 1301, Score: 0, State: 2User Id: 0, "
+              "Client Package Name: org.lineageos.aperture, Conflicting Client Devices: {})\nActive Client listener PIDs: 1\n")
+
+    @staticmethod
+    def streams(preview: int | None, other: int, consumer: str = PREVIEW_CONSUMER) -> str:
+        text = "    Stream[4]: Output\n      Consumer name: ImageReader-1x1-1-0\n      Dims: 640 x 480, format 0x23\n" \
+               f"      Frames produced: {other}, last timestamp: 1 ns\n"
+        if preview is not None:
+            text = ("    Stream[3]: Output\n      Consumer name: " + consumer + "\n      Dims: 1008 x 756, format 0x23\n"
+                    f"      Frames produced: {preview}, last timestamp: 1 ns\n") + text
+        return text
+
+    def test_a_frozen_preview_is_not_rescued_by_another_stream(self) -> None:
+        # The application holds its camera and shows the picture it showed before the loss; its preview stream produced
+        # nothing, and a different output runs. Counters summed over every stream rose, and the case passed.
+        class Frozen(self.Guest):
+            other = 0
+
+            def media_camera(self) -> str:
+                self.other += 1
+                return VideoLostTests.FROZEN + VideoLostTests.streams(100, self.other)
+
+        guest = Frozen(self.plan())
+        clock, failure = self.on_clock(guest)
+        self.assertIsNotNone(failure)
+        self.assertRegex(str(failure), r"live capture: a new frame of the video viewfinder after the return preview stream")
+        self.assertRegex(str(failure), "counters stand at")
+        # The same guest with the preview stream's own counter rising passes.
+        class Live(self.Guest):
+            count = 0
+
+            def media_camera(self) -> str:
+                self.count += 1
+                return VideoLostTests.FROZEN + VideoLostTests.streams(100 + self.count, 5)
+
+        _, failure = self.on_clock(Live(self.plan()))
+        self.assertIsNone(failure)
+
+    def test_the_preview_stream_may_start_again_with_a_new_count(self) -> None:
+        # The camera closes and opens again: the stream is gone for a read, then listed from 0. The read pair that straddles
+        # it shows no rise, the next pair does.
+        counts = [None, None, 0, 3, 6]
+
+        class Reopening(self.Guest):
+            reads = 0
+
+            def media_camera(self) -> str:
+                count = counts[min(self.reads, len(counts) - 1)]
+                self.reads += 1
+                return VideoLostTests.FROZEN + VideoLostTests.streams(count, 7)
+
+        _, failure = self.on_clock(Reopening(self.plan()))
+        self.assertIsNone(failure)
+
+    def test_a_dump_without_the_application_s_preview_stream_is_not_a_live_viewfinder(self) -> None:
+        class Elsewhere(self.Guest):
+            count = 0
+
+            def media_camera(self) -> str:
+                self.count += 1
+                return VideoLostTests.FROZEN + VideoLostTests.streams(self.count, self.count, "ImageReader-1x1-1-9")
+
+        _, failure = self.on_clock(Elsewhere(self.plan()))
+        self.assertIsNotNone(failure)
+        self.assertRegex(str(failure), "lists no stream of the application's preview surface")
+
+    def test_the_parser_reads_the_preview_stream_by_its_consumer(self) -> None:
+        dump = self.FROZEN + self.streams(12, 99)
+        self.assertEqual(runner.preview_stream_frames(dump), {3: 12})
+        self.assertEqual(runner.preview_stream_frames(self.FROZEN + self.streams(None, 99)), {})
+        self.assertEqual(runner.preview_stream_frames(self.FROZEN + self.streams(12, 99, "SurfaceView[other.app/x]#2")), {})
+        # Without a counter the stream is not listed; frames_produced still sums every stream.
+        self.assertEqual(runner.preview_stream_frames("    Stream[3]: Output\n      Consumer name: " + PREVIEW_CONSUMER + "\n"), {})
+        self.assertEqual(runner.frames_produced(dump), 111)
+
+    def test_a_clip_without_media_data_does_not_pass(self) -> None:
+        # A sample table over an empty file (no mdat box, or an empty one, or one too small for the declared samples).
+        raw = movie(3.5, payload=0)
+        bare = b"".join(raw[start - 8:stop] for kind, start, stop in runner.mp4_boxes(raw, 0, len(raw)) if kind != b"mdat")
+        self.assertNotIn(b"mdat", bare)
+        self.assertGreater(runner.parse_mp4(bare).frames, 0)
+        self.assertEqual(runner.parse_mp4(bare).media_bytes, 0)
+        for name, clip in (("no mdat box", bare), ("an empty mdat", raw), ("a tiny mdat", movie(3.5, payload=100))):
+            with self.subTest(clip=name, which="the clip the loss saved"):
+                guest = self.Guest(self.plan(), movies=clip)
+                with self.assertRaisesRegex(runner.Failure, r"declares 105 video samples but its media data holds \d+ bytes"):
+                    self.run_check(guest)
+            with self.subTest(clip=name, which="the recording after the return"):
+                guest = self.Guest(self.plan())
+                guest.again_movie = clip
+                with self.assertRaisesRegex(runner.Failure, r"declares 105 video samples but its media data holds \d+ bytes"):
+                    self.run_check(guest)
+        # The smallest payload that passes: MINIMUM_SAMPLE_BYTES for each declared sample.
+        needed = 105 * runner.MINIMUM_SAMPLE_BYTES
+        self.assertIn("the recording ended by itself", self.run_check(self.Guest(self.plan(), movies=movie(3.5, payload=needed))))
+        with self.assertRaisesRegex(runner.Failure, "media data holds"):
+            self.run_check(self.Guest(self.plan(), movies=movie(3.5, payload=needed - 1)))
 
     def test_the_pipe_takes_one_line_and_is_waited_for(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
