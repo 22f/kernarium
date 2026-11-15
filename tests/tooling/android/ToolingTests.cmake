@@ -170,6 +170,16 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 60)
 
+# The old-application runner without a guest: the probe application's two
+# packages (manifest, DEX file, libraries built for armv7 when the host has the
+# tools), the verdicts, the permission review and the commands it sends.
+uml_add_tooling_test(
+    NAME android17-oldapp-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_oldapp_runner.py
+    LABELS android
+    TIMEOUT 120)
+
 # The compass runner without a guest: the wire against the golden frames (the
 # magnetic field records and the 20-byte "ANC3" frame), the oracle of the four
 # mounts and the compass points, the parsers of what the guest prints, its host

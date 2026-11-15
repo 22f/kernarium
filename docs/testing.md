@@ -992,6 +992,19 @@ Android sees (devices, keys, axes), what comes back (rumble, lights, the
 drivers' feature requests), hot plug, the relay's recovery, and reports the
 guest's cost per report and the relay's memory. `android17-gamepad-runner`
 (tooling) runs its wire, controllers and parsers without a guest.
+`android-oldapp` (integration) registers when `UML_ANDROID_OLDAPP_RELEASE`
+names a release built with the old-application layer
+([README](../android/lineage-24/README.md#old-applications)): a probe application
+of its own (`oldapp_probe_apk.py`, native code built for armeabi-v7a with the
+host's `clang++` and `ld.lld`) is installed as a package that targets API 10, past
+the block on old targets, and as one that targets API 29. The old package reads
+a Java `byte[]` through the Dalvik offsets, hands it back to Java and the array
+functions, from a second thread too, leaks local references and allocates below
+2 GiB, and passes; the modern package gets no layer and the raw read fails.
+`--host-shim` boots a release without the layer and loads a host-built copy from
+the old package after a control run without it, which qualifies the library and
+not the framework hook. `android17-oldapp-runner` (tooling) runs the package
+(manifest, DEX file, armv7 build), the verdicts and the commands without a guest.
 `android-camera` (integration) registers when `UML_ANDROID_CAMERA_RELEASE`
 names the release: the runner boots it with the launcher's synthetic camera
 (`--camera=synthetic|blocked`, `--camera-profile=`) and a layout on the vendor
