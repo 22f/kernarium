@@ -4,13 +4,16 @@
 #include "gadget_selection.hpp"
 #include "execution_histogram.hpp"
 #include "scalar_forwarding.hpp"
+#include "same_base.hpp"
 
 #include "cpu/arm64/floating_controls.hpp"
 
 #include <algorithm>
 #include <array>
+#include <optional>
 #include <span>
 #include <utility>
+#include <vector>
 
 /* Builder::build() below calls one of these five per guest instruction it
  * translates, and each of them calls on into the gadget selection tables.
@@ -819,6 +822,134 @@ struct Placed final {
 
 } // namespace moves
 
+/* Same-base translation reuse (engine/same_base.inc). */
+namespace same_base_pass {
+
+using same_base::Row;
+
+/* The row whose established entry is `established`, or null. Never
+ * destroyed, as the scalar contract index is: carriers translate with it until
+ * their process ends. */
+[[nodiscard]] const Row *find(std::uintptr_t established)
+{
+	[[clang::no_destroy]] static const auto sorted = [] {
+		std::vector<const Row *> rows;
+		for (const Row *row = same_base::uml_arm64_gadget_same_base_rows;
+		     row != same_base::uml_arm64_gadget_same_base_rows_end;
+		     ++row)
+			rows.push_back(row);
+		std::sort(rows.begin(), rows.end(),
+			[](const Row *a, const Row *b) {
+				return a->established < b->established;
+			});
+		return rows;
+	}();
+	const auto found = std::lower_bound(sorted.begin(), sorted.end(),
+		established, [](const Row *row, std::uintptr_t key) {
+			return row->established < key;
+		});
+	return found != sorted.end() && (*found)->established == established ?
+		*found : nullptr;
+}
+
+/* The latest transfer through each base in each direction, which a later
+ * one may follow while no other chain has written x25 since it: `writer` is
+ * the ordinal of the latest follower. */
+struct Candidate final {
+	const Row *row;
+	std::int64_t offset;
+	std::uint32_t word;
+	std::uint32_t ordinal;
+	unsigned mask;
+	/* The entry before it, which the execution histogram pairs it with. */
+	const void *previous;
+};
+
+struct State final {
+	std::array<std::array<Candidate, 2>, 32> candidates;
+	std::array<std::uint32_t, 2> valid{};
+	std::int64_t writer = -1;
+	std::uint32_t ordinal = 0;
+
+	void kill(std::uint32_t registers) noexcept
+	{
+		valid[0] &= ~registers;
+		valid[1] &= ~registers;
+	}
+
+	void kill(std::span<const std::uint32_t> window, std::size_t first,
+		std::size_t last) noexcept
+	{
+		for (std::size_t index = first;
+		     index <= last && index < window.size(); ++index)
+			kill(same_base::writes(window[index]));
+	}
+
+	/* The transfer whose entry is words[word], selected with forwarding
+	 * mask `mask`, after the entry `previous`: a follower of the candidate
+	 * it follows, which then leads, and the next candidate through its
+	 * base. Returns the candidate it rewrote to a leader, if any. */
+	std::optional<Candidate> transfer(ProgramWords &words, std::size_t word,
+		const Row &row, unsigned mask, const same_base::Access &access,
+		const void *previous) noexcept
+	{
+		const unsigned direction = access.load ? 1U : 0U;
+		auto &candidate = candidates[access.base][direction];
+		const auto current = ordinal++;
+		std::optional<Candidate> led;
+		if (((valid[direction] >> access.base) & 1U) != 0 &&
+		    static_cast<std::int64_t>(candidate.ordinal) >= writer &&
+		    row.follower[mask] != 0 &&
+		    candidate.row->leader[candidate.mask] != 0) {
+			const auto d = access.offset - candidate.offset;
+			const bool narrow = row.narrow_displacement(mask);
+			if (narrow ? d >= -128 && d <= 127 : d > -4096 && d < 4096) {
+				if (static_cast<std::int64_t>(candidate.ordinal) >
+				    writer) {
+					words[candidate.word] =
+						candidate.row->leader[candidate.mask];
+					led = candidate;
+				}
+				words[word] = row.follower[mask];
+				const auto field = narrow ?
+					std::uintptr_t{0xff} << 48 : std::uintptr_t{0xffff};
+				const auto value = narrow ?
+					(static_cast<std::uintptr_t>(d) & 0xffU) << 48 :
+					static_cast<std::uintptr_t>(d) & 0xffffU;
+				words[word + 1] = (words[word + 1] & ~field) | value;
+				writer = current;
+			}
+		}
+		candidate = {&row, access.offset, static_cast<std::uint32_t>(word),
+			current, mask, previous};
+		valid[direction] |= same_base::bit(access.base);
+		kill(access.written);
+		return led;
+	}
+};
+
+#if UML_GADGET_EXECUTION_HISTOGRAM
+/* A candidate rewritten to its leader is paired anew: its own counter with
+ * the entry before it, and the counter after its operand with it. Returns
+ * the predecessor of the entry at `current`, which may be that next one. */
+const void *recount(ProgramWords &words, const Candidate &led,
+	std::size_t current, const void *previous)
+{
+	const auto *leader = reinterpret_cast<const void *>(words[led.word]);
+	words[led.word - 2] =
+		diagnostics::execution_histogram_slot(led.previous, leader);
+	const std::size_t next = led.word + 2U;
+	if (next + 3U < words.size() &&
+	    words[next] == reinterpret_cast<std::uintptr_t>(
+		    &diagnostics::uml_arm64_gadget_execution_count))
+		words[next + 1] = diagnostics::execution_histogram_slot(leader,
+			reinterpret_cast<const void *>(words[next + 3]));
+	return next + 3U == current ? leader : previous;
+}
+#endif
+
+} // namespace same_base_pass
+
 } // namespace
 
 BuildResult Builder::build(
@@ -857,6 +988,9 @@ BuildResult Builder::build(
 #endif
 	std::uint16_t previous_scalar = scalar_no_register;
 	std::uint16_t previous_vector = scalar_no_register;
+	/* No streaming program takes part: its entries are streaming twins. */
+	const bool same_base = !streaming && options.same_base;
+	same_base_pass::State same_base_state;
 	/* FIZ, AH and NEP are guest state only where the virtual CPU implements
 	 * FEAT_AFP; there every entry that would ignore them runs as its twin,
 	 * which carries no forwarding contract. */
@@ -935,6 +1069,9 @@ BuildResult Builder::build(
 #endif
 				previous_scalar = head.destination;
 				previous_vector = scalar_no_register;
+				if (same_base)
+					same_base_state.kill(window, compiled,
+						compiled + head.instructions - 1);
 				compiled += head.instructions;
 				continue;
 			}
@@ -1016,6 +1153,40 @@ BuildResult Builder::build(
 				--suffixes.count;
 			compiled = compiled_before;
 			decoded = decode_streaming_fallback(context);
+		}
+		/* A run element is never a leader or a follower: a head may do it
+		 * without dispatching its word. */
+		if (same_base) {
+			bool handled = false;
+			const auto mask = options.scalar_forwarding ? source_mask : 0U;
+			if (current_scalar.contract != nullptr &&
+			    words.size() == emitted_start + 2U && mask < 4U &&
+			    words[emitted_start] ==
+				    current_scalar.contract->entries[mask] &&
+			    !prologue::is_element(instruction) &&
+			    !epilogue::is_element(instruction)) {
+				const auto *row = same_base_pass::find(
+					current_scalar.contract->entries[0]);
+				const auto access = same_base::scope_access(instruction);
+				if (row != nullptr && access &&
+				    access->family == row->family()) {
+#if UML_GADGET_EXECUTION_HISTOGRAM
+					if (const auto led = same_base_state.transfer(
+						    words, emitted_start, *row, mask,
+						    *access, previous_gadget))
+						previous_gadget = same_base_pass::recount(
+							words, *led, emitted_start,
+							previous_gadget);
+#else
+					(void)same_base_state.transfer(words,
+						emitted_start, *row, mask, *access,
+						nullptr);
+#endif
+					handled = true;
+				}
+			}
+			if (!handled)
+				same_base_state.kill(window, compiled_before, compiled);
 		}
 #if UML_GADGET_EXECUTION_HISTOGRAM
 		/* The entry is final only after forwarding selection above. */

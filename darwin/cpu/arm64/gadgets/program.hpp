@@ -315,6 +315,10 @@ struct BuildOptions final {
 	/* Select adjacent write-through forwarding for this program. */
 	bool scalar_forwarding{true};
 	bool vector_forwarding{true};
+	/* Reuse a transfer's translation for the next transfer through the
+	 * same base (engine/same_base.inc). Production leaves this true; a
+	 * test builds a block's established form with it false. */
+	bool same_base{true};
 	/* Test and portability validation can force optional checksum operations
 	 * through their precompiled software gadgets. Production leaves this
 	 * false and selects from detected host features.

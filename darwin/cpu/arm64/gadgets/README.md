@@ -73,6 +73,26 @@ indirect sites, as single-step builds them, get no head.
 or behind one and its resume, and generated runs against a model of the
 instructions.
 
+A transfer through a base register that nothing in its block has written since
+the previous transfer through it in the same direction reuses that transfer's
+translation (`engine/same_base.inc`). The earlier transfer's entry becomes a
+leader, which also keeps the host address it translated in x25; the later one
+becomes a follower, which adds its displacement to x25 when its access lies in
+that guest page and otherwise runs its leader's body, which translates. One
+chain holds x25 at a time, a transfer becomes a leader only when one follows
+it, and a run element is never either. A leader that misses or crosses a page
+re-dispatches its word as its established entry, except the in-place leaders
+that are not baked (an SP base, or a base or data forwarded), which have no
+entry of their form and keep that family's own miss, crossing and alignment
+paths. Either way a fault, its resume and the retirement count are those of the
+block built without the pass. No other gadget names x25
+(`arm64-gadget-same-base-register`). `arm64-gadget-same-base` runs every
+family, every leader's and follower's paths, a fault on either side of a
+follower and its resume, the page's edges and blocks that write the base
+between two transfers against the same guest words built with the pass off;
+`arm64-gadget-same-base-writes` checks the builder's list of the registers each
+instruction writes against the engine.
+
 ## Return ring and target table
 
 A cached return consults a private per-carrier ring of return records that
