@@ -50,6 +50,8 @@ struct Stats final {
 	 * routine (a size above 64 bytes, a backward copy, a page crossing or
 	 * a TLB miss). */
 	std::uint64_t mops_slow{};
+	std::uint64_t mops_fault{};
+	std::uint64_t mops_illegal{};
 	/* What binder lookups answered: hit, uncovered, not_ready, poisoned,
 	 * unverified, no_entry, stale. */
 	std::array<std::uint64_t, 7> finds{};

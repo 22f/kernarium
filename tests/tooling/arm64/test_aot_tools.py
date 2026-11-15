@@ -396,6 +396,42 @@ class StackAlignmentTests(unittest.TestCase):
         self.assertNotIn(self.GUARD, unit)
 
 
+class CensusTests(unittest.TestCase):
+    """The byte census names the kind of every word of a unit."""
+
+    LDR = 0xf9400020      # ldr x0, [x1]
+    STR = 0xf9000022      # str x2, [x1]
+    ADD = 0x8b020020      # add x0, x1, x2
+
+    def census(self) -> tuple[dict, int]:
+        library = library_of([self.LDR, self.STR, self.ADD, RET],
+                             [(0, 16)])
+        unit = unit_words(library)
+        return library.stats.census, 4 * len(unit)
+
+    def test_the_kinds_add_up_to_the_unit(self) -> None:
+        census, size = self.census()
+        self.assertEqual(sum(census.values()), size)
+        self.assertEqual(census["other"], 0)
+
+    def test_a_load_and_a_store_are_a_probe_an_access_and_a_stub(self) -> None:
+        census, _ = self.census()
+        # A probe of a wide access is eight words: the untag, the index, the
+        # entry address, the entry load, the host address, the last byte,
+        # the compare and the branch to its cold stub of two words.
+        self.assertEqual(census["mem.probe"], 2 * 8 * 4)
+        self.assertEqual(census["mem.access"], 2 * 4)
+        self.assertEqual(census["stub.mm"], 2 * 2 * 4)
+        self.assertEqual(census["insn"], 4)
+        self.assertEqual(census["table"], 4096)  # one text page of entries
+
+    def test_the_stored_source_is_counted_once(self) -> None:
+        library = library_of([self.ADD, RET], [(0, 8)])
+        digests = [1] * ((library.table_end - library.table_base) // 4096)
+        library.build(digests, bytes(4096))
+        self.assertEqual(library.stats.census["src"], 4096)
+
+
 class WideningTests(unittest.TestCase):
     """Ordered accesses, atomics and the MOPS stages that rewritten code
     runs itself, and what is left to the engine."""

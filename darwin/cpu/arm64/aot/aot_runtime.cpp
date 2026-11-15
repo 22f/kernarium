@@ -191,7 +191,7 @@ std::atomic<std::uint64_t> binds{0}, verifications{0}, pages_hashed{0},
 	unreadable{0}, poisoned{0}, enters{0}, steps{0}, retired{0}, refills{0},
 	refill_failures{0}, cross_hits{0}, cross_misses{0}, max_retired{0},
 	verify_nanos{0}, step_nanos{0}, steps_run{0}, code_bumps{0},
-	history_queries{0}, mops_slow{0};
+	history_queries{0}, mops_slow{0}, mops_fault{0}, mops_illegal{0};
 std::array<std::atomic<std::uint64_t>, 4> refusals{};
 /* The guest addresses AOT code stepped at most: library << 40 | offset. */
 constexpr std::size_t step_slots = 32768;
@@ -293,11 +293,13 @@ void write_report() noexcept
 		get(counters::cross_misses));
 	std::fprintf(file,
 		"max_retired %llu verify_nanos %llu step_nanos %llu steps_run %llu "
-		"code_bumps %llu history_queries %llu mops_slow %llu\n",
+		"code_bumps %llu history_queries %llu mops_slow %llu mops_fault %llu "
+		"mops_illegal %llu\n",
 		get(counters::max_retired), get(counters::verify_nanos),
 		get(counters::step_nanos), get(counters::steps_run),
 		get(counters::code_bumps), get(counters::history_queries),
-		get(counters::mops_slow));
+		get(counters::mops_slow), get(counters::mops_fault),
+		get(counters::mops_illegal));
 	std::fprintf(file, "refused tbi %llu sp %llu exclusive %llu fp %llu\n",
 		get(counters::refusals[0]), get(counters::refusals[1]),
 		get(counters::refusals[2]), get(counters::refusals[3]));
@@ -429,6 +431,10 @@ std::uint64_t mops(CpuState *cpu, ::uml::memory::Tlb *tlb,
 			registers[0], registers[1], registers[2]);
 		break;
 	}
+	if (outcome == MopsOutcome::fault)
+		UML_AOT_COUNT(mops_fault, 1);
+	else if (outcome != MopsOutcome::complete)
+		UML_AOT_COUNT(mops_illegal, 1);
 	return outcome == MopsOutcome::complete ? 1 :
 		outcome == MopsOutcome::fault ? 0 : 2;
 }
@@ -560,6 +566,8 @@ Stats stats() noexcept
 	result.code_bumps = get(counters::code_bumps);
 	result.history_queries = get(counters::history_queries);
 	result.mops_slow = get(counters::mops_slow);
+	result.mops_fault = get(counters::mops_fault);
+	result.mops_illegal = get(counters::mops_illegal);
 	for (std::size_t i = 0; i < result.finds.size(); ++i)
 		result.finds[i] = get(counters::find_results[i]);
 	return result;
@@ -575,7 +583,8 @@ void reset_stats() noexcept
 		     &counters::cross_misses, &counters::max_retired,
 		     &counters::verify_nanos, &counters::step_nanos,
 		     &counters::steps_run, &counters::code_bumps,
-		     &counters::history_queries, &counters::mops_slow})
+		     &counters::history_queries, &counters::mops_slow,
+		     &counters::mops_fault, &counters::mops_illegal})
 		counter->store(0, std::memory_order_relaxed);
 	for (auto &counter : counters::refusals)
 		counter.store(0, std::memory_order_relaxed);

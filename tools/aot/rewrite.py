@@ -193,6 +193,21 @@ TPIDR_EL0 = 0xd53bd040
 TPIDR_MASK = 0xffffffe0
 
 
+# The byte census of a unit: every emitted word has one kind. The narrowest
+# emitter that knows a word's purpose tags it, and the untagged words of an
+# instruction take the instruction's class.
+CENSUS = ("other", "insn", "spill", "branch", "pcrel", "step", "hint",
+          "atomic", "mops.site", "mem.ea", "mem.probe", "mem.access",
+          "mem.wb", "charge", "gate", "stub.mm", "stub.st", "stub.xu",
+          "stub.ma", "stub.xb", "exits", "mops.thunk", "table", "src")
+CENSUS_CODE = {name: code for code, name in enumerate(CENSUS)}
+CENSUS_OUTER = {"branch_imm": "branch", "condbranch": "branch",
+                "compbranch": "branch", "testbranch": "branch",
+                "branch_reg": "branch", "pcreladdr": "pcrel",
+                "memcms": "mops.site", "ldstord": "atomic", "memop": "atomic",
+                "comswap": "atomic", "hint": "hint"}
+
+
 @dataclasses.dataclass
 class Stats:
     functions: int = 0
@@ -206,6 +221,8 @@ class Stats:
     # Words emitted, by instruction class, charges, stubs and the rest.
     words: collections.Counter = dataclasses.field(
         default_factory=collections.Counter)
+    # Bytes of the unit by kind (CENSUS), set when the unit is built.
+    census: dict = dataclasses.field(default_factory=dict)
 
 
 class Library:
@@ -262,6 +279,8 @@ class Library:
         # The guest offset of the instruction being emitted.
         self.cur = 0
         self.charge = self._plan_charges()
+        # One census code per emitted word (see CENSUS).
+        self.census = bytearray()
 
     def _flow(self, word: int, offset: int) -> tuple[str, int | None]:
         """How control leaves an instruction: its kind and direct target."""
@@ -327,6 +346,16 @@ class Library:
                 if offset in self.covered}
 
     # labels
+    def tag(self, kind: str, start: int) -> None:
+        """Give the words emitted since `start` that have no kind this one."""
+        end = len(self.asm._w)
+        census = self.census
+        if len(census) < end:
+            census.extend(bytes(end - len(census)))
+        if end > start:
+            census[start:end] = census[start:end].replace(
+                b"\0", bytes((CENSUS_CODE[kind],)))
+
     def lab(self, kind: str, value: int) -> str:
         return f"L{self.index}{kind}{value:x}"
 
@@ -359,9 +388,11 @@ class Library:
             raise A.AsmError("a library's text must be below 16 MiB")
         asm = self.asm
         self.fn_xb.add(target)
+        before = len(asm._w)
         asm.word(A.ldr_x(T0, 31, SLOT_PSTATE))
         asm.word(A.ldrb_w(T0, T0, page))
         asm.cbz(T0, self.xb_label(target), sf=0)
+        self.tag("gate", before)
         self.stats.words["gate"] += 3
 
     def xb_label(self, target: int) -> str:
@@ -379,17 +410,28 @@ class Library:
         asm = self.asm = A.Assembler()
         asm.label("UNIT")
         emit_exits(asm, self)
+        self.tag("exits", 0)
         for function in self.functions:
             self.stats.functions += 1
             self._emit_function(function)
         before = len(asm._w)
         emit_mops_thunks(asm, self)
         self.stats.words["mops_thunks"] += len(asm._w) - before
+        self.tag("mops.thunk", before)
         asm.label("TAB")
+        before = len(asm._w)
         asm.data(bytes(4 * self.table_words))
+        self.tag("table", before)
         asm.label("SRC")
+        before = len(asm._w)
         asm.data(source)
+        self.tag("src", before)
         unit = bytearray(asm.resolve())
+        self.stats.census = {
+            name: 4 * self.census.count(code)
+            for name, code in CENSUS_CODE.items()}
+        # Conditional branches out of range grew by one word each.
+        self.stats.census["relax"] = len(unit) - 4 * len(asm._w)
         table_at = asm.label_address("TAB")
         view = memoryview(unit)[table_at:table_at + 4 * self.table_words
                                 ].cast("I")
@@ -422,8 +464,10 @@ class Library:
             if cost:
                 asm.label(self.lab("G", offset))
                 self.fn_xu.add(offset)
+                before = len(asm._w)
                 asm.word(A.add_imm(BUD, BUD, cost, sub=True))
                 asm.tbz(BUD, 63, self.lab("XU", offset), nz=True)
+                self.tag("charge", before)
                 self.stats.words["charge"] += 2
             asm.label(self.lab("E", offset))
             if self.count_retired:
@@ -449,6 +493,8 @@ class Library:
         result = self._classify(offset, word)
         label = self._site_key.split(":")[0] if self.stats.steps == steps \
             else "step"
+        self.tag("step" if label == "step" else
+                 CENSUS_OUTER.get(label, "spill"), before)
         self.stats.words[label] += len(self.asm._w) - before
         if self.stats.steps == steps:
             self.sites.setdefault(self._site_key, []).append(offset)
@@ -618,6 +664,7 @@ class Library:
                 needed.append(guest)
         if not needed:
             self.asm.word(word)
+            self.tag("insn", len(self.asm._w) - 1)
         elif len(needed) > len(SCRATCH):
             return self._step(offset, "operands")
         else:
@@ -630,6 +677,7 @@ class Library:
                 if guest in mapping:
                     patched = (patched & ~(31 << lsb)) | (mapping[guest] << lsb)
             self.asm.word(patched)
+            self.tag("insn", len(self.asm._w) - 1)
             written = {self._resolve(word & 31, sp_capable)
                        for lsb, sp_capable in fields if lsb == 0}
             for guest in needed:
@@ -847,6 +895,7 @@ class Library:
                 virtual_operands[1]:
             return self._step(offset, "pair-same-virtual")
         # ---- the effective address, in a host register
+        census_start = len(asm._w)
         if literal is not None:
             self._materialize(T0, literal)
             ea = T0
@@ -888,6 +937,8 @@ class Library:
         # puts neighbouring pages in one entry (darwin/memory/tlb.hpp), so a
         # crossing is a miss. A miss restarts the instruction from its entry
         # after the host fills the entry, or steps it when the host cannot.
+        self.tag("mem.ea", census_start)
+        census_start = len(asm._w)
         if literal is None and base_g != "sp":
             asm.word(A.ubfx(T0, ea, 0, 56))
         entry = 0 if load else 16
@@ -900,6 +951,8 @@ class Library:
             asm.word(A.add_imm(T0, T0, total - 1))
         asm.word(A.eor_reg(T1, T1, T0, shift=1, amount=12))
         asm.cbz(T1, self.lab("MM", offset), sf=1, nz=True)
+        self.tag("mem.probe", census_start)
+        census_start = len(asm._w)
         # ---- the access, through the entry's host delta
         if pair:
             keep = word & ((3 << 30) | (1 << 26) | (1 << 22))
@@ -943,6 +996,8 @@ class Library:
                          (0b011 << 13) | (0b10 << 10) | (T2 << 5) | host_rt)
             if guest_rt in VIRTUAL and load:
                 self._store_guest(T1, guest_rt)
+        self.tag("mem.access", census_start)
+        census_start = len(asm._w)
         # ---- writeback of the base register, after the access succeeded
         if wb_mode != "none":
             if base_virtual:
@@ -954,6 +1009,7 @@ class Library:
                     self._guard_sp(offset, T0)
             else:
                 self._add_immediate(base, base, imm)
+        self.tag("mem.wb", census_start)
         self.stats.inlined += 1
         self.stats.kinds["pair" if pair else "mem"] += 1
         return True
@@ -1176,9 +1232,12 @@ class Library:
         # branch-exit stubs they leave by).
         for target in sorted(self.fn_pg):
             asm.label(self.pg_label(target))
+            before = len(asm._w)
             self.page_test(target)
             asm.b(self.direct_label(target))
+            self.tag("gate", before)
             self.stats.words["gate"] += 1
+        before = len(asm._w)
         for offset, kind, total in self.fn_mm:
             # The thunk gets the instruction's slot in the entry table in T1
             # and the access in the routine it enters.
@@ -1187,18 +1246,27 @@ class Library:
             asm.word(A.movz(T1, slot & 0xffff))
             chunk = slot >> 16
             asm.b(f"REFILL_{kind}_{total}" + (f"_{chunk}" if chunk else ""))
+        self.tag("stub.mm", before)
+        before = len(asm._w)
         for offset in self.fn_st:
             asm.label(self.lab("ST", offset))
             self._exit_to(offset, "EXIT_STEP")
+        self.tag("stub.st", before)
+        before = len(asm._w)
         for offset in sorted(self.fn_xu):
             asm.label(self.lab("XU", offset))
             self._exit_to(offset, "EXIT_BUDGET")
+        self.tag("stub.xu", before)
+        before = len(asm._w)
         for offset in self.fn_ma:
             asm.label(self.lab("MA", offset))
             self._exit_to(offset + 4, "EXIT_BRANCH")
+        self.tag("stub.ma", before)
+        before = len(asm._w)
         for target in sorted(self.fn_xb):
             asm.label(self.xb_label(target))
             self._exit_to(target, "EXIT_BRANCH")
+        self.tag("stub.xb", before)
 
 
 # ---- the entry and exit routines -----------------------------------------
@@ -1710,7 +1778,8 @@ def build_unit(job: tuple) -> dict:
                   "steps": library.stats.steps,
                   "steps_by_cause": dict(library.stats.steps_by_cause),
                   "inlined_by_kind": dict(library.stats.kinds),
-                  "words": dict(library.stats.words)},
+                  "words": dict(library.stats.words),
+                  "census": library.stats.census},
     })
     return unit
 
@@ -1781,6 +1850,15 @@ def build_blob(units: list[dict], layout: dict[str, int],
     manifest = {
         "release_id": release_id,
         "blob_bytes": len(blob),
+        # What is not in a unit: the header and library records, ENTER, the
+        # page-digest hash, and the padding that aligns the units.
+        "blob_overhead": {
+            "header": header_size,
+            "enter": len(enter_code),
+            "hash": 16 * slots,
+            "alignment": len(blob) - header_size - len(enter_code) -
+            16 * slots - sum(len(unit["unit"]) for unit in units),
+        },
         "libraries": [{
             "path": unit["path"],
             "elf_sha256": unit["sha256"],
@@ -1796,6 +1874,7 @@ def build_blob(units: list[dict], layout: dict[str, int],
             "steps_by_cause": unit["stats"]["steps_by_cause"],
             "inlined_by_kind": unit["stats"]["inlined_by_kind"],
             "words": unit["stats"]["words"],
+            "census": unit["stats"]["census"],
             "source_bytes": unit["table_end"] - unit["table_base"],
         } for unit in units],
     }
