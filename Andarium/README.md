@@ -225,8 +225,8 @@ block.
   but TestFlight, whose icon is `DuskEmber` (`Shared/DuskEmber.icon`).
   `APP_ICON_NAME` in `Config/Andarium.xcconfig` names the document a build
   compiles and the other is left out; the bundle check requires each bundle
-  to have its own icon in Info.plist and Assets.car and an AppStore bundle to
-  hold nothing of DuskEmber.
+  to have its own icon in Info.plist and as the one app icon of the compiled
+  `Assets.car`, so an AppStore bundle holds nothing of DuskEmber.
 - It refuses an embedded artifact that is behind the archived commit: a build
   phase runs [`scripts/check-embedded-artifacts.py`](../scripts/check-embedded-artifacts.py),
   which compares the accepted Android release and kernel descriptors with the
@@ -640,7 +640,7 @@ control out.
   `WhatsNewTrack` loads, and any value but `BETA` or `APP_STORE` stops the
   compile), which the bundle check of an AppStore or TestFlight build
   requires; `andarium-whats-new-track` runs the loader's source under each
-  configuration's resolved condition. One string table, `Localization/WhatsNew.xcstrings`,
+  configuration's resolved condition and holds the icon settings. One string table, `Localization/WhatsNew.xcstrings`,
   serves both.
   The first launch of an update that carries notes shows a ribbon above Start,
   on at most three launches, that opens them; a build shows the notes up to its

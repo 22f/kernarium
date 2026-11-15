@@ -97,7 +97,9 @@ uml_add_tooling_test(
 # Each configuration reads its own track of What's New notes: the target's resolved
 # build settings give the compilation conditions, the loader's own source is compiled
 # with them and run against a bundle that holds a different list in each track's file,
-# and a track value that names neither track stops the compile.
+# and a track value that names neither track stops the compile. The same settings
+# give each configuration's app icon, the exclusion of the other icon's document and
+# no other app icon asset.
 uml_add_tooling_test(
     NAME andarium-whats-new-track
     COMMAND ${Python3_EXECUTABLE} -B

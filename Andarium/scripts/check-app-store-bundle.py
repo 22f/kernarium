@@ -124,9 +124,11 @@ application that must:
     App Store track's, each a list of releases; and
   - have the app icon of its own configuration alone: DuskJade in AppStore,
     DuskEmber in TestFlight, as the primary icon of the iPhone and the iPad in
-    Info.plist and as an icon of the compiled asset catalog (Assets.car), and
-    nothing of the other icon in any file name or file of the bundle, so an
-    AppStore bundle holds nothing of DuskEmber; and
+    Info.plist and as the one app icon of the compiled asset catalog
+    (Assets.car, read by its typed renditions with assetutil), and no other
+    icon: none in Info.plist's icon keys, a nested catalog or an icon file or
+    document of the other icon's name, so an AppStore bundle holds nothing of
+    DuskEmber; and
   - open the files of the two document pickers (Install APK and the file
     browser's Import) in place, through SwiftUI's fileImporter, and hold no
     trace of the copy-mode presenter every other configuration uses
@@ -1068,8 +1070,7 @@ def bundle_tree(app: Path) -> BundleTree:
                         plist_keys[relative] = frozenset(str(key) for key in content)
                 elif name == "Assets.car":
                     data = path.read_bytes()
-                    catalog_names[relative] = frozenset(
-                        item for item in (*RESOURCE_NAMES, *(name.encode() for name in ICON_NAMES)) if item in data)
+                    catalog_names[relative] = frozenset(item for item in RESOURCE_NAMES if item in data)
             except (OSError, plistlib.InvalidFileException, ValueError, OverflowError):
                 continue
     return BundleTree(tuple(sorted(directories)), plist_keys, catalog_names)
@@ -1281,9 +1282,12 @@ def notes_problems(app: Path, configuration: str) -> tuple[list[str], str]:
 # the one document its configuration names and leaves the other out.
 ICON_JADE = "DuskJade"
 ICON_EMBER = "DuskEmber"
-ICON_NAMES = (ICON_JADE, ICON_EMBER)
 # Info.plist's icon blocks, for the iPhone and for the iPad.
 ICON_KEYS = ("CFBundleIcons", "CFBundleIcons~ipad")
+# The files an icon's name begins: its renditions and its document.
+ICON_SUFFIXES = (".png", ".icon", ".icns", ".jpg", ".jpeg", ".heic", ".pdf", ".svg")
+# The asset types of an app icon in a compiled catalog (`assetutil --info`).
+ICON_ASSET_TYPES = ("Icon Image", "IconImageStack")
 
 
 def app_icons(configuration: str) -> tuple[str, str]:
@@ -1291,12 +1295,43 @@ def app_icons(configuration: str) -> tuple[str, str]:
     return (ICON_EMBER, ICON_JADE) if configuration == TESTFLIGHT else (ICON_JADE, ICON_EMBER)
 
 
+@functools.lru_cache(maxsize=None)
+def catalog_icons(catalog: Path) -> frozenset[str] | None:
+    """The app icons a compiled asset catalog holds, by the names of its typed icon
+    renditions as the platform's own reader (`assetutil --info`) lists them; None
+    if the catalog cannot be read."""
+    try:
+        done = subprocess.run(
+            ["xcrun", "assetutil", "--info", str(catalog)], check=False, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=120)
+        entries = json.loads(done.stdout) if done.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if not isinstance(entries, list):
+        return None
+    return frozenset(entry["Name"] for entry in entries
+                     if isinstance(entry, dict) and entry.get("AssetType") in ICON_ASSET_TYPES
+                     and isinstance(entry.get("Name"), str))
+
+
+def strings_of(value: object) -> list[str]:
+    """Every string of a property list value, nested ones included."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for item in value.values() for text in strings_of(item)]
+    if isinstance(value, list):
+        return [text for item in value for text in strings_of(item)]
+    return []
+
+
 def icon_problems(app: Path, configuration: str) -> tuple[list[str], str]:
-    """Whether the bundle has its configuration's app icon, and nothing of the other
-    one: the icon is the primary icon of both Info.plist blocks and an icon of the
-    application's compiled asset catalog, and the other icon's name is in no file
-    name and no file of the bundle (the catalogs of nested bundles included). The
-    line says which icon the bundle has."""
+    """Whether the bundle has its configuration's app icon and no other. The icon is
+    the primary icon of both Info.plist blocks, which name no other icon, and the one
+    app icon of the application's compiled asset catalog, read by its typed
+    renditions; no catalog of a nested bundle holds the other icon, and no icon file
+    or document of the other icon's name is in the bundle. Text that only mentions
+    an icon's name is no icon. The line says which icon the bundle has."""
     own, other = app_icons(configuration)
     problems = []
     try:
@@ -1311,23 +1346,34 @@ def icon_problems(app: Path, configuration: str) -> tuple[list[str], str]:
         if named != own:
             problems.append(f"Info.plist: {key} names {named or 'no icon'} as the primary icon; "
                             f"{configuration} has {own}")
-    if "Assets.car" not in catalog_holders(app, own.encode()):
+        elif any(other.lower() in text.lower() for text in strings_of(block)):
+            problems.append(f"Info.plist: {key} names the {other} icon though {configuration} has {own}")
+    # What a catalog states is the icon's name: artwork compiled under the other icon's
+    # name is not told from it.
+    catalogs = bundle_tree(app).catalog_names
+    if "Assets.car" not in catalogs:
         problems.append(f"Assets.car: lacks the {own} icon; {configuration} has it")
-    reported = set()
+    for relative in sorted(catalogs):
+        icons = catalog_icons(app / relative)
+        if icons is None:
+            # A nested catalog the platform cannot read draws no icon; the application's must be read.
+            if relative == "Assets.car":
+                problems.append(f"Assets.car: cannot be read for its app icons; {configuration} has {own}")
+        elif relative == "Assets.car":
+            if own not in icons:
+                problems.append(f"Assets.car: lacks the {own} icon; {configuration} has it")
+            for name in sorted(icons - {own}):
+                problems.append(f"Assets.car: holds the {name} icon though {configuration} has {own} alone")
+        elif other in icons:
+            problems.append(f"{relative}: holds the {other} icon though {configuration} has {own}")
     for directory in bundle_tree(app).directories:
         try:
-            names = sorted(path for path in directory.iterdir() if path.name.lower().startswith(other.lower()))
+            names = sorted(path for path in directory.iterdir()
+                           if path.name.lower().startswith(other.lower()) and path.suffix.lower() in ICON_SUFFIXES)
         except OSError:
             continue
-        for path in names:
-            reported.add(str(path.relative_to(app)))
-            problems.append(f"{path.relative_to(app)}: is a file of the {other} icon though {configuration} has {own}")
-    for path in catalog_holders(app, other.encode()):
-        reported.add(path)
-        problems.append(f"{path}: holds the {other} icon though {configuration} has {own}")
-    for path in value_leaks(app, [other]):
-        if path not in reported:
-            problems.append(f"{path}: holds the name {other} though {configuration} has the icon {own}")
+        problems.extend(f"{path.relative_to(app)}: is a file of the {other} icon though {configuration} has {own}"
+                        for path in names)
     return problems, f"app icon is {own}"
 
 
@@ -2000,8 +2046,6 @@ def planned_scans(options: argparse.Namespace) -> set[Scan]:
     else:
         feedback = follow_x = icp = tip = review = True
     scans: set[Scan] = set()
-    if feedback and follow_x and icp and tip and review:
-        scans |= value_scans([app_icons(options.configuration)[1]])
     if feedback:
         scans |= value_scans([options.feedback_receiver])
     if follow_x:
