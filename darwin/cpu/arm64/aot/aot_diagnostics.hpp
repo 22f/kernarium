@@ -42,6 +42,10 @@ struct Stats final {
 	 * that took in all (the engine's side of a step, entry to return). */
 	std::uint64_t step_nanos{};
 	std::uint64_t steps_run{};
+	/* How many times the code-change sequence moved between lookups, and
+	 * how many times a lookup asked the history what changed. */
+	std::uint64_t code_bumps{};
+	std::uint64_t history_queries{};
 };
 
 /* Override DARWIN_UML_AOT (nullopt: read the environment again). */

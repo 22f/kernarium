@@ -169,6 +169,9 @@ private:
 	std::array<PageSlot, page_slots> pages_{};
 	std::size_t next_instance_{};
 	std::uint64_t ticks_{};
+	/* The last code-change sequence find() was given (a diagnostics build
+	 * counts how often it moves). */
+	std::uint64_t last_changes_{};
 	/* Moves whenever the set of usable instances changes. */
 	std::uint64_t epoch_{1};
 	CrossTable cross_{};

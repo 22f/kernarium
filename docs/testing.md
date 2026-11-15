@@ -742,8 +742,16 @@ blocker in every one of them.
   (thread pointer, misaligned stack pointer, faulting stack pages and floating-
   point modes included), then the unhappy paths (single step, preemption
   bound, two load biases, other or changed bytes, tagged pointers, page
-  crossings, forced refills). `arm64-aot-tools` checks the generator's
-  encoders and classifier.
+  crossings, forced refills). A generated library holds one function per
+  instruction form of the ordered, atomic and MOPS classes, so each form runs
+  from random states. `arm64-aot-tools` checks the generator's encoders and
+  classifier, including which forms are left to the engine.
+- `aot-guest-workloads` (integration, opt-in like the other Android guest
+  tests: it exists where `UML_AOT_IMAGE` and the Android launcher target do)
+  boots the release twice, without and with `DARWIN_UML_AOT=1`, runs one
+  workload per covered library family and the guest probe (faults inside
+  rewritten libz code, text patched at run time), and requires identical
+  output; speed is printed, not judged.
 - `arm64-instruction-corpus` runs the generated A64 corpus through both
   engines; the special records (native SME, absent features, the SM = 0 family,
   top-byte ignore, native floating-point traps) have their own
