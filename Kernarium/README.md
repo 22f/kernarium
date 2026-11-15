@@ -319,8 +319,9 @@ opens the microphone. Turning it on is the one place iOS is asked for access
 (`MicrophoneSetting`); the application then tells the runtime
 (`set_microphone`), which never asks. While the switch is on, the input also
 opens when a camera opens in video mode, ahead of the recording, and closes
-when video mode ends. A guest kept running in the background may keep
-recording under the `audio` background mode.
+when video mode ends, unless a recording is running, which keeps it open. A
+guest kept running in the background may keep recording under the `audio`
+background mode.
 [`../darwin/device/audio/README.md`](../darwin/device/audio/README.md#microphone)
 owns the device side.
 
