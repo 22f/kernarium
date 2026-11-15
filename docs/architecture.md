@@ -520,12 +520,15 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   the digests of its code pages), page aligned in the blob. Branches between
   libraries verified in the same address space (up to 64 instances) stay in
   rewritten code; any other target leaves to the engine.
-- Binding: the framework stands for exact guest bytes. A 64-bit digest of
-  each 4 KiB code page identifies a library. An instance is verified in full
-  before its code first runs, then only for the pages the address space's
-  code-change history names. A page the guest has not mapped yet defers the
-  instance and a later lookup tries again; any other difference retires the
-  instance for that address space, and the engine runs the code.
+- Binding: the framework stands for exact guest bytes and stores them: the
+  text pages of each library, read-only. A mapped page authorizes native
+  execution only by an exact comparison with the stored page; a 64-bit digest
+  of each 4 KiB page merely finds which library a page belongs to. An
+  instance is verified in full before its code first runs, then only for the
+  pages the address space's code-change history names. A page the guest has
+  not mapped yet defers the instance and a later lookup tries again; any
+  other difference retires the instance for that address space, and the
+  engine runs the code.
 - Entry: only at an instruction the framework covers, with PSTATE.SM clear,
   no FPCR trap enable and FPCR.FIZ, AH and NEP clear, no single step, no open
   exclusive monitor, top-byte ignore on (the framework probes the TLB with
@@ -537,11 +540,16 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
 - Exit: whatever the framework does not inline stops with committed state and
   the engine runs exactly that instruction (`run_trap_enabled_instruction`)
   before the next entry, so faults, system calls, signals and debugger
-  exits are the engine's own. One entry retires at most 4096 instructions,
-  the engine's chaining limit: the budget is charged at function entries,
-  every backward-branch target and indirect branches, so interrupt and
-  mapping-change polling are those of the engine; retired counts are
-  estimates.
+  exits are the engine's own. The budget of an entry is 4096 instructions,
+  the engine's chaining limit. It is charged in advance at function entries,
+  every backward-branch target, call targets and points inserted so that no
+  run of code from a point is longer than 32 instructions; a branch, a
+  fall-through or a landing through the entry table into a point pays it, and
+  an indirect branch pays for itself and for the run it lands in. Every
+  cycle therefore pays at least what it executes, and an entry retires at
+  most 4096 + 32 instructions, so interrupt and mapping-change polling are
+  those of the engine. A diagnostics build counts the instructions to check
+  the bound; a product reports the budget used.
 - Memory: inline TLB probe of the engine's entry (the page of the access's
   last byte, read or write key); a page crossing steps; a miss calls the
   executor's refill once, with every register the host ABI lets a callee

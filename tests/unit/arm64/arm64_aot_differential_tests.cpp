@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <arm_acle.h>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -336,7 +337,12 @@ struct Environment final {
 			PROT_READ | PROT_EXEC, true}
 	{
 		backing.put(0, image_.bytes);
+		/* The stub: a system call, and after it `ldxr x0, [x1]; br x2`
+		 * for the case that opens an exclusive monitor in the engine and
+		 * then branches into the library. */
 		stub_backing.put32(0, system_call);
+		stub_backing.put32(4, 0xc85f7c20U);
+		stub_backing.put32(8, 0xd61f0040U);
 	}
 
 	/* Map the pages of the library that were left out. */
@@ -1455,6 +1461,207 @@ void loop_through_another_range(const LibraryImage &image,
 	require(have.max_block <= 4096 + 64);
 }
 
+/* The instructions between two polls are the instructions that ran: the
+ * framework of a diagnostics build counts each one it starts. */
+constexpr std::uint64_t entry_bound = 4096 + 32 + 2; /* RUN_LIMIT, rewrite.py */
+
+/* A state rewritten code may be entered with: SP aligned and none of the
+ * FPCR controls the entry refuses. */
+void enterable(Case &c)
+{
+	c.cpu.sp &= ~0xfULL;
+	c.cpu.fpcr &= ~static_cast<std::uint32_t>(arm64::fpcr_afp_controls);
+}
+
+/* Forty instructions and a RET that returns to the start of the run: a lap
+ * the budget used to charge four for (libz 0x11638..0x116d8). */
+void return_loop_is_bounded(const LibraryImage &image)
+{
+	constexpr std::uint64_t first = 0x11638, last = 0x116d8;
+	std::uint32_t word;
+	std::memcpy(&word, &image.bytes[last], 4);
+	require(word == 0xd65f03c0U); /* ret */
+	const auto bias = Fixture::bias;
+	Fixture got{4321, image};
+	SplitMix rng{47};
+	auto c = make_case(rng, bias, first, false, true, arena_base(bias));
+	c.cpu.registers[30] = bias + first;
+	enterable(c);
+	aot::reset_stats();
+	aot::set_enabled(true);
+	const auto run = drive(got.env, got.arena, c, 60);
+	aot::set_enabled(false);
+	const auto st = aot::stats();
+	std::fprintf(stderr, "return loop: %llu entries, longest entry %llu "
+		"instructions (%zu blocks)\n",
+		static_cast<unsigned long long>(st.enters),
+		static_cast<unsigned long long>(st.max_retired), run.blocks);
+	require(st.enters >= 20);
+	require(st.max_retired > 1000);
+	require(st.max_retired <= entry_bound);
+}
+
+/* STP X29, X30, [SP, #-32]! (libz 0x8028) entered with SP = 8 (mod 16): the
+ * engine faults without writing, so rewritten code is not entered. */
+void misaligned_sp_at_a_pair_store(const LibraryImage &image)
+{
+	constexpr std::uint64_t at = 0x8028;
+	std::uint32_t word;
+	std::memcpy(&word, &image.bytes[at], 4);
+	require(word == 0xa9be7bfdU);
+	const auto bias = Fixture::bias;
+	Fixture ref{4331, image}, got{4332, image};
+	SplitMix rng{53};
+	auto c = make_case(rng, bias, at, false, true, arena_base(bias));
+	c.cpu.sp = (c.cpu.sp & ~0xfULL) - 8;
+	aot::reset_stats();
+	aot::set_enabled(false);
+	const auto want = drive(ref.env, ref.arena, c, max_blocks);
+	aot::set_enabled(true);
+	const auto have = drive(got.env, got.arena, c, aot_max_blocks);
+	aot::set_enabled(false);
+	require(!want.faults.empty());
+	require(same(want, have, c));
+	const auto st = aot::stats();
+	require(st.refusals[1] > 0);
+}
+
+/* An exclusive monitor the gadget engine opened (LDXR, then a branch into
+ * the library) is the engine's to complete: nothing is entered. */
+void open_exclusive_is_not_entered(const LibraryImage &image,
+	const std::vector<Function> &functions)
+{
+	const auto bias = Fixture::bias;
+	Fixture ref{4341, image}, got{4342, image};
+	SplitMix rng{59};
+	auto c = make_case(rng, bias, stub_offset + 4, false, true,
+		arena_base(bias));
+	enterable(c);
+	c.cpu.registers[1] = arena_base(bias) + 0x40;
+	c.cpu.registers[2] = bias + functions[3].start;
+	aot::reset_stats();
+	aot::set_enabled(false);
+	const auto want = drive(ref.env, ref.arena, c, max_blocks);
+	aot::set_enabled(true);
+	const auto have = drive(got.env, got.arena, c, aot_max_blocks);
+	aot::set_enabled(false);
+	require(same(want, have, c));
+	const auto st = aot::stats();
+	require(st.refusals[2] > 0);
+	require(st.enters == 0);
+}
+
+/* The 64-bit page digests find a library; they authorize nothing. Two words
+ * of a page are changed (the first to something the engine will run, the
+ * second to make the digest come out the same), and the page is not the one
+ * the framework was built from. */
+[[nodiscard]] std::uint64_t digest_of(const std::byte *page)
+{
+	std::uint32_t low = 0, high = 0x9e3779b9U;
+	for (std::size_t offset = 0; offset < page_bytes; offset += 8) {
+		std::uint64_t word;
+		std::memcpy(&word, page + offset, 8);
+		low = __crc32cd(low, word);
+		high = __crc32cd(high, word);
+	}
+	return (std::uint64_t{high} << 32) | low;
+}
+
+/* The CRC of a page with zero initial state, which is linear in the page. */
+[[nodiscard]] std::uint32_t crc_of(const std::byte *page)
+{
+	std::uint32_t crc = 0;
+	for (std::size_t offset = 0; offset < page_bytes; offset += 8) {
+		std::uint64_t word;
+		std::memcpy(&word, page + offset, 8);
+		crc = __crc32cd(crc, word);
+	}
+	return crc;
+}
+
+void equal_digest_is_not_equal_code(const LibraryImage &image,
+	const std::vector<Function> &functions)
+{
+	LibraryImage other = image;
+	const auto start = functions[2].start;
+	const auto page = start / page_bytes * page_bytes;
+	const auto fixup = page + page_bytes - 4;
+	require(start + 4 < fixup);
+	std::array<std::byte, page_bytes> original;
+	std::memcpy(original.data(), &image.bytes[page], page_bytes);
+	/* mov x0, #120 in place of the function's first word. */
+	const std::uint32_t mov = 0xd2800f00U;
+	std::memcpy(&other.bytes[start], &mov, 4);
+	/* The CRC is linear: find the word at the end of the page that cancels
+	 * the change (its effect is a bijection of 32-bit values). */
+	std::array<std::byte, page_bytes> work;
+	std::memcpy(work.data(), &other.bytes[page], page_bytes);
+	const auto wanted = crc_of(original.data());
+	std::array<std::uint32_t, 32> image_of_bit{};
+	const auto base_crc = crc_of(work.data());
+	for (unsigned bit = 0; bit < 32; ++bit) {
+		std::array<std::byte, page_bytes> flipped = work;
+		std::uint32_t value;
+		std::memcpy(&value, &flipped[page_bytes - 4], 4);
+		value ^= 1U << bit;
+		std::memcpy(&flipped[page_bytes - 4], &value, 4);
+		image_of_bit[bit] = crc_of(flipped.data()) ^ base_crc;
+	}
+	/* Solve: choose bits so that the xor of their images is base ^ wanted. */
+	std::uint32_t target = base_crc ^ wanted;
+	std::array<std::uint32_t, 32> rows = image_of_bit;
+	std::array<std::uint32_t, 32> combo{};
+	for (unsigned i = 0; i < 32; ++i)
+		combo[i] = 1U << i;
+	std::uint32_t chosen = 0;
+	for (unsigned bit = 0; bit < 32; ++bit) {
+		/* Find a row with this bit as pivot. */
+		unsigned pivot = bit;
+		while (pivot < 32 && ((rows[pivot] >> bit) & 1U) == 0)
+			++pivot;
+		require(pivot < 32);
+		std::swap(rows[bit], rows[pivot]);
+		std::swap(combo[bit], combo[pivot]);
+		for (unsigned other_row = 0; other_row < 32; ++other_row)
+			if (other_row != bit && ((rows[other_row] >> bit) & 1U) != 0) {
+				rows[other_row] ^= rows[bit];
+				combo[other_row] ^= combo[bit];
+			}
+	}
+	for (unsigned bit = 0; bit < 32; ++bit)
+		if ((target >> bit) & 1U) {
+			/* rows[bit] is the unit vector for bit. */
+			chosen ^= combo[bit];
+		}
+	std::uint32_t value;
+	std::memcpy(&value, &work[page_bytes - 4], 4);
+	value ^= chosen;
+	std::memcpy(&work[page_bytes - 4], &value, 4);
+	std::memcpy(&other.bytes[fixup], &value, 4);
+	require(digest_of(work.data()) == digest_of(original.data()));
+	require(std::memcmp(work.data(), original.data(), page_bytes) != 0);
+
+	SplitMix rng{61};
+	const auto bias = Fixture::bias;
+	Fixture ref{4351, other}, got{4352, other};
+	auto c = make_case(rng, bias, start, false, true, arena_base(bias));
+	enterable(c);
+	aot::reset_stats();
+	aot::set_enabled(false);
+	const auto want = drive(ref.env, ref.arena, c, max_blocks);
+	aot::set_enabled(true);
+	const auto have = drive(got.env, got.arena, c, aot_max_blocks);
+	aot::set_enabled(false);
+	require(want.done());
+	require(same(want, have, c));
+	const auto st = aot::stats();
+	std::fprintf(stderr, "equal digest, different code: %llu entries, "
+		"poisoned %llu\n", static_cast<unsigned long long>(st.enters),
+		static_cast<unsigned long long>(st.poisoned));
+	require(st.poisoned == 1);
+	require(st.enters == 0);
+}
+
 } // namespace
 
 /* A host fault inside rewritten code is a bug; say where before dying. */
@@ -1551,6 +1758,9 @@ int main(int argc, char **argv)
 		require(t.compared > t.cases / 2);
 		require(st.enters > t.compared / 2);
 		require(st.poisoned == 0);
+		/* No entry ran longer than the budget allows, counted one
+		 * instruction at a time. */
+		require(st.max_retired <= entry_bound);
 		/* Both entry refusals are exercised by every library's cases. */
 		require(st.refusals[1] > 0);
 		require(st.refusals[3] > 0);
@@ -1559,8 +1769,13 @@ int main(int argc, char **argv)
 		/* The scenarios use the first library: they are about the
 		 * mechanism, not about the code. */
 		if (file.index == libraries.front().index) {
-			if (file.guest.ends_with("/libz.so"))
+			if (file.guest.ends_with("/libz.so")) {
 				inline_hit_path_is_taken(image, functions);
+				return_loop_is_bounded(image);
+				misaligned_sp_at_a_pair_store(image);
+				open_exclusive_is_not_entered(image, functions);
+				equal_digest_is_not_equal_code(image, functions);
+			}
 			preemption_is_bounded(image, sample);
 			two_load_biases(image, sample);
 			other_bytes_fall_back(image, sample);

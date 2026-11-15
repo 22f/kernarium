@@ -160,6 +160,19 @@ RET = 0xd65f03c0
 
 
 class AssemblerFarBranchTests(unittest.TestCase):
+    def test_far_never_branch_is_a_branch_too(self) -> None:
+        # B.NV (condition 15) is taken like B.AL: AArch64 treats both as
+        # always, so neither may be relaxed to a no-op.
+        assembler = A.Assembler()
+        assembler.bcond(15, "far")
+        assembler.data(bytes(4 * 300000))
+        assembler.label("far")
+        assembler.word(A.nop())
+        blob = assembler.resolve()
+        first, second = struct.unpack_from("<2I", blob, 0)
+        self.assertEqual(first >> 26, 0b000101)
+        self.assertEqual(4 * (first & 0x03ffffff), assembler.label_address("far"))
+
     def test_far_always_branch_is_a_branch(self) -> None:
         # b.al has no inverse condition: the relaxed form is a branch.
         assembler = A.Assembler()
@@ -217,6 +230,12 @@ class SimdRegisterFieldTests(unittest.TestCase):
                             None, word, encoding)
                         self.assertEqual(fields, [], hex(word))
 
+    def test_reviewed_ins_words_keep_their_vector_registers(self) -> None:
+        # INS V0.B[0], V27.B[1] and INS V18.B[0], V0.B[5]: imm4 selects the
+        # source lane, so no field names a general register.
+        for word in (0x6e010f60, 0x6e012c12):
+            self.assertEqual(self.fields(word)[1], [], hex(word))
+
     def test_general_register_forms_still_substitute(self) -> None:
         # INS (general), DUP (general): Rn is a general register.
         for rn in (18, 24, 31):
@@ -248,11 +267,10 @@ class FixtureTests(unittest.TestCase):
     def test_loop_branch_lands_inside_another_range(self) -> None:
         # b.lo at 0x1028 (range B) targets 0x1004 (inside range A), and no
         # function entry lies on the cycle.
-        target = self.library._direct_target(
-            fixture.CODE[0x1028], 0x1028)
-        self.assertEqual(target, 0x1004)
-        self.assertIn(0x1004, self.library.budget_extent)
-        self.assertNotIn(0x1008, self.library.budget_extent)
+        kind, target = self.library._flow(fixture.CODE[0x1028], 0x1028)
+        self.assertEqual((kind, target), ("cond", 0x1004))
+        self.assertIn(0x1004, self.library.charge)
+        self.assertNotIn(0x1008, self.library.charge)
 
 
 class HintAndFloatingPointTests(unittest.TestCase):
@@ -310,14 +328,44 @@ class BudgetTests(unittest.TestCase):
         words = [NOP, NOP, NOP, NOP,          # A: 0x1000-0x100c
                  NOP, NOP, b_back, RET]       # B: 0x1010-0x101c
         library = library_of(words, [(0, 0x10), (0x10, 0x20)])
-        self.assertIn(0x100c, library.budget_extent)
-        self.assertIn(0x1000, library.budget_extent)
-        self.assertIn(0x1010, library.budget_extent)
+        self.assertIn(0x100c, library.charge)
+        self.assertIn(0x1000, library.charge)
+        self.assertIn(0x1010, library.charge)
 
     def test_a_self_loop_is_charged(self) -> None:
         words = [NOP, 0x14000000, RET]  # b . at 0x1004
         library = library_of(words, [(0, 0xc)])
-        self.assertIn(0x1004, library.budget_extent)
+        self.assertIn(0x1004, library.charge)
+
+
+class RunBoundTests(unittest.TestCase):
+    """No run of code is longer than the budget pays for (RUN_LIMIT)."""
+
+    def test_long_straight_code_is_split(self) -> None:
+        words = [NOP] * 200 + [RET]
+        library = library_of(words, [(0, 4 * len(words))])
+        points = sorted(library.charge)
+        self.assertGreater(len(points), 200 // rewrite.RUN_LIMIT)
+        for offset, cost in library.charge.items():
+            self.assertLessEqual(cost, rewrite.RUN_LIMIT + 1)
+        # The gaps between charge points are at most RUN_LIMIT words.
+        edges = points + [0x1000 + 4 * len(words)]
+        for before, after in zip(edges, edges[1:]):
+            self.assertLessEqual((after - before) // 4, rewrite.RUN_LIMIT + 1)
+
+    def test_a_return_loop_pays_for_what_it_executes(self) -> None:
+        # Forty instructions and a RET that returns to the start: the
+        # reviewed case that retired 42,000 instructions between polls
+        # while charging four a lap. Every lap pays for the run it landed
+        # on, plus the RET.
+        words = [NOP] * 40 + [RET]
+        library = library_of(words, [(0, 4 * len(words))])
+        unit = unit_words(library)
+        self.assertIn(A.add_imm(rewrite.BUD, rewrite.BUD,
+                                rewrite.RUN_LIMIT + 1, sub=True), unit)
+        # The lap itself crosses charge points that cover its 41 words.
+        paid = sum(library.charge[offset] for offset in library.charge)
+        self.assertGreaterEqual(paid, len(words))
 
 
 class StackAlignmentTests(unittest.TestCase):

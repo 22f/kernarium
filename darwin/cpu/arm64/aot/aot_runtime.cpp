@@ -38,9 +38,9 @@ constexpr std::size_t record_table_base = 152;
 constexpr std::size_t record_table_end = 160;
 constexpr std::size_t record_table_offset = 168;
 constexpr std::size_t record_table_words = 172;
-constexpr std::size_t record_digests = 176;
 constexpr std::size_t record_pages = 180;
 constexpr std::size_t record_unit_offset = 200;
+constexpr std::size_t record_source = 204;
 
 template<typename T>
 [[nodiscard]] T read(std::size_t offset) noexcept
@@ -55,9 +55,10 @@ struct Library final {
 	std::uint64_t table_end;
 	std::size_t table_offset;
 	std::size_t table_words;
-	std::size_t digests;
 	std::size_t pages;
 	std::size_t unit_offset;
+	/* The text pages the library was built from, to compare with. */
+	std::size_t source;
 };
 
 struct Directory final {
@@ -75,9 +76,9 @@ struct Directory final {
 			read<std::uint64_t>(base + record_table_end),
 			read<std::uint32_t>(base + record_table_offset),
 			read<std::uint32_t>(base + record_table_words),
-			read<std::uint32_t>(base + record_digests),
 			read<std::uint32_t>(base + record_pages),
-			read<std::uint32_t>(base + record_unit_offset)};
+			read<std::uint32_t>(base + record_unit_offset),
+			read<std::uint32_t>(base + record_source)};
 	}
 };
 
@@ -158,7 +159,8 @@ std::atomic<bool> g_refill_stress{false};
 namespace counters {
 std::atomic<std::uint64_t> binds{0}, verifications{0}, pages_hashed{0},
 	unreadable{0}, poisoned{0}, enters{0}, steps{0}, retired{0}, refills{0},
-	refill_failures{0}, cross_hits{0}, cross_misses{0};
+	refill_failures{0}, cross_hits{0}, cross_misses{0}, max_retired{0},
+	verify_nanos{0};
 std::array<std::atomic<std::uint64_t>, 4> refusals{};
 /* The guest addresses AOT code stepped at most: library << 40 | offset. */
 constexpr std::size_t step_slots = 32768;
@@ -371,6 +373,8 @@ Stats stats() noexcept
 		get(counters::cross_misses), {}};
 	for (std::size_t i = 0; i < result.refusals.size(); ++i)
 		result.refusals[i] = get(counters::refusals[i]);
+	result.max_retired = get(counters::max_retired);
+	result.verify_nanos = get(counters::verify_nanos);
 	return result;
 }
 
@@ -381,7 +385,8 @@ void reset_stats() noexcept
 		     &counters::poisoned, &counters::enters, &counters::steps,
 		     &counters::retired, &counters::refills,
 		     &counters::refill_failures, &counters::cross_hits,
-		     &counters::cross_misses})
+		     &counters::cross_misses, &counters::max_retired,
+		     &counters::verify_nanos})
 		counter->store(0, std::memory_order_relaxed);
 	for (auto &counter : counters::refusals)
 		counter.store(0, std::memory_order_relaxed);
@@ -430,8 +435,8 @@ Binder::Verdict Binder::verify_pages(
 		if (!memory.fetch(address, page))
 			return Verdict::unreadable;
 		UML_AOT_COUNT(pages_hashed, 1);
-		if (page_digest(page.data()) !=
-		    read<std::uint64_t>(library.digests + 8 * index))
+		if (std::memcmp(page.data(), uml_aot_blob + library.source +
+		    index * page_size, page_size) != 0)
 			return Verdict::mismatch;
 	}
 	return Verdict::match;
@@ -572,7 +577,17 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 	if (!instance.verified || instance.verified_changes != code_changes) {
 		if (ticks_ < instance.retry_at)
 			return {};
-		switch (verify(memory, context, instance, code_changes)) {
+#if UML_AOT_DIAGNOSTICS
+		const auto began = std::chrono::steady_clock::now();
+#endif
+		const auto verdict = verify(memory, context, instance, code_changes);
+#if UML_AOT_DIAGNOSTICS
+		counters::verify_nanos.fetch_add(static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::steady_clock::now() - began).count()),
+			std::memory_order_relaxed);
+#endif
+		switch (verdict) {
 		case Verdict::match:
 			++epoch_;
 			break;
@@ -681,6 +696,13 @@ EnterResult enter(CpuState &cpu, ::uml::memory::Tlb &tlb, const Hit &hit,
 		&table);
 	UML_AOT_COUNT(retired, result.retired);
 #if UML_AOT_DIAGNOSTICS
+	{
+		auto seen = counters::max_retired.load(std::memory_order_relaxed);
+		while (seen < result.retired &&
+		       !counters::max_retired.compare_exchange_weak(
+			       seen, result.retired, std::memory_order_relaxed)) {
+		}
+	}
 	if (result.reason == Reason::step) {
 		counters::steps.fetch_add(1, std::memory_order_relaxed);
 		for (std::uint64_t index = 0; index < table.count; ++index) {

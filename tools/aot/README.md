@@ -24,6 +24,12 @@ framework is generated and never committed.
 - `fixture.py` writes the small library of the differential test (a
   diagnostics build only).
 
+Tools: the build needs a Python 3 and an `fsck.erofs` that decodes
+Zstandard (`UML_AOT_FSCK_EROFS`), as the Android build produces; the
+Homebrew `erofs-utils` is built without libzstd and cannot read the release
+(CMake fails the configure step when the tool's `--help` does not list
+`zstd`).
+
 Entry points: `ctest -R '^arm64-aot-tools$'` for the encoders, decoder and
 assembler, and `ctest -R '^arm64-aot-differential$'` (a configuration with
 `UML_AOT_DIAGNOSTICS=ON`) for the rewritten libraries against the gadget

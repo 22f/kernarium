@@ -3393,11 +3393,12 @@ std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 	arm64::CpuState &cpu, StaticGuestMemory &memory, unsigned long generation,
 	std::uint64_t code_changes, std::size_t &executed)
 {
-	/* An open exclusive monitor is the engine's to complete. The rewritten
+	/* An open exclusive monitor (the JIT records it in exclusive_size, the
+	 * gadget engine in exclusive_key) is the engine's to complete. The rewritten
 	 * code ignores the top address byte, as every Android process runs
 	 * with, and keeps SP 16-byte aligned, which the engine checks for every
 	 * SP-based access; a guest that has neither is the engine's alone. */
-	if (cpu.exclusive_size != 0U) {
+	if (cpu.exclusive_size != 0U || cpu.exclusive_key != 0U) {
 		arm64::aot::note_refusal(arm64::aot::Refusal::exclusive_monitor);
 		return std::nullopt;
 	}

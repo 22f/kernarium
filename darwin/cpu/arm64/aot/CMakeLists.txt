@@ -22,6 +22,18 @@ if(NOT UML_AOT_FSCK_EROFS OR NOT EXISTS "${UML_AOT_FSCK_EROFS}")
     message(FATAL_ERROR
         "UML_AOT_FSCK_EROFS must name an fsck.erofs that decodes Zstandard")
 endif()
+execute_process(COMMAND "${UML_AOT_FSCK_EROFS}" --help
+    OUTPUT_VARIABLE _uml_aot_fsck_help ERROR_VARIABLE _uml_aot_fsck_help_err
+    RESULT_VARIABLE _uml_aot_fsck_status)
+if(NOT _uml_aot_fsck_help MATCHES "zstd" AND
+   NOT _uml_aot_fsck_help_err MATCHES "zstd")
+    message(FATAL_ERROR
+        "UML_AOT_FSCK_EROFS (${UML_AOT_FSCK_EROFS}) cannot read the "
+        "release's Zstandard-compressed EROFS images: its --help does not "
+        "list zstd among the algorithms it checks. Use an fsck.erofs built "
+        "with libzstd, such as the one the Android build produces "
+        "(tools/aot/README.md, \"Tools\").")
+endif()
 if(NOT UML_AOT_LIBRARIES)
     message(FATAL_ERROR "UML_AOT_LIBRARIES is empty")
 endif()
@@ -127,6 +139,8 @@ endforeach()
 set(_uml_aot_generated_args)
 set(_uml_aot_generated_files)
 if(UML_AOT_DIAGNOSTICS)
+    # Count the instructions each entry starts, to measure the budget's bound.
+    list(APPEND _uml_aot_generated_args --count-retired)
     set(_uml_aot_fixture ${_uml_aot_dir}/fixture/libaotfixture.so)
     add_custom_command(
         OUTPUT ${_uml_aot_fixture}

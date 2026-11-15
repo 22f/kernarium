@@ -380,9 +380,10 @@ class Assembler:
                     if not long:
                         out.append(bcond_word(cond, delta // 4))
                     elif cond >= 14:
-                        # AL and NV have no inverse: AL is a branch, NV a
-                        # no-op; the second word keeps the size.
-                        out.append(b_word(delta // 4) if cond == 14 else nop())
+                        # AL and NV (which AArch64 also takes as always)
+                        # have no inverse: both are a plain branch; the
+                        # second word keeps the size.
+                        out.append(b_word(delta // 4))
                         out.append(nop())
                     else:
                         out.append(bcond_word(cond ^ 1, 2))

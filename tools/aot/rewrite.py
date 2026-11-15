@@ -4,7 +4,8 @@
 
 The blob is the whole content of the AOT framework's __TEXT,__text: the
 entry/exit routines, the rewritten code, the per-instruction ENTRY tables and
-the page digests that bind the code to the guest bytes it stands for. See
+the source pages and page digests that bind the code to the guest bytes it
+stands for. See
 docs/architecture.md (ahead-of-time code) for the contract this implements.
 
 Every guest instruction is either inlined or becomes a STEP: AOT code leaves
@@ -42,10 +43,17 @@ SCRATCH = (T0, T1, T2)
 FRAME = 0x100
 SLOT_CPU, SLOT_BIAS, SLOT_BUD0, SLOT_SP = 0xA0, 0xA8, 0xB0, 0xB8
 SLOT_XTAB = 0xF0
+# Instructions started in this entry (a diagnostics build counts them).
+SLOT_COUNT = 0xF8
 # The refill thunk's own frame: x0-x17, x30, NZCV, then q0-q31.
 REFILL_FRAME = 0x2a0
 VSLOT = {18: 0xC0, 24: 0xC8, 25: 0xD0, 26: 0xD8, 27: 0xE0, 28: 0xE8}
 VIRTUAL = frozenset(VSLOT) | {"sp"}
+
+# The most instructions that run between two charges of the budget: every
+# forward run of code from a charge point, and from any instruction an
+# indirect branch can land on, is at most this long.
+RUN_LIMIT = 32
 
 EXIT_BUDGET, EXIT_BRANCH, EXIT_STEP = 0, 1, 2
 ABSOLUTE = 0x100
@@ -180,7 +188,9 @@ class Library:
     """One library's rewrite: classification, then emission into the blob."""
 
     def __init__(self, index: int, name: str, elf: elf64.Elf,
-                 decoder: a64decode.Decoder, layout: dict[str, int]) -> None:
+                 decoder: a64decode.Decoder, layout: dict[str, int],
+                 count_retired: bool = False) -> None:
+        self.count_retired = count_retired
         self.index = index
         self.name = name
         self.elf = elf
@@ -220,21 +230,70 @@ class Library:
         self.fn_xu: set[int] = set()
         self.fn_xb: set[int] = set()
         self.fn_ma: list[int] = []
-        # Where a budget is charged: every function entry and loop header.
-        # A cycle contains a direct branch to a lower address (or to itself),
-        # whatever the unwind ranges say, so every such target charges; calls
-        # and returns that close a cycle are charged by the entry they reach
-        # or by the indirect branch itself.
-        self.budget_extent: dict[int, int] = {}
-        for function in self.functions:
-            self.budget_extent[function.start] = 8
+        self.charge = self._plan_charges()
+
+    def _flow(self, word: int, offset: int) -> tuple[str, int | None]:
+        """How control leaves an instruction: its kind and direct target."""
+        encoding = self.decoder.decode(word)
+        if encoding is None:
+            return "seq", None
+        cls = encoding.decode_class
+        mnemonic = encoding.mnemonic
+        if cls == "branch_imm":
+            target = offset + sext(word & 0x3ffffff, 26) * 4
+            return ("call" if mnemonic == "BL" else "jump"), target
+        if cls == "condbranch" and mnemonic == "B":
+            return "cond", offset + sext((word >> 5) & 0x7ffff, 19) * 4
+        if cls == "compbranch":
+            return "cond", offset + sext((word >> 5) & 0x7ffff, 19) * 4
+        if cls == "testbranch":
+            return "cond", offset + sext((word >> 5) & 0x3fff, 14) * 4
+        if cls == "branch_reg" and mnemonic in ("BR", "BLR", "RET"):
+            return "indirect", None
+        return "seq", None
+
+    def _plan_charges(self) -> dict[int, int]:
+        """Where the budget is charged, and by how much.
+
+        A charge point pays in advance for the longest run of instructions
+        that can follow it before the next charge point. Charge points are
+        the function entries, every target of a backward or self branch (so
+        every cycle of direct branches contains one), the targets of calls,
+        and points inserted so that no run from an instruction that is not a
+        charge point exceeds RUN_LIMIT. A direct branch to a charge point,
+        and a fall-through into it, pay it; so does a landing through the
+        entry table. An indirect branch pays for itself and for the longest
+        run after any instruction it can land on (RUN_LIMIT), which no
+        charge point has paid: with that every cycle, however it closes,
+        pays at least as much as it executes, and an entry runs at most its
+        budget and one unpaid run.
+        """
+        points = {function.start for function in self.functions}
+        flow: dict[int, tuple[str, int | None]] = {}
         for offset, word in self.words.items():
-            target = self._direct_target(word, offset)
-            if target is None or target > offset or target not in self.covered:
-                continue
-            extent = (offset - target) // 4 + 1
-            self.budget_extent[target] = max(
-                self.budget_extent.get(target, 0), extent)
+            kind, target = self._flow(word, offset)
+            flow[offset] = (kind, target)
+            if target is not None and target in self.covered and (
+                    kind == "call" or target <= offset):
+                points.add(target)
+        run: dict[int, int] = {}
+        for offset in sorted(self.words, reverse=True):
+            kind, target = flow[offset]
+            longest = 0
+            successors = []
+            if kind in ("seq", "cond"):
+                successors.append(offset + 4)
+            if kind in ("jump", "cond") and target is not None and \
+                    target > offset:
+                successors.append(target)
+            for successor in successors:
+                if successor in self.covered and successor not in points:
+                    longest = max(longest, run[successor])
+            run[offset] = 1 + longest
+            if offset not in points and run[offset] > RUN_LIMIT:
+                points.add(offset)
+        return {offset: run[offset] for offset in points
+                if offset in self.covered}
 
     # labels
     def lab(self, kind: str, value: int) -> str:
@@ -243,8 +302,7 @@ class Library:
     def goto_label(self, target: int) -> str:
         if target in self.covered:
             # The branch charges the budget where the target is a charge point.
-            return self.lab("G" if target in self.budget_extent else "E",
-                            target)
+            return self.lab("G" if target in self.charge else "E", target)
         self.fn_xb.add(target)
         return self.xb_label(target)
 
@@ -252,8 +310,14 @@ class Library:
         return f"L{self.index}XB{self.fn_start:x}_{target:x}"
 
     # emission -------------------------------------------------------------
-    def build(self, digests: list[int]) -> dict:
-        """Emit the whole library as one self-contained unit."""
+    def build(self, digests: list[int], source: bytes = b"") -> dict:
+        """Emit the whole library as one self-contained unit.
+
+        `source` is the library's text pages as the guest must map them: the
+        binder compares each mapped page with it, byte for byte, before any
+        rewritten code of the page runs. `digests` (one per page) only find
+        the library in the blob's hash.
+        """
         asm = self.asm = A.Assembler()
         asm.label("UNIT")
         emit_exits(asm, self)
@@ -262,33 +326,18 @@ class Library:
             self._emit_function(function)
         asm.label("TAB")
         asm.data(bytes(4 * self.table_words))
-        asm.label("DIG")
-        asm.data(b"".join(struct.pack("<Q", d) for d in digests))
+        asm.label("SRC")
+        asm.data(source)
         unit = bytearray(asm.resolve())
         table_at = asm.label_address("TAB")
         view = memoryview(unit)[table_at:table_at + 4 * self.table_words
                                 ].cast("I")
         for offset in self.entry_labels:
             view[(offset - self.table_base) // 4] = asm.label_address(
-                self.lab("E", offset))
+                self.lab("G" if offset in self.charge else "E", offset))
         view.release()
         return {"unit": bytes(unit), "table_at": table_at,
-                "digest_at": asm.label_address("DIG")}
-
-    def _direct_target(self, word: int, offset: int) -> int | None:
-        encoding = self.decoder.decode(word)
-        if encoding is None:
-            return None
-        cls = encoding.decode_class
-        if cls == "branch_imm":
-            return offset + sext(word & 0x3ffffff, 26) * 4
-        if cls == "condbranch" and encoding.mnemonic == "B":
-            return offset + sext((word >> 5) & 0x7ffff, 19) * 4
-        if cls == "compbranch":
-            return offset + sext((word >> 5) & 0x7ffff, 19) * 4
-        if cls == "testbranch":
-            return offset + sext((word >> 5) & 0x3fff, 14) * 4
-        return None
+                "source_at": asm.label_address("SRC")}
 
     def _emit_function(self, function: elf64.Function) -> None:
         asm = self.asm
@@ -300,14 +349,17 @@ class Library:
         last_falls_through = True
         for offset in range(function.start, function.end, 4):
             word = self.words[offset]
-            extent = self.budget_extent.get(offset, 0)
-            if extent:
-                extent = min(extent, 4095)
+            cost = self.charge.get(offset, 0)
+            if cost:
                 asm.label(self.lab("G", offset))
                 self.fn_xu.add(offset)
-                asm.word(A.add_imm(BUD, BUD, extent, sub=True))
+                asm.word(A.add_imm(BUD, BUD, cost, sub=True))
                 asm.tbz(BUD, 63, self.lab("XU", offset), nz=True)
             asm.label(self.lab("E", offset))
+            if self.count_retired:
+                asm.word(A.ldr_x(T2, 31, SLOT_COUNT))
+                asm.word(A.add_imm(T2, T2, 1))
+                asm.word(A.str_x(T2, 31, SLOT_COUNT))
             self.entry_labels.append(offset)
             self.stats.instructions += 1
             last_falls_through = self._emit_instruction(offset, word)
@@ -603,7 +655,7 @@ class Library:
         asm = self.asm
         rn = (word >> 5) & 31
         self.fn_xu.add(offset)
-        asm.word(A.add_imm(BUD, BUD, 4, sub=True))
+        asm.word(A.add_imm(BUD, BUD, RUN_LIMIT + 1, sub=True))
         asm.tbz(BUD, 63, self.lab("XU", offset), nz=True)
         guest = self._resolve(rn, False)
         if guest in VIRTUAL:
@@ -890,7 +942,8 @@ class Library:
 
 # ---- the entry and exit routines -----------------------------------------
 
-def emit_enter(asm: A.Assembler, layout: dict[str, int]) -> None:
+def emit_enter(asm: A.Assembler, layout: dict[str, int],
+               count_retired: bool = False) -> None:
     L = layout
     cpu_regs = L["UML_GADGET_CPU_X0"]
     v0 = L["UML_GADGET_CPU_V0"]
@@ -907,6 +960,8 @@ def emit_enter(asm: A.Assembler, layout: dict[str, int]) -> None:
     asm.word(A.str_x(2, 31, SLOT_BIAS))
     asm.word(A.str_x(4, 31, SLOT_BUD0))
     asm.word(A.str_x(5, 31, SLOT_XTAB))
+    if count_retired:
+        asm.word(A.str_x(31, 31, SLOT_COUNT))
     asm.word(A.mov_reg(TLB, 1))
     asm.word(A.mov_reg(BUD, 4))
     asm.word(A.mov_reg(T0, 3))
@@ -1000,8 +1055,11 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
         asm.word(A.ldp_q(2 * index, 2 * index + 1, T2, v0 + 32 * index,
                          load=False))
     asm.word(A.ubfx(0, T1, 0, 8))
-    asm.word(A.ldr_x(TLB, 31, SLOT_BUD0))
-    asm.word(A.add_reg(1, TLB, BUD, sub=True))
+    if library.count_retired:
+        asm.word(A.ldr_x(1, 31, SLOT_COUNT))
+    else:
+        asm.word(A.ldr_x(TLB, 31, SLOT_BUD0))
+        asm.word(A.add_reg(1, TLB, BUD, sub=True))
     for index in range(4):
         asm.word(A.ldp_d(8 + 2 * index, 9 + 2 * index, 31, 0x60 + 16 * index))
     asm.word(A.ldp_x(29, 30, 31, 0))
@@ -1114,19 +1172,22 @@ def resolve_library(root: pathlib.Path, mounts: dict[str, pathlib.Path],
 
 def build_unit(job: tuple) -> dict:
     """One library to its self-contained unit (runs in a worker process)."""
-    index, name, file_path = job
+    index, name, file_path, count_retired = job
     decoder = a64decode.Decoder(a64decode.DEFAULT_TABLE)
     layout = read_layout(LAYOUT_HEADER)
     data = pathlib.Path(file_path).read_bytes()
-    library = Library(index, name, elf64.Elf(data), decoder, layout)
+    library = Library(index, name, elf64.Elf(data), decoder, layout,
+                      count_retired)
     segment = library.segment
     digests = []
+    pages = []
     for page_vaddr in range(library.table_base, library.table_end, PAGE):
         file_offset = segment.offset + (page_vaddr - segment.vaddr)
         page = bytes(library.elf.data[file_offset:file_offset + PAGE])
         page += bytes(PAGE - len(page))
         digests.append(page_digest(page))
-    unit = library.build(digests)
+        pages.append(page)
+    unit = library.build(digests, b"".join(pages))
     unit.update({
         "index": index,
         "path": name,
@@ -1154,11 +1215,12 @@ def build_unit(job: tuple) -> dict:
 
 
 def build_blob(units: list[dict], layout: dict[str, int],
-               release_id: str) -> tuple[bytes, dict]:
+               release_id: str, count_retired: bool = False
+               ) -> tuple[bytes, dict]:
     """Place the units after the header and ENTER; add the digest hash."""
     units = sorted(units, key=lambda unit: unit["index"])
     enter_asm = A.Assembler()
-    emit_enter(enter_asm, layout)
+    emit_enter(enter_asm, layout, count_retired)
     enter_code = enter_asm.resolve()
     header_size = HEADER_SIZE + LIB_RECORD_SIZE * len(units)
 
@@ -1210,10 +1272,11 @@ def build_blob(units: list[dict], layout: dict[str, int],
                          bytes.fromhex(unit["sha256"]))
         struct.pack_into("24s", blob, record + 128, unit["build_id"][:24])
         struct.pack_into(
-            "<QQIIIIQIII", blob, record + 152, unit["table_base"],
+            "<QQIIIIQIIII", blob, record + 152, unit["table_base"],
             unit["table_end"], base + unit["table_at"], unit["table_words"],
-            base + unit["digest_at"], len(unit["digests"]), unit["text_end"],
-            unit["stats"]["instructions"], unit["stats"]["steps"], base)
+            0, len(unit["digests"]), unit["text_end"],
+            unit["stats"]["instructions"], unit["stats"]["steps"], base,
+            base + unit["source_at"])
     manifest = {
         "release_id": release_id,
         "blob_bytes": len(blob),
@@ -1256,6 +1319,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release-id", required=True)
     parser.add_argument("--out", type=pathlib.Path, required=True,
                         help="output directory (blob.bin, manifest.json)")
+    parser.add_argument("--count-retired", action="store_true",
+                        help="count the instructions each entry starts and "
+                        "report that count (a diagnostics build, to measure "
+                        "the budget's bound independently)")
     parser.add_argument("--jobs", type=int, default=0,
                         help="worker processes (default: about half the CPUs)")
     arguments = parser.parse_args(argv)
@@ -1263,11 +1330,12 @@ def main(argv: list[str] | None = None) -> int:
     for item in arguments.mount:
         guest, _, directory = item.partition("=")
         mounts[guest.rstrip("/")] = pathlib.Path(directory)
-    jobs = [(index, path, str(resolve_library(arguments.root, mounts, path)))
-            for index, path in enumerate(arguments.library)]
+    count = arguments.count_retired
+    jobs = [(index, path, str(resolve_library(arguments.root, mounts, path)),
+             count) for index, path in enumerate(arguments.library)]
     for item in arguments.generated:
         guest, _, host = item.partition("=")
-        jobs.append((len(jobs), guest, host))
+        jobs.append((len(jobs), guest, host, count))
     workers = arguments.jobs or max(1, (os.cpu_count() or 2) // 2)
     order = sorted(jobs, key=lambda job: -pathlib.Path(job[2]).stat().st_size)
     if workers == 1 or len(jobs) == 1:
@@ -1276,7 +1344,7 @@ def main(argv: list[str] | None = None) -> int:
         with multiprocessing.Pool(min(workers, len(jobs))) as pool:
             units = list(pool.imap_unordered(build_unit, order))
     layout = read_layout(LAYOUT_HEADER)
-    blob, manifest = build_blob(units, layout, arguments.release_id)
+    blob, manifest = build_blob(units, layout, arguments.release_id, count)
     arguments.out.mkdir(parents=True, exist_ok=True)
     # The notice of each library as the image states it: generated output
     # beside the framework, never tracked.
