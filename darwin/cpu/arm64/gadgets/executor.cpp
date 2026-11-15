@@ -3415,10 +3415,13 @@ GadgetExecutor::run_block_body(
  * without polling for an interrupt. */
 constexpr std::uint64_t aot_entry_budget = 4096;
 /* Entering and leaving rewritten code costs about what the engine takes for
- * this many instructions, so an address whose entries keep retiring fewer
- * is left to the engine, except for one entry in aot_short_again, which
- * tells whether it has become worth entering. */
-constexpr std::uint64_t aot_short_entry = 48;
+ * half this many instructions, and an instruction in rewritten code still
+ * costs a fraction of an engine instruction, so an entry pays only above the
+ * break-even set here (chosen from a series at 48, 96 and 192). An address
+ * whose entries keep retiring fewer is left to the engine, except for one
+ * entry in aot_short_again, which tells whether it has become worth
+ * entering. */
+constexpr std::uint64_t aot_short_entry = 96;
 constexpr std::uint8_t aot_short_streak = 2;
 constexpr std::uint8_t aot_short_again = 64;
 
