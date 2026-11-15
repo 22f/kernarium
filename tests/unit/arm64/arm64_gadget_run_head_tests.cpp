@@ -10,8 +10,10 @@
  * two pages, a misaligned SP and a page the TLB does not hold each fall back
  * and end as the architecture says; that a fault inside the fallback resumes
  * at its instruction; and, over generated runs, that every block ends with
- * the state an independent model of the instructions gives. */
+ * the state an independent model of the instructions gives. It also checks
+ * the builder's ring of group starts, which decides where a head may go. */
 #include "arm64_gadget_test_support.hpp"
+#include "cpu/arm64/gadgets/group_starts.hpp"
 #include "cpu/arm64/gadgets/program.hpp"
 #include "require.hpp"
 
@@ -419,6 +421,62 @@ struct Placed final {
 	}
 	return gadgets::Program{program.guest_address(),
 		program.instruction_count(), std::move(copy), false};
+}
+
+/* A run gets a head only when each of its instructions is a group of its
+ * own of the size the head skips. The ring of group starts the builder
+ * decides that by holds none for an instruction an earlier group took in,
+ * the second of a fused pair or a move behind the first of a row, nor for
+ * one it has not reached: not even where the words of the group that holds
+ * it begin and end as a group of its own would, as at the block's first
+ * word. */
+void group_starts()
+{
+	using gadgets::builder_detail::GroupStarts;
+	constexpr std::size_t words = 2;
+	{
+		GroupStarts starts;
+		for (std::size_t index = 0; index < 3; ++index)
+			starts.begin(index, index * words);
+		require(starts.grouped(0, 2, words, starts[2]));
+		require(starts.grouped(1, 2, words, starts[2]));
+		require(!starts.grouped(0, 2, words, starts[2] + 1));
+		require(!starts.grouped(0, 2, words + 1, starts[2]));
+	}
+	/* Instructions 0 and 1 are one group of `words` words. */
+	{
+		GroupStarts starts;
+		starts.begin(0, 0);
+		starts.join(1);
+		starts.begin(2, words);
+		require(!starts.grouped(1, 2, words, starts[2]));
+		require(!starts.grouped(0, 2, words, starts[2]));
+		require(!starts.grouped(0, 1, words, starts[1]));
+	}
+	/* The same 32 instructions on, in the slots of the first pair. */
+	{
+		GroupStarts starts;
+		for (std::size_t index = 0; index < 32; ++index)
+			starts.begin(index, index * words);
+		starts.begin(32, 32 * words);
+		starts.join(33);
+		starts.begin(34, 33 * words);
+		require(!starts.grouped(33, 34, words, starts[34]));
+		require(starts.grouped(31, 32, words, starts[32]));
+	}
+	{
+		GroupStarts starts;
+		require(!starts.grouped(0, 1, words, words));
+	}
+	/* A head inserted in front of a run moves the run's groups. */
+	{
+		GroupStarts starts;
+		starts.begin(0, 0);
+		starts.begin(1, words);
+		starts.shift(0, 2, 5);
+		require(starts[0] == 5 && starts[1] == words + 5);
+		require(starts.grouped(0, 2, words, 2 * words + 5));
+	}
 }
 
 /* Where the builder puts a head and the operand words it writes. */
@@ -897,6 +955,7 @@ void generated_runs(const Memory &memory)
 int main()
 {
 	const Memory memory;
+	group_starts();
 	structure();
 	head_does_the_run(memory);
 	head_falls_back(memory);

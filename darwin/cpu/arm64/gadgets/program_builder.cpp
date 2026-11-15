@@ -3,6 +3,7 @@
 #include "afp_twin.hpp"
 #include "gadget_selection.hpp"
 #include "execution_histogram.hpp"
+#include "group_starts.hpp"
 #include "scalar_forwarding.hpp"
 #include "same_base.hpp"
 
@@ -85,7 +86,7 @@ inline constexpr std::size_t maximum_adds = 1;
 /* The elements a run may have, ADD SP included: every one of them and the
  * RET must still be in the builder's ring of group starts. */
 inline constexpr std::size_t maximum_elements = 16;
-inline constexpr std::size_t ring = 32;
+inline constexpr std::size_t ring = GroupStarts::ring;
 /* Every element and the RET is one decode group of two words, behind its
  * execution_count group in a counting build. */
 #if UML_GADGET_EXECUTION_HISTOGRAM
@@ -254,6 +255,7 @@ struct Head final {
 		return {};
 	/* A load's place in the span has 5 bits, which keeps the span's last
 	 * byte inside its 9. */
+	static_assert(8 * 31 + 16 - 1 < 1 << 9);
 	for (std::size_t index = 0; index < plan.loads; ++index)
 		if (plan.load[index].address - low > 8 * 31)
 			return {};
@@ -279,7 +281,7 @@ struct Head final {
 	return 1 + (loads + 1) / 4;
 }
 
-using Starts = std::array<std::uint32_t, ring>;
+using Starts = GroupStarts;
 #if UML_GADGET_EXECUTION_HISTOGRAM
 using Predecessors = std::array<const void *, ring>;
 #endif
@@ -300,13 +302,13 @@ void place(ProgramWords &words, InlineSuffixes &suffixes,
 #endif
 	)
 {
-	const auto ret_start = starts[ret % ring];
+	const auto ret_start = starts[ret];
 	if (words.size() != ret_start + group_words ||
 	    words[ret_start + count_words] != reinterpret_cast<std::uintptr_t>(
 		    uml_arm64_gadget_return_x30_cached))
 		return;
 	auto end = ret;
-	if (ret != 0 && starts[(ret - 1) % ring] + count_words + 1 == ret_start &&
+	if (ret != 0 && starts[ret - 1] + count_words + 1 == ret_start &&
 	    words[ret_start - 1] ==
 		    reinterpret_cast<std::uintptr_t>(uml_arm64_gadget_nop))
 		end = ret - 1;
@@ -316,18 +318,14 @@ void place(ProgramWords &words, InlineSuffixes &suffixes,
 		++length;
 	for (; length != 0; --length) {
 		const auto start = end - length;
-		bool grouped = true;
-		for (std::size_t index = start; index < end; ++index)
-			grouped = grouped && starts[(index + 1) % ring] ==
-				starts[index % ring] + group_words;
-		if (!grouped)
+		if (!starts.grouped(start, end, group_words, starts[end]))
 			continue;
 		std::array<std::uintptr_t, 4> operands{};
 		const auto [gadget, loads] = encode(window, start, end, operands);
 		if (gadget == nullptr)
 			continue;
 		if (end != ret) {
-			const auto dropped = starts[end % ring];
+			const auto dropped = starts[end];
 			words.erase(dropped, count_words + 1);
 #if UML_GADGET_EXECUTION_HISTOGRAM
 			/* The RET's group now follows the run's last word. */
@@ -342,7 +340,7 @@ void place(ProgramWords &words, InlineSuffixes &suffixes,
 						count_words + 1);
 		}
 		const auto head = reinterpret_cast<std::uintptr_t>(gadget);
-		const std::size_t at = starts[start % ring];
+		const std::size_t at = starts[start];
 		const auto inserted = count_words + 1 + operand_words(loads);
 		words.insert(at, inserted);
 		auto cursor = at;
@@ -568,6 +566,7 @@ struct Head final {
 		return {};
 	/* A store's place in the span has 5 bits, which keeps the span's last
 	 * byte inside its 9. */
+	static_assert(8 * 31 + 16 - 1 < 1 << 9);
 	for (std::size_t index = 0; index < plan.stores; ++index)
 		if (plan.store[index].address - low > 8 * 31)
 			return {};
@@ -615,21 +614,15 @@ bool place(ProgramWords &words, InlineSuffixes &suffixes,
 		++length;
 	for (; length > 1; --length) {
 		const auto start = end - length;
-		bool grouped = true;
-		for (std::size_t index = start; index < end; ++index) {
-			const auto next = index + 1 == end ? words.size() :
-				std::size_t{starts[(index + 1) % epilogue::ring]};
-			grouped = grouped && next == starts[index % epilogue::ring] +
-				epilogue::group_words;
-		}
-		if (!grouped)
+		if (!starts.grouped(start, end, epilogue::group_words,
+			    words.size()))
 			continue;
 		std::array<std::uintptr_t, 3> operands{};
 		const auto [gadget, stores] = encode(window, start, end, operands);
 		if (gadget == nullptr)
 			continue;
 		const auto head = reinterpret_cast<std::uintptr_t>(gadget);
-		const std::size_t at = starts[start % epilogue::ring];
+		const std::size_t at = starts[start];
 		const auto inserted = epilogue::count_words + 1 +
 			operand_words(stores);
 		words.insert(at, inserted);
@@ -653,9 +646,7 @@ bool place(ProgramWords &words, InlineSuffixes &suffixes,
 			reinterpret_cast<const void *>(
 				words[cursor + epilogue::count_words]));
 #endif
-		for (std::size_t index = start; index < end; ++index)
-			starts[index % epilogue::ring] +=
-				static_cast<std::uint32_t>(inserted);
+		starts.shift(start, end, inserted);
 		for (std::uint32_t index = 0; index < suffixes.count; ++index)
 			if (suffixes.word[index] >= at)
 				suffixes.word[index] +=
@@ -720,6 +711,15 @@ struct Move final {
 	unsigned destination{};
 	bool wide{};
 };
+
+/* The operand word holds a source in 10 bits, which the offset of every
+ * register a move reads must fit, XZR's zero slot among them. */
+static_assert([] {
+	for (unsigned index = 0; index < 32; ++index)
+		if (arithmetic_register_offset(index) >= std::uintptr_t{1} << 10)
+			return false;
+	return true;
+}());
 
 struct Plan final {
 	std::size_t instructions{};
@@ -1031,8 +1031,7 @@ BuildResult Builder::build(
 			uml::cpu::arm64::detail::
 				instruction_accesses_fp_state(instruction);
 		const auto address = guest_address + compiled * sizeof(instruction);
-		group_starts[compiled % epilogue::ring] =
-			static_cast<std::uint32_t>(words.size());
+		group_starts.begin(compiled, words.size());
 #if UML_GADGET_EXECUTION_HISTOGRAM
 		group_predecessors[compiled % epilogue::ring] = previous_gadget;
 		const auto counter_word = words.size();
@@ -1050,11 +1049,10 @@ BuildResult Builder::build(
 				emit(words, head.operand);
 				for (std::size_t index = 1; index < head.instructions;
 				     ++index) {
-					const auto at = (compiled + index) % epilogue::ring;
-					group_starts[at] =
-						group_starts[compiled % epilogue::ring];
+					group_starts.join(compiled + index);
 #if UML_GADGET_EXECUTION_HISTOGRAM
-					group_predecessors[at] = previous_gadget;
+					group_predecessors[(compiled + index) %
+						epilogue::ring] = previous_gadget;
 #endif
 				}
 #if UML_GADGET_EXECUTION_HISTOGRAM
@@ -1215,6 +1213,10 @@ BuildResult Builder::build(
 		if (decoded != DecodeResult::decoded)
 			return {finish(compiled), decoded == DecodeResult::terminal,
 				address, instruction};
+		/* What a fusing decoder took in behind this instruction is part
+		 * of its group. */
+		for (auto index = compiled_before + 1; index <= compiled; ++index)
+			group_starts.join(index);
 		++compiled;
 	}
 	(void)place_prologue();
