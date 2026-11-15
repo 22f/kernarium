@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yi Xie <imxieyi@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 06:47:20 +0900
+Subject: [PATCH] end the recording when the camera closes with a recoverable
+ error
+
+When CameraX closes the camera with a recoverable error and opens it
+again (the camera device reports ERROR_CAMERA_DEVICE, or an open that
+fails is retried), the recording in progress goes on across the gap and
+holds whatever the new session delivers, a stall and then dark frames,
+until the person stops it. CameraX ends a recording only on an explicit
+stop, a use case that is detached, a limit or an encoder error, so no
+camera error ends it alone.
+
+Stop the current recording where the app handles that error. The
+recorder finalizes with no error, the clip ends where the camera did and
+is offered as for any other recording, and the app stays open and opens
+its camera again by itself. A paused recording ends the same way, and
+nothing happens when no video is recording.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ app/src/main/java/org/lineageos/aperture/CameraActivity.kt | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+index a1f5caa90d4d66ca80f4fa28910d7a3d60e3a95f..35ba34fa83149939ac1cc90c8ab049299c119c59 100644
+--- a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
++++ b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
+@@ -804,7 +804,12 @@ open class CameraActivity : AppCompatActivity(R.layout.activity_camera) {
+                         }
+ 
+                         CameraXCameraState.ERROR_OTHER_RECOVERABLE_ERROR -> {
+-                            // Warn the user and don't do anything
++                            // The camera is closed and CameraX opens it again, so a
++                            // recording would go on across the gap: end it and save the
++                            // clip. There is nothing to stop when no video is recording
++                            viewModel.videoRecording.value?.stop()
++
++                            // Warn the user
+                             showToast(R.string.error_other_recoverable_error)
+                         }
+ 

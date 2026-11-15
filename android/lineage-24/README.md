@@ -350,7 +350,10 @@ lowest camera ID; the external cameras are one side), snapped to 0.5, 1, 2,
 2.5, 3, 4 or 5 when within 20 %. Pinch to zoom (the front camera's too),
 the zoom slider and the Zoom action of the hardware keys are off, the volume
 keys keep their other actions (the shutter by default), and a tap on the
-active button does nothing. A product overlay in
+active button does nothing. When CameraX closes the camera with a recoverable
+error and opens it again (the HAL's report that the host ended the camera's
+video, ERROR_DEVICE), the application ends the recording in progress and saves
+its clip, and stays open. A product overlay in
 `overlay/overlay/packages/apps/Aperture` sets the switch and ignores camera
 ID 2, which only a host that publishes the wide lens twice has. The build
 installs it as a static runtime overlay of the application; the application

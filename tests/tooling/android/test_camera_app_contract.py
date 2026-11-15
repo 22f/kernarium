@@ -5,7 +5,9 @@
 The product overlay of the camera application (Aperture) replaces resources the application's own
 patch series defines: the switch for free zoom (default on, off in the overlay) and the two settings
 that list each lens of the host. A name that one side renames leaves the overlay applying to nothing,
-and the verifier's constants must name the same settings and values as the overlay.
+and the verifier's constants must name the same settings and values as the overlay. The series also
+ends a recording when the camera closes with a recoverable error (the host ended the camera's video):
+the camera video-lost integration row relies on it.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ ZOOM = "config_enableZoom"
 AUX_CAMERAS = "config_enableAuxCameras"
 IGNORED_AUX_CAMERAS = "config_ignoredAuxCameraIds"
 MAIN_CAMERAS = "LensZoomRatioUtils.getMainCameras("
+STOP_RECORDING = "viewModel.videoRecording.value?.stop()"
 
 
 def fail(message: str) -> None:
@@ -107,6 +110,10 @@ def check(android_root: Path) -> None:
     # cameras alike by the same grouping.
     if not any(MAIN_CAMERAS in line for line in added):
         fail(f"the camera application's patches never group the cameras of a side: no line adds {MAIN_CAMERAS}")
+    # The recording ends when the camera closes with a recoverable error: the host ending the camera's
+    # video reaches the application as that error, and nothing else of the HAL's report ends the clip.
+    if not any(STOP_RECORDING in line for line in added):
+        fail(f"the camera application's patches never end a recording on the camera's recoverable error: no line adds {STOP_RECORDING}")
 
 
 def fixtures(android_root: Path) -> None:
@@ -148,6 +155,12 @@ def fixtures(android_root: Path) -> None:
             if MAIN_CAMERAS in text:
                 patch.write_text(text.replace(MAIN_CAMERAS, "mainCamerasOf("), encoding="utf-8")
                 expect_failure(lambda: check(copy), "a patch that does not group the cameras of a side")
+                patch.write_text(text, encoding="utf-8")
+        for patch in sorted((copy / SERIES_DIRECTORY).glob("*.patch")):
+            text = patch.read_text(encoding="utf-8")
+            if STOP_RECORDING in text:
+                patch.write_text(text.replace(STOP_RECORDING, "viewModel.videoRecording.value?.pause()"), encoding="utf-8")
+                expect_failure(lambda: check(copy), "a patch that does not end the recording on the camera's recoverable error")
                 patch.write_text(text, encoding="utf-8")
         check(copy)
 
