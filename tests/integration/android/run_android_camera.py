@@ -2416,7 +2416,7 @@ def check_viewfinder_returns(guest: Guest, plan: Plan, mode: str) -> None:
     and with no error window. `mode` is "video" (the video mode's viewfinder, which binds an encoder surface: the HAL
     ends the camera for it as for a recording, printed, not required) or "photo" (the photo mode's viewfinder has no
     encoder stream: the HAL must not tell it the device is gone, it closes the camera's video streams and opens them
-    again, and the log says so)."""
+    again, once for the loss, and the log says so)."""
     camera = plan.camera_ids[0]
     photo = mode == "photo"
     label = "photo viewfinder" if photo else "video viewfinder"
@@ -2451,10 +2451,16 @@ def check_viewfinder_returns(guest: Guest, plan: Plan, mode: str) -> None:
     after = guest.shell("logcat -d -b events | grep -a -E 'am_crash|am_anr|am_proc_died' || true")
     if after != crashes:
         raise Failure(f"the application crashed or stopped responding around the loss: {after[len(crashes):][-300:]!r}")
-    if photo and guest.hal_log().count(HAL_REOPEN_LINE) <= reopened:
+    reopens = guest.hal_log().count(HAL_REOPEN_LINE) - reopened
+    if photo and reopens == 0:
         raise Failure("the HAL logged no reopening of its video streams: the host did not end the camera's video, or the image "
                       "lacks the HAL topic of route p0030")
-    print(f"  {label}: live again after the return, same process {process}, no error window")
+    if photo and reopens != 1:
+        raise Failure(f"the HAL closed and reopened its video streams {reopens} times for one loss (one expected): the host "
+                      "ended the camera's video again for each session the HAL opened while the application was away, instead "
+                      "of holding one session, interrupted, until the return")
+    print(f"  {label}: live again after the return, same process {process}, no error window"
+          + (", one reopening of the video streams" if photo else ""))
 
 
 def check_audio_stall(guest: Guest, plan: Plan) -> None:
@@ -2709,7 +2715,7 @@ def check_cameraserver_restart(guest: Guest, plan: Plan) -> None:
 
 # ---- Starting and stopping the guest.
 
-CAMERA_SOURCES = {"live": "synthetic", "blocked": "blocked", "none": "none"}
+CAMERA_SOURCES = {"live": "synthetic", "video-lost": "synthetic", "blocked": "blocked", "none": "none"}
 
 
 AUTO_LAYOUT = "auto"

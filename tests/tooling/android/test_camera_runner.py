@@ -272,6 +272,19 @@ class LauncherTests(unittest.TestCase):
                           "androidboot.product.vendor.sku=bf-small-flash"])
         self.assertNotIn("--camera-tier=large",
                          runner.launcher_arguments(runner.make_plan("front", "laptop", "blocked")))
+
+    def test_every_mode_has_a_camera_source_and_the_launcher_arguments_for_it(self) -> None:
+        # The restart mode runs its guests as the live plan (main() maps it); every other mode makes its own plan.
+        sources = {"live": "synthetic", "restart": "synthetic", "video-lost": "synthetic", "blocked": "blocked", "none": "none"}
+        self.assertEqual(set(sources), set(runner.MODES), "a mode without an expected source is a mode this row does not walk")
+        for mode, source in sources.items():
+            with self.subTest(mode=mode):
+                plan_mode = "live" if mode == "restart" else mode
+                plan = runner.make_plan("none" if mode == "none" else "bf-small-flash", "phone", plan_mode)
+                arguments = runner.launcher_arguments(plan)
+                self.assertEqual(arguments[0], f"--camera={source}")
+                if mode != "none":
+                    self.assertIn("--camera-profile=phone", arguments)
         # With auto the launcher composes the layout and no SKU is passed.
         self.assertEqual(runner.launcher_arguments(runner.make_plan("bf-small-flash", "phone", "live"), auto=True),
                          ["--camera=synthetic", "--camera-profile=phone", "--camera-layout=auto"])
@@ -3043,10 +3056,11 @@ class VideoLostTests(unittest.TestCase):
             self.pid = 4711
             self.crash = False
             self.events_log = ""
-            # The photo viewfinder: the HAL reopens its video streams and the application notices nothing; or the HAL
-            # tells it the device is gone (a defect); or it does not come back.
+            # The photo viewfinder: the HAL reopens its video streams (once for the loss, or as many times as the host
+            # ends the camera's video again) and the application notices nothing; or the HAL tells it the device is gone
+            # (a defect); or it does not come back.
             self.photo = False
-            self.photo_reopens = True
+            self.photo_reopen_lines = 1
             self.photo_lost = False
             self.photo_returns = True
             # The movie the second recording saved, when it is not the first one.
@@ -3068,8 +3082,8 @@ class VideoLostTests(unittest.TestCase):
                 if self.photo_lost:
                     self.held = set()
                     self.log += VideoLostTests.END
-                elif self.photo_reopens:
-                    self.log += VideoLostTests.REOPEN
+                else:
+                    self.log += VideoLostTests.REOPEN * self.photo_reopen_lines
                 if not self.photo_returns:
                     self.held = set()
             elif line == "interrupt background":
@@ -3221,9 +3235,33 @@ class VideoLostTests(unittest.TestCase):
 
     def test_a_photo_viewfinder_the_hal_never_reopened_fails(self) -> None:
         guest = self.Guest(self.plan())
-        guest.photo_reopens = False
+        guest.photo_reopen_lines = 0
         with self.assertRaisesRegex(runner.Failure, "logged no reopening of its video streams"):
             self.run_check(guest)
+
+    # One close and one reopening per loss: the host holds the session the HAL opens while the application is away.
+    def test_a_photo_viewfinder_reopened_once_for_the_loss_passes_and_says_so(self) -> None:
+        guest = self.Guest(self.plan())
+        text = self.run_check(guest)
+        self.assertIn("photo viewfinder: live again after the return, same process 4711, no error window, one reopening", text)
+        self.assertNotIn("video viewfinder: live again after the return, same process 4711, no error window, one reopening", text)
+
+    def test_a_photo_viewfinder_reopened_again_and_again_for_one_loss_fails(self) -> None:
+        # The loop of the defect: each session the HAL opens while the application is away is ended again.
+        for lines in (2, 37):
+            with self.subTest(lines=lines):
+                guest = self.Guest(self.plan())
+                guest.photo_reopen_lines = lines
+                with self.assertRaisesRegex(runner.Failure,
+                                            rf"reopened its video streams {lines} times for one loss \(one expected\)"):
+                    self.run_check(guest)
+
+    def test_the_reopenings_before_the_loss_are_not_the_losss(self) -> None:
+        # The count is the loss's own: lines the HAL logged earlier (the log is cumulative) do not count.
+        guest = self.Guest(self.plan())
+        guest.log += self.REOPEN * 5
+        text = self.run_check(guest)
+        self.assertIn("photo viewfinder: live again after the return", text)
 
     def test_a_photo_viewfinder_that_does_not_come_back_fails(self) -> None:
         guest = self.Guest(self.plan())
