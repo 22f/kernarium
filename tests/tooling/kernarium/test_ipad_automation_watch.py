@@ -1451,6 +1451,22 @@ class StallTests(unittest.TestCase):
         self.assertIn("2.0 s by the monotonic clock and 3602.0 s by the wall clock",
                       self.late()[0])
 
+    def test_a_stall_after_a_verdict_that_did_not_stand_is_still_told(self) -> None:
+        # Rule: the time spent in a replacement is not a poll's, but the wait
+        # after it is. When the verdict no longer stands (AGAIN) and the wait
+        # that follows overruns, the next turn tells it: the baseline is set
+        # at the end of the replacement, not deleted.
+        def again(reason):
+            self.clock.advance(100)
+            self.clock.extra = 4800
+            return automation.AGAIN
+        self.run_turns(self.quiet, lambda clock: "dead", self.quiet, self.quiet,
+                       replace=again)
+        self.assertEqual(len(self.late()), 1, self.messages)
+        self.assertIn("did not run for 4802.0 s by the monotonic clock",
+                      self.late()[0])
+        self.assertIn("its wait took 4802.0 s", self.late()[0])
+
     def test_a_replacement_is_not_a_late_turn(self) -> None:
         # Rule: a replacement takes minutes and is not a poll; the turn after
         # it is not late for it.
@@ -2788,9 +2804,7 @@ class RecordTests(WatchTestCase):
     CASES = (
         ("quiet", ("xcodebuild started the runner again at ",
                    "shows neither a restart notice nor a run of no tests",
-                   "so the device may have asked for an approval nobody gave",
-                   "(the host that ended: the supervisor ended (xcodebuild exited "
-                   "with status 65)")),
+                   "so the device may have asked for an approval nobody gave")),
         ("authentication", ("the system cancelled the approval prompt, as when "
                             "the screen locks during it",
                             "Code=-4 \"UI canceled by system.\"")),
@@ -2815,13 +2829,54 @@ class RecordTests(WatchTestCase):
                 latch = automation.ApprovalLatch(self.options("status")).read()
                 for text in expected:
                     self.assertIn(text, detail)
-                    if not text.startswith("(the host"):
-                        self.assertIn(text, latch["detail"])
+                    self.assertIn(text, latch["detail"])
+                self.assert_ended_for(detail)
                 summary = automation.watch_summary(self.options("status"))
                 self.assertEqual(summary["detail"], detail)
                 self.assertEqual(self.run_watch().join(),
                                  automation.EXIT_NEEDS_APPROVAL)
                 self.assertIn(expected[0], self.record()["detail"])
+
+    GENERIC = "the host that ended: its heartbeat stopped"
+
+    def assert_ended_for(self, detail: str) -> str:
+        """The record ends with the reason the watch called the host dead, as it
+        recorded it in `last_end`, which is not the generic fallback; returns
+        that reason."""
+        reason = self.record()["last_end"]["reason"]
+        self.assertTrue(detail.endswith(f"(the host that ended: {reason})"),
+                        (detail, reason))
+        self.assertNotIn(self.GENERIC, detail)
+        self.assertNotEqual(reason, "its heartbeat stopped")
+        return reason
+
+    def test_the_record_gives_the_reason_the_host_was_called_dead_in_either_order(self) -> None:
+        # Rule: the watch calls a host dead for one of two reasons when xcodebuild
+        # started the runner again and the log says nothing of it: its
+        # supervisor ended (xcodebuild exited), or the logged relaunch and the
+        # stale heartbeat came first. Which it is depends on how soon xcodebuild
+        # exits after the relaunch notice, which the test sets, and the record
+        # carries that reason, not a generic one.
+        orders = (
+            ("the supervisor ended first", {"quiet_exit_after": 0},
+             {"WATCH_GONE_AGE": 4.0},
+             "the supervisor ended (xcodebuild exited with status 65)"),
+            ("the relaunch was seen first", {"quiet_exit_after": 60}, {},
+             "xcodebuild started the runner again, so the host's runner ended"))
+        for what, scenario, constants, stem in orders:
+            with self.subTest(what):
+                self.setUp()
+                self.tune(**constants)
+                self.device.scenarios([dict(kind="serve", **scenario)])
+                first = self.watch_over_host()
+                self.device.control(first, "relaunch-quiet")
+                self.assertEqual(self.last_watch.join(),
+                                 automation.EXIT_NEEDS_APPROVAL, self.messages)
+                reason = self.assert_ended_for(self.record()["detail"])
+                self.assertTrue(reason.startswith(stem), reason)
+                latch = automation.ApprovalLatch(self.options("status")).read()
+                self.assertEqual(latch["kind"], "possible")
+                self.invoked(1)
 
     def test_a_runner_that_never_served_is_named_with_its_time(self) -> None:
         self.tune(WATCH_RUNNER_WAIT=1.0)
@@ -2842,10 +2897,12 @@ class LogSignalTests(unittest.TestCase):
     RUNNER = ("2026-11-13 22:04:30.522108+0900 KernariumAutomation-Runner[11111:"
               "2222222] [Default] Running tests...")
 
-    def scan(self, *lines: str):
+    def scan(self, *lines: str, pid: int | None = None):
+        """What the watch reads of a log; with `pid`, what the supervisor of the
+        xcodebuild that has it reads."""
         with mock.patch("builtins.open", mock.mock_open(
                 read_data=("\n".join(lines) + "\n").encode())):
-            scan = automation.LogScan("log")
+            scan = automation.LogScan("log", xcodebuild_pid=pid)
             scan.read()
         return scan
 
@@ -2981,9 +3038,11 @@ class LogSignalTests(unittest.TestCase):
     # What xcodebuild printed when the connection to the device was lost, and
     # when it could not launch a runner, in two logs of real hosts; the launch
     # report ids and the device are left out.
-    LOST = [line.replace("{stamp}", "2026-11-15 10:34:52.158") for line in LOST_BLOCK]
+    XCODEBUILD = 4242
+    LOST = [line.replace("{stamp}", "2026-11-15 10:34:52.158").replace("{pid}", "4242")
+            for line in LOST_BLOCK]
     LAUNCH_FAILED = [line.replace("{stamp}", "2026-11-13 18:20:17.544")
-                     for line in LAUNCH_FAILED_BLOCK]
+                     .replace("{pid}", "4242") for line in LAUNCH_FAILED_BLOCK]
     # Lines of runs that were healthy, from the same logs.
     HEALTHY = (
         "ipad-automation: device reports (cap 25 per kind, 5 free needed): "
@@ -3026,10 +3085,12 @@ class LogSignalTests(unittest.TestCase):
         # are not. The header is xcodebuild's own line in either spelling.
         for header in (self.LOST[0].replace("An error occurred while communicating "
                                             "with a remote process.", "Ein Fehler."),
-                       self.LOST[0].replace("xcodebuild[1:2] [MT] ", "xcodebuild[1:2]  ")):
+                       self.LOST[0].replace("xcodebuild[4242:2] [MT] ",
+                                            "xcodebuild[4242:2]  ")):
             with self.subTest(header):
-                self.assertEqual(self.scan(header, *self.LOST[1:]).connection_lost,
-                                 "10:34:52")
+                self.assertEqual(
+                    self.scan(header, *self.LOST[1:],
+                              pid=self.XCODEBUILD).connection_lost, "10:34:52")
 
     def test_nothing_but_the_whole_block_in_order_is_a_lost_connection(self) -> None:
         # Rule: no line of a healthy run, and no other CoreDevice error, ends
@@ -3055,13 +3116,23 @@ class LogSignalTests(unittest.TestCase):
                 "IDELaunchReport: x Finished with error: y", domain, code],
             "the words in the host's own report": [
                 "AutomationHost: tap x failed: 2026-11-15 10:34:52.158 "
-                "xcodebuild[1:2] [MT] IDELaunchReport: x Finished with error: y",
+                "xcodebuild[4242:2] [MT] IDELaunchReport: x Finished with error: y",
                 domain, code],
             "healthy lines": list(self.HEALTHY),
+            # The host prints a failure's text with a prefix on its first
+            # line only, so a sender's words with line breaks in them put whole
+            # lines in the log: a modifier "\n" + the three lines.
+            "a command's diagnostic with the lines of another xcodebuild": [
+                "AutomationHost: key x failed: unknown modifier ",
+                *[line.replace("[4242:", "[1:") for line in self.LOST[:3]]],
+            "the block of another process, whole": [
+                line.replace("[4242:", "[4243:") for line in self.LOST],
         }
         for what, lines in variants.items():
             with self.subTest(what):
-                self.assertIsNone(self.scan(self.RUNNER, *lines).connection_lost)
+                self.assertIsNone(
+                    self.scan(self.RUNNER, *lines,
+                              pid=self.XCODEBUILD).connection_lost)
         # A block cut after its header, with the rest read later, is the block.
         with __import__("tempfile").TemporaryDirectory() as scratch:
             path = Path(scratch) / "log"
@@ -3073,6 +3144,36 @@ class LogSignalTests(unittest.TestCase):
                 handle.write("\n".join(self.LOST[2:]) + "\n")
             scan.read()
             self.assertEqual(scan.connection_lost, "10:34:52")
+
+    def test_only_the_xcodebuild_a_supervisor_started_can_report_the_loss(self) -> None:
+        # Rule: the supervisor ends the xcodebuild it started, so the header's
+        # pid must be that one's. The watch's own reading only words the record
+        # and takes the block of any xcodebuild.
+        for pid, told in ((self.XCODEBUILD, "10:34:52"), (self.XCODEBUILD + 1, None),
+                          (1, None), (None, "10:34:52")):
+            with self.subTest(pid=pid):
+                self.assertEqual(
+                    self.scan(self.RUNNER, *self.LOST, pid=pid).connection_lost, told)
+
+    def test_a_line_ends_only_at_a_newline(self) -> None:
+        # Rule: the log's lines are those ending in a newline. A sender's
+        # words that carry another line separator (a carriage return, a form
+        # feed, Unicode's line and paragraph separators, ...) do not start a
+        # line of their own, so they cannot put a header at the start of one,
+        # even with the right pid.
+        header, rest = self.LOST[0], self.LOST[1:3]
+        for separator in ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85",
+                          "\u2028", "\u2029"):
+            with self.subTest(separator=separator.encode("unicode_escape")):
+                text = "AutomationHost: key x failed: unknown modifier " + separator
+                scan = self.scan(text + header, *rest, pid=self.XCODEBUILD)
+                self.assertIsNone(scan.connection_lost)
+        # A carriage return that ends a line, as a terminal's does, is a newline's.
+        with mock.patch("builtins.open", mock.mock_open(read_data=(
+                "\r\n".join(self.LOST) + "\r\n").encode())):
+            scan = automation.LogScan("log", xcodebuild_pid=self.XCODEBUILD)
+            scan.read()
+        self.assertEqual(scan.connection_lost, "10:34:52")
 
     def test_the_record_of_a_runner_started_again_after_a_lost_connection(self) -> None:
         # Rule: what xcodebuild did by itself (older supervisors, or one that

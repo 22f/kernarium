@@ -211,6 +211,23 @@ class LostConnectionTests(unittest.TestCase):
         self.assertLess(lost, text.index("ipad-automation: xcodebuild exited with "
                                          "status -15"))
 
+    def test_a_diagnostic_that_carries_the_block_leaves_a_healthy_host_alone(self) -> None:
+        # Rule: a command's failure text with line breaks puts whole lines in
+        # the log, the lost-connection lines of another process among them
+        # (a key modifier "\n" and the three lines). That is not xcodebuild
+        # reporting its own connection lost: the host keeps serving and the
+        # supervisor ends nothing.
+        process, nonce, log = self.supervise(named=True)
+        self.device.control(nonce, "forged-diagnostic")
+        self.device.wait(lambda: "Code: 3" in log.read_text(), 15,
+                         "the diagnostic is in the log")
+        time.sleep(1.5)
+        self.assertIsNone(process.poll())
+        self.assertTrue(self.device.serving(nonce))
+        text = log.read_text()
+        self.assertNotIn("ending xcodebuild", text)
+        self.assertNotIn("exited with status", text)
+
     def test_a_supervisor_that_is_not_told_its_log_does_not_read_it(self) -> None:
         # The control for the test above: the fake xcodebuild does what the
         # real one did, and ends by itself with status 65.

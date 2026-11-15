@@ -16,10 +16,11 @@ Scenario kinds:
   with `FakeDevice.control(nonce, action)`: `die` (xcodebuild exits),
   `lifetime` (a clean end at the host's own deadline), `relaunch` (xcodebuild
   starts the runner again, which never serves and never says anything),
-  `relaunch-quiet` (the same, and xcodebuild ends at once with no word of
-  whether the runner initialized), `relaunch-initialized` (the runner
-  initialized: xcodebuild's restart notice and the totals of a run of no
-  tests, as its log shows them, and xcodebuild ends),
+  `relaunch-quiet` (the same, and xcodebuild ends with no word of whether
+  the runner initialized, `quiet_exit_after` seconds later, 0 by default),
+  `relaunch-initialized` (the runner initialized: xcodebuild's restart
+  notice and the totals of a run of no tests, as its log shows them, and
+  xcodebuild ends),
   `relaunch-initialized-then-timeout` (and then the runner started again
   fails as `relaunch-timeout` does; `-authentication` likewise),
   `relaunch-restarting` (the restart notice, and then nothing: a log cut
@@ -30,8 +31,10 @@ Scenario kinds:
   runner came up, 0.3 by default), `silent` (the runner stops
   beating and xcodebuild stays) or `busy` (a command that never ends shows in
   the heartbeat, which keeps beating).
-- `serve` also takes the control `launch-failed` (xcodebuild reports a failed
-  launch, CoreDevice error 10002, once, and the host serves on) and the control
+- `serve` also takes the control `forged-diagnostic` (a command's failure text
+  that carries the lost-connection lines of another process: a healthy host),
+  `launch-failed` (xcodebuild reports a failed launch, CoreDevice error 10002,
+  once, and the host serves on) and the control
   `connection-lost`: xcodebuild reports the
   connection to the device lost (CoreDevice error 3, as its log shows it) and,
   `lost_relaunch_after` seconds later (6 by default), starts the runner again by
@@ -72,10 +75,10 @@ import time
 
 # The block xcodebuild prints when the connection to the device is lost, as its
 # log shows it (the launch report ids, the pointers and the device are left
-# out); `{stamp}` is the line's time. It appears twice, for the launch and for
-# its group. The block of a failed launch (CoreDevice error 10002) follows.
+# out); `{stamp}` is the line's time and `{pid}` the pid of the xcodebuild that
+# prints it. It appears twice, for the launch and for its group. The block of a failed launch (CoreDevice error 10002) follows.
 LOST_BLOCK = [
-    "{stamp} xcodebuild[1:2] [MT] IDELaunchReport: 0000000000000000:"
+    "{stamp} xcodebuild[{pid}:2] [MT] IDELaunchReport: 0000000000000000:"
     "0000000000000000:Launching KernariumAutomation Finished with error: An error "
     "occurred while communicating with a remote process.",
     "Domain: com.apple.dt.CoreDeviceError",
@@ -93,7 +96,7 @@ LOST_BLOCK = [
     "}",
     "--",
     "",
-    "{stamp} xcodebuild[1:2] [MT] IDELaunchReport: 0000000000000000:"
+    "{stamp} xcodebuild[{pid}:2] [MT] IDELaunchReport: 0000000000000000:"
     "0000000000000000: Finished with error: An error occurred while communicating "
     "with a remote process.",
     "Domain: com.apple.dt.CoreDeviceError",
@@ -108,7 +111,7 @@ LOST_BLOCK = [
     "",
 ]
 LAUNCH_FAILED_BLOCK = [
-    "{stamp} xcodebuild[1:2]  IDELaunchReport: 0000000000000000:"
+    "{stamp} xcodebuild[{pid}:2]  IDELaunchReport: 0000000000000000:"
     "0000000000000000:Launching KernariumAutomation Finished with error: The "
     "application failed to launch.",
     "Domain: com.apple.dt.CoreDeviceError",
@@ -200,18 +203,27 @@ def runner_up():
     say(f"{stamp} KernariumAutomation-Runner[1:2] [Default] Running tests...")
 
 
+def block(lines, stamp, pid):
+    for line in lines:
+        say(line.replace("{stamp}", stamp).replace("{pid}", str(pid)))
+
+
 def connection_lost():
     """What xcodebuild's log shows when the connection to the device is lost."""
-    stamp = time.strftime("%Y-%m-%d %H:%M:%S") + ".158"
-    for line in LOST_BLOCK:
-        say(line.replace("{stamp}", stamp))
+    block(LOST_BLOCK, time.strftime("%Y-%m-%d %H:%M:%S") + ".158", os.getpid())
 
 
 def launch_failed():
     """What xcodebuild's log shows when it could not launch a runner."""
-    stamp = time.strftime("%Y-%m-%d %H:%M:%S") + ".544"
-    for line in LAUNCH_FAILED_BLOCK:
-        say(line.replace("{stamp}", stamp))
+    block(LAUNCH_FAILED_BLOCK, time.strftime("%Y-%m-%d %H:%M:%S") + ".544", os.getpid())
+
+
+def forged_diagnostic():
+    """A command's failure text with the lost-connection block in it, as the
+    host printed it when a sender's words carried a line break: the first line
+    prefixed, the rest not, and the header naming another process."""
+    say("AutomationHost: key synthetic failed: unknown modifier ")
+    block(LOST_BLOCK[:3], "2000-01-01 00:00:00.000", 1)
 
 
 def relaunch_initialized(finish=True):
@@ -346,6 +358,9 @@ while True:
     if now == "launch-failed" and not reported:
         reported = True
         launch_failed()
+    if now == "forged-diagnostic" and not reported:
+        reported = True
+        forged_diagnostic()
     if now == "die":
         sys.exit(1)
     if now == "lifetime":
@@ -383,6 +398,7 @@ while True:
         runner_up()
         if now == "relaunch-quiet":
             say("Test Suite 'Selected tests' passed at 2026-11-13 23:59:35.792.")
+            time.sleep(scenario.get("quiet_exit_after", 0))
             sys.exit(65)
         time.sleep(scenario.get("relaunch_after", 0.3))
         approval_failure(now[len("relaunch-"):])

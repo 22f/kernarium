@@ -51,9 +51,9 @@ runner initialized (a new host then serves with nobody at the device), and
 "Failed to initialize for UI testing" means the owner is needed. A runner that
 xcodebuild starts after the connection to the device was lost (CoreDevice error
 3, as when the Mac's CoreDevice service crashes) cannot initialize, so the
-host's supervisor ends xcodebuild as soon as its log reports that error, before
-the runner is started again: the host's death is then a plain one. `watch` keeps
-one device's host serving:
+host's supervisor tries to end xcodebuild as soon as its log reports that
+error, before the runner is started again (best effort, not a guarantee): the
+host's death is then a plain one. `watch` keeps one device's host serving:
 
   ipad-automation.py --device UDID watch --hours 8
   ipad-automation.py --device UDID watch --detach
@@ -289,9 +289,12 @@ EXIT_STATUS_LINE = "ipad-automation: xcodebuild exited with status"
 # initialize. Any other CoreDevice error does not match (code 10002, "The
 # application failed to launch", is xcodebuild's own failed relaunch: it ends
 # by itself), and no line of a healthy run does: only xcodebuild's own lines
-# start with its time and process name.
+# start with its time and process name. The supervisor takes a header only
+# from the xcodebuild it started (its pid), and a line ends only at a newline:
+# text the runner prints (a diagnostic with line breaks in it) cannot form the
+# block unless it knows that pid and writes the three lines.
 LAUNCH_ERROR_LINE = re.compile(
-    r"^\d{4}-\d\d-\d\d (\d\d:\d\d:\d\d)\.\d+ xcodebuild\[\d+:\d+\] +"
+    r"^\d{4}-\d\d-\d\d (\d\d:\d\d:\d\d)\.\d+ xcodebuild\[(\d+):\d+\] +"
     r"(?:\[MT\] )?IDELaunchReport: .*Finished with error: ")
 CORE_DEVICE_DOMAIN = "Domain: com.apple.dt.CoreDeviceError"
 CONNECTION_LOST_CODE = "3"
@@ -1269,8 +1272,12 @@ def command_supervise(options):
     runner again by itself some seconds later, a runner that cannot
     initialize when the device is locked and may leave the device asking for an
     approval nobody gives; with xcodebuild ended first, the host's death is a
-    plain one and the watch may replace it. xcodebuild's own relaunch never
-    yields a host that serves (the test that serves is not run again)."""
+    plain one and the watch may replace it. This is best effort: the log is
+    polled, so xcodebuild may have started the runner before the supervisor
+    reads the error, and the watch then handles that death as it does any
+    other. xcodebuild's own relaunch never yields a host that serves (the
+    test that serves is not run again). The error is taken only from lines
+    of the xcodebuild this supervisor started."""
     publish_supervisor_identity(options)
     if refuse_recording(options.xctestrun):
         return EXIT_FAILED
@@ -1292,7 +1299,7 @@ def command_supervise(options):
     # watch signal as a whole.
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, env=environment)
     deadline = time.monotonic() + options.seconds + 900
-    scan = LogScan(options.log)
+    scan = LogScan(options.log, xcodebuild_pid=process.pid)
     while (process.poll() is None and not stopping
            and time.monotonic() < deadline):
         scan.read()
@@ -1618,10 +1625,13 @@ def command_stop(options):
 
 class LogScan:
     """Reads a host's xcodebuild log as it grows and keeps what the watch
-    needs of it. A line is taken once it is complete."""
+    needs of it. A line is taken once it is complete, and ends only at a
+    newline. With `xcodebuild_pid`, the launch error of a lost connection is
+    taken only from the lines of that xcodebuild (the supervisor's own)."""
 
-    def __init__(self, path):
+    def __init__(self, path, xcodebuild_pid=None):
         self.path = path
+        self.xcodebuild_pid = xcodebuild_pid
         self.offset = 0
         self.runner_up = 0
         # When each runner came up ("HH:MM:SS", or "" when the line has no
@@ -1660,7 +1670,9 @@ class LogScan:
             return
         complete = data.rfind(b"\n") + 1
         self.offset += complete
-        for line in data[:complete].decode(errors="replace").splitlines():
+        # Not splitlines(): it also ends a line at \r, \x0b, \x0c, \x1c-\x1e,
+        # \x85, \u2028 and \u2029, which text printed by the runner may carry.
+        for line in data[:complete].decode(errors="replace").split("\n")[:-1]:
             self.take(line.rstrip())
 
     def take_launch_error(self, line):
@@ -1669,6 +1681,8 @@ class LogScan:
         lines. Only CoreDevice error 3 is a lost connection."""
         state, self.launch_error = self.launch_error, None
         header = LAUNCH_ERROR_LINE.match(line)
+        if header and self.xcodebuild_pid not in (None, int(header.group(2))):
+            header = None
         if header:
             self.launch_error = ("domain", header.group(1))
         elif state and state[0] == "domain" and line.rstrip() == CORE_DEVICE_DOMAIN:
@@ -1990,9 +2004,10 @@ class Cadence:
             self.waited = self.clock.monotonic() - began
 
     def reset(self):
-        """What happened since is not a poll (a replacement, which takes
-        minutes): the next turn is not late."""
-        self.last = None
+        """What happened until now is not a poll (a replacement, which takes
+        minutes): the next turn is late only by what comes after this call,
+        so a wait that follows it is still timed."""
+        self.last = (self.clock.monotonic(), self.clock.time())
         self.waited = 0.0
 
 
