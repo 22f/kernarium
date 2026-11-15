@@ -420,6 +420,11 @@ static_assert(std::is_trivially_destructible_v<Body>,
 static_assert(sizeof(Body) == 16 &&
 	sizeof(Body) % alignof(std::uintptr_t) == 0,
 	"the stream tail follows the body at pointer alignment");
+static_assert(sizeof(Body) == arm64::gadgets::block_header_bytes &&
+	offsetof(Body, guest_address) == 0 &&
+	offsetof(Body, instruction_count) ==
+		arm64::gadgets::block_header_count,
+	"a body is the header in front of the words its link record names");
 static_assert(maximum_t32_validation_units < 0x100U,
 	"a T32 translation's halfword count fits the narrow field");
 static_assert(block_instruction_count < 0xffU,
@@ -430,32 +435,27 @@ static_assert(block_instruction_count < 0xffU,
  * another's translation. Each address space therefore owns its own records,
  * which also keeps the key a single word.
  *
- * Translated code follows `link` with one `ldp` of its stream and count while
- * other vCPUs of the address space may retarget it, so the pair sits on a
- * sixteen-byte boundary and is only ever written whole (store_pair). An
- * unlinked record's stream is the link_exit word right in front of it, which
- * link_exit runs with its stream two words before the PC. Records are carved
- * thirty-two bytes apart, so that word is the last of the record before, or for
- * a chunk's first record the last of the chunk's prefix: each record's last
- * word holds link_exit for the next, and a released record keeps it. Only what
- * generated code reads is in the record; what the cache alone needs, the body
- * a miss may adopt and whether the record is listed, is its companion (see
- * gadget_cache::StableRecordTable).
+ * Translated code follows `link` with one `ldp` of its pair, the first entry
+ * of the body linked to and the stream behind it, while other vCPUs of the
+ * address space may retarget it, so the pair sits on a sixteen-byte boundary
+ * and is only ever written whole (store_pair). The count and the retirement
+ * PC come from the header in front of the stream: the body's own, or for an
+ * unlinked record, which names link_exit and its own stream word, the
+ * record's. Only what generated code reads is in the record; what the cache
+ * alone needs, the body a miss may adopt and whether the record is listed, is
+ * its companion (see gadget_cache::StableRecordTable).
  */
 struct alignas(16) LinkRecord final {
 	explicit LinkRecord(std::uint64_t pc) noexcept
-		: link{
-			.stream = fallback(),
-			.instruction_count = 0,
-			.guest_pc = pc,
-		  },
-		  next_fallback{exit_word()}
+		: link{.guest_pc = pc, .entry = exit_word()}
 	{
+		link.stream = arm64::gadgets::unlinked_stream(link);
 	}
 
 	void reset() noexcept
 	{
-		store_pair(&link, word_of(fallback()), 0);
+		store_pair(&link.entry, exit_word(),
+			word_of(arm64::gadgets::unlinked_stream(link)));
 	}
 
 	/* Retarget the record at a stored body. Its words were written before
@@ -463,19 +463,13 @@ struct alignas(16) LinkRecord final {
 	void link_to(const Body &body) noexcept
 	{
 		std::atomic_thread_fence(std::memory_order_release);
-		store_pair(&link, word_of(body.link_entry()),
-			body.instruction_count);
+		store_pair(&link.entry, *body.link_entry(),
+			word_of(body.link_entry() + 1));
 	}
 
 	[[nodiscard]] bool names(const Body &body) const noexcept
 	{
-		return link.stream == body.link_entry();
-	}
-
-	/* An unlinked record's stream: the word in front of it, link_exit. */
-	[[nodiscard]] const std::uintptr_t *fallback() const noexcept
-	{
-		return reinterpret_cast<const std::uintptr_t *>(this) - 1;
+		return link.stream == body.link_entry() + 1;
 	}
 
 	[[nodiscard]] static std::uintptr_t exit_word() noexcept
@@ -485,20 +479,6 @@ struct alignas(16) LinkRecord final {
 	}
 
 	arm64::gadgets::BlockLink link;
-	/* The next record's fallback, link_exit, whatever that record holds. */
-	std::uintptr_t next_fallback;
-
-	/* The chunk's prefix ends in its first record's fallback. */
-	static constexpr std::size_t chunk_prefix = 16;
-	static void prepare_chunk(std::byte *storage) noexcept
-	{
-		const auto word = exit_word();
-		std::memcpy(storage + chunk_prefix - sizeof(word), &word,
-			sizeof(word));
-	}
-	/* A released record keeps its next record's fallback. */
-	static constexpr std::size_t cleared_bytes =
-		sizeof(arm64::gadgets::BlockLink);
 
 	/* The newest body stored for this PC that some slot still holds, which
 	 * another executor's miss may adopt instead of translating, with bit 0
@@ -531,14 +511,9 @@ struct alignas(16) LinkRecord final {
 	};
 };
 
-static_assert(offsetof(LinkRecord, link) == 0 &&
-	offsetof(LinkRecord, next_fallback) ==
-		sizeof(arm64::gadgets::BlockLink) &&
-	sizeof(LinkRecord) == 32 &&
-	LinkRecord::chunk_prefix % alignof(LinkRecord) == 0,
-	"link_exit reads the PC two words past its stream word, the stream and "
-	"count are one aligned pair, and each record ends in the next one's "
-	"fallback");
+static_assert(offsetof(LinkRecord, link) == 0 && sizeof(LinkRecord) == 32 &&
+	offsetof(arm64::gadgets::BlockLink, entry) % 16 == 0,
+	"a record is its BlockLink, whose pair is one aligned access");
 
 struct LinkKey final {
 	[[nodiscard]] std::uint64_t operator()(
@@ -964,7 +939,8 @@ public:
 		const auto number = known != 0 ? known :
 			shard.links.try_emplace_number(pc, pc).first;
 		auto *record = shard.links.record_at(number);
-		assert(record->link.guest_pc == pc);
+		/* A follow that exits reports the body's PC as the record's. */
+		assert(record->link.guest_pc == pc && body.guest_address == pc);
 		if (gate_.load(std::memory_order_seq_cst) != changes)
 			return {number, &record->link};
 		/* Only an activation links a record, and it lists the record
