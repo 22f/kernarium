@@ -660,8 +660,9 @@ public:
 	Space(const Space &) = delete;
 	Space &operator=(const Space &) = delete;
 
-	/* The unreachable guest PC an untrained indirect cell names; guest
-	 * targets are admitted only word-aligned, so none can collide. */
+	/* The vacant key an untrained indirect cell names, with a safe unlinked
+	 * fallback link beside it. A guest can branch there: no block begins at
+	 * it, since guest targets are admitted only word-aligned. */
 	static constexpr std::uint64_t empty_pc = ~std::uint64_t{};
 
 	[[nodiscard]] const SpaceKey &key() const noexcept { return key_; }
@@ -805,7 +806,7 @@ public:
 	{
 		train_target(target_pc, target);
 		/* Training is the only thing C++ does to move a site off its
-		 * empty cells, and empty_pc is unreachable as a guest target, so
+		 * empty cells, and empty_pc is never a trained target, so
 		 * a site still holding two empty cells is untrained since its
 		 * last reset -- which makes this the transition that enrols it.
 		 * Translated code trains cells too, without enrolling; such a

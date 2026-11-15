@@ -100,7 +100,9 @@ A cached return consults a private per-carrier ring of return records that
 linked calls push, and a cached indirect branch the address space's
 direct-mapped target table that every miss exit trains, only after the site's
 cells miss, so a stale or wrong record can only fall back to the ordinary miss
-exit. The executor empties the ring on every address-space switch and after a
+exit. An empty record holds the all-ones PC and no link: a return to that
+address, which a guest can request, leaves through the miss exit like any cold
+return. The executor empties the ring on every address-space switch and after a
 link sweep. The table belongs to the address space's link state and is retired
 with it, so it never names another address space's code.
 
