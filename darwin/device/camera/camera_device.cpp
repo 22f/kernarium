@@ -284,6 +284,8 @@ public:
     bool firingWaiting {};
     std::unique_ptr<uml::platform::Nv12Transformer> transformer;
     CameraState reported {CameraState::idle};
+    /* Whether the application was last told the guest is in video mode (`onVideoMode`). */
+    bool reportedVideoMode {};
     std::uint64_t lastRetry {};
     bool sessionFailed {};
     /* The format each platform camera runs in, which a session is told when it opens. */
@@ -335,7 +337,11 @@ public:
         if (::kevent(queue.get(), &change, 1, nullptr, 0, nullptr) < 0) throw std::runtime_error("Virtio camera wake-up failed");
     }
 
-    ~Implementation() override { closeSession(); }
+    ~Implementation() override
+    {
+        closeSession();
+        reportVideoMode(false);
+    }
 
     // ------------------------------------------------------------------------
     // Time and bookkeeping
@@ -600,8 +606,16 @@ public:
     }
 
     /* Brings the platform's video for a camera in line with the streams that
-     * are running on it. */
+     * are running on it, and tells the application whether a camera is in video
+     * mode now: whatever the way in or out (the guest's stream, a timer's retry
+     * of a start that failed, a session that failed and came back). */
     void reconfigure(Runtime& runtime)
+    {
+        reconfigureVideo(runtime);
+        reportVideoMode(inVideoMode());
+    }
+
+    void reconfigureVideo(Runtime& runtime)
     {
         std::uint32_t width = 0, height = 0, rate = 0;
         for (const auto& [id, stream] : streams) {
@@ -635,6 +649,10 @@ public:
         bool ok = false;
         if (admitsCamera(runtime)) {
             openFramesOf(runtime.description.platformIndex);
+            // The settings first: the platform programs the stabilization the guest asks for on the new video connection
+            // before the capture can deliver a frame, so the first picture has the crop the rest will have. (Applied after
+            // the start, the picture would change its crop under a guest that already shows it.)
+            applySettings(runtime, true);
             ok = session->startVideo(runtime.description.platformIndex, width, height, rate);
         }
         if (ok) {
@@ -668,8 +686,32 @@ public:
         return std::max<std::uint32_t>(1, (stream.intervalDenominator + stream.intervalNumerator / 2) / stream.intervalNumerator);
     }
 
+    /* Whether the guest has a camera in video mode (`CameraDeviceOptions::onVideoMode`): its video runs, the camera is not
+     * interrupted or failing, and the guest's last applied settings ask for the picture stabilized. A blocked session
+     * runs no video. */
+    [[nodiscard]] bool inVideoMode() const noexcept
+    {
+        if (blocked()) return false;
+        return std::any_of(runtimes.begin(), runtimes.end(), [](const Runtime& runtime) {
+            return runtime.videoRunning && !runtime.failed && runtime.interruption == Interruption::none && runtime.appliedValid &&
+                runtime.applied.stabilization;
+        });
+    }
+
+    void reportVideoMode(bool inMode) noexcept
+    {
+        if (inMode == reportedVideoMode) return;
+        reportedVideoMode = inMode;
+        try {
+            if (options.onVideoMode) options.onVideoMode(inMode);
+        } catch (...) {
+            // The application's use of it must not stop the device.
+        }
+    }
+
     void reportState()
     {
+        reportVideoMode(inVideoMode());
         bool active = !groups.empty();
         bool interrupted = false, multitasking = false, pressure = false;
         for (const auto& runtime : runtimes) {
@@ -2211,6 +2253,7 @@ public:
             runtime.videoRunning = false;
             runtime.appliedValid = false;
         }
+        reportVideoMode(false);
         if (reported != CameraState::idle) {
             reported = CameraState::idle;
             try {

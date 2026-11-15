@@ -963,6 +963,8 @@ void camera_line(FixedText &text, CameraLineKind kind,
 		camera_size(text, c.videoAskedWidth, c.videoAskedHeight);
 		text.text(" first ");
 		camera_size(text, c.videoFirstWidth, c.videoFirstHeight);
+		text.text(" stab ")
+			.text(uml::platform::stabilizationName(c.videoStabilization));
 		break;
 	case CameraLineKind::photo:
 		text.text(" compensation supported ")

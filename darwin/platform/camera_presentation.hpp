@@ -10,6 +10,7 @@
 // or a message of the framework never enters it.
 
 #include "camera_still_failure.hpp"
+#include "video_stabilization.hpp"
 
 #include <array>
 #include <cstdint>
@@ -128,6 +129,9 @@ struct CameraPresentation {
     std::uint32_t videoAskedHeight {};
     std::uint32_t videoFirstWidth {};
     std::uint32_t videoFirstHeight {};
+    // What the connection's stabilization is, once an apply has written or kept it (`unknown` until then), and
+    // `unsupported` when the guest wants it and the active format supports no mode.
+    VideoStabilizationState videoStabilization {};
 
     // The photo output of the camera's last admission or repair: whether it
     // supports turning its stills to an earlier model's orientation and whether

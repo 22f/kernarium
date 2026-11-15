@@ -115,6 +115,14 @@ struct CameraDeviceOptions {
     std::function<void(const uml::platform::CameraPresentation&)> onCameraPresentation;
     /* Called on the transport thread when the state changes. */
     std::function<void(CameraState)> onState;
+    /* Called on the transport thread, with the value it has now, whenever whether a camera of the guest is in video
+     * mode changes. The guest is in video mode when a live camera's video runs, uninterrupted, and the guest asks for
+     * the picture stabilized: Android's record template asks and its preview template does not, so a camera
+     * application's video mode asks and its photo mode does not, and so does an application that records with no
+     * preview. An application that records without asking is not seen as in video mode. The application opens the
+     * microphone for it before the guest records, so the recording does not begin in silence. It is told false when
+     * the device is reset or goes away; it changes nothing and must not block. */
+    std::function<void(bool)> onVideoMode;
     /* The clock frame ages are measured on; the platform's where empty. */
     std::function<std::uint64_t()> clock;
 };

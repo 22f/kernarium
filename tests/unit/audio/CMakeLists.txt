@@ -39,4 +39,15 @@ if(TARGET uml_audio_device)
         UML::AudioDevice)
     uml_add_unit_test(NAME virtio-sound-microphone
         COMMAND uml_virtio_sound_microphone_tests LABELS audio)
+
+    # The microphone's input tap on the real converter, over buffers the test
+    # makes: no engine, session or microphone is opened.
+    add_executable(uml_virtio_sound_microphone_tap_tests
+        microphone_tap_tests.mm)
+    target_include_directories(uml_virtio_sound_microphone_tap_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(uml_virtio_sound_microphone_tap_tests PRIVATE
+        UML::AudioDevice)
+    uml_add_unit_test(NAME virtio-sound-microphone-tap
+        COMMAND uml_virtio_sound_microphone_tap_tests LABELS audio)
 endif()
