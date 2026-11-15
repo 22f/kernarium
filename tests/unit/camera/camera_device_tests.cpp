@@ -290,6 +290,7 @@ struct Rig final {
             states.push_back(state);
             if (onStateChange) onStateChange();
         };
+        options.onVideoMode = [this](bool inMode) { videoModes.push_back(inMode); };
         options.automaticRotation = [this](const uml::platform::CameraInfo&) { return automaticDegrees ? *automaticDegrees : 0u; };
         options.onCheckpoint = [this](CameraCheckpoint where) { checkpoints.push_back(where); };
         options.onStillFailure = [this](const CameraStillFailure& failure) { stillFailures.push_back(failure); };
@@ -323,6 +324,8 @@ struct Rig final {
     std::shared_ptr<CalibrationStore> store;
     std::unique_ptr<VirtioCameraDevice> device;
     std::vector<CameraState> states;
+    /* What the device told onVideoMode, in order. */
+    std::vector<bool> videoModes;
     /* Called on the worker where the device tells the application its state changed, which is
      * while it handles a platform event, with the frames of its batch in hand. */
     std::function<void()> onStateChange;
@@ -1482,6 +1485,66 @@ void testResetAndDestroy()
     require(rig.get(1, {UML_V4L2_CID_ISO_SENSITIVITY})[0] != 400, "and so are the controls' values");
     rig.device->reset();
     rig.device->reset();
+}
+
+/* A camera is in video mode while its video runs, uninterrupted, and the guest asks for the picture stabilized (Android's
+ * record template does and its preview template does not): the application opens the microphone then, before the guest
+ * records. */
+void testVideoModeIsWhatTheGuestAsksStabilizationFor()
+{
+    Rig rig;
+    rig.create(1, 0, videoKind);
+    rig.setVideo(1, 640, 480);
+    rig.attach(1, 1, nv12Size(640, 480));
+    rig.attach(1, 2, nv12Size(640, 480));
+    // A camera nothing is open on is not in video mode, and a photo mode (a preview that asks for no stabilization) is not.
+    require(rig.videoModes.empty(), "nothing is said before a camera is open");
+    rig.setOk(1, {{UML_V4L2_CID_IMAGE_STABILIZATION, 0, {}}});
+    rig.queue(1, 1);
+    require(rig.camera->videoRunning(0) && rig.videoModes.empty(), "a preview that does not ask is not video mode");
+    // The record template asks.
+    rig.setOk(1, {{UML_V4L2_CID_IMAGE_STABILIZATION, 1, {}}});
+    require(rig.videoModes == std::vector<bool> {true}, "asking while the video runs is video mode");
+    rig.setOk(1, {{UML_V4L2_CID_ISO_SENSITIVITY, 400, {}}});
+    require(rig.videoModes.size() == 1, "another setting says nothing");
+    // The camera is interrupted (the application left the foreground): the microphone is not held for it.
+    rig.camera->interrupt(CameraEventKind::interruptedByMultitasking);
+    rig.step();
+    require(rig.videoModes == std::vector<bool> {true, false}, "an interruption ends video mode");
+    rig.camera->resume();
+    rig.step();
+    require(rig.videoModes == std::vector<bool> {true, false, true}, "and its end returns to it");
+    // Back to photo mode.
+    rig.setOk(1, {{UML_V4L2_CID_IMAGE_STABILIZATION, 0, {}}});
+    require(rig.videoModes == std::vector<bool> {true, false, true, false}, "a guest that stops asking leaves video mode");
+    rig.setOk(1, {{UML_V4L2_CID_IMAGE_STABILIZATION, 1, {}}});
+    require(rig.videoModes.back(), "and enters it");
+    // The guest closes the camera, or the device is reset.
+    rig.device->reset();
+    require(!rig.videoModes.back() && rig.videoModes.size() == 6, "a reset ends video mode");
+    rig.device->reset();
+    require(rig.videoModes.size() == 6, "and says it once");
+}
+
+void testVideoModeIsNeverToldForABlockedSessionOrAfterTheStreamStops()
+{
+    RigOptions blockedOptions;
+    blockedOptions.mode = CameraMode::blocked;
+    Rig blockedRig(blockedOptions);
+    blockedRig.create(1, 0, videoKind);
+    blockedRig.setVideo(1, 640, 480);
+    blockedRig.attach(1, 1, nv12Size(640, 480));
+    blockedRig.queue(1, 1);
+    require(blockedRig.videoModes.empty(), "a blocked session opens no capture: the guest is not in video mode");
+
+    Rig rig;
+    rig.create(1, 0, videoKind);
+    rig.setVideo(1, 640, 480);
+    rig.attach(1, 1, nv12Size(640, 480));
+    rig.queue(1, 1);
+    require(rig.videoModes == std::vector<bool> {true}, "the default asks for stabilization");
+    rig.destroy(1);
+    require(rig.videoModes == std::vector<bool> {true, false}, "the stream's end ends video mode");
 }
 
 /* The event buffers a guest keeps posted, and the events that have reached it. */
@@ -3476,6 +3539,8 @@ int main()
 {
     testThePlatformsPresentationReachesTheOwnerUnderTheGuestsNumber();
     testThePresentationStatesWhatTheGuestIsTold();
+    testVideoModeIsWhatTheGuestAsksStabilizationFor();
+    testVideoModeIsNeverToldForABlockedSessionOrAfterTheStreamStops();
     testHandshake();
     testStreamsAndParameters();
     testVideoAndMetadata();

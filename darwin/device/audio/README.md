@@ -85,7 +85,20 @@ reads or opens the microphone, and no permission prompt can appear.
   the same silence as an off one.
 - `MicrophoneCaptureSource` runs the `MicrophoneInput` only while the guest
   records and the switch is active, so the system's recording indicator is lit
-  only while a guest listens.
+  only while a guest listens, and while the switch's standby holds: a camera of
+  the guest is in video mode (`CameraDeviceOptions::onVideoMode`), which is
+  when the guest is about to record and the system takes a quarter of a second
+  or more to open the microphone. Standby opens the input before the guest
+  starts (stereo until a recording has said otherwise, opened again if the
+  recording asks for other channels), and the guest's start drops what it held,
+  so the recording begins with the next audio, not with sound from before it. It
+  changes neither the setting nor the permission, and it closes with video mode
+  unless the guest is recording. The indicator is lit, and a Bluetooth headset
+  is on the hands-free profile, from the open to the close, not from the
+  recording's start to its end. An application that records with no preview is
+  in video mode if it asks for the picture stabilized, as Android's record
+  template does; one that records without asking opens the microphone when it
+  starts, as before.
 - On iOS the microphone never takes the audio session from an app that plays or
   records, such as a call. The session is shared with the output
   (`audio_session.hpp`); macOS has no audio session.

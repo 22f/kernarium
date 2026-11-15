@@ -284,6 +284,8 @@ public:
     bool firingWaiting {};
     std::unique_ptr<uml::platform::Nv12Transformer> transformer;
     CameraState reported {CameraState::idle};
+    /* Whether the application was last told the guest is in video mode (`onVideoMode`). */
+    bool reportedVideoMode {};
     std::uint64_t lastRetry {};
     bool sessionFailed {};
     /* The format each platform camera runs in, which a session is told when it opens. */
@@ -335,7 +337,11 @@ public:
         if (::kevent(queue.get(), &change, 1, nullptr, 0, nullptr) < 0) throw std::runtime_error("Virtio camera wake-up failed");
     }
 
-    ~Implementation() override { closeSession(); }
+    ~Implementation() override
+    {
+        closeSession();
+        reportVideoMode(false);
+    }
 
     // ------------------------------------------------------------------------
     // Time and bookkeeping
@@ -668,8 +674,32 @@ public:
         return std::max<std::uint32_t>(1, (stream.intervalDenominator + stream.intervalNumerator / 2) / stream.intervalNumerator);
     }
 
+    /* Whether the guest has a camera in video mode (`CameraDeviceOptions::onVideoMode`): its video runs, the camera is not
+     * interrupted or failing, and the guest's last applied settings ask for the picture stabilized. A blocked session
+     * runs no video. */
+    [[nodiscard]] bool inVideoMode() const noexcept
+    {
+        if (blocked()) return false;
+        return std::any_of(runtimes.begin(), runtimes.end(), [](const Runtime& runtime) {
+            return runtime.videoRunning && !runtime.failed && runtime.interruption == Interruption::none && runtime.appliedValid &&
+                runtime.applied.stabilization;
+        });
+    }
+
+    void reportVideoMode(bool inMode) noexcept
+    {
+        if (inMode == reportedVideoMode) return;
+        reportedVideoMode = inMode;
+        try {
+            if (options.onVideoMode) options.onVideoMode(inMode);
+        } catch (...) {
+            // The application's use of it must not stop the device.
+        }
+    }
+
     void reportState()
     {
+        reportVideoMode(inVideoMode());
         bool active = !groups.empty();
         bool interrupted = false, multitasking = false, pressure = false;
         for (const auto& runtime : runtimes) {
@@ -2211,6 +2241,7 @@ public:
             runtime.videoRunning = false;
             runtime.appliedValid = false;
         }
+        reportVideoMode(false);
         if (reported != CameraState::idle) {
             reported = CameraState::idle;
             try {

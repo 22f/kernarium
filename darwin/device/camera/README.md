@@ -209,6 +209,14 @@ application's statements (the sensor orientation, the rotation that
   for it: a frame of a lower serial was captured before that boundary (it waited
   in the inbox or in the pump's batch while the event was handled) and is
   dropped, never delivered as a live picture after the repair.
+- **Video mode.** The device tells its owner (`onVideoMode`) whether the guest
+  is in video mode: a live camera's video runs, uninterrupted, and the guest
+  asks for the picture stabilized, which Android's record template does and its
+  preview template does not (the wire carries no other sign of the template). The owner
+  opens the microphone for it before the guest records
+  ([`darwin/device/audio`](../audio/README.md#microphone)). It is told false
+  when the video stops, the camera is interrupted, the session is blocked and
+  when the device is reset or goes away.
 - **Events and reset.** The event queue never holds a buffer: with no event
   pending it returns retry, so the guest's buffer stays in its ring, and an
   event raised later signals the device's event descriptor so the server runs
