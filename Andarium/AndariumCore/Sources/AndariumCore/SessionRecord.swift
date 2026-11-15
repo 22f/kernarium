@@ -64,9 +64,10 @@ public struct SessionRecord: Equatable, Sendable {
     /// slot is blank (no settle yet) or when it is of a version this reader
     /// does not know.
     public var storage: StorageRecord?
-    /// The stills of the guest's cameras that did not end in a picture and why,
-    /// from layout 8 on; nil in an earlier layout, when the slot is blank (no
-    /// failure) or when it is of a version this reader does not know.
+    /// How the platform presented each of the guest's cameras and the stills of
+    /// the guest's cameras that did not end in a picture and why, from layout 8
+    /// on; nil in an earlier layout, when the slot is blank (no camera presented
+    /// and no failure) or when it is of a version this reader does not know.
     public var camera: CameraRecord?
 
     /// The layouts this reader knows: 1 to 3 keep the session's state right

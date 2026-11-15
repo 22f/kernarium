@@ -106,6 +106,13 @@ struct CameraDeviceOptions {
      * for it, so it is brief: the runtime's writes the session record, a
      * synchronous write, once for each. */
     std::function<void(const uml::platform::CameraStillFailure&)> onStillFailure;
+    /* Told for a diagnostic record whenever the platform states or sets something about a camera it presents to the guest:
+     * the camera's mounting, its anchor, what an admission set on its connections, the photo output's compensation, the
+     * device's aspect ratio (`uml::platform::CameraPresentation`: numbers and fixed words, the camera as the guest numbers
+     * it; the camera's whole note each time, so the newest of a camera replaces the older). Only cameras the guest sees
+     * are told. It runs on a thread of the platform, in order for one camera, and returns quickly: the runtime's writes the
+     * session record. It changes nothing. */
+    std::function<void(const uml::platform::CameraPresentation&)> onCameraPresentation;
     /* Called on the transport thread when the state changes. */
     std::function<void(CameraState)> onState;
     /* The clock frame ages are measured on; the platform's where empty. */

@@ -1939,6 +1939,13 @@ private:
                 [](const uml::platform::CameraStillFailure& failure) {
                     uml::runtime::note_camera_still_failure(failure);
                 };
+            /* How each camera is presented to the guest (its mounting, what
+             * its connections were set to, the photo output's compensation)
+             * goes to the same slot, in numbers and fixed words. */
+            cameraOptions.onCameraPresentation =
+                [](const uml::platform::CameraPresentation& presentation) {
+                    uml::runtime::note_camera_presentation(presentation);
+                };
             boot->camera = uml::camera::makeInProcessCameraService(
                 cameras_.source, std::move(cameraOptions),
                 sharedMemoryRegions_);

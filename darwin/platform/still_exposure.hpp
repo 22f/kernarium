@@ -30,6 +30,8 @@ struct PhotoReadings {
     std::optional<double> focalLengthMillimetres;
     // The Exif Flash field: bit 0 says the flash fired.
     std::optional<std::int64_t> flash;
+    // The image's orientation tag (1 to 8, TIFF's numbering), where it has one.
+    std::optional<std::int64_t> orientation;
 };
 
 // The exposure of a still. `device` is the session's state as it reports it when
