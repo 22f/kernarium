@@ -797,8 +797,8 @@ the compatibility layer.
   any more or is another installation, so a choice lasts at most until the next
   listing, which Andarium makes whenever it starts, after each install and when
   its page opens. The command's changes and that cleanup are serialised by a lock
-  of the shell user; turning off is accepted for any name that can be a property
-  name.
+  on a file that only the shell user can open; turning off is accepted for any
+  name that can be a property name.
 - **Command.** `kernarium_oldapp` (`overlay/oldapp_switch`, a Java tool that
   `app_process` starts, installed on system_ext) runs as the adb shell user, with
   no root on a `user` build. It lists the eligible applications of the owner

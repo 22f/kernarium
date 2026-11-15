@@ -34,20 +34,13 @@ import android.util.DisplayMetrics;
 import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.LinkOption;
 import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
+import java.util.Collection;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * {@link OldAppCommand.Platform} on Android, for a process that runs as the adb shell user: the
@@ -60,8 +53,6 @@ final class AndroidPlatform implements OldAppCommand.Platform {
     private static final int GETPROP_SECONDS = 30;
     /** The shell user's own data directory (shell_data_file); the command's lock lives in it. */
     private static final String LOCK_FILE = "/data/local/tmp/kernarium_oldapp.lock";
-    private static final long LOCK_POLL_MILLIS = 50;
-    private static final Pattern PROPERTY_LINE = Pattern.compile("\\[([^\\]]+)\\]: \\[(.*)\\]");
     private static final int OUTPUT_LIMIT = 400;
 
     private final IPackageManager mPackageManager;
@@ -164,69 +155,30 @@ final class AndroidPlatform implements OldAppCommand.Platform {
     }
 
     /**
-     * The stored turn-ons, read from the output of {@code getprop} (the system properties have no
-     * list call): lines of the form {@code [name]: [value]}, kept for the store's prefix and a value.
+     * The packages with a stored property, named by the output of {@code getprop} (the system
+     * properties have no list call); {@link PropertyListing} reads that output, whose values the
+     * command does not take from it.
      */
     @Override
-    public Map<String, String> storedChoices() throws Exception {
+    public Collection<String> storedPackages() throws Exception {
         Process process = new ProcessBuilder("/system/bin/getprop").redirectErrorStream(true).start();
         process.getOutputStream().close();
-        Map<String, String> choices = new HashMap<>();
+        Collection<String> packages;
         try (BufferedReader lines = new BufferedReader(
                 new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = lines.readLine()) != null) {
-                Matcher match = PROPERTY_LINE.matcher(line);
-                if (match.matches() && match.group(1).startsWith(OldAppEligibility.STORE_PREFIX)
-                        && !match.group(2).isEmpty()) {
-                    choices.put(match.group(1).substring(OldAppEligibility.STORE_PREFIX.length()),
-                            match.group(2));
-                }
-            }
+            packages = PropertyListing.storedPackages(lines);
         }
         if (!process.waitFor(GETPROP_SECONDS, TimeUnit.SECONDS) || process.exitValue() != 0) {
             process.destroy();
             throw new IllegalStateException("getprop did not finish cleanly");
         }
-        return choices;
+        return packages;
     }
 
-    /**
-     * An exclusive lock on a file in the shell user's own data directory, polled until the time
-     * is up. The file stays in place (it is only ever locked); the shell domain creates and locks
-     * files of /data/local/tmp's type, and nothing else may write in that directory. A symbolic
-     * link in its place is refused.
-     */
+    /** {@link LockFile} on the shell user's own data directory. */
     @Override
     public OldAppCommand.Lock lock(long timeoutMillis) throws Exception {
-        final FileChannel channel = FileChannel.open(Paths.get(LOCK_FILE), StandardOpenOption.CREATE,
-                StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
-        try {
-            long deadline = System.nanoTime() + timeoutMillis * 1_000_000L;
-            while (true) {
-                final FileLock held = channel.tryLock();
-                if (held != null) {
-                    return new OldAppCommand.Lock() {
-                        @Override
-                        public void release() throws Exception {
-                            try {
-                                held.release();
-                            } finally {
-                                channel.close();
-                            }
-                        }
-                    };
-                }
-                if (System.nanoTime() - deadline >= 0) {
-                    channel.close();
-                    return null;
-                }
-                Thread.sleep(LOCK_POLL_MILLIS);
-            }
-        } catch (Exception | Error problem) {
-            channel.close();
-            throw problem;
-        }
+        return LockFile.acquire(Paths.get(LOCK_FILE), timeoutMillis);
     }
 
     @Override

@@ -18,6 +18,7 @@ package com.kernarium.oldapp;
 
 import java.io.PrintWriter;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -40,10 +41,12 @@ import java.util.Map;
  * {@link OldAppEligibility#outlived} says is no longer its application's, so a choice does not
  * outlive the installation it was made for by more than the time to the next listing. Turning
  * off is accepted for any name that can be a property name, installed or not. {@code set} and
- * that cleanup are serialised across processes by {@link Platform#lock}: inside it the cleanup
- * reads the value again and clears only the value it examined, so it never erases a choice made
- * after its snapshot; a {@code set} that cannot take the lock in time fails and changes nothing,
- * and a listing that cannot lists the same lines without cleaning.
+ * that cleanup are serialised across processes by {@link Platform#lock}. The listing's snapshot
+ * only says which choices look stale; inside the lock the cleanup reads the installation and the
+ * value again and clears a value only when it is not its installation's now, so it never erases a
+ * choice made after the snapshot, whether for a package that was not there or for a replacement.
+ * A {@code set} that cannot take the lock in time fails and changes nothing, and a listing that
+ * cannot lists the same lines without cleaning.
  *
  * <p>Exit status: 0 done, 1 any other failure, 2 refused (not eligible), 64 usage. The format grows
  * by trailing fields; {@link #FORMAT_VERSION} changes when a field's meaning does.
@@ -78,8 +81,11 @@ final class OldAppCommand {
         /** Sets a system property, and throws if the system did not take it. */
         void setProperty(String name, String value) throws Exception;
 
-        /** Every stored turn-on with a value: package name (the end of the property name) to value. */
-        Map<String, String> storedChoices() throws Exception;
+        /**
+         * The package part (the end of the property name) of every property under the store's
+         * prefix, whatever its value; the value of each is read with {@link #getProperty}.
+         */
+        Collection<String> storedPackages() throws Exception;
 
         /**
          * Takes the exclusive lock that serialises the commands' changes across processes, waiting
@@ -139,7 +145,15 @@ final class OldAppCommand {
             for (Candidate candidate : platform.installedPackages()) {
                 installed.put(candidate.packageName, candidate);
             }
-            Map<String, String> choices = new HashMap<>(platform.storedChoices());
+            Map<String, String> choices = new HashMap<>();
+            for (String packageName : platform.storedPackages()) {
+                if (OldAppEligibility.isPropertyKeyPart(packageName)) {
+                    String value = platform.getProperty(OldAppEligibility.propertyName(packageName));
+                    if (!value.isEmpty()) {
+                        choices.put(packageName, value);
+                    }
+                }
+            }
             clearStale(platform, abis32, installed, choices);
             List<Candidate> eligible = new ArrayList<>();
             for (Candidate candidate : installed.values()) {
@@ -177,21 +191,22 @@ final class OldAppCommand {
 
     /**
      * Clears the choices that are not their application's and takes them out of {@code choices},
-     * which is what the listing then shows. The snapshot says which look stale; inside the lock
-     * each one is read again and cleared only when it is still the value that was examined. A
-     * value that changed meanwhile (a {@code set} slipped in before the lock) is judged again as
-     * it now is and left in place. Without the lock nothing is cleared and the listing is the
-     * same.
+     * which is what the listing then shows. The snapshot (the installed packages and the values
+     * read after it) only says which choices look stale. Inside the lock each of those is judged
+     * again on what is true then: the value as it is now against the installation as it is now,
+     * so a choice made after the snapshot, for a package that was not there or for a replacement,
+     * is kept, and one that has gone stale since is cleared. Without the lock nothing is cleared
+     * and the listing is the same.
      */
     private static void clearStale(Platform platform, List<String> abis32, Map<String, Candidate> installed,
             Map<String, String> choices) throws Exception {
-        List<String> stale = new ArrayList<>();
+        List<String> suspects = new ArrayList<>();
         for (Map.Entry<String, String> choice : choices.entrySet()) {
             if (OldAppEligibility.outlived(installed.get(choice.getKey()), abis32, choice.getValue())) {
-                stale.add(choice.getKey());
+                suspects.add(choice.getKey());
             }
         }
-        if (stale.isEmpty()) {
+        if (suspects.isEmpty()) {
             return;
         }
         Lock lock = null;
@@ -200,29 +215,25 @@ final class OldAppCommand {
         } catch (Exception problem) {
             // No lock, no cleaning: the listing below is the same.
         }
+        if (lock == null) {
+            choices.keySet().removeAll(suspects);
+            return;
+        }
         try {
-            for (String packageName : stale) {
-                String examined = choices.get(packageName);
-                if (lock == null) {
-                    choices.remove(packageName);
-                    continue;
-                }
+            for (String packageName : suspects) {
                 String name = OldAppEligibility.propertyName(packageName);
                 String current = platform.getProperty(name);
-                if (current.equals(examined)) {
-                    write(platform, name, "");
+                if (current.isEmpty()) {
                     choices.remove(packageName);
-                } else if (current.isEmpty()
-                        || OldAppEligibility.outlived(installed.get(packageName), abis32, current)) {
+                } else if (OldAppEligibility.outlived(platform.find(packageName), abis32, current)) {
+                    write(platform, name, "");
                     choices.remove(packageName);
                 } else {
                     choices.put(packageName, current);
                 }
             }
         } finally {
-            if (lock != null) {
-                lock.release();
-            }
+            lock.release();
         }
     }
 

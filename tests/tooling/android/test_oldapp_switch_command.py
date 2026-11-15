@@ -43,7 +43,7 @@ def main() -> int:
         print("SKIP: no JDK (javac and java) on PATH")
         return SKIP
     sources = sorted(path for path in SOURCES.rglob("*.java") if path.name not in ANDROID_GLUE)
-    expected = {"Candidate.java", "OldAppCommand.java", "OldAppEligibility.java"}
+    expected = {"Candidate.java", "LockFile.java", "OldAppCommand.java", "OldAppEligibility.java", "PropertyListing.java"}
     if {path.name for path in sources} != expected:
         print(f"FAIL: the platform-free sources are {sorted(path.name for path in sources)}, not {sorted(expected)}",
               file=sys.stderr)
