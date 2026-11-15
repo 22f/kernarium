@@ -172,13 +172,9 @@ void test_executor_links()
 		"the vacant link's header is not a zero count and its RIP");
 }
 
-/* The paired store and load a retargeting writer and a following reader use.
- */
-inline void store_pair(void *at, std::uint64_t first, std::uint64_t second)
-{
-	asm volatile("stp %x1, %x2, [%x0]"
-		: : "r"(at), "r"(first), "r"(second) : "memory");
-}
+/* A retargeting writer stores and a following reader loads a pair with the
+ * engines' own paired store and load. */
+using uml::cpu::gadget_cache::store_pair;
 
 struct Pair final {
 	std::uint64_t first;
@@ -188,8 +184,7 @@ struct Pair final {
 inline Pair load_pair(const void *at)
 {
 	Pair pair;
-	asm volatile("ldp %x0, %x1, [%x2]"
-		: "=r"(pair.first), "=r"(pair.second) : "r"(at) : "memory");
+	uml::cpu::gadget_cache::load_pair(at, pair.first, pair.second);
 	return pair;
 }
 
@@ -239,7 +234,7 @@ struct alignas(16) SeparateBounds final {
 	std::uint64_t unlinked_end;
 	std::uintptr_t fallback_stream;
 	gadgets::BlockLink link;
-	std::uint64_t begin;
+	alignas(16) std::uint64_t begin;
 	std::uint64_t end;
 };
 
