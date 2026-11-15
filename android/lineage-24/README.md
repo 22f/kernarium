@@ -680,9 +680,9 @@ patches ART's one JNI function table in place and gives the application:
   the array; a real array keeps the runtime's own flag. Bytes Java writes
   outside those points (another thread, a callback after the native method
   returned) show at the next one, also when they land while a point runs. A
-  byte both sides write in the same interval keeps the application's last value
-  (a write that came after the point read the byte reaches the array at the
-  next point): that is the one case in which a racing write is lost. A reference to a block ends where a Dalvik local
+  byte both sides write in the same interval keeps one of the two values, the
+  application's unless its write lands while a point stores Java's: that is
+  the one case in which a racing write is lost. A reference to a block ends where a Dalvik local
   reference did: at `DeleteLocalRef` of a reference the innermost frame holds (a
   reference of an outer frame is left alone, as both runtimes leave it), at
   `PopLocalFrame`, at the return of a native
