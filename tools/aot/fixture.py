@@ -325,6 +325,33 @@ def hammer_functions() -> tuple[tuple[int, int], ...]:
     return ((HAMMER_ADD, 0x14), (HAMMER_CAS, 0x24), (HAMMER_LLSC, 0x1c))
 
 
+# ---- the memory copy and set stages ---------------------------------------
+# Three-stage sequences with fixed registers, which the differential test
+# starts from chosen states (x0 destination, x1 source or fill value, x2
+# count; the second set of rows names x17, x15 and x16). The words are the
+# prologue, main and epilogue stages and a RET.
+MOPS_AT = TEXT + 0x1b00
+MOPS_STEP = 0x20
+MOPS_ROWS = (("cpyf", 0, 2, 1), ("cpy", 0, 2, 1), ("set", 0, 2, 1),
+             ("cpyf", 17, 16, 15), ("cpy", 17, 16, 15), ("set", 17, 16, 15),
+             ("set", 0, 2, 31))
+
+
+def mops_code() -> dict[int, int]:
+    code: dict[int, int] = {}
+    for index, (kind, d, n, s) in enumerate(MOPS_ROWS):
+        base = MOPS_AT + index * MOPS_STEP
+        for stage in range(3):
+            code[base + 4 * stage] = mops(kind, stage, 0, d, n, s)
+        code[base + 12] = RET
+    return code
+
+
+def mops_functions() -> tuple[tuple[int, int], ...]:
+    return tuple((MOPS_AT + index * MOPS_STEP, 0x10)
+                 for index in range(len(MOPS_ROWS)))
+
+
 def eh_frame() -> bytes:
     # CIE: version 1, "zR", code alignment 4, data alignment -8, return
     # address x30, pointers are pc-relative signed 32-bit.
@@ -333,7 +360,7 @@ def eh_frame() -> bytes:
     cie_body += bytes(-(len(cie_body) + 4) % 8)
     out = bytearray(struct.pack("<I", len(cie_body)) + cie_body)
     for start, size in (FUNCTIONS + form_functions() + edge_functions() +
-                        hammer_functions()):
+                        hammer_functions() + mops_functions()):
         position = len(out)
         field = EH_FRAME + position + 8
         body = struct.pack("<Iii", position + 4, start - field, size)
@@ -357,6 +384,8 @@ def build() -> bytes:
     if FORMS_AT + len(forms()) * FORM_SIZE > HAMMER_AT:
         raise ValueError("the forms run into the shared-memory loops")
     for address, word in hammer_code().items():
+        struct.pack_into("<I", text, address - TEXT, word)
+    for address, word in mops_code().items():
         struct.pack_into("<I", text, address - TEXT, word)
     for index, word in enumerate(PLT_CODE):
         struct.pack_into("<I", text, PLT - TEXT + 4 * index, word)

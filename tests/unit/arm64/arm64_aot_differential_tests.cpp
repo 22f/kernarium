@@ -405,8 +405,27 @@ struct Fault final {
 	std::uint32_t access;
 	bool alignment;
 	std::uint32_t syndrome;
+	/* The state the fault leaves, which the resumed run then builds on: the
+	 * integer registers, the stack pointer, the flags and the arena (as a
+	 * hash). A partial copy or set must leave exactly the engine's. */
+	std::array<std::uint64_t, 31> registers;
+	std::uint64_t sp;
+	std::uint32_t nzcv;
+	std::uint64_t memory;
 	bool operator==(const Fault &) const = default;
 };
+
+[[nodiscard]] std::uint64_t hash_bytes(const std::vector<std::byte> &bytes)
+{
+	std::uint64_t hash = 0xcbf29ce484222325ULL;
+	for (std::size_t i = 0; i + 8 <= bytes.size(); i += 8) {
+		std::uint64_t word;
+		std::memcpy(&word, &bytes[i], 8);
+		hash = (hash ^ word) * 0x100000001b3ULL;
+		hash ^= hash >> 29;
+	}
+	return hash;
+}
 
 struct Result final {
 	arm64::CpuState cpu{};
@@ -515,10 +534,14 @@ struct BlockLog final {
 		if (out.event != EngineEvent::memory_fault)
 			break;
 		const auto address = executor.fault_address();
-		r.faults.push_back({c.cpu.pc, address,
+		Fault fault{c.cpu.pc, address,
 			static_cast<std::uint32_t>(executor.fault_access()),
 			executor.fault_alignment(),
-			executor.floating_point_syndrome()});
+			executor.floating_point_syndrome(), {}, c.cpu.sp, c.cpu.nzcv,
+			hash_bytes(arena.snapshot())};
+		for (std::size_t i = 0; i < fault.registers.size(); ++i)
+			fault.registers[i] = c.cpu.registers[i];
+		r.faults.push_back(fault);
 		const auto untagged = address & 0x00ff'ffff'ffff'ffffULL;
 		if (untagged < arena.base() ||
 		    untagged >= arena.base() + arena.total() * page_bytes ||
@@ -585,8 +608,36 @@ void describe(const char *what, const Case &c)
 			"aot %d\n", a.end_syndrome, b.end_syndrome,
 			a.end_alignment ? 1 : 0, b.end_alignment ? 1 : 0);
 	}
-	if (a.faults != b.faults)
+	if (a.faults != b.faults) {
 		say("faults");
+		std::fprintf(stderr, "  faults ref %zu aot %zu\n", a.faults.size(),
+			b.faults.size());
+		for (std::size_t i = 0; i < std::min(a.faults.size(),
+		     b.faults.size()); ++i) {
+			const auto &x = a.faults[i];
+			const auto &y = b.faults[i];
+			if (x == y)
+				continue;
+			std::fprintf(stderr, "  fault %zu: pc %llx/%llx address %llx/%llx "
+				"access %u/%u alignment %d/%d syndrome %x/%x nzcv %x/%x "
+				"sp %llx/%llx memory %s\n", i,
+				static_cast<unsigned long long>(x.pc),
+				static_cast<unsigned long long>(y.pc),
+				static_cast<unsigned long long>(x.address),
+				static_cast<unsigned long long>(y.address), x.access,
+				y.access, x.alignment ? 1 : 0, y.alignment ? 1 : 0,
+				x.syndrome, y.syndrome, x.nzcv, y.nzcv,
+				static_cast<unsigned long long>(x.sp),
+				static_cast<unsigned long long>(y.sp),
+				x.memory == y.memory ? "same" : "DIFFERENT");
+			for (std::size_t r = 0; r < x.registers.size(); ++r)
+				if (x.registers[r] != y.registers[r])
+					std::fprintf(stderr, "    x%zu ref %llx aot %llx\n", r,
+						static_cast<unsigned long long>(x.registers[r]),
+						static_cast<unsigned long long>(y.registers[r]));
+			break;
+		}
+	}
 	for (std::size_t i = 0; i < a.cpu.registers.size(); ++i)
 		if (a.cpu.registers[i] != b.cpu.registers[i]) {
 			say("register");
@@ -2633,6 +2684,212 @@ void code_change_history_overflows(const LibraryImage &image,
 }
 
 
+/* ---- memory copies and sets ---------------------------------------------- */
+
+/* tools/aot/fixture.py (MOPS_AT, MOPS_ROWS): the three stages of CPYF, CPY and
+ * SET from registers 0, 2, 1 (destination, count, source or fill), the same
+ * from 17, 16, 15, and a SET whose fill is the zero register. */
+constexpr std::uint64_t mops_at = 0x2b00, mops_step = 0x20;
+enum MopsRow : std::size_t {
+	row_cpyf, row_cpy, row_set, row_cpyf_high, row_cpy_high, row_set_high,
+	row_set_zero, mops_rows,
+};
+
+[[nodiscard]] bool mops_is_set(std::size_t row)
+{
+	return row == row_set || row == row_set_high || row == row_set_zero;
+}
+
+struct MopsRun final {
+	std::size_t compared{}, faulted{};
+};
+
+/* One start of a row: destination, source and count, and the kind of each
+ * page of the arena (0 unmapped, 1 read-only, 2 writable). The engine runs
+ * it alone and then with rewritten code; the end state and the state at every
+ * fault (registers, flags, memory) must be the same. */
+void mops_row(Fixture &ref, Fixture &got, SplitMix &rng, MopsRun &run,
+	std::size_t row, std::uint64_t destination, std::uint64_t source,
+	std::uint64_t count, const std::vector<std::uint8_t> &kinds,
+	std::uint64_t fill = 0x1234'5678'90ab'cdefULL)
+{
+	const auto bias = Fixture::bias;
+	auto c = make_case_from_seed(rng.next(), bias, mops_at + row * mops_step,
+		true, true, arena_base(bias));
+	enterable(c);
+	c.kinds = kinds;
+	const bool high = row == row_cpyf_high || row == row_cpy_high ||
+		row == row_set_high;
+	const unsigned d = high ? 17 : 0, n = high ? 16 : 2, s = high ? 15 : 1;
+	c.cpu.registers[d] = destination;
+	c.cpu.registers[n] = count;
+	if (row != row_set_zero)
+		c.cpu.registers[s] = mops_is_set(row) ? fill : source;
+	aot::set_enabled(false);
+	const auto want = drive(ref.env, ref.arena, c, max_blocks);
+	aot::set_enabled(true);
+	const auto have = drive(got.env, got.arena, c, aot_max_blocks);
+	aot::set_enabled(false);
+	if (!want.done() || !same(want, have, c)) {
+		std::fprintf(stderr, "  memory copy/set row %zu: destination %llx "
+			"source %llx count %llx\n", row,
+			static_cast<unsigned long long>(destination),
+			static_cast<unsigned long long>(source),
+			static_cast<unsigned long long>(count));
+		require(false);
+	}
+	++run.compared;
+	run.faulted += want.faults.empty() ? 0 : 1;
+}
+
+void memory_copy_and_set_match_the_engine(const LibraryImage &image)
+{
+	const auto bias = Fixture::bias;
+	Fixture ref{4601, image}, got{4602, image};
+	SplitMix rng{31};
+	MopsRun run;
+	aot::reset_stats();
+	const auto base = arena_base(bias);
+	const auto page_at = [&](std::size_t page) {
+		return base + page * page_bytes;
+	};
+	const std::vector<std::uint8_t> plain(arena_pages + stack_pages, 2);
+	const auto with = [&](std::initializer_list<
+		std::pair<std::size_t, std::uint8_t>> changes) {
+		auto kinds = plain;
+		for (const auto &[page, kind] : changes)
+			kinds[page] = kind;
+		return kinds;
+	};
+	const std::uint64_t counts[] = {0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17,
+		31, 32, 33, 63, 64, 65, 100, 128, 255, 1000, 4095, 4096, 4097,
+		5000, 9000, 1ULL << 20};
+	const std::uint64_t tags[] = {0, 0x5aULL << 56, 0xa3ULL << 56};
+	for (std::size_t row = 0; row < mops_rows; ++row) {
+		const bool set = mops_is_set(row);
+		const bool high = row == row_cpyf_high || row == row_cpy_high ||
+			row == row_set_high;
+		for (const auto n : counts) {
+			if (high && n > 129 && n != 4097)
+				continue;
+			for (const auto tag : tags) {
+				const auto tagged = [&](std::uint64_t address) {
+					return address | tag;
+				};
+				/* Inside one page each, at several alignments. */
+				for (const auto &[so, dof] : std::vector<
+				     std::pair<std::uint64_t, std::uint64_t>>{
+				     {0x100, 0x300}, {0x103, 0x7fd}, {0, 0},
+				     {0x4f, 0x60}}) {
+					if (n > 4096 && so != 0x100)
+						continue;
+					mops_row(ref, got, rng, run, row,
+						tagged(page_at(4) + dof), tagged(page_at(2) + so),
+						n, plain);
+				}
+				if (n == 0)
+					continue;
+				/* The destination, the source or both end in a page that
+				 * is unmapped or read-only: the fault comes at the first,
+				 * a middle and the last byte. */
+				std::vector<std::uint64_t> leads{0, n / 2, n - 1};
+				if (n == 1)
+					leads = {0};
+				if (n > 4096)
+					leads = {0, 1, 4095};
+				for (const auto lead : leads) {
+					for (const std::uint8_t kind : {0, 1, 2}) {
+						/* The destination: `lead` bytes before the
+						 * boundary of page 5, the rest in page 5. */
+						mops_row(ref, got, rng, run, row,
+							tagged(page_at(5) - lead), tagged(page_at(2) + 0x40),
+							n, with({{5, kind}}));
+						if (set || kind == 1)
+							continue;
+						/* The source likewise. */
+						mops_row(ref, got, rng, run, row,
+							tagged(page_at(8) + 0x30), tagged(page_at(5) - lead),
+							n, with({{5, kind}}));
+						/* Both cross, at different places. */
+						for (const auto other : leads)
+							mops_row(ref, got, rng, run, row,
+								tagged(page_at(8) - other),
+								tagged(page_at(5) - lead), n,
+								with({{5, kind}, {8, 0}}));
+					}
+					/* Past the first boundary the next page is unmapped
+					 * too: progress, then the fault. */
+					if (n > 4096)
+						mops_row(ref, got, rng, run, row,
+							tagged(page_at(5) - lead),
+							tagged(page_at(2) + 0x40), n,
+							with({{6, 0}}));
+				}
+				if (set || n > 200)
+					continue;
+				/* Source and destination overlap, the destination above or
+				 * below, in one page and across a boundary. */
+				for (const std::uint64_t delta : {0, 1, 2, 7, 8, 15, 16, 17,
+				     63, 64, 65}) {
+					mops_row(ref, got, rng, run, row,
+						tagged(page_at(3) + 0x400 + delta),
+						tagged(page_at(3) + 0x400), n, plain);
+					mops_row(ref, got, rng, run, row,
+						tagged(page_at(3) + 0x400),
+						tagged(page_at(3) + 0x400 + delta), n, plain);
+					mops_row(ref, got, rng, run, row,
+						tagged(page_at(4) - n / 2 + delta),
+						tagged(page_at(4) - n / 2), n, plain);
+					mops_row(ref, got, rng, run, row,
+						tagged(page_at(4) - n / 2),
+						tagged(page_at(4) - n / 2 + delta), n,
+						with({{4, 0}}));
+				}
+			}
+		}
+	}
+	/* A set whose fill value has other bits than its low byte. */
+	for (const std::uint64_t fill : {0x00ULL, 0xffULL, ~0ULL, 0x100ULL,
+	     0xdead'beef'0000'0042ULL})
+		for (const std::uint64_t n : {1, 9, 33, 64, 65})
+			mops_row(ref, got, rng, run, row_set, page_at(4) + 0x21,
+				0, n, plain, fill);
+	const auto st = aot::stats();
+	std::fprintf(stderr, "memory copy and set: %zu starts compared, %zu "
+		"faulted; enters %llu steps %llu slow %llu\n", run.compared,
+		run.faulted, static_cast<unsigned long long>(st.enters),
+		static_cast<unsigned long long>(st.steps),
+		static_cast<unsigned long long>(st.mops_slow));
+	require(run.compared > 5000);
+	require(run.faulted > 500);
+	require(st.enters > run.compared / 2);
+	require(st.mops_slow > 0);
+
+	/* The thunk's own path: a copy and a set of up to 64 bytes inside one
+	 * page each, with the pages in the TLB, leave neither a step nor a call
+	 * to the host routine; a larger one calls it once and does not step. */
+	MopsRun small;
+	for (const auto n : {1ULL, 7ULL, 16ULL, 33ULL, 64ULL}) {
+		for (const auto row : {row_cpyf, row_cpy, row_set}) {
+			/* Twice: the first start fills the TLB entries. */
+			mops_row(ref, got, rng, small, row, page_at(4) + 0x300,
+				page_at(2) + 0x100, n, plain);
+			aot::reset_stats();
+			mops_row(ref, got, rng, small, row, page_at(4) + 0x300,
+				page_at(2) + 0x100, n, plain);
+			const auto once = aot::stats();
+			require(once.enters > 0);
+			require(once.mops_slow == 0);
+			require(once.steps == 0);
+		}
+	}
+	aot::reset_stats();
+	mops_row(ref, got, rng, small, row_cpy, page_at(4) + 0x300,
+		page_at(2) + 0x100, 100, plain);
+	require(aot::stats().mops_slow == 1);
+	require(aot::stats().steps == 0);
+}
+
 } // namespace
 
 /* A host fault inside rewritten code is a bug; say where before dying. */
@@ -2775,6 +3032,7 @@ int main(int argc, char **argv)
 			more_instances_than_the_binder_holds(image);
 			code_change_history_overflows(image, functions);
 			a_shootdown_reaches_a_native_loop(image);
+			memory_copy_and_set_match_the_engine(image);
 		}
 		/* The scenarios use the first library: they are about the
 		 * mechanism, not about the code. */

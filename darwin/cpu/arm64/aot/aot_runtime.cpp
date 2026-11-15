@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "cpu/arm64/aot/aot_runtime.hpp"
 
+#include "cpu/arm64/detail/memory_copy_set.hpp"
+
 #include <arm_acle.h>
 
 #include "uml_darwin_static_mmu.h"
@@ -189,7 +191,7 @@ std::atomic<std::uint64_t> binds{0}, verifications{0}, pages_hashed{0},
 	unreadable{0}, poisoned{0}, enters{0}, steps{0}, retired{0}, refills{0},
 	refill_failures{0}, cross_hits{0}, cross_misses{0}, max_retired{0},
 	verify_nanos{0}, step_nanos{0}, steps_run{0}, code_bumps{0},
-	history_queries{0};
+	history_queries{0}, mops_slow{0};
 std::array<std::atomic<std::uint64_t>, 4> refusals{};
 /* The guest addresses AOT code stepped at most: library << 40 | offset. */
 constexpr std::size_t step_slots = 32768;
@@ -291,10 +293,11 @@ void write_report() noexcept
 		get(counters::cross_misses));
 	std::fprintf(file,
 		"max_retired %llu verify_nanos %llu step_nanos %llu steps_run %llu "
-		"code_bumps %llu history_queries %llu\n",
+		"code_bumps %llu history_queries %llu mops_slow %llu\n",
 		get(counters::max_retired), get(counters::verify_nanos),
 		get(counters::step_nanos), get(counters::steps_run),
-		get(counters::code_bumps), get(counters::history_queries));
+		get(counters::code_bumps), get(counters::history_queries),
+		get(counters::mops_slow));
 	std::fprintf(file, "refused tbi %llu sp %llu exclusive %llu fp %llu\n",
 		get(counters::refusals[0]), get(counters::refusals[1]),
 		get(counters::refusals[2]), get(counters::refusals[3]));
@@ -400,6 +403,34 @@ std::uint64_t refill(void *tlb_pointer, std::uint64_t address,
 	}
 #endif
 	return filled ? 1 : 0;
+}
+
+/* The epilogue of a memory copy or set that the thunk of its registers did
+ * not carry out (tools/aot/rewrite.py: emit_mops_thunks): the engine's own
+ * routine on the registers the prologue formatted. */
+std::uint64_t mops(CpuState *cpu, ::uml::memory::Tlb *tlb,
+	std::uint64_t *registers, std::uint64_t kind) noexcept
+{
+	using namespace ::uml::cpu::arm64::detail;
+	UML_AOT_COUNT(mops_slow, 1);
+	cpu->nzcv = static_cast<std::uint32_t>(registers[3]);
+	MopsOutcome outcome;
+	switch (kind) {
+	case 0:
+		outcome = mops_epilogue<MopsFamily::copy_forward>(*cpu, *tlb,
+			registers[0], registers[1], registers[2]);
+		break;
+	case 1:
+		outcome = mops_epilogue<MopsFamily::copy_general>(*cpu, *tlb,
+			registers[0], registers[1], registers[2]);
+		break;
+	default:
+		outcome = mops_epilogue<MopsFamily::set>(*cpu, *tlb,
+			registers[0], registers[1], registers[2]);
+		break;
+	}
+	return outcome == MopsOutcome::complete ? 1 :
+		outcome == MopsOutcome::fault ? 0 : 2;
 }
 
 /* Rewritten code branches to an address outside its own library: answer the
@@ -528,6 +559,7 @@ Stats stats() noexcept
 	result.steps_run = get(counters::steps_run);
 	result.code_bumps = get(counters::code_bumps);
 	result.history_queries = get(counters::history_queries);
+	result.mops_slow = get(counters::mops_slow);
 	for (std::size_t i = 0; i < result.finds.size(); ++i)
 		result.finds[i] = get(counters::find_results[i]);
 	return result;
@@ -543,7 +575,7 @@ void reset_stats() noexcept
 		     &counters::cross_misses, &counters::max_retired,
 		     &counters::verify_nanos, &counters::step_nanos,
 		     &counters::steps_run, &counters::code_bumps,
-		     &counters::history_queries})
+		     &counters::history_queries, &counters::mops_slow})
 		counter->store(0, std::memory_order_relaxed);
 	for (auto &counter : counters::refusals)
 		counter.store(0, std::memory_order_relaxed);
@@ -565,6 +597,7 @@ Binder::Binder() noexcept
 {
 	cross_.refill = &refill;
 	cross_.lookup = &lookup;
+	cross_.mops = &mops;
 }
 
 bool Binder::changed_since(void *context, std::uint64_t sequence,

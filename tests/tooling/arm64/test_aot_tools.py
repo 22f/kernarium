@@ -466,6 +466,30 @@ class WideningTests(unittest.TestCase):
             llsc + 20: 0x54ffff61, llsc + 24: 0xd65f03c0}
         self.assertEqual(code, expected)
 
+    def test_memory_copy_and_set_rows_match_an_assembler(self) -> None:
+        # The rows the differential test starts memory copies and sets from
+        # (fixture.mops_code), as the system assembler wrote the stages of
+        # CPYF, CPY and SET with registers 0, 2, 1, then 17, 16, 15, and a
+        # SET whose fill is the zero register.
+        expected = {}
+        for row, words in enumerate((
+                (0x19010440, 0x19410440, 0x19810440),
+                (0x1d010440, 0x1d410440, 0x1d810440),
+                (0x19c10440, 0x19c14440, 0x19c18440),
+                (0x190f0611, 0x194f0611, 0x198f0611),
+                (0x1d0f0611, 0x1d4f0611, 0x1d8f0611),
+                (0x19cf0611, 0x19cf4611, 0x19cf8611),
+                (0x19df0440, 0x19df4440, 0x19df8440))):
+            base = fixture.MOPS_AT + row * fixture.MOPS_STEP
+            for stage, word in enumerate(words):
+                expected[base + 4 * stage] = word
+            expected[base + 12] = 0xd65f03c0
+        self.assertEqual(fixture.mops_code(), expected)
+        # Past the shared-memory loops, before the page edges.
+        self.assertGreater(fixture.MOPS_AT, fixture.HAMMER_AT + 0x80)
+        self.assertLess(fixture.MOPS_AT + len(fixture.MOPS_ROWS) *
+                        fixture.MOPS_STEP, fixture.SRC_PAGE)
+
     def test_the_differential_test_finds_the_forms_it_names(self) -> None:
         # The test addresses cas_<size>_<ordering> by arithmetic.
         names = [name for name, _ in fixture.forms()]
@@ -512,9 +536,6 @@ class WideningTests(unittest.TestCase):
                 expected[name] = {
                     "ordered-sp" if name[:4] in ("ldar", "stlr") else
                     "atomic-sp"}
-            elif name.endswith("_e") and name.split("_")[0] in (
-                    "cpyf", "cpy", "set"):
-                expected[name] = {"mops-epilogue"}
         for name, cause in (("ldapr", "memop:LDAPR:FEAT_LRCPC"),
                             ("ldapr_b", "memop:LDAPRB:FEAT_LRCPC"),
                             ("ldlar", "ldstord:LDLAR:FEAT_LOR"),
@@ -525,15 +546,14 @@ class WideningTests(unittest.TestCase):
                 expected[f"{kind}_{name}"] = {"mops-invalid"}
         expected["cpyf_zs"] = {"mops-invalid"}
         expected["cpy_zs"] = {"mops-invalid"}
-        for name, _ in fixture.forms():
-            parts = name.split("_")
-            if parts[0] in ("cpyf", "cpy", "set") and len(parts) > 1 and \
-                    parts[1] not in ("m", "pp", "e", "same", "xzr_d", "zs"):
-                expected.setdefault(name, set()).add("mops-epilogue")
-        expected["set_zs"] = {"mops-epilogue"}
+        # The epilogue is carried out by a thunk unless an operand lives in a
+        # frame slot; the prologue of a copy with two of them steps.
+        for kind in ("cpyf", "cpy", "set"):
+            for name in ("vn", "vd", "vs", "vdvn", "vnvs"):
+                expected[f"{kind}_{name}"] = {"mops-epilogue-virtual"}
         expected["isb_mov"] = {"barriers:ISB:baseline"}
-        expected["cpy_vdvn"] = {"mops-virtual", "mops-epilogue"}
-        expected["cpy_vnvs"] = {"mops-virtual", "mops-epilogue"}
+        expected["cpy_vdvn"] = {"mops-virtual", "mops-epilogue-virtual"}
+        expected["cpy_vnvs"] = {"mops-virtual", "mops-epilogue-virtual"}
         # "xzr_d" is parsed as ("xzr", "d").
         for kind in ("cpyf", "cpy", "set"):
             expected[f"{kind}_xzr_d"] = {"mops-invalid"}

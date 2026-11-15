@@ -46,6 +46,10 @@ struct Stats final {
 	 * how many times a lookup asked the history what changed. */
 	std::uint64_t code_bumps{};
 	std::uint64_t history_queries{};
+	/* Memory copy and set epilogues the generated thunk left to the host
+	 * routine (a size above 64 bytes, a backward copy, a page crossing or
+	 * a TLB miss). */
+	std::uint64_t mops_slow{};
 	/* What binder lookups answered: hit, uncovered, not_ready, poisoned,
 	 * unverified, no_entry, stale. */
 	std::array<std::uint64_t, 7> finds{};

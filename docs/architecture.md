@@ -555,9 +555,14 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
 - Memory and atomics: an inline probe of the engine's TLB entry, refilled
   through the executor on a miss; ordered accesses, the LSE atomic operations
   and compare-and-swap run as the host's own instruction on naturally aligned
-  addresses. An unaligned address, an SP base, a pair, an exclusive and the
-  epilogue of CPY, CPYF and SET (the engine's option B,
-  `darwin/cpu/arm64/detail/memory_copy_set.hpp`) are the engine's.
+  addresses. An unaligned address, an SP base, a pair and an exclusive are
+  the engine's. The epilogue of CPY, CPYF and SET (the engine's option B,
+  `darwin/cpu/arm64/detail/memory_copy_set.hpp`) runs in rewritten code for a
+  forward copy or a set of at most 64 bytes with both ends in one mapped
+  page; every other case calls the engine's own routine on the same
+  registers. A fault, or registers the prologue cannot have produced, steps
+  the instruction with the registers committed at that region, so the engine
+  takes the fault with its own state.
 - Floating point and SIMD run under the guest FPCR/FPSR in the host registers
   the way gadget code does; the engine restores the host environment at the
   dispatcher boundary.

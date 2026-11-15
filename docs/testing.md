@@ -752,8 +752,12 @@ blocker in every one of them.
   holds one function per instruction form of the ordered, atomic and MOPS
   classes, so each form runs from random states, compare-and-swap with every
   outcome and permission, and loops that update one cell from rewritten code
-  and the engine on two vCPUs. `arm64-aot-tools` checks the generator's
-  encoders and classifier, including which forms are left to the engine.
+  and the engine on two vCPUs. Memory copies and sets also run from directed
+  states (the first, a middle and the last byte faulting, both directions,
+  overlap, zero length, a copy across an unmapped page), and the registers,
+  flags and memory at every fault must equal the engine's.
+  `arm64-aot-tools` checks the generator's encoders and classifier,
+  including which forms are left to the engine.
 - `arm64-aot-runtime-product` checks that the product compilation of the AOT
   runtime holds none of the diagnostics or test switches.
 - `arm64-aot-guest-runner` drives the guest runner of the next test against

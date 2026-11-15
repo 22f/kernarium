@@ -54,6 +54,12 @@ SLOT_PSTATE = 0x100
 CROSS_BIAS, CROSS_PAGES = 16, 24
 # The refill thunk's own frame: x0-x17, x30, NZCV, then q0-q31.
 REFILL_FRAME = 0x2a0
+# The members of the host table that ENTER's last argument names (CrossTable
+# in aot_runtime.hpp) the generated thunks call through.
+XTAB_REFILL, XTAB_LOOKUP, XTAB_MOPS = 0, 8, 16
+COND_LO, COND_MI = 3, 4
+# The kinds the host's MOPS epilogue routine takes.
+MOPS_KIND = {"cpyf": 0, "cpy": 1, "set": 2}
 VSLOT = {18: 0xC0, 24: 0xC8, 25: 0xD0, 26: 0xD8, 27: 0xE0, 28: 0xE8}
 VIRTUAL = frozenset(VSLOT) | {"sp"}
 
@@ -250,6 +256,9 @@ class Library:
         self.fn_pg: set[int] = set()
         self.fn_ma: list[int] = []
         self.fn_st: list[int] = []
+        # The register combinations of the MOPS epilogues in the library:
+        # (kind, destination, count, source), one thunk each.
+        self.mops_keys: set[tuple[str, int, int, int]] = set()
         # The guest offset of the instruction being emitted.
         self.cur = 0
         self.charge = self._plan_charges()
@@ -321,6 +330,9 @@ class Library:
     def lab(self, kind: str, value: int) -> str:
         return f"L{self.index}{kind}{value:x}"
 
+    def mops_label(self, key: tuple[str, int, int, int]) -> str:
+        return f"L{self.index}MOPS_{key[0]}_{key[1]}_{key[2]}_{key[3]}"
+
     def goto_label(self, target: int) -> str:
         if target in self.covered:
             # A target on another text page goes through that page's gate:
@@ -370,6 +382,9 @@ class Library:
         for function in self.functions:
             self.stats.functions += 1
             self._emit_function(function)
+        before = len(asm._w)
+        emit_mops_thunks(asm, self)
+        self.stats.words["mops_thunks"] += len(asm._w) - before
         asm.label("TAB")
         asm.data(bytes(4 * self.table_words))
         asm.label("SRC")
@@ -1043,6 +1058,29 @@ class Library:
         self.stats.kinds["cas" if cas else "atomic"] += 1
         return True
 
+    def _mops_epilogue(self, offset: int, kind: str, d: int, n: int, s: int
+                       ) -> bool:
+        """The stage that moves the data, which the virtual CPU does whole
+        (option B). The site calls the thunk of its registers (emit_mops_thunks)
+        with T0 = where to go on and T1 = its slot in the entry table; an
+        operand held in a frame slot steps."""
+        operands = [d, n] + ([] if kind == "set" and s == 31 else [s])
+        if any(self._resolve(register, False) in VIRTUAL
+               for register in operands):
+            return self._step(offset, "mops-epilogue-virtual")
+        self.mops_keys.add((kind, d, n, s))
+        slot = offset - self.table_base
+        asm = self.asm
+        # adr T0 = the word after the branch below.
+        asm.word(A.adr_word(T0, 16 if slot >> 16 else 12))
+        asm.word(A.movz(T1, slot & 0xffff))
+        if slot >> 16:
+            asm.word(A.movk(T1, slot >> 16, 1))
+        asm.b(self.mops_label((kind, d, n, s)))
+        self.stats.inlined += 1
+        self.stats.kinds["mops-epilogue"] += 1
+        return True
+
     def _mops(self, offset: int, word: int) -> bool:
         """The prologue and main stages of CPY, CPYF and SET. The virtual CPU
         implements option B (darwin/cpu/arm64/detail/memory_copy_set.hpp): the
@@ -1062,7 +1100,8 @@ class Library:
                 d == n or s == d or s == n or (not family_set and s == 31):
             return self._step(offset, "mops-invalid")
         if stage == 2:
-            return self._step(offset, "mops-epilogue")
+            return self._mops_epilogue(offset, "set" if family_set else
+                                       "cpyf" if forward else "cpy", d, n, s)
         names = [("n", n), ("d", d), ("s", s)] if general else [("n", n)]
         virtual = [name for name, reg in names
                    if self._resolve(reg, False) in VIRTUAL]
@@ -1234,6 +1273,32 @@ def emit_enter(asm: A.Assembler, layout: dict[str, int],
     asm.word(A.br(T0))
 
 
+def emit_save_state(asm: A.Assembler) -> None:
+    """Push the REFILL_FRAME that holds what a C++ call may change: x0-x17,
+    x30, NZCV and q0-q31. Clobbers x9 after saving it."""
+    asm.word(A.add_imm(31, 31, REFILL_FRAME, sub=True))
+    for index in range(0, 18, 2):
+        asm.word(A.stp_x(index, index + 1, 31, 8 * index))
+    asm.word(A.str_x(30, 31, 0x90))
+    asm.word(A.mrs(9, "nzcv"))
+    asm.word(A.str_x(9, 31, 0x98))
+    for index in range(16):
+        asm.word(A.ldp_q(2 * index, 2 * index + 1, 31, 0xa0 + 32 * index,
+                         load=False))
+
+
+def emit_restore_state(asm: A.Assembler) -> None:
+    """Pop what emit_save_state pushed."""
+    for index in range(16):
+        asm.word(A.ldp_q(2 * index, 2 * index + 1, 31, 0xa0 + 32 * index))
+    asm.word(A.ldr_x(9, 31, 0x98))
+    asm.word(A.msr("nzcv", 9))
+    asm.word(A.ldr_x(30, 31, 0x90))
+    for index in range(0, 18, 2):
+        asm.word(A.ldp_x(index, index + 1, 31, 8 * index))
+    asm.word(A.add_imm(31, 31, REFILL_FRAME))
+
+
 def emit_exits(asm: A.Assembler, library: "Library") -> None:
     """The exit routines and the refill thunk, once in every unit so that no
     branch needs more than a unit's reach."""
@@ -1305,25 +1370,10 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
     rf = REFILL_FRAME
 
     def save() -> None:
-        asm.word(A.add_imm(31, 31, rf, sub=True))
-        for index in range(0, 18, 2):
-            asm.word(A.stp_x(index, index + 1, 31, 8 * index))
-        asm.word(A.str_x(30, 31, 0x90))
-        asm.word(A.mrs(9, "nzcv"))
-        asm.word(A.str_x(9, 31, 0x98))
-        for index in range(16):
-            asm.word(A.ldp_q(2 * index, 2 * index + 1, 31, 0xa0 + 32 * index,
-                             load=False))
+        emit_save_state(asm)
 
     def restore() -> None:
-        for index in range(16):
-            asm.word(A.ldp_q(2 * index, 2 * index + 1, 31, 0xa0 + 32 * index))
-        asm.word(A.ldr_x(9, 31, 0x98))
-        asm.word(A.msr("nzcv", 9))
-        asm.word(A.ldr_x(30, 31, 0x90))
-        for index in range(0, 18, 2):
-            asm.word(A.ldp_x(index, index + 1, 31, 8 * index))
-        asm.word(A.add_imm(31, 31, rf))
+        emit_restore_state(asm)
 
     # A cold miss stub enters REFILL_<kind>_<bytes> with T0 = the address the
     # probe formed (an access of more than one byte leaves the address of its
@@ -1419,6 +1469,190 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
     asm.word(A.ldr_x(T0, T1, CROSS_PAGES))
     asm.word(A.str_x(T0, 31, SLOT_PSTATE))
     asm.word(A.br(T2))
+
+
+def emit_mops_thunks(asm: A.Assembler, library: "Library") -> None:
+    """One thunk per register combination of a MOPS epilogue in the library.
+
+    The virtual CPU implements option B (darwin/cpu/arm64/detail/
+    memory_copy_set.hpp): the prologue formatted the registers and the flags,
+    and the epilogue moves everything that remains, a page-contained region at
+    a time, committing the registers between regions. The thunk does the
+    common case itself, with no call and no change to the flags, and leaves
+    the rest to the host routine that runs that very function:
+
+    * the count is zero: nothing happens;
+    * the flags are not the prologue's (C clear), the copy runs backward, or
+      the count is above 64: the host routine;
+    * the source (a copy) and the destination each lie in one page, both
+      pages have their TLB entries (the key is the untagged page, as the
+      engine looks it up): a copy of n <= 64 bytes is one region, which the
+      engine moves with one memmove. Every byte is loaded before the first
+      is stored, so the result is the memmove's for any overlap, and a set
+      is one memset;
+    * anything else, a page crossing or a missing entry included, goes to
+      the host routine, which translates (filling the TLB) and moves the
+      regions exactly as the engine does. When it completes the thunk goes
+      on; when it stops at a fault or at registers the prologue cannot have
+      formatted, the registers it committed are the engine's at that region
+      and the instruction steps, so the engine redoes the rest and takes the
+      fault with its own state.
+
+    The site has set T0 to the word after it and T1 to its slot in the entry
+    table. The thunk writes no flag; it saves the registers it uses.
+    """
+    rf = REFILL_FRAME
+    for key in sorted(library.mops_keys):
+        kind, d, n, s = key
+        copy = kind != "set"
+        has_source = copy or s != 31
+        name = library.mops_label(key)
+        a, b, c, e = [r for r in range(9, 18) if r not in (d, n, s)][:4]
+        done, ret, slow, slow2, fail = (name + "_done", name + "_ret",
+                                        name + "_slow", name + "_slow2",
+                                        name + "_fail")
+
+        def locate(address: int, pointer: int, entry: int) -> None:
+            """pointer = the host address of the n bytes at the guest address
+            in `address`, or leave by slow2."""
+            asm.word(A.ubfx(pointer, address, 0, 56))
+            asm.word(A.and_ones(T2, pointer, 12))
+            asm.word(A.add_reg(T2, T2, n))
+            asm.word(A.add_imm(T2, T2, 1, sub=True))
+            asm.word(A.lsr_imm(T2, T2, 12))
+            asm.cbz(T2, slow2, nz=True)
+            asm.word(A.ubfx(c, pointer, 12, 14))
+            asm.word(A.add_reg(c, TLB, c, shift=0, amount=5))
+            asm.word(A.ldp_x(e, c, c, entry))
+            asm.word(A.eor_reg(e, e, pointer, shift=1, amount=12))
+            asm.cbz(e, slow2, nz=True)
+            asm.word(A.add_reg(pointer, c, pointer))
+
+        asm.label(name)
+        asm.cbz(n, ret, sf=1)
+        asm.bcond(COND_LO, slow)
+        if kind == "cpy":
+            asm.bcond(COND_MI, slow)
+        asm.word(A.add_imm(T2, n, 1, sub=True))
+        asm.word(A.lsr_imm(T2, T2, 6))
+        asm.cbz(T2, slow, nz=True)
+        asm.word(A.add_imm(31, 31, 32, sub=True))
+        asm.word(A.stp_x(a, b, 31, 0))
+        asm.word(A.stp_x(c, e, 31, 16))
+        if copy:
+            locate(s, a, 0)
+        locate(d, b, 16)
+        if not copy:
+            # The fill byte in every byte of e.
+            if s == 31:
+                asm.word(A.movz(e, 0))
+            else:
+                asm.word(A.and_ones(e, s, 8))
+                for amount in (8, 16, 32):
+                    asm.word(A.orr_reg(e, e, e, shift=0, amount=amount))
+        asm.word(A.add_imm(c, n, 1, sub=True))
+        for bit, size in ((5, 33), (4, 17), (3, 9), (2, 5), (1, 3)):
+            asm.tbz(c, bit, f"{name}_n{size}", nz=True)
+        # n = 1 or 2, 3 or 4, 5 to 8 and 9 to 16: the first and the last
+        # element of the size, every load before the first store.
+        for label, log in ((f"{name}_n1", 0), (f"{name}_n3", 1),
+                           (f"{name}_n5", 2), (f"{name}_n9", 3)):
+            if label != f"{name}_n1":
+                asm.label(label)
+            size = 1 << log
+            asm.word(A.add_reg(T2, b, n))
+            if copy:
+                asm.word(A.ldst_imm(e, a, 0, log, load=True))
+                asm.word(A.add_reg(c, a, n))
+                asm.word(A.ldst_unscaled(c, c, -size, log, load=True))
+                asm.word(A.ldst_imm(e, b, 0, log, load=False))
+                asm.word(A.ldst_unscaled(c, T2, -size, log, load=False))
+            else:
+                asm.word(A.ldst_imm(e, b, 0, log, load=False))
+                asm.word(A.ldst_unscaled(e, T2, -size, log, load=False))
+            asm.b(done)
+        # 17 to 32 and 33 to 64 bytes.
+        asm.label(f"{name}_n17")
+        asm.word(A.add_reg(T2, b, n))
+        if copy:
+            asm.word(A.add_imm(31, 31, 32, sub=True))
+            asm.word(A.stp_q(30, 31, 31, 0))
+            asm.word(A.ldr_q(30, a, 0))
+            asm.word(A.add_reg(c, a, n))
+            asm.word(A.ldst_unscaled(31, c, -16, 0, load=True, vector=True))
+            asm.word(A.str_q(30, b, 0))
+            asm.word(A.ldst_unscaled(31, T2, -16, 0, load=False, vector=True))
+            asm.word(A.ldp_q(30, 31, 31, 0))
+            asm.word(A.add_imm(31, 31, 32))
+        else:
+            asm.word(A.stp_x(e, e, b, 0))
+            asm.word(A.stp_x(e, e, T2, -16))
+        asm.b(done)
+        asm.label(f"{name}_n33")
+        asm.word(A.add_reg(T2, b, n))
+        if copy:
+            asm.word(A.add_imm(31, 31, 64, sub=True))
+            asm.word(A.stp_q(28, 29, 31, 0))
+            asm.word(A.stp_q(30, 31, 31, 32))
+            asm.word(A.ldp_q(28, 29, a, 0))
+            asm.word(A.add_reg(c, a, n))
+            asm.word(A.ldp_q(30, 31, c, -32))
+            asm.word(A.stp_q(28, 29, b, 0))
+            asm.word(A.stp_q(30, 31, T2, -32))
+            asm.word(A.ldp_q(28, 29, 31, 0))
+            asm.word(A.ldp_q(30, 31, 31, 32))
+            asm.word(A.add_imm(31, 31, 64))
+        else:
+            asm.word(A.stp_x(e, e, b, 0))
+            asm.word(A.stp_x(e, e, b, 16))
+            asm.word(A.stp_x(e, e, T2, -32))
+            asm.word(A.stp_x(e, e, T2, -16))
+        # Commit the registers the way the engine does at the end of the
+        # last region, and go on.
+        asm.label(done)
+        asm.word(A.add_reg(d, d, n))
+        if copy:
+            asm.word(A.add_reg(s, s, n))
+        asm.word(A.movz(n, 0))
+        asm.word(A.ldp_x(a, b, 31, 0))
+        asm.word(A.ldp_x(c, e, 31, 16))
+        asm.word(A.add_imm(31, 31, 32))
+        asm.label(ret)
+        asm.word(A.br(T0))
+        # The fast path gave up after saving its registers.
+        asm.label(slow2)
+        asm.word(A.ldp_x(a, b, 31, 0))
+        asm.word(A.ldp_x(c, e, 31, 16))
+        asm.word(A.add_imm(31, 31, 32))
+        # The host routine: it takes the registers (and the flags) in a block
+        # on the stack and writes the registers back.
+        asm.label(slow)
+        asm.word(A.add_imm(31, 31, 32, sub=True))
+        asm.word(A.stp_x(d, n, 31, 0))
+        asm.word(A.str_x(s, 31, 16))
+        emit_save_state(asm)
+        asm.word(A.ldr_x(9, 31, 0x98))
+        asm.word(A.str_x(9, 31, rf + 24))
+        asm.word(A.ldr_x(0, 31, rf + 32 + SLOT_CPU))
+        asm.word(A.mov_reg(1, TLB))
+        asm.word(A.add_imm(2, 31, rf))
+        asm.word(A.movz(3, MOPS_KIND[kind]))
+        asm.word(A.ldr_x(9, 31, rf + 32 + SLOT_XTAB))
+        asm.word(A.ldr_x(9, 9, XTAB_MOPS))
+        asm.word(A.blr(9))
+        asm.word(A.mov_reg(T2, 0))
+        emit_restore_state(asm)
+        asm.word(A.ldp_x(d, n, 31, 0))
+        if has_source:
+            asm.word(A.ldr_x(s, 31, 16))
+        asm.word(A.add_imm(31, 31, 32))
+        # 1 = done; 0 = a fault and 2 = registers the prologue cannot have
+        # formatted: the instruction steps (T1 = its slot).
+        asm.word(A.add_imm(T2, T2, 1, sub=True))
+        asm.cbz(T2, fail, nz=True)
+        asm.word(A.br(T0))
+        asm.label(fail)
+        asm.b("REFILL_FAIL")
 
 
 # ---- the blob ----------------------------------------------------------------

@@ -115,6 +115,13 @@ def ccmp_imm(rn: int, imm5: int, nzcv: int, cond: int) -> int:
             (rn << 5) | _u(nzcv, 4))
 
 
+def orr_reg(rd: int, rn: int, rm: int, *, shift: int = 0, amount: int = 0
+            ) -> int:
+    """ORR (shifted register), 64-bit."""
+    return ((1 << 31) | (0b01 << 29) | (0b01010 << 24) | (shift << 22) |
+            (rm << 16) | (_u(amount, 6) << 10) | (rn << 5) | rd)
+
+
 def movz_hw(rd: int, imm16: int, hw: int) -> int:
     return movz(rd, imm16, hw)
 
@@ -140,6 +147,15 @@ def ldst_imm(rt: int, rn: int, imm: int, size: int, *, load: bool,
         raise AsmError("unaligned scaled offset")
     return ((size << 30) | (0b111 << 27) | (int(vector) << 26) | (1 << 24) |
             (opc << 22) | (_u(imm >> scale, 12) << 10) | (rn << 5) | rt)
+
+
+def ldst_unscaled(rt: int, rn: int, imm: int, size: int, *, load: bool,
+                  vector: bool = False) -> int:
+    """LDUR/STUR (a signed 9-bit byte offset); size 0-3 is B, H, W, X, and
+    with `vector` and size 0 it is the 128-bit Q register."""
+    opc = (3 if load else 2) if vector else (1 if load else 0)
+    return ((size << 30) | (0b111 << 27) | (int(vector) << 26) |
+            (opc << 22) | (_s(imm, 9) << 12) | (rn << 5) | rt)
 
 
 def ldr_x(rt: int, rn: int, imm: int) -> int:

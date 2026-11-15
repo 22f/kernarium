@@ -87,8 +87,9 @@ struct Target final {
 };
 
 /* What rewritten code asks the host for, and the libraries it may branch to
- * without leaving: the instances of the entered address space. The first two
- * members are read by the generated refill and lookup thunks. */
+ * without leaving: the instances of the entered address space. The first
+ * three members are called by the generated refill, lookup and MOPS
+ * thunks (tools/aot/rewrite.py: XTAB_*). */
 struct CrossTable final {
 	static constexpr std::size_t capacity = 64;
 	using Entry = CrossEntry;
@@ -99,6 +100,16 @@ struct CrossTable final {
 	std::uint64_t (*refill)(void *tlb, std::uint64_t address,
 		std::uint64_t code) noexcept;
 	Target (*lookup)(const CrossTable *table, std::uint64_t address) noexcept;
+	/* The epilogue of a memory copy or set (FEAT_MOPS) when the thunk's own
+	 * fast path does not apply. `registers` holds the destination, count and
+	 * source (the fill value of a set) and the flags, in that order; the
+	 * three are updated as the engine's epilogue does. `kind` is 0 for CPYF,
+	 * 1 for CPY and 2 for SET. Answers 1 when the epilogue completed, 0 when
+	 * it stopped at a fault (the registers are committed to the region the
+	 * fault is in) and 2 when the registers cannot have come from the
+	 * prologue. */
+	std::uint64_t (*mops)(CpuState *cpu, ::uml::memory::Tlb *tlb,
+		std::uint64_t *registers, std::uint64_t kind) noexcept;
 	std::uint64_t count{};
 	std::array<Entry, capacity> entries{};
 };
