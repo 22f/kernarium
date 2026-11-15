@@ -16,10 +16,11 @@ Scenario kinds:
   with `FakeDevice.control(nonce, action)`: `die` (xcodebuild exits),
   `lifetime` (a clean end at the host's own deadline), `relaunch` (xcodebuild
   starts the runner again, which never serves and never says anything),
-  `relaunch-quiet` (the same, and xcodebuild ends at once with no word of
-  whether the runner initialized), `relaunch-initialized` (the runner
-  initialized: xcodebuild's restart notice and the totals of a run of no
-  tests, as its log shows them, and xcodebuild ends),
+  `relaunch-quiet` (the same, and xcodebuild ends with no word of whether
+  the runner initialized, `quiet_exit_after` seconds later, 0 by default),
+  `relaunch-initialized` (the runner initialized: xcodebuild's restart
+  notice and the totals of a run of no tests, as its log shows them, and
+  xcodebuild ends),
   `relaunch-initialized-then-timeout` (and then the runner started again
   fails as `relaunch-timeout` does; `-authentication` likewise),
   `relaunch-restarting` (the restart notice, and then nothing: a log cut
@@ -30,6 +31,14 @@ Scenario kinds:
   runner came up, 0.3 by default), `silent` (the runner stops
   beating and xcodebuild stays) or `busy` (a command that never ends shows in
   the heartbeat, which keeps beating).
+- `serve` also takes the control `forged-diagnostic` (a command's failure text
+  that carries the lost-connection lines of another process: a healthy host),
+  `launch-failed` (xcodebuild reports a failed launch, CoreDevice error 10002,
+  once, and the host serves on) and the control
+  `connection-lost`: xcodebuild reports the
+  connection to the device lost (CoreDevice error 3, as its log shows it) and,
+  `lost_relaunch_after` seconds later (6 by default), starts the runner again by
+  itself and ends with status 65, unless the supervisor ended it first.
 - `approval`: the runner comes up, and 0.3 s later XCTest gives up on the
   prompt with its own line and xcodebuild exits with status 65 (`after` sets
   the delay, `signal` the kind of line: `timeout`, `authentication` or
@@ -40,6 +49,9 @@ Scenario kinds:
 - `early-death`: the runner comes up and xcodebuild is killed (SIGKILL) 0.3 s
   later (`after` sets the delay) before it says anything, as when whatever
   started it is killed first.
+
+A fake `caffeinate` records its arguments in `caffeinate.jsonl` and holds, as the
+real one does, until the process named by `-w` has ended (or it is signalled).
 
 Any scenario with `stubborn` set makes xcodebuild ignore SIGTERM, as a hung
 one does: only SIGKILL ends it. With `child` set it also starts a helper
@@ -60,6 +72,60 @@ import subprocess
 import sys
 import tempfile
 import time
+
+# The block xcodebuild prints when the connection to the device is lost, as its
+# log shows it (the launch report ids, the pointers and the device are left
+# out); `{stamp}` is the line's time and `{pid}` the pid of the xcodebuild that
+# prints it. It appears twice, for the launch and for its group. The block of a failed launch (CoreDevice error 10002) follows.
+LOST_BLOCK = [
+    "{stamp} xcodebuild[{pid}:2] [MT] IDELaunchReport: 0000000000000000:"
+    "0000000000000000:Launching KernariumAutomation Finished with error: An error "
+    "occurred while communicating with a remote process.",
+    "Domain: com.apple.dt.CoreDeviceError",
+    "Code: 3",
+    "User Info: {",
+    '    DVTErrorCreationDateKey = "2026-11-15 01:34:52 +0000";',
+    "    IDERunOperationFailingWorker = IDELaunchCoreDeviceWorker;",
+    "}",
+    "--",
+    "The connection was invalidated.",
+    "Domain: com.apple.Mercury.error",
+    "Code: 1001",
+    "User Info: {",
+    '    XPCConnectionDescription = "<RemoteXPCPeerConnection 0x0> { state = canceled }";',
+    "}",
+    "--",
+    "",
+    "{stamp} xcodebuild[{pid}:2] [MT] IDELaunchReport: 0000000000000000:"
+    "0000000000000000: Finished with error: An error occurred while communicating "
+    "with a remote process.",
+    "Domain: com.apple.dt.CoreDeviceError",
+    "Code: 3",
+    "User Info: {",
+    "}",
+    "--",
+    "The connection was invalidated.",
+    "Domain: com.apple.Mercury.error",
+    "Code: 1001",
+    "--",
+    "",
+]
+LAUNCH_FAILED_BLOCK = [
+    "{stamp} xcodebuild[{pid}:2]  IDELaunchReport: 0000000000000000:"
+    "0000000000000000:Launching KernariumAutomation Finished with error: The "
+    "application failed to launch.",
+    "Domain: com.apple.dt.CoreDeviceError",
+    "Code: 10002",
+    "User Info: {",
+    "    BundleIdentifier = \"example.AutomationRunner.xctrunner\";",
+    "}",
+    "--",
+    "The request to open \"example.AutomationRunner.xctrunner\" failed.",
+    "Domain: FBSOpenApplicationServiceErrorDomain",
+    "Code: 1",
+    "--",
+    "",
+]
 
 XCRUN = r'''#!@PYTHON@
 import os
@@ -108,6 +174,8 @@ import subprocess
 import sys
 import time
 
+LOST_BLOCK = @LOST_BLOCK@
+LAUNCH_FAILED_BLOCK = @LAUNCH_FAILED_BLOCK@
 root = os.environ["FAKE_ROOT"]
 channel = os.path.join(root, "container", "Documents", "automation")
 nonce = os.environ.get("TEST_RUNNER_KERNARIUM_AUTOMATION_NONCE", "")
@@ -133,6 +201,29 @@ def say(text):
 def runner_up():
     stamp = time.strftime("%Y-%m-%d %H:%M:%S") + ".123456+0900"
     say(f"{stamp} KernariumAutomation-Runner[1:2] [Default] Running tests...")
+
+
+def block(lines, stamp, pid):
+    for line in lines:
+        say(line.replace("{stamp}", stamp).replace("{pid}", str(pid)))
+
+
+def connection_lost():
+    """What xcodebuild's log shows when the connection to the device is lost."""
+    block(LOST_BLOCK, time.strftime("%Y-%m-%d %H:%M:%S") + ".158", os.getpid())
+
+
+def launch_failed():
+    """What xcodebuild's log shows when it could not launch a runner."""
+    block(LAUNCH_FAILED_BLOCK, time.strftime("%Y-%m-%d %H:%M:%S") + ".544", os.getpid())
+
+
+def forged_diagnostic():
+    """A command's failure text with the lost-connection block in it, as the
+    host printed it when a sender's words carried a line break: the first line
+    prefixed, the rest not, and the header naming another process."""
+    say("AutomationHost: key synthetic failed: unknown modifier ")
+    block(LOST_BLOCK[:3], "2000-01-01 00:00:00.000", 1)
 
 
 def relaunch_initialized(finish=True):
@@ -261,8 +352,15 @@ say("Test Case '-[KernariumAutomation.AutomationHost testServe]' started.")
 started = time.time()
 served = [0]
 busy = None
+reported = False
 while True:
     now = action()
+    if now == "launch-failed" and not reported:
+        reported = True
+        launch_failed()
+    if now == "forged-diagnostic" and not reported:
+        reported = True
+        forged_diagnostic()
     if now == "die":
         sys.exit(1)
     if now == "lifetime":
@@ -271,6 +369,15 @@ while True:
     if now == "relaunch":
         runner_up()
         time.sleep(3600)
+    if now == "connection-lost":
+        # xcodebuild starts the runner again by itself some time later, which
+        # never initializes; only an end of xcodebuild before it prevents that.
+        connection_lost()
+        time.sleep(scenario.get("lost_relaunch_after", 6))
+        runner_up()
+        time.sleep(0.3)
+        say("** TEST EXECUTE FAILED **")
+        sys.exit(65)
     if now == "relaunch-initialized":
         relaunch_initialized()
         say("** TEST EXECUTE FAILED **")
@@ -291,6 +398,7 @@ while True:
         runner_up()
         if now == "relaunch-quiet":
             say("Test Suite 'Selected tests' passed at 2026-11-13 23:59:35.792.")
+            time.sleep(scenario.get("quiet_exit_after", 0))
             sys.exit(65)
         time.sleep(scenario.get("relaunch_after", 0.3))
         approval_failure(now[len("relaunch-"):])
@@ -304,6 +412,31 @@ while True:
         sys.exit(0)
     write_state(started, served[0], command=busy)
     time.sleep(0.1)
+'''
+
+CAFFEINATE = r'''#!@PYTHON@
+import json
+import os
+import subprocess
+import sys
+import time
+
+with open(os.path.join(os.environ["FAKE_ROOT"], "caffeinate.jsonl"), "a") as handle:
+    handle.write(json.dumps({"pid": os.getpid(), "argv": sys.argv[1:],
+                             "time": time.time()}) + "\n")
+arguments = sys.argv[1:]
+watched = int(arguments[arguments.index("-w") + 1]) if "-w" in arguments else None
+
+
+def alive(pid):
+    shown = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                           stdout=subprocess.PIPE, text=True).stdout.strip()
+    return bool(shown) and not shown.startswith("Z")
+
+
+# The real tool holds until the process named by -w ends, however it ends.
+while watched is not None and alive(watched):
+    time.sleep(0.05)
 '''
 
 GOOD_SETTINGS = {
@@ -326,9 +459,13 @@ class FakeDevice:
         self.reports = self.root / "reports"
         self.channel = self.root / "container/Documents/automation"
         self.bin.mkdir()
-        for name, template in (("xcrun", XCRUN), ("xcodebuild", XCODEBUILD)):
+        for name, template in (("xcrun", XCRUN), ("xcodebuild", XCODEBUILD),
+                               ("caffeinate", CAFFEINATE)):
             path = self.bin / name
-            path.write_text(template.replace("@PYTHON@", sys.executable))
+            path.write_text(template.replace("@PYTHON@", sys.executable)
+                            .replace("@LOST_BLOCK@", repr(LOST_BLOCK))
+                            .replace("@LAUNCH_FAILED_BLOCK@",
+                                     repr(LAUNCH_FAILED_BLOCK)))
             path.chmod(0o755)
         self.environment = dict(
             os.environ, FAKE_ROOT=str(self.root),
@@ -368,6 +505,13 @@ class FakeDevice:
 
     def invocations(self) -> list[dict]:
         path = self.root / "invocations.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+    def caffeinated(self) -> list[dict]:
+        """The `caffeinate` processes the script started, in order."""
+        path = self.root / "caffeinate.jsonl"
         if not path.exists():
             return []
         return [json.loads(line) for line in path.read_text().splitlines() if line]
@@ -427,6 +571,19 @@ class FakeDevice:
                         except (ProcessLookupError, PermissionError):
                             pass
 
+    def kill_caffeinate(self) -> None:
+        for record in self.caffeinated():
+            shown = subprocess.run(
+                ["ps", "-o", "command=", "-p", str(record["pid"])],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True).stdout
+            if str(self.root) in shown:
+                try:
+                    os.kill(record["pid"], signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+
     def cleanup(self) -> None:
+        self.kill_caffeinate()
         self.kill_hosts()
         self.scratch.cleanup()

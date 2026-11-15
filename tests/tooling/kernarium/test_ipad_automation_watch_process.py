@@ -208,6 +208,11 @@ class WatchProcessTests(ProcessTestCase):
         self.assertFalse(status["watch"]["running"])
         self.assertIn("since", status["watch"])
         self.assertIn("observed", status["watch"]["approval"])
+        # `status` says why: the cause and the device's own words.
+        self.assertIn("the approval prompt was not answered in time",
+                      status["watch"]["detail"])
+        self.assertIn("Timed out while enabling automation mode",
+                      status["watch"]["detail"])
         again = self.run_script("watch", "--hours", "3", *self.reports())
         self.assertEqual(again.returncode, 4, again.stderr)
         self.assertIn("starting nothing", again.stderr)
@@ -261,6 +266,72 @@ class WatchProcessTests(ProcessTestCase):
         self.assertIn("could not start a host", self.text(child))
         self.assertFalse((self.device.state_dir / self.device.udid
                           / "approval.json").exists())
+
+
+class KeepAwakeProcessTests(ProcessTestCase):
+    def test_the_watch_holds_an_idle_sleep_assertion_until_it_ends(self) -> None:
+        # Rule: a watch process holds `caffeinate -i -w <its pid>` (idle sleep
+        # only, never the display) and releases it when it ends: on SIGTERM
+        # itself, and on SIGKILL by `-w`, which the real tool honours (the
+        # fake holds until the process it is told to wait for is gone).
+        started = self.run_script("start", "--hours", "3", "--wait", "60",
+                                  *self.reports())
+        self.assertEqual(started.returncode, 0, started.stderr)
+        for kind in (signal.SIGTERM, signal.SIGKILL):
+            with self.subTest(kind.name):
+                before = len(self.device.caffeinated())
+                child = self.spawn("watch", "--hours", "3", *self.reports())
+                self.wait_state("watching")
+                calls = self.device.caffeinated()
+                self.assertEqual(len(calls), before + 1, calls)
+                self.assertEqual(calls[-1]["argv"], ["-i", "-w", str(child.pid)])
+                self.assertEqual(self.watcher(), child.pid)
+                self.assertTrue(self.device.alive(calls[-1]["pid"]))
+                child.send_signal(kind)
+                child.wait(timeout=30)
+                self.device.wait(lambda: not self.device.alive(calls[-1]["pid"]), 30,
+                                 f"the assertion ends with the watch ({kind.name})")
+
+    def test_a_refused_watch_holds_none(self) -> None:
+        started = self.run_script("start", "--hours", "3", "--wait", "60",
+                                  *self.reports())
+        self.assertEqual(started.returncode, 0, started.stderr)
+        self.spawn("watch", "--hours", "3", *self.reports())
+        self.wait_state("watching")
+        again = self.run_script("watch", "--hours", "3", *self.reports())
+        self.assertEqual(again.returncode, 6, again.stderr)
+        self.assertEqual(len(self.device.caffeinated()), 1)
+        # Printing the job holds nothing either.
+        self.run_script("watch", "--print-launchd-job", LABEL)
+        self.assertEqual(len(self.device.caffeinated()), 1)
+
+
+class LostConnectionProcessTests(ProcessTestCase):
+    def test_a_lost_connection_is_a_plain_death_the_watch_replaces(self) -> None:
+        # Rule: xcodebuild reports the connection lost; the supervisor ends it
+        # before its relaunch of the runner (6 s later in the fake), and the
+        # watch process replaces the host and says why in its record.
+        self.device.scenarios([{"kind": "serve"}, {"kind": "serve"}])
+        started = self.run_script("start", "--hours", "3", "--wait", "60",
+                                  *self.reports())
+        self.assertEqual(started.returncode, 0, started.stderr)
+        child = self.spawn("watch", "--hours", "3", *self.reports())
+        first = self.wait_state("watching")["host"]
+        self.device.control(first, "connection-lost")
+        record = self.device.wait(
+            lambda: self.record() if self.record().get("restarts") == 1
+            and self.record().get("state") == "watching" else None, 90,
+            "the watch replaced the host")
+        self.assertNotEqual(record["host"], first)
+        self.assertIn("the device connection was lost at ",
+                      record["last_end"]["reason"])
+        self.assertIn("started no runner again", self.text(child))
+        self.assertFalse((self.device.state_dir / self.device.udid
+                          / "approval.json").exists())
+        code, status = self.status()
+        self.assertEqual(code, 0)
+        self.assertTrue(status["serving"])
+        self.assertIsNone(child.poll())
 
 
 class LaunchdJobTests(ProcessTestCase):
@@ -449,6 +520,32 @@ class LaunchdJobTests(ProcessTestCase):
             [sys.executable, str(SCRIPT), "--device", "X", "watch", "--help"],
             stdout=subprocess.PIPE, text=True, timeout=60).stdout
         self.assertIn("mkdir -p", helped.replace("\n", " ").replace("  ", " "))
+
+    def test_the_job_asks_for_interactive_scheduling_and_nothing_else_of_the_system(self) -> None:
+        # Rule: launchd.plist(5): ProcessType Interactive lifts the light
+        # resource limits a job gets by default (throttled CPU and I/O), and
+        # LegacyTimers keeps the job's timers out of the coalescing. A watch of
+        # the default kind was once not run for over an hour while the Mac
+        # idled with its display off. Nothing else is asked: no Nice, no
+        # priority, no power assertion (the watch holds its own).
+        job = self.job()
+        self.assertEqual(job["ProcessType"], "Interactive")
+        self.assertIs(job["LegacyTimers"], True)
+        for key in ("Nice", "LowPriorityIO", "LowPriorityBackgroundIO",
+                    "HardResourceLimits", "SoftResourceLimits", "KeepAlive",
+                    "StartInterval", "StartCalendarInterval", "ThrottleInterval"):
+            self.assertNotIn(key, job)
+
+    def test_the_usage_names_what_the_job_and_the_watch_hold(self) -> None:
+        header = " ".join(subprocess.run(
+            [sys.executable, str(SCRIPT), "--help"],
+            stdout=subprocess.PIPE, text=True, timeout=60).stdout.split())
+        self.assertIn("interactive scheduling (ProcessType Interactive, "
+                      "LegacyTimers)", header)
+        self.assertIn("idle-sleep assertion (`caffeinate -i -w PID`: never the "
+                      "display)", header)
+        self.assertIn("whenever a turn of its loop starts more than 15 s after "
+                      "the one before it", header)
 
     def test_the_job_is_not_brought_back_after_the_watch_ends(self) -> None:
         # Rule (E): no KeepAlive. launchd starts the watch once and never
