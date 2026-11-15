@@ -582,15 +582,18 @@ qualifies this contract.
 A 32-bit application that targets an API level below 14 is a game written for
 Dalvik, which gave native code direct object pointers and a heap below 2 GiB.
 The layer that gives ART's process those two things is a choice made per
-application, off by default. `ActivityThread.handleBindApplication` (a topic of
-route p0007) loads `/system/lib/libkernarium_oldapp.so` (`overlay/oldapp`) into
-the process of an application that is 32-bit, targets below API 14 and is on the
-list of applications the person switched it on for, and into no other. The
-hook tests the bitness and the target level first and reads the list through one
-function (at present the system property `persist.sys.kernarium.oldapp`, a
-comma-separated list of packages). A user ID that several packages share gets
-the layer only when every package of it is eligible, because they share the one
-process. A failed load is logged and the application starts as before.
+application, off by default: the native-return case below cannot be covered, so
+the person switches it on for the games that need it. The store is one
+persistent property per package, `persist.sys.kernarium.oldapp.<package>`; its
+value is the turn-on time and an empty or unset property means off.
+`ActivityThread.handleBindApplication` (a topic of route p0007) tests the
+target level, then the bitness, then reads that property, and only an
+application that is below API 14, 32-bit and switched on gets
+`/system/lib/libkernarium_oldapp.so` (`overlay/oldapp`) in its process; an
+application that is not eligible never reads the property. Packages that share
+a user ID share the process, so the hook also leaves the layer out when the
+user ID has more than one package. A failed load is logged and the application
+starts as before.
 Applications that target below API 23 get Android's permission review before
 their first component runs. The library, which includes no Android header,
 patches ART's one JNI function table in place and gives the application:

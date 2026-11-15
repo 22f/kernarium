@@ -3,8 +3,8 @@
 """Qualify the old-application layer: an old 32-bit application the person switched it on for starts on ART, any other is left alone.
 
 android/lineage-24/overlay/oldapp is a library the framework loads into an application process when the
-application is 32-bit, targets an API level below 14 (Android before 4.0) and is on the list of applications the
-person switched the layer on for. It gives such an application what Dalvik gave it: a Java `byte[]` that reads
+application targets an API level below 14 (Android before 4.0), is 32-bit and is switched on for it (the persistent
+property persist.sys.kernarium.oldapp.<package> is not empty). It gives such an application what Dalvik gave it: a Java `byte[]` that reads
 through the object pointer at the Dalvik offsets (a block that stands for the array: a write through it reaches
 the array, it is the same object for every JNI function), and a heap below 2 GiB. This runner installs the probe
 application of oldapp_probe_apk.py in its two variants and reads what each one reports:
@@ -199,13 +199,14 @@ def layer_in_image(guest) -> str:
 
 
 def switch(guest, package: str, on: bool) -> str:
-    """Puts the application on the list of those the layer is loaded for (or takes it off), the way the framework
-    reads that list at present, and checks the guest holds what was set."""
-    value = package if on else ""
-    guest.shell(f"su 0 setprop {probe.LIST_PROPERTY} '{value}'")
-    held = guest.shell(f"getprop {probe.LIST_PROPERTY}").strip()
+    """Switches the layer on for the application (or off) by writing its property of the store, as the image's
+    own command does, and checks the guest holds what was set."""
+    name = probe.STORE_PROPERTY_PREFIX + package
+    value = str(int(time.time())) if on else ""
+    guest.shell(f"su 0 setprop {name} '{value}'")
+    held = guest.shell(f"getprop {name}").strip()
     if held != value:
-        raise Failure(f"{probe.LIST_PROPERTY} holds '{held}', not '{value}'")
+        raise Failure(f"{name} holds '{held}', not '{value}'")
     return f"{package} {'switched on' if on else 'switched off'}"
 
 

@@ -394,9 +394,10 @@ class StepTests(unittest.TestCase):
 
         guest = Properties()
         package = probe.package_of("old")
+        name = f"persist.sys.kernarium.oldapp.{package}"
         self.assertIn("switched on", runner.switch(guest, package, True))
-        self.assertEqual(guest.value, package)
-        self.assertIn(f"shell su 0 setprop {probe.LIST_PROPERTY} '{package}'", guest.commands)
+        self.assertTrue(guest.value.isdigit(), "the value is the turn-on time in epoch seconds")
+        self.assertTrue(any(c.startswith(f"shell su 0 setprop {name} '") for c in guest.commands))
         self.assertIn("switched off", runner.switch(guest, package, False))
         self.assertEqual(guest.value, "")
 

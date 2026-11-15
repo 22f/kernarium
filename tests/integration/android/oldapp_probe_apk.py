@@ -47,8 +47,9 @@ SHIM_LIBRARY = "kernarium_oldapp"
 SHIM_IMAGE_PATH = "/system/lib/libkernarium_oldapp.so"
 #: The label an application may map and execute that library with.
 SHIM_IMAGE_LABEL = "u:object_r:system_lib_file:s0"
-#: Where the framework reads the applications the person switched the layer on for (comma-separated packages).
-LIST_PROPERTY = "persist.sys.kernarium.oldapp"
+#: The persistent property the framework reads for a package the person switched the layer on for (its value is the
+#: turn-on time; empty means off): this prefix and the package name.
+STORE_PROPERTY_PREFIX = "persist.sys.kernarium.oldapp."
 RECEIVER = oldapp_probe_dex.CLASS_NAME
 ABI_DIRECTORY = "lib/armeabi-v7a"
 
