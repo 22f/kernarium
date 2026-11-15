@@ -691,30 +691,7 @@ class Library:
             asm.word(A.mov_reg(T0, rn))
         if mnemonic == "BLR":
             self._materialize(30, offset + 4)
-        asm.word(A.ldr_x(T1, 31, SLOT_BIAS))
-        asm.word(A.add_reg(T1, T0, T1, sub=True))  # vaddr
-        base_pages = self.table_base >> 12
-        if base_pages:
-            asm.word(A.add_imm(T1, T1, base_pages, sub=True, shift12=True))
-        asm.word(A.ror_imm(T2, T1, 2))
-        asm.word(A.lsr_imm(T2, T2, self.log_span - 2))
-        asm.cbz(T2, "XLIB", nz=True)
-        # The test above passes anything below the next power of two; the
-        # table covers exactly the code span.
-        span = self.table_end - self.table_base
-        if (span >> 12) < 4096 and span % 4096 == 0:
-            asm.word(A.add_imm(T2, T1, span >> 12, sub=True, shift12=True))
-        else:
-            asm.word(A.movz(T2, span & 0xffff))
-            asm.word(A.movk(T2, (span >> 16) & 0xffff, 1))
-            asm.word(A.add_reg(T2, T1, T2, sub=True))
-        asm.tbz(T2, 63, "XLIB", nz=False)
-        asm.adrp_add(T2, "TAB")
-        asm.word(A.ldr_reg_w(T1, T2, T1))
-        asm.cbz(T1, "EXIT_BRANCH_ABS", sf=0, nz=False)
-        asm.adrp_add(T2, "UNIT")
-        asm.word(A.add_reg(T2, T2, T1))
-        asm.word(A.br(T2))
+        asm.b("IND")
         self.stats.inlined += 1
         self.stats.kinds[mnemonic.lower()] += 1
         return False
@@ -1118,9 +1095,8 @@ class Library:
             asm.label(self.lab("MM", offset))
             slot = offset - self.table_base
             asm.word(A.movz(T1, slot & 0xffff))
-            if slot >> 16:
-                asm.word(A.movk(T1, (slot >> 16) & 0xffff, 1))
-            asm.b(f"REFILL_{kind}_{total}")
+            chunk = slot >> 16
+            asm.b(f"REFILL_{kind}_{total}" + (f"_{chunk}" if chunk else ""))
         for offset in self.fn_st:
             asm.label(self.lab("ST", offset))
             self._exit_to(offset, "EXIT_STEP")
@@ -1309,6 +1285,12 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
             asm.label(f"REFILL_{kind}_{total}")
             asm.word(A.movz(T2, access | (total << 8)))
             asm.b("REFILL")
+            # A site names its slot in 16 bits; the thunk of a later 64 KiB
+            # of the table supplies the rest.
+            for chunk in range(1, (library.table_words * 4 + 0xffff) >> 16):
+                asm.label(f"REFILL_{kind}_{total}_{chunk}")
+                asm.word(A.movk(T1, chunk, 1))
+                asm.b(f"REFILL_{kind}_{total}")
     asm.label("REFILL")
     save()
     asm.word(A.ldr_x(9, 31, rf + SLOT_XTAB))
@@ -1331,6 +1313,34 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
         raise A.AsmError("a library's code must start below 16 MiB")
     asm.word(A.add_imm(T0, T1, base_pages, shift12=True))
     asm.b("EXIT_STEP")
+
+    # An indirect branch: T0 = the guest target, the budget already charged.
+    # The target is inside this library when it lies in the code span.
+    asm.label("IND")
+    asm.word(A.ldr_x(T1, 31, SLOT_BIAS))
+    asm.word(A.add_reg(T1, T0, T1, sub=True))  # vaddr
+    base_pages = library.table_base >> 12
+    if base_pages:
+        asm.word(A.add_imm(T1, T1, base_pages, sub=True, shift12=True))
+    asm.word(A.ror_imm(T2, T1, 2))
+    asm.word(A.lsr_imm(T2, T2, library.log_span - 2))
+    asm.cbz(T2, "XLIB", nz=True)
+    # The test above passes anything below the next power of two; the
+    # table covers exactly the code span.
+    span = library.table_end - library.table_base
+    if (span >> 12) < 4096 and span % 4096 == 0:
+        asm.word(A.add_imm(T2, T1, span >> 12, sub=True, shift12=True))
+    else:
+        asm.word(A.movz(T2, span & 0xffff))
+        asm.word(A.movk(T2, (span >> 16) & 0xffff, 1))
+        asm.word(A.add_reg(T2, T1, T2, sub=True))
+    asm.tbz(T2, 63, "XLIB", nz=False)
+    asm.adrp_add(T2, "TAB")
+    asm.word(A.ldr_reg_w(T1, T2, T1))
+    asm.cbz(T1, "EXIT_BRANCH_ABS", sf=0, nz=False)
+    asm.adrp_add(T2, "UNIT")
+    asm.word(A.add_reg(T2, T2, T1))
+    asm.word(A.br(T2))
 
     # An indirect branch to an address outside this library: T0 = the target.
     # When the host knows a verified library instance that holds it, the
