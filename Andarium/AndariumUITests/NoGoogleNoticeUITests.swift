@@ -8,9 +8,10 @@ import XCTest
 /// The first start: the launch gives the application a guest instance of its
 /// own (`ANDARIUM_GUEST_INSTANCE`, a folder in the Simulator's container that
 /// no other launch uses), so there is no virtual machine; the test sets one
-/// up, starts it, finds the panel under the boot screen's first-run note while
-/// the real runtime boots Android on the Simulator's software renderer, and
-/// waits for the boot to end, which takes the screen and the panel away.
+/// up, starts it, finds the panel last in the boot screen's column, below its
+/// first-run note, while the real runtime boots Android on the Simulator's
+/// software renderer, and waits for the boot to end, which takes the screen and
+/// the panel away.
 ///
 /// Send feedback: the line at the top of its mail, reached from a session's
 /// Settings (the launch asks for the input probe, so a session opens with no
@@ -46,7 +47,7 @@ final class NoGoogleNoticeUITests: XCTestCase {
         XCTAssertTrue(start.waitForExistence(timeout: 600), "the virtual machine was not created")
         start.tap()
 
-        // The first start's boot screen: its own note, and under it the panel.
+        // The first start's boot screen: its own note, and below it the panel.
         let panel = labelled("No Google apps, on purpose", in: app)
         XCTAssertTrue(panel.waitForExistence(timeout: 120), "the first start has no panel")
         XCTAssertTrue(panel.label.contains(reason), "the panel says \(panel.label)")
@@ -97,10 +98,14 @@ final class NoGoogleNoticeUITests: XCTestCase {
         XCTAssertTrue(answer.waitForExistence(timeout: 10), "the answer did not open")
         XCTAssertTrue(app.buttons["Send feedback"].exists, "the mail lost its Send")
 
-        // Closing takes the line away.
+        // Closing takes the line away. The button is a 44 pt target with its own VoiceOver name (the bug-report card's
+        // is "Dismiss"), and a tap 18 pt from the glyph's centre on each axis, past where a bare glyph reaches, closes it.
         let close = app.buttons["no-google-feedback-close"]
         XCTAssertTrue(close.exists, "the line has no close button")
-        close.tap()
+        XCTAssertEqual(close.label, "Dismiss Google apps note")
+        XCTAssertGreaterThanOrEqual(close.frame.width, 44, "the close button is narrower than 44 pt")
+        XCTAssertGreaterThanOrEqual(close.frame.height, 44, "the close button is lower than 44 pt")
+        close.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).withOffset(CGVector(dx: 18, dy: 18)).tap()
         XCTAssertTrue(answer.waitForNonExistence(timeout: 10), "the line stayed after it was closed")
         XCTAssertFalse(app.buttons["no-google-feedback-open"].exists)
     }

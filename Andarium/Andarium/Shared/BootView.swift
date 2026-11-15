@@ -11,8 +11,9 @@ import SwiftUI
 /// has one run, so the boot has no Cancel; the notice's Stop asks first.
 ///
 /// A first start also carries a panel saying that Android has no Google apps,
-/// on purpose, and so does the next normal or update start of an installation
-/// that has not seen it (`NoGoogleBootNote`, kept by `NoGoogleNotice`).
+/// on purpose (`NoGoogleBootNote`), and so does the retry of a first start
+/// that ended before Android booted; no other start does, and nothing is kept
+/// for it (`NoGoogleNotice.showsOnBoot`).
 ///
 /// A start that has run for three minutes (`SlowStart`; eight for a first
 /// start and the first after an update) without reaching Android puts a notice
@@ -35,10 +36,6 @@ struct BootView: View {
 
     @State private var stage = 0
     @State private var startedAt = Date()
-    /// Whether this screen carries the no-Google-apps panel, decided once as
-    /// the screen appears (`NoGoogleNotice`), so the panel stays for the whole
-    /// boot although showing it is what uses the notice up.
-    @State private var showsNoGoogleNote: Bool?
 
     struct Step {
         let title: String
@@ -58,8 +55,7 @@ struct BootView: View {
             GeometryReader { proxy in
                 ScrollView {
                     content(
-                        guest: guest, system: model.system, steps: steps, current: current,
-                        noGoogleNote: showsNoGoogleNote ?? model.noGoogleNotice.showsOnBoot(kind))
+                        guest: guest, system: model.system, steps: steps, current: current)
                         .frame(minHeight: proxy.size.height, alignment: .center)
                 }
                 .scrollBounceBehavior(.basedOnSize)
@@ -83,12 +79,6 @@ struct BootView: View {
                 model.updateSlowStart()
                 try? await Task.sleep(for: .seconds(1))
             }
-        }
-        .onAppear {
-            guard showsNoGoogleNote == nil else { return }
-            let shows = model.noGoogleNotice.showsOnBoot(kind)
-            showsNoGoogleNote = shows
-            if shows { model.noGoogleNotice.keepBootShown() }
         }
         .onChange(of: model.slowStart.showing) { _, showing in
             guard showing else { return }
@@ -205,7 +195,7 @@ struct BootView: View {
     }
 
     private func content(
-        guest: Guest, system: SystemInfo, steps: [Step], current: Int, noGoogleNote: Bool
+        guest: Guest, system: SystemInfo, steps: [Step], current: Int
     ) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             Text(kind == .recovery ? "Recovery" : "Andarium")
@@ -240,13 +230,6 @@ struct BootView: View {
                 .modifier(BootPanel(dimmed: dimmed, radius: 22))
             }
 
-            if noGoogleNote {
-                NoGoogleBootNote()
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .modifier(BootPanel(dimmed: dimmed, radius: 22))
-            }
-
             #if !APP_STORE
             if let sentence = model.jitLastStart?.fallbackSentence {
                 Label {
@@ -263,6 +246,14 @@ struct BootView: View {
                 .modifier(BootPanel(dimmed: dimmed, radius: 22))
             }
             #endif
+
+            // Last, below every sentence the boot says of itself.
+            if NoGoogleNotice.showsOnBoot(kind, firstBootPending: model.bootStartedUnfinished) {
+                NoGoogleBootNote()
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .modifier(BootPanel(dimmed: dimmed, radius: 22))
+            }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 20)

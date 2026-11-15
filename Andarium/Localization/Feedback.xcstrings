@@ -760,6 +760,29 @@
         }
       }
     },
+    "Dismiss Google apps note" : {
+      "comment" : "VoiceOver name of the close button of the box at the top of Send feedback's mail (\"Missing Google apps?\"). It differs from \"Dismiss\", the card that asks for a bug report, so the two are told apart. Google stays in Latin letters in every language.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Googleアプリの案内を閉じる"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关闭Google应用说明"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "關閉Google應用程式說明"
+          }
+        }
+      }
+    },
     "Feedback is sent with the Mail app. Add a mail account in Settings › Apps › Mail › Mail Accounts, then come back." : {
       "comment" : "The text of that notice. The path is iOS's: Settings, Apps, Mail, Mail Accounts, each in iOS's own words for the language.",
       "localizations" : {
@@ -904,7 +927,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Googleは、アプリとGoogle Play開発者サービスを認定済みデバイスのメーカーにのみライセンスしています。お持ちのファイルからアプリを追加でき、多くはこれらなしで動作します。"
+            "value" : "Googleは、自社のアプリとGoogle Play開発者サービスを、認定済みデバイスのメーカーにのみライセンス供与しています。お持ちのファイルからアプリを追加でき、多くはこれらなしで動作します。"
           }
         },
         "zh-Hans" : {

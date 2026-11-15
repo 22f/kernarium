@@ -67,10 +67,14 @@ struct NoGoogleFeedbackLine: View {
                 Image(systemName: "xmark")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.secondary)
-                    .frame(width: 28, height: 28)
+                    .frame(width: 44, height: 44)
+                    .contentShape(.rect)
+                    // The target is 44 pt; the layout keeps the 28 pt the glyph's slot had.
+                    .padding(-8)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(Text("Dismiss", tableName: "Feedback"))
+            // Not "Dismiss" alone: the bug-report card in the same sheet has that one.
+            .accessibilityLabel(Text("Dismiss Google apps note", tableName: "Feedback"))
             .accessibilityIdentifier("no-google-feedback-close")
         }
         .padding(14)

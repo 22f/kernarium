@@ -637,12 +637,13 @@ disk then holds and where Start boots again in the same process; an unclean
 shutdown, a host stop or a cleanup that fails keeps the failure screen and
 requires reopening Andarium.
 
-- **No Google apps, on purpose.** The boot screen of a first start, and of the
-  next normal or update start of an installation that has not seen it, carries
-  a panel saying that Android has no Google apps, and Send feedback opens with
-  a line that answers the same question in place until it is opened or closed
-  once (`NoGoogleNotice` keeps both); their strings are the only ones that
-  name Google, which `scripts/localization.py` allows by key.
+- **No Google apps, on purpose.** The boot screen of a new installation's
+  first Android boot (a first start, and the retry of one that ended before
+  Android booted) carries a panel saying that Android has no Google apps, and
+  Send feedback opens with a line that answers the same question in place
+  until it is opened or closed once (`NoGoogleNotice` keeps that one value);
+  their strings are the only ones that name Google, which
+  `scripts/localization.py` allows by key.
 - **Slow start.** A start still on the boot screen after three minutes
   (`SlowStart`; eight for a guest's first start and the first start after an
   update, which also get a title that does not say the start is slower than

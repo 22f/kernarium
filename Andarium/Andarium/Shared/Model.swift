@@ -128,6 +128,10 @@ final class AppModel {
     var plan: StartPlan = .normal
     /// The release the running boot updates from, where it is known.
     var bootFrom: String?
+    /// Whether the guest's first Android boot had not been seen to complete
+    /// when the start under way began (`InstanceFiles.firstBootPending`): an
+    /// ordinary start of such a guest is its first Android boot still.
+    private(set) var bootStartedUnfinished = false
     /// The preview's plan after Restore; a device reads it from the files.
     var planAfterRestore: StartPlan?
 
@@ -228,9 +232,9 @@ final class AppModel {
     /// update.
     var whatsNew = WhatsNewModel()
     /// What is kept of the notice that the virtual machine's Android has no
-    /// Google apps, on purpose (the boot screen's panel and Send feedback's
-    /// line). It keeps nothing until the person's own launch gives it the
-    /// defaults (`AppEntry.makeModel`).
+    /// Google apps, on purpose (Send feedback's line; the boot screen's panel
+    /// keeps nothing). It keeps nothing until the person's own launch gives it
+    /// the defaults (`AppEntry.makeModel`).
     @ObservationIgnored var noGoogleNotice = NoGoogleNotice()
     /// The launch decided whether the statistics show (automation, see
     /// `StatsPreference.launch`): the value belongs to that run and is not kept.
@@ -1575,7 +1579,8 @@ final class AppModel {
             snapshots.cancelReads()
             frozenBootStage = nil
             bootTracker = BootTracker()
-            slowStart.begin(at: clock(), kind: kind, firstBootPending: driver?.firstBootPending() ?? false)
+            bootStartedUnfinished = driver?.firstBootPending() ?? false
+            slowStart.begin(at: clock(), kind: kind, firstBootPending: bootStartedUnfinished)
             // The record the file holds now is not the run's: the runtime rewrites it for the run, after this.
             bootRecord = BootRecordBinding(
                 processID: Int(ProcessInfo.processInfo.processIdentifier),

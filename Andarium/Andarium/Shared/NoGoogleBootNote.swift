@@ -4,10 +4,10 @@ import AndariumCore
 import SwiftUI
 
 /// The notice on the boot screen that the virtual machine's Android has no
-/// Google apps, on purpose, and why: one panel under the boot's own note,
-/// while the person waits for Android's first screen. It has no control and
-/// goes with the boot screen. Whether a start shows it, and for whom, is
-/// `NoGoogleNotice`'s; this one's words are the only place in the application
+/// Google apps, on purpose, and why: one panel last in the boot's column,
+/// below its own notes, while the person waits for Android's first screen. It
+/// has no control and goes with the boot screen. Which start shows it is
+/// `NoGoogleNotice.showsOnBoot`'s (a new installation's first Android boot); this one's words are the only place in the application
 /// that names Google (`scripts/localization.py` holds the exception to its
 /// rule). VoiceOver reads the title and then the text as one element.
 struct NoGoogleBootNote: View {

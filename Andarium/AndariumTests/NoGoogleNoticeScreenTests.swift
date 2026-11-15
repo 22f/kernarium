@@ -9,11 +9,12 @@ import UIKit
 
 /// The notice that Android has no Google apps, on purpose, on the real
 /// screens in the application's window: the panel on the boot screen of a
-/// first start, which the end of the boot takes away; the one start that an
-/// existing installation sees it on; the starts that never show it; and, where
-/// Send feedback is compiled in, the line at the top of its mail, which opens
-/// in place, closes, and is not there on the next sheet. A stub stands for the
-/// runtime, and the boot ends as the runtime ends it (`finishBoot`).
+/// first start or the retry of one that did not finish, which the end of the
+/// boot takes away; the starts that never show it, whatever the installation
+/// has seen; and, where Send feedback is compiled in, the line at the top of
+/// its mail, which opens in place, closes, and is not there on the next sheet.
+/// A stub stands for the runtime, and the boot ends as the runtime ends it
+/// (`finishBoot`).
 ///
 /// SwiftUI publishes its accessibility elements only while application
 /// accessibility is on (the Simulator preference `ApplicationAccessibilityEnabled`);
@@ -95,6 +96,10 @@ struct NoGoogleNoticeScreenTests {
         node(in: root) { $0.accessibilityLabel?.hasPrefix(prefix) == true && $0.accessibilityTraits.contains(.button) }
     }
 
+    private func button(exactly label: String, in root: NSObject) -> NSObject? {
+        node(in: root) { $0.accessibilityLabel == label && $0.accessibilityTraits.contains(.button) }
+    }
+
     private func eventually(_ condition: () -> Bool, seconds: Double = 8) async -> Bool {
         let deadline = ContinuousClock.now + .seconds(seconds)
         while ContinuousClock.now < deadline {
@@ -149,32 +154,11 @@ struct NoGoogleNoticeScreenTests {
         #expect(gone, "the panel stayed after the boot ended")
     }
 
-    @Test func anExistingInstallationSeesThePanelOnItsNextStartOnce() async throws {
-        let fixture = rig(phase: .booting(.normal))
-        defer { fixture.clean() }
-        let lease = try await HostWindow.take()
-        defer { lease.give() }
-        let controller = root(fixture, lease: lease)
-        guard await bootScreen("Starting", in: controller) else {
-            Issue.record("the boot screen was not found: is application accessibility on in this Simulator?")
-            return
-        }
-        #expect(await eventually { labelled(Self.title, in: controller.view) != nil }, "the next start has no panel")
-        // Showing it used the notice up.
-        #expect(!NoGoogleNotice(defaults: fixture.defaults).showsOnBoot(.normal))
-
-        fixture.model.finishBoot(.normal)
-        #expect(await eventually { labelled(Self.title, in: controller.view) == nil })
-        fixture.model.phase = .booting(.normal)
-        #expect(await bootScreen("Starting", in: controller))
-        try await Task.sleep(for: .milliseconds(800))
-        #expect(labelled(Self.title, in: controller.view) == nil, "the second start shows it again")
-    }
-
     @Test func aFirstStartAfterEraseShowsItAgain() async throws {
+        // An installation that has used the line, started normally and is erased: its next start is a first start.
         let fixture = rig(phase: .booting(.normal))
         defer { fixture.clean() }
-        NoGoogleNotice(defaults: fixture.defaults).keepBootShown()
+        NoGoogleNotice(defaults: fixture.defaults).keepFeedbackAnswered()
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let controller = root(fixture, lease: lease)
@@ -183,14 +167,41 @@ struct NoGoogleNoticeScreenTests {
             return
         }
         try await Task.sleep(for: .milliseconds(800))
-        #expect(labelled(Self.title, in: controller.view) == nil)
+        #expect(labelled(Self.title, in: controller.view) == nil, "a normal start shows the panel")
         fixture.model.finishBoot(.normal)
         fixture.model.phase = .booting(.firstStart)
         #expect(await eventually { labelled(Self.title, in: controller.view) != nil }, "the first start has no panel")
     }
 
-    @Test(arguments: [(BootKind.restart, "Restarting"), (.recovery, "Starting recovery")])
-    func aRestartAndRecoveryShowNone(kind: BootKind, status: String) async throws {
+    /// A normal start of a guest whose first Android boot did not complete is that boot still (`SlowStart` says the
+    /// same); an ordinary one is not. The model reads the guest's record as the start begins.
+    @Test(arguments: [true, false])
+    func aNormalStartShowsThePanelOnlyWhileTheFirstBootIsUnfinished(pending: Bool) async throws {
+        let fixture = rig(phase: .home)
+        defer { fixture.clean() }
+        fixture.driver.firstBootIsPending = pending
+        fixture.model.start(.normal)
+        #expect(fixture.model.phase == .booting(.normal))
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let controller = root(fixture, lease: lease)
+        guard await bootScreen("Starting", in: controller) else {
+            Issue.record("the boot screen was not found: is application accessibility on in this Simulator?")
+            return
+        }
+        if pending {
+            #expect(await eventually { labelled(Self.title, in: controller.view) != nil }, "the retry has no panel")
+        } else {
+            try await Task.sleep(for: .milliseconds(800))
+            #expect(labelled(Self.title, in: controller.view) == nil, "an ordinary start shows the panel")
+        }
+    }
+
+    @Test(arguments: [
+        (BootKind.normal, "Starting"), (.upgrade, "Updating"), (.restart, "Restarting"),
+        (.recovery, "Starting recovery"),
+    ])
+    func everyOtherStartShowsNone(kind: BootKind, status: String) async throws {
         let fixture = rig(phase: .booting(kind))
         defer { fixture.clean() }
         let lease = try await HostWindow.take()
@@ -201,9 +212,9 @@ struct NoGoogleNoticeScreenTests {
             return
         }
         try await Task.sleep(for: .milliseconds(800))
-        #expect(labelled(Self.title, in: controller.view) == nil)
-        // And the notice was not used up on the way: the next normal start still shows it.
-        #expect(NoGoogleNotice(defaults: fixture.defaults).showsOnBoot(.normal))
+        #expect(labelled(Self.title, in: controller.view) == nil, "\(kind) shows the panel")
+        // Nothing was kept on the way: the defaults hold no value of the notice.
+        #expect(fixture.defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix("andarium.noGoogleNotice") }.isEmpty)
     }
 
     @Test func thePanelStaysWhenTheSlowStartNoticeComesAbove() async throws {
@@ -217,8 +228,7 @@ struct NoGoogleNoticeScreenTests {
             Issue.record("the panel was not found: is application accessibility on in this Simulator?")
             return
         }
-        // Eight minutes of a first start: the slow-start notice sits above the steps. Showing the panel used the
-        // notice up (the value is kept), and that does not take the panel off the screen.
+        // Eight minutes of a first start: the slow-start notice sits above the steps and the panel stays.
         fixture.clock.now += 481
         fixture.model.updateSlowStart()
         #expect(fixture.model.slowStart.showing)
@@ -260,16 +270,18 @@ struct NoGoogleNoticeScreenTests {
         let line = text("That\u{2019}s on purpose. Why", table: "Feedback")
         let why = text("Why", table: "Feedback")
         let hint = text("Shows the answer", table: "Feedback")
+        let dismiss = text("Dismiss Google apps note", table: "Feedback")
         let answer = text(
             "Google licenses its apps and Google Play services only to makers of certified devices. Install apps from files you have; many work without them.",
             table: "Feedback")
-        inLatinLetters([question, short, line, why, hint, answer])
+        inLatinLetters([question, short, line, why, hint, answer, dismiss])
         // The collapsed line is the first words and then the word that opens the answer, which the line colours.
         #expect(line.hasPrefix(short) && line.hasSuffix(why), "\(language): the line is not its first words and its Why")
         #expect(answer == body, "\(language): the answer is not the panel's text")
         if language != "en" {
             #expect(question.contains("Google") && question != "Missing Google apps?", "\(language): the question")
-            for word in [short, why, hint] { #expect(!word.isEmpty) }
+            for word in [short, why, hint, dismiss] { #expect(!word.isEmpty) }
+            #expect(dismiss != "Dismiss Google apps note" && dismiss != text("Dismiss", table: "Feedback"), "\(language): the close button's name")
             #expect(short != "That\u{2019}s on purpose." && why != "Why" && hint != "Shows the answer", "\(language) says it in English")
         }
         #endif
@@ -335,7 +347,11 @@ struct NoGoogleNoticeScreenTests {
         // Opening kept the line for no later sheet.
         #expect(!NoGoogleNotice(defaults: fixture.defaults).showsInFeedback)
         // Close: the line goes from this sheet.
-        let dismiss = try #require(sheetView().flatMap { button("Dismiss", in: $0) }, "the line has no close button")
+        let dismiss = try #require(
+            sheetView().flatMap { button("Dismiss Google apps note", in: $0) }, "the line has no close button")
+        // The bug-report card in the same sheet has a Dismiss of its own, and the two are told apart.
+        let card = sheetView().flatMap { button(exactly: "Dismiss", in: $0) }
+        #expect(card != nil && card !== dismiss, "the card's Dismiss is not another button")
         #expect(dismiss.accessibilityActivate())
         let gone = await eventually { sheetView().flatMap { labelled("Missing Google apps?", in: $0) } == nil }
         #expect(gone, "the line stayed after it was closed")

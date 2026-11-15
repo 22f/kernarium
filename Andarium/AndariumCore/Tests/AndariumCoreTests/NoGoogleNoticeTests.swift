@@ -25,63 +25,24 @@ private let everyKind: [BootKind] = [.normal, .firstStart, .upgrade, .recovery, 
 struct NoGoogleNoticeTests {
     // MARK: The panel on the boot screen
 
-    @Test func aFirstStartShowsThePanelWhateverIsKept() {
+    @Test func onlyAFirstStartShowsThePanel() {
+        #expect(everyKind.filter { NoGoogleNotice.showsOnBoot($0, firstBootPending: false) } == [.firstStart])
+    }
+
+    @Test func theRetryOfAFirstBootThatDidNotCompleteShowsItToo() {
+        // A normal start of a guest whose first Android boot is unfinished is that boot still; no other kind changes.
+        #expect(everyKind.filter { NoGoogleNotice.showsOnBoot($0, firstBootPending: true) } == [.normal, .firstStart])
+    }
+
+    @Test func nothingIsKeptForThePanel() {
         withDefaults { defaults in
-            let notice = NoGoogleNotice(defaults: defaults)
-            #expect(notice.showsOnBoot(.firstStart))
-            // Nothing kept: a start of an installation that has not seen it shows it too, but never a restart or recovery.
-            #expect(everyKind.filter(notice.showsOnBoot) == [.normal, .firstStart, .upgrade])
+            // A person who has used the line, and a database that has seen it all, change nothing for the panel.
+            NoGoogleNotice(defaults: defaults).keepFeedbackAnswered()
+            #expect(everyKind.filter { NoGoogleNotice.showsOnBoot($0, firstBootPending: false) } == [.firstStart])
+            // The one key the notice keeps is the line's.
+            #expect(defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix("andarium.noGoogleNotice") }
+                == [NoGoogleNotice.feedbackKey])
         }
-    }
-
-    @Test func aFirstStartThatHasBeenSeenIsSeenAgainAfterErase() {
-        withDefaults { defaults in
-            let notice = NoGoogleNotice(defaults: defaults)
-            notice.keepBootShown()
-            // The next first start, a new virtual machine or one after Erase, is a first start again.
-            #expect(notice.showsOnBoot(.firstStart))
-        }
-    }
-
-    @Test func theNoticeIsSeenOnceAndNotShownAgain() {
-        withDefaults { defaults in
-            // The installation that finished its first start on an earlier build: its next start shows it.
-            #expect(NoGoogleNotice(defaults: defaults).showsOnBoot(.normal))
-            NoGoogleNotice(defaults: defaults).keepBootShown()
-            // The next launch reads the same database and shows it no more.
-            for kind in [BootKind.normal, .upgrade, .recovery, .restart] {
-                #expect(!NoGoogleNotice(defaults: defaults).showsOnBoot(kind), "\(kind)")
-            }
-        }
-    }
-
-    @Test func anExistingInstallationSeesItOnItsNextNormalOrUpdateStartOnce() {
-        for kind in [BootKind.normal, .upgrade] {
-            withDefaults { defaults in
-                let notice = NoGoogleNotice(defaults: defaults)
-                #expect(notice.showsOnBoot(kind), "\(kind)")
-                notice.keepBootShown()
-                #expect(!notice.showsOnBoot(kind), "\(kind) a second time")
-            }
-        }
-    }
-
-    @Test func aRestartAndRecoveryNeverShowIt() {
-        withDefaults { defaults in
-            let notice = NoGoogleNotice(defaults: defaults)
-            #expect(!notice.showsOnBoot(.restart) && !notice.showsOnBoot(.recovery))
-            // And one of them does not use the notice up for the start that follows.
-            #expect(notice.showsOnBoot(.normal))
-        }
-    }
-
-    // MARK: A launch that keeps nothing
-
-    @Test func aLaunchThatKeepsNothingShowsThePanelOnAFirstStartOnly() {
-        let notice = NoGoogleNotice()
-        #expect(everyKind.filter(notice.showsOnBoot) == [.firstStart])
-        notice.keepBootShown()
-        #expect(everyKind.filter(notice.showsOnBoot) == [.firstStart])
     }
 
     // MARK: The line in Send feedback
@@ -93,17 +54,6 @@ struct NoGoogleNoticeTests {
             #expect(NoGoogleNotice(defaults: defaults).showsInFeedback)
             NoGoogleNotice(defaults: defaults).keepFeedbackAnswered()
             #expect(!NoGoogleNotice(defaults: defaults).showsInFeedback)
-        }
-    }
-
-    @Test func theTwoNoticesAreKeptApart() {
-        withDefaults { defaults in
-            let notice = NoGoogleNotice(defaults: defaults)
-            notice.keepBootShown()
-            #expect(notice.showsInFeedback)
-            notice.keepFeedbackAnswered()
-            #expect(NoGoogleNotice(defaults: defaults).showsOnBoot(.firstStart))
-            #expect(Set([NoGoogleNotice.bootKey, NoGoogleNotice.feedbackKey]).count == 2)
         }
     }
 
