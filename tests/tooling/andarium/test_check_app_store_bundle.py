@@ -451,7 +451,14 @@ def strip_debug_map(library: Path) -> Path:
     return stripped
 
 
+def icon_info(name: str) -> dict:
+    """The icon blocks of an Info.plist whose primary icon, for the iPhone and the iPad, is `name`."""
+    return {key: {"CFBundlePrimaryIcon": {"CFBundleIconFiles": [f"{name}60x60"], "CFBundleIconName": name}}
+            for key in ("CFBundleIcons", "CFBundleIcons~ipad")}
+
+
 def app_info(**overrides: object) -> dict:
+    """An Info.plist as the AppStore configuration builds one, with its icon (DuskJade)."""
     keys: dict[str, object] = {
         "CFBundleIdentifier": "org.example.Fixture",
         "CFBundleExecutable": "Fixture",
@@ -466,6 +473,7 @@ def app_info(**overrides: object) -> dict:
         "NSCameraUsageDescription": "Uses the camera only while Camera is on.",
         "NSMicrophoneUsageDescription": "Records only while Microphone is on.",
         "NSLocationWhenInUseUsageDescription": "Shares the location only while Location is on.",
+        **icon_info("DuskJade"),
     }
     keys.update(overrides)
     return {key: value for key, value in keys.items() if value is not None}
@@ -568,6 +576,9 @@ def make_app(
     if follow_x_tables:
         write_follow_x_tables(app)
     wanted = {asset for key, asset in CATALOG_ASSETS.items() if key in info}
+    primary = info.get("CFBundleIcons", {}).get("CFBundlePrimaryIcon", {}).get("CFBundleIconName")
+    if primary:
+        wanted.add(primary)
     for asset, present in {**(assets or {}), **({} if follow_x_logo is None else {"XLogo": follow_x_logo})}.items():
         (wanted.add if present else wanted.discard)(asset)
     if wanted:
@@ -1725,12 +1736,38 @@ def main() -> int:
     modes = {"--feedback", "--follow-x", "--icp", "--pickers", "--tip-jar", "--review", "--runtime",
              "--host-traces"}
     injected: dict[Path, str] = {}
+    # The icon a fixture names where the harness set it: DuskJade, as `app_info` writes, until a run
+    # under TestFlight makes it DuskEmber.
+    iconic: dict[Path, str] = {}
+
+    def retarget_icon(app: Path, configuration: str) -> None:
+        """A fixture that names the AppStore's icon gets TestFlight's (and back) in its Info.plist and
+        its asset catalog, as the configuration's build compiles its own."""
+        want = "DuskEmber" if configuration == "TestFlight" else "DuskJade"
+        have = iconic.get(app, "DuskJade")
+        if have == want:
+            return
+        iconic[app] = want
+        try:
+            with (app / "Info.plist").open("rb") as handle:
+                info = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            return
+        info.update(icon_info(want))
+        (app / "Info.plist").write_bytes(plistlib.dumps(info))
+        catalog = app / "Assets.car"
+        if catalog.exists():
+            catalog.write_bytes(catalog.read_bytes().replace(have.encode(), want.encode()))
 
     def check(app: Path, *, passes: bool, expect: str = "", args: list[str] | None = None,
-              never: str = "", notes: bool = True) -> None:
+              never: str = "", notes: bool = True, icon: bool = True) -> None:
         """Runs the checker on `app`. A fixture of the full check that carries no What's New notes
-        gets its configuration's track, an empty list, as every build has one, unless `notes` is false."""
+        gets its configuration's track, an empty list, as every build has one, unless `notes` is false;
+        and one that has the AppStore's icon has the configuration's, unless `icon` is false."""
         arguments = args or []
+        if icon and not modes.intersection(arguments):
+            retarget_icon(app, arguments[arguments.index("--configuration") + 1]
+                          if "--configuration" in arguments else "AppStore")
         if notes and not modes.intersection(arguments):
             configuration = arguments[arguments.index("--configuration") + 1] if "--configuration" in arguments \
                 else "AppStore"
@@ -2136,6 +2173,58 @@ def main() -> int:
         write_notes(shipped, [], strings, track=APP_STORE_NOTES)
         check(shipped, passes=True, expect="What's New notes are the App Store track",
               args=["--beta-notes", str(real_notes)])
+
+        # The app icon is the configuration's own and nothing of the other: the AppStore bundle has
+        # DuskJade and nothing of DuskEmber, the TestFlight bundle the reverse. The icon is the primary
+        # icon of the iPhone's and the iPad's Info.plist block and an icon of Assets.car; the other
+        # icon's name is in no file name and no file, a nested catalog and a binary included, in any
+        # of the encodings a value is searched in.
+        for label, flags, own, other in (("appstore", [], "DuskJade", "DuskEmber"),
+                                         ("testflight", testflight, "DuskEmber", "DuskJade")):
+            ready = make_app(root, f"icon-{label}", clean, app_info())
+            check(ready, passes=True, expect=f"app icon is {own}", args=flags)
+            # Both configurations run on one fixture in turn, each with its own icon.
+            check(ready, passes=True, expect=f"app icon is {'DuskEmber' if own == 'DuskJade' else 'DuskJade'}",
+                  args=testflight if not flags else [])
+            for name, info in (
+                    ("other-primary", app_info(**icon_info(other))),
+                    ("no-icon", app_info(CFBundleIcons=None, **{"CFBundleIcons~ipad": None})),
+                    ("iphone-other", app_info(CFBundleIcons=icon_info(other)["CFBundleIcons"],
+                                              **{"CFBundleIcons~ipad": icon_info(own)["CFBundleIcons~ipad"]})),
+                    ("ipad-other", app_info(**{"CFBundleIcons~ipad": icon_info(other)["CFBundleIcons~ipad"],
+                                               "CFBundleIcons": icon_info(own)["CFBundleIcons"]})),
+                    ("no-icon-name", app_info(CFBundleIcons={"CFBundlePrimaryIcon": {"CFBundleIconFiles": ["x"]}}))):
+                wrong = make_app(root, f"icon-{name}-{label}", clean, info)
+                check(wrong, passes=False, expect="Info.plist: CFBundleIcons", args=flags, icon=False)
+            # The compiled catalog must have the icon; the Info.plist alone is not enough.
+            bare = make_app(root, f"icon-no-catalog-{label}", clean, app_info(**icon_info(own)),
+                            assets={own: False})
+            check(bare, passes=False, expect=f"Assets.car: lacks the {own} icon", args=flags, icon=False)
+            # The other icon in the compiled catalog, in a nested one, in a file of its name, in a binary,
+            # in a property list, in UTF-16.
+            for name, path, data, said in (
+                    ("catalog", "Assets.car", f"\0BOMStore\0{own}\0{other}\0".encode(), f"Assets.car: holds the {other} icon"),
+                    ("nested-catalog", "Feature.bundle/Assets.car", f"\0BOMStore\0{other}\0".encode(),
+                     f"Feature.bundle/Assets.car: holds the {other} icon"),
+                    ("png", f"{other}60x60@2x.png", b"\x89PNG", f"{other}60x60@2x.png: is a file of the {other} icon"),
+                    ("png-nested", f"Feature.bundle/{other}76x76@2x~ipad.png", b"\x89PNG",
+                     f"Feature.bundle/{other}76x76@2x~ipad.png: is a file of the {other} icon"),
+                    ("document", f"{other}.icon", b"{}", f"{other}.icon: is a file of the {other} icon"),
+                    ("plist", "Extra.plist", plistlib.dumps({"icon": other}), f"Extra.plist: holds the name {other}"),
+                    ("utf-16", "Extra.dat", other.encode("utf-16-le"), f"Extra.dat: holds the name {other}"),
+                    ("case", "Extra.txt", other.lower().encode(), f"Extra.txt: holds the name {other}")):
+                stray = make_app(root, f"icon-{name}-{label}", clean, app_info(**icon_info(own)))
+                (stray / path).parent.mkdir(parents=True, exist_ok=True)
+                (stray / path).write_bytes(data)
+                check(stray, passes=False, expect=said, args=flags, icon=False)
+            # A binary that holds the name, in code.
+            inside = build(root, f"icon-code-{label}", f'const char *fixture(void) {{ return "{other}"; }}\n')
+            check(make_app(root, f"icon-code-app-{label}", inside, app_info(**icon_info(own))), passes=False,
+                  expect=f"Fixture: holds the name {other}", args=flags, icon=False)
+            # The name of the icon the bundle has is in its files without harm.
+            fine = make_app(root, f"icon-own-names-{label}", clean, app_info(**icon_info(own)))
+            (fine / f"{own}60x60@2x.png").write_bytes(b"\x89PNG")
+            check(fine, passes=True, expect=f"app icon is {own}", args=flags, icon=False)
         # The feature's own strings table (Feedback.strings, and the stringsdict of
         # its plurals) is the feature's: a product without the receiver holds none,
         # found by the file name though the table says nothing of the feature.

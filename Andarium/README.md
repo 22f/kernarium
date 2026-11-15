@@ -221,6 +221,12 @@ block.
 - The scheme's Archive action uses AppStore. The archive for the App Store is
   made with `-configuration AppStore` and the archive for TestFlight with
   `-configuration TestFlight`; both are the builds offered to Macs.
+- The app icon is `DuskJade` (`Shared/DuskJade.icon`) in every configuration
+  but TestFlight, whose icon is `DuskEmber` (`Shared/DuskEmber.icon`).
+  `APP_ICON_NAME` in `Config/Andarium.xcconfig` names the document a build
+  compiles and the other is left out; the bundle check requires each bundle
+  to have its own icon in Info.plist and Assets.car and an AppStore bundle to
+  hold nothing of DuskEmber.
 - It refuses an embedded artifact that is behind the archived commit: a build
   phase runs [`scripts/check-embedded-artifacts.py`](../scripts/check-embedded-artifacts.py),
   which compares the accepted Android release and kernel descriptors with the

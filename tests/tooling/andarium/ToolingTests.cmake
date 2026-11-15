@@ -52,10 +52,12 @@ uml_add_tooling_test(
 # the value, in either direction; and that a TestFlight product carries none of
 # Buy me tokens, Review on the App Store and the ICP filing number, whatever the
 # local values are, and that an AppStore bundle holds the App Store track of the
-# What's New notes and not the beta track, a TestFlight bundle the reverse. A
-# supplied value is searched in every file in UTF-8 and both
-# UTF-16 byte orders, a feature's resources in nested bundles, property lists and
-# asset catalogs too, and no line of the report spells a value, even in a path.
+# What's New notes and not the beta track, a TestFlight bundle the reverse, and
+# that each has its configuration's app icon and an AppStore bundle holds
+# nothing of the TestFlight one. A supplied value is searched in every file in
+# UTF-8 and both UTF-16 byte orders, a feature's resources in nested bundles,
+# property lists and asset catalogs too, and no line of the report spells a
+# value, even in a path.
 uml_add_tooling_test(
     NAME andarium-app-store-bundle
     COMMAND ${Python3_EXECUTABLE} -B

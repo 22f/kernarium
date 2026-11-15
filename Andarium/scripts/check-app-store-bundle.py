@@ -122,6 +122,11 @@ application that must:
     holds the App Store track's file (WhatsNewAppStore.json) and not the beta
     track's, a TestFlight bundle the beta track's (WhatsNew.json) and not the
     App Store track's, each a list of releases; and
+  - have the app icon of its own configuration alone: DuskJade in AppStore,
+    DuskEmber in TestFlight, as the primary icon of the iPhone and the iPad in
+    Info.plist and as an icon of the compiled asset catalog (Assets.car), and
+    nothing of the other icon in any file name or file of the bundle, so an
+    AppStore bundle holds nothing of DuskEmber; and
   - open the files of the two document pickers (Install APK and the file
     browser's Import) in place, through SwiftUI's fileImporter, and hold no
     trace of the copy-mode presenter every other configuration uses
@@ -1063,7 +1068,8 @@ def bundle_tree(app: Path) -> BundleTree:
                         plist_keys[relative] = frozenset(str(key) for key in content)
                 elif name == "Assets.car":
                     data = path.read_bytes()
-                    catalog_names[relative] = frozenset(item for item in RESOURCE_NAMES if item in data)
+                    catalog_names[relative] = frozenset(
+                        item for item in (*RESOURCE_NAMES, *(name.encode() for name in ICON_NAMES)) if item in data)
             except (OSError, plistlib.InvalidFileException, ValueError, OverflowError):
                 continue
     return BundleTree(tuple(sorted(directories)), plist_keys, catalog_names)
@@ -1208,6 +1214,61 @@ def notes_problems(app: Path, configuration: str) -> tuple[list[str], str]:
     if (app / other).exists():
         problems.append(f"{other}: is the other track's What's New notes; {configuration} bundles {own} alone")
     return problems, f"What's New notes are the {track} track ({own})"
+
+
+# The app icon: DuskJade (Shared/DuskJade.icon) in every configuration but
+# TestFlight, which has DuskEmber (Shared/DuskEmber.icon). The build compiles
+# the one document its configuration names and leaves the other out.
+ICON_JADE = "DuskJade"
+ICON_EMBER = "DuskEmber"
+ICON_NAMES = (ICON_JADE, ICON_EMBER)
+# Info.plist's icon blocks, for the iPhone and for the iPad.
+ICON_KEYS = ("CFBundleIcons", "CFBundleIcons~ipad")
+
+
+def app_icons(configuration: str) -> tuple[str, str]:
+    """The icon a configuration compiles, and the other one."""
+    return (ICON_EMBER, ICON_JADE) if configuration == TESTFLIGHT else (ICON_JADE, ICON_EMBER)
+
+
+def icon_problems(app: Path, configuration: str) -> tuple[list[str], str]:
+    """Whether the bundle has its configuration's app icon, and nothing of the other
+    one: the icon is the primary icon of both Info.plist blocks and an icon of the
+    application's compiled asset catalog, and the other icon's name is in no file
+    name and no file of the bundle (the catalogs of nested bundles included). The
+    line says which icon the bundle has."""
+    own, other = app_icons(configuration)
+    problems = []
+    try:
+        with (app / "Info.plist").open("rb") as handle:
+            info = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        info = {}
+    for key in ICON_KEYS:
+        block = info.get(key) if isinstance(info, dict) else None
+        primary = block.get("CFBundlePrimaryIcon") if isinstance(block, dict) else None
+        named = primary.get("CFBundleIconName") if isinstance(primary, dict) else None
+        if named != own:
+            problems.append(f"Info.plist: {key} names {named or 'no icon'} as the primary icon; "
+                            f"{configuration} has {own}")
+    if "Assets.car" not in catalog_holders(app, own.encode()):
+        problems.append(f"Assets.car: lacks the {own} icon; {configuration} has it")
+    reported = set()
+    for directory in bundle_tree(app).directories:
+        try:
+            names = sorted(path for path in directory.iterdir() if path.name.lower().startswith(other.lower()))
+        except OSError:
+            continue
+        for path in names:
+            reported.add(str(path.relative_to(app)))
+            problems.append(f"{path.relative_to(app)}: is a file of the {other} icon though {configuration} has {own}")
+    for path in catalog_holders(app, other.encode()):
+        reported.add(path)
+        problems.append(f"{path}: holds the {other} icon though {configuration} has {own}")
+    for path in value_leaks(app, [other]):
+        if path not in reported:
+            problems.append(f"{path}: holds the name {other} though {configuration} has the icon {own}")
+    return problems, f"app icon is {own}"
 
 
 def feedback_tables(app: Path) -> list[Path]:
@@ -1879,6 +1940,8 @@ def planned_scans(options: argparse.Namespace) -> set[Scan]:
     else:
         feedback = follow_x = icp = tip = review = True
     scans: set[Scan] = set()
+    if feedback and follow_x and icp and tip and review:
+        scans |= value_scans([app_icons(options.configuration)[1]])
     if feedback:
         scans |= value_scans([options.feedback_receiver])
     if follow_x:
@@ -2150,6 +2213,10 @@ def check(options: argparse.Namespace) -> int:
     problems.extend(f"{app.name}: {problem}" for problem in notes)
     if not notes:
         emit(f"{app.name}: {bundled}")
+    icon, icon_line = icon_problems(app, options.configuration)
+    problems.extend(f"{app.name}: {problem}" for problem in icon)
+    if not icon:
+        emit(f"{app.name}: {icon_line}")
     follow, compiled = follow_x_problems(
         app, options.configuration, options.follow_x_handle, options.developer_x_handle, options.developer_x)
     problems.extend(follow)
