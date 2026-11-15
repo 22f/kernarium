@@ -1141,6 +1141,27 @@ is on. `AndariumCore/Adb` speaks the protocol.
   installed, with a result that says its data was not all copied. That
   result is a warning, not a success: the caution symbol in the caution
   colour, and a title of its own (`ApkInstallOutcome.words`).
+- **Old app compatibility** (Settings > Apps) makes Android run one app built
+  for an Android before 4.0 more like the older versions did, for an app that
+  closes as soon as it opens. The image's `kernarium_oldapp` command lists the
+  installed apps it can apply to and writes the switch
+  ([`android/lineage-24`](../android/lineage-24/README.md)); `OldAppCompatibility`
+  in `AndariumCore` is the only code that knows its words and its output, and
+  everything else sees `OldApp`, `OldAppListing` and `OldAppWrite`. The
+  Settings row exists only in a normal session, once a listing has found an
+  app. Andarium lists once at the start of every run, with Settings closed,
+  again after an install and each time the page opens; a listing that is
+  older than a change the page made is dropped. The page's switches are off
+  while the virtual machine cannot be asked (Recovery, paused for space). An image without the command, one
+  that answers `list` as a usage error, or one that speaks a version of its
+  listing this Andarium does not know, offers nothing. Turning the switch on is
+  always asked; turning it off only when the app is open (`pidof`; the command
+  does not say), and the image closes the app either way. A change the image
+  does not take is said, and the list is read again. After Install anyway of
+  an app that Android refused for a level below 14, the install card says where
+  the switch is when the listing taken as the file went again and the one after
+  the install differ by an app: the card's detail gains two sentences. The
+  switch is the person's choice per app; Andarium keeps nothing of it.
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB
@@ -1271,6 +1292,10 @@ registers each device it is plugged; `unregistered` makes it one that never
 does. The launch states "Use the pointer as touch" off, hides the tips (but for
 `ANDARIUM_INPUT_PROBE_TIP=1`, which shows the side keys' tip anew) and keeps
 nothing.
+`ANDARIUM_OLD_APPS_PROBE` (`apps`, `refuse` or `none`), with the probe, gives its
+session a scripted list of two made-up old apps in place of the image's command:
+`apps` lists them (one on and open), `refuse` also refuses every change, `none` is
+an image without the command.
 `ANDARIUM_GUEST_INSTANCE=<name>` runs an isolated guest under
 `Library/TestGuests/<name>`, for tests that need a fresh guest while the
 ordinary guest or its pending update must be preserved. A file `free-space-mib`

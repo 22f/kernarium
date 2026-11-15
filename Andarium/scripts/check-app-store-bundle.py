@@ -641,6 +641,11 @@ DEBUG_SYMBOLS = (
     # (AppModel.previewInstallAttempt): the preview refuses the first attempt
     # for its version, which the application's install never does by itself.
     ("legacy install preview", (b"21previewInstallAttempt",)),
+    # The list of old apps that the Simulator preview and a UI test's probe
+    # session play in place of the image's command (ScriptedOldApps,
+    # AppModel.scriptedOldApps and the probe's launch setting
+    # OldAppsProbeLaunch): the application asks the image.
+    ("old apps preview", (b"15ScriptedOldApps", b"15scriptedOldApps", b"18OldAppsProbeLaunch")),
     # The Simulator preview's hooks into the Send feedback sheet
     # (SendFeedbackServices.previewOpensAtLaunch and previewPrepare): the
     # preview opens the sheet and fills a draft; the application never does.

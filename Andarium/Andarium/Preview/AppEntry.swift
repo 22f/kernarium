@@ -363,7 +363,10 @@ struct AppEntry {
              "settings-feedback", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
              "install-app-bundle", "bug-report", "install-data", "install-done-without-data", "install-done-data-not-placed", "install-done-container",
              "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-missing-split",
-             "install-part-too-large":
+             "install-part-too-large", "install-legacy-hint", "install-legacy-hint-data",
+             "settings-old-apps", "settings-old-apps-page", "settings-old-apps-turn-on", "settings-old-apps-turn-on-open",
+             "settings-old-apps-turn-off", "settings-old-apps-refused", "settings-old-apps-empty",
+             "settings-old-apps-failed", "settings-old-apps-loading":
             let session = model.session
             switch screen {
             case "settings-adb":
@@ -376,13 +379,15 @@ struct AppEntry {
             default:
                 break
             }
+            Self.playOldApps(screen: screen, in: model, play: play)
             // The guest operations play on the full-screen overlay with
             // Settings already gone.
             let operation = Self.operationScreens.contains(screen)
             model.sessionPreset = SessionPreset(
                 settings: !operation,
                 settingsLarge: Self.settingsScrolls.keys.contains(screen) || screen == "settings",
-                settingsScroll: Self.settingsScrolls[screen]
+                settingsScroll: Self.settingsScrolls[screen],
+                oldAppsPage: screen.hasPrefix("settings-old-apps-")
             )
             model.phase = .running(.normal)
             // The real operation lasts a few seconds, too short for a
@@ -442,17 +447,45 @@ struct AppEntry {
         return model
     }
 
+    /// Old app compatibility's screens: the image's list the preview plays, and
+    /// the state the page starts in.
+    @MainActor
+    private static func playOldApps(screen: String, in model: AppModel, play: Bool) {
+        guard screen.hasPrefix("settings-old-apps") else { return }
+        let scripted = ScriptedOldApps(open: ["com.example.rally"])
+        model.scriptedOldApps = scripted
+        let state = model.session.oldApps
+        switch screen {
+        case "settings-old-apps-empty":
+            scripted.listingAnswer = .apps([])
+            state.apply(.apps([]))
+        case "settings-old-apps-failed":
+            scripted.listingAnswer = .failed
+            state.apply(.apps(ScriptedOldApps.sampleApps))
+            state.apply(.failed)
+        case "settings-old-apps-loading":
+            // The list never comes: the page keeps saying it is looking.
+            scripted.delay = .seconds(3600)
+        case "settings-old-apps-refused":
+            scripted.writeAnswer = .failed
+            state.apply(.apps(ScriptedOldApps.sampleApps))
+        default:
+            state.apply(.apps(ScriptedOldApps.sampleApps))
+        }
+    }
+
     /// The screens that show a guest operation on the full-screen overlay.
     private static let operationScreens: Set<String> = [
         "bug-report", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
         "install-app-bundle", "install-data", "install-done-without-data", "install-done-data-not-placed", "install-done-container", "install-encrypted",
         "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-missing-split", "install-part-too-large",
+        "install-legacy-hint", "install-legacy-hint-data",
     ]
     /// The ones that show how an install ended.
     private static let resultScreens: Set<String> = [
         "install-done", "install-failed", "install-not-apk", "install-app-bundle", "install-done-without-data",
         "install-done-data-not-placed", "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged",
-        "install-missing-split", "install-part-too-large",
+        "install-missing-split", "install-part-too-large", "install-legacy-hint", "install-legacy-hint-data",
     ]
 
     /// A guest operation's overlay as it looks part way, or at its end: what
@@ -482,6 +515,14 @@ struct AppEntry {
                 title: String(localized: "Installing app"),
                 detail: String(localized: "Copying data file \(1) of \(2)\u{2026}"),
                 progress: 0.6, cancel: cancel
+            )
+        case "install-legacy-hint", "install-legacy-hint-data":
+            // After Install anyway of an app built for an Android before 4.0 that
+            // Old app compatibility lists: the card says where its switch is.
+            let outcome: ApkInstallOutcome = screen == "install-legacy-hint" ? .installed : .installedWithoutData
+            let words = outcome.words(fileName: "pixel-knights.apk", oldAppHint: true)
+            return BusyState(
+                title: words.title, detail: words.detail, result: BusyResult(style: words.style, dismiss: dismiss)
             )
         case "install-done-without-data", "install-done-data-not-placed", "install-done-container":
             // What the install's own card says for each of these endings.
@@ -688,12 +729,27 @@ struct AppEntry {
         case "install-apk" where play:
             try? await Task.sleep(for: .milliseconds(450))
             model.installPicked(PreviewData.sampleApk())
+        case "settings-old-apps-turn-on", "settings-old-apps-turn-on-open", "settings-old-apps-turn-off",
+             "settings-old-apps-refused":
+            // The page is up behind the alert, as a tap on a switch leaves it.
+            try? await Task.sleep(for: .milliseconds(1400))
+            let pixel = ScriptedOldApps.sampleApps[0]
+            let rally = ScriptedOldApps.sampleApps[1]
+            model.session.oldApps.prompt = switch screen {
+            case "settings-old-apps-turn-on": .turnOn(pixel, open: false)
+            case "settings-old-apps-turn-on-open": .turnOn(pixel, open: true)
+            case "settings-old-apps-turn-off": .turnOff(rally)
+            default: .notChanged
+            }
         case "install-legacy" where play:
             // The whole install: Android takes its time over the first
             // attempt (`-legacyRefusalSeconds`, 8 by default: long enough to
             // unfold a folding iPhone meanwhile) and refuses the app for its
             // version; the answer decides the rest.
             let refusalSeconds = UserDefaults.standard.string(forKey: "legacyRefusalSeconds").flatMap { Double($0) } ?? 8
+            // The image lists one old app already; the one installed anyway joins it.
+            let scripted = ScriptedOldApps(apps: [ScriptedOldApps.sampleApps[1]])
+            model.scriptedOldApps = scripted
             model.previewInstallAttempt = { bypass, update in
                 for step in 1...10 {
                     try await Task.sleep(for: .milliseconds(100))
@@ -705,6 +761,9 @@ struct AppEntry {
                     throw LegacyApkRefused(target: LegacyTarget(appLevel: 7, requiredLevel: 24))
                 }
                 try await Task.sleep(for: .milliseconds(1200))
+                // The app is in, and the image's list has it now.
+                await scripted.install(
+                    OldApp(package: "com.example.pixelknights", label: "Pixel Knights", isOn: false, lastUpdate: Int(Date().timeIntervalSince1970)))
             }
             try? await Task.sleep(for: .milliseconds(450))
             model.installPicked(PreviewData.sampleApk())
