@@ -54,7 +54,7 @@ index 4b21c5ab4e8f1c8239b35d0f90dcd0891c3848af..8738c6dd5eb4b33864e42b1e3d419f4f
        ALOGE("%s: No available tonemap modes!", __FUNCTION__);
        return BAD_VALUE;
 diff --git a/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp b/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
-index 6cc1bb9ac5739abbacc164ad7abc4b68acaa7408..39eec7563bc3278cf8fa27a86bfb2bcf4338b9fe 100644
+index 61dfe4a449cee286fab33d7b44907321ceb0af1a..1965f8abe24ed95b84a6e92f5a53bf30c0b7d92f 100644
 --- a/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
 +++ b/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
 @@ -42,6 +42,19 @@ namespace {

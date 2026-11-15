@@ -252,6 +252,17 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 60)
 
+# A camera the HAL states as RAW capable states what the stock device info
+# requires of one (the lens shading map modes), or the camera is refused at boot
+# and never listed again; the series' specializer and template are rebuilt and
+# checked without a guest.
+uml_add_tooling_test(
+    NAME android17-camera-raw-metadata
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_camera_raw_metadata.py
+    LABELS android
+    TIMEOUT 120)
+
 # The microG spoofing probe's sources agree with each other and with the
 # certificate LineageOS compares with, and its runner reads `am instrument`.
 uml_add_tooling_test(
