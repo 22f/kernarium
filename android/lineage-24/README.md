@@ -662,8 +662,10 @@ patches ART's one JNI function table in place and gives the application:
   of the last such point. At each point, in chunks of 4 KiB, a chunk whose block
   differs from that copy was written through the raw pointer and is merged with
   the array byte by byte: a byte the application wrote goes to the array, every
-  other byte takes the array's, and a byte both sides wrote takes the
-  application's. Any other chunk takes the array's bytes. A committing
+  other byte takes the array's if Java changed it, and a byte both sides wrote
+  takes the application's. Any other chunk takes the bytes Java changed. The
+  block never takes a byte Java did not change, so a raw write to such a byte
+  that races a synchronization survives it. A committing
   release (mode 0 or `JNI_COMMIT`) is such a point and keeps Java's bytes
   wherever the application did not write; `JNI_ABORT` discards the working copy,
   and the block takes the array's bytes. `Get...Elements` and `Get...Critical`
@@ -671,8 +673,7 @@ patches ART's one JNI function table in place and gives the application:
   commits when told so makes its writes visible through any other reference to
   the array; a real array keeps the runtime's own flag. Bytes Java writes
   outside those points (another thread, a callback after the native method
-  returned) show at the next one, and a raw write from another thread while a
-  point is running can be lost. A reference to a block ends where a Dalvik local
+  returned) show at the next one. A reference to a block ends where a Dalvik local
   reference did: at `DeleteLocalRef` of a reference the innermost frame holds (a
   reference of an outer frame is left alone, as both runtimes leave it), at
   `PopLocalFrame`, at the return of a native
@@ -706,35 +707,36 @@ patches ART's one JNI function table in place and gives the application:
   and synchronizes nothing; `MonitorExit` of a block's reference, which JNI
   allows then, takes the exception out, releases the monitor with the array and
   puts the exception back (one `MonitorExit` raised itself stays). A monitor
-  call on a block whose array is gone is refused with `JNI_ERR`. Two threads that use one block at once share its
-  memory as on Dalvik. Every synchronization of a block with its array, its own
-  thread's included, runs under one process-wide lock that no call into Java
-  holds, so the synchronizations of all threads run one at a time, and a raw
-  write that races one can be lost. A release goes to
-  the block whose data starts at its pointer, whichever reference comes with it,
-  and never reaches the runtime for a pointer in the region; a pointer inside
-  the region that is not at a block's start is not read as a header, copies
-  nothing, and counts as the release of the block of the reference that comes
-  with it. A pointer the runtime itself handed out for a real reference to the
-  array (the layer records those from `Get...Elements` and `Get...Critical` once
-  the process has had a block, until their release with mode 0 or `JNI_ABORT`)
-  goes to the runtime's own Release when it comes with a block's reference, with
-  the block's array, and closes its critical region; any other pointer that
-  comes with a block's reference is the application's own buffer, and is copied
-  into the block. At most 16384 blocks exist at once, live, ended or pinned, since each
-  ends with a weak global reference and an end never frees a block whose pointer
-  the application may hold. Ended and pinned blocks do not count toward the 512
-  of a thread. When the region or the 16384 are used up, a result first makes
-  room: the blocks whose arrays are gone are freed (a full pass is made whenever
-  the runtime has collected since a full pass last ran, and otherwise once a
-  second) and, once in ten seconds, the runtime is asked to collect; a result
-  that still finds none stays ART's own reference. Where no weak global
-  reference can be had for an ended block it stays strong and is tried again;
-  where the array's identity cannot be had (`System.identityHashCode` and
-  `Runtime.gc()` are looked up when the layer installs, before any block exists,
-  and again once a second after a failure) the result stays ART's own reference.
-  The process holds 32 MiB of blocks, and each block's copy takes as many bytes
-  again in the ordinary heap.
+  call on a block whose array is gone is refused with `JNI_ERR`. Two threads
+  that use one block at once share its memory as on Dalvik. Every
+  synchronization of a block with its array, its own thread's included, runs
+  under one process-wide lock that no call into Java holds, so the
+  synchronizations of all threads run one at a time; a raw write that races one
+  to a byte both sides wrote can be lost. A release goes to the block whose data
+  starts at its pointer, whichever reference comes with it, and never reaches
+  the runtime for a pointer in the region; a pointer inside the region that is
+  not at a block's start is not read as a header, copies nothing, and counts as
+  the release of the block of the reference that comes with it. A pointer the
+  runtime itself handed out for a real reference to the array (the layer records
+  those from `Get...Elements` and `Get...Critical` once the process has had a
+  block, until their release with mode 0 or `JNI_ABORT`) goes to the runtime's
+  own Release when it comes with a block's reference, with the block's array,
+  and closes its critical region; any other pointer that comes with a block's
+  reference is the application's own buffer, and is copied into the block. At
+  most 16384 blocks exist at once, live, ended or pinned, since each ends with a
+  weak global reference and an end never frees a block whose pointer the
+  application may hold. Ended and pinned blocks do not count toward the 512 of a
+  thread. When the region or the 16384 are used up, a result first makes room:
+  the blocks whose arrays are gone are freed (a full pass is made whenever the
+  runtime has collected since a full pass last ran, and otherwise once a second)
+  and, once in ten seconds, the runtime is asked to collect; a result that still
+  finds none stays ART's own reference. Where no weak global reference can be
+  had for an ended block it stays strong and is tried again; where the array's
+  identity cannot be had (`System.identityHashCode` and `Runtime.gc()` are
+  looked up when the layer installs, before any block exists, and again once a
+  second after a failure) the result stays ART's own reference. The process
+  holds 32 MiB of blocks, and each block's copy takes as many bytes again in the
+  ordinary heap.
   An array the application creates itself (`NewByteArray`) stays ART's own;
 - an allocator below 2 GiB for the libraries the application ships: their
   `malloc`, `calloc`, `strdup`, `strndup`, `operator new` and `operator

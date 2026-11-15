@@ -236,6 +236,7 @@ const Platform kPlatform{fake_is_app, fake_thread_state, fake_log, fake_make_wri
 
 jsize f_GetArrayLength(Env*, jarray a) { return static_cast<jsize>(object_of(a)->bytes.size()); }
 jobject f_NewByteArray(Env*, jsize n) { return byte_array(std::vector<uint8_t>(static_cast<size_t>(n), 0)); }
+std::function<void()> g_after_set;  // runs inside a SetByteArrayRegion, after it copied
 void f_SetByteArrayRegion(Env*, jarray a, jsize start, jsize len, const jbyte* buf) {
     revoke_if_asked();
     jni_allowed("SetByteArrayRegion where JNI is not allowed (a critical region, or an exception pending)");
@@ -246,6 +247,11 @@ void f_SetByteArrayRegion(Env*, jarray a, jsize start, jsize len, const jbyte* b
         return;
     }
     std::memcpy(bytes.data() + start, buf, size_t(len));
+    if (g_after_set) {
+        auto hook = g_after_set;
+        g_after_set = nullptr;
+        hook();
+    }
 }
 std::function<void()> g_after_get;  // runs inside a GetByteArrayRegion, after it copied: another thread acts meanwhile
 void f_GetByteArrayRegion(Env*, jarray a, jsize start, jsize len, jbyte* buf) {
@@ -743,6 +749,7 @@ void reset_world() {
     g_on_find_class = nullptr;
     g_in_call = nullptr;
     g_after_get = nullptr;
+    g_after_set = nullptr;
     g_thunk_capacity = 1024;
     g_register_fail_at = -1;
     g_registered.clear();
@@ -1623,8 +1630,8 @@ void check_an_exact_comparison_keeps_every_write() {
     require(std::memcmp(buffer, written.data(), 8) == 0 && made.object->bytes == written, "the write reached the array and the reader");
 }
 
-// A run of chunks that are alike is one region call (two for a run the application wrote: read, merge, write), and a
-// clean chunk is never written.
+// A run of chunks the application wrote is two region calls (read, merge, write); a clean run is read in pieces of 16 KiB;
+// and a clean chunk is never written.
 void check_a_run_of_chunks_is_one_region_call() {
     Fixture f = make();
     Made made = make_shadow_of(f, sample(6 * 4096));
@@ -1635,14 +1642,14 @@ void check_a_run_of_chunks_is_one_region_call() {
     world.get_calls = 0;
     call_static_int_v(f, f.consume, made.shadow);
     require(world.set_calls == 1, "chunks 2 to 4 went to the array in one call");
-    require(world.get_calls == 2, "after one read of that run (it is merged with Java's bytes), and the six chunks came back in one");
+    require(world.get_calls == 3, "one read of that run (it is merged with Java's bytes), and the six chunks came back in two pieces");
     require(world.seen_arrays[0][2 * 4096] == raw_of(made)[2 * 4096] && world.seen_arrays[0][4 * 4096 + 5] == raw_of(made)[4 * 4096 + 5],
             "Java saw the writes");
     Made big = make_shadow_of(f, sample(256 * 4096));
     world.set_calls = 0;
     world.get_calls = 0;
     call_static_int_v(f, f.consume, big.shadow);
-    require(world.set_calls == 0 && world.get_calls == 1, "a clean 1 MiB block: one region call, no write");
+    require(world.set_calls == 0 && world.get_calls == 64, "a clean 1 MiB block: 64 region reads of 16 KiB, no write");
     // The range of a small read is one chunk's turn, and only the bytes asked for come over.
     world.get_calls = 0;
     jbyte sixteen[16];
@@ -3500,6 +3507,59 @@ void check_monitor_exit_with_an_exception_pending() {
     }
 }
 
+// ---- a synchronization writes only the bytes Java changed into the block
+
+// A raw write to a byte of a clean chunk, made while the synchronization is pulling Java's bytes in (the hook runs in the
+// runtime's region read, after it copied), is not overwritten by the pull: Java wrote a neighbouring byte, the application
+// wrote this one, and both are in the block afterwards; the next synchronization pushes the application's byte. (Fails on
+// ecb411ce: the pull copied whole chunks into the block.)
+void check_a_pull_does_not_overwrite_a_raw_write_to_another_byte() {
+    Fixture f = make();
+    Made a = make_held(f, std::vector<uint8_t>(64, 0x3a));
+    a.object->bytes[10] = 0xA1;  // Java wrote it
+    g_after_get = [&] { raw_of(a)[20] = 0x99; };  // the application wrote another byte of the chunk meanwhile
+    jbyte result[64] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 64, result);
+    require(raw_of(a)[10] == 0xA1 && raw_of(a)[20] == 0x99, "the block has Java's byte and the application's");
+    require(a.object->bytes[20] == 0x3a, "the array does not have the raw write yet");
+    jbyte again[64] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 64, again);
+    require(a.object->bytes[20] == 0x99 && a.object->bytes[10] == 0xA1 && static_cast<uint8_t>(again[20]) == 0x99,
+            "and the next synchronization pushes it");
+}
+
+// The same for a chunk the application had written: the merge writes the block only where Java changed a byte, so a raw
+// write to a third byte that races the merge survives it. (Fails on ecb411ce: the merged run was copied over the block.)
+void check_a_merge_does_not_overwrite_a_raw_write_to_a_third_byte() {
+    Fixture f = make();
+    Made a = make_held(f, std::vector<uint8_t>(64, 0x3a));
+    a.object->bytes[10] = 0xA1;  // Java wrote one byte
+    raw_of(a)[0] = 0x31;         // the application wrote another: the chunk is dirty
+    g_after_set = [&] { raw_of(a)[40] = 0x99; };  // and a third byte, after the merge decided and wrote Java's bytes
+    jbyte result[64] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 64, result);
+    require(a.object->bytes[0] == 0x31 && a.object->bytes[10] == 0xA1, "Java has both of the earlier writes");
+    require(raw_of(a)[0] == 0x31 && raw_of(a)[10] == 0xA1 && raw_of(a)[40] == 0x99, "the block has all three");
+    require(a.object->bytes[40] == 0x3a, "the raw write is not in the array yet");
+    jbyte again[64] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 64, again);
+    require(a.object->bytes[40] == 0x99, "and the next synchronization pushes it");
+}
+
+// Where both sides wrote the same byte at the pull, the application's byte stays and goes to the array next time.
+void check_a_byte_both_sides_wrote_keeps_the_applications_at_a_racing_pull() {
+    Fixture f = make();
+    Made a = make_held(f, std::vector<uint8_t>(64, 0x3a));
+    a.object->bytes[10] = 0xA1;
+    g_after_get = [&] { raw_of(a)[10] = 0x55; };
+    jbyte result[64] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 64, result);
+    require(raw_of(a)[10] == 0x55, "the application's byte stays in the block");
+    jbyte again[64] = {};
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 64, again);
+    require(a.object->bytes[10] == 0x55 && static_cast<uint8_t>(again[10]) == 0x55, "and reaches the array at the next synchronization");
+}
+
 // A full sweep follows every collection that no full sweep has seen, also one that the step sweep (a few blocks at a
 // creation) found first: a result that fits after one full pass is not declined.
 void check_a_collection_the_step_sweep_saw_is_swept_in_full() {
@@ -3757,6 +3817,9 @@ int main(int argc, char** argv) {
     check_the_record_of_a_runtime_pointer_ends_with_its_release();
     check_a_nested_native_method_cannot_delete_its_callers_reference();
     check_monitor_exit_with_an_exception_pending();
+    check_a_pull_does_not_overwrite_a_raw_write_to_another_byte();
+    check_a_merge_does_not_overwrite_a_raw_write_to_a_third_byte();
+    check_a_byte_both_sides_wrote_keeps_the_applications_at_a_racing_pull();
     check_a_collection_the_step_sweep_saw_is_swept_in_full();
     check_a_kept_reference_gives_a_critical_pointer();
     check_a_release_of_a_pointer_inside_a_block_is_harmless();

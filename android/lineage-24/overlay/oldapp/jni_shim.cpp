@@ -35,6 +35,7 @@ constexpr uint32_t kFullSweepIntervalMs = 1000;  // between two full sweeps that
 constexpr unsigned kRecordSlots = 2048;         // the runtime's own pointers that are out (Get...Elements / Critical on a real reference)
 constexpr size_t kBlockTail = 16;  // zeroes behind the data: raw readers overrun by a few bytes
 constexpr uint32_t kChunk = 4096;  // the unit of the block's synchronization with its array
+constexpr uint32_t kPullPiece = 16384;  // the array's bytes are read into a stack buffer of this size, and compared with the baseline
 
 template <class T>
 struct IsVoid {
@@ -289,11 +290,13 @@ inline void enter_any(Env* env) {
 // as of the last synchronization, in memory outside the low arena (it needs no low address). A chunk whose block
 // differs from its baseline was written through the raw pointer since then, and that comparison is exact. At a
 // synchronization point such a chunk is merged with the array's byte by byte: a byte the application wrote (it
-// differs from its baseline) goes to the array, every other byte of the chunk takes the array's (which Java may have
-// written); where both wrote the same byte, the application's wins. Any other chunk takes the array's bytes into
-// baseline and block. A chunk neither side touched costs two comparisons and a copy in, and writes nothing to the
-// array or the block. A run of adjacent chunks that are alike is one region call (two for a run the application wrote:
-// the array's bytes are read, merged and written).
+// differs from its baseline) goes to the array, every other byte of the chunk takes the array's if Java changed it since
+// the baseline; where both wrote the same byte, the application's wins. Any other chunk takes the bytes Java changed.
+// The block never takes a byte Java did not change, so a raw write by another thread to such a byte, racing the
+// synchronization, survives it and goes to the array at the next one. A chunk neither side touched costs two
+// comparisons and a read, and writes nothing to the array or the block. A run of adjacent chunks that are alike is read
+// in pieces of kPullPiece bytes; a run the application wrote costs two region calls (the array's bytes are read, merged
+// and written).
 // The synchronization points: before a call that is passed the block, as an argument or as the receiver (the
 // application's chunks go to the array), after that call, at the start of Get...Elements, Get...Critical and
 // GetByteArrayRegion (the chunks of the range), before and after SetByteArrayRegion, and at a Release. A
@@ -323,6 +326,45 @@ void adopt_baseline(BlockHeader* header, uint32_t from, uint32_t to) {
         if (__builtin_memcmp(data_of(header) + at, header->baseline + at, length) != 0) {
             __builtin_memcpy(data_of(header) + at, header->baseline + at, length);
         }
+    }
+}
+
+// The array's bytes `java` become the baseline, and the block takes the ones Java changed since the baseline, unless the
+// application has written that byte meanwhile (block != baseline): a raw write by another thread to a byte Java did not
+// write survives a synchronization that races it, and the next one pushes it; where both sides wrote, the application's
+// byte stays (the baseline takes Java's, so the block still differs from it). Words that Java left alone are skipped.
+inline void take_java_byte(uint8_t* block, uint8_t* baseline, uint8_t java, uint32_t at) {
+    const uint8_t old = baseline[at];
+    if (java == old) {
+        return;
+    }
+    baseline[at] = java;
+    if (block[at] == old) {
+        block[at] = java;
+    }
+}
+void take_java(uint8_t* block, uint8_t* baseline, const uint8_t* java, uint32_t n) {
+    uint32_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        uint32_t j, k;
+        __builtin_memcpy(&j, java + i, 4);
+        __builtin_memcpy(&k, baseline + i, 4);
+        if (j == k) {
+            continue;
+        }
+        uint32_t b;
+        __builtin_memcpy(&b, block + i, 4);
+        if (b == k) {  // the application wrote none of the four: the block takes all of Java's
+            __builtin_memcpy(block + i, &j, 4);
+            __builtin_memcpy(baseline + i, &j, 4);
+            continue;
+        }
+        for (uint32_t m = i; m < i + 4; ++m) {
+            take_java_byte(block, baseline, java[m], m);
+        }
+    }
+    for (; i < n; ++i) {
+        take_java_byte(block, baseline, java[i], i);
     }
 }
 
@@ -389,10 +431,21 @@ void merge_run(Env* env, BlockHeader* header, jobject array, unsigned first, uns
         original<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(slot::SetByteArrayRegion)(
             env, array, static_cast<jsize>(from), static_cast<jsize>(n), reinterpret_cast<const jbyte*>(java));
     }
-    __builtin_memcpy(baseline, java, n);
-    __builtin_memcpy(block, java, n);
+    take_java(block, baseline, java, n);
     if (heap) {
         g.platform.free_baseline(java);
+    }
+}
+
+// The array's bytes over [from, to) reach the baseline and, where Java changed them, the block (take_java), a piece of
+// kPullPiece bytes at a time.
+void pull_range(Env* env, BlockHeader* header, jobject array, uint32_t from, uint32_t to) {
+    uint8_t piece[kPullPiece];
+    for (uint32_t at = from; at < to; at += kPullPiece) {
+        const uint32_t n = to - at < kPullPiece ? to - at : kPullPiece;
+        original<void (*)(Env*, jarray, jsize, jsize, jbyte*)>(slot::GetByteArrayRegion)(
+            env, array, static_cast<jsize>(at), static_cast<jsize>(n), reinterpret_cast<jbyte*>(piece));
+        take_java(data_of(header) + at, header->baseline + at, piece, n);
     }
 }
 
@@ -423,10 +476,7 @@ void sync_bytes(Env* env, BlockHeader* header, jobject array, uint32_t start, ui
             uint32_t from = chunk_offset(first), to = chunk_end(header, chunk);
             from = from < start ? start : from;
             to = to > end ? end : to;
-            original<void (*)(Env*, jarray, jsize, jsize, jbyte*)>(slot::GetByteArrayRegion)(
-                env, array, static_cast<jsize>(from), static_cast<jsize>(to - from),
-                reinterpret_cast<jbyte*>(header->baseline + from));
-            adopt_baseline(header, from, to);
+            pull_range(env, header, array, from, to);
         }
         if (chunk == last) {
             break;
@@ -470,11 +520,9 @@ void sync_critical(Env* env, BlockHeader* header, jobject array) {
             const uint8_t* block = data_of(header) + offset;
             const uint8_t* baseline = header->baseline + offset;
             wrote = merge_bytes(java, block, baseline, length) || wrote;
-            __builtin_memcpy(header->baseline + offset, java, length);
-            __builtin_memcpy(data_of(header) + offset, java, length);
+            take_java(data_of(header) + offset, header->baseline + offset, java, length);
         } else {
-            __builtin_memcpy(header->baseline + offset, static_cast<const uint8_t*>(pinned) + offset, length);
-            adopt_baseline(header, offset, offset + length);
+            take_java(data_of(header) + offset, header->baseline + offset, static_cast<const uint8_t*>(pinned) + offset, length);
         }
     }
     original<void (*)(Env*, jarray, void*, jint)>(slot::ReleasePrimitiveArrayCritical)(env, array, pinned,
