@@ -317,8 +317,10 @@ The Microphone switch in Emulator settings is off by default; while it is off,
 or iOS has not granted access, a guest that records gets silence and nothing
 opens the microphone. Turning it on is the one place iOS is asked for access
 (`MicrophoneSetting`); the application then tells the runtime
-(`set_microphone`), which never asks. A guest kept running in the background
-may keep recording under the `audio` background mode.
+(`set_microphone`), which never asks. While the switch is on, the input also
+opens when a camera opens in video mode, ahead of the recording, and closes
+when video mode ends. A guest kept running in the background may keep
+recording under the `audio` background mode.
 [`../darwin/device/audio/README.md`](../darwin/device/audio/README.md#microphone)
 owns the device side.
 
