@@ -66,6 +66,7 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <signal.h>
 #include <stdint.h>
@@ -925,6 +926,8 @@ bool startOtherInstance(const FdType& fd, int memoryFd, VkDeviceSize size, int s
     }
     if (pid == 0) {
         if (dup2(pipes[0], 0) < 0) _exit(kChildNotStarted);
+        // The driver exports a memory fd close-on-exec; exec would close it, so the child keeps it across exec.
+        if (fcntl(memoryFd, F_SETFD, 0) != 0) _exit(kChildNotStarted);
         for (int i = 3; i < limit; i++) {
             if (i != memoryFd) close(i);
         }
