@@ -1149,6 +1149,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           reclaim_variant: str | None = None,
                           time_zone_variant: str | None = None,
                           keyboard_default_variant: str | None = None,
+                          oldapp_variant: str | None = None,
                           wallpaper_variant: str | None = None,
                           cas_hal_variant: str | None = None,
                           adbd_variant: str | None = None,
@@ -1843,6 +1844,39 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         keyboard_rc = keyboard_rc.replace(old, new)
                 if keyboard_default_variant != "missing-rc":
                     archive.writestr("SYSTEM_EXT/etc/init/kernarium_keyboard_default.rc", keyboard_rc)
+                # The shell command of Old app compatibility: the tracked wrapper script, and a jar whose
+                # code holds the command's class (a build may strip the code into the odex instead).
+                oldapp_wrapper = (
+                    verifier.parents[1] / "overlay/oldapp_switch/kernarium_oldapp"
+                ).read_text()
+                for variant, (old, new) in {
+                    "wrapper-no-classpath": ("export CLASSPATH=$base/framework/kernarium_oldapp.jar\n", ""),
+                    "wrapper-wrong-jar": ("framework/kernarium_oldapp.jar", "framework/other.jar"),
+                    "wrapper-wrong-class": ("com.kernarium.oldapp.Main",
+                                            "com.kernarium.oldapp.Other"),
+                    "wrapper-no-exec": ("exec app_process", "app_process"),
+                    "wrapper-system-base": ("base=/system_ext", "base=/system"),
+                }.items():
+                    if oldapp_variant == variant:
+                        if old not in oldapp_wrapper:
+                            fail(f"the Old app wrapper lacks '{old}' for the {variant} variant")
+                        oldapp_wrapper = oldapp_wrapper.replace(old, new)
+                if oldapp_variant != "missing-wrapper":
+                    archive.writestr("SYSTEM_EXT/bin/kernarium_oldapp", oldapp_wrapper)
+                oldapp_jar = io.BytesIO()
+                with zipfile.ZipFile(oldapp_jar, "w") as jar:
+                    jar.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+                    if oldapp_variant != "jar-stripped":
+                        jar.writestr(
+                            "classes.dex",
+                            b"dex\n035\0"
+                            + (b"Lcom/kernarium/oldapp/Other;" if oldapp_variant == "jar-without-class"
+                               else b"Lcom/kernarium/oldapp/Main;"),
+                        )
+                if oldapp_variant == "jar-not-zip":
+                    archive.writestr("SYSTEM_EXT/framework/kernarium_oldapp.jar", b"not a jar")
+                elif oldapp_variant != "missing-jar":
+                    archive.writestr("SYSTEM_EXT/framework/kernarium_oldapp.jar", oldapp_jar.getvalue())
                 # The device configuration of the host's keyboard and mouse: the tracked files.
                 for name, destination in input_device_files.items():
                     archive.writestr(destination, (verifier.parents[1] / "overlay/input" / name).read_text())
@@ -1988,7 +2022,15 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         if keyboard_default_variant == "missing-marker-context"
                         else "persist.sys.kernarium.keyboard_default    "
                         "u:object_r:kernarium_keyboard_default_prop:s0 exact bool\n"
-                    ),
+                    )
+                    + {
+                        "missing-context": "",
+                        "exact-context": "persist.sys.kernarium.oldapp.    "
+                        "u:object_r:kernarium_oldapp_prop:s0 exact string\n",
+                        "wrong-type-context": "persist.sys.kernarium.oldapp.    "
+                        "u:object_r:kernarium_time_zone_prop:s0\n",
+                    }.get(oldapp_variant or "",
+                          "persist.sys.kernarium.oldapp.    u:object_r:kernarium_oldapp_prop:s0\n"),
                 )
                 archive.writestr(
                     "SYSTEM_EXT/etc/selinux/system_ext_sepolicy.cil",
@@ -2042,6 +2084,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                        else "kernarium_time_zone_prop ")
                     + ("" if keyboard_default_variant == "marker-not-system"
                        else "kernarium_keyboard_default_prop ")
+                    + ("" if oldapp_variant == "not-system" else "kernarium_oldapp_prop ")
                     + "))\n"
                     + (
                         ""
@@ -2152,6 +2195,29 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         "(allow kernarium_keyboard_default timezone_prop (property_service (set)))\n"
                         if keyboard_default_variant == "sets-another-property"
                         else ""
+                    )
+                    + (
+                        ""
+                        if oldapp_variant == "no-shell-set"
+                        else "(allow shell kernarium_oldapp_prop (property_service (set)))\n"
+                    )
+                    + "(allow shell kernarium_oldapp_prop (file (read getattr map open)))\n"
+                    + (
+                        ""
+                        if oldapp_variant == "no-app-read"
+                        else "(allow appdomain kernarium_oldapp_prop (file (read getattr map open)))\n"
+                    )
+                    + {
+                        "untrusted-app-sets": "(allow untrusted_app kernarium_oldapp_prop (property_service (set)))\n",
+                        "platform-app-sets": "(allow platform_app_36_202604 kernarium_oldapp_prop_202604 "
+                        "(property_service (set)))\n",
+                        "appdomain-sets": "(allow appdomain kernarium_oldapp_prop (property_service (set)))\n",
+                        "runas-app-sets": "(allow runas_app kernarium_oldapp_prop (property_service (set)))\n",
+                    }.get(oldapp_variant or "", "")
+                    + (
+                        ""
+                        if oldapp_variant == "no-neverallow"
+                        else "(neverallow base_typeattr_9 kernarium_oldapp_prop (property_service (set)))\n"
                     )
                     + (
                         ""
@@ -5410,6 +5476,46 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "lets the keyboard default domain set"),
             ("keyboard-default-missing-marker-context", {"keyboard_default_variant": "missing-marker-context"},
              "do not label persist.sys.kernarium.keyboard_default"),
+            ("oldapp-missing-wrapper", {"oldapp_variant": "missing-wrapper"},
+             "required entries are missing: .*SYSTEM_EXT/bin/kernarium_oldapp"),
+            ("oldapp-missing-jar", {"oldapp_variant": "missing-jar"},
+             "required entries are missing: .*SYSTEM_EXT/framework/kernarium_oldapp.jar"),
+            ("oldapp-wrapper-no-classpath", {"oldapp_variant": "wrapper-no-classpath"},
+             "kernarium_oldapp does not contain 'CLASSPATH=.base/framework/kernarium_oldapp.jar'"),
+            ("oldapp-wrapper-wrong-jar", {"oldapp_variant": "wrapper-wrong-jar"},
+             "kernarium_oldapp does not contain 'CLASSPATH=.base/framework/kernarium_oldapp.jar'"),
+            ("oldapp-wrapper-wrong-class", {"oldapp_variant": "wrapper-wrong-class"},
+             "kernarium_oldapp does not contain 'exec app_process .base/bin com.kernarium.oldapp.Main'"),
+            ("oldapp-wrapper-no-exec", {"oldapp_variant": "wrapper-no-exec"},
+             "kernarium_oldapp does not contain 'exec app_process"),
+            ("oldapp-wrapper-system-base", {"oldapp_variant": "wrapper-system-base"},
+             "kernarium_oldapp does not contain 'base=/system_ext'"),
+            ("oldapp-jar-not-zip", {"oldapp_variant": "jar-not-zip"},
+             "kernarium_oldapp.jar is not a readable jar"),
+            ("oldapp-jar-without-class", {"oldapp_variant": "jar-without-class"},
+             "holds code without the class com.kernarium.oldapp.Main"),
+            ("oldapp-missing-context", {"oldapp_variant": "missing-context"},
+             "is labelled default_prop, not kernarium_oldapp_prop"),
+            ("oldapp-exact-context", {"oldapp_variant": "exact-context"},
+             "is labelled default_prop, not kernarium_oldapp_prop"),
+            ("oldapp-wrong-type-context", {"oldapp_variant": "wrong-type-context"},
+             "is labelled kernarium_time_zone_prop, not kernarium_oldapp_prop"),
+            ("oldapp-not-system", {"oldapp_variant": "not-system"},
+             "does not define the system-owned kernarium_oldapp_prop"),
+            ("oldapp-no-shell-set", {"oldapp_variant": "no-shell-set"},
+             "the shell domain may not set persist.sys.kernarium.oldapp."),
+            ("oldapp-no-app-read", {"oldapp_variant": "no-app-read"},
+             "may not read persist.sys.kernarium.oldapp."),
+            ("oldapp-untrusted-app-sets", {"oldapp_variant": "untrusted-app-sets"},
+             "untrusted_app may set persist.sys.kernarium.oldapp."),
+            ("oldapp-platform-app-sets", {"oldapp_variant": "platform-app-sets"},
+             "platform_app_36 may set persist.sys.kernarium.oldapp."),
+            ("oldapp-appdomain-sets", {"oldapp_variant": "appdomain-sets"},
+             "may set persist.sys.kernarium.oldapp."),
+            ("oldapp-runas-app-sets", {"oldapp_variant": "runas-app-sets"},
+             "runas_app may set persist.sys.kernarium.oldapp."),
+            ("oldapp-no-neverallow", {"oldapp_variant": "no-neverallow"},
+             "no neverallow that keeps application domains from setting kernarium_oldapp_prop"),
             ("missing-side-key-layout", {"entries": {input_device_files["Vendor_1af4_Product_0002.kl"]: None}},
              "required entries are missing"),
             ("missing-keyboard-configuration", {"entries": {input_device_files["Vendor_1af4_Product_0003.idc"]: None}},

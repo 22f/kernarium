@@ -269,6 +269,8 @@ REQUIRED_ENTRIES = {
     "SYSTEM_EXT/etc/init/kernarium_time_zone.rc",
     "SYSTEM_EXT/bin/kernarium_keyboard_default.sh",
     "SYSTEM_EXT/etc/init/kernarium_keyboard_default.rc",
+    "SYSTEM_EXT/bin/kernarium_oldapp",
+    "SYSTEM_EXT/framework/kernarium_oldapp.jar",
     "VENDOR/usr/keylayout/Vendor_1af4_Product_0002.kl",
     "VENDOR/usr/idc/Vendor_1af4_Product_0003.idc",
     "VENDOR/usr/idc/Vendor_1af4_Product_0004.idc",
@@ -926,6 +928,27 @@ KEYBOARD_DEFAULT_TRANSITION = re.compile(
     rb"kernarium_keyboard_default\)$",
     re.MULTILINE,
 )
+# Old app compatibility is a choice per application, kept as one persistent property per package
+# (persist.sys.kernarium.oldapp.<package>: the turn-on time in epoch seconds, empty for off) and
+# written by the shell command kernarium_oldapp, which Andarium runs as the adb shell user
+# (overlay/oldapp_switch). The command is a Java tool started through app_process, so the image
+# carries its wrapper script and its jar on system_ext. The property has a type of its own under
+# the existing persist.sys.kernarium. policy: the shell domain sets it, every application domain
+# reads it (the framework hook reads it in the application's own process) and no other application
+# domain may set it.
+OLDAPP_COMMAND = "kernarium_oldapp"
+OLDAPP_WRAPPER = "SYSTEM_EXT/bin/kernarium_oldapp"
+OLDAPP_JAR = "SYSTEM_EXT/framework/kernarium_oldapp.jar"
+OLDAPP_CLASS = "com.kernarium.oldapp.Main"
+OLDAPP_WRAPPER_REQUIRED = (
+    "#!/system/bin/sh",
+    "CLASSPATH=$base/framework/kernarium_oldapp.jar",
+    "base=/system_ext",
+    f"exec app_process $base/bin {OLDAPP_CLASS}",
+)
+OLDAPP_PROPERTY_PREFIX = "persist.sys.kernarium.oldapp."
+OLDAPP_PROPERTY_TYPE = "kernarium_oldapp_prop"
+OLDAPP_SETTER = "shell"
 # The partition the host grew is filled on every boot, once /data is mounted
 # (init.vendor.rc says why): the kernel's online resize needs neither a fsck nor
 # a recorded check. resize2fs runs as root with the group of /data's owner, so
@@ -1543,6 +1566,9 @@ def check_boot_policy(
             "utf-8", errors="strict"
         ),
         read_small(archive, infos["SYSTEM_EXT/bin/kernarium_keyboard_default.sh"]),
+    )
+    check_oldapp_switch(
+        read_small(archive, infos[OLDAPP_WRAPPER]), read_small(archive, infos[OLDAPP_JAR])
     )
     check_media_codecs_c2(read_small(archive, infos["VENDOR/etc/media_codecs_c2.xml"]))
 
@@ -4034,6 +4060,12 @@ def check_kernel_policy(
         (platform_policy, vendor_policy, system_ext_policy)
         + tuple(read_small(archive, infos[name]) for name in APP_POLICY_CIL if name in infos),
     )
+    check_oldapp_switch_policy(
+        contexts,
+        (platform_policy, vendor_policy, system_ext_policy)
+        + tuple(read_small(archive, infos[name]) for name in APP_POLICY_CIL if name in infos),
+        system_ext_policy,
+    )
     check_lmkd_gpu_policy(contexts, (platform_policy, vendor_policy, system_ext_policy), vendor_policy)
     check_venus_option_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
     check_audio_ring_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
@@ -4580,6 +4612,80 @@ def check_keyboard_default_policy(
         if line.strip() and not line.lstrip().startswith("#")
     ):
         fail(f"system_ext property contexts do not label {KEYBOARD_DEFAULT_MARKER}")
+
+
+def check_oldapp_switch(wrapper: bytes, jar: bytes) -> None:
+    """The shell command is a wrapper script that starts the Java tool's class from its jar."""
+    text = "\n".join(
+        line
+        for line in wrapper.decode("utf-8", errors="strict").splitlines()
+        if not line.lstrip().startswith("#") or line.startswith("#!")
+    )
+    for token in OLDAPP_WRAPPER_REQUIRED:
+        if token not in text:
+            fail(f"/system_ext/bin/{OLDAPP_COMMAND} does not contain '{token}'")
+    try:
+        with zipfile.ZipFile(io.BytesIO(jar)) as archive:
+            names = archive.namelist()
+            dex = archive.read("classes.dex") if "classes.dex" in names else None
+    except (zipfile.BadZipFile, OSError, zlib.error) as problem:
+        fail(f"{OLDAPP_JAR} is not a readable jar: {problem}")
+    # Dexpreopting may strip the code from the jar into the odex and vdex beside it; a jar that
+    # keeps it must hold the command's class.
+    if dex is not None and b"L" + OLDAPP_CLASS.replace(".", "/").encode() + b";" not in dex:
+        fail(f"{OLDAPP_JAR} holds code without the class {OLDAPP_CLASS}")
+
+
+def check_oldapp_switch_policy(
+    contexts: list[str], policies: tuple[bytes, ...], system_ext_policy: bytes
+) -> None:
+    """The choice's property has a type of its own: the shell domain sets it, every application
+    domain reads it, and no application domain but the shell may set it."""
+    sample = OLDAPP_PROPERTY_PREFIX + "org.example.package"
+    label = property_label(sample, contexts) or "default_prop"
+    if label != OLDAPP_PROPERTY_TYPE:
+        fail(
+            f"{sample} is labelled {label}, not {OLDAPP_PROPERTY_TYPE} "
+            "(overlay/sepolicy/system_ext/private/property_contexts): the shell command could not "
+            "set it, or any application could set it"
+        )
+    if OLDAPP_PROPERTY_TYPE not in cil_attribute_members(system_ext_policy, "system_property_type"):
+        fail(f"system_ext policy does not define the system-owned {OLDAPP_PROPERTY_TYPE}")
+    if not cil_allows_property_set(policies, OLDAPP_SETTER, label):
+        fail(
+            f"the {OLDAPP_SETTER} domain may not set {OLDAPP_PROPERTY_PREFIX}<package>, labelled "
+            f"{label}: Andarium's adb could not switch Old app compatibility"
+        )
+    members = {
+        member
+        for policy in policies
+        for attribute in ADB_KEY_APP_ATTRIBUTES
+        for member in cil_attribute_members(policy, attribute)
+    }
+    if not any(cil_attribute_members(policy, "appdomain") for policy in policies):
+        fail("the policy lists no type for appdomain: the check could not tell who runs applications")
+    for domain in sorted({OLDAPP_SETTER, *ADB_KEY_APP_DOMAINS, *members}):
+        if not cil_allows_file_read(policies, domain, label):
+            fail(
+                f"{domain} may not read {OLDAPP_PROPERTY_PREFIX}<package>, labelled {label}: the "
+                "framework hook (the shell command for the shell domain) could not read the choice"
+            )
+    for domain in sorted((set(ADB_KEY_APP_DOMAINS) | members) - {OLDAPP_SETTER, "appdomain"}):
+        if cil_allows_property_set(policies, domain, label):
+            fail(
+                f"{domain} may set {OLDAPP_PROPERTY_PREFIX}<package>, labelled {label}: an "
+                "application could turn Old app compatibility on for itself"
+            )
+    if not any(
+        match.group(2).decode() == label
+        for policy in policies
+        for match in re.finditer(
+            rb"^\(neverallow (\S+) (\S+) \(property_service \(([^)]*\bset\b[^)]*)\)\)\)$",
+            policy,
+            re.MULTILINE,
+        )
+    ):
+        fail(f"system_ext policy has no neverallow that keeps application domains from setting {label}")
 
 
 # The host's keyboard and mouse are virtio-input devices that Android finds by vendor and product
