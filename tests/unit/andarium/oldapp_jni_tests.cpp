@@ -4619,6 +4619,161 @@ void check_the_synchronizations_need_little_stack() {
 
 // ---- stores that touch only the bytes the rule chose
 
+// ---- one load of every Java byte a merge takes
+
+// A Java thread's write that lands while the layer takes Java's bytes into the block must not leave the block different
+// from the baseline for a byte the application never wrote: the next synchronization would take that for the application's
+// write and put the old value back into the array. The page-protection handler places the write at the layer's first
+// store into the block's page, between the layer's load of Java's byte and any second load of it (a second load is what
+// the fast path of take_java_words made; the product is built with optimization, as these tests are).
+struct WordRace {
+    Made a;
+    uint8_t* block;
+    uint8_t* array;
+    uint8_t* page;
+    size_t at;  // the offset of a word in the page, on the word grid and 20 bytes or more into its chunk
+};
+WordRace word_race(Fixture& f, size_t size = 65536) {
+    WordRace race{make_held(f, std::vector<uint8_t>(size, 0)), nullptr, nullptr, nullptr, 0};
+    race.block = raw_of(race.a);
+    race.array = race.a.object->bytes.data();
+    race.page = page_inside(race.block, size);
+    race.at = size_t(race.page - race.block) + 20;
+    while (race.at % 4096 < 20 || race.at % 4 != 0) race.at += (race.at % 4 != 0) ? 1 : 4;
+    require(race.block + race.at + 4 <= race.page + size_t(getpagesize()), "the word lies in the watched page");
+    return race;
+}
+// The array and the block after a read-only release (the application never wrote the byte at `at + which`): Java's racing
+// write is in the array and, a point later, in the block.
+void require_java_write_kept(Fixture& f, WordRace& race, size_t which, uint8_t java_value, const char* what) {
+    jbyte* p = get_elements(f, race.a.shadow);
+    release_elements(f, race.a.shadow, p, 0);
+    require(race.array[race.at + which] == java_value, what);
+    require(race.block[race.at + which] == java_value, "and the block took it at the next point");
+    p = get_elements(f, race.a.shadow);
+    release_elements(f, race.a.shadow, p, 0);
+    require(race.array[race.at + which] == java_value && race.block[race.at + which] == java_value, "and they stay alike");
+}
+
+// The fast path: Java changed all four bytes of a word, the application none, and a Java write to the first of them lands
+// at the store of that byte into the block. The merge of the dirty chunk goes through the live array's critical pair.
+void check_a_java_write_during_the_word_path_of_a_merge_is_not_reverted() {
+    Fixture f = make();
+    WordRace r = word_race(f);
+    r.block[r.at - 16] = 0x41;  // the application wrote a byte of the chunk: it is merged in the live array
+    for (size_t i = 0; i < 4; ++i) r.array[r.at + i] = 0x52;
+    arm_watch(r.page, r.array + r.at, 0x63);
+    jbyte* p = get_elements(f, r.a.shadow);
+    const int hits = disarm_watch();
+    require(hits == 1, "Java's write landed at the layer's store of the word's first byte");
+    require(r.array[r.at] == 0x63 && r.array[r.at - 16] == 0x41, "the point left Java's write, and pushed the application's");
+    release_elements(f, r.a.shadow, p, 0);
+    require(r.array[r.at] == 0x63, "a read-only release cannot revert a Java-only write");
+    require_java_write_kept(f, r, 0, 0x63, "and neither can a later point");
+    require(r.array[r.at + 1] == 0x52 && r.block[r.at + 1] == 0x52, "the word's other bytes are Java's");
+}
+
+// The byte path: Java changed three bytes of a word, so each is decided on its own; a Java write to the second lands at the
+// store of the first.
+void check_a_java_write_during_the_byte_path_of_a_merge_is_not_reverted() {
+    Fixture f = make();
+    WordRace r = word_race(f);
+    r.block[r.at - 16] = 0x41;
+    for (size_t i = 0; i < 3; ++i) r.array[r.at + i] = 0x52;
+    arm_watch(r.page, r.array + r.at + 1, 0x63);
+    jbyte* p = get_elements(f, r.a.shadow);
+    const int hits = disarm_watch();
+    require(hits == 1, "Java's write landed at the layer's store of the word's first byte");
+    release_elements(f, r.a.shadow, p, 0);
+    require(r.array[r.at + 1] == 0x63, "a read-only release cannot revert a Java-only write");
+    require_java_write_kept(f, r, 1, 0x63, "and neither can a later point");
+    require(r.block[r.at] == 0x52 && r.block[r.at + 2] == 0x52 && r.array[r.at + 3] == 0, "the other bytes are as Java left them");
+}
+
+// The critical merge (a block's critical pointer, then its release), the same race.
+void check_a_java_write_during_a_critical_merge_is_not_reverted() {
+    Fixture f = make();
+    WordRace r = word_race(f);
+    r.block[r.at - 16] = 0x41;
+    for (size_t i = 0; i < 4; ++i) r.array[r.at + i] = 0x52;
+    arm_watch(r.page, r.array + r.at, 0x63);
+    void* p = get_critical(f, r.a.shadow);
+    const int hits = disarm_watch();
+    require(hits == 1, "Java's write landed at the layer's store of the word's first byte");
+    release_critical(f, r.a.shadow, p, 0);  // the application wrote nothing at `at`
+    require(r.array[r.at] == 0x63, "a release cannot revert a Java-only write");
+    require_java_write_kept(f, r, 0, 0x63, "and neither can a later point");
+}
+
+// The pull of a clean chunk inside the same critical pair (the block has a dirty chunk elsewhere, so the pair is made), the
+// same race.
+void check_a_java_write_during_the_pull_in_place_is_not_reverted() {
+    Fixture f = make();
+    WordRace r = word_race(f);
+    const size_t far_chunk = (r.at / 4096 == 0) ? 3 * 4096 : 0;
+    r.block[far_chunk + 1] = 0x41;  // a dirty chunk elsewhere: the pair is made; the chunk of the word is clean
+    for (size_t i = 0; i < 4; ++i) r.array[r.at + i] = 0x52;
+    world.critical_gets = 0;
+    arm_watch(r.page, r.array + r.at, 0x63);
+    jbyte* p = get_elements(f, r.a.shadow);
+    const int hits = disarm_watch();
+    require(world.critical_gets == 1 && hits == 1, "the pair pulled the clean chunk, and Java's write landed at its store");
+    release_elements(f, r.a.shadow, p, 0);
+    require(r.array[r.at] == 0x63, "a read-only release cannot revert a Java-only write");
+    require_java_write_kept(f, r, 0, 0x63, "and neither can a later point");
+}
+
+// A pull through a region copy of a clean block: the copy is a snapshot, block and baseline take the copy's byte, and Java's
+// write after the copy is taken at the next point.
+void check_a_java_write_during_a_region_pull_is_taken_at_the_next_point() {
+    Fixture f = make();
+    WordRace r = word_race(f);
+    for (size_t i = 0; i < 4; ++i) r.array[r.at + i] = 0x52;
+    world.critical_gets = 0;
+    arm_watch(r.page, r.array + r.at, 0x63);
+    std::vector<jbyte> copy(65536);
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, r.a.shadow, 0, 65536, copy.data());
+    const int hits = disarm_watch();
+    require(hits == 1 && world.critical_gets == 0, "a region pull, and Java's write landed at its store");
+    require(r.array[r.at] == 0x63, "the array keeps Java's write");
+    require_java_write_kept(f, r, 0, 0x63, "and no later point reverts it");
+}
+
+// The deferred end of a block (the one merge through region calls): its copy is a snapshot too.
+void check_a_java_write_during_a_deferred_ends_merge_is_kept() {
+    Fixture f = make();
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    require(push(f.env, 16) == 0, "a frame");
+    WordRace r = word_race(f);
+    r.block[r.at - 16] = 0x41;
+    for (size_t i = 0; i < 4; ++i) r.array[r.at + i] = 0x52;
+    world.exception_pending = true;
+    pop(f.env, nullptr);  // the end waits for a call without an exception
+    world.exception_pending = false;
+    arm_watch(r.page, r.array + r.at, 0x63);
+    jobject plain = byte_array(sample(4));
+    fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, plain);  // the end is finished here
+    const int hits = disarm_watch();
+    require(hits == 1 && is_ended_block(r.a.shadow), "the end took Java's word, and Java's write landed at its store");
+    require(r.array[r.at] == 0x63 && r.array[r.at - 16] == 0x41, "Java's write is kept, and the application's byte is in the array");
+    jbyte* p = get_elements(f, r.a.shadow);  // the kept reference of the ended block: a point
+    release_elements(f, r.a.shadow, p, 0);
+    require(r.array[r.at] == 0x63 && r.block[r.at] == 0x63, "and the next point gave the block Java's byte");
+}
+
+// A span that a pull found equal to the baseline is skipped; what Java writes afterwards is taken at the next point.
+void check_a_java_write_after_a_skipped_span_is_taken_at_the_next_point() {
+    Fixture f = make();
+    Made a = make_held(f, std::vector<uint8_t>(4096, 0x11));
+    g_after_get = [&] { a.object->bytes[1000] = 0x77; };  // after the copy, which was equal to the baseline
+    jbyte buffer[4096];
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 4096, buffer);
+    require(raw_of(a)[1000] == 0x11 && a.object->bytes[1000] == 0x77, "the point did not see the write");
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, 4096, buffer);
+    require(raw_of(a)[1000] == 0x77 && static_cast<uint8_t>(buffer[1000]) == 0x77, "the next point took it");
+}
+
 // A pull stores the byte Java changed and no other byte of its word: another thread's raw write to the next byte, landing
 // at that store, survives, and reaches the array at the next point.
 void check_a_pull_stores_only_the_byte_java_changed() {
@@ -4822,6 +4977,13 @@ int main(int argc, char** argv) {
     check_a_block_freed_between_the_two_holds_is_not_merged();
     check_a_java_write_during_a_merge_is_kept();
     check_scattered_application_bytes_keep_a_java_write_in_every_gap();
+    check_a_java_write_during_the_word_path_of_a_merge_is_not_reverted();
+    check_a_java_write_during_the_byte_path_of_a_merge_is_not_reverted();
+    check_a_java_write_during_a_critical_merge_is_not_reverted();
+    check_a_java_write_during_the_pull_in_place_is_not_reverted();
+    check_a_java_write_during_a_region_pull_is_taken_at_the_next_point();
+    check_a_java_write_during_a_deferred_ends_merge_is_kept();
+    check_a_java_write_after_a_skipped_span_is_taken_at_the_next_point();
     check_a_pull_stores_only_the_byte_java_changed();
     check_the_critical_merge_stores_only_the_byte_the_application_wrote();
     check_install_rules();

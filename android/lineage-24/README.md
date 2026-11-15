@@ -669,7 +669,9 @@ patches ART's one JNI function table in place and gives the application:
   each, into the array's own memory through the real array's critical pair, and
   a block the application did not write is read through region calls and makes no
   critical get), so a write by either side to such a byte that races a
-  synchronization survives it. A committing
+  synchronization survives it. A byte of the array that a point takes is read
+  once, and that one value goes to the block and to its copy, so a Java write
+  that lands meanwhile is taken at the next point, never reverted. A committing
   release (mode 0 or `JNI_COMMIT`) is such a point and keeps Java's bytes
   wherever the application did not write; `JNI_ABORT` discards the working copy,
   and the block takes the array's bytes. `Get...Elements` and `Get...Critical`

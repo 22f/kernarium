@@ -356,7 +356,25 @@ void adopt_baseline(BlockHeader* header, uint32_t from, uint32_t to) {
 // The bytes are compared by words and stored one at a time: a store to the block (which other threads write through the
 // raw pointer) or to the live array (which Java threads write) touches only a byte the rule has chosen, never its
 // neighbours. The stores are relaxed atomics so that the compiler cannot merge neighbouring ones into a wider store.
+//
+// A byte of the live array (which Java threads write at any moment) that a decision rests on is loaded exactly once, into
+// a local value, through a relaxed atomic load, which the compiler can neither repeat nor split; that one value is what
+// goes to the block and to the baseline, so the two cannot differ for a byte the application never wrote (a second load
+// that saw a Java write in between would leave block != baseline, and the next synchronization would take it for an
+// application write and put the old value back into the array). A word is four such loads. A pass that compares a span
+// with memcmp to skip it (take_java, merge_bytes) decides only to look closer: the bytes it skips are equal at that moment,
+// and what changes afterwards is taken at the next synchronization point.
 inline void store_byte(uint8_t* at, uint8_t value) { __atomic_store_n(at, value, __ATOMIC_RELAXED); }
+inline uint8_t load_byte(const uint8_t* at) { return __atomic_load_n(at, __ATOMIC_RELAXED); }
+// Four bytes at `at`, each loaded once into `bytes`, and the word they make up.
+inline uint32_t load_word(const uint8_t* at, uint8_t (&bytes)[4]) {
+    for (uint32_t m = 0; m < 4; ++m) {
+        bytes[m] = load_byte(at + m);
+    }
+    uint32_t word;
+    __builtin_memcpy(&word, bytes, 4);
+    return word;
+}
 // Whether no byte of `a` equals the byte of `b` at its position (x has no zero byte).
 inline bool all_bytes_differ(uint32_t a, uint32_t b) {
     const uint32_t x = a ^ b;
@@ -380,8 +398,9 @@ inline void take_java_byte(uint8_t* block, uint8_t* baseline, uint8_t java, uint
 void take_java_words(uint8_t* block, uint8_t* baseline, const uint8_t* java, uint32_t n) {
     uint32_t i = 0;
     for (; i + 4 <= n; i += 4) {
-        uint32_t j, k;
-        __builtin_memcpy(&j, java + i, 4);
+        uint8_t seen[4];  // Java's four bytes, each loaded once: what the decision rests on is what is taken
+        const uint32_t j = load_word(java + i, seen);
+        uint32_t k;
         __builtin_memcpy(&k, baseline + i, 4);
         if (j == k) {
             continue;
@@ -389,18 +408,18 @@ void take_java_words(uint8_t* block, uint8_t* baseline, const uint8_t* java, uin
         uint32_t b;
         __builtin_memcpy(&b, block + i, 4);
         if (b == k && all_bytes_differ(j, k)) {  // Java changed all four and the application none: four byte stores
-            for (uint32_t m = i; m < i + 4; ++m) {
-                store_byte(block + m, java[m]);
-                baseline[m] = java[m];
+            for (uint32_t m = 0; m < 4; ++m) {
+                store_byte(block + i + m, seen[m]);
+                baseline[i + m] = seen[m];
             }
             continue;
         }
-        for (uint32_t m = i; m < i + 4; ++m) {
-            take_java_byte(block, baseline, java[m], m);
+        for (uint32_t m = 0; m < 4; ++m) {
+            take_java_byte(block, baseline, seen[m], i + m);
         }
     }
     for (; i < n; ++i) {
-        take_java_byte(block, baseline, java[i], i);
+        take_java_byte(block, baseline, load_byte(java + i), i);
     }
 }
 // (libc's memcmp skips what Java left alone, kScanBlock bytes at a time: most of a run is that)
@@ -431,7 +450,8 @@ void merge_words(uint8_t* java, const uint8_t* block, const uint8_t* baseline, u
         if (b == k) {
             continue;  // the application wrote none of the four: the array's bytes stay
         }
-        __builtin_memcpy(&j, java + i, 4);
+        uint8_t seen[4];
+        j = load_word(java + i, seen);
         if (j == k && all_bytes_differ(b, k)) {
             uint8_t written[4];
             __builtin_memcpy(written, &b, 4);
@@ -443,7 +463,7 @@ void merge_words(uint8_t* java, const uint8_t* block, const uint8_t* baseline, u
         }
         for (uint32_t m = i; m < i + 4; ++m) {
             const uint8_t written = block[m];
-            if (written != baseline[m] && java[m] != written) {
+            if (written != baseline[m] && load_byte(java + m) != written) {
                 store_byte(java + m, written);
                 sink.changed(base + m, 1);
             }
@@ -451,7 +471,7 @@ void merge_words(uint8_t* java, const uint8_t* block, const uint8_t* baseline, u
     }
     for (; i < n; ++i) {
         const uint8_t written = block[i];
-        if (written != baseline[i] && java[i] != written) {
+        if (written != baseline[i] && load_byte(java + i) != written) {
             store_byte(java + i, written);
             sink.changed(base + i, 1);
         }
@@ -545,6 +565,9 @@ void merge_run(Env* env, BlockHeader* header, jobject array, unsigned first, uns
 
 // The array's bytes over [from, to) reach the baseline and, where Java changed them, the block (take_java), a piece of
 // kPullPiece bytes at a time.
+//
+// A region copy is a snapshot: Java threads write the array, not the copy, so what is decided on the copy is what is
+// taken from it, and a write after the copy is taken at the next synchronization point.
 //
 // The scratch: the bytes read from the array (a pull's pieces, a merge of up to kPullPiece bytes) are read into one static
 // buffer, not onto the stack, so that a thread with a small stack can call any wrapper. Every synchronization runs under
@@ -675,6 +698,7 @@ void abort_critical(Env* env, BlockHeader* header, jobject array, const Pair& pa
         return;
     }
     if (block_is_valid(header)) {
+        // One read of the array, into the baseline; the block takes the baseline, not a second read of the array.
         __builtin_memcpy(header->baseline, pair.pointer, header->capacity);
         adopt_baseline(header, 0, header->capacity);
     }
