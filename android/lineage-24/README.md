@@ -657,11 +657,12 @@ patches ART's one JNI function table in place and gives the application:
   (`Get...Elements`, `Get...Critical`, `GetByteArrayRegion`), around
   `SetByteArrayRegion` and at a release. The block keeps a copy of its bytes as
   of the last such point. At each point, in chunks of 4 KiB, a chunk whose block
-  differs from that copy was written through the raw pointer and goes to the
-  array, and any other chunk takes the array's bytes; where both sides changed
-  the same chunk, the application's bytes win for that chunk. A committing
-  release (mode 0 or `JNI_COMMIT`) is such a point and keeps Java's bytes in the
-  chunks the application did not write; `JNI_ABORT` discards the working copy,
+  differs from that copy was written through the raw pointer and is merged with
+  the array byte by byte: a byte the application wrote goes to the array, every
+  other byte takes the array's, and a byte both sides wrote takes the
+  application's. Any other chunk takes the array's bytes. A committing
+  release (mode 0 or `JNI_COMMIT`) is such a point and keeps Java's bytes
+  wherever the application did not write; `JNI_ABORT` discards the working copy,
   and the block takes the array's bytes. `Get...Elements` and `Get...Critical`
   of a block report a copy (`isCopy` is `JNI_TRUE`), so an application that
   commits when told so makes its writes visible through any other reference to
@@ -680,9 +681,19 @@ patches ART's one JNI function table in place and gives the application:
   the pointer reaches the array then) until the runtime collects the array; the
   same array obtained again, on any thread, is that block again, so Java's later
   writes and the application's later raw writes meet in it, and until then they
-  reach neither side. Ended blocks do not count toward the 512; when the region
-  or 16384 of them are used up, those whose arrays are gone are freed and, once
-  in ten seconds, the runtime is asked to collect. The process holds 32 MiB of
+  reach neither side. The reference of an ended block still means the array in
+  every JNI function (the application may keep it in a variable across native
+  methods): a function that uses it makes it a reference of the calling thread
+  again, and `DeleteLocalRef` and the releases do not. A pointer from
+  `Get...Elements` or `Get...Critical` pins its block as Dalvik pinned the array:
+  the block keeps its place, and a strong reference to the array, until the
+  pointer is released (mode 0 or `JNI_ABORT`; `JNI_COMMIT` keeps it). A release is
+  routed by the pointer to its block, whichever reference comes with it, and never
+  reaches the runtime for a pointer the runtime did not hand out. Ended and pinned
+  blocks do not count toward the 512; when the region or 16384 of them are used
+  up, those whose arrays are gone are freed (a full pass runs only after the
+  runtime has collected since the last one, or once a second) and, once in ten
+  seconds, the runtime is asked to collect. The process holds 32 MiB of
   blocks, and each block's copy takes as many bytes again in the ordinary heap.
   An array the application creates itself (`NewByteArray`) stays ART's own;
 - an allocator below 2 GiB for the libraries the application ships: their
@@ -700,8 +711,9 @@ process see the real arrays. Page protection is restored after each write, and
 a library whose pages cannot all be opened is left untouched. The library logs
 under the tag `kernarium_oldapp` the first `byte[]` result that stayed ART's own
 reference (with the blocks and bytes its thread held, and the ended blocks that
-waited), the first time it asked the runtime to collect, a process name it could
-not read (every library but the platform's then counts as the application's), the first allocation
+waited), the first time it asked the runtime to collect, a package it could
+not learn (the runtime's `ActivityThread.currentPackageName()`, else the process
+name; every library but the platform's then counts as the application's), the first allocation
 that went to libc because the low arena had no room, and, at most every 30 s
 while it grows, the most blocks any one thread has held.
 

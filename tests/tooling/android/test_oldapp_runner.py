@@ -202,6 +202,16 @@ class ProbePackageTests(unittest.TestCase):
         self.assertEqual(body[-1] & 0xFF, 0x0E, "return-void")
         self.assertEqual([unit & 0xFF for unit in body].count(0x71), 3, "sceneFrames, scene, sceneDone")
 
+    def test_the_named_variant_runs_in_a_process_that_is_not_its_package(self) -> None:
+        named = binary_xml.decode_manifest(binary_xml.encode_manifest(probe.manifest_tree("named")))
+        old = binary_xml.decode_manifest(binary_xml.encode_manifest(probe.manifest_tree("old")))
+        application = [child for child in named.children if child.tag == "application"][0]
+        process = application.attributes["process"]
+        self.assertEqual(process, probe.PROCESS_NAMES["named"])
+        self.assertFalse(process.startswith(probe.package_of("named")))
+        self.assertNotIn("process", [child for child in old.children if child.tag == "application"][0].attributes)
+        self.assertEqual(named.attributes["package"], probe.package_of("named"))
+
     def test_the_variants_differ_in_package_and_target_level_only(self) -> None:
         old = binary_xml.decode_manifest(binary_xml.encode_manifest(probe.manifest_tree("old")))
         modern = binary_xml.decode_manifest(binary_xml.encode_manifest(probe.manifest_tree("modern")))
@@ -270,7 +280,7 @@ class VerdictTests(unittest.TestCase):
                  "java_fill": "pass", "commit_chunks": "pass", "clone": "pass", "alias_elements": "pass",
                  "alias_critical": "pass", "abi_args": "pass", "abi_returns": "pass", "ends_exception": "pass"}
     ENDS = ("ends_lazy_thumb", "ends_lazy_arm", "ends_reg_thumb", "ends_reg_arm", "ends_recursion", "ends_onload",
-            "ends_outside", "ended_keep", "ended_arrays")
+            "ends_outside", "ended_keep", "ended_arrays", "ended_pin", "ended_kept_ref")
     OLD = {"shim_mapped": "yes", "raw_read": "pass", "passback": "pass", "elements": "pass", "global": "pass",
            "thread_raw": "pass", **SEMANTICS, "java_fill_raw": "pass", "raw_write_java": "pass",
            "low_heap": "pass", **dict.fromkeys(ENDS, "pass"), "empty_us": "123456", "done": "1"}
@@ -296,7 +306,7 @@ class VerdictTests(unittest.TestCase):
                            ("ends_lazy_thumb", "fail"), ("ends_lazy_arm", "fail"), ("ends_reg_thumb", "fail"),
                            ("ends_reg_arm", "fail"), ("ends_recursion", "fail"), ("ends_onload", "fail"),
                            ("ends_outside", "fail"), ("ended_keep", "fail"), ("ended_arrays", "fail"),
-                           ("done", "")):
+                           ("ended_pin", "fail"), ("ended_kept_ref", "fail"), ("done", "")):
             with self.assertRaises(runner.Failure) as raised:
                 runner.evaluate("old", {**self.OLD, key: value})
             self.assertIn(f"{key}={value}", str(raised.exception))

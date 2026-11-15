@@ -80,7 +80,7 @@ SEMANTICS = {"write_through": "pass", "identity": "pass", "retained": "pass", "m
 #: its array is collected (every row reads the block through the Dalvik offsets, so it is "fail" where the layer is not
 #: loaded, as java_fill_raw is).
 ENDS = ("ends_lazy_thumb", "ends_lazy_arm", "ends_reg_thumb", "ends_reg_arm", "ends_recursion", "ends_onload",
-        "ends_outside", "ended_keep", "ended_arrays")
+        "ends_outside", "ended_keep", "ended_arrays", "ended_pin", "ended_kept_ref")
 #: The render-thread scene of an application (a run of its own, with the options "scene"): the same in every variant,
 #: since a thread that gets a few hundred results at a time works on ART too. The first three rows are a thread that
 #: Java starts; scene_attached is a short run on a native thread that attaches itself.
@@ -436,11 +436,16 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
             report.run(f"{what}: an application's render thread (one init, one native method per frame)",
                        lambda: scene(guest, "old", shim=options.host_shim, layer=True, checked=checked))
 
+        def named_scene() -> None:
+            report.run("old, process named otherwise: the render thread's scene still gets thunks",
+                       lambda: scene(guest, "named", shim=options.host_shim, layer=True))
+
         if options.host_shim:
             report.run("old without the layer: the reads fail (control)", control)
             report.run("old without the layer: the render thread's scene", lambda: scene(guest, "old", shim=False, layer=False))
             report.run("old: the application's reads, references and allocations", old)
             old_scene()
+            named_scene()
         else:
             report.run("old, not switched on: the layer is left out", control)
             report.run("old, not switched on: the render thread's scene", lambda: scene(guest, "old", shim=False, layer=False))
@@ -450,6 +455,12 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
                 old_scene()
             finally:
                 switch(guest, package, False)
+            named_package = probe.package_of("named")
+            report.run("old, process named otherwise: switched on", lambda: switch(guest, named_package, True))
+            try:
+                named_scene()
+            finally:
+                switch(guest, named_package, False)
         report.run("modern: the layer is left out", modern)
         report.run("modern: the render thread's scene", lambda: scene(guest, "modern", shim=False, layer=False))
         report.run("old, debuggable: install", lambda: install(guest, debug_apk, "old"))

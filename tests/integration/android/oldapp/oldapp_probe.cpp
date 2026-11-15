@@ -66,10 +66,20 @@
 //                through the kept pointer (in another 4 KiB chunk), and the array obtained again is the block at the
 //                same address, with both bytes visible on both sides
 //   ended_arrays 64 arrays that Java holds, each obtained 100 times in turn: always its own block, at the same address
+//   ended_pin    a pointer from GetByteArrayElements that is never released, on an array Java drops: the block's
+//                reference ends, Runtime.gc() runs between 100 results of the same size, and the kept pointer still
+//                reads what was written through it; a Release by a real reference to the array with the block's
+//                pointer is the block's, not the runtime's (the process lives and the array is Java's)
+//   ended_kept_ref  the reference of a block that ended, kept in a variable across 100 "frames": each frame asks it
+//                the length, the elements, a Java call and a region, with Java and the application both writing the
+//                array (bytes of one 4 KiB chunk), and both writes show on both sides
 //   ended_reuse, ended_limit, sentinel_pressure, sentinel_gc, create_ns  recorded: a temporary took the address of an
 //                earlier one after a collection; a raw write after the block ended does not reach Java (the stated
 //                limit); whether a weak reference to an array nothing holds is cleared by allocation pressure and by an
 //                explicit collection (the layer's sentinel); nanoseconds for a byte[] result and its deletion
+//   push_ns      recorded: nanoseconds for a Java call that is passed a 1 MiB block with every 4 KiB chunk written
+//                through the pointer (the push of the dirty chunks, and the pull after), and for the same call with the
+//                block clean
 //   empty_us     microseconds for 10^6 calls of an empty native method from a Java loop (recorded, not judged)
 //   monitor      MonitorEnter and MonitorExit accept it
 //   pop          PopLocalFrame hands it out of the frame
@@ -1168,6 +1178,8 @@ void ended_cases(Report& report, Env* env, jclass probe) {
     if (!ids.asset || !ids.same || !ids.poke || !ids.peek || !ids.collect || !ids.payload) {
         report.line("ended_keep", "fail");
         report.line("ended_arrays", "fail");
+        report.line("ended_pin", "fail");
+        report.line("ended_kept_ref", "fail");
         return;
     }
 
@@ -1270,6 +1282,150 @@ void ended_cases(Report& report, Env* env, jclass probe) {
             }
         }
         report.verdict("ended_arrays", ok && !entry<jboolean (*)(Env*)>(env, slot::ExceptionCheck)(env));
+        exception_clear(env);
+    }
+
+    // A pointer from Get...Elements that is never released: the array stays reachable and the pointer valid (Dalvik pinned
+    // it). Java holds nothing of this array.
+    {
+        constexpr uint32_t n = 4096;
+        unsigned failed = 0;
+        const auto check = [&](unsigned code, bool condition) {
+            if (!condition && failed == 0) {
+                failed = code;
+            }
+        };
+        const auto get_elements = entry<jbyte* (*)(Env*, jarray, jboolean*)>(env, slot::GetByteArrayElements);
+        const auto release_elements = entry<void (*)(Env*, jarray, jbyte*, jint)>(env, slot::ReleaseByteArrayElements);
+        jobject block = call_object(env, probe, ids.asset, static_cast<jint>(n), 0x61);
+        check(1, block != nullptr && block_holds(block, n, 0x61));
+        jbyte* pointer = block != nullptr ? get_elements(env, block, nullptr) : nullptr;
+        uint8_t pattern[16];
+        for (unsigned i = 0; i < sizeof(pattern); ++i) {
+            pattern[i] = static_cast<uint8_t>(0x90 + i);
+        }
+        check(2, pointer != nullptr && safe_store(pointer + 100, pattern, sizeof(pattern)));
+        if (block != nullptr) {
+            delete_local(env, block);  // the native method returns; the pointer is never released
+        }
+        for (int i = 0; i < 100; ++i) {
+            jobject temporary = call_object(env, probe, ids.asset, static_cast<jint>(n), 0x70 + (i & 15));
+            check(3, temporary != nullptr && temporary != block);
+            if (temporary != nullptr) {
+                delete_local(env, temporary);
+            }
+            if (i % 10 == 9) {
+                call_void(env, probe, ids.collect);
+            }
+        }
+        uint8_t seen[128];
+        check(4, pointer != nullptr && safe_copy(seen, pointer, sizeof(seen)) && all_equal(seen, 100, 0x61) &&
+                     __builtin_memcmp(seen + 100, pattern, sizeof(pattern)) == 0);
+        // The release goes to the block, however it arrives: the runtime would free a pointer it never handed out.
+        jobject second = call_object(env, probe, ids.asset, 300, 0x62);
+        jobject held = second != nullptr ? new_global(env, second) : nullptr;  // a real reference to the array
+        jbyte* second_pointer = second != nullptr ? get_elements(env, second, nullptr) : nullptr;
+        check(5, held != nullptr && second_pointer != nullptr);
+        if (held != nullptr && second_pointer != nullptr) {
+            const uint8_t written = 0x63;
+            check(6, safe_store(second_pointer + 7, &written, 1));
+            release_elements(env, held, second_pointer, 0);
+            check(7, call_int(env, probe, ids.peek, held, 7) == 0x63);
+        }
+        if (second != nullptr) {
+            delete_local(env, second);
+        }
+        if (held != nullptr) {
+            delete_global(env, held);
+        }
+        check(8, !entry<jboolean (*)(Env*)>(env, slot::ExceptionCheck)(env));
+        exception_clear(env);
+        report.verdict("ended_pin", failed == 0);
+        char code[12];
+        decimal(code, failed);
+        report.line("ended_pin_failed_check", code);
+    }
+
+    // The reference of a block that ended, kept across "frames": every call accepts it, and Java's and the application's
+    // writes (different bytes of one chunk) meet in the block.
+    {
+        constexpr uint32_t n = 2048;
+        constexpr int kFrames = 100;
+        unsigned failed = 0;
+        const auto check = [&](unsigned code, bool condition) {
+            if (!condition && failed == 0) {
+                failed = code;
+            }
+        };
+        const auto get_elements = entry<jbyte* (*)(Env*, jarray, jboolean*)>(env, slot::GetByteArrayElements);
+        const auto release_elements = entry<void (*)(Env*, jarray, jbyte*, jint)>(env, slot::ReleaseByteArrayElements);
+        const auto array_length = entry<jsize (*)(Env*, jarray)>(env, slot::GetArrayLength);
+        const auto get_region = entry<void (*)(Env*, jarray, jsize, jsize, jbyte*)>(env, slot::GetByteArrayRegion);
+        jobject kept = call_object(env, probe, ids.asset, static_cast<jint>(n), 0x41);
+        check(1, kept != nullptr && block_holds(kept, n, 0x41));
+        jobject held = kept != nullptr ? new_global(env, kept) : nullptr;  // Java keeps the array
+        if (kept != nullptr) {
+            delete_local(env, kept);  // the first native method returned: the reference in the variable is an ended block's
+        }
+        for (int frame = 0; failed == 0 && frame < kFrames; ++frame) {
+            call_void(env, probe, ids.poke, held, frame, 0x80 + (frame & 0x3f));  // Java writes
+            check(2, array_length(env, kept) == static_cast<jsize>(n));
+            jbyte* elements = get_elements(env, kept, nullptr);
+            check(3, elements != nullptr && byte_at(kept, frame) == 0x80 + (frame & 0x3f));  // Java's write is in the block
+            const uint8_t written = static_cast<uint8_t>(0x40 + (frame & 0x3f));
+            check(4, elements != nullptr && safe_store(elements + 1000 + frame, &written, 1));  // the application writes
+            if (elements != nullptr) {
+                release_elements(env, kept, elements, 0);
+            }
+            check(5, call_int(env, probe, ids.peek, kept, 1000 + frame) == written);  // a call with the kept reference
+            jbyte region[2] = {};
+            get_region(env, kept, frame, 1, region);
+            check(6, static_cast<uint8_t>(region[0]) == 0x80 + (frame & 0x3f));
+            check(7, call_int(env, probe, ids.peek, held, 1000 + frame) == written &&
+                         (call_int(env, probe, ids.peek, held, frame) & 0xff) == 0x80 + (frame & 0x3f));  // both reached the array
+            delete_local(env, kept);  // the frame's end: the reference ends again
+        }
+        if (held != nullptr) {
+            delete_global(env, held);
+        }
+        check(8, !entry<jboolean (*)(Env*)>(env, slot::ExceptionCheck)(env));
+        exception_clear(env);
+        report.verdict("ended_kept_ref", failed == 0);
+        char code[12];
+        decimal(code, failed);
+        report.line("ended_kept_ref_failed_check", code);
+    }
+
+    // What a dirty push costs (recorded): a Java call passed a 1 MiB block with every chunk written through the pointer,
+    // against the same call with the block clean.
+    {
+        const jmethodID echo = static_method(env, probe, "echo", "([B)I");
+        constexpr uint32_t n = 1u << 20;
+        constexpr int kRounds = 20;
+        jobject block = echo != nullptr ? call_object(env, probe, ids.asset, static_cast<jint>(n), 0x10) : nullptr;
+        if (block != nullptr && block_holds(block, n, 0x10)) {
+            uint64_t dirty_us = 0, clean_us = 0;
+            for (int round = 0; round < kRounds; ++round) {
+                for (uint32_t chunk = 0; chunk < n / 4096; ++chunk) {
+                    const uint8_t written = static_cast<uint8_t>(round + chunk + 1);
+                    safe_store(const_cast<char*>(static_cast<const char*>(block)) + 16 + chunk * 4096 + 1, &written, 1);
+                }
+                const uint64_t start = now_us();
+                call_int(env, probe, echo, block);
+                dirty_us += now_us() - start;
+                const uint64_t clean_start = now_us();
+                call_int(env, probe, echo, block);
+                clean_us += now_us() - clean_start;
+            }
+            char text[12];
+            decimal(text, static_cast<uint32_t>(dirty_us * 1000 / kRounds));
+            report.line("push_dirty_ns", text);
+            decimal(text, static_cast<uint32_t>(clean_us * 1000 / kRounds));
+            report.line("push_clean_ns", text);
+        }
+        if (block != nullptr) {
+            delete_local(env, block);
+        }
         exception_clear(env);
     }
 

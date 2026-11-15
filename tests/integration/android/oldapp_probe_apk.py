@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""The old-application probe: one application in two variants, built without Android's SDK.
+"""The old-application probe: one application in three variants, built without Android's SDK.
 
 android/lineage-24/overlay/oldapp makes a very old 32-bit game start on ART. A test of it needs an application
 that does what such a game does and that is no one's game: the receiver here (oldapp_probe_dex.py) loads
 `libkoldprobe.so` (oldapp/oldapp_probe.cpp), which reads a Java `byte[]` through the object pointer the way
 Dalvik allowed, uses it through the array functions, and allocates from a heap that must lie below 2 GiB.
 
-The two variants have the same code and differ in the package and the target level:
+The variants have the same code and differ in the package, the target level and the process:
 
 - ``old``: targetSdkVersion 10. The framework loads the layer for it once it is switched on, and the probe passes;
 - ``modern``: targetSdkVersion 29, the highest a host can sign without Android's tools (the JAR signature of
   orientation_probe_apk.py is scheme v1). The rule the layer follows is "below 14", so any level from 14 up
-  is the same witness; this one never gets the layer.
+  is the same witness; this one never gets the layer;
+- ``named``: the old variant in a process named other than its package (android:process), as a game that
+  declares its own process name is: the layer must still know which libraries are the application's own.
 
 The old variant installs only past the package manager's block on old targets (`adb install
 --bypass-low-target-sdk-block`, the path Andarium's installer takes for them). The packages are not
@@ -58,7 +60,11 @@ ABI_DIRECTORY = "lib/armeabi-v7a"
 VARIANTS = {
     "old": ("org.example.andarium.oldappprobe", 4, 10),
     "modern": ("org.example.andarium.oldappprobe.modern", 21, 29),
+    "named": ("org.example.andarium.oldappprobe.named", 4, 10),
 }
+#: variant -> the name of its process, where it is not the package's (android:process): the application's own
+#: libraries are told apart by the package, which the process name then does not show.
+PROCESS_NAMES = {"named": "org.example.andarium.namedprocess"}
 
 
 def package_of(variant: str) -> str:
@@ -74,7 +80,8 @@ def manifest_tree(variant: str, debuggable: bool = False) -> binary_xml.Element:
     package, minimum, target = VARIANTS[variant]
     return binary_xml.Element("manifest", (("package", package), ("versionCode", 1)), (
         binary_xml.Element("uses-sdk", (("minSdkVersion", minimum), ("targetSdkVersion", target))),
-        binary_xml.Element("application", (("label", "Old App Probe"), *((("debuggable", True),) if debuggable else ())), (
+        binary_xml.Element("application", (("label", "Old App Probe"), *((("debuggable", True),) if debuggable else ()),
+                                           *((("process", PROCESS_NAMES[variant]),) if variant in PROCESS_NAMES else ())), (
             binary_xml.Element("receiver", (("name", RECEIVER), ("exported", True))),
         )),
     ))

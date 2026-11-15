@@ -1090,7 +1090,10 @@ reads it again, writes it through the raw pointer without a release and hands it
 to a Java method that reads it, opens it through its own critical pointer and the
 block's at once, keeps a pointer to an array Java holds through a thousand later
 blocks and collections and gets the same block back when the array is obtained
-again (64 such arrays, 100 times each), clones it after a write through `GetByteArrayElements`, reads
+again (64 such arrays, 100 times each), keeps a pointer from `GetByteArrayElements` that it never
+releases through later blocks and collections, releases a copy through the array's other reference,
+uses the reference of an ended block for a hundred frames of calls and writes from both sides, clones it
+after a write through `GetByteArrayElements`, reads
 a committed write through a second reference to the array (pointers from
 `GetByteArrayElements` and `GetPrimitiveArrayCritical`), grows
 a malloc buffer with `getline`, asks `malloc_usable_size`, reallocates and
@@ -1106,7 +1109,8 @@ get 5000 or more `byte[]` results of seeded lengths from a Java asset reader and
 never delete them) runs in a process of its own in every variant, and once more
 debuggable (CheckJNI); with the layer the log shows no declined result, no
 allocation that left the arena and a thread peak below the limit. A shorter run
-on a native thread that attaches itself is the second row (`scene_attached`).
+on a native thread that attaches itself is the second row (`scene_attached`), and the scene runs
+once more in a process named other than its package (`android:process`).
 `android17-oldapp-runner` (tooling) runs the package (manifest, DEX file, armv7
 build), the verdicts and the commands without a guest. The unit tests
 (`andarium-oldapp-*`) run the JNI interposer against a fake runtime that accepts

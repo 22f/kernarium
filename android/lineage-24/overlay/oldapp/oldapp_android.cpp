@@ -658,7 +658,8 @@ bool is_own_library(const void* function) {
 }
 
 // The package of this process, from its name (/proc/self/cmdline): left empty when it cannot be read, and every
-// application library is then the application's own.
+// application library is then the application's own. A process named other than its package (android:process) shows
+// no package there: package_from_runtime() below asks the runtime, which knows it, and the name is only the fallback.
 void read_package() {
     constexpr int kReadOnly = 0;
     constexpr int kCloseOnExec = 0x80000;
@@ -677,6 +678,65 @@ void read_package() {
     if (!package_of_process(name, g_package, sizeof(g_package))) {
         g_package[0] = '\0';
     }
+}
+
+// The package the runtime says this process runs: ActivityThread.currentPackageName(), looked up through JNI at the
+// load of the layer (the framework loads it in handleBindApplication, after the application's binding is set). It
+// replaces the name taken from the command line when it answers. False (nothing changed) when the class or the method is
+// not there, the call fails, or the answer is empty.
+bool package_from_runtime(jni::Env* env) {
+    using namespace jni;
+    auto push_frame = reinterpret_cast<jint (*)(Env*, jint)>(env->functions[slot::PushLocalFrame]);
+    auto pop_frame = reinterpret_cast<jobject (*)(Env*, jobject)>(env->functions[slot::PopLocalFrame]);
+    auto exception_check = reinterpret_cast<jboolean (*)(Env*)>(env->functions[slot::ExceptionCheck]);
+    auto exception_clear = reinterpret_cast<void (*)(Env*)>(env->functions[slot::ExceptionClear]);
+    if (push_frame(env, 8) != JNI_OK) {
+        exception_clear(env);
+        return false;
+    }
+    bool ok = false;
+    do {
+        auto find_class = reinterpret_cast<jobject (*)(Env*, const char*)>(env->functions[slot::FindClass]);
+        auto get_static = reinterpret_cast<jmethodID (*)(Env*, jclass, const char*, const char*)>(
+            env->functions[slot::GetStaticMethodID]);
+        auto call_static = reinterpret_cast<jobject (*)(Env*, jclass, jmethodID, const jvalue*)>(
+            env->functions[static_call_slot(kObject, kArray)]);
+        auto utf_chars = reinterpret_cast<const char* (*)(Env*, jobject, jboolean*)>(env->functions[slot::GetStringUTFChars]);
+        auto release_chars = reinterpret_cast<void (*)(Env*, jobject, const char*)>(env->functions[slot::ReleaseStringUTFChars]);
+        jobject activity_thread = find_class(env, "android/app/ActivityThread");
+        if (activity_thread == nullptr || exception_check(env)) {
+            break;
+        }
+        jmethodID current = get_static(env, activity_thread, "currentPackageName", "()Ljava/lang/String;");
+        if (current == nullptr || exception_check(env)) {
+            break;
+        }
+        jobject name = call_static(env, activity_thread, current, nullptr);
+        if (name == nullptr || exception_check(env)) {
+            break;
+        }
+        const char* chars = utf_chars(env, name, nullptr);
+        if (chars == nullptr) {
+            break;
+        }
+        char text[sizeof(g_package)];
+        if (package_of_process(chars, text, sizeof(text))) {
+            for (size_t i = 0; i < sizeof(text); ++i) {
+                g_package[i] = text[i];
+                if (text[i] == '\0') {
+                    break;
+                }
+            }
+            ok = true;
+        }
+        release_chars(env, name, chars);
+    } while (false);
+    if (exception_check(env)) {
+        exception_clear(env);
+        ok = false;
+    }
+    pop_frame(env, nullptr);
+    return ok;
 }
 
 // ---- the native methods of the application
@@ -932,7 +992,8 @@ extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void* vm_pointe
         oldapp_log_print(kLogWarn, kTag, "no region below 2 GiB: allocator imports are left alone");
     }
     read_package();
-    if (g_package[0] == '\0') {
+    const bool package_from_command_line = g_package[0] != '\0';
+    if (!package_from_runtime(env) && !package_from_command_line) {
         oldapp_log_print(kLogWarn, kTag,
                          "the package of this process is unknown: every library but the platform's counts as the application's own");
     }
