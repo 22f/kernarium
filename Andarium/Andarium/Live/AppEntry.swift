@@ -296,6 +296,17 @@ struct AppEntry {
         model.driver = runtime
         model.phase = .running(.normal)
         runtime.beginInputProbe()
+        if let script = OldAppsProbeLaunch.script(in: ProcessInfo.processInfo.environment) {
+            let scripted = ScriptedOldApps(open: ["com.example.rally"])
+            switch script {
+            case .apps: break
+            case .refuse: scripted.writeAnswer = .failed
+            case .none: scripted.listingAnswer = .unavailable
+            }
+            model.scriptedOldApps = scripted
+            // What the first listing of a run does once Android's storage is up.
+            Task { await model.refreshOldApps() }
+        }
         return model
     }
 

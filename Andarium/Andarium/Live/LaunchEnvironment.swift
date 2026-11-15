@@ -90,6 +90,23 @@ nonisolated enum InputProbeLaunch {
     }
 }
 
+/// A UI test's probe session with a scripted list of old apps in place of the
+/// image's `kernarium_oldapp` command (`ANDARIUM_OLD_APPS_PROBE`): `apps` lists
+/// two made-up apps, one of them on and open; `refuse` lists the same and
+/// refuses every change; `none` lists none, as an image without the command.
+/// Settings > Apps > Old app compatibility is then reachable without a guest.
+nonisolated enum OldAppsProbeLaunch {
+    static let environmentName = "ANDARIUM_OLD_APPS_PROBE"
+
+    enum Script: String {
+        case apps, refuse, none
+    }
+
+    static func script(in environment: [String: String]) -> Script? {
+        InputProbeLaunch.requested(in: environment) ? environment[environmentName].flatMap(Script.init(rawValue:)) : nil
+    }
+}
+
 /// The development build's compass check (`ANDARIUM_COMPASS_READOUT=1`): the
 /// application prints the device motion sample the guest's field comes from,
 /// with iOS's own attitude and heading from it (`CompassReadout`).
@@ -110,6 +127,7 @@ extension AppEntry {
             && ThermalOverride.stated(in: environment) == nil
             && !InputProbeLaunch.requested(in: environment)
             && !CompassReadoutLaunch.requested(in: environment)
+            && environment[OldAppsProbeLaunch.environmentName] == nil
             && environment["XCTestConfigurationFilePath"] == nil
     }
 

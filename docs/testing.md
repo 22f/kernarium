@@ -507,6 +507,19 @@ do nothing unless `TEST_RUNNER_ANDARIUM_CAPTURE_DIR` names a folder.
 `GuestRecoveryTests` check that a recovery the guest asked for is a recovery
 session and its reboot a normal one.
 
+`OldAppCompatibilityTests` (`andarium-core`) read the image's old-app command on
+canned output of its specification (the version line and the five fields, an
+unknown trailing field, a label with odd characters, a missing command, an
+unknown version, a usage error, a refusal) and send it nothing that is not a
+package name; `OldAppsModelTests` play the page's model against a stub runtime
+and a scripted list (the run's first listing with Settings never opened, when
+the virtual machine is asked, a listing older than a change, an alert for a
+page that was closed, what each switch asks first, what a refused change
+leaves, the hint after Install anyway), `OldAppsScreenTests` host
+Settings and the page, `OldAppsOperationTests` run the adapter through the
+application's adb channel against the fake adbd, and `OldAppsWordsTests` read the
+words in each language.
+
 `AndariumUITests` is the UI-test target of the same scheme
 (`xcodebuild test -scheme Andarium -only-testing:AndariumUITests`, with
 `-parallel-testing-enabled NO`), run on an iPad Simulator and an iPhone
@@ -525,7 +538,11 @@ a session: an iPad's interface follows, an iPhone's stays portrait. The
 results carry how many attempts each repeated step took. The Simulator produces
 no Escape, Delete, Caps Lock, F13, lone Shift or Globe key, and no raw mouse
 motion under the pointer lock. `SideKeysTipUITests` leaves the side keys' tip
-on and taps the keys once: they open. `NoGoogleNoticeUITests` holds the one
+on and taps the keys once: they open. `OldAppsUITests` reach Settings > Apps > Old
+app compatibility in a probe session with a scripted list of old apps
+(`ANDARIUM_OLD_APPS_PROBE`) and flip the switches: the alert that asks before
+turning on, the one for an open app turned off, a change the virtual machine
+refuses, and no row without the command. `NoGoogleNoticeUITests` holds the one
 test of the target that is not a probe session, and boots a real guest: it
 creates a virtual machine in the Simulator and starts it for real, so it needs
 the Simulator Android runtime packaged and the system image staged
