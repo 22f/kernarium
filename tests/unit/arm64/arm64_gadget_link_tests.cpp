@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "arm64_gadget_test_support.hpp"
 #include "cpu/arm64/gadgets/program.hpp"
+#include "cpu/gadget_shared_space.hpp"
 #include "require.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory_resource>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -119,6 +122,199 @@ std::uint32_t test_branch(std::uint64_t pc, std::uint64_t target,
 		(static_cast<std::uint32_t>(bit & 31U) << 19) |
 		(static_cast<std::uint32_t>(nonzero) << 24) |
 		(immediate << 5);
+}
+
+/* A cell laid out as the executor's LinkRecord, retargeted as it is: its
+ * pair written whole with gadget_cache::store_pair, behind a release fence
+ * when it names a block, while translated code follows it. */
+struct RetargetedRecord final {
+	explicit RetargetedRecord(std::uint64_t pc) noexcept : link{.guest_pc = pc}
+	{
+		uml::emulator::tests::unlink(link);
+	}
+
+	RetargetedRecord(const RetargetedRecord &) = delete;
+	RetargetedRecord &operator=(const RetargetedRecord &) = delete;
+
+	void reset() noexcept
+	{
+		uml::cpu::gadget_cache::store_pair(&link.entry,
+			address(uml_arm64_gadget_link_exit),
+			uml::cpu::gadget_cache::word_of(
+				gadgets::unlinked_stream(link)));
+	}
+
+	void link_to(const gadgets::BlockLink &block) noexcept
+	{
+		std::atomic_thread_fence(std::memory_order_release);
+		uml::cpu::gadget_cache::store_pair(&link.entry, block.entry,
+			uml::cpu::gadget_cache::word_of(block.stream));
+	}
+
+	gadgets::BlockLink link;
+};
+
+/* The blocks a retargeted record names at its PC, each with a count of its
+ * own, and the pairs a writer stores whole: one of theirs, or link_exit with
+ * the record's own stream word. */
+struct RetargetedBlocks final {
+	explicit RetargetedBlocks(std::uint64_t pc)
+	{
+		for (std::uint32_t index = 0; index < count; ++index) {
+			/* `index` NOPs, MOVZ X0, #(100 + index), SVC #0. */
+			std::vector<std::uint32_t> instructions(index,
+				0xd503'201fU);
+			instructions.push_back(0xd280'0000U |
+				((100U + index) << 5));
+			instructions.push_back(0xd400'0001U);
+			const auto built = gadgets::Builder{}.build(pc, instructions);
+			blocks.emplace_back(built.program);
+			blocks.back().link(views[index]);
+			counts[index] = built.program.instruction_count();
+		}
+	}
+
+	/* Whether `entry` and `stream` are a pair one store wrote, with the
+	 * header in front of the stream giving `link`'s PC and the count of the
+	 * block it names. */
+	[[nodiscard]] bool whole(const gadgets::BlockLink &link,
+		std::uint64_t entry, std::uint64_t stream) const noexcept
+	{
+		const auto header = [&](std::uint64_t &pc, std::uint8_t &count) {
+			const auto *bytes = reinterpret_cast<const unsigned char *>(
+				stream) - gadgets::block_header_bytes -
+				sizeof(std::uintptr_t);
+			std::memcpy(&pc, bytes, sizeof(pc));
+			count = bytes[gadgets::block_header_count];
+		};
+		std::uint64_t pc = 0;
+		std::uint8_t header_count = 0;
+		if (stream == uml::cpu::gadget_cache::word_of(
+				gadgets::unlinked_stream(link))) {
+			header(pc, header_count);
+			return entry == address(uml_arm64_gadget_link_exit) &&
+				pc == link.guest_pc && header_count == 0;
+		}
+		for (std::size_t index = 0; index < count; ++index) {
+			if (stream != uml::cpu::gadget_cache::word_of(
+					views[index].stream))
+				continue;
+			header(pc, header_count);
+			return entry == views[index].entry && pc == link.guest_pc &&
+				header_count == counts[index];
+		}
+		return false;
+	}
+
+	static constexpr std::size_t count = 4;
+	std::vector<LinkedBlock> blocks;
+	std::array<gadgets::BlockLink, count> views{};
+	std::array<std::size_t, count> counts{};
+};
+
+/* Translated code follows a record that other threads retarget between the
+ * blocks at its PC and its exit, through the production pair writer: every
+ * pair a reader loads is one a writer stored, and every run of a branch to
+ * the record ends as one of the blocks or the exit says. */
+void retargeted_record_follow()
+{
+	constexpr std::uint64_t source = 0x4000;
+	constexpr std::uint64_t pc = 0x4040;
+	RetargetedRecord record{pc};
+	const RetargetedBlocks targets{pc};
+
+	/* The check tells a pair torn between two stores from a whole one. */
+	require(targets.views[0].entry != targets.views[1].entry);
+	for (std::size_t index = 0; index < RetargetedBlocks::count; ++index)
+		require(targets.whole(record.link, targets.views[index].entry,
+			uml::cpu::gadget_cache::word_of(
+				targets.views[index].stream)));
+	require(targets.whole(record.link, address(uml_arm64_gadget_link_exit),
+		uml::cpu::gadget_cache::word_of(
+			gadgets::unlinked_stream(record.link))));
+	require(!targets.whole(record.link, targets.views[0].entry,
+		uml::cpu::gadget_cache::word_of(targets.views[1].stream)));
+	require(!targets.whole(record.link, address(uml_arm64_gadget_link_exit),
+		uml::cpu::gadget_cache::word_of(targets.views[0].stream)));
+	require(!targets.whole(record.link, targets.views[0].entry,
+		uml::cpu::gadget_cache::word_of(
+			gadgets::unlinked_stream(record.link))));
+
+	const std::array instructions{direct_branch(source, pc)};
+	const auto branch = gadgets::Builder{}.build(source, instructions,
+		[&](std::uint64_t) -> const gadgets::BlockLink * {
+			return &record.link;
+		});
+
+	std::atomic<bool> stop{false};
+	std::atomic<unsigned> writing{0};
+	std::atomic<std::uint64_t> torn{0};
+	std::atomic<std::uint64_t> wrong{0};
+	std::vector<std::thread> threads;
+	for (unsigned writer = 0; writer < 2; ++writer)
+		threads.emplace_back([&, writer] {
+			writing.fetch_add(1);
+			for (std::size_t step = writer; !stop.load(
+				     std::memory_order_relaxed); step += 3) {
+				const auto state = step % (RetargetedBlocks::count + 1);
+				if (state == RetargetedBlocks::count)
+					record.reset();
+				else
+					record.link_to(targets.views[state]);
+			}
+		});
+	for (unsigned reader = 0; reader < 2; ++reader)
+		threads.emplace_back([&] {
+			while (!stop.load(std::memory_order_relaxed)) {
+				std::uint64_t entry = 0;
+				std::uint64_t stream = 0;
+				uml::cpu::gadget_cache::load_pair(&record.link.entry,
+					entry, stream);
+				if (!targets.whole(record.link, entry, stream))
+					torn.fetch_add(1);
+			}
+		});
+	while (writing.load() != 2)
+		std::this_thread::yield();
+
+	/* What a run of the branch ends as: the exit at the record's PC, or
+	 * block `index`'s system call. */
+	std::array<std::uint64_t, RetargetedBlocks::count + 1> seen{};
+	::uml::memory::Tlb tlb;
+	std::uint64_t runs = 0;
+	constexpr std::uint64_t enough = 200'000;
+	constexpr std::uint64_t most = 20'000'000;
+	const auto outcomes = [&] {
+		return static_cast<std::size_t>(std::ranges::count_if(seen,
+			[](std::uint64_t times) { return times != 0; }));
+	};
+	for (; runs < most && (runs < enough || outcomes() < 2); ++runs) {
+		arm64::CpuState cpu{};
+		std::size_t executed = 0;
+		const auto event = gadgets::execute(branch.program, cpu, tlb,
+			executed);
+		if (event == ::uml::cpu::EngineEvent::continued) {
+			if (cpu.pc == pc && executed == 1)
+				++seen[RetargetedBlocks::count];
+			else
+				wrong.fetch_add(1);
+			continue;
+		}
+		const auto index = cpu.registers[0] - 100;
+		if (event == ::uml::cpu::EngineEvent::system_call &&
+		    index < RetargetedBlocks::count &&
+		    cpu.pc == pc + 4 * targets.counts[index] &&
+		    executed == 1 + targets.counts[index])
+			++seen[index];
+		else
+			wrong.fetch_add(1);
+	}
+	stop.store(true);
+	for (auto &thread : threads)
+		thread.join();
+	require(torn.load() == 0);
+	require(wrong.load() == 0);
+	require(runs < most);
 }
 
 } // namespace
@@ -489,6 +685,8 @@ int main()
 		require(cpu.pc == 0x4000);
 		require(executed == 8193);
 	}
+
+	retargeted_record_follow();
 
 	return 0;
 }
