@@ -83,10 +83,12 @@ tail and resolves the same address.
   instruction from the stream pointer on a fault.
 - A block ends at an unconditional transfer or at the 64-instruction fetch
   window, not at its first conditional branch. A cached link names its target
-  by a stream pointer and an instruction count, one aligned pair that a single
-  paired store replaces; the guest bounds of a stream sit in the two words in
-  front of it, loaded at `[stream, #-16]`. `x86-64-gadget-link-layout` holds the
-  layout.
+  by the target's first entry and its stream past that entry, one aligned pair
+  that a single paired store replaces, so a follow branches on the pair alone.
+  In front of the stream a pair names sit the target's instruction count, its
+  guest bounds and the first entry (`link_header` in `program.hpp`): a body's
+  own, or an unlinked record's, whose entry is `link_exit`.
+  `x86-64-gadget-link-layout` holds the layout.
 - A dispatch's instruction budget bounds how long it runs, not where a block
   stops: the block that crosses it runs to its end. Only a single step and the
   instruction a POPF or IRET setting TF leaves before its trap ask for an exact
