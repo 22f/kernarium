@@ -1192,6 +1192,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           cas_hal_variant: str | None = None,
                           adbd_variant: str | None = None,
                           services_jar_variant: str | None = None,
+                          oldapp_variant: str | None = None,
                           input_flinger_variant: str | None = None,
                           network_stack_variant: str | None = None,
                           wifi_tracker_variant: str | None = None,
@@ -3173,6 +3174,29 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                                else b"kernarium: no reminder for a camera that the hardware toggle blocks (\x00")
                         )
                     archive.writestr("SYSTEM/framework/services.jar", services_jar.getvalue())
+                # The old-application layer: a 32-bit ARM shared object with a JNI_OnLoad, and the
+                # framework's ActivityThread topic that loads it (framework.jar stores its dex files
+                # uncompressed, so the topic's strings are in the bytes).
+                if oldapp_variant != "missing-library":
+                    archive.writestr(
+                        "SYSTEM/lib/libkernarium_oldapp.so",
+                        (synthetic_aarch64_elf() if oldapp_variant == "not-arm" else synthetic_arm_elf())
+                        + (b"" if oldapp_variant == "no-entry" else b"\x00JNI_OnLoad\x00"),
+                    )
+                if oldapp_variant != "missing-framework":
+                    framework_jar = io.BytesIO()
+                    with zipfile.ZipFile(framework_jar, "w", zipfile.ZIP_STORED) as jar:
+                        jar.writestr(
+                            "classes.dex",
+                            b"dex\n039\x00"
+                            + (b"" if oldapp_variant == "no-load-marker"
+                               else b"/system/lib/libkernarium_oldapp.so\x00")
+                            + (b"" if oldapp_variant == "no-log-marker"
+                               else b"kernarium: old-application layer not loaded\x00")
+                            + (b"" if oldapp_variant == "no-switch-marker"
+                               else b"persist.sys.kernarium.oldapp.\x00"),
+                        )
+                    archive.writestr("SYSTEM/framework/framework.jar", framework_jar.getvalue())
                 # libinputflinger.so holds the p0022 pointer capture LED topic's dump line.
                 if input_flinger_variant != "missing":
                     archive.writestr(
@@ -4537,6 +4561,20 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "of route p0007"),
             ("missing-services-jar-cause", {"services_jar_variant": "missing"},
              "SYSTEM/framework/services.jar is missing"),
+            ("missing-old-application-library", {"oldapp_variant": "missing-library"},
+             "required entries are missing: .*SYSTEM/lib/libkernarium_oldapp.so"),
+            ("old-application-library-is-64-bit", {"oldapp_variant": "not-arm"},
+             "64-bit ELF in a 32-bit library directory: SYSTEM/lib/libkernarium_oldapp.so"),
+            ("old-application-library-without-jni-onload", {"oldapp_variant": "no-entry"},
+             "libkernarium_oldapp.so has no JNI_OnLoad"),
+            ("missing-framework-jar", {"oldapp_variant": "missing-framework"},
+             "SYSTEM/framework/framework.jar is missing"),
+            ("framework-jar-without-the-old-application-hook", {"oldapp_variant": "no-load-marker"},
+             "lacks the ActivityThread topic that loads the old-application layer of route p0007"),
+            ("framework-jar-without-the-old-application-log-line", {"oldapp_variant": "no-log-marker"},
+             "lacks the log line of that topic of route p0007"),
+            ("framework-jar-loads-the-old-application-layer-for-every-app", {"oldapp_variant": "no-switch-marker"},
+             "lacks the per-application switch .* of that topic of route p0007"),
             ("input-flinger-without-the-pointer-capture-led-cause", {"input_flinger_variant": "no-marker"},
              "lacks the pointer capture LED topic of route p0022"),
             ("missing-input-flinger-cause", {"input_flinger_variant": "missing"},

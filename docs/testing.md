@@ -1045,6 +1045,34 @@ Android sees (devices, keys, axes), what comes back (rumble, lights, the
 drivers' feature requests), hot plug, the relay's recovery, and reports the
 guest's cost per report and the relay's memory. `android17-gamepad-runner`
 (tooling) runs its wire, controllers and parsers without a guest.
+`android-oldapp` (integration) registers when `UML_ANDROID_OLDAPP_RELEASE`
+names a release built with the old-application layer
+([README](../android/lineage-24/README.md#old-applications)): a probe application
+of its own (`oldapp_probe_apk.py`, native code built for armeabi-v7a with the
+host's `clang++` and `ld.lld`) is installed as a package that targets API 10, past
+the block on old targets, and as one that targets API 29. The old package, once
+the runner switches it on (after a run without that, which must not load the
+layer), reads a Java `byte[]` through the Dalvik offsets, hands it back to Java
+and the array functions, from a second thread too, writes it through the array
+functions, compares it with a global reference and the original, locks it, keeps
+it while more results arrive, pops it out of a local frame, has Java fill it and
+reads it again, writes it through the raw pointer without a release and hands it
+to a Java method that reads it, opens it through its own critical pointer and the
+block's at once, clones it after a write through `GetByteArrayElements`, reads
+a committed write through a second reference to the array (pointers from
+`GetByteArrayElements` and `GetPrimitiveArrayCritical`), grows
+a malloc buffer with `getline`, asks `malloc_usable_size`, reallocates and
+frees a block libc allocated, finds the function tables
+read-only again and allocates below 2 GiB, and passes; the runner also asserts
+the library's SELinux label and that the log names the first declined shadow once. The modern package gets no layer, the raw read fails
+and the array operations give the runtime's own answers. `--host-shim` boots a
+release without the layer and loads a host-built copy from the old package after
+a control run without it, which qualifies the library and not the framework hook.
+`android17-oldapp-runner` (tooling) runs the package (manifest, DEX file, armv7
+build), the verdicts and the commands without a guest. The unit tests
+(`andarium-oldapp-*`) run the JNI interposer against a fake runtime that accepts
+live references only, the allocator arena, the ELF relocation scan and the page
+protection window.
 `android-camera` (integration) registers when `UML_ANDROID_CAMERA_RELEASE`
 names the release: the runner boots it with the launcher's synthetic camera
 (`--camera=synthetic|blocked`, `--camera-profile=`) and a layout on the vendor

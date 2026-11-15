@@ -408,3 +408,27 @@ if(UML_ANDROID_SYNC_RELEASE AND TARGET uml-darwin-android17)
         PROCESSORS 4
         RESOURCE_GROUPS cpus:4)
 endif()
+
+# The old-application layer (android/lineage-24/overlay/oldapp): a probe
+# application of its own, installed as an old (targetSdkVersion 10) and a
+# modern (29) package, reads a Java byte[] the way a Dalvik-era game does,
+# leaks local references and allocates below 2 GiB; the old package passes, the
+# modern one is left alone. The release must carry the layer and its
+# ActivityThread hook, so it is a release built from this repository's overlay
+# (the accepted release predates them and fails it), and it boots Android with
+# the macOS launcher, so the test is opt-in. The probe's native code is built
+# with the host's clang++ and ld.lld (PATH).
+set(UML_ANDROID_OLDAPP_RELEASE "" CACHE PATH
+    "Installed Android release directory, built with the old-application layer, that the android-oldapp test boots")
+if(UML_ANDROID_OLDAPP_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-oldapp
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_oldapp.py
+            --release ${UML_ANDROID_OLDAPP_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+        LABELS guest;boot;android
+        TIMEOUT 3600
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
