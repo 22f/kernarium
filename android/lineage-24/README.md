@@ -396,7 +396,26 @@ combined camera and microphone reminder becomes the microphone's. The service's
 leaves the `config_sensorUseStartedActivity*` strings at the platform's
 defaults, and `android-camera` ([testing](../../docs/testing.md#android))
 checks it. The host also sends black frames while it interrupts a camera, and
-the HAL passes them on as frames of the camera. Output sizes the host lacks that
+the HAL passes them on as frames of the camera. When the host ends the video of a
+camera (the application left the foreground while the guest had a video stream
+open on it), the camera's video buffers fail under a black, interrupted record
+for as long as the guest keeps the stream, and the HAL decides by the session's
+streams (`camera_session.hpp`). A session with a stream whose consumer is a
+video encoder is over: the request that met the loss fails with every output
+buffer returned as an error, the HAL reports `ERROR_DEVICE` once, the requests
+it still holds drain as `ERROR_REQUEST` without the frame source, and the opened
+session answers every later request, flush and configuration with the internal
+error; a close succeeds. Any other session is told nothing: the HAL closes the
+camera's video streams between requests, which ends the host's loss, and opens
+them again with the next request. The rules have limits: the camera service
+refuses further work on a device in its error state, so a client that reaches the
+HAL after `ERROR_DEVICE` talks to the provider directly, and there a configuration
+is refused by the HAL, which reaches the client as an illegal-argument answer and
+leaves no capture session behind, so a flush after it returns OK; and a
+session closed while it still holds requests returns their buffers as errors
+without a request error for each, and a flush notifies the errors of the requests
+it holds in the order it reaches them, which can precede the request in the
+sensor. Output sizes the host lacks that
 CTS and the camera API require (standard JPEG sizes, 3840x2160 where that is the
 largest video mode, which is the recording size of the large tier, the YUV sizes
 of every smaller JPEG, 1920x1440 and 1280x720 for a concurrent camera) are cut
@@ -412,7 +431,14 @@ declared. A camera lists the keys it honours: the frame duration and the black
 level lock only with `MANUAL_SENSOR`, the AF regions only with autofocus, and no
 camera lists the tone map mode or curves or states the available tone map modes
 (the templates carry no tone map key). Every result carries the scene mode
-(`DISABLED`) and, with `MANUAL_SENSOR`, the black level lock. A video output
+(`DISABLED`) and, with `MANUAL_SENSOR`, the black level lock. A result states
+the crop region its centred camera applies (`camera_crop.hpp`: the requested
+size centred in the active array, clamped to the array and to the smallest size
+the maximum digital zoom allows, which is the array over that zoom; the whole
+array when the request has none), because the camera service joins the zoom
+ratio and that residual region again in the result. The HAL's session layer has
+divided the region by the ratio before the camera sees it and multiplies the
+result's back, so the camera's rule has no ratio in it. A video output
 that stays configured but leaves the requests has its host stream closed after
 half a second and two requests without a still; a request that takes a still
 counts for nothing and starts the count again for every open video output, so

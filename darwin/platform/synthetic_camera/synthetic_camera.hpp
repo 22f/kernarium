@@ -23,6 +23,9 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
 
 namespace uml::platform {
@@ -54,7 +57,22 @@ struct SyntheticCameraOptions {
     std::uint32_t latencyMilliseconds {};
     // The system has granted access. A session of a host that has not is null.
     bool authorized {true};
+    // A named pipe the camera reads commands from, for a test that cannot reach the camera object (a guest that runs in
+    // another process): the camera makes it if the path does not exist, and reads one command a line from it for as long as
+    // it lives (parseSyntheticControlLine). Empty: none.
+    std::string controlPath;
 };
+
+// A command of the control pipe: interrupt every session (for the named cause, the generic one by default) or end the
+// interruption.
+struct SyntheticControlCommand {
+    bool interrupt {};
+    CameraEventKind kind {CameraEventKind::interrupted};
+};
+
+// `interrupt`, `interrupt background|multitasking|pressure|other` or `resume`, in any case, with the blanks around them
+// ignored; nothing for any other line.
+[[nodiscard]] std::optional<SyntheticControlCommand> parseSyntheticControlLine(std::string_view line);
 
 // The multi-camera rule it models, as an AVCaptureMultiCamSession asks it:
 // every camera with an input (one that streams, or has a still on its way)

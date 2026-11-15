@@ -875,8 +875,10 @@ anywhere is a blocker. The candidate must show:
 - **Cameras** (a guest started with `--camera=synthetic` and a camera layout on
   `androidboot.product.vendor.sku`). `android-camera` passes for the layouts
   the synthetic profiles compose, live and blocked, a blocked session showing
-  no sensor privacy reminder for the camera, and `android-camera-restart`
-  passes for the phone profile; the VTS camera provider test
+  no sensor privacy reminder for the camera, `android-camera-restart`
+  passes for the phone profile, and `android-camera-video-lost` passes on an
+  image that carries the HAL topic that handles the host's end of a camera's
+  video; the VTS camera provider test
   (`VtsAidlHalCameraProvider_TargetTest`) passes against the lazy provider; and
   these CTS modules pass sharded, with the failures rerun alone and a result
   that differs from the accepted release's explained:
@@ -1128,13 +1130,37 @@ boots the same instance again over it, expects the same camera IDs, one of them
 with RAW, because a camera the HAL refuses while it builds its list is not
 listed again, reads the static metadata those RAW cameras state (the lens
 shading map and hot pixel map modes, the lens shading state) and takes a RAW
-still of one, with its DNG. `android17-camera-runner` (tooling) runs its
+still of one, with its DNG.
+`android-camera-video-lost` (`--mode video-lost`) tells the synthetic camera,
+through its control pipe (`UML_SYNTHETIC_CAMERA_CONTROL`, test-only), that the
+application left the foreground while the video mode records, and expects the
+recording to end by itself with its clip (which holds encoded video samples)
+saved, the camera application to stay in front, and a recording to work again
+once the application is started again after the person returns (that step starts
+the activity again and shows only that the camera can be opened again). Two more
+cases leave a viewfinder with no recording, the video mode's (which binds an
+encoder surface) and the photo mode's, and expect each live again within 45 s of
+the return (one deadline for the camera, the picture and the frame counters), in
+the same process, with no activity start and no error window; the photo mode's
+viewfinder must not be told the device is gone, and the HAL's log must show that
+it closed and reopened its video streams. The release must carry the HAL topic
+that handles the host's end of a camera's video.
+`android17-camera-runner` (tooling) runs its
 parsers and the expectations of every layout without a guest,
 `android17-camera-layouts` (tooling) the layout set, its fallback order and the
 generated files, and `andarium-camera-plan` (unit) the metadata a RAW camera
 states, which the HAL writes from the same function (`state_raw_metadata`).
 The HAL's result path (the lens shading map and the empty hot pixel map for the
 mode ON) has no check of its own outside the camera CTS modules.
+`android17-camera-device-lost` (tooling) compiles the series' sensor source
+against stub headers and runs its callback path (a request that met the loss
+returns every buffer as an error and tells the framework once, the requests the
+session still holds drain without the frame source); the rest of the series'
+wiring it reads as text, which is a structural check.
+`android17-camera-crop-region` (tooling) is a structural check as well: it reads
+what the series does to the request state, and the rule it uses is the unit row
+`andarium-camera-crop`, which runs the request-to-result round trip through a
+model of the session layer's zoom ratio arithmetic.
 
 Every first-party script that reaches a guest over adb uses the one shared adb
 server, names the guest with `-s 127.0.0.1:<port>` and at the end only

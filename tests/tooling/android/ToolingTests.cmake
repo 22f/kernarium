@@ -284,6 +284,29 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 60)
 
+# What the camera HAL does when the host ends the video of a camera (the
+# application left the foreground): the callback path of the sensor is run, the
+# series' own source compiled against stub headers, and the wiring of the rest
+# of the series is read as text; nothing boots.
+uml_add_tooling_test(
+    NAME android17-camera-device-lost
+    COMMAND ${CMAKE_COMMAND} -E env UML_CXX=${CMAKE_CXX_COMPILER}
+        ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_camera_device_lost.py
+    LABELS android
+    TIMEOUT 180)
+
+# A result of the camera HAL states the crop region its centred camera applies,
+# so that the zoom the camera service splits into a ratio and a residual region
+# joins again in the result; a structural check of what the series does to the
+# request state, the rule itself is a unit row.
+uml_add_tooling_test(
+    NAME android17-camera-crop-region
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_camera_crop_region.py
+    LABELS android
+    TIMEOUT 120)
+
 # The microG spoofing probe's sources agree with each other and with the
 # certificate LineageOS compares with, and its runner reads `am instrument`.
 uml_add_tooling_test(

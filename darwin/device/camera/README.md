@@ -210,6 +210,23 @@ application's statements (the sensor orientation, the rotation that
   for it: a frame of a lower serial was captured before that boundary (it waited
   in the inbox or in the pump's batch while the event was handled) and is
   dropped, never delivered as a live picture after the repair.
+- **Lost video.** The platform reports that the application left the
+  foreground (`CameraEventKind::interruptedInBackground`, which the Apple
+  backend raises for the system's reason that a camera is not available to an
+  application in the background). If the guest has a video stream open on a
+  camera then (even one a suspend has stopped; nothing else decides it, as the
+  host cannot tell a recording from a viewfinder), the camera's video is lost:
+  the capture stops, and every buffer of every video stream of the camera
+  completes with the error and interrupted flags at the stream's rate, with a
+  black interrupted record, whatever the platform does afterwards and for a
+  stream the guest restarts after a suspend, until the guest has closed its
+  last video stream of the camera. A stream it opens next is an ordinary one, so
+  the camera opens again on demand. What the guest's client sees of it is for
+  the guest's camera HAL to decide (the wire's README has the rule). Every other
+  interruption (another application or a call, iPad multitasking, the system's
+  pressure, a restart after an error), and a camera with no video stream, only
+  get the dark gap above. A blocked session hears of none. The report line names
+  the camera and says the video ended.
 - **Video mode.** The device tells its owner (`onVideoMode`) whether the guest
   is in video mode: a live camera's video runs, uninterrupted, and the guest
   asks for the picture stabilized, which Android's record template does and its
@@ -313,7 +330,8 @@ a blocked session never opens a platform session and reports each open of a
 camera once, a hostile guest, a reset with
 streams and stills in flight, an event queue that retries and wakes the server,
 a ring disable that resets nothing, a still on one camera while another
-streams, a join over the hardware budget, and a capture that fails to start
-round after round. `camera-held-requests` runs the vhost-user server over the
+streams, a join over the hardware budget, a capture that fails to start
+round after round, and a video that the application's leaving the foreground
+ends, with the interruptions and the modes that it does not. `camera-held-requests` runs the vhost-user server over the
 device and holds a stream's buffer across a disable and an enable. The Apple
 backend's capture is not run by any test.
