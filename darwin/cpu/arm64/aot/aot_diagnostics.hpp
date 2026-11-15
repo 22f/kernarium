@@ -46,6 +46,9 @@ struct Stats final {
 	 * how many times a lookup asked the history what changed. */
 	std::uint64_t code_bumps{};
 	std::uint64_t history_queries{};
+	/* What binder lookups answered: hit, uncovered, not_ready, poisoned,
+	 * unverified, no_entry, stale. */
+	std::array<std::uint64_t, 7> finds{};
 };
 
 /* Override DARWIN_UML_AOT (nullopt: read the environment again). */

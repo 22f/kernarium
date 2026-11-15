@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <execinfo.h>
 #include <fstream>
 #include <functional>
 #include <iterator>
@@ -155,6 +156,8 @@ const LibraryImage *g_sites_image = nullptr;
 /* Addresses in another library mapped in the same address space: some
  * registers (and the return address) of a case hold one. */
 std::vector<std::uint64_t> g_cross_targets;
+/* Whether the library under test is the fixture (tools/aot/fixture.py). */
+bool g_fixture_library = false;
 
 /* The register an instruction writes SP from, or -1: the 64-bit
  * add/sub (immediate and extended register) and logical (immediate) forms
@@ -670,6 +673,15 @@ void describe(const char *what, const Case &c)
 	c.cpu.tls = arena_base + rng.below(arena_pages) * page_bytes +
 		0x40 * rng.below(32);
 	c.cpu.registers[30] = bias + stub_offset;
+	/* The fixture's page-edge functions return through x15 and one branches
+	 * through x16 (tools/aot/fixture.py). A case may start after the
+	 * instruction that sets x15, so give both a valid target: the random
+	 * ones include addresses of all ones, which the engine's cached
+	 * indirect-branch gadget takes for an empty cell. */
+	if (g_fixture_library) {
+		c.cpu.registers[15] = bias + stub_offset;
+		c.cpu.registers[16] = bias + stub_offset;
+	}
 	if (!g_cross_targets.empty()) {
 		for (std::size_t i = 0; i < 29; ++i)
 			if (rng.below(6) == 0)
@@ -1080,11 +1092,21 @@ void other_bytes_fall_back(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
 	LibraryImage other = image;
-	/* Change one instruction of every code page: a NOP in place of the
-	 * first word of each function, which the engine will run. */
+	/* Change one instruction of every code page: a NOP (a BRK where it is
+	 * one already) in place of the first word of each function, and of
+	 * the first word on every page a function reaches, which the engine
+	 * will run. */
+	const auto change = [&](std::uint64_t at) {
+		std::uint32_t word;
+		std::memcpy(&word, &other.bytes[at], 4);
+		word = word == 0xd503201fU ? 0xd4200000U : 0xd503201fU;
+		std::memcpy(&other.bytes[at], &word, 4);
+	};
 	for (const auto &f : functions) {
-		const std::uint32_t nop = 0xd503201fU;
-		std::memcpy(&other.bytes[f.start + 4], &nop, 4);
+		change(f.start + 4);
+		for (auto page = (f.start / page_bytes + 1) * page_bytes;
+		     page < f.end; page += page_bytes)
+			change(page);
 	}
 	SplitMix rng{17};
 	const auto bias = Fixture::bias;
@@ -1109,25 +1131,18 @@ void other_bytes_fall_back(const LibraryImage &image,
 }
 
 /* A guest that rewrites covered text after the AOT code was entered: the
- * change is seen at the next entry, which falls back for good. */
-void changed_text_falls_back_for_good(const LibraryImage &image,
+ * page it changed is no longer the code the framework stands for, so the
+ * engine runs it, and the pages that did not change are still entered. When
+ * the bytes are back the page is compared again and entered. */
+void changed_text_falls_back(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
 	SplitMix rng{19};
 	const auto bias = Fixture::bias;
-	Fixture ref{4241, image}, got{4242, image};
 	const auto fn = functions[5];
 	auto c = make_case(rng, bias, fn.start, false, true, arena_base(bias));
-	aot::reset_stats();
-	aot::set_enabled(true);
-	const auto first = drive(got.env, got.arena, c, aot_max_blocks);
-	aot::set_enabled(false);
-	const auto entered = aot::stats().enters;
-	require(entered > 0);
-	require(first.done());
-
-	/* Rewrite the first instruction of a function on another code page
-	 * in both guests and tell each address space its code changed. */
+	/* A function on another code page, whose first instruction is
+	 * rewritten below. */
 	const std::uint32_t patched = 0xd2800f00U; /* mov x0, #0x78 */
 	std::uint64_t offset = 0;
 	for (const auto &f : functions)
@@ -1136,25 +1151,62 @@ void changed_text_falls_back_for_good(const LibraryImage &image,
 			break;
 		}
 	require(offset != 0);
-	for (auto *e : {&ref.env, &got.env}) {
-		e->backing.put32(offset, patched);
-		e->memory.invalidate_code(e->bias + offset);
-	}
+	std::uint32_t original;
+	std::memcpy(&original, &image.bytes[offset], 4);
+	LibraryImage changed = image;
+	std::memcpy(&changed.bytes[offset], &patched, 4);
+	const auto d = make_case(rng, bias, offset, false, true, arena_base(bias));
+	/* What the engine does with the bytes the guest holds before and after,
+	 * on fresh guests (invalidate_code publishes in the generation the
+	 * thread ran last, so the guest under test runs last before each). */
+	Fixture ref_changed{4241, changed}, ref_original{4243, image};
 	aot::set_enabled(false);
-	const auto want = drive(ref.env, ref.arena, c, max_blocks);
+	const auto want_c = drive(ref_changed.env, ref_changed.arena, c,
+		max_blocks);
+	const auto want_changed = drive(ref_changed.env, ref_changed.arena, d,
+		max_blocks);
+	const auto want_back = drive(ref_original.env, ref_original.arena, d,
+		max_blocks);
+
+	Fixture got{4242, image};
+	aot::reset_stats();
+	aot::set_enabled(true);
+	const auto first = drive(got.env, got.arena, c, aot_max_blocks);
+	aot::set_enabled(false);
+	auto entered = aot::stats().enters;
+	require(entered > 0);
+	require(first.done());
+	const auto publish = [&](std::uint32_t word) {
+		got.env.backing.put32(offset, word);
+		got.env.memory.invalidate_code(got.env.bias + offset);
+	};
+	publish(patched);
+	/* fn's page did not change: still entered. */
 	aot::set_enabled(true);
 	const auto have = drive(got.env, got.arena, c, aot_max_blocks);
 	aot::set_enabled(false);
-	require(same(want, have, c));
-	const auto st = aot::stats();
-	require(st.poisoned == 1);
-	require(st.enters == entered);
-	/* ... and stays on the engine: a second run enters nothing either. */
+	require(same(want_c, have, c));
+	auto st = aot::stats();
+	require(st.poisoned == 0);
+	require(st.enters > entered);
+	entered = st.enters;
+	/* The changed page itself: a function there is the engine's. */
 	aot::set_enabled(true);
-	const auto again = drive(got.env, got.arena, c, aot_max_blocks);
+	const auto have_changed = drive(got.env, got.arena, d, aot_max_blocks);
 	aot::set_enabled(false);
-	require(same(want, again, c));
-	require(aot::stats().enters == entered);
+	require(same(want_changed, have_changed, d));
+	st = aot::stats();
+	require(st.enters == entered);
+	require(st.poisoned == 0);
+	/* The bytes are back and published: the page is compared again. */
+	publish(original);
+	aot::set_enabled(true);
+	const auto have_back = drive(got.env, got.arena, d, aot_max_blocks);
+	aot::set_enabled(false);
+	require(same(want_back, have_back, d));
+	st = aot::stats();
+	require(st.enters > entered);
+	require(st.poisoned == 0);
 }
 
 /* A loop over a buffer takes the inline hit path: adler32_z over 40000 bytes
@@ -1239,9 +1291,9 @@ void refill_keeps_state(const LibraryImage &image,
 	require(st.refills > compared);
 }
 
-/* A library whose last code page is not mapped yet: the instance cannot be
- * verified, so nothing is entered and the engine runs everything as usual;
- * once the page is mapped the code is entered. */
+/* A library whose last code page is not mapped yet: the code on the pages
+ * that are mapped is entered, a function on the missing page is the
+ * engine's, and once the page is mapped its code is entered too. */
 void partially_mapped_library(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
@@ -1250,11 +1302,18 @@ void partially_mapped_library(const LibraryImage &image,
 		code_end = std::max(code_end, f.end);
 	const auto last_page = (code_end - 1) / page_bytes;
 	require(last_page >= 1);
+	/* Whole functions below the last page, and a pc on the last page in
+	 * each function that reaches it. */
 	std::vector<Function> below;
-	for (const auto &f : functions)
+	std::vector<std::uint64_t> on_last;
+	for (const auto &f : functions) {
 		if (f.end <= last_page * page_bytes)
 			below.push_back(f);
+		else
+			on_last.push_back(std::max(f.start, last_page * page_bytes));
+	}
 	require(below.size() > 8);
+	require(!on_last.empty());
 	SplitMix rng{31};
 	const auto bias = Fixture::bias;
 	Environment ref{4281, bias, image};
@@ -1282,15 +1341,27 @@ void partially_mapped_library(const LibraryImage &image,
 	}
 	require(compared > 3);
 	auto st = aot::stats();
-	require(st.enters == 0);
-	require(st.unreadable > 0);
-	/* The loader maps the rest: the next verification that is due binds
-	 * the library and the code is entered. */
+	require(st.enters > 0);
+	require(st.poisoned == 0);
+	/* The missing page is not entered: it cannot be read. */
+	const auto entered = st.enters;
+	for (int attempt = 0; attempt < 3; ++attempt) {
+		const auto c = make_case(rng, bias, on_last[0], false, true,
+			arena_base(bias));
+		aot::set_enabled(true);
+		(void)drive(got, got_arena, c, 40);
+		aot::set_enabled(false);
+	}
+	st = aot::stats();
+	require(st.enters == entered);
+	require(st.finds[2] > 0); /* not_ready */
+	/* The loader maps the rest: the next time the page is due it is
+	 * compared and the code on it is entered. */
 	got.map_rest(image);
 	std::size_t attempts = 0;
-	while (aot::stats().enters == 0 && attempts < 4000) {
+	while (aot::stats().enters == entered && attempts < 4000) {
 		const auto c = make_case(rng, bias,
-			below[attempts % below.size()].start, false, true,
+			on_last[attempts % on_last.size()], false, true,
 			arena_base(bias));
 		aot::set_enabled(true);
 		(void)drive(got, got_arena, c, aot_max_blocks);
@@ -1301,8 +1372,21 @@ void partially_mapped_library(const LibraryImage &image,
 	std::fprintf(stderr, "partial mapping: after the rest was mapped, entered "
 		"after %zu cases; unreadable %llu\n", attempts,
 		static_cast<unsigned long long>(st.unreadable));
-	require(st.enters > 0);
+	require(st.enters > entered);
 	require(st.poisoned == 0);
+	/* And the code on it behaves as the engine's. */
+	for (std::size_t f = 0; f < on_last.size(); ++f) {
+		const auto c = make_case(rng, bias, on_last[f], false, true,
+			arena_base(bias));
+		aot::set_enabled(false);
+		const auto want = drive(ref, ref_arena, c, max_blocks);
+		if (!want.done())
+			continue;
+		aot::set_enabled(true);
+		const auto have = drive(got, got_arena, c, aot_max_blocks);
+		aot::set_enabled(false);
+		require(same(want, have, c));
+	}
 }
 
 /* Two vCPUs of one address space run rewritten code at once, each with its
@@ -1636,11 +1720,16 @@ void publish_in_the_window(void *context)
 void code_change_in_the_dispatch_window(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
-	const auto form = functions.back();
-	std::uint32_t words[2];
-	std::memcpy(words, &image.bytes[form.start], sizeof(words));
-	require(words[0] == 0xd5033fdfU); /* isb */
-	require(words[1] == 0xd2800020U); /* mov x0, #1 */
+	/* The fixture's `isb; mov x0, #1` form (tools/aot/fixture.py). */
+	const Function *found = nullptr;
+	for (const auto &f : functions) {
+		std::uint32_t words[2];
+		std::memcpy(words, &image.bytes[f.start], sizeof(words));
+		if (words[0] == 0xd5033fdfU && words[1] == 0xd2800020U)
+			found = &f;
+	}
+	require(found != nullptr);
+	const auto form = *found;
 	const std::uint32_t patched = 0xd2800f00U; /* mov x0, #0x78 */
 	const auto bias = Fixture::bias;
 	Fixture ref{4371, image}, got{4372, image};
@@ -1675,6 +1764,208 @@ void code_change_in_the_dispatch_window(const LibraryImage &image,
 		static_cast<unsigned long long>(st.enters));
 	/* Entered once, at the ISB; the changed page is no library page. */
 	require(st.enters == entered + 1);
+}
+
+/* The fixture's page edges (tools/aot/fixture.py: EDGES): functions on one
+ * text page that leave it for the next page by each kind of edge. The
+ * target there adds 100 to x0 and returns through x15; the function that
+ * falls into the page adds 4 on it (1 and 2 on the page before). */
+struct PageEdge final {
+	const char *name;
+	std::uint64_t at;
+};
+constexpr PageEdge page_edges[] = {
+	{"fall", 0x3ff8}, {"b", 0x3000}, {"bl", 0x3020}, {"bcond", 0x3040},
+	{"cbz", 0x3060}, {"tbz", 0x3080}, {"br", 0x30a0}, {"blr", 0x30c0},
+	{"ret", 0x30e0}};
+constexpr std::uint64_t edge_next_page = 0x4000, edge_target = 0x4100;
+
+[[nodiscard]] LibraryImage with_next_page_changed(const LibraryImage &image)
+{
+	LibraryImage other = image;
+	const std::uint32_t eight = 0x91002000U;       /* add x0, x0, #8 */
+	const std::uint32_t two_hundred = 0x91032000U; /* add x0, x0, #200 */
+	std::memcpy(&other.bytes[edge_next_page], &eight, 4);
+	std::memcpy(&other.bytes[edge_target], &two_hundred, 4);
+	return other;
+}
+
+[[nodiscard]] Case edge_case(const PageEdge &edge, std::uint64_t seed,
+	std::uint64_t bias)
+{
+	SplitMix rng{seed};
+	auto c = make_case(rng, bias, edge.at, false, true, arena_base(bias));
+	enterable(c);
+	c.cpu.registers[0] = 0;
+	c.cpu.registers[1] = 5;
+	c.cpu.registers[30] = bias + stub_offset;
+	return c;
+}
+
+/* Every kind of edge from a page that matches the framework to a page whose
+ * mapped bytes differ from it. The code of the page it left is entered, the
+ * edge ends the entry, and the engine runs the other page's bytes; an edge
+ * that went on in the rewritten code of that page would add the old
+ * amount. */
+void edges_into_a_page_that_differs(const LibraryImage &image)
+{
+	const auto other = with_next_page_changed(image);
+	const auto bias = Fixture::bias;
+	unsigned long generation = 4400;
+	for (const auto &edge : page_edges) {
+		Fixture ref{generation++, other}, got{generation++, other};
+		const auto c = edge_case(edge, 73, bias);
+		aot::reset_stats();
+		aot::set_enabled(false);
+		const auto want = drive(ref.env, ref.arena, c, max_blocks);
+		require(want.finished);
+		require(want.cpu.registers[0] ==
+			(std::string{edge.name} == "fall" ? 11U : 200U));
+		aot::set_enabled(true);
+		const auto have = drive(got.env, got.arena, c, aot_max_blocks);
+		aot::set_enabled(false);
+		if (!same(want, have, c))
+			std::fprintf(stderr, "  edge %s\n", edge.name);
+		require(same(want, have, c));
+		const auto st = aot::stats();
+		std::fprintf(stderr, "edge %s into a changed page: %llu entries\n",
+			edge.name, static_cast<unsigned long long>(st.enters));
+		require(st.enters >= 1);
+		require(st.poisoned == 0);
+	}
+}
+
+/* The same edges into a page that matches: it is compared when the edge
+ * first reaches it, and the code on it is entered. */
+void edges_into_a_page_that_matches(const LibraryImage &image)
+{
+	const auto bias = Fixture::bias;
+	unsigned long generation = 4420;
+	for (const auto &edge : page_edges) {
+		Fixture ref{generation++, image}, got{generation++, image};
+		const auto c = edge_case(edge, 79, bias);
+		aot::reset_stats();
+		aot::set_enabled(false);
+		const auto want = drive(ref.env, ref.arena, c, max_blocks);
+		require(want.finished);
+		require(want.cpu.registers[0] ==
+			(std::string{edge.name} == "fall" ? 7U : 100U));
+		aot::set_enabled(true);
+		const auto have = drive(got.env, got.arena, c, aot_max_blocks);
+		aot::set_enabled(false);
+		require(same(want, have, c));
+		const auto st = aot::stats();
+		require(st.enters >= 2);
+		require(st.verifications >= 2);
+		require(st.poisoned == 0);
+	}
+}
+
+/* A page that changes after the page it is entered from was compared: the
+ * edge into it is the engine's from then on; when the bytes are back, it is
+ * compared again. */
+void next_page_changes_after_its_neighbour_was_compared(
+	const LibraryImage &image)
+{
+	const auto other = with_next_page_changed(image);
+	const auto bias = Fixture::bias;
+	for (const auto &edge : page_edges) {
+		Fixture ref_old{4440, image}, ref_new{4441, other};
+		Fixture got{4442, image};
+		const auto c = edge_case(edge, 83, bias);
+		aot::reset_stats();
+		aot::set_enabled(false);
+		const auto old_result = drive(ref_old.env, ref_old.arena, c,
+			max_blocks);
+		const auto new_result = drive(ref_new.env, ref_new.arena, c,
+			max_blocks);
+		require(old_result.finished && new_result.finished);
+		aot::set_enabled(true);
+		const auto first = drive(got.env, got.arena, c, aot_max_blocks);
+		aot::set_enabled(false);
+		require(same(old_result, first, c));
+		auto entered = aot::stats().enters;
+		require(entered >= 2);
+		const auto change = [&](const LibraryImage &to) {
+			for (const auto offset : {edge_next_page, edge_target}) {
+				std::uint32_t word;
+				std::memcpy(&word, &to.bytes[offset], 4);
+				got.env.backing.put32(offset, word);
+			}
+			got.env.memory.invalidate_code(got.env.bias + edge_next_page);
+		};
+		change(other);
+		aot::set_enabled(true);
+		const auto second = drive(got.env, got.arena, c, aot_max_blocks);
+		aot::set_enabled(false);
+		if (!same(new_result, second, c))
+			std::fprintf(stderr, "  edge %s after the change\n", edge.name);
+		require(same(new_result, second, c));
+		/* The page the edge starts on is still entered. */
+		auto st = aot::stats();
+		require(st.enters > entered);
+		require(st.poisoned == 0);
+		entered = st.enters;
+		change(image);
+		aot::set_enabled(true);
+		const auto third = drive(got.env, got.arena, c, aot_max_blocks);
+		aot::set_enabled(false);
+		require(same(old_result, third, c));
+		st = aot::stats();
+		require(st.enters >= entered + 2);
+		require(st.poisoned == 0);
+	}
+}
+
+/* An indirect branch into another instance of the library (a second load
+ * address in the same address space) lands on a page that matches, or on
+ * one that differs: either way the result is the engine's, and the code of
+ * a page that differs is not entered. */
+void edge_into_another_instance(const LibraryImage &image)
+{
+	const auto other = with_next_page_changed(image);
+	constexpr std::uint64_t bias_b = 0x7155'0000'0000ULL;
+	const auto bias = Fixture::bias;
+	for (const bool differs : {true, false}) {
+		const unsigned long generation = differs ? 4460 : 4462;
+		Environment ref{generation, bias, image};
+		Environment got{generation + 1, bias, image};
+		ref.add_library(bias_b, differs ? other : image);
+		got.add_library(bias_b, differs ? other : image);
+		Arena ref_arena{ref.generation, arena_base(bias)};
+		Arena got_arena{got.generation, arena_base(bias)};
+		/* The second instance is bound by running a function on its
+		 * first code page. */
+		const PageEdge warm{"b", 0x3000};
+		auto w = edge_case(warm, 89, bias_b);
+		aot::reset_stats();
+		aot::set_enabled(true);
+		(void)drive_on(got.executor, got.memory, got.generation, bias_b,
+			got_arena, w, aot_max_blocks);
+		aot::set_enabled(false);
+		const auto warmed = aot::stats().enters;
+		require(warmed >= 1);
+		const PageEdge via_register{"reg", 0x3100};
+		auto c = edge_case(via_register, 97, bias);
+		c.cpu.registers[16] = bias_b + edge_target;
+		aot::set_enabled(false);
+		const auto want = drive_on(ref.executor, ref.memory, ref.generation,
+			bias, ref_arena, c, max_blocks);
+		require(want.finished);
+		require(want.cpu.registers[0] == (differs ? 200U : 100U));
+		aot::set_enabled(true);
+		const auto have = drive_on(got.executor, got.memory, got.generation,
+			bias, got_arena, c, aot_max_blocks);
+		aot::set_enabled(false);
+		require(same(want, have, c));
+		const auto st = aot::stats();
+		std::fprintf(stderr, "edge into another instance (page %s): %llu "
+			"entries, %llu cross misses\n", differs ? "differs" : "matches",
+			static_cast<unsigned long long>(st.enters),
+			static_cast<unsigned long long>(st.cross_misses));
+		require(st.cross_misses >= 1);
+		require(st.poisoned == 0);
+	}
 }
 
 /* The 64-bit page digests find a library; they authorize nothing. Two words
@@ -1808,6 +2099,14 @@ void report_host_fault(int signal, siginfo_t *info, void *context)
 		static_cast<unsigned long long>(ss.__x[28]),
 		static_cast<unsigned long long>(ss.__lr));
 	(void)!write(2, text, static_cast<std::size_t>(n));
+	char more[400];
+	const int m = std::snprintf(more, sizeof(more),
+		"x8 %llx x9 %llx x10 %llx x11 %llx x12 %llx x13 %llx x14 %llx x15 %llx x29 %llx\n",
+		(unsigned long long)ss.__x[8], (unsigned long long)ss.__x[9], (unsigned long long)ss.__x[10], (unsigned long long)ss.__x[11], (unsigned long long)ss.__x[12], (unsigned long long)ss.__x[13], (unsigned long long)ss.__x[14], (unsigned long long)ss.__x[15], (unsigned long long)ss.__x[29]);
+	(void)!write(2, more, static_cast<std::size_t>(m));
+	void *frames[24];
+	const int depth = backtrace(frames, 24);
+	backtrace_symbols_fd(frames, depth, 2);
 	_exit(99);
 }
 
@@ -1847,6 +2146,7 @@ int main(int argc, char **argv)
 			continue;
 		const auto image = load_library(file.host);
 		g_sites_image = &image;
+		g_fixture_library = file.guest.ends_with("/libaotfixture.so");
 		const auto functions = load_functions(cfg.functions, file.index);
 		std::fprintf(stderr, "library %zu %s: %zu functions\n", file.index,
 			file.guest.c_str(), functions.size());
@@ -1893,6 +2193,10 @@ int main(int argc, char **argv)
 		if (file.guest.ends_with("/libaotfixture.so")) {
 			loop_through_another_range(image, functions);
 			code_change_in_the_dispatch_window(image, functions);
+			edges_into_a_page_that_differs(image);
+			edges_into_a_page_that_matches(image);
+			next_page_changes_after_its_neighbour_was_compared(image);
+			edge_into_another_instance(image);
 		}
 		/* The scenarios use the first library: they are about the
 		 * mechanism, not about the code. */
@@ -1909,7 +2213,7 @@ int main(int argc, char **argv)
 			preemption_is_bounded(image, sample);
 			two_load_biases(image, sample);
 			other_bytes_fall_back(image, sample);
-			changed_text_falls_back_for_good(image, functions);
+			changed_text_falls_back(image, functions);
 			refill_keeps_state(image, sample);
 			partially_mapped_library(image, functions);
 			two_vcpus(image, sample);

@@ -414,12 +414,17 @@ Target lookup(const CrossTable *table, std::uint64_t address) noexcept
 		const std::uint64_t offset = address - entry.bias;
 		if ((offset & 3U) != 0)
 			break;
+		/* The target's text page must have been compared with the
+		 * stored source; a page not yet compared ends the entry at the
+		 * branch, and the host compares it before the next one. */
+		if (entry.pages[(offset - library.table_base) / page_size] == 0)
+			break;
 		const auto native = read<std::uint32_t>(library.table_offset +
 			4 * ((offset - library.table_base) / 4));
 		if (native == 0)
 			break;
 		UML_AOT_COUNT(cross_hits, 1);
-		return {uml_aot_blob + library.unit_offset + native, entry.bias};
+		return {uml_aot_blob + library.unit_offset + native, &entry};
 	}
 	UML_AOT_COUNT(cross_misses, 1);
 #if UML_AOT_DIAGNOSTICS
@@ -523,6 +528,8 @@ Stats stats() noexcept
 	result.steps_run = get(counters::steps_run);
 	result.code_bumps = get(counters::code_bumps);
 	result.history_queries = get(counters::history_queries);
+	for (std::size_t i = 0; i < result.finds.size(); ++i)
+		result.finds[i] = get(counters::find_results[i]);
 	return result;
 }
 
@@ -582,86 +589,89 @@ bool Binder::changed_since(void *context, std::uint64_t sequence,
 	return false;
 }
 
-Binder::Verdict Binder::verify_pages(
-	::uml::memory::StaticGuestMemory &memory, Instance &instance) noexcept
+Binder::Verdict Binder::verify_page(
+	::uml::memory::StaticGuestMemory &memory, Instance &instance,
+	std::uint64_t index) noexcept
 {
-	const auto &dir = directory();
-	const auto library = dir.library(instance.library);
+	const auto library = directory().library(instance.library);
 	alignas(8) std::array<std::byte, page_size> page;
-	for (std::uint64_t index = 0; index < library.pages; ++index) {
-		auto &word = instance.matched[index / 64];
-		const auto bit = std::uint64_t{1} << (index % 64);
-		if ((word & bit) != 0)
-			continue;
-		const auto address =
-			instance.bias + library.table_base + index * page_size;
-		if (!memory.fetch(address, page))
-			return Verdict::unreadable;
-		UML_AOT_COUNT(pages_hashed, 1);
-		if (std::memcmp(page.data(), uml_aot_blob + library.source +
-		    index * page_size, page_size) != 0)
-			return Verdict::mismatch;
-		word |= bit;
-	}
+	const auto address =
+		instance.bias + library.table_base + index * page_size;
+	if (!memory.fetch(address, page))
+		return Verdict::unreadable;
+	UML_AOT_COUNT(verifications, 1);
+	if (std::memcmp(page.data(), uml_aot_blob + library.source +
+	    index * page_size, page_size) != 0)
+		return Verdict::mismatch;
+	instance.pages[index] = 1;
 	return Verdict::match;
 }
 
-Binder::Verdict Binder::verify(::uml::memory::StaticGuestMemory &memory,
-	void *context, Instance &instance, std::uint64_t code_changes) noexcept
+void Binder::sync(void *context, unsigned long generation,
+	std::uint64_t code_changes) noexcept
 {
-	const auto library = directory().library(instance.library);
-	/* instance.matched holds the pages known to equal the stored text as of
-	 * instance.matched_changes. A page progress is kept when a later page
-	 * is unreadable, so that a retry compares only what is still unknown;
-	 * the code-change history then clears the pages it names. */
-	if (instance.matched.empty()) {
-		instance.matched.assign((library.pages + 63) / 64, 0);
-		instance.matched_changes = code_changes;
-	} else if (instance.matched_changes != code_changes) {
-		darwin_uml_static_code_change ranges[32];
-		std::uint64_t current = 0;
-		const int count = context == nullptr ? -1 :
-			darwin_uml_static_vm_execution_context_code_change_ranges(
-				context, instance.matched_changes, ranges, 32, &current);
+	if (sync_generation_ == generation && sync_changes_ == code_changes)
+		return;
+	darwin_uml_static_code_change ranges[32];
+	std::uint64_t ranges_from = 0;
+	int count = 0;
+	bool have = false;
+	for (auto &instance : instances_) {
+		if (!instance.used || instance.generation != generation ||
+		    instance.poisoned || instance.state_changes == code_changes)
+			continue;
+		/* The history answers what was published after a sequence, up to
+		 * the present, so a change newer than code_changes clears a page
+		 * early and never late. A sequence from the future or a history
+		 * that no longer reaches back clears everything. */
+		const auto from = instance.state_changes;
+		if (!have || ranges_from != from) {
+			std::uint64_t current = 0;
+			count = context == nullptr || from > code_changes ? -1 :
+				darwin_uml_static_vm_execution_context_code_change_ranges(
+					context, from, ranges, 32, &current);
+			ranges_from = from;
+			have = true;
+			UML_AOT_COUNT(history_queries, 1);
+		}
+		const auto library = directory().library(instance.library);
 		const std::uint64_t low = instance.bias + library.table_base;
 		const std::uint64_t high = instance.bias + library.table_end;
-		for (int index = 0; index < count; ++index) {
-			std::uint64_t from = ranges[index].address;
-			std::uint64_t to = from + ranges[index].length;
-			if (ranges[index].length == 0) {
-				from = low;
-				to = high;
+		if (count < 0) {
+			std::fill(instance.pages.begin(), instance.pages.end(), 0);
+		} else {
+			for (int index = 0; index < count; ++index) {
+				std::uint64_t first = ranges[index].address;
+				std::uint64_t last = first + ranges[index].length;
+				/* A range of length zero names the whole address space. */
+				if (ranges[index].length == 0) {
+					first = low;
+					last = high;
+				}
+				if (first >= high || last <= low)
+					continue;
+				first = std::max(first, low);
+				last = std::min(last, high);
+				for (auto page = (first - low) / page_size;
+				     page < (last - low + page_size - 1) / page_size; ++page)
+					instance.pages[page] = 0;
 			}
-			if (from >= high || to <= low)
-				continue;
-			from = std::max(from, low);
-			to = std::min(to, high);
-			for (auto page = (from - low) / page_size;
-			     page < (to - low + page_size - 1) / page_size; ++page)
-				instance.matched[page / 64] &=
-					~(std::uint64_t{1} << (page % 64));
 		}
-		if (count < 0)
-			std::fill(instance.matched.begin(), instance.matched.end(), 0);
-		instance.matched_changes = code_changes;
+		instance.state_changes = code_changes;
 	}
-	UML_AOT_COUNT(verifications, 1);
-	const auto verdict = verify_pages(memory, instance);
-	if (verdict == Verdict::match) {
-		instance.verified = true;
-		instance.verified_changes = code_changes;
-		instance.backoff = 0;
-	}
-	return verdict;
+	sync_generation_ = generation;
+	sync_changes_ = code_changes;
 }
 
 std::int32_t Binder::resolve(::uml::memory::StaticGuestMemory &memory,
-	void *, unsigned long generation, std::uint64_t, std::uint64_t page_va) noexcept
+	void *, unsigned long generation, std::uint64_t code_changes,
+	std::uint64_t page_va) noexcept
 {
 	const auto &dir = directory();
 	alignas(8) std::array<std::byte, page_size> page;
 	if (!memory.fetch(page_va, page))
 		return not_ready;
+	UML_AOT_COUNT(pages_hashed, 1);
 	const auto digest = page_digest(page.data());
 	std::uint32_t slot = static_cast<std::uint32_t>(digest) & (dir.slots - 1);
 	std::uint32_t library_index = 0;
@@ -696,8 +706,13 @@ std::int32_t Binder::resolve(::uml::memory::StaticGuestMemory &memory,
 			if (slot_entry.instance == static_cast<std::int32_t>(victim))
 				slot_entry = PageSlot{};
 		found = &instances_[victim];
-		*found = Instance{generation, library_index, bias, 0, 0, 0, false,
-			true, false};
+		*found = Instance{};
+		found->generation = generation;
+		found->library = library_index;
+		found->bias = bias;
+		found->used = true;
+		found->pages.assign(library.pages, 0);
+		found->state_changes = code_changes;
 		++epoch_;
 	}
 	return found->poisoned ? none :
@@ -717,6 +732,8 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 		last_changes_ = code_changes;
 	}
 #endif
+	/* Every instance of the address space is current before any is used. */
+	sync(context, generation, code_changes);
 	const auto page_va = pc & ~(page_size - 1);
 	auto &slot = pages_[((page_va >> 12) ^ generation) % page_slots];
 	bool fresh = slot.page == page_va && slot.generation == generation;
@@ -754,15 +771,24 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 		slot = PageSlot{};
 		return {};
 	}
-	if (!instance.verified || instance.verified_changes != code_changes) {
-		if (ticks_ < instance.retry_at) {
+	/* The page of `pc` must have been compared with the stored source. */
+	const auto record = directory().library(instance.library);
+	const std::uint64_t page_index =
+		(pc - instance.bias - record.table_base) / page_size;
+	if (pc - instance.bias < record.table_base ||
+	    page_index >= instance.pages.size()) {
+		note_find(FindResult::no_entry, instance.library);
+		return {};
+	}
+	if (instance.pages[page_index] == 0) {
+		if (ticks_ < slot.retry_at) {
 			note_find(FindResult::unverified, instance.library);
 			return {};
 		}
 #if UML_AOT_DIAGNOSTICS
 		const auto began = std::chrono::steady_clock::now();
 #endif
-		const auto verdict = verify(memory, context, instance, code_changes);
+		const auto verdict = verify_page(memory, instance, page_index);
 #if UML_AOT_DIAGNOSTICS
 		counters::verify_nanos.fetch_add(static_cast<std::uint64_t>(
 			std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -771,19 +797,17 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 #endif
 		switch (verdict) {
 		case Verdict::match:
-			++epoch_;
+			slot.backoff = 0;
 			break;
 		case Verdict::unreadable:
 			UML_AOT_COUNT(unreadable, 1);
-			instance.backoff = std::min<std::uint64_t>(
-				std::max<std::uint64_t>(instance.backoff * 2, 64), 65536);
-			instance.retry_at = ticks_ + instance.backoff;
-			instance.verified = false;
+			slot.backoff = std::min<std::uint64_t>(
+				std::max<std::uint64_t>(slot.backoff * 2, 64), 65536);
+			slot.retry_at = ticks_ + slot.backoff;
 			note_find(FindResult::unverified, instance.library);
 			return {};
 		case Verdict::mismatch:
 			instance.poisoned = true;
-			instance.verified = false;
 			UML_AOT_COUNT(poisoned, 1);
 			++epoch_;
 			note_find(FindResult::poisoned, instance.library);
@@ -801,7 +825,7 @@ Hit Binder::entry(std::uint32_t instance_index,
 	std::uint64_t pc) const noexcept
 {
 	const auto &instance = instances_[instance_index];
-	if (!instance.used || instance.poisoned || !instance.verified)
+	if (!instance.used || instance.poisoned)
 		return {};
 	const auto library = directory().library(instance.library);
 	const std::uint64_t offset = pc - instance.bias;
@@ -814,7 +838,7 @@ Hit Binder::entry(std::uint32_t instance_index,
 	if (native == 0)
 		return {};
 	return {uml_aot_blob + library.unit_offset + native, instance.bias,
-		instance_index, instance.library};
+		instance_index, instance.library, instance.pages.data()};
 }
 
 const CrossTable &Binder::cross(unsigned long generation,
@@ -829,15 +853,15 @@ const CrossTable &Binder::cross(unsigned long generation,
 		return cross_;
 	cross_.count = 0;
 	for (const auto &instance : instances_) {
-		if (!instance.used || instance.poisoned || !instance.verified ||
+		if (!instance.used || instance.poisoned ||
 		    instance.generation != generation ||
-		    instance.verified_changes != code_changes)
+		    instance.state_changes != code_changes)
 			continue;
 		const auto library = directory().library(instance.library);
 		cross_.entries[cross_.count++] = {
 			instance.bias + library.table_base,
 			instance.bias + library.table_end, instance.bias,
-			instance.library, 0};
+			instance.pages.data(), instance.library, 0};
 	}
 	std::sort(cross_.entries.begin(), cross_.entries.begin() +
 		static_cast<std::ptrdiff_t>(cross_.count),
@@ -871,7 +895,8 @@ EnterResult enter(CpuState &cpu, ::uml::memory::Tlb &tlb, const Hit &hit,
 	std::uint64_t budget, const CrossTable &table) noexcept
 {
 	using Entry = EnterResult (*)(CpuState *, void *, std::uint64_t,
-		const void *, std::uint64_t, const CrossTable *);
+		const void *, std::uint64_t, const CrossTable *,
+		const std::uint8_t *);
 	/* The probe indexes the entries from the pointer the refill gets. */
 	if (static_cast<const void *>(tlb.entries.data()) !=
 	    static_cast<const void *>(&tlb))
@@ -885,7 +910,7 @@ EnterResult enter(CpuState &cpu, ::uml::memory::Tlb &tlb, const Hit &hit,
 			1, std::memory_order_relaxed);
 #endif
 	const auto result = function(&cpu, &tlb, hit.bias, hit.native, budget,
-		&table);
+		&table, hit.pages);
 	UML_AOT_COUNT(retired, result.retired);
 #if UML_AOT_DIAGNOSTICS
 	{

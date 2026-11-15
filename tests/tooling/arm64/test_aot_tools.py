@@ -433,6 +433,15 @@ class WideningTests(unittest.TestCase):
                                 0x19c24420),
         "setptn [x0]!, x1!, x2": (fixture.mops("set", 0, 3, 0, 1, 2),
                                   0x19c23420),
+        # The page-edge functions of the fixture, from TARGET = 0x4100.
+        "b target": (fixture.b(0x3004, 0x4100), 0x1400043f),
+        "bl target": (fixture.bl(0x3024, 0x4100), 0x94000437),
+        "b.eq target": (fixture.b_cond(0, 0x3048, 0x4100), 0x540085c0),
+        "cbz x2, target": (fixture.cbz(2, 0x3068, 0x4100), 0xb40084c2),
+        "tbz x2, #0, target": (fixture.tbz(2, 0, 0x3088, 0x4100),
+                               0x360083c2),
+        "adr x16, target": (fixture.adr(16, 0x30a4, 0x4100), 0x100082f0),
+        "adr x30, target": (fixture.adr(30, 0x30e4, 0x4100), 0x100080fe),
     }
 
     def test_encoders_match_an_assembler(self) -> None:

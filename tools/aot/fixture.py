@@ -21,7 +21,7 @@ import sys
 
 PAGE = 4096
 TEXT = 0x1000
-TEXT_PAGES = 2
+TEXT_PAGES = 4
 EH_FRAME = TEXT + TEXT_PAGES * PAGE
 
 
@@ -31,6 +31,23 @@ def b_cond(cond: int, here: int, target: int) -> int:
 
 def b(here: int, target: int) -> int:
     return 0x14000000 | (((target - here) // 4) & 0x3ffffff)
+
+
+def bl(here: int, target: int) -> int:
+    return 0x94000000 | (((target - here) // 4) & 0x3ffffff)
+
+
+def cbz(rt: int, here: int, target: int) -> int:
+    return 0xb4000000 | (((target - here) // 4) & 0x7ffff) << 5 | rt
+
+
+def tbz(rt: int, bit: int, here: int, target: int) -> int:
+    return 0x36000000 | bit << 19 | (((target - here) // 4) & 0x3fff) << 5 | rt
+
+
+def adr(rd: int, here: int, target: int) -> int:
+    delta = target - here
+    return 0x10000000 | (delta & 3) << 29 | ((delta >> 2) & 0x7ffff) << 5 | rd
 
 
 NOP = 0xd503201f
@@ -54,6 +71,65 @@ CODE = {
     LOOP_B + 0x0c: RET,
 }
 FUNCTIONS = ((LOOP_A, 0x10), (LOOP_B, 0x10))
+
+# Page edges. The functions below are on one text page and leave it for the
+# next by every kind of edge the rewritten code can take; the target there
+# adds 100 to x0 and returns through x15. The differential test maps the
+# next page with other bytes than the framework was built from, so an edge
+# that runs the stored code of a page it was not compared with gives another
+# x0 than the engine does.
+SRC_PAGE = TEXT + 2 * PAGE
+DST_PAGE = TEXT + 3 * PAGE
+TARGET = DST_PAGE + 0x100
+MOV_X15_X30 = 0xaa1e03ef
+CMP_X1_X1 = 0xeb01003f
+MOV_X2_0 = 0xd2800002
+BR_X16, BLR_X16, RET_X15 = 0xd61f0200, 0xd63f0200, 0xd65f01e0
+EDGES = {
+    "fall": SRC_PAGE + 0xff8,
+    "b": SRC_PAGE,
+    "bl": SRC_PAGE + 0x20,
+    "bcond": SRC_PAGE + 0x40,
+    "cbz": SRC_PAGE + 0x60,
+    "tbz": SRC_PAGE + 0x80,
+    "br": SRC_PAGE + 0xa0,
+    "blr": SRC_PAGE + 0xc0,
+    "ret": SRC_PAGE + 0xe0,
+    "reg": SRC_PAGE + 0x100,
+}
+
+
+def edge_code() -> dict[int, int]:
+    code: dict[int, int] = {}
+
+    def put(at: int, *words: int) -> None:
+        for index, word in enumerate(words):
+            code[at + 4 * index] = word
+
+    e = EDGES
+    # Falls into the next page: 1 + 2 on this one, 4 on the next.
+    put(e["fall"], 0x91000400, 0x91000800, 0x91001000, RET)
+    put(TARGET, 0x91019000, RET_X15)
+    put(e["b"], MOV_X15_X30, b(e["b"] + 4, TARGET))
+    put(e["bl"], MOV_X15_X30, bl(e["bl"] + 4, TARGET), RET)
+    put(e["bcond"], MOV_X15_X30, CMP_X1_X1,
+        b_cond(0, e["bcond"] + 8, TARGET), RET)
+    put(e["cbz"], MOV_X15_X30, MOV_X2_0, cbz(2, e["cbz"] + 8, TARGET), RET)
+    put(e["tbz"], MOV_X15_X30, MOV_X2_0, tbz(2, 0, e["tbz"] + 8, TARGET), RET)
+    put(e["br"], MOV_X15_X30, adr(16, e["br"] + 4, TARGET), BR_X16)
+    put(e["blr"], MOV_X15_X30, adr(16, e["blr"] + 4, TARGET), BLR_X16, RET)
+    put(e["ret"], MOV_X15_X30, adr(30, e["ret"] + 4, TARGET), RET)
+    # x16 comes from the case: the other instance of the library.
+    put(e["reg"], MOV_X15_X30, BR_X16)
+    return code
+
+
+def edge_functions() -> tuple[tuple[int, int], ...]:
+    sizes = {"fall": 0x10, "bl": 0x10, "bcond": 0x10, "cbz": 0x10, "tbz": 0x10,
+             "blr": 0x10, "ret": 0x10, "b": 8, "br": 0x0c, "reg": 8}
+    return tuple((EDGES[name], size) for name, size in sizes.items()
+                 ) + ((TARGET, 8),)
+
 
 # A PLT stub: it has no unwind entry, only a .plt section, as in every
 # library the linker produced. The GOT slot it reads is 0x100 into the page.
@@ -205,7 +281,7 @@ def eh_frame() -> bytes:
                 bytes([4, 0x78, 30, 1, 0x1b, 0x0c, 31, 0]))
     cie_body += bytes(-(len(cie_body) + 4) % 8)
     out = bytearray(struct.pack("<I", len(cie_body)) + cie_body)
-    for start, size in FUNCTIONS + form_functions():
+    for start, size in FUNCTIONS + form_functions() + edge_functions():
         position = len(out)
         field = EH_FRAME + position + 8
         body = struct.pack("<Iii", position + 4, start - field, size)
@@ -223,6 +299,8 @@ def build() -> bytes:
     for address, word in CODE.items():
         struct.pack_into("<I", text, address - TEXT, word)
     for address, word in form_code().items():
+        struct.pack_into("<I", text, address - TEXT, word)
+    for address, word in edge_code().items():
         struct.pack_into("<I", text, address - TEXT, word)
     for index, word in enumerate(PLT_CODE):
         struct.pack_into("<I", text, PLT - TEXT + 4 * index, word)

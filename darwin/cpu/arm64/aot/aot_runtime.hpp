@@ -53,33 +53,45 @@ struct EnterResult final {
 	std::uint64_t retired;
 };
 
-/* One guest instruction the rewritten code can be entered at. */
+/* One guest instruction the rewritten code can be entered at. `pages` is
+ * the state of the text pages of the instance it is in: byte p is 1 once
+ * text page p was compared with the stored source (rewritten code reads it
+ * where it leaves a page; the binder alone writes it, between entries). */
 struct Hit final {
 	const void *native{};
 	std::uint64_t bias{};
 	std::uint32_t instance{};
 	std::uint32_t library{};
+	const std::uint8_t *pages{};
 };
 
+/* A library instance rewritten code may branch to. The thunk generated for
+ * a cross-library branch reads `bias` and `pages` (tools/aot/rewrite.py:
+ * CROSS_BIAS, CROSS_PAGES). */
+struct CrossEntry final {
+	std::uint64_t low;
+	std::uint64_t high;
+	std::uint64_t bias;
+	const std::uint8_t *pages;
+	std::uint32_t library;
+	std::uint32_t reserved;
+};
+static_assert(offsetof(CrossEntry, bias) == 16 &&
+	offsetof(CrossEntry, pages) == 24);
+
 /* The answer of a cross-library lookup: the native code of a guest address
- * in another verified library instance and that instance's load bias. */
+ * in another library instance, and that instance's entry. */
 struct Target final {
 	const void *native;
-	std::uint64_t bias;
+	const CrossEntry *entry;
 };
 
 /* What rewritten code asks the host for, and the libraries it may branch to
- * without leaving: the verified instances of the entered address space. The
- * first two members are read by the generated refill and lookup thunks. */
+ * without leaving: the instances of the entered address space. The first two
+ * members are read by the generated refill and lookup thunks. */
 struct CrossTable final {
 	static constexpr std::size_t capacity = 64;
-	struct Entry final {
-		std::uint64_t low;
-		std::uint64_t high;
-		std::uint64_t bias;
-		std::uint32_t library;
-		std::uint32_t reserved;
-	};
+	using Entry = CrossEntry;
 	/* Fill the TLB entry of an access: `address` is the address the probe
 	 * formed (the last byte of an access of more than one byte) and `code`
 	 * is 0 or 1 (read or write) | bytes << 8. Answers whether the entry now
@@ -92,25 +104,30 @@ struct CrossTable final {
 };
 
 /* The libraries an address space has mapped, identified by the digest of
- * their code pages and verified before any of their code runs. An instance
- * whose bytes differ is never entered again in that address space generation;
- * one whose pages cannot be read yet is tried again later. After the first
- * full verification an instance is re-verified only for the pages that the
- * address space's code-change history names. One binder belongs to one
+ * their code pages. Each text page is compared, byte for byte, with the page
+ * of the stored source before any rewritten instruction of it runs (when
+ * find() is asked for an entry in it, and when rewritten code leaves another
+ * page for it: it tests the page's state byte), and again after the address
+ * space's code-change history names it. An instance with a page whose bytes
+ * differ is never entered again in that address space generation; a page
+ * that cannot be read yet is tried again later. One binder belongs to one
  * executor thread. */
 class Binder final {
 public:
 	Binder() noexcept;
 
 	/* The AOT entry for `pc`, or an empty Hit. `context` is the executor's
-	 * execution context (it names the code-change history). */
+	 * execution context (it names the code-change history); `code_changes`
+	 * is the sequence the dispatcher read. */
 	[[nodiscard]] Hit find(::uml::memory::StaticGuestMemory &memory,
 		void *context, unsigned long generation, std::uint64_t code_changes,
 		std::uint64_t pc) noexcept;
 	/* The entry for `pc` in an instance find() returned, or an empty Hit. */
 	[[nodiscard]] Hit entry(std::uint32_t instance,
 		std::uint64_t pc) const noexcept;
-	/* The instances rewritten code may branch to, as of `code_changes`. */
+	/* The instances rewritten code may branch to: those usable in
+	 * `generation`, current as of the sequence find() was given (call it
+	 * after find()). */
 	[[nodiscard]] const CrossTable &cross(unsigned long generation,
 		std::uint64_t code_changes) noexcept;
 	/* The library and offset a guest address belongs to, for reports. */
@@ -122,26 +139,21 @@ private:
 		unsigned long generation{};
 		std::uint32_t library{};
 		std::uint64_t bias{};
-		/* The code-change sequence the instance's bytes were last known
-		 * to match at. */
-		std::uint64_t verified_changes{};
-		/* Not tried again before this many lookups (an unreadable page
-		 * stays unreadable for a while). */
-		std::uint64_t retry_at{};
-		std::uint64_t backoff{};
 		bool poisoned{};
 		bool used{};
-		bool verified{};
-		/* One bit per text page: known to equal the stored text as of
-		 * `matched_changes`. */
-		std::vector<std::uint64_t> matched{};
-		std::uint64_t matched_changes{};
+		/* One byte per text page: 1 = compared with the stored source and
+		 * not named by a code change since; as of `state_changes`. */
+		std::vector<std::uint8_t> pages{};
+		std::uint64_t state_changes{};
 	};
 	struct PageSlot final {
 		unsigned long generation{};
 		std::uint64_t stamp{};
 		std::uint64_t page{1};
 		std::int32_t instance{-1};
+		/* An unreadable page is not tried again before this many lookups. */
+		std::uint64_t retry_at{};
+		std::uint64_t backoff{};
 	};
 
 	/* resolve() answers an instance index, none (not a library page, or a
@@ -153,15 +165,15 @@ private:
 		::uml::memory::StaticGuestMemory &memory, void *context,
 		unsigned long generation, std::uint64_t code_changes,
 		std::uint64_t page) noexcept;
-	/* Bring the instance up to `code_changes`: compare its pages with the
-	 * stored text the first time, then only the pages the history names and
-	 * those an earlier attempt could not read. */
-	[[nodiscard]] Verdict verify(::uml::memory::StaticGuestMemory &memory,
-		void *context, Instance &instance,
+	/* Bring the page states of every instance of `generation` up to
+	 * `code_changes`: pages the code-change history names since an
+	 * instance's last sequence are cleared. */
+	void sync(void *context, unsigned long generation,
 		std::uint64_t code_changes) noexcept;
-	[[nodiscard]] Verdict verify_pages(
-		::uml::memory::StaticGuestMemory &memory,
-		Instance &instance) noexcept;
+	/* Compare text page `index` of the instance with the stored source. */
+	[[nodiscard]] Verdict verify_page(
+		::uml::memory::StaticGuestMemory &memory, Instance &instance,
+		std::uint64_t index) noexcept;
 	/* Whether a code change after `sequence` touches [low, high). */
 	[[nodiscard]] static bool changed_since(void *context,
 		std::uint64_t sequence, std::uint64_t low, std::uint64_t high,
@@ -173,6 +185,9 @@ private:
 	std::array<PageSlot, page_slots> pages_{};
 	std::size_t next_instance_{};
 	std::uint64_t ticks_{};
+	/* The last (generation, sequence) sync() brought the instances to. */
+	unsigned long sync_generation_{};
+	std::uint64_t sync_changes_{};
 	/* The last code-change sequence find() was given (a diagnostics build
 	 * counts how often it moves). */
 	std::uint64_t last_changes_{};

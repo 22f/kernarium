@@ -40,11 +40,18 @@ import licences  # noqa: E402
 BUD, TLB, T0, T1, T2 = 24, 25, 26, 27, 28
 SCRATCH = (T0, T1, T2)
 
-FRAME = 0x100
+FRAME = 0x110
 SLOT_CPU, SLOT_BIAS, SLOT_BUD0, SLOT_SP = 0xA0, 0xA8, 0xB0, 0xB8
 SLOT_XTAB = 0xF0
 # Instructions started in this entry (a diagnostics build counts them).
 SLOT_COUNT = 0xF8
+# The state bytes of the library instance the code is running in: byte p is
+# 1 once text page p was compared with the stored source (the binder writes
+# them between entries; the code only reads them).
+SLOT_PSTATE = 0x100
+# CrossTable::Entry (aot_runtime.hpp): the offsets the cross-library thunk
+# reads from the entry the host answers with.
+CROSS_BIAS, CROSS_PAGES = 16, 24
 # The refill thunk's own frame: x0-x17, x30, NZCV, then q0-q31.
 REFILL_FRAME = 0x2a0
 VSLOT = {18: 0xC0, 24: 0xC8, 25: 0xD0, 26: 0xD8, 27: 0xE0, 28: 0xE8}
@@ -240,8 +247,11 @@ class Library:
         self.fn_mm: list[tuple[int, str, int]] = []
         self.fn_xu: set[int] = set()
         self.fn_xb: set[int] = set()
+        self.fn_pg: set[int] = set()
         self.fn_ma: list[int] = []
         self.fn_st: list[int] = []
+        # The guest offset of the instruction being emitted.
+        self.cur = 0
         self.charge = self._plan_charges()
 
     def _flow(self, word: int, offset: int) -> tuple[str, int | None]:
@@ -313,10 +323,34 @@ class Library:
 
     def goto_label(self, target: int) -> str:
         if target in self.covered:
-            # The branch charges the budget where the target is a charge point.
-            return self.lab("G" if target in self.charge else "E", target)
+            # A target on another text page goes through that page's gate:
+            # the page must have been compared with the stored source.
+            if target // PAGE != self.cur // PAGE:
+                self.fn_pg.add(target)
+                return self.pg_label(target)
+            return self.direct_label(target)
         self.fn_xb.add(target)
         return self.xb_label(target)
+
+    def direct_label(self, target: int) -> str:
+        # The branch charges the budget where the target is a charge point.
+        return self.lab("G" if target in self.charge else "E", target)
+
+    def pg_label(self, target: int) -> str:
+        return f"L{self.index}PG{self.fn_start:x}_{target:x}"
+
+    def page_test(self, target: int) -> None:
+        """Leave by the branch exit of `target` unless its text page is
+        known to equal the stored source: T0 is clobbered, flags are not."""
+        page = (target - self.table_base) // PAGE
+        if page >= 4096:
+            raise A.AsmError("a library's text must be below 16 MiB")
+        asm = self.asm
+        self.fn_xb.add(target)
+        asm.word(A.ldr_x(T0, 31, SLOT_PSTATE))
+        asm.word(A.ldrb_w(T0, T0, page))
+        asm.cbz(T0, self.xb_label(target), sf=0)
+        self.stats.words["gate"] += 3
 
     def xb_label(self, target: int) -> str:
         return f"L{self.index}XB{self.fn_start:x}_{target:x}"
@@ -357,11 +391,18 @@ class Library:
         self.fn_mm = []
         self.fn_xu = set()
         self.fn_xb = set()
+        self.fn_pg = set()
         self.fn_ma = []
         self.fn_st = []
         last_falls_through = True
         for offset in range(function.start, function.end, 4):
             word = self.words[offset]
+            self.cur = offset
+            # Falling into the next page of the function is an edge between
+            # pages; branches into the page enter at the labels below.
+            if offset % PAGE == 0 and offset != function.start and \
+                    last_falls_through:
+                self.page_test(offset)
             cost = self.charge.get(offset, 0)
             if cost:
                 asm.label(self.lab("G", offset))
@@ -379,6 +420,7 @@ class Library:
             self.stats.instructions += 1
             last_falls_through = self._emit_instruction(offset, word)
         if last_falls_through:
+            self.cur = function.end - 4
             asm.b(self.goto_label(function.end))
         before = len(asm._w)
         self._emit_stubs(function)
@@ -1089,6 +1131,13 @@ class Library:
     def _emit_stubs(self, function: elf64.Function) -> None:
         """The function's out-of-line exits, right after its code."""
         asm = self.asm
+        # Cross-page direct branches land here first (page_test adds the
+        # branch-exit stubs they leave by).
+        for target in sorted(self.fn_pg):
+            asm.label(self.pg_label(target))
+            self.page_test(target)
+            asm.b(self.direct_label(target))
+            self.stats.words["gate"] += 1
         for offset, kind, total in self.fn_mm:
             # The thunk gets the instruction's slot in the entry table in T1
             # and the access in the routine it enters.
@@ -1131,6 +1180,7 @@ def emit_enter(asm: A.Assembler, layout: dict[str, int],
     asm.word(A.str_x(2, 31, SLOT_BIAS))
     asm.word(A.str_x(4, 31, SLOT_BUD0))
     asm.word(A.str_x(5, 31, SLOT_XTAB))
+    asm.word(A.str_x(6, 31, SLOT_PSTATE))
     if count_retired:
         asm.word(A.str_x(31, 31, SLOT_COUNT))
     asm.word(A.mov_reg(TLB, 1))
@@ -1335,6 +1385,11 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
         asm.word(A.movk(T2, (span >> 16) & 0xffff, 1))
         asm.word(A.add_reg(T2, T1, T2, sub=True))
     asm.tbz(T2, 63, "XLIB", nz=False)
+    # The target's text page must have been compared with the stored source.
+    asm.word(A.ldr_x(T2, 31, SLOT_PSTATE))
+    asm.word(A.add_reg(T2, T2, T1, shift=1, amount=12))
+    asm.word(A.ldrb_w(T2, T2, 0))
+    asm.cbz(T2, "EXIT_BRANCH_ABS", sf=0, nz=False)
     asm.adrp_add(T2, "TAB")
     asm.word(A.ldr_reg_w(T1, T2, T1))
     asm.cbz(T1, "EXIT_BRANCH_ABS", sf=0, nz=False)
@@ -1356,7 +1411,11 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
     asm.word(A.mov_reg(T1, 1))
     restore()
     asm.cbz(T2, "EXIT_BRANCH_ABS", sf=1, nz=False)
-    asm.word(A.str_x(T1, 31, SLOT_BIAS))
+    # T1 = the CrossTable entry of the instance the target is in.
+    asm.word(A.ldr_x(T0, T1, CROSS_BIAS))
+    asm.word(A.str_x(T0, 31, SLOT_BIAS))
+    asm.word(A.ldr_x(T0, T1, CROSS_PAGES))
+    asm.word(A.str_x(T0, 31, SLOT_PSTATE))
     asm.word(A.br(T2))
 
 
