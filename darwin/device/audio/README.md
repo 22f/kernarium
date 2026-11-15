@@ -62,9 +62,12 @@ the session back runs on another thread while the mute clock goes on, so no
 guest write waits longer than its stream's buffer lasts.
 
 An engine made on an output route that was lost (the app spent time in the
-background) never starts again, so the sink replaces it, plays muted without
-a route, and starts a fresh engine once a second for up to 15 s before it
-reports the output as unavailable.
+background) never starts again, so the sink replaces it. A start with no route,
+or with a session the system will not activate yet, plays muted and starts a
+fresh engine once a second for up to 15 s before it reports the output as
+unavailable, naming which of the two it waited for; an interruption ends that
+wait, and the wait begins again if the route is missing when the interruption
+ends.
 
 ## Capture
 

@@ -8,8 +8,12 @@
 namespace {
 
 using uml::audio::EngineHealth;
+using uml::audio::HandbackAction;
+using uml::audio::handback;
 using uml::audio::mustReplaceEngine;
+using uml::audio::ResumeResult;
 using uml::audio::RouteWait;
+using uml::audio::WaitCause;
 using uml::testing::require;
 using namespace std::chrono;
 
@@ -81,14 +85,14 @@ void theWaitForTheRouteIsBounded()
     require(!wait.waiting() && !wait.expired(origin + hours(1)),
         "a sink that is not waiting never expires");
 
-    wait.begin(origin);
+    wait.begin(origin, WaitCause::route);
     require(wait.waiting(), "the wait begins");
     require(!wait.expired(origin + RouteWait::limit - nanoseconds(1)),
         "it has not expired a nanosecond before its limit");
     require(wait.expired(origin + RouteWait::limit),
         "it expires at its limit");
 
-    wait.begin(origin + RouteWait::limit - seconds(1));
+    wait.begin(origin + RouteWait::limit - seconds(1), WaitCause::route);
     require(wait.expired(origin + RouteWait::limit),
         "asking again does not extend a wait that is under way");
 
@@ -97,10 +101,84 @@ void theWaitForTheRouteIsBounded()
         "a wait that has ended does not expire");
 
     const auto later = origin + minutes(5);
-    wait.begin(later);
+    wait.begin(later, WaitCause::route);
     require(!wait.expired(later + RouteWait::limit - nanoseconds(1)) &&
             wait.expired(later + RouteWait::limit),
         "a new wait has a full limit of its own");
+}
+
+// The limit and the cadence are the named constants the sink uses.
+void theBoundAndTheCadenceAreNamed()
+{
+    require(uml::audio::routeWaitLimit == seconds(15) &&
+            RouteWait::limit == uml::audio::routeWaitLimit,
+        "the wait for the output is bounded at 15 s");
+    require(uml::audio::routeRetryInterval == seconds(1),
+        "and asks again once a second");
+}
+
+// A wait says what it awaits, and asking again with another cause changes
+// that without extending the deadline.
+void aWaitSaysWhatItAwaits()
+{
+    RouteWait wait;
+    wait.begin(origin, WaitCause::session);
+    require(wait.cause() == WaitCause::session, "a refused session is awaited");
+    wait.begin(origin + seconds(5), WaitCause::route);
+    require(wait.cause() == WaitCause::route,
+        "and the route once the session is there");
+    require(wait.expired(origin + RouteWait::limit),
+        "the deadline stays that of the first request");
+}
+
+// An interruption ends a wait, and the route is asked about afresh, with a
+// full limit, when the interruption ends.
+void anInterruptionRestartsTheDeadline()
+{
+    RouteWait wait;
+    wait.begin(origin, WaitCause::route);
+    wait.end();
+    require(!wait.expired(origin + hours(1)),
+        "an interruption that outlasts the limit expires nothing");
+    const auto resumed = origin + minutes(2);
+    wait.begin(resumed, WaitCause::route);
+    require(!wait.expired(resumed + RouteWait::limit - nanoseconds(1)) &&
+            wait.expired(resumed + RouteWait::limit),
+        "the route is asked about with a full limit of its own");
+}
+
+// What the device thread does with the result of the thread that takes the
+// session and the engine back.
+void aHandbackActsOnWhatIsCurrent()
+{
+    auto act = [](ResumeResult result, bool interrupted, bool changed) {
+        return handback(result, interrupted, changed);
+    };
+    require(act(ResumeResult::ready, false, false) == HandbackAction::play,
+        "an engine that runs plays");
+    require(act(ResumeResult::ready, false, true) == HandbackAction::askAgain,
+        "an engine the route or its configuration changed under while it "
+        "started is asked for again, not played");
+    require(act(ResumeResult::noRoute, false, false) ==
+            HandbackAction::waitForRoute,
+        "a session that took with no route waits for the route, with the "
+        "deadline");
+    require(act(ResumeResult::noRoute, false, true) ==
+            HandbackAction::waitForRoute,
+        "whatever changed meanwhile");
+    require(act(ResumeResult::sessionRefused, false, false) ==
+            HandbackAction::stayMuted,
+        "a session another app holds stays muted");
+    require(act(ResumeResult::engineFailed, false, false) ==
+            HandbackAction::fail,
+        "an engine that would not start is a failure");
+    for (const auto result : {ResumeResult::sessionRefused, ResumeResult::noRoute,
+             ResumeResult::engineFailed, ResumeResult::ready}) {
+        require(act(result, true, false) == HandbackAction::stayMuted &&
+                act(result, true, true) == HandbackAction::stayMuted,
+            "an interruption that began meanwhile owns the stream again, "
+            "whatever the result was");
+    }
 }
 
 } // namespace
@@ -111,5 +189,9 @@ int main()
     evidenceMakesAnEngineStale();
     aStaleMarkOutlivesRoutineChanges();
     theWaitForTheRouteIsBounded();
+    theBoundAndTheCadenceAreNamed();
+    aWaitSaysWhatItAwaits();
+    anInterruptionRestartsTheDeadline();
+    aHandbackActsOnWhatIsCurrent();
     return 0;
 }

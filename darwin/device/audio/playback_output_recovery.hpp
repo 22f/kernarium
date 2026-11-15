@@ -2,6 +2,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 
 namespace uml::audio {
 
@@ -58,25 +59,43 @@ private:
     bool stale_ {};
 };
 
-/* How long a sink whose output has no route yet keeps asking for it. The
- * route comes back some seconds after the app returns, and nothing announces
- * it, so a sink that starts into a missing route plays muted (the stream
- * keeps its clock) and starts the output again with a fresh engine once a
- * second, on the poll that already asks whether another app let go of the
- * session. A wait ends when the output runs, when the stream stops, is
- * released or is configured again, or when it has lasted `limit`: the route
- * is then reported as a failure of the output, like any other, and only a
- * later route change or a new start asks again. */
+/* How long a sink whose output cannot start yet keeps asking, and how often.
+ * The route comes back some seconds after the app returns, and nothing
+ * announces it, so a sink that starts into a missing route plays muted (the
+ * stream keeps its clock) and starts the output again with a fresh engine every
+ * `routeRetryInterval`, on the poll that already asks whether another app let
+ * go of the session. The same wait covers a session the system would not
+ * activate at a start that is not an interruption (the app is not yet active
+ * when the guest resumes). After `routeWaitLimit` the output has failed and the
+ * usual failure notice is given; only a later change of the route or a new
+ * start asks again. */
+inline constexpr std::chrono::seconds routeRetryInterval(1);
+inline constexpr std::chrono::seconds routeWaitLimit(15);
+
+/* What the sink waits for. It names the cause in its notices, so that a log
+ * tells a refused activation from a missing route. */
+enum class WaitCause : std::uint8_t {
+    // The output node has no route.
+    route,
+    // The system would not activate the session.
+    session,
+};
+
+/* The deadline of that wait. A wait ends when the output runs, when the stream
+ * stops, is released or is configured again, and when an interruption takes
+ * the stream: the interruption owns the mute then, has its own way back, and
+ * the route is asked about afresh when it ends, with a full limit. */
 class RouteWait final {
 public:
     using Clock = std::chrono::steady_clock;
 
-    static constexpr auto limit = std::chrono::seconds(15);
+    static constexpr auto limit = routeWaitLimit;
 
     /* Starts waiting at `now`, unless a wait is under way: asking again does
-     * not extend it. */
-    void begin(Clock::time_point now) noexcept
+     * not extend it, but says what is awaited now. */
+    void begin(Clock::time_point now, WaitCause cause) noexcept
     {
+        cause_ = cause;
         if (!waiting_) {
             waiting_ = true;
             since_ = now;
@@ -87,6 +106,8 @@ public:
 
     [[nodiscard]] bool waiting() const noexcept { return waiting_; }
 
+    [[nodiscard]] WaitCause cause() const noexcept { return cause_; }
+
     [[nodiscard]] bool expired(Clock::time_point now) const noexcept
     {
         return waiting_ && now - since_ >= limit;
@@ -94,7 +115,54 @@ public:
 
 private:
     bool waiting_ {};
+    WaitCause cause_ {WaitCause::route};
     Clock::time_point since_ {};
 };
+
+/* How an attempt to take the session and the engine back, made on another
+ * thread, ended. */
+enum class ResumeResult : std::uint8_t {
+    // The system would not activate the session: another app still holds it.
+    sessionRefused,
+    // The session is active and the output has no route.
+    noRoute,
+    engineFailed,
+    // The engine runs.
+    ready,
+};
+
+enum class HandbackAction : std::uint8_t {
+    // Stay muted and ask again after the next poll.
+    stayMuted,
+    // Stay muted and ask again at once: what the attempt started is obsolete.
+    askAgain,
+    // The session is ours; wait for the route, with the deadline.
+    waitForRoute,
+    fail,
+    play,
+};
+
+/* What the device thread does with the attempt's result. A result is obsolete
+ * when an interruption began since the attempt started (the interruption owns
+ * the stream again, whatever the attempt found) or, for an engine that runs,
+ * when the engine's configuration or the route changed since (the engine the
+ * attempt started may be gone already). */
+[[nodiscard]] constexpr HandbackAction handback(
+    ResumeResult result, bool interruptedSince, bool changedSince) noexcept
+{
+    if (interruptedSince)
+        return HandbackAction::stayMuted;
+    switch (result) {
+    case ResumeResult::sessionRefused:
+        return HandbackAction::stayMuted;
+    case ResumeResult::noRoute:
+        return HandbackAction::waitForRoute;
+    case ResumeResult::engineFailed:
+        return HandbackAction::fail;
+    case ResumeResult::ready:
+        return changedSince ? HandbackAction::askAgain : HandbackAction::play;
+    }
+    return HandbackAction::fail;
+}
 
 } // namespace uml::audio
