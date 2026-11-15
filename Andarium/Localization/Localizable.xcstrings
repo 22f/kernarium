@@ -41,7 +41,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@已輸出"
+            "value" : "%@已匯出"
           }
         }
       }
@@ -52,7 +52,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "この%2$@の空き容量: %1$@"
+            "value" : "この%2$@の空き容量%1$@"
           }
         },
         "zh-Hans" : {
@@ -86,7 +86,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@已輸入"
+            "value" : "%@已匯入"
           }
         }
       }
@@ -297,7 +297,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "この%2$@での使用量: %1$@"
+            "value" : "この%2$@での使用量%1$@"
           }
         },
         "zh-Hans" : {
@@ -393,7 +393,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%1$@ · 空き容量: %2$@"
+            "value" : "%1$@ · 空き容量%2$@"
           }
         },
         "zh-Hans" : {
@@ -711,7 +711,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%2$lld個中有%1$lld個未輸出"
+            "value" : "%2$lld個中有%1$lld個未匯出"
           }
         }
       }
@@ -739,7 +739,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%2$lld個中有%1$lld個未輸入"
+            "value" : "%2$lld個中有%1$lld個未匯入"
           }
         }
       }
@@ -2324,7 +2324,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "取消輸入"
+            "value" : "取消匯入"
           }
         }
       }
@@ -3632,7 +3632,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "輸出"
+            "value" : "匯出"
           }
         }
       }
@@ -3654,7 +3654,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在輸出%@"
+            "value" : "正在匯出%@"
           }
         }
       }
@@ -3766,7 +3766,30 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "無法輸入檔案夾和套件。"
+            "value" : "無法匯入檔案夾和套件。"
+          }
+        }
+      }
+    },
+    "FPS" : {
+      "comment" : "The frame rate's unit as a title of the statistics capsule. It is a unit's name, so every language keeps FPS.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "FPS"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "FPS"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "FPS"
           }
         }
       }
@@ -3788,7 +3811,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "影格率"
+            "value" : "影格速率"
           }
         }
       }
@@ -3811,7 +3834,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "影格率%@"
+            "value" : "影格速率%@"
           }
         }
       }
@@ -3909,7 +3932,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "元のサイズ: %@"
+            "value" : "元のサイズ%@"
           }
         },
         "zh-Hans" : {
@@ -4189,7 +4212,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "輸入"
+            "value" : "匯入"
           }
         }
       }
@@ -4211,7 +4234,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在輸入%@"
+            "value" : "正在匯入%@"
           }
         }
       }
@@ -5456,7 +5479,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "未輸出"
+            "value" : "未匯出"
           }
         }
       }
@@ -5478,7 +5501,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "未輸入"
+            "value" : "未匯入"
           }
         }
       }

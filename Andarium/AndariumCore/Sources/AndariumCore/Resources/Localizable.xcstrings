@@ -600,7 +600,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "裝置溫度較高，已降低影格率"
+            "value" : "裝置溫度較高，已降低影格速率"
           }
         }
       }
