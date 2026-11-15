@@ -9,3 +9,4 @@ patch	call-the-camera-framework-without-the-provider-s-callbacks-lock.patch
 patch	list-only-the-keys-a-V4L2-camera-honours.patch
 patch	report-the-scene-mode-and-the-black-level-lock-of-a-camera.patch
 patch	end-the-camera-when-the-host-ends-a-recording.patch
+patch	return-the-crop-region-of-the-request-in-the-result.patch

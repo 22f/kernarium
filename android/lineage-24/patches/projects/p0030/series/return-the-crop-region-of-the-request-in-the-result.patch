@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yi Xie <imxieyi@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 16:33:36 +0900
+Subject: [PATCH] return the crop region of the request in the result
+
+The camera service splits an application's zoom into CONTROL_ZOOM_RATIO and
+a residual SCALER_CROP_REGION, sends both to the HAL, and joins them again
+in the result: it unscales the result's crop region by the result's ratio.
+The result stated the whole active array instead of the residual, so above
+about 57x on a 4032 x 3024 array the region an application got back was
+a pixel or three off (CTS testDigitalZoom on the front camera, which
+checks the region within 5%).
+
+The result now states the crop region of its request, clamped into the
+active array of the sensor mode in use (camera_crop.hpp, the overlay's
+rule); a request with no region, an empty one or one outside the array
+gets the array, as before.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../EmulatedCamera/hwl/EmulatedRequestState.cpp  | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/devices/EmulatedCamera/hwl/EmulatedRequestState.cpp b/devices/EmulatedCamera/hwl/EmulatedRequestState.cpp
+index 3884d28cd14f819fe8dafee44dd6424f1fbc4661..3a988f13a263553eb465f848d1be4a0173623b2c 100644
+--- a/devices/EmulatedCamera/hwl/EmulatedRequestState.cpp
++++ b/devices/EmulatedCamera/hwl/EmulatedRequestState.cpp
+@@ -24,6 +24,7 @@
+ #include <utils/HWLUtils.h>
+ 
+ #include "EmulatedRequestProcessor.h"
++#include "camera_crop.hpp"
+ 
+ namespace android {
+ 
+@@ -1200,8 +1201,19 @@ std::unique_ptr<HwlPipelineResult> EmulatedRequestState::InitializeResult(
+     if (info.sensor_pixel_mode_ == ANDROID_SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION) {
+       chosen_crop_region = info.scaler_crop_region_max_resolution_;
+     }
+-    result->result_metadata->Set(ANDROID_SCALER_CROP_REGION, chosen_crop_region,
+-                                 ARRAY_SIZE(info.scaler_crop_region_default_));
++    // The camera service splits an application's zoom into the ratio and a residual crop
++    // region, and unscales this result's region by this result's ratio to join them again:
++    // the region of the request comes back (clamped into the array), not the whole array.
++    camera_metadata_ro_entry_t asked;
++    const bool has_asked =
++        request_settings_->Get(ANDROID_SCALER_CROP_REGION, &asked) == OK;
++    const andarium::camera::CropRegion crop = andarium::camera::result_crop_region(
++        has_asked ? asked.data.i32 : nullptr, has_asked ? asked.count : 0,
++        {chosen_crop_region[0], chosen_crop_region[1], chosen_crop_region[2],
++         chosen_crop_region[3]});
++    const int32_t crop_region[4] = {crop.left, crop.top, crop.width, crop.height};
++    result->result_metadata->Set(ANDROID_SCALER_CROP_REGION, crop_region,
++                                 ARRAY_SIZE(crop_region));
+     if (info.report_active_sensor_crop_) {
+       int32_t active_crop_region[4];
+       // width
