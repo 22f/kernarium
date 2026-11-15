@@ -44,6 +44,7 @@ enum class Import : uint8_t {
     kMalloc, kFree, kCalloc, kRealloc, kStrdup, kStrndup, kReallocarray, kUsableSize,
     kNew, kNewArray, kNewNothrow, kNewArrayNothrow,
     kDelete, kDeleteArray, kDeleteNothrow, kDeleteArrayNothrow, kDeleteSized, kDeleteArraySized,
+    kDlsym,  // not an allocator call: the runtime's symbol lookup, which the layer wraps for the natives' thunks
     kCount,
 };
 
@@ -64,6 +65,9 @@ constexpr uint32_t kProducers = bit(Import::kMalloc) | bit(Import::kCalloc) | bi
                                 bit(Import::kStrndup) | bit(Import::kNew) | bit(Import::kNewArray) |
                                 bit(Import::kNewNothrow) | bit(Import::kNewArrayNothrow) | bit(Import::kRealloc) |
                                 bit(Import::kReallocarray);
+
+// libart's symbol lookup: the one import the layer rewrites outside the allocator.
+constexpr uint32_t kDlsymImport = bit(Import::kDlsym);
 
 struct ImportSlot {
     uint32_t vaddr;  // relative to the library's load bias
@@ -94,6 +98,7 @@ inline bool import_for_symbol(const char* name, Import* out) {
         {"_ZdaPvRKSt9nothrow_t", Import::kDeleteArrayNothrow},
         {"_ZdlPvj", Import::kDeleteSized},
         {"_ZdaPvj", Import::kDeleteArraySized},
+        {"dlsym", Import::kDlsym},
     };
     for (const Entry& entry : kEntries) {
         if (entry.name[0] == name[0] && __builtin_strcmp(entry.name, name) == 0) {

@@ -44,17 +44,18 @@ import argparse
 import importlib.util
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-import xml.etree.ElementTree as ElementTree
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / "integration" / "support"))
 sys.path.insert(0, str(HERE))
 import oldapp_probe_apk as probe  # noqa: E402
+import permission_review  # noqa: E402
 
 # The orientation runner owns the guest: its launcher and its adb.
 SPEC = importlib.util.spec_from_file_location("run_android_orientation", HERE / "run_android_orientation.py")
@@ -74,17 +75,32 @@ BROADCAST_SECONDS = 60
 SEMANTICS = {"write_through": "pass", "identity": "pass", "retained": "pass", "monitor": "pass", "pop": "pass",
              "getline": "pass", "usable_size": "pass", "libc_block": "pass", "table_read_only": "pass",
              "java_fill": "pass", "commit_chunks": "pass", "clone": "pass", "alias_elements": "pass",
-             "alias_critical": "pass"}
+             "alias_critical": "pass", "abi_args": "pass", "abi_returns": "pass", "ends_exception": "pass"}
+#: What the layer adds: the blocks of a native method end when it returns, and an ended block stays where it was until
+#: its array is collected (every row reads the block through the Dalvik offsets, so it is "fail" where the layer is not
+#: loaded, as java_fill_raw is).
+ENDS = ("ends_lazy_thumb", "ends_lazy_arm", "ends_reg_thumb", "ends_reg_arm", "ends_recursion", "ends_onload",
+        "ends_outside", "ended_keep", "ended_arrays", "ended_pin", "ended_kept_ref")
+#: The render-thread scene of an application (a run of its own, with the options "scene"): the same in every variant,
+#: since a thread that gets a few hundred results at a time works on ART too. The first three rows are a thread that
+#: Java starts; scene_attached is a short run on a native thread that attaches itself.
+SCENE_ROWS = ("scene_complete", "scene_data", "scene_write", "scene_attached")
 EXPECTED = {
+    "scene": {**dict.fromkeys(SCENE_ROWS, "pass"), "done": "1"},
+    # A library of another package is closed and the application's own opened at its address: the layer's binding is decided
+    # from the loader's list as it is (a run of its own, with the options "swap|<foreign>|<own>").
+    "swap": {"bind_swap": "pass", "bind_swap_good": "600", "bind_swap_same_address": "yes", "done": "1"},
     "old": {"shim_mapped": "yes", "raw_read": "pass", "passback": "pass", "elements": "pass", "global": "pass",
             "thread_raw": "pass", **SEMANTICS, "java_fill_raw": "pass", "raw_write_java": "pass", "low_heap": "pass",
-            "done": "1"},
+            **dict.fromkeys(ENDS, "pass"), "done": "1"},
     "modern": {"shim_mapped": "no", "raw_read": "fail", "passback": "pass", "elements": "pass", "global": "pass",
-               **SEMANTICS, "java_fill_raw": "fail", "raw_write_java": "skipped", "done": "1"},
+               **SEMANTICS, "java_fill_raw": "fail", "raw_write_java": "skipped", **dict.fromkeys(ENDS, "fail"),
+               "done": "1"},
     # The old application before the layer is loaded (a host-shim run's control, or an image's application that is not
     # switched on): what the layer changes.
     "control": {"shim_mapped": "no", "raw_read": "fail", "passback": "pass", "elements": "pass", "global": "pass",
-                **SEMANTICS, "java_fill_raw": "fail", "raw_write_java": "skipped", "done": "1"},
+                **SEMANTICS, "java_fill_raw": "fail", "raw_write_java": "skipped", **dict.fromkeys(ENDS, "fail"),
+                "done": "1"},
 }
 DATA = re.compile(r'data="(.*)"', re.DOTALL)
 
@@ -157,52 +173,6 @@ def install(guest, apk: pathlib.Path, variant: str) -> str:
     return f"{probe.package_of(variant)} installed"
 
 
-REVIEW_FLAG = "REVIEW_REQUIRED"
-REVIEW_SECONDS = 60
-BOUNDS = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
-
-
-def continue_button(ui: str) -> tuple[int, int] | None:
-    """The centre of the permission review's Continue button in a `uiautomator dump`, if it is on screen."""
-    try:
-        root = ElementTree.fromstring(ui)
-    except ElementTree.ParseError:
-        return None
-    for node in root.iter("node"):
-        if node.get("resource-id", "").endswith(":id/continue_button"):
-            match = BOUNDS.fullmatch(node.get("bounds", ""))
-            if match:
-                left, top, right, bottom = (int(group) for group in match.groups())
-                return (left + right) // 2, (top + bottom) // 2
-    return None
-
-
-def review_pending(guest, package: str) -> bool:
-    return REVIEW_FLAG in guest.shell(f"dumpsys package {package} | grep -A4 'runtime permissions'")
-
-
-def complete_review(guest, package: str) -> str:
-    """Android shows an application that targets below API 23 the permission review before its first component
-    runs (a broadcast is skipped until then). The user's Continue is pressed here, as it is on the first launch of
-    such a game."""
-    if not review_pending(guest, package):
-        return "no review pending"
-    guest.shell(f"am start -W -a android.intent.action.REVIEW_PERMISSIONS "
-                f"--es android.intent.extra.PACKAGE_NAME {package}", timeout=60)
-    deadline = time.monotonic() + REVIEW_SECONDS
-    while time.monotonic() < deadline:
-        guest.adb_run("shell", "uiautomator dump /data/local/tmp/oldapp-ui.xml", timeout=60)
-        dump = guest.adb_run("shell", "cat /data/local/tmp/oldapp-ui.xml", timeout=30)
-        button = continue_button(dump.stdout) if dump.returncode == 0 else None
-        if button is not None:
-            guest.shell(f"input tap {button[0]} {button[1]}")
-            time.sleep(2)
-            if not review_pending(guest, package):
-                return "permission review completed"
-        time.sleep(2)
-    raise Failure(f"the permission review of {package} was not completed")
-
-
 def layer_in_image(guest) -> str:
     """The library the framework loads is in the image, with the label an application may execute from."""
     listing = guest.shell(f"ls -lZ {probe.SHIM_IMAGE_PATH}").strip()
@@ -212,9 +182,19 @@ def layer_in_image(guest) -> str:
 
 
 def switch(guest, package: str, on: bool) -> str:
-    """Switches the layer on for the application (or off) by writing its property of the store, as the image's
-    own command does, and checks the guest holds what was set."""
+    """Switches the layer on for the application (or off) as the person does, with the image's own command,
+    `kernarium_oldapp set PACKAGE on|off` as the adb shell user (a user build has no root shell), and checks the
+    guest holds what was set. Where the image has no such command (a release from before it) the property of the
+    store is written as root, which the command does for the person."""
     name = probe.STORE_PROPERTY_PREFIX + package
+    if guest.shell("command -v kernarium_oldapp", timeout=30).strip().startswith("/"):
+        verb = "on" if on else "off"
+        result = guest.shell(f"kernarium_oldapp set {package} {verb}; echo rc=$?", timeout=60).strip()
+        held = guest.shell(f"getprop {name}").strip()
+        if not result.endswith("rc=0") or bool(held) != on:
+            raise Failure(f"kernarium_oldapp set {package} {verb}: {result[-200:]!r}; {name} holds '{held}'")
+        time.sleep(1)
+        return f"{package} {'switched on' if on else 'switched off'} with kernarium_oldapp"
     value = str(int(time.time())) if on else ""
     guest.shell(f"su 0 setprop {name} '{value}'")
     held = guest.shell(f"getprop {name}").strip()
@@ -244,15 +224,38 @@ def diagnosis(guest, package: str) -> str:
     return " | ".join(line.split(": ", 1)[-1][:200] for line in lines[-8:])
 
 
-def run_variant(guest, variant: str, *, shim: bool) -> tuple[dict[str, str], int]:
+def package_library(guest, variant: str, library: str) -> str:
+    """The path of a library of the variant's package as the package manager installed it."""
+    output = guest.shell(f"pm path {probe.package_of(variant)}", timeout=30)
+    paths = [line[len("package:"):].strip() for line in output.splitlines() if line.startswith("package:")]
+    if not paths:
+        raise Failure(f"{probe.package_of(variant)} is not installed: {output.strip()[-200:]}")
+    directory = paths[0].rsplit("/", 1)[0] + "/lib"
+    abis = guest.shell(f"ls {shlex.quote(directory)}", timeout=30).split()
+    if not abis:
+        raise Failure(f"{directory} holds no native libraries: {abis}")
+    return f"{directory}/{abis[0]}/lib{library}.so"
+
+
+def outside_library(guest) -> str:
+    """The probe library as the modern probe package installed it: a library of another package than the old probe's,
+    which the old process can load (the row ends_outside registers a native method from it)."""
+    return package_library(guest, "modern", probe.PROBE_LIBRARY)
+
+
+def run_variant(guest, variant: str, *, shim: bool, options: str | None = None,
+                fresh: bool = True) -> tuple[dict[str, str], int]:
     """Starts the probe with `am broadcast` (the zygote forks an ordinary application process) and reads the probe's
     report from the result data the broadcast prints, and how many installs the log gained meanwhile. A probe that
     did not finish leaves "log" among the entries, with what the guest's log says."""
     package = probe.package_of(variant)
-    # A process of an earlier run would take the broadcast with whatever it loaded then.
-    guest.adb_run("shell", f"am force-stop {package}", timeout=30)
+    # A process of an earlier run would take the broadcast with whatever it loaded then (the "peak" run wants it).
+    if fresh:
+        guest.adb_run("shell", f"am force-stop {package}", timeout=30)
     before = installed_count(guest)
     extras = f" --es shim {probe.SHIM_LIBRARY}" if shim else ""
+    if options is not None:
+        extras += f" --es opts {shlex.quote(options)}"
     output = guest.shell(f"am broadcast -n {probe.component_of(variant)}{extras}", timeout=BROADCAST_SECONDS)
     if "Broadcast completed" not in output:
         raise Failure(f"the broadcast to {package} was not delivered: {output.strip()[-300:]}")
@@ -260,6 +263,104 @@ def run_variant(guest, variant: str, *, shim: bool) -> tuple[dict[str, str], int
     if "done" not in result:
         result = {**result, "log": diagnosis(guest, package)}
     return result, installed_count(guest) - before
+
+
+#: What the scene's log must not say, wherever it comes from: a crash, or a misuse CheckJNI caught.
+CRASH_WORDS = ("Fatal signal", "JNI DETECTED ERROR", "Abort message", "SIGILL")
+ARENA_LINE = "the low arena has no room"
+FIRST_ENDED_LINE = "ended at the return of a native method"
+PEAK_LINE = re.compile(r"most live byte\[\] blocks one thread has held; blocks live in the process: (\d+) (\d+)")
+#: A line of the layer's tag in `logcat -v brief` (the adb service lines that name the tag are not).
+LAYER_LINE = re.compile(r"^[VDIWEF]/" + LOG_TAG + r"\(", re.MULTILINE)
+#: The longest a critical region the layer opened stayed open, as it logs it (recorded, not judged).
+REGION_LINE = re.compile(r"the longest a critical region of a synchronization stayed open, microseconds: (\d+)")
+#: The scene's smallest peak: its init method holds 170 results at once, and a burst more than 100.
+SCENE_FLOOR = 170
+THREAD_LIMIT = 512
+#: The layer logs a growing peak at most every 30 s; the next result after that logs the one that was kept.
+PEAK_WAIT_SECONDS = 31
+
+
+def layer_lines(text: str) -> str:
+    """The lines of the layer's tag, as one text."""
+    return "\n".join(line for line in text.splitlines() if LAYER_LINE.match(line))
+
+
+def thread_peak(text: str) -> int:
+    """The most blocks one thread held live, as the layer logged it (0 where it did not)."""
+    return max((int(match.group(1)) for match in PEAK_LINE.finditer(text)), default=0)
+
+
+def longest_region(text: str) -> int:
+    """The longest time in microseconds a critical region of the layer's own stayed open, as it logged it (0 where it did not)."""
+    return max((int(match.group(1)) for match in REGION_LINE.finditer(text)), default=0)
+
+
+def scene_log_problems(text: str, *, layer: bool) -> list[str]:
+    """What a scene's log says that it must not. With the layer: no result that stayed ART's own reference, no
+    allocation that left the arena, blocks that ended at returns (the thunks were used), and a peak below the thread's
+    limit; without it, no line of the layer at all."""
+    problems = [f"the log has '{word}'" for word in CRASH_WORDS if word in text]
+    own = layer_lines(text)
+    if not layer:
+        if own:
+            problems.append("the log has lines of the layer in a process that must not load it")
+        return problems
+    for marker, what in ((DECLINED, "a result stayed ART's own reference"), (ARENA_LINE, "an allocation left the arena")):
+        if lines_in_log(own, marker):
+            problems.append(what)
+    if not lines_in_log(own, FIRST_ENDED_LINE):
+        problems.append("no block ended at a native method's return")
+    held = thread_peak(own)
+    if not SCENE_FLOOR <= held < THREAD_LIMIT:
+        problems.append(f"the most live blocks of a thread is {held}, not {SCENE_FLOOR} to {THREAD_LIMIT - 1}")
+    return problems
+
+
+CHECKJNI_LINE = "Late-enabling -Xcheck:jni"
+
+
+def scene(guest, variant: str, *, shim: bool, layer: bool, checked: bool = False) -> str:
+    """The render-thread scene in a fresh process of the variant (one native init method and one per frame, entered
+    from Java, with thousands of byte[] results that are never deleted), and then what its log says."""
+    guest.adb_run("logcat", "-c", timeout=30)
+    result, installs = run_variant(guest, variant, shim=shim, options="scene")
+    note = evaluate("scene", result)
+    if layer:
+        if installs < 1:
+            raise Failure(f"the log shows no install of the layer in the scene's process; {note}")
+        # The same process once more, after the layer's interval between two lines: the peaks it kept are logged.
+        time.sleep(PEAK_WAIT_SECONDS)
+        again, _ = run_variant(guest, variant, shim=shim, options="peak", fresh=False)
+        if again.get("peak_result") != "pass" or again.get("done") != "1":
+            raise Failure(f"the scene's process did not answer the second run: {sorted(again.items())}")
+    elif installs != 0:
+        raise Failure(f"the layer installed itself {installs} times in a process that must not load it; {note}")
+    text = guest.adb_run("logcat", "-d", "-b", "all", "-v", "brief", timeout=90).stdout
+    problems = scene_log_problems(text, layer=layer)
+    if checked and CHECKJNI_LINE not in text:
+        problems.append("the process did not run with CheckJNI")
+    if problems:
+        raise Failure(f"{variant}: " + "; ".join(problems) + f"; {note}")
+    return note + (f"; most live blocks of a thread {thread_peak(layer_lines(text))}"
+                   f"; longest region the layer opened {longest_region(layer_lines(text))} us" if layer else "")
+
+
+def swap(guest, *, shim: bool) -> str:
+    """The row bind_swap in a process of its own: the modern package's copy of the probe library is opened in a reserved
+    range, enters the layer and is closed, and the old package's second file of the library is opened at the same address
+    and bound to a native method; every one of 600 calls must return a block."""
+    guest.adb_run("logcat", "-c", timeout=30)
+    paths = f"swap|{outside_library(guest)}|{package_library(guest, 'old', probe.PROBE_LIBRARY_COPY)}"
+    result, installs = run_variant(guest, "old", shim=shim, options=paths)
+    note = evaluate("swap", result)
+    if installs < 1:
+        raise Failure(f"the log shows no install of the layer in the process of bind_swap; {note}")
+    text = guest.adb_run("logcat", "-d", "-b", "all", "-v", "brief", timeout=90).stdout
+    problems = [f"the log has '{word}'" for word in CRASH_WORDS if word in text]
+    if problems:
+        raise Failure("old: " + "; ".join(problems) + f"; {note}")
+    return note
 
 
 def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report) -> None:
@@ -278,6 +379,8 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
                                              needed=probe.SHIM_NEEDED)
     apks = {variant: probe.build_apk(private / f"{variant}.apk", variant, probe_library, shim_library)
             for variant in probe.VARIANTS}
+    # The old application again, debuggable: ART runs it with CheckJNI, which aborts on a misuse of the JNI functions.
+    debug_apk = probe.build_apk(private / "old-debug.apk", "old", probe_library, shim_library, debuggable=True)
     if options.serial:
         guest = Serial(adb, options.serial)
         stop = lambda: None  # noqa: E731
@@ -295,11 +398,11 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
             report.run(f"{variant}: install", lambda variant=variant: install(guest, apks[variant], variant))
         for variant in probe.VARIANTS:
             report.run(f"{variant}: permission review",
-                       lambda variant=variant: complete_review(guest, probe.package_of(variant)))
+                       lambda variant=variant: permission_review.complete_review(guest, probe.package_of(variant), Failure))
 
         def old() -> str:
             declined_before = declined_count(guest)
-            result, installs = run_variant(guest, "old", shim=options.host_shim)
+            result, installs = run_variant(guest, "old", shim=options.host_shim, options=outside_library(guest))
             note = evaluate("old", result)
             if not options.host_shim and installs < 1:
                 raise Failure(f"the log shows no install of the layer in the old process; {note}")
@@ -310,30 +413,66 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
             return f"{note}; installs logged: {installs}; declined-shadow lines: {declined}"
 
         def modern() -> str:
-            result, installs = run_variant(guest, "modern", shim=False)
+            result, installs = run_variant(guest, "modern", shim=False, options=outside_library(guest))
             note = evaluate("modern", result)
             if installs != 0:
                 raise Failure(f"the layer installed itself in the modern process {installs} times; {note}")
             return note
 
         def control() -> str:
-            result, installs = run_variant(guest, "old", shim=False)
+            result, installs = run_variant(guest, "old", shim=False, options=outside_library(guest))
             note = evaluate("control", result)
             if installs != 0:
                 raise Failure(f"the layer installed itself in an old process that is not switched on {installs} times; {note}")
             return note
 
+        package = probe.package_of("old")
+
+        def old_scene(checked: bool = False) -> None:
+            what = "old, debuggable (CheckJNI)" if checked else "old"
+            report.run(f"{what}: an application's render thread (one init, one native method per frame)",
+                       lambda: scene(guest, "old", shim=options.host_shim, layer=True, checked=checked))
+
+        def named_scene() -> None:
+            report.run("old, process named otherwise: the render thread's scene still gets thunks",
+                       lambda: scene(guest, "named", shim=options.host_shim, layer=True))
+
         if options.host_shim:
             report.run("old without the layer: the reads fail (control)", control)
+            report.run("old without the layer: the render thread's scene", lambda: scene(guest, "old", shim=False, layer=False))
             report.run("old: the application's reads, references and allocations", old)
+            old_scene()
+            named_scene()
+            report.run("old: a native method bound where another package's library was closed gets its thunk",
+                       lambda: swap(guest, shim=True))
         else:
             report.run("old, not switched on: the layer is left out", control)
-            report.run("old: switched on", lambda: switch(guest, probe.package_of("old"), True))
+            report.run("old, not switched on: the render thread's scene", lambda: scene(guest, "old", shim=False, layer=False))
+            report.run("old: switched on", lambda: switch(guest, package, True))
             try:
                 report.run("old: the application's reads, references and allocations", old)
+                old_scene()
+                report.run("old: a native method bound where another package's library was closed gets its thunk",
+                           lambda: swap(guest, shim=False))
             finally:
-                switch(guest, probe.package_of("old"), False)
+                switch(guest, package, False)
+            named_package = probe.package_of("named")
+            report.run("old, process named otherwise: switched on", lambda: switch(guest, named_package, True))
+            try:
+                named_scene()
+            finally:
+                switch(guest, named_package, False)
         report.run("modern: the layer is left out", modern)
+        report.run("modern: the render thread's scene", lambda: scene(guest, "modern", shim=False, layer=False))
+        report.run("old, debuggable: install", lambda: install(guest, debug_apk, "old"))
+        report.run("old, debuggable: permission review", lambda: permission_review.complete_review(guest, package, Failure))
+        if not options.host_shim:
+            report.run("old, debuggable: switched on", lambda: switch(guest, package, True))
+        try:
+            old_scene(checked=True)
+        finally:
+            if not options.host_shim:
+                switch(guest, package, False)
     finally:
         stop()
 

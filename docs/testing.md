@@ -1097,21 +1097,53 @@ functions, compares it with a global reference and the original, locks it, keeps
 it while more results arrive, pops it out of a local frame, has Java fill it and
 reads it again, writes it through the raw pointer without a release and hands it
 to a Java method that reads it, opens it through its own critical pointer and the
-block's at once, clones it after a write through `GetByteArrayElements`, reads
+block's at once, keeps a pointer to an array Java holds through a thousand later
+blocks and collections and gets the same block back when the array is obtained
+again (64 such arrays, 100 times each), keeps a pointer from `GetByteArrayElements` that it never
+releases through later blocks and collections, releases a copy through the array's other reference,
+uses the reference of an ended block for a hundred frames of calls and writes from both sides, clones it
+after a write through `GetByteArrayElements`, reads
 a committed write through a second reference to the array (pointers from
 `GetByteArrayElements` and `GetPrimitiveArrayCritical`), grows
 a malloc buffer with `getline`, asks `malloc_usable_size`, reallocates and
 frees a block libc allocated, finds the function tables
 read-only again and allocates below 2 GiB, and passes; the runner also asserts
-the library's SELinux label and that the log names the first declined shadow once. The modern package gets no layer, the raw read fails
+the library's SELinux label and that the log names the first declined shadow once. It switches the package on
+with the image's own `kernarium_oldapp set` as the adb shell user (a user build has no root shell) and writes
+the store's property as root only on a release without that command. A swap row loads the probe's library from
+another path over the range a closed library of the modern package left, registers its native method and calls
+it 600 times: the layer classifies a binding from the loader's current state, so these calls end their
+references. The runner presses the permission review's Continue with
+`permission_review.py`, which the runners of the old-application switch share. The probe also records, without
+judging them, what a call costs: an empty native method, a Java call passed a 1 MiB block (written and clean), a
+result and its deletion, and a `Get...Elements` or critical pair on an array of the application's own. The modern
+package gets no layer, the raw read fails
 and the array operations give the runtime's own answers. `--host-shim` boots a
 release without the layer and loads a host-built copy from the old package after
 a control run without it, which qualifies the library and not the framework hook.
+The scene row is the acceptance of the block ends: an application's render thread (a
+`java.lang.Thread` that Java starts, whose loop enters one lazily bound native init method and one per frame, which
+get 5000 or more `byte[]` results of seeded lengths from a Java asset reader and
+never delete them) runs in a process of its own in every variant, and once more
+debuggable (CheckJNI); with the layer the log shows no declined result, no
+allocation that left the arena and a thread peak below the limit (the note records, without
+judging it, the longest a critical region the layer opened stayed open). A shorter run
+on a native thread that attaches itself is the second row (`scene_attached`), and the scene runs
+once more in a process named other than its package (`android:process`).
 `android17-oldapp-runner` (tooling) runs the package (manifest, DEX file, armv7
 build), the verdicts and the commands without a guest. The unit tests
 (`andarium-oldapp-*`) run the JNI interposer against a fake runtime that accepts
-live references only, the allocator arena, the ELF relocation scan and the page
-protection window.
+live references only (rows revoke the block's own references at a wrapper's first
+runtime call, end a block from a callback during a call, and run a second thread
+inside a synchronization through hooks in the fake's region and release
+functions, place a Java or application write at the layer's first store into a
+page with a page-protection handler, and model the collector's thread-flip rule;
+the fake fails a runtime call that arrives with the layer's mutex held unless the
+mutex rule in the code lists it (no critical get at all), any runtime call inside
+a critical region the layer opened except that region's release, and models which
+critical gets raise a thread's flip count: movable arrays and uncompressed
+strings do, large and non-moving arrays and compressed strings do not), the
+allocator arena, the ELF relocation scan and the page protection window.
 `android-camera` (integration) registers when `UML_ANDROID_CAMERA_RELEASE`
 names the release: the runner boots it with the launcher's synthetic camera
 (`--camera=synthetic|blocked`, `--camera-profile=`) and a layout on the vendor
