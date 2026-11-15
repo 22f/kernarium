@@ -37,6 +37,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import functools
 from dataclasses import dataclass
 from pathlib import Path
 import sys
@@ -140,8 +141,8 @@ def _name(tier: str, flash: bool, manual: bool, raw: bool, concurrent: bool, fro
     return "-".join(parts)
 
 
-def all_layouts() -> list[Layout]:
-    """Every layout, in the order of the table: none, the front camera alone, back and front."""
+@functools.cache
+def _layouts() -> tuple[Layout, ...]:
     layouts = [
         Layout("none", "none", ""),
         Layout("front", "front", ""),
@@ -154,11 +155,22 @@ def all_layouts() -> list[Layout]:
                     for concurrent in (False, True):
                         layouts.append(Layout(_name(tier, flash, manual, raw, concurrent, front2160),
                                               "back+front", tier, flash, manual, raw, concurrent, front2160))
-    return layouts
+    return tuple(layouts)
+
+
+@functools.cache
+def _layouts_by_name() -> dict[str, Layout]:
+    return {layout.name: layout for layout in _layouts()}
+
+
+def all_layouts() -> list[Layout]:
+    """Every layout, in the order of the table: none, the front camera alone, back and front.
+    Layouts are immutable and built once; each call returns a list of its own."""
+    return list(_layouts())
 
 
 def by_name() -> dict[str, Layout]:
-    return {layout.name: layout for layout in all_layouts()}
+    return dict(_layouts_by_name())
 
 
 def _drops(layout: Layout) -> list[Layout]:
