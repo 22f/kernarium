@@ -479,6 +479,7 @@ class WideningTests(unittest.TestCase):
                     parts[1] not in ("m", "pp", "e", "same", "xzr_d", "zs"):
                 expected.setdefault(name, set()).add("mops-epilogue")
         expected["set_zs"] = {"mops-epilogue"}
+        expected["isb_mov"] = {"barriers:ISB:baseline"}
         expected["cpy_vdvn"] = {"mops-virtual", "mops-epilogue"}
         expected["cpy_vnvs"] = {"mops-virtual", "mops-epilogue"}
         # "xzr_d" is parsed as ("xzr", "d").

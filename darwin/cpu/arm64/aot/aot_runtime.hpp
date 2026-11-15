@@ -32,6 +32,10 @@ enum class Refusal : unsigned {
 	count,
 };
 void note_refusal(Refusal reason) noexcept;
+/* Where a diagnostics build's test hook runs: after the dispatcher read the
+ * address space's sequences, before anything is looked up (nothing in a
+ * production build). */
+void note_run_start() noexcept;
 /* Bracket the engine's execution of one instruction rewritten code left to
  * it (counted and timed in a diagnostics build only). */
 [[nodiscard]] std::uint64_t step_begin() noexcept;

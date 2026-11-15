@@ -54,6 +54,10 @@ void set_enabled(std::optional<bool> state) noexcept;
  * other page or kind misses too) and leave every register that the refill
  * thunk must preserve scrambled when the callback returns. */
 void set_refill_stress(bool on) noexcept;
+/* Call `hook(context)` whenever a run of the executor reaches AOT, after
+ * it read the address space's sequences (nullptr: none). The hook may
+ * publish a code change, as another vCPU would at that moment. */
+void set_run_hook(void (*hook)(void *), void *context) noexcept;
 [[nodiscard]] Stats stats() noexcept;
 void reset_stats() noexcept;
 

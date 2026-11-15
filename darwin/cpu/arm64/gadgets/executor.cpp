@@ -3335,7 +3335,8 @@ GadgetExecutor::finish_block(ProgramCache &programs, const BuildResult &built,
 #if UML_AOT
 	if (arm64::aot::enabled()) [[unlikely]] {
 		if (const auto aot_event = run_aot(cpu, memory, generation,
-			    sequences.code_changes, executed))
+			    sequences.code_changes, sequences.mapping_changes,
+			    executed))
 			return *aot_event;
 	}
 #endif
@@ -3417,12 +3418,16 @@ constexpr std::uint64_t aot_entry_budget = 4096;
 
 std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 	arm64::CpuState &cpu, StaticGuestMemory &memory, unsigned long generation,
-	std::uint64_t code_changes, std::size_t &executed)
+	std::uint64_t code_changes, std::uint64_t mapping_changes,
+	std::size_t &executed)
 {
 	if (!aot_)
 		aot_ = std::make_unique<AotState>();
-	const auto entry = darwin_uml_static_vm_execution_context_sequences(
-		execution_context_);
+	/* The sequences are the ones run_block read: the lookups below
+	 * validate against them, the engine's ISB compares with them
+	 * (cpu.code_sequence_seen) and the loop leaves when either has moved
+	 * since, so a change published after that read cannot go unseen. */
+	arm64::aot::note_run_start();
 	std::size_t total = 0;
 	const auto first = cpu.pc;
 	for (;;) {
@@ -3489,8 +3494,8 @@ std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 			execution_context_);
 		if (total >= aot_entry_budget || single_step_ ||
 		    now.execution_interrupt != 0U ||
-		    now.code_changes != entry.code_changes ||
-		    now.mapping_changes != entry.mapping_changes ||
+		    now.code_changes != code_changes ||
+		    now.mapping_changes != mapping_changes ||
 		    cpu.svcr != 0U ||
 		    (cpu.effective_fpcr() &
 		     arm64::detail::fpcr_exception_enable_mask) != 0U)

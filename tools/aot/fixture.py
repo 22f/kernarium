@@ -175,6 +175,9 @@ def forms() -> list[tuple[str, list[int]]]:
                                    mops(kind, 0, 0, 0, 2, 1)]))
         out.append((f"{kind}_m", [mops(kind, 1, 0, 0, 2, 1)]))
         out.append((f"{kind}_e", [mops(kind, 2, 0, 0, 2, 1)]))
+    # An ISB, which the engine runs, then a MOV: the code-change scenario
+    # rewrites the MOV while the ISB's function is being entered.
+    out.append(("isb_mov", [0xd5033fdf, 0xd2800020]))
     return out
 
 

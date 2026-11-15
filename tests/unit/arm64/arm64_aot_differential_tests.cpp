@@ -1609,6 +1609,74 @@ void deferred_fp_state_is_judged_by_its_guest_fpcr(const LibraryImage &image,
 	}
 }
 
+/* Another vCPU's code change, published in the window between the
+ * dispatcher reading the sequences and AOT looking its entry up. */
+struct WindowChange final {
+	Environment *env;
+	std::uint64_t offset;
+	std::uint32_t word;
+	bool fired;
+};
+
+void publish_in_the_window(void *context)
+{
+	auto &change = *static_cast<WindowChange *>(context);
+	if (change.fired)
+		return;
+	change.fired = true;
+	change.env->backing.put32(change.offset, change.word);
+	change.env->memory.invalidate_code(change.env->bias + change.offset);
+}
+
+/* `isb; mov x0, #1; ret` is entered after a change to the MOV was published
+ * in the window. The instance was verified before the change and the
+ * engine's ISB sees the change (it compares with the sequence the dispatcher
+ * read), so the run must leave at the ISB and look the MOV up again at the
+ * new sequence, which finds it changed; rewritten code must not run it. */
+void code_change_in_the_dispatch_window(const LibraryImage &image,
+	const std::vector<Function> &functions)
+{
+	const auto form = functions.back();
+	std::uint32_t words[2];
+	std::memcpy(words, &image.bytes[form.start], sizeof(words));
+	require(words[0] == 0xd5033fdfU); /* isb */
+	require(words[1] == 0xd2800020U); /* mov x0, #1 */
+	const std::uint32_t patched = 0xd2800f00U; /* mov x0, #0x78 */
+	const auto bias = Fixture::bias;
+	Fixture ref{4371, image}, got{4372, image};
+	SplitMix rng{71};
+	auto c = make_case(rng, bias, form.start, false, true, arena_base(bias));
+	enterable(c);
+	/* The engine, running the changed code. */
+	ref.env.backing.put32(form.start + 4, patched);
+	ref.env.memory.invalidate_code(ref.env.bias + form.start + 4);
+	aot::set_enabled(false);
+	const auto want = drive(ref.env, ref.arena, c, max_blocks);
+	require(want.finished);
+	require(want.cpu.registers[0] == 0x78);
+	/* AOT code verified against the original text, then the window. */
+	aot::reset_stats();
+	aot::set_enabled(true);
+	const auto warm = drive(got.env, got.arena, c, aot_max_blocks);
+	require(warm.finished);
+	require(warm.cpu.registers[0] == 1);
+	const auto entered = aot::stats().enters;
+	require(entered > 0);
+	WindowChange change{&got.env, form.start + 4, patched, false};
+	aot::set_run_hook(publish_in_the_window, &change);
+	const auto have = drive(got.env, got.arena, c, aot_max_blocks);
+	aot::set_run_hook(nullptr, nullptr);
+	aot::set_enabled(false);
+	require(change.fired);
+	require(same(want, have, c));
+	const auto st = aot::stats();
+	std::fprintf(stderr, "code change in the dispatch window: %llu entries "
+		"before, %llu after\n", static_cast<unsigned long long>(entered),
+		static_cast<unsigned long long>(st.enters));
+	/* Entered once, at the ISB; the changed page is no library page. */
+	require(st.enters == entered + 1);
+}
+
 /* The 64-bit page digests find a library; they authorize nothing. Two words
  * of a page are changed (the first to something the engine will run, the
  * second to make the digest come out the same), and the page is not the one
@@ -1822,8 +1890,10 @@ int main(int argc, char **argv)
 		/* Both entry refusals are exercised by every library's cases. */
 		require(st.refusals[1] > 0);
 		require(st.refusals[3] > 0);
-		if (file.guest.ends_with("/libaotfixture.so"))
+		if (file.guest.ends_with("/libaotfixture.so")) {
 			loop_through_another_range(image, functions);
+			code_change_in_the_dispatch_window(image, functions);
+		}
 		/* The scenarios use the first library: they are about the
 		 * mechanism, not about the code. */
 		if (file.index == libraries.front().index) {

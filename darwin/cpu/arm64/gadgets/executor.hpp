@@ -164,7 +164,7 @@ private:
 	[[nodiscard]] std::optional<::uml::cpu::EngineEvent> run_aot(
 		CpuState &cpu, ::uml::memory::StaticGuestMemory &memory,
 		unsigned long generation, std::uint64_t code_changes,
-		std::size_t &executed);
+		std::uint64_t mapping_changes, std::size_t &executed);
 	/* run_aot's engine step: the one instruction rewritten code left to the
 	 * engine, as run_trap_enabled_instruction runs it, from a cached
 	 * one-instruction program. Defined only with UML_AOT. */

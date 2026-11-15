@@ -120,6 +120,8 @@ std::atomic<int> g_state{-1};
 
 #if UML_AOT_DIAGNOSTICS
 std::atomic<bool> g_refill_stress{false};
+std::atomic<void (*)(void *)> g_run_hook{nullptr};
+std::atomic<void *> g_run_hook_context{nullptr};
 
 /* Leave every general and vector register the caller could rely on holding
  * something else: the refill thunk saves x0-x17, x30, NZCV and q0-q31 around
@@ -353,6 +355,14 @@ void note_refusal(Refusal reason) noexcept
 #endif
 }
 
+void note_run_start() noexcept
+{
+#if UML_AOT_DIAGNOSTICS
+	if (const auto hook = g_run_hook.load(std::memory_order_acquire))
+		hook(g_run_hook_context.load(std::memory_order_relaxed));
+#endif
+}
+
 std::uint64_t step_begin() noexcept
 {
 #if UML_AOT_DIAGNOSTICS
@@ -387,6 +397,12 @@ void set_enabled(std::optional<bool> state) noexcept
 void set_refill_stress(bool on) noexcept
 {
 	g_refill_stress.store(on, std::memory_order_relaxed);
+}
+
+void set_run_hook(void (*hook)(void *), void *context) noexcept
+{
+	g_run_hook_context.store(context, std::memory_order_relaxed);
+	g_run_hook.store(hook, std::memory_order_release);
 }
 
 Stats stats() noexcept
