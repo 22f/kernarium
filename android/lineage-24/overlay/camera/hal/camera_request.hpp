@@ -3,14 +3,13 @@
 // How a capture request of the camera HAL ends. The HAL collects the output
 // buffers of a request one after another, their waits sharing one budget, and the
 // framework learns of the end by the camera HAL's notify contract: a request
-// whose outputs all failed is an ERROR_REQUEST (the application gets
-// onCaptureFailed and may shoot again), while ERROR_BUFFER, which Camera2 hands
-// to the application as onCaptureBufferLost and CameraX ignores, belongs to a
-// request that lost only some of its outputs. A camera the host has ended is
-// neither: the framework is told ERROR_DEVICE, which Camera2 hands to the
-// application as onError(ERROR_CAMERA_DEVICE) and which CameraX answers by
-// closing the camera, ending a recording it holds with the clip saved. The tests
-// hold the rules where no Android library is needed.
+// whose outputs all failed is an ERROR_REQUEST (a failed capture, after which the
+// application may shoot again), while ERROR_BUFFER belongs to a request that lost
+// only some of its outputs. A camera the host has ended is neither: when the
+// session has a video encoder stream the request fails as a whole and the
+// framework is told ERROR_DEVICE, once per session (camera_session.hpp); any other
+// session is told nothing of it. The tests hold the rules where no Android library
+// is needed.
 #pragma once
 
 #include <algorithm>
