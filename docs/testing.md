@@ -738,50 +738,53 @@ AArch32 JIT tests exist only on macOS). A guest `SIGILL` is a correctness
 blocker in every one of them.
 
 - `arm64-aot-differential` exists only in a build configured with
-  `UML_AOT_IMAGE`, `UML_AOT_FSCK_EROFS` and `UML_AOT_DIAGNOSTICS`: it runs
+  `UML_AOT_IMAGE`, `UML_AOT_FSCK_EROFS` and `UML_AOT_DIAGNOSTICS`. It runs
   functions of every rewritten library through the gadget engine with and
-  without ahead-of-time code and compares all guest state, memory and faults
-  (thread pointer, misaligned stack pointer, faulting stack pages, floating-
-  point modes, and the alignment flag and floating-point syndrome of the
-  ending event included), then the unhappy paths: single step, preemption
-  bound, two load biases, other or changed bytes, pages that appear or change
-  after their neighbours were compared, edges into such pages, more code
-  changes than the history keeps, more libraries than the binder holds,
-  tagged pointers, page crossings, forced refills, and a shootdown by another
-  thread while rewritten code loops. The runs use the product's code layout;
-  `UML_AOT_COUNT_RETIRED=ON` rewrites the libraries to count each instruction
-  an entry runs, which checks the budget's bound exactly. A generated library
-  holds one function per instruction form of the ordered, atomic and MOPS
-  classes, so each form runs from random states, compare-and-swap with every
-  outcome and permission, and loops that update one cell from rewritten code
-  and the engine on two vCPUs. Memory copies and sets also run from directed
-  states (the first, a middle and the last byte faulting, both directions,
-  overlap, zero length, a copy across an unmapped page), and the registers,
-  flags and memory at every fault must equal the engine's.
-  A short function run 200 times is entered a handful of times, and a copy
-  that faults on five pages is entered for once.
-  One row per Advanced SIMD structure form (loads and stores, lanes and
-  replicating loads, post-index by immediate and register, virtual base and
-  index registers) is started the same way.
-  `arm64-aot-tools` checks the generator's encoders and classifier,
-  including which forms are left to the engine.
+  without ahead-of-time code and requires the same guest state, memory,
+  ending event and exception syndrome, and the same registers, flags, vector
+  registers and memory at every fault. The unhappy paths are part of it:
+  single step, the preemption bound, two load biases, other or changed bytes,
+  pages that appear or change after their neighbours were compared, edges
+  into such pages, more code changes than the history keeps, more libraries
+  than the binder holds, tagged pointers, page crossings, forced refills and
+  a shootdown by another thread while rewritten code loops. The runs use the
+  product's code layout; `UML_AOT_COUNT_RETIRED=ON` rewrites the libraries to
+  count each instruction an entry runs, which checks the budget's bound
+  exactly.
+  A generated library holds the forms of the ordered, atomic, memory copy and
+  set, and Advanced SIMD structure classes. Each form runs from random
+  states; compare-and-swap runs with every outcome and permission; loops that
+  update one cell run from rewritten code and the engine on two vCPUs; copies
+  and sets also run from directed states, including the epilogue started
+  alone in states a signal handler can leave; and structure accesses run over
+  a page boundary with one page cached and the other not.
+  Admission and retry decisions are performance hints: rows warm them and
+  then change the text, restore it, and move the executor to another address
+  space, and the result must stay the engine's. Entering rewritten code must
+  not need more than a bounded part of the 64 KiB stack the guest kernel's
+  threads run on: a row runs the paths on a painted stack and holds the
+  high-water mark to a budget.
+  `arm64-aot-tools` checks the generator's encoders, classifier, byte census
+  and fixture layout, including which forms are left to the engine.
 - `arm64-aot-runtime-product` checks that the product compilation of the AOT
   runtime holds none of the diagnostics or test switches.
 - `arm64-aot-guest-runner` drives the guest runner of the next test against
   scripted guests: a complete pair of arms passes, and every failed or
   incomplete one (an exit status, a missing or empty workload row, a probe
-  that skipped scenarios or recorded no faults, a product arm whose framework
-  never became resident) fails.
+  that skipped scenarios or recorded no faults, a product arm without
+  residency evidence) fails.
 - `aot-guest-workloads` (integration, opt-in like the other Android guest
   tests: it exists where `UML_AOT_IMAGE` and the Android launcher target do)
   boots the release twice, without and with `DARWIN_UML_AOT=1`, runs the
   covered library families' workloads, three times each, and the guest probe
-  (faults inside rewritten libz code, text patched at run time), requires
-  every command to succeed and identical output, and that the AOT arm ran
-  rewritten code: in a diagnostics build, that the libraries it names were
-  entered; in a product build, which states nothing itself, that the
-  framework's text became resident in the emulator process (`vmmap`, macOS)
-  and was not with the component off. Speed is printed, not judged.
+  (faults inside rewritten libz code, text patched at run time), and requires
+  every command to succeed with identical output. Execution evidence exists
+  only in a diagnostics build, where the libraries the run names must have
+  been entered. A product build has residency evidence: the framework's text
+  became resident in the emulator process (`vmmap`, macOS) and was not with
+  the component off. Reading the text raises residency too, so that proves
+  the framework was touched and not that rewritten instructions ran. Speed is
+  printed, not judged.
 - `arm64-instruction-corpus` runs the generated A64 corpus through both
   engines; the special records (native SME, absent features, the SM = 0 family,
   top-byte ignore, indirect-branch targets, native floating-point traps) have

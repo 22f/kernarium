@@ -548,32 +548,36 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
 - Exit: whatever the framework does not inline stops with committed state and
   the engine runs exactly that instruction, so faults, system calls, signals
   and debugger exits are the engine's own. When such an instruction faults,
-  the engine also runs it again where the guest resumes (a copy into fresh
-  memory faults once per page), without entering rewritten code for it. An
-  entry runs at most the engine's chaining limit of instructions, and the
-  executor goes on into the next entry only while nothing the dispatcher
-  checks has changed (the interrupt, mapping and code-change sequences,
-  SVCR, the FPCR trap enables), so interrupts and shootdowns are noticed as
-  they are in the engine.
-- Admission: entering and leaving rewritten code costs about what the engine
-  takes for 48 instructions. An address whose last two entries each retired
-  fewer is left to the engine, except one entry in 64, which tells whether it
-  has become worth entering (a callback that a library calls into code
-  outside the framework is the common case).
+  the engine also runs it again where the guest resumes, without entering
+  rewritten code for it. An entry runs at most the engine's chaining limit of
+  instructions, and the executor goes on into the next entry only while
+  nothing the dispatcher checks has changed (the interrupt, mapping and
+  code-change sequences, SVCR, the FPCR trap enables), so interrupts and
+  shootdowns are noticed as they are in the engine. The limit counts
+  instructions, not bytes or time: one memory copy or set is one instruction
+  here as it is in the engine.
+- Admission: an address whose entries keep retiring too few instructions to
+  repay the cost of entering and leaving is left to the engine, and is
+  entered again from time to time to find out whether it has become worth
+  it. That history and the retry above are hints kept per executor and keyed
+  by address alone. They can only decline an entry; every entry that is taken
+  is validated against the address space as it is at that moment, so changed
+  text, a remap or another address space can cost a declined entry and never
+  run stale code.
 - Memory and atomics: an inline probe of the engine's TLB entry, refilled
   through the executor on a miss; ordered accesses, the LSE atomic operations
   and compare-and-swap run as the host's own instruction on naturally aligned
   addresses. Advanced SIMD structure loads and stores (LD1 to LD4, ST1 to
   ST4, the lane forms and LDnR) run as the host's own instruction on the
-  host address of the guest bytes, probed once by the page of the last byte.
-  An unaligned address, an SP base, a pair and an exclusive are the
-  engine's. The epilogue of CPY, CPYF and SET (the engine's option B,
-  `darwin/cpu/arm64/detail/memory_copy_set.hpp`) runs in rewritten code for a
-  forward copy or a set of at most 64 bytes with both ends in one mapped
-  page; every other case calls the engine's own routine on the same
-  registers. A fault, or registers the prologue cannot have produced, steps
-  the instruction with the registers committed at that region, so the engine
-  takes the fault with its own state.
+  host address of the guest bytes when both ends are in pages the probe
+  holds. A page-crossing access, an unaligned address, an SP base, a pair
+  and an exclusive are the engine's. The epilogue of CPY, CPYF and SET (the
+  engine's option B, `darwin/cpu/arm64/detail/memory_copy_set.hpp`) runs in
+  rewritten code for a small forward copy or set inside mapped pages; every
+  other case calls the engine's own routine on the same registers. A fault,
+  or registers the prologue cannot have produced, steps the instruction with
+  the registers committed at that region, so the engine takes the fault with
+  its own state.
 - Floating point and SIMD run under the guest FPCR/FPSR in the host registers
   the way gadget code does; the engine restores the host environment at the
   dispatcher boundary.

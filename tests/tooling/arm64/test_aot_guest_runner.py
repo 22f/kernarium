@@ -302,18 +302,18 @@ class RunnerTest(unittest.TestCase):
             "done faults=%d\n" % len(runner.PROBE_CASES), "")),
             "closing record")
 
-    def test_product_arm_that_never_ran_the_framework_fails(self):
+    def test_product_arm_without_residency_evidence_fails(self):
         scenario = good_scenario()
         scenario["vmmap"]["on"] = vmmap_text("16K")
-        self.fails(scenario, "never ran rewritten code")
+        self.fails(scenario, "no residency evidence")
         scenario = good_scenario()
         scenario["vmmap"]["on"] = vmmap_text("512K")
-        self.fails(scenario, "never ran rewritten code")
+        self.fails(scenario, "no residency evidence")
 
-    def test_framework_that_ran_with_the_component_off_fails(self):
+    def test_framework_resident_with_the_component_off_fails(self):
         scenario = good_scenario()
         scenario["vmmap"]["off"] = vmmap_text("19.3M")
-        self.fails(scenario, "ran with the component off")
+        self.fails(scenario, "resident with the component off")
 
     def test_product_mode_without_evidence_fails(self):
         scenario = good_scenario()

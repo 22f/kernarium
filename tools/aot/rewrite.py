@@ -205,7 +205,9 @@ TPIDR_MASK = 0xffffffe0
 
 # The byte census of a unit: every emitted word has one kind. The narrowest
 # emitter that knows a word's purpose tags it, and the untagged words of an
-# instruction take the instruction's class.
+# instruction take the instruction's class. "mem.probe" is the inline TLB
+# probe of plain loads and stores only: an atomic's probe is part of
+# "atomic", a copy's or set's of "mops.site" and "mops.thunk".
 CENSUS = ("other", "insn", "spill", "branch", "pcrel", "step", "hint",
           "atomic", "mops.site", "mem.ea", "mem.probe", "mem.access",
           "mem.wb", "charge", "gate", "stub.mm", "stub.st", "stub.xu",

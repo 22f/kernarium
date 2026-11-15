@@ -24,9 +24,12 @@ Checked:
   masked; the others are compared for each fault, and at least one must be;
 - every adb command and push reports success;
 - without --diagnostics (the product emulator, which states nothing itself):
-  the AOT arm read and ran the framework, judged from outside by the resident
-  size of the framework's text in the emulator process (vmmap), which is a
-  few pages with the component off and megabytes once it has entered code;
+  residency evidence that the AOT arm touched the framework, judged from
+  outside by the resident size of the framework's text in the emulator
+  process (vmmap), which is a few pages with the component off and megabytes
+  once it has been used. Reading the text makes it resident as well, so this
+  is not evidence that rewritten instructions ran; only --diagnostics counts
+  entries;
 - with --diagnostics (a framework built with UML_AOT_DIAGNOSTICS, which writes
   the report named by DARWIN_UML_AOT_REPORT): the AOT arm entered rewritten
   code, and the arm with the component off did not. With --manifest the
@@ -69,8 +72,8 @@ DEFAULT_ADB_PORT = 5585
 SETTLE_SECONDS = 20
 REPORT_SECONDS = 3
 # The resident size of the framework's text that separates "loaded" from
-# "run": a component that is off leaves a few pages, one that entered code
-# has megabytes.
+# "touched": a component that is off leaves a few pages, one that was used
+# has megabytes. It is residency evidence, not proof of execution.
 MIN_RESIDENT_BYTES = 1 << 20
 WORKLOAD_SECONDS = 900
 PROBE_SECONDS = 120
@@ -500,13 +503,14 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
     if not options.diagnostics:
         assert off.resident is not None and on.resident is not None
         if on.resident < MIN_RESIDENT_BYTES:
-            raise Failure("the AOT arm never ran rewritten code (the "
-                          f"framework's text is {on.resident} bytes resident)")
+            raise Failure("no residency evidence that the AOT arm used the "
+                          "framework (its text is "
+                          f"{on.resident} bytes resident)")
         if off.resident >= MIN_RESIDENT_BYTES:
-            raise Failure("the framework's text ran with the component off "
-                          f"({off.resident} bytes resident)")
-        print(f"framework text resident: off {off.resident >> 10} KiB, "
-              f"on {on.resident >> 10} KiB")
+            raise Failure("the framework's text is resident with the "
+                          f"component off ({off.resident} bytes resident)")
+        print(f"framework text resident (residency evidence): off "
+              f"{off.resident >> 10} KiB, on {on.resident >> 10} KiB")
     if options.diagnostics:
         if on.report.get("enters", 0) == 0:
             raise Failure("the AOT arm never entered rewritten code")

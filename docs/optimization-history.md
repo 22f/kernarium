@@ -837,3 +837,9 @@ the AArch64 gadget parts byte-identical.
 | G259 | Let the block transfers carry a position instead of a key | Accepted. LDM, STM, PUSH and POP carry their block position as G253's transfers do, and the library runs the instruction at address 0 since no block transfer the gadgets run reads its own address (an STM storing the PC goes to the library with its key). A one-workload loss spread over untouched gadgets was layout: a never-run pad reproduced it. |
 | G260 | Pack a block transfer's registers five bits each | Accepted. Registers were CpuState byte offsets, eight to a stream word; each is now its offset over four in five bits, so six fit beside the base and position and every block transfer carries a word less. |
 | G261 | Hold a short skip's distance in the gadget | Accepted. Each condition also has a skip for every run of two to nine words with the distance as an immediate (112 gadgets), covering almost all skips. A builder removing a word from a stream under construction must move every index it recorded past it. |
+
+## Ahead-of-time code (study line)
+
+| ID | Attempt | Disposition and lesson |
+| --- | --- | --- |
+| AOT1 | Leave an address to the engine when its entries retire too few instructions | Accepted. A callback that a library makes into code outside the framework entered and left rewritten code twice per call and ran slower than the engine; declining the address (with a periodic re-probe) removed most of that loss. The threshold is the transition's cost in engine instructions, but an instruction in rewritten code still costs a fraction of an engine one, so the true break-even is higher: tune it with a series, not by the cost alone. |
