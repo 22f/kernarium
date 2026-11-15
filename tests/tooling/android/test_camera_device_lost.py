@@ -125,11 +125,13 @@ class DeviceLostTests(unittest.TestCase):
         self.assertEqual(self.sensor.count("ErrorCode::kErrorDevice"), 1)
         self.assertNotIn("kErrorDevice", self.source)
 
-    def test_the_topic_is_the_last_one_of_the_series(self) -> None:
-        last = (SERIES / patch_names()[-1]).read_text(encoding="utf-8")
-        self.assertIn("DeviceLost", last)
-        self.assertIn("kErrorDevice", last)
-
+    def test_the_topic_is_a_patch_of_the_series(self) -> None:
+        # Later topics may stack on it: the row names the patch, not its place.
+        name = "end-the-camera-when-the-host-ends-a-recording.patch"
+        self.assertIn(name, patch_names())
+        text = (SERIES / name).read_text(encoding="utf-8")
+        self.assertIn("DeviceLost", text)
+        self.assertIn("kErrorDevice", text)
 
 if __name__ == "__main__":
     unittest.main()
