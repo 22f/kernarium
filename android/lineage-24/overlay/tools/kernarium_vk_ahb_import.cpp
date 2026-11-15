@@ -27,16 +27,38 @@
  * case imported and every byte read back is a proof that the row pitch gralloc
  * reports is a pitch the driver can import and the renderer reads the rows at.
  *
+ * It also checks that the driver shares memory as a file descriptor beside the
+ * hardware buffer: both fd extensions are offered and enabled on the same
+ * device, and for each fd handle type host-visible memory is allocated for
+ * export, exported, mapped in this process through Vulkan and through the fd,
+ * written from there and from another process, read back by the GPU, and
+ * imported again from a second fd and read back by the GPU and the CPU.
+ *
  * Usage: kernarium_vk_ahb_import [width...]
  * With no argument it runs a set of widths for each format. The exit status is
  * 0 when every case that could be allocated passed.
+ *
+ * It prints one line for each extension ("memory-fd extension NAME: offered"
+ * or "not offered"), then for each memory-fd case "memory-fd TYPE N bytes"
+ * and, indented, "PASS" or "FAIL" (a failed step is printed above FAIL).
+ * Each hardware-buffer case prints "FORMAT WxH stride S (B bytes)" and the
+ * same indented verdict. The last line is
+ * "PASS|FAIL: N cases imported, F failed, K not allocated; memory fd M cases,
+ * G failed" on one line (tests/integration/android/run_android_vulkan_smoke.py
+ * reads it).
  */
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <vector>
 
 #include <android/hardware_buffer.h>
 #include <vulkan/vulkan.h>
@@ -86,7 +108,15 @@ struct Device {
     VkCommandPool pool = VK_NULL_HANDLE;
     VkPhysicalDeviceMemoryProperties memory = {};
     PFN_vkGetAndroidHardwareBufferPropertiesANDROID getProperties = nullptr;
+    // The guest fd extensions the driver offers, and the entry points of the first.
+    bool fdOffered = false;
+    bool dmaBufOffered = false;
+    PFN_vkGetMemoryFdKHR getMemoryFd = nullptr;
+    PFN_vkGetMemoryFdPropertiesKHR getMemoryFdProperties = nullptr;
 };
+
+constexpr const char* kFdExtension = "VK_KHR_external_memory_fd";
+constexpr const char* kDmaBufExtension = "VK_EXT_external_memory_dma_buf";
 
 bool check(VkResult result, const char* what) {
     if (result == VK_SUCCESS) return true;
@@ -111,7 +141,22 @@ bool createDevice(Device* d) {
     }
     vkGetPhysicalDeviceMemoryProperties(d->physical, &d->memory);
 
-    const char* extensions[] = {
+    uint32_t offeredCount = 0;
+    std::vector<VkExtensionProperties> offered;
+    if (vkEnumerateDeviceExtensionProperties(d->physical, nullptr, &offeredCount, nullptr) == VK_SUCCESS) {
+        offered.resize(offeredCount);
+        if (vkEnumerateDeviceExtensionProperties(d->physical, nullptr, &offeredCount, offered.data()) !=
+            VK_SUCCESS) {
+            offeredCount = 0;
+        }
+    }
+    for (uint32_t i = 0; i < offeredCount; i++) {
+        if (!strcmp(offered[i].extensionName, kFdExtension)) d->fdOffered = true;
+        if (!strcmp(offered[i].extensionName, kDmaBufExtension)) d->dmaBufOffered = true;
+    }
+
+    // The hardware-buffer extensions, and the fd extensions the driver offers on the same device.
+    std::vector<const char*> extensions = {
             "VK_ANDROID_external_memory_android_hardware_buffer",
             "VK_KHR_sampler_ycbcr_conversion",
             "VK_KHR_external_memory",
@@ -121,6 +166,8 @@ bool createDevice(Device* d) {
             "VK_KHR_maintenance1",
             "VK_EXT_queue_family_foreign",
     };
+    if (d->fdOffered) extensions.push_back(kFdExtension);
+    if (d->fdOffered && d->dmaBufOffered) extensions.push_back(kDmaBufExtension);
     float priority = 1.0f;
     VkDeviceQueueCreateInfo qci = {};
     qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -135,8 +182,8 @@ bool createDevice(Device* d) {
     dci.pNext = &ycbcr;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
-    dci.enabledExtensionCount = sizeof(extensions) / sizeof(extensions[0]);
-    dci.ppEnabledExtensionNames = extensions;
+    dci.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+    dci.ppEnabledExtensionNames = extensions.data();
     if (!check(vkCreateDevice(d->physical, &dci, nullptr, &d->device), "vkCreateDevice")) return false;
 
     vkGetDeviceQueue(d->device, 0, 0, &d->queue);
@@ -145,6 +192,11 @@ bool createDevice(Device* d) {
     if (!d->getProperties) {
         printf("    vkGetAndroidHardwareBufferPropertiesANDROID is not exposed\n");
         return false;
+    }
+    if (d->fdOffered) {
+        d->getMemoryFd = reinterpret_cast<PFN_vkGetMemoryFdKHR>(vkGetDeviceProcAddr(d->device, "vkGetMemoryFdKHR"));
+        d->getMemoryFdProperties = reinterpret_cast<PFN_vkGetMemoryFdPropertiesKHR>(
+                vkGetDeviceProcAddr(d->device, "vkGetMemoryFdPropertiesKHR"));
     }
 
     VkCommandPoolCreateInfo pci = {};
@@ -385,6 +437,390 @@ bool importAndRead(const Device& d, AHardwareBuffer* buffer, const AHardwareBuff
     return ok;
 }
 
+// ---- Memory shared as a file descriptor ----------------------------------------------------------
+
+struct FdType {
+    VkExternalMemoryHandleTypeFlagBits type;
+    const char* name;
+};
+
+const FdType kFdTypes[] = {
+        {VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT, "opaque-fd"},
+        {VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, "dma-buf"},
+};
+
+// A size that is not a multiple of a page, and one of several pages.
+const VkDeviceSize kFdSizes[] = {65540, 4u << 20};
+
+// A byte of one writer's pattern.
+uint8_t fdByte(uint32_t seed, VkDeviceSize i) {
+    return static_cast<uint8_t>(i * 131 + (i >> 8) * 17 + seed * 37 + 1);
+}
+
+// What byte i of a buffer of `size` bytes holds once the stage's writers are done. Stage 0: the Vulkan mapping filled
+// all of it (pattern 1). Stage 1: a mapping of the fd rewrote the upper half (2). Stage 2: another process rewrote the
+// last quarter (3).
+uint8_t fdExpected(int stage, VkDeviceSize size, VkDeviceSize i) {
+    if (stage >= 2 && i >= size - size / 4) return fdByte(3, i);
+    if (stage >= 1 && i >= size / 2) return fdByte(2, i);
+    return fdByte(1, i);
+}
+
+void fdFill(uint8_t* bytes, VkDeviceSize from, VkDeviceSize to, uint32_t seed) {
+    for (VkDeviceSize i = from; i < to; i++) bytes[i] = fdByte(seed, i);
+}
+
+// How many of the first `size` bytes are not what the stage expects, and the first of them.
+uint64_t fdWrong(const uint8_t* bytes, int stage, VkDeviceSize size, VkDeviceSize* first) {
+    uint64_t wrong = 0;
+    for (VkDeviceSize i = 0; i < size; i++) {
+        if (bytes[i] != fdExpected(stage, size, i)) {
+            if (!wrong) *first = i;
+            wrong++;
+        }
+    }
+    return wrong;
+}
+
+bool fdVerify(const uint8_t* bytes, int stage, VkDeviceSize size, const char* what) {
+    VkDeviceSize first = 0;
+    const uint64_t wrong = fdWrong(bytes, stage, size, &first);
+    if (!wrong) return true;
+    printf("    %s: %" PRIu64 " of %" PRIu64 " bytes differ, first at %" PRIu64 ": read %u, wrote %u\n", what, wrong,
+           static_cast<uint64_t>(size), static_cast<uint64_t>(first), bytes[first], fdExpected(stage, size, first));
+    return false;
+}
+
+// Another process: it maps the fd, checks what the others wrote and writes the last quarter. It runs in the child of
+// a fork, so it maps, compares and exits, and is killed if it does not finish.
+[[noreturn]] void fdChild(int fd, VkDeviceSize size, size_t mapSize) {
+    alarm(60);
+    void* view = mmap(nullptr, mapSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (view == MAP_FAILED) _exit(10);
+    uint8_t* bytes = static_cast<uint8_t*>(view);
+    VkDeviceSize first = 0;
+    if (fdWrong(bytes, 1, size, &first)) _exit(11);
+    fdFill(bytes, size - size / 4, size, 3);
+    munmap(view, mapSize);
+    _exit(0);
+}
+
+// A buffer bound to its own host-visible, coherent memory, mapped.
+struct Blob {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    void* mapped = nullptr;
+    VkMemoryRequirements requirements = {};
+};
+
+void destroyBlob(const Device& d, Blob* blob) {
+    if (blob->mapped) vkUnmapMemory(d.device, blob->memory);
+    if (blob->buffer) vkDestroyBuffer(d.device, blob->buffer, nullptr);
+    if (blob->memory) vkFreeMemory(d.device, blob->memory, nullptr);
+    *blob = Blob();
+}
+
+// Creates the buffer and its memory: allocated for export as `type` when importFd is negative, imported from importFd
+// otherwise. A successful import takes the fd (`consumed`). The memory type is chosen on export and reused on import.
+bool createBlob(const Device& d, VkDeviceSize size, VkExternalMemoryHandleTypeFlagBits type, int importFd,
+                uint32_t* typeIndex, bool* consumed, Blob* blob) {
+    VkExternalMemoryBufferCreateInfo external = {};
+    external.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
+    external.handleTypes = type;
+    VkBufferCreateInfo bci = {};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.pNext = &external;
+    bci.size = size;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (!check(vkCreateBuffer(d.device, &bci, nullptr, &blob->buffer), "vkCreateBuffer")) return false;
+    vkGetBufferMemoryRequirements(d.device, blob->buffer, &blob->requirements);
+    if (importFd < 0 &&
+        !findMemoryType(d, blob->requirements.memoryTypeBits,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, typeIndex)) {
+        printf("    no host-visible memory type\n");
+        return false;
+    }
+    if (!(blob->requirements.memoryTypeBits & (1u << *typeIndex))) {
+        printf("    the imported buffer cannot use memory type %u (types %#x)\n", *typeIndex,
+               blob->requirements.memoryTypeBits);
+        return false;
+    }
+
+    VkMemoryDedicatedAllocateInfo dedicated = {};
+    dedicated.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+    dedicated.buffer = blob->buffer;
+    VkExportMemoryAllocateInfo exported = {};
+    exported.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
+    exported.handleTypes = type;
+    VkImportMemoryFdInfoKHR imported = {};
+    imported.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
+    imported.handleType = type;
+    imported.fd = importFd;
+    dedicated.pNext = importFd < 0 ? static_cast<const void*>(&exported) : static_cast<const void*>(&imported);
+    VkMemoryAllocateInfo mai = {};
+    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.pNext = &dedicated;
+    mai.allocationSize = blob->requirements.size;
+    mai.memoryTypeIndex = *typeIndex;
+    if (!check(vkAllocateMemory(d.device, &mai, nullptr, &blob->memory), importFd < 0 ? "vkAllocateMemory (export)"
+                                                                                      : "vkAllocateMemory (import)")) {
+        return false;
+    }
+    if (importFd >= 0) *consumed = true;
+    if (!check(vkBindBufferMemory(d.device, blob->buffer, blob->memory, 0), "vkBindBufferMemory")) return false;
+    return check(vkMapMemory(d.device, blob->memory, 0, VK_WHOLE_SIZE, 0, &blob->mapped), "vkMapMemory");
+}
+
+// Copies `source` to a host-visible buffer with the GPU and compares the copy with the stage's pattern.
+bool gpuRead(const Device& d, VkBuffer source, VkDeviceSize size, int stage, const char* what) {
+    VkBuffer readback = VK_NULL_HANDLE;
+    VkDeviceMemory readbackMemory = VK_NULL_HANDLE;
+    VkCommandBuffer commands = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    bool ok = false;
+
+    do {
+        VkBufferCreateInfo bci = {};
+        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size = size;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (!check(vkCreateBuffer(d.device, &bci, nullptr, &readback), "vkCreateBuffer (readback)")) break;
+        VkMemoryRequirements requirements;
+        vkGetBufferMemoryRequirements(d.device, readback, &requirements);
+        VkMemoryAllocateInfo rai = {};
+        rai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        rai.allocationSize = requirements.size;
+        if (!findMemoryType(d, requirements.memoryTypeBits,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            &rai.memoryTypeIndex)) {
+            printf("    no host-visible memory type\n");
+            break;
+        }
+        if (!check(vkAllocateMemory(d.device, &rai, nullptr, &readbackMemory), "vkAllocateMemory (readback)")) break;
+        if (!check(vkBindBufferMemory(d.device, readback, readbackMemory, 0), "vkBindBufferMemory (readback)")) break;
+
+        VkCommandBufferAllocateInfo cai = {};
+        cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cai.commandPool = d.pool;
+        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cai.commandBufferCount = 1;
+        if (!check(vkAllocateCommandBuffers(d.device, &cai, &commands), "vkAllocateCommandBuffers")) break;
+        VkCommandBufferBeginInfo begin = {};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (!check(vkBeginCommandBuffer(commands, &begin), "vkBeginCommandBuffer")) break;
+
+        VkMemoryBarrier written = {};
+        written.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        written.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        written.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &written, 0,
+                             nullptr, 0, nullptr);
+        const VkBufferCopy region = {0, 0, size};
+        vkCmdCopyBuffer(commands, source, readback, 1, &region);
+        VkBufferMemoryBarrier visible = {};
+        visible.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        visible.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        visible.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        visible.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        visible.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        visible.buffer = readback;
+        visible.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1,
+                             &visible, 0, nullptr);
+        if (!check(vkEndCommandBuffer(commands), "vkEndCommandBuffer")) break;
+
+        VkFenceCreateInfo fci = {};
+        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        if (!check(vkCreateFence(d.device, &fci, nullptr, &fence), "vkCreateFence")) break;
+        VkSubmitInfo submit = {};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &commands;
+        if (!check(vkQueueSubmit(d.queue, 1, &submit, fence), "vkQueueSubmit")) break;
+        if (!check(vkWaitForFences(d.device, 1, &fence, VK_TRUE, 30ull * 1000 * 1000 * 1000), "vkWaitForFences")) {
+            break;
+        }
+
+        void* mapped = nullptr;
+        if (!check(vkMapMemory(d.device, readbackMemory, 0, VK_WHOLE_SIZE, 0, &mapped), "vkMapMemory (readback)")) {
+            break;
+        }
+        ok = fdVerify(static_cast<const uint8_t*>(mapped), stage, size, what);
+        vkUnmapMemory(d.device, readbackMemory);
+    } while (false);
+
+    if (fence) vkDestroyFence(d.device, fence, nullptr);
+    if (commands) vkFreeCommandBuffers(d.device, d.pool, 1, &commands);
+    if (readback) vkDestroyBuffer(d.device, readback, nullptr);
+    if (readbackMemory) vkFreeMemory(d.device, readbackMemory, nullptr);
+    return ok;
+}
+
+// What the driver says about sharing a buffer's memory as this fd type: it exports and imports it, names the type
+// among the types it is compatible with, and leaves the hardware buffer out of them (a hardware buffer is not a blob).
+bool fdProperties(const Device& d, const FdType& fd) {
+    VkPhysicalDeviceExternalBufferInfo info = {};
+    info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO;
+    info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    info.handleType = fd.type;
+    VkExternalBufferProperties props = {};
+    props.sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES;
+    vkGetPhysicalDeviceExternalBufferProperties(d.physical, &info, &props);
+    const VkExternalMemoryProperties& memory = props.externalMemoryProperties;
+    printf("    features %#x, compatible handle types %#x, exportable from %#x\n", memory.externalMemoryFeatures,
+           memory.compatibleHandleTypes, memory.exportFromImportedHandleTypes);
+    bool ok = true;
+    if (!(memory.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) ||
+        !(memory.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)) {
+        printf("    the type is not both exportable and importable\n");
+        ok = false;
+    }
+    if ((memory.compatibleHandleTypes & fd.type) != static_cast<VkExternalMemoryHandleTypeFlags>(fd.type)) {
+        printf("    the type is not compatible with itself\n");
+        ok = false;
+    }
+    if ((memory.compatibleHandleTypes | memory.exportFromImportedHandleTypes) &
+        VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) {
+        printf("    the type is described as compatible with a hardware buffer\n");
+        ok = false;
+    }
+    return ok;
+}
+
+// Host-visible memory shared as a fd of this type, through the whole path an application uses: the Vulkan mapping
+// fills it, an export gives a fd, a mapping of the fd sees it and rewrites half of it, another process rewrites a
+// quarter, the GPU reads it, and an import of a second fd of the memory is read by the GPU and the CPU.
+bool fdCase(const Device& d, const FdType& fd, VkDeviceSize size) {
+    Blob exported, imported;
+    int first = -1, second = -1;
+    bool consumed = false;
+    void* view = MAP_FAILED;
+    size_t viewSize = 0;
+    uint32_t typeIndex = 0;
+    bool ok = false;
+
+    do {
+        if (!createBlob(d, size, fd.type, -1, &typeIndex, &consumed, &exported)) break;
+        uint8_t* bytes = static_cast<uint8_t*>(exported.mapped);
+        fdFill(bytes, 0, size, 1);
+
+        VkMemoryGetFdInfoKHR get = {};
+        get.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
+        get.memory = exported.memory;
+        get.handleType = fd.type;
+        if (!check(d.getMemoryFd(d.device, &get, &first), "vkGetMemoryFdKHR")) break;
+        if (first < 0) {
+            printf("    vkGetMemoryFdKHR returned the fd %d\n", first);
+            break;
+        }
+        if (fd.type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) {
+            VkMemoryFdPropertiesKHR props = {};
+            props.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR;
+            if (!check(d.getMemoryFdProperties(d.device, fd.type, first, &props), "vkGetMemoryFdPropertiesKHR")) break;
+            if (!(props.memoryTypeBits & (1u << typeIndex))) {
+                printf("    the dma-buf's memory types %#x lack the exported type %u\n", props.memoryTypeBits,
+                       typeIndex);
+                break;
+            }
+        }
+
+        // The fd is a view of the memory's pages: mapped, it holds what the Vulkan mapping holds.
+        const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+        viewSize = (static_cast<size_t>(exported.requirements.size) + page - 1) / page * page;
+        view = mmap(nullptr, viewSize, PROT_READ | PROT_WRITE, MAP_SHARED, first, 0);
+        if (view == MAP_FAILED) {
+            printf("    mmap of the fd (%zu bytes) failed: %s\n", viewSize, strerror(errno));
+            break;
+        }
+        uint8_t* seen = static_cast<uint8_t*>(view);
+        if (!fdVerify(seen, 0, size, "the mapping of the fd after the Vulkan mapping wrote")) break;
+        fdFill(seen, size / 2, size, 2);
+        if (!fdVerify(bytes, 1, size, "the Vulkan mapping after the mapping of the fd wrote")) break;
+
+        const pid_t child = fork();
+        if (child < 0) {
+            printf("    fork failed: %s\n", strerror(errno));
+            break;
+        }
+        if (child == 0) fdChild(first, size, viewSize);
+        int status = 0;
+        if (waitpid(child, &status, 0) != child) {
+            printf("    waitpid failed: %s\n", strerror(errno));
+            break;
+        }
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            if (WIFEXITED(status)) {
+                printf("    the other process failed with %d (%s)\n", WEXITSTATUS(status),
+                       WEXITSTATUS(status) == 10 ? "it could not map the fd"
+                                                 : WEXITSTATUS(status) == 11 ? "it read what the others wrote wrongly"
+                                                                             : "unknown");
+            } else {
+                printf("    the other process was killed by signal %d\n", WTERMSIG(status));
+            }
+            break;
+        }
+        if (!fdVerify(bytes, 2, size, "the Vulkan mapping after another process wrote through the fd")) break;
+        if (!fdVerify(seen, 2, size, "the mapping of the fd after another process wrote through it")) break;
+        if (!gpuRead(d, exported.buffer, size, 2, "the GPU's read of the exported memory")) break;
+
+        // A second fd of the same memory, imported as a memory object of its own.
+        VkMemoryGetFdInfoKHR again = get;
+        if (!check(d.getMemoryFd(d.device, &again, &second), "vkGetMemoryFdKHR (second)")) break;
+        if (second < 0) {
+            printf("    vkGetMemoryFdKHR returned the fd %d\n", second);
+            break;
+        }
+        const bool imports = createBlob(d, size, fd.type, second, &typeIndex, &consumed, &imported);
+        if (consumed) second = -1;  // the driver owns it from here
+        if (!imports) break;
+        if (!fdVerify(static_cast<const uint8_t*>(imported.mapped), 2, size, "the mapping of the imported memory")) {
+            break;
+        }
+        if (!gpuRead(d, imported.buffer, size, 2, "the GPU's read of the imported memory")) break;
+        ok = true;
+    } while (false);
+
+    destroyBlob(d, &imported);
+    destroyBlob(d, &exported);
+    if (view != MAP_FAILED) munmap(view, viewSize);
+    if (second >= 0) close(second);
+    if (first >= 0) close(first);
+    return ok;
+}
+
+// The fd cases: the extensions are offered (and were enabled on the device), then each type's properties and each
+// type shared at each size.
+void runMemoryFd(const Device& d, int* run, int* failed) {
+    printf("memory-fd extension %s: %s\n", kFdExtension, d.fdOffered ? "offered" : "not offered");
+    printf("memory-fd extension %s: %s\n", kDmaBufExtension, d.dmaBufOffered ? "offered" : "not offered");
+    const bool entryPoints = d.getMemoryFd && d.getMemoryFdProperties;
+    if (d.fdOffered && !entryPoints) printf("    vkGetMemoryFdKHR or vkGetMemoryFdPropertiesKHR is not exposed\n");
+    const bool offered = d.fdOffered && d.dmaBufOffered && entryPoints;
+    (*run)++;
+    printf("  %s\n", offered ? "PASS" : "FAIL");
+    if (!offered) (*failed)++;
+    if (!d.fdOffered || !entryPoints) return;
+
+    for (const FdType& fd : kFdTypes) {
+        if (fd.type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT && !d.dmaBufOffered) continue;
+        printf("memory-fd %s properties\n", fd.name);
+        (*run)++;
+        const bool good = fdProperties(d, fd);
+        printf("  %s\n", good ? "PASS" : "FAIL");
+        if (!good) (*failed)++;
+        for (VkDeviceSize size : kFdSizes) {
+            printf("memory-fd %s %" PRIu64 " bytes\n", fd.name, static_cast<uint64_t>(size));
+            (*run)++;
+            const bool shared = fdCase(d, fd, size);
+            printf("  %s\n", shared ? "PASS" : "FAIL");
+            if (!shared) (*failed)++;
+        }
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -402,6 +838,9 @@ int main(int argc, char** argv) {
         printf("FAIL: no Vulkan device to import into\n");
         return 2;
     }
+
+    int fdRun = 0, fdFailed = 0;
+    runMemoryFd(device, &fdRun, &fdFailed);
 
     int run = 0, failed = 0, skipped = 0;
     for (const FormatCase& format : kFormats) {
@@ -443,6 +882,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    printf("%s: %d cases imported, %d failed, %d not allocated\n", failed ? "FAIL" : "PASS", run, failed, skipped);
-    return failed ? 1 : 0;
+    const bool bad = failed || fdFailed;
+    printf("%s: %d cases imported, %d failed, %d not allocated; memory fd %d cases, %d failed\n",
+           bad ? "FAIL" : "PASS", run, failed, skipped, fdRun, fdFailed);
+    return bad ? 1 : 0;
 }

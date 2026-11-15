@@ -974,6 +974,12 @@ packages, install times and processes, and `android17-oldapp-switch-command`
 (tooling; skipped without a JDK) runs the command's rule, listing, cleanup,
 lock file (on real files), writes and exit statuses on a plain JVM; the Android
 calls need a built image.
+`android-vulkan-smoke` (integration) registers when `UML_ANDROID_VULKAN_SMOKE_RELEASE`
+names a release and runs the image's `kernarium_vk_ahb_import` in a guest: hardware
+buffers imported and read back, and the guest memory file descriptors
+(`VK_KHR_external_memory_fd`, the opaque-fd and dma-buf types) offered, exported,
+mapped, written by another process, read by the GPU and imported. Its reading of
+the tool's lines is the tooling test `android17-vulkan-smoke-runner`.
 `android-video-suspend` (integration) registers when
 `UML_ANDROID_VIDEO_SUSPEND_RELEASE` names the release: the gallery's decoder and
 `screenrecord`'s encoder run across a suspend by the host's route (asked again
