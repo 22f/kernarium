@@ -23,6 +23,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "application_path.hpp"
 #include "elf_scan.hpp"
 #include "jni_shim.hpp"
 #include "low_arena.hpp"
@@ -44,8 +45,16 @@ int oldapp_close(int) __asm__("close");
 int oldapp_pthread_key_create(int*, void (*)(void*)) __asm__("pthread_key_create");
 void* oldapp_pthread_getspecific(int) __asm__("pthread_getspecific");
 int oldapp_pthread_setspecific(int, const void*) __asm__("pthread_setspecific");
+int oldapp_pthread_mutex_lock(void*) __asm__("pthread_mutex_lock");
+int oldapp_pthread_mutex_unlock(void*) __asm__("pthread_mutex_unlock");
 int oldapp_log_print(int, const char*, const char*, ...) __asm__("__android_log_print");
 int oldapp_clock_gettime(int, long*) __asm__("clock_gettime");  // struct timespec is two longs on bionic
+int oldapp_sched_yield() __asm__("sched_yield");
+void* oldapp_dlsym(void*, const char*) __asm__("dlsym");
+
+// The native-method thunks (oldapp_thunks.S): thunk i is at oldapp_thunks + 8 * i.
+void oldapp_thunks();
+void oldapp_thunks_end();
 
 // bionic's struct dl_phdr_info, 32-bit layout.
 struct OldappPhdrInfo {
@@ -81,6 +90,13 @@ bool g_arena_ready = false;
 int g_thread_key = 0;
 bool g_have_thread_key = false;  // a key is any int: bionic sets its top bit
 bool g_installed = false;
+char g_package[256];  // the package this process runs (its process name up to ':'); empty: unknown
+
+// The lock of the ended byte[] blocks (jni_shim.cpp): bionic's PTHREAD_MUTEX_INITIALIZER is all zeroes, and the
+// buffer is larger than any version's pthread_mutex_t.
+alignas(8) uint32_t g_ended_mutex[16];
+void ended_lock() { oldapp_pthread_mutex_lock(g_ended_mutex); }
+void ended_unlock() { oldapp_pthread_mutex_unlock(g_ended_mutex); }
 
 void log_line(const char* message, long a, long b) { oldapp_log_print(kLogInfo, kTag, "%s %ld %ld", message, a, b); }
 
@@ -89,6 +105,13 @@ uint32_t now_ms() {
     oldapp_clock_gettime(1, now);  // CLOCK_MONOTONIC
     return static_cast<uint32_t>(now[0]) * 1000u + static_cast<uint32_t>(now[1] / 1000000);
 }
+
+uint64_t now_ns() {
+    long now[2] = {0, 0};
+    oldapp_clock_gettime(1, now);  // CLOCK_MONOTONIC
+    return static_cast<uint64_t>(static_cast<uint32_t>(now[0])) * 1000000000ull + static_cast<uint64_t>(static_cast<uint32_t>(now[1]));
+}
+void yield_thread() { oldapp_sched_yield(); }
 
 // The baselines of the byte[] blocks live in libc's heap: they need no low address.
 void* alloc_baseline(size_t bytes) { return oldapp_malloc(bytes); }
@@ -222,6 +245,8 @@ void low_delete(void* pointer) { low_free(pointer); }
 void low_delete_nothrow(void* pointer, const void*) { low_free(pointer); }
 void low_delete_sized(void* pointer, size_t) { low_free(pointer); }
 
+void* layer_dlsym(void* handle, const char* name);
+
 // `producing`: the producer pass of an application library, which may hand out memory of the arena. The consumer pass
 // gives every module the realloc that never does, so a module whose free cannot be rewritten stays free of arena blocks.
 void* replacement_for(Import what, bool producing) {
@@ -247,6 +272,7 @@ void* replacement_for(Import what, bool producing) {
         case Import::kDeleteArrayNothrow: return reinterpret_cast<void*>(&low_delete_nothrow);
         case Import::kDeleteSized:
         case Import::kDeleteArraySized: return reinterpret_cast<void*>(&low_delete_sized);
+        case Import::kDlsym: return reinterpret_cast<void*>(&layer_dlsym);
         case Import::kCount: break;
     }
     return nullptr;
@@ -624,6 +650,181 @@ bool is_app_caller(const void* return_address) {
     return false;
 }
 
+// Whether the function is in one of the application's own libraries (the thunks' domain): asked once for each native
+// method the runtime binds, never per call. The answer comes from the loader's list as it is at this moment, never from the
+// classification cache: a library that was closed and another opened at its address would keep the old verdict there, and
+// a refresh that another thread is making would leave none. Bindings are rare, and the loader's lock is held for the
+// length of the question, so the library cannot be closed under it. The loader's list can still name a library that was
+// closed (its entry outlives the unload) beside the one now mapped over its range: the later entry is the current one.
+struct OwnQuery {
+    uintptr_t address;
+    int verdict;  // -1: no mapping covers the address
+};
+int own_module_at(OldappPhdrInfo* info, size_t, void* user) {
+    OwnQuery* query = static_cast<OwnQuery*>(user);
+    uintptr_t lo = ~uintptr_t{0};
+    uintptr_t hi = 0;
+    for (unsigned i = 0; i < info->phnum; ++i) {
+        if (info->phdr[i].p_type == kPtLoad) {
+            const uintptr_t start = info->addr + info->phdr[i].p_vaddr;
+            const uintptr_t end = start + info->phdr[i].p_memsz;
+            lo = start < lo ? start : lo;
+            hi = end > hi ? end : hi;
+        }
+    }
+    if (hi == 0 || query->address < lo || query->address >= hi) {
+        return 0;
+    }
+    const uintptr_t self = reinterpret_cast<uintptr_t>(&own_module_at);
+    const bool is_self = self >= lo && self < hi;
+    query->verdict = !is_self && !platform_path(info->name) && in_application_directories(info->name, g_package) ? 1 : 0;
+    return 0;  // the list goes on: a later entry over the same range replaces this verdict
+}
+bool is_own_library(const void* function) {
+    OwnQuery query{reinterpret_cast<uintptr_t>(function) & ~uintptr_t{1}, -1};  // the Thumb bit
+    oldapp_dl_iterate_phdr(own_module_at, &query);
+    return query.verdict == 1;
+}
+
+// The package of this process, from its name (/proc/self/cmdline): left empty when it cannot be read, and every
+// application library is then the application's own. A process named other than its package (android:process) shows
+// no package there: package_from_runtime() below asks the runtime, which knows it, and the name is only the fallback.
+void read_package() {
+    constexpr int kReadOnly = 0;
+    constexpr int kCloseOnExec = 0x80000;
+    g_package[0] = '\0';
+    const int fd = oldapp_open("/proc/self/cmdline", kReadOnly | kCloseOnExec);
+    if (fd < 0) {
+        return;
+    }
+    char name[sizeof(g_package)];
+    const long n = oldapp_read(fd, name, sizeof(name) - 1);
+    oldapp_close(fd);
+    if (n <= 0) {
+        return;
+    }
+    name[n] = '\0';  // the file is the NUL-separated argument list: its first string is the process name
+    if (!package_of_process(name, g_package, sizeof(g_package))) {
+        g_package[0] = '\0';
+    }
+}
+
+// The package the runtime says this process runs: ActivityThread.currentPackageName(), looked up through JNI at the
+// load of the layer (the framework loads it in handleBindApplication, after the application's binding is set). It
+// replaces the name taken from the command line when it answers. False (nothing changed) when the class or the method is
+// not there, the call fails, or the answer is empty.
+bool package_from_runtime(jni::Env* env) {
+    using namespace jni;
+    auto push_frame = reinterpret_cast<jint (*)(Env*, jint)>(env->functions[slot::PushLocalFrame]);
+    auto pop_frame = reinterpret_cast<jobject (*)(Env*, jobject)>(env->functions[slot::PopLocalFrame]);
+    auto exception_check = reinterpret_cast<jboolean (*)(Env*)>(env->functions[slot::ExceptionCheck]);
+    auto exception_clear = reinterpret_cast<void (*)(Env*)>(env->functions[slot::ExceptionClear]);
+    if (push_frame(env, 8) != JNI_OK) {
+        exception_clear(env);
+        return false;
+    }
+    bool ok = false;
+    do {
+        auto find_class = reinterpret_cast<jobject (*)(Env*, const char*)>(env->functions[slot::FindClass]);
+        auto get_static = reinterpret_cast<jmethodID (*)(Env*, jclass, const char*, const char*)>(
+            env->functions[slot::GetStaticMethodID]);
+        auto call_static = reinterpret_cast<jobject (*)(Env*, jclass, jmethodID, const jvalue*)>(
+            env->functions[static_call_slot(kObject, kArray)]);
+        auto utf_chars = reinterpret_cast<const char* (*)(Env*, jobject, jboolean*)>(env->functions[slot::GetStringUTFChars]);
+        auto release_chars = reinterpret_cast<void (*)(Env*, jobject, const char*)>(env->functions[slot::ReleaseStringUTFChars]);
+        jobject activity_thread = find_class(env, "android/app/ActivityThread");
+        if (activity_thread == nullptr || exception_check(env)) {
+            break;
+        }
+        jmethodID current = get_static(env, activity_thread, "currentPackageName", "()Ljava/lang/String;");
+        if (current == nullptr || exception_check(env)) {
+            break;
+        }
+        jobject name = call_static(env, activity_thread, current, nullptr);
+        if (name == nullptr || exception_check(env)) {
+            break;
+        }
+        const char* chars = utf_chars(env, name, nullptr);
+        if (chars == nullptr) {
+            break;
+        }
+        char text[sizeof(g_package)];
+        if (package_of_process(chars, text, sizeof(text))) {
+            for (size_t i = 0; i < sizeof(text); ++i) {
+                g_package[i] = text[i];
+                if (text[i] == '\0') {
+                    break;
+                }
+            }
+            ok = true;
+        }
+        release_chars(env, name, chars);
+    } while (false);
+    if (exception_check(env)) {
+        exception_clear(env);
+        ok = false;
+    }
+    pop_frame(env, nullptr);
+    return ok;
+}
+
+// ---- the native methods of the application
+
+constexpr unsigned kThunkBytes = 8;  // movw ip, #index; b entry
+
+void* thunk_address(unsigned index) {
+    return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(&oldapp_thunks) + kThunkBytes * index);
+}
+unsigned thunk_count() {
+    return static_cast<unsigned>((reinterpret_cast<uintptr_t>(&oldapp_thunks_end) - reinterpret_cast<uintptr_t>(&oldapp_thunks)) /
+                                 kThunkBytes);
+}
+
+// ART's lookup of a symbol in the library it loaded (SharedLibrary::FindSymbolWithoutNativeBridge: dlsym with the
+// library's handle) finds the application's JNI_OnLoad and the Java_ functions its native methods are bound to by
+// name. The function of the application's own library comes back as its thunk; any other lookup is the loader's
+// answer. Only libart's import of dlsym is pointed here.
+__attribute__((noinline)) void* layer_dlsym_found(void* handle, const char* name) {
+    void* function = oldapp_dlsym(handle, name);
+    if (function == nullptr || !(starts_with(name, "Java_") || same_text(name, "JNI_OnLoad"))) {
+        return function;
+    }
+    return thunk_for(function);
+}
+void* layer_dlsym(void* handle, const char* name) {
+    // RTLD_DEFAULT and RTLD_NEXT look up from the caller's namespace: they go to the loader as libart's own call (a tail
+    // call, so the caller is still libart). This library is 32-bit: Bionic's LP32 values are 0xffffffff and 0xfffffffe
+    // (the LP64 ones, 0 and -1, are not those).
+    constexpr uintptr_t kRtldDefault = 0xffffffffu;
+    constexpr uintptr_t kRtldNext = 0xfffffffeu;
+    const uintptr_t value = reinterpret_cast<uintptr_t>(handle);
+    if (handle == nullptr || value == kRtldDefault || value == kRtldNext) {
+        return oldapp_dlsym(handle, name);
+    }
+    return layer_dlsym_found(handle, name);
+}
+
+int rewrite_art_module(OldappPhdrInfo* info, size_t, void* user) {
+    if (!platform_path(info->name) || !same_text(base_name(info->name), "libart.so")) {
+        return 0;
+    }
+    Module module{};
+    module.lo = info->addr;
+    module.bias = info->addr;
+    module.phdr = info->phdr;
+    module.phnum = info->phnum;
+    *static_cast<unsigned*>(user) += patch_module(module, kDlsymImport, false, false, nullptr).written;
+    return 1;
+}
+
+// Points libart's dlsym slot at layer_dlsym: the number of slots rewritten (0: the native methods get no thunk when they
+// are bound by name).
+unsigned rewrite_art_dlsym() {
+    unsigned written = 0;
+    oldapp_dl_iterate_phdr(rewrite_art_module, &written);
+    return written;
+}
+
 // ---- protection of the interposed tables
 
 bool read_maps(int fd, char* buffer, size_t capacity, size_t* got) {
@@ -823,14 +1024,25 @@ extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void* vm_pointe
     } else {
         oldapp_log_print(kLogWarn, kTag, "no region below 2 GiB: allocator imports are left alone");
     }
+    read_package();
+    const bool package_from_command_line = g_package[0] != '\0';
+    if (!package_from_runtime(env) && !package_from_command_line) {
+        oldapp_log_print(kLogWarn, kTag,
+                         "the package of this process is unknown: every library but the platform's counts as the application's own");
+    }
     const Platform platform{is_app_caller, thread_state, log_line, make_writable, make_read_only, describe_method, now_ms,
-                            alloc_baseline, free_baseline};
+                            alloc_baseline, free_baseline, region != nullptr ? thunk_address : nullptr,
+                            region != nullptr ? thunk_count() : 0, is_own_library, ended_lock, ended_unlock, now_ns,
+                            yield_thread};
     refresh_modules(true);  // every library the application loaded before this one
     void** table = const_cast<void**>(env->functions);
     const bool jni_ok = install_jni_wrappers(table, platform, region != nullptr ? region + kArenaBytes : nullptr,
-                                             region != nullptr ? kShadowBytes : 0);
+                                             region != nullptr ? kShadowBytes : 0, env);
     install_vm_wrappers(const_cast<void**>(vm->functions), platform);
     oldapp_log_print(kLogInfo, kTag, "installed: jni=%ld arena=%ld", static_cast<long>(jni_ok),
                      static_cast<long>(g_arena_ready));
+    const unsigned art_slots = jni_ok && region != nullptr ? rewrite_art_dlsym() : 0;
+    oldapp_log_print(kLogInfo, kTag, "native-method thunks: ready %ld, libart's dlsym rewritten %ld",
+                     static_cast<long>(jni_ok && region != nullptr ? thunk_count() : 0), static_cast<long>(art_slots));
     return kJniVersion;
 }
