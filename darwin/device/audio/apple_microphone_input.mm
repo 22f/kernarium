@@ -10,6 +10,7 @@
 #import <Foundation/Foundation.h>
 #import <TargetConditionals.h>
 
+#include <chrono>
 #include <memory>
 #include <mutex>
 
@@ -21,6 +22,8 @@ namespace {
 constexpr AVAudioFrameCount maximumConvertedFrames = 24000;
 // The shortest delivery the tap supports, which is also its lowest latency.
 constexpr double tapSeconds = 0.1;
+// How soon a microphone that lost its engine tries to open it again.
+constexpr auto reviveInterval = std::chrono::seconds(1);
 
 /* The microphone's engine. Nothing here exists until start() is called, and
  * start() is called only for a guest that records while the user's setting is
@@ -34,6 +37,7 @@ struct Capture final : std::enable_shared_from_this<Capture> {
         channels = channelCount;
         ring = &target;
         wanted = true;
+        interrupted = false;
         return open();
     }
 
@@ -67,6 +71,7 @@ struct Capture final : std::enable_shared_from_this<Capture> {
         const std::lock_guard guard(lock);
         if (!wanted)
             return;
+        interrupted = true;
         close();
     }
 
@@ -84,6 +89,22 @@ struct Capture final : std::enable_shared_from_this<Capture> {
             return;
         if (!recommended && session::otherAudioPlaying())
             return;
+        if (open())
+            interrupted = false;
+    }
+
+    /* A rebuild that could not take the session back (the system had not
+     * given the route back yet) leaves the microphone wanted and without an
+     * engine, and nothing else would build one before the guest records
+     * again. The capture source calls this while the guest records: it opens
+     * the engine again, at most once a second. A microphone that another app
+     * interrupted waits for the system's advice instead. */
+    void revive() noexcept
+    {
+        const std::lock_guard guard(lock);
+        if (!wanted || interrupted || engine != nil ||
+            std::chrono::steady_clock::now() - lastAttempt < reviveInterval)
+            return;
         (void)open();
     }
 
@@ -94,12 +115,14 @@ struct Capture final : std::enable_shared_from_this<Capture> {
     AVAudioEngine* __strong engine {};
     id __strong routeObserver {};
     bool sessionHeld {};
+    bool interrupted {};
 
 private:
     [[nodiscard]] bool open() noexcept
     {
         if (engine != nil)
             return true;
+        lastAttempt = std::chrono::steady_clock::now();
         @try {
             if (!session::acquire(session::Client::capture)) {
                 closeSession();
@@ -200,6 +223,8 @@ private:
             sessionHeld = false;
         }
     }
+
+    std::chrono::steady_clock::time_point lastAttempt {};
 };
 
 class AppleMicrophoneInput final : public MicrophoneInput {
@@ -263,6 +288,8 @@ public:
     }
 
     void stop() noexcept override { capture_->stop(); }
+
+    void revive() noexcept override { capture_->revive(); }
 
 private:
     std::shared_ptr<Capture> capture_;
