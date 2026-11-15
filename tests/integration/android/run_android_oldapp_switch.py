@@ -28,15 +28,22 @@ three that each fail one clause of the rule) and, as the adb shell user, checks 
 - ``set old off`` exits 0 with ``<package><TAB>off``, the property reads empty and ``list`` shows ``off``;
 - a choice does not outlive its installation: after the application is uninstalled and installed again (at once,
   with no regard to the clock), or replaced by a package of the same name that is not eligible (a raised target
-  level, a shared user ID), or only uninstalled, or the property holds the earlier one-number form or another
-  installation's value, the next ``list`` clears the property and shows the application ``off`` or not at all;
+  level, a shared user ID; the ``shared`` probe is uninstalled first, because two packages of one shared user ID
+  need one signing key and each probe has a key of its own), or only uninstalled, or the property holds the
+  earlier one-number form or another installation's value, the next ``list`` clears the property and shows the
+  application ``off`` or not at all;
 - the command's lock is a file of the shell user in its own data directory (type ``shell_data_file``) that only
-  its owner can read and write (mode 600), and one that was loosened (mode 666) is tightened by the next command.
+  its owner can read and write (mode 600), and one that was loosened (mode 666) is tightened by the next command
+  that takes the lock: a ``set``, and a ``list`` that has a stale choice to clear (a ``list`` with nothing to
+  clear does not use the lock).
 
 ``--hook`` (an image that also carries the framework hook and the compatibility library) adds the steps that
 need an old application's own process: the process of the ``running`` probe, started by `am broadcast` in the
-hook's domain (``untrusted_app_25``), reads the property and cannot set it (the denial leaves an avc line in the
-log when the log shows it); switching on or off ends that process; the process that starts afterwards has the
+hook's domain (``untrusted_app_25``), reads the property and cannot set it (its refused `setprop` leaves an avc
+line in the log, which the step requires and prints: on a user build the refusal is at the property service's
+socket, before the property's own rule; the runner presses Continue on the permission review that an application
+targeting below API 23 gets before its first component runs, after each install of that probe); switching on
+or off ends that process; the process that starts afterwards has the
 layer's library mapped exactly while the switch is on; and a stale choice is gone from the next process. Not
 automated here: that the choice survives a restart or an Android update of the guest (the image proof's own
 recipe restarts the guest), that a snapshot restore brings it back, that an in-place update of an eligible
@@ -73,6 +80,7 @@ from typing import NamedTuple
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import oldswitch_probe_apk as probe  # noqa: E402
+import permission_review  # noqa: E402
 
 # The orientation runner owns the guest: its launcher and its adb.
 SPEC = importlib.util.spec_from_file_location("run_android_orientation", HERE / "run_android_orientation.py")
@@ -105,8 +113,16 @@ LOCK_TYPE = "shell_data_file"
 LOCK_MODE = "-rw-------"
 #: What the property holds: the turn-on time in seconds, a space, the installation's first-install time in milliseconds.
 CHOICE_VALUE = re.compile(r"([0-9]+) ([0-9]+)")
-#: The log the denial of the application's set appears in, and how long it is given to show.
+#: How long the log is given to show the denial of the application's set.
 AVC_SECONDS = 10
+#: The domain of the hook's probe, and the two lines its refused `setprop` can leave in the log. A user build refuses it
+#: at the property service's socket (an application domain may not write it), before the property's own rule is asked:
+#:   avc: denied { write } for comm="setprop" name="property_service" scontext=u:r:untrusted_app_25:... \
+#:     tcontext=u:object_r:property_socket:s0 tclass=sock_file
+#: A domain that may reach the socket is refused by the rule of the property's type instead:
+#:   avc: denied { set } for property=persist.sys.kernarium.oldapp.<package> ... scontext=u:r:untrusted_app_25:... \
+#:     tcontext=u:object_r:kernarium_oldapp_prop:s0 tclass=property_service
+HOOK_DOMAIN = "u:r:untrusted_app_25:"
 #: Slack between the host's reading of the guest's clock and a time the guest wrote.
 CLOCK_SLACK_SECONDS = 5
 
@@ -366,7 +382,21 @@ def check_lock_file(guest) -> str:
     tightened = lock_listing(guest)
     if tightened.split()[0] != LOCK_MODE:
         raise Failure(f"the command did not tighten the lock file: {tightened[-200:]}")
-    return f"{LOCK_TYPE}, {listing.split()[0]}; a loosened file is tightened again"
+    # A listing that has a stale choice to clear (the earlier one-number form, for a package that is not installed)
+    # takes the lock for it and so makes the file safe too. One with nothing to clear does not use the lock.
+    stale = probe.STORE_PROPERTY_PREFIX + UNKNOWN_PACKAGE
+    guest.shell(f"chmod 666 {LOCK_PATH}")
+    guest.shell(f"setprop {stale} '1700000000'")
+    try:
+        listing_of(guest)
+        if property_value(guest, stale):
+            raise Failure(f"{stale} still holds a value after a listing: the cleanup did not run")
+        cleaned = lock_listing(guest)
+        if cleaned.split()[0] != LOCK_MODE:
+            raise Failure(f"a listing that cleared a choice left the lock file loose: {cleaned[-200:]}")
+    finally:
+        guest.shell(f"setprop {stale} ''")
+    return f"{LOCK_TYPE}, {listing.split()[0]}; a loosened file is tightened again by a set and by a listing that cleans"
 
 
 def probe_result(guest, variant: str) -> dict[str, str]:
@@ -441,7 +471,9 @@ def check_lifecycle(guest, apks: dict[str, pathlib.Path]) -> str:
         raise Failure(f"{name} still holds a value after the listing of a reinstalled application")
     notes.append("reinstalled: cleared")
 
-    # Replaced by the same package name that is no longer eligible.
+    # Replaced by the same package name that is no longer eligible. The shared probe goes first: two packages of
+    # one shared user ID need one signing key, each probe has a key of its own, and its rows are done.
+    guest.adb_run("uninstall", probe.package_of("shared"), timeout=60)
     for successor, what in (("raised", "a raised target level"), ("oldshared", "a shared user ID")):
         install(guest, apks["old"], package)
         value = switched_on()
@@ -490,16 +522,47 @@ def process_ids(guest, package: str) -> list[int]:
     return [int(word) for word in guest.run(f"pidof {package}").out.split() if word.isdigit()]
 
 
-def avc_line(guest) -> str:
-    """The log line of the denial of an old application's set of the property, or '' when the log shows none."""
+def denials(guest) -> list[str]:
+    """The auditd lines of denials to an old application's domain in the whole log."""
+    out = guest.run("logcat -d -b all", timeout=60).out
+    return [line.strip() for line in out.splitlines()
+            if "avc" in line and "denied" in line and f"scontext={HOOK_DOMAIN}" in line]
+
+
+def denial_kind(line: str) -> str | None:
+    """Which refusal of an application's `setprop` the line records, or None when it is another denial."""
+    if ('comm="setprop"' in line and "{ write }" in line and "tcontext=u:object_r:property_socket:" in line
+            and "tclass=sock_file" in line):
+        return "at the property service's socket"
+    if ("{ set }" in line and "tcontext=u:object_r:kernarium_oldapp_prop:" in line
+            and "tclass=property_service" in line):
+        return "by the rule of the property's type"
+    return None
+
+
+def denial_summary(line: str) -> str:
+    """The permission, the process name, the target type and class of a denial line, for a failure message."""
+    parts = [re.search(pattern, line) for pattern in (r"denied\s+(\{[^}]*\})", r'(comm="[^"]*")',
+                                                     r"tcontext=u:object_r:([^:\s]+)", r"tclass=(\S+)")]
+    return " ".join(part.group(1) for part in parts if part)
+
+
+def denial_note(guest, before: set[str]) -> str:
+    """The refusal that the probe's set left in the log since `before`, or a failure that says what the log held."""
     deadline = time.monotonic() + AVC_SECONDS
     while True:
-        for line in guest.run("logcat -d -b all", timeout=60).out.splitlines():
-            if ("avc" in line and "denied" in line and "kernarium_oldapp_prop" in line
-                    and "scontext=u:r:untrusted_app_25:" in line):
-                return line.strip()[line.strip().index("avc"):][:300]
+        new = [line for line in denials(guest) if line not in before]
+        for line in new:
+            kind = denial_kind(line)
+            if kind:
+                return f"refused {kind}: {line[line.index('avc'):][:300]}"
         if time.monotonic() >= deadline:
-            return ""
+            seen = sorted({denial_summary(line) for line in new})
+            raise Failure(f"the log shows no avc line for the application's refused set within {AVC_SECONDS} s: "
+                          f"{len(new)} new denial(s) to {HOOK_DOMAIN}*"
+                          + (f" ({'; '.join(seen[:4])})" if seen else "")
+                          + "; a refused setprop at the property service's socket, or a refused set of the "
+                          "property, is what the step requires")
         time.sleep(1)
 
 
@@ -510,10 +573,11 @@ def check_hook(guest, apks: dict[str, pathlib.Path], report: Report) -> None:
 
     def installed() -> str:
         install(guest, apks["running"], package)
+        review = permission_review.complete_review(guest, package, Failure)
         row = next((row for row in listing_of(guest) if row.package == package), None)
         if row is None or (row.state, row.turned_on) != ("off", 0):
             raise Failure(f"the running probe is listed as {row}, not off")
-        return f"{package} installed and listed off"
+        return f"{package} installed ({review}) and listed off"
 
     def off_process() -> str:
         pid = evaluate_process(probe_result(guest, "running"), "", mapped=False)
@@ -550,6 +614,7 @@ def check_hook(guest, apks: dict[str, pathlib.Path], report: Report) -> None:
             raise Failure(f"set {package} on: status {result.status}, err {result.err.strip()!r}")
         value = property_value(guest, name)
         install(guest, apks["running"], package)
+        permission_review.complete_review(guest, package, Failure)
         if property_value(guest, name) != value:
             raise Failure(f"{name} did not survive the reinstall: the stale case is not exercised")
         listing_of(guest)
@@ -561,13 +626,9 @@ def check_hook(guest, apks: dict[str, pathlib.Path], report: Report) -> None:
             return
         report.run("hook: off, the old application's process has no layer", off_process)
         report.run("hook: set on ends the application's process", lambda: switch("on"))
+        earlier = set(denials(guest))
         report.run("hook: on, the new process maps the layer and reads the property", on_process)
-        line = avc_line(guest)
-        if line:
-            report.add("hook: the denied set leaves an avc line", "PASS", line)
-        else:
-            report.add("hook: the denied set leaves an avc line", "SKIP",
-                       "the log shows no avc line for the denial; read it from the kernel log of the image proof")
+        report.run("hook: the denied set leaves an avc line", lambda: denial_note(guest, earlier))
         report.run("hook: set off ends the process", lambda: switch("off"))
         report.run("hook: off again, the next process has no layer", off_again)
         report.run("hook: a stale choice is gone before the next process", stale)

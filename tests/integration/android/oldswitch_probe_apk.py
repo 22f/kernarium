@@ -27,6 +27,14 @@ reports the process id, whether the layer's library is mapped into it and what i
 All receivers carry INTERNET: the probe class lists the network interfaces before its script runs, and without
 the permission the list is null and the class dies.
 
+Android 17 refuses a package that declares code and holds no classes.dex ("code is missing"), so each fixture has
+what it stands for. The ones that stand for an old game's native side (``old``, ``shared``, ``raised``,
+``oldshared``) declare ``hasCode=false``: nothing ever starts them, and the command reads only what the package
+manager keeps of a package (the target level, the shared user ID and the library directory the primary ABI
+follows), never its code. ``javaonly`` stands for an application with Java code and no native code, so it carries
+a DEX file (the probe class, with no component that names it). ``modern`` and ``running`` start processes, so
+they carry the receiver.
+
 The native library is a stand-in: a valid ELF32 ARM shared object that holds nothing, because only the
 package manager reads it (the primary ABI follows the directory it is in) and no application loads it.
 """
@@ -70,6 +78,9 @@ SUCCESSORS = {
 #: Eligible, with the receiver and debuggable: the application an image with the hook starts and watches.
 RUNNING = {"running": (PACKAGE_PREFIX + ".running", 4, 10, True, None, True)}
 SPECS = {**VARIANTS, **SUCCESSORS, **RUNNING}
+#: The fixtures that declare no code (hasCode=false) and the one with Java code only; the others have the receiver.
+NATIVE_ONLY = ("old", "shared", "raised", "oldshared")
+JAVA_ONLY = ("javaonly",)
 #: The library the hook loads into an application that is switched on (OLDGAMES-I: System.load of this file).
 LAYER_LIBRARY = "libkernarium_oldapp.so"
 
@@ -148,6 +159,8 @@ def manifest_tree(variant: str) -> binary_xml.Element:
     if shared is not None:
         attributes += (("sharedUserId", shared),)
     application = [("label", LABEL if variant in ("old", "raised", "oldshared") else f"Switch Probe {variant}")]
+    if variant in NATIVE_ONLY:
+        application.append(("hasCode", False))
     children: tuple[binary_xml.Element, ...] = ()
     permissions: tuple[binary_xml.Element, ...] = ()
     if probe:
@@ -173,4 +186,6 @@ def build_apk(destination: pathlib.Path, variant: str, workdir: pathlib.Path | N
         watched = property_of(variant if variant in RUNNING else "old")
         files["classes.dex"] = property_probe_dex.build_dex(
             package_of(variant), watched, watched, shell_script=script)
+    elif variant in JAVA_ONLY:
+        files["classes.dex"] = property_probe_dex.build_dex(package_of(variant), "", "", shell_script="true")
     return binary_xml.build_apk(destination, workdir, manifest_tree(variant), files)
