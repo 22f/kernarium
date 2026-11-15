@@ -7,9 +7,18 @@
 // it unscales the result's crop region by the result's ratio. A result that
 // states the whole array instead of the request's region loses the residual, and
 // the application's region is a pixel or three off once the ratio is high (about
-// 57x on a 4032 x 3024 array, CTS testDigitalZoom). So the result states the
-// region the request asked for, clamped into the array; a request with no region,
-// an empty one, or one outside the array gets the array.
+// 57x on a 4032 x 3024 array, CTS testDigitalZoom).
+//
+// The camera is CENTER_ONLY: it applies a region centred in the active array, so
+// the result states that region, not the rectangle that was asked for. Its size is
+// the requested size, clamped to the array and to the smallest size the advertised
+// maximum digital zoom allows (the array divided by that zoom, times the request's
+// zoom ratio so that the zoom the camera service reports back, the ratio times the
+// array over the region, cannot exceed the maximum). The origin of the request is
+// not used; a request with no region, or an empty one, gets the array. The host
+// scales a frame to the stream's size and applies the zoom ratio; it takes no
+// residual region, so for a region whose aspect differs from the stream's the
+// result states the region and not what the host does to the picture.
 #pragma once
 
 #include <algorithm>
@@ -26,26 +35,39 @@ struct CropRegion {
     std::int32_t height = 0;
 };
 
-// `requested` is the request's SCALER_CROP_REGION entry (null or short when the
-// request has none), `array` the region the result falls back to and is clamped
-// into: the active array of the sensor mode in use.
-[[nodiscard]] constexpr CropRegion result_crop_region(const std::int32_t* requested, std::size_t count,
-                                                      const CropRegion& array) noexcept
+// The smallest extent of a region over `extent` pixels: the extent times the zoom
+// ratio over the maximum digital zoom, rounded up so that the zoom stays within the
+// maximum, and within [1, extent]. A ratio that is not positive counts as 1, a
+// maximum that is not above 1 allows no crop.
+[[nodiscard]] constexpr std::int32_t minimum_extent(std::int32_t extent, double zoom_ratio,
+                                                    double max_digital_zoom) noexcept
 {
-    if (requested == nullptr || count < 4 || requested[2] <= 0 || requested[3] <= 0) {
+    if (extent <= 1 || !(max_digital_zoom > 1.0)) return extent;
+    const double ratio = zoom_ratio > 0.0 ? zoom_ratio : 1.0;
+    const double smallest = static_cast<double>(extent) * ratio / max_digital_zoom;
+    if (!(smallest < static_cast<double>(extent))) return extent;
+    auto whole = static_cast<std::int64_t>(smallest);
+    if (static_cast<double>(whole) < smallest) ++whole;
+    return static_cast<std::int32_t>(std::clamp<std::int64_t>(whole, 1, extent));
+}
+
+// `requested` is the request's SCALER_CROP_REGION entry (null or short when the
+// request has none), `array` the active array of the sensor mode in use, `zoom_ratio`
+// the ratio the result states and `max_digital_zoom` the camera's advertised maximum.
+// The region is centred in the array; an odd remainder goes to the right and the bottom.
+[[nodiscard]] constexpr CropRegion result_crop_region(const std::int32_t* requested, std::size_t count,
+                                                      const CropRegion& array, double zoom_ratio,
+                                                      double max_digital_zoom) noexcept
+{
+    if (requested == nullptr || count < 4 || requested[2] <= 0 || requested[3] <= 0 || array.width <= 0 ||
+        array.height <= 0) {
         return array;
     }
-    const std::int64_t left = std::max<std::int64_t>(requested[0], array.left);
-    const std::int64_t top = std::max<std::int64_t>(requested[1], array.top);
-    const std::int64_t right = std::min<std::int64_t>(std::int64_t{requested[0]} + requested[2],
-                                                      std::int64_t{array.left} + array.width);
-    const std::int64_t bottom = std::min<std::int64_t>(std::int64_t{requested[1]} + requested[3],
-                                                       std::int64_t{array.top} + array.height);
-    if (right <= left || bottom <= top) {
-        return array;
-    }
-    return {static_cast<std::int32_t>(left), static_cast<std::int32_t>(top),
-            static_cast<std::int32_t>(right - left), static_cast<std::int32_t>(bottom - top)};
+    const std::int32_t width =
+        std::max(std::min(requested[2], array.width), minimum_extent(array.width, zoom_ratio, max_digital_zoom));
+    const std::int32_t height =
+        std::max(std::min(requested[3], array.height), minimum_extent(array.height, zoom_ratio, max_digital_zoom));
+    return {array.left + (array.width - width) / 2, array.top + (array.height - height) / 2, width, height};
 }
 
 } // namespace andarium::camera
