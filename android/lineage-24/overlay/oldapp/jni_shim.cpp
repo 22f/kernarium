@@ -35,6 +35,7 @@ constexpr uint32_t kFullSweepIntervalMs = 1000;  // between two full sweeps that
 constexpr unsigned kRecordSlots = 2048;         // the runtime's own pointers that are out (Get...Elements / Critical on a real reference)
 constexpr size_t kBlockTail = 16;  // zeroes behind the data: raw readers overrun by a few bytes
 constexpr uint32_t kChunk = 4096;  // the unit of the block's synchronization with its array
+constexpr uint32_t kScanBlock = 256;   // the bytes the merges compare with one libc call before they look at words
 constexpr uint32_t kPullPiece = 16384;  // the array's bytes are read into a stack buffer of this size, and compared with the baseline
 
 template <class T>
@@ -343,7 +344,7 @@ inline void take_java_byte(uint8_t* block, uint8_t* baseline, uint8_t java, uint
         block[at] = java;
     }
 }
-void take_java(uint8_t* block, uint8_t* baseline, const uint8_t* java, uint32_t n) {
+void take_java_words(uint8_t* block, uint8_t* baseline, const uint8_t* java, uint32_t n) {
     uint32_t i = 0;
     for (; i + 4 <= n; i += 4) {
         uint32_t j, k;
@@ -367,12 +368,24 @@ void take_java(uint8_t* block, uint8_t* baseline, const uint8_t* java, uint32_t 
         take_java_byte(block, baseline, java[i], i);
     }
 }
+// (libc's memcmp skips what Java left alone, kScanBlock bytes at a time: most of a run is that)
+void take_java(uint8_t* block, uint8_t* baseline, const uint8_t* java, uint32_t n) {
+    uint32_t i = 0;
+    for (; i + kScanBlock <= n; i += kScanBlock) {
+        if (__builtin_memcmp(java + i, baseline + i, kScanBlock) != 0) {
+            take_java_words(block + i, baseline + i, java + i, kScanBlock);
+        }
+    }
+    if (i < n) {
+        take_java_words(block + i, baseline + i, java + i, n - i);
+    }
+}
 
 // The byte-by-byte rule over n bytes: a byte the application wrote (block != baseline) replaces the array's `java`
 // byte, unless that is the same already. Returns whether `java` changed. Where the array's four bytes are the baseline's
 // the application's four bytes are the result, so a word at a time decides most of a run; any other word is decided
 // byte by byte.
-bool merge_bytes(uint8_t* java, const uint8_t* block, const uint8_t* baseline, uint32_t n) {
+bool merge_words(uint8_t* java, const uint8_t* block, const uint8_t* baseline, uint32_t n) {
     bool differs = false;
     uint32_t i = 0;
     for (; i + 4 <= n; i += 4) {
@@ -400,6 +413,20 @@ bool merge_bytes(uint8_t* java, const uint8_t* block, const uint8_t* baseline, u
             java[i] = block[i];
             differs = true;
         }
+    }
+    return differs;
+}
+// (libc's memcmp skips what the application did not write, kScanBlock bytes at a time: most of a run is that)
+bool merge_bytes(uint8_t* java, const uint8_t* block, const uint8_t* baseline, uint32_t n) {
+    bool differs = false;
+    uint32_t i = 0;
+    for (; i + kScanBlock <= n; i += kScanBlock) {
+        if (__builtin_memcmp(block + i, baseline + i, kScanBlock) != 0) {
+            differs = merge_words(java + i, block + i, baseline + i, kScanBlock) || differs;
+        }
+    }
+    if (i < n) {
+        differs = merge_words(java + i, block + i, baseline + i, n - i) || differs;
     }
     return differs;
 }

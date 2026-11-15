@@ -1111,7 +1111,11 @@ with the image's own `kernarium_oldapp set` as the adb shell user (a user build 
 the store's property as root only on a release without that command. A swap row loads the probe's library from
 another path over the range a closed library of the modern package left, registers its native method and calls
 it 600 times: the layer classifies a binding from the loader's current state, so these calls end their
-references. The modern package gets no layer, the raw read fails
+references. The runner presses the permission review's Continue with
+`permission_review.py`, which the runners of the old-application switch share. The probe also records, without
+judging them, what a call costs: an empty native method, a Java call passed a 1 MiB block (written and clean), a
+result and its deletion, and a `Get...Elements` or critical pair on an array of the application's own. The modern
+package gets no layer, the raw read fails
 and the array operations give the runtime's own answers. `--host-shim` boots a
 release without the layer and loads a host-built copy from the old package after
 a control run without it, which qualifies the library and not the framework hook.
@@ -1126,8 +1130,10 @@ once more in a process named other than its package (`android:process`).
 `android17-oldapp-runner` (tooling) runs the package (manifest, DEX file, armv7
 build), the verdicts and the commands without a guest. The unit tests
 (`andarium-oldapp-*`) run the JNI interposer against a fake runtime that accepts
-live references only, the allocator arena, the ELF relocation scan and the page
-protection window.
+live references only (rows revoke the block's own references at a wrapper's first
+runtime call, end a block from a callback during a call, and run a second thread
+inside a synchronization through hooks in the fake's region functions), the
+allocator arena, the ELF relocation scan and the page protection window.
 `android-camera` (integration) registers when `UML_ANDROID_CAMERA_RELEASE`
 names the release: the runner boots it with the launcher's synthetic camera
 (`--camera=synthetic|blocked`, `--camera-profile=`) and a layout on the vendor

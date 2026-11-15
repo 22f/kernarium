@@ -85,6 +85,9 @@
 //   push_ns      recorded: nanoseconds for a Java call that is passed a 1 MiB block with every 4 KiB chunk written
 //                through the pointer (the push of the dirty chunks, and the pull after), and for the same call with the
 //                block clean
+//   real_pair_ns, real_critical_ns  recorded: nanoseconds for a Get...Elements / Release pair (JNI_ABORT) and for a critical
+//                pair on an array the application made, which stays the runtime's own (the layer records the runtime's
+//                pointers once it has made a block, so that a block's reference can release them)
 //   empty_us     microseconds for 10^6 calls of an empty native method from a Java loop (recorded, not judged)
 //   monitor      MonitorEnter and MonitorExit accept it
 //   pop          PopLocalFrame hands it out of the frame
@@ -1530,6 +1533,47 @@ void ended_cases(Report& report, Env* env, jclass probe) {
         }
         if (block != nullptr) {
             delete_local(env, block);
+        }
+        exception_clear(env);
+    }
+
+    // What a Get and Release of a real array costs while the layer is active (recorded): the least of three rounds.
+    {
+        const auto get_elements = entry<jbyte* (*)(Env*, jarray, jboolean*)>(env, slot::GetByteArrayElements);
+        const auto release_elements = entry<void (*)(Env*, jarray, jbyte*, jint)>(env, slot::ReleaseByteArrayElements);
+        const auto get_critical = entry<void* (*)(Env*, jarray, jboolean*)>(env, slot::GetPrimitiveArrayCritical);
+        const auto release_critical = entry<void (*)(Env*, jarray, void*, jint)>(env, slot::ReleasePrimitiveArrayCritical);
+        const auto make_array = entry<jobject (*)(Env*, jsize)>(env, slot::NewByteArray);
+        jobject real = make_array(env, 256);
+        if (real != nullptr) {
+            constexpr int kPairs = 20000;
+            uint64_t best_elements = ~uint64_t{0}, best_critical = ~uint64_t{0};
+            for (int round = 0; round < 3; ++round) {
+                uint64_t start = now_us();
+                for (int i = 0; i < kPairs; ++i) {
+                    jbyte* pointer = get_elements(env, real, nullptr);
+                    if (pointer != nullptr) {
+                        release_elements(env, real, pointer, kReleaseAbort);
+                    }
+                }
+                uint64_t elapsed = now_us() - start;
+                best_elements = elapsed < best_elements ? elapsed : best_elements;
+                start = now_us();
+                for (int i = 0; i < kPairs; ++i) {
+                    void* pointer = get_critical(env, real, nullptr);
+                    if (pointer != nullptr) {
+                        release_critical(env, real, pointer, kReleaseAbort);
+                    }
+                }
+                elapsed = now_us() - start;
+                best_critical = elapsed < best_critical ? elapsed : best_critical;
+            }
+            char text[12];
+            decimal(text, static_cast<uint32_t>(best_elements * 1000 / kPairs));
+            report.line("real_pair_ns", text);
+            decimal(text, static_cast<uint32_t>(best_critical * 1000 / kPairs));
+            report.line("real_critical_ns", text);
+            delete_local(env, real);
         }
         exception_clear(env);
     }

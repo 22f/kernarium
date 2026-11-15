@@ -3560,6 +3560,45 @@ void check_a_byte_both_sides_wrote_keeps_the_applications_at_a_racing_pull() {
     require(a.object->bytes[10] == 0x55 && static_cast<uint8_t>(again[10]) == 0x55, "and reaches the array at the next synchronization");
 }
 
+// Random writes from both sides, over sizes around the scan block, the chunk and the pull piece: after one read of the
+// whole block both copies agree with the per-byte rule (a byte the application wrote is the application's, else a byte Java
+// wrote is Java's, else it is as it was), and a second read changes nothing.
+void check_the_synchronization_is_byte_exact_for_random_writes() {
+    uint32_t seed = 12345;
+    const auto next = [&] {
+        seed = seed * 1664525u + 1013904223u;
+        return seed >> 8;
+    };
+    const unsigned sizes[] = {1, 3, 4, 5, 255, 256, 257, 511, 512, 513, 4095, 4096, 4097, 8191, 16383, 16384, 16385, 20000, 40000};
+    for (unsigned trial = 0; trial < 190; ++trial) {
+        const unsigned n = sizes[trial % (sizeof(sizes) / sizeof(sizes[0]))];
+        Fixture f = make();
+        std::vector<uint8_t> original(n);
+        for (unsigned i = 0; i < n; ++i) original[i] = uint8_t(next());
+        Made a = make_held(f, original);
+        std::vector<uint8_t> expected = original;
+        const unsigned density = 1 + next() % 200;  // one in `density` bytes
+        for (unsigned i = 0; i < n; ++i) {
+            const bool java = next() % density == 0, app = next() % density == 0;
+            if (java) {
+                a.object->bytes[i] = uint8_t(original[i] ^ 0xA5);
+                expected[i] = a.object->bytes[i];
+            }
+            if (app) {
+                raw_of(a)[i] = uint8_t(original[i] ^ 0x5A);
+                expected[i] = raw_of(a)[i];
+            }
+        }
+        std::vector<jbyte> result(n);
+        fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, jsize(n), result.data());
+        require(std::memcmp(result.data(), expected.data(), n) == 0, "the read has the rule's bytes");
+        require(a.object->bytes == expected && std::memcmp(raw_of(a), expected.data(), n) == 0, "so have the array and the block");
+        fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, a.shadow, 0, jsize(n), result.data());
+        require(a.object->bytes == expected && std::memcmp(raw_of(a), expected.data(), n) == 0, "and a second read changes nothing");
+        reset_world();
+    }
+}
+
 // A full sweep follows every collection that no full sweep has seen, also one that the step sweep (a few blocks at a
 // creation) found first: a result that fits after one full pass is not declined.
 void check_a_collection_the_step_sweep_saw_is_swept_in_full() {
@@ -3820,6 +3859,7 @@ int main(int argc, char** argv) {
     check_a_pull_does_not_overwrite_a_raw_write_to_another_byte();
     check_a_merge_does_not_overwrite_a_raw_write_to_a_third_byte();
     check_a_byte_both_sides_wrote_keeps_the_applications_at_a_racing_pull();
+    check_the_synchronization_is_byte_exact_for_random_writes();
     check_a_collection_the_step_sweep_saw_is_swept_in_full();
     check_a_kept_reference_gives_a_critical_pointer();
     check_a_release_of_a_pointer_inside_a_block_is_harmless();
