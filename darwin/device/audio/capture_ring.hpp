@@ -74,7 +74,7 @@ public:
 
     /* The same, for a buffer that reached the producer when the ring was at `epoch`: dropped (and reported as taken) if
      * a restart has been made since. */
-    std::size_t write(std::span<const std::uint8_t> data, std::uint32_t epoch) noexcept
+    std::size_t write(std::span<const std::uint8_t> data, std::uint64_t epoch) noexcept
     {
         // Sequentially consistent: either this sees the restart's epoch, or the restart sees this write under way.
         writing_.store(true, std::memory_order_seq_cst);
@@ -93,7 +93,7 @@ public:
     }
 
     /* The epoch and the boundary as they stand, for a buffer that has just reached the producer. */
-    [[nodiscard]] std::uint32_t epoch() const noexcept { return epoch_.load(std::memory_order_acquire); }
+    [[nodiscard]] std::uint64_t epoch() const noexcept { return epoch_.load(std::memory_order_acquire); }
     [[nodiscard]] std::uint64_t boundaryNanoseconds() const noexcept { return boundary_.load(std::memory_order_acquire); }
 
     /* Begins a recording at `boundaryNanoseconds` (the producer's clock): drops what is held and every buffer a producer
@@ -102,7 +102,7 @@ public:
     void restart(std::uint64_t boundaryNanoseconds) noexcept
     {
         boundary_.store(boundaryNanoseconds, std::memory_order_release);
-        const std::uint32_t next = epoch_.fetch_add(1, std::memory_order_seq_cst) + 1;
+        const std::uint64_t next = epoch_.fetch_add(1, std::memory_order_seq_cst) + 1;
         Seam::afterPublish();
         while (writing_.load(std::memory_order_seq_cst))
             std::this_thread::yield();
@@ -145,8 +145,9 @@ public:
     [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }
 
 private:
-    // An epoch with the bit that tells a note from none.
-    [[nodiscard]] static constexpr std::uint64_t tagOf(std::uint32_t epoch) noexcept { return (1ULL << 32) | epoch; }
+    // An epoch as a note: never zero, which is no note. An epoch is 64 bits wide, so none repeats while a ring lives
+    // and a note of an earlier recording never passes for the present one's.
+    [[nodiscard]] static constexpr std::uint64_t tagOf(std::uint64_t epoch) noexcept { return epoch + 1; }
 
     void copyIn(std::size_t position, std::span<const std::uint8_t> data) noexcept
     {
@@ -169,7 +170,7 @@ private:
     // Free-running positions; their difference is the fill.
     std::atomic<std::size_t> head_ {};
     std::atomic<std::size_t> tail_ {};
-    std::atomic<std::uint32_t> epoch_ {};
+    std::atomic<std::uint64_t> epoch_ {};
     std::atomic<std::uint64_t> boundary_ {};
     std::atomic<bool> writing_ {};
     // The producer's note of where its first write of an epoch began (tagOf(epoch), zero for none) and the position.

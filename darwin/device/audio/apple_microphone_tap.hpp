@@ -24,8 +24,12 @@ namespace uml::audio {
  * holds the rest for the next call, so a boundary late in a buffer reaches
  * into the output of the next.
  *
- * receive() runs on the tap's own thread and takes no lock, waits for
- * nothing and allocates nothing (resetting the converter included). */
+ * receive() runs on the tap's own thread. It adds no lock, wait or allocation
+ * of its own: the converter's reset takes the framework lock a conversion
+ * takes, and the constructor runs one reset so that the first one on the
+ * tap's thread finds the call already made once. A buffer whose time is not
+ * known (no host time) has nothing left out: the boundary cannot be placed
+ * in it. */
 class MicrophoneTap final {
 public:
     /* `converted` is the converter's output buffer, in the ring's sample format and channel count. */
@@ -43,7 +47,7 @@ private:
     const std::uint32_t outputRate_;
     // The epoch of the buffers being converted, and the frames of its output that remain to be left out.
     bool started_ {};
-    std::uint32_t epoch_ {};
+    std::uint64_t epoch_ {};
     std::size_t leaveOut_ {};
 };
 

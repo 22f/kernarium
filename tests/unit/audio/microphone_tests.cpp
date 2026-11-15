@@ -21,6 +21,8 @@
 #include <optional>
 #include <thread>
 #include <vector>
+#include <type_traits>
+#include <utility>
 
 namespace {
 
@@ -103,7 +105,7 @@ public:
 
     /* What a buffer finds when it reaches the audio thread, which converts it and writes it a moment later. */
     struct Reception {
-        std::uint32_t epoch {};
+        std::uint64_t epoch {};
         std::uint64_t boundary {};
     };
     [[nodiscard]] Reception receive() const
@@ -596,8 +598,11 @@ struct PausedRestart {
 
 using PausedRing = uml::audio::BasicCaptureRing<PausedRestart>;
 
+// A note of an earlier recording must never pass for the present one's: an epoch does not repeat while a ring lives.
+static_assert(std::is_same_v<decltype(std::declval<const PausedRing&>().epoch()), std::uint64_t>);
+
 /* What the audio thread does with a buffer: offers it under the epoch it saw when the buffer reached it. */
-std::size_t offer(PausedRing& ring, std::uint8_t value, std::size_t size, std::uint32_t epoch)
+std::size_t offer(PausedRing& ring, std::uint8_t value, std::size_t size, std::uint64_t epoch)
 {
     return ring.write(std::vector<std::uint8_t>(size, value), epoch);
 }

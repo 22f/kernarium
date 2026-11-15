@@ -15,13 +15,16 @@ MicrophoneTap::MicrophoneTap(AVAudioConverter* converter, AVAudioPCMBuffer* conv
     , frameBytes_(channels * sizeof(std::int16_t))
     , outputRate_(outputRate)
 {
+    // The first reset of a process does work a later one does not (the call's own lookup): do it here, off the tap's
+    // thread. A converter that has not run holds nothing, so this drops nothing.
+    [converter_ reset];
 }
 
 void MicrophoneTap::receive(AVAudioPCMBuffer* buffer, AVAudioTime* when)
 {
     // The recording's epoch and boundary as this buffer reaches the tap: a recording that begins while the buffer is
     // converted drops it at the write (CaptureRing::restart).
-    const std::uint32_t epoch = ring_.epoch();
+    const std::uint64_t epoch = ring_.epoch();
     if (!started_ || epoch != epoch_) {
         const std::uint64_t boundary = ring_.boundaryNanoseconds();
         std::uint64_t captured = 0;
