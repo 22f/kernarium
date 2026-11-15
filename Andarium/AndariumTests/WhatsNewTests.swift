@@ -77,8 +77,10 @@ struct WhatsNewTests {
     private static let buildElevenIDsOnAnIPad = buildElevenIDs.filter { $0 != "haptics" }
     private static let buildNineIDs = ["file-browser", "more-memory", "stability-fixes"]
 
-    @Test func theBundledNotesDecodeAndStartWithBuildEleven() throws {
-        let url = try #require(Bundle.main.url(forResource: "WhatsNew", withExtension: "json"))
+    /// The beta track is what Debug, Release and TestFlight builds bundle, and
+    /// so what this test run has.
+    @Test func theBetaTracksBundledNotesDecodeAndStartWithBuildEleven() throws {
+        let url = try #require(Bundle.main.url(forResource: WhatsNewTrack.beta.resource, withExtension: "json"))
         let releases = try WhatsNewCatalog.decode(Data(contentsOf: url))
         #expect(releases.map(\.build) == [11, 9])
         #expect(releases.map(\.version) == ["1.0 (11)", "1.0 (9)"])
@@ -97,6 +99,38 @@ struct WhatsNewTests {
         let nineFixes = try #require(nine.last)
         #expect(nineFixes.title == "Stability fixes" && nineFixes.text == nil && nineFixes.points.count == 6)
         #expect(nineFixes.place == nil && nineFixes.requirement == nil)
+    }
+
+    /// A build bundles its own track's file and none of the other's, and
+    /// reads the one it bundles. The configuration decides (`WHATS_NEW_TRACK`),
+    /// and this run's is not an AppStore one.
+    @Test func aBuildBundlesAndReadsOnlyItsOwnTracksFile() {
+        #if WHATS_NEW_TRACK_APP_STORE
+        let own = WhatsNewTrack.appStore
+        #else
+        let own = WhatsNewTrack.beta
+        #endif
+        #expect(WhatsNewTrack.bundled == own)
+        #expect(own == .beta, "the tests run in a configuration of the beta track")
+        for track in WhatsNewTrack.allCases {
+            let bundled = Bundle.main.url(forResource: track.resource, withExtension: "json") != nil
+            #expect(bundled == (track == own), "\(track)")
+        }
+        #expect(Set(WhatsNewTrack.allCases.map(\.resource)).count == WhatsNewTrack.allCases.count)
+    }
+
+    /// Each track is read from its own file, whatever else the bundle holds.
+    @Test func eachTrackIsReadFromItsOwnFile() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("andarium-whatsnew-tracks-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let note = #"[{"build": 14, "version": "1.0 (14)", "entries": [{"id": "a", "title": "A", "text": "T", "symbol": "star"}]}]"#
+        try Data(note.utf8).write(to: directory.appendingPathComponent("WhatsNewAppStore.json"))
+        try Data("[]".utf8).write(to: directory.appendingPathComponent("WhatsNew.json"))
+        let bundle = try #require(Bundle(url: directory))
+        #expect(WhatsNewCatalog.load(.appStore, from: bundle).map(\.build) == [14])
+        #expect(WhatsNewCatalog.load(.beta, from: bundle).isEmpty)
     }
 
     @Test func everyEntryHasWordsASymbolAndARequirementTheCodeKnows() {
@@ -341,6 +375,31 @@ struct WhatsNewTests {
             entry(announces: true, defaults: defaults).announce(on: model, hasGuest: false)
             #expect(!model.whatsNew.showsRibbon)
             #expect(WhatsNewStore(defaults: defaults).record == WhatsNewRecord(seenBuild: 11))
+        }
+    }
+
+    /// The App Store track has no notes yet: an App Store build shows no
+    /// ribbon and no history, and keeps no record, whatever the install had.
+    /// (Info lists the history only when the model has releases.)
+    @Test func aTrackWithNoNotesShowsNothingAndKeepsNoRecord() {
+        let installs: [(record: WhatsNewRecord?, hasGuest: Bool)] = [
+            (nil, false), (nil, true), (WhatsNewRecord(seenBuild: 5), true), (WhatsNewRecord(seenBuild: 11), true),
+        ]
+        for install in installs {
+            withDefaults { defaults in
+                install.record.map { WhatsNewStore(defaults: defaults).keep($0) }
+                let model = model(on: host(maximumMiB: 6144))
+                entry(announces: true, build: 12, defaults: defaults)
+                    .announceWhatsNew(
+                        on: model, hasGuest: install.hasGuest, vCPUs: 6, features: withSendFeedback, notes: [])
+                #expect(!model.whatsNew.showsRibbon)
+                #expect(model.whatsNew.pendingEntries.isEmpty)
+                #expect(model.whatsNew.releases.isEmpty)
+                #expect(WhatsNewStore(defaults: defaults).record == install.record)
+                model.whatsNew.read()
+                model.whatsNew.putAway()
+                #expect(WhatsNewStore(defaults: defaults).record == install.record)
+            }
         }
     }
 
