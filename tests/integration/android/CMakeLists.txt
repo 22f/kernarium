@@ -263,8 +263,9 @@ add_dependencies(integration-test-binaries uml_audio_hold)
 # to be listed again. Its video-lost mode tells the synthetic camera, through its
 # test-only control pipe, that the application left the foreground while the video
 # mode records, and expects the recording to end by itself with the clip saved, the
-# application still in front and the camera to open again (the release carries the
-# last topic of route p0030). It boots Android with the macOS launcher, so it is
+# application still in front and the camera to open again, and the video mode's
+# viewfinder with no recording to be live again after the return (the release
+# carries the last topics of route p0030). It boots Android with the macOS launcher, so it is
 # opt-in: name the release under test.
 set(UML_ANDROID_CAMERA_RELEASE "" CACHE PATH
     "Installed Android release directory that the android-camera tests boot")

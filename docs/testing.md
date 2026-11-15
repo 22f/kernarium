@@ -1048,7 +1048,9 @@ through its control pipe (`UML_SYNTHETIC_CAMERA_CONTROL`, test-only), that the
 application left the foreground while the video mode records, and expects the
 recording to end by itself with its clip saved, the camera application to stay
 in front and its camera to open again for a recording once the person returns;
-the release must carry the HAL's report of the end of the camera.
+a second case leaves the video mode's viewfinder with no recording and expects
+it live again after the return, in the same process and with no error window.
+The release must carry the HAL's report of the end of the camera.
 `android17-camera-runner` (tooling) runs its parsers and the expectations of
 every layout without a guest, `android17-camera-layouts` (tooling) the layout
 set, its fallback order and the generated files, and

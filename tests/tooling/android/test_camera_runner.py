@@ -2535,14 +2535,37 @@ class VideoLostTests(unittest.TestCase):
             self.ends_on_loss = True
             self.in_front = True
             self.log = "W V4l2FrameSource: camera 0: the host ended the camera: its video buffers fail\n"
+            # The second case, the viewfinder with no recording: whether the host ends the camera for it, whether the
+            # application opens its camera again by itself after the return, and what else may happen to it.
+            self.viewfinder_lost = True
+            self.reopens = True
+            self.restarts = False
+            self.pid = 4711
+            self.crash = False
+            self.events_log = ""
 
         def camera_control(self, line: str) -> None:
             self.control_lines.append(line)
-            if line == "interrupt background" and self.ends_on_loss:
-                self.recording = False
-                self.rows["2"] = {"_id": "2", "_data": "/sdcard/lost.mp4", "_display_name": "lost.mp4"}
+            if line == "interrupt background" and self.recording:
+                if self.ends_on_loss:
+                    self.recording = False
+                    self.rows["2"] = {"_id": "2", "_data": "/sdcard/lost.mp4", "_display_name": "lost.mp4"}
+            elif line == "interrupt background":
+                if self.viewfinder_lost:
+                    self.held = set()
+                    self.log += "W V4l2FrameSource: camera 0: the host ended the camera: its video buffers fail\n"
+            elif line == "resume" and not self.held and self.reopens:
+                self.held = {"0"}
+                if self.restarts:
+                    self.pid += 1
+                if self.crash:
+                    self.events_log += "11-15 16:50:00.000 I am_crash: [4711,0,org.lineageos.aperture]\n"
 
         def shell(self, command: str, timeout: float = 0) -> str:
+            if command.startswith("pidof "):
+                return f"{self.pid}\n"
+            if command.startswith("logcat -d -b events"):
+                return self.events_log
             if command == runner.FOREGROUND_COMMAND:
                 return foreground_text() if self.in_front else foreground_text("topResumedActivity=ActivityRecord{1 u0 com.android.launcher3/.Launcher t1}")
             if command == f"input keyevent {runner.CAMERA_KEYCODE}" and self.recording and "2" in self.rows:
@@ -2571,11 +2594,13 @@ class VideoLostTests(unittest.TestCase):
     def test_the_loss_ends_the_recording_and_the_camera_opens_again(self) -> None:
         guest = self.Guest(self.plan())
         text = self.run_check(guest)
-        self.assertEqual(guest.control_lines, ["interrupt background", "resume"])
         self.assertIn("the recording ended by itself: lost.mp4", text)
         self.assertIn("the application stays in front", text)
         self.assertIn("the camera opened again: again.mp4", text)
         self.assertIn("the HAL reported the end of the camera", text)
+        self.assertIn("viewfinder: the host ended the camera", text)
+        self.assertIn("viewfinder: live again after the return, same process 4711, no error window", text)
+        self.assertEqual(guest.control_lines, ["interrupt background", "resume", "interrupt background", "resume"])
         # The first recording is stopped by the loss, not by a second key press; the second is started and stopped by key.
         self.assertEqual(guest.commands.count(f"input keyevent {runner.CAMERA_KEYCODE}"), 3)
         starts = [command for command in guest.commands if command.startswith("am start")]
@@ -2600,6 +2625,46 @@ class VideoLostTests(unittest.TestCase):
         guest = self.Guest(self.plan())
         guest.log = ""
         with self.assertRaisesRegex(runner.Failure, "image lacks the HAL topic"):
+            self.run_check(guest)
+
+    def test_a_viewfinder_the_host_did_not_end_passes_and_says_so(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.viewfinder_lost = False
+        text = self.run_check(guest)
+        self.assertIn("viewfinder: the host did not end the camera", text)
+        self.assertIn("live again after the return", text)
+
+    def test_a_viewfinder_that_does_not_come_back_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.reopens = False
+        with self.assertRaisesRegex(runner.Failure, "holding camera 0 \\(video viewfinder after the return\\)"), \
+                mock.patch.object(runner, "VIEWFINDER_RECOVERY_SECONDS", 0):
+            self.run_check(guest)
+
+    def test_a_viewfinder_the_application_restarted_for_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.restarts = True
+        with self.assertRaisesRegex(runner.Failure, "was restarted"):
+            self.run_check(guest)
+
+    def test_a_crash_around_the_loss_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.crash = True
+        with self.assertRaisesRegex(runner.Failure, "crashed or stopped responding"):
+            self.run_check(guest)
+
+    def test_an_error_window_in_front_is_not_a_viewfinder(self) -> None:
+        # The application holds its camera again but an error window has the focus.
+        guest = self.Guest(self.plan())
+        original = guest.shell
+
+        def shell(command: str, timeout: float = 0) -> str:
+            if command == runner.FOREGROUND_COMMAND and guest.control_lines.count("resume") == 2:
+                return foreground_text(focus="mCurrentFocus=Window{9 u0 Application Error: org.lineageos.aperture}")
+            return original(command, timeout)
+
+        guest.shell = shell
+        with self.assertRaisesRegex(runner.Failure, "does not show its viewfinder after the return"):
             self.run_check(guest)
 
     def test_the_pipe_takes_one_line_and_is_waited_for(self) -> None:
