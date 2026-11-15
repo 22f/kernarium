@@ -41,7 +41,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@已輸出"
+            "value" : "%@已匯出"
           }
         }
       }
@@ -711,7 +711,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%2$lld個中有%1$lld個未輸出"
+            "value" : "%2$lld個中有%1$lld個未匯出"
           }
         }
       }
@@ -3632,7 +3632,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "輸出"
+            "value" : "匯出"
           }
         }
       }
@@ -3654,7 +3654,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在輸出%@"
+            "value" : "正在匯出%@"
           }
         }
       }
@@ -5479,7 +5479,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "未輸出"
+            "value" : "未匯出"
           }
         }
       }
