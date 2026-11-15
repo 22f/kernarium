@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "executor.hpp"
+#if UML_AOT
+#include "cpu/arm64/aot/aot_runtime.hpp"
+#endif
 
 #include "cpu/arm64/aarch32/breakpoint_immediate.hpp"
 #include "cpu/arm64/aarch32/guest_fetch.hpp"
@@ -2921,6 +2924,14 @@ private:
 	std::array<std::uint8_t, set_count> next_replacement_{};
 };
 
+#if UML_AOT
+struct GadgetExecutor::AotState final {
+	arm64::aot::Binder binder;
+};
+#else
+struct GadgetExecutor::AotState final {};
+#endif
+
 GadgetExecutor::GadgetExecutor(arm64::gadgets::BuildOptions build_options)
 	: build_options_{build_options},
 	  sampling_{diagnostics::guest_sampling_register(*this)}
@@ -3335,6 +3346,13 @@ GadgetExecutor::finish_block(ProgramCache &programs, const BuildResult &built,
 		cpu.gadget_return_top = 0;
 	}
 	prepare_cache(generation, sequences.code_changes);
+#if UML_AOT
+	if (arm64::aot::enabled()) [[unlikely]] {
+		if (const auto aot_event = run_aot(cpu, memory, generation,
+			    sequences.code_changes, executed))
+			return *aot_event;
+	}
+#endif
 	auto selected = find(cpu.pc, sequences.code_changes, memory);
 #if UML_GADGET_EXECUTION_HISTOGRAM
 	++cache_diagnostics_.block_entries;
@@ -3364,6 +3382,53 @@ GadgetExecutor::finish_block(ProgramCache &programs, const BuildResult &built,
 			built.program, cpu, tlb_, executed);
 	return finish_block(*programs_, built, event, cpu, executed);
 }
+
+#if UML_AOT
+/* One AOT entry runs at most as many instructions as the engine chains
+ * between two returns to its dispatcher, which bounds how long a vCPU goes
+ * without polling for an interrupt. */
+constexpr std::uint64_t aot_entry_budget = 4096;
+
+std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
+	arm64::CpuState &cpu, StaticGuestMemory &memory, unsigned long generation,
+	std::uint64_t code_changes, std::size_t &executed)
+{
+	/* An open exclusive monitor is the engine's to complete. The rewritten
+	 * code ignores the top address byte, as every Android process runs
+	 * with. */
+	if (cpu.exclusive_size != 0U || !cpu.tbi_enabled)
+		return std::nullopt;
+	if (!aot_)
+		aot_ = std::make_unique<AotState>();
+	const auto hit = aot_->binder.find(
+		memory, generation, code_changes, cpu.pc);
+	if (hit.native == nullptr)
+		return std::nullopt;
+	const auto start = cpu.pc;
+	/* Rewritten code reads and writes the vector registers in place. */
+	cpu.access_fp_state();
+	cpu.gadget_indirect_miss = nullptr;
+	const auto result = arm64::aot::enter(
+		cpu, tlb_, hit.bias, hit.native, aot_entry_budget);
+	executed = static_cast<std::size_t>(result.retired);
+	if (result.reason == arm64::aot::Reason::step) {
+		/* The engine runs the one instruction the rewritten code left
+		 * to it: it needs the guest's floating-point environment the
+		 * way a stepped instruction does, and reports faults and
+		 * system calls as any block does. */
+		std::size_t stepped = 0;
+		const auto event =
+			run_trap_enabled_instruction(cpu, memory, stepped);
+		executed += stepped;
+		return event;
+	}
+	if (cpu.pc == start && result.retired == 0)
+		return std::nullopt;
+	if (executed == 0)
+		executed = 1;
+	return ::uml::cpu::EngineEvent::continued;
+}
+#endif
 
 /* The SME modes' run_block. Its cache, links and target table are the
  * mode's own, so everything the program can reach was translated for the

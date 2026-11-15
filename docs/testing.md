@@ -735,6 +735,12 @@ cannot hold has focused tests whose headers say what they check
 AArch32 JIT tests exist only on macOS). A guest `SIGILL` is a correctness
 blocker in every one of them.
 
+- `arm64-aot-libz` exists only in a build configured with `UML_AOT_IMAGE`
+  and `UML_AOT_FSCK_EROFS`: it runs every function of the release's libz.so
+  through the gadget engine with and without ahead-of-time code and compares
+  all guest state, memory and faults, then the unhappy paths (single step,
+  preemption bound, two load biases, other or changed bytes, tagged pointers,
+  page crossings). `arm64-aot-tools` checks the generator's encoders.
 - `arm64-instruction-corpus` runs the generated A64 corpus through both
   engines; the special records (native SME, absent features, the SM = 0 family,
   top-byte ignore, native floating-point traps) have their own

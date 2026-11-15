@@ -19,6 +19,12 @@
         $<TARGET_OBJECTS:uml_arm64_jit_test_support>
         $<TARGET_OBJECTS:uml_static_guest_memory>
         $<TARGET_OBJECTS:uml_runtime_context>)
+    if(TARGET uml_arm64_aot_framework)
+        # The executor enters the ahead-of-time code of an accepted release.
+        list(APPEND UML_STATIC_RUNTIME_TEST_BASE_OBJECTS
+            $<TARGET_OBJECTS:uml_arm64_aot_runtime>)
+        link_libraries(uml_arm64_aot_framework)
+    endif()
     if(TARGET uml_x86_64_gadgets)
         list(APPEND UML_STATIC_RUNTIME_TEST_BASE_OBJECTS
             $<TARGET_OBJECTS:uml_x86_64_target>
@@ -471,6 +477,15 @@
         uml_add_arm64_unit_test(gadget_${GADGET_RUNTIME_TEST} WITHOUT_HARNESS
             OBJECTS ${UML_ARM64_GADGET_RUNTIME_TEST_OBJECTS})
     endforeach()
+    if(TARGET uml_arm64_aot_framework)
+        uml_add_arm64_unit_test(aot_libz WITHOUT_HARNESS
+            OBJECTS ${UML_ARM64_GADGET_RUNTIME_TEST_OBJECTS})
+        get_property(_uml_aot_root GLOBAL PROPERTY UML_AOT_IMAGE_ROOT)
+        get_property(_uml_aot_functions GLOBAL PROPERTY UML_AOT_FUNCTIONS)
+        target_compile_definitions(uml_arm64_aot_libz_tests PRIVATE
+            AOT_TEST_ROOT="${_uml_aot_root}"
+            AOT_TEST_FUNCTIONS="${_uml_aot_functions}")
+    endif()
     # The AArch32 gadget tests read the library-exit counters, which only the
     # semantic library's counting variant has.
     set(UML_ARM64_COUNTING_GADGET_RUNTIME_TEST_OBJECTS

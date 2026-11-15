@@ -14,6 +14,25 @@ add_subdirectory(jit_memory)
 # The AArch32 decoder both arm64 engines and the semantic library share.
 add_subdirectory(arm64/aarch32)
 
+# Ahead-of-time native code for the Android image's libraries is built only
+# from an accepted release; without one there is no AOT component and the
+# gadget executor compiles none of its hooks.
+set(UML_AOT_IMAGE "" CACHE PATH
+    "An accepted Android release directory to generate the AOT framework from; empty builds without AOT")
+set(UML_AOT_FSCK_EROFS "" CACHE FILEPATH
+    "An fsck.erofs that decodes Zstandard, used to unpack UML_AOT_IMAGE")
+set(UML_AOT_LIBRARIES "/system/lib64/libz.so" CACHE STRING
+    "Libraries of the release to rewrite, as absolute guest paths")
+set(UML_AOT OFF)
+if(UML_AOT_IMAGE)
+    if(NOT UML_TARGET_MACOS OR UML_APP_STORE_RUNTIME)
+        message(FATAL_ERROR
+            "UML_AOT_IMAGE is supported for the macOS product only so far")
+    endif()
+    set(UML_AOT ON)
+    add_subdirectory(arm64/aot)
+endif()
+
 # A private cache holds one translation per slot, so the slot count is the
 # working set an executor can keep. Counted on Geekbench 6 Clang, the workload
 # with the largest code footprint, one executor reaches about 194,000 distinct
@@ -469,7 +488,11 @@ function(_uml_add_gadget_executor TARGET SLOTS)
     _uml_add_cpu_objects(${TARGET} gadget arm64/gadgets/executor.cpp)
     # The program slabs and record tables come from the memory layer's heaps.
     target_link_libraries(${TARGET} PUBLIC uml_arm64_gadgets UML::MemoryHeap)
+    if(UML_AOT)
+        target_link_libraries(${TARGET} PUBLIC uml_arm64_aot_runtime)
+    endif()
     target_compile_definitions(${TARGET} PRIVATE
+        UML_AOT=$<BOOL:${UML_AOT}>
         UML_GADGET_CACHE_CENSUS=$<BOOL:${UML_GADGET_CACHE_CENSUS}>
         UML_GADGET_CACHE_SLOTS=${SLOTS}
         UML_GADGET_BLOCK_INSTRUCTIONS=${UML_GADGET_BLOCK_INSTRUCTIONS}
@@ -551,6 +574,12 @@ target_sources(uml_cpu_engine_objects INTERFACE
     $<TARGET_OBJECTS:uml_arm64_aarch32_semantics>
     $<TARGET_OBJECTS:uml_arm64_gadgets>
     $<TARGET_OBJECTS:uml_arm64_execution_helpers>)
+if(UML_AOT)
+    target_link_libraries(uml_cpu_engine_objects INTERFACE
+        uml_arm64_aot_framework)
+    target_sources(uml_cpu_engine_objects INTERFACE
+        $<TARGET_OBJECTS:uml_arm64_aot_runtime>)
+endif()
 # The JIT engine's objects, and the executable-memory owner they alone link.
 if(UML_ARM64_JIT_ENGINE)
     target_sources(uml_cpu_engine_objects INTERFACE

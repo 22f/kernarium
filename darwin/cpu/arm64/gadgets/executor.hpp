@@ -154,6 +154,18 @@ private:
 
 	class ProgramCache;
 
+	/* The ahead-of-time component's state (cpu/arm64/aot), present only in
+	 * a build with an AOT framework; the member exists in every build so
+	 * that the layout does not depend on the option. */
+	struct AotState;
+	/* run_block's AOT step: when cpu.pc has rewritten code, runs it and
+	 * returns the event the run ends with, else nothing and the engine
+	 * runs the block as usual. Defined only with UML_AOT. */
+	[[nodiscard]] std::optional<::uml::cpu::EngineEvent> run_aot(
+		CpuState &cpu, ::uml::memory::StaticGuestMemory &memory,
+		unsigned long generation, std::uint64_t code_changes,
+		std::size_t &executed);
+
 	/* run_block for a guest SVCR other than 0, out of line so that the
 	 * mode-0 path stays as it was. */
 	[[nodiscard]] ::uml::cpu::EngineEvent run_sme_block(
@@ -188,6 +200,7 @@ private:
 	unsigned long mapping_generation_{};
 	std::uint64_t mapping_changes_{};
 	std::unique_ptr<ProgramCache> programs_;
+	std::unique_ptr<AotState> aot_;
 	::uml::memory::Tlb tlb_;
 	CpuState *current_cpu_{};
 	void *execution_context_{};
