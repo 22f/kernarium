@@ -392,11 +392,17 @@ otherwise; the framework overlay reads that switch
 (`config_supportsHardwareCamToggle`) and Android shows its own blocked-camera
 state. The host also sends black frames while it interrupts a camera, and the
 HAL passes them on as frames of the camera. When the host ends the video of a
-camera (the application left the foreground while the guest recorded), the
-camera's video buffers fail under a black, interrupted record for as long as the
-guest keeps the stream, and the HAL reports `ERROR_DEVICE`: Camera2 hands that to
-the application as `onError(ERROR_CAMERA_DEVICE)`, and CameraX closes the camera,
-which ends a recording it holds with the clip saved. Output sizes the host lacks that
+camera (the application left the foreground while the guest had a video stream
+open on it), the camera's video buffers fail under a black, interrupted record
+for as long as the guest keeps the stream, and the HAL decides by the session's
+streams (`camera_session.hpp`). A session with a stream whose consumer is a
+video encoder is over: the request that met the loss fails with every output
+buffer returned as an error, the HAL reports `ERROR_DEVICE` once, the requests
+it still holds drain as `ERROR_REQUEST` without the frame source, and the opened
+session answers every later request, flush and configuration with the internal
+error; a close succeeds. Any other session is told nothing: the HAL closes the
+camera's video streams between requests, which ends the host's loss, and opens
+them again with the next request. Output sizes the host lacks that
 CTS and the camera API require (standard JPEG sizes, 3840x2160 where that is the
 largest video mode, which is the recording size of the large tier, the YUV sizes
 of every smaller JPEG, 1920x1440 and 1280x720 for a concurrent camera) are cut
@@ -413,9 +419,11 @@ level lock only with `MANUAL_SENSOR`, the AF regions only with autofocus, and no
 camera lists the tone map mode or curves or states the available tone map modes
 (the templates carry no tone map key). Every result carries the scene mode
 (`DISABLED`) and, with `MANUAL_SENSOR`, the black level lock. A result states
-the crop region of its request (`camera_crop.hpp`: clamped into the active
-array, the whole array when the request has none), because the camera service
-joins the zoom ratio and that residual region again in the result. A video output
+the crop region its centred camera applies (`camera_crop.hpp`: the requested
+size centred in the active array, clamped to the array and to the smallest size
+the maximum digital zoom allows, scaled by the request's zoom ratio; the whole
+array when the request has none), because the camera service joins the zoom
+ratio and that residual region again in the result. A video output
 that stays configured but leaves the requests has its host stream closed after
 half a second and two requests without a still; a request that takes a still
 counts for nothing and starts the count again for every open video output, so

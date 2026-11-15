@@ -238,10 +238,10 @@ void check_what_the_application_sees()
 }
 
 // The host ends a camera (the application left the foreground while the guest
-// recorded, wire README): the buffers of its video streams fail and its newest
-// record says black and interrupted. That is the camera's loss, told to the
-// framework as ERROR_DEVICE; a failed video buffer under any other record, and
-// a failed still, are not.
+// had a video stream open, wire README): the buffers of its video streams fail
+// and its newest record says black and interrupted. That is the camera's loss,
+// which the HAL then answers by the session's streams (camera_session.hpp); a
+// failed video buffer under any other record, and a failed still, are not.
 void check_the_hosts_end_of_a_camera()
 {
     namespace flag = abi::frame_flag;

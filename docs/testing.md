@@ -1055,11 +1055,17 @@ still of one, with its DNG.
 `android-camera-video-lost` (`--mode video-lost`) tells the synthetic camera,
 through its control pipe (`UML_SYNTHETIC_CAMERA_CONTROL`, test-only), that the
 application left the foreground while the video mode records, and expects the
-recording to end by itself with its clip saved, the camera application to stay
-in front and its camera to open again for a recording once the person returns;
-a second case leaves the video mode's viewfinder with no recording and expects
-it live again after the return, in the same process and with no error window.
-The release must carry the HAL's report of the end of the camera.
+recording to end by itself with its clip (which holds encoded video samples)
+saved, the camera application to stay in front, and a recording to work again
+once the application is started again after the person returns (that step starts
+the activity again and shows only that the camera can be opened again). Two more
+cases leave a viewfinder with no recording, the video mode's (which binds an
+encoder surface) and the photo mode's, and expect each live again within 45 s of
+the return (one deadline for the camera, the picture and the frame counters), in
+the same process, with no activity start and no error window; the photo mode's
+viewfinder must not be told the device is gone, and the HAL's log must show that
+it closed and reopened its video streams. The release must carry the HAL topic
+that handles the host's end of a camera's video.
 `android17-camera-runner` (tooling) runs its
 parsers and the expectations of every layout without a guest,
 `android17-camera-layouts` (tooling) the layout set, its fallback order and the
