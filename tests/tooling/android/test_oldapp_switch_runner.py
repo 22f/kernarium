@@ -44,7 +44,8 @@ class ScriptedGuest:
     def __init__(self) -> None:
         self.properties: dict[str, str] = {}
         self.clock = 1_700_000_000
-        self.packages: dict[str, tuple[str, int]] = {}
+        self.packages: dict[str, tuple[str, int]] = {}   # package -> (variant, first-install milliseconds)
+        self.counter = 0
         self.processes: dict[str, int] = {}
         self.results: dict[str, str] = {}
         self.next_pid = 4000
@@ -64,7 +65,8 @@ class ScriptedGuest:
         self.result_file: str | None = None
         self.version_line = runner.VERSION_LINE
         self.on_time_offset = 0
-        self.skip_cleanup: set[str] = set()      # causes `list` does not clear: absent, ineligible, reinstalled
+        self.skip_cleanup: set[str] = set()      # causes `list` does not clear: absent, ineligible, reinstalled, foreign
+        self.lock_type = "shell_data_file"
         self.off_needs_eligible = False
         self.accept_unrepresentable = False
         self.layer = "when-on"                    # when-on, never, always
@@ -75,8 +77,13 @@ class ScriptedGuest:
             self.install_variant(variant)
 
     # ---- the model
+    def first_install(self) -> int:
+        """Epoch milliseconds, unique per installation whatever the second."""
+        self.counter += 1
+        return self.clock * 1000 + self.counter
+
     def install_variant(self, variant: str, package: str | None = None) -> None:
-        self.packages[package or probe.package_of(variant)] = (variant, self.clock)
+        self.packages[package or probe.package_of(variant)] = (variant, self.first_install())
         self.processes.pop(package or probe.package_of(variant), None)
 
     def eligible(self, package: str) -> bool:
@@ -100,14 +107,18 @@ class ScriptedGuest:
         return {name[len(probe.STORE_PROPERTY_PREFIX):]: value for name, value in self.properties.items()
                 if name.startswith(probe.STORE_PROPERTY_PREFIX) and value}
 
+    def names_installation(self, package: str, value: str) -> bool:
+        match = re.fullmatch(r"([0-9]+) ([0-9]+)", value)
+        return match is not None and int(match.group(2)) == self.packages[package][1]
+
     def clear_stale(self) -> None:
         for package, value in self.stored().items():
             if package not in self.packages:
                 cause = "absent"
             elif not self.eligible(package):
                 cause = "ineligible"
-            elif value.isdigit() and self.packages[package][1] > int(value):
-                cause = "reinstalled"
+            elif not self.names_installation(package, value):
+                cause = "reinstalled" if re.fullmatch(r"[0-9]+ [0-9]+", value) else "foreign"
             else:
                 continue
             if cause not in self.skip_cleanup:
@@ -119,7 +130,7 @@ class ScriptedGuest:
             variant = pathlib.Path(arguments[-1]).stem
             self.clock += 3
             if variant in self.real:
-                self.packages[self.real[variant][0]] = ("real", self.clock)
+                self.packages[self.real[variant][0]] = ("real", self.first_install())
             else:
                 self.install_variant(variant)
         elif arguments[:1] == ("uninstall",):
@@ -146,6 +157,11 @@ class ScriptedGuest:
             return runner.Run(0, f"{self.clock}\n", "")
         if words[:1] == ["id"]:
             return runner.Run(0, self.shell_context + "\n", "")
+        if words[:3] == ["ls", "-lZ", runner.LOCK_PATH]:
+            return runner.Run(0, f"-rw-rw-rw- 1 shell shell u:object_r:{self.lock_type}:s0 0 2026-11-15 17:00 {runner.LOCK_PATH}\n", "")
+        if words[:1] == ["setprop"]:
+            self.properties[words[1]] = words[2]
+            return runner.Run(0, "", "")
         if words[:1] == ["ls"]:
             return runner.Run(0, "\n".join(f"-rwxr-xr-x 1 root shell u:object_r:system_file:s0 1 {path}"
                                            for path in words[2:]) + "\n", "")
@@ -199,8 +215,10 @@ class ScriptedGuest:
             for package in sorted(self.packages):
                 if self.eligible(package):
                     value = self.properties.get(probe.STORE_PROPERTY_PREFIX + package, "")
-                    lines.append(f"{package}\t{self.label_of(package)}\t{'on' if value else 'off'}\t{value or 0}\t"
-                                 f"{self.packages[package][1]}")
+                    valid = value and self.names_installation(package, value)
+                    seconds = value.split(" ")[0] if valid else "0"
+                    lines.append(f"{package}\t{self.label_of(package)}\t{'on' if valid else 'off'}\t{seconds}\t"
+                                 f"{self.packages[package][1] // 1000}")
             lines += self.list_extra
             return runner.Run(0, "\n".join(lines) + "\n", "")
         if len(arguments) == 3 and arguments[0] == "set" and arguments[2] in ("on", "off"):
@@ -214,7 +232,7 @@ class ScriptedGuest:
                 return refused
             name = probe.STORE_PROPERTY_PREFIX + package
             if mode == "on":
-                self.properties[name] = str(self.clock + self.on_time_offset)
+                self.properties[name] = f"{self.clock + self.on_time_offset} {self.packages[package][1]}"
             elif self.keep_on_off and self.properties.get(name):
                 self.properties[name] = ""
             if package in self.packages and not self.keep_process:
@@ -369,12 +387,11 @@ class Parsers(unittest.TestCase):
 
 class Steps(unittest.TestCase):
     def setUp(self) -> None:
-        self.gap, self.avc_wait = runner.INSTALL_GAP_SECONDS, runner.AVC_SECONDS
-        runner.INSTALL_GAP_SECONDS = 0
+        self.avc_wait = runner.AVC_SECONDS
         runner.AVC_SECONDS = 0
 
     def tearDown(self) -> None:
-        runner.INSTALL_GAP_SECONDS, runner.AVC_SECONDS = self.gap, self.avc_wait
+        runner.AVC_SECONDS = self.avc_wait
 
     def guest(self) -> ScriptedGuest:
         return ScriptedGuest()
@@ -410,7 +427,7 @@ class Steps(unittest.TestCase):
             elif change == "stale":
                 installed_at = guest.clock + 1000
             elif change == "future":
-                guest.packages[probe.package_of("old")] = ("old", guest.clock + 1000)
+                guest.packages[probe.package_of("old")] = ("old", (guest.clock + 1000) * 1000)
             with self.assertRaises(Failure, msg=change):
                 runner.check_listing(guest, installed_at)
         guest = self.guest()
@@ -450,7 +467,8 @@ class Steps(unittest.TestCase):
         guest = self.guest()
         note, value = runner.switch_on(guest)
         self.assertIn(str(value), note)
-        self.assertEqual(guest.properties[probe.property_of("old")], str(value))
+        self.assertEqual(guest.properties[probe.property_of("old")], value)
+        self.assertRegex(value, r"^[0-9]+ [0-9]+$")
         self.assertIn("could not set it", runner.application_view(guest, value))
         self.assertIn("is empty", runner.switch_off(guest))
         self.assertEqual(guest.properties[probe.property_of("old")], "")
@@ -489,16 +507,42 @@ class Steps(unittest.TestCase):
         with self.assertRaises(Failure):
             runner.switch_off(guest)
 
+    def test_the_stored_value_is_two_numbers(self) -> None:
+        self.assertEqual(runner.choice_seconds("1700000000 1700000000123", "p"), 1700000000)
+        for bad in ("", "1700000000", "1700000000 ", "a b", "1 2 3", "1700000000 0", " 1 2"):
+            with self.assertRaises(Failure, msg=repr(bad)):
+                runner.choice_seconds(bad, "p")
+        guest = self.guest()
+        original = guest.command
+
+        def old_form(arguments):
+            result = original(arguments)
+            if arguments[:1] == ["set"] and arguments[2] == "on":
+                guest.properties[probe.property_of("old")] = str(guest.clock)
+            return result
+
+        guest.command = old_form  # type: ignore[method-assign]
+        with self.assertRaises(Failure):
+            runner.switch_on(guest)
+
+    def test_the_lock_file(self) -> None:
+        guest = self.guest()
+        self.assertIn("shell_data_file", runner.check_lock_file(guest))
+        guest.lock_type = "system_data_file"
+        with self.assertRaises(Failure):
+            runner.check_lock_file(guest)
+
     def test_lifecycle(self) -> None:
         guest = self.guest()
         note = runner.check_lifecycle(guest, self.apks())
         for what in ("reinstalled: cleared", "a raised target level: cleared", "a shared user ID: cleared",
-                     "uninstalled: cleared"):
+                     "uninstalled: cleared", "the earlier one-number form: cleared", "another installation: cleared",
+                     "a value that is no time: cleared"):
             self.assertIn(what, note)
         self.assertEqual(guest.properties[probe.property_of("old")], "")
 
     def test_lifecycle_fails_when_the_listing_does_not_clear(self) -> None:
-        for cause in ("reinstalled", "ineligible", "absent"):
+        for cause in ("reinstalled", "ineligible", "absent", "foreign"):
             guest = self.guest()
             guest.skip_cleanup = {cause}
             with self.assertRaises(Failure, msg=cause) as problem:

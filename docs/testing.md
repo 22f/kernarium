@@ -930,8 +930,9 @@ with status 2, `set off` accepts them, a name that cannot be a property name is
 refused for both, and unknown arguments give status 64; `set on` stores the time
 and `list` shows it; an ordinary application (`untrusted_app_29`) reads the value
 and its attempt to set it is refused; `set off` clears it; and a choice is
-cleared by the next listing after a reinstall, a replacement by a package that is
-no longer eligible, or an uninstall. `--hook` (an image that also carries the
+cleared by the next listing after a reinstall (at once, whatever the clock says),
+a replacement by a package that is no longer eligible, an uninstall, or a value
+that names no installation, and the command's lock is a file of the shell user. `--hook` (an image that also carries the
 framework hook) adds an old application's own process (`untrusted_app_25`): it
 reads the property and cannot set it, switching on or off ends it, the layer's
 library is mapped into the next process exactly while the switch is on, and a

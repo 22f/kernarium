@@ -7,10 +7,10 @@ user: ``list`` names the applications the compatibility layer can apply to (not 
 primary ABI, a target level below 14, no shared user ID, a package name that can end a property name) with their
 labels, ``set PACKAGE on|off`` writes or clears the persistent property ``persist.sys.kernarium.oldapp.<package>``
 and stops the application. The property's SELinux type (overlay/sepolicy/system_ext/private/kernarium_oldapp_prop.te)
-lets the shell domain set it and every application domain read it, and no application domain set it. A choice
-does not outlive the installation it was made for: ``list`` clears the property of a package that is absent, is
-not eligible any more or was first installed after the turn-on time, and turning off is accepted for any name
-that can be a property name. This runner installs the probe applications of oldswitch_probe_apk.py (one eligible,
+lets the shell domain set it and every application domain read it, and no application domain set it. The value
+names the installation (turn-on seconds, a space, the installation's first-install milliseconds) and a choice does
+not outlive it: ``list`` clears the property of a package that is absent, is not eligible any more or is another
+installation than the value names, and turning off is accepted for any name that can be a property name. This runner installs the probe applications of oldswitch_probe_apk.py (one eligible,
 three that each fail one clause of the rule) and, as the adb shell user, checks that:
 
 - the command and its jar are in the image and `kernarium_oldapp` resolves on the shell's PATH;
@@ -26,9 +26,11 @@ three that each fail one clause of the rule) and, as the adb shell user, checks 
 - an ordinary application (the modern probe, domain ``untrusted_app_29``, started with `am broadcast`) reads the
   property with that value and its attempt to set it is refused, with the value unchanged;
 - ``set old off`` exits 0 with ``<package><TAB>off``, the property reads empty and ``list`` shows ``off``;
-- a choice does not outlive its installation: after the application is uninstalled and installed again, or
-  replaced by a package of the same name that is not eligible (a raised target level, a shared user ID), or
-  only uninstalled, the next ``list`` clears the property and shows the application ``off`` or not at all.
+- a choice does not outlive its installation: after the application is uninstalled and installed again (at once,
+  with no regard to the clock), or replaced by a package of the same name that is not eligible (a raised target
+  level, a shared user ID), or only uninstalled, or the property holds the earlier one-number form or another
+  installation's value, the next ``list`` clears the property and shows the application ``off`` or not at all;
+- the command's lock is a file of the shell user in its own data directory (type ``shell_data_file``).
 
 ``--hook`` (an image that also carries the framework hook and the compatibility library) adds the steps that
 need an old application's own process: the process of the ``running`` probe, started by `am broadcast` in the
@@ -36,7 +38,11 @@ hook's domain (``untrusted_app_25``), reads the property and cannot set it (the 
 log when the log shows it); switching on or off ends that process; the process that starts afterwards has the
 layer's library mapped exactly while the switch is on; and a stale choice is gone from the next process. Not
 automated here: that the choice survives a restart or an Android update of the guest (the image proof's own
-recipe restarts the guest), and that a snapshot restore brings it back.
+recipe restarts the guest), that a snapshot restore brings it back, that an in-place update of an eligible
+application keeps it (the probe packages are signed with a key of their own per build, so none can update
+another), that a choice made after the guest's clock was set back is kept (the runner does not change the
+guest's clock; the command's JVM test does), and that a listing and a set racing each other lose no choice
+(the JVM test serialises them against the production core).
 
 ``--real-apk`` (with ``--real-package`` and ``--real-label``) also installs an application you provide, whose
 label is a resource of its own package, and requires the listing to show that label: the probe's label is a
@@ -91,8 +97,11 @@ SYSTEM_PACKAGE = "com.android.settings"
 UNKNOWN_PACKAGE = "org.example.andarium.oldswitchprobe.notinstalled"
 #: Package names the package manager installs and a property name cannot hold (an empty segment, a trailing dot).
 UNREPRESENTABLE_PACKAGES = ("org.example..oldapp", "org.example.oldapp.")
-#: The turn-on and the next first install must fall in different seconds (the rule compares whole seconds).
-INSTALL_GAP_SECONDS = 2
+#: The lock file the command takes (the shell user's own data directory) and the type its directory gives it.
+LOCK_PATH = "/data/local/tmp/kernarium_oldapp.lock"
+LOCK_TYPE = "shell_data_file"
+#: What the property holds: the turn-on time in seconds, a space, the installation's first-install time in milliseconds.
+CHOICE_VALUE = re.compile(r"([0-9]+) ([0-9]+)")
 #: The log the denial of the application's set appears in, and how long it is given to show.
 AVC_SECONDS = 10
 #: Slack between the host's reading of the guest's clock and a time the guest wrote.
@@ -305,8 +314,9 @@ def check_refusals(guest) -> str:
             + "; unrepresentable names refused; unknown arguments: status 64")
 
 
-def switch_on(guest) -> tuple[str, int]:
-    """Turns the eligible probe on and returns the note and the property's value."""
+def switch_on(guest) -> tuple[str, str]:
+    """Turns the eligible probe on and returns the note and the property's value (turn-on seconds, a space and
+    the installation's first-install time in milliseconds)."""
     package, name = probe.package_of("old"), probe.property_of("old")
     before = guest_time(guest)
     result = guest.run(f"{COMMAND} set {package} on")
@@ -314,12 +324,29 @@ def switch_on(guest) -> tuple[str, int]:
     if result.status != 0 or result.out != f"{package}\ton\n" or result.err.strip():
         raise Failure(f"set {package} on: status {result.status}, out {result.out!r}, err {result.err.strip()!r}")
     value = property_value(guest, name)
-    if not value.isdigit() or not before - CLOCK_SLACK_SECONDS <= int(value) <= after + CLOCK_SLACK_SECONDS:
-        raise Failure(f"{name} holds {value!r}, not a time between {before} and {after}")
+    seconds = choice_seconds(value, name)
+    if not before - CLOCK_SLACK_SECONDS <= seconds <= after + CLOCK_SLACK_SECONDS:
+        raise Failure(f"{name} holds {value!r}: the turn-on time is not between {before} and {after}")
     row = row_of(listing_of(guest), "old")
-    if row is None or (row.state, row.turned_on) != ("on", int(value)):
+    if row is None or (row.state, row.turned_on) != ("on", seconds):
         raise Failure(f"the listing shows {row} after set on; the property holds {value}")
-    return f"{name} = {value}; listed on", int(value)
+    return f"{name} = {value}; listed on", value
+
+
+def choice_seconds(value: str, name: str) -> int:
+    """The turn-on seconds of a stored value, which must be the two numbers the command writes."""
+    match = CHOICE_VALUE.fullmatch(value)
+    if match is None or int(match.group(2)) <= 0:
+        raise Failure(f"{name} holds {value!r}, not '<turn-on seconds> <first-install milliseconds>'")
+    return int(match.group(1))
+
+
+def check_lock_file(guest) -> str:
+    """The command's lock is a file the shell domain made in its own data directory."""
+    listing = guest.shell(f"ls -lZ {LOCK_PATH}").strip()
+    if LOCK_PATH not in listing or LOCK_TYPE not in listing or " shell " not in f" {listing} ":
+        raise Failure(f"the lock file is not a {LOCK_TYPE} file of the shell user: {listing[-200:]}")
+    return listing
 
 
 def probe_result(guest, variant: str) -> dict[str, str]:
@@ -340,13 +367,13 @@ def probe_result(guest, variant: str) -> dict[str, str]:
     raise Failure(f"the probe application wrote no result in {PROBE_SECONDS} s: {result}")
 
 
-def application_view(guest, value: int) -> str:
+def application_view(guest, value: str) -> str:
     """The modern probe, an ordinary application, reads the eligible application's property and tries to set it."""
     result = probe_result(guest, "modern")
-    note = evaluate_probe(result, str(value))
+    note = evaluate_probe(result, value)
     held = property_value(guest, probe.property_of("old"))
-    if held != str(value):
-        raise Failure(f"the property reads {held!r} after the application's attempt, not {value}")
+    if held != value:
+        raise Failure(f"the property reads {held!r} after the application's attempt, not {value!r}")
     return note
 
 
@@ -375,10 +402,7 @@ def check_lifecycle(guest, apks: dict[str, pathlib.Path]) -> str:
         if result.status != 0 or result.out != f"{package}\ton\n":
             raise Failure(f"set {package} on: status {result.status}, out {result.out!r}, err {result.err.strip()!r}")
         value = property_value(guest, name)
-        if not value.isdigit():
-            raise Failure(f"{name} holds {value!r} after set on")
-        # The next first install must be in a later second than the turn-on.
-        time.sleep(INSTALL_GAP_SECONDS)
+        choice_seconds(value, name)
         return value
 
     def still_stored(value: str, what: str) -> None:
@@ -386,7 +410,7 @@ def check_lifecycle(guest, apks: dict[str, pathlib.Path]) -> str:
         if held != value:
             raise Failure(f"{name} holds {held!r} after {what}, not {value}: the cleanup is not exercised")
 
-    # Uninstalled and installed again: first installed after the turn-on time.
+    # Uninstalled and installed again at once: another installation, whatever the clock and the second say.
     value = switched_on()
     install(guest, apks["old"], package)
     still_stored(value, "the reinstall")
@@ -423,6 +447,21 @@ def check_lifecycle(guest, apks: dict[str, pathlib.Path]) -> str:
     if property_value(guest, name):
         raise Failure(f"{name} still holds a value after the listing of an uninstalled package")
     notes.append("uninstalled: cleared")
+
+    # A value that names no installation, or another one, is cleared. The shell may set the property, which
+    # is how the earlier one-number form (a proof image wrote it) and a foreign installation are made here.
+    install(guest, apks["old"], package)
+    for text, what in (("1700000000", "the earlier one-number form"), ("1700000000 5", "another installation"),
+                       ("on", "a value that is no time")):
+        guest.shell(f"setprop {name} '{text}'")
+        if property_value(guest, name) != text:
+            raise Failure(f"the shell could not set {name} to {text!r}")
+        row = row_of(listing_of(guest), "old")
+        if row is None or (row.state, row.turned_on) != ("off", 0):
+            raise Failure(f"with {what} the listing shows {row}, not the application off")
+        if property_value(guest, name):
+            raise Failure(f"{name} still holds a value after the listing, {what}")
+        notes.append(f"{what}: cleared")
     return "; ".join(notes)
 
 
@@ -474,8 +513,7 @@ def check_hook(guest, apks: dict[str, pathlib.Path], report: Report) -> None:
 
     def on_process() -> str:
         value = property_value(guest, name)
-        if not value.isdigit():
-            raise Failure(f"{name} holds {value!r} after set on")
+        choice_seconds(value, name)
         pid = evaluate_process(probe_result(guest, "running"), value, mapped=True)
         if pid == state.get("pid"):
             raise Failure(f"the process after set on is the earlier process {pid}")
@@ -491,7 +529,6 @@ def check_hook(guest, apks: dict[str, pathlib.Path], report: Report) -> None:
         if result.status != 0:
             raise Failure(f"set {package} on: status {result.status}, err {result.err.strip()!r}")
         value = property_value(guest, name)
-        time.sleep(INSTALL_GAP_SECONDS)
         install(guest, apks["running"], package)
         if property_value(guest, name) != value:
             raise Failure(f"{name} did not survive the reinstall: the stale case is not exercised")
@@ -554,7 +591,7 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
                 install(guest, apks[variant], probe.package_of(variant)) or f"{probe.package_of(variant)} installed"))
         report.run("list names the eligible application and no other", lambda: check_listing(guest, installed_at))
         report.run("set refuses what is not eligible; usage", lambda: check_refusals(guest))
-        state: dict[str, int] = {}
+        state: dict[str, str] = {}
 
         def on() -> str:
             note, state["value"] = switch_on(guest)
@@ -562,6 +599,7 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
 
         try:
             if report.run("set on", on):
+                report.run("the lock is a shell_data_file of the shell user", lambda: check_lock_file(guest))
                 report.run("an application reads it and cannot set it", lambda: application_view(guest, state["value"]))
         finally:
             report.run("set off", lambda: switch_off(guest))
