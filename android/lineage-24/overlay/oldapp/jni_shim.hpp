@@ -59,6 +59,11 @@ struct Platform {
     // and none of them re-enters the layer. Null: a spin lock.
     void (*mutex_lock)();
     void (*mutex_unlock)();
+    // A monotonic clock in nanoseconds: the longest time a critical region the layer opened stayed open. Null: not measured.
+    uint64_t (*now_ns)();
+    // Gives the calling thread's processor up for a moment: a waiter of the pointer table's spin lock calls it after a short
+    // spin. Null: it spins on.
+    void (*yield_thread)();
 };
 
 struct Counters {
@@ -80,6 +85,7 @@ struct Counters {
     uint32_t blocks_collected;   // ended blocks freed after their arrays were collected
     uint32_t blocks_revived;     // ended blocks that the same array was obtained again for
     uint32_t collections_asked;  // Runtime.gc() calls made to make room
+    uint32_t longest_region_us;  // the longest a critical region the layer opened stayed open, in microseconds
 };
 
 // `table` is the shared function table (kSlotCount entries), `shadow_region` the memory of the byte[]

@@ -416,6 +416,9 @@ class SceneTests(unittest.TestCase):
     def test_the_peaks_are_read_from_the_layers_lines(self) -> None:
         self.assertEqual(runner.thread_peak(LAYER_LOG), 241)
         self.assertEqual(runner.thread_peak(""), 0)
+        region = "I/kernarium_oldapp( 1): the longest a critical region of a synchronization stayed open, microseconds: 1234 0\n"
+        self.assertEqual(runner.longest_region(LAYER_LOG + region), 1234)
+        self.assertEqual(runner.longest_region(LAYER_LOG), 0)
         service = "I/adbd( 5): adbd service requested 'shell,v2:logcat -d -s kernarium_oldapp:I'\n"
         self.assertEqual(runner.layer_lines(service + LAYER_LOG).count("\n"), LAYER_LOG.count("\n") - 1,
                          "the adb service lines that name the tag are not the layer's")

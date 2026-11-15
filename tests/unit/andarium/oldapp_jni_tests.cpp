@@ -50,7 +50,18 @@ struct Obj {
     bool held = false;           // Java holds it: a collection does not take it
     bool is_class = false;       // what FindClass gave
     int hash = 0;                // its identity hash (given at the first ask)
+    bool is_string = false;      // a string: bytes hold its characters (one byte each)
+    bool compressed = false;     // a compressed string: its critical is a copy
+    bool non_moving = false;     // in the non-moving space
 };
+// The runtime raises a thread's flip count at a critical get only for a movable array or an uncompressed movable string
+// (art jni_internal.cc): an array of 12 KiB or more is in the large-object space and does not move, nor does one in the
+// non-moving space, and a compressed string's critical is a copy.
+bool raises_the_flip_count(const Obj* o) {
+    if (o->non_moving) return false;
+    if (o->is_string) return !o->compressed;
+    return o->bytes.size() < 12288;
+}
 struct Ref {
     Obj* object;                 // null: a weak reference whose object was collected
     bool global;
@@ -115,7 +126,8 @@ struct World {
 World world;
 
 thread_local int t_ended_depth = 0;  // how deep this thread is in the ended lock (a wrapper is never entered under it)
-thread_local int t_regions = 0;      // the runtime critical regions this thread has open (the nesting the runtime's flip rule sees)
+thread_local int t_regions = 0;      // the critical regions this thread has open (CheckJNI's rule: nothing else runs inside one)
+thread_local int t_flips = 0;        // the thread's flip count: raised only by a get that raises_the_flip_count (the nesting the flip rule sees)
 thread_local int t_app_regions = 0;  // the ones the application holds: the count after each of its own critical calls returned
 
 // CheckJNI's rules: nothing but the critical pair runs inside a critical region (a thread's own), and almost nothing with
@@ -126,10 +138,11 @@ void jni_allowed(const char* what) {
 }
 
 // The layer's mutex rule (the comment "What may run under the mutex" in jni_shim.cpp): under the mutex the layer calls the
-// runtime's region and reference functions, the releases, and a critical get that is nested in a region the thread holds
-// already. A thread that holds the mutex must never wait for the collector, because a thread inside a runtime critical
-// region may be waiting for the mutex while the collector's flip waits for that region. Every other fake function calls
-// this first, so a call that is not on the list fails in every row, whichever thread makes it.
+// runtime's region and reference functions and the releases, and no critical get at all (a get it would call nested can be
+// the runtime's outermost, when the application's region is on an array that does not raise the flip count). A thread that
+// holds the mutex must never wait for the collector, because a thread inside a runtime critical region may be waiting for
+// the mutex while the collector's flip waits for that region. Every other fake function calls this first, so a call that is
+// not on the list fails in every row, whichever thread makes it.
 void not_under_mutex(const char* function) {
     require(t_ended_depth == 0, function);
     require(t_regions == t_app_regions, "a runtime call inside a region the layer opened (only its release is allowed)");
@@ -142,7 +155,7 @@ void on_the_list(const char*) {
 }
 
 // The runtime's thread-flip rule (art/runtime/gc/heap.cc): ThreadFlipBegin sets the flag, then waits until no thread has a
-// region open; a critical get that opens a region (the thread has none open) waits while the flag is set; a nested one does
+// flip count; a critical get that raises the count from zero waits while the flag is set; one that raises it further does
 // not. A wait that exceeds two seconds is counted (the real runtime waits for good) and the get goes on.
 std::mutex g_flip_mutex;
 std::condition_variable g_flip_cv;
@@ -297,9 +310,15 @@ void fake_mutex_unlock() {
     --t_ended_depth;
     g_ended_mutex.unlock();
 }
+uint64_t fake_now_ns() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count());
+}
+void fake_yield() { std::this_thread::yield(); }
 const Platform kPlatform{fake_is_app, fake_thread_state, fake_log, fake_make_writable, fake_make_read_only,
                          fake_describe, fake_now, fake_alloc_baseline, fake_free_baseline, fake_thunk_address, 1024,
-                         fake_is_own, fake_mutex_lock, fake_mutex_unlock};
+                         fake_is_own, fake_mutex_lock, fake_mutex_unlock, fake_now_ns, fake_yield};
 
 jsize f_GetArrayLength(Env*, jarray a) {
     not_under_mutex("GetArrayLength is not on the list of calls under the mutex");
@@ -364,41 +383,66 @@ void f_ReleaseByteArrayElements(Env*, jarray a, jbyte* p, jint) {
     ++world.release_calls;
     world.released.push_back(p);
 }
+// A critical get of the runtime. Under the layer's mutex none is allowed, whether or not the thread has a region open: the
+// flip count decides whether a get waits, and the layer cannot know it. A get that raises the thread's count from zero waits
+// for a pending flip; the hook runs just before that wait.
+void begin_region(const Obj* object) {
+    if (raises_the_flip_count(object)) {
+        if (t_flips == 0) {
+            if (g_before_first_critical) {
+                auto hook = g_before_first_critical;
+                g_before_first_critical = nullptr;
+                hook();
+            }
+            flip_enter_region();
+        }
+        ++t_flips;
+    }
+    ++t_regions;
+    ++world.critical;
+}
+void end_region(const Obj* object) {
+    require(world.critical > 0 && t_regions > 0, "a critical region was open");
+    --world.critical;
+    --t_regions;
+    if (raises_the_flip_count(object)) {
+        require(t_flips > 0, "the thread's flip count was raised by the get");
+        if (--t_flips == 0) flip_leave_region();
+    }
+}
 void* f_GetPrimitiveArrayCritical(Env*, jarray a, jboolean* is_copy) {
     on_the_list("GetPrimitiveArrayCritical");
     ++world.critical_gets;
-    const bool nested = t_regions > 0;
-    if (!nested) {
-        // The first get of a thread waits for a pending flip: not while this thread holds the mutex.
-        not_under_mutex("a critical get that is not nested in a region the thread holds, under the mutex");
-        if (g_before_first_critical) {
-            auto hook = g_before_first_critical;
-            g_before_first_critical = nullptr;
-            hook();
-        }
-        flip_enter_region();
-    }
-    ++t_regions;
+    not_under_mutex("a critical get under the mutex");
+    Obj* object = object_of(a);
+    begin_region(object);
     revoke_if_asked();
     if (is_copy) *is_copy = 0;
-    ++world.critical;
-    return object_of(a)->bytes.data();
+    return object->bytes.data();
 }
 std::function<void()> g_in_release_critical;  // runs inside a ReleasePrimitiveArrayCritical, after it closed the region
 void f_ReleasePrimitiveArrayCritical(Env*, jarray a, void* p, jint) {
     revoke_if_asked();
-    (void)object_of(a);
+    Obj* object = object_of(a);
     ++world.release_calls;
     world.released.push_back(p);
-    require(world.critical > 0 && t_regions > 0, "a critical region was open");
-    --world.critical;
-    if (--t_regions == 0) flip_leave_region();
+    end_region(object);
     if (g_in_release_critical) {
         auto hook = g_in_release_critical;
         g_in_release_critical = nullptr;
         hook();
     }
 }
+// A string's critical: a compressed string's is a copy (no flip count), an uncompressed movable string's raises the count.
+const jchar* f_GetStringCritical(Env*, jstring s, jboolean* is_copy) {
+    on_the_list("GetStringCritical");
+    not_under_mutex("GetStringCritical under the mutex");
+    Obj* object = object_of(s);
+    begin_region(object);
+    if (is_copy) *is_copy = object->compressed ? 1 : 0;
+    return reinterpret_cast<const jchar*>(object->bytes.data());
+}
+void f_ReleaseStringCritical(Env*, jstring s, const jchar*) { end_region(object_of(s)); }
 void f_DeleteLocalRef(Env*, jobject o) {
     on_the_list("DeleteLocalRef");
     Ref* ref = static_cast<Ref*>(o);
@@ -811,6 +855,8 @@ struct Table {
         slots[slot::ReleaseByteArrayElements] = reinterpret_cast<void*>(&f_ReleaseByteArrayElements);
         slots[slot::GetPrimitiveArrayCritical] = reinterpret_cast<void*>(&f_GetPrimitiveArrayCritical);
         slots[slot::ReleasePrimitiveArrayCritical] = reinterpret_cast<void*>(&f_ReleasePrimitiveArrayCritical);
+        slots[slot::GetStringCritical] = reinterpret_cast<void*>(&f_GetStringCritical);
+        slots[slot::ReleaseStringCritical] = reinterpret_cast<void*>(&f_ReleaseStringCritical);
         slots[slot::DeleteLocalRef] = reinterpret_cast<void*>(&f_DeleteLocalRef);
         slots[slot::NewGlobalRef] = reinterpret_cast<void*>(&f_NewGlobalRef);
         slots[slot::NewWeakGlobalRef] = reinterpret_cast<void*>(&f_NewWeakGlobalRef);
@@ -898,6 +944,7 @@ void reset_world() {
         g_gets_that_waited = 0;
     }
     t_regions = 0;
+    t_flips = 0;
     t_app_regions = 0;
     g_flip_timeouts = 0;
     g_thunk_capacity = 1024;
@@ -914,6 +961,17 @@ void* app_get_critical(Env* env, jarray a, jboolean* is_copy) {
 }
 void app_release_critical(Env* env, jarray a, void* p, jint mode) {
     g_wrapped_release_critical(env, a, p, mode);
+    t_app_regions = t_regions;
+}
+const jchar* (*g_wrapped_get_string_critical)(Env*, jstring, jboolean*) = nullptr;
+void (*g_wrapped_release_string_critical)(Env*, jstring, const jchar*) = nullptr;
+const jchar* app_get_string_critical(Env* env, jstring s, jboolean* is_copy) {
+    const jchar* chars = g_wrapped_get_string_critical(env, s, is_copy);
+    t_app_regions = t_regions;
+    return chars;
+}
+void app_release_string_critical(Env* env, jstring s, const jchar* chars) {
+    g_wrapped_release_string_critical(env, s, chars);
     t_app_regions = t_regions;
 }
 
@@ -935,6 +993,10 @@ Table* install(bool shadows = true, unsigned thunks = 1024) {
     g_wrapped_release_critical = reinterpret_cast<void (*)(Env*, jarray, void*, jint)>(table->slots[slot::ReleasePrimitiveArrayCritical]);
     table->slots[slot::GetPrimitiveArrayCritical] = reinterpret_cast<void*>(&app_get_critical);
     table->slots[slot::ReleasePrimitiveArrayCritical] = reinterpret_cast<void*>(&app_release_critical);
+    g_wrapped_get_string_critical = reinterpret_cast<const jchar* (*)(Env*, jstring, jboolean*)>(table->slots[slot::GetStringCritical]);
+    g_wrapped_release_string_critical = reinterpret_cast<void (*)(Env*, jstring, const jchar*)>(table->slots[slot::ReleaseStringCritical]);
+    table->slots[slot::GetStringCritical] = reinterpret_cast<void*>(&app_get_string_critical);
+    table->slots[slot::ReleaseStringCritical] = reinterpret_cast<void*>(&app_release_string_critical);
     return table;
 }
 
@@ -4079,6 +4141,145 @@ void check_the_mutex_is_free_while_the_first_critical_get_is_in_the_runtime() {
     release_critical(f, k.shadow, p, 0);
 }
 
+// ---- a critical get is never made under the mutex, wherever the thread's region is
+
+// Opens, as the application, a region of the runtime on an object of the kind, and returns what closes it. The kinds differ
+// in whether the runtime raises the thread's flip count: 0 a small array (it does), 1 an array of 16 KiB (large-object
+// space: it does not), 2 a small array in the non-moving space (no), 3 a compressed string (its critical is a copy: no),
+// 4 an uncompressed string (yes).
+constexpr int kRegionKinds = 5;
+std::function<void()> open_region(Fixture& f, int kind) {
+    if (kind <= 2) {
+        Obj* object = new Obj{kind == 1 ? std::vector<uint8_t>(16384, 1) : sample(64), true};
+        object->non_moving = kind == 2;
+        jobject array = new_local(object);
+        void* pointer = get_critical(f, array);
+        require(pointer != nullptr, "the application's region is open");
+        return [&f, array, pointer] { release_critical(f, array, pointer, 0); };
+    }
+    Obj* object = new Obj{std::vector<uint8_t>{'a', 'b', 'c', 'd'}, false};
+    object->is_string = true;
+    object->compressed = kind == 3;
+    jobject string = new_local(object);
+    const jchar* chars = fn<const jchar* (*)(Env*, jstring, jboolean*)>(*f.table, slot::GetStringCritical)(f.env, string, nullptr);
+    require(chars != nullptr, "the application's string region is open");
+    return [&f, string, chars] { fn<void (*)(Env*, jstring, const jchar*)>(*f.table, slot::ReleaseStringCritical)(f.env, string, chars); };
+}
+
+// A block's critical pointer, and its commit and abort releases, inside a region of the application's own on each kind of
+// object: the layer's gets are made before the mutex is taken whatever the runtime's count is (the fake fails any get
+// under it), the application's bytes reach the array at the commit, and the abort gives the block the array's bytes.
+void check_a_block_critical_pointer_inside_any_region_makes_its_gets_outside_the_mutex() {
+    for (int kind = 0; kind < kRegionKinds; ++kind) {
+        Fixture f = make();
+        Made k = make_held(f, sample(100));
+        raw_of(k)[3] ^= 0x5A;  // the application wrote through the pointer: the chunk is dirty
+        const uint8_t written = raw_of(k)[3];
+        auto close = open_region(f, kind);
+        world.critical_gets = 0;
+        void* p = get_critical(f, k.shadow);
+        require(p == static_cast<void*>(raw_of(k)), "the block's pointer inside the region");
+        require(world.critical_gets == 1 && k.object->bytes[3] == written, "one get, and the application's byte reached the array");
+        raw_of(k)[4] ^= 0x33;
+        release_critical(f, k.shadow, p, 0);  // a commit: dirty, merged in place
+        require(k.object->bytes[4] == raw_of(k)[4], "the commit's merge reached the array");
+        void* q = get_critical(f, k.shadow);
+        const uint8_t before = raw_of(k)[5];
+        raw_of(k)[5] ^= 0x77;
+        release_critical(f, k.shadow, q, kReleaseAbort);  // the abort path
+        require(raw_of(k)[5] == before && k.object->bytes[5] == before, "an abort gives the block the array's bytes");
+        require(world.critical == 1, "only the application's region is open");
+        close();
+        require(world.critical == 0 && t_regions == 0 && t_flips == 0, "every region closed");
+    }
+}
+
+// The cycle the runtime's rule makes with a get under the mutex. Thread H holds a region that does not raise the runtime's
+// flip count and gets (or releases) a block's pointer, which the runtime treats as its outermost get; meanwhile thread X, in
+// a region of its own that does raise the count, takes the mutex for a block's pair of its own, and the collector's flip
+// waits for X. A mutex held by H across its wait for the flip would hold X, X's region, the flip and H in a cycle. The
+// model times the waits out and the row counts the timeouts.
+void run_the_foreign_region_cycle(int kind, bool h_releases) {
+    Fixture f = make();
+    Made k = make_held(f, sample(100));
+    Made k2 = make_held(f, sample(50));
+    Other x(f);
+    jobject small = byte_array(sample(64));
+    std::atomic<int> x_stage{0};
+    std::atomic<bool> go{false};
+    std::atomic<bool> flip_ok{false};
+    std::thread x_thread, collector;
+    raw_of(k)[3] ^= 0x5A;
+    void* p = h_releases ? get_critical(f, k.shadow) : nullptr;
+    raw_of(k)[4] ^= 0x33;
+    auto close = open_region(f, kind);
+    g_before_first_critical = [&] {  // H's get of the block's array, the runtime's outermost: no mutex may be held
+        x_thread = std::thread([&] {
+            void* region = get_critical(x.f, small);  // X's region (the flip count rises)
+            x_stage = 1;
+            wait_until([&] { return go.load(); });
+            void* pair = get_critical(x.f, k2.shadow);  // a block's pair inside it: the mutex
+            x_stage = 2;
+            release_critical(x.f, k2.shadow, pair, 0);
+            release_critical(x.f, small, region, 0);
+            x_stage = 3;
+        });
+        require(wait_until([&] { return x_stage.load() >= 1; }), "X's region is open");
+        collector = std::thread([&] {
+            flip_ok = flip_begin_waits_for_regions();
+            flip_end();
+        });
+        require(wait_until(flip_is_pending), "the collector's flip is pending");
+        go = true;
+    };
+    if (h_releases) {
+        release_critical(f, k.shadow, p, 0);
+    } else {
+        p = get_critical(f, k.shadow);
+    }
+    x_thread.join();
+    collector.join();
+    require(x_stage == 3 && flip_ok && g_flip_timeouts == 0,
+            "X's pair, the flip and H's get all completed: H held no mutex while it waited for the flip");
+    require(k.object->bytes[3] == raw_of(k)[3], "H's merge reached the array");
+    if (!h_releases) {
+        release_critical(f, k.shadow, p, 0);
+    }
+    close();
+    require(world.critical == 0 && t_regions == 0 && t_flips == 0, "every region closed");
+}
+void check_a_block_get_in_a_region_that_does_not_raise_the_flip_count_does_not_hold_the_mutex() {
+    for (int kind : {1, 2, 3}) run_the_foreign_region_cycle(kind, false);
+}
+void check_a_block_release_in_a_region_that_does_not_raise_the_flip_count_does_not_hold_the_mutex() {
+    for (int kind : {1, 2, 3}) run_the_foreign_region_cycle(kind, true);
+}
+
+// The longest a critical region the layer opened stayed open is kept, from the get's return to the release's, and
+// includes the wait for the mutex: another thread holds it for 30 ms between the two holds.
+void check_the_longest_layer_opened_region_is_counted() {
+    Fixture f = make();
+    Made a = make_held(f, sample(100));
+    require(counters().longest_region_us == 0, "none yet");
+    raw_of(a)[3] ^= 0x5A;
+    std::thread holder;
+    std::atomic<bool> holds{false};
+    g_before_first_critical = [&] {  // in the runtime's get, with no mutex held: another thread takes it for a while
+        holder = std::thread([&] {
+            g_ended_mutex.lock();
+            holds = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            g_ended_mutex.unlock();
+        });
+        require(wait_until([&] { return holds.load(); }), "the other thread holds the layer's mutex");
+    };
+    jbyte* e = get_elements(f, a.shadow);  // a dirty synchronization: the pair waits for the mutex
+    holder.join();
+    release_elements(f, a.shadow, e, 0);
+    require(counters().longest_region_us >= 20000 && counters().longest_region_us < 2000000,
+            "the region stayed open while the pair waited for the mutex");
+}
+
 // The table of the runtime's own pointers has a lock of its own: a thread that has just opened a region records the
 // pointer without the mutex, whoever holds it.
 void check_the_table_of_the_runtimes_pointers_does_not_wait_for_the_mutex() {
@@ -4607,6 +4808,10 @@ int main(int argc, char** argv) {
     check_a_block_critical_get_does_not_hold_the_mutex_while_it_waits_for_the_collector();
     check_a_block_critical_release_does_not_hold_the_mutex_while_it_waits_for_the_collector();
     check_the_mutex_is_free_while_the_first_critical_get_is_in_the_runtime();
+    check_a_block_critical_pointer_inside_any_region_makes_its_gets_outside_the_mutex();
+    check_a_block_get_in_a_region_that_does_not_raise_the_flip_count_does_not_hold_the_mutex();
+    check_a_block_release_in_a_region_that_does_not_raise_the_flip_count_does_not_hold_the_mutex();
+    check_the_longest_layer_opened_region_is_counted();
     check_the_table_of_the_runtimes_pointers_does_not_wait_for_the_mutex();
     check_the_sentinels_array_is_made_outside_the_mutex();
     check_a_failed_sentinel_allocation_is_survived();

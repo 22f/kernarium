@@ -272,6 +272,8 @@ FIRST_ENDED_LINE = "ended at the return of a native method"
 PEAK_LINE = re.compile(r"most live byte\[\] blocks one thread has held; blocks live in the process: (\d+) (\d+)")
 #: A line of the layer's tag in `logcat -v brief` (the adb service lines that name the tag are not).
 LAYER_LINE = re.compile(r"^[VDIWEF]/" + LOG_TAG + r"\(", re.MULTILINE)
+#: The longest a critical region the layer opened stayed open, as it logs it (recorded, not judged).
+REGION_LINE = re.compile(r"the longest a critical region of a synchronization stayed open, microseconds: (\d+)")
 #: The scene's smallest peak: its init method holds 170 results at once, and a burst more than 100.
 SCENE_FLOOR = 170
 THREAD_LIMIT = 512
@@ -287,6 +289,11 @@ def layer_lines(text: str) -> str:
 def thread_peak(text: str) -> int:
     """The most blocks one thread held live, as the layer logged it (0 where it did not)."""
     return max((int(match.group(1)) for match in PEAK_LINE.finditer(text)), default=0)
+
+
+def longest_region(text: str) -> int:
+    """The longest time in microseconds a critical region of the layer's own stayed open, as it logged it (0 where it did not)."""
+    return max((int(match.group(1)) for match in REGION_LINE.finditer(text)), default=0)
 
 
 def scene_log_problems(text: str, *, layer: bool) -> list[str]:
@@ -335,7 +342,8 @@ def scene(guest, variant: str, *, shim: bool, layer: bool, checked: bool = False
         problems.append("the process did not run with CheckJNI")
     if problems:
         raise Failure(f"{variant}: " + "; ".join(problems) + f"; {note}")
-    return note + (f"; most live blocks of a thread {thread_peak(layer_lines(text))}" if layer else "")
+    return note + (f"; most live blocks of a thread {thread_peak(layer_lines(text))}"
+                   f"; longest region the layer opened {longest_region(layer_lines(text))} us" if layer else "")
 
 
 def swap(guest, *, shim: bool) -> str:

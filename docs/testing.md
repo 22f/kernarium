@@ -1126,7 +1126,8 @@ The scene row is the acceptance of the block ends: an application's render threa
 get 5000 or more `byte[]` results of seeded lengths from a Java asset reader and
 never delete them) runs in a process of its own in every variant, and once more
 debuggable (CheckJNI); with the layer the log shows no declined result, no
-allocation that left the arena and a thread peak below the limit. A shorter run
+allocation that left the arena and a thread peak below the limit (the note records, without
+judging it, the longest a critical region the layer opened stayed open). A shorter run
 on a native thread that attaches itself is the second row (`scene_attached`), and the scene runs
 once more in a process named other than its package (`android:process`).
 `android17-oldapp-runner` (tooling) runs the package (manifest, DEX file, armv7
@@ -1138,9 +1139,11 @@ inside a synchronization through hooks in the fake's region and release
 functions, place a Java or application write at the layer's first store into a
 page with a page-protection handler, and model the collector's thread-flip rule;
 the fake fails a runtime call that arrives with the layer's mutex held unless the
-mutex rule in the code lists it, and any runtime call inside a critical region
-the layer opened except that region's release), the allocator arena, the ELF
-relocation scan and the page protection window.
+mutex rule in the code lists it (no critical get at all), any runtime call inside
+a critical region the layer opened except that region's release, and models which
+critical gets raise a thread's flip count: movable arrays and uncompressed
+strings do, large and non-moving arrays and compressed strings do not), the
+allocator arena, the ELF relocation scan and the page protection window.
 `android-camera` (integration) registers when `UML_ANDROID_CAMERA_RELEASE`
 names the release: the runner boots it with the launcher's synthetic camera
 (`--camera=synthetic|blocked`, `--camera-profile=`) and a layout on the vendor

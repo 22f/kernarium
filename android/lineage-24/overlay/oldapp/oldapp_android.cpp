@@ -49,6 +49,7 @@ int oldapp_pthread_mutex_lock(void*) __asm__("pthread_mutex_lock");
 int oldapp_pthread_mutex_unlock(void*) __asm__("pthread_mutex_unlock");
 int oldapp_log_print(int, const char*, const char*, ...) __asm__("__android_log_print");
 int oldapp_clock_gettime(int, long*) __asm__("clock_gettime");  // struct timespec is two longs on bionic
+int oldapp_sched_yield() __asm__("sched_yield");
 void* oldapp_dlsym(void*, const char*) __asm__("dlsym");
 
 // The native-method thunks (oldapp_thunks.S): thunk i is at oldapp_thunks + 8 * i.
@@ -104,6 +105,13 @@ uint32_t now_ms() {
     oldapp_clock_gettime(1, now);  // CLOCK_MONOTONIC
     return static_cast<uint32_t>(now[0]) * 1000u + static_cast<uint32_t>(now[1] / 1000000);
 }
+
+uint64_t now_ns() {
+    long now[2] = {0, 0};
+    oldapp_clock_gettime(1, now);  // CLOCK_MONOTONIC
+    return static_cast<uint64_t>(static_cast<uint32_t>(now[0])) * 1000000000ull + static_cast<uint64_t>(static_cast<uint32_t>(now[1]));
+}
+void yield_thread() { oldapp_sched_yield(); }
 
 // The baselines of the byte[] blocks live in libc's heap: they need no low address.
 void* alloc_baseline(size_t bytes) { return oldapp_malloc(bytes); }
@@ -1024,7 +1032,8 @@ extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void* vm_pointe
     }
     const Platform platform{is_app_caller, thread_state, log_line, make_writable, make_read_only, describe_method, now_ms,
                             alloc_baseline, free_baseline, region != nullptr ? thunk_address : nullptr,
-                            region != nullptr ? thunk_count() : 0, is_own_library, ended_lock, ended_unlock};
+                            region != nullptr ? thunk_count() : 0, is_own_library, ended_lock, ended_unlock, now_ns,
+                            yield_thread};
     refresh_modules(true);  // every library the application loaded before this one
     void** table = const_cast<void**>(env->functions);
     const bool jni_ok = install_jni_wrappers(table, platform, region != nullptr ? region + kArenaBytes : nullptr,

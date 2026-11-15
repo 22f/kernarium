@@ -718,10 +718,12 @@ patches ART's one JNI function table in place and gives the application:
   synchronization of a block with its array, its own thread's included, runs
   under one process-wide lock that no call into Java holds, so the
   synchronizations of all threads run one at a time. Nothing under it waits for
-  the runtime's collector (a critical get that opens a region, an allocation in
-  the Java heap): those are made before it is taken, so a thread that waits for
-  it inside a critical region never holds up a collection. Between a critical get
-  and its release the layer makes no runtime call except that release. A release goes to the block whose data
+  the runtime's collector (a critical get, nested in a region the thread holds
+  or not, since the runtime raises a thread's count only for a movable array or
+  string; an allocation in the Java heap): those are made before it is taken, on
+  a reference that is valid outside it, so a thread that waits for it inside a
+  critical region never holds up a collection. Between a critical get and its
+  release the layer makes no runtime call except that release. A release goes to the block whose data
   starts at its pointer, whichever reference comes with it, and never reaches
   the runtime for a pointer in the region; a pointer inside the region that is
   not at a block's start is not read as a header, copies nothing, and counts as

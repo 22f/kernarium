@@ -139,6 +139,8 @@ struct Globals {
     uint32_t declined_logged;  // the first declined shadow of the process has been logged
     uint32_t peak_logged;      // the highest block count that has been logged, and when
     uint32_t peak_logged_ms;
+    uint32_t region_logged;    // the longest layer-opened region that has been logged, and when
+    uint32_t region_logged_ms;
     uint32_t lock;
     uint32_t thunk_lock;
     void* thunk_target[kMaxThunks];
@@ -592,18 +594,38 @@ void abort_block(Env* env, BlockHeader* header, jobject array) {
 // region (the application may be in one for another array when it asks for this block's critical pointer). The pair
 // is released with mode 0 only when a chunk went to the array.
 //
-// The runtime's critical get that opens a region (the thread has none open) waits while a collection's thread flip is
-// pending, and the flip waits for every open region, so a thread must not make that get while it holds the mutex: another
-// thread inside a region may be waiting for the mutex. The caller makes it first (first_critical, no mutex held) and
-// passes the pointer; a thread that has a region open already (`nested`) makes the get here, which waits for nothing.
-void* first_critical(Env* env, const BlockHeader* header, jobject array) {
+// The runtime's critical get waits while a collection's thread flip is pending unless the thread's own flip count is
+// raised already, and the flip waits for every open region, so a thread must never make a critical get while it holds the
+// mutex: another thread inside a region may be waiting for the mutex. That count rises only for a movable array or an
+// uncompressed movable string, so a thread inside the application's region on a large array, a non-moving one or a
+// compressed string has a count of zero, and a get the layer would call "nested" is the runtime's outermost. The caller
+// therefore makes every get (first_critical, no mutex held, on a reference that is valid outside it) and passes the
+// pointer; the hold that uses it revalidates the block.
+//
+// The longest time a region the layer opened stayed open is kept (Counters::longest_region_us): from the get's return to
+// the release's, which includes the wait for the mutex behind the merges of other threads.
+struct Pair {
+    void* pointer;    // the array's bytes, null: no region is open
+    uint64_t opened;  // when the get returned, nanoseconds on the monotonic clock
+};
+uint64_t now_ns() { return g.platform.now_ns != nullptr ? g.platform.now_ns() : 0; }
+Pair first_critical(Env* env, const BlockHeader* header, jobject array) {
     if (header->capacity == 0 || array == nullptr) {
-        return nullptr;
+        return Pair{nullptr, 0};
     }
-    return original<void* (*)(Env*, jarray, jboolean*)>(slot::GetPrimitiveArrayCritical)(env, array, nullptr);
+    void* pointer = original<void* (*)(Env*, jarray, jboolean*)>(slot::GetPrimitiveArrayCritical)(env, array, nullptr);
+    return Pair{pointer, pointer != nullptr ? now_ns() : 0};
 }
-void release_critical_pair(Env* env, jobject array, void* pinned, jint mode) {
-    original<void (*)(Env*, jarray, void*, jint)>(slot::ReleasePrimitiveArrayCritical)(env, array, pinned, mode);
+void release_critical_pair(Env* env, jobject array, const Pair& pair, jint mode) {
+    original<void (*)(Env*, jarray, void*, jint)>(slot::ReleasePrimitiveArrayCritical)(env, array, pair.pointer, mode);
+    if (g.platform.now_ns == nullptr) {
+        return;
+    }
+    const uint32_t us = static_cast<uint32_t>((now_ns() - pair.opened) / 1000);
+    uint32_t longest = __atomic_load_n(&g.counters.longest_region_us, __ATOMIC_RELAXED);
+    while (us > longest && !__atomic_compare_exchange_n(&g.counters.longest_region_us, &longest, us, true, __ATOMIC_RELAXED,
+                                                        __ATOMIC_RELAXED)) {
+    }
 }
 bool block_is_valid(const BlockHeader* header) {
     const uint32_t magic = __atomic_load_n(&header->magic, __ATOMIC_ACQUIRE);
@@ -612,21 +634,18 @@ bool block_is_valid(const BlockHeader* header) {
 // [start, end) of the block synchronized with its array in place, through the critical pair: a chunk the application wrote
 // is merged into the array's own bytes, byte stores of exactly the bytes it wrote (a Java write to any other byte is never
 // touched, and no region copy is made); every other chunk in the range takes the array's bytes when `pull` is set. The
-// caller holds the mutex and has made the first get (`pinned`), or has a region open (`nested`) and the get is made here.
-// Between the get and the release the layer makes no runtime call: the release is the only one.
-void sync_in_place(Env* env, BlockHeader* header, jobject array, void* pinned, bool nested, uint32_t start, uint32_t end,
-                   bool pull) {
+// caller holds the mutex and has made the get (`pair`, from first_critical) before the hold, so that this makes no
+// critical get. Between the get and the release the layer makes no runtime call: the release is the only one.
+void sync_in_place(Env* env, BlockHeader* header, jobject array, const Pair& pair, uint32_t start, uint32_t end, bool pull) {
     if (header->capacity == 0 || array == nullptr || end <= start) {
         return;
     }
-    if (nested) {
-        pinned = first_critical(env, header, array);
-    }
-    if (pinned == nullptr) {
+    if (pair.pointer == nullptr) {
         return;
     }
+    void* pinned = pair.pointer;
     if (!block_is_valid(header)) {  // revalidated under this hold of the mutex: nothing to merge into
-        release_critical_pair(env, array, pinned, kReleaseAbort);
+        release_critical_pair(env, array, pair, kReleaseAbort);
         return;
     }
     bool wrote = false;
@@ -646,23 +665,20 @@ void sync_in_place(Env* env, BlockHeader* header, jobject array, void* pinned, b
             take_java(data_of(header) + from, header->baseline + from, static_cast<const uint8_t*>(pinned) + from, to - from);
         }
     }
-    release_critical_pair(env, array, pinned, wrote ? 0 : kReleaseAbort);
+    release_critical_pair(env, array, pair, wrote ? 0 : kReleaseAbort);
 }
-void abort_critical(Env* env, BlockHeader* header, jobject array, void* pinned, bool nested) {
+void abort_critical(Env* env, BlockHeader* header, jobject array, const Pair& pair) {
     if (header->capacity == 0 || array == nullptr) {
         return;
     }
-    if (nested) {
-        pinned = first_critical(env, header, array);
-    }
-    if (pinned == nullptr) {
+    if (pair.pointer == nullptr) {
         return;
     }
     if (block_is_valid(header)) {
-        __builtin_memcpy(header->baseline, pinned, header->capacity);
+        __builtin_memcpy(header->baseline, pair.pointer, header->capacity);
         adopt_baseline(header, 0, header->capacity);
     }
-    release_critical_pair(env, array, pinned, kReleaseAbort);
+    release_critical_pair(env, array, pair, kReleaseAbort);
 }
 
 // ---- ended blocks
@@ -716,8 +732,7 @@ struct EndedLock {
 //   - Otherwise the first critical get of the array is made with no lock held (see first_critical), and the second hold
 //     merges the chunks in place (sync_in_place) and releases the pair. A chunk the first hold saw dirty that another
 //     thread has synchronized meanwhile is clean in the second, and costs a pair and nothing more.
-// Where the get returns nothing, the chunks stay as they are in the block for the next synchronization point. A thread that
-// has a region open already makes the nested get in the second hold.
+// Where the get returns nothing, the chunks stay as they are in the block for the next synchronization point.
 void sync_range(Env* env, BlockHeader* header, jobject array, uint32_t start, uint32_t end, bool pull) {
     if (end <= start || header->capacity == 0 || array == nullptr) {
         return;
@@ -731,14 +746,12 @@ void sync_range(Env* env, BlockHeader* header, jobject array, uint32_t start, ui
             return;
         }
     }
-    ThreadState* state = thread();
-    const bool nested = state != nullptr && state->critical_depth != 0;
-    void* pinned = nested ? nullptr : first_critical(env, header, array);
-    if (pinned == nullptr && !nested) {
+    const Pair pair = first_critical(env, header, array);
+    if (pair.pointer == nullptr) {
         return;
     }
     EndedLock second_hold;
-    sync_in_place(env, header, array, pinned, nested, start, end, pull);
+    sync_in_place(env, header, array, pair, start, end, pull);
 }
 
 void publish_ended() {
@@ -1081,13 +1094,11 @@ void end_block(Env* env, BlockHeader* header) {
         }
         own = original<jobject (*)(Env*, jobject)>(slot::NewLocalRef)(env, header->global);
     }
-    ThreadState* state = thread();
-    const bool nested = state != nullptr && state->critical_depth != 0;
-    void* pinned = own != nullptr && !nested ? first_critical(env, header, own) : nullptr;
+    const Pair pair = own != nullptr ? first_critical(env, header, own) : Pair{nullptr, 0};
     {
         EndedLock second_hold;
-        if (own != nullptr && (nested || pinned != nullptr)) {
-            sync_in_place(env, header, own, pinned, nested, 0, header->capacity, false);
+        if (pair.pointer != nullptr) {
+            sync_in_place(env, header, own, pair, 0, header->capacity, false);
         }  // else the chunks stay in the block, which ends as it is (the next synchronization of the array pushes them)
         end_locked(env, header, spare);
     }
@@ -1199,7 +1210,27 @@ void note_declined(const ThreadState* state, const char* why) {
     }
 }
 
+// The longest a critical region the layer opened has stayed open, logged when it has grown, at most every kPeakLogMs (the
+// next creation after that logs the one that was kept, as for the peak).
+void note_longest_region() {
+    const uint32_t longest = __atomic_load_n(&g.counters.longest_region_us, __ATOMIC_RELAXED);
+    uint32_t logged = __atomic_load_n(&g.region_logged, __ATOMIC_RELAXED);
+    if (g.platform.log == nullptr || longest <= logged) {
+        return;
+    }
+    const uint32_t now = g.platform.now_ms != nullptr ? g.platform.now_ms() : 0;
+    if (logged != 0 && g.platform.now_ms != nullptr &&
+        now - __atomic_load_n(&g.region_logged_ms, __ATOMIC_RELAXED) < kPeakLogMs) {
+        return;
+    }
+    if (__atomic_compare_exchange_n(&g.region_logged, &logged, longest, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+        __atomic_store_n(&g.region_logged_ms, now, __ATOMIC_RELAXED);
+        g.platform.log("the longest a critical region of a synchronization stayed open, microseconds:", longest, 0);
+    }
+}
+
 void note_peak(uint32_t blocks) {
+    note_longest_region();
     uint32_t peak = __atomic_load_n(&g.counters.peak_thread_blocks, __ATOMIC_RELAXED);
     while (blocks > peak && !__atomic_compare_exchange_n(&g.counters.peak_thread_blocks, &peak, blocks, true,
                                                          __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
@@ -1443,25 +1474,27 @@ jobject make_shadow(Env* env, jobject local) {
 // in two separate holds. It serializes the synchronizations of all blocks, not only of one: the layer has no per-block lock.
 //
 // What may run under the mutex. The collector's thread flip waits for every open runtime critical region, and sets its
-// flag before it waits; a critical get that opens a region (one the thread does not have open already) waits while the flag
-// is set; an allocation in the Java heap can wait for a collection. A thread inside a region may be waiting for the mutex,
-// so the thread that holds it must never wait for the collector. Under the mutex there is therefore
-//   - no critical get that is not nested in a region the calling thread holds already, and no allocation in the Java heap;
+// flag before it waits; a critical get waits while the flag is set unless the thread's own flip count is raised already
+// (the runtime raises it only for a movable array or an uncompressed movable string, so a thread inside the application's
+// region on a large array, a non-moving one or a compressed string has none); an allocation in the Java heap can wait for a
+// collection. A thread inside a region may be waiting for the mutex, so the thread that holds it must never wait for the
+// collector. Under the mutex there is therefore
+//   - no critical get at all, nested in a region or not, and no allocation in the Java heap;
 //   - no Java code, and no wait for another thread; and
 //   - of the runtime only these calls, none of which waits for the collector to begin a flip:
 //       GetByteArrayRegion, SetByteArrayRegion;
 //       NewLocalRef, DeleteLocalRef, NewGlobalRef, DeleteGlobalRef, NewWeakGlobalRef, DeleteWeakGlobalRef, IsSameObject;
 //       ExceptionCheck, ExceptionClear;
-//       ReleasePrimitiveArrayCritical, ReleaseByteArrayElements (they close what a Get opened);
-//       GetPrimitiveArrayCritical nested in a region the calling thread holds.
-// A path that needs the first critical get of an array (a block's critical pointer, its release) makes it before it takes
-// the mutex, on a local reference of its own made in an earlier hold, and revalidates the block in the next (first_critical,
-// sync_in_place). Between a critical get and its release the layer makes no runtime call except that release (and the
-// nested critical get of a thread that holds a region already): CheckJNI allows nothing else inside a region, and the merge
-// is stores into the pinned memory. The sentinel's array is made the same way (Spare). The table of the runtime's own pointers has a lock of
-// its own, so that the thread that has just opened a region records it without the mutex. A thread inside a region may take
-// the mutex where a block must be synchronized: that is safe exactly because of the list above. The unit tests' fake runtime
-// fails any other call that arrives with the mutex held.
+//       ReleasePrimitiveArrayCritical, ReleaseByteArrayElements (they close what a Get opened).
+// A path that needs the critical get of an array (a block's critical pointer, its release, a dirty push) makes it before it
+// takes the mutex, on a reference that is valid outside it (a local reference of its own made in an earlier hold, or, inside
+// the application's region where none can be made, the block's pinned global), and revalidates the block in the next hold
+// (first_critical, sync_in_place). Between a critical get and its release the layer makes no runtime call except that
+// release: CheckJNI allows nothing else inside a region, and the merge is stores into the pinned memory. The sentinel's
+// array is made the same way (Spare). The table of the runtime's own pointers has a lock of its own, so that the thread
+// that has just opened a region records it without the mutex. A thread inside a region may take the mutex where a block
+// must be synchronized: that is safe exactly because of the list above. The unit tests' fake runtime fails any other call
+// that arrives with the mutex held, and models which gets raise a thread's flip count.
 
 // How a wrapper reaches the array of a block.
 struct Access {
@@ -2422,10 +2455,17 @@ jsize w_GetArrayLength(Env* e, jarray a) {
 // The table has a lock of its own, a spin lock: the pointers are recorded and looked up by a thread that has a runtime
 // critical region open (its Get just returned, or its Release is about to), and such a thread must not wait for the
 // layer's mutex on this account. Nothing is called and no other lock is taken under it, and it is held for a few
-// instructions.
+// instructions. A waiter yields its processor after a short spin (the platform's yield, which calls nothing of the runtime),
+// so that a holder the scheduler took off its processor can run.
 struct TableLock {
+    static constexpr unsigned kSpinsBeforeYield = 64;
     TableLock() {
+        unsigned spins = 0;
         while (__atomic_exchange_n(&g.records_lock, 1u, __ATOMIC_ACQUIRE) != 0) {
+            if (++spins >= kSpinsBeforeYield && g.platform.yield_thread != nullptr) {
+                g.platform.yield_thread();
+                spins = 0;
+            }
         }
     }
     ~TableLock() { __atomic_store_n(&g.records_lock, 0u, __ATOMIC_RELEASE); }
@@ -2558,16 +2598,17 @@ void release_block(Env* e, BlockHeader* header, const void* elements, jint mode,
                              header->capacity > 0;
         if (critical) {
             // The critical pair, as the release of a pointer that the application may hold inside a region of its own: the
-            // first get, when the thread has no region open, is made before the mutex is taken, the rest in one hold.
-            void* pinned = in_region ? nullptr : first_critical(e, header, array);
+            // get is made before the mutex is taken, on a reference that is valid outside it (inside a region, the block's
+            // pinned global), the rest in one hold.
+            const Pair pair = first_critical(e, header, array);
             SyncScope scope;
             if (mode == kReleaseAbort) {
-                abort_critical(e, header, array, pinned, in_region);
+                abort_critical(e, header, array, pair);
             } else {
                 if (foreign) {
                     __builtin_memcpy(data_of(header), elements, header->capacity);
                 }
-                sync_in_place(e, header, array, pinned, in_region, 0, header->capacity, true);
+                sync_in_place(e, header, array, pair, 0, header->capacity, true);
             }
         } else if (mode == kReleaseAbort) {
             SyncScope scope;
@@ -2673,12 +2714,11 @@ void* w_GetPrimitiveArrayCritical(Env* e, jarray a, jboolean* is_copy) {
             close_access(e, access);
             return nullptr;
         }
-        const bool in_region = state != nullptr && state->critical_depth != 0;
-        // With no region open the first get is made before the mutex is taken (see first_critical).
-        void* pinned = in_region ? nullptr : first_critical(e, header, access.array);
+        // The get is made before the mutex is taken, whether or not the thread has a region open (see first_critical).
+        const Pair pair = first_critical(e, header, access.array);
         {
             SyncScope scope;
-            sync_in_place(e, header, access.array, pinned, in_region, 0, header->capacity, true);
+            sync_in_place(e, header, access.array, pair, 0, header->capacity, true);
         }
         if (access.pinned) {
             access.pinned = false;  // the wrapper's pin becomes the pointer's
