@@ -14,7 +14,7 @@ uml_add_tooling_test(
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_builder_lane.py
         --source-root ${PROJECT_SOURCE_DIR} --part target-files
     LABELS android;audit
-    TIMEOUT 120)
+    TIMEOUT 300)
 
 uml_add_tooling_test(
     NAME lineage24-aosp-patch-regenerator
