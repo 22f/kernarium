@@ -62,6 +62,11 @@ final class SendFeedbackModel {
     var showsInformation = false
     /// The card that asks for a bug report was put away.
     var hintDismissed = false
+    /// The no-Google-apps line is at the top of the mail: it is there when the sheet is made unless the person
+    /// has opened or closed it on an earlier one, and it stays until it is closed (`NoGoogleNotice`).
+    private(set) var showsNoGoogleLine: Bool
+    /// Its answer is open in place.
+    private(set) var noGoogleAnswerOpen = false
     /// The mail was sent: the sheet shows its confirmation over what was sent and closes when the person
     /// closes the confirmation, not before (`mailFinished`, `close`).
     var sent: Bool { form.sent }
@@ -82,11 +87,26 @@ final class SendFeedbackModel {
         folder = staging.makeFolder()
         scopes = SendFeedbackScopes(system: app.feedbackServices.files)
         form = SendFeedbackForm(mailAvailable: app.feedbackServices.canSendMail(), running: app.virtualMachineRuns)
+        showsNoGoogleLine = app.noGoogleNotice.showsInFeedback
     }
 
     deinit {
         folder.removeAll()
         scopes.releaseAll()
+    }
+
+    // MARK: The no-Google-apps line
+
+    /// The person opened the line's answer: it stays open until the sheet closes, and the next sheet has no line.
+    func openNoGoogleAnswer() {
+        noGoogleAnswerOpen = true
+        app.noGoogleNotice.keepFeedbackAnswered()
+    }
+
+    /// The person closed the line: the next sheet has none either.
+    func closeNoGoogleLine() {
+        showsNoGoogleLine = false
+        app.noGoogleNotice.keepFeedbackAnswered()
     }
 
     /// The form with what the app says now: whether a virtual machine runs,

@@ -78,7 +78,9 @@ UML implementation. `Build.SOC_MANUFACTURER` and `SOC_MODEL` are `Kernarium` and
   LineageOS cloud services are excluded by name in the product makefile, and the
   build and the verifier assert that list.
 - **Signature spoofing.** The image ships no Google or microG software, and
-  no guest or iOS interface names Google's services. LineageOS's restricted
+  no guest interface names Google's services; Andarium names them only to say
+  that they are left out on purpose ([No Google
+  apps](../../Andarium/README.md#runtime)). LineageOS's restricted
   spoofing is on in the `user` build as well as in debuggable ones (route
   `p0007`): only `com.google.android.gms` and `com.android.vending`, signed with
   microG's own key and carrying Google's certificate as their `fake-signature`
