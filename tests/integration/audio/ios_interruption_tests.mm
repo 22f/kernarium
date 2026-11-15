@@ -11,10 +11,19 @@
 // iOS because the Simulator does not interrupt audio sessions, and the
 // session's activation, its hint about other apps' audio and the player's
 // scheduling are observed and driven through hooks on AVFAudio's methods.
+//
+// The sequence of an app that returns from the background is modelled too: the
+// guest suspends, the output route goes away, the engine says its
+// configuration changed, and the guest resumes. A real engine is bound to the
+// route it was made on, so the hooks keep an engine that was made without one
+// (or caught by its loss) from ever starting, and only an engine made after
+// the route returned works. The Simulator does not take the route from an
+// app, so the hooks do.
 
 #include "capture_source.hpp"
 #include "ios_session_notifications.hpp"
 #include "period_clock.hpp"
+#include "playback_output_recovery.hpp"
 #include "playback_sink.hpp"
 #include "protocol.hpp"
 #include "virtio_sound_device.hpp"
@@ -35,6 +44,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <thread>
@@ -78,8 +88,114 @@ std::atomic<int> activationsToFail {};
 std::atomic<int> activationDelay {};
 std::atomic<std::uint64_t> scheduledPeriods {};
 
+// The output route of the engines. An engine made while it is down, or alive
+// when it goes, reports no format and cannot start for the rest of its life,
+// as CoreAudio's does; the route coming back changes nothing for it.
+std::atomic<bool> routeDown {};
+std::atomic<std::uint64_t> startsWithoutRoute {};
+std::atomic<std::uint64_t> enginesMade {};
+std::mutex enginesLock;
+NSHashTable<AVAudioEngine*>* engines =
+    [NSHashTable weakObjectsHashTable];
+const char lostKey = 0;
+
+void markLost(id engine)
+{
+    objc_setAssociatedObject(
+        engine, &lostKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+bool lost(id engine)
+{
+    return objc_getAssociatedObject(engine, &lostKey) != nil;
+}
+
+// The app goes to the background and loses the route.
+void routeGoesDown()
+{
+    routeDown = true;
+    const std::lock_guard guard(enginesLock);
+    for (AVAudioEngine* engine in engines)
+        markLost(engine);
+}
+
+void routeComesBack() { routeDown = false; }
+
+// Every engine says its configuration changed, as they do when the route goes.
+void postEngineChanges()
+{
+    NSArray<AVAudioEngine*>* all;
+    {
+        const std::lock_guard guard(enginesLock);
+        all = engines.allObjects;
+    }
+    for (AVAudioEngine* engine in all) {
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:AVAudioEngineConfigurationChangeNotification
+                          object:engine];
+    }
+}
+
+void installRouteHooks()
+{
+    Method make = class_getInstanceMethod([AVAudioEngine class], @selector(init));
+    using Make = id (*)(id, SEL);
+    static const auto makeOriginal =
+        reinterpret_cast<Make>(method_getImplementation(make));
+    method_setImplementation(make, imp_implementationWithBlock(^id(id engine) {
+        id made = makeOriginal(engine, @selector(init));
+        ++enginesMade;
+        {
+            const std::lock_guard guard(enginesLock);
+            [engines addObject:made];
+        }
+        if (routeDown.load())
+            markLost(made);
+        return made;
+    }));
+
+    Method start = class_getInstanceMethod(
+        [AVAudioEngine class], @selector(startAndReturnError:));
+    using Start = BOOL (*)(id, SEL, NSError* __autoreleasing*);
+    static const auto startOriginal =
+        reinterpret_cast<Start>(method_getImplementation(start));
+    method_setImplementation(start, imp_implementationWithBlock(
+        ^BOOL(id engine, NSError* __autoreleasing* error) {
+          if (lost(engine)) {
+              ++startsWithoutRoute;
+              if (error != nullptr) {
+                  // kAudioUnitErr_InvalidPropertyValue, as CoreAudio fails it.
+                  *error = [NSError errorWithDomain:NSOSStatusErrorDomain
+                                               code:-10851
+                                           userInfo:nil];
+              }
+              return NO;
+          }
+          return startOriginal(
+              engine, @selector(startAndReturnError:), error);
+        }));
+
+    // The output node is AVAudioNode's method; the override is the output
+    // node's own.
+    Method format = class_getInstanceMethod(
+        [AVAudioNode class], @selector(outputFormatForBus:));
+    using Format = AVAudioFormat* (*)(id, SEL, AVAudioNodeBus);
+    static const auto formatOriginal =
+        reinterpret_cast<Format>(method_getImplementation(format));
+    class_replaceMethod([AVAudioOutputNode class], @selector(outputFormatForBus:),
+        imp_implementationWithBlock(
+            ^AVAudioFormat*(AVAudioOutputNode* node, AVAudioNodeBus bus) {
+              if (lost(node.engine))
+                  return nil;
+              return formatOriginal(
+                  node, @selector(outputFormatForBus:), bus);
+            }),
+        method_getTypeEncoding(format));
+}
+
 void installHooks()
 {
+    installRouteHooks();
     Method hint = class_getInstanceMethod([AVAudioSession class],
         @selector(secondaryAudioShouldBeSilencedHint));
     method_setImplementation(hint, imp_implementationWithBlock(^BOOL(id) {
@@ -599,6 +715,27 @@ private:
     bool running_ {};
 };
 
+// The first output a process starts can find the Simulator's route not there
+// yet and gets it a moment later (the sink plays muted until then, then
+// plays), and a window that opens in that moment sees both. The checks that
+// follow measure steady playback, so the first output of the run comes up
+// before they begin.
+void firstOutputOfTheProcessComesUp()
+{
+    Stream stream;
+    check(stream.open(), "the first stream opens");
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    Observed seen;
+    do {
+        seen = stream.window(0ms, 250ms);
+    } while (!(seen.playing() && seen.outputLatency()) &&
+        std::chrono::steady_clock::now() < deadline);
+    check(seen.playing() && seen.outputLatency(),
+        "the first output of the process plays, however late its route is "
+        "there",
+        seen.text());
+}
+
 void interruptionMutesAndResumes()
 {
     Stream stream;
@@ -1068,12 +1205,183 @@ void reportsAGuestThatRunsAhead()
         "and so is the output that will not start");
 }
 
+// The app goes to the background while the guest plays: the guest suspends,
+// which stops and releases its stream and, once the sink gives the session
+// back, leaves the app with none; the output route goes away and the engine
+// says its configuration changed. Then the app returns and the guest resumes
+// at once, before the route is back, as iOS orders it. The sink must not start
+// the engine that lost the route (starting it fails for good), must play
+// muted at the guest's rate meanwhile instead of giving up, and must play with
+// an engine of the new route as soon as there is one.
+void backgroundReturnWaitsForTheRoute()
+{
+    StderrCapture lines;
+    otherAudioPlaying = false;
+    Stream stream;
+    check(stream.open(), "the stream opens before the app goes to the background");
+    auto seen = stream.window(500ms, 1500ms);
+    check(seen.playing(), "the stream plays before the background", seen.text());
+
+    stream.close();
+    routeGoesDown();
+    postEngineChanges();
+    stream.idle(300ms);
+
+    const auto withoutRoute = startsWithoutRoute.load();
+    const auto made = enginesMade.load();
+    check(stream.open(), "the guest restarts the stream before the route is back");
+    seen = stream.window(300ms, 1500ms);
+    check(seen.muted(),
+        "a stream that starts with no route plays muted at the guest's rate",
+        seen.text());
+    check(stream.healthy(), "and fails no period");
+
+    routeComesBack();
+    const auto taken = stream.untilPlayed(recoveryLimit + 500ms);
+    check(taken < recoveryLimit + 500ms,
+        "playback returns once the route is back, within the retry cadence",
+        std::to_string(taken.count()) + " ms");
+    seen = stream.window(300ms, 1500ms);
+    check(seen.playing() && stream.healthy(),
+        "and plays on without failing a period", seen.text());
+    check(startsWithoutRoute.load() == withoutRoute,
+        "no engine without a route was started");
+    check(enginesMade.load() > made,
+        "the sink played with an engine made after the route returned",
+        std::to_string(enginesMade.load() - made) + " made");
+    stream.close();
+    const auto text = lines.finish();
+    check(StderrCapture::count(text, "Audio output unavailable (") == 0,
+        "a route that returns is not reported as a failure of the output");
+    check(StderrCapture::count(text, "Audio muted: the output route is not "
+                                     "available") == 1,
+        "the wait for the route is said once");
+}
+
+// The same, with the route back before the app returns: the engine that
+// lost it has none still, and must not be started either.
+void backgroundReturnAfterTheRoute()
+{
+    StderrCapture lines;
+    otherAudioPlaying = false;
+    Stream stream;
+    check(stream.open(), "the stream opens before the second background");
+    auto seen = stream.window(500ms, 1000ms);
+    check(seen.playing(), "the stream plays before the second background",
+        seen.text());
+
+    // The guest's device is reset when it suspends.
+    stream.reset();
+    routeGoesDown();
+    postEngineChanges();
+    stream.idle(300ms);
+    routeComesBack();
+
+    const auto withoutRoute = startsWithoutRoute.load();
+    check(stream.open(), "the guest restarts the stream once the route is back");
+    seen = stream.window(300ms, 1500ms);
+    check(seen.playing() && stream.healthy(),
+        "a stream that starts with the route back plays at once", seen.text());
+    check(startsWithoutRoute.load() == withoutRoute,
+        "the engine that lost the route was not started");
+    stream.close();
+    const auto text = lines.finish();
+    check(StderrCapture::count(text, "Audio output unavailable (") == 0 &&
+            StderrCapture::count(text, "Audio muted: the output route") == 0,
+        "and nothing is reported");
+}
+
+// The guest's suspend failed, so its stream goes on through the background:
+// the route goes and the engine says so while the stream runs, and the sink
+// starts the output again by itself, muted until the route is back.
+void streamThroughTheBackground()
+{
+    StderrCapture lines;
+    otherAudioPlaying = false;
+    Stream stream;
+    check(stream.open(), "the stream opens before the third background");
+    auto seen = stream.window(500ms, 1000ms);
+    check(seen.playing(), "the stream plays before the third background",
+        seen.text());
+
+    const auto withoutRoute = startsWithoutRoute.load();
+    routeGoesDown();
+    postEngineChanges();
+    // The periods the engine held when it stopped complete unplayed; the
+    // device completes them on its own clock for a real guest.
+    stream.idle(200ms);
+    seen = stream.window(300ms, 2000ms);
+    check(seen.muted(),
+        "a stream that loses its route plays muted at the guest's rate",
+        seen.text());
+
+    routeComesBack();
+    const auto taken = stream.untilPlayed(recoveryLimit + 500ms);
+    check(taken < recoveryLimit + 500ms,
+        "and plays again once the route is back",
+        std::to_string(taken.count()) + " ms");
+    seen = stream.window(300ms, 1500ms);
+    check(seen.playing(), "and plays on", seen.text());
+    check(startsWithoutRoute.load() == withoutRoute,
+        "the engine that lost the route was not started");
+    stream.close();
+    const auto text = lines.finish();
+    check(StderrCapture::count(text, "Audio output unavailable (") == 0,
+        "a route that returns is not reported as a failure");
+}
+
+// A route that does not return is a failure of the output like any other,
+// reported once after the wait's limit; the next change of the route asks again.
+void aRouteThatDoesNotReturnIsReported()
+{
+    StderrCapture lines;
+    otherAudioPlaying = false;
+    Stream stream;
+    check(stream.open(), "the stream opens before the route is lost for good");
+    (void)stream.window(300ms, 500ms);
+    stream.close();
+    routeGoesDown();
+    postEngineChanges();
+    stream.idle(200ms);
+
+    check(stream.open(), "the guest restarts the stream with no route");
+    auto seen = stream.window(300ms, 2000ms);
+    check(seen.muted(), "it plays muted while the route is awaited",
+        seen.text());
+    const auto limit = std::chrono::duration_cast<std::chrono::milliseconds>(
+        uml::audio::RouteWait::limit);
+    stream.idle(limit);
+    auto text = lines.finish();
+    check(StderrCapture::count(
+              text, "Audio output unavailable (the output route did not come "
+                    "back)") == 1,
+        "a route that does not return in time is reported once");
+
+    // The route comes back and says so: the output starts again, with an
+    // engine made after it.
+    StderrCapture second;
+    routeComesBack();
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:AVAudioSessionRouteChangeNotification
+                      object:[AVAudioSession sharedInstance]];
+    const auto taken = stream.untilPlayed(1500ms);
+    check(taken < 1500ms, "a change of the route starts the output again",
+        std::to_string(taken.count()) + " ms");
+    seen = stream.window(300ms, 1000ms);
+    check(seen.playing(), "and the stream plays", seen.text());
+    stream.close();
+    text = second.finish();
+    check(StderrCapture::count(text, "Audio output unavailable (") == 0,
+        "and reports nothing more");
+}
+
 } // namespace
 
 int main()
 {
     @autoreleasepool {
         installHooks();
+        firstOutputOfTheProcessComesUp();
         interruptionMutesAndResumes();
         beganWithNoEnd();
         slowActivationKeepsTheClock();
@@ -1084,6 +1392,10 @@ int main()
         destroyWhileInterrupted();
         devicePaceAcrossSuspend();
         reportsAGuestThatRunsAhead();
+        backgroundReturnWaitsForTheRoute();
+        backgroundReturnAfterTheRoute();
+        streamThroughTheBackground();
+        aRouteThatDoesNotReturnIsReported();
     }
     std::printf("%s: %d failure(s)\n", failures == 0 ? "PASS" : "FAIL",
         failures);

@@ -61,6 +61,11 @@ starts during one, or the guest suspending and resuming, joins the mute. Taking
 the session back runs on another thread while the mute clock goes on, so no
 guest write waits longer than its stream's buffer lasts.
 
+An engine made on an output route that was lost (the app spent time in the
+background) never starts again, so the sink replaces it, plays muted without
+a route, and starts a fresh engine once a second for up to 15 s before it
+reports the output as unavailable.
+
 ## Capture
 
 While the guest records, the device completes one receive buffer per period of
