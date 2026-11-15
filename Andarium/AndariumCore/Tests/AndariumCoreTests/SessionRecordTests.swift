@@ -44,7 +44,7 @@ struct SessionRecordTests {
         #expect(record.memory?.footprintBytes == 2 << 30 && record.memory?.availableBytes == nil)
         #expect(record.summary == "The previous session ended in a guest kernel panic: sysrq triggered crash.")
         #expect(record.notice(endedOutOfForeground: false) == SessionEndNotice(
-            title: "Android's kernel panicked", text: "Android stopped with a kernel panic: sysrq triggered crash."))
+            title: "Android’s kernel panicked", text: "Android stopped with a kernel panic: sysrq triggered crash."))
     }
 
     @Test func readsWhereAnUnfinishedBootHadGot() throws {
@@ -138,7 +138,7 @@ struct SessionRecordTests {
 
     @Test func eachBadEndHasItsNotice() throws {
         let titles = [
-            "kernel-abort": "Android's kernel crashed",
+            "kernel-abort": "Android’s kernel crashed",
             "kernel-exit": "Android stopped",
             "hibernation-restore-failed": "Android could not resume",
             "host-fault": "Andarium crashed",

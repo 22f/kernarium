@@ -225,7 +225,7 @@ public struct SessionRecord: Equatable, Sendable {
         case "guest-panic":
             return SessionEndNotice(
                 title: String(
-                    localized: "Android's kernel panicked", bundle: .module,
+                    localized: "Android’s kernel panicked", bundle: .module,
                     comment: "Title of Home's card after Android's kernel panicked, the Linux kernel's own fatal error."),
                 text: message.map {
                     String(
@@ -238,7 +238,7 @@ public struct SessionRecord: Equatable, Sendable {
         case "kernel-abort":
             return SessionEndNotice(
                 title: String(
-                    localized: "Android's kernel crashed", bundle: .module,
+                    localized: "Android’s kernel crashed", bundle: .module,
                     comment: "Title of Home's card after Android's kernel stopped on an error of its own."),
                 text: String(
                     localized: "Android stopped on a kernel error.", bundle: .module,
@@ -249,7 +249,7 @@ public struct SessionRecord: Equatable, Sendable {
                     localized: "Android stopped", bundle: .module,
                     comment: "Title of Home's card after Android's kernel ended the session by itself, or after a stop with no known cause."),
                 text: String(
-                    localized: "Android's kernel ended Andarium.", bundle: .module,
+                    localized: "Android’s kernel ended Andarium.", bundle: .module,
                     comment: "Home's card after Android's kernel ended the session by itself."))
         case "hibernation-restore-failed":
             return SessionEndNotice(
@@ -257,7 +257,7 @@ public struct SessionRecord: Equatable, Sendable {
                     localized: "Android could not resume", bundle: .module,
                     comment: "Title of Home's card after a start that could not bring back the memory Android saved when it was paused."),
                 text: String(
-                    localized: "Android's memory could not be restored, so it starts again from boot.", bundle: .module,
+                    localized: "Android’s memory could not be restored, so it starts again from boot.", bundle: .module,
                     comment: "Home's card after a start that could not bring back the memory Android saved when it was paused."))
         case "host-fault", "process-exit":
             return SessionEndNotice(

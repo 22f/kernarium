@@ -3433,6 +3433,7 @@ CAMERA_APP_OVERLAY = "PRODUCT/overlay/Aperture__lineage_andarium__auto_generated
 CAMERA_AUX_CAMERAS = "config_enableAuxCameras"
 CAMERA_IGNORED_AUX_CAMERAS = "config_ignoredAuxCameraIds"
 CAMERA_IGNORED_AUX_IDS = ["2"]
+CAMERA_ZOOM = "config_enableZoom"
 CAMERA_HARDWARE_TOGGLE = "config_supportsHardwareCamToggle"
 CAMERA_LAZY_HAL_PROPERTY = ("PRODUCT/etc/build.prop", "ro.camera.enableLazyHal", "true")
 CAMERA_CONFIG_PROPERTY = ("VENDOR/build.prop", "ro.vendor.camera.config", "v4l2")
@@ -3619,8 +3620,8 @@ def check_camera_configuration(archive: zipfile.ZipFile, infos: dict[str, zipfil
 
 
 def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
-    """The camera application lists each lens the host has, and the sensor privacy service reads
-    the camera switch."""
+    """The camera application lists each lens the host has and offers no free zoom, and the sensor
+    privacy service reads the camera switch."""
     app_table = camera_resources(archive, infos, CAMERA_APP, CAMERA_APP_LIMIT)
     try:
         defines_overlayable = resource_table_defines_overlayable(app_table)
@@ -3635,7 +3636,7 @@ def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
         )
     # An overlay replaces resources its target defines; one for a name the application lost (an uprev
     # renamed it) applies to nothing, and the overlay's own values then look right.
-    for name, kind in ((CAMERA_AUX_CAMERAS, "bool"), (CAMERA_IGNORED_AUX_CAMERAS, "array")):
+    for name, kind in ((CAMERA_AUX_CAMERAS, "bool"), (CAMERA_IGNORED_AUX_CAMERAS, "array"), (CAMERA_ZOOM, "bool")):
         if name not in app_defaults[kind]:
             fail(
                 f"{CAMERA_APP} does not define the {kind} resource {name} in its default configuration: "
@@ -3645,7 +3646,7 @@ def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
     if info is None or info.is_dir():
         fail(
             f"{CAMERA_APP_OVERLAY} is missing: the application's own resources keep the defaults that "
-            "hide each lens of the host as a camera of its own"
+            "hide each lens of the host as a camera of its own and leave free zoom on"
         )
     try:
         with zipfile.ZipFile(io.BytesIO(read_small(archive, info, CAMERA_APP_LIMIT))) as overlay_apk:
@@ -3672,11 +3673,16 @@ def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
         fail(
             f"{CAMERA_APP_OVERLAY} must list the camera IDs {CAMERA_IGNORED_AUX_IDS} in "
             f"{CAMERA_IGNORED_AUX_CAMERAS}: {arrays.get(CAMERA_IGNORED_AUX_CAMERAS)}; "
-            "the wide lens is the zoom camera's 1x"
+            "a host that still publishes the wide lens as camera 2 beside camera 0 would show it twice"
+        )
+    if booleans.get(CAMERA_ZOOM) != [False]:
+        fail(
+            f"{CAMERA_APP_OVERLAY} must set {CAMERA_ZOOM} to false: {booleans.get(CAMERA_ZOOM)}; "
+            "the lens buttons are the camera's only zoom"
         )
     # The one definition of each name is the sole one, and it carries no qualifier: a value under a
     # resource configuration applies only on a device that matches it.
-    for name, kind in ((CAMERA_AUX_CAMERAS, "bool"), (CAMERA_IGNORED_AUX_CAMERAS, "array")):
+    for name, kind in ((CAMERA_AUX_CAMERAS, "bool"), (CAMERA_IGNORED_AUX_CAMERAS, "array"), (CAMERA_ZOOM, "bool")):
         if name not in overlay_defaults[kind]:
             fail(f"{CAMERA_APP_OVERLAY} defines {name} only under a resource configuration: "
                  "it must be in the default configuration")
