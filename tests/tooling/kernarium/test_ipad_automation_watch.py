@@ -35,7 +35,8 @@ from unittest import mock
 import warnings
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from automation_fakes import FakeDevice  # noqa: E402
+from automation_fakes import (  # noqa: E402
+    FakeDevice, LAUNCH_FAILED_BLOCK, LOST_BLOCK)
 
 SCRIPT = Path(__file__).resolve().parents[3] / "Kernarium/scripts/ipad-automation.py"
 SPEC = importlib.util.spec_from_file_location("ipad_automation", SCRIPT)
@@ -2737,6 +2738,103 @@ class KeepAwakeTests(WatchTestCase):
                 self.assertEqual(self.last_watch.end(), 0)
 
 
+class LostConnectionTests(WatchTestCase):
+    """xcodebuild reports the connection to the device lost, and some seconds
+    later starts the runner again by itself, a runner that cannot initialize.
+    The supervisor ends xcodebuild first, so the death is a plain one."""
+
+    def test_a_lost_connection_ends_xcodebuild_before_it_starts_the_runner_again(self) -> None:
+        # Rule: the host is replaced at once, with no latch and no word of an
+        # approval: only one runner ever came up. Without the supervisor's
+        # rule the fake xcodebuild starts a second runner 6 s later, which is
+        # an unconfirmed relaunch and ends the watch with needs-approval.
+        self.device.scenarios([{"kind": "serve"}, {"kind": "serve"}])
+        host = self.start_host(hours=3)
+        watch = self.run_watch()
+        self.wait_record(state=automation.WATCHING)
+        self.device.control(host.nonce, "connection-lost")
+        second = self.watching(restarts=1)
+        self.assertNotEqual(second, host.nonce)
+        self.assertIsNone(watch.code, self.messages)
+        self.invoked(2)
+        text = host.log_path.read_text()
+        self.assertEqual(text.count("Running tests..."), 1, text)
+        self.assertIn("the device connection was lost at ", text)
+        self.assertIn("ending xcodebuild before it starts the runner again", text)
+        self.assertFalse(self.device.alive(self.device.invocations()[0]["pid"]))
+        self.assertIsNone(automation.ApprovalLatch(self.options("status")).read())
+        self.assertIn("the device connection was lost",
+                      self.record()["last_end"]["reason"])
+        self.assertTrue(any("started no runner again" in message
+                            for message in self.messages), self.messages)
+        self.assertTrue(self.device.serving(second))
+
+    def test_another_launch_error_does_not_end_xcodebuild(self) -> None:
+        # Rule: only CoreDevice error 3 is a lost connection. A failed launch
+        # (code 10002) is xcodebuild's own, and it ends by itself.
+        host = self.start_host(hours=3)
+        self.device.control(host.nonce, "launch-failed")
+        self.device.wait(lambda: "Code: 10002" in host.log_path.read_text(), 15,
+                         "xcodebuild reports the failed launch")
+        time.sleep(1.5)
+        self.assertIsNone(host.process.poll())
+        self.assertTrue(self.device.serving(host.nonce))
+        self.assertNotIn("ending xcodebuild", host.log_path.read_text())
+
+
+class RecordTests(WatchTestCase):
+    """The watch's record says why the owner is needed."""
+
+    CASES = (
+        ("quiet", ("xcodebuild started the runner again at ",
+                   "shows neither a restart notice nor a run of no tests",
+                   "so the device may have asked for an approval nobody gave",
+                   "(the host that ended: the supervisor ended (xcodebuild exited "
+                   "with status 65)")),
+        ("authentication", ("the system cancelled the approval prompt, as when "
+                            "the screen locks during it",
+                            "Code=-4 \"UI canceled by system.\"")),
+        ("timeout", ("the approval prompt was not answered in time",
+                     "Timed out while enabling automation mode")))
+
+    def test_the_record_says_why_the_owner_is_needed(self) -> None:
+        # Rule: the record `status` shows names the cause: a runner xcodebuild
+        # started again that the log does not show initialized, or the
+        # failure text of a device that would not enable automation (a locked
+        # screen cancels the prompt), and a later watch refuses with the same
+        # words.
+        for failure, expected in self.CASES:
+            with self.subTest(failure):
+                self.setUp()
+                self.device.scenarios([{"kind": "serve"}])
+                first = self.watch_over_host()
+                self.device.control(first, f"relaunch-{failure}")
+                self.assertEqual(self.last_watch.join(),
+                                 automation.EXIT_NEEDS_APPROVAL, self.messages)
+                detail = self.record()["detail"]
+                latch = automation.ApprovalLatch(self.options("status")).read()
+                for text in expected:
+                    self.assertIn(text, detail)
+                    if not text.startswith("(the host"):
+                        self.assertIn(text, latch["detail"])
+                summary = automation.watch_summary(self.options("status"))
+                self.assertEqual(summary["detail"], detail)
+                self.assertEqual(self.run_watch().join(),
+                                 automation.EXIT_NEEDS_APPROVAL)
+                self.assertIn(expected[0], self.record()["detail"])
+
+    def test_a_runner_that_never_served_is_named_with_its_time(self) -> None:
+        self.tune(WATCH_RUNNER_WAIT=1.0)
+        self.device.scenarios([{"kind": "serve"}, {"kind": "up-silent"}])
+        first = self.watch_over_host()
+        self.device.control(first, "die")
+        self.assertEqual(self.last_watch.join(), automation.EXIT_NEEDS_APPROVAL,
+                         self.messages)
+        detail = self.record()["detail"]
+        self.assertIn("a runner came up at ", detail)
+        self.assertIn("that did not serve, and its log does not say why", detail)
+
+
 class LogSignalTests(unittest.TestCase):
     """The lines of xcodebuild's own log the watch reads, as it prints them."""
 
@@ -2879,6 +2977,154 @@ class LogSignalTests(unittest.TestCase):
         scan = self.scan(self.RUNNER, self.RUNNER, *self.INITIALIZED)
         self.assertIsNotNone(self.risk(scan, served=False))
         self.assertIsNone(self.risk(self.scan("Test Case started")))
+
+    # What xcodebuild printed when the connection to the device was lost, and
+    # when it could not launch a runner, in two logs of real hosts; the launch
+    # report ids and the device are left out.
+    LOST = [line.replace("{stamp}", "2026-11-15 10:34:52.158") for line in LOST_BLOCK]
+    LAUNCH_FAILED = [line.replace("{stamp}", "2026-11-13 18:20:17.544")
+                     for line in LAUNCH_FAILED_BLOCK]
+    # Lines of runs that were healthy, from the same logs.
+    HEALTHY = (
+        "ipad-automation: device reports (cap 25 per kind, 5 free needed): "
+        "JetsamEvent 9 -> 9, Kernarium crash 0 -> 0; nothing to move",
+        "Command line invocation:",
+        "Writing result bundle at path:",
+        RUNNER,
+        "2026-11-14 13:17:44.428640+0900 KernariumAutomation-Runner[11111:2222222] "
+        "[UIKit App Config] Update the Info.plist: Launch screens will soon be required.",
+        "    t =      nans Interface orientation changed to Landscape Right",
+        "Test Case '-[KernariumAutomation.AutomationHost testServe]' started.",
+        "    t = 14549.77s     Requesting snapshot of accessibility hierarchy for app with pid 37",
+        "AutomationHost: tap 01794554535041827000-ffb77e35 failed: no such element",
+        "AutomationHost: tap 01794554535041827000-ffb77e35 failed: Failed to get "
+        "matching snapshot: No matches found for first query match sequence: "
+        "`Descendants matching type Any` -> `Elements matching predicate "
+        "'label == \"x\"'`, given input label: ' '",
+        "2026-11-15 10:35:31.982 xcodebuild[1:2]  IDETestOperationsObserverDebug: "
+        "Failure collecting diagnostics from devices: Process exited with error 1:",
+        "2026-11-15 10:35:31.999 xcodebuild[1:2] [MT] IDETestOperationsObserverDebug: "
+        "76672.496 elapsed -- Testing started completed.",
+        "Testing failed:",
+        "Failing tests:",
+        "** TEST EXECUTE FAILED **",
+        *INITIALIZED)
+
+    def test_a_lost_connection_is_told_from_xcodebuilds_block(self) -> None:
+        # Rule: the connection to the device is lost when xcodebuild's launch
+        # report ends in CoreDevice error 3, whose block is replayed as it was
+        # printed. It is told once, at the time of the first header.
+        scan = self.scan(self.RUNNER, *self.LOST)
+        self.assertEqual(scan.connection_lost, "10:34:52")
+        self.assertIn("the device connection was lost at 10:34:52 (CoreDevice "
+                      "error 3)", scan.describe())
+        self.assertEqual(scan.runner_up, 1)
+        self.assertEqual(self.scan(self.RUNNER).connection_lost, None)
+
+    def test_a_lost_connection_is_told_by_domain_and_code_not_by_description(self) -> None:
+        # The description is localized like any other; the domain and the code
+        # are not. The header is xcodebuild's own line in either spelling.
+        for header in (self.LOST[0].replace("An error occurred while communicating "
+                                            "with a remote process.", "Ein Fehler."),
+                       self.LOST[0].replace("xcodebuild[1:2] [MT] ", "xcodebuild[1:2]  ")):
+            with self.subTest(header):
+                self.assertEqual(self.scan(header, *self.LOST[1:]).connection_lost,
+                                 "10:34:52")
+
+    def test_nothing_but_the_whole_block_in_order_is_a_lost_connection(self) -> None:
+        # Rule: no line of a healthy run, and no other CoreDevice error, ends
+        # xcodebuild. The block of a failed launch (error 10002) is
+        # xcodebuild's own end; its lines are consecutive too.
+        header, domain, code = self.LOST[:3]
+        variants = {
+            "a failed launch": self.LAUNCH_FAILED,
+            "no header": [line for line in self.LOST
+                          if "IDELaunchReport" not in line],
+            "the code without the domain": [header, code],
+            "the domain without the code": [header, domain],
+            "a blank line between": [header, "", domain, code],
+            "another code": [header, domain, "Code: 30"],
+            "another code, 13": [header, domain, "Code: 13"],
+            "a code of another word": [header, domain, "Code: 3x"],
+            "another domain": [header, "Domain: com.apple.Mercury.error", code],
+            "an indented domain": [header, "  " + domain, code],
+            "an indented code": [header, domain, "  " + code],
+            "the order reversed": [code, domain, header],
+            "an error of the runner": [
+                "2026-11-15 10:34:52.158 KernariumAutomation-Runner[1:2] "
+                "IDELaunchReport: x Finished with error: y", domain, code],
+            "the words in the host's own report": [
+                "AutomationHost: tap x failed: 2026-11-15 10:34:52.158 "
+                "xcodebuild[1:2] [MT] IDELaunchReport: x Finished with error: y",
+                domain, code],
+            "healthy lines": list(self.HEALTHY),
+        }
+        for what, lines in variants.items():
+            with self.subTest(what):
+                self.assertIsNone(self.scan(self.RUNNER, *lines).connection_lost)
+        # A block cut after its header, with the rest read later, is the block.
+        with __import__("tempfile").TemporaryDirectory() as scratch:
+            path = Path(scratch) / "log"
+            path.write_text("\n".join(self.LOST[:2]) + "\n")
+            scan = automation.LogScan(str(path))
+            scan.read()
+            self.assertIsNone(scan.connection_lost)
+            with open(path, "a") as handle:
+                handle.write("\n".join(self.LOST[2:]) + "\n")
+            scan.read()
+            self.assertEqual(scan.connection_lost, "10:34:52")
+
+    def test_the_record_of_a_runner_started_again_after_a_lost_connection(self) -> None:
+        # Rule: what xcodebuild did by itself (older supervisors, or one that
+        # was not scheduled) is told in the record: the connection lost, the
+        # time of the runner started again, and what its log does not show.
+        second = ("2026-11-15 10:35:10.779641+0900 KernariumAutomation-Runner"
+                  "[11111:2222222] [Default] Running tests...")
+        scan = self.scan(self.RUNNER, *self.LOST, second)
+        risk = self.risk(scan)
+        self.assertEqual(risk[0], "possible")
+        self.assertIn(
+            "the device connection was lost at 10:34:52 (CoreDevice error 3); "
+            "xcodebuild started the runner again at 10:35:10 after the host's "
+            "runner ended; its log shows neither a restart notice nor a run of "
+            "no tests, so the device may have asked for an approval nobody gave",
+            risk[2])
+        # Cut at the restart notice, and failed for another reason.
+        scan = self.scan(self.RUNNER, second, self.INITIALIZED[3])
+        self.assertIn("shows the restart notice and not the run of no tests that "
+                      "follows", self.risk(scan)[2])
+        other = self.PROMPT.replace("Timed out while enabling automation mode",
+                                    "Timed out while loading")
+        scan = self.scan(self.RUNNER, second, other)
+        self.assertIn("shows an initialization failure (Failed to initialize for "
+                      "UI testing: ", self.risk(scan)[2])
+
+    def test_a_launch_that_never_served_is_named_with_the_time_its_runner_came_up(self) -> None:
+        scan = self.scan(self.RUNNER)
+        risk = self.risk(scan, served=False)
+        self.assertEqual(risk[2], "a runner came up at 22:04:30 that did not "
+                                  "serve, and its log does not say why, so the "
+                                  "device may have asked for an approval nobody "
+                                  "gave")
+
+    def test_the_failure_of_the_approval_is_told_with_its_cause(self) -> None:
+        # Rule: the record names what went wrong with the approval (a locked
+        # screen cancels the prompt: code -4), not only the device's text.
+        template = (
+            "2026-11-14 00:05:00.059296+0900 KernariumAutomation-Runner[11111:"
+            "2222222] [Default] Failed to initialize for UI testing: Error Domain="
+            'com.apple.LocalAuthentication Code={code} "{text}" UserInfo={{}}')
+        for code, cause in (("-4", "the system cancelled the approval prompt, as "
+                                   "when the screen locks during it"),
+                            ("-2", "the owner cancelled the approval prompt")):
+            with self.subTest(code):
+                description = self.scan(self.RUNNER, template.format(
+                    code=code, text="UI canceled by system.")).describe()
+                self.assertIn(f"{cause}: Failed to initialize for UI testing: "
+                              f"Error Domain=com.apple.LocalAuthentication "
+                              f"Code={code}", description)
+        self.assertIn("the approval prompt was not answered in time: Failed to "
+                      "initialize", self.scan(self.RUNNER, self.PROMPT).describe())
 
     def test_the_supervisors_exit_line_is_read(self) -> None:
         scan = self.scan("ipad-automation: xcodebuild exited with status 65")

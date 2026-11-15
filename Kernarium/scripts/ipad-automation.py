@@ -48,7 +48,11 @@ soon it starts; it needs the owner only when the system lost it. xcodebuild
 starts a runner that iOS ended again at once, and its log says which case it
 was: "Restarting after unexpected exit" then "Executed 0 tests" means the new
 runner initialized (a new host then serves with nobody at the device), and
-"Failed to initialize for UI testing" means the owner is needed. `watch` keeps
+"Failed to initialize for UI testing" means the owner is needed. A runner that
+xcodebuild starts after the connection to the device was lost (CoreDevice error
+3, as when the Mac's CoreDevice service crashes) cannot initialize, so the
+host's supervisor ends xcodebuild as soon as its log reports that error, before
+the runner is started again: the host's death is then a plain one. `watch` keeps
 one device's host serving:
 
   ipad-automation.py --device UDID watch --hours 8
@@ -273,8 +277,26 @@ NO_TESTS_LINE = "Executed 0 tests"
 # screen locks during the prompt). The description is localized; the domain
 # and the code are not.
 AUTHENTICATION_CANCELLED = re.compile(
-    r"Error Domain=com\.apple\.LocalAuthentication Code=-[24]\b")
+    r"Error Domain=com\.apple\.LocalAuthentication Code=-([24])\b")
 EXIT_STATUS_LINE = "ipad-automation: xcodebuild exited with status"
+# xcodebuild reports the end of the runner's launch session with a block of
+# its own: a header line (its time, process and "IDELaunchReport", ending in
+# "Finished with error: <text>"), then the error's domain and code on the next
+# two lines. The block of a lost connection to the device is CoreDevice error
+# 3 ("An error occurred while communicating with a remote process", nested
+# "The connection was invalidated"): xcodebuild then starts the runner again
+# by itself, 18 s later in the one observed case, and that runner cannot
+# initialize. Any other CoreDevice error does not match (code 10002, "The
+# application failed to launch", is xcodebuild's own failed relaunch: it ends
+# by itself), and no line of a healthy run does: only xcodebuild's own lines
+# start with its time and process name.
+LAUNCH_ERROR_LINE = re.compile(
+    r"^\d{4}-\d\d-\d\d (\d\d:\d\d:\d\d)\.\d+ xcodebuild\[\d+:\d+\] +"
+    r"(?:\[MT\] )?IDELaunchReport: .*Finished with error: ")
+CORE_DEVICE_DOMAIN = "Domain: com.apple.dt.CoreDeviceError"
+CONNECTION_LOST_CODE = "3"
+# The time at the start of a line xcodebuild or the runner prints.
+LOG_TIME = re.compile(r"^\d{4}-\d\d-\d\d (\d\d:\d\d:\d\d)\.\d+")
 # The watch record's states: the first three while the watch runs, the others
 # when it has ended.
 WATCHING, RESTARTING, STARTING = "watching", "restarting", "starting"
@@ -1240,7 +1262,15 @@ def command_supervise(options):
     The supervisor stays responsible for the whole host until nothing of it is
     left: SIGTERM (what ends a host) ends xcodebuild, with SIGKILL for one
     that ignores it, and then whatever else xcodebuild left in the group; it
-    exits last."""
+    exits last.
+
+    It also ends xcodebuild itself as soon as xcodebuild's log (`--log`)
+    reports the connection to the device lost. xcodebuild would start the
+    runner again by itself some seconds later, a runner that cannot
+    initialize when the device is locked and may leave the device asking for an
+    approval nobody gives; with xcodebuild ended first, the host's death is a
+    plain one and the watch may replace it. xcodebuild's own relaunch never
+    yields a host that serves (the test that serves is not run again)."""
     publish_supervisor_identity(options)
     if refuse_recording(options.xctestrun):
         return EXIT_FAILED
@@ -1262,8 +1292,14 @@ def command_supervise(options):
     # watch signal as a whole.
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, env=environment)
     deadline = time.monotonic() + options.seconds + 900
+    scan = LogScan(options.log)
     while (process.poll() is None and not stopping
            and time.monotonic() < deadline):
+        scan.read()
+        if scan.connection_lost:
+            print(f"ipad-automation: {scan.lost_connection_text()}: ending "
+                  "xcodebuild before it starts the runner again", flush=True)
+            break
         time.sleep(0.2)
     if process.poll() is None:
         process.terminate()
@@ -1449,7 +1485,7 @@ def launch_host(options, cancelled=None, guard=None, record=None, locked=False):
                 [sys.executable, str(SCRIPT), "--device", options.device,
                  "--runner", options.runner, "--state-dir", options.state_dir,
                  "_supervise", "--xctestrun", str(runs[-1]),
-                 "--result-bundle", str(result_bundle),
+                 "--result-bundle", str(result_bundle), "--log", str(log_path),
                  "--seconds", str(seconds), "--nonce", nonce,
                  "--term-wait", str(CHILD_TERM_WAIT), *reports],
                 stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
@@ -1588,15 +1624,26 @@ class LogScan:
         self.path = path
         self.offset = 0
         self.runner_up = 0
+        # When each runner came up ("HH:MM:SS", or "" when the line has no
+        # time), in order.
+        self.runner_times = []
         # What the log shows of each runner after the first, in order:
         # "pending" (it came up and nothing more), "restarted" (xcodebuild's
         # restart notice), "initialized" (and the totals of a run of no tests)
         # or "failed" (XCTest's initialization failure).
         self.relaunches = []
         self.approval_failure = None
+        # What the approval failure says went wrong, for the record.
+        self.approval_cause = None
         self.init_failure = None
         self.exit_status = None
         self.note = None
+        # The time xcodebuild reported the connection to the device lost, once
+        # it has; and where the block of a launch error it is reading stands:
+        # None, ("domain", time) after its header, ("code", time) after the
+        # domain line.
+        self.connection_lost = None
+        self.launch_error = None
 
     def unconfirmed_relaunches(self):
         """How many runners started again are not shown to have initialized."""
@@ -1616,9 +1663,26 @@ class LogScan:
         for line in data[:complete].decode(errors="replace").splitlines():
             self.take(line.rstrip())
 
+    def take_launch_error(self, line):
+        """Follows xcodebuild's block for the end of the runner's launch
+        session: a header, then the domain, then the code, on consecutive
+        lines. Only CoreDevice error 3 is a lost connection."""
+        state, self.launch_error = self.launch_error, None
+        header = LAUNCH_ERROR_LINE.match(line)
+        if header:
+            self.launch_error = ("domain", header.group(1))
+        elif state and state[0] == "domain" and line.rstrip() == CORE_DEVICE_DOMAIN:
+            self.launch_error = ("code", state[1])
+        elif (state and state[0] == "code" and self.connection_lost is None
+              and line.rstrip() == f"Code: {CONNECTION_LOST_CODE}"):
+            self.connection_lost = state[1]
+
     def take(self, line):
+        self.take_launch_error(line)
         if line.endswith(RUNNER_UP_LINE):
             self.runner_up += 1
+            stamp = LOG_TIME.match(line)
+            self.runner_times.append(stamp.group(1) if stamp else "")
             if self.runner_up > 1:
                 self.relaunches.append("pending")
         elif self.relaunches:
@@ -1631,9 +1695,19 @@ class LogScan:
             if self.relaunches:
                 self.relaunches[-1] = "failed"
             failure = line[line.index(INIT_FAILURE_LINE):][:160]
-            if APPROVAL_TIMEOUT_LINE in line or AUTHENTICATION_CANCELLED.search(line):
+            cancelled = AUTHENTICATION_CANCELLED.search(line)
+            if APPROVAL_TIMEOUT_LINE in line or cancelled:
                 # The device asked for an approval and did not get it.
                 self.approval_failure = failure
+                if cancelled and cancelled.group(1) == "4":
+                    self.approval_cause = ("the system cancelled the approval "
+                                           "prompt, as when the screen locks "
+                                           "during it")
+                elif cancelled:
+                    self.approval_cause = "the owner cancelled the approval prompt"
+                else:
+                    self.approval_cause = ("the approval prompt was not "
+                                           "answered in time")
             else:
                 self.init_failure = failure
         if line.startswith(EXIT_STATUS_LINE):
@@ -1641,18 +1715,51 @@ class LogScan:
         elif line.startswith("ipad-automation:"):
             self.note = line[:200]
 
+    def lost_connection_text(self):
+        return (f"the device connection was lost at {self.connection_lost} "
+                f"(CoreDevice error {CONNECTION_LOST_CODE})")
+
     def describe(self):
         """Why the host's run ended, as far as its log says."""
         parts = []
         if self.exit_status:
             parts.append(f"xcodebuild exited with status {self.exit_status}")
+        if self.connection_lost:
+            parts.append(self.lost_connection_text())
         if self.approval_failure:
-            parts.append(self.approval_failure)
+            parts.append(f"{self.approval_cause}: {self.approval_failure}")
         elif self.init_failure:
             parts.append(self.init_failure)
         elif self.note and not self.exit_status:
             parts.append(self.note)
         return "; ".join(parts) or "its log says nothing"
+
+    def runner_text(self, served):
+        """What the log shows of the runner that may have asked the device for
+        an approval nobody gave, for the record: for a host that served, the
+        first runner that xcodebuild started again and the log does not show
+        initialized; for a launch that never served, its runner."""
+        if not served:
+            return (f"a runner came up{self.at(self.runner_times[:1])} that did "
+                    "not serve, and its log does not say why")
+        index = next(number for number, outcome in enumerate(self.relaunches)
+                     if outcome != "initialized")
+        shown = {"pending": "shows neither a restart notice nor a run of no "
+                            "tests",
+                 "restarted": "shows the restart notice and not the run of no "
+                              "tests that follows",
+                 "failed": f"shows an initialization failure ({self.init_failure})",
+                 }[self.relaunches[index]]
+        parts = [f"xcodebuild started the runner again"
+                 f"{self.at(self.runner_times[index + 1:index + 2])} after the "
+                 f"host's runner ended; its log {shown}"]
+        if self.connection_lost:
+            parts.insert(0, self.lost_connection_text())
+        return "; ".join(parts)
+
+    @staticmethod
+    def at(times):
+        return f" at {times[0]}" if times and times[0] else ""
 
 
 class HostObserver:
@@ -1837,6 +1944,7 @@ class HostObserver:
         if reason is not None:
             self.verdict = dict(
                 extra, nonce=self.nonce, beat=self.beat, relaunched=relaunched,
+                reason=reason,
                 record_nonce=local_record(self.options).get("nonce"))
         return reason
 
@@ -2112,8 +2220,7 @@ class Watch:
             if found is None and (scan.unconfirmed_relaunches() if served
                                   else scan.runner_up):
                 found = ("possible", nonce,
-                         "a runner came up that is not known to have been "
-                         "initialized for UI testing, so the device may have "
+                         f"{scan.runner_text(served)}, so the device may have "
                          "asked for an approval nobody gave", scan.path)
         return found
 
@@ -2185,6 +2292,10 @@ class Watch:
         elif scans[0][1].relaunches:
             self.say("xcodebuild started the runner again and it initialized, "
                      "so the device needs no approval: replacing the host")
+        elif scans[0][1].connection_lost:
+            self.say(f"{scans[0][1].lost_connection_text()} and xcodebuild "
+                     "started no runner again, so the device was asked for "
+                     "nothing: replacing the host")
         remainder = []
         status = self.end_all(verdict, remainder)
         # What the ended processes printed last counts.
@@ -2365,9 +2476,11 @@ class Watch:
 
 
 def reason_of(verdict):
-    """A few words on what the verdict was about, for the record."""
-    return "finished" if verdict.get("finished") else (
-        "hung" if verdict.get("hung") else "its heartbeat stopped")
+    """What the verdict was about, for the record: why the observer called the
+    host dead."""
+    return verdict.get("reason") or (
+        "finished" if verdict.get("finished") else (
+            "hung" if verdict.get("hung") else "its heartbeat stopped"))
 
 
 def launchd_path():
@@ -2669,6 +2782,8 @@ def parse(argv):
     supervise = commands.add_parser("_supervise")
     supervise.add_argument("--xctestrun", required=True)
     supervise.add_argument("--result-bundle", required=True)
+    supervise.add_argument("--log", help="xcodebuild's log (this process's own "
+                           "output), read for a lost connection to the device")
     supervise.add_argument("--seconds", type=int, required=True)
     supervise.add_argument("--nonce", required=True)
     supervise.add_argument("--term-wait", type=float, default=CHILD_TERM_WAIT,

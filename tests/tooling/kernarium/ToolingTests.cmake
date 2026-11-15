@@ -40,7 +40,7 @@ uml_add_tooling_test(
     COMMAND ${Python3_EXECUTABLE}
         ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_ipad_automation_supervisor.py
     LABELS kernarium
-    TIMEOUT 60)
+    TIMEOUT 120)
 
 # The host's test run records no screen video and keeps no attachments: the
 # scheme says so, `start` refuses a run file that does not, and the result
@@ -63,7 +63,7 @@ uml_add_tooling_test(
     COMMAND ${Python3_EXECUTABLE}
         ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_ipad_automation_watch.py
     LABELS kernarium
-    TIMEOUT 600)
+    TIMEOUT 900)
 
 uml_add_tooling_test(
     NAME kernarium-ipad-automation-watch-process

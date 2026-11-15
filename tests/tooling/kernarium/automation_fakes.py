@@ -30,6 +30,12 @@ Scenario kinds:
   runner came up, 0.3 by default), `silent` (the runner stops
   beating and xcodebuild stays) or `busy` (a command that never ends shows in
   the heartbeat, which keeps beating).
+- `serve` also takes the control `launch-failed` (xcodebuild reports a failed
+  launch, CoreDevice error 10002, once, and the host serves on) and the control
+  `connection-lost`: xcodebuild reports the
+  connection to the device lost (CoreDevice error 3, as its log shows it) and,
+  `lost_relaunch_after` seconds later (6 by default), starts the runner again by
+  itself and ends with status 65, unless the supervisor ended it first.
 - `approval`: the runner comes up, and 0.3 s later XCTest gives up on the
   prompt with its own line and xcodebuild exits with status 65 (`after` sets
   the delay, `signal` the kind of line: `timeout`, `authentication` or
@@ -63,6 +69,60 @@ import subprocess
 import sys
 import tempfile
 import time
+
+# The block xcodebuild prints when the connection to the device is lost, as its
+# log shows it (the launch report ids, the pointers and the device are left
+# out); `{stamp}` is the line's time. It appears twice, for the launch and for
+# its group. The block of a failed launch (CoreDevice error 10002) follows.
+LOST_BLOCK = [
+    "{stamp} xcodebuild[1:2] [MT] IDELaunchReport: 0000000000000000:"
+    "0000000000000000:Launching KernariumAutomation Finished with error: An error "
+    "occurred while communicating with a remote process.",
+    "Domain: com.apple.dt.CoreDeviceError",
+    "Code: 3",
+    "User Info: {",
+    '    DVTErrorCreationDateKey = "2026-11-15 01:34:52 +0000";',
+    "    IDERunOperationFailingWorker = IDELaunchCoreDeviceWorker;",
+    "}",
+    "--",
+    "The connection was invalidated.",
+    "Domain: com.apple.Mercury.error",
+    "Code: 1001",
+    "User Info: {",
+    '    XPCConnectionDescription = "<RemoteXPCPeerConnection 0x0> { state = canceled }";',
+    "}",
+    "--",
+    "",
+    "{stamp} xcodebuild[1:2] [MT] IDELaunchReport: 0000000000000000:"
+    "0000000000000000: Finished with error: An error occurred while communicating "
+    "with a remote process.",
+    "Domain: com.apple.dt.CoreDeviceError",
+    "Code: 3",
+    "User Info: {",
+    "}",
+    "--",
+    "The connection was invalidated.",
+    "Domain: com.apple.Mercury.error",
+    "Code: 1001",
+    "--",
+    "",
+]
+LAUNCH_FAILED_BLOCK = [
+    "{stamp} xcodebuild[1:2]  IDELaunchReport: 0000000000000000:"
+    "0000000000000000:Launching KernariumAutomation Finished with error: The "
+    "application failed to launch.",
+    "Domain: com.apple.dt.CoreDeviceError",
+    "Code: 10002",
+    "User Info: {",
+    "    BundleIdentifier = \"example.AutomationRunner.xctrunner\";",
+    "}",
+    "--",
+    "The request to open \"example.AutomationRunner.xctrunner\" failed.",
+    "Domain: FBSOpenApplicationServiceErrorDomain",
+    "Code: 1",
+    "--",
+    "",
+]
 
 XCRUN = r'''#!@PYTHON@
 import os
@@ -111,6 +171,8 @@ import subprocess
 import sys
 import time
 
+LOST_BLOCK = @LOST_BLOCK@
+LAUNCH_FAILED_BLOCK = @LAUNCH_FAILED_BLOCK@
 root = os.environ["FAKE_ROOT"]
 channel = os.path.join(root, "container", "Documents", "automation")
 nonce = os.environ.get("TEST_RUNNER_KERNARIUM_AUTOMATION_NONCE", "")
@@ -136,6 +198,20 @@ def say(text):
 def runner_up():
     stamp = time.strftime("%Y-%m-%d %H:%M:%S") + ".123456+0900"
     say(f"{stamp} KernariumAutomation-Runner[1:2] [Default] Running tests...")
+
+
+def connection_lost():
+    """What xcodebuild's log shows when the connection to the device is lost."""
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S") + ".158"
+    for line in LOST_BLOCK:
+        say(line.replace("{stamp}", stamp))
+
+
+def launch_failed():
+    """What xcodebuild's log shows when it could not launch a runner."""
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S") + ".544"
+    for line in LAUNCH_FAILED_BLOCK:
+        say(line.replace("{stamp}", stamp))
 
 
 def relaunch_initialized(finish=True):
@@ -264,8 +340,12 @@ say("Test Case '-[KernariumAutomation.AutomationHost testServe]' started.")
 started = time.time()
 served = [0]
 busy = None
+reported = False
 while True:
     now = action()
+    if now == "launch-failed" and not reported:
+        reported = True
+        launch_failed()
     if now == "die":
         sys.exit(1)
     if now == "lifetime":
@@ -274,6 +354,15 @@ while True:
     if now == "relaunch":
         runner_up()
         time.sleep(3600)
+    if now == "connection-lost":
+        # xcodebuild starts the runner again by itself some time later, which
+        # never initializes; only an end of xcodebuild before it prevents that.
+        connection_lost()
+        time.sleep(scenario.get("lost_relaunch_after", 6))
+        runner_up()
+        time.sleep(0.3)
+        say("** TEST EXECUTE FAILED **")
+        sys.exit(65)
     if now == "relaunch-initialized":
         relaunch_initialized()
         say("** TEST EXECUTE FAILED **")
@@ -357,7 +446,10 @@ class FakeDevice:
         for name, template in (("xcrun", XCRUN), ("xcodebuild", XCODEBUILD),
                                ("caffeinate", CAFFEINATE)):
             path = self.bin / name
-            path.write_text(template.replace("@PYTHON@", sys.executable))
+            path.write_text(template.replace("@PYTHON@", sys.executable)
+                            .replace("@LOST_BLOCK@", repr(LOST_BLOCK))
+                            .replace("@LAUNCH_FAILED_BLOCK@",
+                                     repr(LAUNCH_FAILED_BLOCK)))
             path.chmod(0o755)
         self.environment = dict(
             os.environ, FAKE_ROOT=str(self.root),

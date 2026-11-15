@@ -208,6 +208,11 @@ class WatchProcessTests(ProcessTestCase):
         self.assertFalse(status["watch"]["running"])
         self.assertIn("since", status["watch"])
         self.assertIn("observed", status["watch"]["approval"])
+        # `status` says why: the cause and the device's own words.
+        self.assertIn("the approval prompt was not answered in time",
+                      status["watch"]["detail"])
+        self.assertIn("Timed out while enabling automation mode",
+                      status["watch"]["detail"])
         again = self.run_script("watch", "--hours", "3", *self.reports())
         self.assertEqual(again.returncode, 4, again.stderr)
         self.assertIn("starting nothing", again.stderr)
@@ -299,6 +304,34 @@ class KeepAwakeProcessTests(ProcessTestCase):
         # Printing the job holds nothing either.
         self.run_script("watch", "--print-launchd-job", LABEL)
         self.assertEqual(len(self.device.caffeinated()), 1)
+
+
+class LostConnectionProcessTests(ProcessTestCase):
+    def test_a_lost_connection_is_a_plain_death_the_watch_replaces(self) -> None:
+        # Rule: xcodebuild reports the connection lost; the supervisor ends it
+        # before its relaunch of the runner (6 s later in the fake), and the
+        # watch process replaces the host and says why in its record.
+        self.device.scenarios([{"kind": "serve"}, {"kind": "serve"}])
+        started = self.run_script("start", "--hours", "3", "--wait", "60",
+                                  *self.reports())
+        self.assertEqual(started.returncode, 0, started.stderr)
+        child = self.spawn("watch", "--hours", "3", *self.reports())
+        first = self.wait_state("watching")["host"]
+        self.device.control(first, "connection-lost")
+        record = self.device.wait(
+            lambda: self.record() if self.record().get("restarts") == 1
+            and self.record().get("state") == "watching" else None, 90,
+            "the watch replaced the host")
+        self.assertNotEqual(record["host"], first)
+        self.assertIn("the device connection was lost at ",
+                      record["last_end"]["reason"])
+        self.assertIn("started no runner again", self.text(child))
+        self.assertFalse((self.device.state_dir / self.device.udid
+                          / "approval.json").exists())
+        code, status = self.status()
+        self.assertEqual(code, 0)
+        self.assertTrue(status["serving"])
+        self.assertIsNone(child.poll())
 
 
 class LaunchdJobTests(ProcessTestCase):

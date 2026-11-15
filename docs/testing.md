@@ -593,7 +593,10 @@ A host ends on its own now and then. A new one needs the owner at the device
 only when the system lost the last approval, however soon it starts: when
 xcodebuild's relaunch of the runner initialized (its log says so) nothing is
 asked and the watch replaces the host at once; when it failed to initialize, or
-the log does not say, the owner may be needed and the watch ends. `watch` keeps one
+the log does not say, the owner may be needed and the watch ends. A host's
+supervisor ends xcodebuild as soon as its log reports the connection to the
+device lost, before xcodebuild starts a runner that cannot initialize, so that
+death is a plain one the watch replaces. `watch` keeps one
 device's host serving, and acts only on evidence: it adopts a serving host,
 starts the next only once the old one is shown to be dead (three reads in a row
 that all worked and all showed the same beat), and otherwise replaces nothing
