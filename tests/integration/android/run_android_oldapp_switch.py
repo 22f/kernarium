@@ -30,7 +30,8 @@ three that each fail one clause of the rule) and, as the adb shell user, checks 
   with no regard to the clock), or replaced by a package of the same name that is not eligible (a raised target
   level, a shared user ID), or only uninstalled, or the property holds the earlier one-number form or another
   installation's value, the next ``list`` clears the property and shows the application ``off`` or not at all;
-- the command's lock is a file of the shell user in its own data directory (type ``shell_data_file``).
+- the command's lock is a file of the shell user in its own data directory (type ``shell_data_file``) that only
+  its owner can read and write (mode 600), and one that was loosened (mode 666) is tightened by the next command.
 
 ``--hook`` (an image that also carries the framework hook and the compatibility library) adds the steps that
 need an old application's own process: the process of the ``running`` probe, started by `am broadcast` in the
@@ -100,6 +101,8 @@ UNREPRESENTABLE_PACKAGES = ("org.example..oldapp", "org.example.oldapp.")
 #: The lock file the command takes (the shell user's own data directory) and the type its directory gives it.
 LOCK_PATH = "/data/local/tmp/kernarium_oldapp.lock"
 LOCK_TYPE = "shell_data_file"
+#: Its mode: readable and writable by its owner alone, so that no application can open it and hold the lock.
+LOCK_MODE = "-rw-------"
 #: What the property holds: the turn-on time in seconds, a space, the installation's first-install time in milliseconds.
 CHOICE_VALUE = re.compile(r"([0-9]+) ([0-9]+)")
 #: The log the denial of the application's set appears in, and how long it is given to show.
@@ -341,12 +344,29 @@ def choice_seconds(value: str, name: str) -> int:
     return int(match.group(1))
 
 
-def check_lock_file(guest) -> str:
-    """The command's lock is a file the shell domain made in its own data directory."""
+def lock_listing(guest) -> str:
+    """`ls -lZ` of the lock file, which must be a file of the shell user in its own data directory."""
     listing = guest.shell(f"ls -lZ {LOCK_PATH}").strip()
     if LOCK_PATH not in listing or LOCK_TYPE not in listing or " shell " not in f" {listing} ":
         raise Failure(f"the lock file is not a {LOCK_TYPE} file of the shell user: {listing[-200:]}")
     return listing
+
+
+def check_lock_file(guest) -> str:
+    """The command's lock is a file the shell domain made in its own data directory, closed to every other user;
+    one that was loosened is tightened by the next command (which takes the lock, so a command still works)."""
+    listing = lock_listing(guest)
+    if listing.split()[0] != LOCK_MODE:
+        raise Failure(f"the lock file is not {LOCK_MODE} (an application could open it): {listing[-200:]}")
+    guest.shell(f"chmod 666 {LOCK_PATH}")
+    result = guest.run(f"{COMMAND} set {UNKNOWN_PACKAGE} off")
+    if result.status != 0 or result.out != f"{UNKNOWN_PACKAGE}\toff\n" or result.err.strip():
+        raise Failure(f"set {UNKNOWN_PACKAGE} off over a loosened lock file: status {result.status}, "
+                      f"out {result.out!r}, err {result.err.strip()!r}")
+    tightened = lock_listing(guest)
+    if tightened.split()[0] != LOCK_MODE:
+        raise Failure(f"the command did not tighten the lock file: {tightened[-200:]}")
+    return f"{LOCK_TYPE}, {listing.split()[0]}; a loosened file is tightened again"
 
 
 def probe_result(guest, variant: str) -> dict[str, str]:
@@ -599,7 +619,7 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
 
         try:
             if report.run("set on", on):
-                report.run("the lock is a shell_data_file of the shell user", lambda: check_lock_file(guest))
+                report.run("the lock is a private shell_data_file of the shell user", lambda: check_lock_file(guest))
                 report.run("an application reads it and cannot set it", lambda: application_view(guest, state["value"]))
         finally:
             report.run("set off", lambda: switch_off(guest))

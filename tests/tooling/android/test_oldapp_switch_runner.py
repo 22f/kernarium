@@ -67,6 +67,8 @@ class ScriptedGuest:
         self.on_time_offset = 0
         self.skip_cleanup: set[str] = set()      # causes `list` does not clear: absent, ineligible, reinstalled, foreign
         self.lock_type = "shell_data_file"
+        self.lock_mode = "-rw-------"
+        self.tightens_lock = True
         self.off_needs_eligible = False
         self.accept_unrepresentable = False
         self.layer = "when-on"                    # when-on, never, always
@@ -158,7 +160,10 @@ class ScriptedGuest:
         if words[:1] == ["id"]:
             return runner.Run(0, self.shell_context + "\n", "")
         if words[:3] == ["ls", "-lZ", runner.LOCK_PATH]:
-            return runner.Run(0, f"-rw-rw-rw- 1 shell shell u:object_r:{self.lock_type}:s0 0 2026-11-15 17:00 {runner.LOCK_PATH}\n", "")
+            return runner.Run(0, f"{self.lock_mode} 1 shell shell u:object_r:{self.lock_type}:s0 0 2026-11-15 17:00 {runner.LOCK_PATH}\n", "")
+        if words[:1] == ["chmod"]:
+            self.lock_mode = "-rw-rw-rw-" if words[1] == "666" else "-rw-------"
+            return runner.Run(0, "", "")
         if words[:1] == ["setprop"]:
             self.properties[words[1]] = words[2]
             return runner.Run(0, "", "")
@@ -223,6 +228,8 @@ class ScriptedGuest:
             return runner.Run(0, "\n".join(lines) + "\n", "")
         if len(arguments) == 3 and arguments[0] == "set" and arguments[2] in ("on", "off"):
             package, mode = arguments[1], arguments[2]
+            if self.tightens_lock and self.lock_mode != "-rw-------":
+                self.lock_mode = "-rw-------"
             refused = runner.Run(self.refuse_with, "", f"kernarium_oldapp: {package} is not an application it applies to\n")
             if KEY_PART.fullmatch(package) is None and not self.accept_unrepresentable:
                 return refused
@@ -529,6 +536,18 @@ class Steps(unittest.TestCase):
         guest = self.guest()
         self.assertIn("shell_data_file", runner.check_lock_file(guest))
         guest.lock_type = "system_data_file"
+        with self.assertRaises(Failure):
+            runner.check_lock_file(guest)
+
+    def test_the_lock_file_is_private(self) -> None:
+        guest = self.guest()
+        self.assertIn("-rw-------", runner.check_lock_file(guest))
+        self.assertEqual(guest.lock_mode, "-rw-------")
+        guest.lock_mode = "-rw-rw-rw-"
+        with self.assertRaises(Failure):
+            runner.check_lock_file(guest)
+        guest = self.guest()
+        guest.tightens_lock = False
         with self.assertRaises(Failure):
             runner.check_lock_file(guest)
 

@@ -949,7 +949,8 @@ and `list` shows it; an ordinary application (`untrusted_app_29`) reads the valu
 and its attempt to set it is refused; `set off` clears it; and a choice is
 cleared by the next listing after a reinstall (at once, whatever the clock says),
 a replacement by a package that is no longer eligible, an uninstall, or a value
-that names no installation, and the command's lock is a file of the shell user. `--hook` (an image that also carries the
+that names no installation, and the command's lock is a file that only the shell user
+can open (a loosened one is tightened). `--hook` (an image that also carries the
 framework hook) adds an old application's own process (`untrusted_app_25`): it
 reads the property and cannot set it, switching on or off ends it, the layer's
 library is mapped into the next process exactly while the switch is on, and a
@@ -960,7 +961,8 @@ provide whose label is a resource. `android17-oldapp-switch-runner` (tooling)
 runs the packages, parsers and steps against a scripted image that keeps
 packages, install times and processes, and `android17-oldapp-switch-command`
 (tooling; skipped without a JDK) runs the command's rule, listing, cleanup,
-writes and exit statuses on a plain JVM; the Android calls need a built image.
+lock file (on real files), writes and exit statuses on a plain JVM; the Android
+calls need a built image.
 `android-video-suspend` (integration) registers when
 `UML_ANDROID_VIDEO_SUSPEND_RELEASE` names the release: the gallery's decoder and
 `screenrecord`'s encoder run across a suspend by the host's route (asked again
