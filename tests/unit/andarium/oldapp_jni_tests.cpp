@@ -122,6 +122,7 @@ struct World {
     Obj* monitor_exit_throws = nullptr; // MonitorExit raises this exception
     std::set<Ref*> revoked;     // globals that stopped being valid (what a re-entrant end of a block would make them)
     bool revoke_next = false;   // the next array function revokes the globals of every array first
+    int set_fails = 0;          // the next SetByteArrayRegion calls are refused (an exception, nothing written)
 };
 World world;
 
@@ -340,7 +341,8 @@ void f_SetByteArrayRegion(Env*, jarray a, jsize start, jsize len, const jbyte* b
     jni_allowed("SetByteArrayRegion where JNI is not allowed (a critical region, or an exception pending)");
     ++world.set_calls;
     auto& bytes = object_of(a)->bytes;
-    if (start < 0 || len < 0 || size_t(start) + size_t(len) > bytes.size()) {
+    if (start < 0 || len < 0 || size_t(start) + size_t(len) > bytes.size() || world.set_fails > 0) {
+        if (world.set_fails > 0) --world.set_fails;
         world.exception_pending = true;
         return;
     }
@@ -4774,6 +4776,92 @@ void check_a_java_write_after_a_skipped_span_is_taken_at_the_next_point() {
     require(raw_of(a)[1000] == 0x77 && static_cast<uint8_t>(buffer[1000]) == 0x77, "the next point took it");
 }
 
+// ---- the application's last write is never lost to the merge's own store
+
+// The merge stores the application's byte W into the array and the pull that follows reads the array; were it to take W for a
+// Java change against the old baseline K, an application thread that wrote K back in between would have W stored over its
+// last write, in its own memory and in the array, on a byte Java never wrote. The merge makes W the baseline at its decision,
+// so the block (K) differs from it and K goes to the array at the next point. The page-protection handler places the
+// application's write of K at the merge's store of W into the live array, between the load of the block byte (the one load
+// every decision rests on) and the baseline write: a second load of the block byte there would see K and write it to the
+// baseline instead.
+void check_the_applications_write_back_to_the_old_value_during_a_critical_merge_is_kept() {
+    for (size_t bytes : {size_t(1), size_t(4)}) {  // the byte path, and the word path
+        Fixture f = make();
+        const size_t size = 65536;
+        Made a = make_held(f, std::vector<uint8_t>(size, 0));
+        uint8_t* block = raw_of(a);
+        uint8_t* array = a.object->bytes.data();
+        uint8_t* apage = page_inside(array, size);
+        size_t at = size_t(apage - array) + 100;
+        at -= at % 4;
+        for (size_t i = 0; i < bytes; ++i) block[at + i] = 0x41;  // the application's first write; the last point's value is 0
+        arm_watch(apage, block + at, 0x00);  // at the merge's store into the array the application writes 0 back
+        jbyte* p = get_elements(f, a.shadow);
+        const int hits = disarm_watch();
+        require(hits == 1, "the application's write landed at the merge's first store into the array");
+        require(array[at] == 0x41 && block[at] == 0x00, "the array has the merge's byte, the block the application's last write");
+        release_elements(f, a.shadow, p, 0);  // a point: block 0 != baseline 0x41, so 0 goes to the array
+        require(block[at] == 0x00 && array[at] == 0x00, "the application's last write reached the array");
+        p = get_elements(f, a.shadow);
+        release_elements(f, a.shadow, p, 0);
+        require(block[at] == 0x00 && array[at] == 0x00, "and the next point keeps it");
+        for (size_t i = 1; i < bytes; ++i) require(block[at + i] == 0x41 && array[at + i] == 0x41, "the other bytes are the application's");
+    }
+}
+
+// The same through the one region merge (a deferred end): the second write lands after the run's region write.
+void check_the_applications_write_back_to_the_old_value_during_a_deferred_ends_merge_is_kept() {
+    Fixture f = make();
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    require(push(f.env, 16) == 0, "a frame");
+    Made a = make_held(f, std::vector<uint8_t>(65536, 0));
+    uint8_t* block = raw_of(a);
+    const size_t at = 5000;
+    block[at] = 0x41;
+    world.exception_pending = true;
+    pop(f.env, nullptr);  // the end waits for a call without an exception
+    world.exception_pending = false;
+    g_after_set = [&] { block[at] = 0x00; };  // after the run's region write: the application writes 0 back
+    jobject plain = byte_array(sample(4));
+    fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, plain);  // the end is finished here
+    require(is_ended_block(a.shadow) && a.object->bytes[at] == 0x41 && block[at] == 0x00, "the end pushed the byte, and the block holds the last write");
+    jbyte* p = get_elements(f, a.shadow);
+    release_elements(f, a.shadow, p, 0);
+    require(block[at] == 0x00 && a.object->bytes[at] == 0x00, "the next point pushed the application's last write");
+}
+
+// A region write the runtime refuses leaves the baseline as it was: the bytes are still the application's at the next point.
+// Two runs; the first write is refused, the second accepted.
+void check_a_refused_region_write_of_a_deferred_end_leaves_the_bytes_to_the_next_point() {
+    Fixture f = make();
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    require(push(f.env, 16) == 0, "a frame");
+    Made a = make_held(f, std::vector<uint8_t>(65536, 0));
+    uint8_t* block = raw_of(a);
+    a.object->bytes[2000] = 0x66;  // Java wrote a byte of the same chunk: it is taken at the end
+    block[1000] = 0x41;            // run 1
+    block[3000] = 0x42;            // run 2
+    world.exception_pending = true;
+    pop(f.env, nullptr);
+    world.exception_pending = false;
+    world.set_fails = 1;
+    world.set_calls = 0;
+    jobject plain = byte_array(sample(4));
+    fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(f.env, plain);
+    require(is_ended_block(a.shadow) && world.set_calls == 2 && !world.exception_pending, "both writes were tried, no exception is left");
+    require(a.object->bytes[1000] == 0 && a.object->bytes[3000] == 0x42, "the refused run is not in the array, the other is");
+    require(block[2000] == 0x66, "Java's byte was taken into the block");
+    world.set_calls = 0;
+    jbyte* p = get_elements(f, a.shadow);  // the next point
+    release_elements(f, a.shadow, p, 0);
+    require(a.object->bytes[1000] == 0x41 && a.object->bytes[3000] == 0x42 && a.object->bytes[2000] == 0x66,
+            "the next point pushed the refused bytes, and nothing else is lost");
+    require(block[1000] == 0x41 && block[3000] == 0x42 && world.set_calls == 0, "the pair, not a region write, did it");
+}
+
 // A pull stores the byte Java changed and no other byte of its word: another thread's raw write to the next byte, landing
 // at that store, survives, and reaches the array at the next point.
 void check_a_pull_stores_only_the_byte_java_changed() {
@@ -4984,6 +5072,9 @@ int main(int argc, char** argv) {
     check_a_java_write_during_a_region_pull_is_taken_at_the_next_point();
     check_a_java_write_during_a_deferred_ends_merge_is_kept();
     check_a_java_write_after_a_skipped_span_is_taken_at_the_next_point();
+    check_the_applications_write_back_to_the_old_value_during_a_critical_merge_is_kept();
+    check_the_applications_write_back_to_the_old_value_during_a_deferred_ends_merge_is_kept();
+    check_a_refused_region_write_of_a_deferred_end_leaves_the_bytes_to_the_next_point();
     check_a_pull_stores_only_the_byte_java_changed();
     check_the_critical_merge_stores_only_the_byte_the_application_wrote();
     check_install_rules();
