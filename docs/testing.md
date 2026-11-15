@@ -649,7 +649,8 @@ assertion (never a display one) and logs any turn of its loop that starts late.
 The `kernarium-ipad-automation-watch` and
 `kernarium-ipad-automation-watch-process` tooling tests, each registered as
 shards that run side by side (`-shard1` and on), run the real script against
-fake `xcrun`, `xcodebuild` and `caffeinate` executables.
+fake `xcrun`, `xcodebuild` and `caffeinate` executables; a shard that selects
+no test fails, and `kernarium-automation-shards` pins that.
 
 ### Edge gestures (device only)
 

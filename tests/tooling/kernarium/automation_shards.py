@@ -5,8 +5,8 @@ The iPad automation watch tests are pinned by real waits, so CTest runs each
 of them as several processes side by side. `--shard INDEX/COUNT` (INDEX counts
 from 0) runs the tests whose place among the module's tests, sorted by id, is
 INDEX modulo COUNT: the COUNT processes together run every test once, and a
-test added to the module joins a shard on its own. Any other argument is
-unittest's.
+test added to the module joins a shard on its own. A shard that selects no test
+is an error. Any other argument is unittest's.
 """
 
 from __future__ import annotations
@@ -34,8 +34,13 @@ class ShardLoader(unittest.TestLoader):
     def loadTestsFromModule(self, module, *args, **kwargs):
         tests = sorted(flatten(super().loadTestsFromModule(module, *args, **kwargs)),
                        key=lambda test: test.id())
-        return unittest.TestSuite(
-            test for place, test in enumerate(tests) if place % self.count == self.index)
+        chosen = [test for place, test in enumerate(tests) if place % self.count == self.index]
+        if not chosen:
+            # unittest ends such a run with status 5 only from Python 3.12; a shard that runs nothing
+            # must not pass as a shard that ran its tests.
+            raise SystemExit(f"shard {self.index}/{self.count} selects none of the {len(tests)} tests of "
+                             f"{module.__name__}")
+        return unittest.TestSuite(chosen)
 
 
 def main(module: str = "__main__") -> None:

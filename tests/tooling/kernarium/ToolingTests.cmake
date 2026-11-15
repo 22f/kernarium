@@ -83,6 +83,13 @@ _uml_add_watch_shards(kernarium-ipad-automation-watch-process
     test_ipad_automation_watch_process.py 4)
 
 uml_add_tooling_test(
+    NAME kernarium-automation-shards
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_automation_shards.py
+    LABELS kernarium
+    TIMEOUT 120)
+
+uml_add_tooling_test(
     NAME kernarium-audio-interrupter
     COMMAND ${Python3_EXECUTABLE} -B
         ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_audio_interrupter.py
