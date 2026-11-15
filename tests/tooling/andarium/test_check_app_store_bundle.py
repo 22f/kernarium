@@ -39,6 +39,11 @@ PROBE_KNOB = (
     "#include <stdlib.h>\n"
     'const char *fixture(void) { return getenv("ANDARIUM_INPUT_PROBE"); }\n'
 )
+# The probe session's scripted list of old apps.
+OLD_APPS_PROBE_KNOB = (
+    "#include <stdlib.h>\n"
+    'const char *fixture(void) { return getenv("ANDARIUM_OLD_APPS_PROBE"); }\n'
+)
 # The harness's console lines (ConsoleReport), which the configuration
 # compiles out: what the check reports for each, and a full line.
 REPORT_LINES = (
@@ -1729,6 +1734,7 @@ def main() -> int:
         launch = build(root, "launch", LAUNCH_KNOB)
         thermal = build(root, "thermal", THERMAL_KNOB)
         probe = build(root, "probe", PROBE_KNOB)
+        old_apps_probe = build(root, "old-apps-probe", OLD_APPS_PROBE_KNOB)
         reports = {
             index: build(root, f"report{index}", f'const char *fixture(void) {{ return "{line}"; }}\n')
             for index, (_name, line) in enumerate(REPORT_LINES)
@@ -1794,6 +1800,10 @@ def main() -> int:
               passes=False, expect="ANDARIUM_THERMAL_STATE")
         check(make_app(root, "probe-knob", probe, app_info()),
               passes=False, expect="ANDARIUM_INPUT_PROBE")
+        # The probe session's scripted list of old apps, for the App Store and for TestFlight.
+        for configuration in ("AppStore", "TestFlight"):
+            check(make_app(root, f"old-apps-probe-knob-{configuration}", old_apps_probe, app_info()),
+                  passes=False, expect="ANDARIUM_OLD_APPS_PROBE", args=["--configuration", configuration])
         knob_app = make_app(root, "framework-knob", clean, app_info(), framework=knob)
         check(knob_app, passes=False, expect="Runtime.framework/Runtime")
 
@@ -1907,6 +1917,10 @@ def main() -> int:
                   passes=False, expect=expect)
             debug_app = make_app(root, f"debug-framework-{index}", clean, app_info(), framework=library)
             check(debug_app, passes=False, expect=expect)
+            if kind == "old apps preview":
+                # TestFlight is held to the same rule.
+                check(make_app(root, f"tf-debug-app-{index}", library, app_info()),
+                      passes=False, expect=expect, args=["--configuration", "TestFlight"])
             runtime_only = run([
                 sys.executable, "-B", str(options.checker), "--runtime",
                 str(debug_app / "Frameworks" / "Runtime.framework")])
