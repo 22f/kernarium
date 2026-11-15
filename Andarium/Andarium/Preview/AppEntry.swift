@@ -520,7 +520,7 @@ struct AppEntry {
             // After Install anyway of an app built for an Android before 4.0 that
             // Old app compatibility lists: the card says where its switch is.
             let outcome: ApkInstallOutcome = screen == "install-legacy-hint" ? .installed : .installedWithoutData
-            let words = outcome.words(fileName: file, oldAppHint: true)
+            let words = outcome.words(fileName: "pixel-knights.apk", oldAppHint: true)
             return BusyState(
                 title: words.title, detail: words.detail, result: BusyResult(style: words.style, dismiss: dismiss)
             )
