@@ -932,6 +932,10 @@ extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void* vm_pointe
         oldapp_log_print(kLogWarn, kTag, "no region below 2 GiB: allocator imports are left alone");
     }
     read_package();
+    if (g_package[0] == '\0') {
+        oldapp_log_print(kLogWarn, kTag,
+                         "the package of this process is unknown: every library but the platform's counts as the application's own");
+    }
     const Platform platform{is_app_caller, thread_state, log_line, make_writable, make_read_only, describe_method, now_ms,
                             alloc_baseline, free_baseline, region != nullptr ? thunk_address : nullptr,
                             region != nullptr ? thunk_count() : 0, is_own_library, ended_lock, ended_unlock};

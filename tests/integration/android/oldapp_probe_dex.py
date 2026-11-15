@@ -5,7 +5,7 @@ The class is the Java side of oldapp_probe_apk.py (the native side is oldapp/old
 written as DEX because the host has no Android SDK; property_probe_dex.py's assembler and tables do
 the work and this module only lays out a class with several methods. The Java it stands for:
 
-    public class Probe extends BroadcastReceiver {
+    public class Probe extends BroadcastReceiver implements Runnable {
         public void onReceive(Context context, Intent intent) {
             String shim = intent.getStringExtra("shim");
             if (shim != null) System.loadLibrary(shim);       // only when the test loads the layer itself
@@ -26,8 +26,15 @@ the work and this module only lays out a class with several methods. The Java it
             for (int i = 0; i < frames; i++) ok &= sceneFrame(i);
             return ok;
         }
+        public static void render() {          // the render thread: a java.lang.Thread that Java starts
+            Thread thread = new Thread(new Probe());
+            thread.start();
+            thread.join();
+        }
+        public void run() { sceneDone(scene(sceneFrames())); }
         public static native int tick(), tickArm(), tickReg(), tickRegArm(), recurse(int depth), abi0();
-        public static native int sceneInit(), sceneFrame(int frame);
+        public static native int sceneInit(), sceneFrame(int frame), sceneFrames();
+        public static native void sceneDone(int status);
         public static native void throws_(), empty();
         ... the argument and result types the thunks must carry through (NATIVES below)
     }
@@ -36,7 +43,8 @@ the work and this module only lays out a class with several methods. The Java it
 passes the array back to. The other native methods are what the native code calls to see the end of a native
 method (blocks that end when it returns) and that the thunks pass every argument and result through; `spin` is the
 loop that times a native call. `asset` is what an application's asset reader does (a fresh array of a given length
-for every call), `scene` the loop of its render thread: one native init method, then one native method per frame;
+for every call), `scene` the loop of its render thread: one native init method, then one native method per frame
+(`render` starts that thread, a java.lang.Thread whose Runnable is the probe class, and waits for it);
 `same` returns its argument (an array Java holds, obtained again), `poke` writes a byte, `collect` is Runtime.gc().
 """
 
@@ -58,6 +66,8 @@ RUNTIME = "Ljava/lang/Runtime;"
 BYTES = "[B"
 ACC_STATIC = 0x8
 ACC_NATIVE = 0x100
+RUNNABLE = "Ljava/lang/Runnable;"
+THREAD = "Ljava/lang/Thread;"
 ABI12 = ("I", "J", "D", "F", "I", "J", "D", "F", "I", "I", "I", "I")  # 64-bit arguments past the registers, aligned
 #: (name, return type, parameters) of the static native methods besides `run`. tick/tickArm are bound by name (Thumb and
 #: ARM functions of the library), tickReg/tickRegArm and abi12Arm by RegisterNatives.
@@ -68,7 +78,7 @@ NATIVES = (
     ("retZ", "Z", ("Z",)), ("retB", "B", ("B",)), ("retC", "C", ("C",)), ("retS", "S", ("S",)), ("retI", "I", ("I",)),
     ("retJ", "J", ("J",)), ("retF", "F", ("F",)), ("retD", "D", ("D",)), ("retL", base.STRING, (base.STRING,)),
     ("retV", "V", ("I",)), ("readV", "I", ()),
-    ("sceneInit", "I", ()), ("sceneFrame", "I", ("I",)),
+    ("sceneInit", "I", ()), ("sceneFrame", "I", ("I",)), ("sceneFrames", "I", ()), ("sceneDone", "V", ("I",)),
 )
 
 
@@ -92,13 +102,18 @@ def build_dex() -> bytes:
     asset = pools.method(owner, "asset", BYTES, ("I", "I"))
     peek = pools.method(owner, "peek", "I", (BYTES, "I"))
     scene = pools.method(owner, "scene", "I", ("I",))
+    render = pools.method(owner, "render", "V")
+    run_thread = pools.method(owner, "run", "V")  # Runnable.run
+    thread_init = pools.method(THREAD, "<init>", "V", (RUNNABLE,))
+    thread_start = pools.method(THREAD, "start", "V")
+    thread_join = pools.method(THREAD, "join", "V")
     fill = pools.method(ARRAYS, "fill", "V", (BYTES, "B"))
     poke = pools.method(owner, "poke", "V", (BYTES, "I", "I"))
     same = pools.method(owner, "same", BYTES, (BYTES,))
     collect = pools.method(owner, "collect", "V")
     get_runtime = pools.method(RUNTIME, "getRuntime", RUNTIME)
     gc = pools.method(RUNTIME, "gc", "V")
-    for item in ("V", "I", BYTES, "Z", "B", "C", "S", "J", "F", "D"):
+    for item in ("V", "I", BYTES, "Z", "B", "C", "S", "J", "F", "D", RUNNABLE, THREAD):
         pools.type(item)
     for text in ("shim", "koldprobe", "opts", PAYLOAD):
         pools.string(text)
@@ -186,6 +201,25 @@ def build_dex() -> bytes:
     scene_body.label("done")
     scene_body.op("return", 0)
 
+    # v0 a temporary, v1 the Thread, v2 the new probe object: render() starts the thread and waits for it.
+    render_body = base.Code(registers=3, ins=0, outs=2)
+    render_body.op("new-instance", 1, THREAD)
+    render_body.op("new-instance", 2, owner)
+    render_body.op("invoke-direct", init, 2)
+    render_body.op("invoke-direct", thread_init, 1, 2)
+    render_body.op("invoke-virtual", thread_start, 1)
+    render_body.op("invoke-virtual", thread_join, 1)
+    render_body.op("return-void")
+
+    # v0 a temporary, v1 this: the Runnable of the render thread.
+    run_body = base.Code(registers=2, ins=1, outs=1)
+    run_body.op("invoke-static", natives["sceneFrames"])
+    run_body.op("move-result", 0)
+    run_body.op("invoke-static", scene, 0)
+    run_body.op("move-result", 0)
+    run_body.op("invoke-static", natives["sceneDone"], 0)
+    run_body.op("return-void")
+
     pools.finish()
     string_count, type_count = len(pools.sorted_strings), len(pools.sorted_types)
     proto_count, method_count = len(pools.sorted_protos), len(pools.sorted_methods)
@@ -214,12 +248,16 @@ def build_dex() -> bytes:
             list_offsets[parameters] = data_off + len(data)
             data += struct.pack("<I", len(parameters)) + b"".join(
                 struct.pack("<H", pools.type_id(item)) for item in parameters)
-    if list_offsets:
-        sections.append((base.TYPE_TYPE_LIST, len(list_offsets), first))
+    interfaces = (RUNNABLE,)  # the class implements Runnable: the render thread's body
+    if interfaces not in list_offsets:
+        align(4)
+        list_offsets[interfaces] = data_off + len(data)
+        data += struct.pack("<I", len(interfaces)) + b"".join(struct.pack("<H", pools.type_id(item)) for item in interfaces)
+    sections.append((base.TYPE_TYPE_LIST, len(list_offsets), first))
 
     bodies = {init: constructor, on_receive: receive, payload: payload_body, echo: echo_body, spin: spin_body,
               asset: asset_body, peek: peek_body, scene: scene_body, poke: poke_body, same: same_body,
-              collect: collect_body}
+              collect: collect_body, render: render_body, run_thread: run_body}
     code_offsets: dict[object, int] = {}
     first_code = None
     for method, body in bodies.items():
@@ -250,8 +288,10 @@ def build_dex() -> bytes:
          (pools.method_id(poke), base.ACC_PUBLIC | ACC_STATIC, code_offsets[poke]),
          (pools.method_id(same), base.ACC_PUBLIC | ACC_STATIC, code_offsets[same]),
          (pools.method_id(collect), base.ACC_PUBLIC | ACC_STATIC, code_offsets[collect]),
+         (pools.method_id(render), base.ACC_PUBLIC | ACC_STATIC, code_offsets[render]),
          *((pools.method_id(method), base.ACC_PUBLIC | ACC_STATIC | ACC_NATIVE, 0) for method in natives.values())))
-    virtual = [(pools.method_id(on_receive), base.ACC_PUBLIC, code_offsets[on_receive])]
+    virtual = sorted([(pools.method_id(on_receive), base.ACC_PUBLIC, code_offsets[on_receive]),
+                      (pools.method_id(run_thread), base.ACC_PUBLIC, code_offsets[run_thread])])
     class_data_offset = data_off + len(data)
     data += base.uleb128(0) + base.uleb128(0) + base.uleb128(len(direct)) + base.uleb128(len(virtual))
     for group in (direct, virtual):
@@ -283,8 +323,8 @@ def build_dex() -> bytes:
         tables += struct.pack("<HHI", pools.type_id(method.owner),
                               pools.index["proto"][(method.return_type, method.parameters)],
                               pools.string_id(method.name))
-    tables += struct.pack("<IIIIIIII", pools.type_id(owner), base.ACC_PUBLIC, pools.type_id(base.RECEIVER), 0,
-                          base.NO_INDEX, 0, class_data_offset, 0)
+    tables += struct.pack("<IIIIIIII", pools.type_id(owner), base.ACC_PUBLIC, pools.type_id(base.RECEIVER),
+                          list_offsets[interfaces], base.NO_INDEX, 0, class_data_offset, 0)
 
     total = data_off + len(data)
     header = bytearray(b"dex\n035\0" + bytes(24))

@@ -90,8 +90,17 @@ class Dex:
                 access, offset = uleb(self.data, offset)
                 code, offset = uleb(self.data, offset)
                 index += step
-                found[self.methods[index][1]] = (access, code)
+                name = self.methods[index][1]
+                found[name + "/instance" if name in found else name] = (access, code)  # Runnable.run beside run(String)
         return found
+
+    def interfaces(self) -> list[str]:
+        """The interfaces the one class implements."""
+        (_, _, _, offset, _, _, _, _) = struct.unpack_from("<IIIIIIII", self.data, self.class_off)
+        if offset == 0:
+            return []
+        (count,) = struct.unpack_from("<I", self.data, offset)
+        return [self.types[i] for i in struct.unpack_from(f"<{count}H", self.data, offset + 4)]
 
     def instructions(self, code_offset: int) -> list[int]:
         registers, ins, outs, tries, debug, size = struct.unpack_from("<HHHHII", self.data, code_offset)
@@ -115,13 +124,14 @@ class ProbePackageTests(unittest.TestCase):
         dex = Dex(probe.oldapp_probe_dex.build_dex())
         methods = dex.class_methods()
         natives = {"run"} | {name for name, _, _ in probe.oldapp_probe_dex.NATIVES}
-        java = {"payload", "echo", "spin", "asset", "peek", "scene", "poke", "same", "collect"}
+        java = {"payload", "echo", "spin", "asset", "peek", "scene", "poke", "same", "collect", "render", "run/instance"}
         self.assertEqual(set(methods), {"<init>", "onReceive"} | java | natives)
         for name in natives:
             self.assertEqual(methods[name][0], ACC_PUBLIC | ACC_STATIC | ACC_NATIVE, name)
             self.assertEqual(methods[name][1], 0, f"{name}: a native method has no code")
         for name in {"<init>", "onReceive"} | java:
             self.assertNotEqual(methods[name][1], 0, name)
+        self.assertEqual(methods["run/instance"][0], ACC_PUBLIC, "Runnable.run is an instance method")
         self.assertEqual(methods["onReceive"][0], ACC_PUBLIC)
         self.assertEqual(methods["payload"][0], ACC_PUBLIC | ACC_STATIC)
         owner = "Lorg/example/andarium/oldappprobe/Probe;"
@@ -175,6 +185,22 @@ class ProbePackageTests(unittest.TestCase):
         self.assertIn(("peek", "ILI", "I"), listed)
         self.assertIn(("scene", "II", "I"), listed)
         self.assertIn(("sceneFrame", "II", "I"), listed)
+
+    def test_the_render_thread_is_a_java_thread_that_runs_the_probe_class(self) -> None:
+        dex = Dex(probe.oldapp_probe_dex.build_dex())
+        methods = dex.class_methods()
+        owner = "Lorg/example/andarium/oldappprobe/Probe;"
+        self.assertEqual(dex.interfaces(), ["Ljava/lang/Runnable;"])
+        listed = {(klass, name, shorty) for klass, name, shorty, ret in dex.methods}
+        for method in (("Ljava/lang/Thread;", "<init>", "VL"), ("Ljava/lang/Thread;", "start", "V"),
+                       ("Ljava/lang/Thread;", "join", "V"), (owner, "run", "V"), (owner, "render", "V")):
+            self.assertIn(method, listed)
+        render = dex.instructions(methods["render"][1])
+        self.assertEqual([unit & 0xFF for unit in render].count(0x22), 2, "new-instance: the Thread and the probe object")
+        self.assertEqual([unit & 0xFF for unit in render].count(0x6E), 2, "invoke-virtual: start and join")
+        body = dex.instructions(methods["run/instance"][1])
+        self.assertEqual(body[-1] & 0xFF, 0x0E, "return-void")
+        self.assertEqual([unit & 0xFF for unit in body].count(0x71), 3, "sceneFrames, scene, sceneDone")
 
     def test_the_variants_differ_in_package_and_target_level_only(self) -> None:
         old = binary_xml.decode_manifest(binary_xml.encode_manifest(probe.manifest_tree("old")))
@@ -347,7 +373,7 @@ LAYER_LOG = ("I/kernarium_oldapp( 1): installed: jni=1 arena=1\n"
              "native methods with a thunk: 400 4\n"
              "I/kernarium_oldapp( 1): the most references one native method call has ended at its return; native "
              "methods with a thunk: 171 6\n")
-SCENE_RESULT = "scene_complete=pass;scene_data=pass;scene_write=pass;peak_result=pass;done=1;"
+SCENE_RESULT = "scene_complete=pass;scene_data=pass;scene_write=pass;scene_attached=pass;peak_result=pass;done=1;"
 
 
 class SceneGuest(FakeGuest):
@@ -371,7 +397,8 @@ class SceneGuest(FakeGuest):
 
 class SceneTests(unittest.TestCase):
     def test_the_scene_must_pass_in_every_variant(self) -> None:
-        self.assertEqual(set(runner.EXPECTED["scene"]), {"scene_complete", "scene_data", "scene_write", "done"})
+        self.assertEqual(set(runner.EXPECTED["scene"]),
+                         {"scene_complete", "scene_data", "scene_write", "scene_attached", "done"})
         with self.assertRaises(runner.Failure) as raised:
             runner.evaluate("scene", {"scene_complete": "pass", "scene_data": "fail", "scene_write": "pass", "done": "1"})
         self.assertIn("scene_data=fail", str(raised.exception))

@@ -82,8 +82,9 @@ SEMANTICS = {"write_through": "pass", "identity": "pass", "retained": "pass", "m
 ENDS = ("ends_lazy_thumb", "ends_lazy_arm", "ends_reg_thumb", "ends_reg_arm", "ends_recursion", "ends_onload",
         "ends_outside", "ended_keep", "ended_arrays")
 #: The render-thread scene of an application (a run of its own, with the options "scene"): the same in every variant,
-#: since a thread that gets a few hundred results at a time works on ART too.
-SCENE_ROWS = ("scene_complete", "scene_data", "scene_write")
+#: since a thread that gets a few hundred results at a time works on ART too. The first three rows are a thread that
+#: Java starts; scene_attached is a short run on a native thread that attaches itself.
+SCENE_ROWS = ("scene_complete", "scene_data", "scene_write", "scene_attached")
 EXPECTED = {
     "scene": {**dict.fromkeys(SCENE_ROWS, "pass"), "done": "1"},
     "old": {"shim_mapped": "yes", "raw_read": "pass", "passback": "pass", "elements": "pass", "global": "pass",

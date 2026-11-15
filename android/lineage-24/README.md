@@ -644,7 +644,8 @@ patches ART's one JNI function table in place and gives the application:
   returned) show at the next one, and a raw write from another thread while a
   point is running can be lost. A reference to a block ends where a Dalvik local
   reference did: at `DeleteLocalRef`, at `PopLocalFrame`, at the return of a native
-  method of the application's own libraries (found by name or registered; another
+  method of the application's own libraries (found by name or registered; those
+  installed with the application or in its private data directories; another
   package's library keeps the runtime's binding) and when its thread detaches. A
   thread holds at most 512 live references; a result beyond the limit stays ART's
   own reference. The same array returned again to the thread is the same block
@@ -673,7 +674,8 @@ process see the real arrays. Page protection is restored after each write, and
 a library whose pages cannot all be opened is left untouched. The library logs
 under the tag `kernarium_oldapp` the first `byte[]` result that stayed ART's own
 reference (with the blocks and bytes its thread held, and the ended blocks that
-waited), the first time it asked the runtime to collect, the first allocation
+waited), the first time it asked the runtime to collect, a process name it could
+not read (every library but the platform's then counts as the application's), the first allocation
 that went to libc because the low arena had no room, and, at most every 30 s
 while it grows, the most blocks any one thread has held.
 

@@ -49,15 +49,17 @@
 //   abi_args, abi_returns  a native method gets its arguments (12, with jlong, jdouble and jfloat on the stack) and
 //                returns its result (every type) as without the thunk
 //   scene_complete, scene_data, scene_write  (the options "scene": a run of its own, in a fresh process) the render
-//                thread of an application. A thread attached by the probe calls a Java loop that enters two
-//                lazily bound native methods of this library directly from Java: an init method that gets 170
-//                fresh byte[] results from a Java asset reader, and a frame method (800 frames) that gets a few
-//                per frame and 100 to 150 in a burst every 100 frames (a map change), 5000 or more in all, of
-//                seeded lengths from 16 bytes to 320 KB, none repeated, none deleted, no local frame. Each is
-//                read as the length and content Java gave it (through the JNI functions, and through the
-//                object pointer where the layer is mapped); every eighth gets four bytes written (through the
-//                pointer where the layer is mapped) and Java reads them back. The runner reads the layer's
-//                log lines for the process: no declined result, no allocation that left the arena
+//                thread of an application. A java.lang.Thread that Java starts (the probe class is its Runnable)
+//                runs a Java loop that enters two lazily bound native methods of this library directly from Java:
+//                an init method that gets 170 fresh byte[] results from a Java asset reader, and a frame method
+//                (800 frames) that gets a few per frame and 100 to 150 in a burst every 100 frames (a map change),
+//                5000 or more in all, of seeded lengths from 16 bytes to 320 KB, none repeated, none deleted, no
+//                local frame. Each is read as the length and content Java gave it (through the JNI functions, and
+//                through the object pointer where the layer is mapped); every eighth gets four bytes written
+//                (through the pointer where the layer is mapped) and Java reads them back. The runner reads the
+//                layer's log lines for the process: no declined result, no allocation that left the arena
+//   scene_attached  the same loop, shorter (100 frames), on a native thread of the probe that attaches itself to the
+//                runtime (AttachCurrentThread) and detaches at the end: the other way a thread enters the runtime
 //   ended_keep   an array Java holds is obtained as a block and its pointer kept; the block's reference ends, a
 //                thousand temporaries of 64 KiB come and go with Runtime.gc() between batches, and the kept pointer
 //                still reads the array's bytes as of the end. Java then changes a byte, the application writes another
@@ -862,6 +864,9 @@ struct Scene {
     uint32_t failure = 0;    // which check
     uint32_t write_failed_at = 0;
     uint32_t largest = 0;
+    int frames = 0;         // the frames of the loop that is running
+    jint status = 0;        // what the loop returned (the Java thread reports it through sceneDone)
+    bool finished = false;  // sceneDone was called
 };
 Scene g_scene;
 
@@ -974,6 +979,17 @@ bool scene_result(Env* env, jclass probe) {
 
 }  // namespace
 
+extern "C" __attribute__((visibility("default"))) jint Java_org_example_andarium_oldappprobe_Probe_sceneFrames(Env*,
+                                                                                                             jclass) {
+    return g_scene.frames;
+}
+
+extern "C" __attribute__((visibility("default"))) void Java_org_example_andarium_oldappprobe_Probe_sceneDone(Env*, jclass,
+                                                                                                           jint status) {
+    g_scene.status = status;
+    g_scene.finished = true;
+}
+
 extern "C" __attribute__((visibility("default"))) jint Java_org_example_andarium_oldappprobe_Probe_sceneInit(Env* env,
                                                                                                            jclass probe) {
     bool ok = g_scene.failed_at == 0;
@@ -1007,6 +1023,7 @@ struct SceneWork {
     jint status;
 };
 
+// The thread of the attached variant: a native thread that attaches itself, runs the Java loop and detaches.
 void* scene_thread_main(void* argument) {
     SceneWork* work = static_cast<SceneWork*>(argument);
     Env* env = nullptr;
@@ -1015,33 +1032,64 @@ void* scene_thread_main(void* argument) {
         return nullptr;
     }
     work->status = entry<jint (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kInt, kVarargs))(
-        env, work->probe, work->scene, kSceneFrames);
+        env, work->probe, work->scene, g_scene.frames);
     entry<jint (*)(Vm*)>(reinterpret_cast<Env*>(work->vm), vmslot::DetachCurrentThread)(work->vm);
     return nullptr;
 }
 
-// The scene on a thread of its own, as a render thread: the rows scene_complete, scene_data and scene_write.
-void scene_cases(Report& report, Env* env, jclass probe) {
+constexpr int kAttachedFrames = 100;
+constexpr uint32_t kAttachedMinimumResults = 500;
+
+// One run of the scene. The Java thread (`attached` false): Probe.render() starts a java.lang.Thread whose run loop is
+// scene(sceneFrames()) and joins it; the thread reports its status through sceneDone. The attached variant: a native
+// thread attaches itself and calls scene(frames).
+struct SceneRun {
+    bool started = false;
+    jint status = 0;
+    uint32_t elapsed_ms = 0;
+};
+
+SceneRun run_scene(Env* env, jclass probe, bool attached) {
     const auto static_method = entry<jmethodID (*)(Env*, jclass, const char*, const char*)>(env, slot::GetStaticMethodID);
     g_scene = Scene{};
     g_scene.asset = static_method(env, probe, "asset", "(II)[B");
     g_scene.peek = static_method(env, probe, "peek", "([BI)I");
     g_scene.layer = shim_mapped();
-    SceneWork work{nullptr, nullptr, static_method(env, probe, "scene", "(I)I"), 0};
-    bool started = false;
-    const uint64_t scene_start = now_us();
-    if (g_scene.asset != nullptr && g_scene.peek != nullptr && work.scene != nullptr &&
-        entry<jint (*)(Env*, Vm**)>(env, 219)(env, &work.vm) == 0) {  // GetJavaVM
-        work.probe = static_cast<jclass>(entry<jobject (*)(Env*, jobject)>(env, slot::NewGlobalRef)(env, probe));
-        unsigned long thread = 0;
-        started = probe_pthread_create(&thread, nullptr, scene_thread_main, &work) == 0;
-        if (started) {
-            probe_pthread_join(thread, nullptr);
+    g_scene.frames = attached ? kAttachedFrames : kSceneFrames;
+    SceneRun run;
+    const uint64_t start = now_us();
+    if (g_scene.asset != nullptr && g_scene.peek != nullptr) {
+        if (attached) {
+            SceneWork work{nullptr, nullptr, static_method(env, probe, "scene", "(I)I"), 0};
+            if (work.scene != nullptr && entry<jint (*)(Env*, Vm**)>(env, 219)(env, &work.vm) == 0) {  // GetJavaVM
+                work.probe = static_cast<jclass>(entry<jobject (*)(Env*, jobject)>(env, slot::NewGlobalRef)(env, probe));
+                unsigned long thread = 0;
+                run.started = probe_pthread_create(&thread, nullptr, scene_thread_main, &work) == 0;
+                if (run.started) {
+                    probe_pthread_join(thread, nullptr);
+                }
+                entry<void (*)(Env*, jobject)>(env, slot::DeleteGlobalRef)(env, work.probe);
+                run.status = work.status;
+            }
+        } else {
+            const jmethodID render = static_method(env, probe, "render", "()V");
+            if (render != nullptr) {
+                entry<void (*)(Env*, jclass, jmethodID, ...)>(env, static_call_slot(kVoid, kVarargs))(env, probe, render);
+                run.started = g_scene.finished;
+                run.status = g_scene.status;
+            }
         }
-        entry<void (*)(Env*, jobject)>(env, slot::DeleteGlobalRef)(env, work.probe);
     }
+    run.elapsed_ms = static_cast<uint32_t>((now_us() - start) / 1000);
+    return run;
+}
+
+// The scene on a thread of its own, as a render thread: the rows scene_complete, scene_data and scene_write (a thread
+// Java started) and scene_attached (a thread the probe attached).
+void scene_cases(Report& report, Env* env, jclass probe) {
     char text[12];
-    decimal(text, static_cast<uint32_t>((now_us() - scene_start) / 1000));
+    const SceneRun run = run_scene(env, probe, false);
+    decimal(text, run.elapsed_ms);
     report.line("scene_ms", text);
     decimal(text, g_scene.results);
     report.line("scene_results", text);
@@ -1055,10 +1103,21 @@ void scene_cases(Report& report, Env* env, jclass probe) {
     report.line("scene_failed_at", text);
     decimal(text, g_scene.failure);
     report.line("scene_failure", text);
-    report.verdict("scene_complete", started && work.status == 1 && g_scene.results >= kSceneMinimumResults &&
+    report.verdict("scene_complete", run.started && run.status == 1 && g_scene.results >= kSceneMinimumResults &&
                                          g_scene.bursts >= kSceneMinimumBursts);
-    report.verdict("scene_data", started && g_scene.failed_at == 0);
-    report.verdict("scene_write", started && g_scene.write_failed_at == 0);
+    report.verdict("scene_data", run.started && g_scene.failed_at == 0);
+    report.verdict("scene_write", run.started && g_scene.write_failed_at == 0);
+
+    const SceneRun attached = run_scene(env, probe, true);
+    decimal(text, attached.elapsed_ms);
+    report.line("scene_attached_ms", text);
+    decimal(text, g_scene.results);
+    report.line("scene_attached_results", text);
+    decimal(text, g_scene.failed_at);
+    report.line("scene_attached_failed_at", text);
+    report.verdict("scene_attached", attached.started && attached.status == 1 && g_scene.failed_at == 0 &&
+                                         g_scene.write_failed_at == 0 && g_scene.results >= kAttachedMinimumResults &&
+                                         g_scene.bursts >= 1);
 }
 
 // ---- ended blocks (the rows ended_*)
