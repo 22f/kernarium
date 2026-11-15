@@ -606,8 +606,16 @@ public:
     }
 
     /* Brings the platform's video for a camera in line with the streams that
-     * are running on it. */
+     * are running on it, and tells the application whether a camera is in video
+     * mode now: whatever the way in or out (the guest's stream, a timer's retry
+     * of a start that failed, a session that failed and came back). */
     void reconfigure(Runtime& runtime)
+    {
+        reconfigureVideo(runtime);
+        reportVideoMode(inVideoMode());
+    }
+
+    void reconfigureVideo(Runtime& runtime)
     {
         std::uint32_t width = 0, height = 0, rate = 0;
         for (const auto& [id, stream] : streams) {
@@ -641,6 +649,10 @@ public:
         bool ok = false;
         if (admitsCamera(runtime)) {
             openFramesOf(runtime.description.platformIndex);
+            // The settings first: the platform programs the stabilization the guest asks for on the new video connection
+            // before the capture can deliver a frame, so the first picture has the crop the rest will have. (Applied after
+            // the start, the picture would change its crop under a guest that already shows it.)
+            applySettings(runtime, true);
             ok = session->startVideo(runtime.description.platformIndex, width, height, rate);
         }
         if (ok) {
