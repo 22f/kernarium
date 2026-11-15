@@ -16,7 +16,8 @@ boots that framework once or more and states what the script did: the saves it
 asked for, the lines it logged, the marker, what the store holds afterwards and
 how long it slept. A guest stops when the script is killed right after it wrote
 the marker, or a set time after it ended. The stubs keep time by the seconds the
-script sleeps and the commands take, so nothing waits.
+script sleeps and the commands take, so nothing waits. A stub reaches the fake framework over a pair of
+FIFOs and runs on shell builtins, so a call starts no interpreter.
 
 The test checks itself: mutants of the script (marker 1 final, marker 2 set by a
 boot that saved, a stalled listing read as absent, a network removed during the
@@ -32,8 +33,20 @@ from __future__ import annotations
 
 __import__("sys").dont_write_bytecode = True
 
+import concurrent.futures
+import dataclasses
 import os
+import subprocess
 import sys
+import tempfile
+import threading
+import traceback
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import wifi_dump_fixtures
 
 CLOCK_LIMIT = 600
 # What `dumpsys wifi` does: fails, says nothing for twelve seconds, says the caller may not, or prints its first
@@ -47,8 +60,18 @@ OTHER_NAMES = ("Elsewhere", "VirtWifi", 'X SSID: "VirtWifi"', 'VirtWifi"')
 HEADER = "Network Id      SSID                         Security type"
 
 
-# ---- The fake framework: a `cmd wifi` the stub forwards to. It is the first thing in the file, so that
-# a stub starts without the imports of the test.
+# ---- The fake framework: what a `cmd wifi` call does.
+
+class Streams:
+    """What one call prints."""
+
+    def __init__(self) -> None:
+        self.out: list[str] = []
+        self.err: list[str] = []
+
+    def say(self, text: str, error: bool = False) -> None:
+        (self.err if error else self.out).append(text + "\n")
+
 
 def load(path: str) -> dict:
     """The framework's state: `name value` lines, a value being None, a boolean or an integer."""
@@ -86,7 +109,7 @@ def duration(state: str, seconds: int) -> None:
         stream.write(f"{seconds}\n")
 
 
-def framework(state: str, arguments: list[str]) -> int:
+def framework(state: str, arguments: list[str], streams: Streams) -> int:
     """One `cmd wifi ...` call against the framework's state; prints what the service prints."""
     path = os.path.join(state, "framework")
     memory = load(path)
@@ -100,7 +123,7 @@ def framework(state: str, arguments: list[str]) -> int:
         if memory["failing"] > 0:
             # The Wi-Fi service is not up: `cmd` says so and exits with its own status.
             memory["failing"] -= 1
-            print("cmd: Can't find service: wifi", file=sys.stderr)
+            streams.say("cmd: Can't find service: wifi", error=True)
             status = 20
         elif memory["stalled"] > 0 or (memory["stall_after"] is not None and now >= memory["stall_after"]):
             # The Wi-Fi thread does not answer: the service gives an empty list after four seconds, status 0. The
@@ -111,7 +134,7 @@ def framework(state: str, arguments: list[str]) -> int:
                 with open(os.path.join(state, "steps"), "a") as stream:
                     stream.write(f"{memory['clock_step_back']}\n")
             advance(memory, now + 4)
-            print("No networks")
+            streams.say("No networks")
         else:
             rows = []
             if memory["listed"]:
@@ -119,24 +142,24 @@ def framework(state: str, arguments: list[str]) -> int:
             if memory["other"]:
                 rows.append((other_id(memory), OTHER_NAMES[memory["other_name"]], "wpa2"))
             if rows:
-                print(HEADER)
+                streams.say(HEADER)
                 for number, name, security in sorted(rows):
-                    print(f"{number:<12} {name:<32} {security}")
+                    streams.say(f"{number:<12} {name:<32} {security}")
             else:
-                print("No networks")
+                streams.say("No networks")
             if memory["slow"] > 0:
                 # An answer that takes two seconds is still an answer.
                 memory["slow"] -= 1
                 duration(state, 2)
     elif arguments[:1] == ["dumpsys"] and arguments[-1:] == ["wifi"]:
-        status = dump(state, memory)
+        status = dump(state, memory, streams)
     elif command == ["wifi", "status"]:
         note(state, "status")
-        print("Wifi is enabled" if memory["wifi_on"] else "Wifi is disabled")
+        streams.say("Wifi is enabled" if memory["wifi_on"] else "Wifi is disabled")
         if memory["wifi_on"] and memory["joined"]:
-            print('Wifi is connected to "VirtWifi"')
+            streams.say('Wifi is connected to "VirtWifi"')
         else:
-            print("Wifi is not connected")
+            streams.say("Wifi is not connected")
     elif command == ["wifi", "add-network"]:
         note(state, "add")
         if memory["add_fails"]:
@@ -169,24 +192,23 @@ def other_id(memory: dict) -> int:
     return 0 if memory["swap_ids"] else 1
 
 
-def dump(state: str, memory: dict) -> int:
+def dump(state: str, memory: dict, streams: Streams) -> int:
     """`dumpsys wifi`: the saved networks' configurations, each printed more than once, as the Wi-Fi service prints
     them, with Auto-connect on a line of its own after a header line that names the configuration's ID and SSID."""
     note(state, "dump")
     mode = memory["dump_state"]
     if mode == DUMP_FAILS:
-        print("Can't find service: wifi", file=sys.stderr)
+        streams.say("Can't find service: wifi", error=True)
         return 20
     if mode == DUMP_DENIED:
-        print("Permission Denial: can't dump WifiService from pid 1 uid 0")
+        streams.say("Permission Denial: can't dump WifiService from pid 1 uid 0")
         return 0
     if mode == DUMP_SLOW:
         duration(state, 12)
         return 0
     if memory["dump_fixture"]:
         # A dump the Wi-Fi service printed, kept in wifi_dump_fixtures.
-        import wifi_dump_fixtures
-        print(wifi_dump_fixtures.DUMPS[sorted(wifi_dump_fixtures.DUMPS)[memory["dump_fixture"] - 1]])
+        streams.say(wifi_dump_fixtures.DUMPS[sorted(wifi_dump_fixtures.DUMPS)[memory["dump_fixture"] - 1]])
         return 0
     networks = []
     if memory["listed"]:
@@ -215,7 +237,7 @@ def dump(state: str, memory: dict) -> int:
         # The whole dump, after twelve seconds: too late for `timeout`.
         lines = [LATE] + lines
         duration(state, 12)
-    print("\n".join(lines))
+    streams.say("\n".join(lines))
     return 0
 
 
@@ -274,19 +296,109 @@ def advance(memory: dict, end: int) -> None:
             schedule(memory, when)
 
 
-if __name__ == "__main__" and sys.argv[1:2] == ["--stub"]:
-    raise SystemExit(framework(sys.argv[2], sys.argv[3:]))
+def append(path: str, seconds: int) -> None:
+    with open(path, "a") as stream:
+        stream.write(f"{seconds}\n")
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import concurrent.futures
-import dataclasses
-import subprocess
-import tempfile
-import unittest
-from pathlib import Path
+def stub_call(state: str, words: list[str]) -> tuple[int, str, str]:
+    """What a stub of the Wi-Fi service prints and ends with. `cmd` and `dumpsys` run a framework call; the
+    `timeout LIMIT` stub runs one under a limit. The time a call takes is passed the way the stubs always did:
+    a call under a limit that outlasts it is cut (status 124, and what follows its LATE line is lost), and
+    any other call lets its whole duration pass, minus its LATE line."""
+    limit = None
+    if words[0] == "timeout":
+        limit, words = int(words[1]), words[2:]
+    if words[0] == "cmd":
+        arguments = words[1:]
+    elif words[0] == "dumpsys":
+        arguments = words
+    else:
+        raise AssertionError(f"the fake Wi-Fi service has no command {words[0]!r}")
+    streams = Streams()
+    try:
+        status = framework(state, arguments, streams)
+    except SystemExit as stop:
+        # What a process that ends so does: the message to standard error, and status 1.
+        status = stop.code if isinstance(stop.code, int) else 1
+        if isinstance(stop.code, str):
+            streams.say(stop.code, error=True)
+    with open(os.path.join(state, "duration")) as stream:
+        passed = int(stream.read())
+    text = "".join(streams.out).rstrip("\n")
+    lines = text.split("\n") if text else []
+    if limit is not None and passed > limit:
+        append(os.path.join(state, "extras"), limit)
+        lines = lines[:lines.index(LATE)] if LATE in lines else lines
+        status = 124
+    else:
+        if passed > 0:
+            append(os.path.join(state, "extras"), passed)
+        lines = [line for line in lines if line != LATE]
+    return status, "".join(line + "\n" for line in lines), "".join(streams.err)
 
-import wifi_dump_fixtures
+
+class Service:
+    """The fake Wi-Fi service of one boot, which its stubs reach over two FIFOs in the state directory: a stub
+    writes its words, one a line and then END, to `request`, waits on `answer`, and prints `reply`: the status, the
+    number of lines of standard output, and the lines of standard output and of standard error. A stub starts no
+    interpreter and no program but its shell. The service holds each FIFO open for reading and writing, so that
+    no open waits for the other side (a pair of waiting opens can fail to meet) and no end of file ends a request."""
+
+    END = "---end-of-request---"
+
+    def __init__(self, state: Path) -> None:
+        self.state = str(state)
+        self.reply = state / "reply"
+        self.request = state / "request"
+        self.answer = state / "answer"
+        self.stopping = False
+        self.thread: threading.Thread | None = None
+        self.descriptors: tuple[int, int] = (-1, -1)
+
+    def __enter__(self) -> "Service":
+        for fifo in (self.request, self.answer):
+            fifo.unlink(missing_ok=True)
+            os.mkfifo(fifo)
+        self.descriptors = (os.open(self.request, os.O_RDWR), os.open(self.answer, os.O_RDWR))
+        self.stopping = False
+        self.thread = threading.Thread(target=self.serve, daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_exit) -> None:
+        assert self.thread is not None
+        self.stopping = True
+        os.write(self.descriptors[0], b"\n")    # wakes the service that waits for a request
+        self.thread.join(30)
+        alive = self.thread.is_alive()
+        for descriptor in self.descriptors:
+            os.close(descriptor)
+        for fifo in (self.request, self.answer):
+            fifo.unlink(missing_ok=True)
+        assert not alive, "the fake Wi-Fi service did not stop"
+
+    def serve(self) -> None:
+        requests, answers = self.descriptors
+        words: list[str] = []
+        pending = b""
+        while True:
+            chunk = os.read(requests, 4096)
+            if self.stopping:
+                return
+            *lines, pending = (pending + chunk).split(b"\n")
+            for line in lines:
+                if line.decode() != self.END:
+                    words.append(line.decode())
+                    continue
+                try:
+                    status, out, err = stub_call(self.state, words)
+                except Exception:   # a defect of the fake: the stub fails and says why
+                    status, out, err = 70, "", traceback.format_exc()
+                words = []
+                self.reply.write_text(f"{status}\n{out.count(chr(10))}\n{out}{err}")
+                os.write(answers, b"\n")
+
 
 SCRIPT = Path(__file__).resolve().parents[3] / "android/lineage-24/overlay/tools/kernarium_wifi_network.sh"
 MARKER = "persist.sys.kernarium.virtwifi_saved"
@@ -358,30 +470,32 @@ class Guest:
         self.stored = stored
         self.disabled = disabled
         self.autojoin_stored = not autojoin_off
+        self.service = Service(self.state)
         self.stubs = directory / "stubs"
         self.stubs.mkdir()
-        python = sys.executable
-        me = Path(__file__).resolve()
-        state = self.state
-        # What a call prints after LATE comes only when its whole duration passes: `timeout` cuts it off.
+        # A call of the Wi-Fi service is a request to the guest's Service and the print of its reply. The
+        # stubs read their files with builtins: no interpreter, `cat` or `sed` starts for a call.
         service_call = (
-            f'if [ -n "$UNDER_TIMEOUT" ]; then exec "{python}" -S -E "{me}" --stub "{state}" "$@"; fi\n'
-            f'out=$("{python}" -S -E "{me}" --stub "{state}" "$@")\nrc=$?\n'
-            f'd=$(cat "{state}/duration")\n[ "$d" -gt 0 ] && echo "$d" >> "{state}/extras"\n'
-            f'[ -n "$out" ] && echo "$out" | sed "/^{LATE}$/d"\nexit $rc\n'
-        )
+            'printf "%s\\n" "@NAME@" "$@" "@END@" > "@STATE@/request"\n'
+            'read -r _ < "@STATE@/answer"\n'
+            '{\n    read -r rc\n    read -r n\n'
+            '    while [ "$n" -gt 0 ]; do\n        IFS= read -r line\n        printf "%s\\n" "$line"\n'
+            '        n=$((n - 1))\n    done\n'
+            '    while IFS= read -r line; do\n        printf "%s\\n" "$line" >&2\n    done\n'
+            '} < "@STATE@/reply"\nexit "$rc"\n'
+        ).replace("@STATE@", str(self.state)).replace("@END@", Service.END)
+        state = self.state
         bodies = {
-            # A call that `timeout` wraps is cut by it; any other call lets its whole duration pass.
-            "cmd": service_call,
-            "dumpsys": service_call.replace('"$@"', 'dumpsys "$@"'),
-            "timeout": (
-                f'limit=$1\nshift\nout=$(UNDER_TIMEOUT=1 "$@")\nrc=$?\nd=$(cat "{state}/duration")\n'
-                f'if [ "$d" -gt "$limit" ]; then echo "$limit" >> "{state}/extras"; '
-                f'[ -n "$out" ] && echo "$out" | sed "/^{LATE}$/,\\$d"; exit 124; fi\n'
-                f'[ "$d" -gt 0 ] && echo "$d" >> "{state}/extras"\n'
-                f'[ -n "$out" ] && echo "$out" | sed "/^{LATE}$/d"\nexit $rc\n'
+            # `timeout LIMIT command...` is the service's too: it cuts a call that outlasts the limit.
+            "cmd": service_call.replace("@NAME@", "cmd"),
+            "dumpsys": service_call.replace("@NAME@", "dumpsys"),
+            "timeout": service_call.replace("@NAME@", "timeout"),
+            "getprop": (
+                f'echo "getprop $*" >> "{state}/calls"\n'
+                f'if [ -f "{state}/properties/$1" ]; then\n'
+                f'    while IFS= read -r line; do printf "%s\\n" "$line"; done < "{state}/properties/$1"\n'
+                'else\n    echo\nfi\n'
             ),
-            "getprop": f'echo "getprop $*" >> "{state}/calls"\ncat "{state}/properties/$1" 2>/dev/null || echo\n',
             "setprop": (
                 f'echo "setprop $*" >> "{state}/calls"\necho "$2" > "{state}/properties/$1"\n'
                 f'if [ -f "{state}/kill" ]; then rm -f "{state}/kill"; kill -9 $PPID; fi\n'
@@ -389,8 +503,9 @@ class Guest:
             "sleep": f'echo "$1" >> "{state}/sleeps"\n',
             # The wall clock: the monotonic time less the steps back it took (the script no longer reads it).
             "date": (
-                f't=0\nfor s in $(cat "{state}/sleeps" "{state}/extras"); do t=$((t + s)); done\n'
-                f'for s in $(cat "{state}/steps"); do t=$((t - s)); done\necho $t\n'
+                f't=0\nfor f in sleeps extras; do\n'
+                f'    while read -r s || [ -n "$s" ]; do t=$((t + s)); done < "{state}/$f"\ndone\n'
+                f'while read -r s || [ -n "$s" ]; do t=$((t - s)); done < "{state}/steps"\necho $t\n'
             ),
             "log": f'echo "log $*" >> "{state}/calls"\n',
         }
@@ -426,8 +541,9 @@ class Guest:
         (self.state / "duration").write_text("0\n")
         if boot.kill_after_marker:
             (self.state / "kill").touch()
-        done = subprocess.run(["/bin/sh", str(script)], env={"PATH": f"{self.stubs}:/usr/bin:/bin"},
-                              capture_output=True, text=True, timeout=120)
+        with self.service:
+            done = subprocess.run(["/bin/sh", str(script)], env={"PATH": f"{self.stubs}:/usr/bin:/bin"},
+                                  capture_output=True, text=True, timeout=120)
         (self.state / "kill").unlink(missing_ok=True)
         ended = elapsed(str(self.state))
         after = load(str(self.state / "framework"))

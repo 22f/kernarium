@@ -8,6 +8,7 @@ __import__("sys").dont_write_bytecode = True
 
 import argparse
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 TIMEOUT_SECONDS = 120
 
@@ -386,6 +388,104 @@ def run(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProc
         text=True,
         timeout=TIMEOUT_SECONDS,
     )
+
+
+def load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class Outcome(NamedTuple):
+    """How a run of a script ended: its status and its two streams."""
+    returncode: int
+    out: str
+    err: str
+
+    @property
+    def stdout(self) -> str:
+        """Both streams as one pipe holds them: a script's standard error is written as it goes and
+        its standard output, block-buffered, at its end."""
+        return self.err + self.out
+
+
+class RunShim:
+    """`subprocess` as a checker module sees it, with its `run` replaced."""
+
+    def __init__(self, run) -> None:
+        self.run = run
+
+    def __getattr__(self, name: str):
+        return getattr(subprocess, name)
+
+
+class Checkers:
+    """The bundle check and the privacy-manifest check it runs, loaded once and run in this process.
+    Run as commands, each of the fixtures starts two interpreters and asks `xcrun nm` for the symbols of
+    a binary the other fixtures hold a copy of; here the symbols of a binary are asked once per distinct
+    content. `check_command_line` runs the real command for what only the command owns."""
+
+    def __init__(self, checker: Path) -> None:
+        self.script = checker
+        self.module = load_module("check_app_store_bundle_under_test", checker)
+        self.privacy_script = Path(self.module.CHECKER)
+        self.privacy = load_module("check_privacy_manifests_under_test", self.privacy_script)
+        self.symbols: dict[tuple, subprocess.CompletedProcess[str]] = {}
+        self.module.subprocess = RunShim(self.run_privacy_checker)
+        self.privacy.subprocess = RunShim(self.run_nm)
+
+    def call(self, main, script: Path, arguments: list[str]) -> Outcome:
+        out, err = io.StringIO(), io.StringIO()
+        saved = sys.argv
+        sys.argv = [str(script), *arguments]
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    status = main()
+                except SystemExit as stop:
+                    status = stop.code
+                    if isinstance(status, str):
+                        # `raise SystemExit(message)` prints the message and ends with status 1.
+                        print(status, file=sys.stderr)
+                        status = 1
+                    elif status is None:
+                        status = 0
+        finally:
+            sys.argv = saved
+        return Outcome(status, out.getvalue(), err.getvalue())
+
+    def run(self, arguments: list[str]) -> Outcome:
+        return self.call(self.module.main, self.script, arguments)
+
+    def run_privacy_checker(self, command: list[str], **options) -> subprocess.CompletedProcess[str]:
+        if command[0] == sys.executable and command[1] == "-B" and Path(command[2]) == self.privacy_script:
+            done = self.call(self.privacy.main, self.privacy_script, command[3:])
+            return subprocess.CompletedProcess(command, done.returncode, done.out, done.err)
+        return subprocess.run(command, **options)
+
+    def run_nm(self, command: list[str], **options) -> subprocess.CompletedProcess[str]:
+        if command[:2] != ["xcrun", "nm"]:
+            return subprocess.run(command, **options)
+        key = (tuple(command[:-1]), hashlib.sha256(Path(command[-1]).read_bytes()).digest())
+        done = self.symbols.get(key)
+        if done is None:
+            done = subprocess.run(command, **options)
+            # A failure names the path it was asked about, so it is asked again.
+            if done.returncode == 0:
+                self.symbols[key] = done
+        return done
+
+
+def run_command(checker: Path, arguments: list[str]) -> Outcome:
+    """The real command, with its streams apart."""
+    done = subprocess.run(
+        [sys.executable, "-B", str(checker), *arguments],
+        check=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, timeout=TIMEOUT_SECONDS)
+    return Outcome(done.returncode, done.stdout, done.stderr)
 
 
 def build(root: Path, name: str, source: str, extra: list[str] | None = None,
@@ -1609,15 +1709,11 @@ def check_whole_bundle(root: Path, check, clean: Path) -> None:
                   args=[*configuration_args, *local])
 
 
-def check_one_walk(checker: Path, root: Path, clean: Path, failures: list[str]) -> None:
+def check_one_walk(checkers: Checkers, root: Path, clean: Path, failures: list[str]) -> None:
     """A run asks every leak question in one walk over the bundle (a gigabyte with the staged system
     image), whichever phase of the build it is: the run of the App Store, and the phases of the other
     configurations. A question the plan lacks would walk again, which this test counts."""
-    spec = importlib.util.spec_from_file_location("check_app_store_bundle_under_test", checker)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module, checker = checkers.module, checkers.script
     walk = module.scan_bundle
     app = make_app(root, "one-walk", clean, app_info())
     values = ["--feedback-receiver", "local@receiver.fixture",
@@ -1672,6 +1768,47 @@ def check_one_walk(checker: Path, root: Path, clean: Path, failures: list[str]) 
         failures.append("the check of a framework walks its path for a leak")
 
 
+def check_command_line(checker: Path, checkers: Checkers, root: Path, clean: Path, knob: Path,
+                       failures: list[str]) -> None:
+    """What only the command owns: its exit status, which stream says what, and its arguments. Every
+    other case of this test runs in this process, so each case here runs as the command and in this
+    process, and the two must agree."""
+    def application(name: str, executable: Path, **options) -> Path:
+        fixture = make_app(root, name, executable, app_info(), **options)
+        (fixture / APP_STORE_NOTES).write_text("[]", encoding="utf-8")
+        return fixture
+
+    ready = application("command-ready", clean, framework=clean)
+    refused = application("command-refused", knob)
+    # What the case is, its arguments, the status, and a text each of the two streams holds.
+    cases = (
+        ("a ready application", [str(ready)], 0, "ready for the App Store", ""),
+        ("a refused application", [str(refused)], 1, "", "KERNARIUM_HOST_FORWARD"),
+        ("a framework alone", ["--runtime", str(ready / "Frameworks" / "Runtime.framework")], 0, "", ""),
+        ("a missing application", [str(root / "absent.app")], 1, "", ""),
+        ("an unknown option", ["--no-such-option", str(ready)], 2, "", "usage:"),
+        ("no application", [], 2, "", "usage:"),
+    )
+    for what, arguments, status, said, complained in cases:
+        command = run_command(checker, arguments)
+        if command.returncode != status:
+            failures.append(f"the command on {what}: status {command.returncode}, expected {status}:\n"
+                            f"{command.err}")
+        elif said not in command.out or complained not in command.err:
+            failures.append(f"the command on {what}: lacks {said!r} on standard output or "
+                            f"{complained!r} on standard error:\n{command.out}{command.err}")
+        elif (status == 0) != (not command.err):
+            failures.append(f"the command on {what}: standard error is {'empty' if status else 'not empty'} "
+                            "where it should not be")
+        # The streams of a refusal: the report's lines are on standard output only where it says ready.
+        if status == 1 and "ready for" in command.out:
+            failures.append(f"the command on {what}: reports it ready and fails")
+        here = checkers.run(arguments)
+        if here != command:
+            failures.append(f"the command on {what} differs from the run in this process:\n"
+                            f"command: {command}\nhere: {here}")
+
+
 def check_examples(root: Path, check, clean: Path, config: Path, failures: list[str]) -> None:
     """The example files' own values are placeholders, and the App Store configuration refuses each
     one of them in the mode that judges it, whatever the other values are. A value added to an
@@ -1720,6 +1857,7 @@ def main() -> int:
     options = parser.parse_args()
 
     failures: list[str] = []
+    checkers = Checkers(options.checker)
 
     # The modes that judge one feature, or a framework: they read no What's New notes.
     modes = {"--feedback", "--follow-x", "--icp", "--pickers", "--tip-jar", "--review", "--runtime",
@@ -1741,7 +1879,7 @@ def main() -> int:
             if not (app / APP_STORE_NOTES).exists() and not (app / BETA_NOTES).exists():
                 (app / wanted).write_text("[]", encoding="utf-8")
                 injected[app] = wanted
-        result = run([sys.executable, "-B", str(options.checker), *arguments, str(app)])
+        result = checkers.run([*arguments, str(app)])
         label = app.parent.name
         if never and never in result.stdout:
             # The output itself is not repeated: it holds what must not be printed.
@@ -1862,16 +2000,14 @@ def main() -> int:
         # stabs name is not reported as a path.
         check(make_app(root, "framework-debug-map-home", clean, app_info(), framework=mapped_home),
               passes=False, expect="Runtime.framework/Runtime: carries the linker's debug map")
-        home_result = run([sys.executable, "-B", str(options.checker),
-                           str(root / "framework-debug-map-home" / "Fixture.app")])
+        home_result = checkers.run([str(root / "framework-debug-map-home" / "Fixture.app")])
         if "home directory" in home_result.stdout:
             failures.append(
                 "a debug map's source directory was reported as a path:\n"
                 + home_result.stdout)
         check(make_app(root, "framework-debug-map", clean, app_info(), framework=mapped),
               passes=False, expect="Runtime.framework/Runtime: carries the linker's debug map")
-        mapped_result = run([sys.executable, "-B", str(options.checker),
-                             str(root / "framework-debug-map" / "Fixture.app")])
+        mapped_result = checkers.run([str(root / "framework-debug-map" / "Fixture.app")])
         if "mounted volume" in mapped_result.stdout:
             failures.append(
                 "a debug map's object paths were reported as paths:\n"
@@ -1911,7 +2047,7 @@ def main() -> int:
             ("ready", True, ""),
         ):
             framework = root / name / "Fixture.app" / "Frameworks" / "Runtime.framework"
-            result = run([sys.executable, "-B", str(options.checker), "--runtime", str(framework)])
+            result = checkers.run(["--runtime", str(framework)])
             if (result.returncode == 0) != passes or expect not in result.stdout:
                 failures.append(f"--runtime {name}: unexpected result ({result.returncode}):\n{result.stdout}")
 
@@ -1927,7 +2063,7 @@ def main() -> int:
             ("stripped-debug-map", True, ""),
         ):
             framework = root / name / "Fixture.app" / "Frameworks" / "Runtime.framework"
-            result = run([sys.executable, "-B", str(options.checker), "--host-traces", str(framework)])
+            result = checkers.run(["--host-traces", str(framework)])
             if (result.returncode == 0) != passes or expect not in result.stdout:
                 failures.append(f"--host-traces {name}: unexpected result ({result.returncode}):\n{result.stdout}")
 
@@ -1945,18 +2081,15 @@ def main() -> int:
                 # TestFlight is held to the same rule.
                 check(make_app(root, f"tf-debug-app-{index}", library, app_info()),
                       passes=False, expect=expect, args=["--configuration", "TestFlight"])
-            runtime_only = run([
-                sys.executable, "-B", str(options.checker), "--runtime",
-                str(debug_app / "Frameworks" / "Runtime.framework")])
+            runtime_only = checkers.run(["--runtime", str(debug_app / "Frameworks" / "Runtime.framework")])
             if runtime_only.returncode == 0 or expect not in runtime_only.stdout:
                 failures.append(f"--runtime debug {index} ({kind}): unexpected result "
                                 f"({runtime_only.returncode}):\n{runtime_only.stdout}")
         stand_ins = build(root, "stand-ins", STAND_INS)
         check(make_app(root, "stand-ins-app", stand_ins, app_info(), framework=stand_ins),
               passes=True, expect="ready for the App Store")
-        stand_in_runtime = run([
-            sys.executable, "-B", str(options.checker), "--runtime",
-            str(root / "stand-ins-app" / "Fixture.app" / "Frameworks" / "Runtime.framework")])
+        stand_in_runtime = checkers.run([
+            "--runtime", str(root / "stand-ins-app" / "Fixture.app" / "Frameworks" / "Runtime.framework")])
         if stand_in_runtime.returncode != 0:
             failures.append(f"--runtime stand-ins: unexpected result:\n{stand_in_runtime.stdout}")
 
@@ -2305,7 +2438,7 @@ def main() -> int:
         check_icp(root, check, clean)
         check_testflight(root, check, clean, feature, receiver)
         check_whole_bundle(root, check, clean)
-        check_one_walk(options.checker, root, clean, failures)
+        check_one_walk(checkers, root, clean, failures)
         check_examples(root, check, clean, options.checker.parent.parent / "Config", failures)
         # Follow developer on X is compiled in only where the build names a handle,
         # by the same rule. The fixtures stand for the application with it (the
@@ -2464,8 +2597,8 @@ def main() -> int:
               passes=True, expect="Follow developer on X is not compiled in (Debug)",
               args=[*x_other, "Debug", "--developer-x", "example_handle"])
         # Both features' phase in one run says both.
-        both = run([sys.executable, "-B", str(options.checker), "--feedback", "--follow-x", "--configuration", "Debug",
-                    str(make_app(root, "x-both", clean, app_info()))])
+        both = checkers.run(["--feedback", "--follow-x", "--configuration", "Debug",
+                             str(make_app(root, "x-both", clean, app_info()))])
         if both.returncode != 0 or "Send feedback is not compiled in (Debug)" not in both.stdout \
                 or "Follow developer on X is not compiled in (Debug)" not in both.stdout:
             failures.append(f"x-both: expected both features reported:\n{both.stdout}")
@@ -2626,9 +2759,7 @@ def main() -> int:
         check(make_app(root, "no-manifest", clean, app_info(), manifest=False),
               passes=False, expect="PrivacyInfo.xcprivacy")
 
-        missing = run([sys.executable, "-B", str(options.checker), str(root / "absent.app")])
-        if missing.returncode == 0:
-            failures.append("a missing application passed")
+        check_command_line(options.checker, checkers, root, clean, knob, failures)
 
     for failure in failures:
         print(failure, file=sys.stderr)
