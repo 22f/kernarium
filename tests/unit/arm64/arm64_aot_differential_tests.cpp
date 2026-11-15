@@ -443,6 +443,20 @@ struct Snapshot final {
 	return s;
 }
 
+/* run_once, through the ahead-of-time step while it is switched on, as the
+ * engine's entry would choose (GadgetExecutor::aot_selected). */
+[[nodiscard]] Outcome run_selected(GadgetExecutor &executor,
+	StaticGuestMemory &memory, unsigned long generation, CpuState &cpu)
+{
+	require(executor.begin_execution(generation, cpu.pc));
+	std::size_t executed = 0;
+	const auto event = aot_runtime::enabled() ?
+		executor.run_aot_block(cpu, memory, generation, executed) :
+		executor.run_block(cpu, memory, generation, executed);
+	executor.end_execution();
+	return {event, executed};
+}
+
 using Observer = std::function<void(const arm64::CpuState &)>;
 
 /* The last blocks of a run, for the failure report. */
@@ -465,7 +479,7 @@ struct BlockLog final {
 	std::size_t faults_taken = 0;
 	for (; r.blocks < blocks; ++r.blocks) {
 		const auto before = c.cpu.pc;
-		const auto out = run_once(
+		const auto out = run_selected(
 			executor, memory, generation, c.cpu);
 		if (g_log.enabled)
 			g_log.blocks.push_back({before,

@@ -2924,6 +2924,9 @@ GadgetExecutor::GadgetExecutor(arm64::gadgets::BuildOptions build_options)
 {
 	tlb_.unaligned_atomics =
 		build_options_.host_capabilities.has(ArmFeature::lse2);
+#if UML_AOT
+	aot_selected_ = arm64::aot::enabled();
+#endif
 	/* Executors running one address space share its translations when
 	 * sharing is enabled, the host retargets a link pair in one access, and
 	 * a reclaimer can see whether this executor is running translated
@@ -3286,7 +3289,9 @@ GadgetExecutor::finish_block(ProgramCache &programs, const BuildResult &built,
 	return event;
 }
 
-::uml::cpu::EngineEvent GadgetExecutor::run_block(
+template<bool Aot>
+[[gnu::always_inline]] inline ::uml::cpu::EngineEvent
+GadgetExecutor::run_block_body(
 	arm64::CpuState &cpu, StaticGuestMemory &memory, unsigned long generation,
 	std::size_t &executed)
 {
@@ -3333,7 +3338,7 @@ GadgetExecutor::finish_block(ProgramCache &programs, const BuildResult &built,
 	}
 	prepare_cache(generation, sequences.code_changes);
 #if UML_AOT
-	if (arm64::aot::enabled()) [[unlikely]] {
+	if constexpr (Aot) {
 		if (const auto aot_event = run_aot(cpu, memory, generation,
 			    sequences.code_changes, sequences.mapping_changes,
 			    executed))
@@ -3369,6 +3374,22 @@ GadgetExecutor::finish_block(ProgramCache &programs, const BuildResult &built,
 			built.program, cpu, tlb_, executed);
 	return finish_block(*programs_, built, event, cpu, executed);
 }
+
+::uml::cpu::EngineEvent GadgetExecutor::run_block(
+	arm64::CpuState &cpu, StaticGuestMemory &memory, unsigned long generation,
+	std::size_t &executed)
+{
+	return run_block_body<false>(cpu, memory, generation, executed);
+}
+
+#if UML_AOT
+::uml::cpu::EngineEvent GadgetExecutor::run_aot_block(
+	arm64::CpuState &cpu, StaticGuestMemory &memory, unsigned long generation,
+	std::size_t &executed)
+{
+	return run_block_body<true>(cpu, memory, generation, executed);
+}
+#endif
 
 #if UML_AOT
 /* One AOT call runs at most as many instructions as the engine chains

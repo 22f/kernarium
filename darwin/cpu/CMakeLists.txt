@@ -531,6 +531,8 @@ endif()
 _uml_add_cpu_objects(uml_arm64_gadget_engine gadget
     arm64/gadgets/engine_adapter.cpp)
 target_link_libraries(uml_arm64_gadget_engine PUBLIC uml_arm64_gadget_executor)
+target_compile_definitions(uml_arm64_gadget_engine PRIVATE
+    UML_AOT=$<BOOL:${UML_AOT}>)
 
 if(UML_ARM64_JIT_ENGINE)
     _uml_add_cpu_objects(uml_arm64_jit_engine native
