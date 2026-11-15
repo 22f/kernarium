@@ -119,6 +119,23 @@ target_include_directories(uml_andarium_camera_streams_tests PRIVATE
 uml_add_unit_test(NAME andarium-camera-streams
     COMMAND uml_andarium_camera_streams_tests LABELS andarium)
 
+# The crop region that a result states, against the residual the camera service
+# splits off an application's zoom.
+add_executable(uml_andarium_camera_crop_tests camera_crop_tests.cpp)
+target_include_directories(uml_andarium_camera_crop_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal)
+uml_add_unit_test(NAME andarium-camera-crop
+    COMMAND uml_andarium_camera_crop_tests LABELS andarium)
+
+# What the camera HAL does when the host ends a camera's video: the session kinds,
+# the session-scoped state of a session that is over, and the reopening of a
+# camera's streams.
+add_executable(uml_andarium_camera_session_tests camera_session_tests.cpp)
+target_include_directories(uml_andarium_camera_session_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal)
+uml_add_unit_test(NAME andarium-camera-session
+    COMMAND uml_andarium_camera_session_tests LABELS andarium)
+
 # The guest's Wi-Fi address as a function of eth0's
 # (android/lineage-24/overlay/tools/kernarium_wifi_mac.h): the golden vectors
 # (the guest runner reads the same file), the properties of every result and the

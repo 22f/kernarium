@@ -19,6 +19,7 @@ import importlib.util
 import inspect
 import io
 import itertools
+import os
 from pathlib import Path
 import re
 import struct
@@ -633,11 +634,17 @@ def audio_track(aac_frames: int, stretch: float = 1.0, rate: int = 48000, entry:
     return box(b"trak", edts + box(b"mdia", box(b"mdhd", mdhd) + handler + (box(b"minf", stbl) if samples else b"")))
 
 
+# The bytes of encoded video a frame of the scripted movies holds (the runner wants MINIMUM_SAMPLE_BYTES for each).
+PAYLOAD_PER_FRAME = 64
+
+
 def movie(seconds: float, scale: int = 1000, video: bool = True, version: int = 0, fps: float = 30.0,
-          samples: bool = True, audio: bytes = b"", video_jump: tuple[int, float] | None = None) -> bytes:
+          samples: bool = True, audio: bytes = b"", video_jump: tuple[int, float] | None = None,
+          payload: int | None = None) -> bytes:
     """A finished movie: `mvhd`, and one track whose `mdhd` has MEDIA_SCALE ticks a second and, for a video
     track with `samples`, an `stts` of one entry of seconds * fps frames (`video_jump` = (index, seconds): the frame
-    at `index` lasts that many seconds longer, a freeze); with `audio` (an `audio_track`) a second track follows."""
+    at `index` lasts that many seconds longer, a freeze); with `audio` (an `audio_track`) a second track follows. The `mdat`
+    holds `payload` bytes (a video track with samples: PAYLOAD_PER_FRAME for each frame; otherwise 40)."""
     if version == 1:
         mvhd = struct.pack(">B3xQQIQ", 1, 0, 0, scale, int(seconds * scale)) + b"\x00" * 80
     else:
@@ -654,7 +661,9 @@ def movie(seconds: float, scale: int = 1000, video: bool = True, version: int = 
         entries = [(index, delta), (1, delta + round(extra * MEDIA_SCALE)), (frames - index - 1, delta)]
     stts = box(b"stts", struct.pack(">BxxxI", 0, len(entries)) + b"".join(struct.pack(">II", c, d) for c, d in entries))
     track = box(b"mdia", box(b"mdhd", mdhd) + handler + (box(b"minf", box(b"stbl", stts)) if video and samples else b""))
-    return (box(b"ftyp", b"isom\x00\x00\x02\x00isom") + box(b"mdat", b"\x00" * 40)
+    if payload is None:
+        payload = frames * PAYLOAD_PER_FRAME if video and samples else 40
+    return (box(b"ftyp", b"isom\x00\x00\x02\x00isom") + box(b"mdat", b"\x00" * payload)
             + box(b"moov", box(b"mvhd", mvhd) + box(b"trak", track) + audio))
 
 
@@ -907,6 +916,10 @@ class AudioHoldTests(unittest.TestCase):
         self.assertIn("env=environment", start)
 
 
+# The consumer the camera service lists for the application's preview stream.
+PREVIEW_CONSUMER = "f279c8e SurfaceView[org.lineageos.aperture/org.lineageos.aperture.CameraActivity]#1"
+
+
 class FakeGuest:
     """A guest that answers the runner's commands from a script and records them."""
 
@@ -1038,10 +1051,12 @@ class FakeGuest:
             "Client Package Name: org.lineageos.aperture, Conflicting Client Devices: {})\n" for camera in sorted(self.held))
         if ("video" if self.in_video else "photo") not in self.stalled:
             self.frames += 25
-        still = ("    Stream[1]: Output\n      Dims: 4032 x 3024, format 0x21, dataspace 0x8c20000\n"
+        still = ("    Stream[1]: Output\n      Consumer name: ImageReader-4032x3024f21m4-2209-0\n"
+                 "      Dims: 4032 x 3024, format 0x21, dataspace 0x8c20000\n"
                  "      Frames produced: 9, last timestamp: 1 ns\n") if self.has_still_stream else ""
         return ("Active Camera Clients:\n" + clients + "Active Client listener PIDs: 1\n"
-                f"    Stream[3]: Output\n      Dims: 1008 x 756, format 0x23, dataspace 0x0\n"
+                f"    Stream[3]: Output\n      Consumer name: {PREVIEW_CONSUMER}\n"
+                f"      Dims: 1008 x 756, format 0x23, dataspace 0x0\n"
                 f"      Frames produced: {self.frames}, last timestamp: 1 ns\n" + still)
 
     def screenshot(self):
@@ -2999,6 +3014,488 @@ class RestartTests(unittest.TestCase):
         self.assertEqual(self.options().mode, "restart")
         self.assertIn("EmulatedCameraDeviceInfo", runner.FAILURE_LOG_PATTERN)
         self.assertIn("V4l2Characteristics", runner.FAILURE_LOG_PATTERN)
+
+
+class VideoLostTests(unittest.TestCase):
+    """The video-lost mode: the synthetic camera's control pipe tells the guest's camera that the application left the
+    foreground. The recording ends by itself with its clip (which holds video samples) saved, the application stays in
+    front, and the camera opens again for a recording when the application is started again after the person returns.
+    The viewfinder cases then show a recovery by itself: the video mode's (the HAL ends the camera for it, as it binds an
+    encoder surface) and the photo mode's (the HAL reopens its video streams and tells the application nothing), each
+    within one deadline from the return and without an activity start. The HAL's own log lines name what it did."""
+
+    LAYOUT = "bf-large-flash-manual-concurrent-front2160"
+    END = "W V4l2FrameSource: camera 0: the host ended the camera: its video buffers fail under an interrupted record\n"
+    REOPEN = "W V4l2FrameSource: camera 0: the host ended the camera's video: its video streams are closed and opened again\n"
+
+    class Guest(FakeGuest):
+        def __init__(self, plan, **kwargs) -> None:
+            super().__init__(plan, **kwargs)
+            self.control_lines: list[str] = []
+            self.ends_on_loss = True
+            self.in_front = True
+            self.log = VideoLostTests.END
+            # The video viewfinder, no recording: whether the host ends the camera for it, whether the application opens
+            # its camera again by itself after the return, and what else may happen to it.
+            self.viewfinder_lost = True
+            self.reopens = True
+            self.restarts = False
+            self.pid = 4711
+            self.crash = False
+            self.events_log = ""
+            # The photo viewfinder: the HAL reopens its video streams and the application notices nothing; or the HAL
+            # tells it the device is gone (a defect); or it does not come back.
+            self.photo = False
+            self.photo_reopens = True
+            self.photo_lost = False
+            self.photo_returns = True
+            # The movie the second recording saved, when it is not the first one.
+            self.again_movie: bytes | None = None
+
+        def pull(self, remote: str) -> bytes:
+            if remote == "/sdcard/again.mp4" and self.again_movie is not None:
+                return self.again_movie
+            return super().pull(remote)
+
+        def camera_control(self, line: str) -> None:
+            self.control_lines.append(line)
+            self.commands.append(f"<control {line}>")
+            if line == "interrupt background" and self.recording:
+                if self.ends_on_loss:
+                    self.recording = False
+                    self.rows["2"] = {"_id": "2", "_data": "/sdcard/lost.mp4", "_display_name": "lost.mp4"}
+            elif line == "interrupt background" and self.photo:
+                if self.photo_lost:
+                    self.held = set()
+                    self.log += VideoLostTests.END
+                elif self.photo_reopens:
+                    self.log += VideoLostTests.REOPEN
+                if not self.photo_returns:
+                    self.held = set()
+            elif line == "interrupt background":
+                if self.viewfinder_lost:
+                    self.held = set()
+                    self.log += VideoLostTests.END
+            elif line == "resume" and not self.held and self.reopens and (self.photo_returns or not self.photo):
+                self.held = {"0"}
+                if self.restarts:
+                    self.pid += 1
+                if self.crash:
+                    self.events_log += "11-15 16:50:00.000 I am_crash: [4711,0,org.lineageos.aperture]\n"
+
+        def shell(self, command: str, timeout: float = 0) -> str:
+            if command.startswith("am start"):
+                self.photo = "STILL_IMAGE_CAMERA" in command
+            if command.startswith("pidof "):
+                return f"{self.pid}\n"
+            if command.startswith("logcat -d -b events"):
+                return self.events_log
+            if command == runner.FOREGROUND_COMMAND:
+                return foreground_text() if self.in_front else foreground_text("topResumedActivity=ActivityRecord{1 u0 com.android.launcher3/.Launcher t1}")
+            if command == f"input keyevent {runner.CAMERA_KEYCODE}" and self.recording and "2" in self.rows:
+                # The key that stops the second recording: a new row, not the one the loss made.
+                self.recording = False
+                self.rows["3"] = {"_id": "3", "_data": "/sdcard/again.mp4", "_display_name": "again.mp4"}
+                self.commands.append(command)
+                return ""
+            return super().shell(command, timeout)
+
+    def run_check(self, guest) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(runner.time, "sleep", lambda seconds: None):
+            runner.check_video_lost(guest, guest.plan)
+        return out.getvalue()
+
+    def plan(self):
+        return runner.make_plan(self.LAYOUT, "phone", "video-lost")
+
+    def test_the_mode_is_a_plan_of_the_live_cameras(self) -> None:
+        plan = self.plan()
+        self.assertEqual(plan.camera_ids, runner.PROFILE_CAMERAS["phone"][1])
+        self.assertIn("video-lost", runner.MODES)
+        self.assertEqual(runner.CONTROL_VARIABLE, "UML_SYNTHETIC_CAMERA_CONTROL")
+
+    def test_the_loss_ends_the_recording_and_the_camera_opens_again(self) -> None:
+        guest = self.Guest(self.plan())
+        text = self.run_check(guest)
+        self.assertIn("the recording ended by itself: lost.mp4", text)
+        self.assertIn("the application stays in front", text)
+        self.assertIn("the camera opened again for a new start of the application: again.mp4", text)
+        self.assertIn("the HAL reported the end of the camera", text)
+        self.assertIn("video viewfinder: the HAL ended the camera and did not reopen its video streams", text)
+        self.assertIn("photo viewfinder: the HAL did not end the camera and reopened its video streams", text)
+        self.assertIn("video viewfinder: live again after the return, same process 4711, no error window", text)
+        self.assertIn("photo viewfinder: live again after the return, same process 4711, no error window", text)
+        self.assertEqual(guest.control_lines, ["interrupt background", "resume"] * 3)
+        # The first recording is stopped by the loss, not by a second key press; the second is started and stopped by key.
+        self.assertEqual(guest.commands.count(f"input keyevent {runner.CAMERA_KEYCODE}"), 3)
+        self.assertEqual(guest.commands.count(f"am force-stop {runner.CAMERA_PACKAGE}"), 1,
+                         "only the first start stops the application: the second shows that it opens its camera again")
+
+    def test_only_the_recording_case_starts_the_application_after_the_return(self) -> None:
+        # The recording case says it starts the application again after its return; the viewfinder cases show a recovery by
+        # itself, so no activity start follows their return. The photo case starts its own mode before its loss.
+        guest = self.Guest(self.plan())
+        self.run_check(guest)
+        tokens = ["start" if command.startswith("am start") else command[len("<control "):-1].split()[0]
+                  for command in guest.commands if command.startswith("am start") or command.startswith("<control")]
+        self.assertEqual(tokens, ["start", "interrupt", "resume", "start", "interrupt", "resume", "start", "interrupt", "resume"])
+
+    def test_a_recording_that_does_not_end_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.ends_on_loss = False
+        with self.assertRaisesRegex(runner.Failure, "a movie in MediaStore"), \
+                mock.patch.object(runner, "LOST_WAIT_SECONDS", 0):
+            self.run_check(guest)
+
+    def test_a_clip_with_a_video_track_and_no_samples_fails(self) -> None:
+        # A header with the track marker and an empty sample table is not a recording (it was accepted before).
+        guest = self.Guest(self.plan(), movies=movie(3.5, samples=False))
+        with self.assertRaisesRegex(runner.Failure, "no encoded video samples"):
+            self.run_check(guest)
+
+    def test_a_recording_after_the_return_without_samples_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.again_movie = movie(3.5, samples=False)
+        with self.assertRaisesRegex(runner.Failure, "with encoded video samples"):
+            self.run_check(guest)
+
+    def test_an_application_that_left_the_front_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.in_front = False
+        with self.assertRaisesRegex(runner.Failure, "not in front after the recording ended"):
+            self.run_check(guest)
+
+    def test_a_hal_without_the_topic_fails_after_the_camera_opened_again(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.log = ""
+        with self.assertRaisesRegex(runner.Failure, "image lacks the HAL topic"):
+            self.run_check(guest)
+
+    def test_a_viewfinder_the_host_did_not_end_passes_and_says_so(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.viewfinder_lost = False
+        text = self.run_check(guest)
+        self.assertIn("video viewfinder: the HAL did not end the camera", text)
+        self.assertIn("live again after the return", text)
+
+    def test_a_viewfinder_that_does_not_come_back_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.reopens = False
+        with self.assertRaisesRegex(runner.Failure, "holding camera 0 \\(video viewfinder after the return\\)"), \
+                mock.patch.object(runner, "VIEWFINDER_RECOVERY_SECONDS", 0):
+            self.run_check(guest)
+
+    def test_a_viewfinder_the_application_restarted_for_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.restarts = True
+        with self.assertRaisesRegex(runner.Failure, "was restarted"):
+            self.run_check(guest)
+
+    def test_a_crash_around_the_loss_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.crash = True
+        with self.assertRaisesRegex(runner.Failure, "crashed or stopped responding"):
+            self.run_check(guest)
+
+    def test_an_error_window_in_front_is_not_a_viewfinder(self) -> None:
+        # The application holds its camera again but an error window has the focus.
+        guest = self.Guest(self.plan())
+        original = guest.shell
+
+        def shell(command: str, timeout: float = 0) -> str:
+            if command == runner.FOREGROUND_COMMAND and guest.control_lines.count("resume") == 2:
+                return foreground_text(focus="mCurrentFocus=Window{9 u0 Application Error: org.lineageos.aperture}")
+            return original(command, timeout)
+
+        guest.shell = shell
+        with self.assertRaisesRegex(runner.Failure, "does not show its viewfinder after the return"):
+            self.run_check(guest)
+
+    # The photo mode's viewfinder has no encoder stream: the HAL must not end the camera for it.
+    def test_a_photo_viewfinder_the_hal_told_the_device_is_gone_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.photo_lost = True
+        with self.assertRaisesRegex(runner.Failure, "told the photo viewfinder that the device is gone"):
+            self.run_check(guest)
+
+    def test_a_photo_viewfinder_the_hal_never_reopened_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.photo_reopens = False
+        with self.assertRaisesRegex(runner.Failure, "logged no reopening of its video streams"):
+            self.run_check(guest)
+
+    def test_a_photo_viewfinder_that_does_not_come_back_fails(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.photo_returns = False
+        with self.assertRaisesRegex(runner.Failure, "holding camera 0 \\(photo viewfinder after the return\\)"), \
+                mock.patch.object(runner, "VIEWFINDER_RECOVERY_SECONDS", 0), \
+                contextlib.redirect_stdout(io.StringIO()), mock.patch.object(runner.time, "sleep", lambda seconds: None):
+            runner.check_viewfinder_returns(guest, guest.plan, "photo")
+
+    # One deadline from the return covers the camera, the picture and the frame counters.
+    class Clock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            self.now += seconds
+
+    def timed_viewfinder(self, camera_back: float, picture_ready: float, counters_ready: float = 0.0, mode: str = "video"):
+        """The viewfinder case on a virtual clock: the application holds its camera `camera_back` seconds after the return,
+        the preview shows the chart `picture_ready` seconds after it, and the frame counters rise from `counters_ready`."""
+        clock = self.Clock()
+        outer = self
+
+        class Slow(self.Guest):
+            returned = None
+
+            def camera_control(self, line: str) -> None:
+                super().camera_control(line)
+                if line == "resume":
+                    self.returned = clock.now
+
+            def media_camera(self) -> str:
+                since = None if self.returned is None else clock.now - self.returned
+                self.held = {"0"} if since is None or since >= camera_back else set()
+                self.stalled = {"photo", "video"} if since is not None and since < counters_ready else set()
+                return super().media_camera()
+
+        guest = Slow(self.plan())
+
+        def luma(image):
+            since = None if guest.returned is None else clock.now - guest.returned
+            return (100.0, 50.0 if since is None or since >= picture_ready else 0.0)
+
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), mock.patch.object(runner.time, "monotonic", clock.monotonic), \
+                    mock.patch.object(runner.time, "sleep", clock.sleep), mock.patch.object(runner, "luma_statistics", luma):
+                runner.check_viewfinder_returns(guest, guest.plan, mode)
+            failure = None
+        except runner.Failure as problem:
+            failure = problem
+        return guest, clock, out.getvalue(), failure
+
+    def test_a_viewfinder_that_is_back_within_the_deadline_passes(self) -> None:
+        for mode in ("video", "photo"):
+            with self.subTest(mode=mode):
+                guest, clock, text, failure = self.timed_viewfinder(5.0, 20.0, 10.0, mode)
+                self.assertIsNone(failure, failure)
+                self.assertIn("after the return (limit 45 s)", text)
+                self.assertLessEqual(clock.now - guest.returned, runner.VIEWFINDER_RECOVERY_SECONDS)
+
+    def test_the_viewfinder_has_one_deadline_not_one_per_wait(self) -> None:
+        # The camera is back after 40 s and the chart after 80 s: each wait alone was within its own 45 s before, and the
+        # recovery took 80 s; with one deadline from the return the case fails at 45 s.
+        guest, clock, _, failure = self.timed_viewfinder(40.0, 80.0)
+        self.assertIsNotNone(failure)
+        self.assertRegex(str(failure), "preview showing the chart")
+        self.assertLessEqual(clock.now - guest.returned, runner.VIEWFINDER_RECOVERY_SECONDS + 1.0)
+        # The counters too: the chart is there at 30 s, the counters rise only at 70 s.
+        guest, clock, _, failure = self.timed_viewfinder(5.0, 30.0, 70.0)
+        self.assertIsNotNone(failure)
+        self.assertRegex(str(failure), "live capture")
+        self.assertLessEqual(clock.now - guest.returned, runner.VIEWFINDER_RECOVERY_SECONDS + 1.0)
+
+    def on_clock(self, guest, mode: str = "video"):
+        """Runs the viewfinder case for `guest` on a virtual clock; returns the clock and the failure (None when it passed)."""
+        clock = self.Clock()
+        guest.clock = clock
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), mock.patch.object(runner.time, "monotonic", clock.monotonic), \
+                    mock.patch.object(runner.time, "sleep", clock.sleep):
+                runner.check_viewfinder_returns(guest, guest.plan, mode)
+            failure = None
+        except runner.Failure as problem:
+            failure = problem
+        return clock, failure
+
+    def test_a_query_that_returns_after_the_deadline_does_not_pass(self) -> None:
+        # The last counter query takes 46 s and answers well: it is 47 s after the return, past the 45 s limit. It used to pass
+        # (the limit was looked at before a query, never after it).
+        class Slow(self.Guest):
+            returned = None
+            reads = 0
+
+            def camera_control(self, line: str) -> None:
+                super().camera_control(line)
+                if line == "resume":
+                    self.returned = self.clock.now
+
+            def media_camera(self) -> str:
+                if self.returned is not None:
+                    self.reads += 1
+                    if self.reads == 3:
+                        self.clock.sleep(46)
+                return super().media_camera()
+
+        guest = Slow(self.plan())
+        clock, failure = self.on_clock(guest)
+        self.assertIsNotNone(failure)
+        self.assertRegex(str(failure), r"live capture: .*the check finished .* s after the limit of")
+        # A query that answers in time passes, with the same guest.
+        guest = self.Guest(self.plan())
+        _, failure = self.on_clock(guest)
+        self.assertIsNone(failure)
+
+    def test_a_command_runs_no_longer_than_the_time_left(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            process = mock.Mock(pid=4242)
+            process.poll.return_value = None
+            log = Path(directory) / "emulator.log"
+            log.write_text("")
+            guest = runner.Guest("adb", "127.0.0.1:1", process, log, Path(directory))
+            clock = self.Clock()
+            clock.now = 100.0
+            timeouts: list[float] = []
+
+            def run(*arguments, **options):
+                timeouts.append(options["timeout"])
+                return subprocess.CompletedProcess(arguments, 0, stdout="ok")
+
+            with mock.patch.object(runner.time, "monotonic", clock.monotonic), mock.patch.object(runner.subprocess, "run", run):
+                guest.adb_run("shell", "true")
+                with runner.bounded(guest, 112.5):
+                    guest.adb_run("shell", "true")
+                    clock.now = 110.0
+                    guest.adb_run("shell", "true", timeout=1.0)
+                    clock.now = 112.5
+                    with self.assertRaisesRegex(runner.Failure, "the deadline passed before"):
+                        guest.adb_run("shell", "true")
+                self.assertIsNone(guest.limit)
+                guest.adb_run("shell", "true")
+            # No limit: the usual bound. A limit: what is left, and 1.0 where the command asked for less.
+            self.assertEqual(timeouts, [runner.COMMAND_SECONDS, 12.5, 1.0, runner.COMMAND_SECONDS])
+
+            def expire(*arguments, **options):
+                raise subprocess.TimeoutExpired(arguments, options["timeout"])
+
+            with mock.patch.object(runner.subprocess, "run", expire):
+                self.assertRaises(subprocess.TimeoutExpired, guest.adb_run, "shell", "true")
+                with mock.patch.object(runner.time, "monotonic", clock.monotonic):
+                    clock.now = 0.0
+                    with runner.bounded(guest, 5.0), self.assertRaisesRegex(runner.Failure, "did not finish by the step's deadline"):
+                        guest.adb_run("shell", "true")
+
+    FROZEN = ("Active Camera Clients:\n(Camera ID: 0, Cost: 100, PID: 1301, Score: 0, State: 2User Id: 0, "
+              "Client Package Name: org.lineageos.aperture, Conflicting Client Devices: {})\nActive Client listener PIDs: 1\n")
+
+    @staticmethod
+    def streams(preview: int | None, other: int, consumer: str = PREVIEW_CONSUMER) -> str:
+        text = "    Stream[4]: Output\n      Consumer name: ImageReader-1x1-1-0\n      Dims: 640 x 480, format 0x23\n" \
+               f"      Frames produced: {other}, last timestamp: 1 ns\n"
+        if preview is not None:
+            text = ("    Stream[3]: Output\n      Consumer name: " + consumer + "\n      Dims: 1008 x 756, format 0x23\n"
+                    f"      Frames produced: {preview}, last timestamp: 1 ns\n") + text
+        return text
+
+    def test_a_frozen_preview_is_not_rescued_by_another_stream(self) -> None:
+        # The application holds its camera and shows the picture it showed before the loss; its preview stream produced
+        # nothing, and a different output runs. Counters summed over every stream rose, and the case passed.
+        class Frozen(self.Guest):
+            other = 0
+
+            def media_camera(self) -> str:
+                self.other += 1
+                return VideoLostTests.FROZEN + VideoLostTests.streams(100, self.other)
+
+        guest = Frozen(self.plan())
+        clock, failure = self.on_clock(guest)
+        self.assertIsNotNone(failure)
+        self.assertRegex(str(failure), r"live capture: a new frame of the video viewfinder after the return preview stream")
+        self.assertRegex(str(failure), "counters stand at")
+        # The same guest with the preview stream's own counter rising passes.
+        class Live(self.Guest):
+            count = 0
+
+            def media_camera(self) -> str:
+                self.count += 1
+                return VideoLostTests.FROZEN + VideoLostTests.streams(100 + self.count, 5)
+
+        _, failure = self.on_clock(Live(self.plan()))
+        self.assertIsNone(failure)
+
+    def test_the_preview_stream_may_start_again_with_a_new_count(self) -> None:
+        # The camera closes and opens again: the stream is gone for a read, then listed from 0. The read pair that straddles
+        # it shows no rise, the next pair does.
+        counts = [None, None, 0, 3, 6]
+
+        class Reopening(self.Guest):
+            reads = 0
+
+            def media_camera(self) -> str:
+                count = counts[min(self.reads, len(counts) - 1)]
+                self.reads += 1
+                return VideoLostTests.FROZEN + VideoLostTests.streams(count, 7)
+
+        _, failure = self.on_clock(Reopening(self.plan()))
+        self.assertIsNone(failure)
+
+    def test_a_dump_without_the_application_s_preview_stream_is_not_a_live_viewfinder(self) -> None:
+        class Elsewhere(self.Guest):
+            count = 0
+
+            def media_camera(self) -> str:
+                self.count += 1
+                return VideoLostTests.FROZEN + VideoLostTests.streams(self.count, self.count, "ImageReader-1x1-1-9")
+
+        _, failure = self.on_clock(Elsewhere(self.plan()))
+        self.assertIsNotNone(failure)
+        self.assertRegex(str(failure), "lists no stream of the application's preview surface")
+
+    def test_the_parser_reads_the_preview_stream_by_its_consumer(self) -> None:
+        dump = self.FROZEN + self.streams(12, 99)
+        self.assertEqual(runner.preview_stream_frames(dump), {3: 12})
+        self.assertEqual(runner.preview_stream_frames(self.FROZEN + self.streams(None, 99)), {})
+        self.assertEqual(runner.preview_stream_frames(self.FROZEN + self.streams(12, 99, "SurfaceView[other.app/x]#2")), {})
+        # Without a counter the stream is not listed; frames_produced still sums every stream.
+        self.assertEqual(runner.preview_stream_frames("    Stream[3]: Output\n      Consumer name: " + PREVIEW_CONSUMER + "\n"), {})
+        self.assertEqual(runner.frames_produced(dump), 111)
+
+    def test_a_clip_without_media_data_does_not_pass(self) -> None:
+        # A sample table over an empty file (no mdat box, or an empty one, or one too small for the declared samples).
+        raw = movie(3.5, payload=0)
+        bare = b"".join(raw[start - 8:stop] for kind, start, stop in runner.mp4_boxes(raw, 0, len(raw)) if kind != b"mdat")
+        self.assertNotIn(b"mdat", bare)
+        self.assertGreater(runner.parse_mp4(bare).frames, 0)
+        self.assertEqual(runner.parse_mp4(bare).media_bytes, 0)
+        for name, clip in (("no mdat box", bare), ("an empty mdat", raw), ("a tiny mdat", movie(3.5, payload=100))):
+            with self.subTest(clip=name, which="the clip the loss saved"):
+                guest = self.Guest(self.plan(), movies=clip)
+                with self.assertRaisesRegex(runner.Failure, r"declares 105 video samples but its media data holds \d+ bytes"):
+                    self.run_check(guest)
+            with self.subTest(clip=name, which="the recording after the return"):
+                guest = self.Guest(self.plan())
+                guest.again_movie = clip
+                with self.assertRaisesRegex(runner.Failure, r"declares 105 video samples but its media data holds \d+ bytes"):
+                    self.run_check(guest)
+        # The smallest payload that passes: MINIMUM_SAMPLE_BYTES for each declared sample.
+        needed = 105 * runner.MINIMUM_SAMPLE_BYTES
+        self.assertIn("the recording ended by itself", self.run_check(self.Guest(self.plan(), movies=movie(3.5, payload=needed))))
+        with self.assertRaisesRegex(runner.Failure, "media data holds"):
+            self.run_check(self.Guest(self.plan(), movies=movie(3.5, payload=needed - 1)))
+
+    def test_the_pipe_takes_one_line_and_is_waited_for(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pipe = Path(directory) / "control"
+            process = mock.Mock(pid=4242)
+            process.poll.return_value = None
+            log = Path(directory) / "emulator.log"
+            log.write_text("")
+            guest = runner.Guest("adb", "127.0.0.1:1", process, log, Path(directory), None, pipe)
+            self.assertRaises(runner.Failure, runner.Guest("adb", "127.0.0.1:1", process, log, Path(directory)).camera_control, "resume")
+            os.mkfifo(pipe)
+            reader = os.open(pipe, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                guest.camera_control("interrupt background")
+                self.assertEqual(os.read(reader, 100), b"interrupt background\n")
+            finally:
+                os.close(reader)
 
 
 def dng_bytes(width: int = 2016, height: int = 1512, bits: int = 16, version: bool = True, matrix: bool = True,

@@ -336,6 +336,10 @@ enum class CameraEventKind : std::uint8_t {
     // The same, because the system is under pressure (heat): the capture is
     // stopped until the pressure eases.
     interruptedBySystemPressure,
+    // The same, because the application is not in the foreground: a camera is
+    // not available to an application that has left it. Only a host that can
+    // tell reports it; the others report interrupted.
+    interruptedInBackground,
     // The capture runs again.
     resumed,
     // The camera went away or came back (an external camera).

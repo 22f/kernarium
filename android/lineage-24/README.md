@@ -396,7 +396,26 @@ combined camera and microphone reminder becomes the microphone's. The service's
 leaves the `config_sensorUseStartedActivity*` strings at the platform's
 defaults, and `android-camera` ([testing](../../docs/testing.md#android))
 checks it. The host also sends black frames while it interrupts a camera, and
-the HAL passes them on as frames of the camera. Output sizes the host lacks that
+the HAL passes them on as frames of the camera. When the host ends the video of a
+camera (the application left the foreground while the guest had a video stream
+open on it), the camera's video buffers fail under a black, interrupted record
+for as long as the guest keeps the stream, and the HAL decides by the session's
+streams (`camera_session.hpp`). A session with a stream whose consumer is a
+video encoder is over: the request that met the loss fails with every output
+buffer returned as an error, the HAL reports `ERROR_DEVICE` once, the requests
+it still holds drain as `ERROR_REQUEST` without the frame source, and the opened
+session answers every later request, flush and configuration with the internal
+error; a close succeeds. Any other session is told nothing: the HAL closes the
+camera's video streams between requests, which ends the host's loss, and opens
+them again with the next request. The rules have limits: the camera service
+refuses further work on a device in its error state, so a client that reaches the
+HAL after `ERROR_DEVICE` talks to the provider directly, and there a configuration
+is refused by the HAL, which reaches the client as an illegal-argument answer and
+leaves no capture session behind, so a flush after it returns OK; and a
+session closed while it still holds requests returns their buffers as errors
+without a request error for each, and a flush notifies the errors of the requests
+it holds in the order it reaches them, which can precede the request in the
+sensor. Output sizes the host lacks that
 CTS and the camera API require (standard JPEG sizes, 3840x2160 where that is the
 largest video mode, which is the recording size of the large tier, the YUV sizes
 of every smaller JPEG, 1920x1440 and 1280x720 for a concurrent camera) are cut
@@ -412,7 +431,14 @@ declared. A camera lists the keys it honours: the frame duration and the black
 level lock only with `MANUAL_SENSOR`, the AF regions only with autofocus, and no
 camera lists the tone map mode or curves or states the available tone map modes
 (the templates carry no tone map key). Every result carries the scene mode
-(`DISABLED`) and, with `MANUAL_SENSOR`, the black level lock. A video output
+(`DISABLED`) and, with `MANUAL_SENSOR`, the black level lock. A result states
+the crop region its centred camera applies (`camera_crop.hpp`: the requested
+size centred in the active array, clamped to the array and to the smallest size
+the maximum digital zoom allows, which is the array over that zoom; the whole
+array when the request has none), because the camera service joins the zoom
+ratio and that residual region again in the result. The HAL's session layer has
+divided the region by the ratio before the camera sees it and multiplies the
+result's back, so the camera's rule has no ratio in it. A video output
 that stays configured but leaves the requests has its host stream closed after
 half a second and two requests without a still; a request that takes a still
 counts for nothing and starts the count again for every open video output, so
@@ -779,6 +805,47 @@ standalone macOS launcher passes none). `kernarium_time_zone.sh` applies it with
 has chosen a zone: it replaces a zone only if that is the one it applied last
 (marker `persist.sys.kernarium.timezone_applied`), so a zone picked in Android
 stays.
+
+### Old application switch
+
+Old app compatibility is a choice the person makes for one application at a time
+(Andarium's Settings); the image keeps the choice and offers the command that
+makes and reads it. The framework reads the choice in the application's own
+process (route `p0007`), so an application that is not switched on never loads
+the compatibility layer.
+
+- **Store.** One persistent property per package,
+  `persist.sys.kernarium.oldapp.<package>`: the value holds the turn-on time and
+  the installation it was made for, and an empty or unset property means off.
+  It lives in the data partition, so an Android update keeps it, Erase resets it
+  and a snapshot restore brings it back. Its type, `kernarium_oldapp_prop`
+  (`overlay/sepolicy/system_ext/private`), is a system-owned restricted
+  property: the shell domain sets it, every application domain reads it (the
+  shell domain is itself an application domain in this policy) and a neverallow
+  keeps every other application domain from setting it.
+- **Eligibility.** Not a system application, a 32-bit primary ABI, a target API
+  level below 14, no shared user ID, and a package name that can end a property
+  name as it is (the whole key at most 255 bytes). `OldAppEligibility` is the
+  one place that says so.
+- **Persistence.** A choice belongs to the installation it was made for (an
+  update keeps the installation, an uninstall and a new install make another):
+  the listing clears the property of a package that is absent, is not eligible
+  any more or is another installation, so a choice lasts at most until the next
+  listing, which Andarium makes whenever it starts, after each install and when
+  its page opens. The command's changes and that cleanup are serialised by a lock
+  on a file that only the shell user can open; turning off is accepted for any
+  name that can be a property name.
+- **Command.** `kernarium_oldapp` (`overlay/oldapp_switch`, a Java tool that
+  `app_process` starts, installed on system_ext) runs as the adb shell user, with
+  no root on a `user` build. It lists the eligible applications of the owner
+  user with their labels and state, and turns the choice on or off for one
+  package, which is device wide; an older image has no command, and the host
+  hides the feature. The command's usage message and `OldAppCommand` carry the
+  arguments, the listing's fields and the statuses.
+- **Kept by a later release.** The property's name prefix, type and meaning, the
+  eligibility and persistence rules, and the command's name, arguments, listing
+  and statuses. `tests/integration/android/run_android_oldapp_switch.py`
+  qualifies it ([testing](../../docs/testing.md#android)).
 
 ### Branding and diagnostics
 
