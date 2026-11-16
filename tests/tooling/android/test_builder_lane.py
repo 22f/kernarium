@@ -1203,6 +1203,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           navigation_variant: str | None = None,
                           launcher_variant: str | None = None,
                           easter_egg_variant: str | None = None,
+                          accessibility_variant: str | None = None,
                           network_time_variant: str | None = None,
                           flip_variant: str | None = None,
                           reclaim_variant: str | None = None,
@@ -2787,6 +2788,13 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     archive.writestr("PRODUCT/app/EasterEgg/EasterEgg.apk", release_apk)
                 elif easter_egg_variant == "wrong-directory":
                     archive.writestr("SYSTEM/app/Egg/EasterEgg.apk", release_apk)
+                # TalkBack and eSpeak NG, the accessibility artifact's two APKs.
+                if accessibility_variant not in ("missing-talkback", "talkback-in-system"):
+                    archive.writestr("PRODUCT/app/TalkBack/TalkBack.apk", release_apk)
+                if accessibility_variant == "talkback-in-system":
+                    archive.writestr("SYSTEM/app/TalkBack/TalkBack.apk", release_apk)
+                if accessibility_variant != "missing-espeak":
+                    archive.writestr("PRODUCT/app/eSpeakNG/eSpeakNG.apk", release_apk)
                 if launcher_variant != "no-overlay":
                     layout_strings = [name for pair in launcher_dock for name in pair]
                     if launcher_variant == "six-application-layout":
@@ -4000,6 +4008,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("launcher-overlay-with-the-six-application-layout", {"launcher_variant": "six-application-layout"}),
             ("launcher-layout-names-an-application-the-image-lacks", {"launcher_variant": "no-documentsui"}),
             ("missing-easter-egg", {"easter_egg_variant": "missing"}),
+            ("missing-talkback", {"accessibility_variant": "missing-talkback"}),
+            ("missing-espeak-ng", {"accessibility_variant": "missing-espeak"}),
+            ("talkback-in-the-system-partition", {"accessibility_variant": "talkback-in-system"}),
             ("easter-egg-in-a-directory-of-another-name", {"easter_egg_variant": "wrong-directory"}),
             ("ntp-server-left", {"network_time_variant": "ntp-server"}),
             ("ntp-server-left-in-a-qualified-definition",
@@ -4894,6 +4905,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("launcher-overlay-with-the-six-application-layout-cause", {"launcher_variant": "six-application-layout"},
              "res/xml/default_workspace_4x5.xml names com.android.calculator2.Calculator: the home screen "
              "holds only the dock"),
+            ("missing-talkback-cause", {"accessibility_variant": "missing-talkback"},
+             "TalkBack.apk is missing from the image: the accessibility artifact supplies TalkBack"),
+            ("missing-espeak-ng-cause", {"accessibility_variant": "missing-espeak"},
+             "eSpeakNG.apk is missing from the image: the accessibility artifact supplies TalkBack"),
+            ("talkback-in-the-system-partition-cause", {"accessibility_variant": "talkback-in-system"},
+             "TalkBack.apk is missing from the image: the accessibility artifact supplies TalkBack"),
             ("missing-easter-egg-cause", {"easter_egg_variant": "missing"},
              "EasterEgg.apk is missing from the image: the Android version row opens the logo screen"),
             ("easter-egg-in-a-directory-of-another-name-cause", {"easter_egg_variant": "wrong-directory"},
