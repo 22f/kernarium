@@ -15,6 +15,7 @@ namespace {
 std::atomic<AllocationSite> failure_site{};
 std::atomic_size_t failure_occurrence{};
 std::atomic_size_t backing_mappings{};
+std::atomic_size_t count_anomaly_total{};
 std::atomic<AllocationObserver> allocation_observer{};
 std::array<std::atomic_size_t,
 	static_cast<std::size_t>(AllocationSite::count)> allocation_attempts{};
@@ -81,6 +82,16 @@ std::size_t allocation_attempt_count(const AllocationSite site) noexcept
 	const auto site_index = static_cast<std::size_t>(site);
 	return site_index < allocation_attempts.size() ?
 		allocation_attempts[site_index].load(std::memory_order_relaxed) : 0;
+}
+
+void count_anomaly() noexcept
+{
+	count_anomaly_total.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::size_t count_anomalies() noexcept
+{
+	return count_anomaly_total.load(std::memory_order_relaxed);
 }
 
 void backing_mapping_created() noexcept

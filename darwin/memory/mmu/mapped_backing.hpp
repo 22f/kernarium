@@ -2,6 +2,7 @@
 #pragma once
 
 #include "../shared_backing.hpp"
+#include "allocation_fault.hpp"
 
 #include <array>
 #include <atomic>
@@ -68,10 +69,51 @@ public:
 	 * translated store saw. Moves the version and the epoch. */
 	static void invalidate_code_page(void *handle) noexcept;
 	/* A departure: a mapping of the page at `offset` went away or lost
-	 * execute. Moves the version of the page's record if a translator has
-	 * ever asked for it. A page nothing stamped holds no translation whose
+	 * execute. Moves the version of the page's record if it has one. A page
+	 * nothing maps executable and nothing stamped holds no translation whose
 	 * stamp could be stale, so it is not given a record here. */
 	void retire_code_page(std::uint64_t offset) noexcept;
+
+	/* The record of the page at `offset`, made if it is not there yet; a
+	 * std::bad_alloc if it cannot be. This is the step of a mapping change
+	 * that can fail: the record of every executable mapping exists before
+	 * the change counts itself in. */
+	[[nodiscard]] void *obtain_code_page(std::uint64_t offset);
+	/* The record if it exists. */
+	[[nodiscard]] void *find_code_page(std::uint64_t offset) noexcept;
+
+	/* An executable guest-code mapping of the record's page appears, or goes
+	 * away. Each is one atomic step of the record's `fresh` word, so mappings
+	 * of one frame in different address spaces need no lock between them:
+	 * the count of the last departure and the epoch step that kills every
+	 * verdict about the page are stored together. A departure that finds the
+	 * count at zero is a bug in the accounting; the count stays zero and the
+	 * epoch moves, so no verdict about the page survives it. A record whose
+	 * count would overflow is marked never-share for good and counts no
+	 * more. Both are noexcept and take a record that obtain_code_page made
+	 * (or find_code_page found). */
+	static void executable_mapping_added(void *handle) noexcept;
+	static void executable_mapping_removed(void *handle) noexcept;
+
+#if UML_MEMORY_ALLOCATION_TESTING
+	/* The record's count of executable mappings, and a visit of every record
+	 * of this backing by the number of its page: what an audit recounts
+	 * against. */
+	[[nodiscard]] static std::uint64_t executable_mappings(
+		const void *handle) noexcept;
+	/* Puts a record in a state no test can reach by mapping: a count and an
+	 * epoch as given (the never-share bit cleared). */
+	static void preset_for_testing(void *handle, std::uint64_t count,
+		std::uint64_t epoch) noexcept;
+	template <typename Visit>
+	void for_each_code_page(Visit &&visit)
+	{
+		const std::lock_guard lock{code_pages_mutex_};
+		for (const auto &[page, record] : code_pages_)
+			if (record)
+				visit(page, record.get());
+	}
+#endif
 
 private:
 	struct CodePage;

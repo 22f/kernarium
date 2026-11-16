@@ -17,6 +17,7 @@ enum class AllocationSite : std::uint8_t {
 	batch,
 	batch_commit,
 	batch_index,
+	code_record,
 	generation,
 	history,
 	reserve,
@@ -48,6 +49,13 @@ void reset_allocation_attempt_counts() noexcept;
 using AllocationObserver = void (*)(AllocationSite site) noexcept;
 void set_allocation_observer(AllocationObserver observer) noexcept;
 
+/* The executable-mapping counts of the physical-page records are exact by
+ * construction. A departure with nothing to count out, or a count that names
+ * no record, is a bug in the accounting; the production code survives it (the
+ * count clamps at zero and the epoch moves) and a test must see it. */
+void count_anomaly() noexcept;
+[[nodiscard]] std::size_t count_anomalies() noexcept;
+
 void backing_mapping_created() noexcept;
 void backing_mapping_destroyed() noexcept;
 [[nodiscard]] std::size_t active_backing_mappings() noexcept;
@@ -56,6 +64,8 @@ void backing_mapping_destroyed() noexcept;
 
 #define UML_MEMORY_ALLOCATION_CHECKPOINT(site) \
 	::uml::memory::testing::allocation_checkpoint(site)
+#define UML_MEMORY_COUNT_ANOMALY() \
+	::uml::memory::testing::count_anomaly()
 #define UML_MEMORY_BACKING_MAPPING_CREATED() \
 	::uml::memory::testing::backing_mapping_created()
 #define UML_MEMORY_BACKING_MAPPING_DESTROYED() \
@@ -65,6 +75,7 @@ void backing_mapping_destroyed() noexcept;
  * allocation-site enum and test functions therefore create no ordinary
  * product symbol, load, branch, or call even in an unoptimized build. */
 #define UML_MEMORY_ALLOCATION_CHECKPOINT(...) ((void)0)
+#define UML_MEMORY_COUNT_ANOMALY() ((void)0)
 #define UML_MEMORY_BACKING_MAPPING_CREATED() ((void)0)
 #define UML_MEMORY_BACKING_MAPPING_DESTROYED() ((void)0)
 #endif

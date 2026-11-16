@@ -10,6 +10,7 @@
 #include <atomic>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <utility>
@@ -25,6 +26,7 @@ std::atomic_uint64_t next_code_page_identity{1};
  * record can no longer be trusted to share. The epoch is the high field, so
  * one more step past its largest value carries into bit 63 and sets it:
  * exhausting the epoch fails closed. */
+constexpr std::uint64_t fresh_count_mask = (std::uint64_t{1} << 24) - 1;
 constexpr std::uint64_t fresh_epoch_step = std::uint64_t{1} << 24;
 constexpr std::uint64_t fresh_epoch_mask =
 	((std::uint64_t{1} << 39) - 1) << 24;
@@ -124,8 +126,11 @@ void *MappedBacking::install_code_page(std::uint64_t page) noexcept
 	try {
 		const std::lock_guard lock{code_pages_mutex_};
 		auto &slot = code_pages_[page];
-		if (!slot)
+		if (!slot) {
+			UML_MEMORY_ALLOCATION_CHECKPOINT(
+				testing::AllocationSite::code_record);
 			slot = std::make_unique<CodePage>();
+		}
 		auto *handle = slot.get();
 		if (!code_index_ || page >= code_index_pages_)
 			return handle;
@@ -173,28 +178,94 @@ void MappedBacking::invalidate_code_page(void *handle) noexcept
 
 void MappedBacking::retire_code_page(std::uint64_t offset) noexcept
 {
-	const auto depart = [](CodePage *page) noexcept {
-		if (page != nullptr)
-			page->version.fetch_add(1, std::memory_order_release);
-	};
+	if (auto *page = static_cast<CodePage *>(find_code_page(offset));
+	    page != nullptr)
+		page->version.fetch_add(1, std::memory_order_release);
+}
+
+void *MappedBacking::find_code_page(std::uint64_t offset) noexcept
+{
 	const auto page = offset / page_size;
 	if (code_index_ && page < code_index_pages_) {
 		/* Every record of an indexed page is in the index. */
 		const auto *leaf = code_index_[page / code_index_leaf_pages].load(
 			std::memory_order_acquire);
 		if (leaf == nullptr)
-			return;
-		depart((*leaf)[page % code_index_leaf_pages].load(
-			std::memory_order_acquire));
-		return;
+			return nullptr;
+		return (*leaf)[page % code_index_leaf_pages].load(
+			std::memory_order_acquire);
 	}
 	try {
 		const std::lock_guard lock{code_pages_mutex_};
 		const auto found = code_pages_.find(page);
-		if (found != code_pages_.end())
-			depart(found->second.get());
+		return found == code_pages_.end() ? nullptr : found->second.get();
 	} catch (...) {
+		return nullptr;
 	}
 }
+
+void *MappedBacking::obtain_code_page(std::uint64_t offset)
+{
+	if (auto *handle = code_page_handle(offset); handle != nullptr)
+		return handle;
+	throw std::bad_alloc{};
+}
+
+void MappedBacking::executable_mapping_added(void *handle) noexcept
+{
+	auto *page = static_cast<CodePage *>(handle);
+	auto fresh = page->fresh.load(std::memory_order_relaxed);
+	for (;;) {
+		if ((fresh & fresh_never_share) != 0)
+			return;
+		const auto next = (fresh & fresh_count_mask) == fresh_count_mask ?
+			fresh | fresh_never_share : fresh + 1;
+		if (page->fresh.compare_exchange_weak(fresh, next,
+			    std::memory_order_acq_rel, std::memory_order_relaxed))
+			return;
+	}
+}
+
+void MappedBacking::executable_mapping_removed(void *handle) noexcept
+{
+	auto *page = static_cast<CodePage *>(handle);
+	auto fresh = page->fresh.load(std::memory_order_relaxed);
+	for (;;) {
+		if ((fresh & fresh_never_share) != 0)
+			return;
+		const auto count = fresh & fresh_count_mask;
+		std::uint64_t next;
+		if (count > 1) {
+			next = fresh - 1;
+		} else {
+			/* The last departure stores a count of zero and the next
+			 * epoch in one step; a departure at zero is the accounting's
+			 * bug, which the epoch step also contains. A step past the
+			 * largest epoch carries into the never-share bit. */
+			next = (fresh & ~fresh_count_mask) + fresh_epoch_step;
+			if (count == 0)
+				UML_MEMORY_COUNT_ANOMALY();
+		}
+		if (page->fresh.compare_exchange_weak(fresh, next,
+			    std::memory_order_acq_rel, std::memory_order_relaxed))
+			return;
+	}
+}
+
+#if UML_MEMORY_ALLOCATION_TESTING
+std::uint64_t MappedBacking::executable_mappings(const void *handle) noexcept
+{
+	return static_cast<const CodePage *>(handle)->fresh.load(
+		std::memory_order_acquire) & fresh_count_mask;
+}
+
+void MappedBacking::preset_for_testing(void *handle, std::uint64_t count,
+	std::uint64_t epoch) noexcept
+{
+	static_cast<CodePage *>(handle)->fresh.store(
+		(count & fresh_count_mask) | ((epoch << 24) & fresh_epoch_mask),
+		std::memory_order_release);
+}
+#endif
 
 } // namespace uml::memory

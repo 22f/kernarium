@@ -354,6 +354,24 @@ private:
 		mapping.guest_code, mapping.guest_writable, slot});
 }
 
+/* A departing word: counts one executable mapping out of its record when
+ * the word is one a translator can hold code for. For a caller that has not
+ * yet let go of the word's backing. */
+void count_executable_departure(const GenerationState &state,
+	std::uint64_t page, std::uintptr_t word) noexcept
+{
+	const auto fields = FillIndex::decode(word);
+	if (!fields.guest_code || !fields.exec)
+		return;
+	const auto mapping = decode_page(state, page, word);
+	auto *record = mapping ?
+		mapping->backing->find_code_page(mapping->offset) : nullptr;
+	if (record != nullptr)
+		MappedBacking::executable_mapping_removed(record);
+	else
+		UML_MEMORY_COUNT_ANOMALY();
+}
+
 struct PlannedMappingPage final {
 	std::uint64_t address;
 	std::optional<PageMapping> original;
@@ -362,6 +380,10 @@ struct PlannedMappingPage final {
 	const std::shared_ptr<MappedBacking> *owner;
 	/* The backing slot `final` lies in, which the plan claimed. */
 	unsigned slot;
+	/* The record of the physical page `final` maps when a translator can
+	 * hold code for it, made by the reserve step so that counting it in
+	 * cannot fail. */
+	void *record{};
 };
 
 /* The step of a mapping change that can fail: the nodes, and the overflow
@@ -369,9 +391,9 @@ struct PlannedMappingPage final {
  * committed only once all of them exist, so a change that fails here has
  * changed nothing but the empty nodes it made. */
 void reserve_planned_pages(GenerationState &state,
-	std::span<const PlannedMappingPage> pages)
+	std::span<PlannedMappingPage> pages)
 {
-	for (const auto &page : pages) {
+	for (auto &page : pages) {
 		if (!page.final || same_mapping(page.original, page.final))
 			continue;
 		UML_MEMORY_ALLOCATION_CHECKPOINT(testing::AllocationSite::reserve);
@@ -379,6 +401,35 @@ void reserve_planned_pages(GenerationState &state,
 			throw std::bad_alloc{};
 		if (page.slot == BackingSlots::overflow)
 			state.backings.reserve_overflow(page.address);
+		if (can_hold_translation(*page.final))
+			page.record = page.final->backing->obtain_code_page(
+				page.final->offset);
+	}
+}
+
+/* The executable-mapping count of the records a page's change touches: one
+ * more on the record of the page it becomes when a translator can hold code
+ * for it, one fewer on the record of the page it was. A page that stays on
+ * one record (the protection or the immutable fact moved, the bytes did not)
+ * changes nothing, so the count never passes through zero for it. The record
+ * of the old page exists, since counting it in made it; it is found before
+ * the plan lets go of the old backing. */
+void count_executable_change(const PlannedMappingPage &page) noexcept
+{
+	const bool had = page.original && can_hold_translation(*page.original);
+	const bool has = page.final && can_hold_translation(*page.final);
+	if (had && has && page.original->backing == page.final->backing &&
+	    page.original->offset == page.final->offset)
+		return;
+	if (has)
+		MappedBacking::executable_mapping_added(page.record);
+	if (had) {
+		if (auto *record = page.original->backing->find_code_page(
+			    page.original->offset);
+		    record != nullptr)
+			MappedBacking::executable_mapping_removed(record);
+		else
+			UML_MEMORY_COUNT_ANOMALY();
 	}
 }
 
@@ -392,6 +443,7 @@ void commit_planned_pages(GenerationState &state,
 	for (const auto &page : pages) {
 		if (same_mapping(page.original, page.final))
 			continue;
+		count_executable_change(page);
 		const auto old_word = state.fill_index.lookup(page.address);
 		const bool had = old_word != 0;
 		const auto old_slot = FillIndex::decode(old_word).slot;
@@ -426,6 +478,12 @@ void commit_planned_pages(GenerationState &state,
 /* Empties a generation of its pages. */
 void clear_mappings(GenerationState &state) noexcept
 {
+	/* Every executable mapping departs with the generation's words. */
+	(void)state.fill_index.scan(0, std::numeric_limits<std::uint64_t>::max(),
+		[&](std::uint64_t page, std::uintptr_t word) {
+			count_executable_departure(state, page, word);
+			return false;
+		});
 	state.fill_index.clear();
 	state.backings.clear();
 	state.mapped_pages = 0;
@@ -686,6 +744,15 @@ public:
 						mapping->backing->retire_code_page(
 							mapping->offset);
 				}
+				/* A page that gains execute is counted in below, which
+				 * cannot fail: its record is made first. */
+				if (fields.guest_code && !fields.exec &&
+				    (protection & PROT_EXEC) != 0) {
+					if (const auto mapping = decode_page(
+						    *state, page, word))
+						(void)mapping->backing->obtain_code_page(
+							mapping->offset);
+				}
 				return false;
 			});
 		if (!changed)
@@ -696,6 +763,20 @@ public:
 		(void)state->fill_index.scan(address, address + length,
 			[&](std::uint64_t page, std::uintptr_t word) {
 				auto fields = FillIndex::decode(word);
+				if (fields.guest_code &&
+				    fields.exec != ((protection & PROT_EXEC) != 0)) {
+					if (fields.exec) {
+						count_executable_departure(*state, page, word);
+					} else if (const auto mapping = decode_page(
+							   *state, page, word)) {
+						if (auto *record = mapping->backing->find_code_page(
+							    mapping->offset);
+						    record != nullptr)
+							MappedBacking::executable_mapping_added(record);
+						else
+							UML_MEMORY_COUNT_ANOMALY();
+					}
+				}
 				fields.read = (protection & PROT_READ) != 0;
 				fields.write = (protection & PROT_WRITE) != 0;
 				fields.exec = (protection & PROT_EXEC) != 0;
@@ -1371,6 +1452,78 @@ public:
 		};
 	}
 
+#if UML_MEMORY_ALLOCATION_TESTING
+	/* The records of this space's backings whose count of executable
+	 * mappings differs from the executable words of its generations. */
+	[[nodiscard]] std::size_t audit_executable_counts() noexcept
+	{
+		try {
+			std::vector<std::shared_ptr<GenerationState>> generations;
+			{
+				std::shared_lock lock{states_mutex_};
+				for (const auto &[generation, state] : states_) {
+					(void)generation;
+					generations.push_back(state);
+				}
+			}
+			std::unordered_map<const void *, std::uint64_t> recount;
+			for (const auto &state : generations) {
+				std::shared_lock lock{state->mappings_mutex};
+				(void)state->fill_index.scan(0,
+					std::numeric_limits<std::uint64_t>::max(),
+					[&](std::uint64_t page, std::uintptr_t word) {
+						const auto fields = FillIndex::decode(word);
+						if (!fields.guest_code || !fields.exec)
+							return false;
+						const auto mapping = decode_page(*state, page, word);
+						auto *record = mapping ?
+							mapping->backing->find_code_page(mapping->offset) :
+							nullptr;
+						++recount[record];
+						return false;
+					});
+			}
+			std::vector<std::shared_ptr<MappedBacking>> backings;
+			{
+				std::shared_lock lock{backing_mutex_};
+				for (const auto &[key, weak] : backings_) {
+					(void)key;
+					if (auto backing = weak.lock())
+						backings.push_back(std::move(backing));
+				}
+				for (const auto &[fd, weak] : descriptor_backings_) {
+					(void)fd;
+					if (auto backing = weak.lock())
+						backings.push_back(std::move(backing));
+				}
+			}
+			std::size_t mismatches = recount.contains(nullptr) ? 1 : 0;
+			std::unordered_map<const void *, bool> seen;
+			for (const auto &backing : backings) {
+				backing->for_each_code_page(
+					[&](std::uint64_t, void *record) {
+						if (seen.emplace(record, true).second == false)
+							return;
+						MappedBacking::RecordStamp stamp;
+						(void)MappedBacking::load_code_page_stamp(
+							record, stamp);
+						if (stamp.never_share)
+							return;
+						const auto found = recount.find(record);
+						const auto expected =
+							found == recount.end() ? 0 : found->second;
+						if (MappedBacking::executable_mappings(record) !=
+						    expected)
+							++mismatches;
+					});
+			}
+			return mismatches;
+		} catch (...) {
+			return ~std::size_t{0};
+		}
+	}
+#endif
+
 private:
 	friend class AddressSpaceAccess;
 
@@ -1732,6 +1885,7 @@ private:
 		PendingMappingChanges pending{state, changes};
 		state.fill_index.erase_range(address, end,
 			[&state](std::uint64_t page, std::uintptr_t word) noexcept {
+				count_executable_departure(state, page, word);
 				state.backings.remove(FillIndex::decode(word).slot, page);
 				--state.mapped_pages;
 			});
@@ -2009,6 +2163,17 @@ public:
 		std::shared_lock lock{mutex_};
 		return spaces_.size();
 	}
+
+	[[nodiscard]] std::size_t audit_executable_counts() const noexcept
+	{
+		std::size_t mismatches = 0;
+		std::shared_lock lock{mutex_};
+		for (const auto &[domain, space] : spaces_) {
+			(void)domain;
+			mismatches += space->audit_executable_counts();
+		}
+		return mismatches;
+	}
 #endif
 
 	void forget_descriptor(int fd)
@@ -2118,6 +2283,12 @@ void set_software_address_space_acquired_hook(
 {
 	software_address_space_acquired_hook().store(
 		hook, std::memory_order_release);
+}
+
+std::size_t audit_executable_counts() noexcept
+{
+	auto *registry = existing_address_space_registry();
+	return registry != nullptr ? registry->audit_executable_counts() : 0;
 }
 
 } // namespace testing

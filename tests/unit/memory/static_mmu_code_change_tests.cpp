@@ -11,6 +11,8 @@
  * reader that retires only those ranges runs no stale code. */
 #include "uml_darwin_guest.h"
 #include "uml_darwin_static_mmu.h"
+#include "allocation_fault.hpp"
+#include "domain_registry_testing.hpp"
 #include "require.hpp"
 #include "scratch_backing.hpp"
 
@@ -737,6 +739,9 @@ int main()
 	test_mappings_of_one_frame_that_disagree_share_its_record();
 	test_a_stamp_carries_the_epoch_and_the_mapping_fact();
 	test_a_kernel_write_publishes_once_x86_code_may_run();
+	/* Every generation of every row is gone: no record counts a mapping. */
+	require(uml::memory::testing::audit_executable_counts() == 0);
+	require(uml::memory::testing::count_anomalies() == 0);
 	std::puts("Static MMU code change tests passed");
 	return 0;
 }
